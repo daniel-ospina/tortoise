@@ -48,6 +48,7 @@ import tarfile
 from pathlib import Path
 
 import pytest
+import yaml
 
 REPO = Path(__file__).resolve().parent.parent
 SCRIPT = REPO / ".github" / "scripts" / "runner-tools.sh"
@@ -68,7 +69,7 @@ MARKER = "RUNNER-TOOL-CONTRACT-UNSATISFIED"
 #: `auto-file-issue.sh` (`e2e-live-reconcile`, `prod-csp-monitor`,
 #: `tenant-provision-monitor`), `welcome-e2e-monitor.sh` (`welcome-e2e-monitor`),
 #: `mergify_config_guard.py` (`mergify-guard-recut`), `inbound_relay_sweep.py`
-#: (`inbound-relay-sweep`). The set is 17 jobs across 15 workflows; count it from
+#: (`inbound-relay-sweep`). The set is 18 jobs across 16 workflows; count it from
 #: the literal, not from this sentence.
 GH_JOBS = {
     "python-ci.yml": ["canary-streak"],
@@ -91,6 +92,22 @@ GH_JOBS = {
     # added (#9943/#9946); the job does carry a checkout, so the step can run and
     # this is coverage, not a declared gap.
     "inbound-relay-sweep.yml": ["sweep"],
+    # #10597: the warn-only `Closes-coherence` step runs
+    # `tools/closes_landing.py`, which reads the PR body and the base branch's PR
+    # through `gh` for EVERY measurement. The job has a checkout, so the contract
+    # step can run — this is coverage, not a declared gap. Without `gh` present
+    # the `Ensure gh` step reds the JOB (it fails closed and has no
+    # `continue-on-error`), so the advisory step never gets to report UNMEASURED —
+    # which is exactly why the contract step is required here.
+    #
+    # ⚠️ It is mounted on its OWN workflow, not on `drift-guard.yml` where #10597
+    # first put it: that workflow is `disabled_manually`, so a step there never
+    # executes and the instrument was inert while the PR was green (#10634 review
+    # P1). A NEW workflow is `active` on creation. The pin that keeps a re-mount
+    # off a disabled host is `test_an_advisory_mount_is_not_on_a_disabled_workflow`
+    # below; `drift-guard.yml` therefore has no entry here any more — the step,
+    # its `Ensure gh` and the `pull-requests: read` grant it needed all moved.
+    "closes-coherence.yml": ["closes-coherence"],
 }
 
 #: Jobs that use `gh` and are NOT covered, with the reason each one cannot simply take
@@ -119,6 +136,12 @@ KNOWN_UNCOVERED = {
     # These jobs run `*.test.sh` harnesses, which install a STUB `gh` on PATH
     # (`.github/scripts/ai-review-gate.test.sh:416` writes `$T/bin/gh`). A harness that
     # stubs its tool is not a hazard; giving it the real one would mask the stub.
+    #
+    # These two are also why the POOL-ONLY arm above is load-bearing rather than
+    # decorative: `repo-harnesses` pins `runs-on: [self-hosted, self-hosted-x64]`, so a
+    # predicate that answered only for hosted labels would skip it (and every future
+    # pool pin) before looking for a `gh` hazard at all — the silent-skip direction this
+    # file's docstring calls unsafe.
     "ci.yml": {
         "ops-harnesses": "runs *.test.sh harnesses that stub `gh` on PATH",
         "repo-harnesses": "runs *.test.sh harnesses that stub `gh` on PATH",
@@ -126,6 +149,86 @@ KNOWN_UNCOVERED = {
 }
 
 CONTRACT_STEP = "runner-tools.sh ensure gh"
+
+
+#: Workflows GitHub reports as NOT `active`, with the date each state was MEASURED.
+#: A workflow in this set never runs: no `pull_request`, no `workflow_dispatch`,
+#: nothing. Two review cycles on #10634 measured 45 workflows with exactly two in
+#: this state, both from the same window (`drift-guard.yml` updated
+#: 2026-10-29T02:33:12Z; `finding-provenance` around it).
+#:
+#: ⚠️ THIS IS A RECORD, NOT A LIVE READ, and it can go stale in ONE direction that
+#: matters: a workflow disabled AFTER this line was written will not red anything
+#: until someone adds it here. That is the price of a pin a unit suite can run
+#: (this repo's suite has no network and no token), and it is why the entry
+#: carries the date it was measured. Re-measure with
+#: `gh api "repos/<owner>/<repo>/actions/workflows?per_page=100" \
+#:   --jq '.workflows[] | select(.state!="active") | "\(.path)\t\(.state)"'`
+#: before trusting it — the same rule that retired a stale count in this repo's
+#: instruction file (`agent-infra#2936`).
+KNOWN_DISABLED_WORKFLOWS = {
+    "drift-guard.yml": "disabled_manually, measured 2026-11-03 (updated_at 2026-10-29T02:33:12Z)",
+    "finding-provenance.yml": "disabled_manually, measured 2026-11-03 (same window as drift-guard)",
+}
+
+#: Workflows whose job exists ONLY to ADVISE (warn, never gate). Their whole value
+#: is that a reader SEES the warning, so a mount on a workflow that cannot run is
+#: not a cosmetic defect — it is the instrument being absent (#10634 review P1).
+#: `drift-guard.yml:80` was exactly that: a well-built warn-only step on a
+#: `disabled_manually` workflow, green on every PR and never executed.
+ADVISORY_MOUNTS = {
+    "closes-coherence.yml": "closes-coherence",
+}
+
+
+def test_an_advisory_mount_is_not_on_a_disabled_workflow():
+    """A warn-only step on a workflow GitHub will not run advises nobody.
+
+    WHY THIS IS A PIN AND NOT A COMMENT. #10597's deliverable was one annotation
+    on a stacked PR; it was mounted in `drift-guard.yml`, which had been
+    `disabled_manually` for five days. Every other leg was green and correct —
+    the contract step was declared, the registration was in `ci-surfaces.yml`, the
+    suite passed — because NONE of them can see a workflow's live state. The
+    defect survived the whole review history for that reason, so the declared
+    disabled set above is the cheapest executable form that reds on a re-mount.
+    """
+    dead = sorted(set(ADVISORY_MOUNTS) & set(KNOWN_DISABLED_WORKFLOWS))
+    assert not dead, (
+        f"these workflows host a warn-only mount but are declared DISABLED, so the "
+        f"warning can never reach a reader: {dead}. Mount the advisory job on a "
+        f"workflow that runs (a new workflow is active on creation), or re-enable "
+        f"the host as its own reviewed decision — do not leave the step there "
+        f"(#10634 review P1)"
+    )
+    for workflow, job in ADVISORY_MOUNTS.items():
+        path = WORKFLOWS / workflow
+        assert path.exists(), f"advisory mount names a workflow that is not in the tree: {workflow}"
+        text = path.read_text()
+        # The TRIGGER, not the file. `workflow_dispatch`-only would pass a
+        # file-exists check and still never fire for the PR the warning is for —
+        # and a whole-file substring check cannot see that either, because
+        # `pull_request` also occurs in the step's `if:`, in
+        # `github.event.pull_request.number`, and in `github.event.pull_request.
+        # head.sha`. Measured (#10634 review P2): deleting the `on: pull_request:`
+        # entry while leaving the `if:` intact still matched the old substring
+        # assertion four times, so the pin passed on a workflow with no PR
+        # trigger at all. Parse the `on:` block instead.
+        doc = yaml.safe_load(text) or {}
+        # PyYAML parses the YAML 1.1 `on:` key as boolean True (same shape as
+        # `tests/test_mergify_config_guard.py::test_recut_workflow_is_never_required`).
+        triggers = doc.get("on") or doc.get(True) or {}
+        if isinstance(triggers, str):
+            triggers = {triggers}
+        assert "pull_request" in set(triggers), (
+            f"{workflow} is an ADVISORY mount but its `on:` trigger is "
+            f"{sorted(triggers) if not isinstance(triggers, str) else [triggers]!r}, not "
+            f"`pull_request`, so the advisory job cannot fire for a PR"
+        )
+        # …and the job must really be there, so a rename cannot leave this pin
+        # asserting over a workflow with no advisory step in it at all.
+        assert re.search(rf"^  {re.escape(job)}:\s*$", text, re.M), (
+            f"{workflow}: no job `{job}` — the advisory mount moved or was renamed"
+        )
 
 
 # ── the probe: the same call, both polarities ────────────────────────────────
@@ -456,6 +559,27 @@ _SCRIPT_GLOBS = (
 #: Labels the fallback pool has been observed to serve. Not `ubuntu-latest` only:
 #: the 2026-10-24 measurement shows the pool serving `ubuntu-24.04` as well.
 _POOLABLE_LABEL = re.compile(r"ubuntu-(latest|\d+\.\d+)")
+#: The pool's OWN labels — a POOL-ONLY pin, in the runbook's vocabulary
+#: (`docs/ops/ci-runner-x64.md:62`: "not a spelling but a CLASS — any POOL-ONLY label:
+#: `self-hosted`, and equally the bare custom `self-hosted-x64`").
+#:
+#: WHY THIS ARM EXISTS. Until it, the predicate answered only for a hosted label, so a job
+#: pinned to the pool BY NAME — the most direct route onto a bare box, and the shape a
+#: `self-hosted` job actually takes — was invisible to the scan and skipped before its `gh`
+#: hazards were ever looked for. `ci.yml`'s #10237 canary is the tree's FIRST literal such pin,
+#: and deleting its provisioning steps left the whole suite green (#10511 review). The blind
+#: spot was not inherited: it was being introduced.
+#:
+#: FOLDED CASE, deliberately: GitHub matches runner labels without regard to case, and the
+#: three spellings the pool carries are lowercase (`self-hosted`, `self-hosted-x64`,
+#: `self-hosted-arm64`). Folding can only admit MORE jobs into the scan, never fewer — the
+#: safe direction, because a false positive asks for a declaration and a false negative is the
+#: silent skip this whole file exists to prevent.
+#:
+#: BOUNDARY-MATCHED, not substring: `self-hosted-arm64` must match as one label, and
+#: `self-hosted-x65` (the typo `workflow-lint` catches separately) must not be read as the
+#: pool marker. A truncated read would admit the typo'd job as pool-eligible.
+_POOL_ONLY_LABEL = re.compile(r"(?<![\w-])self-hosted(?:-(?:x64|arm64))?(?![\w-])", re.IGNORECASE)
 #: A `runs-on` VALUE the workflow text cannot resolve to a label: GitHub supports
 #: `runs-on: ${{ matrix.os }}` (its own matrix example), and the label is then
 #: decided per leg at run time. `_poolable_label` fails CLOSED on it — see the
@@ -540,7 +664,7 @@ def _looks_poolable(value: str) -> bool:
     """
     if _EXPRESSION in value:
         return True
-    return bool(_POOLABLE_LABEL.search(value))
+    return bool(_POOLABLE_LABEL.search(value) or _POOL_ONLY_LABEL.search(value))
 
 
 def _poolable_label(text: str) -> bool:
@@ -586,7 +710,8 @@ def _poolable_label(text: str) -> bool:
     inline arm text-searches the whole rest of the line, while the BLOCK one stops at
     `group:` — no `- ` item matches, the item loop breaks, and the job comes back
     invisible although `ubuntu-24.04` is named one line below in `labels:`. None is
-    used in the tree today — all 86 `runs-on:` keys are inline scalars, so the miss is
+    used in the tree today — all 86 `runs-on:` keys are single-line values (one of
+    them, `ci.yml:1534`, an inline FLOW list the inline arm answers), so the miss is
     latent, not live — and they are named here so the next author writing one of them
     knows the scan is a text reader rather than a YAML parser, and adds the shape
     instead of assuming coverage.
@@ -732,7 +857,7 @@ def test_the_poolable_label_reader_sees_every_yaml_shape():
     """
     inline = "    runs-on: ubuntu-latest\n    steps:\n"
     block = "    runs-on:\n      - self-hosted\n      - ubuntu-24.04\n    steps:\n"
-    block_pool_free = "    runs-on:\n      - self-hosted\n      - linux\n    steps:\n"
+    block_pool_only = "    runs-on:\n      - self-hosted\n      - linux\n    steps:\n"
     expression = "    runs-on: ${{ fromJSON(matrix.runner) }}\n    steps:\n"
     expression_in_list = (
         "    runs-on:\n      - self-hosted\n      - ${{ matrix.arch }}\n    steps:\n"
@@ -747,7 +872,12 @@ def test_the_poolable_label_reader_sees_every_yaml_shape():
     )
     assert _poolable_label(inline)
     assert _poolable_label(block)
-    assert not _poolable_label(block_pool_free)
+    # …and a block list that names ONLY the pool's own markers is pool-eligible, which the
+    # pre-fix reader answered False for — the #9018 scan's blind spot, pinned here so the
+    # next edit cannot restore it. `[self-hosted, linux]` is a POOL-ONLY pin in the
+    # runbook's sense (`docs/ops/ci-runner-x64.md:62`): no GitHub-hosted runner carries
+    # `self-hosted`, so every leg is a bare box.
+    assert _poolable_label(block_pool_only)
     # An expression is UNRESOLVABLE from the text, so it must not be skipped: on the
     # pre-fix reader both of these answered False (#10186 review).
     assert _poolable_label(expression)
@@ -756,10 +886,10 @@ def test_the_poolable_label_reader_sees_every_yaml_shape():
     # comment arm — the same silent skip, one shape further out.
     assert _poolable_label(block_after_inline_comment)
     assert _poolable_label(block_after_item_comment)
-    # …and a pool-free list stays pool-free whichever way the comments fall, so the
-    # arm cannot be satisfied by simply always answering True.
+    # …and the pool arm cannot be satisfied by simply always answering True: a value naming
+    # neither class stays out.
     assert not _poolable_label(
-        "    runs-on:  # hosted class\n      - self-hosted\n      - linux\n    steps:\n"
+        "    runs-on:  # hosted class\n      - linux\n      - macOS\n    steps:\n"
     )
 
 

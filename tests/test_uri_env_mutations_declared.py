@@ -165,12 +165,32 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # the fixture-param monkeypatch auto-restores (no lane leak).
     "test_8447_truncation_marker.py": [
         r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
+    # #8447 (the OTHER half of the contract): `issue_insight` is asserted on the
+    # PRE-cut population of a real store, so it must own the store — a URI
+    # redirect would fold the "12 matches, limit=2" measurement onto a shared
+    # server graph whose match count the test does not control. The delenv IS
+    # the point; the fixture-param monkeypatch auto-restores (no lane leak).
+    "test_8447_issue_insight_truncation.py": [
+        r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
     # #2724 churn-wave hygiene (2026-09-09): the two #2600 Phase 1 Task 1
     # apikey-verify unit tests (TestRegistryApikeyVerifyRawCreatedBy at
     # :163/:184) force the embedded lane (delenv the URI, then pin
     # TORTOISE_DB_PATH to a tmp_path db) — the delenv IS the point, and the
     # fixture-param monkeypatch auto-restores at teardown (no lane leak).
     "test_attribution_actor.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],  # embedded lane via delenv (the test_billing pattern — db_path-pinned store, so the constructions never ride the URI)
+    # #10180: the promote verb's suite asserts NAMED-GRAPH semantics — it
+    # seeds `graph_name=f"org_{team}"` and reads it back through the onboarding
+    # projection, whose existence verdict probes the server-wide listing. Epic
+    # #1647's docker-lane redirect (with a `TORTOISE_DB_URI` in the ambient
+    # env) flips the fixture's explicit-`db_path` construction onto the lane
+    # server AND hash-renames the graph, so the seed lands under
+    # `test_promote_<hash>` while the test reasons about `org_{team}`: absent
+    # from the listing, verdict False. Three of the file's own tests red on
+    # every CI shard (measured: green embedded, RED with the URI set). The
+    # delenv IS the point; the fixture-param monkeypatch auto-restores at
+    # teardown (no lane leak).
+    "test_10180_promote_default_graph.py": [
+        r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
     "test_audit.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"',
                        r'monkeypatch\.setenv\(\s*$'],
     "test_billing.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
@@ -400,6 +420,14 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     "test_session_index_health.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
     "test_tortoise_client.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
     "test_2206_confidence_surfaces.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],  # #2206: module-level live-FalkorDB probe + per-test isolated-graph fixture (set/restore, never leaves a mutation)
+    # #10137: the belief-order suite is the SAME shape as #2206's above — a
+    # module-level live-FalkorDB probe (set + save/restore in `finally`, so the
+    # import leaves no mutation) plus an autouse per-test isolated-graph fixture
+    # (set before the yield, restore after, so no lane leaks into a later
+    # docker-lane test). DELIBERATE_URI: the probe IS what decides whether the
+    # module's cases run against a server at all — a URI-less probe would report
+    # "unavailable" and skip every case on a lane that has one.
+    "test_belief_order_10137.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
     # ── E2E-8 conformance (Task 8): the leg env control IS the test input —
     #    the embedded leg delenvs the URI, the docker leg setenvs it (the
     #    E2E-1 pattern); declared so the guard stays green ────────────────
@@ -764,6 +792,26 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     "test_s3_prior_ablation.py": [
         r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"',
         r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
+    # #10655 `tortoise config show`: the URI VALUE is the input under test — a
+    # scheme-less DSN, an empty string, white space, a docker DSN with
+    # user:password, a query-string credential — because the verb's whole job is
+    # to classify the target and MASK its credentials. DELIBERATE_URI: several
+    # sites deliberately probe a docker DSN, and every site needs the lane the
+    # value names rather than the ambient one (a redirect would fold the masked
+    # DSN onto the lane's own URI and the assertion would observe the ambient
+    # target instead of the one under test). Nothing connects: `config show` is a
+    # REPORT of the resolved target, so a docker-half green is not claimed for
+    # any site. Function-scoped `monkeypatch`, auto-undone at teardown (no lane
+    # leak) — including the site that replaces a RAW `os.environ[...] = ...`
+    # whose `finally: del` is a DELETE, not a restore: the site never puts the
+    # ambient value back, which is the shape this module's second guard reds
+    # (the #2062 pop-without-restore class). ⚠️ In THIS module that shape could
+    # not have reached a later test — the autouse `_isolated` fixture removes the
+    # URI with `monkeypatch.delenv` before every test and its teardown restores
+    # the ambient value — so the red was the mutation SHAPE, not an observed
+    # lane flip. Do not cite it as a measured leak (review finding, baf951165).
+    "test_cli_config_show.py": [
+        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
 }
 
 # Carve-out TEST-MODULE stems (Task 5 wires these into TEST_NO_REDIRECT_STEMS;

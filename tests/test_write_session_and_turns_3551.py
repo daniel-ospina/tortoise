@@ -76,11 +76,13 @@ _HOSTED_SESSION_CYPHER = (
     "s.model=coalesce(s.model, $model)"
 )
 #: sha256 of the whitespace-normalized ``UNWIND $turns`` turn-store Cypher.
-#: Identical for W1 and W2 and identical pre-/post-refactor. Pinned as a hash
-#: (not by identity to ``_TURN_WRITE_CYPHER``) so a future edit to the text is
-#: caught rather than trivially satisfied.
+#: Identical for W1 and W2 and identical pre-/post-refactor (and after #8488's
+#: ``t.embeddingText=turn.et`` clause and its ``prior_et``-aware preserve arm —
+#: the pinned hash MOVED when those clauses were added, deliberately). Pinned as
+#: a hash (not by identity to ``_TURN_WRITE_CYPHER``) so a future edit to the
+#: text is caught rather than trivially satisfied.
 _TURN_CYPHER_SHA256 = \
-    "fe0c0e87c14993c6fd185fc72c71d75fd5c0d68cccae21d5584417818afdfdd9"
+    "221baab64b38cca8f3909a18ff37e8cedb037ec0bcd9e514a78ea6caf02726cf"
 
 #: The pre-refactor per-turn params (minus the environment-dependent vector and
 #: clock) for the 5-turn window above.
@@ -490,9 +492,16 @@ def test_demo_seed_is_excluded_from_the_primitive(client):
     assert "_write_session_and_turns" not in src
     assert "_write_capture_turns" not in src
     assert "_capture_turn_id" not in src
-    # It still writes its OWN deliberately-different demo Session (3 turns, no
-    # is_episodic / capture_ok) — the reason it must stay out.
-    assert "s.turn_count=3" in src
+    # It still writes its OWN deliberately-different demo Session (a turn
+    # counter, no is_episodic / capture_ok) — the reason it must stay out.
+    # ⛔ The counter is 0 since #10000: the seed stores no turn anywhere
+    # (§9.1/D1), so it may not declare a length. A non-zero count here is a
+    # completeness claim `served_turn_count` acts on, and the demo session has
+    # nothing to serve — that refusal/contradiction is the regression the value
+    # was changed to remove. Asserted by VALUE, not by parameter name, so a
+    # refactor that reintroduces a declared length fails this pin.
+    assert "s.turn_count=0" in src
+    assert "s.turn_count=3" not in src
 
     demo_org = "demo-3551-org"
     ha_mod._seed_demo_graph(demo_org)

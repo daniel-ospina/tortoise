@@ -85,9 +85,32 @@ the marker. The distinguishing property is not the shape of the response, it is
 whether the dropped rows are REACHABLE: the offset/cursor paths
 (``TortoiseSDK.paginated_query`` -> ``{results, total, hasMore}``, the hosted
 cursor walks) already report ``total``/``hasMore`` and hand the caller the next
-page, so they are never marked here. The limit-capped search path has no
-offset and no cursor — a row dropped at ``result_ids[:limit]`` is unreachable
-by any subsequent call — so that is the only place the marker is written.
+page, so they are never marked here. The criterion is REACHABILITY, and it is
+applied per surface rather than stated once: the marker is written where a row
+dropped at the cap is unreachable by any subsequent call. Every site that meets
+it today is named below by ``<module>::<function>``, and
+``tests/test_8447_truncation_marker.py::TestTheMarkerSiteRegisterIsComplete``
+derives that list from the tree so this register cannot re-stale — it has
+already shipped wrong twice, both times as a claim about how MANY sites there
+are rather than naming them:
+
+- ``tortoise/sdk.py::tortoise_fts_query`` — the limit-capped search path
+  (``result_ids[:limit]``, no offset and no cursor; ``/v1/search``).
+- ``tortoise/sdk.py::issue_insight`` — ``semantic_hits[:limit]`` over its own
+  default bound of 2, with no offset and no cursor (the
+  ``tortoise_issue_insight`` surface).
+- ``tortoise/hosted_api.py::list_points`` — hosted ``GET /v1/points``, a
+  store-side ``LIMIT`` with no offset and no cursor.
+- ``tortoise/hosted_api.py::search`` — hosted ``GET /v1/search``, the OUTAGE
+  arm: a store that will not OPEN answers 0 rows, and that empty is marked
+  ``incomplete`` so a 0-row outage is never served as a complete empty (the arm
+  landed on ``main`` after this register was written; a new site joins this list
+  however it arrives).
+
+Every such site must be on a DICT body; a field cannot ride a bare ``list``, so
+a list-shaped surface needs a return-shape decision first
+(``config/surface-manifest.yml``). ⛔ A new marker site joins this list — it
+does not mint a third predicate.
 """
 from __future__ import annotations
 
@@ -135,15 +158,29 @@ DEFAULT_LEG_ANSWERED_REASONS: frozenset[str] = _ANSWERED_REASONS
 #: Present ONLY when it is exact — absence means "unknown", never "zero".
 TOTAL_AVAILABLE_FIELD = "total_available"
 
+#: A PRIVATE relay: did this read PROVE the candidate population is the whole
+#: match set? NOT a response field (``truncation_field`` never republishes it) —
+#: it exists so a consumer ABOVE the read can relay the marker's own proof
+#: instead of re-deriving it from ``truncated``, which is not equivalent:
+#: ``truncated: False`` is also what a read reports when it COMPLETED but had to
+#: WITHHOLD exactness (a post-window filter shrank the union, so the survivors
+#: are no longer the whole population). A consumer that read ``not truncated``
+#: as ``exact`` would publish that floor as a total — the same defect one level
+#: up. Reading the recorded proof is the only sound route.
+EXACT_KEY = "_exact"
+
 
 def mark_truncation(sink: dict | None, *, returned: int,
                     candidates: int, exact: bool = False,
                     incomplete: bool = False) -> None:
     """Record whether a read DROPPED rows at its cap, on the caller's sink.
 
-    ``candidates``  rows the read held after every filter and BEFORE the
-                    ``limit`` cut — the honest population the cap was applied
-                    to.
+    ``candidates``  the candidate set the producer could SEE, after every
+                    filter and BEFORE the ``limit`` cut. ⚠️ It may itself be
+                    BOUNDED (hosted ``GET /v1/points`` passes a ``limit+1``
+                    probe row), which is exactly why ``exact`` is a separate
+                    input: pass ``exact=True`` only when the producer proved
+                    this is the WHOLE match population.
     ``returned``    rows actually delivered.
     ``exact``       the producer PROVED the candidate set is the whole match
                     population (no retrieval leg filled its own window). The
@@ -161,14 +198,22 @@ def mark_truncation(sink: dict | None, *, returned: int,
                     ``complete``.
 
     Writes ``truncated`` on EVERY call (so a complete read is positively
-    marked complete, not merely un-marked) and ``total_available`` only when
+    marked complete, not merely un-marked), ``total_available`` only when
     ``exact`` — see the module docstring for why a lower bound rendered as a
-    total is the same defect one level down.
+    total is the same defect one level down — and the private :data:`EXACT_KEY`
+    proof on every call, which is what lets a consumer RELAY the exactness
+    verdict instead of re-deriving it from ``truncated`` (they are not the same
+    thing). All three are written ONLY here, so a reused sink cannot carry a
+    stale verdict from an earlier call.
     """
     if sink is None:
         return
     truncated = (candidates > returned) or incomplete
     sink[TRUNCATED_FIELD] = truncated
+    # The exactness PROOF, recorded so a consumer relays it rather than
+    # re-deriving it (see EXACT_KEY). A private key: ``truncation_field``
+    # publishes only the two response fields, so this never reaches a caller.
+    sink[EXACT_KEY] = bool(exact)
     # Hygiene, not decoration: a sink is CALLER-OWNED and may be REUSED, so a
     # stale ``total_available`` from an earlier call would ride a later verdict —
     # a complete (or unprovable) answer advertising an exact total, which is the

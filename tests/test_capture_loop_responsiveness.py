@@ -183,7 +183,7 @@ def test_capture_extraction_runs_off_the_event_loop(client, monkeypatch, mode):
         f"[{mode}] the extraction ran on {seen['thread']!r}, not the dedicated "
         f"capture pool — long stalls there would occupy the SHARED default "
         f"executor's workers and starve every other ``to_thread`` caller out "
-        f"of it (the auth middleware's abuse hooks among them) (#3060)")
+        f"of it (#3060)")
 
 
 def test_capture_points_estimate_reads_off_the_event_loop(client, monkeypatch):
@@ -403,7 +403,7 @@ def test_health_answers_while_the_default_executor_is_saturated(
 
     The first revision moved the extraction to `asyncio.to_thread`, which uses
     the loop's SHARED default executor — at the time, also the pool /health's DB
-    probe (and the auth middleware's abuse hooks) rode. Six-plus concurrent
+    probe rode. Six-plus concurrent
     stalls (prod runs 2 vCPU → `min(32, cpu+4)` workers) would therefore leave
     that probe queued for minutes, miss Fly's 15s check timeout, and drop the
     machine exactly as in the original outage — one level down, with nothing

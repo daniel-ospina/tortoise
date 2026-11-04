@@ -13,7 +13,8 @@ place the declared set lives; this file is the gate over it. Every declared
 mechanism must be either
 
   * **implemented** — a code path AND a test, every declared path present; or
-  * **not-implemented** — an explicit marker (a tracking issue);
+  * **not-implemented** — an explicit marker (a tracking issue) AND the test
+    node that reds when the absence closes (`pins:`);
 
 and a mechanism that is **neither** FAILS the gate. A mechanism with code but no
 test is not "implemented with a test" — that is the `declared ⇒ present`
@@ -28,6 +29,24 @@ not an anchor, because re-shaping a mechanism is exactly when its test is
 edited). An `implemented` row therefore names its `symbols:` and the gate
 resolves each one in the file(s) the SAME row declares — so "the mechanism is
 there" is a fact about the code, not about the path.
+
+⭐ THE ABSENCE PIN IS A TEST NODE, NOT A FILE PATH, and it is the mirror of
+`symbols:` on the other side of the registry. `tracking_issue:` says WHERE an
+absence is tracked; `tests:` proves a FILE exists — neither says anything would
+NOTICE the absence closing, and a pin whose cited call was renamed away kept the
+row reading as watched (#10636 measured the class: `span_link`'s one pinned gate
+stood in for four, and the other three were named only in the note's prose). So
+every `not-implemented` row names `pins:` — `path::test_name` or
+`path::Class::test_name`, pytest's own selector, so a reader can run exactly
+what the row cites — and the gate resolves the node against the file's AST. An
+unreadable test source is UNVERIFIABLE, never a pass; a pin on an `implemented`
+row is refused, because a pin asserts an ABSENCE. ⚠️ What the gate ESTABLISHES is
+narrower than what the pin MEANS, and the difference is stated rather than
+overclaimed: the cited NODE is still defined at that call, so a rename or a
+deletion cannot leave the row silently unwatched. That the node actually
+OBSERVES this absence is the row author's claim, reviewed once — and a node that
+never runs (`skip`/`xfail`) is a review-time refusal, not something this gate
+can see.
 
 WHAT THIS GATE DELIBERATELY DOES NOT DO (#5064, bounded slice)
 -------------------------------------------------------------
@@ -80,6 +99,12 @@ limits) — and `membership_errors` fails closed on FOUR shapes:
     backfill, not a property the gate can derive. What IS closed is every MARKED
     case: a marker in a document the row omits is refused, so the registry's
     enumeration cannot silently shrink;
+  * a pin resolves at MODULE/CLASS depth only. A NESTED test class
+    (`path::TestOuter::TestInner::test_x`) is a selector pytest runs that this
+    gate cannot name, so it is refused as malformed rather than silently
+    accepted — the direction that cannot hide a mechanism nobody is watching,
+    and the reason the refusal message says "module/class depth" instead of
+    claiming "the node pytest selects";
   * a marker DETACHED from what it declares is not detected: the marker's
     position inside a document is a convention, so moving it to the file's end
     and deleting the passage it marked leaves the gate green (measured — a
@@ -220,6 +245,20 @@ STATES = (IMPLEMENTED, NOT_IMPLEMENTED)
 #: registry rather than discovered at implementation time"*). Read by
 #: `_precondition_cycles` and by the per-row rule in `gate_errors`.
 PRECONDITIONS = "preconditions"
+
+#: ⚠️ STATED LIMIT: a pin resolves at MODULE/CLASS depth, which is every shape
+#: `_test_node_names` can name. A NESTED test class
+#: (`path::TestOuter::TestInner::test_x`) is a selector pytest runs and this
+#: gate cannot name, so it is refused as malformed rather than silently accepted
+#: — the direction that cannot hide a mechanism nobody is watching (review
+#: cycle 2, P2).
+#:
+#: The ABSENCE PIN field: the test NODE that reds the day a `not-implemented`
+#: mechanism lands, so the row flips instead of the absence quietly outliving
+#: itself (#5064 indicator (3) applied to the mechanisms; `symbols:` on the
+#: test side). `path::test_name` or `path::Class::test_name` — pytest's own
+#: selector. Read by the per-row rule in `gate_errors`.
+PINS = "pins"
 
 
 def _precondition_cycles(edges: dict[str, list[str]]) -> list[list[str]]:
@@ -662,6 +701,314 @@ def _defined_names(path: Path) -> set[str] | None:
     return {n for n in names if not (n.startswith("__") and n.endswith("__"))}
 
 
+def _test_node_names(path: Path) -> set[str] | None:
+    """The test nodes pytest COLLECTS from a file — or ``None`` if unreadable.
+
+    The mirror of :func:`_defined_names` on the test side, because `tests:`
+    proves only that a FILE exists: a row whose pin cites a call that was later
+    renamed away still read as watched while nothing would red when the absence
+    closed.
+
+    ⭐ Only shapes a pytest run selects, resolved by pytest's OWN rules WHERE
+    THEY ARE VISIBLE IN THE FILE, rather than by a name prefix:
+
+      * a module-level ``test_*`` function (this repo sets no
+        ``python_functions``, so pytest's default ``test*`` applies);
+      * a ``test_*`` method of a ``Test*`` class — UNLESS the class carries an
+        ``__init__``, which pytest refuses to collect (the probe walks the
+        IN-FILE base chain, because pytest's rule is
+        ``getattr(cls, "__init__", object.__init__)``, not the own body);
+      * a ``test_*`` method of a ``unittest.TestCase`` subclass, resolved
+        TRANSITIVELY through in-file bases and through the module's own import
+        alias (``from unittest import TestCase as TC`` / ``unittest.case``), and
+        regardless of the class-name prefix — pytest runs those through
+        unittest, so ``__init__`` never applies;
+      * nothing at all in a file whose module-level ``__test__ = False`` disables
+        collection, under a class carrying ``__test__ = False`` (in its body,
+        inherited, or written through the module-scope class handle), or for a
+        member opted out individually.
+
+    A HELPER, a ``test_*`` FUNCTION carrying a ``@pytest.fixture`` marker (pytest
+    does not collect it — `fixtures.getfixturemarker(obj) is None`), and a
+    ``test_*`` method of a class pytest never collects are therefore refused by
+    resolution: each reads like a pin while no run would reach it.
+
+    ⚠️ THE LIMIT OF THAT, stated because the alternative is an overclaim (review
+    cycles 4-5, extended cycle 9): the base chain is resolved IN THIS FILE, and
+    pytest's collection is a decision over the whole MRO. SIX shapes therefore
+    remain REVIEW-TIME, not gate verdicts, and they err in BOTH directions:
+
+      * a class defining ``__new__`` and an ABSTRACT class — pytest collects no
+        test under them, this gate accepts them; and a node marked
+        ``skip``/``xfail`` — pytest COLLECTS it and never RUNS it, so the pin
+        would red nowhere while reading as watched (the fail-open direction);
+      * a base imported from ANOTHER file that defines ``__init__`` — pytest
+        REFUSES the subclass, this gate accepts it;
+      * an imported base carrying ``__test__ = False`` — pytest collects
+        nothing under the subclass, this gate accepts it;
+      * an imported ``unittest.TestCase`` subclass base — pytest COLLECTS the
+        subclass, this gate REFUSES it (the false-refuse direction).
+
+    The gate still proves the cited node is defined where the row says it is; it
+    cannot prove pytest will run it. For the INHERITED-method cause a pin can
+    cite the DEFINING class in ITS OWN file WHEN THAT CLASS IS ITSELF COLLECTED
+    (`Test*`, or a `unittest.TestCase` subclass). Two shapes have no citation
+    that resolves, and both are stated rather than papered over: a base in
+    ANOTHER file (the gate sees no nodes for the class at all), and an in-file
+    base that pytest does not collect — a plain `class Base:` holding `test_*`
+    methods contributes no node, so citing it loops back to this same refusal.
+    In that last shape, cite a node in the COLLECTED class's own body, or state
+    the limit in the row's `note`.
+
+    ``None`` — not an empty set — for a source that cannot be read or parsed, so
+    "this file defines nothing named that" stays distinct from "this file could
+    not be turned into names" (an unreadable pin is UNVERIFIABLE, never absent;
+    same polarity and same :func:`tokenize.open` encoding rules as
+    ``_defined_names``, so a legal PEP-263 cookie is not a false verdict).
+    """
+    try:
+        with tokenize.open(path) as fh:
+            source = fh.read()
+        tree = ast.parse(source, filename=str(path))
+    except (OSError, SyntaxError, ValueError, UnicodeError):
+        return None
+
+    def _own_disabled(node: ast.AST) -> bool:
+        """``__test__`` set FALSY in this body — pytest's own opt-out.
+
+        ⚠️ FALSY, not `is False` (review cycle 4, P2): pytest reads
+        `getattr(obj, "__test__", True)` for TRUTHINESS, so ``__test__ = 0`` is
+        just as opted-out as ``False`` and the allow-list-on-the-value spelling
+        accepted a node no run reaches. The ATTRIBUTE form
+        (``test_x.__test__ = False``) is read too, because that is how a
+        function-level opt-out is actually written.
+        """
+        for child in getattr(node, "body", ()):
+            if not isinstance(child, (ast.Assign, ast.AnnAssign)):
+                continue
+            targets = (
+                child.targets if isinstance(child, ast.Assign) else [child.target]
+            )
+            named = any(
+                isinstance(t, ast.Name) and t.id == "__test__" for t in targets
+            )
+            if not named:
+                continue
+            if isinstance(child.value, ast.Constant) and not child.value.value:
+                return True
+        return False
+
+    def _member_exclusions(
+        body: object,
+    ) -> tuple[set[str], dict[str, set[str]]]:
+        """Members opted out INDIVIDUALLY by ``member.__test__ = False``.
+
+        ⭐ A bare-`Name` target is the SCOPE opt-out above; an ATTRIBUTE target is
+        the per-member form, and conflating the two disabled the WHOLE module for
+        a single opted-out function — refusing pins pytest collects (review
+        cycle 5, P2, measured: a module with `test_off.__test__ = False` and a
+        sibling `test_kept` collects `test_kept` while the gate returned
+        nothing).
+
+        Returns ``(plain, qualified)``: `plain` names members excluded in the
+        SCOPE they are written in (a class body's own ``test_off.__test__``),
+        `qualified` maps a CLASS to the members excluded through the class
+        handle at module scope — ``TestCls.test_off.__test__ = False``, which
+        pytest honours and a Name-only read missed (review cycle 6, P2).
+        """
+        plain: set[str] = set()
+        qualified: dict[str, set[str]] = {}
+        for child in body:
+            if not isinstance(child, (ast.Assign, ast.AnnAssign)):
+                continue
+            targets = (
+                child.targets if isinstance(child, ast.Assign) else [child.target]
+            )
+            if not (isinstance(child.value, ast.Constant) and not child.value.value):
+                continue
+            for target in targets:
+                if not (
+                    isinstance(target, ast.Attribute)
+                    and target.attr == "__test__"
+                ):
+                    continue
+                owner = target.value
+                if isinstance(owner, ast.Name):
+                    plain.add(owner.id)
+                elif isinstance(owner, ast.Attribute) and isinstance(
+                    owner.value, ast.Name
+                ):
+                    qualified.setdefault(owner.value.id, set()).add(owner.attr)
+        return plain, qualified
+
+    #: `@pytest.fixture` names, however the module imported it (review cycle 6,
+    #: P1): a `test_*` function carrying the fixture marker is NOT collected
+    #: (`_pytest/python.py` — `fixtures.getfixturemarker(obj) is None`), and this
+    #: repo has live instances (`tests/test_mcp_telemetry.py`'s
+    #: `@pytest.fixture def test_tools()`), so a pin could cite a call no run
+    #: reaches.
+    #: ⚠️ SEEDED EMPTY on purpose (review cycle 8, P2): a seeded
+    #: {"fixture", "pytest.fixture"} made BOTH import branches inert — deleting
+    #: either left the suite green, because the seed already spelled the marker.
+    #: Every marker now comes from a real import, so each branch is decidable.
+    fixture_markers: set[str] = set()
+    for top in tree.body:
+        if isinstance(top, ast.Import):
+            fixture_markers.update(
+                f"{alias.asname or alias.name}.fixture"
+                for alias in top.names
+                if alias.name == "pytest"
+            )
+        elif isinstance(top, ast.ImportFrom) and (top.module or "") == "pytest":
+            fixture_markers.update(
+                alias.asname or alias.name
+                for alias in top.names
+                if alias.name == "fixture"
+            )
+
+    def _is_fixture(node: ast.AST) -> bool:
+        return any(
+            _dotted_decorator(decorator) in fixture_markers
+            for decorator in getattr(node, "decorator_list", ())
+        )
+
+    #: `TestCase` however the module imported it (review cycle 2, P2; cycle 3, P2
+    #: added the `unittest.case` spelling): pytest collects a
+    #: `unittest.TestCase` subclass regardless of the class-name prefix, so an
+    #: ALIASED base is the same node — and a name-only check reported a runnable
+    #: pin as "the cited call is gone".
+    testcase_aliases = {"TestCase"}
+    for top in tree.body:
+        if isinstance(top, ast.ImportFrom) and (top.module or "") in (
+            "unittest",
+            "unittest.case",
+        ):
+            testcase_aliases.update(
+                alias.asname or alias.name
+                for alias in top.names
+                if alias.name == "TestCase"
+            )
+
+    if _own_disabled(tree):
+        return set()  # the whole module is opted out of collection
+
+    classes: dict[str, ast.ClassDef] = {
+        top.name: top for top in tree.body if isinstance(top, ast.ClassDef)
+    }
+
+    def _dotted_decorator(node: ast.AST) -> str:
+        """The dotted name of a decorator expression (``pytest.fixture`` / ``fix``)."""
+        parts: list[str] = []
+        current = node
+        while isinstance(current, (ast.Call,)):
+            current = current.func
+        while isinstance(current, ast.Attribute):
+            parts.append(current.attr)
+            current = current.value
+        if isinstance(current, ast.Name):
+            parts.append(current.id)
+        return ".".join(reversed(parts))
+
+    def _base_names(node: ast.ClassDef) -> list[str]:
+        out: list[str] = []
+        for base in node.bases:
+            if isinstance(base, ast.Name):
+                out.append(base.id)
+            elif isinstance(base, ast.Attribute):
+                out.append(base.attr)
+        return out
+
+    def _has_init(name: str, seen: frozenset[str] = frozenset()) -> bool:
+        """``__init__`` over the IN-FILE base chain (pytest's own rule)."""
+        node = classes.get(name)
+        if node is None or name in seen:
+            return False
+        if any(
+            isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and child.name == "__init__"
+            for child in node.body
+        ):
+            return True
+        return any(_has_init(base, seen | {name}) for base in _base_names(node))
+
+    def _disabled(name: str, seen: frozenset[str] = frozenset()) -> bool:
+        """``__test__`` opt-out over the IN-FILE base chain (pytest uses getattr)."""
+        # ⭐ The module-scope CLASS handle (`Base.__test__ = False`) disables the
+        # base AND every subclass pytest would have collected through it, so it
+        # must be consulted HERE too, not only where a class row is judged
+        # (review cycle 8, P1 — the cycle-7 fix covered the direct class and
+        # left the inherited shape accepted).
+        if name in module_plain or name in seen:
+            return True
+        node = classes.get(name)
+        if node is None:
+            return False
+        if _own_disabled(node):
+            return True
+        return any(_disabled(base, seen | {name}) for base in _base_names(node))
+
+    def _is_case(name: str, seen: frozenset[str] = frozenset()) -> bool:
+        """A ``unittest.TestCase`` subclass, TRANSITIVELY (review cycle 3, P2).
+
+        `class FooTest(MyCase)` where `MyCase(unittest.TestCase)` is in the same
+        file IS collected by pytest; a direct-base-only check refused it with
+        "the cited call is gone" — the exact false verdict the alias fix closed,
+        one inheritance hop out.
+        """
+        if name in seen:
+            return False
+        node = classes.get(name)
+        if node is None:
+            return name in testcase_aliases
+        return any(
+            base in testcase_aliases or _is_case(base, seen | {name})
+            for base in _base_names(node)
+        )
+
+    module_plain, module_qualified = _member_exclusions(tree.body)
+    nodes: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            # ⚠️ No opt-out probe here on purpose (review cycle 4, P2): pytest
+            # reads the FUNCTION's `__test__` ATTRIBUTE, and a local assignment
+            # in the body is not that attribute — a probe here could never
+            # decide, so it is pruned rather than left as unreachable code
+            # (module- and class-level opt-outs are read above).
+            if (
+                node.name.startswith("test")
+                and node.name not in module_plain
+                and not _is_fixture(node)
+            ):
+                nodes.add(node.name)
+            continue
+        if (
+            not isinstance(node, ast.ClassDef)
+            or _disabled(node.name)
+            # ... and the module-scope CLASS handle (`TestCls.__test__ = False`),
+            # which pytest honours and `_member_exclusions` has already read as a
+            # plain name (review cycle 7, P2).
+            or node.name in module_plain
+        ):
+            continue
+        collected = _is_case(node.name)
+        if not collected:
+            # The prefix route, with pytest's `__init__` refusal (cycle 2, P1;
+            # cycle 3, P1 made the probe walk the base chain).
+            collected = node.name.startswith("Test") and not _has_init(node.name)
+        if collected:
+            in_class, _ = _member_exclusions(node.body)
+            excluded = in_class | module_qualified.get(node.name, set())
+            nodes.update(
+                f"{node.name}::{child.name}"
+                for child in node.body
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and child.name.startswith("test")
+                and child.name not in excluded
+                and not _is_fixture(child)
+            )
+    return nodes
+
+
 def _resolve_in_repo(rel: str, root: Path) -> Path | None:
     """``root / rel`` when it is a real file INSIDE the repo, else ``None``.
 
@@ -1041,6 +1388,233 @@ def gate_errors(mechanisms: list[dict], root: Path = ROOT) -> list[str]:
                     f"(got {issue!r}) — an unbuilt mechanism needs a home"
                 )
 
+            # ⭐ THE ARTIFACT FIELDS, WHEN PRESENT (review P2, #5064). A
+            # `not-implemented` row may still declare the half that IS built —
+            # `span_link` names its schema file, its test and its symbol, which
+            # is how a reader learns WHAT the absence excludes. Before this
+            # rule those three fields were checked only under `implemented`, so
+            # the flip that recorded the absence silently turned three verified
+            # declarations into inert prose: the file could be deleted, the test
+            # renamed and the symbol removed with this gate green, while the row
+            # still claimed the test pins the built half. Judged by the SAME
+            # rules the `implemented` branch applies (path kind, containment,
+            # existence, module-level definition) — presence is what makes a
+            # field a claim, and a claim this gate cannot verify is the
+            # fail-open this registry exists to close.
+            #
+            # ⚠️ Those rules are a DELIBERATE LINE-FOR-LINE MIRROR of the
+            # `implemented` branch above (`_path_violations` / `_resolve_in_repo`
+            # / `_defined_names`, same order, same keying), NOT a single shared
+            # helper — an earlier draft of this comment claimed "one validator
+            # is the only way the two branches cannot drift", which is the goal
+            # and not yet the fact. The two copies are decision-equivalent
+            # today and `test_the_artifact_fields_of_a_not_implemented_row_are_`
+            # `still_verified` pins THIS branch, while the `implemented` branch's
+            # own tests pin the other; but a rule added to ONE copy later
+            # would not reach the other: that is the same drift-shaped defect
+            # this PR closes, so the extraction to one helper is tracked rather
+            # than assumed (#10650).
+            declared_code = row.get("code")
+            declared_tests = row.get("tests")
+            declared_symbols = row.get("symbols")
+            for field, value, kind in (
+                ("code", declared_code, "code"),
+                ("tests", declared_tests, "test"),
+            ):
+                # Review cycle 3 (P3): PRESENCE is `field in row`, not
+                # `row.get(field) is not None` — an explicit `code:` with no
+                # value is a declaration of nothing that looks like a
+                # declaration, and the same function already reads
+                # `preconditions:` by membership for exactly that reason. A null
+                # falls through to the "not a list" verdict below.
+                if field not in row:
+                    continue
+                if not isinstance(value, list):
+                    errors.append(
+                        f"{mid}: `{field}` is declared on a not-implemented "
+                        f"row but is not a list (got {value!r}) — name the "
+                        f"artifact(s) as a list, or omit the field"
+                    )
+                    continue
+                if not value:
+                    errors.append(
+                        f"{mid}: `{field}` is declared on a not-implemented "
+                        f"row but is empty (got {value!r}) — either name the "
+                        f"artifact or omit the field; an unverifiable claim is "
+                        f"not a record of what is built"
+                    )
+                    continue
+                errors.extend(_path_violations(mid, field, value, root, kind))
+            if "symbols" in row:
+                if (
+                    not isinstance(declared_symbols, list)
+                    or not declared_symbols
+                    or not all(
+                        isinstance(s, str) and s.strip() for s in declared_symbols
+                    )
+                ):
+                    errors.append(
+                        f"{mid}: `symbols` is declared on a not-implemented "
+                        f"row but is not a non-empty list of names (got "
+                        f"{declared_symbols!r})"
+                    )
+                elif not (isinstance(declared_code, list) and declared_code):
+                    # Review cycle 2 (P2): `symbols:` with no `code:` names a
+                    # home it never gives. Nothing can then check the claim, and
+                    # the IMPLEMENTED branch refuses exactly this shape — a
+                    # branch that passes what the other refuses is the drift the
+                    # shared-rule comment above claims is impossible.
+                    #
+                    # ⚠️ ONE DEFECT, ONE VERDICT (#10636 review P3): this fires
+                    # only when `code:` is ABSENT from the row. When it is
+                    # present but malformed (`code: "src.py"`) or empty
+                    # (`code: []`), the artifact-field loop above already
+                    # reported that defect, and the IMPLEMENTED branch yields a
+                    # single error for it — a second verdict here would grade
+                    # the same defect twice, in the same fail-closed direction.
+                    if "code" not in row:
+                        errors.append(
+                            f"{mid}: `symbols` is declared on a not-implemented "
+                            f"row but `code:` names no non-empty file list (got "
+                            f"{declared_code!r}) — the symbol's home is unnamed, so "
+                            f"the claim cannot be verified"
+                        )
+                else:
+                    defined: set[str] = set()
+                    resolved_entries: list[str] = []
+                    unreadable: list[str] = []
+                    for rel in declared_code:
+                        if not isinstance(rel, str) or not rel:
+                            continue
+                        if _path_violations(mid, "code", [rel], root, "code"):
+                            continue
+                        resolved = _resolve_in_repo(rel, root)
+                        if resolved is None:
+                            continue
+                        resolved_entries.append(rel)
+                        names = _defined_names(resolved)
+                        if names is None:
+                            unreadable.append(rel)
+                        else:
+                            defined |= names
+                    if unreadable:
+                        # Mirrors the IMPLEMENTED branch's per-source message
+                        # (#10636 review P3): it names the symbols whose claim
+                        # could not be verified, not just the files it could
+                        # not read — and no backticked field name with a
+                        # trailing space inside it.
+                        errors.append(
+                            f"{mid}: declared `code:` source(s) {unreadable} "
+                            f"could not be read or parsed, so the declared "
+                            f"symbol(s) {declared_symbols} cannot be verified in "
+                            f"them — an unreadable source is not the record of "
+                            f"what is built"
+                        )
+                    # Review cycle 2 (P2): the absence check runs over a
+                    # COMPLETE read, keyed on `resolved_entries` — NOT on
+                    # `defined` being non-empty, which skipped the check for a
+                    # file that defines no module-level name (an empty file, or
+                    # a re-export module whose only binding is `__all__`). The
+                    # IMPLEMENTED branch keys on the same pair for the same
+                    # reason: "not found in what I could read" is evidence only
+                    # when everything was read.
+                    elif resolved_entries:
+                        missing = sorted(s for s in declared_symbols if s not in defined)
+                        if missing:
+                            errors.append(
+                                f"{mid}: symbol(s) {missing} are not defined at "
+                                f"module level in the `code:` file(s) this row "
+                                f"declares ({declared_code}) — the half the row "
+                                f"says is built is not where the row says it is"
+                            )
+
+        # ── the ABSENCE PIN: a recorded absence must be falsifiable by a CALL ─
+        # `tracking_issue:` names WHERE an absence is tracked; nothing in it says
+        # anything would NOTICE the absence closing. #10636 found the live case:
+        # `span_link`'s row asserted an every-point requirement whose real
+        # coverage was 1 of 4 gates, with the other three named only in the
+        # note's own prose ("pinned ELSEWHERE, not by it") — a claim no call
+        # could falsify, and the same class this gate refuses one field up. So a
+        # `not-implemented` row names the test NODE that reds the day the absence
+        # closes (and the ROW is what then flips, not the pin silently deleted).
+        #
+        # A BARE PATH is refused on purpose: that is exactly what `tests:`
+        # already is, and a file whose cited call was renamed away is the drift
+        # this closes. A pin on an `implemented` row is refused too — a pin
+        # asserts an absence, so carrying one while claiming the mechanism is
+        # built reads watched-and-shipped at once.
+        if state == IMPLEMENTED:
+            if PINS in row:
+                errors.append(
+                    f"{mid}: `{PINS}` is declared on an `implemented` row — a "
+                    f"pin asserts that the mechanism is ABSENT and would red "
+                    f"when it closes, so a built mechanism carrying one reads "
+                    f"watched and shipped at once; drop the pin when the row flips"
+                )
+            continue
+        declared_pins = row.get(PINS)
+        if not isinstance(declared_pins, list) or not declared_pins:
+            errors.append(
+                f"{mid}: not-implemented with no absence pin (`{PINS}`) — an "
+                f"absent mechanism needs the test that reds the day the absence "
+                f"closes, or nothing notices it landing and this row keeps "
+                f"publishing the absence (#5064 indicator (3))"
+            )
+            continue
+        for entry in declared_pins:
+            if not isinstance(entry, str) or not entry:
+                errors.append(
+                    f"{mid}: `{PINS}` entry is not a non-empty string: {entry!r}"
+                )
+                continue
+            parts = entry.split("::")
+            if len(parts) == 1:
+                errors.append(
+                    f"{mid}: `{PINS}` entry names no test node ({entry!r}) — "
+                    f"name `path::test_name` or `path::Class::test_name`. A bare "
+                    f"path is what `tests:` is, and the call it cites can be "
+                    f"renamed away while the file stays"
+                )
+                continue
+            if len(parts) > 3 or not parts[0] or not all(p.strip() for p in parts[1:]):
+                errors.append(
+                    f"{mid}: `{PINS}` entry is malformed ({entry!r}) — expected "
+                    f"`path::test_name` or `path::Class::test_name` (pins "
+                    f"resolve at module/class depth — see the stated limits)"
+                )
+                continue
+            rel, node = parts[0], "::".join(parts[1:])
+            path_errors = _path_violations(mid, PINS, [rel], root, "test")
+            if path_errors:
+                errors.extend(path_errors)
+                continue
+            resolved_pin = _resolve_in_repo(rel, root)
+            if resolved_pin is None:
+                continue  # the path rule above already reported it
+            node_names = _test_node_names(resolved_pin)
+            if node_names is None:
+                errors.append(
+                    f"{mid}: `{PINS}` source {rel!r} could not be read or "
+                    f"parsed, so the pin cannot be resolved — an unreadable "
+                    f"test file is not a pin"
+                )
+            elif node not in node_names:
+                errors.append(
+                    f"{mid}: `{PINS}` entry {entry!r} is not a test node that "
+                    f"pytest collects from {rel!r} under that name (nor a node "
+                    f"in its OWN body under it). Causes, and this verdict does "
+                    f"NOT guess which: the cited call is gone; the name is not a "
+                    f"collected test (a helper, no `test` prefix, a non-test "
+                    f"method, or a non-test name); the node carries a "
+                    f"`@pytest.fixture` marker (pytest never collects it); the "
+                    f"method is INHERITED (pytest collects it, so cite the "
+                    f"DEFINING class WHEN THAT CLASS IS ITSELF COLLECTED — a "
+                    f"plain `class Base:` holding `test_*` methods is not); or "
+                    f"the CLASS is not collected — by name, "
+                    f"`__init__` or an opt-out this file can see, or by a base "
+                    f"in ANOTHER file the gate cannot read (a stated limit)"
+                )
+
     # ── the ordering must itself be orderable: a cycle is not an ordering ────
     # Judged over the SET, after the rows: `a → b → a` satisfies every per-row
     # rule, so no single row can report it. Unknown ids and self-references are
@@ -1107,33 +1681,71 @@ def test_every_declared_mechanism_has_a_declaration_marker_and_vice_versa() -> N
         "\n  ".join(errors)
 
 
-def test_the_state_value_carve_out_is_registered_and_marked_absent() -> None:
+def test_the_state_value_carve_out_row_records_what_is_enforced_and_what_is_not() -> None:
     """The enumeration's first deliverable, pinned by name (#5064, #2453, #9775).
 
     `STATE_VALUE_CARVE_OUT` is declared by name in §7 of BOTH design documents and
     the table carried only seven rows — so the mechanism the checklist names
     ("verbatim operational values hold on a live write") had **neither code entry
-    nor marker** in the registry while the gate passed. Its state must stay
-    `not-implemented` because the guarantee is still prompt-only (no mechanical
-    enforcement; #2453's own closing records that): a row marked `implemented`
-    here would make prompt text read as the guarantee, which is the defect this
-    registry exists to catch.
+    nor marker** in the registry while the gate passed. The row carried
+    `not-implemented` while the guarantee was prompt-only (#2453's own closing
+    records that).
 
-    What the row no longer records is an OMISSION: until #9775 the compact render
-    appended nothing, so the row's `note` had to name the render path that
-    dropped the guarantee. Every render path now carries it, and the row says so
-    and names the compaction rule that keeps it there — the code half of that
-    claim is `test_every_render_path_carries_the_carve_out_the_guarantee_requires`.
+    ⛔ Why the state may now read `implemented`, and what keeps that from being
+    the defect this registry exists to catch. The row moved only when the
+    ENFORCEMENT half landed in the write path (`#10360`: `execute_embed` refuses
+    a point whose own verbatim quote holds a different value in the same slot),
+    with a test that goes red when the rule is removed. The state word alone
+    would be overclaiming, so this test pins the residual IN the row: the note
+    must keep naming what is still not enforced. A future lane that deletes that
+    section while keeping `implemented` reds this test instead of shipping a
+    blanket claim.
     """
     rows = {r["id"]: r for r in load_registry()["mechanisms"]}
     assert "state_value_carve_out" in rows, sorted(rows)
     row = rows["state_value_carve_out"]
-    assert row["state"] == NOT_IMPLEMENTED, row
-    assert isinstance(row.get("tracking_issue"), int), row
+    assert row["state"] == IMPLEMENTED, row
+    # An `implemented` row names its code, its test and its symbols — that is
+    # the `declared ⇒ present` contract the gate reads.
+    for field in ("code", "tests", "symbols"):
+        assert row.get(field), (field, row)
+    assert "tortoise/extractor_v2.py" in row["code"], row
+    assert "tests/test_state_value_verbatim_10360.py" in row["tests"], row
+    assert "_refuse_rewritten_value" in row["symbols"], row
+    # The residual stays STATED, as a literal: the claim it guards is "nothing
+    # is silently absorbed". The class the write path cannot reach (a value the
+    # model never emitted) must stay readable in the row.
+    assert "STILL NOT ENFORCED" in row["note"], row["note"]
+    assert "never EMITS" in row["note"], row["note"]
     # The compact render is NAMED in the row: it is the path the row's claim was
     # once false on (#9775), so a reader is sent to the render the compaction
     # rule lives in rather than to a prose assurance.
     assert "_render_master_compact" in row["note"], row["note"]
+    # And the mint guard's COARSE KEY is stated as a residual (#10513 review
+    # cycle-11 P3): the slot key carries the value and no identity for the
+    # claim, so a distinct endpoint sharing an anchor+value is dropped too. The
+    # claim this row makes is "nothing is silently absorbed", so the cost has to
+    # stay readable in the artifact a lane acts on.
+    assert "THAT KEY IS COARSE" in row["note"], row["note"]
+    assert "sharing an anchor word and" in row["note"], row["note"]
+    # And the SHARED tokenizer arm's over-read is stated too (#10513 review
+    # cycle-11 advisory): the dash-as-sign fix is not local to this rule — it
+    # feeds `_value_bindings`, which the against-store fold path also consumes —
+    # and it reads an em dash written flush against the numeral as a minus. A
+    # lane that narrows the arm, or widens it, has to move this row.
+    assert "ATTACHED" in row["note"], row["note"]
+    assert "OVER-READS A BULLET GLYPH" in row["note"], row["note"]
+    assert "test_never_across_fold_5080" in row["note"], row["note"]
+    # And the SEPARATOR exclusion's COST is stated as a residual (#10513 review
+    # cycle-12 P1): NO separator rung ships — `tortoise/value_normalizer.py`'s
+    # #2817 point 1, which this seam now COMPLIES with after shipping the
+    # unrecorded "commas are thousands" rung and WITHHOLDING truthful
+    # comma-decimal points — so the price is that a real thousands rewrite is
+    # unjudged too. The row is where that compliance and that cost are recorded
+    # together, so a future lane either moves the row or re-ships the guess.
+    assert "A SEPARATOR-BEARING NUMERAL IS NEVER JUDGED" in row["note"], row["note"]
+    assert ("test_a_separator_bearing_number_is_outside_the_judged_set"
+            in row["note"]), row["note"]
 
 
 #: Number words the registry prose may spell, keyed by the count they name. A
@@ -1757,6 +2369,297 @@ def test_the_failure_policy_absence_is_pinned_to_the_mint_not_the_render() -> No
         "#5095's remaining-slices list"
     )
     assert row.get("tracking_issue") == 5087, row
+
+
+def test_the_span_link_row_records_the_widening_as_unbuilt() -> None:
+    """The `span_link` row's state is read off the LIVE WRITE PATH, not a helper.
+
+    `STORAGE-ARCHITECTURE.md` §9.4 says it in these words: *"Every committed
+    `Point`/`Object` must walk up to its `Source`"*. `EXTRACTOR-V4-ARCHITECTURE.md`
+    §2.4.1 rule 1 states the same requirement as *"must carry a reachable link to
+    its `Source` span"*, and §2.4 records the widening — from `#2684`'s
+    value-bearing points to ALL points — as a deliberate decision. What the write path actually does is narrower:
+    `_value_verbatim_span` stamps offsets only when the anchor is VERBATIM **and**
+    the text it addresses carries a value, so an ordinary point is written with
+    no address at all.
+
+    ⇒ The row must not read `implemented`. A `validate_span` that checks a
+    SUPPLIED pair never produces one, so marking the row implemented publishes
+    exactly the "a declared mechanism reads like a shipped one" this registry
+    exists to stop — and only a STATE assertion can see it, because the
+    behavioural probes below stay green either way.
+
+    Both directions are pinned, so the test also tells the next lane when to
+    flip the row: build the every-point stamping and the first half goes red.
+    """
+    from tortoise import extractor_v2 as v2
+
+    quoted = "the p99 under load test was 480 ms on 2026-09-19"
+    edus = [
+        {"index": 0, "role": "user", "text": quoted, "turn_id": 1},
+        {"index": 1, "role": "user", "text": "Ravi is the release manager",
+         "turn_id": 2},
+    ]
+    written = v2.execute_embed(
+        {"entities": [], "events": [], "operators": [], "chain_notes": [],
+         "points": [
+             # value-bearing + a verbatim anchor → the one shape that gets a span
+             {"content": "p99 was 480 ms on 2026-09-19",
+              "pointKind": "statement", "quote": quoted, "source_turn_id": 0},
+             # content carries no value → refused at the VALUE gate, so the
+             # route that actually fires is `_carries_value`, not the anchor
+             {"content": "Ravi is the release manager", "pointKind": "statement"},
+             # same route: neither the content nor the quote carries a value
+             {"content": "the deployment slipped to November",
+              "pointKind": "statement", "quote": "nothing verbatim here"},
+         ]},
+        {}, session_id="s1", edus=edus)
+    points = written["payload"]["points"]
+    assert len(points) == 3, points
+    spanned = [p for p in points if p.get("span_start") is not None]
+    unspanned = [p for p in points if p.get("span_start") is None]
+
+    # The ADDRESS half is real: the offsets slice the quote back out of the
+    # source turn, and the verbatim TEXT is never copied onto the point.
+    assert len(spanned) == 1, (
+        "the live write path's span coverage moved — re-measure before touching "
+        f"the `span_link` row: {[(p['content'], p.get('span_start')) for p in points]!r}"
+    )
+    address = spanned[0]
+    start, end = address["span_start"], address["span_end"]
+    assert edus[0]["text"][start:end] == quoted, (start, end)
+
+    # …and the EVERY-POINT half is not: two of three committed points walk up to
+    # nothing. That is the absence the row's state has to record.
+    assert len(unspanned) == 2, (
+        "every committed point now carries a span — §2.4.1 rule 1 is met, so the "
+        f"`span_link` row is stale and should be re-measured and flipped: {points!r}"
+    )
+
+    row = {r["id"]: r for r in load_registry()["mechanisms"]}["span_link"]
+    assert row["state"] == NOT_IMPLEMENTED, (
+        "`span_link` was flipped to `implemented`, but the live write path stamps "
+        "a span only for a value-bearing point with a VERBATIM anchor — §2.4.1 "
+        "rule 1's every-committed-Point widening is not built (see the row note)"
+    )
+    assert row.get("tracking_issue") == 2684, row
+    # Review cycle 3 (P2): the flip makes these three fields OPTIONAL on a
+    # `not-implemented` row, so nothing above stops them being deleted — and the
+    # row's note would go on claiming the built half is pinned. The same
+    # precedent as the carve-out row: name the artifacts, not just the state.
+    for field in ("code", "tests", "symbols"):
+        assert row.get(field), (
+            f"`span_link` dropped `{field}:` when it was flipped — the row's note "
+            "still says the address half is built and pinned, so the fields that "
+            "record it are part of the claim"
+        )
+    assert "tests/test_verbatim_span.py" in row["tests"], row["tests"]
+    assert "validate_span" in row["symbols"], row["symbols"]
+
+
+def test_the_artifact_fields_of_a_not_implemented_row_are_still_verified(
+    tmp_path,
+) -> None:
+    """Review P2 (#5064): presence of `code:`/`tests:`/`symbols:` is a claim.
+
+    A `not-implemented` row that names the half which IS built publishes an
+    anchor a reader relies on (“the built half is at this file, pinned by this
+    test”). The fields used to be verified only under `implemented`, so ONE
+    state flip turned three verified declarations into inert prose — the file
+    could be deleted and the symbol renamed with the gate green. Both directions
+    are pinned here, and they are the same rules the other branch applies.
+    """
+    (tmp_path / "src.py").write_text("def present_symbol():\n    return 1\n")
+    (tmp_path / "test_x.py").write_text("def test_ok():\n    assert True\n")
+    (tmp_path / FIXTURE_DECLARED_DOC).parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / FIXTURE_DECLARED_DOC).write_text("# declaration\n")
+    good = dict(
+        _row("mid"),
+        state=NOT_IMPLEMENTED,
+        tracking_issue=2684,
+        pins=["test_x.py::test_ok"],
+        code=["src.py"],
+        tests=["test_x.py"],
+        symbols=["present_symbol"],
+    )
+    assert gate_errors([good], root=tmp_path) == []
+
+    missing_file = dict(good, code=["nope.py"], symbols=[])
+    assert any("nope.py" in e for e in gate_errors([missing_file], root=tmp_path))
+
+    wrong_symbol = dict(good, symbols=["absent_symbol"])
+    errors = gate_errors([wrong_symbol], root=tmp_path)
+    assert any("absent_symbol" in e for e in errors), errors
+
+    wrong_kind = dict(good, tests=["src.py"])
+    assert any(
+        "not a test file" in e for e in gate_errors([wrong_kind], root=tmp_path)
+    )
+
+    # Review cycle 2 pinned two fail-open routes the first version left, both of
+    # which let a `symbols:` claim go unverified — the exact inert-declaration
+    # shape this rule exists to close.
+    symbols_without_code = {k: v for k, v in good.items() if k != "code"}
+    errors = gate_errors([symbols_without_code], root=tmp_path)
+    assert any("the symbol's home is unnamed" in e for e in errors), errors
+
+    (tmp_path / "empty.py").write_text("__all__ = []\n")
+    defines_nothing = dict(good, code=["empty.py"], symbols=["absent_symbol"])
+    errors = gate_errors([defines_nothing], root=tmp_path)
+    assert any("absent_symbol" in e for e in errors), errors
+
+    not_a_list = dict(good, code="src.py")
+    errors = gate_errors([not_a_list], root=tmp_path)
+    assert any("is not a list" in e for e in errors), errors
+
+    # #10636 review round 3 (P3, after the 5 pre-flip cycles): the EMPTY-list
+    # refusal is the ONLY thing rejecting `code: []` / `tests: []` on a
+    # not-implemented row — `_path_violations` returns `[]` for an empty list,
+    # so nothing else fires — and NOTHING pinned it. Mutating `if not value:` to
+    # `if False:` left the rest of this test GREEN while a row with
+    # `code: [], tests: ["test_x.py"], tracking_issue: 2684` produced
+    # `gate_errors() == []`: a GREEN gate on an inert declaration, which is
+    # exactly the shape this PR exists to close. The assertion names the
+    # per-field message, so the guard is pinned per field rather than by the
+    # `symbols:`-home rule that also happens to fire for `code: []`.
+    for field in ("code", "tests"):
+        empty_list = dict(good, **{field: []})
+        errors = gate_errors([empty_list], root=tmp_path)
+        assert any(
+            f"`{field}` is declared on a not-implemented row but is empty" in e
+            for e in errors
+        ), f"{field}: an empty list was not refused ({errors})"
+
+    # #10636 review round 3 (P3): the `symbols:` SHAPE guard is the same
+    # fail-open class, one field over, and NOTHING pinned it. Its three operands
+    # are load-bearing in different ways, so each is asserted through the message
+    # it alone produces (the same per-operand discipline the `code:`/`tests:` loop
+    # above uses):
+    #
+    # * `not isinstance(…)` — a bare STRING would iterate CHARACTER BY CHARACTER
+    #   and reach the absence check with a nonsense name list (the exact shape the
+    #   `preconditions:` allow-list comment calls out);
+    # * `not declared_symbols` — with a VALID `code:`, `symbols: []` leaves the
+    #   absence check iterating an empty list, which finds nothing missing: drop
+    #   this operand and `gate_errors() == []` on an inert declaration;
+    # * `not all(isinstance(s, str) and s.strip() …)` — without it a blank name is
+    #   fed to the absence check and reported as "not defined at module level",
+    #   a different and wrong verdict for the same row.
+    for bad_symbols in ([], ["   "], [123], "validate_span"):
+        errors = gate_errors([dict(good, symbols=bad_symbols)], root=tmp_path)
+        assert any(
+            "`symbols` is declared on a not-implemented row but is not a "
+            "non-empty list of names" in e
+            for e in errors
+        ), f"symbols={bad_symbols!r} was not refused by the shape guard ({errors})"
+
+    # Review cycle 3 (P3): an explicit null is a declaration of nothing that
+    # looks like a declaration — refused, never read as an omission.
+    for field in ("code", "tests", "symbols"):
+        explicit_null = dict(good, **{field: None})
+        errors = gate_errors([explicit_null], root=tmp_path)
+        # The PER-FIELD message, not just "some error": with `cross` fields
+        # present, `code: None` would otherwise error only via the symbols-home
+        # rule and the assertion would survive a revert to `is None -> continue`
+        # (review cycle 4, P3).
+        assert any(
+            f"`{field}` is declared on a not-implemented row but" in e
+            for e in errors
+        ), f"{field}: null was read as an omission ({errors})"
+
+    # An unreadable source keeps its own verdict: "not found in what I could
+    # read" is not evidence of absence, so the absence check must NOT fire too
+    # (review cycle 4, P3 — the same one-defect-one-verdict rule the
+    # IMPLEMENTED branch has its own test for).
+    (tmp_path / "broken.py").write_text("def broken(:\n")
+    unreadable = dict(good, code=["broken.py"], symbols=["ANYTHING"])
+    errors = gate_errors([unreadable], root=tmp_path)
+    assert any("could not be read or parsed" in e for e in errors), errors
+    assert not any("not defined at module level" in e for e in errors), errors
+
+
+def test_a_broken_code_field_yields_one_verdict_on_a_not_implemented_row(
+    tmp_path,
+) -> None:
+    """#10636 review P3: ONE defect, ONE verdict — both branches, same count.
+
+    `symbols:` on a not-implemented row whose `code:` is present-but-broken
+    used to produce TWO errors for one defect: the artifact-field loop reports
+    the shape (`is not a list` / `is empty`) and the symbols-home rule fired
+    again on the same field. The IMPLEMENTED branch yields exactly one for the
+    same shape. Two verdicts for one defect is how a per-field message stops
+    naming the field that is actually wrong.
+    """
+    (tmp_path / "src.py").write_text("def present_symbol():\n    return 1\n")
+    (tmp_path / "test_x.py").write_text("def test_ok():\n    assert True\n")
+    (tmp_path / FIXTURE_DECLARED_DOC).parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / FIXTURE_DECLARED_DOC).write_text("# declaration\n")
+    good = dict(
+        _row("mid"),
+        state=NOT_IMPLEMENTED,
+        tracking_issue=2684,
+        code=["src.py"],
+        tests=["test_x.py"],
+        symbols=["present_symbol"],
+        # #5064 indicator (3): an absent row also names the test that reds when
+        # the absence closes. Without it the row earns a SECOND verdict ("no
+        # absence pin"), which would make this test measure the pin rule instead
+        # of the one-defect-one-verdict shape it exists for.
+        pins=["test_x.py::test_ok"],
+    )
+    assert gate_errors([good], root=tmp_path) == []
+
+    for broken in ("src.py", [], None):  # scalar / empty / explicit null
+        errors = gate_errors([dict(good, code=broken)], root=tmp_path)
+        assert len(errors) == 1, (
+            f"code={broken!r} produced {len(errors)} verdicts for ONE defect: "
+            f"{errors}"
+        )
+        assert "`code` is declared on a not-implemented row" in errors[0], errors
+
+    # The symbols-home verdict still fires on the shape it alone owns: `code:`
+    # ABSENT from the row (nothing else reports that).
+    without_code = {k: v for k, v in good.items() if k != "code"}
+    errors = gate_errors([without_code], root=tmp_path)
+    assert len(errors) == 1, errors
+    assert "the symbol's home is unnamed" in errors[0], errors
+
+
+def test_the_unreadable_source_verdict_names_the_symbols_it_could_not_verify(
+    tmp_path,
+) -> None:
+    """#10636 review P3: name what could not be verified, not just the file.
+
+    The not-implemented branch's unreadable-source message said "so
+    `symbols: ` cannot be verified" — a backticked field name with a trailing
+    space inside it, and no indication of WHICH symbols the row's claim rested
+    on. The IMPLEMENTED branch names them; this mirrors it.
+    """
+    (tmp_path / "broken.py").write_text("def broken(:\n")
+    (tmp_path / "test_x.py").write_text("def test_ok():\n    assert True\n")
+    (tmp_path / FIXTURE_DECLARED_DOC).parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / FIXTURE_DECLARED_DOC).write_text("# declaration\n")
+    row = dict(
+        _row("mid"),
+        state=NOT_IMPLEMENTED,
+        tracking_issue=2684,
+        code=["broken.py"],
+        tests=["test_x.py"],
+        symbols=["present_symbol"],
+        # #5064 indicator (3): the pin is what makes the count below "ONE
+        # verdict for ONE defect" rather than "one verdict, plus the row's
+        # missing pin".
+        pins=["test_x.py::test_ok"],
+    )
+    errors = gate_errors([row], root=tmp_path)
+    assert len(errors) == 1, errors
+    assert "could not be read or parsed" in errors[0], errors
+    assert "['present_symbol']" in errors[0], (
+        f"the verdict does not name the symbols whose claim it refuses: {errors[0]}"
+    )
+    assert "`symbols: `" not in errors[0], (
+        f"a backticked field name with a trailing space inside it: {errors[0]}"
+    )
 
 
 # ── THE DDL SCAN, as a function so it can be TESTED ─────────────────────────
@@ -3504,6 +4407,472 @@ def test_gate_fails_closed_on_not_implemented_without_a_tracking_issue() -> None
     assert any("no real tracking_issue" in e for e in errors), errors
 
 
+# ── the ABSENCE PIN: a recorded absence must be falsifiable by a CALL ───────
+#
+# `tracking_issue:` says WHERE an absent mechanism is tracked. It says nothing
+# about whether anything would NOTICE the absence closing — and that is not a
+# hypothetical: #10636 found `span_link`'s row publishing an every-point
+# requirement whose real coverage was 1 of 4 gates, with the other three named
+# only in the note's own prose ("pinned ELSEWHERE, not by it"). The registry's
+# remedy for a claim it cannot verify is to refuse it (see the `not-implemented`
+# artifact fields above), and an absence claim is a claim.
+#
+# So a `not-implemented` row names its PIN: the test node that reds the day the
+# absence closes, at which point the row flips to `implemented` rather than the
+# pin being quietly deleted. Same polarity as every other rule here — a pin this
+# gate cannot resolve to a real test is a violation, never a default, and an
+# unreadable test source is a violation of its own (never a silent pass).
+
+
+def _not_implemented_row(**overrides) -> dict:
+    row = {
+        "id": "x",
+        "name": "x",
+        "declared_in": ["config/v4-mechanisms.yml"],
+        "state": "not-implemented",
+        "tracking_issue": 4242,
+        "pins": ["tests/test_fanout_cap.py::test_bounded_fanout_defaults_to_the_cap"],
+    }
+    row.update(overrides)
+    return row
+
+
+def test_absence_pin_accepts_a_pin_that_resolves_to_a_real_test() -> None:
+    """The control: a resolvable pin is NOT a violation (so the cases below fail
+    for the reason they claim, not because the rule always fires)."""
+    errors = [e for e in gate_errors([_not_implemented_row()]) if "pin" in e]
+    assert errors == [], errors
+
+
+def test_absence_pin_accepts_a_class_qualified_pin() -> None:
+    """`Class::test_name` is a node pytest selects, so it is a pin."""
+    errors = [
+        e
+        for e in gate_errors(
+            [
+                _not_implemented_row(
+                    pins=[
+                        "tests/test_5095_s3_identity_policy.py"
+                        "::TestTheRemainingAbsence::test_an_unresolved_lookup_still_mints"
+                    ]
+                )
+            ]
+        )
+        if "pin" in e
+    ]
+    assert errors == [], errors
+
+
+def test_gate_fails_closed_on_not_implemented_without_an_absence_pin() -> None:
+    """An absence nobody would notice closing is the state #5064 exists to end."""
+    row = _not_implemented_row()
+    del row["pins"]
+    errors = gate_errors([row])
+    assert any("no absence pin" in e for e in errors), errors
+
+
+def test_gate_fails_closed_on_an_empty_absence_pin_list() -> None:
+    errors = gate_errors([_not_implemented_row(pins=[])])
+    assert any("no absence pin" in e for e in errors), errors
+
+
+def test_gate_fails_closed_on_a_bare_test_path_as_the_pin() -> None:
+    """A path is what `tests:` already is — and exactly the gap this closes:
+    the FILE can exist while the named call is renamed away."""
+    errors = gate_errors(
+        [_not_implemented_row(pins=["tests/test_fanout_cap.py"])]
+    )
+    assert any("names no test node" in e for e in errors), errors
+
+
+def test_gate_fails_closed_on_a_pin_naming_a_test_that_does_not_exist() -> None:
+    errors = gate_errors(
+        [_not_implemented_row(pins=["tests/test_fanout_cap.py::test_no_such_pin_5064"])]
+    )
+    assert any("is not a test node that pytest collects" in e for e in errors), errors
+
+
+def test_gate_fails_closed_on_a_pin_whose_test_file_is_missing() -> None:
+    errors = gate_errors(
+        [_not_implemented_row(pins=["tests/test_no_such_file_5064.py::test_x"])]
+    )
+    assert any("does not exist" in e for e in errors), errors
+
+
+def test_gate_fails_closed_on_a_pin_in_an_unreadable_source(tmp_path) -> None:
+    """An unparsable test file is UNVERIFIABLE, not absent — it must not read as
+    a resolved pin (the same direction `_defined_names` refuses)."""
+    (tmp_path / "test_broken_5064.py").write_text("def test_oops(:\n")
+    errors = gate_errors(
+        [_not_implemented_row(pins=["test_broken_5064.py::test_oops"])], root=tmp_path
+    )
+    assert any("could not be read or parsed" in e for e in errors), errors
+
+
+def test_gate_fails_closed_on_a_malformed_pin_entry() -> None:
+    """Each operand is asserted by the message IT ALONE produces.
+
+    `assert errors` was not enough (review cycle 1, P2): every case below also
+    reds through a DIFFERENT branch, so deleting the shape guard left the suite
+    green while the gate accepted a pin no reader can run.
+    """
+    for bad in (
+        "tests/test_fanout_cap.py::",                 # empty node
+        "::test_bounded_fanout_defaults_to_the_cap",  # empty path
+        "tests/test_fanout_cap.py::A::b::c",          # more than Class::method
+    ):
+        errors = gate_errors([_not_implemented_row(pins=[bad])])
+        assert any("is malformed" in e for e in errors), (bad, errors)
+
+    # ... and the TYPE operand, which the shape guard never reaches. The EMPTY
+    # string is included because it is the one case that pins `or not entry`
+    # (review cycle 2, P2): without it `pins: [""]` falls through to the
+    # bare-path branch and the operand could be deleted with the suite green.
+    for bad in (4242, ""):
+        errors = gate_errors([_not_implemented_row(pins=[bad])])
+        assert any("not a non-empty string" in e for e in errors), (bad, errors)
+
+
+def test_gate_fails_closed_on_a_non_list_pins_value() -> None:
+    """The container shape: `pins: "path::test"` iterates CHARACTERS and a
+    bare int must be a verdict, not a `TypeError` (review cycle 1, P2 — this
+    operand was unpinned, so deleting it left the suite green)."""
+    for value in ("tests/test_fanout_cap.py::test_bounded_fanout_defaults_to_the_cap", 5):
+        errors = gate_errors([_not_implemented_row(pins=value)])
+        assert any("no absence pin" in e for e in errors), (value, errors)
+
+
+def test_gate_fails_closed_on_a_pin_naming_a_node_pytest_never_collects(
+    tmp_path,
+) -> None:
+    """Resolution is over COLLECTABLE nodes, not over every ``def`` in the file.
+
+    Review cycle 1 (P1): `_test_node_names` accepted any top-level function and
+    any method of any class, so `path::_helper` resolved as a pin while no run
+    could ever select it — the row read as watched and nothing could red. Each
+    refused shape below is a name that EXISTS in the file and that pytest does
+    not collect; the accepted ones keep the rule from being vacuous.
+    """
+    (tmp_path / "test_shapes_5064.py").write_text(
+        "import unittest\n"
+        "def _helper():\n    return 1\n"
+        "def not_a_test():\n    return 1\n"
+        "def test_ok_5064():\n    assert True\n"
+        "class Helper:\n"
+        "    def test_looks_like_one(self):\n        assert True\n"
+        "class TestCollected:\n"
+        "    def test_yes(self):\n        assert True\n"
+        "    def helper(self):\n        return 1\n"
+        "class CaseTest(unittest.TestCase):\n"
+        "    def test_unittest_style(self):\n        assert True\n"
+        "class TestNeedsInit:\n"
+        "    def __init__(self):\n        self.x = 1\n"
+        "    def test_not_collected(self):\n        assert True\n"
+        "from unittest import TestCase as TC\n"
+        "from unittest.case import TestCase as TC2\n\n\n"
+        "class AliasedCase(TC):\n"
+        "    def test_aliased(self):\n        assert True\n"
+        "class ViaCaseModule(TC2):\n"
+        "    def test_via_case(self):\n        assert True\n"
+        "class BaseWithInit:\n"
+        "    def __init__(self):\n        self.x = 1\n"
+        "class TestIndirectInit(BaseWithInit):\n"
+        "    def test_inherited_init(self):\n        assert True\n"
+        "class TestDisabled:\n"
+        "    __test__ = False\n"
+        "    def test_no(self):\n        assert True\n"
+        "class MyCase(unittest.TestCase):\n"
+        "    def test_base(self):\n        assert True\n"
+        "class FooTest(MyCase):\n"
+        "    def test_indirect(self):\n        assert True\n"
+        "class DisabledBase:\n"
+        "    __test__ = 0\n"
+        "class TestInheritsDisabled(DisabledBase):\n"
+        "    def test_no(self):\n        assert True\n"
+        "class TestZero:\n"
+        "    __test__ = 0\n"
+        "    def test_zero(self):\n        assert True\n"
+        "import pytest\n"
+        "import pytest as pt\n"
+        "from pytest import fixture as fix\n"
+        "from pytest import fixture\n\n\n"
+        "@pytest.fixture\n"
+        "def test_a_fixture_5064():\n    return 1\n\n\n"
+        "@pt.fixture\n"
+        "def test_a_fixture_alias_5064():\n    return 1\n\n\n"
+        "@fix\n"
+        "def test_a_fixture_imported_5064():\n    return 1\n\n\n"
+        "@pytest.fixture()\n"
+        "def test_a_fixture_call_5064():\n    return 1\n\n\n"
+        "@fixture\n"
+        "def test_a_fixture_unaliased_5064():\n    return 1\n\n\n"
+
+        "class TestMemberForms:\n"
+        "    def test_off_in_class(self):\n        assert True\n"
+        "    test_off_in_class.__test__ = False\n"
+        "    def test_kept_in_class(self):\n        assert True\n"
+        "class TestClassHandle:\n"
+        "    def test_off_by_handle(self):\n        assert True\n"
+        "    def test_kept_by_handle(self):\n        assert True\n"
+        "TestClassHandle.test_off_by_handle.__test__ = False\n"
+        "class TestFixtureMethod:\n"
+        "    @pytest.fixture\n"
+        "    def test_a_fixture_method(self):\n        return 1\n"
+        "    def test_a_real_method(self):\n        assert True\n"
+        "class TestHandleOff:\n"
+        "    def test_x(self):\n        assert True\n"
+        "TestHandleOff.__test__ = False\n"
+        "class DisabledByHandleBase:\n"
+        "    pass\n"
+        "DisabledByHandleBase.__test__ = False\n"
+        "class TestChildOfDisabled(DisabledByHandleBase):\n"
+        "    def test_child(self):\n        assert True\n"
+    )
+
+    def pin_errors(node: str) -> list[str]:
+        return [
+            e
+            for e in gate_errors(
+                [_not_implemented_row(pins=[f"test_shapes_5064.py::{node}"])],
+                root=tmp_path,
+            )
+            if "pin" in e
+        ]
+
+    for node in (
+        "_helper",                        # a helper, not a test
+        "not_a_test",                     # a plain function
+        "Helper::test_looks_like_one",    # a class pytest does not collect
+        "TestCollected::helper",          # a method that is not a test
+        "TestNeedsInit::test_not_collected",  # `Test*` with __init__: not collected
+        "TestIndirectInit::test_inherited_init",  # ... `__init__` from a BASE
+        "TestDisabled::test_no",          # `__test__ = False` opts the class out
+        "TestZero::test_zero",            # ... any FALSY value, not just False
+        "TestInheritsDisabled::test_no",  # ... including an INHERITED opt-out
+        "test_a_fixture_5064",            # @pytest.fixture: pytest never collects it
+        "TestMemberForms::test_off_in_class",   # member opt-out in the class body
+        "TestClassHandle::test_off_by_handle",  # ... written through the CLASS handle
+        "test_a_fixture_alias_5064",       # `import pytest as pt` + `@pt.fixture`
+        "test_a_fixture_imported_5064",    # `from pytest import fixture as fix`
+        "test_a_fixture_call_5064",        # the CALL form `@pytest.fixture()`
+        "test_a_fixture_unaliased_5064",   # `from pytest import fixture` + `@fixture`
+        "TestFixtureMethod::test_a_fixture_method",  # a fixture METHOD
+        "TestHandleOff::test_x",           # the class handle `TestCls.__test__ = False`
+        "TestChildOfDisabled::test_child",  # ... inherited from a handle-disabled BASE
+    ):
+        assert any("is not a test node that pytest collects" in e for e in pin_errors(node)), (
+            node,
+            pin_errors(node),
+        )
+
+    # ⭐ An INHERITED test method is collected by pytest but NOT nameable as a
+    # pin (review cycle 5, P2 — the message said so and nothing asserted it, so
+    # an MRO-walking rewrite would have left the suite green and the message
+    # false). `FooTest` inherits `test_base` from `MyCase`.
+    inherited = pin_errors("FooTest::test_base")
+    assert any(
+        "OWN body" in e and "INHERITED" in e for e in inherited
+    ), inherited
+
+    for node in (
+        "test_ok_5064",
+        "TestCollected::test_yes",
+        "CaseTest::test_unittest_style",   # unittest.TestCase methods ARE collected
+        "AliasedCase::test_aliased",      # ... including through an ALIASED base
+        "ViaCaseModule::test_via_case",   # ... and the `unittest.case` spelling
+        "FooTest::test_indirect",         # ... and TRANSITIVELY via an in-file base
+        "TestMemberForms::test_kept_in_class",   # the sibling of an opted-out member
+        "TestClassHandle::test_kept_by_handle",  # ... same, through the class handle
+        "TestFixtureMethod::test_a_real_method",  # sibling of a fixture method
+    ):
+        assert pin_errors(node) == [], (node, pin_errors(node))
+
+
+def test_gate_treats_a_member_test_opt_out_as_one_member(tmp_path) -> None:
+    """`member.__test__ = False` excludes THAT member — not the whole module.
+
+    Review cycle 5 (P2): conflating the attribute form with the bare-`Name` scope
+    opt-out disabled collection for the entire file, so a sibling `test_kept`
+    that pytest DOES collect was refused with "the cited call is gone".
+    """
+    (tmp_path / "test_member_opt_out_5064.py").write_text(
+        "def test_off_5064():\n    assert True\n"
+        "test_off_5064.__test__ = False\n\n\n"
+        "def test_kept_5064():\n    assert True\n"
+    )
+    refused = gate_errors(
+        [_not_implemented_row(pins=["test_member_opt_out_5064.py::test_off_5064"])],
+        root=tmp_path,
+    )
+    assert any("is not a test node that pytest collects" in e for e in refused), refused
+    accepted = [
+        e
+        for e in gate_errors(
+            [_not_implemented_row(pins=["test_member_opt_out_5064.py::test_kept_5064"])],
+            root=tmp_path,
+        )
+        if "pin" in e
+    ]
+    assert accepted == [], accepted
+
+
+def test_gate_fails_closed_on_an_annotated_scope_opt_out(tmp_path) -> None:
+    """`__test__: bool = False` (`AnnAssign`) is the same scope opt-out."""
+    (tmp_path / "test_ann_opt_out_5064.py").write_text(
+        "__test__: bool = False\n\n\ndef test_nope_5064():\n    assert True\n"
+    )
+    errors = gate_errors(
+        [_not_implemented_row(pins=["test_ann_opt_out_5064.py::test_nope_5064"])],
+        root=tmp_path,
+    )
+    assert any("is not a test node that pytest collects" in e for e in errors), errors
+
+
+def test_gate_accepts_a_decorator_named_fixture_from_another_module(
+    tmp_path,
+) -> None:
+    """A decorator named ``fixture`` that is NOT pytest's is not the marker.
+
+    This is the case the EMPTY SEED needs (review cycle 9, P2): pytest collects
+    this node, so a marker set seeded with ``"fixture"`` would wrongly refuse it,
+    and the seed's comment could claim decidability that nothing observed.
+    """
+    (tmp_path / "test_foreign_fixture_5064.py").write_text(
+        "from helpers_5064 import fixture\n\n\n"
+        "@fixture\n"
+        "def test_collected_5064():\n    assert True\n"
+    )
+    errors = [
+        e
+        for e in gate_errors(
+            [_not_implemented_row(pins=["test_foreign_fixture_5064.py::test_collected_5064"])],
+            root=tmp_path,
+        )
+        if "pin" in e
+    ]
+    assert errors == [], errors
+
+
+def test_gate_fails_closed_on_an_unaliased_pytest_fixture_import(tmp_path) -> None:
+    """``from pytest import fixture`` + ``@fixture`` — the un-aliased marker.
+
+    Pins the ``alias.asname or alias.name`` operand: with the fallback removed,
+    the alias is ``None`` and the node is wrongly accepted.
+    """
+    (tmp_path / "test_unaliased_fixture_5064.py").write_text(
+        "from pytest import fixture\n\n\n"
+        "@fixture\n"
+        "def test_never_runs_5064():\n    return 1\n"
+    )
+    errors = gate_errors(
+        [_not_implemented_row(pins=["test_unaliased_fixture_5064.py::test_never_runs_5064"])],
+        root=tmp_path,
+    )
+    assert any("is not a test node that pytest collects" in e for e in errors), errors
+
+
+def test_gate_fails_closed_on_a_pin_in_a_module_opting_out_of_collection(
+    tmp_path,
+) -> None:
+    """Module-level `__test__ = False` — pytest collects NOTHING from the file.
+
+    Claimed in `_test_node_names`' docstring and, before this case, unexercised
+    (review cycle 4, P2): deleting the module-level probe left the suite green,
+    so a pin in an opted-out module would have read as watched.
+    """
+    (tmp_path / "test_opted_out_5064.py").write_text(
+        "__test__ = False\n\n\ndef test_never_runs():\n    assert True\n"
+    )
+    errors = gate_errors(
+        [_not_implemented_row(pins=["test_opted_out_5064.py::test_never_runs"])],
+        root=tmp_path,
+    )
+    assert any("is not a test node that pytest collects" in e for e in errors), errors
+
+
+def test_gate_fails_closed_when_the_defining_class_is_not_collected(
+    tmp_path,
+) -> None:
+    """A plain in-file base class holds `test_*` methods pytest runs ONLY via a
+    collected subclass — so there is no citation that resolves for the inherited
+    method.
+
+    The refusal message tells the author to cite the DEFINING class, and for this
+    shape that advice loops back to the same refusal (final verification pass,
+    P2): the fix is to say which bases qualify, and to prove the double refusal
+    rather than narrate it.
+    """
+    (tmp_path / "test_plain_base_5064.py").write_text(
+        "class Base:\n"
+        "    def test_inherited(self):\n        assert True\n"
+        "class TestSub(Base):\n"
+        "    def test_own(self):\n        assert True\n"
+    )
+
+    def pin_errors(node: str) -> list[str]:
+        return [
+            e
+            for e in gate_errors(
+                [_not_implemented_row(pins=[f"test_plain_base_5064.py::{node}"])],
+                root=tmp_path,
+            )
+            if "pin" in e
+        ]
+
+    inherited = pin_errors("TestSub::test_inherited")
+    assert any(
+        "WHEN THAT CLASS IS ITSELF COLLECTED" in e for e in inherited
+    ), inherited
+    defining = pin_errors("Base::test_inherited")
+    assert any(
+        "is not a test node that pytest collects" in e for e in defining
+    ), defining
+    assert pin_errors("TestSub::test_own") == [], pin_errors("TestSub::test_own")
+
+
+def test_gate_fails_closed_on_pins_declared_on_an_implemented_row() -> None:
+    """A pin asserts an absence. An `implemented` row carrying one reads as
+    watched-and-built at the same time — the two states are exclusive."""
+    errors = gate_errors(
+        [_implemented_row(pins=["tests/test_fanout_cap.py::test_bounded_fanout_defaults_to_the_cap"])]
+    )
+    assert any("declared on an `implemented` row" in e for e in errors), errors
+
+
+def test_every_absent_mechanism_in_the_registry_names_its_absence_pin() -> None:
+    """The deliverable on the REAL registry: indicator (3) for absences.
+
+    Every `not-implemented` row resolves its pin through `gate_errors`, and
+    `sufficiency_router` is the one row whose absence (#5009's *"nothing
+    escalates yet"*) had no call that could falsify it until this pin existed.
+    """
+    absent = {
+        row["id"]: row
+        for row in load_registry()["mechanisms"]
+        if row.get("state") == NOT_IMPLEMENTED
+    }
+    assert absent, "no absent mechanism to pin — this test is measuring nothing"
+    for mid, row in absent.items():
+        assert row.get("pins"), f"{mid}: not-implemented row carries no `pins:`"
+    # ⚠️ Guarded on PRESENCE, not asserted unconditionally (review cycle 1, P2):
+    # the pin's own docstring tells the next lane to flip `sufficiency_router` to
+    # `implemented` when escalation lands, and an unconditional assertion would
+    # red on that legitimate flip — a false verdict from a test whose job is to
+    # demand the pin, not to keep the mechanism absent.
+    if "sufficiency_router" in absent:
+        assert any(
+            "test_sufficiency_router.py" in p
+            for p in absent["sufficiency_router"]["pins"]
+        ), absent["sufficiency_router"]["pins"]
+
+    # ⚠️ UNFILTERED (review cycle 4, P2): filtering on the substring "pin"
+    # skipped the PATH verdict ("declared path does not exist"), so a pin naming
+    # a missing file left this test — whose whole job is "every absent row
+    # resolves its pin" — green while `gate_errors` was red.
+    errors = gate_errors(load_registry()["mechanisms"])
+    assert errors == [], errors
+
+
 # ── the CODE ANCHOR: `implemented` must name a SYMBOL, not just a file ──────
 #
 # The gate's remaining `declared ⇒ present` inference: `code:` proved a FILE
@@ -4215,6 +5584,9 @@ def test_gate_accepts_the_issue_number_one_and_a_symlinked_root(tmp_path) -> Non
                 "declared_in": ["config/v4-mechanisms.yml"],
                 "state": "not-implemented",
                 "tracking_issue": 1,
+                "pins": [
+                    "tests/test_fanout_cap.py::test_bounded_fanout_defaults_to_the_cap"
+                ],
             }
         ]
     ) == []
@@ -4321,6 +5693,7 @@ def _absent_row(**overrides) -> dict:
         "declared_in": ["config/v4-mechanisms.yml"],
         "state": "not-implemented",
         "tracking_issue": 5006,
+        "pins": ["tests/test_fanout_cap.py::test_bounded_fanout_defaults_to_the_cap"],
     }
     row.update(overrides)
     return row

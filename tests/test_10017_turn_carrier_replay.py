@@ -94,6 +94,12 @@ TURN_SNAPSHOT_UNATTESTABLE_KEYS = frozenset({"status", "createdAt"})
 TURN_SNAPSHOT_BRANCH_KEYS = frozenset({
     "embedding_preserved",
     "embedding_model", "embedding_revision", "embedding_text_hash",
+    # #8488 (review round 2, P1): rides the snapshot only on the branch where
+    # `TORTOISE_CONTEXT_ENRICH` was ON and the enrichment produced a text, so it
+    # belongs to the OPTIONAL (branch) set — the same set the pin below holds
+    # this copy to. It is here rather than in `TURN_SNAPSHOT_KEYS` because the
+    # OFF configuration emits no such key at all (byte-identical to pre-#8488).
+    "embeddingText",
 })
 
 #: The three stamps that cannot coexist with `embedding_preserved`.

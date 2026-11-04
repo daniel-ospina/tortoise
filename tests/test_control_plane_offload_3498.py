@@ -134,6 +134,119 @@ def test_control_plane_pool_runs_calls_concurrently():
     assert len(set(names)) >= 2, f"pool serialised four calls onto {names}"
 
 
+# ── #10618 cycle-4: `drain()` — the completion barrier a harness quiesces with ──
+
+
+def test_drain_waits_for_running_work_not_for_free_workers():
+    """``drain()`` is a COMPLETION barrier: it returns only once work submitted
+    before it has actually run.
+
+    ⛔ A no-op per worker is the idiom that looks equivalent and MEASURED as
+    insufficient (the #10618 cycle-4 review's own suggested fix, falsified here):
+    with N workers a free worker consumes several no-ops while another still
+    holds a real item, so every no-op completes with real work still in flight.
+    These pools are process-lifetime (#10618/#3060), so work CAN outlive the
+    caller that submitted it — a harness that quiesces with the sentinel shape
+    leaks that work into the next test's process globals (#5049 rule 4).
+    """
+    pool = monitoring._SingleSlotWorker("test-drain-running", workers=4)
+    entered = threading.Event()
+    release = threading.Event()
+    drained = threading.Event()
+
+    def _slow():
+        entered.set()
+        release.wait(10)
+        return "done"
+
+    def _drain() -> None:
+        if pool.drain(timeout=10.0):
+            drained.set()
+
+    pool.submit(_slow)
+    assert entered.wait(5), "the pool never started the submitted callable"
+    drainer = threading.Thread(target=_drain, daemon=True)
+    drainer.start()
+    assert not drained.wait(0.3), (
+        "drain() returned while a submitted callable was still RUNNING — it is "
+        "counting only the queue, not in-flight work, which is the sentinel bug")
+    release.set()
+    assert drained.wait(10), (
+        "drain() never returned after the work completed — a completion barrier "
+        "that hangs is worse than none")
+
+
+def test_drain_cannot_be_left_waiting_by_a_fast_completing_submission():
+    """The in-flight register is populated BEFORE the enqueue.
+
+    The reverse order loses a race with a FREE worker: it can dequeue, run and
+    settle the callable before ``submit`` registers it, so ``_settle`` discards
+    nothing and the settled future is added afterwards — it then sits in the
+    register forever and every later ``drain()`` waits for work that already
+    finished (a teardown hang, not a slow test).
+
+    The race is forced deterministically here by completing the submission from
+    inside ``put_nowait`` — the exact instant a worker that won the race would —
+    without leaving it on the queue for `_loop` to trip over.
+    """
+    pool = monitoring._SingleSlotWorker("test-drain-race", workers=1)
+
+    def _racing_put(item):
+        fn, future = item
+        future.set_result(fn())
+        pool._settle(future)
+
+    pool._queue.put_nowait = _racing_put
+    pool.submit(lambda: None)
+    assert pool.drain(timeout=2.0), (
+        "a submission that settled before `submit` returned stayed in the "
+        "in-flight register — every later drain() would wait for work that had "
+        "already finished")
+
+
+def test_drain_is_not_held_open_by_a_refused_submission():
+    """A REFUSED submission never reaches a worker, so it can never run late —
+    it must not hold a drainer open (that would turn fail-fast refusal into a
+    teardown hang).
+
+    ⛔ The refusal must be ESTABLISHED, not hoped for (#10618 cycle-5 review
+    P2). `max_backlog` bounds the QUEUE, and `queue.Queue.get()` REMOVES the
+    item before the callable runs (`_SingleSlotWorker._loop`), so a
+    submit-immediately-after-submit test lets the worker free the slot first and
+    the second submission is ACCEPTED — a 5 s stall in the worker's `wait` and a
+    false RED on the premise assertion, decided by the GIL rather than by the
+    test. `started` makes it deterministic: once the worker has set it, it is
+    blocked inside the callable and cannot dequeue anything, so the backlog
+    filled below stays full.
+    """
+    tiny = monitoring._SingleSlotWorker("test-drain-refused", workers=1,
+                                        max_backlog=1)
+    release = threading.Event()
+    started = threading.Event()
+    assert tiny.drain(timeout=5.0)
+    accepted = tiny.submit(lambda: (started.set(), release.wait(5)))
+    assert started.wait(5), (
+        "the single worker never picked up the blocking submission, so the "
+        "backlog below was never proven full and the refusal was not "
+        "established")
+    # The worker is provably past its `_queue.get()` and parked, so the queue is
+    # empty: fill it to `max_backlog` while no worker can drain it.
+    queued = tiny.submit(lambda: release.wait(5))
+    assert tiny._queue.full(), (
+        "premise: the backlog must be FULL before the refusal below is "
+        "asserted, or this test measures the scheduling race it is meant to "
+        "remove")
+    refused = tiny.submit(lambda: None)
+    assert isinstance(refused.exception(), TimeoutError), (
+        "premise: the third submission must be REFUSED by the bounded backlog")
+    release.set()
+    assert tiny.drain(timeout=10.0), (
+        "a refused submission has no worker to run on, so it must not hold "
+        "drain() open")
+    assert accepted.done()
+    assert queued.done()
+
+
 def test_offload_records_op_and_duration():
     async def _run():
         return await monitoring.run_control_plane_call(lambda: "ok", op="unit")
@@ -1416,6 +1529,174 @@ def test_heartbeat_task_records_lag_each_tick():
     asyncio.run(_run())
     assert monitoring.loop_lag_stats()["samples"] >= 1
     monitoring._reset_heartbeat()
+
+
+# ── #10602: the READ path's own lane ────────────────────────────────────────
+
+
+def test_read_pool_is_separate_from_all_other_pools():
+    """#10602: a read burst must not park an auth/graph/telemetry slot — and
+    they must not park it.
+
+    Same isolation argument #3498 review P1 used to split ``telemetry`` out and
+    #3773 used for ``graph``, applied to the hot READ round trip: the measured
+    defect was a 40–80 ms store behind a 3.7–14.6 s answer because the read
+    queued on the SHARED default executor behind other tenants. A shared pool
+    with any of these lanes re-creates it one lane down."""
+    pools = {
+        name: monitoring.control_plane_worker(name)
+        for name in ("auth", "graph", "telemetry", "oauth", "org", "read")
+    }
+    assert len(set(pools.values())) == len(pools), (
+        "a read submission shared a pool with another lane")
+    assert pools["read"].workers == monitoring.CONTROL_PLANE_READ_WORKERS
+
+
+def test_read_bound_sits_below_the_transport_wait_bound():
+    """#10602: the read lane's wait bound must sit BELOW the transport budget.
+
+    The lane exists to fail a stranded read LEGIBLY. If its bound lands above
+    ``mcp_auth._TRANSPORT_WAIT_BOUND_S`` the transport seam always fires first,
+    and its 504 spells "the work may still complete" for a submission that was
+    never dequeued — the misleading refusal #10602 measured. The ordering is the
+    contract; the numbers are free to move together (mirrors
+    ``test_fetch_deadline_sits_below_the_offload_bound``).
+    """
+    from tortoise import mcp_auth
+
+    assert monitoring.read_offload_timeout_s() < \
+        mcp_auth._TRANSPORT_WAIT_BOUND_S, (
+            "the read lane's bound reached/exceeded the transport wait bound — a "
+            "stranded read would be refused as in-flight work it never ran "
+            "(#10602)")
+
+
+def test_read_offload_routes_to_the_read_pool(monkeypatch):
+    """WIRING guard (the #3773 re-review gap, same shape): reverting
+    ``_read_offload``'s ``pool="read"`` back to the default ``auth`` pool kept
+    every read test green — silently re-parking the auth slots the lane exists
+    to protect. Record what the seam actually passes."""
+    seen: list[tuple[str, str]] = []
+
+    async def _recorder(fn, *, op, pool="auth", timeout=None,
+                        cancel_on_timeout=True, best_effort=False,
+                        unavailable=None):
+        seen.append((pool, op))
+        return fn()
+
+    monkeypatch.setattr(ha, "run_control_plane_call", _recorder)
+
+    async def _run():
+        return await ha._read_offload(lambda: "rows", op="search")
+
+    assert asyncio.run(_run()) == "rows"
+    assert [p for p, _ in seen] == ["read"], (
+        f"_read_offload used pools {seen} — the read path must use the "
+        "dedicated `read` lane (#10602)")
+
+
+def test_read_offload_maps_failure_to_the_graph_503(monkeypatch):
+    """#10602: a saturated / bound-missed read is a retryable 503
+    ``graph_unavailable`` — never a silent empty (the #3892 shape #3718's
+    disclosure forbids) and never the sign-in ``control_plane_unavailable``
+    copy, which would mislead a client retrying a read."""
+    # Patch the name ``hosted_api`` actually resolved (it imports the resolver
+    # into its own namespace, the same reason the graph sibling patches ``ha``).
+    monkeypatch.setattr(ha, "read_offload_timeout_s", lambda: 0.05)
+
+    async def _run():
+        await ha._read_offload(lambda: time.sleep(0.4), op="read-slow")
+
+    with pytest.raises(HTTPException) as excinfo:
+        asyncio.run(_run())
+    assert excinfo.value.status_code == 503
+    assert excinfo.value.detail["error_code"] == "graph_unavailable"
+
+
+def test_a_re_await_reports_a_callable_timeout_as_a_domain_error():
+    """#10602 review P2 (finding 1) — RED before the fix, and unconditional.
+
+    ``reawait_control_plane_call`` awaits ``asyncio.wrap_future(future)``, which
+    re-raises the CALLABLE's own exception unchanged — so a builtin
+    ``TimeoutError`` raised by ``fn`` arrives at the same ``except TimeoutError``
+    arm with the same class as the arm's own bound expiry. The class therefore
+    cannot discriminate; only the FUTURE can. Pre-fix, a ``socket.timeout``
+    escaping the graph driver was answered as OUR lane's bound miss: 503
+    ``graph_unavailable`` for a callable that ran here, plus one increment of
+    ``bound_miss_running`` — the saturation child — for a pool that was never
+    saturated.
+
+    The sibling arm in ``run_control_plane_call`` already discriminates by
+    reading ``future.exception()``; this pins that the re-await does too.
+    """
+    import concurrent.futures as _cf
+
+    done: _cf.Future = _cf.Future()
+    done.set_exception(TimeoutError("driver socket timeout"))
+
+    async def _run():
+        return await monitoring.reawait_control_plane_call(
+            done, op="reawait-domain-timeout", timeout=5.0)
+
+    with pytest.raises(TimeoutError) as excinfo:
+        asyncio.run(_run())
+    assert "driver socket timeout" in str(excinfo.value), (
+        "the callable's own TimeoutError was replaced by a seam-generated one — "
+        "the original diagnosis must reach the caller unchanged")
+    records = [r for r in monitoring.control_plane_offload_records()
+               if r[0] == "reawait-domain-timeout"]
+    assert [r[2] for r in records] == ["domain_error"], (
+        "a callable-raised TimeoutError was recorded as "
+        f"{[r[2] for r in records]!r} — `bound_miss_running` is the "
+        "SATURATION child, and this lane was never saturated (#10602 review P2)")
+
+
+def test_a_genuine_re_armed_bound_miss_still_refuses_and_counts_running():
+    """The other direction, so "never call it a bound miss" cannot pass above.
+
+    A future that is still RUNNING when the re-armed bound expires IS a bound
+    miss: it must raise ``ControlPlaneOffloadError(refused=False)`` and record
+    ``bound_miss_running``. Without this, the discrimination could be
+    implemented by deleting the arm.
+    """
+    import concurrent.futures as _cf
+
+    still_running: _cf.Future = _cf.Future()   # never resolves
+    # Mark it RUNNING, as the pool's worker does once it dequeues the callable:
+    # a RUNNING future cannot be cancelled, so the bound abandons only the await
+    # and the submission stays re-awaitable — the real bound-miss shape, which a
+    # bare (cancellable) future does not model.
+    assert still_running.set_running_or_notify_cancel() is True
+
+    async def _run():
+        return await monitoring.reawait_control_plane_call(
+            still_running, op="reawait-still-running", timeout=0.05)
+
+    with pytest.raises(monitoring.ControlPlaneOffloadError) as excinfo:
+        asyncio.run(_run())
+    assert excinfo.value.refused is False
+    assert excinfo.value.in_flight is still_running, (
+        "a still-running submission must stay re-awaitable")
+    records = [r for r in monitoring.control_plane_offload_records()
+               if r[0] == "reawait-still-running"]
+    assert [r[2] for r in records] == ["bound_miss_running"], records
+
+
+def test_read_offload_isolates_the_caller_context():
+    """#10602: the read callable runs under a CONTEXT COPY, like every other
+    offload seam — a pool thread is process-lifetime, so a ContextVar written at
+    its top level would leak into the NEXT request the worker serves."""
+    import contextvars
+
+    probe: contextvars.ContextVar[str] = contextvars.ContextVar("probe")
+
+    async def _run():
+        probe.set("request-a")
+        return await ha._read_offload(lambda: probe.get("missing"), op="ctx")
+
+    assert asyncio.run(_run()) == "request-a"
+    probe.set("request-b")
+    assert probe.get() == "request-b"
 
 
 # ── premise guard ───────────────────────────────────────────────────────────

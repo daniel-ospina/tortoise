@@ -407,7 +407,7 @@ is_foreign_arch_label() {
 }
 # Is $1 a VERSION-PINNED HOSTED label (`ubuntu-24.04`, `ubuntu-22.04-arm`, …)? Same class/shape as
 # `tools/runner_autoscale.py::VERSION_PINNED_HOSTED_LABEL` — one invariant, two writers. The pool's
-# DEFAULT is `ubuntu-latest`, never an `ubuntu-<version>` (`docs/ops/ci-runner-x64.md:87-88`: the
+# DEFAULT is `ubuntu-latest`, never an `ubuntu-<version>` (`docs/ops/ci-runner-x64.md:90-91`: the
 # `CI_RUNNER_OS_LABEL=on|auto` suspension) — the pin a leg names to escape this pool, and
 # `ubuntu-2204-tools` is NOT in the class (boundary test in `tests/test_runner_autoscale.py`). ⛔ A
 # HERE-STRING, never a builtin writer piped into a quiet grep (#841): under `pipefail` the quiet
@@ -823,7 +823,7 @@ if [ "$MODE" = status ]; then
     # the whole pool) yet the verdict arm claimed it, so a zero-carrier CUSTOM label exited `5` and
     # was told "python-ci-gate is never dispatched and every PR stays BLOCKED" — a false red from
     # the one block that must not produce one, and the mirror of the boundary
-    # `tools/runner_autoscale.py:284-287` states ("a custom label that merely starts
+    # `tools/runner_autoscale.py:330-333` states ("a custom label that merely starts
     # `ubuntu-<digits>` … is NOT in the class"). One predicate, two readers.
     # ⛔ THE NUMERATOR IS COUNTED IN THE SAME POPULATION AS THE DENOMINATOR, OR THE RATIO CAN
     # EXCEED 1 AND THE EROSION ARM SWITCHES ITSELF OFF. The denominator was fixed to the sub-pool
@@ -883,7 +883,7 @@ if [ "$MODE" = status ]; then
     # with the flag `on`, a workflow pinning `ubuntu-22.04` at zero took the verdict arm, exited `5`,
     # and printed a remedy (`CI_RUNNER_OS_LABEL=on --repair-labels`) that CANNOT apply it: the
     # installer only ever emits `$OS_LABEL`. A permanent red with an unactionable remedy is the
-    # false-red class this block refuses to create, and the drift `tools/runner_autoscale.py:284-287`
+    # false-red class this block refuses to create, and the drift `tools/runner_autoscale.py:330-333`
     # names ("a custom label that merely starts `ubuntu-<digits>` … is NOT in the class") in the
     # other direction. So `$OS_LABEL` is the ONLY label this script can be asked to serve; every
     # other bare spelling is somebody else's registration and is reported, never verdicted.

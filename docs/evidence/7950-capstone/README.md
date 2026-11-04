@@ -193,10 +193,18 @@ S1 VERDICT: BYPASS CONFIRMED
 
 ### The highest-traffic write path is apply-first
 
-`uv run pytest -v "tests/test_7951_enforce_atomic_write.py::test_create_point_is_apply_first_a_recorded_deviation"`
-→ **1 passed** (`s1-create-point-apply-first.log`). The shipped test's own docstring:
+`uv run pytest -v` over `tests/test_7951_enforce_atomic_write.py`, selecting
+`test_create_point_is_apply_first_a_recorded_deviation` — the name this pin carried when the bundle
+measured → **1 passed** (`s1-create-point-apply-first.log`). The shipped test's own docstring:
 `create_point` writes the Point through the guarded handle and appends its `PointAdded` record only
 afterwards — **cache ahead of truth**, §17.1's ordering contract exception 2.
+
+⛔ **Renamed AND flipped since, so that name no longer collects a test.** `#8697` retitled it
+`tests/test_7951_enforce_atomic_write.py::test_create_point_journals_the_record_before_the_cache_write`
+and inverted what it asserts (`cache_at_journal == [0]`, journal-first): the deviation this section
+records was REPAIRED by that lane, so the current symbol asserts the opposite of this paragraph. The
+`1 passed` above is the as-measured transcript, not a command to re-run — follow the log, and read
+`docs/evidence/7951-create-point-outbox/` for the repair.
 
 ### The surface is not small
 

@@ -23,6 +23,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -30,6 +32,9 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parents[1]
+#: Absolute, because the pins below run the workflow's own steps with a PATH that
+#: deliberately carries no git — a bare `bash` would not resolve under it.
+_BASH = shutil.which("bash") or "/bin/bash"
 sys.path.insert(0, str(REPO))
 
 from tortoise import hosted_api  # noqa: E402  - the subject under test
@@ -125,13 +130,15 @@ def _scratch_repo_with_two_commits(tmp_path: Path) -> tuple[str, str]:
 def sha_env(monkeypatch):
     """Set the build identity the way the DEPLOY would.
 
-    `TORTOISE_GIT_SHA` IS staged by `deploy-hosted.yml`
-    (`ARGS+=(TORTOISE_GIT_SHA="${GITHUB_SHA}")`). `TORTOISE_GIT_DIRTY` is NOT
-    staged by anything yet — see the note beside `_PROCESS_STARTED_AT` in
-    `tortoise/hosted_api.py` — so the dirty cases below pin what the payload does
-    with a stamp the deploy HANDS it, not a claim that a stamp exists.
+    `TORTOISE_GIT_SHA` and `TORTOISE_GIT_DIRTY` are BOTH staged by
+    `deploy-hosted.yml` (the second since #10447's reopen — before that, the field
+    was published with no producer and `null` was silence). The pins below set the
+    stamps directly, which is what proves the PAYLOAD's reading; the producer
+    itself is pinned separately in
+    `test_the_deploy_stamps_whether_the_built_tree_was_dirty` and
+    `test_the_dirty_stamp_is_declared_to_the_fly_drift_gate`.
     """
-    def _set(sha: str | None, dirty: str | None = None) -> None:
+    def _set(sha: str | None, dirty: str | None = "0") -> None:
         if sha is None:
             monkeypatch.delenv("TORTOISE_GIT_SHA", raising=False)
         else:
@@ -141,6 +148,380 @@ def sha_env(monkeypatch):
         else:
             monkeypatch.setenv("TORTOISE_GIT_DIRTY", dirty)
     return _set
+
+
+def _workflow_step_run(step_name_prefix: str) -> str:
+    """The `run:` body of the deploy step whose name starts with `step_name_prefix`.
+
+    Parsed from the WORKFLOW YAML, not grepped out of the file: a pin that
+    executes the real body cannot be satisfied by a comment or by a string that
+    appears somewhere else in a 1,200-line workflow.
+    """
+    yaml = pytest.importorskip("yaml")
+    doc = yaml.safe_load((REPO / ".github" / "workflows" / "deploy-hosted.yml")
+                         .read_text(encoding="utf-8"))
+    for job in (doc.get("jobs") or {}).values():
+        for step in (job or {}).get("steps") or []:
+            if str(step.get("name") or "").startswith(step_name_prefix):
+                return step["run"]
+    raise AssertionError(f"no step named {step_name_prefix!r} in deploy-hosted.yml")
+
+
+def _git_head(cwd: Path) -> str:
+    """The scratch repo's HEAD, so `GITHUB_SHA` names the commit it was checked out at."""
+    proc = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(cwd), env=_git_env(),
+                          capture_output=True, text=True)
+    return proc.stdout.strip()
+
+
+def _run_record_step(cwd: Path, *, git_available: bool, stamp: Path | None = None,
+                     github_sha: str | None = None,
+                     path_prefix: Path | None = None) -> str:
+    """Execute the workflow's OWN `record the built tree` step and return the stamp
+    file's contents.
+
+    `PATH` carries the real git binaries' directory when `git_available`, and a
+    SINGLE NON-EXISTENT directory otherwise (`/nonexistent-bin`) — so every
+    external command fails, which is what routes `git_available=False` to the
+    HEAD-guard arm. `bash` is invoked by absolute path (`_BASH`), never resolved
+    from `PATH`. ⚠️ `git_available=False` reaches the
+    HEAD-GUARD arm (`git rev-parse HEAD` fails → `unknown`), NOT the `git status`
+    failure arm — the guard runs first. The `git status` arm needs a git that can
+    `rev-parse` but not `status`, which is what `path_prefix` is for (a shim dir).
+
+    ⛔ THE STAMP FILE LIVES OUTSIDE `cwd` (review P2). It is the OUTPUT of measuring
+    the tree, so a stamp written inside `cwd` makes the tree dirty and a SECOND call
+    on an unchanged tree reads `true` — a trap in the very pin that claims "clean →
+    false".
+    """
+    body = _workflow_step_run("Record whether the built tree matches the deploy commit")
+    stamp = stamp or (cwd.parent / f"{cwd.name}-git-dirty")
+    # The workflow writes a fixed path; substitute a scratch one so a test never
+    # touches a real /tmp marker an earlier run left behind.
+    body = body.replace("/tmp/tortoise-deploy-git-dirty", str(stamp))
+    git_bin = os.path.dirname(shutil.which("git") or "/usr/bin/git")
+    env = {**_git_env(),
+           "PATH": f"{git_bin}:/usr/bin:/bin" if git_available else "/nonexistent-bin",
+           # The step compares the checkout HEAD with the deploy commit, so the
+           # scratch repo's HEAD must be what GITHUB_SHA names (review P2).
+           "GITHUB_SHA": _git_head(cwd) if git_available else "0" * 40}
+    if path_prefix is not None:
+        env["PATH"] = f"{path_prefix}:{git_bin}:/usr/bin:/bin"
+    if github_sha is not None:
+        env["GITHUB_SHA"] = github_sha
+    proc = subprocess.run([_BASH, "-e", "-c", body], cwd=str(cwd), env=env,
+                          capture_output=True, text=True)
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    return stamp.read_text().strip()
+
+
+def _run_payload_read(cwd: Path, *, stamp: Path | None = None) -> str:
+    """Execute the workflow's OWN staging lines for the dirty stamp and return the
+    value that would reach Fly.
+
+    ⛔ THIS IS THE PIN THE FIRST VERSION OF THIS FILE LACKED (review P1). The
+    staging line used to be `$(< file 2>/dev/null || echo unknown)`, and bash's
+    `$(< file)` shortcut fires only when the body is EXACTLY the redirect — with
+    any extra redirection the substitution runs a redirect-only command that
+    writes NOTHING, so the value staged was an empty string on every real deploy
+    while every string-grep pin stayed green. Executing the lines is the only
+    reading that can tell those apart.
+    """
+    body = _workflow_step_run("Set all app secrets on Fly.io")
+    lines = body.splitlines()
+    def _index(prefix: str, what: str) -> int:
+        for i, ln in enumerate(lines):
+            if ln.strip().startswith(prefix):
+                return i
+        raise AssertionError(
+            f"the staging payload has no line starting {prefix!r} — {what} is not "
+            "staged any more, so /health's `commit_dirty` has no producer"
+        )
+
+    start = _index("TORTOISE_GIT_DIRTY_STAMP=", "the dirty reading")
+    end = _index("ARGS+=(TORTOISE_GIT_DIRTY=", "TORTOISE_GIT_DIRTY")
+    body = "\n".join(lines[start:end + 1])
+    stamp = stamp or (cwd / "git-dirty")
+    body = body.replace("/tmp/tortoise-deploy-git-dirty", str(stamp))
+    # Emit the staged value: a bare `printf` keeps the assertion about the VALUE.
+    body += '\nprintf %s "${ARGS[0]#TORTOISE_GIT_DIRTY=}"'
+    proc = subprocess.run([_BASH, "-e", "-c", body], cwd=str(cwd),
+                          env={**_git_env(), "PATH": "/nonexistent-bin"},
+                          capture_output=True, text=True)
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    return proc.stdout.strip()
+
+
+def test_the_deploy_stamps_whether_the_built_tree_was_dirty(tmp_path):
+    """THE PRODUCER PIN (#10447 reopen), BEHAVIOURAL.
+
+    The payload can only publish what the deploy stamps, and before this the
+    deploy stamped nothing: `commit_dirty` was permanently `null` on production
+    while `build_identified` folded that silence into "not dirty" — a build from a
+    modified tree claimed the commit it named.
+
+    The workflow's OWN steps are executed here, in a scratch repo, for all three
+    readings: clean tree → `false`, modified tree → `true`, and an UNREADABLE tree
+    (no git on PATH) → `unknown`, never `false`. Each assertion is a direction a
+    mutation can break: swapping the two `printf` branches reds the first two,
+    hardcoding `false` reds the modified case, and folding a git failure into
+    `false` reds the third.
+    """
+    repo = tmp_path / "build"
+    repo.mkdir()
+    # ONE stamp path for both steps, OUTSIDE the measured tree (review P2).
+    stamp = tmp_path / "stamp"
+    env = {**_git_env(), "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com"}
+    subprocess.run(["git", "init", "-q"], cwd=str(repo), env=env, check=True,
+                   capture_output=True, text=True)
+    (repo / "f.txt").write_text("1\n")
+    subprocess.run(["git", "add", "f.txt"], cwd=str(repo), env=env, check=True,
+                   capture_output=True)
+    subprocess.run(["git", "commit", "-qm", "one"], cwd=str(repo), env=env,
+                   check=True, capture_output=True)
+
+    assert _run_record_step(repo, git_available=True, stamp=stamp) == "false", (
+        "a clean tree must stamp `false` — the positive claim"
+    )
+    # Twice: the helper's own output must not be able to make the tree dirty
+    # (review P2 — a stamp written INSIDE the measured tree returns `true` on the
+    # second call and would teach the next maintainer that `false` is unreachable).
+    assert _run_record_step(repo, git_available=True, stamp=stamp) == "false", (
+        "a second reading of the same clean tree changed its answer — the stamp "
+        "artifact is inside the tree being measured"
+    )
+    assert _run_payload_read(repo, stamp=stamp) == "false", (
+        "the staged argv did not carry the clean reading — this is the `$(< file)` "
+        "empty-value bug: the file is present, so an empty/unknown value here "
+        "means the reading never reached Fly"
+    )
+
+    (repo / "f.txt").write_text("2\n")
+    assert _run_record_step(repo, git_available=True, stamp=stamp) == "true", (
+        "a MODIFIED tree must stamp `true` — otherwise a modified build claims the "
+        "commit it names"
+    )
+    assert _run_payload_read(repo, stamp=stamp) == "true", "the dirty reading must reach the argv"
+
+    # …and COMMIT it, so the wrong-HEAD arm below really measures a CLEAN tree at
+    # the wrong commit — the only scenario that could publish
+    # `build_identified: true` for a commit the image was not built from
+    # (review P2: the tree was dirty here, so the arm proved less than it claimed).
+    subprocess.run(["git", "commit", "-qam", "two"], cwd=str(repo), env=env,
+                   check=True, capture_output=True)
+    assert _run_record_step(repo, git_available=True, stamp=stamp,
+                            github_sha="0" * 40) == "unknown", (
+        "a clean tree at a HEAD the deploy did not name must stamp `unknown` — "
+        "`false` there would publish build_identified: true for a commit the image "
+        "was not built from"
+    )
+    assert _run_record_step(repo, git_available=False, stamp=stamp) == "unknown", (
+        "an UNREADABLE tree must stamp `unknown` (→ null, NOT STATED). Stamping "
+        "`false` here is the false PASS: a positive 'provably clean' claim from a "
+        "reading that never happened"
+    )
+
+
+def test_a_git_that_cannot_read_the_tree_stamps_unknown(tmp_path):
+    """THE `git status` FAILURE ARM (review P2) — distinct from the HEAD guard.
+
+    Round 2 fixed a failure falling through to `false`, and round 3 added a HEAD
+    guard that runs FIRST — which meant the `git status` arm stopped being reached
+    by any test: flipping it back to `printf 'false'` was 210-passed, undetected.
+    A shim that answers `rev-parse` (so the HEAD guard passes) and fails `status`
+    is the only shape that reaches it.
+    """
+    repo = tmp_path / "build"
+    repo.mkdir()
+    stamp = tmp_path / "stamp"
+    env = {**_git_env(), "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com"}
+    subprocess.run(["git", "init", "-q"], cwd=str(repo), env=env, check=True,
+                   capture_output=True)
+    (repo / "f.txt").write_text("1\n")
+    subprocess.run(["git", "add", "f.txt"], cwd=str(repo), env=env, check=True,
+                   capture_output=True)
+    subprocess.run(["git", "commit", "-qm", "one"], cwd=str(repo), env=env,
+                   check=True, capture_output=True)
+
+    shim_dir = tmp_path / "shim"
+    shim_dir.mkdir()
+    shim = shim_dir / "git"
+    real_git = shutil.which("git") or "/usr/bin/git"
+    shim.write_text(
+        "#!/bin/sh\n"
+        f'if [ "$1" = "rev-parse" ]; then exec {real_git} "$@"; fi\n'
+        "echo 'fatal: cannot read the index' >&2\n"
+        "exit 128\n"
+    )
+    shim.chmod(0o755)
+
+    assert _run_record_step(repo, git_available=True, stamp=stamp,
+                            path_prefix=shim_dir) == "unknown", (
+        "a git that cannot read the tree stamped a POSITIVE claim — an unreadable "
+        "tree is UNSTATED, never `false` (the round-2 P1, back again)"
+    )
+
+
+def test_the_staged_dirty_value_is_never_a_bare_empty_string(tmp_path):
+    """THE STAGING SHAPE ITSELF, pinned by execution (review P1).
+
+    `ARGS+=(K=\"$(< file 2>/dev/null || echo unknown)\")` looks right and is not:
+    bash's `$(< file)` shortcut requires the body to be EXACTLY the redirect, so
+    with the file PRESENT the substitution yields the empty string. Empty is not a
+    reading the payload may stage — `unknown` is the honest fallback. This asserts
+    the value for the absent-file case, which the empty-value bug also got right,
+    AND that a present file is honoured, which it did not.
+    """
+    (tmp_path / "git-dirty").write_text("true")
+    assert _run_payload_read(tmp_path) == "true"
+    (tmp_path / "git-dirty").unlink()
+    assert _run_payload_read(tmp_path) == "unknown", (
+        "an absent stamp file must stage `unknown` (null), never an empty string "
+        "and never `false`"
+    )
+    # AN EMPTY file: `-r` would pass and `IFS= read -r` would leave the value
+    # empty, staging `TORTOISE_GIT_DIRTY=` — the `K=` clobber this pin's name
+    # promises cannot happen (review P2, measured).
+    (tmp_path / "git-dirty").write_text("")
+    assert _run_payload_read(tmp_path) == "unknown", (
+        "an EMPTY stamp file staged an empty value — `[ -r ]` proves readable, not "
+        "non-empty, and `K=` clobbers the Fly value"
+    )
+
+
+def test_the_dirty_stamp_is_recorded_before_the_payload_stages_it():
+    """THE ORDERING IS THE LOAD-BEARING INVARIANT (review P1).
+
+    The producer writes a file and the payload reads it. Swapping the two steps
+    leaves every other pin green — the drift gate executes the payload standalone,
+    never the step sequence — while production stages `unknown` on every run, i.e.
+    `commit_dirty: null` / `build_identified: false` forever: the exact "published
+    with no producer" defect this issue was reopened for, now reading as "cannot
+    check" instead. Measured: moving the record step after the payload step
+    survived 128 tests before this pin existed.
+    """
+    yaml = pytest.importorskip("yaml")
+    doc = yaml.safe_load((REPO / ".github" / "workflows" / "deploy-hosted.yml")
+                         .read_text(encoding="utf-8"))
+    record = "Record whether the built tree matches the deploy commit"
+    stage = "Set all app secrets on Fly.io"
+    for job_name, job in (doc.get("jobs") or {}).items():
+        names = [str(step.get("name") or "") for step in (job or {}).get("steps") or []]
+        if not any(n.startswith(record) for n in names):
+            continue
+        assert any(n.startswith(stage) for n in names), (
+            f"the record step is in job {job_name!r} but the staging step is not — "
+            "the two must be in the SAME job or the file can never be read"
+        )
+        record_at = next(i for i, n in enumerate(names) if n.startswith(record))
+        stage_at = next(i for i, n in enumerate(names) if n.startswith(stage))
+        assert record_at < stage_at, (
+            f"the record step runs AFTER the staging step in job {job_name!r}: the "
+            "stamp file does not exist yet when the payload reads it, so every "
+            "deploy stages `unknown` and `commit_dirty` is null forever"
+        )
+        return
+    raise AssertionError("deploy-hosted.yml has no step that records the built tree")
+
+
+def test_the_dirty_stamp_is_declared_to_the_fly_drift_gate():
+    """The other half of the contract: a name the workflow ASSIGNS must be declared
+    in `.github/scripts/fly-managed-secrets.txt`, or `check-fly-secret-drift.py`
+    reports UNDECLARED and blocks every later deploy.
+
+    That is why the previous approach (publish the field, file the stamp
+    separately) left the field dead; the declaration and the stamp have to land
+    together.
+
+    The DERIVING owner of this contract is
+    `tests/test_fly_secret_drift.py::test_shipped_manifest_matches_the_real_workflow_and_recorded_debt`
+    (it derives declaration↔payload from the real workflow). This pin is the local
+    readability half and deliberately duplicates ONE line of it; if that owner is
+    ever removed, the invariant loses its deriving reader and this grep alone is
+    not enough.
+    """
+    declared = (REPO / ".github" / "scripts" / "fly-managed-secrets.txt").read_text(
+        encoding="utf-8")
+    assert re.search(r"^TORTOISE_GIT_DIRTY\s+workflow\b", declared, re.M), (
+        "TORTOISE_GIT_DIRTY is not declared `workflow` to the drift gate — the "
+        "deploy that stamps it would then be RED on an UNDECLARED Fly name"
+    )
+
+
+# ── the artefact identity ────────────────────────────────────────────────────
+
+def test_the_image_the_process_was_started_from_is_published(monkeypatch):
+    """The issue asks for the *artefact* (`image digest (or build id)`), not only
+    the commit. Fly injects `FLY_IMAGE_REF` into every Machine, so the runtime can
+    name the image that created it without any deploy-time digest dance (the image
+    does not exist until the deploy builds it, so it cannot be staged before).
+
+    `TORTOISE_IMAGE_REF` is the non-Fly spelling and is read first: a selfhost
+    deployment that knows its own ref must be able to state it.
+    """
+    monkeypatch.setenv("TORTOISE_GIT_SHA", "d" * 40)
+    monkeypatch.setenv("TORTOISE_GIT_DIRTY", "false")
+    monkeypatch.delenv("FLY_IMAGE_REF", raising=False)
+    monkeypatch.delenv("TORTOISE_IMAGE_REF", raising=False)
+    assert _health()["build"]["image"] is None, (
+        "an unstated image must be null — never a plausible placeholder"
+    )
+    monkeypatch.setenv("FLY_IMAGE_REF", "registry.fly.io/tortoise-y4mjjq:deployment-abc123")
+    assert _health()["build"]["image"] == "registry.fly.io/tortoise-y4mjjq:deployment-abc123"
+    monkeypatch.setenv("TORTOISE_IMAGE_REF", "ghcr.io/o/r@sha256:deadbeef")
+    assert _health()["build"]["image"] == "ghcr.io/o/r@sha256:deadbeef", (
+        "an explicitly stated image ref must win over the platform's"
+    )
+
+
+# ── "unknown" must say unknown, and must not be read as clean ────────────────
+
+def test_an_unstated_tree_is_not_an_identified_build(sha_env):
+    """THE FAIL-OPEN THIS REOPEN NAMED. With the dirty flag never stamped the
+    predicate was `not dirty_flag`, and `not None` is `True`: a build from a
+    MODIFIED tree published `build_identified: true` while publishing no evidence
+    that the tree matched. That is the false PASS #10447 exists to refuse, and it
+    is the reason `commit_dirty: null` was not cosmetic.
+
+    So an unstated tree is not identified — and the payload says WHICH silence it
+    was (`tree_dirt_unstated`), instead of leaving a reader to guess between "we do
+    not know" and "we know it is dirty".
+    """
+    sha_env("e" * 40, dirty=None)
+    build = _health()["build"]
+    assert build["commit_dirty"] is None, "unset must stay null, not False"
+    assert build["build_identified"] is False, (
+        "an unstated tree claimed `build_identified: true` — that is a modified "
+        "build passing as the commit it names"
+    )
+    assert build["build_identified_reason"] == "tree_dirt_unstated", build
+
+
+def test_build_identified_reason_names_the_actual_silence(sha_env):
+    """Four different worlds produce `build_identified: false`. Collapsing them to
+    one reading is the class of failure this block exists to prevent: "we know it
+    is dirty" and "nobody told us" are different facts, and only one of them is a
+    reason to re-deploy.
+    """
+    cases = {
+        None: "no_commit_stamp",
+        "main": "commit_stamp_not_a_sha",
+        "${GITHUB_SHA}": "commit_stamp_not_a_sha",
+    }
+    for sha, reason in cases.items():
+        sha_env(sha)
+        build = _health()["build"]
+        assert build["build_identified_reason"] == reason, (sha, build)
+    sha_env("f" * 40, dirty="true")
+    assert _health()["build"]["build_identified_reason"] == "tree_dirty"
+    sha_env("f" * 40, dirty="0")
+    build = _health()["build"]
+    assert build["build_identified"] is True, build
+    assert build["build_identified_reason"] is None, (
+        "an identified build needs no excuse — the reason must not fabricate one"
+    )
 
 
 # ── the published commit is the DEPLOY's, not a constant ─────────────────────
@@ -273,7 +654,7 @@ def test_an_unnamed_commit_stamp_is_not_an_identified_build(sha_env):
 
 def test_a_full_sha_and_a_short_sha_are_both_identified(sha_env):
     for good in ("a" * 40, "b" * 7, "1234567890abcdef1234567890abcdef12345678"):
-        sha_env(good)
+        sha_env(good, dirty="false")
         assert _health()["build"]["build_identified"] is True, good
 
 

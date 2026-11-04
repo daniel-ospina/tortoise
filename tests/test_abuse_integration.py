@@ -21,10 +21,12 @@ the same seam pattern as test_hosted_api.py / test_flip_gate.py.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import re
 import sys
 import tempfile
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -42,7 +44,7 @@ from tortoise import abuse
 from tortoise.abuse import ALERT_TYPES, SupabaseAbuseStore, _alert_dict
 from tortoise.auth import lookup_hash
 from tests._http_fixtures import patched_tortoise_sdk
-from tests._verdict import verdict_client
+from tests._verdict import verdict_client, verdict_async_client
 from tests.fake_control_plane import FakeControlPlane
 
 TEAM = "team-abuse-1"
@@ -126,13 +128,137 @@ def env(monkeypatch, fake, notified):
         # relative order as the old restore → set_engine pair.
         try:
             with patched_tortoise_sdk(db_path):
-                yield {"fake": fake, "notified": notified, "app": app}
+                body_error: BaseException | None = None
+                try:
+                    yield {"fake": fake, "notified": notified, "app": app}
+                except BaseException as exc:
+                    body_error = exc
+                    raise
+                finally:
+                    # #10618 cycle-4 review: QUIESCE the process-lifetime
+                    # ``abuse`` pool BEFORE this test's seams come down. A hook
+                    # still queued when the test ends resolves the module-global
+                    # ``abuse.READ_TRACKER`` at CALL time, so it is counted by
+                    # the NEXT test's tracker — which permanently offsets that
+                    # test's exact-count barriers (an off-by-one that no amount
+                    # of polling can fix). An order-dependent outcome is a
+                    # harness defect, not a product verdict (#5049 rule 4), so
+                    # failing to quiesce is an error here rather than a green
+                    # pass on a dirty pool.
+                    if not _drain_abuse_pool() and body_error is None:
+                        raise AssertionError(
+                            "the abuse offload pool did not quiesce within "
+                            f"{_ABUSE_POOL_DRAIN_TIMEOUT_S}s of teardown — a hook "
+                            "from this test is still in flight, so the next "
+                            "test's READ_TRACKER could measure this test's reads "
+                            "(#10618; #5049 rule 4)")
         finally:
             abuse.set_engine(None)
 
 
 def _auth(token=TOKEN_A):
     return {"Authorization": f"Bearer {token}"}
+
+
+def _await_records(predicate, *, timeout: float = 5.0,
+                   interval: float = 0.02) -> bool:
+    """Bounded wait for an offloaded abuse/activation record (#10618).
+
+    The hooks used to run on the loop's default executor under
+    ``asyncio.to_thread``, which returned only once the work was DONE. They now
+    ride a bounded, delivery-preserving offload lane, so a record can land a
+    moment after the request returns. Tests that assert on the record must poll,
+    not assume — otherwise this change introduces a new flake class in pins that
+    were deterministic before.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(interval)
+    return predicate()
+
+
+def _await_no_record(predicate, *, after=None, barrier=None,
+                     window: float = 1.0, interval: float = 0.02) -> bool:
+    """Bounded NEGATIVE wait for an offloaded abuse/activation record (#10618).
+
+    The mirror of `_await_records`, and the fix for the class the cycle-3
+    review named: a negative assertion (``flagged_at is None``,
+    ``not notified``) read straight after the response is measured BEFORE the
+    offloaded hook can land, so a regression that wrongly flags/notifies
+    PASSES. Returns True only when `predicate` — the record that must NOT
+    appear — stayed false for the whole `window`.
+
+    COMPLETION MUST BE ESTABLISHED before that window is measured, by exactly
+    one of two barriers:
+
+    * `after` — a predicate giving positive evidence that the offloaded work for
+      this request has already run (its own durable row, its own in-memory read
+      count);
+    * `barrier` — a callable that BLOCKS until the lane is quiesced
+      (``_drain_abuse_pool``), for the requests whose hook has no observable row
+      to poll for at all.
+
+    Supplying NEITHER is an ``AssertionError``, not a weaker pass: without a
+    barrier the window can elapse while the hook is still queued behind a busy
+    ``abuse`` pool — the same vacuity one step later (#10618 cycle-5 review P3).
+    """
+    if after is None and barrier is None:
+        raise AssertionError(
+            "a negative assertion needs a COMPLETION BARRIER — either `after=` "
+            "(a predicate the offloaded hook makes true) or `barrier=` (a "
+            "callable that quiesces the lane) — otherwise the bounded window "
+            "below measures nothing (#10618)")
+    if after is not None and not _await_records(after):
+        raise AssertionError(
+            "the offloaded abuse hook never landed the record this negative "
+            "assertion needs as its completion barrier, so the negative below "
+            "would measure nothing (#10618)")
+    if barrier is not None and not barrier():
+        raise AssertionError(
+            "the abuse lane did not quiesce, so the negative below would "
+            "measure a hook that is still queued (#10618)")
+    return not _await_records(predicate, timeout=window, interval=interval)
+
+
+#: Bound for the teardown quiesce of the ``abuse`` pool. Generous by design:
+#: the pool is a handful of workers whose unit of work is one small round trip
+#: against the fake plane, so a drained pool costs milliseconds. Expiry is a
+#: HARNESS defect (#5049 rule 4), never a product verdict.
+_ABUSE_POOL_DRAIN_TIMEOUT_S = 10.0
+
+
+def _drain_abuse_pool(timeout: float = _ABUSE_POOL_DRAIN_TIMEOUT_S) -> bool:
+    """Quiesce the process-lifetime ``abuse`` pool before teardown (#10618).
+
+    WHY THIS IS NEEDED AT ALL. The ``tortoise-abuse`` workers are daemon
+    threads created once per process (`monitoring._DAEMON_WORKERS`), and this
+    change makes the per-request hooks OUTLIVE the request by design (a bound
+    miss abandons the await, not the submission). So a hook from one test can
+    still be queued or running when that test ends — and because the hooks
+    resolve the module-global ``abuse.READ_TRACKER`` at CALL time, it is the
+    NEXT test's tracker (installed fresh by the ``env`` fixture) that counts
+    the read. Every barrier in this file that waits for an exact count (``== N``)
+    would then never be satisfiable, and the poll would expire on a machine-load
+    artefact — the flake class #5049 rule 1 forbids producing a product FAIL
+    from, whose root cause here is order dependence (rule 4).
+
+    WHY ``drain()`` AND NOT A SENTINEL OR A SLEEP. One no-op submitted per
+    worker is the idiom that looks right and is NOT: with N workers a free
+    worker consumes several no-ops while another still holds a real item, so
+    every no-op completes with real work still in flight (measured — the
+    three-leg pin below failed on exactly that). `_SingleSlotWorker.drain()`
+    waits on an in-flight register instead, so queued AND running work counts.
+    A sleep would be a guess about load, and `shutdown(wait=True)` would be
+    wrong: the pool is process-lifetime on purpose (#10618/#3060).
+
+    Returns False only when the pool did not quiesce within `timeout`; the
+    caller decides whether that is a harness failure.
+    """
+    from tortoise.monitoring import control_plane_worker
+
+    return control_plane_worker("abuse").drain(timeout)
 
 
 # ── R5: REST suspension enforcement ─────────────────────────────────────────
@@ -203,7 +329,14 @@ class TestPointBurst:
             for i in range(6):
                 self._post_point(tc, i)
             org_row = fake.tables["organizations"][0]
-            assert org_row["flagged_at"] is not None      # stage 1
+            # #10618: R1 recording + evaluation run in the OFFLOADED
+            # `_abuse_record_points` hook, so the flag can land just AFTER the
+            # response — poll (a bare read here flakes RED on a busy pool).
+            assert _await_records(
+                lambda: fake.tables["organizations"][0]["flagged_at"]
+                is not None), (  # stage 1
+                f"R1 never flagged after 6 in-window points; "
+                f"org={fake.tables['organizations'][0]!r}")
             assert org_row["suspended_at"] is None        # never stage 2
             assert not abuse.is_suspended_signal(TEAM)
             for i in range(3):  # continued in-window writes: still no suspend
@@ -225,10 +358,16 @@ class TestPointBurst:
         # is released when the clean evaluation above ends the first episode
         # (#3631), so both episodes notify; assert both the durable re-flag and
         # the second alert.
-        flag_rows = [e for e in fake.tables["abuse_events"]
-                     if e["event_type"] == "flag"]
-        assert len(flag_rows) >= 2
-        assert [c[0] for c in env["notified"]].count("abuse_flag") >= 2
+        # #10618: both are hook-produced, so poll for the SECOND of each rather
+        # than reading the instant the last response returns.
+        assert _await_records(
+            lambda: len([e for e in fake.tables["abuse_events"]
+                         if e["event_type"] == "flag"]) >= 2), (
+            f"the second (post-window) episode never re-flagged; "
+            f"flags={[e for e in fake.tables['abuse_events'] if e['event_type'] == 'flag']!r}")
+        assert _await_records(
+            lambda: [c[0] for c in env["notified"]].count("abuse_flag") >= 2), (
+            f"the second episode never re-alerted; notified={env['notified']!r}")
 
     def test_boundary_crossing_alerts_and_does_not_403(self, env):
         """A breach persisting past flagged_at + window escalates to a HUMAN
@@ -242,7 +381,12 @@ class TestPointBurst:
         with verdict_client(env["app"]) as tc:
             for i in range(6):
                 self._post_point(tc, i)
-            assert fake.tables["organizations"][0]["flagged_at"] is not None
+            # #10618: the flag is written by the OFFLOADED R1 hook — poll.
+            assert _await_records(
+                lambda: fake.tables["organizations"][0]["flagged_at"]
+                is not None), (
+                f"R1 never flagged after 6 in-window points; "
+                f"org={fake.tables['organizations'][0]!r}")
             # Age the flag EPISODE anchor (the flag event row — staging is
             # event-derived) a full window into the past, and move ONE point
             # event into the continuity band (flag, now-window] so the breach
@@ -262,11 +406,18 @@ class TestPointBurst:
             assert tc.get("/v1/team/keys", headers=_auth()).status_code != 403
             # The escalation is a human-review alert — a dashboard row the
             # operator can see AND a notification, never an "auto-suspended" lie.
-            assert [e for e in fake.tables["abuse_events"]
-                    if e["event_type"] == "review_needed"]
-            kinds = [c[0] for c in env["notified"]]
-            assert "abuse_review_needed" in kinds
-            assert "abuse_suspended" not in kinds
+            # #10618: the crossing evaluation, its `review_needed` row and its
+            # alert all come from the OFFLOADED R1 hook — poll each one.
+            assert _await_records(
+                lambda: bool([e for e in fake.tables["abuse_events"]
+                              if e["event_type"] == "review_needed"])), (
+                f"the boundary-crossing escalation never landed a "
+                f"review_needed row; events={fake.tables['abuse_events']!r}")
+            assert _await_records(
+                lambda: "abuse_review_needed"
+                in [c[0] for c in env["notified"]]), (
+                f"the human-review alert never fired; notified={env['notified']!r}")
+            assert "abuse_suspended" not in [c[0] for c in env["notified"]]
             # The 403 contract is UNCHANGED — it now requires a deliberate
             # OPERATOR suspend, which the engine no longer performs for anyone.
             fake.rpc("abuse_suspend", {"p_org_id": TEAM})
@@ -290,9 +441,20 @@ class TestPointBurst:
             for _ in range(6):
                 r = tc.delete("/v1/team/keys/revoke-me", headers=_auth())
                 assert r.status_code in (200, 404), r.text
-        events = [e for e in fake.tables.get("abuse_events", [])
-                  if e["event_type"] == "point_create"]
-        assert events == []  # revokes never record point_create
+        # #10618: the post-auth hook for those requests is offloaded, so a
+        # regression that recorded a point_create asynchronously could land
+        # AFTER this read. These requests' hooks write no row of their own to
+        # poll for (R3 counts GETs only, and there is no geo header), so the
+        # barrier is the lane itself: `_drain_abuse_pool()` returns only once
+        # every submission made before it has COMPLETED, after which a late
+        # point_create can no longer appear.
+        assert _await_no_record(
+            lambda: bool([e for e in fake.tables.get("abuse_events", [])
+                          if e["event_type"] == "point_create"]),
+            barrier=_drain_abuse_pool,
+            window=1.0), (
+            f"a non-create write recorded a point_create; "
+            f"events={fake.tables.get('abuse_events')!r}")
         assert env["fake"].tables["organizations"][0]["flagged_at"] is None
 
 
@@ -322,7 +484,17 @@ class TestKeyVelocity:
                         json={"content": "next hooked request",
                               "kind": "statement"})
             assert r.status_code == 200
-        assert fake.tables["organizations"][0]["flagged_at"] is not None
+        # #10618: R1/R2 evaluation runs in the OFFLOADED `_abuse_record_points`
+        # hook, so the flag can land just after the response — poll. Once the
+        # flag is up the hook has run, so the alert read below is safe to poll
+        # on independently (it is emitted in the same evaluation).
+        assert _await_records(
+            lambda: fake.tables["organizations"][0]["flagged_at"] is not None), (
+            f"the piggybacked R2 evaluation never flagged the org; "
+            f"org={fake.tables['organizations'][0]!r}")
+        assert _await_records(
+            lambda: bool([c for c in env["notified"] if c[0] == "abuse_flag"])), (
+            f"the key_create flag never notified; notified={env['notified']!r}")
         flag_notifies = [c for c in env["notified"] if c[0] == "abuse_flag"]
         assert flag_notifies and flag_notifies[0][2]["rule"] == "key_create"
 
@@ -341,7 +513,18 @@ class TestKeyVelocity:
             r = tc.post("/v1/points", headers=_auth(),
                         json={"content": "hooked", "kind": "statement"})
             assert r.status_code == 200
-        assert fake.tables["organizations"][0]["flagged_at"] is None
+        # #10618: the flag would be written by the OFFLOADED hook, so reading it
+        # instantly would pass even if the regression flagged late. Barrier =
+        # the hooked request's OWN point_create row (R1 writes it, then
+        # evaluates); the evaluation's own `flagged_at` write follows it, so the
+        # bounded window starts once the hook has demonstrably run.
+        assert _await_no_record(
+            lambda: fake.tables["organizations"][0]["flagged_at"] is not None,
+            after=lambda: bool([e for e in fake.tables.get("abuse_events", [])
+                                if e["event_type"] == "point_create"]),
+            window=0.5), (
+            f"11 bootstrap mints must not flag the org; "
+            f"org={fake.tables['organizations'][0]!r}")
 
 
 # ── R3: exfiltration detection ──────────────────────────────────────────────
@@ -351,6 +534,13 @@ class TestExfiltration:
         with verdict_client(env["app"]) as tc:
             for _ in range(101):
                 assert tc.get("/v1/team/keys", headers=_auth()).status_code == 200
+        # #10618: R3 is recorded by the OFFLOADED post-auth hook, so it can land
+        # just AFTER the request returns — poll instead of assuming
+        # completion-on-return (the pre-#10618 `to_thread` guarantee is gone).
+        assert _await_records(
+            lambda: len([c for c in env["notified"]
+                         if c[0] == "abuse_read_velocity"]) == 1), (
+            f"R3 velocity notify never landed; notified={env['notified']!r}")
         velocity = [c for c in env["notified"]
                     if c[0] == "abuse_read_velocity"]
         assert len(velocity) == 1
@@ -368,9 +558,27 @@ class TestExfiltration:
                 tc.get("/v1/team/keys", headers=_auth(TOKEN_A))
             for _ in range(40):
                 tc.get("/v1/team/keys", headers=_auth(TOKEN_B))
-            assert not [c for c in env["notified"]
-                        if c[0] == "abuse_read_velocity"]
+            # #10618 cycle-3 review: the pre-#10618 negative here (`assert not
+            # [...]`, 100 reads == no breach) was DELETED rather than converted,
+            # so a threshold regression firing the TEAM breach at ≤100 reads
+            # would still pass (READ_TRACKER._notified dedups per window, so
+            # exactly one scope="team" notify results either way). Restored as a
+            # bounded negative: barrier = all 100 reads counted by the offloaded
+            # hooks, then a window in which no velocity notify may appear.
+            assert _await_no_record(
+                lambda: bool([c for c in env["notified"]
+                              if c[0] == "abuse_read_velocity"]),
+                after=lambda: len(abuse.READ_TRACKER._by_org.get(TEAM) or []) == 100,
+                window=0.5), (
+                f"the TEAM breach fired at 100 reads, below its 101 threshold; "
+                f"notified={env['notified']!r}")
             tc.get("/v1/team/keys", headers=_auth(TOKEN_B))  # 101st team read
+        # #10618: the team notify comes from the OFFLOADED hook — poll (§ see
+        # `_await_records`), then assert it fired exactly once.
+        assert _await_records(
+            lambda: len([c for c in env["notified"]
+                         if c[0] == "abuse_read_velocity"]) == 1), (
+            f"team velocity notify never landed; notified={env['notified']!r}")
         velocity = [c for c in env["notified"]
                     if c[0] == "abuse_read_velocity"]
         assert len(velocity) == 1 and velocity[0][2]["scope"] == "team"
@@ -383,8 +591,18 @@ class TestExfiltration:
             for i in range(101):
                 tc.post("/v1/points", headers=_auth(),
                         json={"content": f"write {i}", "kind": "statement"})
-        assert not [c for c in env["notified"]
-                    if c[0] == "abuse_read_velocity"]
+        # #10618: a wrongly-counted read would be recorded by the OFFLOADED
+        # post-auth hook, so an instant read of `notified` can pass before it
+        # lands. Barrier = all 101 POSTs' own point_create rows (the write-side
+        # hook), then a window in which no read-velocity notify may appear.
+        assert _await_no_record(
+            lambda: bool([c for c in env["notified"]
+                          if c[0] == "abuse_read_velocity"]),
+            after=lambda: len([e for e in env["fake"].tables.get("abuse_events", [])
+                               if e["event_type"] == "point_create"]) >= 101,
+            window=0.5), (
+            f"a POST burst fired read velocity (writes must never count as "
+            f"reads); notified={env['notified']!r}")
 
 
 # ── R4: geo ─────────────────────────────────────────────────────────────────
@@ -394,14 +612,32 @@ class TestGeo:
         fake = env["fake"]
         with verdict_client(env["app"]) as tc:
             tc.get("/v1/team/keys", headers={**_auth(), "CF-IPCountry": "US"})
-            assert [c[0] for c in env["notified"]] == ["abuse_new_ip"]
+            # #10618: R4 runs in the OFFLOADED hook, so poll for the notify
+            # (and, implicitly, for the hook's own `_GEO_CACHE` write that the
+            # next two GETs' "already seen" behaviour depends on).
+            assert _await_records(
+                lambda: [c[0] for c in env["notified"]] == ["abuse_new_ip"]), (
+                f"R4 notify never landed; notified={env['notified']!r}")
             tc.get("/v1/team/keys", headers={**_auth(), "CF-IPCountry": "US"})
+            # negative assertion: give a MISSED notify the same bounded window
+            # to arrive before declaring the country quiet. Barrier = this
+            # second GET's own R3 read counted, i.e. its offloaded hook ran.
+            assert _await_no_record(
+                lambda: len(env["notified"]) > 1,
+                after=lambda: len(abuse.READ_TRACKER._by_org.get(TEAM) or []) == 2,
+                window=0.5), (
+                f"an already-seen country notified again; "
+                f"notified={env['notified']!r}")
             assert len(env["notified"]) == 1  # seen country stays quiet
             tc.get("/v1/team/keys", headers={**_auth(), "CF-IPCountry": "DE"})
-            assert len(env["notified"]) == 2
-        ip_events = [e for e in fake.tables["abuse_events"]
-                     if e["event_type"] == "auth_ip"]
-        assert {e["country"] for e in ip_events} == {"US", "DE"}
+            assert _await_records(lambda: len(env["notified"]) == 2), (
+                f"the new-country notify for DE never landed; "
+                f"notified={env['notified']!r}")
+        assert _await_records(
+            lambda: {e["country"] for e in fake.tables.get("abuse_events") or []
+                     if e["event_type"] == "auth_ip"} == {"US", "DE"}), (
+            f"auth_ip events never landed; "
+            f"tables={fake.tables.get('abuse_events')!r}")
         # R4 notifies the OWNER (email resolved from the team row)
         geo = [c for c in env["notified"] if c[0] == "abuse_new_ip"]
         assert geo and all(c[1]["email"] == "owner@abuse.test" for c in geo)
@@ -409,6 +645,16 @@ class TestGeo:
     def test_no_header_fail_open(self, env):
         with verdict_client(env["app"]) as tc:
             assert tc.get("/v1/team/keys", headers=_auth()).status_code == 200
+        # #10618: the post-auth hook is offloaded and ALSO records R3 — barrier
+        # = that read counted, then a window in which no notify may appear (a
+        # geo notify without a CF-IPCountry header is the fail-closed bug this
+        # pins).
+        assert _await_no_record(
+            lambda: bool(env["notified"]),
+            after=lambda: len(abuse.READ_TRACKER._by_org.get(TEAM) or []) == 1,
+            window=0.5), (
+            f"a request with no CF-IPCountry header notified ops; "
+            f"notified={env['notified']!r}")
         assert env["notified"] == []
 
 
@@ -428,7 +674,7 @@ class TestSessionLane:
             "status": "active", "org_name": "abuse-team"}])
 
     def _ip_events(self, fake):
-        return [e for e in fake.tables["abuse_events"]
+        return [e for e in fake.tables.get("abuse_events") or []
                 if e["event_type"] == "auth_ip"]
 
     def test_session_get_records_auth_ip_and_read(self, env):
@@ -451,12 +697,20 @@ class TestSessionLane:
         })
         team = asyncio.run(_session_user_org(request, {"user_id": _U1}))
         assert team["org_id"] == TEAM
-        # R4: the new-country session request recorded auth_ip + notified
-        assert {e["country"] for e in self._ip_events(fake)} == {"MX"}
+        # #10618: the hook is now offloaded with a delivery-preserving bound, so
+        # the record can land a moment AFTER the await returns (the pre-#10618
+        # `to_thread` guaranteed-before-return semantics is deliberately gone).
+        # Poll instead of asserting the instant the coroutine finishes.
+        assert _await_records(
+            lambda: {e["country"] for e in self._ip_events(fake)} == {"MX"}), (
+            f"R4 auth_ip never landed; events={self._ip_events(fake)!r}")
+        # R4: the new-country session request notified
         geo = [c for c in env["notified"] if c[0] == "abuse_new_ip"]
         assert len(geo) == 1 and geo[0][2]["country"] == "MX"
         # R3: the session GET counted toward team read velocity
-        assert len(abuse.READ_TRACKER._by_org[TEAM]) == 1
+        assert _await_records(
+            lambda: len(abuse.READ_TRACKER._by_org.get(TEAM) or []) == 1), (
+            f"R3 read never counted; tracker={abuse.READ_TRACKER._by_org!r}")
 
     def test_key_lane_unchanged(self, env):
         """Regression: the key lane still records auth_ip (R4) + R3 reads
@@ -466,9 +720,14 @@ class TestSessionLane:
             r = tc.get("/v1/team/keys",
                        headers={**_auth(), "CF-IPCountry": "CL"})
             assert r.status_code == 200
-        assert {e["country"] for e in self._ip_events(fake)} == {"CL"}
+        # #10618: see the poll note in the sibling test above.
+        assert _await_records(
+            lambda: {e["country"] for e in self._ip_events(fake)} == {"CL"}), (
+            f"R4 auth_ip never landed; events={self._ip_events(fake)!r}")
         assert [c[0] for c in env["notified"]] == ["abuse_new_ip"]
-        assert len(abuse.READ_TRACKER._by_org[TEAM]) == 1
+        assert _await_records(
+            lambda: len(abuse.READ_TRACKER._by_org.get(TEAM) or []) == 1), (
+            f"R3 read never counted; tracker={abuse.READ_TRACKER._by_org!r}")
 
 
 class TestMcp:
@@ -1942,3 +2201,363 @@ def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
     message = str(excinfo.value)
     assert "INCONCLUSIVE [#5049]" in message
     assert "GET /v1/team answered" in message
+
+
+# ── #10618: the per-request hooks leave the SHARED default executor ─────────
+# Every authenticated request used to pay a hop on the loop's SHARED default
+# executor (`first_api_call`, then `_abuse_post_auth`) BEFORE its handler ran.
+# That pool is `min(32, cpu+4)` (6 on prod's 2 vCPU) with an UNBOUNDED wait and
+# ~180 other `to_thread` tenants, so a stalled pool parked the request before it
+# could reach its handler — the #10602 shape ("a 40–80 ms store behind a 3.7–14.6 s
+# answer"). These pin the seam, not a number: the hooks ride the bounded
+# `abuse` control-plane pool (NOT `telemetry`, which also carries the
+# unrecoverable `billing_notify`), the short bound is DELIVERY-preserving, and a
+# refused submission is REPORTED rather than silently dropped.
+
+#: #10618: the bound an authenticated read must answer inside while every
+#: shared-pool slot is occupied. Generous next to a healthy ~50 ms answer; the
+#: point is that it is finite on a shape where the pre-fix code never returns.
+_ANSWER_BOUND_S = 10.0
+#: How long the test waits for the stall to be PROVEN established before failing
+#: with that premise rather than with an assertion (a stall that never fills the
+#: pool proves nothing).
+_STALL_ESTABLISHED_S = 30.0
+
+
+def _default_executor_width() -> int:
+    """The width the loop actually builds for ``run_in_executor(None, ...)``."""
+    return min(32, (os.cpu_count() or 1) + 4)
+
+
+def _stall_the_default_executor(loop, width: int):
+    """Occupy EVERY shared default-executor slot with one blocked callable.
+
+    Returns ``(blockers, occupied, release)``. Occupancy is proven by the
+    workers themselves (the last one sets ``occupied``) rather than by sleeping:
+    a test that only QUEUED them would pass on the defect, because the request's
+    own submission could be dequeued ahead of them.
+    """
+    import threading as _threading
+
+    release = _threading.Event()
+    occupied = _threading.Event()
+    lock = _threading.Lock()
+    state = {"running": 0}
+
+    def _block() -> None:
+        with lock:
+            state["running"] += 1
+            if state["running"] >= width:
+                occupied.set()
+        release.wait(_STALL_ESTABLISHED_S * 4)
+
+    blockers = [loop.run_in_executor(None, _block) for _ in range(width)]
+    return blockers, occupied, release
+
+
+class TestPerRequestHooksLeaveTheSharedPool:
+    def test_whole_request_path_answers_while_the_shared_pool_is_stalled(
+            self, env):
+        """#10618 acceptance: the WHOLE request path — the auth dependency
+        included, NOT stubbed — answers a read while every shared-pool slot is
+        occupied.
+
+        ⛔ RED on the pre-#10618 shape, and the RED is a TIMEOUT, not a wrong
+        number: ``get_current_org`` awaits ``first_api_call`` and
+        ``_abuse_post_auth``, both ``asyncio.to_thread`` onto the shared pool, so
+        with every slot held the request never reaches ``/v1/team/keys``.
+
+        The ``client`` fixture in ``test_read_routes_loop_responsiveness.py``
+        overrides ``get_current_org``, which is exactly why it cannot see this
+        hop — this test deliberately goes through a real API key.
+        """
+        app = env["app"]
+        width = _default_executor_width()
+        answer: dict = {}
+
+        async def _run() -> None:
+            loop = asyncio.get_running_loop()
+            blockers, occupied, release = _stall_the_default_executor(loop, width)
+            try:
+                deadline = time.monotonic() + _STALL_ESTABLISHED_S
+                while not occupied.is_set():
+                    if time.monotonic() >= deadline:
+                        raise AssertionError(
+                            f"the shared default executor never reached {width} "
+                            f"running blockers — the pool was never full, so this "
+                            f"run proves nothing about the request path (#10618)")
+                    await asyncio.sleep(0.01)
+                async with verdict_async_client(
+                        app, base_url="http://test") as ac:
+                    started = time.monotonic()
+                    try:
+                        response = await asyncio.wait_for(
+                            ac.get("/v1/team/keys", headers=_auth()),
+                            timeout=_ANSWER_BOUND_S)
+                    except TimeoutError:
+                        answer["failure"] = (
+                            f"GET /v1/team/keys did not answer within "
+                            f"{_ANSWER_BOUND_S}s while all {width} shared-"
+                            f"executor slots were occupied — a per-request hop "
+                            f"(first_api_call / _abuse_post_auth) is still "
+                            f"queued on the SHARED pool before its handler "
+                            f"(#10618)")
+                        return
+                    answer["status"] = response.status_code
+                    answer["body"] = response.text[:200]
+                    answer["elapsed"] = time.monotonic() - started
+            finally:
+                release.set()
+                for f in blockers:
+                    with contextlib.suppress(Exception):
+                        await asyncio.wait_for(f, timeout=5)
+
+        asyncio.run(_run())
+        assert "failure" not in answer, answer.get("failure")
+        assert answer["status"] == 200, (
+            f"GET /v1/team/keys answered {answer['status']}: {answer['body']}")
+
+    def test_the_hook_seam_is_bounded_delivery_preserving_and_contextconfined(
+            self, monkeypatch):
+        """#10618: the SHAPE of the hand-off, pinned.
+
+        ``cancel_on_timeout=False`` is what makes the short bound
+        DELIVERY-preserving (the bound abandons the AWAIT; a queued submission
+        still runs), the lane is the DEDICATED ``abuse`` pool (so a cold-geo
+        stall can never consume the capacity the unrecoverable ``billing_notify``
+        needs), and every invocation is wrapped in ``monitoring.confine_context``
+        so a pool thread's process-lifetime context cannot leak into the next
+        request's hook.
+        """
+        import tortoise.hosted_api as ha
+
+        calls: list[dict] = []
+
+        async def _record(fn, **kwargs):
+            calls.append({"fn": fn, **kwargs})
+            return None
+
+        monkeypatch.setattr(ha, "run_control_plane_call", _record)
+        monkeypatch.setattr(ha, "confine_context",
+                            lambda fn: ("CONFINED", fn))
+        asyncio.run(ha._telemetry_hook_off_loop(lambda: None, op="abuse.post_auth"))
+        assert len(calls) == 1, calls
+        kwargs = calls[0]
+        assert kwargs["op"] == "abuse.post_auth"
+        assert kwargs["pool"] == "abuse", (
+            "the hooks must ride their OWN pool: `telemetry` also carries the "
+            "UNRECOVERABLE billing_notify, whose refusal is a permanent loss "
+            "(#10618 review P2)")
+        assert kwargs["cancel_on_timeout"] is False, (
+            "without cancel_on_timeout=False the bound DROPS a queued "
+            "submission instead of abandoning only the await — the abuse "
+            "record would vanish rather than land late (#10618)")
+        assert kwargs["timeout"] == ha._ABUSE_OFFLOAD_TIMEOUT_S
+        assert calls[0]["fn"][0] == "CONFINED", (
+            "the callable must be wrapped in confine_context PER SUBMISSION — "
+            "a pool thread is process-lifetime, so an unwrapped callable runs "
+            "under the worker's own ambient context and a ContextVar set there "
+            "would leak into the NEXT request (#10618 review P2)")
+
+    def test_a_bound_miss_is_metered_never_logged_per_request(
+            self, monkeypatch, caplog):
+        """#10618 review P2: a BOUND MISS must not emit a line per request.
+
+        ``_cp_offload(best_effort=True)`` warns on EVERY miss
+        (``control-plane offload %r failed (best-effort, swallowed)``), and this
+        hook runs on EVERY authenticated request, so saturation would produce one
+        WARNING per request — burying the single attributable refusal line.
+        The seam still meters the miss (``bound_miss_running``), so nothing is
+        invisible.
+
+        ⛔ The assertion is on the SEAM's noise, not only on our own marker: a
+        filter on ``ABUSE_OFFLOAD_REFUSED`` alone would pass while the pre-fix
+        shape screamed per call (#10618 cycle-2 review, measured).
+        """
+        import logging
+
+        import tortoise.hosted_api as ha
+        import tortoise.monitoring as mon
+
+        async def _bound_miss(fn, **kwargs):
+            raise mon.ControlPlaneOffloadError("hook missed its bound",
+                                               refused=False)
+
+        monkeypatch.setattr(ha, "run_control_plane_call", _bound_miss)
+        monkeypatch.setattr(ha, "_LAST_ABUSE_REFUSED_LOG", None)
+        with caplog.at_level(logging.DEBUG):
+            asyncio.run(ha._telemetry_hook_off_loop(lambda: None,
+                                                    op="abuse.post_auth"))
+        noisy = [r.getMessage() for r in caplog.records
+                 if "ABUSE_OFFLOAD_REFUSED" in r.getMessage()
+                 or "control-plane offload" in r.getMessage()
+                 or "best-effort, swallowed" in r.getMessage()]
+        assert noisy == [], (
+            "a bound miss is NOT a drop: it must neither claim one was lost nor "
+            "emit the seam's per-call WARNING (one per authenticated request is "
+            f"the amplification #10618 forbids); got {noisy}")
+
+    def test_a_refused_hook_is_reported_never_silently_dropped(
+            self, monkeypatch, caplog):
+        """#10618 acceptance: a REFUSED submission is REPORTED on a named lane.
+
+        A refusal (the pool's backlog is full) is the ONE case where the record
+        genuinely does not happen, so it must be attributable: an attacker who
+        can saturate the pool must not be able to suppress their own velocity
+        accounting INVISIBLY.
+        """
+        import logging
+
+        import tortoise.hosted_api as ha
+        import tortoise.monitoring as mon
+
+        async def _refuse(fn, **kwargs):
+            raise mon.ControlPlaneOffloadError("hook refused", refused=True)
+
+        monkeypatch.setattr(ha, "run_control_plane_call", _refuse)
+        monkeypatch.setattr(ha, "_LAST_ABUSE_REFUSED_LOG", None)
+        with caplog.at_level(logging.ERROR, logger="tortoise.hosted_api"):
+            asyncio.run(ha._telemetry_hook_off_loop(lambda: None,
+                                                    op="abuse.post_auth"))
+        hits = [r for r in caplog.records
+                if "ABUSE_OFFLOAD_REFUSED" in r.getMessage()]
+        assert len(hits) == 1, (
+            "a REFUSED hook must emit the named ABUSE_OFFLOAD_REFUSED line — "
+            f"a silent drop is a suppression (#10618); "
+            f"records={[r.getMessage() for r in caplog.records]}")
+
+    def test_the_refusal_line_is_shed_logged(self, monkeypatch, caplog):
+        """#10618: one line per window, not one per request — a saturation of the
+        ``abuse`` pool refuses a hook per request for EVERY tenant (the ``operator_alert._log_shed`` rule the #4456
+        billing floor already follows)."""
+        import logging
+
+        import tortoise.hosted_api as ha
+
+        monkeypatch.setattr(ha, "_LAST_ABUSE_REFUSED_LOG", None)
+        with caplog.at_level(logging.ERROR, logger="tortoise.hosted_api"):
+            ha._log_abuse_offload_refused("abuse.post_auth")
+            ha._log_abuse_offload_refused("abuse.post_auth")
+            ha._log_abuse_offload_refused("abuse.record_points")
+        hits = [r for r in caplog.records
+                if "ABUSE_OFFLOAD_REFUSED" in r.getMessage()]
+        assert len(hits) == 1, (
+            f"the refusal floor must shed within its window; got {len(hits)} "
+            f"lines (#10618)")
+
+
+# ── #10618 cycle-4: the pool must be QUIESCED between tests ─────────────────
+# The ``tortoise-abuse`` workers are process-lifetime daemon threads and this
+# change makes the hooks OUTLIVE the request on purpose (a bound miss abandons
+# the AWAIT, not the submission). So a hook can still be queued or running when
+# its test ends — and the hooks resolve the module-global ``abuse.READ_TRACKER``
+# at CALL time, which by then is the NEXT test's tracker. Every «completion
+# barrier» in this file waits for an EXACT count (``== 100`` at
+# `test_fanout_team_velocity`, ``== 2`` at `TestGeo`, ``== 1`` at
+# `test_no_header_fail_open` and both `TestSessionLane` pins), so one leaked
+# read makes the barrier permanently unsatisfiable and the poll expires into a
+# product-looking FAIL on a load artefact — the #5049 rule 1 shape, whose root
+# cause here is order dependence (rule 4).
+
+#: How long the test's own hook stays in flight, i.e. how long after its
+#: request ended it is still able to write into a newly installed tracker.
+_LATE_HOOK_SLEEP_S = 0.25
+
+
+class TestTheAbusePoolIsQuiescedBetweenTests:
+    def test_a_hook_left_in_flight_lands_in_the_next_tests_tracker_and_the_drain_stops_it(
+            self, env):
+        """The `env` teardown drain is LOAD-BEARING, proven in two legs.
+
+        (1) the hazard is real, and it is the NO-DRAIN shape: a hook running when
+            its test ends is counted by whoever's tracker is installed when it
+            lands (this is why the exact-count barriers were reachable only by
+            luck). Nothing quiesces the pool before the leak is observed —
+            that is precisely the pre-fix teardown;
+        (2) WITH `_drain_abuse_pool()` nothing survives it.
+
+        The pair is what makes this discriminating rather than vacuous: a drain
+        that returned without waiting would pass (2) as long as nothing was in
+        flight, and (1) establishes that something was. An earlier draft ran (1)
+        twice under different names; that repetition measured nothing new
+        (#10618 cycle-5 review P3) and is replaced by this single honest
+        no-drain leg.
+        """
+        import threading
+
+        import tortoise.monitoring as mon
+
+        pool = mon.control_plane_worker("abuse")
+
+        def _submit_a_late_read() -> None:
+            started = threading.Event()
+
+            def _late_read() -> None:
+                started.set()
+                time.sleep(_LATE_HOOK_SLEEP_S)
+                abuse.record_read("key-a", TEAM)
+
+            pool.submit(_late_read)
+            assert started.wait(_LATE_HOOK_SLEEP_S * 8), (
+                "the hook submitted to the abuse pool never started, so this "
+                "test's premise — a hook still in flight after its request "
+                "ended — was not established (#10618)")
+
+        def _install_a_fresh_tracker() -> abuse.ReadVelocityTracker:
+            # exactly what the `env` fixture does for the next test
+            abuse.READ_TRACKER = abuse.ReadVelocityTracker()
+            return abuse.READ_TRACKER
+
+        def _count(tracker) -> int:
+            return len(tracker._by_org.get(TEAM) or [])
+
+        # (1) the hazard in its NO-DRAIN shape, reproduced: the hook outlives
+        # its request, nothing quiesces the pool, and it lands in the freshly
+        # installed tracker — a stray read is exactly what makes an `== N`
+        # barrier unsatisfiable.
+        _submit_a_late_read()
+        leaked = _install_a_fresh_tracker()
+        assert _await_records(lambda: _count(leaked) == 1), (
+            "the in-flight hook never reached the freshly installed tracker, so "
+            "the leak this test is about did not reproduce — the assertions "
+            f"below would measure nothing; tracker={leaked._by_org!r}")
+
+        # (2) the fix: a hook submitted BEFORE the drain cannot land after it.
+        _submit_a_late_read()
+        assert _drain_abuse_pool(), (
+            f"the abuse pool did not quiesce within {_ABUSE_POOL_DRAIN_TIMEOUT_S}s")
+        clean = _install_a_fresh_tracker()
+        assert not _await_records(lambda: _count(clean) != 0, timeout=0.5), (
+            "a hook submitted before the drain landed AFTER it, in the next "
+            "test's READ_TRACKER — every exact-count barrier in this file "
+            "(`== 100` / `== 2` / `== 1`) would then be off by one and its poll "
+            f"would expire into a FAIL (#10618 cycle-4 review P3); "
+            f"tracker={clean._by_org!r}")
+
+
+# ── #10618 cycle-5: a negative WITHOUT a completion barrier must not pass ────
+
+
+class TestANegativeNeedsACompletionBarrier:
+    def test_a_negative_with_no_barrier_is_a_harness_failure(self):
+        """`_await_no_record` REFUSES to measure a negative with no barrier.
+
+        The cycle-5 review's P3: the docstring promised "a missing barrier is an
+        assertion failure, not a silently weaker pass" while the code accepted
+        `after=None`. A caller that omitted it would then measure a bounded
+        window that can elapse while the hook is still queued — the vacuus pass
+        this helper exists to remove. This pin is the promise, executable: on the
+        pre-fix helper (which accepted the omission) it FAILS, because the call
+        returns `True` instead of raising.
+        """
+        import pytest
+
+        with pytest.raises(AssertionError, match="COMPLETION BARRIER"):
+            _await_no_record(lambda: False)
+
+    def test_a_supplied_barrier_is_enforced(self):
+        """A barrier that does not establish completion fails the measurement."""
+        import pytest
+
+        with pytest.raises(AssertionError, match="never landed the record"):
+            _await_no_record(lambda: False, after=lambda: False)

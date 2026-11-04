@@ -31,6 +31,17 @@ os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
 # exercise the watchdog with an injected exit_fn; the real one stays disarmed
 # for the whole session.
 os.environ.setdefault("TORTOISE_LOOP_STALL_EXIT_S", "0")
+# The HARD ceiling (#10585) is the deliberate exception to that gate — it exits
+# EVEN with a request in flight — so an ambient value is more dangerous here,
+# not less: ``fly.toml`` and ``.env.example`` both document 600, and a developer
+# who exported either would make any hosted-API test that arms the watchdog
+# ``os._exit`` the runner. ASSIGNED, not ``setdefault`` (#10585 review P3):
+# ``setdefault`` writes only when the key is ABSENT, which is the one case that
+# is NOT the hazard — so it pins nothing in the case it exists for. Same shape
+# and same reason as the ``TORTOISE_EMBEDDER_WARMUP`` pin below (#7015). A test
+# that arms the ceiling deliberately still wins: ``monkeypatch.setenv`` applies
+# after this and restores this value when the test ends.
+os.environ["TORTOISE_LOOP_STALL_HARD_EXIT_S"] = "0"
 # #2850: the dedicated liveness listener defaults to the fixed 0.0.0.0:9090
 # deployment contract. An ephemeral port for the test session keeps parallel
 # test sessions on one host from fighting over it (and never exposes a
@@ -192,6 +203,78 @@ install_tolerant_tempdir_cleanup()
 # it), so 240 left only 1.17x over what we have actually seen. It stays at or
 # under the hosted pre-warm's 300.0 (`hosted_api.py`), so this lane never
 # out-budgets the lane that runs the same cold torch import.
+
+# #10010: the HuggingFace cache must NOT follow a redirected `$HOME`.
+#
+# `huggingface_hub` resolves its model cache from `$HF_HOME` (default
+# `~/.cache/huggingface`, docs: "All environment variables are read at import
+# time of huggingface_hub. Any modification made afterwards will not be taken
+# into account."), and `sentence_transformers` is imported LAZILY — inside the
+# first test that needs an embedding. A module whose fixture isolates `$HOME`
+# (`tests/test_capture_session.py::_isolated_home`, added for #3662) therefore
+# freezes the cache inside a PER-TEST tmp dir, so every such test process
+# resolves an EMPTY model cache instead of the one CI provisioned.
+#
+# Measured on test-slow (e), PR #10010 head 2feca037f (run 41183376264, job
+# 124496278891, self-hosted `pi-runner-x64-2`): every capture test paid a cold
+# model load — the leg ran 120 of its 857 items in 2405 s and was killed by its
+# 40 m watchdog with `rc=124` and ZERO failures, i.e. a red check no
+# failure-identity could explain. The same mechanism is the one
+# `test_carve_out_lane_provisions_the_embedder_offline` (#4387) already pins for
+# another lane: an uncached load RETRIES/instantiates instead of using the
+# provisioned copy, once per attempt, and the shard dies at its budget.
+#
+# Measured here (one file, standalone): 4 m 04 s with the leaked cache vs
+# 1 m 42 s once the load resolves the provisioned model — the difference is two
+# cold loads (77 s + 71 s) that find nothing under the redirected `$HOME`.
+#
+# ASSIGNED at conftest import, before any test module can import
+# `huggingface_hub` (the same "in force BEFORE collection" rule the
+# `TORTOISE_EMBEDDER_WARMUP` pin above follows): an env var set later is IGNORED
+# by the already-frozen constants. `setdefault`, unlike the warm-up pin, so an
+# operator's explicit `HF_HOME` (a shared cache, a hosted image) still wins.
+# This fixes WHERE the cache is looked up — never WHETHER the embedder is
+# required: a cold cache still degrades exactly as before, and the CI steps that
+# provision it (`Cache HF embedding model` + `Embedding model REQUIRED`) keep
+# owning availability.
+def _default_hf_home(environ=None) -> str:
+    """The cache root `huggingface_hub` itself would resolve — re-derived, not assumed.
+
+    ⛔ The default is NOT unconditionally ``~/.cache/huggingface``: the vendor's
+    own `environment_variables` reference says it *"Defaults to
+    \"~/.cache/huggingface\" unless XDG_CACHE_HOME is set"*, and the constant is
+    built that way (``huggingface_hub/constants.py``, v1.27.0)::
+
+        default_home = os.path.join(os.path.expanduser("~"), ".cache")
+        HF_HOME = os.path.expandvars(os.path.expanduser(os.getenv("HF_HOME",
+            os.path.join(os.getenv("XDG_CACHE_HOME", default_home), "huggingface"))))
+
+    This helper mirrors that expression exactly (including `XDG_CACHE_HOME`
+    being honoured only when UNSET, i.e. `os.environ.get(key, default)` rather
+    than an `or`, which differ for a set-but-empty value). Pinning the
+    XDG-blind arm instead REDIRECTED the suite away from the cache the loader
+    would have used on any host that sets `XDG_CACHE_HOME` — re-introducing the
+    per-test cold load this pin exists to remove, on exactly those hosts, and
+    silently, because the old pin could only compare the env value to itself
+    (#10010 review F4). `tests/test_capture_session.py::
+    test_the_default_hf_home_is_the_one_the_vendor_would_resolve` drives the
+    real vendor constant in a subprocess and would fail on the old formula.
+
+    `os.path.expanduser` NOT `Path.home()` for the same reason the vendor uses
+    it: it reads the same mechanism (`~` expansion of the ambient HOME at THIS
+    instant), so the two cannot disagree about which cache "default" means.
+    """
+    env = os.environ if environ is None else environ
+    default_home = os.path.join(os.path.expanduser("~"), ".cache")
+    return os.path.expandvars(
+        os.path.expanduser(
+            os.path.join(env.get("XDG_CACHE_HOME", default_home), "huggingface")
+        )
+    )
+
+
+os.environ.setdefault("HF_HOME", _default_hf_home())
+
 from tortoise.embeddings import EmbeddingModel as _EmbeddingModelForTestLane  # noqa: E402
 
 _EmbeddingModelForTestLane._LOAD_TIMEOUT_S = 270.0
@@ -630,6 +713,64 @@ def _no_ambient_record_arming(monkeypatch):
     if _hosted is not None:
         _hosted._ACL_ABSENCE_ANNOUNCED.clear()
     record_writer._close_live_breaker()
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_record_refusal():
+    """#10648 review P2: the record's refusal STATE is process state, never ambient.
+
+    `_record_health` folds ``monitoring.record_refusing()`` into `record.ok`, so
+    ``health()``'s ``status`` reads ``degraded`` for ``RECORD_REFUSAL_WINDOW_
+    SECONDS`` (300 s — longer than a whole shard) after ANY counted refusal in
+    the same process. Two files that COUNT a refusal and four legs in
+    ``tests/test_backup_watcher_health.py`` that assert ``status == "ok"`` through
+    the REAL block are registered on the same ``api``/``core`` surfaces, so
+    before this fixture existed those legs asserted "no earlier test tripped the
+    seam" — an ordering dependency between test FILES, not a property of the
+    watcher block.
+
+    Three pieces of process state are cleared, and they are different facts:
+
+    * the REFUSAL STAMP the window verdict is read from (#10185) — clearing a
+      counter does NOT clear it;
+    * the CUMULATIVE counter, per reported reason through the public
+      ``remove(reason)``, so a reason added later is cleared too rather than
+      silently re-introducing the bleed;
+    * …on BOTH sides, because a leg that stamps a refusal must not hand it to the
+      next one either (the per-file copies this replaces cleared at setup only
+      in ``test_9548``, which is exactly how the stamp outlived its file).
+
+    Production never calls ``clear_record_last_refusal`` (test-only by contract):
+    the stamp is what makes a refusal observable. Resolved through
+    ``sys.modules``, so an un-imported monitoring module costs nothing — and if
+    it is not imported, no refusal can exist.
+    """
+    _clear_record_refusal_state()
+    yield
+    _clear_record_refusal_state()
+
+
+def _clear_record_refusal_state() -> None:
+    """Clear the record seam's process-global refusal state (both facts)."""
+    import contextlib
+    import sys
+
+    monitoring = sys.modules.get("tortoise.monitoring")
+    if monitoring is None:
+        return
+    monitoring.clear_record_last_refusal()
+    # The snapshot is READ to enumerate the reasons, and one leg deliberately
+    # patches it to raise (`test_a_failing_counter_snapshot_does_not_fail_open`).
+    # Isolation hygiene must never be the thing that errors: this teardown runs
+    # before a later-created `monkeypatch` is undone, and a raise here would
+    # report that leg as an ERROR for a reason unrelated to what it asserts.
+    try:
+        reasons = list(monitoring.record_write_failure_counts())
+    except Exception:  # a snapshot this test broke on purpose
+        return
+    for reason in reasons:
+        with contextlib.suppress(KeyError):  # already gone — nothing to do
+            monitoring.RECORD_WRITE_FAILURE_COUNT.remove(reason)
 
 
 @pytest.fixture(autouse=True)

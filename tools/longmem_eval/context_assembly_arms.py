@@ -26,9 +26,11 @@ Controls (§5) enforced here
   driver calls the identical ``answer_with_evidence`` path for every arm.
 * **One prompt scaffolding** used byte-identically across arms — the
   pre-rendered-evidence seam of ``tortoise/reader.py``
-  (``build_reader_user_message`` + ``system_prompt_for``); only the
-  ``{context}`` slot differs. :func:`reader_prompt_hash` records the one
-  scaffolding identity in every arm's methodology block.
+  (``build_reader_user_message`` + the composed system prompt,
+  ``_system_prompt_for_question``: ``system_prompt_for`` plus the #10539
+  conditional aggregation clause); only the ``{context}`` slot differs.
+  :func:`reader_prompt_hash` records the one scaffolding identity in every
+  arm's methodology block.
 * **One judge** for all arms (the caller passes one object).
 * **Fresh graph namespace per question** — the driver builds one SDK per
   question through ``sdk_factory`` and records the namespace.
@@ -1385,7 +1387,9 @@ def build_manifest(
         "reader_prompt_sha256": reader_prompt_sha256(),
         "reader_prompt_source": (
             "tortoise/reader.py:build_reader_user_message + "
-            "system_prompt_for + reader_prompt_constants, consumed via "
+            "system_prompt_for + reader_prompt_constants + the #10539 "
+            "conditional aggregation clause, composed per question by "
+            "_system_prompt_for_question, consumed via "
             "LLMReader.answer_with_evidence"),
         "judge_model": getattr(judge, "model_spec", None)
         or getattr(judge, "model_id", ""),

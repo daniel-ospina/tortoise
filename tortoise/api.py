@@ -416,13 +416,36 @@ class EventAPI:
                           # model change that never happened.
                           "embedding_model", "embedding_revision",
                           "embedding_text_hash",
+                          # #8488 scope 1: the enriched text is writer-minted
+                          # and no `PointRevised` arm replays it — a caller-set
+                          # value would be a live-only write a rebuild drops,
+                          # and would forge the #4194 text↔vector identity.
+                          "embeddingText",
                           # #5256: the `extractedFrom` read-version anchor is
                           # server-derived (resolved from the :Source below).
                           # Accepting it would let this non-SDK seam forge the
                           # provenance record, and the same reason the SDK and
                           # MCP boundaries reject it applies here.
+                          # #7704: `extractedFromAll` joins them — it is the
+                          # FOLD's record of the ref set, and
+                          # `_upsert_point_edges`/`_point_all_source_refs`
+                          # re-derive the `extractedFrom` edges from it on
+                          # replay, so a caller-supplied value puts the
+                          # payload's edges AHEAD of the :Source resolution
+                          # this seam performs (live wires the resolved refs,
+                          # the replay wires the caller's array too). This
+                          # seam is the one producer that never reaches
+                          # `_sanitize_props`, so the entry is the ONLY guard
+                          # on the key here — the sibling keys are registered
+                          # at every home for the same reason.
                           "sourceVersion", "sourceVersions",
-                          "sourceVersionTransit"})
+                          "sourceVersionTransit", "extractedFromAll",
+                          # #10010: the FOLD's record FLAG — `_fold_source_evidence`
+                          # mints it on the snapshot it re-emits, and the replay's
+                          # recreate anchor reads it to tell a fold from a
+                          # creation. Server-minted like the keys above, so a
+                          # caller value is refused at this seam too.
+                          "evidence_fold"})
         if _forged:
             raise ValueError(
                 f"{_forged} are server-managed journal fields (embedding "

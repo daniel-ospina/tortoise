@@ -170,6 +170,7 @@ __all__ = [
     "TURNS_SNAPSHOT_OPTIONAL_KEYS",
     "TURNS_SNAPSHOT_UNATTESTABLE_KEYS",
     "RecordProjectionError",
+    "RecordStatementError",
     "RefusedJournalOperation",
     "ReplayReport",
     "UnknownJournalRecordType",
@@ -261,6 +262,14 @@ RECORD_MIGRATIONS: tuple[str, ...] = (
     # post-move one.
     "20261027000001_record_semantic_id_key.sql",
     "20261029000001_record_point_cache_tier.sql",
+    # #10620 — R4's remaining half: `public.point.search_keys` NARROWED to
+    # `text`, because the producers emit the graph's flat space-joined STRING
+    # and a `jsonb` column refused every record carrying one (302 rows dropped
+    # while /health read ok). It contributes no COLUMN and no refusal, and it is
+    # listed anyway, per the registry rule above: `pyproject.toml`'s
+    # `*_record_*.sql` glob ships it, so an unlisted file is invisible to
+    # `tests/test_9231_record_migrations_trigger.py`'s reverse direction.
+    "20261102000002_record_point_search_keys_text.sql",
 )
 
 #: The tenancy GUC every record RLS policy reads (`*_read_org`, `*_app_tenant`).
@@ -534,9 +543,16 @@ TURNS_RECORD_TYPE = "TurnsRecorded"
 #: ⛔ THE PAYLOAD IS PINNED TO THE WRITER'S, so step 7 is a MOVE and not a
 #: reshape. Each entry of the carrier's ``turns`` list is one of the
 #: ``_turn_snapshot`` dicts `sdk._write_capture_turns` builds today, verbatim —
-#: these keys ALWAYS, plus at most one branch of the optional set below, MINUS
-#: (never partially) the ``TURNS_SNAPSHOT_UNATTESTABLE_KEYS`` when the writer could
-#: not attest them. The
+#: these keys ALWAYS, plus ONE of the embedding-identity branches
+#: (``embedding_preserved`` XOR the three stamps) and INDEPENDENTLY
+#: ``embeddingText`` on the enriched branch, MINUS (never partially) the
+#: ``TURNS_SNAPSHOT_UNATTESTABLE_KEYS`` when the writer could not attest them.
+#: ⛔ "at most one key of the optional set" was the sentence here until #10523
+#: review P3, and it is FALSE on the enriched preserved capture the writer can
+#: now emit: that snapshot carries ``embedding_preserved`` AND ``embeddingText``
+#: — two optional keys, because the text is a separate question from the vector's
+#: identity. `_assert_snapshot_contract(optional=…)` takes a SET, so the two
+#: coexist without tripping the contract; the prose, not the code, was wrong. The
 #: ``contains_session`` link rides the EVENT ENVELOPE rather than the per-turn
 #: dicts, exactly as it does for `PointAdded` (#3947: it is a capture-write
 #: STRUCTURAL fact, restored by the projection's edge fold, and never a node
@@ -564,6 +580,14 @@ TURNS_SNAPSHOT_KEYS: frozenset[str] = frozenset({
 TURNS_SNAPSHOT_OPTIONAL_KEYS: frozenset[str] = frozenset({
     "embedding_preserved",
     "embedding_model", "embedding_revision", "embedding_text_hash",
+    # #8488 scope 1: the enriched text the turn's vector describes rides the
+    # snapshot ONLY on the branch where the gate was ON and the enrichment
+    # produced a text. It stays OPTIONAL because the OFF branch is byte-identical
+    # to pre-#8488 (no key at all). ⛔ Step 7 carries it VERBATIM for the same
+    # reason as the identity stamps: a carrier that kept the vector and dropped
+    # the text it describes would replay exactly the #4194 lie the field exists
+    # to close.
+    "embeddingText",
 })
 #: The keys a snapshot MAY OMIT — TOGETHER — when the writer could not attest the
 #: stored value (#10021 review P3). ``sdk._write_capture_turns`` journals
@@ -655,6 +679,40 @@ JOURNAL_EVENT_TYPES: frozenset[str] = frozenset({
 
 class RecordProjectionError(Exception):
     """Base class — a record projection failure is loud, never a warning."""
+
+
+class RecordStatementError(RecordProjectionError):
+    """One PLAN statement failed to execute — naming WHICH one, and why (#10620).
+
+    ``replay()`` used to let the driver's exception escape unadorned, and the
+    only consumer that logs it (`record_writer.RecordWriter.write`) formatted
+    ``type(exc).__name__`` — so a live deployment reported
+    ``the record write failed … (InvalidTextRepresentation)`` and nothing else.
+    That is exactly enough information to know a row was lost and NOT enough to
+    know which one or why: 302 point records were dropped by ONE column
+    (``public.point.search_keys`` declared ``jsonb``, producer emitting a flat
+    string) over five hours, and the deployment's own log could not name it.
+
+    The message therefore carries, all of it derived from the statement that
+    actually ran rather than from a guess: the driver's own PRIMARY message
+    (:func:`_driver_fault` — its SQLSTATE and its terse ``M`` field, never the
+    ``DETAIL``/``CONTEXT`` fields that quote the refused row), the statement's
+    ordinal, its verb and table, and the columns it wrote with their (bounded)
+    values. The primary message is the half that names the FAULT (``invalid input
+    syntax for type json``); the columns are the half that names the SUBJECT.
+    Neither alone answers "which column, which row, why".
+
+    ⛔ ``str(exc)`` IS NOT CARRIED, on purpose (#10648 review P2): on a driver
+    error it is the protocol's fields CONCATENATED, so the value this line
+    withholds (`search_keys=<15 chars withheld>`) came back verbatim through the
+    driver's own `CONTEXT` clause. See :func:`_primary_message`.
+
+    ⛔ THE LINE IS COMPOSED TO FIT THE WRAPPING CONSUMER'S BUDGET
+    (:func:`_failure_line`), because `record_writer._bounded_cause` keeps the
+    HEAD of a message: a line over its limit loses the TAIL, which is where this
+    method puts the driver's fault clause — the half that says what went wrong
+    (#10648 review P2).
+    """
 
 
 class UnknownJournalRecordType(RecordProjectionError):
@@ -828,16 +886,20 @@ class OpDispatch:
     nothing, the cache derived nothing, and a record-sourced rebuild
     materialized a superseded entity with NO `status`, which
     `live._terminal_excluded` reads as LIVE. The computing half is now TWO legs
-    of `cache_projection`: `DERIVED_FROM_RECORD` (from this module's own PRIMARY
+    of `cache_projection` — `DERIVED_FROM_RECORD` (from this module's own PRIMARY
     carriers, `superseded_by` / `superseded_at`, the same OR-predicate the
-    record's `public.*_current_status` views use) and `EVENT_STREAM_FOLDS` —
-    the connector/pack vocabulary (#10198) and an explicit state op's
-    `state.status` (#9974), read from `public.journal_event.payload`, which IS
-    this module's own layer-1 record. So an explicit `restatus` is no longer
+    record's `public.*_current_status` views use) and `EVENT_STREAM_FOLDS`, which
+    reads THREE record shapes out of `public.journal_event.payload` (this
+    module's own layer-1 record): the connector/pack vocabulary (#10198), an
+    explicit state op's `state.status` (#9974), and the CREATION record's own
+    `status` (`ObjectRegistered` / `SubjectAdded` — #9974's birth leg, and the
+    FOURTH status writer overall once the supersession carriers are counted, so
+    a census that stopped at the two stream legs above left the birth writer
+    reading as unowned here). So an explicit `restatus` is no longer
     uncomputable: it is dropped HERE by design and folded THERE from the record
-    itself. (This paragraph used to end "those stay an ownership decision, not a
-    silent success" — true before #9974's second leg, and the contradiction the
-    detail gate caught.)
+    itself — and neither is a birth status the record seeded. (This paragraph
+    used to end "those stay an ownership decision, not a silent success" — true
+    before the state-op leg, and the contradiction the detail gate caught.)
     """
 
     table_for_label: Mapping[str, str]
@@ -1566,6 +1628,12 @@ _RECORD_ONLY_KEYS: frozenset[str] = frozenset({
     # node property — the fold's `_POINT_HANDLED` drops them too).
     "embedding_model", "embedding_revision", "embedding_text_hash",
     "embedding_preserved",
+    # #10010 review P1: the dedup fold's RECORD flag (a description of the
+    # record, never node state — `_POINT_HANDLED` drops it on replay too). It
+    # states that this creation-shaped record folded evidence into an EXISTING
+    # Point; without the entry it would fall into the record's `props` jsonb and
+    # `cache_projection._props_from_row` would copy it back onto the node.
+    "evidence_fold",
 })
 
 
@@ -1580,6 +1648,15 @@ class Statement:
 
     sql: str
     params: tuple[Any, ...]
+
+    #: The columns this statement writes, in `params` order — or ``None`` when
+    #: they cannot be paired off positionally. The upsert's key may be a
+    #: database-computed :class:`_SqlExpr` (#9956): a scalar subquery carrying its
+    #: OWN parameter inside the `VALUES` list, which keeps the COUNT equal while
+    #: shifting every later pairing by one. A builder that knows this therefore
+    #: declines to state the pairing (#10620, `_statement_attribution`), and a
+    #: failure line names the columns without inventing their values.
+    columns: tuple[str, ...] | None = None
 
     def render(self) -> str:
         """A readable one-liner for logs and hover-less debugging."""
@@ -1694,7 +1771,11 @@ def _split_properties(
             # failure Interface A forbids.
             tail[prop] = value
         elif column in cols:
-            col_values[column] = value
+            resolved = _record_column_value(table, column, value)
+            if resolved is _OMIT:
+                # A blank derived form contributes no column — see `_OMIT`.
+                continue
+            col_values[column] = resolved
         elif prop in refused_here or column in refused_here:
             # DERIVED/VOLATILE — the carve-out. Dropping is the correct
             # mutation; storing it would make a recomputed value authority.
@@ -1702,6 +1783,64 @@ def _split_properties(
         else:
             tail[prop] = value
     return col_values, tail
+
+
+#: `public.point.search_keys` is TEXT, and the graph's canonical form for it is
+#: the flat space-joined STRING (`projection/entities.py::flatten_search_keys_prop`,
+#: the ONE flattener the write path runs — `PointAdded` journal snapshots carry
+#: its output). A snapshot taken from a RAW graph value can still carry a LIST
+#: (`sparse.py`: "raw graph values may still be arrays"), and once #10620 narrowed
+#: the column to `text` a list would otherwise reach `_jsonb_or_scalar` and be
+#: serialized into it as `["a", "b"]` — storing a SECOND representation of a datum
+#: whose one form is `a b`. That is exactly the failure #10620 exists to end, so
+#: the record boundary flattens with the same rule instead of serializing.
+#: The rule is restated here (not imported) because this module deliberately has
+#: NO imports beyond the standard library — it must be loadable without the graph
+#: stack — and
+#: `tests/test_record_searchkeys_10620.py::test_the_record_flattener_agrees_with_the_graph_flattener`
+#: pins the two implementations together, presence included, so they cannot drift.
+class _Omit:
+    """A property with no column value at all — writes NOTHING, not NULL.
+
+    Distinct from ``None``, which is a VALUE: the upsert's
+    ``ON CONFLICT … SET search_keys = EXCLUDED.search_keys`` would copy a NULL
+    over a value an earlier record landed, while the graph's fold MERGES props
+    (`SET n += $props`) and the graph's own flattener POPS a blank key — so the
+    two stores would disagree exactly where this module exists to keep them
+    equal (#10620 review P2).
+    """
+
+
+_OMIT = _Omit()
+
+
+def _record_column_value(table: str, column: str, value: Any) -> Any:
+    """The value the RECORD's column takes, for the one property that has a rule."""
+    if table == "point" and column == "search_keys" and isinstance(value, Mapping):
+        # ⚠️ A DELIBERATE DIVERGENCE from the graph, and it is stated rather than
+        # hidden: `flatten_search_keys_prop` has no Mapping arm (it flattens only
+        # list/tuple), so the fold stores a dict-valued `search_keys` AS-IS while
+        # this boundary REFUSES the record. The reasons are asymmetric on purpose
+        # — `_jsonb_or_scalar` would `json.dumps` the dict into the now-`text`
+        # column, which is the SECOND representation #10620 exists to remove, and
+        # this module's standing rule is that a disagreement stays visible rather
+        # than being coerced. A dict-valued `search_keys` is unreachable from
+        # every producer today (the extractor emits a list, the fold a string);
+        # the refusal is the guard for the day that stops being true.
+        raise RecordProjectionError(
+            "point.search_keys arrived as a MAPPING — the graph's form is the flat "
+            "space-joined string (projection/entities.py::"
+            "flatten_search_keys_prop flattens list/tuple only and leaves a dict "
+            "as-is, which this boundary will not copy into a text column as JSON). "
+            "Refusing rather than serializing a second representation."
+        )
+    if table == "point" and column == "search_keys" and isinstance(value, (list, tuple)):
+        flat = " ".join(str(item).strip() for item in value if str(item).strip())
+        # The graph POPS a blank list (`flatten_search_keys_prop`: "an empty/blank
+        # list pops the key … so a blank list never clears an existing value"),
+        # and its fold merges. So a blank form contributes NO column here either.
+        return flat if flat else _OMIT
+    return value
 
 
 def _node_table(node: Node, columns: Mapping[str, frozenset[str]]) -> str:
@@ -1874,7 +2013,13 @@ def _upsert_statement(
         f"VALUES ({placeholders}) "
         f"ON CONFLICT (org_id, graph_id, node_key) DO UPDATE SET {updates}"
     )
-    return Statement(sql, tuple(params))
+    # A `_SqlExpr` anywhere in the VALUES list adds its own placeholders, so the
+    # column list no longer pairs off against `params` positionally. Stating a
+    # pairing then would name the WRONG column's value on a failure line, which
+    # is worse than naming none (#10620).
+    exact = not isinstance(key, _SqlExpr) and not any(
+        isinstance(value, _SqlExpr) for value in col_values.values())
+    return Statement(sql, tuple(params), tuple(columns) if exact else None)
 
 
 def _patch_statement(
@@ -1906,7 +2051,7 @@ def _patch_statement(
         f"UPDATE public.{node.table} SET {', '.join(sets)} "
         f"WHERE org_id = %s AND graph_id = %s AND {predicate}"
     )
-    return Statement(sql, tuple(params))
+    return Statement(sql, tuple(params), tuple(col_values) + (("props",) if tail else ()))
 
 
 def _delete_statement(
@@ -3315,8 +3460,9 @@ def _envelope_relation_statements(
 #:
 #: ⛔ FOUR TYPES, NOT TWO — AND THE FOLD'S TWO ROUTES DO NOT AGREE ABOUT THEM.
 #: `apply()` materialises a Point from FOUR arms, and three of them reach
-#: `_upsert_point_edges` (which reads `extractedFrom` off the payload with no
-#: type gate of its own):
+#: `_upsert_point_edges` (which reads the payload's FULL ref set through
+#: `_point_all_source_refs` — `extractedFromAll` when the payload states a
+#: non-empty list, else `extractedFrom` — with no type gate of its own):
 #:
 #:   * `PointAdded` / `OperatorAdded` → `self._upsert(p)`;
 #:   * `PointPromoted` → `self._upsert(gated_promote_payload(p, …))`;
@@ -3349,6 +3495,18 @@ _POINT_PROPERTY_RELATIONS: tuple[tuple[str, str, str, str], ...] = (
     ("PointPromoted", "extractedFrom", "extractedFrom", "Source"),
     ("OperatorPromoted", "extractedFrom", "extractedFrom", "Source"),
 )
+
+#: The one declared POINT property whose refs the record reads through the fold's
+#: own fallback (`_point_all_source_refs`) instead of off the named property.
+#: `_fold_source_evidence` keeps it a scalar and carries the folded set beside it
+#: on `extractedFromAll` (#7704), so the record has to read the SET — the same
+#: selector the journal replay's `_upsert_point_edges` uses — or it materialises
+#: one edge where the graph holds N.
+#: ⚠️ All four declared rows name this ONE property today, so the selector's
+#: `else` arm (`_point_property_refs` off the named prop) is a FORWARD guard for
+#: a second declared point property, not a live branch: nothing constructs it
+#: and no pin reds if it is wrong. Said here so it is not read as coverage.
+_POINT_FOLDED_PROP = "extractedFrom"
 
 
 #: ``tortoise/source_identity.py``'s canonicalisation constants, restated for the
@@ -3465,6 +3623,48 @@ def _point_property_refs(value: Any) -> list[str]:
             if _writable_endpoint_id(ref)]
 
 
+def _point_all_source_refs(snapshot: Mapping[str, Any]) -> list[Any]:
+    """`_point_all_source_refs`'s rule: the Point's FULL held ref set (#7704).
+
+    A dedup fold keeps the convenience property ``extractedFrom`` a SCALAR (or
+    the array the Point was born with) — it is what ``query`` matches by
+    EQUALITY — and carries the folded set on ``extractedFromAll``. The two
+    replay-side writers that must see EVERY ref read this: the ``#5256``
+    carrier filter (`_point_source_transit`) and the edge fold
+    (`_upsert_point_edges`). A payload from before that split carries no
+    ``extractedFromAll`` at all, so the scalar/array is the FALLBACK — never
+    ``[]``, which would silently drop a pre-#7704 record's provenance.
+
+    Restated rather than imported for the same STANDALONE reason as the
+    siblings, and pinned EQUAL to the fold's own over a value table by
+    `tests/test_record_projection.py::test_the_fold_ref_selector_is_the_records_own`.
+
+    ⛔ The record lane needed this for a reason the journal lane does not have:
+    `_fold_source_evidence` emits its `PointAdded` through
+    `_write_record_projection`, so a fold's payload is a RECORD too. Read off
+    the scalar alone, the record of a folded claim derived ONE `relation` row
+    and ONE carrier pair where the graph holds N — record POORER than graph,
+    the direction `_point_property_relation_statements` names as forbidden, and
+    invisible to `check_consistency` (which compares graph against JOURNAL).
+    """
+    all_refs = snapshot.get("extractedFromAll")
+    if isinstance(all_refs, (list, tuple)) and all_refs:
+        return [ref for ref in all_refs if ref]
+    return _point_raw_refs(snapshot.get("extractedFrom"))
+
+
+def _point_all_property_refs(snapshot: Mapping[str, Any]) -> list[str]:
+    """The FOLD's ref set, filtered by the same writer gate as
+    :func:`_point_property_refs` — one `relation` statement per surviving ref.
+
+    Applied to `_point_all_source_refs` rather than to a property, because the
+    fold's set spans two properties: the scalar `extractedFrom` and the folded
+    list beside it.
+    """
+    return [ref for ref in _point_all_source_refs(snapshot)
+            if _writable_endpoint_id(ref)]
+
+
 def _point_source_versions(snapshot: Mapping[str, Any]) -> dict[str, str]:
     """The `{raw ref: hash}` anchors the fold stamps on those edges (#5256).
 
@@ -3475,8 +3675,14 @@ def _point_source_versions(snapshot: Mapping[str, Any]) -> dict[str, str]:
     1. the carrier is accepted ALL-OR-NOTHING — one malformed pair (not a
        2-element `[str, str]` with both members non-blank) and the payload
        contributes NO anchor, rather than the well-formed half of one;
-    2. no `extractedFrom` ref at all ⇒ no anchor (the carrier is a transit for
-       an edge that will be written, so a stray carrier writes nothing);
+    2. no ref at all ⇒ no anchor (the carrier is a transit for an edge that
+       will be written, so a stray carrier writes nothing). The ref set is the
+       Point's FULL one — `extractedFromAll` when the payload states it, else
+       `extractedFrom` (#7704), which is the fold's own
+       `_point_all_source_refs`: a fold re-keys a retained pair to the spelling
+       its own list uses, and that spelling lives on the folded surface, so a
+       scalar-only gate would drop a held ref's recorded read-version from the
+       record while the journal replay stamped it;
     3. a pair naming a ref this Point does NOT carry is dropped
        (`kept = [[k, h] for k, h in pairs if any(k == r for r in refs)]`), so a
        carrier whose every pair is foreign yields NO anchor;
@@ -3496,7 +3702,7 @@ def _point_source_versions(snapshot: Mapping[str, Any]) -> dict[str, str]:
                 and isinstance(pair[0], str) and pair[0].strip()
                 and isinstance(pair[1], str) and pair[1].strip()):
             return {}
-    refs = _point_raw_refs(snapshot.get("extractedFrom"))
+    refs = _point_all_source_refs(snapshot)
     if not refs:
         return {}
     return {pair[0]: pair[1] for pair in pairs if pair[0] in refs}
@@ -3592,7 +3798,21 @@ def _point_property_relation_statements(
     statements: list[Statement] = []
     for prop, rel_type, tgt_label in declared:
         versions = _point_source_versions(snapshot)
-        for ref in _point_property_refs(snapshot.get(prop)):
+        # #7704: the FOLD's set, not the property it happens to leave a scalar.
+        # `_fold_source_evidence` keeps `extractedFrom` as the survivor's OWN
+        # creating source (so the EQUALITY read door keeps answering) and
+        # carries the folded refs on `extractedFromAll`, which the journal
+        # replay already reads through `_point_all_source_refs`. Read off the
+        # scalar here, the record derived ONE row for a claim the graph holds N
+        # edges for, and a record-sourced rebuild (`rebuild_from_record`,
+        # #9556) then materialised N-1 fewer `extractedFrom` edges than live
+        # and than `rebuild_all`. Nothing reported it: `check_consistency`
+        # compares graph against JOURNAL, never graph against record.
+        # The `else` arm is a FORWARD guard (all four declared rows name
+        # `_POINT_FOLDED_PROP` today), named at that constant.
+        for ref in (_point_all_property_refs(snapshot)
+                    if prop == _POINT_FOLDED_PROP
+                    else _point_property_refs(snapshot.get(prop))):
             # Mirror `resolve_source_key`: the raw ref, the canonical SPELLING,
             # and its canonical FORM, with the CANONICAL match preferred (that
             # is the order it queries in: canonicalUrl first, return there;
@@ -4771,6 +4991,255 @@ def scope_connection(conn: Any, org_id: str) -> Any:
     return cursor
 
 
+#: How much of ONE parameter a failure line carries. Long enough to identify a
+#: value (a node key, a space-joined search-key string, a small object), short
+#: enough that a `content` or `props` parameter cannot fill the log line.
+_ATTRIBUTION_VALUE_LIMIT = 80
+
+#: Columns whose VALUE is the user's own content, withheld from a failure line.
+#: The record's log is an application warning log; the DSN posture on the same
+#: seam is "fingerprinted, never printed", and the same reasoning applies to a
+#: conversation turn. The COLUMN NAME is still printed — that is what names the
+#: subject of the failure — with its length instead of its text (#10620 review
+#: P2: a failing point insert logged the first 80 characters of `content` and
+#: the whole `props` JSON).
+#: Every one of these is a REAL column of a record table (`table_columns()`),
+#: asserted by `tests/test_record_searchkeys_10620.py::test_content_columns_are_
+#: real_record_columns` so the next content column cannot be left out of it.
+_CONTENT_COLUMNS: frozenset[str] = frozenset({
+    "content", "quote", "props", "narrative", "summary", "story_arc",
+    "embedding", "embedding_verbatim",
+    # `source._search_text` — the derived summary of a captured session or a
+    # document's title+summary+topics: the SAME datum as `summary`, which is
+    # already withheld, so printing it here would leak the value through the
+    # column next door (#10620 review cycle 3, P2).
+    "_search_text",
+    # …and the other two components of that same datum. Naming `summary` while
+    # printing `title`/`topics` would withhold nothing: the source row's indexed
+    # text is built from all three (#10620 review cycle 4, P2).
+    "title", "topics",
+    # `point.search_keys` is the SAME datum one table over, and it is the user's
+    # own words: `commit_schema` declares it E3's "2-4 aliases + verbatim
+    # tokens", and `point_identifier_aliases` derives it from `content`
+    # ∪ `search_keys`. So the attribution withholding `content` while printing
+    # this column leaks the turn through the column next door — the incident's
+    # own line (`search_keys=err4032 release`) is extracted content tokens in an
+    # operator log (#10620 review cycle 5, P2). The line still NAMES the column
+    # and its length, which is what makes a refusal diagnosable.
+    "search_keys",
+    # ⛔ …and the IDENTITY-NAME columns, which the OTHER half of the same log line
+    # ALREADY withheld — so the withhold read as true of each half and false of
+    # the line (#10648 review P2). `record_writer._IDENTITY_CONTENT_KEYS` rules
+    # that a `source`'s `name` is its document title — the same datum `title`
+    # above is withheld as — and prints `name=<N chars withheld>`; the
+    # attribution half then printed the SAME string as `name=Q3 pricing memo`, in
+    # one warning line, for a `SourceCreated`/`SourceAdded` whose insert failed
+    # (`test_the_same_document_title_is_withheld_by_BOTH_halves_of_the_line`).
+    # `canonical_name` is that datum's home on `object`; `event.subject` /
+    # `event.object` are an event's own text describing its participants, the
+    # same class on `event`.
+    # NOT hand-maintained prose: `record_writer._IDENTITY_CONTENT_KEYS` is now a
+    # SUBSET of this set, asserted by
+    # `tests/test_record_searchkeys_10620.py::test_the_identity_withhold_list_is_
+    # a_subset_of_the_attribution_list`, so the two halves of one line cannot
+    # disagree again.
+    "name", "canonical_name", "subject", "object",
+})
+
+#: How much of the DRIVER's message a failure line carries. The driver names the
+#: fault in the first clause and then quotes a LINE of our own SQL, which the
+#: attribution already states far better than a truncated excerpt can.
+_ATTRIBUTION_EXC_LIMIT = 200
+
+#: The WHOLE failure line's budget in characters, and the number
+#: ``record_writer._bounded_cause`` uses as its own default — ONE number, in one
+#: place, because the two halves have to be budgeted TOGETHER (#10648 review P2).
+#:
+#: The wrap's limit used to be independent of what the projection composed, and
+#: `_bounded_cause` keeps the HEAD of a message. With the driver's text at the
+#: TAIL, a wide statement (a point upsert populates 21 columns — a measured
+#: 488-char attribution) produced a line over the wrap's 400, and the first thing
+#: truncated away was the FAULT: the wrap returned 400 chars in which `invalid
+#: input syntax for type json` was absent, which is the one half this attribution
+#: exists to deliver. The line is now COMPOSED to fit this budget — the driver
+#: clause is bounded on its own, the statement/columns take what is left, and a
+#: long column list is shortened (with an explicit `…` marker) rather than the
+#: fault — so the wrap never truncates a line the projection composed.
+ATTRIBUTION_LINE_LIMIT = 600
+
+#: Between the two halves of a failure line.
+_FAILURE_SEP = " — "
+
+
+def _failure_line(attribution: str, driver: str) -> str:
+    """``<subject> — <driver>``, composed to FIT the wrap's own budget.
+
+    Both halves are bounded here, together, against
+    :data:`ATTRIBUTION_LINE_LIMIT`: the driver clause on its own
+    (:data:`_ATTRIBUTION_EXC_LIMIT`), then the statement/columns against what is
+    left. Nothing downstream has to re-budget a line this function produced, and
+    a column list longer than the room left for it is cut with a `…` marker
+    instead of the fault clause disappearing (#10648 review P2).
+    """
+    driver = _bounded(driver, _ATTRIBUTION_EXC_LIMIT)
+    budget = ATTRIBUTION_LINE_LIMIT - len(driver) - len(_FAILURE_SEP)
+    if len(attribution) > budget:
+        # One character of the budget is the truncation marker itself.
+        attribution = f"{attribution[:max(budget - 1, 0)]}…"
+    return f"{attribution}{_FAILURE_SEP}{driver}"
+
+#: The three shapes the plan emits (`_upsert_statement`, `_patch_statement`,
+#: `_delete_statement`). Anything else is named by index rather than
+#: mis-attributed to a table it does not write.
+_STATEMENT_HEAD_RE = re.compile(
+    r"^(?P<verb>INSERT INTO|UPDATE|DELETE FROM)\s+public\.(?P<table>\w+)")
+_INSERT_COLUMNS_RE = re.compile(
+    r"^INSERT INTO\s+public\.\w+\s*\((?P<columns>[^)]*)\)")
+_UPDATE_SETS_RE = re.compile(
+    r"^UPDATE\s+public\.\w+\s+SET\s+(?P<sets>.*?)\s+WHERE\s", re.S)
+#: One `column = <expression>` item of an UPDATE's SET list — the LHS only.
+#: A value may be a quoted literal holding a comma, which splits into a part
+#: that matches nothing and is dropped rather than mis-named.
+_SET_ASSIGNMENT_RE = re.compile(r"\s*(?P<column>\w+)\s*=")
+
+
+def _bounded(text: str, limit: int) -> str:
+    """`text`, newline-escaped and truncated to `limit` characters."""
+    flat = text.replace("\n", "\\n")
+    if len(flat) <= limit:
+        return flat
+    return f"{flat[:limit]}…({len(text)} chars)"
+
+
+def _primary_message(exc: BaseException) -> str:
+    """The driver's TERSE message — the protocol's ``M`` field, never ``D``/``W``.
+
+    ⛔ `str(exc)` ON A DRIVER ERROR IS NOT THE MESSAGE (#10648 review, P2). The
+    protocol carries a primary human-readable message (``M``: *"accurate but
+    terse (typically one line)"*) and two OPTIONAL fields that quote the DATA:
+    ``DETAIL`` (for `22P02`, the refused token; for a `CHECK` violation, the whole
+    row) and ``CONTEXT``/``W`` (the fragment being read). psycopg2 concatenates
+    them into ``str(exc)``, so interpolating it re-emitted the very value this
+    module's attribution half withholds — the line read
+    ``search_keys=<15 chars withheld> … err4032 release``.
+
+    The rule restored here is the one the sibling record module already records
+    and enforces (`record_backup._connection_failure`, #9601 review cycle 9):
+    carry the exception TYPE and the SQLSTATE, **never ``str(exc)``**, because a
+    driver's text reaches the log stream — and `hosted_api` states the same rule
+    twice for its own driver calls.
+
+    ``diag.message_primary`` is preferred where the driver exposes it (psycopg2's
+    `extensions.Diagnostics`, which also exposes the ``message_detail``/
+    ``context`` fields this function refuses); the first line of ``str(exc)`` is
+    the fallback, and is the same field for every driver that formats the
+    protocol's fields as lines. PostgreSQL notes a field may contain newlines and
+    should be read as paragraph breaks, so the head of the string is the close
+    equivalent when no structured accessor exists.
+    """
+    diag = getattr(exc, "diag", None)
+    primary = getattr(diag, "message_primary", None) if diag is not None else None
+    if primary:
+        return str(primary)
+    text = str(exc)
+    return text.splitlines()[0] if text else ""
+
+
+def _driver_fault(exc: BaseException) -> str:
+    """``<Type> [<SQLSTATE>]: <primary message>`` — the FAULT, never the row dump.
+
+    The half of a failure line a class name alone never carried (the deployment
+    logged ``(InvalidTextRepresentation)`` and nothing else while 302 point rows
+    were dropped, without naming a column) — reduced to what is safe to log: the
+    driver's type, its SQLSTATE and its terse message (:func:`_primary_message`).
+
+    The attribution half of the same line withholds `content`, `props` and
+    `search_keys` by name-and-length; carrying ``str(exc)`` here put those same
+    values back through the driver's `DETAIL`/`CONTEXT` fields, so the withhold
+    was true of each half and false of the line.
+    """
+    code = getattr(exc, "pgcode", None)
+    primary = _primary_message(exc)
+    name = type(exc).__name__ + (f" {code}" if code else "")
+    return f"{name}: {primary}" if primary else name
+
+
+def _column_pair(column: str, value: Any) -> str:
+    """`column=value` for an identifying column, `column=<N chars>` for content.
+
+    The VALUE is what makes a failure line diagnosable (a node key, a short
+    search-key string, a boolean) — but a conversation turn is not this log's to
+    print, and neither is the `props` tail. Those are named, never quoted.
+    """
+    if column in _CONTENT_COLUMNS:
+        try:
+            length = len(value) if hasattr(value, "__len__") else len(str(value))
+        except Exception:  # pragma: no cover — a value whose len() raises
+            return f"{column}=<withheld>"
+        return f"{column}=<{length} chars withheld>"
+    return f"{column}={_bounded(str(value), _ATTRIBUTION_VALUE_LIMIT)}"
+
+
+def _statement_attribution(statement: Statement, index: int, total: int) -> str:
+    """Name what a failed statement TARGETED: verb, table, columns, entity key.
+
+    Derived from the statement that actually ran, never from the record that
+    produced it — the two can differ (one record emits several statements, a
+    patch emits a different column set than the upsert before it), and the
+    question an operator is answering is "which statement refused the row".
+
+    Columns are paired with their parameters ONLY when the BUILDER said the
+    pairing is exact (`Statement.columns`, which the upsert declines to state
+    when its key is a database-computed `_SqlExpr`). A count comparison is not
+    enough: a scalar-subquery key adds its own placeholder inside the `VALUES`
+    list, so the counts stay equal while every later value shifts by one — a
+    mis-paired line would report the WRONG column's value, which is worse than
+    reporting none (#10620).
+    """
+    head = _STATEMENT_HEAD_RE.match(statement.sql)
+    if head is None:
+        return (f"record statement {index}/{total} (unrecognised shape; "
+                f"{_bounded(statement.sql.strip().splitlines()[0] if statement.sql.strip() else '', 120)})")
+    verb, table = head.group("verb"), head.group("table")
+    parts = [f"record statement {index}/{total}: {verb} public.{table}"]
+    params = statement.params
+    if statement.columns is not None and len(statement.columns) <= len(params):
+        parts.append("columns(" + ", ".join(
+            _column_pair(column, params[offset])
+            for offset, column in enumerate(statement.columns)) + ")")
+    else:
+        # A `_SqlExpr` (or a shape no builder declared): name the columns the SQL
+        # itself spells, and the parameter count, and pair NOTHING.
+        #
+        # Both verbs are covered. `_UPDATE_SETS_RE` was added with the INSERT arm
+        # and left UNREFERENCED, so an unattributed UPDATE fell through to a bare
+        # `params=N` — no column names at all — which is exactly the case the
+        # regex was written for (#10620 review, finding 3).
+        #
+        # ⛔ The UPDATE arm is REACHABLE, not speculative: `_tier_demote_statement`
+        # (the record's half of a graph-tier removal) emits
+        # `UPDATE public.point SET cache_tier = %s …` and states NO `columns`,
+        # because that statement has no builder-declared pairing to state. So a
+        # failed tier demotion in the delete path was the one shape that named
+        # no column at all; `test_an_unattributed_update_names_its_set_column`
+        # drives that real builder, not a hand-built statement.
+        names: list[str] = []
+        if verb == "INSERT INTO":
+            inserted = _INSERT_COLUMNS_RE.match(statement.sql)
+            if inserted is not None:
+                names = [c.strip().strip('"')
+                         for c in inserted.group("columns").split(",")]
+        elif verb == "UPDATE":
+            updated = _UPDATE_SETS_RE.match(statement.sql)
+            if updated is not None:
+                names = [assignment.group("column")
+                         for part in updated.group("sets").split(",")
+                         if (assignment := _SET_ASSIGNMENT_RE.match(part))]
+        parts.append(f"columns({', '.join(names)}) params={len(params)}"
+                     if names else f"params={len(params)}")
+    return " ".join(parts)
+
+
 def replay(records: Sequence[Mapping[str, Any]], conn: Any, *, org_id: str,
            graph_id: str, start_seq: int = 1,
            position: bool = True) -> ReplayReport:
@@ -4877,8 +5346,22 @@ def replay(records: Sequence[Mapping[str, Any]], conn: Any, *, org_id: str,
     # context the plan is applied in — plus the role gate that decides whether
     # the context can mean anything at all.
     cursor = scope_connection(conn, org_id)
-    for statement in plan:
-        cursor.execute(statement.sql, statement.params)
+    total = len(plan)
+    for index, statement in enumerate(plan, start=1):
+        try:
+            cursor.execute(statement.sql, statement.params)
+        except Exception as exc:
+            # ⛔ ATTRIBUTION, NOT A BARE RE-RAISE (#10620). The caller's wrap
+            # (`RecordWriter.write`) used to name only the exception CLASS, so
+            # the record's own log could not say which statement, table or
+            # column refused a row. Raised here, where the failing statement is
+            # still in hand, and chained so the driver's traceback survives.
+            raise RecordStatementError(
+                _failure_line(
+                    _statement_attribution(statement, index, total),
+                    _driver_fault(exc),
+                )
+            ) from exc
     report = ReplayReport(events=len(records), statements=0)
     for statement in plan:
         if _JOURNAL_INSERT_PREFIX in statement.sql:

@@ -66,6 +66,7 @@ from .live import (
     epistemic_disjunction,  # #6976: the traversal-position widening
     epistemic_label_queries,  # #6976: the id-anchored per-label sweep
     is_terminal_status,
+    status_as_reported,  # #9974 R1: an absent status RENDERS as live
 )
 
 
@@ -933,12 +934,20 @@ class SearchResult:
             d["supersedes"] = self.supersedes
         # E6 (#1538) D7: window fields — additive keys, emitted only when
         # present (#1353 D8 rule).
-        if self.valid_from:
-            d["valid_from"] = self.valid_from
-        if self.valid_to:
-            d["valid_to"] = self.valid_to
-        if self.expired_at:
-            d["expired_at"] = self.expired_at
+        # #9741 review P3-2: PRESENT, not truthy. ``if self.valid_from:``
+        # dropped a stored ``0`` — a legal epoch instant (``create_point(
+        # validFrom=0)``; the write boundary orders it) — so the wire said "no
+        # window" while ``valid_from_precision: "day"`` rode the same hit. The
+        # renderer's own fix could not reach this: the value was gone before it
+        # arrived. ``""`` keeps its ABSENT spelling on purpose — it is what the
+        # write path stores for "no bound", and putting it on the wire would
+        # mint an asserted end that the eval lane's ``is_stale_entry`` reads as
+        # ENDED (#9202's END_UNKNOWN, the C6 regression the annotation contract
+        # in ``tools/longmem_eval/retrieve.py`` records).
+        for _field in ("valid_from", "valid_to", "expired_at"):
+            _bound = getattr(self, _field)
+            if _bound or (_bound is not None and _bound != ""):
+                d[_field] = _bound
         # #2350 (E-prec): the precision block, emitted only when the point
         # carries window information at all — undated points stay byte-
         # identical (no keys), a dated point states its end state so a
@@ -4654,9 +4663,20 @@ def fetch_point_epistemic_state(graph, point_ids: list[str]) -> dict[str, dict]:
             # E6 (#1538) D5/D7: promoted window fields — additive, absent
             # when undated (open window ⇒ no marker, byte-identical
             # rendering). Written by supersede_point/invalidate_point (D2).
-            st.setdefault("valid_from", row[2] or None)
-            st.setdefault("valid_to", row[3] or None)
-            st.setdefault("expired_at", row[4] or None)
+            # #9741 review P3-2: ``row[k] or None`` erased a PRESENT FALSY bound
+            # into ABSENCE — ``valid_from = 0`` is a legal epoch instant (the
+            # write boundary orders it; ``tests/test_validity_windows.py`` pins
+            # it as "a real start"), and it left here as ``None`` while
+            # ``valid_from_present`` said True and ``valid_from_precision`` said
+            # ``"day"``. Every renderer downstream then said "no window" beside
+            # that precision. ``""`` is NOT in that class: it is the write
+            # path's own spelling of "no bound" (``retrieval._bound_present``
+            # reads a blank string as absent), so it keeps normalising to
+            # ``None``. Absence and the blank spelling collapse; a NUMBER — at
+            # any value — survives.
+            st.setdefault("valid_from", None if row[2] in (None, "") else row[2])
+            st.setdefault("valid_to", None if row[3] in (None, "") else row[3])
+            st.setdefault("expired_at", None if row[4] in (None, "") else row[4])
             # #2350 (E-prec): the additive precision block, resolved by the ONE
             # read-projection home so search/recall annotation cannot drift
             # from ``get_historical_knowledge``/``assembly``. The bounds are
@@ -4690,8 +4710,11 @@ def fetch_point_epistemic_state(graph, point_ids: list[str]) -> dict[str, dict]:
             # ``None``, so the resolved precision can no longer double as "this
             # point has that bound" — the surface's emit gate would then drop
             # the key here only (the #2350 review-P2 drift, now on both ends).
-            # The raw column is the presence datum; ``row[2] or None`` below
-            # normalises a falsey bound for the promoted WINDOW field only.
+            # The raw column is the presence datum; the promoted WINDOW field
+            # collapses only ABSENCE and the blank "no bound" spelling to
+            # ``None`` (a stored NUMBER is kept at any value — ``0`` is the
+            # epoch instant, #9741 review P3-2), so presence and value can
+            # differ for a bound that is blank here.
             st.setdefault("valid_from_present", row[2] is not None)
             st.setdefault("valid_to_present", row[3] is not None)
             old_id, old_content, old_created = row[5], row[6], row[7]
@@ -4720,20 +4743,37 @@ def fetch_point_epistemic_state(graph, point_ids: list[str]) -> dict[str, dict]:
             # WITHOUT the point's provenance disappearing — the ONTOLOGY
             # §4.2/§12 doctrine is `superseded, never deleted`, and a point
             # about a reorganized team remains a true record of that turn.
-            # Additive: the key is present on every row ("" when unset), so
-            # existing consumers reading id/name/kind are unaffected.
+            # Additive: the key is present on every row, so existing consumers
+            # reading id/name/kind are unaffected.
+            #
+            # The VALUE is `status_as_reported`, not `or ""` (#9974 R1 review
+            # P2, third site): a status-less Subject is the ORDINARY shape since
+            # R1 (the fold seeds `status=$st`), and absent has always READ live
+            # — so rendering `""` here would report a live team as having no
+            # lifecycle state, and a consumer comparing `== "live"` would start
+            # seeing a None-shaped deformation. Both arms are `:Subject`-anchored
+            # by construction, so the `:Event` carve-out cannot apply.
+            #
+            # The POINT's own `status` in the payload above keeps `or ""`: the
+            # Point fold still writes `coalesce($st, n.status, 'live')`, so
+            # that row was never absent and this change does not reach it.
             s_id, s_name, s_kind = row[12], row[13], row[14]
             es_id, es_name, es_kind = row[15], row[16], row[17]
-            s_status = row[19] if len(row) > 19 else ""
-            es_status = row[20] if len(row) > 20 else ""
+            # #9974 R1 review: the short-row fallback is ABSENT (None), not
+            # `""` — `status_as_reported("")` reports `""` (a stored empty
+            # value) while `status_as_reported(None)` reports `live`, and these
+            # arms are `:Subject`-anchored, so a short row must not read as
+            # "this team has no lifecycle state".
+            s_status = row[19] if len(row) > 19 else None
+            es_status = row[20] if len(row) > 20 else None
             if st["subject"] is None and s_id:
                 st["subject"] = {"id": s_id, "name": s_name or "",
                                  "kind": s_kind or "",
-                                 "status": s_status or ""}
+                                 "status": status_as_reported(s_status)}
             elif st["subject"] is None and es_id:
                 st["subject"] = {"id": es_id, "name": es_name or "",
                                  "kind": es_kind or "",
-                                 "status": es_status or ""}
+                                 "status": status_as_reported(es_status)}
     except Exception:
         logger.warning("Epistemic-state fetch failed", exc_info=True)
 

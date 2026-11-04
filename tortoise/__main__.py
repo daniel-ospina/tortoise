@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import re
 import sys
 from pathlib import Path
 
@@ -1949,6 +1950,38 @@ def _cmd_init(args):
 
 
 
+def _load_regular_store_json(path: Path):
+    """`json.loads(path.read_text())` for a REGULAR file, else `None`.
+
+    `read_text()` on a FIFO/socket/device BLOCKS in `open()` — it does not
+    raise, so a caller's `except` never fires and the command never returns
+    (#10655 review). `_describe_store` already gates on `is_file()` for exactly
+    this reason; the raw credential readers did not, and there are three of
+    them — so the gate lives HERE rather than being remembered per call site.
+    `is_file()` is the resolver's own predicate (regular files only), so a path
+    this skips is exactly a path `_resolve_config_path` skips: the resolver
+    moves on to the next candidate and the read that would have hung follows
+    the same decision.
+    """
+    import json as _j
+    try:
+        if not path.is_file():
+            return None
+    except OSError:
+        # `is_file()` re-raises a non-ENOENT OSError (EACCES on a PARENT
+        # directory). The resolver skips such a candidate silently, and so do
+        # these readers.
+        return None
+    try:
+        return _j.loads(path.read_text())
+    except Exception:
+        # Unparseable JSON, invalid UTF-8 (ValueError), a pathologically nested
+        # store (RecursionError): a reader that raised here would refuse every
+        # command instead of reporting on it, which is the opposite of what
+        # these readers exist for.
+        return None
+
+
 def _read_stored_signup_token_with_source() -> tuple[str | None, Path | None]:
     """Stored st_ token from the active configs (#1709), WITH its source.
 
@@ -1959,14 +1992,10 @@ def _read_stored_signup_token_with_source() -> tuple[str | None, Path | None]:
     divergence (revoke/recover read the token from a DIFFERENT config
     than the auth key).
     """
-    import json as _j
     from pathlib import Path
     for path in (Path.cwd() / ".tortoise",
                  Path.home() / ".tortoise" / "credentials.json"):
-        try:
-            cfg = _j.loads(path.read_text())
-        except Exception:
-            continue
+        cfg = _load_regular_store_json(path)
         tok = cfg.get("signup_token") if isinstance(cfg, dict) else None
         if isinstance(tok, str) and tok:
             # #5109: the `st_` recovery token is a full credential in its own
@@ -2036,14 +2065,10 @@ def _read_stored_config_api_url() -> str | None:
     carries no api_key — recover authenticates with the signup token and
     only needs the URL, so a keyless config must not block recovery.
     """
-    import json as _j
     from pathlib import Path
     for path in (Path.cwd() / ".tortoise",
                  Path.home() / ".tortoise" / "credentials.json"):
-        try:
-            cfg = _j.loads(path.read_text())
-        except Exception:
-            continue
+        cfg = _load_regular_store_json(path)
         url = cfg.get("api_url") if isinstance(cfg, dict) else None
         if isinstance(url, str) and url.strip():
             return url.strip()
@@ -2069,16 +2094,14 @@ def _token_only_config_path():
     legacy token-only file shadows it); None when the key is genuinely
     lost.
     """
-    import json as _j
     from pathlib import Path
     candidates = (Path.cwd() / ".tortoise",
                   Path.home() / ".tortoise" / "credentials.json")
     seen_token_only = None
     for path in candidates:
-        try:
-            cfg = _j.loads(path.read_text())
-        except Exception:
-            continue
+        # Regular-file gate: `read_text()` on a FIFO blocks forever (#10655
+        # review). A skipped candidate is a candidate the resolver skips too.
+        cfg = _load_regular_store_json(path)
         if not isinstance(cfg, dict):
             continue
         key = cfg.get("api_key")
@@ -2823,15 +2846,1352 @@ def _cmd_signup(args) -> int:
     return 0
 
 
+def _key_fingerprint(key: str) -> str:
+    """Non-reversible identity for a credential: sha256(key)[:12].
+
+    Lets a human tell two keys apart — and tell WHICH store won — without the
+    value ever reaching a terminal or a transcript (#5109). Never used as an
+    authenticator; it is a label.
+    """
+    import hashlib
+    # `surrogatepass`: `os.environ` decodes with surrogateescape, so a key
+    # holding a non-UTF-8 byte becomes a str with lone surrogates and a strict
+    # `.encode()` raises UnicodeEncodeError — on the one state (an unusable key)
+    # that makes someone run this verb. The encoding is injective, so the label
+    # stays honest.
+    return hashlib.sha256(key.encode("utf-8", "surrogatepass")).hexdigest()[:12]
+
+
+def _mask_secret_tail(value: str) -> str:
+    """`tt_…1a2b` — a prefix plus a short tail, for reading, never for use.
+
+    The 16-char floor is deliberate: at 12 chars this helper would print half a
+    secret (`ab…ijkl`), and `serve --auth static` keys are arbitrary strings of
+    any length. Below the floor the only output is "(present)". The FINGERPRINT
+    beside it is governed by its own floor (`_publishable_fingerprint`) — a
+    48-bit digest over a short secret is brute-forceable offline, so it is
+    withheld rather than published.
+    """
+    if not isinstance(value, str) or len(value) < 16:
+        return "(present)"
+    head = value[:3] if "_" in value[:4] else value[:2]
+    return f"{head}…{value[-4:]}"
+
+
+#: `_describe_store` states. For the CLI store they follow
+#: `_resolve_config_path`'s own predicate, because a reporter that disagrees
+#: with the resolver is worse than no reporter: `empty-key` FALLS THROUGH to the
+#: next candidate, while `invalid-key`/`corrupt` make the resolver raise
+#: `_ConfigError` and refuse every command. `unreadable` is deliberately split
+#: from that pair, and it is reached TWO ways: a store behind an inaccessible
+#: (e.g. mode-000) PARENT DIRECTORY fails `Path.is_file()`, which sits outside the
+#: resolver's own `try`, so it escapes as a bare `OSError` — which is why
+#: `_cmd_config` handles `(OSError, RuntimeError)` and attributes the offender from
+#: `exc.filename`; a mode-000 FILE passes `is_file()` and fails `read_text()`
+#: INSIDE the try, arriving as `_ConfigError`. Both render `unreadable`. A BROKEN
+#: SYMLINK merely makes the resolver SKIP the candidate, so it never licenses
+#: naming the row as the refuser.
+#:
+#: The Pi harness store is described by the same helper but resolved by
+#: `pi-hooks/tortoise-capture.ts::resolveConfig`, which treats a non-string
+#: `apiKey` as merely unset rather than as a refusal — so a harness `invalid-key`
+#: is a dead file, not a blocking one, and the harness block renders it that way.
+_STORE_ABSENT = "absent"
+_STORE_OK = "ok"
+_STORE_EMPTY = "empty-key"          # present, blank → the next candidate wins
+_STORE_NO_KEY = "no-key"            # the field is absent/None (harness: normal)
+_STORE_INVALID = "invalid-key"      # present but not a string
+_STORE_CORRUPT = "corrupt"          # unparseable, or not a JSON object
+_STORE_UNREADABLE = "unreadable"    # PermissionError — the resolver cannot read it
+_STORE_BROKEN_SYMLINK = "broken symlink"    # the resolver SKIPS this one
+_STORE_NOT_REGULAR = "not a regular file"   # FIFO/socket/device — reading HANGS
+_STORE_DIRECTORY = "skipped (directory)"
+_STORE_REFUSING = frozenset({_STORE_NO_KEY, _STORE_INVALID, _STORE_CORRUPT,
+                              _STORE_UNREADABLE})
+
+_MISSING = object()
+
+
+def _describe_store(path: Path, key_field: str = "api_key") -> tuple[str, dict | None]:
+    """Read ONE credential file → (state, config). State is a short word.
+
+    Corrupt is reported, never raised: the whole point of this verb is to
+    survive the state that made a user run it. `key_field` exists because the
+    two stores do not agree on spelling — the CLI store is snake_case
+    (`api_key`), the Pi harness store is camelCase (`apiKey`).
+    """
+    import json as _json
+
+    # `Path.is_dir()`/`is_file()` re-raise a non-ENOENT OSError — EACCES on a
+    # PARENT DIRECTORY, or an inaccessible path in general (a self-referential
+    # `ELOOP` is swallowed by pathlib and lands in the `is_file()` branch below).
+    # This verb's whole purpose is to survive the state that made someone run it,
+    # so the boundary is wrapped: #3963 recorded the same lesson twice in this file
+    # (`_cmd_session_drain_best_effort`, `_cmd_store_sync`).
+    try:
+        if path.is_dir():
+            # The resolver SKIPS a directory at a candidate path (D5). Saying
+            # "absent" about a path that exists is the kind of small lie that
+            # sends someone hunting for a file they are looking straight at.
+            return _STORE_DIRECTORY, None
+        if not path.is_file():
+            # The resolver's own gate is `is_file()`, so it SKIPS these too —
+            # but the report must say which, and `read_text()` on a FIFO BLOCKS
+            # the verb forever (a symlink to /dev/zero eats memory until OOM).
+            if path.is_symlink() and not path.exists():
+                return _STORE_BROKEN_SYMLINK, {"_error": "broken symlink"}
+            if path.exists():
+                return _STORE_NOT_REGULAR, None
+            return _STORE_ABSENT, None
+        config = _json.loads(path.read_text())
+    except OSError as exc:
+        return _STORE_UNREADABLE, {"_error": f"{type(exc).__name__}: {exc}"}
+    except (ValueError, TypeError, RecursionError):
+        # `json.loads` on a pathologically nested store raises RecursionError —
+        # which is neither, and would escape the "corrupt is reported, never
+        # raised" contract in the docstring above.
+        return _STORE_CORRUPT, None
+    if not isinstance(config, dict):
+        return _STORE_CORRUPT, None
+    key = config.get(key_field, _MISSING)
+    if key is _MISSING or key is None:
+        # ABSENT is not "empty": for the CLI store the resolver raises
+        # `_ConfigError` (so `empty-key` would be a lie), while for the HARNESS
+        # store it is the documented env-provisioned shape. `no-key` carries that
+        # distinction to the harness block; the CLI block reads it as refusing.
+        return _STORE_NO_KEY, config
+    if not isinstance(key, str):
+        return _STORE_INVALID, config
+    if not key.strip():
+        return _STORE_EMPTY, config
+    return _STORE_OK, config
+
+
+def _is_sendable_key(key: object) -> bool:
+    """Can this key go into an `Authorization` header at all?
+
+    HTTP header values are LATIN-1, and `http.client` refuses CR/LF outright —
+    raising `ValueError("Invalid header value b'Bearer <THE KEY>'")`, i.e. the
+    refusal itself echoes the credential. Testing UTF-8 encodability (the first
+    version of this check) passes a key that every request then rejects, and
+    misses nothing else.
+    """
+    if not isinstance(key, str) or not key:
+        return False
+    if "\r" in key or "\n" in key:
+        return False
+    try:
+        key.encode("latin-1")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
+def _scrub(text: str, *secrets: object) -> str:
+    """Remove credentials from text that an exception or a reply copied verbatim.
+
+    Two sources, both real: `http.client` interpolates the Authorization header
+    into its own `ValueError`/`InvalidURL` text, and a proxy may echo the request
+    (headers included) into its response body. The rule from #5109 has to apply
+    to the MESSAGE, not only to the values we build ourselves — and a URL's
+    userinfo is a credential too (`_mask_uri_userinfo`'s whole premise), so each
+    supplied value is expanded into its user/password fragments.
+    """
+    fragments: list[str] = []
+    for sec in secrets:
+        if not (isinstance(sec, str) and sec):
+            continue
+        fragments.append(sec)
+        tail = sec.split("//", 1)[-1]
+        if "@" in tail:
+            userinfo = tail.rsplit("@", 1)[0]
+            fragments.append(userinfo)
+            if ":" in userinfo:
+                password = userinfo.split(":", 1)[1]
+                if password:
+                    fragments.append(password)
+    # Longest first: scrubbing `<password>` before `<user:password>` would leave
+    # a mangled value behind that no longer matches the longer fragment.
+    # A client (or a log redactor) may echo the DECODED form too: `redis.from_url`
+    # applies `unquote` to userinfo, so `p%40ss%3Aword` reaches the wire as
+    # `p@ss:word`. Cover both forms — `config.parse_uri_userinfo` is the tree's
+    # single decoding rule.
+    from tortoise.config import parse_uri_userinfo
+    for sec in secrets:
+        if not (isinstance(sec, str) and sec and "://" in sec):
+            continue
+        try:
+            user, password = parse_uri_userinfo(sec)
+        except (ValueError, TypeError):
+            continue
+        for part in (user, password):
+            if part:
+                fragments.append(part)
+        if user and password:
+            fragments.append(f"{user}:{password}")
+    # A query/fragment can carry a credential too (`?api_key=…`), and a proxy may
+    # echo only that PART of the URL — so each value (raw and percent-decoded) is
+    # a fragment in its own right.
+    from urllib.parse import unquote as _unquote
+    for sec in secrets:
+        if not (isinstance(sec, str) and sec):
+            continue
+        cut = min([i for i in (sec.find("?"), sec.find("#")) if i != -1], default=-1)
+        if cut == -1:
+            continue
+        query = sec[cut + 1:]
+        if not query:
+            # A URL ending in `?`/`#` yields an EMPTY query, and
+            # `"".join`-style replacement (`text.replace("", marker)`) interleaves
+            # the marker between EVERY character — shredding the diagnostic this
+            # function exists to keep legible (and losing the 403 remedy, because
+            # the body is scrubbed before it is parsed).
+            continue
+        fragments.append(query)
+        decoded = _unquote(query)
+        fragments.append(decoded)
+        for part in query.replace("#", "&").split("&"):
+            if "=" not in part:
+                continue
+            value = part.split("=", 1)[1]
+            if not value:
+                continue
+            if len(value) >= 6:
+                fragments.append(value)
+                fragments.append(_unquote(value))
+            else:
+                # A short query value (`?v=2`, `?env=prod`) as a bare fragment
+                # shreds the diagnostic it exists to preserve — `?v=1` turns
+                # "API error 401" into "API error 40<redacted>". Scrub the whole
+                # pair instead: the credential is still covered, the prose is not.
+                # The floor is deliberately NOT applied to user/password
+                # fragments above — a short password is still a credential.
+                fragments.append(part)
+
+    for fragment in sorted((f for f in set(fragments) if f), key=len, reverse=True):
+        # belt and braces: a zero-length fragment matches between every character
+        if len(fragment) < 1:
+            continue
+        if not fragment.strip():
+            # A whitespace-only value is not a credential any reader can learn
+            # from — and treating it as a replacement site rewrites EVERY space
+            # in the message: `TORTOISE_DB_URI=' '` turned the
+            # `RELATIVE_PATH_ERROR` remedy into `<redacted>` confetti, in the one
+            # verb whose whole purpose is legibility. Echoing a space is strictly
+            # better than shredding the diagnostic, so this fragment is skipped.
+            # (#10655 review: the same reasoning already guarded SHORT QUERY
+            # values above; it was not applied to the top-level secret.)
+            continue
+        if len(fragment) <= 2:
+            # A 1-2 char secret IS a credential and must still not be printed,
+            # but a bare substring sweep replaces that character everywhere
+            # (every `a` in the prose becomes `<redacted>`). Token-bounded
+            # replacement keeps both properties: the secret as a standalone
+            # token is redacted, the words that merely contain the character are
+            # not. A boundary is a non-word char on each side, so an echoed
+            # `"api_key": "a"` is still covered.
+            text = re.sub(rf"(?<!\w){re.escape(fragment)}(?!\w)", "<redacted>", text)
+            continue
+        text = text.replace(fragment, "<redacted>")
+    return text
+
+
+#: The id shapes this tree mints — named so the truncation warning can justify
+#: itself without asserting a single length (they are NOT all the same: a hosted
+#: id is `uuid4().hex[:26]`, a selfhost id is `ids.ulid()`
+#: (`<ts-hex>-<uuid4 hex[:12]>`, 24 today), and `selfhost` itself is a literal).
+_ORG_ID_SHAPES = "hosted `uuid4().hex[:26]`, selfhost `ids.ulid()`, or the literal `selfhost`"
+
+#: A digest over a secret shorter than this is brute-forceable offline, and this
+#: report is what a transcript keeps — so the same floor `_mask_secret_tail` uses
+#: applies to PUBLISHING a fingerprint. Comparisons inside this module always use
+#: the full value.
+_MIN_PUBLISHABLE_KEY_LEN = 16
+
+
+def _mask_display_target(value: str) -> str:
+    """Mask a URL/DSN for DISPLAY, including a query or fragment.
+
+    `_mask_uri_userinfo` deliberately judges only the authority, but this verb is
+    a NEW printing surface for the record DSN, and `?password=…` / `#token=…` are
+    as much a credential as `user:pw@`. Redacting from the first `?`/`#` is
+    over-broad for a harmless query — losing query readability is acceptable,
+    losing a password to a transcript is not.
+    """
+    masked = _mask_uri_userinfo(value)
+    cuts = [i for i in (masked.find("?"), masked.find("#")) if i != -1]
+    if not cuts:
+        return masked
+    return masked[:min(cuts)] + "…"
+
+
+def _endpoint_is_readable(value: object) -> bool:
+    """Does ONE side's api_url parse as an endpoint at all? (the pair's question)
+
+    `_same_endpoint` answers for a PAIR, so it folds "the CLI's value is not a URL"
+    and "the harness's value is not a URL" into the same `None`. The `host-unknown`
+    message has to name WHICH side is unreadable (or that both are), so the
+    per-side question is asked through the SAME parser rather than re-deriving
+    parseability a second way: `x` vs `x` is `True` for a parseable endpoint and
+    `None` for an unparseable one.
+    """
+    return _same_endpoint(value, value) is not None
+
+
+def _same_endpoint(a: object, b: object) -> bool | None:
+    """Do two configured api_urls name the SAME endpoint?
+
+    Three-valued: True/False for two PARSEABLE endpoints, None when either side is
+    not a URL at all (so "I could not read it" is never rendered as "they differ").
+    Compares the parsed endpoint (host case-folded, port defaulted per scheme, path
+    with trailing slashes stripped — the normalisation the Pi hook applies before
+    use), not the literal string. Comparing
+    whole URLs made `https://h/` vs `https://h` read as "a DIFFERENT host" when
+    both surfaces contact the identical endpoint — a false statement about the
+    user's own configuration, and the one this comparison exists to avoid.
+    """
+    from urllib.parse import urlsplit
+
+    def parts(value: object) -> tuple[str, str, int, str] | None:
+        if not isinstance(value, str) or not value.strip():
+            return None
+        # `urlsplit` is LAZY about the authority: `.port` re-parses the netloc and
+        # raises ValueError for a non-numeric, negative or >65535 port, so the read
+        # must sit INSIDE the guard (the same hazard `_cmd_doctor` wraps, #720).
+        try:
+            split = urlsplit(value.strip())
+            host = split.hostname
+            if not host:
+                return None
+            scheme = split.scheme.lower()
+            if not scheme:
+                # No scheme: the value is not a URL at all, so the comparison
+                # cannot be made (and `//h` vs `https://h` are not the same
+                # endpoint anyway).
+                return None
+            default = 443 if scheme == "https" else 80
+            port = split.port
+            # `port or default` would fold an explicit 0 into the scheme default;
+            # `:0` is not a usable endpoint, so treat it as unknown rather than
+            # silently equal to `:443`. The PATH is part of the endpoint too:
+            # `https://h/v1` and `https://h/v2` are different endpoints, and the
+            # verdict is printed while the user is chasing a per-surface refusal.
+            # The SCHEME is part of the endpoint: plaintext vs TLS is exactly what
+            # decides whether a transport failure carries across surfaces, which is
+            # the question this verdict is printed to answer.
+            return (scheme, host.lower(), default if port is None else port,
+                    split.path.rstrip("/"))
+        except ValueError:
+            return None
+
+    left, right = parts(a), parts(b)
+    if left is None or right is None:
+        # UNKNOWN, not "different". A missing scheme (`host` instead of
+        # `https://host`) is the normal shape of a mistyped TORTOISE_API_URL, and
+        # collapsing "I could not parse either side" into False made the report
+        # print two IDENTICAL api_url values one above the other and then assert
+        # they differ — a false statement about the user's own configuration, and
+        # the real finding (neither value is a URL, so BOTH surfaces fail the same
+        # way) was never stated.
+        return None
+    return left == right
+
+
+def _publishable_fingerprint(key: object) -> str | None:
+    """The digest to publish, or None when the key is too short to publish one."""
+    if not (isinstance(key, str) and len(key) >= _MIN_PUBLISHABLE_KEY_LEN):
+        return None
+    return _key_fingerprint(key)
+
+
+def _printable(value: object) -> str:
+    """Render an untrusted, store/env-supplied string as ONE printable line.
+
+    `./.tortoise` is attacker-controllable by this file's own reckoning
+    (`_resolve_transmit_config`), and this report prints its fields into a
+    human-facing diagnostic. A newline in `org_name` would fabricate a whole
+    ladder row (`  /home/…/credentials.json  ok  ←  USED`), and an ESC sequence
+    would rewrite the line it lands on. JSON output is already safe
+    (`json.dumps` escapes); this is for the text report.
+    """
+    if value is None:
+        return ""
+    # Coerce rather than swallow: `_printable(reason)` where `reason` is an
+    # exception OBJECT used to render as an empty string, which silently deleted
+    # the diagnosis from the one line that carries it.
+    if not isinstance(value, str):
+        value = str(value)
+    out = []
+    for ch in value:
+        if ch == "\n":
+            out.append("\\n")
+        elif ch == "\r":
+            out.append("\\r")
+        elif ch == "\t":
+            out.append("\t")
+        elif ch.isprintable():
+            out.append(ch)
+        else:
+            out.append(f"\\x{ord(ch):02x}")
+    return "".join(out)
+
+
+def _same_path(a: Path | None, b: Path | None) -> bool:
+    """Compare two candidate paths, tolerating symlinked parents.
+
+    macOS surfaces the same directory as `/var/…` and `/private/var/…`; a naive
+    string compare would silently mismatch and mark no row as the winner.
+    """
+    import os as _os
+    if a is None or b is None:
+        return False
+    if str(a) == str(b):
+        return True
+    try:
+        return _os.path.realpath(a) == _os.path.realpath(b)
+    except OSError:
+        return False
+
+
+def _blocking_directory(path: Path) -> Path | None:
+    """The SHALLOWEST directory that makes `path` unreachable, else None.
+
+    `_STORE_UNREADABLE` is reached TWO ways, and only one of them is about the
+    FILE's own mode: a store behind a mode-000 PARENT DIRECTORY fails
+    `Path.is_file()`, which re-raises `EACCES` out of the resolver instead of
+    reading the file (`pathlib` swallows only ENOENT/ENOTDIR/EBADF/ELOOP). In
+    that state the file's own mode is not merely unknown — it cannot be known,
+    because `stat` on the child needs search permission on the parent.
+
+    So the remedy must name the object that actually blocks. Measured on a
+    mode-000 parent, the printed `chmod 600 <dir>/credentials.json` exits 1
+    with "Permission denied" and sends the reader back to the same refusal,
+    while granting traversal on the DIRECTORY succeeds — the file is fine.
+
+    Two things make the answer non-obvious, and both are measured:
+
+    * `Path.parents` is purely LEXICAL. A store reached through a SYMLINK is
+      real practice here (a `./.tortoise` symlinked to the global store is the
+      documented sharing trick), and then every lexical ancestor of the LINK is
+      traversable while the TARGET sits behind a mode-000 directory — so the
+      real path is walked too, and it is walked FIRST because its ancestor is
+      the object to fix.
+    * Walked from the ROOT down, not by testing the nearest parent first: an
+      inaccessible NEAREST ancestor is only reachable THROUGH the shallower one
+      that blocks it, so `chmod` on the deeper path cannot run at all.
+
+    Returns None when no directory blocks — then the file's own mode is the
+    problem and the caller's `chmod 600 <file>` is the right advice.
+    """
+    import os as _os
+    chains: list[Path] = []
+    try:
+        real = Path(_os.path.realpath(path))
+        if str(real) != str(path):
+            chains.append(real)
+    except (OSError, RuntimeError):
+        pass
+    chains.append(path)
+    for chain in chains:
+        try:
+            ancestors = list(chain.parents)
+        except (OSError, RuntimeError):
+            continue
+        for cand in reversed(ancestors):            # root first, nearest last
+            try:
+                if not cand.is_dir():
+                    # Not a directory at all. `os.access` is False for ENOENT /
+                    # ENOTDIR / ESTALE too, not only EACCES, and blaming the
+                    # mode of a path that is not there would assert a fact this
+                    # verb cannot see. Reaching this candidate already PROVES
+                    # every shallower component is traversable AND a directory,
+                    # so stopping here cannot hide a real blocker.
+                    return None
+            except OSError:
+                # The environment itself cannot answer (a deleted cwd). Decline
+                # rather than repeat the guessing this verb exists to replace.
+                return None
+            if not _os.access(cand, _os.X_OK):
+                return cand
+    return None
+
+
+def _cmd_config(args) -> int:
+    """Report the credential + coordinates this shell would actually use.
+
+    THE GAP THIS CLOSES. Tortoise resolves a hosted identity from up to four
+    places — `TORTOISE_API_KEY` (env), `<cwd>/.tortoise` (written by
+    `init --api-key`), and `~/.tortoise/credentials.json` (written by `signup`
+    and `recover`) for the CLI, plus `~/.pi/agent/tortoise-config.json` for the
+    Pi harness seam — and until this verb existed NOTHING reported which one
+    won, what org/graph the winner claims, or that the harness reads a
+    different file entirely. An operator following the record verbs' own
+    `--org`/`--graph`/`--cache-graph` contract therefore had no supported way
+    to learn any of the four values (#10655).
+
+    Deliberately OFFLINE: no request is made, so it answers on a box whose
+    hosted app is cold, down, or behind a refusal. `tortoise team info` is the
+    networked twin, and it 403s for exactly the keys most likely to be lost.
+
+    Exit 0 when an identity resolves (or when there is simply none configured —
+    that is an answer, and the printed next step is the remedy). Exit 1 when the
+    resolver REFUSED a store — matching `_read_config`'s `_ConfigError` → 1
+    contract — or COULD NOT RUN (a deleted cwd, an unresolvable HOME). The
+    could-not-run case is handled only HERE: every other verb's `_read_config`
+    path raises on it rather than reporting it. A diagnostic verb may be
+    informative and non-zero, but a script must not read "config show succeeded"
+    off a configuration no command can use.
+    """
+    import os as _os
+    import shlex as _shlex
+    import sys as _sys
+
+    from tortoise.config import is_db_uri, looks_like_uri_userinfo
+
+    json_mode = bool(getattr(args, "json", False))
+    payload: dict = {"status": "ok", "credential": {}, "graph_store": {},
+                     "harness": {}}
+
+    raw_env_key = _os.environ.get("TORTOISE_API_KEY")
+    env_key = raw_env_key if (raw_env_key and raw_env_key.strip()) else None
+    # A variable the user SET and the resolver ignores is the most confusing
+    # state of all — name it rather than reporting "not set".
+    env_state = ("set but blank (ignored)" if (raw_env_key is not None and not env_key)
+                 else ("set" if env_key else "not set"))
+
+    # BOTH anchors are resolved inside the guard: `Path.cwd()` raises
+    # FileNotFoundError in a deleted directory and `Path.home()` raises
+    # RuntimeError with no HOME — a verb that survives a corrupt store but dies
+    # on a deleted cwd has not closed the class.
+    cwd: Path | None
+    home: Path | None
+    try:
+        cwd = Path.cwd()
+    except OSError:
+        cwd = None
+    try:
+        home = Path.home()
+    except (RuntimeError, OSError):
+        home = None
+    cwd_cfg = (cwd / ".tortoise") if cwd is not None else None
+    global_cfg = (home / ".tortoise" / "credentials.json") if home is not None else None
+    state_cwd, cfg_cwd = (_describe_store(cwd_cfg) if cwd_cfg is not None
+                          else ("cwd unresolvable", None))
+    state_global, cfg_global = (_describe_store(global_cfg) if global_cfg is not None
+                                else ("home unresolvable", None))
+
+    # The ladder is built BEFORE the resolver runs, because the resolver's
+    # failure path needs to know which candidates are already known-refusing in
+    # order to name the RIGHT offender (see below).
+    ladder = [
+        {"source": "TORTOISE_API_KEY (env)", "state": env_state},
+        {"source": str(cwd_cfg) if cwd_cfg is not None else "(cwd unresolvable)",
+         "state": state_cwd},
+        {"source": str(global_cfg) if global_cfg is not None else "(home unresolvable)",
+         "state": state_global},
+    ]
+
+    # The resolver is the authority on who won — never re-derive the ladder here
+    # (a second implementation is how a reporter starts lying). `_ConfigError`
+    # means it REFUSED a store: that path is the blocker, not a winner. An
+    # OSError here is a DIFFERENT failure — the environment (a deleted cwd, an
+    # inaccessible parent) — and is recorded as a degraded resolution rather
+    # than as a verdict about a store.
+    winner_path: Path | None = None
+    winner_cfg: dict | None = None
+    blocked_path: str | None = None
+    blocked_reason: str | None = None
+    api_key: str | None = None
+    api_url: str | None = None
+    try:
+        winner_path, winner_cfg, api_key, api_url = _resolve_config_path()
+        # `_resolve_config_path` validates `api_key` (`isinstance(str)`) but NOT
+        # `api_url` — a hand-edited store may carry a number or a list, and every
+        # other verb just f-strings it. The masker calls `.split()`, so coerce
+        # once here rather than crash on the state this verb diagnoses.
+        if api_url is not None and not isinstance(api_url, str):
+            api_url = str(api_url)
+    except _ConfigError as exc:
+        blocked_path = str(exc.args[0]) if exc.args else None
+        blocked_reason = str(exc.__cause__) if exc.__cause__ else "api_key missing or invalid"
+    except (OSError, RuntimeError) as exc:
+        # RuntimeError is here because the resolver calls `Path.home()`, which
+        # raises it for `HOME=~` / `HOME=~/x` / a uid absent from passwd — the
+        # same raise-set the anchor resolution above already guards.
+        # Attribute from EVIDENCE only. `exc.filename` names the path that
+        # actually failed — a mode-000 store raises here from the resolver's
+        # `is_file()` probe (which sits OUTSIDE its own try, so it does not
+        # become `_ConfigError`), and that IS the blocker. With no filename the
+        # failure is the ENVIRONMENT (`Path.cwd()` in a deleted directory): no
+        # store is to blame, so none is named and the payload reports a DEGRADED
+        # resolution — an earlier version guessed a store and ended up telling
+        # the reader to delete a file the resolver never opened.
+        blocked_reason = f"{type(exc).__name__}: {exc}"
+        offender = getattr(exc, "filename", None)
+        if offender and any(_same_path(Path(offender), cand)
+                            for cand in (cwd_cfg, global_cfg) if cand is not None):
+            blocked_path = str(offender)
+        else:
+            # No store to blame, so none is named: this is a DEGRADED
+            # environment (a deleted cwd) and the payload says so, rather than
+            # inventing a `refused` verdict about a store the ladder calls `ok`.
+            payload["resolution_error"] = f"{type(exc).__name__}: {exc}"
+    if blocked_path is not None:
+        api_key = api_url = None
+        payload["status"] = "error"
+        payload["error"] = "no_config"
+        payload["config_state"] = "refused"
+        payload["message"] = f"Invalid config at {blocked_path}: {blocked_reason}"
+    elif payload.get("resolution_error"):
+        # The resolver could not run at all (a deleted cwd). Reporting `ok` and
+        # then advising a fresh mint would hide a store the ladder just called
+        # `ok` — the state is DEGRADED, not healthy.
+        payload["status"] = "degraded"
+        # Derive the anchor from evidence: an unset/unresolvable HOME and a
+        # deleted cwd are different findings, and anything else is not an anchor
+        # problem at all (it is the store, and the ladder row already says so).
+        if cwd is None:
+            where = "from this directory"
+        elif home is None:
+            where = "HOME could not be resolved"
+        else:
+            where = "while reading a store"
+        payload["message"] = (
+            f"the credential resolver could not run ({where}): "
+            f"{payload['resolution_error']}; the stores below were read directly")
+
+    if env_key:
+        source = "env:TORTOISE_API_KEY"
+    elif winner_path is not None:
+        source = str(winner_path)
+    else:
+        source = "none"
+
+    # "first match wins" must produce exactly ONE `←  USED`, even when
+    # `./.tortoise` is a symlink to the global store (a real sharing trick) and
+    # both candidates therefore resolve to the same file.
+    ladder[0]["used"] = env_key is not None
+    ladder[0]["blocks"] = False            # an env var is never a refused STORE
+    claimed = ladder[0]["used"]
+    for row, candidate in zip(ladder[1:], (cwd_cfg, global_cfg), strict=True):
+        matches = _same_path(winner_path, candidate)
+        row["used"] = matches and not claimed
+        if row["source"] == str(cwd_cfg) and cwd_cfg is not None:
+            # DISCLOSURE, not a posture change: `_resolve_transmit_config`
+            # deliberately excludes this candidate for the surfaces that SEND
+            # (session capture/drain/import) because a
+            # repo-committed `./.tortoise` is attacker-controllable. The report
+            # must say so, or "which credential won" is wrong for those verbs.
+            row["note"] = (
+                "the transmitting verbs (session capture/drain/import) skip this"
+                " candidate and resolve from TORTOISE_API_KEY if set, else the"
+                " global store (#3660)")
+        if matches and claimed:
+            row["note"] = "same file as the winner above"
+        claimed = claimed or matches
+        # `blocks` means the RESOLVER refused THIS store — never "this store's
+        # state is refusing". A corrupt `./.tortoise` beside a live env key does
+        # not block anything, and saying it does would put a BLOCKS marker on a
+        # row the very next line proves harmless. An ABSENT row can never block,
+        # and neither can a store the resolver merely SKIPPED (a broken symlink).
+        row["blocks"] = (
+            blocked_path is not None
+            and row["state"] not in (_STORE_ABSENT, _STORE_BROKEN_SYMLINK,
+                                     _STORE_DIRECTORY, _STORE_NOT_REGULAR)
+            and _same_path(Path(blocked_path) if blocked_path else None, candidate)
+        )
+    for row, stored in zip(ladder, (None, cfg_cwd, cfg_global), strict=True):
+        if isinstance(stored, dict) and stored.get("_error"):
+            row["reason"] = stored["_error"]
+
+    cred: dict = {"source": source, "ladder": ladder}
+    if blocked_path:
+        # RAW in the payload: `json.dumps` escapes, and a consumer comparing
+        # `source` with `ladder[i].source` must see the same bytes. Escaping
+        # happens at PRINT time only (one place, below).
+        cred["blocked_by"] = blocked_path
+        cred["blocked_reason"] = blocked_reason
+    if api_key:
+        cred["api_key"] = _mask_secret_tail(api_key)
+        # A 48-bit digest over a SHORT secret is brute-forceable offline, and this
+        # line is what a transcript keeps — so the same 16-char floor the tail
+        # uses applies to publishing the digest. Comparisons keep using the full
+        # value internally (`identity_agrees` etc.).
+        publishable = _publishable_fingerprint(api_key)
+        if publishable is not None:
+            cred["api_key_fingerprint"] = publishable
+        else:
+            cred["api_key_fingerprint_withheld"] = (
+                "key shorter than 16 chars — a digest of it would be "
+                "brute-forceable, so it is not published")
+        if not _is_sendable_key(api_key):
+            # A key with a lone surrogate (a non-UTF-8 byte read back through
+            # `os.environ`'s surrogateescape), a non-latin-1 character, or an
+            # embedded CR/LF cannot go into an Authorization header at all —
+            # `http.client` refuses it and echoes the value in its own message.
+            # Say so here: `team info` can only report the resulting
+            # server-shaped noise, which blames the server.
+            cred["api_key_unsendable"] = (
+                "this key cannot be sent in a request header (not latin-1 "
+                "encodable, or contains CR/LF) — re-mint it (`tortoise signup` "
+                "or `tortoise recover`)")
+        # userinfo in a URL is a credential; the same mask the DB URI below gets.
+        # A no-op for the normal https host.
+        cred["api_url"] = _mask_display_target(api_url or "")
+        if api_key != api_key.strip():
+            # The CLI sends the env key VERBATIM; the Pi hook trims it. A key
+            # copied with a trailing newline therefore authenticates from one
+            # surface and not the other, and the fingerprint alone cannot say so.
+            cred["api_key_whitespace"] = (
+                "the resolved key has leading/trailing whitespace — this CLI "
+                "sends it verbatim, while the Pi hook trims it, so a copied "
+                "key can work in one surface and fail in the other"
+            )
+        # Coordinates live in the FILE (an env-supplied identity has none) — the
+        # gap that made `--org`/`--graph` undiscoverable.
+        unusable_fields: list[str] = []
+        for field in ("org_id", "org_name"):
+            value = (winner_cfg or {}).get(field)
+            if isinstance(value, str) and value.strip():
+                cred[field] = value
+            elif value is not None and not (isinstance(value, str) and not value.strip()):
+                # Present but not a usable string. Reporting "(absent)" here was a
+                # false claim about the store twice over: the field IS there, and
+                # the "init --api-key writes only the key" hint does not describe
+                # a store that wrote a list. Same distinction `_describe_store`
+                # already draws between `no-key` and `invalid-key`.
+                unusable_fields.append(f"{field} ({type(value).__name__})")
+        if unusable_fields:
+            cred["org_field_warning"] = (
+                "the resolved store carries " + ", ".join(unusable_fields)
+                + " — not a NON-EMPTY string, so it cannot be used. Fix the field "
+                "in the store; nothing here can repair it")
+            # The machine-readable half of the same distinction, so `--json`
+            # cannot say "the field is there" in one key while saying nothing
+            # beside the missing one. Names only — the warning carries the types.
+            cred["org_fields_unusable"] = [entry.split(" (", 1)[0]
+                                           for entry in unusable_fields]
+        # `recover` does NOT read the token from the winning store — it scans
+        # `<cwd>/.tortoise` then `~/.tor…/credentials.json` regardless of which
+        # store supplied the KEY (#1752's divergence case). Asking the winner
+        # alone reported "absent" for a token `recover` finds and uses.
+        try:
+            stored_token, token_source = _read_stored_signup_token_with_source()
+        except (OSError, RuntimeError):
+            # That reader calls `Path.home()` itself — RuntimeError for
+            # `HOME=~/x` — and the guard is bypassed on the env-key path because
+            # the resolver returns before it ever touches home.
+            stored_token, token_source = None, None
+        cred["recovery_token"] = "present" if stored_token else "absent"
+        if stored_token and token_source is not None:
+            cred["recovery_token_source"] = str(token_source)
+            if not (winner_path is not None and _same_path(token_source, winner_path)):
+                # Includes the env-key case (`recover` still finds the token in a
+                # FILE) — which is the commonest divergence of all.
+                cred["recovery_token_note"] = (
+                    "the recovery token lives in a DIFFERENT store than the key "
+                    "(#1752) — `tortoise recover` reads it from there")
+        raw_env_url = _os.environ.get("TORTOISE_API_URL")
+        if raw_env_url is not None and winner_path is not None:
+            # #2369 D1.1 co-source: a FILE-sourced key resolves its URL from the
+            # same file only. The variable is set and IGNORED — the report's own
+            # rule is that an ignored env var must be named, not silently beaten.
+            cred["api_url_note"] = (
+                "TORTOISE_API_URL is set but IGNORED: the key came from a file, "
+                "and one identity uses one source chain (#2369)")
+        elif raw_env_url is not None and not raw_env_url.strip():
+            cred["api_url_note"] = (
+                "TORTOISE_API_URL is set but blank — the CLI will send requests "
+                "to an empty base URL")
+        org_id = cred.get("org_id")
+        if not org_id and not cred.get("org_field_warning"):
+            # No org_id is the documented onboarding shape, not a fault: the
+            # store `tortoise init --api-key` writes persists ONLY
+            # api_key/api_url, and an env key carries no file at all. Name the
+            # next command instead of printing an unexplained gap — and name the
+            # right one, so nobody hunts for a file that does not exist.
+            cred["org_id_hint"] = (
+                "an env-supplied key carries no coordinates. `tortoise team "
+                "info` with an org-wide key, or the dashboard, reports it"
+                if source.startswith("env:") else
+                "the resolved store has no USABLE org_id — absent, or present "
+                "but blank (`init --api-key` writes only the key). `tortoise "
+                "team info` with an org-wide key, or the dashboard, reports it"
+            )
+        if isinstance(org_id, str) and len(org_id) < 6:
+            # Neither id can be this short: a hosted org_id is
+            # `uuid4().hex[:26]`, and a selfhost id is `ids.ulid()`
+            # (`<ts-hex>-<uuid4 hex[:12]>`) or the literal `selfhost`. So a 1-2
+            # char value is a truncated write in EITHER mode — never a short
+            # org. This verb cannot repair it and must not guess, so it reports.
+            cred["org_id_warning"] = (
+                f"only {len(org_id)} character(s) — no id shape this tree mints"
+                f" is that short ({_ORG_ID_SHAPES}); this looks truncated."
+                " `tortoise team info` (or the dashboard) reports the real one"
+                " for an org-wide key"
+            )
+    payload["credential"] = cred
+
+    # ── the graph store this shell would use, plus the record verbs' naming ──
+    # The CLI resolves its graph target through `_resolve_db_target`'s ONE
+    # precedence (TORTOISE_DB_URI scheme > FALKORDB_* trio > TORTOISE_DB_PATH >
+    # canonical default). ASK IT — do not re-derive it: an earlier version of this
+    # block re-implemented the ladder, labelled the target from env-var PRESENCE,
+    # and ended up pairing the trio's label with the DB_PATH target (the exact
+    # "reporter disagrees with the resolver" failure this verb exists to end).
+    # `_resolve_db_target` also PRINTS its legacy-trio notice, which would corrupt
+    # a `--json` payload, so stdout is captured and forwarded to stderr.
+    import contextlib as _contextlib
+    import io as _io
+
+    raw_uri = _os.environ.get("TORTOISE_DB_URI")
+    trio_set = any((_os.environ.get(k) or "").strip() for k in
+                   ("FALKORDB_HOST", "FALKORDB_PORT", "FALKORDB_PASSWORD"))
+    # Mirrors `_resolve_db_target`'s precedence, INCLUDING the backward-compat
+    # branch `resolve_db_path` documents (a scheme-less TORTOISE_DB_URI is treated
+    # as an embedded file path). Counting only `is_db_uri` labelled a user-supplied
+    # path as `default` — "nothing is configured" about a target the user set.
+    if is_db_uri(raw_uri or ""):
+        db_source = "TORTOISE_DB_URI"
+    elif trio_set:
+        db_source = "FALKORDB_* trio"
+    elif (_os.environ.get("TORTOISE_DB_PATH") or "").strip():
+        db_source = "TORTOISE_DB_PATH"
+    elif raw_uri:
+        # `resolve_db_path`'s branch 3 tests TRUTHINESS (`if uri and not
+        # is_db_uri(uri)`), so a whitespace-only value takes that rung and is then
+        # REFUSED as a relative path — it does not reach the default. Reporting
+        # `default` beside `status: configured but unusable` made one payload say
+        # both "nothing is configured" and "the configured store is unusable".
+        db_source = "TORTOISE_DB_URI (file path)"
+    else:
+        db_source = "default"
+    graph_store: dict = {"source": db_source}
+    resolved: str | None = None
+    db_error: str | None = None
+    _db_notice = _io.StringIO()
+    try:
+        with _contextlib.redirect_stdout(_db_notice):
+            resolved = _resolve_db_target()
+    except (ValueError, OSError) as exc:
+        # "configured but unusable" is a real verdict — falling through to the
+        # default note claimed the variable was unset and told the user to go
+        # look at `doctor` for a store the CLI REFUSES.
+        db_error = _scrub(f"{type(exc).__name__}: {exc}", raw_uri,
+                          _os.environ.get("TORTOISE_DB_PATH"))
+    if _db_notice.getvalue().strip():
+        print(_db_notice.getvalue().rstrip(), file=_sys.stderr)
+    if db_error is not None:
+        graph_store["status"] = "configured but unusable"
+        graph_store["error"] = _printable(db_error[:500])
+    elif resolved:
+        uri = resolved
+        if db_source == "default":
+            graph_store["note_default"] = (
+                "nothing is configured — this is the resolved default")
+        # AUTHORITY FORM **or** USERINFO COLLAPSED INTO A PATH — one shared
+        # predicate (`looks_like_uri_userinfo` in `tortoise/config.py`), because this
+        # report and that module's log line were two hand-written copies of a
+        # `startswith("//")` test and BOTH leaked `/user:pw@host/x.db`: the value is
+        # ABSOLUTE here, and `os.path.abspath` collapses a leading `///` to `/`, so
+        # the `//` test never fired and the password was printed as a plain path.
+        # The predicate is now the MASKER's own rule (any `@` in a scheme-less
+        # value, #2987/#5267) rather than a narrower second definition — see its
+        # docstring for the three shapes every narrowing leaked.
+        userinfoish = looks_like_uri_userinfo(uri)
+        if is_db_uri(uri) or "://" in uri or userinfoish:
+            graph_store["target"] = _mask_display_target(uri)
+            if graph_store["target"].startswith("<"):
+                if userinfoish and not (is_db_uri(uri) or "://" in uri):
+                    # Scheme-less, so `resolve_db_path` really does treat this as an
+                    # embedded file path ("treating as embedded DB path (backward
+                    # compat)") — the value is masked, the STORE is not inscrutable.
+                    # Calling it "unrecognised" was the same false claim this block
+                    # refuses to make for a plain `/tmp/a:b.db`, and it hid which file
+                    # the CLI will open.
+                    graph_store["target_kind"] = (
+                        "embedded file path (redacted — userinfo-shaped)")
+                else:
+                    graph_store["target_kind"] = "unrecognised (redacted)"
+            elif is_db_uri(uri):
+                graph_store["target_kind"] = "database URI"
+            else:
+                graph_store["warning"] = (
+                    "unrecognised URI scheme — `tortoise doctor` reports supported "
+                    "schemes and the resolved target")
+        else:
+            # `uri` came back from a SUCCESSFUL `_resolve_db_target()`, and every
+            # path it can produce is absolute (`resolve_db_path` rejects relative
+            # values, and the scheme/trio cases took the branches above) — so this
+            # is a real filesystem path and cannot carry URI USERINFO: labelling a
+            # legal `/tmp/a:b.db` as "<redacted: userinfo-shaped>" was a false
+            # statement about a working store.
+            #
+            # A QUERY/fragment is different. `resolve_db_path`'s backward-compat
+            # branch treats the whole string as a path, so
+            # `TORTOISE_DB_URI=/tmp/x.db?password=…` resolves to that "path" — the
+            # credential is real and must not be printed. Cut it, and SAY the value
+            # is truncated rather than printing an ellipsis under an unchanged kind.
+            shown = _printable(uri)
+            cuts = [i for i in (shown.find("?"), shown.find("#")) if i != -1]
+            if cuts:
+                graph_store["target"] = shown[:min(cuts)] + "…"
+                graph_store["target_kind"] = "embedded file path (query/fragment redacted)"
+            else:
+                graph_store["target"] = shown
+                graph_store["target_kind"] = "embedded file path"
+    payload["graph_store"] = graph_store
+
+    org_id = cred.get("org_id")
+    if isinstance(org_id, str) and org_id:
+        # BOTH lines are SHELL-QUOTED, and for the same reason: `<cwd>/.tortoise` is
+        # attacker-controllable by this file's own threat model, and both are
+        # presented as things to paste into a `record-*` command (`--cache-graph`
+        # takes no derived default, so this line is the ONLY place its name is
+        # printed — and `record-restore` against a wrong cache graph wipes a graph
+        # nobody reads). Quoting `--org` and not the cache-graph token left the
+        # worse hole open: pasting `--cache-graph org_$(…)` executes it. The raw
+        # value is still shown on the `org_id` line, which is not shell-shaped.
+        q_org = _shlex.quote(str(org_id))
+        graph_store["cache_graph_convention"] = (
+            f"org_{q_org} (org SDK) or org_{q_org}_<graph_id> (registry/ACL)"
+        )
+        if cred.get("org_id_warning"):
+            # The same payload says this org id looks TRUNCATED. A paste-ready
+            # `--cache-graph`/`--org` built from it would point at a junk graph,
+            # and `record-restore` against a wrong cache graph leaves the real one
+            # stale while reporting success — the hazard the quoting above names.
+            graph_store["org_id_unverified"] = (
+                "the org id in the resolved store looks truncated, so the cache-"
+                "graph and record-scope values below name a graph that probably "
+                "does not exist — confirm the org id first")
+        graph_store["record_scope"] = (
+            f"--org {_shlex.quote(str(org_id))} --graph <graph_id>")
+    payload["graph_store"] = graph_store
+
+    # ── the OTHER store: the harness seam resolves its own identity ──
+    harness_path = (home / ".pi" / "agent" / "tortoise-config.json") if home is not None else None
+    harness_state, harness_cfg = (_describe_store(harness_path, "apiKey")
+                                  if harness_path is not None else ("home unresolvable", None))
+    harness_url_raw: str | None = None
+    file_url_in_use = False
+    harness: dict = {"path": (str(harness_path) if harness_path is not None
+                              else "(home unresolvable)"),
+                     "state": harness_state}
+    file_harness_key = None
+    if harness_cfg:
+        raw_hkey = harness_cfg.get("apiKey")
+        # `resolveConfig` applies `.trim()` to the file key AND to the env key.
+        if isinstance(raw_hkey, str) and raw_hkey.strip():
+            file_harness_key = raw_hkey.strip()
+            # The FILE's own key is published under its own name — a STALE file
+            # is real evidence — but the `api_key`/`api_key_fingerprint` fields
+            # must describe the identity the hook will actually USE, or the
+            # payload prints the file's fingerprint beside `source: env:…` and
+            # then claims one identity with two different digests.
+            harness["file_api_key"] = _mask_secret_tail(file_harness_key)
+            file_fp = _publishable_fingerprint(file_harness_key)
+            if file_fp is not None:
+                harness["file_api_key_fingerprint"] = file_fp
+    # The harness's OWN precedence (`pi-hooks/tortoise-capture.ts::resolveConfig`:
+    # `envKey || fileKey`, and `envKey ? TORTOISE_API_URL : fileUrl || DEFAULT`) —
+    # an env key makes the harness the SAME identity AND the same host as the CLI
+    # whatever the stale file holds. Reporting the file's apiUrl beside an
+    # env-sourced identity would name a host the hook would never contact.
+    harness_effective = (raw_env_key or "").strip() or file_harness_key
+    if harness_effective:
+        harness["api_key"] = _mask_secret_tail(harness_effective)
+        if not _is_sendable_key(harness_effective):
+            # The same disclosure the CLI key gets. Without it the arrow below
+            # asserts "the harness's works" about a key that cannot be sent.
+            harness["api_key_unsendable"] = (
+                "this key cannot be sent in a request header (not latin-1 "
+                "encodable, or contains CR/LF)")
+        effective_fp = _publishable_fingerprint(harness_effective)
+        if effective_fp is not None:
+            harness["api_key_fingerprint"] = effective_fp
+        else:
+            harness["api_key_fingerprint_withheld"] = (
+                "key shorter than 16 chars — a digest of it would be "
+                "brute-forceable, so it is not published")
+    if env_key:
+        harness["source"] = "env:TORTOISE_API_KEY"
+        harness_url_raw = (_os.environ.get("TORTOISE_API_URL")
+                           or "https://api.premiselabs.co")
+        harness["api_url"] = _mask_display_target(harness_url_raw)
+        file_url_in_use = False        # the ENV chooses the host on this path
+    else:
+        harness["source"] = "file" if file_harness_key else "none"
+        raw_url = (harness_cfg or {}).get("apiUrl")
+        harness_url_raw = (raw_url if isinstance(raw_url, str) and raw_url
+                           else "https://api.premiselabs.co")
+        harness["api_url"] = _mask_display_target(harness_url_raw)
+        # The FILE supplies the host on this path — but only if it carries one.
+        file_url_in_use = bool(isinstance(raw_url, str) and raw_url)
+    payload["harness"] = harness
+    same_identity: bool | None = None
+    relation: str | None = None
+    # Compare the RAW urls: `_mask_display_target` truncates at `?`/`#` and appends
+    # an ellipsis, so comparing the published (masked) form made two IDENTICAL
+    # endpoints with a query string read as "a DIFFERENT endpoint".
+    endpoint_verdict = (_same_endpoint(api_url, harness_url_raw)
+                        if (api_key and harness_effective) else None)
+    hosts_agree = endpoint_verdict is True
+    if api_key and harness_effective:
+        # Compare the VALUES, not the published 48-bit labels: `_key_fingerprint`
+        # is a display label ("never used as an authenticator"), and deciding "the
+        # SAME key" on a truncated digest is a collision away from a false claim.
+        if harness_effective == api_key:
+            same_identity = True
+            if hosts_agree:
+                relation = "same"
+            elif endpoint_verdict is False:
+                relation = "same-key-different-host"
+            else:
+                # Same key, and the api_url cannot be parsed on either side — the
+                # honest answer, and the finding the reader needs.
+                relation = "same-key-host-unknown"
+        elif isinstance(api_key, str) and api_key.strip() == harness_effective:
+            # The SAME credential, differing only by the whitespace the report
+            # already flags (the CLI's copy cannot authenticate; the hook's can).
+            # `identity_agrees` answers "is this one credential?" — yes — and
+            # `identity_relation` carries the caveat. Reporting `false` here made
+            # the payload's two fields disagree about the same question.
+            same_identity = True
+            if hosts_agree:
+                relation = "same-modulo-whitespace"
+            elif endpoint_verdict is False:
+                relation = "same-modulo-whitespace-different-host"
+            else:
+                relation = "same-modulo-whitespace-host-unknown"
+        else:
+            same_identity, relation = False, "different"
+    payload["identity_agrees"] = same_identity
+    payload["identity_relation"] = relation
+    payload["identity_host_agrees"] = endpoint_verdict
+
+    if payload.get("message"):
+        # The message goes to stderr in BOTH modes. The two failure payloads
+        # differ on purpose: `refused` carries status/error/config_state/message
+        # (the `_cmd_fail` shape a consumer keys on), while `degraded` carries
+        # status/message/resolution_error and NO `error` — nothing was refused,
+        # so nothing is claimed about a store. Both exit 1.
+        print(_printable(payload["message"]), file=_sys.stderr)
+    if json_mode:
+        _emit_json(payload)
+        return 1 if (blocked_path or payload.get("resolution_error")) else 0
+
+    # ── human output ──
+    print("Tortoise configuration — what THIS shell would use")
+    print("=" * 54)
+    print("Resolution order (first match wins):")
+    # Widths computed from the rows: a fixed 38 overflows on any real path
+    # (macOS `HOME` alone is ~70 chars) and floats the marker off its own row.
+    labels = [_printable(r["source"]) for r in ladder]
+    w_src = min(60, max(len(ln) for ln in labels))
+    w_state = max(10, max(len(r["state"]) for r in ladder))
+    for row, label in zip(ladder, labels, strict=True):
+        mark = "←  USED" if row["used"] else ("←  BLOCKS" if row["blocks"] else "")
+        print(f"  {label:<{w_src}} {row['state']:<{w_state}} {mark}".rstrip())
+        if row.get("reason"):
+            print(f"      {_printable(row['reason'])}")
+        if row.get("note"):
+            print(f"      {_printable(row['note'])}")
+    if blocked_path:
+        print(f"\n⛔ the resolver REFUSED {_printable(cred['blocked_by'])} "
+              f"({_printable(cred['blocked_reason'])}).")
+        blocked_states = {r["state"] for r in ladder if r["blocks"]}
+        if _STORE_UNREADABLE in blocked_states:
+            # NEVER offer deletion as an equal-looking option here: the file is
+            # intact, and this store may hold the `signup_token` — a full credential
+            # in its own right, and the only way back into the org (`tortoise
+            # recover`). The right fix is a permission change.
+            # This is a line the user is told to PASTE, and the path is
+            # store-derived (a directory name can legally contain `;`/spaces/`|`),
+            # so it is shell-quoted like the other two paste lines in this report.
+            # WHICH OBJECT: `unreadable` is reached both by a mode-000 FILE and
+            # by a store behind a non-traversable DIRECTORY (see
+            # `_blocking_directory`), and the file's mode is unknowable in the
+            # second state. A single `chmod 600 <file>` line asserted a fact the
+            # tool cannot see AND printed a command that fails (measured), so the
+            # object is decided from evidence at render time.
+            blocker = _blocking_directory(Path(cred["blocked_by"]))
+            if blocker is not None:
+                # `u+x`, not `700`: traversal is ALL that is missing, and the
+                # blocker can be an ancestor the reader never meant to change
+                # (a shared parent, even `HOME`) — `700` would revoke its
+                # group/other access and fix more than the diagnosis names.
+                print("   The DIRECTORY containing it is not traversable — fix "
+                      "that first (`chmod u+x "
+                      f"{_printable(_shlex.quote(str(blocker)))}`); the "
+                      "file's own mode cannot be checked until it is.")
+                # The blocker is chosen shallowest and can be a shared parent,
+                # and `chmod` needs OWNERSHIP — which the report cannot grant.
+                # Naming that here is the difference between advice that can be
+                # followed and an imperative the reader cannot obey.
+                print("   That `chmod` needs ownership of the directory — if it "
+                      "is a shared parent you do not own, ask its owner to "
+                      "grant traversal.")
+            else:
+                print("   The file is there but unreadable — fix its permissions "
+                      f"(`chmod 600 "
+                      f"{_printable(_shlex.quote(str(cred['blocked_by'])))}`).")
+            print("   ⛔ Do NOT delete it: this store may hold the signup_token that "
+                  "`tortoise recover` needs.")
+        else:
+            print("   The commands that resolve through this store (`team info`, "
+                  "`team keys …`, `init`) will fail until it is fixed.")
+            print("   Repair it; if you delete it, SAVE any `signup_token` from it "
+                  "first — `tortoise recover` needs it.")
+        print("   Or set TORTOISE_API_KEY to override for one shell.")
+        if blocked_path and cwd_cfg is not None and _same_path(
+                Path(blocked_path), cwd_cfg):
+            # Those verbs resolve `global_only=True`, so "unaffected" is only true
+            # when the GLOBAL candidate itself resolves. Asserting it without
+            # looking told a reader to rely on transcript upload while it was
+            # broken by the other store.
+            if blocked_path == str(global_cfg) or state_global in _STORE_REFUSING:
+                print("   The transmitting verbs (`session capture/drain/import`) "
+                      "FAIL TOO: they resolve the global store, which is refusing "
+                      "as well.")
+            elif state_global != _STORE_OK:
+                # Only `ok` actually resolves. For absent/empty/directory/broken-
+                # symlink the verbs resolve NO identity and file nothing — and
+                # `session drain` then exits 0 with "nothing to file", so claiming
+                # "unaffected" told the reader upload was fine while it was dead.
+                print("   The transmitting verbs (`session capture/drain/import`) do "
+                      f"not resolve either: their global store is {state_global}, so "
+                      "they have no identity and file nothing.")
+            else:
+                print("   The transmitting verbs (`session capture/drain/import`) are "
+                      "unaffected: they skip this candidate and use the global store.")
+    if cwd is None:
+        print("\n· the current directory could not be resolved — the `./.tortoise` "
+              "candidate was not evaluated. Re-run from a directory that exists.")
+    print()
+    if api_key:
+        print("Identity")
+        print(f"  api_url       {_printable(cred['api_url'])}   (masked)")
+
+        def _coord_label(field: str) -> str:
+            """Render ONE coordinate, without claiming a present field is gone.
+
+            A field can be PRESENT and still missing from `cred` — it is only
+            copied there when it is a non-empty string (`org_field_warning`
+            covers the rest). So `cred.get(field) or '(absent)'` printed
+            "org_id (absent)" directly above a warning saying the store carries
+            it: two lines of one report disagreeing about one file (#10655
+            review P2). The hint suppression already drew this distinction; the
+            value line now draws it too.
+            """
+            value = cred.get(field)
+            if value:
+                return _printable(value)
+            if field in (cred.get("org_fields_unusable") or ()):
+                return "(present but unusable)"
+            return "(absent)"
+
+        print(f"  org_id        {_coord_label('org_id')}")
+        print(f"  org_name      {_coord_label('org_name')}")
+        fp = (f"  (sha256:{cred['api_key_fingerprint']})"
+              if cred.get("api_key_fingerprint")
+              else "  (digest withheld — short key)")
+        print(f"  api_key       {_printable(cred['api_key'])}{fp}")
+        rec = cred["recovery_token"]
+        if cred.get("recovery_token_source"):
+            rec += f"  ({_printable(cred['recovery_token_source'])})"
+        print(f"  recovery      signup_token {rec}")
+        if cred.get("recovery_token_note"):
+            print(f"  ⚠️  {cred['recovery_token_note']}")
+        if cred.get("org_id_warning"):
+            print(f"  ⚠️  org_id is {cred['org_id_warning']}")
+        if cred.get("org_field_warning"):
+            print(f"  ⚠️  {cred['org_field_warning']}")
+        if cred.get("org_id_hint"):
+            print(f"  ·  {cred['org_id_hint']}")
+        if cred.get("api_key_whitespace"):
+            print(f"  ⚠️  {cred['api_key_whitespace']}")
+        if cred.get("api_key_unsendable"):
+            print(f"  ⛔ {cred['api_key_unsendable']}")
+        if cred.get("api_url_note"):
+            print(f"  ⚠️  {cred['api_url_note']}")
+        if cred.get("api_key_fingerprint_withheld"):
+            print(f"  ·  {cred['api_key_fingerprint_withheld']}")
+    else:
+        print("Identity: none resolved.")
+        if blocked_path:
+            print("  (a store exists but the resolver refuses it — see above)")
+        elif payload.get("resolution_error"):
+            print("  (the resolver could not run — the stores above were read "
+                  "directly; the reason is on stderr)")
+        else:
+            print("  Mint one with `tortoise signup` (hosted, no email) or set")
+            print("  TORTOISE_API_KEY. `tortoise init --api-key <tt_…>` connects an")
+            print("  existing team from the current directory.")
+    print()
+    print("Graph store")
+    if graph_store.get("status"):
+        # The mode a user actually reads must not say "nothing is configured"
+        # about a store the CLI REFUSES — that was the split this block exists to
+        # close, reintroduced on the human side.
+        print(f"  ⛔ {_printable(graph_store['status'])}: "
+              f"{_printable(graph_store.get('error', ''))}")
+    if graph_store.get("note_default"):
+        print(f"  ·  {graph_store['note_default']}")
+    if graph_store.get("target"):
+        kind = graph_store.get("target_kind")
+        suffix = f"  ({graph_store['source']}{', ' + kind if kind else ''})"
+        print(f"  target        {_printable(graph_store['target'])}{suffix}")
+    elif not graph_store.get("status"):
+        print("  target        (no TORTOISE_DB_URI — `tortoise doctor` reports the "
+              "resolved default)")
+    if graph_store.get("warning"):
+        print(f"  ⚠️  {graph_store['warning']}")
+    if graph_store.get("org_id_unverified"):
+        print(f"  ⛔ {_printable(graph_store['org_id_unverified'])}")
+    if graph_store.get("cache_graph_convention"):
+        print(f"  cache graph   {_printable(graph_store['cache_graph_convention'])}")
+        print(f"  record scope  {_printable(graph_store['record_scope'])}"
+              "   (+ --cache-graph, + --record-dsn/$TORTOISE_RECORD_DSN)")
+    print()
+    print("Harness credential — a DIFFERENT store; the CLI never reads it")
+    print(f"  {_printable(harness['path'])}")
+    print(f"  state         {harness_state}   (identity from {harness['source']})")
+    if harness.get("api_key"):
+        hfp = (f"  (sha256:{harness['api_key_fingerprint']})"
+               if harness.get("api_key_fingerprint")
+               else "  (digest withheld — short key)")
+        print(f"  api_key       {_printable(harness['api_key'])}{hfp}")
+    if harness.get("api_key_fingerprint_withheld"):
+        print(f"  ·  {harness['api_key_fingerprint_withheld']}")
+    if harness.get("api_key_unsendable"):
+        print(f"  ⛔ {harness['api_key_unsendable']}")
+    if harness.get("api_url"):
+        print(f"  api_url       {_printable(harness['api_url'])}   (masked)")
+    if harness.get("file_api_key") and harness["source"] != "file":
+        if file_harness_key is not None and file_harness_key == harness_effective:
+            # The commonest fleet state: signup wrote the file, the user then
+            # exported the same key. Calling that file "stale / NOT in use" would
+            # invite deleting the only identity a session without the env var has.
+            print(f"  on disk       {_printable(harness['file_api_key'])}"
+                  " — same key as above")
+        else:
+            fdetail = (f"  (sha256:{harness['file_api_key_fingerprint']})"
+                       if harness.get("file_api_key_fingerprint")
+                       else "  (digest withheld — short key)")
+            print(f"  stale file    {_printable(harness['file_api_key'])}"
+                  f"{fdetail} — NOT in use")
+    if harness_state == _STORE_NO_KEY:
+        # `resolveConfig` reads a keyless harness file happily (it supplies
+        # apiUrl/settings; the key may come from the env), so this is NOT
+        # "repair or delete" territory — it is the documented env-provisioned
+        # shape, and telling the user to delete it would break their settings.
+        print("  ·  no api-key in this file (the key comes from the environment "
+              "or is simply unset)")
+    elif harness_state == _STORE_INVALID:
+        # `resolveConfig` reads `apiUrl` from this file REGARDLESS of the key's
+        # type — but only when no env key is set AND the file actually supplies one
+        # (`envKey ? TORTOISE_API_URL : fileUrl || DEFAULT`). Claiming "this file's
+        # api_url IS still in use" unconditionally was false in two reachable
+        # states: an env key (which chooses the host) and a file with no apiUrl
+        # (where the printed value is the hardcoded default).
+        print("  ⚠️  the harness apiKey here is not a string, so the hook ignores it"
+              " — repair the field.")
+        if file_url_in_use:
+            print("     This file's api_url IS still in use, so deleting the file "
+                  "would drop that endpoint too.")
+        else:
+            print("     The hook reads no endpoint from this file either (the "
+                  "environment/default host governs), so deleting it drops nothing.")
+    elif harness_state in _STORE_REFUSING:
+        # A corrupt/unreadable file yields nothing the hook can use, so this is a
+        # dead file rather than a blocking one — but it is still the reason a
+        # harness seam silently stopped authenticating.
+        print(f"  ⚠️  unusable harness store ({harness_state}) — repair or delete it")
+    elif harness_state == _STORE_DIRECTORY:
+        print("  ⚠️  a directory sits at the harness config path — the harness "
+              "cannot read it")
+    if same_identity is None:
+        if not api_key:
+            print("  → the CLI has no identity — nothing to compare")
+        elif harness_state in (_STORE_ABSENT, _STORE_EMPTY) or not harness_effective:
+            print("  → the harness has no identity — it will run unauthenticated")
+    elif relation in ("same-modulo-whitespace",
+                      "same-modulo-whitespace-different-host"):
+        harness_ok = ("the harness's copy works"
+                      if not harness.get("api_key_unsendable")
+                      else "the harness's copy cannot be sent either")
+        print("  → the SAME key as the CLI, modulo surrounding whitespace — the"
+              " CLI's copy is sent verbatim (surrounding whitespace is normally"
+              " stripped in transit, so it usually still works; CR/LF would make"
+              f" it unsendable), {harness_ok}")
+        if relation == "same-modulo-whitespace-different-host":
+            print("     …but a DIFFERENT endpoint — a refusal on one says nothing"
+                  " about the other")
+    elif relation in ("same-key-host-unknown", "same-modulo-whitespace-host-unknown"):
+        print("  → the SAME key, but the endpoint comparison cannot be made: one or"
+              " both api_url values are not URLs (or are empty). Check the two"
+              " api_url lines above — a missing scheme (`https://host`) is the usual"
+              " cause.")
+        if _endpoint_is_readable(api_url):
+            if _endpoint_is_readable(harness_url_raw):
+                # Unreachable through `same-key-host-unknown` (that relation
+                # means at least one side is unparseable), kept so a future
+                # relation change cannot silently print neither branch.
+                print("     Both surfaces carry a parseable api_url.")
+            else:
+                print("     Only one side is affected — the HARNESS's api_url does"
+                      " not parse, so the CLI's endpoint above is the one in use.")
+        elif _endpoint_is_readable(harness_url_raw):
+            print("     Only one side is affected — the CLI's api_url does not"
+                  " parse, so the harness's endpoint above is the one in use.")
+        else:
+            # BOTH raw values are unparseable, so BOTH sides fail the same way.
+            # Equality of the two raw strings was used as a proxy for this and is
+            # only SUFFICIENT, never necessary: two DIFFERENT non-URLs
+            # (`host-one.example`, `host-two.example`) are a joint failure too, and
+            # the old branch told the reader "Only one side is affected" there —
+            # the false statement this test now pins against.
+            print("     BOTH api_url values are unreadable, so BOTH fail the same"
+                  " way — a refusal on one is reproduced on the other.")
+    elif relation == "same-key-different-host":
+        print("  → the SAME key as the CLI but a DIFFERENT endpoint — a refusal on"
+              " one says nothing about the other")
+    elif same_identity and hosts_agree:
+        print("  → same identity as the CLI (same key, same endpoint)")
+    else:
+        print("  → a DIFFERENT key from the CLI — the harness and the CLI are two"
+              " identities. A refusal from one says nothing about the other.")
+    return 1 if (blocked_path or payload.get("resolution_error")) else 0
+
+
 def _cmd_org_info(args) -> int:
     """Show org info from Tortoise Cloud API."""
-    import json, sys  # noqa: E401, I001
+    import http.client
+    import json
+    import sys
+    from urllib.error import HTTPError
     from urllib.request import Request, urlopen
-    from urllib.error import URLError, HTTPError
 
     # Read config
     config, api_key, api_url = _read_config()  # noqa: RUF059
     if api_key is None:
+        return 1
+    # The resolver validates `api_key` but NOT `api_url`, so a hand-edited store
+    # can carry a list/dict here — and `_mask_uri_userinfo` calls `.split()`.
+    # Coerce ONCE, at the only place this function learns it.
+    api_url = api_url if isinstance(api_url, str) else str(api_url or "")
+    if not _is_sendable_key(api_key):
+        # `http.client` refuses a CR/LF or non-latin-1 header value by raising
+        # `ValueError("Invalid header value b'Bearer <THE KEY>'")` — the refusal
+        # itself echoes the credential into the transcript (#5109). Refuse here,
+        # where the message can be ours, and name the remedy.
+        print("Team info unavailable: the stored API key cannot be sent in a "
+              "request header (not latin-1 encodable, or contains CR/LF).",
+              file=sys.stderr)
+        print("   Re-mint it: `tortoise signup` (new team) or `tortoise recover` "
+              "(same team). `tortoise config show` reports which store won.",
+              file=sys.stderr)
         return 1
 
     # Call API
@@ -2842,23 +4202,224 @@ def _cmd_org_info(args) -> int:
         )
         with urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read())
-    except (json.JSONDecodeError, ValueError) as e:
-        print(f"Invalid response from API: {e}", file=sys.stderr)
-        return 1
+    # ORDER MATTERS — on the FIRST attempt and on the RETRY alike: HTTPError (an
+    # OSError) first, then the transport OSErrors, then the rest.
+    # `http.client.RemoteDisconnected` is BOTH a ConnectionResetError (OSError)
+    # and an HTTPException, and Python takes the FIRST matching clause, so it
+    # must land on the TRANSPORT branch — it is a dropped connection, not a bad
+    # response body. Only a TIMEOUT is retried (`_is_timeout_reason`): a reset or
+    # a refusal is reported on the first attempt and never retried.
     except HTTPError as e:
-        body = e.read().decode() if e.fp else ""
-        print(f"API error ({e.code}): {body}", file=sys.stderr)
+        # `errors="replace"`: a proxy/captive portal answering 4xx with a
+        # latin-1 or binary body would otherwise raise UnicodeDecodeError INSIDE
+        # the handler that exists to explain the 4xx. And the READ itself can
+        # stall (headers, then no body) — a bare TimeoutError is an OSError and
+        # would escape the same way, so the body read is its own guard.
+        try:
+            body = e.read().decode("utf-8", "replace") if e.fp else ""
+        except (OSError, http.client.HTTPException):
+            # `IncompleteRead` (a proxy closing before the declared
+            # Content-Length) is an HTTPException, NOT an OSError — the same
+            # "misbehaving proxy" case, reached a different way.
+            body = ""
+        # #10655: this used to print the raw body — a JSON envelope carrying an
+        # internal `error_code` (`GRAPH_SCOPED_TEAM_SURFACE`) and no remedy. Two
+        # of the three answers here are DELIBERATE server refusals, not faults
+        # of the caller's machine, and the operator reading them needs to know
+        # which. The refusal itself is NOT relaxed (C5 #2114: a graph-scoped key
+        # must never read org-level data) — the remedy points at the LOCAL
+        # coordinates instead, which is the same information without the leak.
+        _explain_org_info_failure(e.code, body, api_url, api_key)
         return 1
-    except URLError as e:
-        print(f"Cannot reach API at {api_url}: {e.reason}", file=sys.stderr)
+    except OSError as e:
+        # `URLError` IS an OSError, and a bare `TimeoutError` raised by
+        # `resp.read()` is an OSError that is NOT a URLError — the cold-app case
+        # this retry exists for arrives in exactly that shape (the response
+        # headers land, the body never does).
+        reason = getattr(e, "reason", None) or e
+        print(f"Cannot reach API at {_printable(_mask_display_target(api_url or ''))}: "
+              f"{_printable(reason)}", file=sys.stderr)
+        if not _is_timeout_reason(reason):
+            return 1
+        # A first request after the hosted app has been idle can wait on a cold
+        # start. Observed >10s (two probes this session) while a warm app answers
+        # in 0.2-1.6s — the CLI's 10s timeout is BELOW that, so a new user's very
+        # first command reports "unreachable" for a service that is merely
+        # waking. Say so, and retry once.
+        print("   (no response in 10s — the service may be starting up; "
+              "retrying once with a longer timeout)", file=sys.stderr)
+        try:
+            with urlopen(req, timeout=30) as resp:
+                data = json.loads(resp.read())
+        except HTTPError as retry_exc:
+            # The retry may land on a DELIBERATE refusal (the app woke and the
+            # key is graph-scoped, say). That is an answer, not "still no
+            # answer" — route it through the same remedy table as the first
+            # attempt, or the fix this change exists for is bypassed on exactly
+            # the cold-then-refusing path.
+            try:
+                body = (retry_exc.read().decode("utf-8", "replace")
+                        if retry_exc.fp else "")
+            except (OSError, http.client.HTTPException):
+                # Same as the first attempt: a stall OR a truncated body must
+                # degrade to no body rather than escape the 502's handler.
+                body = ""
+            _explain_org_info_failure(retry_exc.code, body, api_url, api_key)
+            return 1
+        except OSError as retry_exc:
+            # The TRANSPORT branch, and it MUST precede the HTTPException arm
+            # below: `http.client.RemoteDisconnected` is BOTH a
+            # ConnectionResetError (an OSError) and an HTTPException, so with the
+            # arms in the other order a connection dropped during the retry was
+            # reported as "Invalid response from API" — blaming the server's
+            # BODY on exactly the cold-then-dropped path this retry exists for.
+            # Same order as the first attempt.
+            print(f"   still no answer: {_printable(retry_exc)}", file=sys.stderr)
+            print("   Check https://api.premiselabs.co/health, or your "
+                  "TORTOISE_API_URL, then `tortoise config show`.",
+                  file=sys.stderr)
+            return 1
+        except (http.client.HTTPException, ValueError, RecursionError) as retry_exc:
+            # The retry REACHED something that is NOT a transport failure: a
+            # captive-portal/proxy body is not "still no answer", and folding it
+            # into the transport branch sent the reader to the health endpoint
+            # for a proxy problem.
+            print(f"Invalid response from API: "
+                  f"{_printable(_scrub(str(retry_exc), api_url, api_key))}",
+                  file=sys.stderr)
+            return 1
+
+    except (http.client.HTTPException, ValueError, RecursionError) as e:
+        # `http.client.InvalidURL` derives from HTTPException — neither OSError nor
+        # ValueError — so it used to escape as a TRACEBACK whose message embeds the
+        # api_url (a password in its userinfo, or a "nonnumeric port" reading of
+        # one). `ValueError` covers both the header-value refusal and
+        # `json.JSONDecodeError`; `http.client` interpolates the header value into
+        # its own text, so scrub the key before it reaches the log.
+        print(f"Invalid response from API: {_printable(_scrub(str(e), api_url, api_key))}",
+              file=sys.stderr)
+        return 1
+    if not isinstance(data, dict):
+        # A 200 whose body is a JSON array/string (proxy, captive portal). The
+        # derefs below would AttributeError — reachable twice now that the
+        # timeout path retries, so it is guarded rather than inherited.
+        print("Invalid response from API: expected a JSON object, got "
+              f"{type(data).__name__}", file=sys.stderr)
         return 1
 
-    print(f"Team:       {data.get('org_id', '?')}")
-    print(f"Tier:       {data.get('tier', 'free')}")
-    print(f"Points:     {data.get('point_count', 0)}")
-    print(f"Max users:  {data.get('max_users', 1)}")
-    print(f"Max graphs: {data.get('max_graphs', 1)}")
+    print(f"Team:       {_printable(data.get('org_id', '?'))}")
+    print(f"Tier:       {_printable(data.get('tier', 'free'))}")
+    print(f"Points:     {_printable(data.get('point_count', 0))}")
+    print(f"Max users:  {_printable(data.get('max_users', 1))}")
+    print(f"Max graphs: {_printable(data.get('max_graphs', 1))}")
     return 0
+
+
+#: The delta between `tortoise team info` telling a user what to run instead of
+#: printing a raw error envelope. Keyed on the one server refusal a hosted
+#: operator meets that is a DECISION rather than a fault (C5 #2114). The other
+#: three handled outcomes — 401 invalid key, SUSPENDED (via `_suspended_info`),
+#: and any unrecognised failure — need no table because their remedy is computed
+#: at the call site.
+_ORG_INFO_REMEDIES: dict[str, str] = {
+    "GRAPH_SCOPED_TEAM_SURFACE": (
+        "this API key is bound to ONE graph, so it cannot read team-level info."
+        " That is deliberate (a per-graph key must never see org-wide data), not"
+        " a fault. The dashboard's API Keys tab names the org and graph this key"
+        " is bound to. `tortoise config show` reports what THIS machine knows —"
+        " which for a key installed with `init --api-key`, or exported as"
+        " TORTOISE_API_KEY, is the key but not the org. For an org-wide key, mint"
+        " one on the dashboard and `tortoise init --api-key <it>`."
+    ),
+}
+
+
+def _is_timeout_reason(reason: object) -> bool:
+    """True when a URLError reason is a timeout rather than a refusal.
+
+    `socket.timeout` is an alias of the builtin `TimeoutError` on 3.10+, so the
+    isinstance covers both spellings; the substring check catches the
+    `URLError` wrapper's own message, which does not always carry the type.
+    """
+    return isinstance(reason, TimeoutError) or "timed out" in str(reason).lower()
+
+
+def _explain_org_info_failure(code: int, body: str, api_url: object,
+                              api_key: object = None) -> None:
+    """Turn `tortoise team info`'s failure into a remedy (never a raw code).
+
+    401 means the stored key is not valid (revoked, or minted for another host);
+    403 GRAPH_SCOPED_TEAM_SURFACE means the key is graph-bound and the refusal is
+    by design. Both are answers, and both name the next command. Anything else
+    keeps the body — an unknown failure must stay legible, not be swallowed.
+    """
+    import json as _json
+    import sys as _sys
+
+    # `api_url` is store-supplied and NOT type-validated by the resolver; the
+    # masker calls `.split()`, so coerce here rather than trap the next caller.
+    api_url = api_url if isinstance(api_url, str) else str(api_url or "")
+    # The body is the reply to a request that carried `Authorization`, so a
+    # server or proxy that echoes the request echoes the KEY. Scrub it once, and
+    # parse the FULL text — truncating before `_json.loads` made a verbose
+    # refusal lose the very remedy this function exists to print. Only the
+    # DISPLAY fallback below is bounded (a multi-MB proxy page must not be
+    # printed whole).
+    body = _scrub(body, api_url, api_key)
+
+    error_code = None
+    try:
+        parsed = _json.loads(body)
+    except (ValueError, TypeError, RecursionError):
+        parsed = None
+    # The body is entirely server/proxy-controlled: it may be an object, a list,
+    # a bare string or null. Reading `.get` off it without this guard crashed
+    # `tortoise team info` with an AttributeError on any JSON-array body — the
+    # exact path this function exists to make legible.
+    if isinstance(parsed, dict):
+        detail = parsed.get("detail")
+        if isinstance(detail, dict):
+            code_value = detail.get("error_code")
+            # The VALUE is server-controlled too: a list/dict here would make
+            # the `in _ORG_INFO_REMEDIES` lookup raise TypeError (unhashable)
+            # and replace the diagnostic with a traceback.
+            if isinstance(code_value, str):
+                error_code = code_value
+
+    # SUSPENDED outranks the graph-scope remedy: both can ride the same 403, and
+    # an account-level suspension (with its appeal path) is the more consequential
+    # fact — it also has the module's own parser, which every other 403 site uses.
+    suspended = _suspended_info(body) if code == 403 else None
+    if suspended is not None:
+        # Every other 403 site in this module routes through `_suspended_info`;
+        # this one used to print the raw envelope for the ONE refusal that has a
+        # ready-made explanation and an appeal path.
+        message, appeal_url = suspended
+        # `_suspended_info` appends " Appeal: <url>" to the message, so printing
+        # the message AND the url duplicated it — and the message half is
+        # server-controlled, so a newline in `detail.message` forged a stderr
+        # line beside the carefully escaped URL.
+        suffix = f" Appeal: {appeal_url}" if appeal_url else ""
+        body_message = message[:-len(suffix)] if (suffix and message.endswith(suffix)) else message
+        print(f"Team info unavailable: {_printable(body_message)}", file=_sys.stderr)
+        if isinstance(appeal_url, str) and appeal_url:
+            print(f"   Appeal: {_printable(appeal_url)}", file=_sys.stderr)
+        return
+    if code == 403 and error_code in _ORG_INFO_REMEDIES:
+        print(f"Team info unavailable: {_ORG_INFO_REMEDIES[error_code]}",
+              file=_sys.stderr)
+        return
+    if code == 401:
+        # `api_url` is store-supplied (filesystem-controlled): mask its userinfo
+        # exactly as `config show` does, and keep it on one printable line.
+        print("Team info unavailable: the stored API key at this host is not valid "
+              f"({_printable(_mask_display_target(api_url or ''))}).", file=_sys.stderr)
+        print("   Re-mint it: `tortoise signup` (new team) or `tortoise recover` "
+              "(same team, needs your st_ recovery token).", file=_sys.stderr)
+        print("   Check which store won first: `tortoise config show`.",
+              file=_sys.stderr)
+        return
+    print(f"API error ({code}): {_printable(body[:2000])}", file=_sys.stderr)
 
 
 ONBOARDING_PROMPT_URL = "https://app.premiselabs.co/skills/tortoise-onboarding/SKILL.md"
@@ -2972,9 +4533,14 @@ def _resolve_config_path(include_env: bool = True, *,
             continue
         try:
             config = _json.loads(path.read_text())
-        except (OSError, _json.JSONDecodeError, ValueError, TypeError) as e:
+        except (OSError, _json.JSONDecodeError, ValueError, TypeError,
+                RecursionError) as e:
             # ValueError: UnicodeDecodeError from read_text (invalid UTF-8) is
             # a ValueError subclass — same corrupt-config contract as a parse error.
+            # RecursionError (a RuntimeError) comes from `json.loads` on a
+            # pathologically nested store; without it here EVERY caller reports the
+            # store as an environment failure (or tracebacks outright) instead of
+            # the corrupt file it is.
             raise _ConfigError(path) from e
         if not isinstance(config, dict):
             # Parses but isn't an object ([1,2,3]) — config.get would raise
@@ -12415,6 +13981,29 @@ def main(argv: list[str] | None = None) -> int:
     hs = sp.add_parser("health-server", help="Start standalone /health HTTP server")
     hs.add_argument("--port", type=int, default=9090, help="HTTP port (default: 9090)")
     hs.add_argument("--bind", default="127.0.0.1", help="Bind address (default: 127.0.0.1)")
+    # #10655: offline reporter for the resolved credential + coordinates. `show`
+    # is the only subcommand today; the subparser exists so the verb has room to
+    # grow (`config path`) without a second top-level name.
+    cfg_p = sp.add_parser(
+        "config",
+        help="Show which credential and coordinates this shell would use (offline)",
+    )
+    # `--json` on BOTH the parent and `show`: the short form is deliberately an
+    # affordance (a discovery verb must not be a dead end), and an affordance
+    # that only works in one output mode is a trap.
+    cfg_p.add_argument("--json", action="store_true",
+                       help="Machine-readable JSON output")
+    cfg_sp = cfg_p.add_subparsers(dest="config_cmd")
+    cfg_show = cfg_sp.add_parser(
+        "show",
+        help="Report the resolved credential source, org/graph coordinates and "
+             "graph store — no network call",
+    )
+    # `default=SUPPRESS`: argparse copies the subparser's defaults onto the
+    # parent namespace, so a plain `store_true` here would overwrite a `--json`
+    # given BEFORE the subcommand (`config --json show` would print prose).
+    cfg_show.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                          help="Machine-readable JSON output")
     # tortoise org <subcommand>
     org = sp.add_parser("team", help="Team management (Tortoise Cloud)")
     org_sp = org.add_subparsers(dest="team_cmd")
@@ -12964,6 +14553,11 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_setup(args)
     elif args.cmd == "doctor":
         return _cmd_doctor(args)
+    elif args.cmd == "config":
+        # #10655: only `show` exists; a bare `tortoise config` prints what it
+        # would print rather than exiting non-zero (a discovery verb must not
+        # be a dead end for the user who typed the short form).
+        return _cmd_config(args)
     elif args.cmd == "onboard":
         return _cmd_onboard(args)
     elif args.cmd == "health-server":

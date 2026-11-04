@@ -130,21 +130,29 @@ def min_before_share(prereg: dict | None = None) -> float:
     """E1's OTHER frozen floor: the control arm's share must clear this one.
 
     The criterion is stored as two halves, and only one of them is a floor under
-    the DENOMINATOR. `PRE-REGISTRATION.md:278-280` pairs E1's relative bar with an
+    the DENOMINATOR. `PRE-REGISTRATION.md` §3.2 pairs E1's relative bar with an
     absolute refusal — "if the **control arm's** share is `< 0.20`, the corpus
     cannot measure E1 (a share metric needs a non-trivial base) and the criterion
     is **REFUSED**" — frozen as `denominator_floors.e1_min_before_share: 0.20`.
+    That is a SECTION cite on purpose: it pointed at a LINE RANGE inside §3.1 until
+    #10525's round 11, and this branch's own §0/§7 insertions moved the quoted
+    sentence to 289-290 while the cite stayed on §3.1's E4/E5 table rows — the
+    #10186 defect class, in the probe of the record it cites.
+    `tests/test_9889_capstone_probes.py` holds both halves: no line cite into the
+    record may come back, and the sentence quoted here is re-derived from §3.2.
     This driver is the producer of precisely that number, so it applies that floor
     too: a before-share under it is a reading the record itself calls REFUSED, and
     a reader who took it as a before-share would compute `after <= 0.50 x before`
     over a corpus the record says cannot measure E1.
 
-    Read straight off the record, not through `parse_bars`: that map exposes the
-    four integer floors and not this one, and a floor re-typed here would be a
-    floor nobody froze (#9513's `floor_unconsumed` rule, one map over). Absent and
-    unreadable are DIFFERENT states and both are refused — a probe that silently
-    drops a floor it declared it would honour emits a number its own record
-    refuses.
+    Read straight off the record, not through `parse_bars`: that map is the BAR
+    reader for the scored rows, while this driver PRODUCES the number the floor is
+    written over and must refuse with its own message (an escaping `ValueError`
+    from a helper is not a refusal a run can be read from). A floor re-typed here
+    would be a floor nobody froze (#9513's `floor_unconsumed` rule, one map over).
+    Absent and unreadable are DIFFERENT states and both are refused — a probe that
+    silently drops a floor it declared it would honour emits a number its own
+    record refuses.
     """
     floors = _frozen_record(prereg).get("denominator_floors")
     value = floors.get("e1_min_before_share") if isinstance(floors, dict) else None

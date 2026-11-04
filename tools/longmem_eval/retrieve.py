@@ -115,6 +115,7 @@ from tortoise.retrieval import (
     DEFAULT_EVIDENCE_BOOST_SOURCE,
     DEFAULT_EVIDENCE_BOOST_VERBATIM,
     DEFAULT_MAX_CHUNKS_PER_SESSION,
+    DEFAULT_POOL_SESSION_CAP,
     DEFAULT_POOL_SIZE,
     SESSION_TRANSCRIPT_KIND,
     _has_claim_text,  # #3594 — the seed must mirror the reader's #2978 skip
@@ -373,6 +374,50 @@ def vector_search(sdk: TortoiseSDK, query: str, limit: int) -> list[tuple[str, f
 #: ~40k-token floods despite sr@5=1.0). Knob-exposed via ``--tr-top-k``.
 DEFAULT_TR_TOP_K = 12
 
+#: #10538: the temporal leg's PLACEMENT knob — ``temporal_leg_fusion_order``
+#: has always accepted ``placement`` (``"tail"`` shipped, ``"head"`` the
+#: rank-0 counterfactual) but this module never forwarded it, so the
+#: counterfactual ``tortoise/temporal_leg.py``'s own docstring declares
+#: reproducible for the eval lane — *"`--placement head` on the replay keeps
+#: the counterfactual reproducible for the eval lane, where the base is not
+#: near-ceiling — that A/B belongs there, not in this default"* — was
+#: UNREACHABLE on the eval lane. Measured geometry at #10538
+#: (``/tmp/probe_10538_geom.py``, 2026-11-02, ``window=12``/``limit=2``):
+#: ``tail`` puts the picks at fused ranks **10–11**, ``head`` at **0–1** —
+#: so ``recall_all@5`` (graded on ``hits[:5]``) is structurally unreachable
+#: under ``tail`` and reachable under ``head``. Which of the two ships is an
+#: OPEN decision (#10538 comment 6574199000); this knob only makes the A/B
+#: RUNNABLE, it does not answer it. Default is ``"tail"``, so every existing
+#: number is produced by the unchanged path.
+TEMPORAL_LEG_PLACEMENTS = ("tail", "head")
+DEFAULT_TEMPORAL_LEG_PLACEMENT = "tail"
+
+
+def resolve_temporal_leg_placement(explicit: str | None = None,
+                                   env: str | None = None) -> str:
+    """Resolve the temporal leg's placement: explicit arg > env > ``"tail"``.
+
+    Fail-safe by construction: anything that is not one of
+    :data:`TEMPORAL_LEG_PLACEMENTS` (case/space-insensitive) collapses to the
+    SHIPPED ``"tail"`` — a typo in a run's env must never silently switch the
+    shipped arm to the rank-0 counterfactual, because that would make the
+    run's receipt attribute a head-placement number to the shipped path.
+    """
+    for candidate in (explicit, env):
+        if candidate is None:
+            continue
+        value = str(candidate).strip().lower()
+        if value in TEMPORAL_LEG_PLACEMENTS:
+            return value
+        if candidate is explicit:
+            # An INVALID explicit value is a caller bug, not a request to
+            # consult the environment: falling through would let a stale
+            # exported ``TORTOISE_LME_TEMPORAL_LEG_PLACEMENT`` silently
+            # decide the arm for a call that explicitly named a placement it
+            # got wrong. Fail safe to the shipped default instead.
+            return DEFAULT_TEMPORAL_LEG_PLACEMENT
+    return DEFAULT_TEMPORAL_LEG_PLACEMENT
+
 #: #2976: TR session-COMPLETION budget (the granularity half). An admitted
 #: session must be the WHOLE session the oracle serves, not the fragments
 #: retrieval happened to surface — the measured evidence is that even the arm
@@ -403,8 +448,9 @@ class TimeConstraint:
     shape compares ("the dog bed for Max", "the training pads for Luna").
     Additive — the pre-#2976 consumers read only kind/start/end, so every
     existing shape is unchanged. An empty tuple means no comparison anchor
-    was recovered; the #2976 temporal leg REQUIRES a matched anchor and
-    stays inert in that case (it never promotes on date-spread alone).
+    was recovered; the #2976 temporal leg then promotes on session clustering
+    inside the resolved date window (#10538), and stays inert when there is
+    no window either — it never promotes on date-spread alone.
     """
     kind: str | None
     start: str | None = None
@@ -501,8 +547,11 @@ def _extract_anchors(t: str) -> tuple[str, ...]:
     single content token and are DROPPED — a one-token anchor is claimed by
     any candidate carrying that word (noise). A phrase whose tokens are ALL
     stopwords (deictics like "today") is dropped for the same reason.
-    Returns ``()`` when nothing usable remains — the leg then stays inert
-    (it requires a matched anchor; it never promotes on date-spread alone).
+    Returns ``()`` when nothing usable remains. With no anchors the leg is
+    inert UNLESS the caller also supplies a ``date_window`` AND the visible
+    slots are session-clustered (#10538) — a date-range question promotes on
+    that widened gate. Anchors alone, with no window, never promote on
+    date-spread alone (the #2976 no-harm property).
     """
     from tortoise.temporal_leg import content_tokens
 
@@ -855,8 +904,11 @@ def _annotate_hits(hits: list[dict], props: dict, dates: list[str]) -> list[dict
             # un-datable END (``END_UNKNOWN`` — the owner ruling of
             # 2026-10-25, ONTOLOGY §4.7), and the search payload already
             # normalises absence to ``None``/an omitted key
-            # (``search_engine.fetch_point_epistemic_state`` uses ``or None``
-            # and emits ``end_state`` only for a real window). Coercing here
+            # (``search_engine.fetch_point_epistemic_state`` normalises an
+            # ABSENT bound to ``None`` — only absence and the blank "no bound"
+            # spelling collapse, a stored number is kept at any value (#9741
+            # review P3-2) — and emits ``end_state`` only for a real window).
+            # Coercing here
             # minted an end nobody wrote, which ``is_stale_entry`` then reads
             # as ENDED at every ``question_date`` — every undated eval hit
             # ranked stale and the C6 ``prefer_latest_order`` arm degraded to
@@ -1361,6 +1413,34 @@ def resolve_rerank_arm_pool_limit(
     return max(rerank_pool, baseline)
 
 
+def _floor_arm_guard_kwargs(
+        *, floor_term: bool,
+        guard_per_session_cap: int | None) -> dict[str, Any]:
+    """#2513 (#10629 review): the floor-term arm AS THE GUARD RECEIVES IT,
+    expressed in ONE place.
+
+    Both pool-order compositions call this — the coverage loop's additive
+    merge (``_guard_and_recap_pool``) and the source-session re-injection
+    MOVE (``reinjection_merge_order``, which reaches the same guard). The
+    second composition is the one that gets forgotten: the seam landed
+    armable from the direct composition only, so a re-injection A/B would
+    have run with the lower bound silently OFF while the receipt said it was
+    armed. One expression, called twice, is what makes that class of drift
+    impossible rather than reviewed-for.
+
+    ``guard_per_session_cap=None`` means "the product default" — an explicit
+    value is passed through, so the value a run resolved (and stamped on the
+    checkpoint fingerprint and the methodology) is EXACTLY the value the
+    guard serves.
+    """
+    return {
+        "per_session_cap": (guard_per_session_cap
+                            if guard_per_session_cap is not None
+                            else DEFAULT_POOL_SESSION_CAP),
+        "floor_term": bool(floor_term),
+    }
+
+
 def retrieve_for_question(
     sdk: TortoiseSDK,
     question: dict,
@@ -1398,9 +1478,16 @@ def retrieve_for_question(
     # ``temporal_leg_weight`` / ``temporal_leg_limit`` override the leg's
     # fusion weight and depth (env ``TORTOISE_LME_TEMPORAL_LEG_WEIGHT`` /
     # ``TORTOISE_LME_TEMPORAL_LEG_LIMIT``).
+    # ``temporal_leg_placement`` (#10538) selects ``"tail"`` (shipped,
+    # structural no-harm) or ``"head"`` (the rank-0 counterfactual) via
+    # :func:`resolve_temporal_leg_placement` (env
+    # ``TORTOISE_LME_TEMPORAL_LEG_PLACEMENT``); the resolved value is echoed
+    # in ``temporal_leg_stats`` because a head run and a tail run that are
+    # not distinguishable in the receipt are not comparable numbers.
     temporal_leg: bool | None = None,
     temporal_leg_weight: float | None = None,
     temporal_leg_limit: int | None = None,
+    temporal_leg_placement: str | None = None,
     # R6 (#1545): rerank knobs — the post-fusion cross-encoder + MMR stage,
     # OFF by default (the V3 baseline path is byte-identical; no rerank keys
     # off-path, D2). ``rerank`` tri-state: True/False explicit, None = env
@@ -1509,6 +1596,19 @@ def retrieve_for_question(
     # the fetch serves (methodology == actual == fingerprint). None = a
     # direct caller passed nothing; the env fallback below resolves it.
     session_reinjection_total_cap: int | None = None,
+    # #2513 (#10629 review): the guard's LOWER bound (the floor term) and its
+    # per-session UPPER cap, as the two pool-order compositions receive them.
+    # ``floor_term`` is tri-state (True/False explicit, None = env
+    # ``TORTOISE_LME_FLOOR_TERM``; only 1/true/yes/on enables — fail-safe OFF,
+    # the #1745 default decision); OFF by default and default-preserving, so
+    # arming it is the sealed A/B's decision, not this seam's. The run path
+    # resolves both once and passes them explicitly, so the value that gated
+    # the checkpoint fingerprint and the methodology record is exactly the
+    # value the guard serves (methodology == actual == fingerprint).
+    # ``guard_per_session_cap=None`` = the product default
+    # (``retrieval.DEFAULT_POOL_SESSION_CAP``).
+    floor_term: bool | None = None,
+    guard_per_session_cap: int | None = None,
     # C5 (#2521, #2513): aggregative-intent detection + per-facet coverage
     # check — tri-state (True/False explicit, None = env
     # ``TORTOISE_LME_AGGREGATIVE_FLAG``; only 1/true/yes/on enables —
@@ -1930,7 +2030,10 @@ def retrieve_for_question(
     #
     # Fail-safe OFF: explicit flag > env ``TORTOISE_LME_TEMPORAL_LEG`` >
     # OFF; a question with no temporal constraint, a non-TR question, or a
-    # pool with no dated/anchor-relevant candidates leaves the fused order
+    # pool with no dated candidates (or no anchor-relevant candidates AND no
+    # date window -- #10538's window arm promotes anchor-less pools whose
+    # visible slots are session-clustered, see
+    # tests/test_temporal_leg_date_window_10538.py) leaves the fused order
     # byte-identical. ──
     if temporal_leg is not None:
         temporal_leg_on = temporal_leg
@@ -1978,11 +2081,51 @@ def retrieve_for_question(
         # stats block is the ON/OFF reconstruction surface — never report a
         # knob value that was silently clamped away).
         _tl_limit = effective_promotion_budget(effective_top_k, _tl_limit)
+        # #10538: a question that names a DATE RANGE instead of comparison
+        # anchors targets the pool by that range. Resolve the SAME inclusive
+        # ISO bounds the filter above resolved (one arithmetic, one resolver),
+        # and hand them to the leg, which then promotes on session clustering
+        # inside the range.
+        #
+        # ⚠️ HONEST NOTE (review cycle 2): because these bounds are the ones
+        # ``_apply_time_window`` already filtered on, every surviving hit is
+        # in-window, so this window does NOT select a subset here — the
+        # clustering condition inside ``temporal_leg_order`` is the sole
+        # targeting signal on the wired path. That holds for the
+        # ``tr_window_fallback`` pool as well, which is why it is NOT a second
+        # place the window selects: that pool is unfiltered because the filter
+        # EMPTIED it (``tr_window_fallback`` is set only when
+        # ``_apply_time_window`` returned ``[]``, i.e. no DATED hit was
+        # in-window), and both seams resolve their bounds from the same
+        # ``facet_window_bounds`` call with the same anchor — so
+        # ``_in_date_window`` is false for every promotable candidate there
+        # too and the arm cannot fire on it by construction (review cycle 6,
+        # #10549: the earlier text claimed reachability here that does not
+        # exist; pinned by
+        # ``test_the_fallback_pool_cannot_fire_the_window_arm``). The window
+        # carries reach only for a caller that passes a span the filter has
+        # not already applied.
+        # ``ordering`` has no computable bound (`facet_window_bounds` returns
+        # ``None``) → ``None`` → byte-identical to the pre-#10538 leg.
+        _tl_date_window = None
+        if tr_constraint.kind in ("interval", "recency"):
+            _tl_date_window = facet_window_bounds(
+                tr_constraint.kind, tr_constraint.start, tr_constraint.end,
+                None, anchor=question_date)
+        # #10538: forward the placement knob so the rank-0 counterfactual the
+        # module docstring parks on the eval lane is actually reachable here
+        # (it needs no new code there — ``temporal_leg_fusion_order`` already
+        # implements it — only this forward). Resolved fail-safe to the
+        # shipped ``"tail"``, so the default path is byte-identical.
+        _tl_placement = resolve_temporal_leg_placement(
+            temporal_leg_placement,
+            os.environ.get("TORTOISE_LME_TEMPORAL_LEG_PLACEMENT"))
         _tl_order, _tl_picks = temporal_leg_fusion_order(
             annotated, anchors=tr_constraint.anchors,
             window=effective_top_k, limit=_tl_limit,
             bucket_cap=DEFAULT_TEMPORAL_LEG_BUCKET_CAP,
-            weight=_tl_weight)
+            weight=_tl_weight, date_window=_tl_date_window,
+            placement=_tl_placement)
         _tl_dated = sum(1 for h in annotated if h.get("session_date"))
         temporal_leg_stats = {
             "on": True,
@@ -1990,10 +2133,23 @@ def retrieve_for_question(
             "kind": tr_constraint.kind,
             "anchors": list(tr_constraint.anchors),
             "picks": len(_tl_picks),
-            "ceiling": max(effective_top_k - _tl_limit, 0),
+            # #10538: the ceiling the fused caller ACTUALLY used — ``0`` on
+            # the head arm, because that arm fuses the picks at leg ranks
+            # 0..N by passing ``head_excl = 0`` (``tortoise/temporal_leg.py``).
+            # Reporting the tail ceiling on a head row would put two
+            # contradicting fields on exactly the row the ``placement`` key
+            # exists to disambiguate, and would break this block's own rule
+            # (report the effective value, never a knob the caller overrode).
+            "ceiling": 0 if _tl_placement == "head"
+                       else max(effective_top_k - _tl_limit, 0),
             "dated": _tl_dated,
             "leg": list(_tl_picks),
             "weight": _tl_weight,
+            # #10538: which arm produced this row. A ``head`` run and a
+            # ``tail`` run are not comparable numbers, so the receipt must
+            # carry the arm (the same reason the CLAMPED budget above is
+            # reported rather than the knob value).
+            "placement": _tl_placement,
         }
         if _tl_picks:
             _tl_by_id = {h["id"]: h for h in annotated}
@@ -2002,14 +2158,16 @@ def retrieve_for_question(
             legs.append({"leg": "temporal", "ran": True, "degraded": False,
                          "reason": None, "count": len(_tl_picks)})
         else:
-            # honest trace reason — the five distinct empty-leg causes
+            # honest trace reason — the six distinct empty-leg causes
+            # (``no_window_candidates`` is the #10538 windowed miss)
             # (never launder a budget/anchor/weight miss as "no dates").
             legs.append({"leg": "temporal", "ran": True, "degraded": False,
                          "reason": temporal_leg_empty_reason(
                              dated=_tl_dated,
                              anchors=len(tr_constraint.anchors),
                              weight=_tl_weight,
-                             budget=_tl_limit),
+                             budget=_tl_limit,
+                             date_window=bool(_tl_date_window)),
                          "count": 0})
 
     # ── deduped pool (the retrieval contract: ret["hits"] == pool) ──
@@ -2046,6 +2204,18 @@ def retrieve_for_question(
     # Default OFF + env gate (TORTOISE_LME_COVERAGE_LOOP); TR questions keep
     # the R5 date machinery and skip the loop; any failure keeps the
     # ORIGINAL pool (fail-open, byte-identical). ──
+    # #2513 (#10629 review): resolve the floor-term arm ONCE here — before the
+    # first composition that spends it — and express it once, through
+    # ``_floor_arm_guard_kwargs``, so the coverage-loop leg and the
+    # re-injection leg can never disagree about what arm they are running.
+    if floor_term is not None:
+        floor_term_on = bool(floor_term)
+    else:
+        from .rerank import _TRUTHY
+        _ft_env = (os.environ.get("TORTOISE_LME_FLOOR_TERM") or "")
+        floor_term_on = _ft_env.strip().lower() in _TRUTHY
+    _guard_arm = _floor_arm_guard_kwargs(
+        floor_term=floor_term_on, guard_per_session_cap=guard_per_session_cap)
     if coverage_loop is not None:
         coverage_loop_on = coverage_loop
     else:
@@ -2123,6 +2293,7 @@ def retrieve_for_question(
                     # toggle lives inside it, never in a second entry point.
                     _merged = _guard_and_recap_pool(
                         _merged, guard=True, window=_LOOP_WINDOW,
+                        **_guard_arm,
                         max_chunks_per_session=max_chunks_per_session)
                     _merged_ids = {h["id"] for h in _merged}
                     loop_merged_added = len(
@@ -2141,6 +2312,13 @@ def retrieve_for_question(
         loop_latency_ms = (time.monotonic() - _t_loop) * 1000.0
     coverage_loop_stats = {
         "on": coverage_loop_on,
+        # #2513: the arm the RUN resolved (one value, shared by both
+        # compositions through ``_guard_arm``), recorded beside this
+        # composition's ``on`` — this composition SPENDS it only when ``on``
+        # is true; the value is stamped either way so a receipt reader never
+        # has to guess which arm produced the pool.
+        "floor_term": floor_term_on,
+        "guard_per_session_cap": _guard_arm["per_session_cap"],
         "loop_iterations": loop_iterations,
         "loop_fired_facet": loop_fired_facet,
         "loop_merged_added": loop_merged_added,
@@ -2161,7 +2339,15 @@ def retrieve_for_question(
     # product writes; the raw ``session-transcript`` chunk kind stays
     # addressable for the eval A/B — in ONE batched query and
     # splice them back immediately after that session's LAST base hit —
-    # additive, so an injected item can never evict a base item; the
+    # additive ON THE POOL, so an injected item never drops a base item
+    # FROM IT. That is NOT reader-additivity (#10540): the reader consumes
+    # a PREFIX of the pool, so an injected item inside that window
+    # displaces one base hit, and a session whose hits sat at the window's
+    # tail can lose its representation ENTIRELY — the crowding this arm's
+    # outcome forbids and every pre-#10540 census key could not see. The
+    # reader-window census ~215 lines below
+    # (``session_reinjection.reader_window_displacement``) measures
+    # exactly that. The
     # shared guard then re-caps through the same contract C3-1 uses.
     # Product rules live in tortoise/session_reinjection.py. INSERTION
     # POINT IS PINNED: after the C3-1 block, before the C2 boost — the
@@ -2200,8 +2386,80 @@ def retrieve_for_question(
     _sr_seed_window = (eff_item_cap if eff_item_cap is not None
                        else DEFAULT_REINJECTION_SEED_WINDOW)
     _sr_seed_limit = DEFAULT_REINJECTION_SEED_SESSIONS
+    # The reader's item cap IS its window: ``reader_window_displacement``
+    # measures crowding against the prefix the reader actually consumes, so
+    # the window is the caller's resolved cap. The branch below is a
+    # direct-caller fallback reading ``DEFAULT_CONTEXT_ITEM_CAP`` (40) — the
+    # SAME constant ``eff_item_cap`` itself falls back to above — and NOT
+    # ``assemble_context``'s own default, which is ``top_k``; and it is
+    # unreachable from here, because ``eff_item_cap`` is always resolved to an
+    # int above. Kept as a floor, not as a claim about the reader. It names
+    # the constant the CODE reads: the seed window's constant is numerically
+    # 40 today too, so a comment naming it would be true only by coincidence.
+    _sr_reader_window = (eff_item_cap if eff_item_cap is not None
+                         else DEFAULT_CONTEXT_ITEM_CAP)
+    # …with ONE exception, and it is a narrowing, not a widening: on the
+    # POOL-ONLY isolation arm (``--rerank off --rerank-pool N``) this lane
+    # truncates the delivered pool to ``top_k`` BEFORE assembly
+    # (``pool = pool[:top_k]`` below — the OQ5 reader invariant), while the
+    # assembled item cap stays ``eff_item_cap``. A window of
+    # ``eff_item_cap`` there would census items the reader never received and
+    # over-report crowding — injected items AND displaced base items alike —
+    # on exactly the arm a pool-depth sweep reads. ``min(cap, top_k)`` is the
+    # tightest window that arm admits. What it does NOT do is make the count
+    # incapable of under-counting: that holds only while
+    # ``top_k <= eff_item_cap``, because then the cut and the window coincide
+    # and no candidate below the window exists to be admitted. ``--top-k`` and
+    # ``--context-items`` are independent flags (``run.py``), so with
+    # ``top_k > eff_item_cap`` the cut sits ABOVE the window,
+    # ``assemble_context`` walks past ``eff_item_cap`` whenever a skip frees a
+    # slot, and a hit below the window IS delivered without being counted —
+    # the same under-count as on every other arm. The skip mechanism inside
+    # the prefix over-counts it on all arms. The R6 rerank arm below cannot be
+    # narrowed this way: it re-SELECTS from the whole pool instead of cutting
+    # a prefix. ``top_k`` (not ``effective_top_k``) is the value the
+    # truncation site reads, and the census excludes TR questions anyway,
+    # where the two differ.
+    #
+    # ⛔ THE WINDOW IS DERIVED FROM THE TRUNCATION SHAPE, NOT FROM A FLAG
+    # (#10632 review P2). THREE sites below cut the delivered pool to a
+    # ``top_k`` prefix — the pool-only arm, the D3(a)/S25 load-failure
+    # degrade (``scorer is None``) and the D8c score-failure degrade
+    # (``rerank_hits`` reports ``applied: False``) — and the last two are
+    # DECIDED by the R6 stage, i.e. AFTER this line. A flag test written here
+    # therefore saw the pool-only arm alone: on the two degrade arms the
+    # window stayed ``eff_item_cap`` (40) while the reader received at most
+    # ``top_k`` (20), so ``injected_in_window`` / ``base_displaced``
+    # over-reported crowding and ``sessions_lost`` could name a session as
+    # lost that the reader never had — all stamped ``measured: True``. So
+    # each cutting site DECLARES its cut (``_sr_prefix_cut = len(pool)``) and
+    # the census is TAKEN after the R6 stage (``_sr_census_inputs``), which
+    # makes the window follow the shape the pool actually has. The
+    # applied-rerank arm declares nothing: it re-selects rather than cuts, so
+    # its census stays the pre-rerank positional approximation its docstring
+    # already declares.
+    _sr_prefix_cut: int | None = None
+    _sr_census_inputs: tuple[list[dict], list[dict]] | None = None
     # per-outcome census (§2): the OFF arm records the same zeroed shape so
-    # the arm delta stays reconstructable per question.
+    # the arm delta stays reconstructable per question. That zeroed
+    # ``sessions_before``/``sessions_after`` is a DESIGN, not a measurement —
+    # no census is taken on this arm — so a consumer deriving a rate from it
+    # (``len(sessions_lost) / sessions_before``) must guard the zero rather
+    # than read it as "the reader's window held no sessions". Filling in the
+    # base window's real counts here was considered and declined: the two arms
+    # would then report DIFFERENT quantities under the same key, which is what
+    # breaks the per-question arm delta this comment exists to record.
+    #
+    # ``measured`` is therefore ``False`` in this shape, and it is the ONLY key
+    # that separates it from a real zero. Every path that never reaches the
+    # census below keeps it: the whole OFF arm, a TR question, an ON-arm
+    # question where no injected group materialised, a fetch that reported
+    # not-ok, and a merge-stage failure. ``measured: True`` with zeroed counts
+    # makes "the census ran and found no crowding" indistinguishable from "no
+    # census was taken (or the arm did nothing)", so a consumer filtering on
+    # ``measured`` — the documented way to use it — silently folds half a
+    # corpus's OFF-arm questions into the crowding sample. Only the census (or
+    # its own ``except``, which writes ``None`` values) reports ``True``.
     sr_seeds: list[str] = []
     sr_seeded = 0
     sr_injected_per_session: dict[str, int] = {}
@@ -2211,6 +2469,14 @@ def retrieve_for_question(
     sr_dropped_by_cap = 0
     sr_fetch_ok = False
     sr_total_cap_hit = False
+    sr_window_displacement: dict[str, object] = {
+        "window": _sr_reader_window, "injected_in_window": 0,
+        "base_displaced": 0, "sessions_lost": [],
+        "sessions_before": 0, "sessions_after": 0, "measured": False}
+    # The placeholder above carries the cap; its ``window`` is refined below
+    # once the pool's shape is final (``_sr_prefix_cut``), EVEN when no
+    # census is taken — an unmeasured question still reports the window it
+    # would have censused.
     sr_latency_ms = 0.0
     if reinjection_on and not is_tr and pool:
         from tortoise import session_reinjection as _sr
@@ -2327,11 +2593,13 @@ def retrieve_for_question(
                         if _group:
                             _added_by_session[_sid] = _group
                     if _added_by_session:
+                        _pre_merge_pool = pool
                         _merged = _sr.reinjection_merge_order(
                             pool, _added_by_session,
                             seed_order=[s.session_id for s in _seeds],
                             guard=reinjection_guard,
                             guard_window=_LOOP_WINDOW,
+                            **_guard_arm,
                             max_chunks_per_session=max_chunks_per_session)
                         _merged_ids = {h["id"] for h in _merged}
                         sr_injected_per_session_merged = {
@@ -2339,7 +2607,29 @@ def retrieve_for_question(
                             for sid, v in _added_by_session.items()}
                         sr_injected_merged = sum(
                             sr_injected_per_session_merged.values())
+                        # READER-WINDOW census (#10540): ``injected_merged``
+                        # counts items that reached the POOL. The reader
+                        # consumes a PREFIX of it, so the crowding this arm's
+                        # outcome forbids — base hits, and whole sessions,
+                        # pushed past the cut by the injection — was invisible
+                        # in every prior census key. Measured on 63981d152 at
+                        # the shipped budgets: 10 base hits displaced and two
+                        # sessions lost entirely, while ``injected_merged``
+                        # read a healthy 10.
+                        # The ARM DECISION comes first: a pure measurement
+                        # must never decide whether the treatment is applied.
+                        # ``pool = _merged`` therefore precedes the census
+                        # below, which has its OWN except — a measurement
+                        # failure leaves the merged pool intact and records
+                        # an explicit unmeasured marker instead of the zeroed
+                        # shape (a zero there would read as "no crowding"
+                        # and as a merge-stage failure at once).
                         pool = _merged
+                        # DEFERRED census (#10632 review P2): the window is
+                        # a function of the truncation the R6 stage applies
+                        # below, so the two lists are captured here (the arm
+                        # decision is already made) and measured there.
+                        _sr_census_inputs = (_pre_merge_pool, _merged)
         except Exception:  # noqa: BLE001, RUF100
             # fail-open: any failure (fetch OR annotate/merge stage) keeps
             # the ORIGINAL pool — byte-identical to the one-shot result. The
@@ -2354,9 +2644,16 @@ def retrieve_for_question(
                 "the original pool (fail-open)", qid, exc_info=True)
             sr_injected_per_session_merged = {}
             sr_injected_merged = 0
+            # the merge failed, so there is nothing coherent to census
+            _sr_census_inputs = None
         sr_latency_ms = (time.monotonic() - _t_sr) * 1000.0
     session_reinjection_stats = {
         "on": reinjection_on,
+        # #2513: the arm the RUN resolved — the same value as
+        # ``coverage_loop_stats``, spent here only when ``on`` is true (see
+        # the note there).
+        "floor_term": floor_term_on,
+        "guard_per_session_cap": _guard_arm["per_session_cap"],
         "seed_window": _sr_seed_window,
         "seed_limit": _sr_seed_limit,
         "seed_sessions": sr_seeds,
@@ -2366,6 +2663,7 @@ def retrieve_for_question(
         "injected_per_session_merged": sr_injected_per_session_merged,
         "injected_merged": sr_injected_merged,
         "dropped_by_cap": sr_dropped_by_cap,
+        "reader_window_displacement": sr_window_displacement,
         "fetch_ok": sr_fetch_ok,
         "total_cap_hit": sr_total_cap_hit,
         "guard": reinjection_guard,
@@ -2464,6 +2762,7 @@ def retrieve_for_question(
             # 40-pool stand-in masquerading as a rerank result
             rerank_pass["degrade_reason"] = degrade_reason
             pool = pool[:top_k]
+            _sr_prefix_cut = len(pool)      # the reader's window (#10632)
         else:
             pool_recall = _recall_metrics(
                 pool, ks=ks, answer_sessions=answer_sessions,
@@ -2487,10 +2786,56 @@ def retrieve_for_question(
                 # score-failure degrade (D8c) — same contract as load-failure
                 rerank_pass["degrade_reason"] = stats.get("degrade_reason", "")
                 pool = pool[:top_k]      # reader/context invariant
+                _sr_prefix_cut = len(pool)  # the reader's window (#10632)
         rerank_pass["applied"] = applied
         rerank_ms = (time.monotonic() - t0) * 1000.0
     elif (rerank_pool is not None) and not rerank_on:
         pool = pool[:top_k]              # pool-only arm: reader sees top_k
+        _sr_prefix_cut = len(pool)       # the reader's window (#10632)
+
+    # ── #10540: the READER-WINDOW census, taken HERE because its window is a
+    # property of the pool this function finally hands on. Every cutting site
+    # above declared ``_sr_prefix_cut``; the applied-rerank arm declared
+    # nothing (it re-selects from the whole pool, so no prefix describes what
+    # the reader received — that positional residual is the docstring's, not
+    # this window's). ``min(cap, cut)`` is what the reader can receive: the
+    # assembled item cap, bounded by the prefix that survived truncation.
+    # ⛔ Not a hard ceiling on the COUNT — see the ``top_k > eff_item_cap``
+    # under-count the comment at ``_sr_reader_window`` records. The arm's own
+    # ``latency_ms`` (above) was taken BEFORE this block, so it measures
+    # SEED → MERGE and not the measurement: the census is a pure in-memory
+    # pass, and it no longer rides the arm's cost now that it runs after R6.
+    # ──
+    _sr_window = (_sr_reader_window if _sr_prefix_cut is None
+                  else min(_sr_reader_window, _sr_prefix_cut))
+    sr_window_displacement["window"] = _sr_window
+    if _sr_census_inputs is not None:
+        from tortoise import session_reinjection as _sr
+
+        _sr_census_base, _sr_census_merged = _sr_census_inputs
+        try:
+            sr_window_displacement = _sr.reader_window_displacement(
+                _sr_census_base, _sr_census_merged, window=_sr_window)
+        except Exception:  # noqa: BLE001, RUF100
+            import logging as _logging
+            sr_window_displacement = {
+                "window": _sr_window,
+                # None, not the POOL-scope count: every other key here is
+                # window-scope, and a pool count read as a window count
+                # over-reports.
+                "injected_in_window": None,
+                "base_displaced": None,
+                "sessions_lost": None,
+                "sessions_before": None,
+                "sessions_after": None, "measured": False}
+            _logging.getLogger(__name__).warning(
+                "C4 reader-window census failed for %s — the merged pool "
+                "stands; the crowding is UNMEASURED for this question", qid,
+                exc_info=True)
+        # the stats dict was minted with the placeholder, so the measured
+        # value (or its unmeasured shape) is written back by key
+        session_reinjection_stats["reader_window_displacement"] = (
+            sr_window_displacement)
 
     # ── C6 (#2520, #2513): rank-time prefer-latest ── ─────────────────
     # Applied to the FINAL ``pool``, immediately before the metrics read it,

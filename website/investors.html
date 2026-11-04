@@ -283,12 +283,11 @@
        `text-wrap: pretty` re-breaks a paragraph to avoid ending it on a short
        lone word, which this copy does easily: the third capability gap ends on
        "modeling." alone — 82px against a 592px measure — and with the
-       declaration ends at 165px. The list carries no `.profile` exception
-       because the `.profile` cells want it too — the Progress "1M+ views" line
-       ends on "leads" alone, 43px of a 262px measure, and ends at 113px with
-       it. Line count and element height are unchanged for all 22 items across
-       the page's 7 `.bullets` lists at any of the 225 widths swept, 320px to
-       1600px. */
+       declaration ends at 165px. This rule is deliberately not scoped away
+       from `.profile`: the Progress lists inside it need the same re-break.
+       Paragraph prose in a `.profile` cell is not covered here — `.profile p`
+       carries its own `text-wrap: pretty` below, because a `.bullets li`
+       selector never reaches a paragraph. */
     .bullets { list-style: none; margin-top: 1.15rem; }
     .bullets li { display: flex; gap: 0.7rem; align-items: baseline; font-size: 0.95rem; text-wrap: pretty; }
     .bullets li + li { margin-top: 0.4rem; }
@@ -698,13 +697,14 @@
             <h3>Product &amp; distribution</h3>
             <ul class="bullets">
               <li><span>Working alpha, beta in development</span></li>
-              <li><span>1M+ views on founder-led content, generating inbound leads</span></li>
+              <li><span>2M+ views on founder-led content, generating inbound leads</span></li>
             </ul>
           </div>
           <div>
             <h3>Early demand</h3>
             <ul class="bullets">
-              <li><span>32 of 34 calls: &ldquo;when can I use it&rdquo;</span></li>
+              <li><span>40+ calls: &ldquo;when can I use it&rdquo;</span></li>
+              <li><span>35+ waiting to try it</span></li>
               <li><span>1 team design partner providing data &amp; feedback</span></li>
               <li><span>Enterprise discussions underway</span></li>
             </ul>

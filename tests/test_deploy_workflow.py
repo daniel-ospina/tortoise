@@ -70,10 +70,20 @@ _SHELL_TEST = re.compile(r'\[ -[zn] "\$([A-Z0-9_]+)" \]')
 # it for TORTOISE_GIT_SHA).
 _ARRAY_ELEMENT = re.compile(r"ARGS\+?=\(([^)]*)\)")
 _ARRAY_PAIR = re.compile(r'([A-Z0-9_]+)="\$\{?([A-Z0-9_]+)\}?"')
-# The one argv pair whose value is a GitHub BUILT-IN, not an env-bound secret.
-# Exempted by name, so the parser can accept the brace spelling without the
-# exemption depending on a regex that misses it.
-_NON_SECRET_PAIRS = {("TORTOISE_GIT_SHA", "GITHUB_SHA")}
+# The argv pairs whose value is NOT an env-bound secret: `GITHUB_SHA` is a GitHub
+# built-in, and `TORTOISE_GIT_DIRTY` is workflow-computed from the build's own tree
+# (#10447) and can never be empty (the payload defaults to `unknown`, which /health
+# reads as null). Exempted BY NAME, so the parser can accept the brace spelling
+# without the exemption depending on a regex that misses it — and this set also
+# authorises an UNCONDITIONALLY staged value (no `-n` guard); the exemptions are
+# NAMED in `test_optional_fly_appends_are_n_guarded`'s docstring, so keep the two
+# in step (a numbered count is what drifted twice already).
+_NON_SECRET_PAIRS = {("TORTOISE_GIT_SHA", "GITHUB_SHA"),
+                     # #10447: workflow-COMPUTED from the build's own tree, never an
+                     # env-bound secret, and never empty — an unreadable tree stages
+                     # `unknown` (which /health reads as null), so an `-n` guard would
+                     # buy nothing and the guard exists to stop a SECRET clobber.
+                     ("TORTOISE_GIT_DIRTY", "TORTOISE_GIT_DIRTY_STAMP")}
 # The only argv keys whose FLY-side name deliberately differs from the env var
 # it reads. Every other key must equal the variable it reads — the app resolves
 # its config by the env NAME, so a fly-side typo ships the secret under a name
@@ -315,8 +325,10 @@ def test_every_env_bound_secret_reaches_fly(workflow_text):
     reads — or a declared `_FLY_RENAMES` rename, whose presence is asserted too,
     since a de-renamed key would otherwise ship the secret under a name nothing
     reads while the gate passes. ``FLY_API_TOKEN`` (flyctl consumes it from the
-    environment, never as argv) and the `TORTOISE_GIT_SHA="${GITHUB_SHA}"`
-    built-in pair (`_NON_SECRET_PAIRS`) are the two exemptions."""
+    environment, never as argv) and the `_NON_SECRET_PAIRS` entries
+    (`TORTOISE_GIT_SHA`←`GITHUB_SHA`, and `TORTOISE_GIT_DIRTY`←
+    `TORTOISE_GIT_DIRTY_STAMP`, which the payload defaults to `unknown` so it is
+    never empty) are the exemptions."""
     step = _steps()[_SET_STEP]
     run = step.get("run", "")
     bindings = set(_env_bindings(step))
@@ -368,13 +380,15 @@ def test_optional_fly_appends_are_n_guarded(workflow_text):
     """#4334 — every single-key `ARGS+=(K="$K")` append stays `[ -n "$K" ]`-guarded.
 
     The guard is what keeps an unset optional secret OUT of the argv; dropping
-    it would push `K=` to Fly and clobber any out-of-band value. Two append
-    shapes are deliberately exempt: the two multi-pair appends (the base
-    three-key array and the Stripe pair), and
-    `TORTOISE_GIT_SHA="${GITHUB_SHA}"` — GITHUB_SHA is a GitHub built-in that is
-    always set, not an env-bound secret, so it needs no guard (`_NON_SECRET_PAIRS`).
-    A third is the #4126 versioned default (`_UNCONDITIONAL_BY_DECISION`), which
-    pushes a recorded non-secret constant, never an empty value."""
+    it would push `K=` to Fly and clobber any out-of-band value. The exemptions,
+    named rather than numbered so a stale count cannot hide a deliberate one:
+    the multi-pair appends (the base three-key array and the Stripe pair);
+    `TORTOISE_GIT_SHA="${GITHUB_SHA}"` — a GitHub built-in that is always set, not
+    an env-bound secret (`_NON_SECRET_PAIRS`); `TORTOISE_GIT_DIRTY=` (#10447) — also
+    workflow-computed and never empty, because the payload defaults an absent or
+    EMPTY stamp file to `unknown`; and the #4126 versioned default
+    (`_UNCONDITIONAL_BY_DECISION`), which pushes a recorded non-secret constant,
+    never an empty value."""
     run = _steps()[_SET_STEP]["run"]
     for line in run.splitlines():
         m = re.search(r"ARGS\+=\(([^)]*)\)", line)
@@ -3946,12 +3960,14 @@ def test_the_health_build_block_is_documented_for_operators():
     Four subtleties ride on this block and every one of them is a misread an
     operator will make under pressure: it deliberately does not fold into
     `status` (so `status: ok` is not "current"), `build_identified: false` is the
-    "cannot check" refusal (not "no build"), `commit_dirty` is **`null` on
-    production today** because nothing stamps `TORTOISE_GIT_DIRTY` (`null` is NOT
-    "clean"), and `migrations_head` is the population the IMAGE carries — not the
-    set applied to the database. A stale deploy with `build_identified: true` and
-    a null `commit_dirty` is exactly the case that reads as clean if the runbook
-    is silent.
+    "cannot check" refusal (not "no build"), `commit_dirty: null` means **NOT
+    STATED** — the deploy now stamps `TORTOISE_GIT_DIRTY` from its own tree
+    (#10447 reopen), so `null` means the reading is missing (selfhost / local dev /
+    an unreadable tree), never "clean" — and `migrations_head` is the population
+    the IMAGE carries — not the set applied to the database. A deployment whose
+    `commit_dirty` is null reports `build_identified: false` with
+    `build_identified_reason: tree_dirt_unstated`, which is the case that reads as
+    clean if the runbook is silent.
 
     Pre-fix this reds at the marker: the runbook's §4 has 4.1 (client effect) and
     4.2 (billing mirror) and nothing about `build`.
@@ -3966,10 +3982,15 @@ def test_the_health_build_block_is_documented_for_operators():
         "reading needs no shell, no key and no database"
     )
     for field in ("version", "commit_sha", "commit_dirty", "build_identified",
+                  "build_identified_reason", "image",
                   "started_at", "migrations_head", "migrations_source"):
-        assert field in section, (
-            f"the field table omits `{field}` — a reader who has the field but no "
-            "meaning reads it wrong (a `null` `commit_dirty` as clean, an "
+        # A ROW, not a token (review P2): `field in section` is satisfied by prose
+        # that happens to say "image" (the `migrations_head` row does), so deleting
+        # the row the operator actually reads left the pin green. Anchored to a
+        # table row so a reflow cannot satisfy it by accident.
+        assert re.search(rf"^\|\s*`{re.escape(field)}`\s*\|", section, re.M), (
+            f"the field TABLE has no `{field}` row — a reader who has the field but "
+            "no meaning reads it wrong (a `null` `commit_dirty` as clean, an "
             "`unknown` `migrations_source` as the checkout)"
         )
     assert re.search(r"does NOT fold into `status`", flat), (
@@ -3977,9 +3998,11 @@ def test_the_health_build_block_is_documented_for_operators():
         "who reads `status: ok` as 'current' restarts a healthy machine, and a "
         "future change that DID fold staleness in would look documented-ok"
     )
-    assert re.search(r"`null` means \*\*NOT STAMPED\*\*", flat), (
-        "the entry does not say `commit_dirty: null` means NOT STAMPED — nothing "
-        "stamps `TORTOISE_GIT_DIRTY` yet, so `null` is silence, never 'clean'"
+    assert re.search(r"`null` means \*\*NOT STATED\*\*", flat), (
+        "the entry does not say `commit_dirty: null` means NOT STATED — an "
+        "unstamped deployment now reports `build_identified: false` with "
+        "`build_identified_reason: tree_dirt_unstated`, so `null` is silence, "
+        "never 'clean'"
     )
     assert re.search(r"NOT \"which migration has been APPLIED", flat), (
         "the entry does not refuse the applied reading — `migrations_head` is the "

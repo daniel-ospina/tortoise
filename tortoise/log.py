@@ -49,6 +49,7 @@ import stat
 import threading
 import time
 import weakref
+from collections.abc import Iterator
 from pathlib import Path
 
 try:                      # advisory locking is POSIX-only; Windows has none
@@ -85,11 +86,15 @@ except ImportError:       # pragma: no cover - import-time platform branch
 # though nothing is deleted (see ``PointRevised`` below). The owned-null
 # ``embedding`` clear is such a removal too, NOT a recompute: writing it away
 # RESURRECTED the vector an earlier record set (``_upsert_point_props``'
-# ``embedding_clear`` arm, projection/entities.py:719-730 → :772, whose own
-# ``#5004 round-6`` comment records that bug). The OTHER embedding writes are a
-# genuine recompute cache clear: a ``REMOVE n.embedding`` gated on a NEW vector
-# being written, in the Point fold (entities.py:853), the Subject/Object upserts
-# (:1650, :1713-1719), the Document fold (:1951) and the Event fold (:2127).
+# ``$embedding_clear`` arm, whose own ``#5004 round-6`` note records that bug —
+# every cite in this comment names a SYMBOL, because a bare line cannot survive
+# this file growing above it; the whole comment is swept that way and pinned).
+# The OTHER embedding writes are a genuine recompute cache clear: a
+# ``REMOVE <alias>.embedding`` gated on a NEW vector being written, and it has
+# exactly TWO spellings, both shared helpers — ``vector_write.clear_embedding``
+# (the MERGE-shaped ``Subject``/``Object``/``Event`` upserts) and
+# ``vector_write.clear_then_set_prefix`` (the ``FOREACH``-gated removal spliced
+# into the ``Point``/``Document`` folds' SET).
 # A member with no fold at all is a proof-carrying no-op. A torn tail whose
 # type is legible and wholly inside this set keeps the pre-existing tolerance.
 # EVERYTHING ELSE is refused: an unlisted type and an
@@ -103,13 +108,19 @@ except ImportError:       # pragma: no cover - import-time platform branch
 # cannot prove that payload absent.
 #   * ``PointAdded`` / ``OperatorAdded`` are members, but their fold reaches
 #     ``n.status = coalesce($st, n.status, 'live')`` with ``$st`` taken from the
-#     payload (projection/entities.py:770, :795) and ``create_point`` accepts
+#     payload (``projection/entities._upsert_point_props``'s fixed SET list —
+#     cited by SYMBOL, not by line. The three line cites that stood here
+#     (``:2525``, ``:2515``, ``:2627``) DID resolve when they were written and
+#     at this branch's base; they were moved +50/+56/+59 by ``origin/main``
+#     merges landing above them — which is exactly why a symbol cannot
+#     re-stale) and ``create_point`` accepts
 #     every value in ``POINT_STATUS_VALUES`` — a BORN-TERMINAL
 #     create (``_born_terminal``, a first-class case: see #2422)
 #     journals ``status`` in its ``PointAdded`` point snapshot. A
 #     torn born-terminal ``PointAdded`` for an id an EARLIER record left live is
 #     therefore a resurrection this classifier tolerates. ``n.content=$content``
-#     and the operator ``n.direction=$dir`` (entities.py:766, :825) are the same
+#     and the operator ``n.direction=$dir`` (the same ``_upsert_point_props`` SET
+#     list, and its operator-scoped ``set_clauses`` arm) are the same
 #     family on the same re-create composition, and so is an owned-null
 #     ``embedding`` (re-capture of a deterministic turn id — the
 #     ``f"{session_id}_t{i}"`` form ``sdk._capture_turn_id`` mints — with
@@ -235,16 +246,16 @@ TORN_TAIL_HARMLESS_EVENT_TYPES = frozenset({
 # Deliberately NOT harmless although the name reads as an addition or an
 # update:
 #   PointRevised — its fold WRITES a payload property with a plain
-#                  ``SET n.{key} = ${key}`` (PointRevised belief props
-#                  projection/__init__.py:6734-6736, in-memory :2082-2083;
-#                  the point's content :6660-6712; the annotator dims :6717),
+#                  ``SET n.{key} = ${key}`` (the belief props, the point's
+#                  content and the annotator dims, in ``_revise_point`` on the
+#                  graph and ``_apply_one``'s ``PointRevised`` arm in memory),
 #                  and ``None`` is a LEGITIMATE payload value that CLEARS — the
 #                  code says so at ``_belief_prop_value_ok``
-#                  (projection/entities.py:104-106, "``None`` is VALID for
+#                  ("``None`` is VALID for
 #                  every key — it is the journaled CLEAR … dropping it would
 #                  leave a stale prior in place across a rebuild") and at
-#                  ``_annotator_value_ok`` (projection/__init__.py:1790-1792,
-#                  the same sentence for ``annotate_operator``/``update_point``
+#                  ``_annotator_value_ok``
+#                  (the same sentence, for ``annotate_operator``/``update_point``
 #                  with ``x=None``). ``update_point(id, confidence=None)``
 #                  journals ``"confidence": null``, so a
 #                  torn ``PointRevised`` that drops a CLEAR leaves the stale
@@ -253,27 +264,28 @@ TORN_TAIL_HARMLESS_EVENT_TYPES = frozenset({
 #                  argument: the clear is visible IN THE SURVIVING PREFIX when
 #                  it is the torn key, and the type alone cannot exclude it.
 #   OperatorAnnotated — same shape: ``set_clauses = [f"n.{key} = ${key}" for
-#                  key in dims]`` (projection/__init__.py:6585), and
+#                  key in dims]`` (``_apply_annotator``), and
 #                  ``annotator_bias=None`` / a dim of ``None`` is the journaled
 #                  CLEAR (``_annotator_value_ok``).
 #   DocumentCreated — ``_upsert_document`` scrubs the RETIRED props
 #                     ``content`` / ``doc_status`` / ``docStatus`` /
 #                     ``objectKind`` / ``object_kind``
-#                     (projection/entities.py:1989), so a dropped tear leaves
+#                     (the ``_DOC_RETIRED_KEYS`` set), so a dropped tear leaves
 #                     state the live write removed.
 #   ConfidenceChanged — can carry ``outdated=true``, an EP-terminal flag.
 #   DirectEdgeRepoint — its ``delete_only=true`` leg removes an edge.
 #   EventRecorded — additive ONLY in the common case; see below.
 #   SessionRecorded — ``_fold_session_recorded`` OVERWRITES ``capture_ok`` /
 #                     ``capture_extractor`` / ``capture_redactions`` from the
-#                     payload (projection/entities.py:1261-1266; the only gate
+#                     payload (the only gate
 #                     is payload PRESENCE — ``val is not None and
 #                     _annotator_value_ok(val)``), and the SDK emits it as one of
 #                     the capture's TRAILING records with
 #                     ``capture_ok=False`` on a failed or keyless capture. A
 #                     dropped tear restores ``capture_ok=NULL``, which
-#                     ``hosted_api`` reads as the legacy "presumed captured"
-#                     replay case (hosted_api.py:10041-10065) — so the failed
+#                     the capture lane reads as the legacy "presumed captured"
+#                     replay case (``TortoiseSDK.capture_session``'s
+#                     ``#2335 WI-2b`` gate) — so the failed
 #                     session silently STOPS being re-attempted while recovery
 #                     reports success. Same root cause as #5921 (a payload-only
 #                     lifecycle property), but its harmful payload is COMMON and
@@ -292,7 +304,7 @@ TORN_TAIL_HARMLESS_EVENT_TYPES = frozenset({
 # direction for most records. ``_upsert_event`` →
 # ``_materialize_connector_source`` DELETEs the superseded
 # ``(Source)-[:references]->(Event)`` edge and the orphaned ``:Source`` node
-# (projection/entities.py:2390, :2399) whenever the record carries a registered
+# (its delete legs) whenever the record carries a registered
 # connector ``sourceKind`` or an explicit ``sourceUrl``. A torn record is a
 # BYTE PREFIX of the record being written, so the ABSENCE of those keys in it
 # is NOT evidence that the full record lacked them — the tear can land before
@@ -1058,6 +1070,26 @@ def _read_regular_file(path: Path) -> bytes | None:
         os.close(fd)
 
 
+def _read_regular_range(path: Path, offset: int, length: int) -> bytes | None:
+    """*length* bytes starting at *offset*, or ``None`` if it is not a REGULAR file.
+
+    The bounded read behind :meth:`EventLog.tail_bytes`, and it carries exactly the
+    guards ``_read_regular_file`` argues for, for the same reason: its caller runs on
+    the SDK's ABSENT-write path, so a special file left at the journal path must be a
+    MISS (the memo is discarded, the caller re-folds) and never a WAIT — ``O_NONBLOCK``
+    so a FIFO cannot park the call, ``S_ISREG`` so a device or directory is refused,
+    ``O_NOFOLLOW`` so a symlink cannot redirect a read. No full-file read and no
+    ``read()`` to EOF: ``pread`` touches only the window asked for.
+    """
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        return os.pread(fd, length, offset)
+    finally:
+        os.close(fd)
+
+
 def _open_regular_for_write(path: Path) -> int:
     """An open descriptor for the cache, which must be a REGULAR file.
 
@@ -1205,6 +1237,81 @@ def read_for_replay(log) -> list[dict]:
             p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
         return read_all(salvage=True)
     return read_all()
+
+
+class MentionScan:
+    """One RESUMABLE, bounded-memory byte scan of a journal (#10515 / #10543 r8).
+
+    Iterating yields the raw journal lines whose bytes contain ``needle`` (or
+    EVERY line when ``needle`` is ``None``) — the contract
+    :meth:`EventLog.mention_lines` already had. What this ADDS is
+    :attr:`resume_offset`: the byte offset just past the last COMPLETE line it
+    consumed, which a LATER scan may start from, because a journal is
+    append-only — nothing before that offset can change.
+
+    ⛔ WHY IT EXISTS (review round 8, finding 2). The caller's memo was keyed on
+    the whole ``os.stat`` identity, so ANY journal append invalidated it and the
+    next distinct absent id re-scanned from byte 0. That made the presence probe
+    O(journal) on **every absent write** on the live lane #7405 describes, and
+    the cost grows monotonically with tenant age (the journal is append-only and
+    never rotated): ~97.5 ms at the measured 23.7 MB is ~1 s at 240 MB and
+    several seconds for the 1.2 GB a 1M-record journal occupies — paid
+    SYNCHRONOUSLY inside ``update_point``, which is HTTP-exposed. QUIESCENT
+    journals were never the problem; appends were.
+
+    ⚠️ A TRAILING PARTIAL LINE IS DELIBERATELY NOT COUNTED. If the journal ends
+    in an unterminated line, ``resume_offset`` points at that line's FIRST byte,
+    so the next scan re-reads it WHOLE. A record that was mid-write at the first
+    read is then folded once, complete, instead of being read as two
+    unparseable fragments — the one way resuming could LOSE a record rather
+    than merely re-read one (a re-read is safe: the fold is last-record-wins).
+
+    ``start`` is taken as given. Only an offset that came from ``resume_offset``
+    is guaranteed to sit on a line boundary; a caller that invents one may read
+    a fragment (which fails its parse and is skipped there, never here). A
+    ``start`` past EOF yields nothing and leaves ``resume_offset`` beyond the
+    file — the caller owns the truncation check, because only it knows which
+    journal state its own memo describes.
+    """
+
+    __slots__ = ('_chunk', '_needle', '_path', '_start', 'resume_offset')
+
+    def __init__(self, path, needle: bytes | None = None, start: int = 0,
+                 chunk: int | None = None):
+        self._path = path
+        self._needle = needle
+        self._start = max(0, int(start))
+        self._chunk = chunk
+        self.resume_offset = self._start
+
+    def __iter__(self) -> Iterator[bytes]:
+        chunk_size = self._chunk or EventLog.MENTION_SCAN_CHUNK
+        consumed = self._start
+        tail = b''
+        self.resume_offset = self._start
+        with open(self._path, 'rb') as fh:
+            if self._start:
+                fh.seek(self._start)
+            while True:
+                chunk = fh.read(chunk_size)
+                if not chunk:
+                    break
+                consumed += len(chunk)
+                buf = tail + chunk
+                lines = buf.split(b'\n')
+                tail = lines.pop()      # a partial line — carried, never parsed
+                # everything before `tail` ended at a ``\n``: a safe resume point
+                self.resume_offset = consumed - len(tail)
+                for line in lines:
+                    for sub in line.split(b'\r'):
+                        if sub and (self._needle is None or self._needle in sub):
+                            yield sub
+        # the carried partial line (no terminator at EOF) is folded too — a
+        # COMPLETE record may simply lack its trailing newline — but it is never
+        # counted in `resume_offset`, so the next scan re-reads it whole
+        for sub in tail.split(b'\r'):
+            if sub and (self._needle is None or self._needle in sub):
+                yield sub
 
 
 class EventLog:
@@ -1994,6 +2101,156 @@ class EventLog:
             # leading newline, or the journal gains a blank line per repair.
             return SEAL_SENTINEL + "\n"
         return ""
+
+    #: The byte window :meth:`mention_lines` reads at a time. A caller may LOWER
+    #: it (a test that needs a line to straddle two windows does); raising it is
+    #: how the bounded scan stops being bounded, so the default is the whole
+    #: budget rather than a starting point.
+    MENTION_SCAN_CHUNK: int = 1 << 20
+
+    def mention_lines(self, needle: bytes | None = None,
+                      start: int = 0) -> MentionScan:
+        """Scan the journal for *needle*, resumably from *start* (#10515).
+
+        ``needle=None`` yields EVERY line — the caller folds them all (see
+        :func:`tortoise.sdk._journal_presence_state`, which retains a prefix map
+        of every id so a later call can resume).
+
+        The bounded-memory half of "does the journal name this id at all", for a
+        caller that must NOT pay :meth:`read_all`'s full parse (measured on a
+        synthetic 100k-record / 23.7 MB journal: 631.7 ms and a 136 MB RSS spike,
+        against 97.5 ms and a 4.6 MB peak for this scan). Memory is one window
+        plus one partial line, never the journal: ``read_all`` materializes every
+        record, this materializes one line at a time.
+
+        Lines are the ones ``append`` writes, matched the way :meth:`read_all`
+        tolerates them — split on the byte ``append`` terminates a record with
+        (``\\n``), then on a bare ``\\r``, which universal newlines also treats as a
+        terminator, so a foreign CR-separated journal still reads. A line SPLIT
+        ACROSS TWO WINDOWS is carried and yielded once complete; a torn tail fails
+        the caller's own parse and is skipped there, never here.
+
+        ⚠️ MEMORY follows the separator, and this method does not close that
+        hole: with ``\\n``/``\\r\\n`` a window is the peak, but a journal with NO
+        ``\\n`` at all makes the carried partial line the whole file. The ANSWER
+        stays correct there; only the bound moves.
+
+        :meth:`read_all`'s own DECODING note is WHY the needle is searched in
+        BYTES: a tear inside a multi-byte character is ordinary (``append``
+        writes ``ensure_ascii=False``), and a decode-first scan would skip a line
+        it could still answer for. A caller that needs the parsed record gets it
+        by parsing what is yielded.
+
+        ⛔ RESUMABLE (review round 8, finding 2). The returned :class:`MentionScan`
+        is an iterable of the same lines, and after iteration its
+        ``resume_offset`` names the end of the last COMPLETE line consumed — the
+        position a later scan of the SAME append-only journal may start from, so
+        a caller that retains what it has folded pays only for bytes appended
+        since, instead of re-reading the whole journal on every append.
+        ``start=0`` (the default) is the full scan, unchanged.
+
+        Raises ``FileNotFoundError`` for a configured path nothing has written
+        yet — the caller decides whether that is an error or ordinary early life;
+        this method does not invent an empty answer for it.
+        """
+        return MentionScan(self.path, needle, start, self.MENTION_SCAN_CHUNK)
+
+    def tail_bytes(self, offset: int, length: int) -> bytes | None:
+        """The bytes just BELOW *offset* — the memo's seam check (#10543 round 9).
+
+        A caller that retains a parsed PREFIX of this journal (see
+        :meth:`TortoiseSDK._journal_knows_point`) is making a claim about bytes it read
+        earlier: "everything below my resume offset is still what I folded". File
+        IDENTITY (``st_dev``/``st_ino``) and SIZE cannot verify that claim — a truncate
+        in place followed by a regrow past the old watermark leaves the same inode at a
+        larger size with different bytes below the seam — and neither can ``mtime_ns``,
+        which moves on an ordinary append too. The one cheap read that can is a
+        comparison across the seam itself, which is what this returns.
+
+        Returns ``None`` — never ``b''`` — when this path cannot ANSWER at all: it is
+        not a regular file (a FIFO, a device, a symlink, a directory), or the read
+        failed. ``b''`` is returned only for a prefix that is genuinely empty
+        (``offset`` at 0).
+
+        ⛔ THE DISTINCTION IS LOAD-BEARING, NOT STYLE (#10543 review round 10,
+        finding 2). The caller retains the bytes it folded and re-reads them later,
+        so an unanswerable read collapsed into ``b''`` reads to that caller as "the
+        retained bytes are not there" — and its guard has to treat that as "nothing
+        to compare", i.e. a MATCH, i.e. reuse. That is the inverse of what the
+        paragraph above promises, and it made the whole seam check inert on any lane
+        whose journal path is a symlink (``_read_regular_range`` opens
+        ``O_NOFOLLOW``, so ``os.open`` raises ``ELOOP`` before ``S_ISREG`` is ever
+        reached) or otherwise not readable. It is the distinction ``pread(2)`` draws
+        for the same reason: a successful read of 0 bytes is END-OF-FILE, while -1
+        is an ERROR, a different outcome
+        (<https://man7.org/linux/man-pages/man2/pread.2.html>).
+
+        Read-only, ``O(1)`` in the journal's size, and it creates nothing. Every
+        failure — a symlink's ``ELOOP`` (raised before the ``S_ISREG`` gate can
+        answer, measured), a directory's ``EISDIR``, a FIFO's refusal, a vanished
+        path's ``ENOENT`` — is the SAME answer (``None``), because the caller has
+        exactly one safe reading of it: re-fold.
+        """
+        start = max(0, int(offset) - max(0, int(length)))
+        stop = max(start, int(offset))
+        try:
+            # `None` from `_read_regular_range` is "not a regular file", and it is
+            # passed through AS ITSELF: an empty bytes object is the answer to a
+            # DIFFERENT question (an empty prefix), never to this one.
+            return _read_regular_range(Path(self.path), start, stop - start)
+        except OSError:
+            return None
+
+    def carried_records(self) -> bool:
+        """Did this journal demonstrably carry at least one RECORD? (#10543 r7)
+
+        The discriminator a caller needs when the journal's own FILE is gone,
+        because ``FileNotFoundError`` from :meth:`mention_lines` is produced by
+        two facts that are answers apart: a configured path nothing has written
+        yet (ordinary early life — silence is correct) and a journal that DID
+        carry records whose file was deleted, rotated or moved off a running
+        lane (nothing can be judged — the caller must say so). Reading the first
+        as the second is the silence #10515 exists to remove.
+
+        The evidence is the POSITION SIDECAR beside the journal
+        (``POSITION_SUFFIX``), which ``append`` maintains WRITE-THROUGH once a
+        record has landed: its payload names the count it last proved, so
+        ``records >= 1`` is a durable statement that this path carried records.
+        It describes a journal STATE that may no longer exist (the file is gone),
+        which is exactly the point — only the count is read, never the state.
+
+        Read-only and O(1): ``_read_regular_file`` is ``O_RDONLY|O_NOFOLLOW``
+        plus ``S_ISREG``, so it CREATES nothing, follows no attacker-chosen link,
+        and cannot block on a FIFO someone left at the sidecar path. It never
+        affects a reply; it only tells a diagnostic which of two silences it is
+        looking at.
+
+        RESIDUAL, stated rather than claimed closed: a lane that could never
+        maintain its sidecar (a read-only data dir, the ``_POSITION_CACHE_DEAD``
+        window, a journal written before the sidecar existed) leaves no such
+        evidence, so a journal removed off THAT lane still reads as early life.
+        The evidence is therefore ONE-DIRECTIONAL — its absence is not proof the
+        journal carried nothing — and that is deliberately the direction a
+        diagnostic may be wrong in: a missed report, never a fabricated alarm.
+        """
+        try:
+            raw = _read_regular_file(
+                _position_cache_path(Path(self._lock_key())))
+        except OSError:
+            return False
+        if raw is None:
+            return False
+        try:
+            payload = json.loads(raw)
+        except (ValueError, RecursionError, MemoryError):
+            # RecursionError/MemoryError: a sidecar is a file anything may have
+            # written, and this only decides a diagnostic — never fail on it.
+            return False
+        if not isinstance(payload, dict) or payload.get("v") != _POSITION_VERSION:
+            return False
+        count = payload.get("records")
+        return (isinstance(count, int) and not isinstance(count, bool)
+                and count > 0)
 
     def read_all(self, *, salvage: bool = False) -> list[dict]:
         """Read all events in the log.

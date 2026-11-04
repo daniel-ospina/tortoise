@@ -51,9 +51,28 @@ _TESTS_ROOT = Path(__file__).resolve().parent
 #   "assertion"        — the test ASSERTS the SDK's namespace→graph mapping
 #                        (test_namespace_uri_mode, test_sdk_legacy_coverage);
 #                        the literal must stay byte-for-byte.
+#   "synthetic-source" — the literal rides a SOURCE STRING handed to
+#                        `ast.parse` (or the explanation around it), never a
+#                        construction; there is nothing to rename and nothing
+#                        for the redirect to resolve.
 # The swept (renamed) sites are the test_-prefixed literals/constants the
 # guard passes on their own — the table documents the residual declarations.
 ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
+    # #10180: `_registry_with_bound_and_wide_keys` builds a REAL embedded
+    # registry (`TortoiseSDK(db_path=..., namespace="registry")`) because the
+    # behaviour under test is `get_current_org`'s REGISTRY branch: the test
+    # mints an org, a custom graph and the two key shapes, then drives the real
+    # auth dependency so the publish decision is measured rather than read. The
+    # literal IS the namespace that branch resolves in production, so a `test_*`
+    # rename would seed a graph the resolver never reads and the test would pass
+    # over nothing — the `prod-coupled` class exactly like test_github_connect /
+    # test_9664_capstone_connector_to_record above. The db_path is tmp_path-bound
+    # (`TORTOISE_DB_PATH` per test), so the shared-graph hazard is closed by the
+    # redirect's per-path derivation, not by a rename.
+    # MEASURED: without this row the literal reds
+    # `test_namespace_literals_guard_passing_or_routed` on the `test-slow (e)`
+    # shard, which is how it was found (the module landed in `516af8e42`).
+    "test_10180_promote_default_graph.py": {"registry": "prod-coupled"},
     # The seed helper does `_make_sdk(namespace="registry")._get_registry()
     # .query(CREATE :Team ...)` — i.e. it seeds a Team through the CANONICAL
     # namespace PROD code resolves, the same `prod-coupled` class as the
@@ -122,6 +141,25 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     # test reads. Same `prod-coupled` class as its neighbours above.
     "test_3516_client_captured_at.py": {"registry": "prod-coupled"},
     "test_agent_signup.py": {"registry": "prod-coupled"},
+    # #10046: the two `namespace="registry"` matches in this module are TEXT fed
+    # to `ast.parse`, never a construction. `test_a_literal_namespace_is_not_an
+    # _org_scoped_site` hands the record-tenant scanner a synthetic source
+    # snippet and asserts the round-3 predicate excludes a string-literal
+    # namespace; the other is the same literal quoted in that test's own
+    # docstring. Both are kept byte-for-byte `"registry"` ON PURPOSE — that is
+    # the spelling PROD resolves and the exact shape the doubled-predicate P1
+    # mis-counted — so they are declared here rather than renamed to a `test_*`
+    # namespace, which would make the pin exercise a spelling no prod lane uses
+    # (and the docstring `grep` a literal it no longer explains). The guard greps
+    # file TEXT, so it cannot tell this from a real construction; MEASURED:
+    # without this row it reds on BOTH of those matches — the docstring sample
+    # and the `registry = 'def f():\n    return _make_sdk(namespace="registry")'`
+    # string — → `test-slow (e)` → python-ci-gate, which is how it was found.
+    # ⛔ NO LINE NUMBERS, deliberately (#10723 review F3): an earlier revision
+    # cited them and they were stale by the very next head, because both matches
+    # ride the END of a file that keeps growing. Name the construct, not the
+    # line — the same rule `tortoise/mcp_auth.py`'s anchors now follow.
+    "test_10047_record_every_lane.py": {"registry": "synthetic-source"},
     # #7677: the retry-idempotency tests drive REAL org creation through the
     # registry control plane — `_make_sdk(namespace="registry")._get_registry()`
     # is the same construction the endpoint under test uses, and the behaviour
@@ -146,6 +184,13 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     "test_acl_graph_users.py": {"registry": "prod-coupled"},   # C4 #2113 — team seeding via _make_sdk(namespace="registry")
     "test_delivery_tenancy.py": {"registry": "prod-coupled"},  # C6 #2115 — registry seeding in _spine_env
     "test_tenancy_spine.py": {"registry": "prod-coupled"},   # C5 #2114 — registry seeding in _spine_env
+    # #8906: the new door-level suite mirrors `test_tenancy_spine`'s seeding — the
+    # literal IS the namespace prod's control plane resolves
+    # (`hosted_api._make_sdk(namespace="registry")`), so a `test_*` rename would
+    # seed a graph the auth resolver never reads and every arm would pass over an
+    # empty registry. `db_path` is `tmp_path`-bound, so the shared-graph hazard is
+    # closed by the redirect's per-path derivation, not by a rename.
+    "test_8906_points_gate_counts_write_graph.py": {"registry": "prod-coupled"},
     "test_hosted_volunteer_context.py": {"registry": "prod-coupled"},   # #2103 (W4C) — registry control-plane mint/revoke mirrors test_hosted_auth
     "test_capture_phase_d_dedup.py": {"team-001": "team-identity"},  # #2104 (W5-D) — hosted _make_sdk(namespace="team-001") mirror arm
     "test_capture_loop_responsiveness.py": {"registry": "prod-coupled"},  # #3086 — the capture-writer loop-affinity proof reaches the graph class via _make_sdk(namespace="registry") to record writer-thread affinity
@@ -869,6 +914,10 @@ def test_no_redirect_stems_registry_exact():
         # reding on the addition is the pin working as designed, so the stem is
         # DECLARED here rather than exempted.
         "test_10122_point_name_not_indexed",
+        # #8488 scope 1: the context-enriched turn-embedding write path — the
+        # sibling of the lexical arm above, same three-way mirror (carve_out,
+        # TEST_NO_REDIRECT_STEMS, and this pin).
+        "test_context_enrich_8488",
         # #9209: the write handle's NON-CYPHER verbs. The suite's
         # `sdk_with_journal` fixture asserts `proj._is_embedded` and counts
         # real nodes on that embedded projection, and the module carries

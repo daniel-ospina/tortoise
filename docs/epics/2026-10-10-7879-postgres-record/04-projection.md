@@ -257,6 +257,27 @@ closed at both layers:
   #2256 population whose promote IS the operator's only record. A full rebuild
   that re-derives no promote edge is the divergence that follows, and it sits on
   the pass-2 side.
+  **Updated by #7704 (the FOLD's ref set):** the family is now read through the
+  fold's own selector — `extractedFromAll` when the payload states a non-empty
+  list, else `extractedFrom` (`record_projection._point_all_source_refs`, pinned
+  EQUAL to `projection/entities.py`'s helper of the same name) — in BOTH places
+  that read it: the `relation` fan-out (`_point_property_relation_statements`)
+  and the `#5256` carrier gate (`_point_source_versions`). The reason is that a
+  dedup fold is a RECORD: `_fold_source_evidence` emits its `PointAdded` through
+  `_write_record_projection`, and it deliberately keeps `extractedFrom` a
+  matchable SCALAR (the survivor's own creating source — an array is not
+  equality-matchable, `#10063`) while the folded refs ride `extractedFromAll`.
+  Read off the scalar alone, the record of a folded claim derived ONE row and one
+  anchor where the graph holds N edges and N anchors, so a record-sourced
+  rebuild (`rebuild_from_record`, `record-restore`, #9556) materialised N−1
+  fewer `extractedFrom` edges than `live` and than `rebuild_all` — the
+  record-POORER direction this document forbids. Nothing reported it:
+  `check_consistency` compares graph against JOURNAL, never graph against
+  record. Backwards-compatible by construction: a pre-#7704 payload carries no
+  `extractedFromAll`, so the scalar/array is the fallback. The folded set also
+  survives into `public.point.props` (measured; `extractedFromAll` is not in
+  `chk_point_props_no_derived`'s refused list), so a record→cache round trip
+  restores the node property as well as the edges.
   The other class-1 families are still **not**
   materialized, each for its own reason: `about*` needs `_create_about_edges`'
   live name→label cascade (and `EntityLinked` already carries it whenever the

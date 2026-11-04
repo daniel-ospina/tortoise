@@ -274,13 +274,22 @@ class TestRestartPendingProjection:
         monkeypatch.setattr(
             ha, "_registry_existing_graphs",
             lambda: {"org_org-3451"} if namespace else set())
+        # #10180: the fake must mirror the helper's FULL keyword surface.
+        # `_open_org_graph_sdk` gained `moved=` (the projection resolves the
+        # org's default namespace ONCE and hands the same answer to both the
+        # existence verdict and this open), and a fake that only accepted
+        # `listed=` raised TypeError on the call — which the projection's
+        # `except Exception` swallowed into the graph-down 'unavailable'
+        # markers, so every assertion below read 'unavailable' instead of the
+        # derived bool. Same for the raising fake, which has to fail for its
+        # OWN reason (the RuntimeError) rather than on the call signature.
         if graph_down:
-            def _boom(oid, *, listed=None):
+            def _boom(oid, *, listed=None, moved=None):
                 raise RuntimeError("graph down")
             monkeypatch.setattr(ha, "_open_org_graph_sdk", _boom)
         else:
             monkeypatch.setattr(ha, "_open_org_graph_sdk",
-                                lambda oid, *, listed=None: None)
+                                lambda oid, *, listed=None, moved=None: None)
             monkeypatch.setattr(ha, "_make_sdk",
                                 lambda namespace=None: _FakeSDK(_FakeProj()))
             monkeypatch.setattr(
@@ -649,7 +658,14 @@ def _stub_create_point_path(monkeypatch, *, opener=None, listed=None):
     opens: list[tuple] = []
     written: list[tuple] = []
 
-    monkeypatch.setattr(ha, "_check_org_limit", lambda org, res: None)
+    # #8906: the doors now pass the request's own SDK to the gate (`sdk=`), so
+    # a stub that does not accept it breaks the call instead of standing in for
+    # it. Pin the REAL signature surface (keyword-only `sdk`/`slot_credit`), not
+    # `**kw` — `**kw` would also swallow a mistyped keyword (e.g. `sdkk=`) that
+    # production would 500 on.
+    monkeypatch.setattr(
+        ha, "_check_org_limit",
+        lambda org, res, *, sdk=None, slot_credit=0: None)
     monkeypatch.setattr(ha, "_get_onboarding_state", lambda oid: {})
     monkeypatch.setattr(ha, "_org_proj", lambda oid: object())
     monkeypatch.setattr(ha, "_maybe_apply_completion", lambda oid: False)
@@ -840,7 +856,10 @@ def _stub_mintable_org_graph(monkeypatch, *, listed=(), org_id: str = "org-truth
 
     monkeypatch.setattr(ha, "_make_sdk", _make_sdk)
     monkeypatch.setattr(ha, "_registry_existing_graphs", lambda: set(state))
-    monkeypatch.setattr(ha, "_check_org_limit", lambda org, res: None)
+    # #8906: same signature surface as the stub at :655 (keyword-only, pinned).
+    monkeypatch.setattr(
+        ha, "_check_org_limit",
+        lambda org, res, *, sdk=None, slot_credit=0: None)
     # ``_get_onboarding_state`` is the legacy jsonb mirror only; stub it so
     # the test does not open the registry. ``_graph_available`` is
     # deliberately NOT stubbed — the fixed auto-file never calls it, and a

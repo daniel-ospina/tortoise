@@ -2,7 +2,7 @@
 """The extractor-v4 capstone MEASUREMENT run (#9080 / epic #7949).
 
 ``capstone_run.py`` (same directory) is the instrument that ships with PR #9089. It
-drove ``TortoiseSDK.capture_session`` — the real entry point — and then read four
+drives ``TortoiseSDK.capture_session`` — the real entry point — and then reads four
 step witnesses off the RECEIPT that the receipt does not carry (#9116), so it
 refuses at G5 for every input and its table is five ``BLOCKED`` rows with
 ``numerator=None`` (#9737: *"a COMPLETED run still yields 0/5 BLOCKED"*). It
@@ -29,18 +29,27 @@ working, and its refusal table stays the artifact that pins the refusal contract
     OBSERVED without editing this probe, and the count is derived.
   * **THE NUMBERS** are E3 (a census over the run's own graph), E4 (the committed
     operator receipt, read verbatim), E5 (a fresh re-score of the #7947 arms
-    against this corpus's current gold), and E1/E1b/E2a/E2b (parsed out of the
-    landed ``e1-e2.log``). Each row's ``evidence`` is the artifact that actually
-    carries its number.
+    against this corpus's current gold), and E1/E1b/E2a/E2b (read out of the
+    `#9889` measurement record, ``E1_E2_SCORES``). Each row's ``evidence`` is the
+    artifact that actually carries its number.
 
 ⚠️ WHAT THIS PROBE DOES NOT DO, stated so the table cannot be read as more than it
-is. E1/E2's only artifacts are (a) ``e1-e2.log``, whose Object population is the
-25-name owner-labelled audit set — below E1's frozen floor of 30 Objects — and
-which ran on a DIFFERENT corpus revision than the pre-registration froze, and
-(b) nothing else: no committed artifact carries E2a's 14-unit denominator or
-E1b's ``grading.strict_survival_counts`` over the m2 lane. Those two rows are
-therefore reported with their proxy numbers PRINTED and their verdict ``BLOCKED``
-— a refused measurement is neither a pass nor a fail, and the record says the same
+is. E1/E2 are scored from ``docs/evidence/9889/e1-e2-scores.json``, one
+invocation of ``e1_e2_scores.py`` over the three ``#9889`` probes' own outputs,
+and NOT from the superseded ``e1-e2.log`` — that parse path is removed, because
+the log carries 25 Objects (under E1's frozen floor of 30), ONE arm, and a corpus
+that is not the pre-registration's. What the record cannot give is **n**: the
+after arm exists once and the before arm twice, so E1's pairings disagree (20.6 pp
+apart) and the row is REFUSED rather than decided — the honest reading, and the
+next requirement (n >= 2 per arm) is stated in the row's note. E2a's frozen
+14-unit denominator IS carried (8 of 14 survived, falsifier reaches 14/14), so the
+E2 row is scored fact rather than a refusal. E1b's
+``grading.strict_survival_counts`` over the m2 lane is still unproduced, so that
+half stays a no-loss CONTROL, not the frozen metric.
+
+⚠️ WHAT A REFUSED ROW IS. ``BLOCKED`` is neither a pass nor a fail: "the
+population could not decide" and "the criterion was scored and failed" are
+different findings, and the table admits both on purpose
 (``below_floor``: *"REFUSED, which is neither a pass nor a fail"*).
 
 ⚠️ THE RUN ARM. ``TORTOISE_VET`` and ``TORTOISE_CLASSIFY_LATER`` are forced ON for
@@ -56,10 +65,10 @@ claim nothing supports. **The seam has since LANDED (#9116), so this module no
 longer reports them as unobservable-by-construction.** Pre-seam, ``capture_session``'s
 receipt could not carry them and the failure was ONE LAYER UP from where it was
 first attributed: ``extract_session_v2`` built the surfaces
-(``result["classify_later"]`` at ``tortoise/extractor_v2.py:9475-9481`` and
-``result["vet"]`` at ``:9485-9489``) while the meta fold dropped them with
+(``result["classify_later"]`` at ``tortoise/extractor_v2.py:10576-10582`` and
+``result["vet"]`` at ``:10586-10590``) while the meta fold dropped them with
 ``"stats": out.get("stats") or {}``. The fold now calls
-``_capture_stats_with_step_witness`` (``tortoise/sdk.py:13911``), which copies each
+``_capture_stats_with_step_witness`` (``tortoise/sdk.py:14959``), which copies each
 stage's own counts onto ``stats["step_witness"]`` and drops no candidate text — so
 this module READS that seam (:func:`_witness_block`) instead of citing the gap. A
 run measured at a stamp BEFORE the seam still reports S2.2/S2.3 unobserved, and
@@ -114,12 +123,14 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     )
 
 import argparse
+import importlib.util
 import json
 import os
 import re
 import subprocess
 import time
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 
 #: ``docs/evidence/7949-capstone/probes/capstone_measure.py`` → repo root.
@@ -131,6 +142,15 @@ ROOT = Path(__file__).resolve().parents[4]
 # that module lives under, and `tortoise`/`tests` are both resolved from it.
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+#: Imported AFTER the sys.path fix above (this file runs as a script from ``probes/``), and through
+#: a FUNCTION so the import sits where the path is already correct rather than mid-module: a
+#: module-level ``from tortoise...`` here is E402, and ruff runs over this file in CI.
+def _derivation_label_classes() -> frozenset[str]:
+    """The LINK-anchored derivation classes, from the writer's own constant (#9736)."""
+    from tortoise.projection.edges import _DERIVATION_REFERENCES_LABELS
+
+    return frozenset(_DERIVATION_REFERENCES_LABELS)
 
 
 def _sdk_line(code: str) -> int:
@@ -189,7 +209,28 @@ TURN_WRITE_CITE = f"tortoise/sdk.py:{_sdk_line('_TURN_WRITE_CYPHER = (')}"
 
 EVIDENCE_DIR = Path("docs/evidence/7949-capstone")
 PREREG_ARTIFACT = "docs/evidence/7949-capstone/preregistration.json"
-E1E2_LOG = "docs/evidence/7949-capstone/e1-e2.log"
+
+#: E1/E2's artifact is the `#9889` measurement record, NOT `e1-e2.log`.
+#:
+#: `e1-e2.log` was the only E1/E2 artifact for eleven days, and it cannot decide
+#: either row: 25 Objects (under E1's frozen floor of 30), one arm, and a corpus
+#: that is not the pre-registration's frozen one. Its parse path is GONE — E1/E2
+#: are scored from `e1_e2_scores.py`'s record, which reads the three `#9889`
+#: probes' own outputs (`e1_paired_arm` x2 OFF realizations, the ON run's census,
+#: `e2a_value_units` + its anchor-injection falsifier, `e1_gate_drops`) and
+#: carries the frozen corpus digest because the OFF probe refuses to run on any
+#: other corpus (G1). A row that cited the old log is now a row with no artifact.
+E1_E2_SCORES = "docs/evidence/9889/e1-e2-scores.json"
+E1_E2_SCORES_CMD = (
+    "uv run python docs/evidence/7949-capstone/probes/e1_e2_scores.py "
+    f"--out {E1_E2_SCORES}")
+
+#: E4's evidence is selected by the receipt's OWN ``corpus_hash``, never by a filename
+#: (see ``select_e4_receipt``). ``E4_RECEIPT`` names the receipt the row USED to cite and
+#: is kept as that record — it is NOT a fallback for any row, and ``build_rows`` refuses an
+#: ``e4`` mapping that does not carry its own ``evidence``.
+E4_RECEIPT_DIR = "tests/eval/write_path/receipts"
+E4_RECEIPT_GLOB = "*.json"
 E4_RECEIPT = "tests/eval/write_path/receipts/w2b-operator-2026-10-19.json"
 E5_RESCORE = "docs/evidence/7949-capstone/e5-rescore.json"
 ARMS_DIR = "tests/eval/write_path/receipts/7947-arms-2026-10-18"
@@ -201,9 +242,30 @@ END = "=== CAPSTONE-VERDICT-END ==="
 CRITERIA = ("E1", "E2", "E3", "E4", "E5")
 STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", "S5", "S6")
 
-#: The node classes the pre-registration's E3 denominator names (``Point + Object
-#: + Event``) — not a choice this probe makes.
-DERIVED_LABELS = ("Point", "Object", "Event")
+#: The node classes the pre-registration's E3 denominator names: ``Point`` (the anchor sits on the
+#: node, #5038) plus the LINK-anchored classes the writer itself names —
+#: ``_DERIVATION_REFERENCES_LABELS`` (``Event``, ``Document``; ``edges.py:747``).
+#: ⛔ DERIVED, not hardcoded (#9736). This constant used to read ``("Point", "Object", "Event")``
+#: with the comment "not a choice this probe makes" — and that WAS a choice: ``:Object`` mention
+#: links carry no ``sourceVersion`` BY DESIGN (#5199 option A — ``Object`` is deliberately ABSENT
+#: from ``_DERIVATION_REFERENCES_LABELS``'s own comment block, cited by SYMBOL not by line), so counting
+#: them made E3's ``= 1.000`` unreachable and a re-run would report ``148/433`` while the registration
+#: now names ``148/383``. A probe that disagrees with the registration measures a criterion nobody
+#: registered, so the set follows the writer's constant and the gate derives the same one.
+DERIVED_LABELS = ("Point", *sorted(_derivation_label_classes()))
+
+#: The node classes the CENSUS enumerates per label — ⛔ NOT the E3 row selector above.
+#: ``per_label`` is the census's per-class node/anchor block, and a SECOND instrument reads it:
+#: ``tools/s3_prior_ablation.py``'s ``created_counts`` takes ``per_label["Object"]["nodes"]`` as
+#: the ``objects`` numerator of ``extraction_nodes = claims + objects + events`` (#10463/#10468),
+#: on live data, three times per run. Enumerating ``per_label`` with ``DERIVED_LABELS`` made that
+#: key VANISH when #9736 narrowed E3 to the anchored classes — so every future ablation run would
+#: print ``objects=0`` while the graph held Objects, silently recomputing #10463's published ratio
+#: on a narrower definition than its committed log was measured with, with no error and no refusal
+#: (#10525 review P1, the silent-zero shape). The census's set is therefore its OWN: E3's classes
+#: UNION the mention class E3 deliberately excludes, so a change to the E3 row can never re-narrow
+#: an instrument that is not about E3.
+CENSUS_LABELS = tuple(sorted(set(DERIVED_LABELS) | {"Object"}))
 
 #: The relationship type that points FROM a derived node at its source. The
 #: anchor is a property of that DERIVATION LINK, so the derived node is its
@@ -214,14 +276,15 @@ ANCHOR_OUT = ("extractedFrom",)
 #: ->(Event|Document)``, written by ``_EdgeHandlers.link_source_to_event``
 #: (``tortoise/projection/edges.py:2832-2857``, ``MERGE (s)-[r:references]->(e)
 #: ON CREATE SET r.sourceVersion = s.contentHash``) and reached from the capture
-#: path at ``tortoise/sdk.py:14197`` (``proj.link_source_to_event(source_key,
+#: path at ``tortoise/sdk.py:15245`` (``proj.link_source_to_event(source_key,
 #: event_id)`` — ``(Source)-[:references]->(sessionCaptured Event)``). The anchor
 #: is on the same link, but the DERIVED node is its TARGET.
 #: ⚠️ Counting this one in the ``extractedFrom`` direction counts SOURCES.
 ANCHOR_IN = ("references",)
 
 E3_RULE = (
-    "a derived node (Point/Object/Event) carries a version anchor iff it is the "
+    "a derived node (Point/Event/Document — the classes the model anchors; see DERIVED_LABELS) "
+    "carries a version anchor iff it is the "
     "SOURCE of at least one extractedFrom relationship whose sourceVersion is a "
     "non-empty string, OR the TARGET of at least one references relationship "
     "whose sourceVersion is a non-empty string. The two directions are NOT "
@@ -257,7 +320,7 @@ ARM_OFF = ("TORTOISE_VALUE_GATE", "TORTOISE_S2_DECISION_SEAM")
 
 #: The three Point classes E3's frozen denominator mixes, each read off a
 #: property its writer stamps (never a hand-kept list): ``is_episodic`` is set by
-#: the turn writer (``_TURN_WRITE_CYPHER``, ``tortoise/sdk.py:2410`` — turn
+#: the turn writer (``_TURN_WRITE_CYPHER``, ``tortoise/sdk.py:2451`` — turn
 #: rows carry ``is_episodic=true``, ``is_operator=false`` and are wired only by
 #: ``CONTAINS``), ``is_operator`` by the operator writers, and an
 #: ``extractedFrom`` edge by the extraction projection.
@@ -422,10 +485,12 @@ def parse_bars(prereg: dict) -> dict:
     """EVERY bar and floor, read out of the frozen record — never typed here.
 
     The record states its thresholds as prose in ``criteria[].threshold`` and its
-    floors as integers in ``denominator_floors``. The prose is PARSED rather than
-    transcribed: a bar typed into this file is a bar nobody froze, so a lane could
-    move a threshold by editing the probe. An unparseable threshold refuses the
-    run (ValueError → G0, exit 3) instead of falling back to a default.
+    floors in ``denominator_floors`` — integer COUNTS plus E1's fraction
+    ``e1_min_before_share`` (``0.2``), which is a floor under a SHARE and so is
+    carried as a float. The prose is PARSED rather than transcribed: a bar typed
+    into this file is a bar nobody froze, so a lane could move a threshold by
+    editing the probe. An unparseable threshold refuses the run (ValueError → G0,
+    exit 3) instead of falling back to a default.
     """
     crit = _criteria(prereg)
     floors = prereg.get("denominator_floors")
@@ -438,6 +503,20 @@ def parse_bars(prereg: dict) -> dict:
             raise ValueError(f"denominator_floors[{key!r}] is not an integer: "
                              f"{value!r}")
         return value
+
+    def share_floor(key: str) -> float:
+        """A floor under a SHARE (a fraction), not a count.
+
+        ``bool`` is an ``int`` in Python and a fraction is neither, so the count
+        helper above would refuse ``0.2``; the record really does carry one
+        non-integer floor, and leaving it out of this map is how a renderer came
+        to read a key nothing emitted (#10610 review issue 1).
+        """
+        value = floors.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"denominator_floors[{key!r}] is not a number: "
+                             f"{value!r}")
+        return float(value)
 
     e1b_ok, e1b_total = _ints(r">=\s*(\d+)\s*of\s*(\d+)",
                               _threshold(crit, "E1b"), "E1b")
@@ -465,6 +544,7 @@ def parse_bars(prereg: dict) -> dict:
         "E5": {"ratio": e5_bars[0], "raw_absolute": e5_bars[1]},
         "floors": {
             "e1_objects": floor("e1_objects"),
+            "e1_min_before_share": share_floor("e1_min_before_share"),
             "e2b_surviving_units": floor("e2b_surviving_units"),
             "e3_derived_nodes": floor("e3_derived_nodes"),
             "e5_rate_min_sentences": floor("e5_rate_min_sentences"),
@@ -493,13 +573,32 @@ def outcome(*, measured: bool, below_floor: bool, passed: bool,
 
 
 def e1_outcome(*, before_share: float | None, after_share: float | None,
-               objects: int | None, bars: dict) -> dict:
+               objects: int | None, bars: dict,
+               decidable: bool = True,
+               below_floor: bool | None = None) -> dict:
     """E1: volume falls (``after <= multiplier x before``) over ALL Objects, floor 30.
 
     ⚠️ ``objects`` is the DENOMINATOR the criterion names ("**all** `:Object`
     nodes written by the run") — not a hand-picked population. A run under the
     frozen floor is REFUSED: with five Objects a single delete moves the share by
     20 points, which is what the floor exists to stop.
+
+    ⚠️ ``below_floor`` is the RECORD's own floor finding, and it is passed in
+    rather than re-derived, because the population that is floored and the one
+    that is scored are the same one: the AFTER arm. `e1_pairings` folds it into
+    ``decidable`` (`decidable = len(verdicts) == 1 and not below_floor`), so a
+    caller that reads only ``decidable`` reports an under-floor after arm as a
+    PAIRING DISAGREEMENT it does not have (#10610 review issue 2). The floor arm
+    is therefore checked BEFORE the decidability arm, and it has its own value
+    text: the pre-registration calls the floor `below_floor` and its verdict
+    "REFUSED, which is neither a pass nor a fail".
+
+    ⚠️ ``decidable`` is the second refusal, and it is measured rather than
+    assumed (`#9889`): where the after arm exists once and the before arm exists
+    in more than one independent realization, the pairings can disagree, and a
+    metric whose verdict depends on which before run you pair against has not
+    decided anything. The aggregate is REFUSED with both pairings printed — never
+    the convenient one.
     """
     floor = bars["floors"]["e1_objects"]
     multiplier = bars["E1"]["multiplier"]
@@ -509,22 +608,171 @@ def e1_outcome(*, before_share: float | None, after_share: float | None,
         return outcome(measured=False, below_floor=False, passed=False,
                        bar=bar, value="unmeasured")
     bound = multiplier * before_share
-    return outcome(measured=True, below_floor=objects < floor,
+    over_floor = (objects < floor) if below_floor is None else below_floor
+    if over_floor:
+        return outcome(measured=True, below_floor=True, passed=False, bar=bar,
+                       value=(f"before={before_share:.6f} after={after_share:.6f} "
+                              f"objects={objects} bound={bound:.6f} — but "
+                              f"{objects} Objects is under the frozen floor of "
+                              f"{floor}, so the population is too small to "
+                              "decide the bar and the row is REFUSED, which is "
+                              "neither a pass nor a fail"))
+    if not decidable:
+        return outcome(measured=False, below_floor=False, passed=False,
+                       bar=bar,
+                       value=(f"before={before_share:.6f} after={after_share:.6f} "
+                              f"objects={objects} bound={bound:.6f} — but the "
+                              "pairings DISAGREE across before realizations, so "
+                              "the bar is not decided at n=1 per arm"))
+    return outcome(measured=True, below_floor=False,
                    passed=after_share <= bound, bar=bar,
                    value=f"before={before_share:.6f} after={after_share:.6f} "
                          f"objects={objects} bound={bound:.6f}")
 
 
-def e3_outcome(*, anchored: int, derived: int, bars: dict) -> dict:
-    """E3: derived nodes carrying a version anchor, floor 30 derived nodes."""
+def e2_outcome(*, e2a_result: dict, e2b_result: dict, bars: dict) -> dict:
+    """E2 is the COMPOSITE — E2a AND E2b, floored — never E2a alone.
+
+    This function exists because the composite used to be assembled INLINE in
+    ``main``, so no pin could reach it: reverting the row's verdict to
+    ``verdict_word(e2a_result)`` — a 13/14 E2a beside a fused 7/114 reading GREEN
+    in the table and FAIL in the artifact the row cites — left every case green
+    (#10610 review issue 1). Extracting it is what makes that mutant killable, and
+    the pin calls THIS function while a second pin asserts ``main`` derives its
+    row from it (``test_the_e2_row_verdict_is_the_composite_main_uses``).
+
+    ⛔ NEITHER half's refusal state is dropped. The composite used to hard-code
+    ``measured=True`` and take ``below_floor`` from E2b ALONE, so an E2a half that
+    was never scored (a record carrying no ``e2a.outcome`` — ``main`` then builds
+    an ``measured=False`` E2a result) was folded into a MEASURED composite: the
+    row read RED and its note asserted a scored shortfall for a half nobody
+    measured, where the pre-composite path read BLOCKED (#10610 P2). A composite
+    is unmeasured when EITHER half is, and below its floor when either half is —
+    the conjunction cannot know more than its weakest operand.
+    """
+    measured = bool(e2a_result.get("measured")) and bool(
+        e2b_result.get("measured"))
+    return outcome(
+        measured=measured,
+        below_floor=bool(e2a_result.get("below_floor"))
+        or bool(e2b_result.get("below_floor")),
+        passed=(e2a_result["outcome"] == "PASS"
+                and e2b_result["outcome"] == "PASS"),
+        bar=f"E2a {bars['E2a']['required']} of {bars['E2a']['of']} AND E2b "
+            f"fused <= {bars['E2b']['max_fused_share']}",
+        value=f"E2a {e2a_result['value']}; E2b {e2b_result['value']}")
+
+
+def e2a_outcome(e1: dict, bars: dict) -> dict:
+    """E2a: value-bearing planted units that STRICTLY survive, bar 13 of 14.
+
+    The denominator comes from the pre-registration's §3.3 rule (a digit in the
+    ``verbatim_anchor``, minus two named exclusions), computed by
+    ``e2a_value_units.py`` from the gold and read here — never typed. The bar is
+    the record's own ``E2a`` criterion, so a change to either moves both.
+    """
+    units = e1["e2a_units"] or 0
+    survived = e1["e2a_survived"] or 0
+    required = bars["E2a"]["required"]
+    return outcome(measured=True, below_floor=units == 0,
+                   passed=survived >= required,
+                   bar=f"{required} of {bars['E2a']['of']}",
+                   value=f"value_units {survived}/{units} survived")
+
+
+def e3_unmeasured_legs(per_label: dict[str, dict[str, int]] | None, *,
+                       labels: tuple[str, ...] = DERIVED_LABELS) -> tuple[str, ...]:
+    """The registered denominator classes the measured graph carries **zero** nodes of (#9736).
+
+    E3's row is scored by SUMMING its classes (``census()`` → ``derived_total``), so a registered
+    class with no nodes contributes ``0/0`` and disappears from BOTH halves of the ratio. The row
+    then reports ``share = 1.000`` — a PASS — over a population NARROWER than the one it registered,
+    which is a false green in the favourable direction: the exact failure ``= 1.000 (zero
+    unanchored)`` cannot distinguish from a real one.
+
+    That is the production shape, not a corner: ``:Document`` is a RETIRED label (the writer remaps
+    it onto ``:Source`` under D10 — the ``entity_label = "Source"`` remap in
+    ``tortoise/projection/edges.py``, cited by SYMBOL because a line number here would re-stale on
+    the next insertion above it), and §10.1 of the
+    pre-registration records that the run IT re-derives wrote none at all (the scored log agrees:
+    ``e3 label=Document nodes=0``). So the leg E3 names is
+    structurally empty on every post-D10 graph, and only #9736's owner-gated ruling can change
+    WHICH spelling the row names.
+
+    ⛔ Which classes are "registered" is ``DERIVED_LABELS`` (re-derived from the writer's
+    ``_DERIVATION_REFERENCES_LABELS``) and NOT the wider instrument census: ``:Object`` is left
+    unanchored BY DESIGN (#5199 option A) and #10525 dropped it from the row, so counting it as a
+    missing leg would re-red E3 for a recorded decision.
+
+    An ABSENT block is empty too — a census that never enumerated a registered class did not
+    measure it, and "absent" must not read as "fine".
+    """
+    blocks = per_label or {}
+    empty: list[str] = []
+    for label in labels:
+        block = blocks.get(label)
+        nodes = block.get("nodes") if isinstance(block, dict) else None
+        if not nodes:
+            empty.append(label)
+    return tuple(empty)
+
+
+def e3_legs_line(per_label: dict[str, dict[str, int]] | None) -> str:
+    """The log's ``e3 unmeasured_legs=`` line, DERIVED from the census it is printed beside.
+
+    ⛔ Derived from ``per_label``, never from a caller's ``e3``/``e3_out`` dict. The first cut read
+    the row's ``unmeasured_legs`` key, so a caller that built the row by hand (this bundle's own
+    render fixture did exactly that, over a canned census whose ``Document`` leg is 0) rendered
+    ``e3 unmeasured_legs=none — every registered class carried nodes`` two lines below
+    ``e3 label=Document nodes=0``. A positive measurement claim asserted from an ABSENT KEY is the
+    same defect this line exists to disclose, one layer up.
+    """
+    legs = e3_unmeasured_legs(per_label)
+    if legs:
+        return ("e3 unmeasured_legs=" + ",".join(legs)
+                + " — a registered class the run wrote ZERO of; its `0/0` cannot "
+                  "satisfy '= 1.000', so the measured denominator is narrower than "
+                  "the registered one and E3 cannot PASS on it (#9736)")
+    return ("e3 unmeasured_legs=none — every registered class the census "
+            "enumerates carried nodes, so the measured denominator IS the "
+            "registered one")
+
+
+def e3_outcome(*, anchored: int, derived: int, bars: dict,
+               unmeasured_legs: tuple[str, ...] = ()) -> dict:
+    """E3: derived nodes carrying a version anchor, floor 30 derived nodes.
+
+    ``unmeasured_legs`` is the ruling-free half of #9736 (``NOT-A-DECISION(9736-gate-empty-leg)``):
+    a registered class the run measured **zero** nodes of cannot SATISFY the ``= 1.000`` bar by
+    arithmetic. The bar is a claim about the REGISTERED class set, so a row whose population is a
+    strict subset of it has not been measured, however clean the subset looks.
+
+    The rule is deliberately narrow and moves NO recorded number:
+
+    * a row that already fails **stays** FAIL and the empty leg is disclosed in the bar — no
+      softening, and no new red on a reading that was already red;
+    * a row whose every registered class carried nodes is scored exactly as before;
+    * the node floor still wins where it applies (``derived < floor`` is REFUSED, not a verdict);
+    * the class set, the threshold and ``:Object``'s exclusion are all UNTOUCHED — choosing
+      ``Document`` vs ``Source``-as-document is #9736's owner-gated ruling, and this function
+      refuses to certify EITHER spelling when the run wrote none of it.
+    """
     floor = bars["floors"]["e3_derived_nodes"]
     share = (anchored / derived) if derived else 0.0
-    return outcome(measured=True, below_floor=derived < floor,
-                   passed=share >= bars["E3"]["required_share"],
-                   bar=f"share = {bars['E3']['required_share']} (zero "
-                       f"unanchored), floor {floor} derived nodes",
-                   value=f"anchored={anchored} derived={derived} "
-                         f"share={share:.6f}")
+    legs = tuple(unmeasured_legs)
+    share_ok = share >= bars["E3"]["required_share"]
+    bar = (f"share = {bars['E3']['required_share']} (zero unanchored), floor "
+           f"{floor} derived nodes")
+    if legs:
+        bar += (f"; ⛔ empty registered class leg(s) {', '.join(legs)} — the "
+                f"measured denominator is NARROWER than the registered one, so "
+                f"this row cannot pass by arithmetic (#9736)")
+    result = outcome(measured=True, below_floor=derived < floor,
+                     passed=share_ok and not legs, bar=bar,
+                     value=f"anchored={anchored} derived={derived} "
+                           f"share={share:.6f}")
+    result["unmeasured_legs"] = legs
+    return result
 
 
 def e4_outcome(*, edge_correct: int, planted: int, bars: dict) -> dict:
@@ -566,52 +814,13 @@ def e5_outcome(*, raw_loss: float, narrative_loss: float, sentences: int,
     return result
 
 
-def parse_e1e2_log(text: str) -> dict:
-    """The arms of ``e1-e2.log`` as ``{arm: {metric: {key: value}}}``.
-
-    Two line shapes: ``arm=<name> metric=<metric> k=v k=v …`` and the summary
-    lines whose first token is the label (``e1 …``, ``e1-control …``,
-    ``e2-state …``, ``e2-atomic …``), which land under the ``summary`` bucket. A
-    ``k=v`` token is split on the FIRST ``=`` so a value containing ``=`` survives;
-    a value containing SPACES (``matches=[["count", "4668"], …]``) is truncated at
-    the first space — that field is a literal list this probe does not read.
-    """
-    arms: dict[str, dict[str, dict[str, str]]] = {}
-    summary_labels = ("e1", "e1-control", "e2-state", "e2-atomic")
-    for raw in text.splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        tokens = line.split(" ")
-        if tokens[0].startswith("arm="):
-            arm = tokens[0][len("arm="):]
-            rest = tokens[1:]
-            if not rest or not rest[0].startswith("metric="):
-                continue
-            metric = rest[0][len("metric="):]
-            bucket = arms.setdefault(arm, {}).setdefault(metric, {})
-            rest = rest[1:]
-        elif tokens[0] in summary_labels:
-            bucket = arms.setdefault("summary", {}).setdefault(tokens[0], {})
-            rest = tokens[1:]
-        else:
-            continue
-        for token in rest:
-            key, sep, value = token.partition("=")
-            if sep:
-                bucket[key] = value
-    return arms
-
-
-def corpus_sha_of_log(text: str) -> str | None:
-    match = re.search(r"\bcorpus_sha256=([0-9a-f]{64})\b", text)
-    return match.group(1) if match else None
-
-
-def line_value(text: str, key: str) -> str | None:
-    """The first token of a ``key=value`` line (a line may carry more tokens)."""
-    match = re.search(rf"^{re.escape(key)}=(\S+)", text, re.M)
-    return match.group(1) if match else None
+# ⛔ THE `e1-e2.log` PARSE PATH IS GONE, not merely unused (#9889 item 5,
+# #10610 P3). `parse_e1e2_log` / `corpus_sha_of_log` / `line_value` survived the
+# re-point with no production caller — the rows cite `E1_E2_SCORES`, and the
+# README states the parse path `is deleted from probes/capstone_measure.py` — so
+# the file was keeping a READER for an artifact no row may cite, which reads as
+# "this log is still scored" to the next lane that greps for it. The record is
+# the one source; a log reader here would be a second, quieter one.
 
 
 def normalise_corpus(value: str | None) -> str | None:
@@ -632,6 +841,130 @@ def verdict_word(result: dict) -> str:
     return {"PASS": "GREEN", "FAIL": "RED"}.get(result["outcome"], "BLOCKED")
 
 
+def e1_pass_objects(e1: dict) -> int | None:
+    """E1's row numerator: the Objects that are NOT bare-definite.
+
+    ⛔ The table's numerator is the count that PASSED, on every other row (E1b's
+    real facts, E2a's surviving units, E3's anchored nodes, E5's recovered facts).
+    E1's criterion is written over the OPPOSITE quantity — the bare-definite
+    `:Object` share it MINIMISES — so carrying that count in the slot would put a
+    row whose best possible outcome is `0 of 61` in front of V5, which refuses a
+    GREEN row with a zero numerator as the silent-drop shape ("a green row must
+    measure at least ONE success"). Refusing the PERFECT outcome is the same
+    green-row-cannot-be-written defect this row was repaired for, one boundary
+    earlier. The complement keeps the table's polarity and the population (all
+    `:Object` nodes written by the after arm, floored at 30), and leaves the
+    measured bare-definite count where it belongs: in the note and in the artifact
+    the row cites.
+
+    ``None`` when the arm is unmeasured — an empty slot, which V5 refuses on a
+    GREEN row and V6 covers with the blocker on every other.
+    """
+    numerator = e1.get("after_numerator")
+    denominator = e1.get("after_objects")
+    if not isinstance(numerator, int) or not isinstance(denominator, int):
+        return None
+    return denominator - numerator
+
+
+def e1_row_note(e1: dict, e1_result: dict, bars: dict) -> str:
+    """E1's row note — the narration BRANCHES on the state the row is in.
+
+    The refusal sentence used to be unconditional (#10610 review issue 3): "the
+    pairings do not agree, so the row is REFUSED" rendered on every scored log,
+    so the first run where E1 became DECIDABLE would have written "… and the
+    pairings do not agree, so the row is PASS — not RED and not GREEN" into the
+    very log that is the evidence. A sentence no input can change is a decision
+    replaced by a constant, and the repo already holds a pin for this class (the
+    E3 narration defect, `#10525`); this is the same branch for E1, and
+    ``test_the_e1_note_narrates_the_state_the_row_is_in`` is its pin.
+
+    The two refusals are also kept DISTINCT here, not merged into "REFUSED": an
+    after arm under the frozen floor is a population finding, and a disagreement
+    between before realizations is an arm-count finding. Reporting the first as
+    the second is #10610 review issue 2.
+    """
+    pass_objects = e1_pass_objects(e1)
+    floor = bars["floors"]["e1_objects"]
+    if e1.get("below_floor"):
+        state = (
+            f"The AFTER arm carries {e1['after_objects']} Objects, under the "
+            f"frozen floor of {floor} — a population that small cannot decide "
+            f"the bar at any n, so the row is {e1_result['outcome']} (neither a "
+            f"pass nor a fail), not RED and not GREEN")
+    elif not e1["decidable"]:
+        state = (
+            f"The two before realizations are {e1['before_spread_pp']} pp apart "
+            f"and the pairings do not agree, so the row is "
+            f"{e1_result['outcome']} — not RED and not GREEN: at n=1 per arm the "
+            f"verdict would depend on which before run is chosen")
+    else:
+        state = (
+            f"Every before realization agrees on the pairing, so the row is "
+            f"{e1_result['outcome']} on the bar")
+    return (
+        f"E1 is scored from {E1_E2_SCORES} (one invocation over the #9889 "
+        f"probes), whose corpus IS the frozen one ({e1['corpus_sha256']}) because "
+        f"e1_paired_arm.py refuses any other. {e1_result['value']} vs bar "
+        f"{e1_result['bar']}. {state}. The deterministic mechanism check "
+        f"(e1_gate_drops) reports value_gate drops {e1['gate_drops_total']} of "
+        f"{e1['gate_drops_objects']} Objects with its positive controls alive, so "
+        f"the selection pass is not the mover — the removal/relocation ruling is "
+        f"(#5333). n >= 2 per arm is the next requirement. The row's count is "
+        f"that population — Objects that are NOT bare-definite over all Objects = "
+        f"{pass_objects}/{e1['after_objects']} — i.e. the PASS-direction half of a "
+        f"share the criterion MINIMISES (the measured bare-definite count is "
+        f"{e1['after_numerator']} of {e1['after_objects']}); E2 carries the "
+        f"planted-unit counts, over the frozen 14")
+
+
+def e2_row_note(e1: dict, e2a_result: dict, e2b_result: dict,
+                e2_result: dict) -> str:
+    """E2's row note — and `E2a falls short of …` only where it DID fall short.
+
+    The clause was hard-coded (#10610 review issue 3), so the 13-of-14 run this
+    record exists to unbury — the one where E2's row finally reads GREEN — would
+    have printed "E2a falls short of 13 of 14 on the run's own graph" beside its
+    own GREEN verdict. The row and the artifact it cites disagreeing, inside the
+    log that IS the evidence, is the class `#10525`'s narration pin closed for E3.
+
+    ⛔ …and "falls short" is a SCORED finding, so it may not be written over a half
+    that was never measured. `main` builds an ``measured=False`` E2a result when
+    the record carries no ``e2a.outcome``; an unmeasured outcome is not ``PASS``,
+    so the old clause asserted a shortfall for a half nobody scored — beside a
+    composite that (correctly) reads BLOCKED (#10610 P2).
+    """
+    return (
+        f"E2a: {e2a_result['outcome']} — {e2a_result['value']} vs bar "
+        f"{e2a_result['bar']} (denominator = pre-registration §3.3's "
+        f"value-bearing planted units, read from "
+        f"docs/evidence/9889/e2a-value-units.json, and PROVEN live by the "
+        f"anchor-injection falsifier reaching "
+        f"{e1['e2a_falsifier_survived']}/{e1['e2a_units']} over the same "
+        f"population). E2b: "
+        f"{e2b_result['outcome']} — {e2b_result['value']} vs bar "
+        f"{e2b_result['bar']}. The E2 row is "
+        f"{verdict_word(e2_result)} on the COMPOSITE "
+        f"({e2_result['bar']}): "
+        + (f"E2a was NOT measured on this record (no `e2a.outcome`), so the "
+           f"composite is {verdict_word(e2_result)} rather than a scored "
+           f"shortfall; the {e1['e2a_required']}-of-{e1['e2a_units']} bar is "
+           f"neither met nor missed"
+           if not e2a_result["measured"] else
+           f"E2a falls short of {e1['e2a_required']} of {e1['e2a_units']} on "
+           f"the run's own graph"
+           if e2a_result["outcome"] != "PASS" else
+           f"E2a meets the {e1['e2a_required']}-of-{e1['e2a_units']} bar on the "
+           f"run's own graph")
+        + f", and E2b's fused count is a proxy over atomic POINTS "
+        f"rather than surviving planted units. #10360 records that "
+        f"nothing enforces retention (the render half closed, #9775). "
+        f"The row's count slots carry the E2a count over the FROZEN "
+        f"denominator ({e1['e2a_survived']}/{e1['e2a_units']}), so a "
+        f"green row here states the number the bar is written over "
+        f"instead of leaving it empty")
+
+
 def build_rows(*, head: str, out_path: str, log_corpus_sha: str,
                e3: dict, e4: dict, e5: dict, e1: dict, e2: dict) -> list[dict]:
     """The five table rows — one per criterion, each with the artifact behind it.
@@ -645,45 +978,124 @@ def build_rows(*, head: str, out_path: str, log_corpus_sha: str,
     the corpus THIS run froze, the row also carries ``artifact_corpus_sha256`` and
     ``tools/capstone_verdict_check.py``'s V7 requires that digest to appear in the
     artifact's own text — a declaration nothing supports is a finding.
+
+    ⛔ E4 is the row where the two are the SAME, so it declares nothing: since the
+    selector landed, ``build_e4_row`` REFUSES a receipt whose ``corpus_hash`` is not
+    the frozen pin, so ``e4["corpus_sha256"]`` is this run's corpus by construction.
+    It carried ``artifact_corpus_sha256`` unconditionally anyway — a declaration that
+    told a machine consumer "a different revision" about the one row whose own note
+    says the opposite, and that V7 could never verify, because its same-corpus arm
+    short-circuits before it reads the field.
     """
     def row(criterion: str, *, verdict: str, evidence: str, sha: str | None,
             numerator: int | None, denominator: int | None,
             corpus_sha256: str | None, blocked_by: str | None, note: str,
             artifact_corpus_sha256: str | None = None,
             sibling: str | None = None) -> dict:
+        # GREEN and BLOCKED are mutually exclusive in the gate (V5 refuses a green
+        # row that carries a blocker; V6 requires one on every non-green row), so
+        # the pair is resolved ONCE, here. Without this a row that is correctly
+        # measured GREEN arrives still carrying the issue it was blocked on and is
+        # refused for it — the row for the criterion a record unblocks (E2 at
+        # 13 of 14) could never be written green at all.
+        if verdict == "GREEN":
+            blocked_by = None
         built = {
             "criterion": criterion, "verdict": verdict,
             "evidence_kind": "measurement", "evidence": evidence, "sha": sha,
             "numerator": numerator, "denominator": denominator,
-            "corpus_sha256": corpus_sha256, "sibling": sibling,
+            "corpus_sha256": corpus_sha256,
             "blocked_by": blocked_by, "note": note,
         }
+        # `sibling` is emitted only where a row really has one: V8 reads a pair as
+        # two copies of ONE population, and a `"sibling": null` on every row reads
+        # as "the pair is there, the numbers are missing" rather than "no pair".
+        if sibling is not None:
+            built["sibling"] = sibling
         if artifact_corpus_sha256 is not None:
             built["artifact_corpus_sha256"] = artifact_corpus_sha256
         return built
 
+    # The docstring's rule, applied to E4's operands rather than hard-coded to
+    # "no declaration": on the real path this is False (`build_e4_row` refused an
+    # off-pin receipt before we got here), and an `e4` handed in from another
+    # revision still declares itself.
+    #
+    # ⛔ A NAMED REFUSAL FOR BOTH KEYS, AND BEFORE EITHER IS SUBSCRIPTED. The guard
+    # below was added for `evidence` alone and sat AFTER this line, so a caller
+    # omitting `corpus_sha256` still got the bare ``KeyError`` the guard exists to
+    # eliminate — from the line above it. Both are checked here, in one place, ahead
+    # of every subscript.
+    missing = [key for key in ("evidence", "corpus_sha256") if key not in e4]
+    if missing:
+        raise SystemExit(
+            "capstone-measure: REFUSED — build_rows was handed an e4 mapping with no "
+            + " and no ".join(f"`{key}`" for key in missing)
+            + ". Defaulting `evidence` to E4_RECEIPT would cite the pre-#8503 "
+            "artifact beside this run's numbers, and a missing `corpus_sha256` would "
+            "raise a bare KeyError from the comparison below — so the mapping is "
+            "refused by name rather than left to either")
+
+    # ⛔ `_same_corpus` coerces both operands itself, so this line passes them RAW on
+    # purpose: a non-string `corpus_sha256` must yield a ROW the gate can report (V7
+    # reds a non-string declaration), never an `AttributeError` from inside the
+    # comparison. `build_e4_row` cannot produce one — this is the synthetic-caller
+    # path — but the predicate's job is a verdict, not a traceback.
+    e4_off_this_corpus = not _same_corpus(e4["corpus_sha256"], log_corpus_sha)
+
     return [
-        row("E1", verdict=e1["verdict"], evidence=E1E2_LOG, sha=e1["sha"],
-            numerator=None, denominator=None,
+        # E1 and E2 carry the counts their OWN criteria are written over — E2 the
+        # E2a count over the FROZEN 14 value-bearing units (8/14, bar >= 13 of 14),
+        # E1 the after arm's Objects that are NOT bare-definite over all its
+        # Objects (48/61 on the #9889 record, whose bare-definite count is 13).
+        #
+        # ⛔ They are NOT a sibling pair and name no `sibling`. V8 requires a pair
+        # to carry the SAME numerator/denominator, which is right for two readings
+        # of ONE population; these two read two populations (all Objects vs the
+        # 14 planted value-bearing units) that no edit can reconcile. Naming them
+        # siblings forced BOTH counts to None — and an empty count on a GREEN row
+        # is exactly what V5 refuses, so the row for the criterion this record
+        # unburies (E2a >= 13 of 14) could not have been written green. The
+        # populations are stated per row instead: in the note, and in the
+        # numerator/denominator themselves.
+        row("E1", verdict=e1["verdict"], evidence=E1_E2_SCORES, sha=e1["sha"],
+            numerator=e1["numerator"], denominator=e1["denominator"],
             corpus_sha256=e1["corpus_sha256"],
-            artifact_corpus_sha256=e1["corpus_sha256"], sibling="E2",
             blocked_by="#5333", note=e1["note"]),
-        row("E2", verdict=e2["verdict"], evidence=E1E2_LOG, sha=e2["sha"],
-            numerator=None, denominator=None,
+        row("E2", verdict=e2["verdict"], evidence=E1_E2_SCORES, sha=e2["sha"],
+            numerator=e2["numerator"], denominator=e2["denominator"],
             corpus_sha256=e2["corpus_sha256"],
-            artifact_corpus_sha256=e2["corpus_sha256"], sibling="E1",
             blocked_by="#10360", note=e2["note"]),
         row("E3", verdict=e3["verdict"], evidence=out_path, sha=head,
             numerator=e3["numerator"], denominator=e3["denominator"],
             corpus_sha256=log_corpus_sha, blocked_by="#9736", note=e3["note"]),
-        row("E4", verdict=e4["verdict"], evidence=E4_RECEIPT, sha=e4["sha"],
+        row("E4", verdict=e4["verdict"], evidence=e4["evidence"], sha=e4["sha"],
             numerator=e4["numerator"], denominator=e4["denominator"],
             corpus_sha256=e4["corpus_sha256"],
-            artifact_corpus_sha256=e4["corpus_sha256"], blocked_by="#8503",
+            artifact_corpus_sha256=(e4["corpus_sha256"] if e4_off_this_corpus
+                                    else None),
+            # `#9596` is the row's LIVE BLOCKER POINTER on a red row — NOT the owner
+            # of the unformed edges. It is the only OPEN issue on E4 and it owns a
+            # DIFFERENT gap (the receipt's unmeasured retrievability rate); the
+            # planted-edge residual is UNOWNED, which `build_e4_row`'s note states and
+            # `#8503`'s own body says in its own words. `#8503` is not the pointer
+            # because it CLOSED 2026-10-24 — that closure records the DISPROOF, so it
+            # is this row's measurement record — and `#10601`'s V12 REFUSES a row for
+            # naming a blocker recorded CLOSED in `blocker-states.json`.
+            #
+            # ⛔ The literal is unconditional HERE because the GREEN invariant is
+            # enforced one layer down, in `row()`: "GREEN carries a blocker … green and
+            # blocked are mutually exclusive" (V5) is resolved once for all five rows,
+            # before the dict is built. Emitting the conditional here as well was a
+            # narrower duplicate of that rule, and it made the cell unreadable to
+            # `test_the_shipped_logs_blocker_cells_are_the_emitters_own`, which reads
+            # the five `blocked_by="#NNNN"` literals in ROW ORDER to hold the shipped
+            # log's cells to what this probe emits.
+            blocked_by="#9596",
             note=e4["note"]),
         row("E5", verdict=e5["verdict"], evidence=E5_RESCORE, sha=head,
             numerator=e5["numerator"], denominator=e5["denominator"],
-            corpus_sha256=log_corpus_sha, blocked_by="#9738", note=e5["note"]),
+            corpus_sha256=log_corpus_sha, blocked_by="#5087", note=e5["note"]),
     ]
 
 
@@ -790,20 +1202,18 @@ def run_corpus(graph: str, sessions: list[str]) -> list[dict]:
     from tortoise.sdk import TortoiseSDK
 
     sdk = TortoiseSDK(graph_name=graph)
-    # ⛔ #4282 deleted the public entry point this probe drives. Check BEFORE the
-    # loop: without it the call below raises `AttributeError` on the first session,
-    # AFTER "running N sessions ..." has been printed, so a dead instrument reads as a
-    # started run. A named refusal is the honest verdict.
+    # ⛔ #4282 (owner ruling 2026-10-27) DELETED `TortoiseSDK.capture_session`.
+    # This probe drives it directly, so with the method gone every session would
+    # raise `AttributeError` and the run would report a crash instead of the
+    # authorised deletion. Refuse by NAME (the pre-registration rule: a
+    # measurement that cannot be taken is a refusal, never a silent zero).
     if not hasattr(sdk, "capture_session"):
         raise SystemExit(
-            "capstone-measure: REFUSED — #4282 deleted "
-            "`TortoiseSDK.capture_session`, the entry point this probe drives. No pass "
-            "can be driven through a deleted door, so no row may be re-measured: the "
-            "scores in the bundle stand as the last MEASURED reading at `e0fc940b5`, not "
-            "as a reproducible one. #9116's seam (`stats[\"step_witness\"]`) survives "
-            "inside `_extract_session_v2` — the surviving in-process door, which the "
-            "hosted POST /v1/sessions handler still reaches — but a measurement against "
-            "THAT door needs its own instrument and its own pre-registration.")
+            "capstone-measure: REFUSED — #4282 deleted TortoiseSDK.capture_session, "
+            "the entry point this probe drives. No pass can be measured; the "
+            "surviving in-process door is the private sdk._extract_session_v2 "
+            "(reached by the hosted handler at hosted_api.py), and a measurement "
+            "against it is a NEW instrument needing its own pre-registration.")
     results = []
     for sid in sessions:
         fixture = load_fixture(sid)
@@ -822,6 +1232,13 @@ def run_corpus(graph: str, sessions: list[str]) -> list[dict]:
             "extraction_mode": receipt.get("extraction_mode"),
             "extracted": receipt.get("extracted"),
             "errors": list(receipt.get("errors") or []),
+            # The receipt's OTHER two error surfaces, kept verbatim for the same
+            # reason: `capstone_run.observe_idle` disqualifies an idle claim by
+            # searching errors/diagnostics/warnings, and a pass whose failure text
+            # only reached one of the three would read as idle here and as failed
+            # there — the two probes grading one fact oppositely (#10215 review P1).
+            "diagnostics": list(receipt.get("diagnostics") or []),
+            "warnings": list(receipt.get("warnings") or []),
             "stats": stats,
             "elapsed_s": round(time.time() - started, 1),
             # WHATEVER the probe holds for the two step witnesses #9116 names —
@@ -866,27 +1283,27 @@ _IDLE_CITES: dict[str, str] = {
         "The extractor emits exactly this shape when the flag is ON and the list "
         "the VET pass would have worked on is empty: `vet_enabled` is computed "
         "BEFORE the `if not edus:` early return that emits {'enabled': "
-        "vet_enabled, 's2': {}, 'union': {}} (tortoise/extractor_v2.py:9099, the "
-        "flag; :9103, the early return; :9119, its vet surface), and each VET "
-        "pass is gated on the LIST — `if vet_enabled and embed_list:` (:9194), "
-        "`if vet_enabled and complete_list:` (:9316) — so "
+        "vet_enabled, 's2': {}, 'union': {}} (tortoise/extractor_v2.py:10200, the "
+        "flag; :10204, the early return; :10220, its vet surface), and each VET "
+        "pass is gated on the LIST — `if vet_enabled and embed_list:` (:10295), "
+        "`if vet_enabled and complete_list:` (:10417) — so "
         "a block that says enabled=true proves the FLAG, never that the pass "
         "ran. A FAILED vet pass leaves the same empty stats (`_run_vet_pass` "
-        "returns {} on its fail-open path, :8978-8981)."
+        "returns {} on its fail-open path, :10079-10082)."
     ),
     "classify_later": (
         "The extractor emits exactly this shape when the flag is ON and the "
         "CLASSIFY pass had nothing to work on: `classify_later` is computed at "
-        "tortoise/extractor_v2.py:9068 (and set False when its classifier cannot "
-        "be constructed, :9093), the `if not edus:` early return emits "
+        "tortoise/extractor_v2.py:10169 (and set False when its classifier cannot "
+        "be constructed, :10194), the `if not edus:` early return emits "
         "{'enabled': classify_later, 's2': {}, 'union': {}, "
-        "'restamp_overrides': 0, 'slot_rekeys': 0} (:9115-9118), and each "
+        "'restamp_overrides': 0, 'slot_rekeys': 0} (:10216-10219), and each "
         "classify pass is gated on the LIST and then on a NON-EMPTY item set — "
-        "`if classify_later and embed_list:` (:9206) around `if items:` "
-        "(:9209), `if classify_later and complete_list:` (:9331) around "
-        "`if items:` (:9341) — so a block that says enabled=true proves the "
+        "`if classify_later and embed_list:` (:10307) around `if items:` "
+        "(:10310), `if classify_later and complete_list:` (:10432) around "
+        "`if items:` (:10442) — so a block that says enabled=true proves the "
         "FLAG, never that the pass ran. A FAILED classify pass leaves the same "
-        "empty stats (its fail-open `except` at :9222 / :9352)."
+        "empty stats (its fail-open `except` at :10323 / :10453)."
     ),
 }
 
@@ -898,26 +1315,26 @@ def _pass_ran(block: dict) -> bool | None:
     where the two were confused. ``extract_session_v2`` emits ``result["vet"]``
     and ``result["classify_later"]`` UNCONDITIONALLY — on the flag-OFF arm and on
     the early-return path the block is ``{"enabled": False, "s2": {}, "union":
-    {}}`` (:9115-9118, :9119, :9475-9489) — so an acceptance test of "a non-empty dict"
+    {}}`` (:10216-10219, :10220, :10576-10590) — so an acceptance test of "a non-empty dict"
     reports S2.2/S2.3 WITNESSED on a run measured with the flags OFF, printing
     ``enabled=false, s2={}`` beside the word WITNESSED.
 
     ⛔ AND THE FLAG ALONE IS NOT ACTIVITY, which is the sharper half and the one
     this rule got wrong first. ``enabled`` is the FLAG value, computed BEFORE the
-    pass is reached: ``vet_enabled`` is set at ``extractor_v2.py:9099`` and
-    ``edus = _edus_from_conversation(...)`` follows at ``:9102``, whose
-    ``if not edus:`` early return (``:9103``) emits literally ``"vet": {"enabled":
-    vet_enabled, "s2": {}, "union": {}}`` (``:9119``) — with the flag ON. The
+    pass is reached: ``vet_enabled`` is set at ``extractor_v2.py:10200`` and
+    ``edus = _edus_from_conversation(...)`` follows at ``:10203``, whose
+    ``if not edus:`` early return (``:10204``) emits literally ``"vet": {"enabled":
+    vet_enabled, "s2": {}, "union": {}}`` (``:10220``) — with the flag ON. The
     passes themselves are gated on the LIST, not the flag: ``if vet_enabled and
-    embed_list:`` (``:9194``) and ``if vet_enabled and complete_list:``
-    (``:9316``). So a session whose conversation produced no list emits
+    embed_list:`` (``:10295``) and ``if vet_enabled and complete_list:``
+    (``:10417``). So a session whose conversation produced no list emits
     ``enabled: True`` with empty counters and no pass ever ran; so does a pass
     that FAILED, because ``_run_vet_pass`` returns ``{}`` stats on its fail-open
-    exception path (``extractor_v2.py:8978-8981``). ``enabled: true`` therefore
+    exception path (``extractor_v2.py:10079-10082``). ``enabled: true`` therefore
     proves the flag was read, never that the pass did anything.
 
     ⛔ The VET lines above are the VET pass's, not the rule's: the CLASSIFY pass
-    is different code (``classify_later`` at `:9068`, its own early-return
+    is different code (``classify_later`` at `:10169`, its own early-return
     block, its ``if classify_later and …`` gates around ``if items:``, its own
     fail-open ``except``), so the rule is stated pass-agnostically here and the
     CITES a reader gets are raised per surface from ``_IDLE_CITES`` — never one
@@ -1010,7 +1427,11 @@ def _witness_block(runs: list[dict], key: str) -> tuple[dict | None, str, str]:
                     f"({_summary(block)}). {_IDLE_CITES[key]} This is NOT the "
                     f"#9116 absent-surface cause: the surface is HERE and says "
                     f"the flag was set, and the step stays unobserved until it "
-                    f"carries a non-empty {'/'.join(_WITNESS_STATS)} AS WELL")
+                    f"carries a non-empty {'/'.join(_WITNESS_STATS)} AS WELL — "
+                    "which is not a refusal on its own since #10215: this same "
+                    "shape is what `step_accounting` accounts as a WITNESSED IDLE "
+                    "step when the four idle predicates hold (no failure marker, "
+                    "a positive candidate count)")
             elif ran is False:
                 refused = refused or (
                     where,
@@ -1186,8 +1607,17 @@ def point_composition_line(composition: dict | None) -> str:
         f"unanchored node in 'other' LOST a link or was minted by a writer that "
         f"never derives is the attribution #9736 still owns; the figure counts "
         f"it, the line does not excuse it. derivation figure (anchored / "
-        f"expected-to-derive): {figure}. The frozen 'all derived nodes' reading "
-        f"above is unchanged")
+        f"expected-to-derive): {figure}. The 'all derived nodes' figure above IS "
+        f"the REGISTERED reading, not the PRE-AMENDMENT one: §10.1 re-registered "
+        f"E3's denominator to the classes the model anchors, so this figure no "
+        f"longer counts ':Object' and is NARROWER than the pre-amendment reading, "
+        f"which §9's provenance table states (and §10.1 restates) and this line does not recompute (the census "
+        f"that produced the old figure is retained in HISTORY, so it is checkable "
+        f"from the commit rather than re-emitted here as if it were this run's). "
+        f"That amendment is a "
+        f"DISCLOSED revision of a frozen denominator — §10.1 states old and new, "
+        f"the authority and the reason — not a silent one, and whether it stands "
+        f"is #9736's ruling to give (owner-gated, still open)")
 
 
 def e3_row_note(*, composition: dict | None, e3_result: dict, graph: str,
@@ -1241,10 +1671,14 @@ def e3_row_note(*, composition: dict | None, e3_result: dict, graph: str,
         f"run's own graph ({graph}, fixtures_hash {corpus_sha}). The "
         f"Source->Object identity link carries no sourceVersion BY "
         f"DESIGN (owner option A, #5199), so ':Object mention links' can "
-        f"never anchor — and the frozen denominator counts them anyway, "
-        f"so the = 1.000 bar is unreachable as registered (#9736: either "
-        f"the metric is re-registered or the model is reopened; a lane "
-        f"cannot pick). COMPOSITION of the {block.get('points', 0)} "
+        f"never anchor, and the UNAMENDED denominator counted them, which made "
+        f"the = 1.000 bar unreachable as registered. §10.1 re-registered E3's "
+        f"class set to the classes the model anchors, so the denominator a "
+        f"conforming row declares no longer counts ':Object' — a DISCLOSED reopen "
+        f"of a frozen denominator, whose ruling is #9736's to give (owner-gated, "
+        f"still open), which is why §10.1 reports both readings rather than one — "
+        f"this row scores the AMENDED set and says so — and it states the "
+        f"COMPOSITION of the {block.get('points', 0)} "
         f"Point nodes the denominator also counts: "
         f"{block.get('turn_rows', 0)} mechanical turn rows + "
         f"{block.get('extraction_claims', 0)} extraction claims "
@@ -1278,10 +1712,33 @@ def e3_row_note(*, composition: dict | None, e3_result: dict, graph: str,
         f"sitting outside it. "
         f"Whether an unanchored 'other' Point lost a link or "
         f"was minted by a writer that never derives is the attribution "
-        f"#9736 still owns. #9736 must choose between "
-        f"re-registering the metric and reopening the model, and this "
-        f"row reports BOTH readings so neither choice is made on a "
-        f"denominator whose composition was hidden")
+        f"#9736 still owns. #9736 holds BOTH the amendment §10.1 makes and "
+        f"the reopening of the model, and §10.1 reports BOTH readings — the "
+        f"amended denominator and the pre-amendment one — while this row states the "
+        f"amended one's composition, so neither is read "
+        f"off a denominator whose composition was hidden"
+        + _e3_empty_leg_clause(e3_result))
+
+
+def _e3_empty_leg_clause(e3_result: dict) -> str:
+    """The #9736 empty-leg disclosure, when the run measured a registered class of ZERO nodes.
+
+    Empty when every registered class carried nodes, so a fully-measured run's note is byte-for-byte
+    what it was before this rule. When a leg IS empty the note says so on the row itself — the one
+    place a reader quotes — rather than leaving it in the log's per-label lines, because a
+    ``0/0`` leg is invisible in the totals the row prints.
+    """
+    legs = tuple(e3_result.get("unmeasured_legs") or ())
+    if not legs:
+        return ""
+    return (
+        f" ⛔ AND THE POPULATION IS NARROWER THAN THE REGISTRATION: this run "
+        f"wrote ZERO nodes of the registered class(es) {', '.join(legs)}, so the "
+        f"denominator above is a strict SUBSET of the one §3.1 registers, and "
+        f"`= 1.000` over a subset is not the criterion. The empty leg contributes "
+        f"0/0: it can neither pass nor fail, so the row may not PASS on it "
+        f"(#9736 NOT-A-DECISION(9736-gate-empty-leg); WHICH spelling the document "
+        f"class should name stays #9736's owner-gated ruling)")
 
 
 def _stage_calls(stats: dict, stage: str) -> int:
@@ -1454,20 +1911,49 @@ def observe_steps(runs: list[dict], census_data: dict) -> tuple[dict, dict]:
                             f"(queries={queries}, degraded={degraded or 'none'}) — "
                             "a degraded search is not S3")
 
+    # ⛔ THE BRACKET MUST SUM TO THE TOTAL IT RENDERS BESIDE (#10525 review P2).
+    # ``per_label`` is the WIDER instrument census — it carries ``:Object`` for
+    # ``s3_prior_ablation`` (see ``CENSUS_LABELS``) — while ``derived_total`` is E3's row
+    # (``Point`` + the link-anchored classes). Rendering every block beside the narrower
+    # total put two irreconcilable numbers on ONE line: the shipped log's own S5 line is
+    # ``433 … [Point 338, Object 50, Event 45]`` (``capstone-measured-e0fc940b.log:26``),
+    # so the same graph would now print ``383 … [Document 0, Event 45, Object 50,
+    # Point 338]`` — parts summing to 433 beside a total of 383, in the bundle whose
+    # subject is that a number must be carried by what backs it. The narrowing had been
+    # applied to the denominator and not to the WITNESS that renders next to it.
+    # The classes the census carries but E3's row does not are therefore named APART
+    # from the total rather than dropped: a reader not told ``:Object`` is excluded reads
+    # its absence from the bracket as "the graph held none".
+    census_per_label = census_data.get("per_label") or {}
+    e3_census = [(label, census_per_label[label]) for label in DERIVED_LABELS
+                 if label in census_per_label]
+    outside_census = [(label, block) for label, block in census_per_label.items()
+                      if label not in DERIVED_LABELS]
     if census_data.get("derived_total"):
         per_label = ", ".join(
             f"{label} {block['nodes']} ({block['anchored']} anchored)"
-            for label, block in census_data["per_label"].items())
+            for label, block in e3_census)
+        outside = ", ".join(
+            f"{label} {block['nodes']} ({block['anchored']} anchored)"
+            for label, block in outside_census)
+        outside_note = (
+            f"; outside E3's row — counted by this census, NOT by the total above, "
+            f"because their links carry no sourceVersion BY DESIGN (#5199 option A): "
+            f"[{outside}]" if outside else "")
         operators = ", ".join(f"{name}={count}" for name, count in
                               sorted(census_data["operator_relationships"].items()))
         observed["S5"] = (
             f"the graph write landed: {census_data['derived_total']} derived "
-            f"node(s) written by the run [{per_label}]; "
+            f"node(s) written by the run [{per_label}]{outside_note}; "
             f"stats.operator_endpoints_minted={endpoints}; operator-shaped "
             f"relationships written [{operators or 'none'}]")
     else:
-        unobserved["S5"] = ("the run's own graph carries no derived node "
-                            "(Point/Object/Event) — nothing was written")
+        outside_note = (
+            f" (the census did carry {', '.join(label for label, _ in outside_census)}, "
+            f"which E3's row does not count)" if outside_census else "")
+        unobserved["S5"] = (f"the run's own graph carries no derived node "
+                            f"({'/'.join(DERIVED_LABELS)}, E3's classes) — nothing was "
+                            f"written{outside_note}")
 
     if census_data.get("points") and \
             census_data.get("event_stamped_points") is not None:
@@ -1500,6 +1986,199 @@ def observe_steps(runs: list[dict], census_data: dict) -> tuple[dict, dict]:
     return observed, unobserved
 
 
+# ── the conditional step, ACCOUNTED (#10215) ──────────────────────────────
+
+#: ``capstone_run`` resolved once, so two calls cannot disagree about the rules.
+_SIBLING_CACHE: dict[str, object] = {}
+
+
+def _sibling(name: str):
+    """The sibling probe, loaded from THIS file's own directory.
+
+    The conditional-step rule has ONE implementation — ``capstone_run``'s
+    ``declared_conditional`` (which steps the FROZEN record makes conditional) and
+    ``observe_idle`` (the four predicates that separate an idle pass from a crashed
+    one). A second copy here is not a style question: it is how the two probes came
+    to grade one fact oppositely. ``capstone_run``'s G5 accepted a classify pass
+    witnessed idle from #10215, while THIS probe emitted neither ``steps_required``
+    nor ``steps_conditional`` at all — so V5 read every log it produces as the
+    pre-#10215 "all eight required" shape and refused a GREEN row for S2.3 on the
+    very path that produces E1–E5's numbers. That is #10215's own symptom, and the
+    file that still had it was this one (review P1).
+
+    Loaded by PATH, never through ``sys.path``: this file is run as a script, exec'd
+    from ``tests/test_7949_capstone_measure.py`` and started from other cwds, and an
+    import that resolved in only one of those would fail OPEN (no split emitted)
+    instead of loudly.
+    """
+    cached = _SIBLING_CACHE.get(name)
+    if cached is not None:
+        return cached
+    path = Path(__file__).resolve().parent / f"{name}.py"
+    spec = importlib.util.spec_from_file_location(f"capstone_sibling_{name}", path)
+    if spec is None or spec.loader is None:          # pragma: no cover — defensive
+        raise SystemExit(f"capstone-measure: REFUSED — cannot load the sibling "
+                         f"probe {path}; the step accounting has ONE implementation "
+                         "and it is not in this file")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    _SIBLING_CACHE[name] = module
+    return module
+
+
+def read_conditional(prereg: dict | None) -> dict[str, dict]:
+    """The steps the FROZEN record declares CONDITIONAL, or REFUSE the run.
+
+    Read from the pre-registration COMMIT (``read_preregistration``), never the
+    worktree, so conditionality is a reviewed edit to a hash-pinned artefact rather
+    than a lane's local choice.
+
+    A MALFORMED declaration refuses, for ``capstone_run.G5``'s own reason: degrading
+    to "all eight required" looks exactly like correct behaviour, so a broken
+    declaration must stop the run rather than quietly change what the table means.
+    """
+    conditional, why = _sibling("capstone_run").declared_conditional(prereg)
+    if why:
+        raise SystemExit(
+            f"capstone-measure: REFUSED — the pre-registration's step declaration "
+            f"is unreadable: {why} — the split between unconditional and conditional "
+            "steps cannot be told, and a malformed declaration must not silently "
+            "mean 'all eight required'")
+    return conditional
+
+
+def _idle_view(run: dict) -> dict:
+    """One measured session, as ``capstone_run.observe_idle`` reads a receipt.
+
+    ``observe_idle`` reads the extractor's stage keys, ``stats`` (and the
+    ``step_witness`` sub-key the #9116 seam copies onto it) and the receipt's own
+    error surfaces. This probe holds each stage under ``surfaces`` and keeps
+    ``errors``/``diagnostics``/``warnings`` verbatim, so the view RE-HOMES what the
+    run already carries — it derives no fact of its own, which is what lets the two
+    probes share one rule.
+    """
+    view: dict = {
+        "stats": run.get("stats") or {},
+        "errors": list(run.get("errors") or []),
+        "diagnostics": list(run.get("diagnostics") or []),
+        "warnings": list(run.get("warnings") or []),
+    }
+    for key, block in (run.get("surfaces") or {}).items():
+        if block:
+            view[key] = block
+    return view
+
+
+def _idle_witness(runs: list[dict], step: str) -> tuple[str, str]:
+    """A RUN-WIDE idle basis for a conditional step, or ``("", why not)``.
+
+    One session's idle block is not a run-wide claim, and one session's ACTIVITY
+    contradicts it — so the step is accounted idle only when EVERY session that
+    carries its surface meets the idle predicates, and at least one does. The
+    predicates are ``capstone_run.observe_idle``'s, called on the receipt-shaped
+    view, so the two probes cannot grade one fact oppositely.
+    """
+    surface = _sibling("capstone_run")._SURFACE_FOR_STEP.get(step)
+    if not surface:
+        return "", (f"the sibling probe has no idle witness for {step!r}, so no "
+                     "receipt surface can account it")
+    observe_idle = _sibling("capstone_run").observe_idle
+    carried = 0
+    idle_basis: str | None = None
+    not_idle: list[str] = []
+    for run in runs:
+        view = _idle_view(run)
+        # A session that carries NO surface for this step is the #9116 instrument
+        # gap for that session, not an idle pass — and not a contradiction either.
+        if not view.get(surface) and not (
+                ((view.get("stats") or {}).get(STEP_WITNESS_KEY) or {})
+                .get(surface)):
+            continue
+        carried += 1
+        idle = observe_idle(view)
+        if step in idle and idle_basis is None:
+            idle_basis = idle[step]
+        elif step not in idle:
+            not_idle.append(str(run.get("session_id")))
+    if not carried:
+        return "", (f"no measured session carries a {surface!r} surface, which is the "
+                     "#9116 INSTRUMENT gap and not an idle pass")
+    if not_idle or idle_basis is None:
+        return "", (f"{len(not_idle) or carried} of the {carried} session(s) carrying a "
+                     f"{surface!r} surface do not meet the idle predicates "
+                     f"({', '.join(not_idle) if not_idle else '—'}: flag off, a "
+                     "fail-open marker, or no usable candidate count), so the run as a "
+                     "whole is not witnessed idle")
+    return (f"every one of the {carried} measured session(s) that carry the "
+            f"{surface!r} surface reads ENABLED with no activity and no fail-open "
+            f"marker — {idle_basis}"), ""
+
+
+def step_accounting(conditional: dict[str, dict], runs: list[dict],
+                    observed: dict[str, str]) -> tuple[list[str], list[dict], str]:
+    """The ``run`` block's step split, from the RECORD and the RUN (#10215).
+
+    Returns ``(steps_required, steps_conditional, why_not)``. The split comes from
+    the frozen record, exactly as ``capstone_run``'s G5 takes it, so a log from this
+    probe is judged by the same rule as a log from the run probe — V5's
+    ``_step_accounting`` reads these two fields and nothing else.
+
+    ``why_not`` is non-empty when a conditional step is neither observed nor
+    witnessed idle. The log then states the pre-#10215 shape — all eight required —
+    instead of emitting conditionality it cannot account for. Both directions of
+    that fallback are STRICTER: V5 then refuses the row for the fact that is
+    actually true ("steps not observed in the run: S2.3", which is what it said
+    before this change) rather than for a partition error this log would be
+    inventing by declaring a conditional step and leaving it unaccounted.
+    """
+    if not conditional:
+        return list(STEPS), [], ""
+    required = [step for step in STEPS if step not in conditional]
+    accounts: list[dict] = []
+    unaccounted: list[str] = []
+    for step in STEPS:
+        if step not in conditional:
+            continue
+        if step in observed:
+            accounts.append({"step": step, "state": "observed",
+                             "basis": observed[step]})
+            continue
+        basis, why = _idle_witness(runs, step)
+        if basis:
+            accounts.append({"step": step, "state": "idle", "basis": basis})
+        else:
+            unaccounted.append(f"{step} — {why}")
+    if unaccounted:
+        return list(STEPS), [], (
+            "conditional step(s) neither observed nor witnessed idle: "
+            + "; ".join(unaccounted))
+    return required, accounts, ""
+
+
+def step_accounting_lines(required: list[str], accounts: list[dict],
+                          steps_gap: str) -> list[str]:
+    """The human log's step SPLIT — the half V5 reads, printed beside the count.
+
+    Seven unconditional steps are REQUIRED and a conditional one is ACCOUNTED
+    (observed, or witnessed idle): a different claim from "eight observed", and a
+    reader who is handed only the count cannot tell the two apart. A separate
+    function so the rendering arm is testable without building a whole log — an
+    untested print is how a claim stops being shown at all.
+    """
+    lines = ["steps required: " + (" ".join(required) if required else "(none)")
+             + "  |  conditional: "
+             + (", ".join(f"{entry['step']}={entry['state']}"
+                           for entry in accounts or []) or "none")]
+    for entry in accounts or []:
+        lines.append(f"conditional {entry['step']}: {entry['state']} — {entry['basis']}")
+    if steps_gap:
+        lines.append(
+            f"steps accounting: NOT CLAIMED — {steps_gap}; the table therefore states "
+            "the pre-#10215 shape (all eight required), so the gate refuses the fact "
+            "that is true rather than a conditionality nothing accounts for")
+    return lines
+
+
 # ── the census ────────────────────────────────────────────────────────────
 
 def census(uri: str) -> dict:
@@ -1517,7 +2196,7 @@ def census(uri: str) -> dict:
     ).result_set}
 
     per_label: dict[str, dict[str, int]] = {}
-    for label in DERIVED_LABELS:
+    for label in CENSUS_LABELS:
         # Per-label queries rather than one grouped query: `labels(n)[0]` would
         # group a multi-labelled node under the wrong key, and the denominator is
         # exactly the thing this census may not get subtly wrong.
@@ -1565,6 +2244,13 @@ def census(uri: str) -> dict:
         relationship_counts[str(name)] = int(count)
         relationship_anchored[str(name)] = int(anchored)
 
+    # E3's totals are summed over the E3 ROW's classes ONLY. ``per_label`` is the wider,
+    # instrument-wide census (it carries ``:Object`` for ``s3_prior_ablation``), so summing
+    # every block here would put the mention class straight back into E3's denominator and
+    # report ``148/433`` beside a registration that names ``148/383`` — the exact defect
+    # #9736 exists to remove, reintroduced from the other side.
+    e3_blocks = [per_label[label] for label in DERIVED_LABELS if label in per_label]
+
     event_stamped = projection.g.query(
         "MATCH (n:Point) WHERE n.eventId IS NOT NULL RETURN count(*)").result_set
 
@@ -1576,8 +2262,8 @@ def census(uri: str) -> dict:
         "label_counts": label_counts,
         "per_label": per_label,
         "point_composition": composition,
-        "derived_total": sum(block["nodes"] for block in per_label.values()),
-        "anchored_total": sum(block["anchored"] for block in per_label.values()),
+        "derived_total": sum(block["nodes"] for block in e3_blocks),
+        "anchored_total": sum(block["anchored"] for block in e3_blocks),
         "points": int(label_counts.get("Point", 0)),
         "graph_events": int(label_counts.get("GraphEvent", 0)),
         "event_stamped_points": (int(event_stamped[0][0])
@@ -1594,25 +2280,286 @@ def census(uri: str) -> dict:
 
 # ── E4 / E5 / E1+E2 ───────────────────────────────────────────────────────
 
-def load_e4(repo: Path = ROOT) -> dict:
-    """E4's number, read VERBATIM out of the committed operator receipt."""
-    path = repo / E4_RECEIPT
-    if not path.is_file():
-        raise SystemExit(f"capstone-measure: REFUSED — E4's receipt {E4_RECEIPT} "
-                         "does not exist; a row with no artifact is an inference, "
-                         "not evidence")
-    record = json.loads(path.read_text())
-    audit = record.get("operator_audit")
-    if not isinstance(audit, dict):
-        raise SystemExit(f"capstone-measure: REFUSED — {E4_RECEIPT} carries no "
-                         "operator_audit block")
+def _same_corpus(a: object, b: object) -> bool:
+    """Two corpus hashes name the same corpus, with or without the ``sha256:`` prefix.
+
+    The record writes ``sha256:<hex>``; a receipt written by a different code path may
+    drop the prefix. Comparing the RAW strings made those two spellings unequal, so a
+    receipt on the pinned corpus was reported as "not measured on the frozen corpus" —
+    a refusal that names a false reason is the one failure mode a refusal must not have.
+
+    ⛔ Both operands are COERCED HERE, not at the call sites. This predicate's contract
+    is to RETURN A VERDICT — and a caller handing it a non-string (a synthetic `e4`, a
+    caller-supplied pin) must get that verdict, not `AttributeError: 'int' object has
+    no attribute 'removeprefix'` raised from inside the check. Doing it in one place is
+    also why the sites cannot drift apart again: three of them coerced one operand or
+    none, and each shape was a separate review round.
+    """
+    return (str(a or "").removeprefix("sha256:")
+            == str(b or "").removeprefix("sha256:"))
+
+
+def _instant(raw: object) -> tuple[int, object]:
+    """A comparable instant from a receipt's ``date``, or a sentinel that sorts FIRST.
+
+    A STRING compare is not an ordering here: ``…T01:00:00+02:00`` sorts ABOVE
+    ``…T00:30:00Z`` lexically while being genuinely EARLIER. The key decides both which
+    receipt wins and whether an unscorable one refuses the selection, so a wrong
+    compare makes the two disagree — a false refusal one way, a reopened silent skip
+    the other. Returns ``(0, "")`` for an ABSENT date, ``(0, <the date as text>)``
+    for one that is PRESENT but unreadable, and ``(1, datetime)`` otherwise (so an
+    undated record never displaces a dated one); the tag is compared first, so a
+    datetime is never ordered against a str.
+
+    ⛔ The two tag-0 shapes are NOT the same fact, and the CALLER must separate them:
+    ``(0, "")`` is "no date recorded", which the ordering can state honestly;
+    ``(0, <text>)`` is "a date is recorded and it cannot be read", which makes the
+    record's position in the order unknowable. Ranking the second as if it were the
+    first let an OLDER on-pin receipt publish E4's number while a newer measurement
+    sat unread (and silenced the would-have-won refusal when that newer one was also
+    unscorable) — so ``select_e4_receipt`` REFUSES it, on the same reasoning it
+    refuses an unreadable file: nothing can prove the newest measurement on the
+    frozen corpus is not the one whose date could not be parsed.
+
+    The second element of a tag-0 key is therefore ALWAYS a ``str``: an absent date
+    contributes ``""`` and a present-but-unreadable one contributes ``repr(raw)`` (a
+    non-string such as ``"date": 20261024`` lands here rather than being flattened
+    into the absent shape). Both are only ever compared against other strings, so
+    ordering is unaffected.
+    """
+    if raw is None:
+        return (0, "")
+    if not isinstance(raw, str):
+        # ⛔ NEVER PARSE `repr(raw)`. A recorded date that is not a string is
+        # UNREADABLE, and the repr of an int is the ISO BASIC form — `repr(20261024)`
+        # is `'20261024'`, which `datetime.fromisoformat` ACCEPTS, so parsing here
+        # silently ranked a malformed date at midnight UTC instead of refusing it
+        # (measured: it did exactly that, while `0` — whose repr fails to parse — was
+        # refused; two non-string dates, opposite outcomes, for no stated reason).
+        # Tag 0 puts every non-string on the refusal path `select_e4_receipt` already
+        # implements for a present-but-unreadable date.
+        return (0, repr(raw))
+    text = raw
+    if not text:
+        return (0, "")
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return (0, text)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return (1, parsed)
+
+
+def _sort_key(record: dict, name: str) -> tuple:
+    """The ONE ordering key, shared by the winner choice and the refusal predicate."""
+    return (_instant(record.get("date")), str(record.get("run_id") or ""), name)
+
+
+def select_e4_receipt(repo: Path = ROOT, frozen_pin: str = "") -> tuple[str, dict]:
+    """E4's artifact: the operator receipt measured on the FROZEN corpus.
+
+    Why this is not a filename constant. E4's bar is *"the planted-operator corpus
+    goes from 0/4 to 4/4"* — on the **pre-registered corpus**, like every other
+    row. A hard-coded path broke that silently: the roll-up cited
+    ``w2b-operator-2026-10-19.json``, whose own ``corpus_hash`` is ``943a99ec…``
+    — not the frozen ``dd7e8520…`` — and scored E4 at **2/15** from it, while three
+    of ``#8503``'s OWN measurement receipts, all on the frozen corpus, read
+    **5/15**. So the published row was measured on a different corpus than the one
+    the record froze. Nothing observed it: the row carried the mismatching
+    ``corpus_hash`` as a disclosure and the gate passes a disclosed mismatch (V7).
+
+    ⛔ NOT "written AFTER ``#8503``'s fix, on code that predates the fix" — there is
+    no fix. ``#8503`` CLOSED 2026-10-24 as a **DISPROOF** (*"This issue is that
+    residual, now measured post-close. No open issue owns it."*), and these three
+    receipts (`w2b-operator-2026-10-24-8503-{preleg,a,b}.json`) are dated
+    ``2026-10-24T05:46:51Z`` / ``06:03:47Z`` / ``06:10:47Z`` — 14.66–15.06 h BEFORE
+    that issue's ``closedAt`` of ``2026-10-24T20:50:13Z``. They are its measurement
+    artifacts, not the output of a repair it never made.
+
+    A filename constant is also an evidence hole: point it at any other receipt and
+    the row reports that receipt's number with no signal that the artifact moved.
+
+    Selection is therefore by the receipt's OWN ``corpus_hash``:
+
+    * ``frozen_pin`` must be a real pin — an un-pinned selection is refused;
+    * every ``*.json`` in the receipts directory is read (the name is not trusted to
+      say which files are receipts), and the one whose hash **matches** the pin wins;
+      no match REFUSES rather than falling back to "the newest file";
+    * among matches the ordering is by the record's own ``date`` and then ``run_id``,
+      and the winner is the last. The date is PARSED where it can be (the writer emits
+      a fixed ``…Z`` stamp, but a hand-authored receipt may carry an offset —
+      ``…T01:00:00+02:00`` sorts ABOVE ``…T00:30:00Z`` as a STRING while being
+      genuinely EARLIER); a receipt whose ``date`` is ABSENT sorts first, so an
+      undated record never displaces a dated one. One helper (``_sort_key``) produces
+      the key for BOTH the winner choice and the would-have-won refusal below, because
+      those two disagreeing is exactly how a silent revert gets in;
+    * a receipt ON the pin whose ``date`` is PRESENT but unparseable REFUSES the
+      selection. Its position in the order is unknowable, so it can neither be ranked
+      (an older receipt would publish while a newer measurement sat unread) nor be
+      shown not to be the newest unread one (which resurrects the silent skip this
+      selector exists to close). An ABSENT date is different and stays permitted: that
+      is a recorded fact, not an unreadable one. The reason is the same one the next
+      bullet gives for an unreadable file;
+    * a file in the receipts directory that cannot be read as a JSON object REFUSES
+      the selection: its corpus and date are unknowable, so nothing can prove the
+      newest measurement on the frozen corpus is not it;
+    * a candidate that IS on the frozen pin but carries no ``operator_audit`` REFUSES
+      **when it would have won** — i.e. when it sorts after the newest scorable
+      receipt. Skipping that one would let an OLDER on-pin receipt publish the row's
+      number while the newest measurement on the same corpus sat unread, which is the
+      same "the row's number is not the artifact you think it is" defect this selector
+      exists to close, one level down. One that sorts BEFORE the winner provably cannot
+      change the result and is ignored, because a refusal that names a consequence that
+      is not true is the one failure mode a refusal must not have;
+    * a candidate carrying no ``corpus_hash``, or one measured on another corpus, is
+      ignored and NAMED in the no-match refusal, so a missing artifact cannot read as
+      "no candidate".
+    """
+    if not frozen_pin:
+        raise SystemExit("capstone-measure: REFUSED — E4 was asked to select its "
+                         "receipt without the frozen corpus pin; a receipt whose "
+                         "corpus cannot be checked is not evidence for a bar "
+                         "written over the pre-registered corpus")
+    directory = repo / E4_RECEIPT_DIR
+    if not directory.exists():
+        raise SystemExit(
+            f"capstone-measure: REFUSED — the receipts directory {directory} does "
+            "not exist, so E4's artifact cannot be looked for. Check the root this "
+            "probe was pointed at; an ABSENT directory is a different failure from "
+            "an empty one, and reporting both as 'none present' points the reader "
+            "at a missing receipt when the real cause is a missing tree")
+    if not directory.is_dir():
+        # ⛔ `is_dir()` IS False FOR A PATH THAT EXISTS AS A FILE. Falling into the
+        # absent-tree refusal above would then assert "does not exist" about a path
+        # that IS there — and a refusal that names a false reason is the one failure
+        # mode a refusal must not have (the same rule `_same_corpus` states). The
+        # sibling commit that split absent-vs-empty made this exact distinction; this
+        # is its third arm, so the reader is never sent to check a root that is fine.
+        raise SystemExit(
+            f"capstone-measure: REFUSED — {directory} exists but is NOT a "
+            "directory, so E4's artifact cannot be looked for. An ABSENT directory "
+            "is a different failure from one that is present but unusable; this one "
+            "is present, so check what occupies that path rather than the root")
+    paths = sorted(directory.glob(E4_RECEIPT_GLOB))
+    matched: list[tuple[tuple, Path, dict]] = []
+    skipped: list[str] = []
+    #: Candidates that ARE on the frozen pin but carry no ``operator_audit``, so they
+    #: cannot be scored. Kept with their ORDERING key: one that sorts after the winner
+    #: is a REFUSAL (it would have won), one that sorts before it provably cannot affect
+    #: the result and is ignored — refusing on those would name a false reason.
+    unscorable: list[tuple[tuple, str]] = []
+    #: Files in the receipts directory that could not be read as a JSON object. Their
+    #: corpus and date are unknowable, so nothing can prove the newest measurement on
+    #: the frozen corpus is not one of them — a REFUSAL, never a silent skip.
+    unreadable: list[str] = []
+    #: Files ON the frozen pin whose ``date`` is present but cannot be parsed. Their
+    #: position in the order is unknowable, so they neither rank nor can be shown not
+    #: to be the newest unread measurement — a REFUSAL, for the same reason an
+    #: unreadable file refuses.
+    unorderable: list[str] = []
+    for path in paths:
+        try:
+            record = json.loads(path.read_text())
+        except (OSError, ValueError) as exc:
+            # JSONDecodeError and UnicodeDecodeError are both ValueError subclasses, so
+            # this catches a non-UTF-8 file too — otherwise it escapes as a traceback
+            # instead of the refusal naming the file.
+            unreadable.append(f"{path.name} (unreadable: {exc})")
+            continue
+        if not isinstance(record, dict):
+            unreadable.append(f"{path.name} ({type(record).__name__}, not a record)")
+            continue
+        corpus_hash = record.get("corpus_hash")
+        if corpus_hash in (None, ""):
+            skipped.append(f"{path.name} (no corpus_hash)")
+            continue
+        if not isinstance(corpus_hash, str):
+            # PRESENT but not a string: the label above would be UNTRUE (the file
+            # plainly carries a corpus_hash) and skipping it silently is the very
+            # defect this selector exists to close — a newer on-pin measurement
+            # whose hash cannot be read would lose to an older scorable one with
+            # nothing said. Its corpus is therefore UNKNOWABLE, which is the reason
+            # the unreadable-file refusal already names: nothing can prove the newest
+            # measurement on the frozen corpus is not this one.
+            unreadable.append(
+                f"{path.name} (corpus_hash is a "
+                f"{type(corpus_hash).__name__}, not a hash)")
+            continue
+        if not _same_corpus(corpus_hash, frozen_pin):
+            skipped.append(f"{path.name} (corpus_hash {corpus_hash[:20]}…)")
+            continue
+        raw_date = record.get("date")
+        if raw_date not in (None, "") and _instant(raw_date)[0] != 1:
+            # PRESENT and unreadable. Ranking it first would let an older receipt
+            # publish; ignoring it would let an unscorable newest measurement be
+            # skipped without the would-have-won refusal firing. Both are the defect
+            # this selector exists to close, so the position is unknowable ⇒ refuse.
+            unorderable.append(f"{path.name} (date {raw_date!r} is not an instant)")
+            continue
+        key = _sort_key(record, path.name)
+        if not isinstance(record.get("operator_audit"), dict):
+            unscorable.append((key, path.name))
+            continue
+        matched.append((key, path, record))
+    if unreadable:
+        raise SystemExit(
+            f"capstone-measure: REFUSED — {len(unreadable)} file(s) in "
+            f"{directory} could not be read as a receipt: {sorted(unreadable)}. "
+            f"Every {E4_RECEIPT_GLOB} there is a candidate receipt, so nothing can "
+            "prove the newest measurement on the frozen corpus is not one of them — "
+            "repair or remove the file, or re-run the operator probe")
+    if unorderable:
+        raise SystemExit(
+            f"capstone-measure: REFUSED — {len(unorderable)} receipt(s) in "
+            f"{directory} ARE on the frozen corpus ({frozen_pin}) but carry a date "
+            f"that is not an instant: {sorted(unorderable)}. The newest measurement "
+            "on the frozen corpus cannot be ORDERED against them, so no scorable "
+            "receipt can be shown to be the newest one — repair the date, or re-run "
+            "the operator probe")
+    if not matched:
+        if unscorable:
+            raise SystemExit(
+                f"capstone-measure: REFUSED — {len(unscorable)} receipt(s) in "
+                f"{directory} ARE on the frozen corpus ({frozen_pin}) but carry no "
+                "operator_audit, and nothing else matched, so none of them can be "
+                f"scored: {sorted(name for _key, name in unscorable)}. Repair or "
+                "remove them, or re-run the operator probe")
+        raise SystemExit(
+            f"capstone-measure: REFUSED — no operator receipt in "
+            f"{directory} was measured on the frozen corpus "
+            f"({frozen_pin}). {len(paths)} candidate(s) were scanned and none "
+            f"matched: {skipped or 'none present'}. E4 is a bar over the "
+            "pre-registered corpus; scoring it from another revision would report "
+            "a number this run's corpus cannot support")
+    matched.sort(key=lambda entry: entry[0])
+    winner = matched[-1][0]
+    would_have_won = sorted(name for key, name in unscorable if key > winner)
+    if would_have_won:
+        raise SystemExit(
+            f"capstone-measure: REFUSED — {len(would_have_won)} receipt(s) in "
+            f"{directory} ARE on the frozen corpus ({frozen_pin}) and sort AFTER the "
+            f"newest scorable one, but carry no operator_audit so they cannot be "
+            f"scored: {would_have_won}. Skipping them would let an OLDER on-pin "
+            "receipt publish the row's number while the newest measurement on the "
+            "same corpus sat unread — repair or remove the receipt, or re-run the "
+            "operator probe")
+    _key, path, record = matched[-1]
+    return path.relative_to(repo).as_posix(), record
+
+
+def load_e4(repo: Path = ROOT, *, frozen_pin: str = "") -> dict:
+    """E4's number, read VERBATIM out of the receipt measured on the frozen corpus."""
+    rel, record = select_e4_receipt(repo, frozen_pin=frozen_pin)
+    audit = record["operator_audit"]
     for key in ("planted", "edge_correct", "content_ok", "operators_total"):
         value = audit.get(key)
         if not isinstance(value, int) or isinstance(value, bool):
-            raise SystemExit(f"capstone-measure: REFUSED — {E4_RECEIPT} "
+            raise SystemExit(f"capstone-measure: REFUSED — {rel} "
                              f"operator_audit[{key!r}] is not an integer count: "
                              f"{value!r}")
     return {
+        "evidence": rel,
         "planted": audit["planted"],
         "edge_correct": audit["edge_correct"],
         "content_ok": audit["content_ok"],
@@ -1625,6 +2572,108 @@ def load_e4(repo: Path = ROOT) -> dict:
         "judge_pin": record.get("judge_pin"),
         "verdict": record.get("verdict"),
         "failure_origin": record.get("failure_origin"),
+    }
+
+
+def e4_outcome_for(receipt: dict, bars: dict) -> dict:
+    """The E4 outcome for a receipt — ONE derivation, two call sites.
+
+    ``build_e4_row`` and ``main``'s ``render_log`` call both need it. Deriving it
+    twice is how the log comes to print an outcome the row was not built from — the
+    exact "the number is not the one you think it is" class this probe exists to
+    refuse — so there is one definition here and no second transcription.
+    """
+    return e4_outcome(edge_correct=receipt["edge_correct"],
+                      planted=receipt["planted"], bars=bars)
+
+
+def build_e4_row(receipt: dict, *, bars: dict, corpus_sha: str) -> dict:
+    """E4's row, from a receipt ``load_e4`` selected on the frozen corpus.
+
+    Factored out of ``main`` so the union of *selection* and *row* is one pinned
+    unit: the row's ``evidence`` is the receipt it was measured from, and while this
+    was inline a reversion to a constant cited a path the row was not measured on
+    with every test still green.
+
+    ⛔ Three things are separate and the note keeps them separate: the corpus hash is
+    the FROZEN one (that is why the receipt was selected), the receipt's own ``date``
+    and ``commit`` are the RECEIPT's (it was written on an earlier head than this
+    run — saying they "equal the frozen corpus" was a sentence the fields refute),
+    and ``verdict``/``failure_origin`` are the receipt's gate verdict over its own
+    metrics, not this row's verdict.
+    """
+    if not corpus_sha or not _same_corpus(receipt.get("corpus_hash"), corpus_sha):
+        raise SystemExit(
+            f"capstone-measure: REFUSED — build_e4_row was handed "
+            f"{receipt.get('evidence')!r}, whose corpus_hash="
+            f"{receipt.get('corpus_hash')!r} is not the frozen corpus "
+            f"({corpus_sha}). The note below states that equality, so building the "
+            "row from a receipt that does not carry the pin would print a sentence "
+            "the row's own fields refute")
+    result = e4_outcome_for(receipt, bars)
+    # ⛔ THIS CLAUSE IS A CLAIM ABOUT THE NUMBER BESIDE IT, so it follows that
+    # number's operands. It used to be unconditional, which was harmless only while
+    # every receipt read below the bar: the bar is 15 of 15, so the moment an on-pin
+    # receipt reads 15/15 the row is GREEN and it announced that "the planted edges
+    # are still not all formed" — a sentence the row's OWN fields refute, fired at
+    # exactly the epic's success state. Nor is `FAIL` a single cause: `e4_outcome`
+    # fails on `edge_correct < required` OR on `planted != of`, so a receipt that
+    # plants its own count (14/14, 16/16) is RED with numerator == denominator and
+    # the wiring clause would be refuted there too. The `#9596` half is a fact about
+    # the RECEIPT (its retrievability is unreported whatever the edge count) and
+    # stays unconditional; only the `#8503` half is a claim about this number.
+    # ⛔ `#8503` is named as the MEASUREMENT RECORD, never as a live blocker: it
+    # CLOSED 2026-10-24 and that closure records E4's DISPROOF. `#10601`'s V12 refuses
+    # a row whose `blocked_by` has closed — so a row that still said "#8503 is what
+    # blocks this" would be refused by the gate for naming work that is finished.
+    #
+    # ⛔ THE RESIDUAL IS UNOWNED, AND SAYING OTHERWISE WAS A FALSE ATTRIBUTION.
+    # `#8503`'s own body closes by stating it plainly — *"This issue is that residual,
+    # now measured post-close. No open issue owns it."* — and `#9596` is scoped to a
+    # DIFFERENT gap: the receipt's retrievability rate is unmeasured (a v2 receipt must
+    # re-cut it on a real run). This clause used to say `#9596` owns the ten unformed
+    # planted edges; it does not, and the sentence would have been emitted into every
+    # future scored log. The row's `blocked_by` cell is still `#9596`, because the gate
+    # requires a non-green row to name a LIVE issue and that is the only open one on
+    # E4 — but the CELL is a pointer, and this NOTE is where its scope is stated.
+    # ⛔ NOT "#8503's fix holds here": there IS no fix. `#8503` closed 2026-10-24 as a
+    # DISPROOF, so a receipt that reaches the bar is evidence the edges were formed on
+    # that artifact — not that a fix landed. The PASS arm is printed into a future
+    # scored log, so it must not name work no issue ever did.
+    if result["outcome"] == "PASS":
+        edge_clause = ("the planted-edge bar IS met by this receipt, so nothing is "
+                       "missing on this row")
+    elif receipt["edge_correct"] < receipt["planted"]:
+        edge_clause = ("the planted edges are still not all formed (#8503 — CLOSED "
+                       "2026-10-24: that closure records the DISPROOF, so it is this "
+                       "row's measurement record and not a live blocker, and no open "
+                       "issue owns the residual — #8503 says so in its own words)")
+    else:
+        edge_clause = (f"the planted-edge COUNT, not the wiring, is the shortfall — "
+                       f"this receipt plants {receipt['planted']} where the record "
+                       f"freezes {bars['E4']['of']} (#8503 — CLOSED 2026-10-24: that "
+                       f"closure records the DISPROOF, so it is this row's measurement "
+                       f"record and not a live blocker, and no open issue owns the "
+                       f"residual — #8503 says so in its own words)")
+    return {
+        "verdict": verdict_word(result),
+        "numerator": receipt["edge_correct"],
+        "denominator": receipt["planted"],
+        "sha": receipt["commit"],
+        "evidence": receipt["evidence"],
+        "corpus_sha256": receipt["corpus_hash"],
+        "note": (f"{result['value']}; bar {result['bar']}; content_ok="
+                 f"{receipt['content_ok']} operators_total="
+                 f"{receipt['operators_total']} on the SAME receipt, from "
+                 f"{receipt['evidence']}. Its corpus_hash={receipt['corpus_hash']} "
+                 f"IS the frozen corpus ({corpus_sha}) — the receipt is selected by "
+                 f"that hash, so this row cannot be scored on another revision. The "
+                 f"receipt's own date={receipt['date']} and commit={receipt['commit']} "
+                 f"are the RECEIPT's, not this run's head. verdict="
+                 f"{receipt['verdict']} failure_origin={receipt['failure_origin']} "
+                 f"is the receipt's own gate verdict over its metrics, not this "
+                 f"row's: {edge_clause}, and "
+                 f"the receipt's retrievability rate is UNMEASURED (#9596)"),
     }
 
 
@@ -1692,42 +2741,70 @@ def score_e5(sessions: list[str], out_path: Path) -> dict:
 
 
 def measure_e1_e2(repo: Path = ROOT) -> dict:
-    """E1/E1b/E2a/E2b, parsed out of the landed ``e1-e2.log``."""
-    path = repo / E1E2_LOG
+    """E1/E1b/E2a/E2b, read off the `#9889` measurement record.
+
+    The record is produced by ONE invocation of ``e1_e2_scores.py`` over the
+    three probes' own outputs (see ``E1_E2_SCORES``); this function only maps it
+    onto the shape the rows need. Both rows now cite a measurement on the FROZEN
+    corpus taken at a named head — which the committed ``e1-e2.log`` never was.
+    """
+    path = repo / E1_E2_SCORES
     if not path.is_file():
-        raise SystemExit(f"capstone-measure: REFUSED — {E1E2_LOG} does not exist")
-    text = path.read_text()
-    arms = parse_e1e2_log(text)
-    before = (arms.get("before") or {}).get("objects") or {}
-    after = (arms.get("after-vet-shipped") or {}).get("objects") or {}
-    if not before.get("share") or not after.get("share"):
-        raise SystemExit(f"capstone-measure: REFUSED — {E1E2_LOG} carries no "
-                         "objects/share line for both arms; E1 cannot be parsed")
-    summary = arms.get("summary") or {}
-    scored = arms.get("after-vet-shipped") or {}
-    real_facts = scored.get("real_facts") or {}
-    state = scored.get("state_value_points") or {}
-    atomic = scored.get("atomic_points") or {}
+        raise SystemExit(
+            f"capstone-measure: REFUSED — {E1_E2_SCORES} does not exist. It is "
+            f"produced by: {E1_E2_SCORES_CMD}")
+    record = json.loads(path.read_text())
+    e1 = record.get("e1") or {}
+    e2 = record.get("e2") or {}
+    e2a = e2.get("e2a") or {}
+    e2b = e2.get("e2b") or {}
+    e1b = record.get("e1b") or {}
+    pairings = e1.get("pairings") or []
+    if not pairings:
+        raise SystemExit(f"capstone-measure: REFUSED — {E1_E2_SCORES} carries "
+                         "no E1 pairings; E1 cannot be scored")
+    if not e2a.get("value_units"):
+        raise SystemExit(f"capstone-measure: REFUSED — {E1_E2_SCORES} carries "
+                         "no E2a denominator")
+    # E1's arithmetic is reported against the FIRST before realization; the
+    # ``decidable`` flag is what stops that reading being mistaken for a verdict.
+    first = pairings[0]
     return {
-        "sha": line_value(text, "sha"),
-        "before_share": float(before["share"]),
-        "after_share": float(after["share"]),
-        "objects_total": int(float(before.get("total") or 0)),
-        "objects_numerator": int(float(before.get("numerator") or 0)),
-        "real_facts": int(float(real_facts.get("count") or 0)),
-        "state_values": int(float(state.get("values") or 0)),
-        "state_points": int(float(state.get("points") or 0)),
-        "atomic_points": int(float(atomic.get("atomic") or 0)),
-        "fused": int(float(atomic.get("fused") or 0)),
-        "e1_summary": summary.get("e1") or {},
-        "e1_control": summary.get("e1-control") or {},
-        "e2_state": summary.get("e2-state") or {},
-        "e2_atomic": summary.get("e2-atomic") or {},
-        "corpus": (re.search(r"\bcorpus=(\S+)", text) or [None, None])[1]
-                  if re.search(r"\bcorpus=(\S+)", text) else None,
-        "corpus_sha256": corpus_sha_of_log(text),
-        "declared_prereg": line_value(text, "prereg"),
-        "declared_result": line_value(text, "result"),
+        "sha": record.get("head"),
+        "decidable": bool(e1.get("decidable")),
+        # The record's own floor finding. `e1_pairings` folds it INTO `decidable`
+        # (`decidable = len(verdicts) == 1 and not below_floor`), so reading only
+        # `decidable` makes an under-floor after arm report a pairing
+        # disagreement it does not have — #10610 review issue 2.
+        "below_floor": bool(e1.get("below_floor")),
+        "before_share": first["before_share"],
+        "after_share": first["after_share"],
+        "before_spread_pp": e1.get("before_spread_pp"),
+        "pairings": pairings,
+        "objects_total": first["before_objects"],
+        # READ from the record, never re-derived from share x objects: a
+        # reconstruction that disagrees with the measurement is a number this
+        # bundle did not take.
+        "objects_numerator": first["before_bare_definite"],
+        "after_objects": first["after_objects"],
+        # The AFTER arm's own numerator, for the row's count slots. It is READ
+        # from the record (the ON log's `e1-aux ... bare_definite=` line), never
+        # re-derived as share x objects — the rule the two lines above state, and
+        # which the E1 row needs now that it carries its count instead of
+        # leaving the slots empty.
+        "after_numerator": first.get("after_bare_definite"),
+        "real_facts": e1b.get("real_facts") or 0,
+        "atomic_points": e2b.get("atomic_points") or 0,
+        "fused": e2b.get("fused") or 0,
+        "e2a_units": e2a.get("value_units"),
+        "e2a_survived": e2a.get("value_survived"),
+        "e2a_required": e2a.get("required"),
+        "e2a_outcome": e2a.get("outcome"),
+        "e2a_falsifier_survived": (e2a.get("falsifier") or {}).get(
+            "value_survived"),
+        "gate_drops_total": (record.get("gate_drops") or {}).get("drops_total"),
+        "gate_drops_objects": (record.get("gate_drops") or {}).get("objects"),
+        "corpus_sha256": normalise_corpus(record.get("corpus_sha256")),
     }
 
 
@@ -1739,6 +2816,9 @@ def render_log(*, head: str, prereg_sha: str, bars: dict, corpus_sha: str,
                e1b_out: dict, e2a_out: dict, e2b_out: dict, e3: dict,
                e3_out: dict, e4: dict, e4_out: dict, e5: dict, e5_out: dict,
                rows: list[dict], out_path: str,
+               required: list[str] | None = None,
+               accounts: list[dict] | None = None,
+               steps_gap: str = "",
                arm: dict | None = None) -> str:
     """The human log with the machine table at the bottom (one artifact, one read)."""
     lines: list[str] = []
@@ -1781,6 +2861,7 @@ def render_log(*, head: str, prereg_sha: str, bars: dict, corpus_sha: str,
         f"{len([s for s in STEPS if s in observed])}/{len(STEPS)}"
         + (f" (unwitnessed: {', '.join(s for s in STEPS if s not in observed)})"
            if len(observed) < len(STEPS) else ""))
+    lines.extend(step_accounting_lines(required, accounts, steps_gap))
     add("")
     add("## E3 census — derived nodes and their version anchor")
     add(f"e3 rule: {E3_RULE}")
@@ -1794,6 +2875,7 @@ def render_log(*, head: str, prereg_sha: str, bars: dict, corpus_sha: str,
     add(f"e3 numerator={e3['numerator']} denominator={e3['denominator']} "
         f"below_floor={'REFUSED' if e3['below_floor'] else 'no'} "
         f"outcome={e3['outcome']} bar={e3['bar']}")
+    add(e3_legs_line(census_data.get("per_label")))
     add("e3 relationship anchors: " + ", ".join(
         f"{name}={census_data['relationship_anchored'].get(name, 0)}/{count}"
         for name, count in sorted(census_data["relationship_counts"].items())))
@@ -1820,31 +2902,54 @@ def render_log(*, head: str, prereg_sha: str, bars: dict, corpus_sha: str,
         f"note=AFTER arm only — this run has no before arm, so E1 is NOT "
         f"scoreable from it; {floor_note}")
     add("")
-    add("## E1 / E1b / E2a / E2b — parsed out of the landed e1-e2.log")
-    add(f"e1 parsed: before_share={e1['before_share']:.6f} "
+    add("## E1 / E1b / E2a / E2b — read out of the #9889 measurement record")
+    add(f"e1 source: {E1_E2_SCORES} (one invocation of e1_e2_scores.py over the "
+        "#9889 probes' own outputs)")
+    add(f"e1 pairing: before_share={e1['before_share']:.6f} "
         f"after_share={e1['after_share']:.6f} "
-        f"objects={e1['objects_numerator']}/{e1['objects_total']} "
-        f"sha={e1['sha']} corpus={e1['corpus']} "
-        f"corpus_sha256={e1['corpus_sha256']} "
-        f"declared prereg={e1['declared_prereg']} "
-        f"declared result={e1['declared_result']}")
+        f"before_objects={e1['objects_total']} "
+        f"after_objects={e1['after_objects']} "
+        f"sha={e1['sha']} corpus_sha256={e1['corpus_sha256']} "
+        f"decidable={e1['decidable']} before_spread_pp={e1['before_spread_pp']}")
+    for pairing in e1["pairings"]:
+        add(f"e1 before={pairing['before_share']:.6f} "
+            f"bound={pairing['bound']:.6f} after={pairing['after_share']:.6f} "
+            f"-> {'PASS' if pairing['passed'] else 'FAIL'} "
+            f"ratio={pairing['ratio']:.6f} graph={pairing['before_graph']}")
     add(f"e1 outcome={e1_out['outcome']} {e1_out['value']} bar={e1_out['bar']}")
-    add("e1 note: the artifact's denominator is the 25-name owner-labelled audit "
-        "population, NOT 'all :Object nodes written by the run', and its "
-        "corpus_sha256 is not the frozen fixtures_hash — so the arithmetic "
-        "(0.600000 vs a 0.300000 bound) would FAIL the bar, but the record's own "
-        f"floor ({bars['floors']['e1_objects']} Objects) makes it REFUSED: "
-        "neither a pass nor a fail")
+    # The narration BRANCHES on the state — the same class as the row note
+    # (#10610 review issue 3). An unconditional "the pairings disagree" writes a
+    # contradiction into the log of the first run that decides E1.
+    add("e1 note: both before realizations clear E1's own floors ("
+        f"{bars['floors']['e1_objects']} Objects, e1_min_before_share "
+        f"{bars['floors']['e1_min_before_share']}) and the record's corpus IS "
+        "the frozen fixtures_hash, so the shares are measurements. "
+        + (f"The AFTER arm carries {e1['after_objects']} Objects, under the "
+           f"frozen floor of {bars['floors']['e1_objects']}, so the row is "
+           f"REFUSED as a floor finding — neither a pass nor a fail, and not "
+           f"a pairing disagreement"
+           if e1.get("below_floor") else
+           "What they cannot do is decide the bar: the two before shares are "
+           f"{e1['before_spread_pp']} pp apart and the pairings disagree, so the "
+           "row is REFUSED at n=1 per arm rather than RED or GREEN"
+           if not e1["decidable"] else
+           "Every before realization agrees on the pairing, so the bar is "
+           f"DECIDED: the row is {e1_out['outcome']} rather than a refusal"))
     add(f"e1b outcome={e1b_out['outcome']} {e1b_out['value']} bar={e1b_out['bar']}")
-    add(f"e1b note: the artifact reports real_facts={e1['real_facts']} on both "
-        "arms; no committed artifact carries grading.strict_survival_counts over "
-        "the m2 lane, so this is a no-loss CONTROL, not the frozen metric")
+    add(f"e1b note: the record reports real_facts={e1['real_facts']} on the "
+        "scored arm; no committed artifact carries "
+        "grading.strict_survival_counts over the m2 lane, so this is a no-loss "
+        "CONTROL, not the frozen metric")
     add(f"e2a outcome={e2a_out['outcome']} {e2a_out['value']} "
         f"bar={e2a_out['bar']}")
-    add(f"e2a note: the artifact carries state_value_points values="
-        f"{e1['state_values']} on both arms (a no-loss control); the frozen "
-        "denominator is the 14 value-bearing PLANTED UNITS, which no committed "
-        "artifact counts")
+    add(f"e2a note: the frozen denominator IS carried — "
+        f"{e1['e2a_survived']} of {e1['e2a_units']} value-bearing planted units "
+        "strictly survive on the run's own graph (docs/evidence/9889/"
+        "e2a-value-units.json), and the anchor-injection falsifier over the SAME "
+        f"{e1['e2a_units']}-unit population reaches "
+        f"{e1['e2a_falsifier_survived']}/{e1['e2a_units']} — so the counter is "
+        "shown to move and the short bar is a measurement, not an inert "
+        "instrument")
     add(f"e2b outcome={e2b_out['outcome']} {e2b_out['value']} "
         f"bar={e2b_out['bar']}")
     add(f"e2b note: fused={e1['fused']} of atomic={e1['atomic_points']} Points on "
@@ -1852,7 +2957,7 @@ def render_log(*, head: str, prereg_sha: str, bars: dict, corpus_sha: str,
         "atomic POINTS rather than surviving planted units")
     add("")
     add("## E4 — the committed operator receipt, read verbatim")
-    add(f"e4 receipt={E4_RECEIPT} run_id={e4['run_id']} date={e4['date']} "
+    add(f"e4 receipt={e4['evidence']} run_id={e4['run_id']} date={e4['date']} "
         f"commit={e4['commit']} corpus_hash={e4['corpus_hash']} "
         f"judge_pin={e4['judge_pin']} verdict={e4['verdict']} "
         f"failure_origin={e4['failure_origin']}")
@@ -1861,12 +2966,19 @@ def render_log(*, head: str, prereg_sha: str, bars: dict, corpus_sha: str,
         f"operators_total={e4['operators_total']} "
         f"operators_provenanced={e4['operators_provenanced']}")
     add(f"e4 outcome={e4_out['outcome']} {e4_out['value']} bar={e4_out['bar']}")
-    add("e4 provenance: the FILE postdates the pre-registration but the "
-        f"MEASUREMENT does not — its own date={e4['date']} and its "
-        f"corpus_hash={e4['corpus_hash']} are not the frozen corpus "
-        f"({corpus_sha}). This row is therefore scored as a NON-GREEN measurement "
-        "on ITS OWN corpus revision, and the gate requires that digest to appear "
-        "in the artifact itself (V7)")
+    on_pin = _same_corpus(e4["corpus_hash"], corpus_sha)
+    add("e4 provenance: the receipt's own "
+        f"date={e4['date']} and commit={e4['commit']} are the RECEIPT's, not this "
+        f"run's head. " + (
+            f"Its corpus_hash={e4['corpus_hash']} IS the frozen corpus "
+            f"({corpus_sha}) — this row was selected BY that hash, so it is scored "
+            "on the pre-registered corpus and V7's declared-mismatch arm is not "
+            "taken for it"
+            if on_pin else
+            f"Its corpus_hash={e4['corpus_hash']} is NOT the frozen corpus "
+            f"({corpus_sha}). This row is therefore scored as a NON-GREEN "
+            "measurement on ITS OWN corpus revision, and the gate requires that "
+            "digest to appear in the artifact itself (V7)"))
     add("")
     add("## E5 — a fresh re-score of the #7947 arms against this corpus's gold")
     add(f"e5 arms_dir={e5['arms_dir']} artifact={e5['artifact']}")
@@ -1928,6 +3040,11 @@ def render_log(*, head: str, prereg_sha: str, bars: dict, corpus_sha: str,
             "probe": "docs/evidence/7949-capstone/probes/capstone_measure.py",
             "graph": graph,
             "arm": arm_record(arm or {}),
+            # #10215: V5 reads the step split from THESE two fields. A log that
+            # omits them is read as the pre-#10215 "all eight required" shape,
+            # which is why emitting them is the whole point of the accounting.
+            "steps_required": required,
+            "steps_conditional": accounts,
             "steps_observed": [step for step in STEPS if step in observed],
             "steps_unobserved": {step: unobserved.get(step) for step in STEPS
                                  if step not in observed},
@@ -1951,7 +3068,8 @@ def render_log(*, head: str, prereg_sha: str, bars: dict, corpus_sha: str,
                 "content_ok": e4["content_ok"],
                 "operators_total": e4["operators_total"],
                 "measured_commit": e4["commit"],
-                "source": E4_RECEIPT,
+                "corpus_hash": e4["corpus_hash"],
+                "source": e4["evidence"],
             },
             "e5_rescore": {
                 "raw_loss_rate": e5["raw_loss"],
@@ -1963,12 +3081,17 @@ def render_log(*, head: str, prereg_sha: str, bars: dict, corpus_sha: str,
                 "source": e5["artifact"],
             },
             "e1_e2_artifact": {
+                "source": E1_E2_SCORES,
                 "before_share": e1["before_share"],
                 "after_share": e1["after_share"],
-                "objects": e1["objects_total"],
+                "before_objects": e1["objects_total"],
+                "after_objects": e1["after_objects"],
                 "corpus_sha256": e1["corpus_sha256"],
-                "declared_prereg": e1["declared_prereg"],
-                "declared_result": e1["declared_result"],
+                "decidable": e1["decidable"],
+                "before_spread_pp": e1["before_spread_pp"],
+                "e2a_value_units": e1["e2a_units"],
+                "e2a_value_survived": e1["e2a_survived"],
+                "e2a_falsifier_survived": e1["e2a_falsifier_survived"],
             },
         },
         "rows": rows,
@@ -2025,11 +3148,25 @@ def main(argv: list[str] | None = None) -> int:
     head = resolve_head()
     prereg_sha = args.prereg or head
     prereg = read_preregistration(prereg_sha)
+    # The step split is read BEFORE any model call: a record whose declaration is
+    # unreadable must refuse the run, not produce a table that silently means
+    # something else (#10215, `capstone_run.G5`'s own rule).
+    conditional = read_conditional(prereg)
     try:
         bars = parse_bars(prereg)
     except ValueError as exc:
         raise SystemExit(f"capstone-measure: REFUSED — {exc}") from exc
     corpus_sha = check_corpus(prereg)
+    # ⛔ THE E4 ARTIFACT IS RESOLVED HERE, WITH THE OTHER PRE-FLIGHT READS, AND FOR
+    # THE SAME REASON: `select_e4_receipt` has ~8 refusal arms (absent pin, no match
+    # on the pin, unreadable / non-object / non-UTF-8 file, non-string `corpus_hash`,
+    # unorderable date, would-have-won unscorable) and every one of them is a property
+    # of the ARTIFACTS, not of the run. Resolved where it used to be — after
+    # `run_corpus` — a bad receipts tree burned the full 7-session extraction cost and
+    # wrote NOTHING, which is the exact class `#9889`'s own pin exists for ("a real run
+    # burned its 7-session LLM cost and wrote NOTHING"). The receipt is CARRIED to the
+    # E4 section rather than re-read, so this is one read, not two.
+    receipt = load_e4(frozen_pin=corpus_sha)
 
     ready, why = backend_ready()
     if not ready:
@@ -2066,6 +3203,12 @@ def main(argv: list[str] | None = None) -> int:
     failed = [run["session_id"] for run in runs if not run["ok"]]
     census_data = census(graph_uri(os.environ["TORTOISE_DB_URI"], graph))
     observed, unobserved = observe_steps(runs, census_data)
+    # #10215: the same split the run probe's G5 emits, read from the SAME frozen
+    # record — so a GREEN row from this probe is no longer refused for S2.3.
+    required, accounts, steps_gap = step_accounting(conditional, runs, observed)
+    if steps_gap:
+        print(f"capstone-measure: steps accounting NOT CLAIMED — {steps_gap}",
+              file=sys.stderr)
 
     e1 = measure_e1_e2()
     bare = sum(1 for name in census_data["object_names"]
@@ -2077,16 +3220,18 @@ def main(argv: list[str] | None = None) -> int:
     # ── E1 / E1b / E2a / E2b (E1/E2 are the table's rows) ────────────────
     e1_result = e1_outcome(before_share=e1["before_share"],
                            after_share=e1["after_share"],
-                           objects=e1["objects_total"], bars=bars)
+                           objects=e1["after_objects"], bars=bars,
+                           decidable=e1["decidable"],
+                           below_floor=e1["below_floor"])
     e1b_result = outcome(measured=True, below_floor=False,
                          passed=e1["real_facts"] >= bars["E1b"]["required"],
                          bar=f"{bars['E1b']['required']} of {bars['E1b']['of']}",
                          value=f"real_facts={e1['real_facts']}")
-    e2a_result = outcome(measured=False, below_floor=False, passed=False,
-                         bar=f"{bars['E2a']['required']} of {bars['E2a']['of']}",
-                         value=f"values={e1['state_values']} (the frozen 14-unit "
-                               "denominator is not carried by any committed "
-                               "artifact)")
+    e2a_result = (e2a_outcome(e1, bars) if e1["e2a_outcome"] else
+                  outcome(measured=False, below_floor=False, passed=False,
+                          bar=f"{bars['E2a']['required']} of {bars['E2a']['of']}",
+                          value=f"value_units={e1['e2a_units']} survived="
+                                f"{e1['e2a_survived']}"))
     e2b_floor = bars["floors"]["e2b_surviving_units"]
     e2b_share = ((e1["fused"] / e1["atomic_points"])
                  if e1["atomic_points"] else 1.0)
@@ -2097,48 +3242,39 @@ def main(argv: list[str] | None = None) -> int:
                              f"(floor {e2b_floor} surviving units)",
                          value=f"fused={e1['fused']}/{e1['atomic_points']} = "
                                f"{e2b_share:.6f}")
+    e2_result = e2_outcome(e2a_result=e2a_result, e2b_result=e2b_result,
+                           bars=bars)
 
     e1_row = {
         "verdict": verdict_word(e1_result),
         "sha": e1["sha"],
         "corpus_sha256": e1["corpus_sha256"],
-        "note": (f"the only E1 artifact is {E1E2_LOG}: {e1_result['value']} vs "
-                 f"bar {e1_result['bar']} — after_share is NOT <= 0.5 x "
-                 f"before_share, so the arithmetic would FAIL — but the row is "
-                 f"NOT RED, because the record's own floor makes it REFUSED: the "
-                 f"artifact's denominator is {e1['objects_total']} Objects (under "
-                 f"the frozen floor of {bars['floors']['e1_objects']}) and is the "
-                 f"25-name owner-labelled audit population rather than 'all "
-                 f":Object nodes written by the run'. Its corpus "
-                 f"({e1['corpus_sha256']}) is not the frozen corpus "
-                 f"({corpus_sha}), and the artifact declares "
-                 f"prereg={e1['declared_prereg']} "
-                 f"result={e1['declared_result']}. No before/after pair on the "
-                 f"pre-registered corpus exists, and the mechanism that must move "
-                 f"the share is an owner ruling on removal/relocation (#5333) — so "
-                 f"no scored E1 measurement exists to be red"),
+        # The population E1's own criterion is written over: a share over ALL
+        # `:Object` nodes written by the AFTER arm. The count slot carries the
+        # PASS-direction half of it (Objects that are NOT bare-definite) because
+        # that is the table's convention on every other row and the bare-definite
+        # count it minimises can legitimately be 0 — see `e1_pass_objects`.
+        "numerator": e1_pass_objects(e1),
+        "denominator": e1["after_objects"],
+        "note": e1_row_note(e1, e1_result, bars),
     }
     e2_row = {
-        "verdict": verdict_word(e2a_result),
+        "verdict": verdict_word(e2_result),
         "sha": e1["sha"],
         "corpus_sha256": e1["corpus_sha256"],
-        "note": (f"E2a: {e2a_result['outcome']} — {e2a_result['value']} vs bar "
-                 f"{e2a_result['bar']}. E2b: {e2b_result['outcome']} — "
-                 f"{e2b_result['value']} vs bar {e2b_result['bar']} (a proxy: the "
-                 f"artifact counts atomic POINTS, not surviving planted units). "
-                 f"The E2 row is BLOCKED because the composite criterion needs "
-                 f"BOTH halves and E2a's frozen 14-value-bearing-unit denominator "
-                 f"is carried by no committed artifact; the artifact's no-loss "
-                 f"control (values {e1['state_values']} before and after, "
-                 f"real_facts {e1['real_facts']}) is consistent with E2a but does "
-                 f"not compute it. Same corpus caveat as E1: "
-                 f"{e1['corpus_sha256']} is not {corpus_sha}, and #10360 records "
-                 f"that nothing enforces retention (the render half closed, #9775)"),
+        "numerator": e1["e2a_survived"],
+        "denominator": e1["e2a_units"],
+        "note": e2_row_note(e1, e2a_result, e2b_result, e2_result),
     }
 
     # ── E3 ────────────────────────────────────────────────────────────────
+    # The empty-leg set is passed to the row because the row's arithmetic cannot see it: the
+    # totals are SUMS, so a registered class with no nodes is already gone from both halves by the
+    # time `e3_outcome` is called (#9736).
     e3_result = e3_outcome(anchored=census_data["anchored_total"],
-                           derived=census_data["derived_total"], bars=bars)
+                           derived=census_data["derived_total"], bars=bars,
+                           unmeasured_legs=e3_unmeasured_legs(
+                               census_data.get("per_label")))
     composition = census_data.get("point_composition") or {}
     e3 = {
         "verdict": verdict_word(e3_result),
@@ -2152,25 +3288,10 @@ def main(argv: list[str] | None = None) -> int:
     }
 
     # ── E4 ────────────────────────────────────────────────────────────────
-    receipt = load_e4()
-    e4_result = e4_outcome(edge_correct=receipt["edge_correct"],
-                           planted=receipt["planted"], bars=bars)
-    e4 = {
-        "verdict": verdict_word(e4_result),
-        "numerator": receipt["edge_correct"],
-        "denominator": receipt["planted"],
-        "sha": receipt["commit"],
-        "corpus_sha256": receipt["corpus_hash"],
-        "note": (f"{e4_result['value']}; bar {e4_result['bar']}; content_ok="
-                 f"{receipt['content_ok']} operators_total="
-                 f"{receipt['operators_total']} on the SAME receipt. Its own "
-                 f"date={receipt['date']}, commit={receipt['commit']} and "
-                 f"corpus_hash={receipt['corpus_hash']} differ from the frozen "
-                 f"corpus ({corpus_sha}), and its verdict={receipt['verdict']} "
-                 f"failure_origin={receipt['failure_origin']}: the planted edges "
-                 f"are not formed at all (#8503), and the receipt's "
-                 f"retrievability rate is UNMEASURED (#9596)"),
-    }
+    # `receipt` was resolved by the PRE-FLIGHT, before the model pass, so a refusal
+    # cannot land after the spend. It is the same object, not a second read.
+    e4_result = e4_outcome_for(receipt, bars)
+    e4 = build_e4_row(receipt, bars=bars, corpus_sha=corpus_sha)
 
     # ── E5 ────────────────────────────────────────────────────────────────
     e5 = score_e5(sessions, Path(args.e5_out))
@@ -2193,7 +3314,13 @@ def main(argv: list[str] | None = None) -> int:
                  f"delta cannot be certified. #9738 also records that §10's prior "
                  f"measurement was visible when the record claimed it was not, and "
                  f"that the 25-bound vs 29-marker populations must be reconciled "
-                 f"before either number is called final"),
+                 f"before either number is called final. The row's blocker moved "
+                 f"on 2026-11-02 from #9738 to #5087: #9738 CLOSED that morning "
+                 f"because its own record correction landed (PR #10525), which is "
+                 f"not a measurement of this number — raw recovery "
+                 f"{e5_result['raw_recovery']:.4f} against the 0.80 floor is S3 "
+                 f"selection recovery, owned by the S0→S6 selective write path "
+                 f"(#5087)"),
     }
 
     rows = build_rows(head=head, out_path=out_path, log_corpus_sha=corpus_sha,
@@ -2207,6 +3334,7 @@ def main(argv: list[str] | None = None) -> int:
                       e2a_out=e2a_result, e2b_out=e2b_result, e3=e3,
                       e3_out=e3_result, e4=receipt, e4_out=e4_result, e5=e5,
                       e5_out=e5_result, rows=rows, out_path=out_path,
+                      required=required, accounts=accounts, steps_gap=steps_gap,
                       arm=arm)
 
     destination = ROOT / out_path

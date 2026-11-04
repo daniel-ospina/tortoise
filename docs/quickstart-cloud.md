@@ -153,8 +153,20 @@ tortoise init --api-key tt_YOUR_KEY    # connects this directory to Tortoise Clo
 Smoke test:
 
 ```bash
-tortoise team info       # shows your team and usage
+tortoise config show     # which credential won, and what it points at (offline)
+tortoise team info       # shows your team and usage (needs the network)
 ```
+
+**When something looks wrong, start with `tortoise config show`.** It answers, with no
+network call: which of the credential stores won (`TORTOISE_API_KEY` env →
+`<cwd>/.tortoise` → `~/.tortoise/credentials.json`), the `api_url` and org it claims, a
+masked form and a short fingerprint of the key in use (never the whole key), the graph
+target, and the cache-graph
+naming the `record-*` verbs expect. It also prints the **separate** store the Pi harness
+reads (`~/.pi/agent/tortoise-config.json`). That is often the *same* key (the report says
+which): when the key *and* the `api_url` match, a refusal applies to both; a different key
+— or the same key pointed at a different host — means a refusal on one says nothing about
+the other. `--json` gives the same report to a script.
 
 Everyday commands:
 

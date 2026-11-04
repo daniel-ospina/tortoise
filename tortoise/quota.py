@@ -320,6 +320,64 @@ _RESOURCE_LIMIT_KEYS = {
 }
 
 
+#: WHERE a resource's count is READ — the ONE declaration of the split, derived
+#: from by `_count_resource`'s branch AND by every caller that must know which
+#: graph a count reads (#4051).
+#:
+#: These three are counted in the CONTROL PLANE (the registry / Supabase seam):
+#: api keys, memberships and graph rows. They are NOT tenant-graph counts, so a
+#: caller gating them must pass no data SDK — building one would be pure cost on
+#: the key-mint path.
+REGISTRY_SCOPED_RESOURCES = frozenset({"api_keys", "users", "graphs"})
+
+#: The resources whose cap is DERIVED from another limit rather than read
+#: through a `_RESOURCE_LIMIT_KEYS` entry — gate-able, but deliberately absent
+#: from that map so no pricing.json field is implied (a `max_documents` field
+#: would ripple through `tier_limits` / `_REQUIRED_LIMIT_KEYS` and every tier's
+#: resolved limits, #1726). `enforce_org_limit` handles each of these in its own
+#: branch BEFORE the pricing-keyed generic path.
+#:
+#: ⛔ THE DECLARATION IS THE DISPATCH, and `enforce_org_limit`'s allow-list
+#: guard reads it: a derived branch for a resource that is NOT named here is
+#: refused as `unknown quota resource` before it can run. Do not add a derived
+#: branch without adding its resource here — the guard turns that omission into a
+#: loud fail-closed 500 rather than a silent regression of #4051 (see
+#: `GATEABLE_RESOURCES` for why silence is the failure mode).
+DERIVED_CAP_RESOURCES = frozenset({"documents"})
+
+#: EVERY resource this module will gate: the pricing-keyed ones plus the derived
+#: caps. `enforce_org_limit` refuses anything outside it (allow-list, deny by
+#: default) BEFORE any branch can accept it.
+#:
+#: That guard is what keeps the two halves below honest. Before it, the universe
+#: was a pair of hand-written literals — this derivation's trailing `{"documents"}`
+#: and the `resource == "documents"` test in the branch that handles it — so a
+#: SECOND derived cap could be added to `enforce_org_limit` and be fully
+#: gate-able while never joining the declaration. It would then fall out of
+#: `TENANT_GRAPH_RESOURCES`, `hosted_api._gate_sdk_for` would return `None` for
+#: it, `_count_resource` would count the org's DEFAULT graph, and a graph-bound
+#: key would again be gated on a graph it does not write — #4051's own defect,
+#: re-armed with nothing red (measured on the round-3 review: a `vectors` cap
+#: derived from `max_points` gated through the default graph and all four new
+#: tests passed).
+GATEABLE_RESOURCES = frozenset(_RESOURCE_LIMIT_KEYS) | DERIVED_CAP_RESOURCES
+
+#: The resources whose count reads the TENANT GRAPH — i.e. `_count_resource`'s
+#: catch-all branch. **DERIVED, never enumerated**: the truthful set is "every
+#: gate-able resource, minus the registry-scoped ones", so a resource added to
+#: either `_RESOURCE_LIMIT_KEYS` or `DERIVED_CAP_RESOURCES` enters it
+#: automatically.
+#:
+#: This exists so no caller can hand-copy the set and silently return to the
+#: #4051 defect on the next resource added: `hosted_api._gate_sdk_for` must count
+#: the graph a write will OPEN for every resource in here, and `None` (the
+#: control plane, or the org's DEFAULT graph) for the rest. A literal in
+#: `hosted_api` equalled this set only on the day it was written — the drift
+#: class this constant removes (the same "constant living in hosted_api" shape
+#: that hid the shared #5425 gate, see the note above).
+TENANT_GRAPH_RESOURCES = GATEABLE_RESOURCES - REGISTRY_SCOPED_RESOURCES
+
+
 # #4614: the machine-readable CATEGORY of a quota refusal — the one value a
 # caller branches on. The message text is for humans only; nothing may key on
 # it (the clients ship independently of the server's wording).
@@ -840,7 +898,10 @@ def _count_resource(org_id: str, resource: str, sdk=None) -> int:
     """
     try:
         # ── Registry-scoped counts (api_keys, users, graphs) ──
-        if resource in ("api_keys", "users", "graphs"):
+        # The membership test is the SAME declaration `TENANT_GRAPH_RESOURCES`
+        # derives from, so the branch and every gate that mirrors it cannot
+        # disagree (#4051).
+        if resource in REGISTRY_SCOPED_RESOURCES:
             # #765 (plan Task 8 quota paths): in Supabase control-plane mode
             # the count reads Supabase via the seam — post-flip the registry
             # is DELETED, so a registry count would fail-open (0 nodes) or
@@ -945,6 +1006,20 @@ def _count_resource(org_id: str, resource: str, sdk=None) -> int:
 
         # ── Tenant-graph-scoped counts (sessions, points) ──
         if sdk is None:
+            # #8906: this fallback is the DEFAULT graph `org_{org_id}`, NOT the
+            # request's — a custom-graph-bound key writes elsewhere. So a caller
+            # reaching here for a tenant-graph resource with a RESOLVED request
+            # SDK absent is counting a graph the request MAY NOT WRITE — for a
+            # graph-bound key, and for a promoted default; for the bound-DEFAULT
+            # and org-wide classes whose default IS ``org_{org_id}`` the graph
+            # coincides, and the cost there is a SECOND HANDLE, not a wrong
+            # count. See `enforce_org_limit`'s `sdk:`/`sdk_factory:` docs for the
+            # full contract. ⚠️ The ONE deliberate exception is
+            # `hosted_api._gate_sdk_for`'s unresolved-binding arm, which answers
+            # `None` ON PURPOSE (no write can occur — `_data_sdk` refuses 403 —
+            # so substituting a graph here WOULD be a fail-open widening); it
+            # reaches this line by design and is not the defect this comment
+            # describes.
             sdk = _make_sdk(namespace=org_id)
         if resource == "documents":
             # #1726 Slice 1, re-pointed by D10 (ONTOLOGY v3.15 §4.4): the
@@ -1044,8 +1119,49 @@ def _count_resource(org_id: str, resource: str, sdk=None) -> int:
         raise QuotaCheckError(f"quota count failed for {resource}: {redacted}") from e
 
 
+def _resolve_count_sdk(sdk, sdk_factory, *, org_id, resource):
+    """The SDK `_count_resource` must count through, built LAZILY (#4051).
+
+    The gate can return before it ever counts — an explicitly-`None` limit is
+    unlimited (#683) and `sessions` is now always that (#4010), and the
+    `documents` derived branch returns for an unlimited `max_points`. Resolving
+    the graph SDK eagerly therefore built and parked one per gate call for a
+    count that never runs: measured by the #4051 reviewer on the capture lane as
+    **0 -> 1 `_make_sdk` calls per capture, 764 us of it embedded**, on the event
+    loop. A factory defers it to the moment the count is actually taken.
+
+    Errors are re-raised as `QuotaCheckError`, never left as the bare exception
+    the construction raised: `_count_resource` used to own this construction and
+    turned every failure into that fail-closed class (500 + an ERROR log). A
+    caller that passes a factory relies on the same contract, so the factory call
+    must not become the one way a counting fault escapes unclassified.
+
+    `org_id`/`resource` exist for the LOG ONLY, and they are not optional: every
+    other fail-closed log in this module carries `team=%s resource=%s`
+    (`_count_resource`, the unreadable-limit and missing-limit arms), and
+    `_check_org_limit`'s #686 paragraph promises exactly that for every
+    data-fault `QuotaCheckError`. A construction fault IS one, so an
+    unattributable line here would be the one class a team/resource dashboard
+    silently drops (#4051 convergence review).
+    """
+    if sdk is not None or sdk_factory is None:
+        return sdk
+    try:
+        return sdk_factory()
+    except QuotaCheckError:
+        raise
+    except Exception as e:
+        from .security import redact_error
+        redacted = redact_error(e)
+        _logger.error(
+            "quota count sdk unavailable (fail-closed): team=%s resource=%s "
+            "error=%s", org_id, resource, redacted)
+        raise QuotaCheckError(
+            f"quota count sdk unavailable: {redacted}") from e
+
+
 def enforce_org_limit(limits: dict | None, resource: str, sdk=None, *,
-                      slot_credit: int = 0) -> None:
+                      slot_credit: int = 0, sdk_factory=None) -> None:
     """Reject a write when the org is at/over its resource limit.
 
     Args:
@@ -1071,7 +1187,67 @@ def enforce_org_limit(limits: dict | None, resource: str, sdk=None, *,
             `int()` refuses it and it is refused here too.
         resource: "points" | "api_keys" | "sessions" | "users" | "graphs"
             | "documents".
-        sdk: pre-built org SDK (REST callers already hold one) — optional.
+        sdk: the pre-built SDK this request WRITES through — pass it for every
+            resource, and it WINS over `sdk_factory` when given (a caller that
+            already holds the handle must not build a second one). ⛔ For a
+            TENANT-GRAPH resource (`points`, `sessions`, `documents`) never let
+            the count land on `_count_resource`'s `namespace=org_id`
+            construction: that is the org's DEFAULT graph ``org_{org_id}`` —
+            while a CUSTOM-graph-bound key writes its own
+            ``graph_namespace`` (``org_{org_id}_{gid}``). Those two graphs differ
+            for that credential class by construction, so such a count compares
+            the cap against a graph the request never touches: a full default
+            graph refuses writes to an EMPTY bound graph (a permanent refusal)
+            and a full bound graph is admitted while the default is small (a cap
+            hole). This was #8906, live on every REST points door. Pass the
+            request's own SDK; where a caller cannot, `sdk_factory` below is
+            what keeps the count on the write's graph. The invariant is MCP's
+            house rule verbatim ("count on the SAME org SDK the tool writes to …
+            so the count and the write can never target different databases"),
+            and the omission is silent — nothing fails loudly when a new door
+            forgets it, which is why the contract is stated HERE rather than at
+            each caller.
+            ⚠️ The bound-DEFAULT class is NOT a lane rule — a bound-default key
+            agrees with ``org_{org_id}`` only while the org's storage key is
+            ``org_{org_id}``. Its namespace IS the org's STORAGE KEY
+            (``organizations.graph_name``), which the hosted org-provisioning
+            paths (``create_org`` / ``register_user`` / ``agent_signup`` / tenant
+            onboarding) set to ``org_{org_id}`` since #1903; the hosted default
+            ``graphs`` row COPIES that key rather than constructing it
+            (``supabase_control.insert_graph``), so a legacy/pre-guard key bound
+            to the default node opens whatever the key holds and agrees with
+            ``org_{org_id}`` only while it is ``org_{org_id}``. That is not
+            hypothetical in the hosted lane either: a pre-#1903 org whose
+            storage key is ``team_{…}`` diverges, and ``hosted_api`` already
+            guards that class
+            (``_make_sdk(namespace=org_id)`` "would therefore open, and so MINT, a
+            different, absent graph"). In the SELFHOST/registry lane
+            ``sdk.org_create`` stores ``graph_name = org_{name}`` (#2023 — the
+            divergence is called out in ``hosted_api._data_sdk``'s docstring), so
+            a bound-default key there diverges from ``org_{org_id}`` exactly as
+            a custom binding does.
+            Registry resources (``api_keys``/``users``/``graphs``) are
+            unaffected BY THE COUNT: they resolve the registry either way — a
+            passed registry-named sdk is reused and any other sdk is discarded
+            (``_count_resource``'s registry arm), so the number is the same.
+        sdk_factory: #4051 — called ONLY if and when the count is actually
+            taken, and only when no `sdk` was passed: for callers that must
+            count the graph the write will open but must not build an SDK when
+            the limit is unlimited (the capture lane's `sessions` gate is vacuous
+            by #4010 and counted nothing before this — it must not start
+            building a graph handle to prove it). Mutually exclusive with `sdk`:
+            a non-None `sdk` wins and the factory is never called.
+            ``hosted_api._gate_sdk_for`` is that factory, and it mirrors the
+            OPENER's own call forms — a bound key's own binding, a promoted
+            default's namespace — so an omitted sdk counts the graph the write
+            lands in for every credential that HAS a write graph. Two arms are
+            the deliberate exceptions, both recorded in ``_gate_sdk_for``'s
+            docstring: the registry-scoped resources and an UNRESOLVED binding
+            answer ``None`` (for the latter no write can occur — ``_data_sdk``
+            refuses 403 — so substituting a graph would be a fail-open
+            widening). The REST doors pass `sdk=` anyway, for identity (one
+            handle for the count and the write) rather than because the fallback
+            is wrong.
         slot_credit: #4355 — how many slots this write RELEASES as part of the
             same operation, so the admission check is evaluated against the
             post-release count. It exists for exactly ONE caller: the
@@ -1089,11 +1265,23 @@ def enforce_org_limit(limits: dict | None, resource: str, sdk=None, *,
     org_id = limits.get("org_id")
     if not org_id:
         return
+    # ── the declared universe, enforced — allow-list, deny by default. The
+    # guard sits ABOVE the derived branches ON PURPOSE: a derived branch that
+    # accepts a resource absent from `DERIVED_CAP_RESOURCES` would keep working
+    # here while its resource had silently dropped out of
+    # `TENANT_GRAPH_RESOURCES`, so the graph it is counted on would be the
+    # default one — #4051's defect, invisible to every test. With the guard, an
+    # undeclared derived cap is a classified refusal instead. Message is the
+    # existing #5425-registered category, unchanged.
+    if resource not in GATEABLE_RESOURCES:
+        raise QuotaCheckError(f"unknown quota resource: {resource!r}")
     # ── documents: DERIVED-CONSTANT cap (T2-P2a, #1726) — handled BEFORE the
     # pricing-keyed generic path. Deliberately NOT in _RESOURCE_LIMIT_KEYS: a
     # pricing.json max_documents field would ripple through tier_limits /
     # _REQUIRED_LIMIT_KEYS / every tier's resolved limits (the KeyError
-    # surface the plan pins against). max_documents = max_points ×
+    # surface the plan pins against) — it is declared in
+    # `DERIVED_CAP_RESOURCES` instead, which is what lets the allow-list guard
+    # above admit it. max_documents = max_points ×
     # _DOCUMENTS_FROM_POINTS_FACTOR; an explicitly-None max_points is
     # UNLIMITED (Team tier) — skip. The documents gate fires on the
     # /v1/index/docs job ONLY (cycle-3 P2: never an unpinned tenant-global
@@ -1122,7 +1310,10 @@ def enforce_org_limit(limits: dict | None, resource: str, sdk=None, *,
                 f"team limits max_points invalid for documents resource "
                 f"({max_points!r})") from None
         limit = max_points * _DOCUMENTS_FROM_POINTS_FACTOR
-        count = _count_resource(org_id, "documents", sdk=sdk)
+        count = _count_resource(org_id, "documents",
+                                sdk=_resolve_count_sdk(
+                                    sdk, sdk_factory, org_id=org_id,
+                                    resource="documents"))
         if count >= limit:
             raise QuotaExceededError(
                 with_limit_contact(
@@ -1203,7 +1394,10 @@ def enforce_org_limit(limits: dict | None, resource: str, sdk=None, *,
         raise QuotaCheckError(
             f"team limits {limit_key} unreadable for resource {resource!r} "
             f"({limit!r})") from None
-    count = _count_resource(org_id, resource, sdk=sdk)
+    count = _count_resource(org_id, resource,
+                            sdk=_resolve_count_sdk(
+                                sdk, sdk_factory, org_id=org_id,
+                                resource=resource))
     # #4614: report what the gate COMPARED (post-credit), never a fresh count —
     # the refusal's numbers must be the ones that produced it.
     used = count - slot_credit

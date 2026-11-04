@@ -943,8 +943,88 @@ def _parse_hook_nodeids(text: str) -> tuple[list[str], int | None]:
     return nodeids, errors
 
 
+def _selection_confcutdir(files: list[str], cwd: str | None = None) -> str:
+    """The directory `--confcutdir` must be pinned to for this selection.
+
+    pytest resolves `conftest.py` by walking EVERY ancestor of each selected
+    path (`PytestPluginManager._loadconftestmodules` iterates
+    `(directory, *directory.parents)` and only skips dirs in
+    `confcutdir.parents`), so a selection living under a shared directory
+    inherits whatever `conftest.py` happens to sit above it. Measured on a
+    self-hosted runner: the shared `/tmp` carried a leaked `conftest.py`, the
+    fixture files these tests pass live under `/tmp/tt_*`, and every
+    collect-only in `emit_manifest` died at import of that foreign conftest
+    (`rc=4`, "ImportError while loading conftest '/tmp/conftest.py'" — the
+    `test-slow (d)` red of PR #10636). A conftest ABOVE the selection is not
+    part of the selection's tree and must never be loaded.
+
+    The pin respects the run step's own chain:
+
+    * selection INSIDE the invocation directory (every CI caller — `$FILES` is
+      repo-relative) -> the invocation directory, i.e. exactly the repo-wide
+      conftest chain the plain run step sees. Pinning to the files' deepest
+      common ancestor instead would DROP `tests/conftest.py` for a selection
+      made of deep files alone (`tests/eval/retrieval/test_x.py`), making the
+      manifest disagree with the run.
+    * selection OUTSIDE it (a temp tree, a test fixture) -> the selection's own
+      deepest common ancestor. For a selection living in ONE tree that IS the
+      tree, so every ancestor above it (`/tmp`, `$HOME`) is excluded and cannot
+      contribute a conftest.
+
+    `cwd` is the directory the manifest's collect-only child will RUN in — the
+    caller's own cwd when omitted (the CLI case), and NOT necessarily the
+    caller's cwd otherwise: `tools/embedded_evidence.py` spawns the child with
+    `cwd=REPO_ROOT` from wherever it was itself invoked, so a repo-relative
+    `$FILES` resolved against the caller's cwd names a tree the child never
+    runs in — and the pin then prunes the wrong ancestry (review P2, #10636).
+
+    WHAT THAT BOUND DOES NOT COVER — `--confcutdir` is a single directory, and
+    pytest loads a `conftest.py` sitting AT it: `_is_in_confcutdir` is
+    `path not in self._confcutdir.parents`, and a directory is never in its own
+    parents. So only directories STRICTLY ABOVE the pin are excluded, and a
+    selection that SPANS trees has no pin of its own:
+
+    * two out-of-tree trees under one shared parent -> the deepest common
+      ancestor is that shared parent, which is exactly where a leaked
+      `/tmp/conftest.py` lives, so it IS imported — the pin bounds nothing;
+    * a mixed repo-relative + out-of-tree selection -> the deepest common
+      ancestor sits above the invocation directory too (the filesystem root in
+      production, whose `parents` is empty), so NOTHING is excluded and the
+      pre-pin behaviour stands.
+
+    No caller produces either shape (`.github/workflows/*` pass repo-relative
+    `$FILES`, `tools/embedded_evidence.py` passes repo-relative `tests/…`, and
+    every out-of-tree caller here passes a SINGLE tree), which is why this is a
+    documented limit rather than a wider fix. Both shapes are pinned by
+    `test_the_confcutdir_pin_does_not_bound_a_selection_spanning_trees` /
+    `…_a_mixed_in_and_out_of_tree_selection` so this paragraph and the code
+    below cannot drift apart. If a caller ever needs a spanning selection to be
+    bounded, this is the place to refuse it or to collect once per tree — do
+    not narrow the claim instead.
+    """
+    invocation = os.path.abspath(cwd if cwd is not None else os.getcwd())
+    roots = []
+    for entry in files:
+        # Resolve against the child's cwd, not this process's: a repo-relative
+        # `$FILES` means "relative to where pytest will run", which is `cwd`.
+        candidate = entry if os.path.isabs(entry) else os.path.join(invocation, entry)
+        try:
+            roots.append(os.path.abspath(
+                candidate if os.path.isdir(candidate) else os.path.dirname(candidate)))
+        except OSError:  # pragma: no cover — an unreadable path is not a dir
+            roots.append(os.path.abspath(os.path.dirname(candidate)))
+    try:
+        deepest = os.path.commonpath(roots)
+    except ValueError:  # pragma: no cover — mixed drives on Windows
+        return invocation
+    if deepest == invocation or deepest.startswith(invocation + os.sep):
+        return invocation
+    return deepest
+
+
 def emit_manifest(files: list[str], marker: str, output: Path,
-                  runner=None, ignores: tuple[str, ...] = ()) -> int:
+                  runner=None, ignores: tuple[str, ...] = (),
+                  cwd: str | None = None) -> int:
     """Generate the expected-nodeid manifest for the given file list.
 
     Spawns `pytest <files> --collect-only -q -m <marker> -p no:cacheprovider`
@@ -956,6 +1036,22 @@ def emit_manifest(files: list[str], marker: str, output: Path,
     passed through as --ignore=<path> so a manifest can replicate its run's
     own excludes (the post-merge-validation full-`tests/` run ignores
     tests/e2e + the slow_files list).
+
+    The ONE deliberate difference from the run step is `--confcutdir`: pytest
+    resolves `conftest.py` by walking every ANCESTOR of each selected path, so
+    a selection under a shared directory imports whatever conftest sits above
+    it. `_selection_confcutdir` pins that chain to the selection's own tree —
+    the invocation directory for a repo-relative `$FILES` (i.e. exactly the
+    run step's chain, `tests/conftest.py` included), the selection's deepest
+    common ancestor for an out-of-tree one (which bounds a single-tree
+    selection only — `_selection_confcutdir` names the shapes a single
+    directory cannot bound). Without it, a leaked
+    `/tmp/conftest.py` on a self-hosted runner turned every collect-only into
+    `rc=4` ("ImportError while loading conftest '/tmp/conftest.py'").
+
+    ``cwd`` is the directory the collect-only child runs in; it is BOTH the
+    spawn cwd and the base the pin is computed against, so the two can never
+    disagree (passing them separately is how they drifted: #10636 review P2).
 
     Fail-closed corners:
     - empty files -> exit 0, NO output file (the CI guard skips manifest
@@ -991,7 +1087,8 @@ def emit_manifest(files: list[str], marker: str, output: Path,
     collect_errors: int | None = None
     cmd = [sys.executable, "-m", "pytest", *files, "--collect-only", "-q",
            "-m", marker, "-p", "no:cacheprovider",
-           *[f"--ignore={ig}" for ig in ignores]]
+           *[f"--ignore={ig}" for ig in ignores],
+           f"--confcutdir={_selection_confcutdir(files, cwd)}"]
     if runner is None:
         # The hook is delivered out-of-tree via -p + PYTHONPATH so the run's
         # own conftest is untouched and nothing is written into the repo.
@@ -1005,7 +1102,7 @@ def emit_manifest(files: list[str], marker: str, output: Path,
                 os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
             proc = subprocess.run(
                 [*cmd, "-p", "_fts_manifest_hook"],
-                capture_output=True, text=True, env=env)
+                capture_output=True, text=True, env=env, cwd=cwd)
             rc, collected = proc.returncode, proc.stdout
             _err = proc.stderr
             # Read INSIDE the TemporaryDirectory: the completion proof is the

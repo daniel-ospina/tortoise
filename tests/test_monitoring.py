@@ -3271,6 +3271,22 @@ class TestHealthzHardening:
 class TestStallWatchdog:
     """#2850 item 5: exit a genuinely hung process so the platform restarts it."""
 
+    @pytest.fixture(autouse=True)
+    def _isolated_ticker(self):
+        """No recorded ticker leaks IN or OUT of a test.
+
+        ``note_heartbeat_task`` records a process-global task; a hosted-API
+        test leaving a cancelled one behind would disarm the ceiling in a later
+        test (a cancelled ticker correctly means "cannot tick"), and a fake
+        left behind would arm it. Both directions are flakiness, so reset on the
+        way in AND out.
+        """
+        monitoring._reset_heartbeat_task()
+        try:
+            yield
+        finally:
+            monitoring._reset_heartbeat_task()
+
     def test_default_threshold_is_conservative_and_env_overridable(
             self, monkeypatch, caplog):
         """#2850 review P0/P2: the self-kill is OFF by default and the enabled
@@ -3322,6 +3338,7 @@ class TestStallWatchdog:
         """
         import logging
 
+        monkeypatch.delenv("TORTOISE_LOOP_STALL_HARD_EXIT_S", raising=False)
         for raw in ("nan", "NaN", "inf", "Infinity", "-inf"):
             caplog.clear()
             monkeypatch.setenv("TORTOISE_LOOP_STALL_EXIT_S", raw)
@@ -3335,6 +3352,7 @@ class TestStallWatchdog:
 
     def test_unset_or_zero_threshold_starts_no_killer_thread(self, monkeypatch):
         monkeypatch.delenv("TORTOISE_LOOP_STALL_EXIT_S", raising=False)
+        monkeypatch.delenv("TORTOISE_LOOP_STALL_HARD_EXIT_S", raising=False)
         assert monitoring.start_stall_watchdog(exit_fn=lambda *_: None) is None
         assert monitoring.start_stall_watchdog(
             threshold_s=0, exit_fn=lambda *_: None) is None
@@ -3376,6 +3394,998 @@ class TestStallWatchdog:
             stop.set()
             thread.join(timeout=2)
         assert fired == [1], "watchdog did not fire on a stale idle loop"
+
+    def test_hard_ceiling_fires_even_with_a_request_in_flight(self,
+                                                             monkeypatch):
+        """The 2026-11-02 outage, as a regression test.
+
+        The idle gate is TRUE by construction during the wedge it guards: an
+        open SSE stream on ``GET /mcp`` holds ``workload_in_flight`` above zero
+        for the connection's whole life, so the soft path vetoed the kill
+        forever and the machine hung for 97 minutes reporting 2/2 checks
+        passing. The hard ceiling must fire WITHOUT the idle gate.
+        """
+        import threading
+        import time
+
+        # Exercise the REAL env parser, not a monkeypatched constant: a broken
+        # parser is otherwise invisible (#2850 review P2).
+        monkeypatch.setenv("TORTOISE_LOOP_STALL_HARD_EXIT_S", "0.15")
+        assert monitoring._loop_stall_hard_exit_s() == 0.15
+        fired: list = []
+        stop = threading.Event()
+        monitoring._reset_heartbeat()
+        monitoring._reset_workload()
+        monitoring.workload_enter()  # a stream is open — NOT idle, forever
+        thread = None
+        try:
+            monitoring.heartbeat_record()
+            monitoring.heartbeat_record()
+            assert monitoring.workload_is_idle() is False
+            thread = monitoring.start_stall_watchdog(
+                None, exit_fn=fired.append, stop_event=stop, poll_interval=0.05)
+            assert thread is not None, (
+                "a hard ceiling must arm the watchdog even when the soft "
+                "idle-gated threshold is disabled")
+            deadline = time.monotonic() + 5.0
+            while not fired and time.monotonic() < deadline:
+                time.sleep(0.05)
+        finally:
+            # Cleanup runs even if an assert above fires, so the gauge cannot
+            # leak into a sibling test (#2850 review P2) — and it runs AFTER
+            # the thread is stopped, so the reset cannot authorise a late kill.
+            self._disarm(thread, stop)
+        assert fired == [1], (
+            "the in-flight gauge vetoed the hard ceiling — this is the "
+            "permanent-silent-outage bug (#2850)")
+
+    def test_the_hard_ceiling_does_not_fire_without_one(self, monkeypatch):
+        """The safety property survives: a busy loop is still never killed
+        unless an operator arms a ceiling."""
+        import threading
+        import time
+
+        monkeypatch.delenv("TORTOISE_LOOP_STALL_HARD_EXIT_S", raising=False)
+        assert monitoring._loop_stall_hard_exit_s() == 0.0
+        fired: list = []
+        stop = threading.Event()
+        monitoring._reset_heartbeat()
+        monitoring._reset_workload()
+        thread = None
+        try:
+            monitoring.heartbeat_record()
+            monitoring.heartbeat_record()
+            monitoring.workload_enter()
+            thread = monitoring.start_stall_watchdog(
+                0.1, exit_fn=fired.append, stop_event=stop,
+                poll_interval=0.05, consecutive_windows=1)
+            assert thread is not None
+            time.sleep(0.5)
+        finally:
+            self._disarm(thread, stop)
+        assert fired == [], "a busy loop must not be killed without a ceiling"
+
+    @staticmethod
+    def _disarm(thread, stop):
+        """STOP the watcher, and only THEN reset any global it reads.
+
+        The reverse order is a real flake, not a style nit (measured in this
+        lane: `test_the_hard_ceiling_does_not_fire_without_one` failed once in
+        ~15 runs on a loaded box). Resetting the workload gauge or the recorded
+        ticker while the thread is still polling lets it observe a *clean*
+        state beside a stale heartbeat — and it fires its ``exit_fn``, which is
+        exactly what these tests assert did NOT happen.
+        """
+        stop.set()
+        if thread is not None:
+            thread.join(timeout=2)
+        monitoring._reset_workload()
+        monitoring._reset_heartbeat_task()
+
+    @staticmethod
+    def _fake_ticker(*, done=False, cancelled=False, exc=None,
+                     unreadable=False):
+        """A stand-in for the heartbeat ticker task — only the three methods
+        ``heartbeat_task_is_dead`` reads, plus the callback registration that
+        ``note_heartbeat_task`` performs.
+
+        ``unreadable`` models the fail-open hazard the review named: a task
+        whose state cannot be read at all.
+        """
+        class _FakeTicker:
+            def __init__(self):
+                self.callbacks: list = []
+
+            def cancelled(self):
+                return cancelled
+
+            def done(self):
+                if unreadable:
+                    raise RuntimeError("ticker state unavailable")
+                return done
+
+            def exception(self):
+                return exc
+
+            def add_done_callback(self, cb):
+                self.callbacks.append(cb)
+
+        return _FakeTicker()
+
+    def test_heartbeat_ticker_verdict_is_derived_from_the_task(self):
+        """R3 review P2: the verdict must FOLLOW the recorded ticker.
+
+        The old ``_HEARTBEAT_TASK_DEAD`` was a one-way latch, so one ticker
+        death disarmed the ceiling for the whole process even after
+        ``_start_liveness`` installed a fresh ticker
+        (``hosted_api.py::_start_liveness``).
+        Every end state of the CURRENT task must disarm, and a re-armed running
+        ticker must re-arm the ceiling.
+        """
+        try:
+            monitoring._reset_heartbeat_task()
+            assert monitoring.heartbeat_task_is_dead() is False, (
+                "nothing instrumented: the ceiling fires on age alone")
+
+            running = self._fake_ticker()
+            monitoring.note_heartbeat_task(running)
+            assert monitoring.heartbeat_task_is_dead() is False
+
+            for label, ticker in (
+                    ("raised", self._fake_ticker(
+                        done=True, exc=RuntimeError("boom"))),
+                    ("returned cleanly", self._fake_ticker(done=True)),
+                    ("cancelled", self._fake_ticker(
+                        done=True, cancelled=True)),
+                    ("unreadable", self._fake_ticker(unreadable=True))):
+                monitoring.note_heartbeat_task(ticker)
+                assert monitoring.heartbeat_task_is_dead() is True, (
+                    f"a ticker that {label} cannot produce another tick, so "
+                    "the ceiling must not act on its stale heartbeat")
+
+            # The sticky-flag regression, stated as an assertion: a ticker
+            # death must not disarm a SUBSEQUENTLY re-armed ticker.
+            monitoring.note_heartbeat_task(self._fake_ticker())
+            assert monitoring.heartbeat_task_is_dead() is False, (
+                "the verdict must not outlive the ticker that produced it — "
+                "a latched flag silently disarms the ceiling for the rest of "
+                "the process")
+        finally:
+            monitoring._reset_heartbeat_task()
+
+    def test_note_heartbeat_task_reports_death_but_not_cancellation(
+            self, caplog):
+        """Review P2: the guard's SET PATH was untested (``note_heartbeat_task``
+        appeared in no test) and failed open — a suppressed read or a suppressed
+        ``add_done_callback`` made the whole guard a no-op. Drive a fake task
+        through it in both the death and the cancel case."""
+        import logging
+
+        try:
+            dead = self._fake_ticker(done=True, exc=RuntimeError("ticker died"))
+            with caplog.at_level(logging.CRITICAL):
+                monitoring.note_heartbeat_task(dead)
+                assert len(dead.callbacks) == 1, (
+                    "the death callback was never registered — the operator "
+                    "signal and the verdict both depend on it")
+                dead.callbacks[0](dead)          # the real callback path
+            assert monitoring.heartbeat_task_is_dead() is True
+            assert any(
+                "heartbeat TASK died" in r.getMessage()
+                for r in caplog.records if r.levelno == logging.CRITICAL), (
+                "a ticker death must be reported at CRITICAL")
+
+            caplog.clear()
+            cancelled = self._fake_ticker(done=True, cancelled=True)
+            with caplog.at_level(logging.CRITICAL):
+                monitoring.note_heartbeat_task(cancelled)
+                cancelled.callbacks[0](cancelled)
+            assert not any(
+                "heartbeat TASK died" in r.getMessage()
+                for r in caplog.records), (
+                "an orderly shutdown cancels the ticker; it is not a fault")
+            assert monitoring.heartbeat_task_is_dead() is True, (
+                "…but a cancelled ticker still cannot tick, so the ceiling "
+                "must stay disarmed (fail-closed)")
+        finally:
+            monitoring._reset_heartbeat_task()
+
+    def test_hard_ceiling_refuses_to_fire_when_the_ticker_itself_died(
+            self, monkeypatch, caplog):
+        """The crash-loop this MUST not add (review P2): if the heartbeat TASK
+        dies while the loop is healthy, the heartbeat is stale forever and the
+        ceiling would ``os._exit`` a HEALTHY process every threshold until the
+        platform's ``max_retries`` are spent and the machine is left STOPPED
+        (Fly: ``on-fail``, ``max_retries 10``). A dead ticker is an operator
+        signal, never permission to kill.
+
+        Driven through a REAL asyncio task — the old test monkeypatched the
+        flag, so a broken derivation was invisible.
+        """
+        import asyncio
+        import logging
+        import threading
+        import time
+
+        async def _boom():
+            raise RuntimeError("ticker died")
+
+        async def _spawn():
+            task = asyncio.ensure_future(_boom())
+            monitoring.note_heartbeat_task(task)
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            return task
+
+        ticker = asyncio.run(_spawn())
+        assert ticker.done() and not ticker.cancelled()
+        assert monitoring.heartbeat_task_is_dead() is True
+
+        monkeypatch.setenv("TORTOISE_LOOP_STALL_HARD_EXIT_S", "0.1")
+        fired: list = []
+        stop = threading.Event()
+        monitoring._reset_heartbeat()
+        monitoring._reset_workload()
+        thread = None
+        try:
+            monitoring.heartbeat_record()
+            monitoring.heartbeat_record()
+            thread = monitoring.start_stall_watchdog(
+                None, exit_fn=fired.append, stop_event=stop, poll_interval=0.05)
+            assert thread is not None
+            time.sleep(0.6)
+        finally:
+            self._disarm(thread, stop)
+        assert fired == [], (
+            "a dead heartbeat ticker must NOT be treated as a wedge — this "
+            "would restart-loop a healthy process")
+        assert sum(
+            1 for r in caplog.records
+            if r.levelno == logging.CRITICAL
+            and "not provably a wedge" in r.getMessage()) == 1, (
+            "the refusal must be reported exactly ONCE per process, not once "
+            "per poll (~43k lines/day at the hosted interval)")
+
+    def test_hard_ceiling_fires_before_the_min_ticks_liveness_gate(
+            self, monkeypatch):
+        """Review P2: the hard branch sat BEHIND ``if ticks < min_ticks``.
+
+        ``min_ticks`` exists so a slow BOOT is not mistaken for a wedge, which
+        is about the first seconds. A loop that wedges during startup — only the
+        synthetic tick at ``hosted_api.py::_start_liveness``
+        (``heartbeat_record()``), never the real ticker's second
+        tick — never advances ``ticks``, so it hung indefinitely with the
+        ceiling armed. Past the ceiling the boot rationale no longer applies.
+        """
+        import threading
+        import time
+
+        monkeypatch.setenv("TORTOISE_LOOP_STALL_HARD_EXIT_S", "0.15")
+        monkeypatch.delenv("TORTOISE_LOOP_STALL_EXIT_S", raising=False)
+        fired: list = []
+        stop = threading.Event()
+        monitoring._reset_heartbeat()
+        monitoring._reset_workload()
+        monitoring._reset_heartbeat_task()
+        thread = None
+        try:
+            monitoring.heartbeat_record()   # the synthetic startup tick ONLY
+            assert monitoring.heartbeat_read()[1] == 1
+            thread = monitoring.start_stall_watchdog(
+                None, exit_fn=fired.append, stop_event=stop, poll_interval=0.05)
+            assert thread is not None
+            deadline = time.monotonic() + 3.0
+            while not fired and time.monotonic() < deadline:
+                time.sleep(0.05)
+        finally:
+            self._disarm(thread, stop)
+        assert fired == [1], (
+            "a loop that wedges before its SECOND tick never grows ``ticks`` "
+            "— the min_ticks gate must not be able to hold the ceiling off")
+
+    def test_hard_ceiling_binds_below_a_larger_soft_threshold(
+            self, monkeypatch):
+        """Review P2: this ordering had no discriminating test — every other
+        test either disables the soft threshold or passes ``threshold=None``,
+        so a regression to ``max(threshold_s, hard_exit_s)`` passed unchanged.
+
+        With soft 5s and ceiling 0.15s, a real CEILING fires at ~0.15s; the
+        ``max()`` mutant would wait 5s.
+        """
+        import threading
+        import time
+
+        monkeypatch.setenv("TORTOISE_LOOP_STALL_HARD_EXIT_S", "0.15")
+        fired: list = []
+        stop = threading.Event()
+        monitoring._reset_heartbeat()
+        monitoring._reset_workload()
+        monitoring._reset_heartbeat_task()
+        thread = None
+        try:
+            monitoring.heartbeat_record()
+            monitoring.heartbeat_record()
+            assert monitoring.workload_is_idle() is True
+            thread = monitoring.start_stall_watchdog(
+                5.0, exit_fn=fired.append, stop_event=stop,
+                poll_interval=0.05)
+            assert thread is not None
+            deadline = time.monotonic() + 1.5
+            while not fired and time.monotonic() < deadline:
+                time.sleep(0.05)
+        finally:
+            self._disarm(thread, stop)
+        assert fired == [1], (
+            "the ceiling was degraded to max(threshold, ceiling): an operator "
+            "who arms soft 5s beside a 0.15s ceiling must still exit at 0.15s")
+
+    def test_hard_ceiling_does_not_fire_on_a_healthy_loop(self, monkeypatch):
+        """The ceiling's NEGATIVE (#10585 review P2): an ARMED ceiling must
+        leave a still-ticking loop completely alone.
+
+        Every other test that arms the ceiling drives ``age`` PAST it (or never
+        enters the branch), so the whole six-test set passes an INVERTED
+        comparison — ``age < hard_exit_s``, i.e. exit while the loop is
+        HEALTHY. ``<`` and ``>=`` are each other's default mutation operator
+        (PIT's ``NEGATE_CONDITIONALS``, active by default), and only a test
+        that asserts the FALSE branch kills that mutant.
+
+        Why it matters in the deployed shape rather than in the abstract:
+        ``fly.toml`` arms 600s with ``poll_interval = min(2.0, ceiling/4)``
+        (``monitoring.py``), so an inverted comparison ``os._exit(1)``s a
+        healthy machine within ~2s of EVERY boot, up to ``retries = 10``, and
+        leaves it STOPPED — the "silent hang replaced by a silent stop" this
+        PR's own ``fly.toml`` comment names as the worst direction, and the one
+        the dead-ticker disarm exists to prevent. ``conftest.py`` pins the
+        ceiling to 0 for the session, so the soft path's negative
+        (``test_does_not_fire_on_a_healthy_loop``) cannot cover it.
+        """
+        import threading
+        import time
+
+        # The REAL env parser, not a monkeypatched constant (same reason as
+        # ``test_hard_ceiling_fires_even_with_a_request_in_flight``).
+        #
+        # 0.5s, not 0.15s (#10585 review, UNVERIFIED note): this is the ONE
+        # armed-ceiling test that needs the heartbeat to stay fresh across
+        # EVERY poll, so a scheduling gap longer than the ceiling fails it
+        # where every other armed test would only be helped by a delay. At
+        # 0.15s a 150 ms stall on a loaded runner is enough; at 0.5s with the
+        # ticker refreshing every 20 ms the tolerance is ~25x the tick period.
+        # The mutant discrimination is unchanged — an INVERTED comparison
+        # (``age < hard_exit_s``) fires at age ~= 0.02s, which is below BOTH
+        # ceilings, so ``fired == []`` still kills it.
+        monkeypatch.setenv("TORTOISE_LOOP_STALL_HARD_EXIT_S", "0.5")
+        monkeypatch.delenv("TORTOISE_LOOP_STALL_EXIT_S", raising=False)
+        assert monitoring._loop_stall_hard_exit_s() == 0.5
+        fired: list = []
+        stop = threading.Event()
+        monitoring._reset_heartbeat()
+        monitoring._reset_workload()
+        monitoring._reset_heartbeat_task()
+
+        def _ticker() -> None:
+            while not stop.is_set():
+                monitoring.heartbeat_record()
+                time.sleep(0.02)
+
+        ticker = threading.Thread(
+            target=_ticker, name="test-hb-ticker", daemon=True)
+        thread = None
+        ticker.start()
+        try:
+            thread = monitoring.start_stall_watchdog(
+                None, exit_fn=fired.append, stop_event=stop,
+                poll_interval=0.05)
+            assert thread is not None, "the armed ceiling must start the thread"
+            time.sleep(1.6)   # ~3x the ceiling, heartbeat kept fresh throughout
+        finally:
+            self._disarm(thread, stop)
+            ticker.join(timeout=2)
+        assert fired == [], (
+            "the armed HARD ceiling exited a HEALTHY, still-ticking loop — in "
+            "the deployed shape (600s ceiling, <=2s poll) that is a kill "
+            "within ~2s of every boot until the retries are spent and the "
+            "machine is left STOPPED")
+
+    def test_hard_ceiling_never_ticked_neither_fires_nor_kills_the_thread(
+            self, monkeypatch):
+        """#10585 review P2: dropping the ``age is not None`` guard is
+        unpinned, and it does NOT fail safe.
+
+        Every armed-ceiling test starts at ``ticks >= 1``, so the ``ticks ==
+        0`` case never executes: there ``age`` is ``None`` and ``None >=
+        hard_exit_s`` raises ``TypeError`` INSIDE the watchdog thread, which
+        silently kills the thread — losing the ceiling entirely, while the
+        process still looks armed (the thread object is alive for a moment and
+        then just dies). A never-ticked loop is not evidence of anything, so the
+        correct behaviour is to record nothing and keep polling.
+        """
+        import threading
+        import time
+
+        monkeypatch.setenv("TORTOISE_LOOP_STALL_HARD_EXIT_S", "0.02")
+        monkeypatch.delenv("TORTOISE_LOOP_STALL_EXIT_S", raising=False)
+        fired: list = []
+        stop = threading.Event()
+        monitoring._reset_heartbeat()
+        monitoring._reset_workload()
+        monitoring._reset_heartbeat_task()
+        thread = None
+        try:
+            assert monitoring.heartbeat_read()[1] == 0
+            assert monitoring.loop_heartbeat_age() is None
+            thread = monitoring.start_stall_watchdog(
+                None, exit_fn=fired.append, stop_event=stop,
+                poll_interval=0.01)
+            assert thread is not None
+            time.sleep(0.3)   # ~30 polls, all with ``ticks == 0``
+            assert thread.is_alive(), (
+                "the watchdog thread DIED on a never-ticked loop — an "
+                "exception inside it loses the ceiling silently, and the "
+                "deployment still believes the ceiling is armed")
+        finally:
+            self._disarm(thread, stop)
+        assert fired == [], (
+            "a loop with no timestamp at all is not evidence of a wedge; "
+            "there is nothing to measure")
+
+    def test_dead_ticker_branch_logs_once_not_once_per_poll(
+            self, monkeypatch, caplog):
+        """R3 review P2: the dead-ticker branch ``continue``d with no latch —
+        one CRITICAL per poll, ~43k lines/day at the hosted interval."""
+        import logging
+        import threading
+        import time
+
+        monkeypatch.setenv("TORTOISE_LOOP_STALL_HARD_EXIT_S", "0.05")
+        fired: list = []
+        stop = threading.Event()
+        monitoring._reset_heartbeat()
+        monitoring._reset_workload()
+        monitoring._reset_heartbeat_task()
+        monitoring.note_heartbeat_task(
+            self._fake_ticker(done=True, exc=RuntimeError("boom")))
+        thread = None
+        try:
+            monitoring.heartbeat_record()
+            monitoring.heartbeat_record()
+            with caplog.at_level(logging.CRITICAL):
+                thread = monitoring.start_stall_watchdog(
+                    None, exit_fn=fired.append, stop_event=stop,
+                    poll_interval=0.01)
+                assert thread is not None
+                time.sleep(0.3)
+        finally:
+            self._disarm(thread, stop)
+        assert fired == []
+        refusals = [r for r in caplog.records
+                    if "not provably a wedge" in r.getMessage()]
+        assert len(refusals) == 1, (
+            f"the refusal was logged {len(refusals)} times across ~30 polls — "
+            "it must be latched to once per process")
+
+    def test_the_soft_path_also_refuses_a_dead_ticker(self, monkeypatch,
+                                                      caplog):
+        """#10585 review P2: the ticker verdict had ONE call site — inside the
+        HARD branch. With soft armed BELOW the ceiling (the reachable ordering:
+        an operator sets ``TORTOISE_LOOP_STALL_EXIT_S=300`` beside the shipped
+        600s ceiling), a dead ticker freezes the heartbeat forever; at
+        ``age >= 300`` the hard branch is not true yet, so control reached the
+        soft path, which never looked at the ticker and exited a HEALTHY
+        process after ``consecutive_windows`` — repeatedly, up to the
+        platform's ``max_retries``: the exact restart-loop the hard-branch
+        guard was added to prevent.
+
+        Pre-fix this test fires: nothing in the soft path consulted the task.
+        """
+        import logging
+        import threading
+        import time
+
+        monkeypatch.delenv("TORTOISE_LOOP_STALL_HARD_EXIT_S", raising=False)
+        fired: list = []
+        stop = threading.Event()
+        monitoring._reset_heartbeat()
+        monitoring._reset_workload()
+        monitoring._reset_heartbeat_task()
+        monitoring.note_heartbeat_task(
+            self._fake_ticker(done=True, exc=RuntimeError("boom")))
+        thread = None
+        try:
+            monitoring.heartbeat_record()
+            monitoring.heartbeat_record()   # ticks >= LOOP_STALL_EXIT_MIN_TICKS
+            with caplog.at_level(logging.CRITICAL):
+                thread = monitoring.start_stall_watchdog(
+                    0.15, exit_fn=fired.append, stop_event=stop,
+                    poll_interval=0.02, consecutive_windows=1)
+                assert thread is not None, (
+                    "a programmatic soft threshold must still arm the watchdog")
+                time.sleep(0.4)
+        finally:
+            self._disarm(thread, stop)
+        assert fired == [], (
+            "the SOFT path exited on a heartbeat frozen by a DEAD TICKER, not "
+            "by a wedged loop — a healthy process would restart-loop up to the "
+            "platform's max_retries")
+        refusals = [r for r in caplog.records
+                    if "not provably a wedge" in r.getMessage()]
+        assert len(refusals) == 1, (
+            f"the soft-path refusal was logged {len(refusals)} times across "
+            "~20 polls — it shares the hard branch's once-per-process latch")
+
+    def test_the_env_contract_declares_the_hard_ceiling(self):
+        """#10585 review P2: the knob the HOSTED deployment arms in fly.toml
+        was absent from ``.env.example`` — the repo's declared env contract —
+        while its sibling got a full paragraph. An operator looking for the
+        name found nothing, and the paragraph that WAS there stated the loop
+        exit "also requires … no request in flight", which is false for the
+        mechanism the hosted app runs and is the exact belief the 97-minute
+        outage sat behind.
+        """
+        from pathlib import Path
+
+        contract = (Path(__file__).resolve().parent.parent
+                    / ".env.example").read_text(encoding="utf-8")
+        lines = contract.splitlines()
+        decl = [i for i, line in enumerate(lines)
+                if "TORTOISE_LOOP_STALL_HARD_EXIT_S" in line]
+        assert decl, (
+            "the hard ceiling must be declared where an operator looks for the "
+            "name to set — .env.example — not only in fly.toml")
+        block = "\n".join(lines[max(0, decl[0] - 20):decl[0]])
+        assert "in-flight" in block, (
+            "its paragraph must say what makes it different from the soft "
+            "path: it IGNORES the in-flight gauge")
+
+    def test_the_deployment_declares_the_restart_the_ceiling_needs(self):
+        """#10585 review P2: the ceiling's PRECONDITION was unversioned.
+
+        ``TORTOISE_LOOP_STALL_HARD_EXIT_S`` only turns a wedged loop into a
+        self-heal because the machine is restarted after a NON-ZERO EXIT. That
+        policy used to be a MACHINE attribute read once by hand
+        (``fly machine status … --display-config``) and asserted nowhere, while
+        ``fly.toml`` claimed it could not be a file key — which Fly's own docs
+        refute (``[[restart]]`` / ``policy`` / ``retries`` / ``processes``).
+        A recreate was therefore free to drop it silently, and the failure
+        direction is the worst one: the ceiling fires, the exit lands, and the
+        machine goes STOPPED — the silent hang replaced by a silent stop.
+
+        So the policy is declared in ``fly.toml`` and pinned here: deleting the
+        block (or disarming the restart) turns this test red instead of
+        silently disarming the self-heal in production.
+        """
+        import tomllib
+        from pathlib import Path
+
+        cfg = tomllib.loads(
+            (Path(__file__).resolve().parent.parent / "fly.toml")
+            .read_text(encoding="utf-8"))
+
+        blocks = cfg.get("restart") or []
+        assert blocks, (
+            "fly.toml declares no [[restart]] block, so the hard ceiling's "
+            "exit is not versionably a RESTART — a machine recreated without "
+            "the machine-level policy turns it into a STOPPED machine")
+        covering = [b for b in blocks
+                    # a block with no `processes` applies to every machine
+                    if "app" in b.get("processes", ["app"])]
+        assert covering, (
+            f"no [[restart]] block covers the `app` process group: {blocks}")
+        for b in covering:
+            assert b.get("policy") == "on-failure", (
+                "only `on-failure` restarts a NON-ZERO exit (the ceiling's "
+                f"`os._exit(1)`); got policy={b.get('policy')!r}")
+            assert int(b.get("retries", 0)) >= 1, (
+                "a restart policy with zero retries never restarts: "
+                f"{b}")
+
+    def test_the_armed_knob_is_declared_fly_toml_env_so_a_gate_can_see_it(self):
+        """#10585 review P2: nothing could see whether PRODUCTION carried the knob.
+
+        ``fly.toml`` ``[env]`` arms ``TORTOISE_LOOP_STALL_HARD_EXIT_S = "600"``,
+        but the name was not declared in
+        ``.github/scripts/fly-managed-secrets.txt``, and
+        ``check-fly-machine-env.py`` — the post-deploy gate — iterates ONLY the
+        names that manifest declares ``fly-toml-env``. So "production was
+        deployed and the RUNNING MACHINE does not carry the ceiling" was GREEN
+        everywhere, and the only signal was ``_loop_stall_hard_exit_s()``
+        returning ``0.0`` inside the process.
+
+        That is the #4568 class (measured there: a product flag off for ~5 h
+        with every gate green), and here the thing silently lost is the wedge
+        ceiling itself, which is this PR's whole subject. A stale machine, or a
+        recreate that drops the ``[env]`` value, disarms the self-heal with no
+        gate, no warning and no red.
+
+        The manifest's own three ``fly-toml-env`` conditions are checked against
+        the gate's inputs rather than restated: the name must be an ASSIGNED key
+        in ``fly.toml [env]``, and the deploy must not stamp it (a stamped value
+        becomes a Fly secret that shadows the versioned one).
+        """
+        import tomllib
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parent.parent
+
+        declared = {}
+        for line in (root / ".github" / "scripts" / "fly-managed-secrets.txt"
+                     ).read_text(encoding="utf-8").splitlines():
+            line = line.split("#", 1)[0].strip()
+            if not line:
+                continue
+            name, _, source = line.partition(" ")
+            declared[name] = source.split()[0] if source.split() else ""
+
+        assert declared.get("TORTOISE_LOOP_STALL_HARD_EXIT_S") == "fly-toml-env", (
+            "the knob this PR ARMS is not declared `fly-toml-env` in "
+            "fly-managed-secrets.txt, so `check-fly-machine-env.py` never "
+            "asserts it against the running machine and the armed ceiling can "
+            "silently disappear from production with every gate green "
+            f"(declared: {declared.get('TORTOISE_LOOP_STALL_HARD_EXIT_S')!r})")
+
+        env = tomllib.loads((root / "fly.toml").read_text(encoding="utf-8"))
+        assert "TORTOISE_LOOP_STALL_HARD_EXIT_S" in (env.get("env") or {}), (
+            "the manifest's `fly-toml-env` arm requires the name to be an "
+            "ASSIGNED key in fly.toml's `[env]` table — otherwise the "
+            "declaration asserts nothing")
+
+        deploy = (root / ".github" / "workflows" / "deploy-hosted.yml"
+                  ).read_text(encoding="utf-8")
+        assert "TORTOISE_LOOP_STALL_HARD_EXIT_S" not in deploy, (
+            "the deploy stages this name, which creates a Fly SECRET that "
+            "shadows the versioned `[env]` value — the manifest's "
+            "`fly-toml-env` arm fails on exactly that, and the app would no "
+            "longer read the ceiling this PR ships")
+
+    def test_the_derivation_names_an_operation_that_is_actually_on_the_loop(
+            self):
+        """#10585 review P2: the 600s derivation was sized against a premise the
+        tree contradicts — and the stale preamble ~100 lines above it said the
+        opposite of the new block.
+
+        The derivation claimed "the longest BOUNDED synchronous operation that
+        can run ON the loop … is the synchronous LLM call". At this head both
+        hosted extraction lanes are submitted through ``_run_capture_bounded``
+        (``_submit_off_loop`` -> ``_CAPTURE_EXECUTOR``) by the #3060 invariant,
+        as are the turn write, its embeddings and the tenant vocabulary
+        compile — so no model call blocks the hosted loop, and the arithmetic
+        that followed ("ten single 60s calls, or five stages of two") modelled
+        on-loop staging that no longer exists.
+
+        The assertion is on the CLAIM, and it cross-checks the claim against
+        the code it describes: the prose must name the real turn cap
+        (``quota.MAX_SESSION_TURNS``, not the request model's 1000), must name
+        the off-loop invariant, and both extraction lanes must still be
+        submitted off-loop in ``hosted_api.py`` — the fact the prose depends
+        on. The 600 is re-derived from the socket bounds rather than trusted.
+        """
+        import tomllib
+        from pathlib import Path
+
+        from tortoise import projection
+        from tortoise.quota import MAX_SESSION_TURNS
+
+        root = Path(__file__).resolve().parent.parent
+        mon = (root / "tortoise" / "monitoring.py").read_text(encoding="utf-8")
+        api = (root / "tortoise" / "hosted_api.py").read_text(encoding="utf-8")
+        api_flat = " ".join(api.split())
+
+        # ── the preamble the old text shipped, in the block that introduces
+        # the SOFT knob (an operator sizes THAT knob from it).
+        pre_start = mon.index("# WHY the default flipped")
+        pre_end = mon.index("# The correct split, therefore:")
+        preamble = " ".join(mon[pre_start:pre_end].split())
+        assert "1000 turns" not in preamble, (
+            "the preamble still claims up to 1000 turns: the window is capped "
+            f"at MAX_SESSION_TURNS = {MAX_SESSION_TURNS} and refused above it")
+        assert f"MAX_SESSION_TURNS = {MAX_SESSION_TURNS}" in preamble, (
+            "the preamble must state the REAL turn cap it is reasoning about")
+        assert "SYNCHRONOUSLY" not in preamble, (
+            "the preamble still says the extractor is called synchronously on "
+            "the loop — it is submitted through _run_capture_bounded (#3060)")
+
+        # ── the derivation of the HARD ceiling.
+        der_start = mon.index("DERIVED, not asserted")
+        der_end = mon.index("LOOP_STALL_HARD_EXIT_S = 0.0")
+        derivation = " ".join(mon[der_start:der_end].split())
+        assert "and that operation is the synchronous LLM call" not in derivation, (
+            "the ceiling is sized against an operation that is OFF the loop by "
+            "the #3060 invariant — a reader then sizes the knob against work "
+            "that is not there")
+        assert "no model call runs on the loop" in derivation, (
+            "the derivation must say plainly that the LLM bound does not set "
+            "this ceiling for the deployment that arms it")
+        assert "_run_capture_bounded" in derivation, (
+            "and must name the submission that keeps it off the loop")
+        assert "_socket_timeouts" in derivation and (
+            "_DB_TIMEOUT_MAX_S" in derivation), (
+            "what DOES block the loop is graph I/O; the derivation must name "
+            "its bound rather than leave a number standing on air")
+
+        # ── the facts the prose depends on, checked against the code.
+        for lane in ("sdk._extract_session_llm", "sdk._extract_session_v2"):
+            assert f"await _run_capture_bounded( slot, {lane}" in api_flat, (
+                f"{lane} is no longer submitted off-loop — the derivation's "
+                "premise (and the #3060 invariant) no longer hold, so the "
+                "prose must be re-derived, not silently kept")
+
+        # ── re-derive the shipped 600 from the socket bounds it cites.
+        with (root / "fly.toml").open("rb") as fh:
+            shipped = float(tomllib.load(fh)["env"][
+                "TORTOISE_LOOP_STALL_HARD_EXIT_S"])
+        worst_on_loop = ((1 + projection._EMBEDDED_RETRY_COUNT)
+                         * projection._DB_TIMEOUT_MAX_S)
+        assert projection._DB_TIMEOUT_MAX_S == 60.0
+        assert projection._DB_SOCKET_TIMEOUT_DEFAULT == 10.0
+        assert shipped >= 5 * worst_on_loop, (
+            f"the armed ceiling ({shipped:.0f}s) is no longer 5x the worst "
+            f"bounded on-loop operation ({worst_on_loop:.0f}s): re-derive it")
+
+    def test_a_hard_ceiling_below_the_floor_is_reported_as_unclamped(
+            self, monkeypatch, caplog):
+        """#10585 review P2: the floor never protected the HARD ceiling, but
+        the only message an operator got said it had been applied.
+
+        Reachable shape: ``TORTOISE_LOOP_STALL_HARD_EXIT_S=5`` with the soft
+        knob unset. ``threshold_s`` is taken from the ceiling (5s), then the
+        destructive-path clamp raises it to the 180s floor and logs "… below
+        the safe floor (180s) … clamping" — while the hard branch still
+        compares ``age >= hard_exit_s`` (5s) and ``os._exit``s. So the last
+        thing an operator read before walking away was that the process-killing
+        path had been floored to 180s when it would fire after ~5s.
+
+        ``stop_event`` is SET before the thread starts, so the watchdog body
+        never runs: this drives the real ``exit_fn is None`` construction path
+        (the clamp lives inside it) without arming ``os._exit`` in the runner.
+        """
+        import logging
+
+        monkeypatch.setenv("TORTOISE_LOOP_STALL_HARD_EXIT_S", "5")
+        monkeypatch.delenv("TORTOISE_LOOP_STALL_EXIT_S", raising=False)
+        floor = monitoring._loop_stall_floor_s()
+        assert floor > 5.0, "this test needs a ceiling below the floor"
+
+        stop = threading.Event()
+        stop.set()   # the body never runs => no os._exit in the test process
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="tortoise.monitoring"):
+            thread = monitoring.start_stall_watchdog(stop_event=stop)
+        assert thread is not None, "the ceiling must arm the watchdog"
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+
+        text = "\n".join(r.getMessage() for r in caplog.records)
+        assert "NOT clamped" in text, (
+            "a ceiling armed below the floor exits at its ARMED value; the "
+            f"log must say the floor does not apply to it. Got:\n{text}")
+        assert "5.000s" in text, (
+            "the message must name the value that actually exits")
+        assert f"{floor:.0f}s" in text, (
+            "and the floor it is being compared against")
+
+    def test_the_module_contract_scopes_the_idle_gate_to_the_soft_path(self):
+        """#10585 review P2: the #2850 gate contract AGED against the code.
+
+        The block an operator reads before arming a PROCESS-KILLING knob
+        (``monitoring.py``, above ``LOOP_STALL_EXIT_S``) said the self-kill
+        "demands (a) N consecutive stale windows … (b) an IDLE WORKLOAD … and
+        (c) at least one real heartbeat tick", and told the reader the
+        in-process kill "cannot be relied on as wedge detection at all".
+        Both are false for the mechanism this PR ships and ``fly.toml`` arms:
+        the hard ceiling fires on the FIRST poll, deliberately does not consult
+        the in-flight gauge, and runs before the ``min_ticks`` boot gate. A
+        reader who lands here first was told to expect an idle gate this
+        deployment does not apply — the belief the 97-minute outage sat behind,
+        and the same defect already fixed in ``.env.example`` and in
+        ``start_stall_watchdog``'s docstring but not in the file that DEFINES
+        the knob.
+        """
+        from pathlib import Path
+
+        src = (Path(__file__).resolve().parent.parent
+               / "tortoise" / "monitoring.py").read_text(encoding="utf-8")
+        lines = src.splitlines()
+
+        start = next(i for i, line in enumerate(lines)
+                     if "the in-process self-kill exists only as an operator "
+                        "escape hatch" in line)
+        end = next(i for i, line in enumerate(lines)
+                   if line.startswith("LOOP_STALL_EXIT_S = 0.0"))
+        assert end > start, (start, end)
+        block = "\n".join(lines[start:end])
+
+        assert "TORTOISE_LOOP_STALL_HARD_EXIT_S" in block, (
+            "the gate contract must name the hard ceiling — it is the one the "
+            "hosted deployment ARMS, and the contract is read before arming")
+        assert "SOFT" in block, (
+            "its three conditions describe the SOFT path only; unqualified "
+            "they describe a mechanism production does not run")
+        assert "IGNORE" in block or "ignore" in block, (
+            "and must say what makes the hard ceiling different: it IGNORES "
+            "the in-flight gauge, which is the whole point")
+        assert "bypass" in block, (
+            "naming the exemption explicitly is the fix: the hard ceiling "
+            "bypasses the idle gate, not inherits it")
+
+        # the second copy of the same false belief, in absolute form
+        unqualified = [i for i, line in enumerate(lines)
+                       if "cannot be relied on as wedge detection" in line]
+        assert len(unqualified) == 1, unqualified
+        assert "SOFT" in lines[unqualified[0]], (
+            "that sentence is about the SOFT path; unqualified it denies the "
+            "in-process detection fly.toml relies on")
+
+    def test_the_call_site_contract_names_the_ceiling_the_deployment_arms(self):
+        """#10585 review P2 (THIRD copy): the CALL SITE still described the
+        pre-ceiling behaviour — in the file this PR edits.
+
+        ``hosted_api._start_liveness`` is where the hosted deployment arms the
+        watchdog, and the comment above that call said it "returns None" with
+        ``TORTOISE_LOOP_STALL_EXIT_S`` unset, and that enabling it "also
+        requires 3 consecutive stale windows and an idle workload". Both are
+        false for the shape production runs: ``fly.toml`` ``[env]`` arms
+        ``TORTOISE_LOOP_STALL_HARD_EXIT_S=600`` while leaving its sibling
+        unset, so that call does NOT return None, and the hard branch consults
+        neither the hysteresis nor the in-flight gauge.
+
+        The identical defect was fixed in ``.env.example``, in
+        ``monitoring.py``'s gate contract and in ``start_stall_watchdog``'s
+        docstring; this is the copy a reader hits while asking the most
+        operational question there is — "what does the hosted deployment
+        actually arm?" — and it is the file, and the call, that does the arming.
+        """
+        from pathlib import Path
+
+        src = (Path(__file__).resolve().parent.parent
+               / "tortoise" / "hosted_api.py").read_text(encoding="utf-8")
+        lines = src.splitlines()
+
+        call = next(i for i, line in enumerate(lines)
+                    if "app.state._loop_watchdog = start_stall_watchdog(" in line)
+        # Slice from the COMMENT BLOCK that introduces this call, not from 40
+        # lines up: the enclosing docstring already names the ceiling, and a
+        # slice that swallows it would make the assertions below pass on the
+        # pre-fix tree (verified by reverting the fix and re-running).
+        lead = next(i for i, line in enumerate(lines)
+                    if i < call
+                    and "DISABLED BY DEFAULT (#2850 review P0):" in line)
+        block = "\n".join(lines[lead:call])
+        assert len(block) > 100, block
+
+        assert "TORTOISE_LOOP_STALL_HARD_EXIT_S" in block, (
+            "the call site must name the knob the hosted deployment ARMS: a "
+            "reader asking what production runs was told only about its "
+            "sibling, which is unset there")
+        assert "SOFT" in block, (
+            "the stale-window and idle-workload conditions describe the SOFT "
+            "path only; unqualified they describe a mechanism production does "
+            "not run")
+        assert "does NOT return None" in block, (
+            "and must state the exemption plainly: with only the soft knob "
+            "unset this call does NOT return None — the hard ceiling arms it")
+        assert "bypass" in block, (
+            "naming the exemption explicitly is the fix: the hard ceiling "
+            "BYPASSES the idle gate, it does not inherit it")
+
+        # The same false belief, one level down: LOOP_STALE_AFTER's own
+        # rationale said the destructive self-kill is "gated on an idle
+        # workload" with no path qualifier.
+        src_mon = (Path(__file__).resolve().parent.parent
+                   / "tortoise" / "monitoring.py").read_text(encoding="utf-8")
+        mon_lines = src_mon.splitlines()
+        stale_end = next(i for i, line in enumerate(mon_lines)
+                         if line.startswith("LOOP_STALE_AFTER = "))
+        stale_block = "\n".join(mon_lines[max(0, stale_end - 30):stale_end])
+        gated = [i for i, line in enumerate(mon_lines)
+                 if "gated on an idle workload" in line
+                 and i < stale_end and i >= max(0, stale_end - 30)]
+        assert gated, "LOOP_STALE_AFTER's rationale no longer states the gate"
+        assert "SOFT" in stale_block and (
+            "TORTOISE_LOOP_STALL_HARD_EXIT_S" in stale_block), (
+            "LOOP_STALE_AFTER's rationale must scope its idle-gate claim to "
+            "the SOFT path and name the hard ceiling that bypasses it")
+
+    def test_the_projection_socket_block_names_the_knob_that_sizes_the_ceiling(self):
+        """#10585 review P2 (SIXTH copy): the socket-timeout rationale still
+        sent the operator to the SOFT knob.
+
+        ``projection._socket_timeouts``' rationale — the block an operator
+        arrives at from ``.env.example``'s pointer — invited a tighter
+        "loop-stall ceiling" by pairing a lower read timeout with a lower
+        ``TORTOISE_LOOP_STALL_EXIT_S``, and closed with an UNQUALIFIED "self-kill
+        is OPT-IN and disabled by default". Both are wrong for the shipped
+        deployment: the knob that SIZES a loop-stall ceiling, and the ONLY one
+        ``fly.toml`` ``[env]`` arms, is ``TORTOISE_LOOP_STALL_HARD_EXIT_S``,
+        while its soft sibling is deliberately unset there — so the block handed
+        an operator tuning this timeout the mechanism production does not run,
+        and read as "nothing is armed" for the deployment that ships the file.
+
+        Same defect class, same fix shape as the five copies already corrected
+        (``.env.example``, the gate contract, ``start_stall_watchdog``'s
+        docstring, ``hosted_api._start_liveness``, ``LOOP_STALE_AFTER``). This
+        one was missed because it lives outside ``monitoring.py``.
+        """
+        from pathlib import Path
+
+        src = (Path(__file__).resolve().parent.parent
+               / "tortoise" / "projection" / "__init__.py").read_text(
+                   encoding="utf-8")
+        lines = src.splitlines()
+
+        end = next(i for i, line in enumerate(lines)
+                   if line.startswith("_DB_CONNECT_TIMEOUT_DEFAULT = "))
+        start = next(i for i, line in enumerate(lines)
+                     if i < end
+                     and "liveness budget; it is now configurable" in line)
+        assert end > start, (start, end)
+        block = "\n".join(lines[start:end])
+        assert len(block) > 200, block
+
+        assert "TORTOISE_LOOP_STALL_HARD_EXIT_S" in block, (
+            "the socket-timeout rationale must name the knob that SIZES the "
+            "loop-stall ceiling and that the hosted deployment ARMS: pointing "
+            "an operator at its sibling hands them the knob production does "
+            "not run")
+        assert "SOFT" in block, (
+            "the idle-gated conditions describe the SOFT path only; "
+            "unqualified they describe a mechanism this deployment does not run")
+        assert "DISABLED BY DEFAULT" in block and "PRODUCT" in block, (
+            "\"self-kill is OPT-IN and disabled by default\" must be scoped to "
+            "the PRODUCT default — unqualified it reads as \"nothing is armed\" "
+            "for the deployment that ships this file, which arms 600s")
+        assert "bypass" in block.lower(), (
+            "and must say what makes the ceiling different: it BYPASSES the "
+            "in-flight gauge, which is the whole point of arming it")
+
+    def test_the_test_session_pin_BEATS_an_ambient_hard_ceiling(self, monkeypatch):
+        """#10585 review P3: the pin must OVERRIDE an ambient value, not defer.
+
+        ``tests/conftest.py`` must pin ``TORTOISE_LOOP_STALL_HARD_EXIT_S=0``:
+        the watchdog ``os._exit``s the process, and the HARD ceiling is the
+        DELIBERATE exception to the idle gate — it exits with a request in
+        flight — so it kills a test runner mid-test. ``fly.toml`` and
+        ``.env.example`` both document ``600``, and a developer who exported
+        either is exactly the case ``setdefault`` does NOT cover: it writes only
+        when the key is ABSENT, so it pins nothing in the case it exists for.
+
+        So the assertion is on the EFFECT of the session pin with an ambient
+        value present, not on the source text (which previously pinned the one
+        construct that cannot do this job — the finding this test fixes). The
+        pin statement is read out of ``conftest.py`` and EXECUTED, so a
+        ``setdefault`` fails here.
+        """
+        import os
+        from pathlib import Path
+
+        conftest = (Path(__file__).resolve().parent
+                    / "conftest.py").read_text(encoding="utf-8")
+        pin = [line for line in conftest.splitlines()
+               if "os.environ" in line
+               and "TORTOISE_LOOP_STALL_HARD_EXIT_S" in line]
+        assert len(pin) == 1, (
+            f"expected exactly one session pin for the hard ceiling, got {pin!r}")
+
+        # The shipped `fly.toml`/`.env.example` value, as a developer who
+        # exported either would carry it into the session.
+        monkeypatch.setenv("TORTOISE_LOOP_STALL_HARD_EXIT_S", "600")
+        exec(compile(pin[0], "<tests/conftest.py hard-ceiling pin>", "exec"),
+             {"os": os})
+
+        assert os.environ["TORTOISE_LOOP_STALL_HARD_EXIT_S"] == "0", (
+            "an ambient TORTOISE_LOOP_STALL_HARD_EXIT_S survived the session "
+            "pin: `setdefault` writes only when the key is ABSENT, so the next "
+            "test that arms the watchdog os._exit()s the runner instead of "
+            "exercising it")
+
+    def test_hard_ceiling_parser_is_fail_closed(self, monkeypatch):
+        """Every unusable value must DISABLE the ceiling (fail closed) — a
+        parsed-but-unusable ceiling is the restart-loop this file guards."""
+        for raw in ("", "   ", "banana", "nan", "NaN", "inf", "-inf", "-1", "0"):
+            monkeypatch.setenv("TORTOISE_LOOP_STALL_HARD_EXIT_S", raw)
+            assert monitoring._loop_stall_hard_exit_s() == 0.0, raw
+        monkeypatch.delenv("TORTOISE_LOOP_STALL_HARD_EXIT_S", raising=False)
+        assert monitoring._loop_stall_hard_exit_s() == 0.0
 
     def test_requires_consecutive_stale_windows(self):
         """#2850 review P2: a single stale sample must not exit the process."""
@@ -3424,14 +4434,18 @@ class TestStallWatchdog:
 
     def test_sync_on_loop_block_far_longer_than_threshold_is_not_killed_by_default(
             self, monkeypatch):
-        """#2850 review P0 regression: the shipped default must survive the
-        app's real (unbounded, synchronous) on-loop work.
+        """#2850 review P0 regression: the shipped default must survive a
+        request that legitimately blocks the loop far past any plausible
+        threshold.
 
-        ``_capture_session_impl`` calls the LLM extractor synchronously with a
-        60s HTTP timeout and can run thousands of synchronous DB round trips,
-        so one free-tier request can freeze the loop far past any plausible
-        threshold. Under the DEFAULT configuration the process must not die.
+        #10585 review P2: this docstring used to say ``_capture_session_impl``
+        runs the extractor and thousands of DB round trips ON the loop. It does
+        not (they are on the capture pool, #3060/#3551) — but a synchronous
+        block on the loop is still the shape the DEFAULT must be safe against,
+        so the scenario stands and only the premise moved.
         """
+        monkeypatch.delenv("TORTOISE_LOOP_STALL_HARD_EXIT_S", raising=False)
+
         import asyncio
         import threading
         import time

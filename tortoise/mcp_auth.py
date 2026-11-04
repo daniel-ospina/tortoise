@@ -234,6 +234,28 @@ def _get_org_sdk() -> TortoiseSDK:
         return TortoiseSDK(
             graph_name=ns,
             event_log_path=_journal_path_for(namespace=None, graph_name=ns))
+    # ── ORG-WIDE: the org's DEFAULT graph ──
+    # #10180: that pointer can MOVE. A promotion
+    # (`POST /v1/graphs/{id}/promote`) moves `kind='default'` AND
+    # `organizations.graph_name` to the promoted graph's own namespace, and the
+    # credential carries that namespace as `_current_graph_namespace` (the same
+    # field REST's `_data_sdk` opens by). Open it by name when it has moved, so
+    # this lane writes where the record tenant points; otherwise open the
+    # historical `namespace=org_id` graph — byte-identical, and the ONLY case
+    # that exists for a deployment whose org never promoted.
+    #
+    # The gate is shared (`supabase_control.moved_default_namespace`), so MCP,
+    # REST and the quota counter cannot disagree. It is also why the resolver
+    # cache's 60s TTL is the read window a promotion has on this lane: a call
+    # made with an already-cached resolution keeps the graph it resolved.
+    from tortoise.supabase_control import moved_default_namespace
+
+    moved = moved_default_namespace(org_id, ns)
+    if moved:
+        return TortoiseSDK(
+            graph_name=moved,
+            event_log_path=_journal_path_for(
+                namespace=None, graph_name=moved))
     sdk = TortoiseSDK(
         namespace=org_id,
         event_log_path=_journal_path_for(namespace=org_id, graph_name=None))
@@ -288,6 +310,7 @@ def _get_org_sdk() -> TortoiseSDK:
 from tortoise.tool_registry import (  # noqa: E402, I001
     GRAPH_ARGUMENT_DESCRIPTION as _GRAPH_ARGUMENT_DESCRIPTION,
     GRAPH_ARGUMENT_EXCLUDED as _GRAPH_ARGUMENT_EXCLUDED,
+    GRAPH_ARGUMENT_EXCLUDED_DEFAULT_TARGET as _GRAPH_ARGUMENT_EXCLUDED_DEFAULT_TARGET,
 )
 
 #: MCP tools that must NOT advertise (or honour) the `graph` argument: they
@@ -298,6 +321,13 @@ from tortoise.tool_registry import (  # noqa: E402, I001
 #: what keeps the advertised set and the honoured set from drifting.
 GRAPH_ARGUMENT_EXCLUDED = _GRAPH_ARGUMENT_EXCLUDED
 GRAPH_ARGUMENT_DESCRIPTION = _GRAPH_ARGUMENT_DESCRIPTION
+
+#: The excluded tools that still WRITE the workspace DEFAULT graph (`#10084`):
+#: they take no routing argument, but "no routing argument" is not "no graph",
+#: so the disclosure fires on these and not on the workspace/control-plane ones.
+#: Re-exported from `tortoise.tool_registry` for the same one-import-site reason
+#: as `GRAPH_ARGUMENT_EXCLUDED`.
+GRAPH_ARGUMENT_EXCLUDED_DEFAULT_TARGET = _GRAPH_ARGUMENT_EXCLUDED_DEFAULT_TARGET
 
 
 #: The bad-argument refusal for a `graph` that is not even a string. ONE
@@ -630,22 +660,42 @@ def record_tenant_for_graph(plan: dict | None) -> tuple[str, str] | None:
       :func:`plan_graph_target` answers that ref with ``None``, and refuses it
       whenever ``_current_graph_id`` is set, because its default-ref branch
       compares the bound id against the ``"default"`` SENTINEL
-      (`_DEFAULT_GRAPH_ID`, :316) while a resolved credential carries a real
-      ``public.graphs`` id. A bound credential is therefore REFUSED there
-      rather than resolved, INCLUDING one bound to the default graph's own row
-      (pinned by ``test_9340_graph_tool_argument.py``::
+      (`_DEFAULT_GRAPH_ID`, the module constant) while a resolved credential
+      carries a real ``public.graphs`` id. A bound credential is therefore
+      REFUSED there rather than resolved, INCLUDING one bound to the default
+      graph's own row (pinned by ``test_9340_graph_tool_argument.py``::
       ``test_a_bound_credential_cannot_ask_for_the_default_graph``). So the
       ``kind='default'`` row handled below reaches this function only for a
       credential bound to that very row, or for one with no binding at all —
-      and in both shapes the ambient scope already names ``(org, default)``.
+      and where the credential IS bound the ambient scope already names
+      ``(org, default)``. (Where it is NOT bound the ambient scope can name
+      NOTHING; see the ⚠️ paragraph below, which is a different answer from
+      this one and was written because this sentence used to claim both
+      shapes at once — #10723 review P3.)
 
     Installing a tenant here would therefore be a SECOND write of the same
-    scope, and the only way it could differ is by disagreeing with the answer
-    the credential already gave — a worse answer, not a better one. The lanes
-    that genuinely needed an install are the ones with NO ambient scope at all
-    (they build their own SDK from an ``org_id`` alone); they are installed at
-    their own construction site by
+    scope in the ambient-present case, and the only way it could differ is by
+    disagreeing with the answer the credential already gave — a worse answer,
+    not a better one. The lanes that genuinely needed an install are the ones
+    with NO ambient scope at all (they build their own SDK from an ``org_id``
+    alone); they are installed at their own construction site by
     ``hosted_api._bind_default_graph_record_tenant`` (#10047, five lanes).
+
+    ⚠️ There IS a reachable shape where the ambient scope names NOTHING, and
+    returning ``None`` there is still right — for a sharper reason than "it
+    would disagree" (#10046 review P2): naming the default graph by its NAME
+    (not the ``"default"`` ref) reaches the ``kind='default'`` early return
+    above even when the credential's own read was fail-soft and stamped no
+    ``default_graph_id``. In that shape the honest answer is the fail-closed
+    ``no_tenant`` refusal, NOT an install — because a default row's
+    ``plan["graph_id"]`` is the ``"default"`` SENTINEL (`_DEFAULT_GRAPH_ID`,
+    the module constant), and
+    :func:`tortoise.record_writer.record_tenant_for` accepts any non-empty
+    string in that field, so installing it would hand the record an
+    FK-invalid tenant and turn an attributable DECLINE into an unattributable
+    ``write_failed``. The only install that could be correct here would read
+    ``plan["stable_id"]``; that is a new resolution path, and #10046's own
+    review round declined it as one.
     """
     if plan is None or (plan.get("kind") or "") == "default":
         return None

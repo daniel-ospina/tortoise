@@ -98,6 +98,11 @@ TEST_TEAM = {
     "max_sessions": None,
 }
 
+# #10602: a SECOND org, used only where a test needs two reads on DIFFERENT
+# snapshot identities (``_namespace`` is the org_id, and it is the
+# fallback-snapshot key). Same shape as TEST_TEAM, different tenant.
+_SECOND_TEAM = {**TEST_TEAM, "org_id": "team-002"}
+
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -5416,6 +5421,109 @@ class TestIssueInsightAPI:
         assert payload["repo_not_indexed"] is False
         assert payload["data_points"] == []
         assert "no prior knowledge" in payload["insight"]
+        # #8447 — the route RELAYS the SDK's marker. `config/surface-manifest.yml`
+        # declares `truncated` ALWAYS present on this body, so a route that
+        # dropped it would break a declared contract field while every
+        # SDK-level test stayed green (review round 4, P2: this arm ran no
+        # route assertion at all, so the `api` registration guarded nothing).
+        assert payload["truncated"] is False
+        assert "total_available" not in payload
+
+    def test_the_route_relays_a_truncated_verdict(self, client, monkeypatch):
+        """#8447 — a cut read reaches the BODY with its exact total.
+
+        A marker written on a sink is a developer fact; the contract is about
+        what the caller receives. Driving the real route is what proves the
+        relay rather than the SDK's internal bookkeeping.
+
+        ⛔ The fixture must be a body the PRODUCER can emit (#10570 review, P3
+        note). It was not: it paired `"at least 20 graph hit(s)"` with
+        `total_available: 20`, and the producer never writes both —
+        `sdk.py:34085` prefixes `"at least "` only when `_exact` is False, and
+        `truncation.py:196` sets `total_available` only when it is True. An
+        impossible pair cannot catch a relay that mixed the two. This arm is now
+        the EXACT case (20 matches at `limit=2`, pool bound 20 — the boundary
+        `tests/test_8447_issue_insight_truncation.py::
+        test_a_pool_at_exactly_its_bound_is_not_marked_cut` pins); its qualified
+        sibling is the test below.
+
+        ⛔ GREEN on the pre-fix tree — a RELAY guard, not a red→green leg
+        (#10570 review P3-1). Measured: both `-k route_relays` arms pass against
+        base `origin/main` = `6b8793351` (`2 passed, 479 deselected`), because
+        the route already returns the SDK dict verbatim, so a fake SDK that
+        carries the marker itself needs nothing from this diff. What it pins is
+        that the route does not WHITELIST or re-shape the body. The red→green
+        arm on this route is the marker assertion block at the end of
+        `test_authed_call_returns_fail_closed_shape`, which reads the real SDK.
+        """
+        import tortoise.hosted_api as hosted_api
+
+        class _FakeSDK:
+            def issue_insight(self, title, body=None, repo=None, limit=2):
+                return {
+                    "has_prior": True, "no_prior_knowledge": False,
+                    "repo_not_indexed": False,
+                    "data_points": [{"kind": "statement", "content": "alpha"}],
+                    "insight": "20 graph hit(s) relate to this issue "
+                               "— check the graph before filing.",
+                    "more_in_graph": "alpha",
+                    "repo_stats": None,
+                    "truncated": True, "total_available": 20,
+                }
+
+        monkeypatch.setattr(hosted_api, "_data_sdk",
+                            lambda org: _FakeSDK())
+
+        r = client.get("/v1/issue-insight", params={"title": "anything"})
+
+        assert r.status_code == 200
+        payload = r.json()
+        assert payload["truncated"] is True
+        assert payload["total_available"] == 20
+        assert not payload["insight"].startswith("at least "), (
+            "an EXACT total beside a qualified count is a pair the producer "
+            "cannot emit — the fixture drifted off the contract")
+
+    def test_the_route_relays_a_floor_without_inventing_a_total(
+            self, client, monkeypatch):
+        """The qualified arm: a saturated pool relays `at least N` and NO total.
+
+        This is the pair that makes the relay's absence handling observable. A
+        route that dropped `truncated`, or that filled a missing
+        `total_available` with the floor it was handed, would pass the exact arm
+        above and fail here.
+
+        ⛔ Also GREEN on the pre-fix tree, for the same reason as its sibling:
+        a relay guard, not a red→green leg (measured with it, `-k route_relays`
+        → `2 passed` at base `6b8793351`).
+        """
+        import tortoise.hosted_api as hosted_api
+
+        class _FakeSDK:
+            def issue_insight(self, title, body=None, repo=None, limit=2):
+                return {
+                    "has_prior": True, "no_prior_knowledge": False,
+                    "repo_not_indexed": False,
+                    "data_points": [{"kind": "statement", "content": "alpha"}],
+                    "insight": "at least 25 graph hit(s) relate to this issue "
+                               "— check the graph before filing.",
+                    "more_in_graph": "alpha",
+                    "repo_stats": None,
+                    "truncated": True,
+                }
+
+        monkeypatch.setattr(hosted_api, "_data_sdk",
+                            lambda org: _FakeSDK())
+
+        r = client.get("/v1/issue-insight", params={"title": "anything"})
+
+        assert r.status_code == 200
+        payload = r.json()
+        assert payload["truncated"] is True
+        assert "total_available" not in payload, (
+            "a floor never wears a total's clothes — the route must relay the "
+            "ABSENCE, not fill it")
+        assert payload["insight"].startswith("at least ")
 
     def test_cross_team_isolation(self, client):
         """Team B cannot see Team A's repo stats via the REST mirror."""
@@ -8192,7 +8300,7 @@ class TestSearchOffloadConcurrency:
                     t0 = time.monotonic()
                     await asyncio.wait_for(asyncio.gather(
                         search("falkordb traversal", limit=10, org=TEST_TEAM),
-                        search("graph performance", limit=10, org=TEST_TEAM),
+                        search("graph performance", limit=10, org=_SECOND_TEAM),
                     ), timeout=15)
                     return time.monotonic() - t0
 
@@ -10082,7 +10190,12 @@ class TestEmbeddedRegistryPathDivergence:
             teams = ha_mod._iter_registered_orgs()
         finally:
             ha_mod._FALLBACK_KEEPALIVE.clear()
-        assert teams == [{"org_id": "supa-team-1", "name": "Supa T"}], teams
+        assert teams == [{"org_id": "supa-team-1", "name": "Supa T",
+                          "graph_name": None}], teams
+        # `graph_name` is the #10180 addition: the page already selects it so the
+        # event-retention sweep can resolve each org's DEFAULT graph without a
+        # second read per org. Pinned exactly (not a subset) so a future field
+        # cannot arrive on this dict unnoticed by the consumers that unpack it.
         assert records == [], f"Supabase mode constructed {len(records)} SDKs"
 
     def test_iter_registered_teams_supabase_query_failure_returns_empty(
@@ -13156,6 +13269,22 @@ class TestOverLimitSurfacesOfferTheHumanPath:
         # customer ceiling. Offering the upgrade path here would promise a
         # plan that cannot lift a data fault.
         "unreadable for resource",
+        # #4051 (this lane): the gate builds the SDK whose graph it counts
+        # (`quota._resolve_count_sdk` calls the `sdk_factory`), so a
+        # CONSTRUCTION fault is now a reachable fail-closed arm — the third of
+        # the same SERVER-fault category as "quota count failed" directly above
+        # (that is the arm `_count_resource` raises when the count itself fails;
+        # this is the arm that fires one step earlier, when the handle a
+        # graph-scoped count reads through cannot be made) and "unreadable for
+        # resource" (corrupt state on our side, never a customer ceiling — no
+        # plan lifts it).
+        # `_check_org_limit` wraps it as "Quota check failed: ...", which IS the
+        # exempted prefix — but this guard reads raise-site LITERALS, and the wrap
+        # happens at the HTTPException site in another module, so the literal here
+        # needs its own entry or the arm reads as an unregistered ceiling refusal.
+        # Registered the same way the previous arm was (#10142, f8970b536): a new
+        # fail-closed arm gets a category entry, not a rewritten message.
+        "quota count sdk unavailable",
         "resolve_org_limits requires a org_id", "cohort is larger than the",
         "cannot bound anything", "cannot be evaluated",
         "an unscoped cap would apply", "Import artifact exceeds the size cap",
@@ -13415,3 +13544,180 @@ def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
     message = str(excinfo.value)
     assert "INCONCLUSIVE [#5049]" in message
     assert "POST /v1/sessions answered" in message
+
+
+# ── #8447 (C2): the four boundary cases, per bounded surface ──────────────
+#
+# The contract (`docs/architecture/BOUNDED-OPERATION-CONTRACT.md` §1):
+#
+#   A bounded operation must either return complete results, or mark the
+#   result as incomplete and say why. It must never return a silently
+#   truncated result that is indistinguishable from a complete one.
+#
+# ⛔ EVERY TEST BELOW ASSERTS THE MARKER, not merely the row count: "returned
+# 3" passes on a silent truncation, which is the defect. The four cases the
+# issue names — exactly-at-limit, limit+1, page 2 of 2, cursor exhaustion —
+# are asserted per surface, and where a surface HAS no cursor the test says so
+# and asserts the positive-complete marker instead (a missing instrument must
+# be a recorded fact, never an untested absence).
+
+
+class TestBoundedPointsListBoundaries:
+    """`GET /v1/points` — limit-capped list, NO offset and NO cursor.
+
+    Rows past the cap are unreachable by any follow-up call, so the marker is
+    the ONLY completeness instrument this surface can have (#8447).
+    """
+
+    def _seed(self, client, n):
+        for i in range(n):
+            r = client.post("/v1/points", json={"content": f"bounded {i}"})
+            assert r.status_code == 200, r.text
+
+    def test_exactly_at_limit_is_marked_complete(self, client):
+        """Boundary 1 — `limit == matches` is COMPLETE, and says so.
+
+        The opposite failure is just as damaging: a marker that fires at
+        exactly-at-limit trains every caller to ignore it (contract §4.3).
+        """
+        self._seed(client, 3)
+        body = client.get("/v1/points", params={"limit": 3}).json()
+        assert body["count"] == 3
+        assert body["truncated"] is False
+        assert "total_available" not in body
+
+    def test_limit_plus_one_is_marked_incomplete(self, client):
+        """Boundary 2 — one row past the cap must flip the marker, visibly."""
+        self._seed(client, 4)
+        body = client.get("/v1/points", params={"limit": 3}).json()
+        assert body["truncated"] is True
+        # The delivered page is still exactly the caller's bound ...
+        assert body["count"] == 3
+        assert len(body["points"]) == 3
+        # ... and `count` keeps its prior meaning (rows delivered), so a caller
+        # that ignores the new field is unaffected; the marker is the instrument.
+        # A total would need a second COUNT over the whole graph, and publishing
+        # the probe's own limit+1 would be a lower bound wearing a total's
+        # clothes, so the third state (incomplete, total unknown) is the honest one.
+        assert "total_available" not in body
+
+    def test_there_is_no_page_two_so_the_marker_is_the_only_instrument(self, client):
+        """Boundary 3 — "page 2 of 2" CANNOT exist here, and that is the point.
+
+        A caller asking again gets the same three rows: the fourth is
+        unreachable forever. So the response must carry the marker rather than a
+        pagination field, and it must NOT pretend to carry a cursor (#8447's
+        "does an exhausted cursor return an empty page, or signal completion?").
+        """
+        self._seed(client, 4)
+        body = client.get("/v1/points", params={"limit": 3}).json()
+        for absent in ("next_cursor", "cursor", "offset", "has_more", "hasMore"):
+            assert absent not in body, (
+                f"{absent!r} would promise a page 2 this route does not have")
+        again = client.get("/v1/points", params={"limit": 3}).json()
+        assert [p["id"] for p in again["points"]] == \
+            [p["id"] for p in body["points"]], "the dropped row is unreachable"
+        assert body["truncated"] is True
+
+    def test_a_complete_page_says_complete_because_no_cursor_can_drain(self, client):
+        """Boundary 4 — cursor exhaustion is N/A: completeness is POSITIVE.
+
+        With no cursor there is nothing to exhaust, so "no more rows" cannot be
+        expressed by an empty follow-up page. That makes the positive
+        `truncated: false` load-bearing: silence would be indistinguishable
+        from a truncation nobody marked.
+        """
+        self._seed(client, 2)
+        body = client.get("/v1/points", params={"limit": 50}).json()
+        assert body["truncated"] is False
+        assert body["count"] == 2
+
+
+class TestBoundedEventCursorBoundaries:
+    """`GET /v1/events` — a real cursor (`next_cursor`), the AIP-158 case.
+
+    ⚠️ MEASURED PROPERTY, pinned here rather than assumed: `next_cursor` is
+    NEVER empty — not even on the page after the last event. So on this seam
+    the completion instrument is the EMPTY `events` list, not a drained cursor.
+    That is a deliberate departure from AIP-158's *"next_page_token must be
+    empty at end-of-collection"* (recorded in the contract doc §3), and a
+    client that loops on `while next_cursor` never terminates — which is why
+    the empty-page case is asserted below instead of being left to inference.
+    """
+
+    # Every poll passes ``types=PointAdded``: the population these tests bound is
+    # "the events one point-create emits", declared rather than assumed. Without
+    # it a second event type on a point create would change what "exactly at
+    # limit" measures, and the failure would blame the cursor.
+    def _seed(self, client, n):
+        for i in range(n):
+            r = client.post("/v1/points", json={"content": f"event {i}"})
+            assert r.status_code == 200, r.text
+            assert r.json().get("id")
+
+    def test_exactly_at_limit_is_indistinguishable_until_the_next_page(self, client):
+        """Boundary 1 — a full page proves nothing; the follow-up page does."""
+        self._seed(client, 3)
+        page = client.get("/v1/events", params={"limit": 3, "types": "PointAdded"}).json()
+        assert len(page["events"]) == 3          # full page — could be more
+        assert page["next_cursor"]                # cursor never empties here
+        beyond = client.get(
+            "/v1/events", params={"limit": 3, "types": "PointAdded", "after": page["next_cursor"]}).json()
+        assert beyond["events"] == [], "at-limit must be PROVED by an empty page"
+        assert beyond["next_cursor"], "the cursor is non-empty even when drained"
+
+    def test_limit_plus_one_needs_and_gets_a_page_two(self, client):
+        """Boundary 2 — the row past the cap is REACHABLE (this is not truncation)."""
+        self._seed(client, 4)
+        first = client.get("/v1/events", params={"limit": 3, "types": "PointAdded"}).json()
+        assert len(first["events"]) == 3
+        second = client.get(
+            "/v1/events", params={"limit": 3, "types": "PointAdded", "after": first["next_cursor"]}).json()
+        assert len(second["events"]) == 1
+        assert second["events"][0]["event_id"] not in {
+            e["event_id"] for e in first["events"]}
+
+    def test_page_two_of_two_is_short_and_that_is_the_signal(self, client):
+        """Boundary 3 — page 2 of 2: short in THIS population, and PROVED complete.
+
+        Scoped to the population these tests declare (four `PointAdded` events,
+        no duplicate ids). A short page is NOT in general a completion signal —
+        `tortoise/event_store.py::read_after` says so explicitly: a duplicate
+        `event_id` is dropped AFTER the query's `LIMIT`, so a page of `limit`
+        rows can legitimately come back with fewer distinct rows while more
+        remain beyond it. What makes completion a claim HERE is the follow-up
+        page, not the row count.
+        """
+        self._seed(client, 4)
+        first = client.get("/v1/events", params={"limit": 3, "types": "PointAdded"}).json()
+        second = client.get(
+            "/v1/events", params={"limit": 3, "types": "PointAdded", "after": first["next_cursor"]}).json()
+        assert len(second["events"]) < 3
+        # The completion instrument is the EMPTY follow-up page, not the short
+        # count: one more poll must find nothing rather than a row the short
+        # page silently dropped. A short page alone proves nothing about a
+        # drained stream (`read_after`'s duplicate-drop window).
+        third = client.get(
+            "/v1/events", params={"limit": 3, "types": "PointAdded", "after": second["next_cursor"]}).json()
+        assert third["events"] == []
+
+    def test_cursor_exhaustion_returns_an_empty_page_not_a_completion_signal(
+            self, client):
+        """Boundary 4 — exhausted cursor: empty page, cursor still non-empty.
+
+        Pinned as a DEPARTURE, not a fix: emptying `next_cursor` at
+        end-of-collection is AIP-158's shape and would change the value of a
+        documented response field, so it needs a design decision (recorded as
+        REMAINING on #8447). What is enforced here is that the empty page is a
+        STABLE, idempotent answer — polling the same exhausted cursor forever
+        returns nothing rather than replaying or erroring.
+        """
+        self._seed(client, 2)
+        page = client.get("/v1/events", params={"limit": 2, "types": "PointAdded"}).json()
+        drained = client.get(
+            "/v1/events", params={"limit": 2, "types": "PointAdded", "after": page["next_cursor"]}).json()
+        assert drained["events"] == []
+        again = client.get(
+            "/v1/events", params={"limit": 2, "types": "PointAdded", "after": drained["next_cursor"]}).json()
+        assert again["events"] == []
+        assert again["next_cursor"] == drained["next_cursor"]

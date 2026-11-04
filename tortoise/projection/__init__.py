@@ -387,9 +387,23 @@ _FALKORDB_VERSION_CACHE: dict[tuple, tuple[int, int, int] | None] = {}
 # it while the client reports an error and retries). After #2850 no health
 # check waits on the DB at all, so the read timeout no longer sits in the
 # liveness budget; it is now configurable for operators who need a tighter
-# loop-stall ceiling (pair a lower value with a lower
-# TORTOISE_LOOP_STALL_EXIT_S, see monitoring.start_stall_watchdog — note that
-# self-kill is OPT-IN and disabled by default).
+# loop-stall ceiling.
+#
+# The knob that SIZES that ceiling — and the only one the HOSTED deployment
+# arms (``TORTOISE_LOOP_STALL_HARD_EXIT_S = "600"`` in ``fly.toml`` ``[env]``)
+# — is ``TORTOISE_LOOP_STALL_HARD_EXIT_S``: it fires on the first poll and
+# deliberately BYPASSES the in-flight gauge and the hysteresis, because an
+# open ``GET /mcp`` SSE stream is an in-flight request, so an idle-gated exit
+# could never fire on the wedge it guards. A request in flight does not stop
+# the loop ticking, so a MISSING TICK is the evidence of a wedge.
+# ``TORTOISE_LOOP_STALL_EXIT_S`` is its SOFT, idle-gated sibling and is
+# deliberately UNSET on the hosted deployment (see
+# ``hosted_api._start_liveness``); pointing an operator at it would hand them
+# the knob production does not run (#10585 review P2 — the sixth copy of this
+# stale belief). Both are DISABLED BY DEFAULT (``0``) in the PRODUCT, so a
+# self-hoster opts in; "disabled by default" is the shipped default, not a
+# description of what the hosted deployment runs. See
+# ``monitoring.start_stall_watchdog``.
 _DB_CONNECT_TIMEOUT_DEFAULT = 2.0
 _DB_SOCKET_TIMEOUT_DEFAULT = 10.0
 #: Sanity ceiling on a configured DB socket timeout (round-3 review P2).
@@ -7951,6 +7965,53 @@ def _owns_point(label: object) -> bool:
     return not (isinstance(label, str) and label in _NON_POINT_ENTITY_LABELS)
 
 
+#: The FOLD's own record flag — the payload key `_fold_source_evidence` mints on
+#: the `PointAdded` it re-emits to journal a dedup fold (#7704 / #10010 review).
+#:
+#: Payload-only metadata, never a node property (`entities._POINT_HANDLED`), and
+#: refused at every caller-prop boundary (`sdk._sanitize_props`, `api`'s internal
+#: seam, the MCP boundary) — the same treatment `embedding_preserved` gets.
+#:
+#: ⛔ It exists because the REPLAY's recreate anchor is not self-describing. Every
+#: creation record advances `last_recreate` (and `_rebuild_all_replay`'s own
+#: `last_recreate_seq`) — "a terminalizer at or before it died with the replaced
+#: node". A FOLD replaces NOTHING: it re-emits an EXISTING incarnation's snapshot
+#: so pass-1a restates the props and pass-2 re-derives the edges. Counting it as
+#: a re-creation refused the very stamp that killed the claim: the rebuild
+#: reassembled `status`/`validTo` from the fold's own snapshot but dropped
+#: `outdated`/`expiredAt`/CORRECTS, which ONLY the terminalizer stamp writes
+#: (`_POINT_DENY` — no payload can restore them), leaving a dead claim with no
+#: `outdated` flag: the state `entities.py` names as "an invalidated Point with no
+#: `outdated` flag — a dead claim served". Measured on the shape the fold's own
+#: branch authorises (`#7819` is scoped to `_TEMPORAL_RESTAMP_PROPS`, so a fold
+#: carrying no temporal prop applies to a dead claim exactly as any revision
+#: does): create → supersede (or invalidate) → re-ingest the same content from a
+#: second source folds onto the dead id, and a `rebuild_all` then dropped
+#: `outdated`/`expiredAt` while `check_consistency` reds with an action ("replay
+#: the journal") that reproduces the same graph.
+#:
+#: Spelled here, next to the plan that reads it, and IMPORTED by the producer, so
+#: the two cannot drift the way `create_document(type="SourceCreated")` did.
+EVIDENCE_FOLD_KEY = "evidence_fold"
+
+
+def record_is_evidence_fold(ev: dict) -> bool:
+    """Is this creation-shaped record a dedup FOLD rather than a creation?
+
+    Reads both journal shapes the replay tolerates (after ``_norm`` a nested
+    record carries the flag in BOTH places, a flat ``EventAPI`` record in one),
+    so the answer cannot depend on which door minted the record.
+
+    A record that states the flag but is NOT a creation type is still reported
+    here; every caller checks the type first, so the flag alone never decides
+    what the record IS.
+    """
+    point = ev.get("point")
+    if isinstance(point, dict) and point.get(EVIDENCE_FOLD_KEY):
+        return True
+    return bool(ev.get(EVIDENCE_FOLD_KEY))
+
+
 def plan_point_restamp_folds(
     events,
 ) -> tuple[dict[int, tuple[bool, bool]], dict[str, int]]:
@@ -7991,7 +8052,10 @@ def plan_point_restamp_folds(
 
     * ``last_recreate_seq[(Point, id)]`` — the id's LAST ``PointAdded`` /
       ``OperatorAdded`` — bounds the STAMP half. A fold at or before it died
-      with the replaced node. ``PointPromoted`` is deliberately NOT a boundary
+      with the replaced node. A FOLD record is NOT such a boundary
+      (``record_is_evidence_fold``, #10010 review): it re-emits an existing
+      incarnation's snapshot and replaces nothing. ``PointPromoted`` is
+      deliberately NOT a boundary
       (same-node draft→live: it clears neither ``outdated`` nor CORRECTS), so
       seeding from it would silently drop a pre-promote invalidate fold.
     * ``last_ann_drop_seq[(Point, id)]`` — the id's last REAL
@@ -8063,6 +8127,14 @@ def plan_point_restamp_folds(
                     pending_deleted.add(("Point", mid))
             continue
         if t in ("PointAdded", "OperatorAdded"):
+            # #10010 review P1: a FOLD re-emits an EXISTING id's snapshot and
+            # replaces nothing, so it is not a recreate boundary — and it must
+            # not consume a pending delete either, because the recreate anchor
+            # belongs to whichever record actually materialized the incarnation
+            # (`record_is_evidence_fold`). Without this, a fold onto a dead
+            # claim refused that claim's own terminalizer stamp below.
+            if record_is_evidence_fold(ev):
+                continue
             p = ev.get("point")
             if isinstance(p, dict) and isinstance(p.get("id"), str):
                 key = ("Point", p["id"])
@@ -8249,6 +8321,18 @@ def journal_recreate_seqs(events) -> set[int]:
     ``seq`` is the enumerate index over the SAME ordered ``events`` list the
     replay engines walk (the seq space ``journal_hard_delete_seqs`` documents),
     so a fold can ask ``seq in journal_recreate_seqs(events)``.
+
+    ⚠️ Deliberately **NOT** fold-aware, so the mirror above is no longer
+    LITERAL (#10010 review): ``_rebuild_all_replay`` excludes an evidence fold
+    from its ``is_recreate`` arm (:func:`record_is_evidence_fold`), so a
+    ``delete → fold`` ordering is a re-creation here and is refused there. No
+    observable divergence is constructible today — every prop that arms a gate
+    on this set (``tags``, ``_REVISION_PROVENANCE_PROPS``) is read off a node
+    the hard delete already removed, and both consumers (``_apply_one``'s
+    carry-forward and pass 1a's #4042 wipe) land on a FRESH node, so both end
+    empty. Recorded here, next to the code, because the next editor of this
+    function needs to know the two readings differ BY DESIGN — this is a note
+    about a mirror, not evidence of a defect.
     """
     armed: set[str] = set()
     recreate: set[int] = set()
@@ -9359,6 +9443,29 @@ def _apply_one(points: dict[str, dict], ev: dict,
                         # dispatch (#7369), which REMOVES the property. Folding
                         # the raw value would keep it.
                         _dropped.add(_pk)
+                # #10010 review P2: the SAME omitted-key carry-forward for the
+                # extracted-from PAIR, and it is the same class for the same
+                # reason. `_upsert_point_props` writes them from an explicit
+                # clause gated on the payload's own SHAPE (`_ef_clauses`: a
+                # TRUTHY scalar for `extractedFrom`, a non-empty list/tuple for
+                # `extractedFromAll`), so a MERGE'd node keeps the stored value
+                # when a later creation states neither — and replacing the
+                # entry outright below dropped them from the journal view only,
+                # which `check_consistency` then reports as a divergence whose
+                # own `action` ("replay the journal") reproduces it. Reachable
+                # because the #7704 fold is the first writer that puts the pair
+                # on an id a HAND-BUILT snapshot later re-emits without them
+                # (`sdk._write_capture_turns`' turn snapshots, which carry no
+                # `extractedFrom`; `EventAPI.add_point(id=…)`, #8317's seam).
+                # Each key is gated on the writer's rule for THAT key, not on
+                # `key not in p`: an explicit `None`/`""`/`[]` writes no
+                # property either, so the stored value survives there too.
+                if not p.get("extractedFrom") and "extractedFrom" in _prev:
+                    _carried["extractedFrom"] = _prev["extractedFrom"]
+                _ef_all = p.get("extractedFromAll")
+                if (not (isinstance(_ef_all, (list, tuple)) and _ef_all)
+                        and "extractedFromAll" in _prev):
+                    _carried["extractedFromAll"] = _prev["extractedFromAll"]
                 if _carried or _dropped:
                     p = {**{_k: _v for _k, _v in p.items() if _k not in _dropped},
                          **_carried}
@@ -9469,6 +9576,64 @@ def _apply_one(points: dict[str, dict], ev: dict,
             for _pk in _REVISION_PROVENANCE_PROPS:
                 if _pk in ev and _store_holds_prop_value(ev[_pk]):
                     p[_pk] = ev[_pk]
+            # #10523 review (P2): fold the ``embeddingText`` CLEAR — parity with
+            # ``_revise_point`` (its ABSOLUTE clear, inside the ``new_content``
+            # re-encode branch, plus the PRESENCE-conditional caller-vector
+            # clause emitted after it). Both journaled clear paths write the key
+            # into the record (`update_point(embedding=…)`/`embedding=None` and
+            # the content-edit re-encode branch), and the GRAPH fold honours
+            # both, but this arm folded neither — so ``check_consistency`` (whose
+            # reference view IS this function, `consistency.py::_fold_journal`)
+            # kept the creation's enriched text and reported a FALSE
+            # ``divergence="content"`` naming ``embeddingText`` on a graph the
+            # live path itself wrote, with an `action` ("replay the journal")
+            # that reproduces exactly that graph and so could never clear it —
+            # the #8317/#5048/#3817 class, one field over.
+            #
+            # Two arms, mirroring the graph fold rather than inventing a rule:
+            #
+            #   1. a CONTENT EDIT re-encodes the vector from the new content, so
+            #      the text the OLD vector described is gone — ABSOLUTE (not
+            #      presence-conditional), exactly like the graph's clause, which
+            #      clears even for a record that does not state the key. ⛔ The
+            #      WRITABILITY gate is the graph's gate, and it is applied HERE:
+            #      ``_revise_point`` NULLS its ``new_content`` local before its
+            #      re-encode, so an unwritable value never reaches that branch —
+            #      but this arm leaves the local alone (the guard above is an
+            #      inline conjunction), so the bar has to be restated in
+            #      ``_content_edit`` itself. #10523 review (P2): a bare
+            #      ``is not None`` made an UNWRITABLE ``new_content`` (a
+            #      NUL/lone-surrogate str, a map, a non-finite float — the #3689
+            #      class) count as a content edit here while the graph fold
+            #      dropped it and emitted no clear — so the pure fold REMOVED
+            #      ``embeddingText`` and the graph fold KEPT it, and
+            #      ``check_consistency`` reported a divergence, with an `action`
+            #      that reproduces the graph already on disk, on a faithful
+            #      graph.
+            #   2. a CALLER-VECTOR write (`embedding=[…]` / `embedding=None`)
+            #      journals ``embeddingText: None`` and no ``new_content``. Here
+            #      live is a bare ``SET n += $props``, so PRESENCE-conditional is
+            #      the faithful shape — an unrelated revision does not speak
+            #      about the key and must not clear a writer-minted value — and
+            #      `_store_holds_prop_value` is the shared write bar: a value the
+            #      transport refuses is what live nulls, so it removes the
+            #      property here too.
+            #
+            # ⛔ This fold never SETS a real value: neither does the graph fold
+            # (`_revise_point` emits only ``= NULL`` for this key; the value
+            # write is the carrier's ``n.embeddingText=$et`` in
+            # ``_upsert_point_props``). Writing one here would be the opposite
+            # divergence.
+            # The two arms are NAMED rather than nested, so a reader can tell
+            # which one fired (and why they are not the same rule).
+            _content_edit = (new_content is not None
+                             and _annotator_value_ok(new_content))
+            _caller_vector_clear = (
+                "embeddingText" in ev
+                and (ev["embeddingText"] is None
+                     or not _store_holds_prop_value(ev["embeddingText"])))
+            if _content_edit or _caller_vector_clear:
+                p.pop("embeddingText", None)
     elif t == "OperatorAnnotated":
         # #3689: the explicit annotation record — parity with apply() /
         # rebuild_all pass-1b. A plain property write on the operator's
@@ -14238,7 +14403,22 @@ class FalkorProjection(
                 # NOT a drop boundary (promote is same-node draft→live; it
                 # never clears outdated/CORRECTS, so seeding from it would
                 # silently drop a pre-promote invalidate fold).
-                if t in ("PointAdded", "OperatorAdded"):
+                # #10010 review P1: a FOLD re-emits an EXISTING id's
+                # snapshot and replaces nothing — it is not a recreate
+                # boundary, and it must not consume a pending delete (the
+                # next REAL creation owns that anchor). Same predicate as
+                # ``plan_point_restamp_folds``, so the sweep and the
+                # chronological pass cannot read one record two ways. Read
+                # ONCE and reused by ``is_recreate`` below: the fold must be
+                # excluded from EVERY recreate-shaped write in this block, or
+                # the two engines still read one record two ways (the #4042
+                # wipe and ``last_ann_drop_seq`` are recreate-shaped too).
+                _is_evidence_fold = record_is_evidence_fold(ev)
+                # (No second type test here: the enclosing block is already
+                # ``t in ("PointAdded", "OperatorAdded")``, so a re-test would
+                # be always-true and would read as if a third type could reach
+                # it — #10010 review round 8.)
+                if not _is_evidence_fold:
                     last_recreate_seq[("Point", p["id"])] = seq
                     last_recreate_seq_any[p["id"]] = seq
                 # #3689 review P2: the annotator folds' drop boundary is a
@@ -14251,7 +14431,18 @@ class FalkorProjection(
                 # possibly-Point) — a foreign-kind delete cannot advance the
                 # Point annotator boundary. #4042 reuses ``is_recreate`` below
                 # for the recreate wipe and its per-source anchors.
-                is_recreate = ("Point", p["id"]) in pending_deleted
+                # #10010 review P2: the FOLD exclusion applies here too. A fold
+                # materialises no incarnation, so it is not a delete→recreate
+                # boundary: consuming the pending delete here moved the
+                # belief/annotator drop anchor onto a record that replaced
+                # nothing (letting a dead incarnation's folds survive), and it
+                # ran the #4042 wipe on a record whose payload cannot restore
+                # ``content_hash``. ``plan_point_restamp_folds`` already skips
+                # the fold before its own ``pending_deleted.discard``; without
+                # this arm the sweep and this chronological pass disagreed —
+                # the exact drift that guard's comment claims is impossible.
+                is_recreate = (not _is_evidence_fold
+                               and ("Point", p["id"]) in pending_deleted)
                 if is_recreate:
                     last_ann_drop_seq[("Point", p["id"])] = seq
                     pending_deleted.discard(("Point", p["id"]))
@@ -14314,11 +14505,51 @@ class FalkorProjection(
                     # and the rebuilt node diverges from live AND from `fold()`.
                     # The wipe runs BEFORE `_upsert_point_props`, so a
                     # re-creation that DOES restate them still writes them.
+                    #
+                    # #7704: `extractedFromAll` — the fold's accumulated ref
+                    # SET — is the same class and is wiped HERE for the same
+                    # reason. Its writer (`_upsert_point_props`'s
+                    # `_ef_clauses`) emits `SET n.extractedFromAll = $all` only
+                    # when the payload states a non-empty list, and a
+                    # re-creation's payload can never state one (only
+                    # `_fold_source_evidence` writes that key; `create_point`
+                    # has no `extractedFromAll` in its `_create_map`). The key
+                    # is in `_POINT_HANDLED`, so the open-set passthrough never
+                    # writes it and never clears it either — so without this
+                    # entry an identical-id re-creation lets the DEAD
+                    # incarnation's folded set survive a rebuild while live has
+                    # none: `derived = replay(journal)` goes false on a
+                    # REPORTED surface (`get_point` returns `properties(n)`),
+                    # naming sources the new incarnation never carried. The
+                    # #4042 residual note below scopes itself to OPEN-SET props
+                    # and therefore does not cover this one: the key is
+                    # declared, handled, and written by its own clause — which
+                    # is exactly why it needs a wipe entry, as
+                    # `embedding_verbatim` (#5004 r4), `sourceVersionTransit`
+                    # (#5256), `tags` (#2897) and the four capture props
+                    # (#9350) each got one. `check_consistency` DOES compare
+                    # this key, so the wipe is what keeps the checker GREEN on
+                    # a re-creation rather than what silences an unseeable
+                    # break (#10010 review P3 — the earlier text here claimed
+                    # the opposite and was false). `_uncarried` does skip every
+                    # `_POINT_HANDLED` key, but that skip only classifies keys
+                    # the projection cannot HOLD for the loss report — it never
+                    # reaches `skip`, which is `frozenset(uncarried.get(pid))`
+                    # — and `_canonical_point_fields` keeps every key not in
+                    # `_NOT_COMPARED`, which `extractedFromAll` is not. Without
+                    # this entry the rebuilt node keeps the dead incarnation's
+                    # folded set, the re-creation's `PointAdded` states none,
+                    # and the gate reports `divergent_points[].fields ==
+                    # ['extractedFromAll']` — a NOISY break, not a silent one.
+                    # `tests/test_source_version_extractedfrom_5038.py::
+                    # test_consistency_gate_compares_the_folded_set` pins it on
+                    # both halves.
                     self.g.query(
                         "MATCH (n:Point {id:$id}) "
                         "SET n.embedding = NULL, n.content_hash = NULL, "
                         "    n.embedding_verbatim = NULL, "
                         "    n.sourceVersionTransit = NULL, "
+                        "    n.extractedFromAll = NULL, "
                         "    n.tags = NULL, "
                         "    n.eventId = NULL, n.source_session = NULL, "
                         "    n.source_harness = NULL, n.ingested_at = NULL",
@@ -19866,6 +20097,11 @@ class FalkorProjection(
         # for why.
         embed_clear = ""
         wrote_content_hash = False
+        # #10523 review (P2): did the re-encode branch below already emit the
+        # absolute `n.embeddingText = NULL`? The caller-vector clause further
+        # down emits the SAME SET for the same field, and one statement must not
+        # carry it twice.
+        reencode_cleared_embedding_text = False
 
         # #4042: `n.content` is written UNCONDITIONALLY by
         # `_upsert_point_props`, so a creation that superseded this revision
@@ -20067,6 +20303,18 @@ class FalkorProjection(
                 embed_clear = clear_then_set_prefix("n")
                 set_clauses.append(
                     set_embedding_clause("n", preserve_on_null=False))
+                # #8488 scope 1 (review round 2, P1): this branch re-encodes the
+                # vector from `content`, so the node must not keep the OLD
+                # enriched text — `embeddingText` describes the vector that was
+                # just replaced. Mirrors `update_point`'s re-derive branch
+                # exactly, so a rebuild and the live write agree (#4194).
+                # ABSOLUTE (not presence-conditional) on purpose: this clause
+                # must clear even for a hand-written record that omits the key,
+                # because the vector it described is gone either way. The
+                # caller-vector door's presence-conditional clause is emitted
+                # after this block and skipped here (`reencode_cleared_…`).
+                set_clauses.append("n.embeddingText = NULL")
+                reencode_cleared_embedding_text = True
                 wrote_embedding = True
             if not skip_hash:
                 # #2795: content_hash is derived from content — mirror the live
@@ -20089,6 +20337,41 @@ class FalkorProjection(
         if set_updated_at and not skip_content:
             set_clauses.append("n.updatedAt = $now")
             params["now"] = _now_iso()
+        # #10523 review (P2): the CALLER-VECTOR door's enrich-text clear.
+        #
+        # `update_point(embedding=[…])` / `update_point(embedding=None)` journals
+        # a `PointRevised` with `embeddingText: None` (the writer sets it beside
+        # `embedding_verbatim`, and `emit_props` carries it). The
+        # only clause that folded that field sat INSIDE the
+        # `new_content is not None` re-encode branch above, so this door's clear
+        # was journalled and never replayed: `rebuild()` restored a text the LIVE
+        # graph no longer holds — the opposite of what that branch's own comment
+        # promises ("so a rebuild and the live write agree").
+        #
+        # Shape is the `tags` / `validToPrecision` one: PRESENCE-conditional
+        # (mirroring live's `SET n += $props`), with `_store_holds_prop_value` as
+        # the shared write bar — a value the transport gate refuses is what live
+        # nulls, so it REMOVES the property here too. On `skip_embedding` the
+        # paired half was superseded by a later same-file creation, and the text
+        # describes THIS revision's vector, so it shares that boundary exactly.
+        # The re-encode branch keeps its ABSOLUTE `n.embeddingText = NULL` (it
+        # must clear even for a record that does not state the key); this clause
+        # is skipped there, since it would restate the same SET.
+        # ⚠️ Not the record lane's rule: `_upsert_statement`'s `props = point.props
+        # || EXCLUDED.props` makes an OMITTED key preserve a stale text, which is
+        # why the carrier's own clause is unconditional (`SET n.embeddingText=$et`),
+        # not conditional.
+        # ⚠️ Residual, stated rather than implied: this fold closes the TEXT half
+        # only. The caller's vector itself is still not replayed on this door (the
+        # clause set is built from `new_content`, and a caller vector arrives with
+        # `new_content=None`), so a rebuild after `update_point(embedding=[…])`
+        # leaves live and rebuilt agreeing on "no text" and disagreeing on WHICH
+        # vector — the declared #5046 gap acknowledged above, not a new one.
+        if (not skip_embedding and not reencode_cleared_embedding_text
+                and "embeddingText" in ev
+                and (ev["embeddingText"] is None
+                     or not _store_holds_prop_value(ev["embeddingText"]))):
+            set_clauses.append("n.embeddingText = NULL")
         # #3689: fold the annotator dims carried as PointRevised extras
         # (update_point's emit) — apply()/rebuild previously dropped them, so
         # rebuild_all silently erased annotate_operator's write. Presence-

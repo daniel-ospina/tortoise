@@ -7,7 +7,7 @@ subjects.team: epistemic-team
 aboutSubjects: ci-runner-pool, ci-headroom-guards
 aboutObjects: tortoise, tools/install-ci-runner-x64.sh, scripts/ci_runner_gate.sh
 created: 2026-10-22
-updated: 2026-10-30
+updated: 2026-11-01
 ---
 
 # x86_64 CI runners — the fallback pool's second architecture
@@ -25,7 +25,7 @@ Every pool-eligible job in this repo asks for a **label**, never an architecture
 | `ubuntu-latest` | 76 | GitHub-hosted **and** (while the fallback is engaged) the self-hosted pool |
 | `ubuntu-24.04` | 9 | **GitHub-hosted, plus — as a temporary mitigation since 2026-10-29 — the self-hosted pool.** Pinned to hosted on purpose (#6897/#7867); the pin deadlocks while hosted is unavailable, so the pool now claims it too (see the label contract). |
 
-Counts are JOBS (not files), re-measured 2026-10-30 at this head (`yaml.safe_load` each workflow,
+Counts are JOBS (not files), re-measured 2026-11-04 at this head (`yaml.safe_load` each workflow,
 count each job's `runs-on`): **76 / 9** — the label classes `--status`'s `label-coverage` block
 measures, though that block reports RUNNER counts per label, not job counts: measured on the live
 pool on 2026-10-29 it printed `ubuntu-24.04 = 7 of 7
@@ -34,37 +34,40 @@ and only ONLINE runners are counted — an offline runner cannot be handed a job
 `ubuntu-latest = 0 of 12 online runner(s)` (a report — the gate is simply not routing that label
 here). ⛔ On THIS tree that block refuses instead — `exit 4` and NO row — because one job has no
 static label set at all (see *Verify it*); it counted 85 / 12 before it stripped whole-line
-comments. Both rows count only jobs whose `runs-on` names a single `ubuntu-*` label, so ONE job
-here is in neither; `--status` reads every documented `runs-on` form (scalar, array, block
-sequence, and a `group:`/`labels:` mapping)
-and refuses with `exit 4` rather than guess on an expression it cannot resolve to a static label
-set — including when the expression is only ONE member of a list that otherwise parses, since a
-parsed sibling must not answer for an unparsed one (GitHub documents both the combined
-`group:`/`labels:` form and expressions in `labels:`). The refusal is a **content** test, not a
-prefix one: the expression may be the whole value (`${{ matrix.os }}`), one member of a list
-(`[self-hosted, "${{ matrix.arch }}"]`) or only PART of a label
-(`ubuntu-24.04-${{ matrix.arch }}`), and a token this parser cannot carry as one static label — a
-space-bearing scalar, or a YAML alias (`runs-on: *pool`) — is refused for the same reason: the
-`runs-on:` has no static label set, so there is nothing to verdict. The `ubuntu-latest` row was
-previously written as 83 against a measured 79, so treat both rows as a dated measurement and
-re-derive them rather than trusting the numbers.
+comments. Both rows count only jobs whose `runs-on` names a single `ubuntu-*` label, so TWO jobs
+here are in neither — `python-ci.yml`'s `test` (`${{ fromJSON(matrix.runner) }}`, the refusal below)
+and `ci.yml`'s `repo-harnesses` (`[self-hosted, self-hosted-x64]`, the #10237 canary, which names
+no `ubuntu-*` label); `--status` reads every documented `runs-on` form (scalar, array, block
+sequence, and a `group:`/`labels:` mapping) and refuses with `exit 4` rather than guess on an
+expression it cannot resolve to a static label set — including when the expression is only ONE
+member of a list that otherwise parses, since a parsed sibling must not answer for an unparsed
+one (GitHub documents both the combined `group:`/`labels:` form and expressions in `labels:`). The
+refusal is a **content** test, not a prefix one: the expression may be the whole value
+(`${{ matrix.os }}`), one member of a list (`[self-hosted, "${{ matrix.arch }}"]`) or only PART of
+a label (`ubuntu-24.04-${{ matrix.arch }}`), and a token this parser cannot carry as one static
+label — a space-bearing scalar, or a YAML alias (`runs-on: *pool`) — is refused for the same
+reason: the `runs-on:` has no static label set, so there is nothing to verdict. The `ubuntu-latest`
+row was previously written as 83 against a measured 79, so treat both rows as a dated measurement
+and re-derive them rather than trusting the numbers.
 
 The architecture labels are **derived by GitHub from the host at registration** and cannot be
 set by hand: the ARM64 VMs register `self-hosted, Linux, ARM64, self-hosted-arm64, ubuntu-latest`,
 and this box registers `self-hosted, Linux, X64, self-hosted-x64, ubuntu-latest`. So:
 
-- `ARM64`/`X64` are **ornaments in DEFAULT routing** — no job in the default tree requests them, so
-  nothing distinguishes the classes today. They are NOT unroutable: labels match cumulatively and a
-  custom label routes on its own (that is how `ubuntu-latest` reaches the pool, next bullet), so a
-  bare `runs-on: self-hosted-x64` DOES select this box. What the repo refuses **as a default** is
-  not a spelling but a CLASS — any POOL-ONLY label: `self-hosted`, and equally the bare custom
-  `self-hosted-x64` above, since no GitHub-hosted runner carries either. The `test-slow` pin's
-  header in `.github/workflows/python-ci.yml:1891` is "Do NOT change it back to `ubuntu-latest`, and
-  never to `self-hosted`", and the reason is recorded at `:1863-1865` — a `self-hosted` pin removes
+- `ARM64`/`X64` are **ornaments in DEFAULT routing** — exactly one job in the default tree names
+  one (`ci.yml`'s `repo-harnesses`, `[self-hosted, self-hosted-x64]`, the #10237 canary recorded
+  below, whose pin excludes the ARM64 VMs), and nothing else in the tree is class-sensitive today.
+  They are NOT unroutable: labels match cumulatively and a custom label routes on its own (that is
+  how `ubuntu-latest` reaches the pool, next bullet), so a bare `runs-on: self-hosted-x64` DOES
+  select this box. What the repo refuses **as a default** is not a spelling but a CLASS — any
+  POOL-ONLY label: `self-hosted`, and equally the bare custom `self-hosted-x64` above, since no
+  GitHub-hosted runner carries either. The `test-slow` pin's
+  header in `.github/workflows/python-ci.yml:1903` is "Do NOT change it back to `ubuntu-latest`, and
+  never to `self-hosted`", and the reason is recorded at `:1875-1877` — a `self-hosted` pin removes
   the GitHub-hosted half of the race, so during a hosted outage the required leg WAITS and "the
   aggregate stays pending — not answered yet" instead of being answered by the pool.
-  **One opt-in departure exists and is recorded below** — `CI_SHARD_ROUTING=pool-split` names
-  `[self-hosted, self-hosted-x64]` on the ODD rows (`OVERRIDES:` + outage-wait exposure in that section).
+  **Two departures are recorded below** — `CI_SHARD_ROUTING=pool-split` names
+  `[self-hosted, self-hosted-x64]` on the ODD rows (OPT-IN), and the #10237 canary pins it by DEFAULT on a non-required job (both carry `OVERRIDES:` + outage-wait exposure).
 - `ubuntu-latest` is a **custom label** on the pool. `scripts/ci_runner_gate.sh:289`
   (`fallback_on`) attaches it, `:292` (`fallback_off`) detaches it.
 - The ARM64-ness is an accident of the first runner's hardware (OrbStack VMs on an
@@ -296,7 +299,7 @@ surface, reported green.
 
 ⛔ **On THIS tree that read refuses — `exit 4`, and ZERO `<label> = <n> of <m>` rows — and that is
 the instrument working, not a broken check.** The no-verdict arms run BEFORE any per-label verdict,
-so `.github/workflows/python-ci.yml:716`'s `runs-on: ${{ fromJSON(matrix.runner) }}` (#10186 — the
+so `.github/workflows/python-ci.yml:728`'s `runs-on: ${{ fromJSON(matrix.runner) }}` (#10186 — the
 selector emits the per-row label array) makes the whole block no-verdict here: it prints
 `⛔ label-coverage could not read 1 runs-on: block(s) as a STATIC label set`, then exits `4`. The
 inventory above is therefore a HAND measurement, never this read's transcript, and a `--status && …`
@@ -752,7 +755,7 @@ belongs to). It drives the script as a subprocess in a hermetic env — a temp b
    ⛔ **WHAT THE UNION DOES AND DOES NOT BUY, stated plainly so the next stall is not read as
    closed.** The repair hardening fixed the *manual* and *provisioner-adjacent* path only: a repair
    can no longer strip `ubuntu-latest`, and nothing else in this repo calls `--repair-labels`
-   (`tools/runner_autoscale.py:1063` invokes the installer as `--count … --fallback auto`, never
+   (`tools/runner_autoscale.py:1299` invokes the installer as `--count … --fallback auto`, never
    `--repair-labels`, and its own `_preserve_labels` already kept the label). It does NOT stop the
    remover above: the gate's `fallback_off` still strips `ubuntu-latest` from this pool on its next
    tick, from `scripts/ci_runner_gate.sh` in **agent-infra**, which is not in this checkout. So the
@@ -892,3 +895,221 @@ Label matching is cumulative — a runner must carry EVERY label named in `runs-
 Changing the DEFAULT is a decision, and its home is #6897: it needs idle pool capacity at schedule
 time **and** a pool job wall within ~1.2x hosted on these rows, neither of which the runs above
 show. Do not set `pool-split` to "try it out" — a killed leg is a required check.
+
+### The lint's label list is DECLARED, not discovered
+
+`workflow-lint` (the REQUIRED `python-ci-gate` leg) runs `rhysd/actionlint:1.7.12`, and actionlint
+verdicts a `runs-on:` label against a **baked-in list of GitHub-hosted labels**. The arch markers
+above are CUSTOM, so the first workflow that pins one is a hard error — measured on the #10237 canary
+job's first run, which redded the required aggregate for a diff that was correct:
+
+```text
+.github/workflows/ci.yml:1534:28: label "self-hosted-x64" is unknown. … set list of labels in
+actionlint.yaml config file [runner-label]
+```
+
+`.github/actionlint.yaml` therefore declares `self-hosted-x64` and `self-hosted-arm64`, spelled in
+full (a `self-hosted-*` glob would swallow the typo that check exists to catch).
+`tests/test_ci_selection.py::test_every_custom_runs_on_label_is_declared_to_actionlint` pins it: any
+new literal custom label in any workflow reds at TEST time instead of on the gate (case-FOLDED —
+actionlint's presets match case-insensitively, so `[self-hosted, Linux, X64, …]` is accepted there).
+
+⛔ Deleting that file does not "clean up stray config" — it reds `python-ci-gate` on every head that
+pins a pool label. And declaring a label is **not** a schedule: it changes the linter only, so
+everything this runbook says about a pool PIN — WAITS instead of degrading, no hosted half — still
+holds for a label named there. Re-measure `actions/runners` before pinning anything to one.
+
+### Residual: the #10237 canary is a POOL-ONLY pin — and it is non-required on purpose
+
+**OVERRIDES:** the "any POOL-ONLY label" rule recorded above — `repo-harnesses`
+(`ci.yml:1473`) now reads `runs-on: [self-hosted, self-hosted-x64]`. Its accepted cost is a WAIT with
+no hosted half — and ⛔ that IS a landing cost: the rail (`admin-merge.sh`) merges with `--admin`, so
+required-ness decides nothing, every code-measuring red on the PR's tree BLOCKS, and this job is on
+that tree. `.mergify.yml` names it in neither `queue_conditions` nor `merge_conditions` and
+`needs: repo-harnesses` appears nowhere — none of which helps: a pool-connectivity red blocks the
+head until someone re-runs. What the green buys is scheduling + the shell contract, not ask 1's proof list.
+
+Why it was taken: `ubuntu-latest` is answered by **0 of the pool's 12 runners** (measured
+2026-11-01T16:41Z, `actions/runners`), so every `ubuntu-latest` job is served only by GitHub-hosted,
+and job queue waits in run `41320964047` were 15.3, 17.8, 19.0, 25.5, 33.7, 34.5, 37.6 and 39.0
+**minutes** while 10 of 12 pool runners sat idle. The required legs cannot absorb that fix: a
+`self-hosted` pin on them removes the GitHub-hosted half of the race, which the refusal recorded at
+`python-ci.yml:1903` and above forbids.
+
+The residual recorded there is a WAIT, which is only one of its two modes — both measured on this
+job itself:
+
+- **QUEUED** — a label set no runner carries: no red, no annotation, no alarm (GitHub holds the job
+  to the 24h limit). That is the silent mis-registration mode.
+- **RED with ZERO steps** — a runner that CLAIMED the job and then dropped it does not wait. At
+  `99e899f3b`, run `41367201398` / job `125030350732`: `repo-harnesses` on `pi-runner-cmux-x64-8`
+  (the same runner that had carried this job green — 15 steps, 1 m 38 s — in run `41343233944`)
+  started 00:29:10Z, ended 00:40:10Z, reported **no steps at all**, and annotated *"The
+  self-hosted runner lost communication with the server"*. The zero-step count is the
+  discriminator: none of the job's own steps ran, so none of them caused it. Re-run before
+  investigating a harness — a red here READS as a harness defect, which is #9018's misdiagnosis one
+  layer up. Absence from the required aggregate's `needs:` (`python-ci.yml:4423`) buys no landing:
+  the rail blocks on any red on the PR's tree, so this one costs a re-run.
+
+⛔ **Do not copy this pin onto a required leg.** The override is scoped to ONE job whose red costs a
+re-run before that head can land; a required leg's red also reddens the aggregate. It bypasses the
+label attachment `scripts/ci_runner_gate.sh` performs, so it has no hosted fallback at all.
+
+### Scope of the #10237 canary's proof — scheduling only; the ask's proof list is NOT discharged
+
+Ask 1 of #10237 is two-part: a canary on one NON-required job, **and** a proof list taken on it —
+*"docker available, the FalkorDB image pullable, `uv sync --extra embeddings --extra parity`
+working, and a representative test file green"*. `repo-harnesses` runs STUBBED shell harnesses: no
+docker, no `uv`, no pytest, no DB, and they make no network calls themselves. So its `success` on
+`pi-runner-cmux-x64-8` (run `41328630369`) discharges:
+
+- the job **schedules** on the pool's own labels with no GitHub-hosted queue wait; and
+- the **minimal-`PATH` shell contract** holds on the pool — `python3` and the `agent-infra-guard`
+  checkout are provisioned ahead of the harnesses, and both provisioners now carry
+  `if: ${{ !cancelled() }}` so one upstream red cannot SKIP them while the harnesses below (which
+  all run under `!cancelled()`) still execute against a missing interpreter and a missing guard tree.
+  Note what that costs honesty-wise: the JOB does need **egress** on a bare pool box, because
+  `actions/setup-python` fetches a toolchain when the tool cache has none and the guard checkout
+  fetches from GitHub — "needs no network" is true of the HARNESSES, not of the job.
+
+It does **NOT** discharge ask 1's proof list (docker / image pull / `uv sync` / a real test file
+green). Ask 2 — *"Only then the five `python-ci-gate` legs"* — rests on that proof list, so its
+precondition is deliberately **unmet**: no required leg is pinned to the pool, and this canary's
+green is not licence to move one.
+
+Two further facts measured on the canary, so the next author copies the right premise:
+
+- **`jq` resolves on the ONE x64 runner this canary has landed on — not pool-wide.** The
+  measurement is `pi-runner-cmux-x64-8` (run `41328630369`, at a head carrying the assert
+  unconditionally); an unsatisfied assertion exits 1 and reds the job, so that green proves jq
+  resolves THERE. The pin selects ~10 x64 agents across more than one host family
+  (`runner-tools.sh:10`), and `tools/install-ci-runner-x64.sh` installs no `jq` — its nine `jq`
+  hits are all `gh api --jq` — so nothing in the tree makes its presence pool-wide by
+  construction. `runner-tools.sh ensure_one` (`:197-213`) installs `gh` and nothing else, so
+  `ensure jq` can never repair an absent jq — it fails closed with
+  `reason=absent-not-provisionable` on any box that lacks it. It is therefore an ASSERTION, and
+  the premise it was first justified with — "the hosted image ships both; the pool does not" —
+  is false for jq and was corrected in `ci.yml`.
+- **It is gated the way its consumer is.** The real jq surface in that job is
+  `registry-cron.test.sh:280` **plus every call in the driver it executes** (`:572` runs the real
+  `registry-cron.sh`; the harness stubs no `jq`), and that whole script is gated on the
+  `driver_scripts` surface, so the assert carries the same gate. Ungated it would red every PR —
+  including the large majority that cannot touch the driver — naming a tool nothing would have used.
+
+## A runner can be ONLINE, IDLE and serve NOTHING — the wedged work dir
+
+⛔ **`status=online` and `busy=false` are both true of a runner that fails every job in one
+second.** A job that dies at setup leaves the runner idle almost all of the time, so a pool census
+built on those two booleans calls the BROKEN runner the *idlest and healthiest* one on the box.
+
+Measured 2026-11-03 on `/opt/gh-runner-x64-{4,6,7,8}`: **16 of that run's 29 jobs** died 6–21 s in,
+before any step, with
+
+```text
+Complete job name: <job>
+##[error]Access to the path '/opt/gh-runner-x64-7/_work/_temp/_github_workflow' is denied.
+```
+
+The measured triple, stated ONCE here because `tools/runner_autoscale.py` and its tests quote it:
+of run `41578276118`'s **29 jobs**, 11 were GitHub-hosted (**11 green**) and 17 self-hosted
+(**16 red**), plus 1 skipped (`canary-streak`, never materialised) — so every one of the 16
+failures was a self-hosted job, and exactly one self-hosted job succeeded. Because
+`python-ci-gate` aggregates both halves, the required check was red on every PR while the *code* was
+fine, `scripts/admin-merge.sh` could not attribute the failures (they are PR-unique by
+construction), and 100 consecutive `python-ci` runs produced **zero** successes. It read as
+"main is broken" for three days.
+
+**Diagnose it from job history, not from the pool census** — `tools/runner_autoscale.py` now does
+this on every pass and reports `verdict=wedged` instead of `at-ceiling`/`converged` (a **real**
+pass exits 6 **unless it also reports a failure of its own** — `under-target` with
+`problem_kind=no-listener` keeps **4**, `fill-refused-by-provisioner` keeps **5**, and the tool's
+EXIT block says which wins; the `--status` plan below returns the same verdict and a note, and
+exits **0** — a no-change pass cannot be a failed pass, because the autoscaler installer's
+install-time probe runs exactly this mode and reads a non-zero exit as "the guard cannot MEASURE").
+
+```bash
+uv run python tools/runner_autoscale.py --repo daniel-ospina/tortoise --status --json \
+  | jq '{verdict, wedged, notes, runners: [.runners[] | {name, dir}]}'
+```
+
+⛔ **THE INSTALL DIRECTORY COMES FROM `runners[]`, NEVER FROM THE NAME.** The section below used to
+say `dir=/opt/gh-runner-x64-<n>`, deriving `<n>` from the name — and the pool read is REPO-WIDE, so a
+wedged name need not have an `-<n>` at all: the measured pool's first wedged registration is named
+plain **`cmux`** (instance 4, `/opt/gh-runner-x64-4`; it served 6 of that run's 16 failures), and
+`/opt/gh-runner-x64-cmux` does not exist — so the obvious `rm -rf` **exits 0 having touched
+nothing** while the operator believes the wedge is repaired. `runners[]` (also `local[]`) carries the
+name→directory pair the box itself reported, which is the only authoritative source.
+
+**Before repairing, name the cause** — ⛔ **THE TUPLE ABOVE IS A SIGNATURE, NOT A CAUSE, AND THE
+TWO KNOWN CAUSES NEED DIFFERENT REPAIRS.** `(runner_name, failure, ≤ 30 s, no success in the window)` is exactly what a
+**host OOM** produces as well: measured on `pi-runner-x64-2` in #10591
+(`started_at 10:04:05Z`, `completed_at 10:04:10Z`, annotation **`Out of memory`**). The jobs
+endpoint's `steps` array does **not** separate them (empty/zero for both), so the discriminator is
+the job's own message — read it before choosing a repair:
+
+```bash
+# the failing job's own annotation (an OOM is reported here; `job_id` from the run's jobs list)
+gh api repos/daniel-ospina/tortoise/check-runs/<job_id>/annotations --jq '.[].message'
+```
+
+- **`Access to the path '…/_work/_temp/_github_workflow' is denied.`** → the work dir. Take the
+  repair below.
+- **`Out of memory`** (or the runner's own shutdown-signal line) → the **HOST** is memory-starved:
+  the `rm -rf` below is a **no-op** there and the wedge simply persists. Give the box memory (or
+  take runners off it) before re-checking; #10591 is the recorded case.
+
+**Repair (work-dir cause)** (per wedged instance; the work dir is the runner's own scratch space,
+nothing else lives there, and a running job must not be interrupted — check `busy=false` on that
+registration first):
+
+```bash
+# Run ON the box that hosts the registration. `name` comes from `--status --json` -> `wedged[]`,
+# and the directory MUST be read from `runners[]` (the box's own report) — NOT derived from the
+# name: `cmux` is a wedged registration with no `-<n>` suffix (it is /opt/gh-runner-x64-4), so
+# `/opt/gh-runner-x64-$suffix` would `rm -rf` a path that does not exist and exit 0.
+name=pi-runner-cmux-x64-7        # from wedged[]
+dir=/opt/gh-runner-x64-7         # from runners[] -> {name, dir}; verify it is THIS box's
+# ⛔ a wedged name from ANOTHER box appears in this repo's pool read but not in `runners[]` — its
+# repair belongs on that box, and no local `rm -rf` can touch it.
+unit="actions.runner.daniel-ospina-tortoise.$name"
+sudo systemctl stop "$unit.service"
+sudo rm -rf "$dir/_work/_temp/_github_workflow"
+sudo systemctl start "$unit.service"
+```
+
+Stop serving from a wedged registration **while it is broken** rather than reverting the pool's
+role: detaching the fallback label (`ubuntu-latest`) from it takes it out of the scheduler's reach
+and is reversible — `--repair-labels` re-derives the set from the gate's condition.
+
+⛔ **AND IT IS NOT A DURABLE STATE — the gate re-applies the label on its NEXT TICK.** The paragraph
+at the top of this file that this section's neighbour edits records it plainly: the pool gate
+re-derives the label set every tick and `current_mode` counts *any* runner carrying `ubuntu-latest`
+as `local`, so a hand detach survives only until that tick. Record it as a **time-boxed** action —
+taken for the duration of the repair — and re-read the runner's labels afterwards instead of
+assuming it is still out of the scheduler's reach.
+
+```bash
+gh api -X DELETE "repos/daniel-ospina/tortoise/actions/runners/<ID>/labels/ubuntu-latest"
+```
+
+Restore it once the box is repaired. ⛔ **Two things the restore command must get right, and the
+obvious-looking form gets both wrong:**
+
+```bash
+# The installer is BASH (`#!/usr/bin/env bash`) — invoke it DIRECTLY. `uv run python` in front of
+# a .sh is a SyntaxError, and the "fixed to bash but no --count" form is worse: a silent no-op
+# that exits 0 (see below).
+tools/install-ci-runner-x64.sh --repair-labels --count 8
+```
+
+- **`--count` must reach every instance you detached.** `--repair-labels` loops `1..COUNT` and the
+  installer's `DEFAULT_COUNT` is **2**, so a bare `--repair-labels` visits instances 1-2 only,
+  prints `skip: … is not configured` for the rest and **exits 0** — a success code over a repair
+  that touched nothing. The registrations this section tells you to detach are
+  `/opt/gh-runner-x64-{4,6,7,8}`, i.e. none of the first two. Pass a count at or above the highest
+  instance number on the box.
+- **The label comes back only while the gate still ASKS for it.** `--fallback auto` (the default)
+  computes the set from the ARM64 pool's live state and the repair only UNIONS it in, so with the
+  fallback not engaged the computed set is `self-hosted-x64` alone and `ubuntu-latest` stays off
+  until the gate attaches it again. It cannot *detach* either — an explicit `--fallback off` is
+  refused (exit 2) precisely because a repair cannot remove a label.

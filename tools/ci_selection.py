@@ -1012,7 +1012,31 @@ SOURCE_PATTERNS = {
             # shape-rate-only PR into tier-1 smoke and the ask-lane tests
             # would not run where the measurement changed.
             "tools/ask_shape_rate.py",
-            "tortoise/projection/edges.py"),
+            # #10549 review cycle 9 (F1): the temporal retrieval leg. The two
+            # tests that pin it on THIS surface are `tests/test_temporal_leg_2976.py`
+            # (#2976's no-harm anchor property) and
+            # `tests/test_temporal_leg_date_window_10538.py` (#10538's date-window
+            # arm) -- and before this entry the module matched no SOURCE_PATTERNS
+            # tuple and is not in SHARED_MODULES, so a temporal_leg-only diff fell
+            # to the `tortoise/` -> `core` fallback, where NEITHER file is
+            # registered: measured on the pre-fix tree,
+            # `select(["tortoise/temporal_leg.py"])` returned `surfaces=['core']`,
+            # `full=False`, both files ABSENT. A change to `_session_clustered` or
+            # to the `held_buckets` slice could therefore re-break the #10538 arm
+            # with every gate green -- and the diff that makes the module
+            # load-bearing is this very PR. Same #1349/#3332/#3616 silent-drop
+            # class as the entries above; same `tortoise/quadrature.py` remedy,
+            # including the CORE_ALSO pairing (a named-surface match REPLACES the
+            # `core` fallback, #2938), which exists to avoid a coverage
+            # downgrade rather than because a core test pins this module: NO
+            # core-registered test imports it (cycle-10 review, measured --
+            # `tests/test_rrf_tie_rank_7704.py` only names it in prose).
+            # Measured, this path selected `['core']` / 721 files before the fix
+            # and selects `['core','eval','sdk']` / 788 after it (dated anchors).
+            # The `eval` half of the fix is one tuple down (the replay proxy).
+            # Pinned by tests/test_ci_selection.py::
+            # test_temporal_leg_change_runs_its_pins_and_keeps_the_core_pool.
+            "tortoise/temporal_leg.py"),
     "api": ("tortoise/hosted_api.py", "tortoise/hosted_backup.py",
             "tortoise/acl_graph_users.py", "tortoise/__main__.py", "tortoise/mcp_auth.py",
             # #3154: hosted_api.py imports hosted_backup.py at module level (the
@@ -1226,6 +1250,17 @@ SOURCE_PATTERNS = {
              # the same #1349/#2938/#3616 silent-drop class as the entries
              # above. The suite is registered on `eval` below.
              "tools/operator_receipt_check.py",
+             # #10538 (fresh-context review P1): the window arm's RETENTION
+             # receipt is a COMMITTED build artifact whose numbers a ruling and
+             # the #9097 exit measurement are argued from, and a docs-only diff
+             # selects NO surface — so a hand-edited receipt, or an instrument
+             # change that re-emits different numbers, ran nothing that gates.
+             # Registering the TEST file alone does not fix this half (the
+             # instrument is `tools/longmem_eval/`, already an `eval` entry, but
+             # the receipt path is not): selection is driven by THIS table, the
+             # #1349/#2938/#3616 silent-drop class. Pinned by
+             # tests/test_ci_selection.py::test_window_arm_receipt_edit_selects_eval.
+             "docs/scoping/receipts/2026-11-03-10538-window-arm-retention.json",
              # P2-1 (code review): an embeddings.py/cross_lens.py-only PR must
              # select eval so probe/vector-arm/threshold tests run (they assert
              # the EMBEDDING_MODEL + threshold constants — drift class #1260).
@@ -1259,7 +1294,27 @@ SOURCE_PATTERNS = {
              # scope or a sealed-gold check could be rewritten with the gate
              # green. Pinned by
              # tests/test_ci_selection.py::test_ask_sealed_corpus_source_edit_selects_eval.
-             "tests/eval/ask/"),
+             "tests/eval/ask/",
+             # #10549 review cycle 9 (F1): `tortoise/temporal_leg.py` is the module
+             # this surface's offline replay proxy delegates to
+             # (`tools/longmem_eval/temporal_leg_replay.py` calls
+             # `temporal_leg_order`, and its own docstring promises "the exact
+             # wiring formula from `retrieve.py`"), and
+             # `tests/test_temporal_leg_replay_wiring_10538.py` -- registered HERE
+             # -- is the pin that the proxy still reproduces the shipped wiring
+             # (it imports `temporal_leg_fusion_order` / `temporal_leg_empty_reason`
+             # directly, so it is a behavioural pin, not only a proxy check).
+             # Before this entry, `temporal_leg.py` matched no
+             # SOURCE_PATTERNS tuple and is not in SHARED_MODULES, so a
+             # temporal_leg-only diff took the `tortoise/` -> `core` fallback:
+             # measured `select(["tortoise/temporal_leg.py"])` -> `surfaces=['core']`,
+             # `full=False`, replay wiring pin ABSENT. An arm added to the leg (or a
+             # kwarg removed) could then desynchronise the proxy on every gate green.
+             # Same #1349/#3332/#3616 silent-drop class as the entries above.
+             # Paired with CORE_ALSO below (a named-surface match REPLACES the `core`
+             # fallback, #2938) and pinned by
+             # tests/test_ci_selection.py::test_temporal_leg_change_runs_its_pins_and_keeps_the_core_pool.
+             "tortoise/temporal_leg.py"),
     # core is the fallback for any other python-relevant path
 }
 
@@ -1322,6 +1377,22 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # tests/test_ci_selection.py::
              # test_commit_schema_change_keeps_the_core_pool_and_runs_the_docs_guard.
              "tortoise/commit_schema.py",
+             # #10549 review cycle 9 (F1): `tortoise/temporal_leg.py` is now
+             # registered in `sdk` (its two behavioural pins) and `eval` (the
+             # offline replay proxy), and a named-surface match REPLACES the
+             # `core` fallback -- so without this entry the very PR that
+             # registers it would STOP running the 721-file core pool a
+             # temporal_leg-only diff selects today (measured before the entry:
+             # `select(["tortoise/temporal_leg.py"])` -> `surfaces=['core']`,
+             # 721 test files; with the entry, 788). Nothing in that pool pins
+             # this module (no core-registered test imports it -- cycle-10
+             # review), so this entry buys COVERAGE PRESERVATION, not
+             # reachability of a pin: dropping it is the #2938 silent
+             # coverage downgrade, not a lost guard. The pool's size is a DATED
+             # ANCHOR, not a live count -- it grows with the suite. Pinned by
+             # tests/test_ci_selection.py::
+             # test_temporal_leg_change_runs_its_pins_and_keeps_the_core_pool.
+             "tortoise/temporal_leg.py",
              # #7947 review P1: `tests/eval/write_path/` is a SOURCE_PATTERNS
              # entry of `eval` (the measurement sources), and a named-surface
              # match REPLACES the `tests/` -> core fallback — but `core`
@@ -1399,6 +1470,22 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # core pool is the lowest-cost leg it can run in. Pinned by
              # tests/test_ci_selection.py::test_batch_review_tool_change_selects_core_not_tier1.
              "tools/batch_review.py",
+             # #10465 review P1: tools/dod_5090_probe.py owns
+             # tests/test_dod_5090_probe.py (registered `core` + `eval`), but
+             # `tools/` is a flat NON_PYTHON_PREFIXES entry and NO SOURCE_PATTERNS
+             # row matches the instrument — so a probe-only change filtered to
+             # `changed == []`, took the docs-only early return and ran 70
+             # unrelated files. Measured before this entry:
+             # `select(["tools/dod_5090_probe.py"])` -> surfaces=[], full=False,
+             # 70 files, test_dod_5090_probe.py ABSENT. That matters more than the
+             # usual silent drop: the instrument's whole deliverable is a count a
+             # reader QUOTES into an epic body, so the diff that hard-wires
+             # `count_embed_predicates` to 1 (turning the falsifier into
+             # machinery) would merge with every pin that catches it green-by-
+             # omission. Same #1349/#3332/#3616/#4309 class as the entries
+             # around it. Pinned by
+             # tests/test_dod_5090_probe.py::test_the_instrument_is_selected_by_its_own_subjects.
+             "tools/dod_5090_probe.py",
              # #4174 review P1: the drift gate's suite (test_drift_guard.py) is
              # `core`-registered, but `tools/` is swallowed by
              # NON_PYTHON_PREFIXES and no SOURCE_PATTERNS entry matches
@@ -1407,6 +1494,13 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # guard. Same silent-drop class as tools/tmpdir_sweep.py above,
              # and the same defect #4174 describes a gate having.
              "tools/drift-guard.py",
+             # #10597: tools/closes_landing.py owns
+             # tests/test_closes_landing.py (registered `core`) and is reached by
+             # a workflow step — but `tools/` is swallowed by NON_PYTHON_PREFIXES
+             # and no SOURCE_PATTERNS entry matches it, so a tool-only fix selects
+             # NO surface, drops to tier-1 smoke, and never runs the suite that
+             # pins the instrument. Same class as the drift-guard entry above.
+             "tools/closes_landing.py",
              # #5084 review P1: tools/test_lane.py owns
              # tests/test_test_lane_tool.py (registered `core`), but `tools/` is
              # swallowed by NON_PYTHON_PREFIXES and no SOURCE_PATTERNS entry
@@ -1792,6 +1886,22 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # `test_10017_cache_tier.py`, not merely a `core` registration
              # (#1349/#3332/#3616).
              "supabase/migrations/20261029000001_record_point_cache_tier.sql",
+             # #10620 / PR #10648 review P1: the FORWARD record migration that
+             # NARROWS `public.point.search_keys` from `jsonb` to `text` — the
+             # same `ALTER COLUMN … TYPE … USING` shape as #9264's
+             # `session.capture_redactions` entry above, and it sorts outside the
+             # `2026101200000` prefix while `supabase/` is a NON_PYTHON_PREFIX.
+             # Measured on the pre-fix head: `_sel([<this path>])` ->
+             # `surfaces: []`, `full: False`, so EVERY guard that reads this
+             # file's text or applies it ran nothing on a change to it alone —
+             # `test_9078`'s `RECORD_REAPPLY_STEPS` (an older container keeps
+             # `jsonb` and would drop rows again), `RECORD_MIGRATIONS`'
+             # registry-completeness pin (`test_9231`), and
+             # `test_record_schema_placement.py`. The #1349/#3332/#3616
+             # silent-drop class, and nine sibling entries exist for exactly it.
+             # Pinned by
+             # tests/test_ci_selection.py::test_record_schema_pin_runs_on_migration_or_doc_change.
+             "supabase/migrations/20261102000002_record_point_search_keys_text.sql",
              # Re-stated at the migration pair, NOT replaced by it (#9638 review
              # P1): the DOC side is an independent member of this set. The
              # #9555/R7 entry above was inserted over this path, so a
@@ -2475,7 +2585,25 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # zips — no DB, no network) and `core` is where it is registered. Pinned by
              # tests/test_ci_selection.py::
              # test_ci_catch_history_tool_change_selects_core_not_tier1.
-             "tools/ci_catch_history.py")
+             "tools/ci_catch_history.py",
+             # #2148: `tools/` is a flat NON_PYTHON_PREFIXES entry and no
+             # SOURCE_PATTERNS row matches `tools/rail_detach.py`, so a
+             # TOOL-ONLY change filtered to `changed == []` and took the
+             # docs-only early return — the durability pin registered under
+             # `core` (`tests/test_rail_detach.py`) would never run on the very
+             # file whose `DETACH_NEW_SESSION` seam is the whole mechanism (the
+             # #1349/#3332/#3616 silent-drop class, the same shape as
+             # `tools/lane_stash.py` and `tools/ci_catch_history.py` above).
+             # The `core` row that registers the test file is CLASSIFICATION
+             # only (#4348): a name in a surface's test_files only runs when that
+             # surface is ALREADY selected. MEASURED before this entry:
+             # `select(["tools/rail_detach.py"], "pull_request",
+             # load_manifest())` -> surfaces=[], full=False, 72 files, the pin
+             # ABSENT. CORE_ALSO (not TOOL_CARVEOUTS) because the guard is
+             # hermetic (a stub rail, temp dirs) and `core` is where its suite
+             # lives. Pinned by
+             # tests/test_ci_selection.py::test_rail_pin_runs_on_a_tools_only_change.
+             "tools/rail_detach.py")
 NON_PYTHON_PREFIXES = (
     "docs/", "website/", "product/", "legal/", "growth/", "engineering/",
     "finance-accounting/", "menu-bar/", "ux/", "data/", "operations/",
@@ -2810,6 +2938,15 @@ TOOL_CARVEOUTS = (
     # matrix) is the safe default for a tool whose answer drives dispatch.
     "tools/who_is_on.py",
     "tools/who-is-on.sh",
+    # #10687 (attest census): `tools/attest_census.py` decides, per PR, whether a review proof may
+    # be RE-POSTED or must be re-reviewed — the fabricate-vs-repair boundary. Same silent-drop class
+    # as the carve-outs above: `tools/` is a flat NON_PYTHON_PREFIXES entry, so a TOOL-ONLY diff came
+    # back `surfaces=[]` and fell to tier-1 smoke, which does not carry `tests/test_attest_census.py`
+    # (registering the test under `core` alone leaves a tool-only change unguarded). Its classifier
+    # IS the rule this lane exists to enforce, so a weakening of it must never ship on a smoke-only
+    # matrix. Fail-closed: the whole `attest_census` family.
+    # Pinned by test_ci_selection.test_attest_census_tool_change_fails_closed_to_full.
+    "tools/attest_census",
     # #5052/#9487 review P1: the dispatch-time CLAIM on the graph
     # (tools/work_claim.py) owns tests/test_work_claim.py — the 87 hermetic arms
     # that pin the fail-closed refusal contract (`acquire`/`status`/`release`

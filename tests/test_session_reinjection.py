@@ -14,7 +14,9 @@ Hermetic contract proven here (docker lane, dense leg pinned out):
         the guard, not the fetched items (falsifier 1),
   * (b) default OFF == explicit OFF, byte-identical ranked ids,
   * (c) fail-open: a fetch failure, a zero-new-ids fetch, AND a forced
-        merge-stage exception each return the base pool unchanged,
+        merge-stage exception each return the base pool unchanged; a census
+        (measurement) failure leaves the merged pool INTACT and records
+        ``measured: False`` — a measurement never decides the arm,
   * (d) caps: the C5 per-session raw-chunk cap holds on the re-injected
         pool. ⚠️ The C5 re-cap counts only raw chunks, so this test pins
         the arm at the NON-default chunk grain (``_pin_chunk_grain``); the
@@ -32,9 +34,15 @@ Hermetic contract proven here (docker lane, dense leg pinned out):
   * (i) the PRODUCT turn shape: a turn Point written the way
         ``capture_session`` writes it (no ``session_id`` property, linked
         ``Session-[:CONTAINS]->Point``) is injected and grouped under its
-        ``:Session`` id, and a non-turn ``pointKind='event'`` point (the
-        hosted demo seed's shape) is NOT — the fixture's ``CONTAINS``
+        ``:Session`` id, and a non-turn ``pointKind='event'`` point (a LEGACY
+        demo-seed node, which the seeder has not written since #10000) is NOT —
+        the fixture's ``CONTAINS``
         membership is per session, so a cross-session leak is visible here.
+  * (j) the READER-WINDOW census counts the surface the arm actually
+        delivers: on the pool-only isolation arm (``--rerank off
+        --rerank-pool N``) that surface is the ``top_k`` prefix, so the
+        census window is ``top_k`` there and the resolved item cap (40) on
+        the default arm.
 
 Requires the docker lane's FTS backend — skips when unavailable.
 """
@@ -53,7 +61,10 @@ import pytest
 # register_kind("session-transcript") apply.
 import tools.longmem_eval.ingest  # noqa: F401
 from tests import _live_utils
-from tortoise.retrieval import SESSION_TRANSCRIPT_KIND
+from tortoise.retrieval import (
+    DEFAULT_POOL_SESSION_CAP,
+    SESSION_TRANSCRIPT_KIND,
+)
 from tortoise.sdk import TortoiseSDK
 
 MINI = Path(__file__).resolve().parent / "fixtures" / "longmemeval_mini.json"
@@ -135,7 +146,22 @@ def _no_embedder(monkeypatch):
     against the documented default, so an ambient
     ``TORTOISE_LME_SESSION_REINJECTION`` / ``TORTOISE_LME_CONTEXT_ITEMS``
     (which resizes the derived seed window) would silently flip the arm
-    under test."""
+    under test.
+
+    #2513 (#10629 review P3): the same hazard applies to the THREE ambient
+    twins the resolved-arm assertions read, so they are pinned here rather
+    than one test at a time — a measurement lane that arms the A/B through
+    the documented env twins would otherwise get a FALSE RED in the very
+    test that pins the arm:
+
+    * ``TORTOISE_LME_GUARD_PER_SESSION_CAP`` — ``_resolve_guard_per_session_cap``
+      reads it, so an exported value reds the ``guard_per_session_cap ==
+      DEFAULT_POOL_SESSION_CAP`` assertion of the ``--no-floor-term`` case.
+    * ``TORTOISE_LME_COVERAGE_LOOP`` — it turns a pool-order arm on, so an
+      exported value makes the ``--floor-term``-alone run legal instead of
+      the ``ArmConflictError`` (exit 1) that case asserts.
+    * ``TORTOISE_LME_FLOOR_TERM`` — an exported value silently arms the
+      lower bound under every OFF-arm assertion."""
     import tortoise.embeddings as _emb
     monkeypatch.setattr(_emb, "compute_embedding",
                         staticmethod(lambda content: None))
@@ -143,6 +169,10 @@ def _no_embedder(monkeypatch):
                         staticmethod(lambda: None))
     monkeypatch.delenv("TORTOISE_LME_SESSION_REINJECTION", raising=False)
     monkeypatch.delenv("TORTOISE_LME_CONTEXT_ITEMS", raising=False)
+    # #2513 (#10629 review P3): hermeticity for the resolved-arm assertions.
+    monkeypatch.delenv("TORTOISE_LME_FLOOR_TERM", raising=False)
+    monkeypatch.delenv("TORTOISE_LME_GUARD_PER_SESSION_CAP", raising=False)
+    monkeypatch.delenv("TORTOISE_LME_COVERAGE_LOOP", raising=False)
 
 
 def _question(question: str = QUESTION, *,
@@ -238,10 +268,14 @@ def _create_product_turn(sdk, pid: str, content: str) -> None:
 
 
 def _create_demo_event(sdk, pid: str, content: str) -> None:
-    """The hosted demo/dashboard seed's shape: ``pointKind='event'`` with
-    NO ``is_episodic``. Its body IS role-tagged (``hosted_api.
-    _DEMO_EPISODIC_TURNS``), so ``is_episodic`` is the conjunct that
-    excludes it — not the ``[``-prefix test."""
+    """A LEGACY demo-seed shape: ``pointKind='event'`` with NO
+    ``is_episodic``. Its body IS role-tagged, so ``is_episodic`` is the
+    conjunct that excludes it — not the ``[``-prefix test.
+
+    ⛔ This synthesizes a node a graph seeded BEFORE #10000 still holds. Since
+    #10000 the hosted demo/dashboard seed writes no turn node at all (§9.1/D1:
+    the transcript is Postgres'), so this helper describes no current writer —
+    it exists to pin that a legacy graph's nodes stay excluded."""
     sdk._get_proj().g.query(
         "MERGE (t:Point {id:$id}) "
         "SET t.content=$c, t.pointKind='event', t.is_operator=false, "
@@ -276,9 +310,11 @@ def test_reinjection_flips_a_starved_session_into_top5(seeded_sdk):
     assert "srBp0" not in off_ids[:5], (
         "the monopolised pool must starve session B out of the top-5")
     assert off["session_recall@k"]["5"] == 0.5
-    # off-arm census is the zeroed shape (reconstructable per question)
+    # off-arm census is the zeroed shape (reconstructable per question) — and
+    # ``measured: False``, because NO census runs on this arm
     assert off["session_reinjection"] is False
     st_off = off["session_reinjection_stats"]
+    assert st_off["reader_window_displacement"]["measured"] is False
     assert st_off["seeded"] == 0
     assert st_off["injected_total"] == 0
     assert st_off["injected_merged"] == 0
@@ -418,6 +454,45 @@ def test_merge_stage_exception_keeps_the_base_pool(seeded_sdk, monkeypatch):
     assert st["injected_total"] >= 1
     assert st["injected_merged"] == 0
     assert st["injected_per_session_merged"] == {}
+
+
+def test_floor_term_arm_reaches_the_reinjection_merge(seeded_sdk,
+                                                    monkeypatch):
+    """#2513 (#10629 review P2): the SECOND composition carries the arm too.
+
+    The seam first landed armable from the direct composition only, so a
+    re-injection A/B would have run with the lower bound OFF while the receipt
+    said armed. Both compositions spend ``_floor_arm_guard_kwargs``; this pins
+    the re-injection half by execution (the coverage-loop half lives in
+    ``tests/test_coverage_loop.py``).
+    """
+    from tools.longmem_eval.retrieve import retrieve_for_question
+    from tortoise import session_reinjection as _sr
+    from tortoise.retrieval import DEFAULT_POOL_SESSION_CAP
+
+    seen: list[dict] = []
+    real = _sr.reinjection_merge_order
+
+    def _capture(pool, added, **kw):
+        seen.append({k: kw.get(k) for k in ("floor_term", "per_session_cap")})
+        return real(pool, added, **kw)
+
+    monkeypatch.setattr(_sr, "reinjection_merge_order", _capture)
+    on = retrieve_for_question(seeded_sdk, _question(), ks=(5,), top_k=10,
+                               pool_size=60, session_reinjection=True,
+                               floor_term=True, guard_per_session_cap=1)
+    assert seen == [{"floor_term": True, "per_session_cap": 1}], seen
+    st = on["session_reinjection_stats"]
+    assert st["floor_term"] is True
+    assert st["guard_per_session_cap"] == 1
+
+    # the default path rides the SAME expression, with the product cap
+    seen.clear()
+    off = retrieve_for_question(seeded_sdk, _question(), ks=(5,), top_k=10,
+                                pool_size=60, session_reinjection=True)
+    assert seen == [{"floor_term": False,
+                     "per_session_cap": DEFAULT_POOL_SESSION_CAP}], seen
+    assert off["session_reinjection_stats"]["floor_term"] is False
 
 
 def test_one_batched_fetch_per_fired_question(seeded_sdk, monkeypatch):
@@ -673,7 +748,14 @@ _CENSUS_KEYS = {
     "on", "seed_window", "seed_limit", "seed_sessions", "seeded",
     "injected_per_session", "injected_total",
     "injected_per_session_merged", "injected_merged", "dropped_by_cap",
-    "fetch_ok", "total_cap_hit", "guard", "latency_ms", "tr_excluded"}
+    "fetch_ok", "total_cap_hit", "guard", "latency_ms", "tr_excluded",
+    # #2513 (#10629 review): the arm THIS composition spent — recorded per
+    # outcome so a re-injection run's receipt says whether the lower bound
+    # was armed and under which window cap, not only what the run declared.
+    "floor_term", "guard_per_session_cap",
+    # #10540: the reader-window crowding census — the pool-scope keys above
+    # could not see it (a displaced item is not dropped by any pool cap).
+    "reader_window_displacement"}
 
 
 def test_reader_item_and_token_caps_hold_on_the_reinjected_pool(seeded_sdk):
@@ -762,6 +844,40 @@ def test_both_arms_on_aborts_with_message_and_nonzero_exit(
     assert not (tmp_path / "r.json").exists()
 
 
+def test_floor_term_cli_flags_reach_the_methodology(monkeypatch, tmp_path):
+    """#2513 (#10629 review P2): the flags the published A/B command passes
+    EXIST and are recorded (methodology == actual).
+
+    ``--floor-term`` / ``--no-floor-term`` are tri-state (explicit beats the
+    env) and ``--guard-per-session-cap`` reaches the guard's cap; arming
+    either without a pool-order arm is REFUSED (exit 1), never a silent
+    no-op.
+    """
+    from tools.longmem_eval import run as _run
+
+    base = ["--data", str(MINI), "--limit", "1", "--split", "s", "--mock",
+            "--skip-preflight", "--output", str(tmp_path / "r.json")]
+    monkeypatch.delenv("TORTOISE_LME_FLOOR_TERM", raising=False)
+    rep = _run.run_main([*base, "--session-reinjection", "--floor-term",
+                         "--guard-per-session-cap", "3"])
+    k = rep["methodology"]
+    assert k["floor_term"] is True
+    assert k["guard_per_session_cap"] == 3
+
+    # tri-state: an explicit --no-floor-term beats the env twin
+    monkeypatch.setenv("TORTOISE_LME_FLOOR_TERM", "1")
+    rep = _run.run_main([*base, "--session-reinjection", "--no-floor-term"])
+    k = rep["methodology"]
+    assert k["floor_term"] is False
+    assert k["guard_per_session_cap"] == DEFAULT_POOL_SESSION_CAP
+
+    # no pool-order arm → the guard never runs → the run REFUSES the knobs
+    monkeypatch.delenv("TORTOISE_LME_FLOOR_TERM", raising=False)
+    with pytest.raises(SystemExit) as excinfo:
+        _run.run_main([*base, "--floor-term"])
+    assert excinfo.value.code == 1
+
+
 def test_run_level_tristate_and_methodology(monkeypatch, tmp_path):
     """CLI flag > env > OFF at the run level, and the resolved arm + guard
     are recorded in the methodology (methodology == actual)."""
@@ -781,3 +897,378 @@ def test_run_level_tristate_and_methodology(monkeypatch, tmp_path):
     k = rep["methodology"]
     assert k["session_reinjection"] is True
     assert k["session_reinjection_guard"] is False
+
+
+# ── the census window is the surface the arm actually delivers ──────────
+
+
+@pytest.fixture
+def deep_seeded_sdk(seeded_sdk):
+    """``seeded_sdk`` plus ten more off-pool turns on session A.
+
+    The default fixture injects fewer items than ``top_k``, so a window that
+    is too LARGE and a window that is right agree on every count — the defect
+    below is invisible there. Ten extra turns make the merged pool longer than
+    the reader's ``top_k``, which is the only shape in which "did the census
+    count what the reader received?" has two different answers.
+    """
+    for i in range(2, 12):
+        seeded_sdk.create_point("event", TURN_PREFIX + OFF_POOL_TURN_CONTENT,
+                                id=f"srAq{i}", session_id=SR_A,
+                                speaker="user", is_episodic=True,
+                                status="draft")
+    _link_sessions(seeded_sdk)
+    return seeded_sdk
+
+
+def test_census_failure_is_UNMEASURED_and_does_not_decide_the_arm(
+        seeded_sdk, monkeypatch):
+    """#10540: the reader-window census is a MEASUREMENT, so its failure must
+    not decide whether the treatment is applied.
+
+    The census has its own ``except`` and sits AFTER ``pool = _merged``, and
+    the two halves of that are what this pins — they fail DIFFERENTLY:
+
+      * if it is moved back onto the arm's decision path, the merge reverts to
+        the control pool and the injected ids vanish from ``hits``;
+      * if its exception is instead allowed to reach the OUTER fail-open
+        handler, the merged pool still stands (``hits`` keep the injected
+        ids) and only the MERGED counters are cleared — that handler's own
+        contract is "the SEED and FETCH censuses are NOT wiped", so
+        ``fetch_ok`` is deliberately still True on that path.
+
+    Where its own ``except`` handles the failure — the path this test
+    measures — the census must read the UNMEASURED shape (``measured: False``
+    and ``None`` values), never the zeroed one: a zero there would be
+    indistinguishable from "no crowding" and from a merge-stage failure at
+    the same time. (On the outer-handler branch the census is simply never
+    written and keeps its initialised zeroed shape — ``measured: False`` since
+    the never-attempted path stopped claiming a measurement — so this key's
+    assertion fails with it on the ``None``-vs-``0`` values; the COUNTERS are
+    what identify the branch (they clear to 0 while ``hits`` still carry the
+    injected ids).)
+    """
+    from tools.longmem_eval.retrieve import retrieve_for_question
+    from tortoise import session_reinjection as _sr
+
+    q = _question()
+    measure = dict(ks=(5,), top_k=10, pool_size=60,
+                   session_reinjection=True)
+    # the same run with the census WORKING is the counterfactual: a census
+    # failure may change the census key and the LATENCY, and no other
+    # OUTCOME key.
+    ok = retrieve_for_question(seeded_sdk, q, **measure)
+    st_ok = ok["session_reinjection_stats"]
+    assert st_ok["reader_window_displacement"]["measured"] is True
+    assert st_ok["injected_merged"] > 0
+
+    def _boom(*a, **kw):
+        raise RuntimeError("census blew up")
+
+    monkeypatch.setattr(_sr, "reader_window_displacement", _boom)
+    ret = retrieve_for_question(seeded_sdk, q, **measure)
+    st = ret["session_reinjection_stats"]
+    # (1) the ARM was still applied, byte-identically: a census failure did
+    # not revert the pool, clear the merged counters, or let its exception
+    # reach the outer fail-open handler (which would clear ``injected_merged``
+    # to 0 and leave the initialised zeroed census shape instead).
+    # ``fetch_ok`` is never CLEARED by either handler — the outer handler's
+    # contract is "only the MERGED counters are cleared" — so on this path it
+    # stays True. It is not True on EVERY fail-open path: a fetch that itself
+    # reports not-ok leaves it False (``test_fetch_failure_keeps_the_base_pool``).
+    # So this assertion documents that contract rather than discriminating a
+    # branch.
+    assert st["fetch_ok"] is True
+    assert [h["id"] for h in ret["hits"]] == [h["id"] for h in ok["hits"]]
+    assert st["injected_merged"] == st_ok["injected_merged"] > 0
+    assert (st["injected_per_session_merged"]
+            == st_ok["injected_per_session_merged"] != {})
+    assert ({h["id"] for h in ret["hits"]}
+            == {h["id"] for h in ok["hits"]})
+    # (2) the census records UNMEASURED, not a zero that reads as "no
+    # crowding" — ``window`` still reports what was attempted
+    assert st["reader_window_displacement"] == {
+        "window": 40, "injected_in_window": None, "base_displaced": None,
+        "sessions_lost": None, "sessions_before": None,
+        "sessions_after": None, "measured": False}
+
+
+def test_an_unrun_census_is_never_reported_as_a_measured_zero(
+        seeded_sdk, monkeypatch):
+    """#10540 (review P2): ``measured`` is ``True`` IFF the census actually ran.
+
+    The zeroed shape is minted BEFORE the arm decides, so it is what ships on
+    every path that never reaches the census: the whole OFF arm (half of every
+    A/B run), every TR question, and an ON-arm question whose fetch injected
+    nothing (plus a not-ok fetch and a merge-stage failure, which have their
+    own tests). On those paths ``sessions_before == 0`` is a PLACEHOLDER —
+    the shipped comment two lines above the shape says exactly that — so
+    ``measured: True`` makes three distinct states report one value: "the
+    census ran and found no crowding", "no census was taken", and "the arm
+    did nothing at all".
+
+    Two consequences the flag exists to prevent, both silent: a consumer that
+    filters on ``measured`` (the documented way to read this key) folds half a
+    corpus's OFF-arm questions into the crowding sample, and a consumer that
+    computes ``len(sessions_lost) / sessions_before`` divides by zero on 100%
+    of the OFF arm. Pre-fix this test fails on the FIRST assertion with
+    ``measured: True``; the counts asserted beside it are what keep the fix
+    minimal — the arm delta the shipped comment protects stays byte-identical.
+
+    The counterfactual (``measured: True`` with real counts) is not re-taken
+    here: ``test_census_failure_is_UNMEASURED_and_does_not_decide_the_arm``
+    reads it on the SAME question with the arm ON.
+    """
+    from tools.longmem_eval.retrieve import retrieve_for_question
+    from tortoise import session_reinjection as _sr
+
+    def _census(**kwargs):
+        ret = retrieve_for_question(seeded_sdk, ks=(5,), top_k=10,
+                                    pool_size=60, **kwargs)
+        return ret["session_reinjection_stats"]["reader_window_displacement"]
+
+    off = _census(question=_question(), session_reinjection=False)
+    tr = _census(question=_question(question_type="temporal-reasoning"),
+                 session_reinjection=True)
+    monkeypatch.setattr(
+        _sr, "source_session_chunk_pass",
+        lambda *a, **kw: {"ok": True, "by_session": {}, "total": 0,
+                          "dropped_by_cap": 0, "total_cap_hit": False})
+    nothing_injected = _census(question=_question(), session_reinjection=True)
+
+    for name, d in (("off", off), ("tr", tr),
+                    ("on-but-nothing-injected", nothing_injected)):
+        assert d["measured"] is False, (name, d)
+        # the VALUES are untouched by the fix: a zeroed design, not a
+        # measurement — so the per-question arm delta stays reconstructable
+        assert (d["sessions_before"], d["sessions_after"]) == (0, 0), name
+        assert d["sessions_lost"] == [] and d["base_displaced"] == 0, name
+        assert d["injected_in_window"] == 0, name
+    # ``window`` still reports what WOULD have been censused — the reader's
+    # resolved item cap, which for a TR question is the pinned ``tr_top_k``
+    # (the arm is excluded there, so the number is the only honest one)
+    from tools.longmem_eval.retrieve import DEFAULT_TR_TOP_K
+    assert off["window"] == 40, off["window"]
+    assert tr["window"] == DEFAULT_TR_TOP_K, tr["window"]
+
+
+
+
+def test_the_pool_only_arm_censuses_the_prefix_the_reader_receives(
+        deep_seeded_sdk):
+    """#10540: on the POOL-ONLY isolation arm the census window is ``top_k``.
+
+    That arm (``--rerank off --rerank-pool N``) fetches a DEEP pool and then
+    truncates the delivered surface to ``top_k`` before assembly — the OQ5
+    reader invariant (``pool = pool[:top_k]`` in ``retrieve_for_question``) —
+    while the assembled item cap stays ``eff_item_cap`` (40). So the reader
+    receives ``merged[:top_k]`` and a census window of ``eff_item_cap``
+    counts items it never received: crowding over-reported on precisely the
+    arm a pool-depth sweep reads it on.
+
+    The truncation is a PREFIX cut, so narrowing the window to
+    ``min(eff_item_cap, top_k)`` is the tightest window that arm admits: the
+    count becomes a CEILING there (nothing below the cut can reach the
+    reader) — not the delivered set, because a skipped hit inside the prefix
+    still over-counts — and it UNDER-counts whenever ``top_k >
+    eff_item_cap``, because the cut then sits above the window and a skipped
+    hit frees a slot the reader walks past it with (the same under-count as
+    every other arm; ``retrieve.py`` states the condition). That narrowing is
+    not available to the R6 rerank arm, whose ``pool = selected`` re-SELECTS
+    from the whole pool.
+
+    ⛔ The window is derived from the truncation SHAPE, not from the
+    pool-only FLAG (#10632 review ISSUE 1): the same prefix cut happens on
+    the two R6 degrade arms, which no flag here can see — see
+    ``test_the_degrade_arms_census_the_prefix_the_reader_receives``.
+
+    Non-vacuity: pre-fix the caller reports ``window: 40`` on this arm, so the
+    first assertion reds (``assert 40 == 8``); pre-fix every injected item is
+    inside 40, so ``injected_in_window`` also equals ``injected_merged`` and
+    the second assertion reds with it. The DEFAULT arm is measured beside
+    them so the narrowing is attributable to this arm and not to a global
+    window change.
+    """
+    from tools.longmem_eval.retrieve import retrieve_for_question
+
+    q = _question()
+    top_k = 8
+
+    def _run(**kw):
+        return retrieve_for_question(
+            deep_seeded_sdk, q, ks=(5,), top_k=top_k, pool_size=60,
+            session_reinjection=True, **kw)
+
+    default = _run()
+    st_default = default["session_reinjection_stats"]
+    pool_only = _run(rerank=False, rerank_pool=40)
+    st_only = pool_only["session_reinjection_stats"]
+
+    # the arm under test is the pool-only one, and it really truncated: on
+    # this fixture the final pool IS the top_k prefix, which is the surface
+    # the window below must describe
+    assert st_only["injected_merged"] > 0, st_only["injected_merged"]
+    assert len(pool_only["hits"]) == top_k, (
+        "the pool-only arm's delivered surface must be the top_k prefix — "
+        "if this changes, the census window below is measuring the wrong "
+        f"surface (got {len(pool_only['hits'])} hits)")
+
+    census = st_only["reader_window_displacement"]
+    assert census["measured"] is True
+    # (1) the window is the arm's truncated surface, not the item cap
+    #     (pre-fix: 40)
+    assert census["window"] == len(pool_only["hits"]) == top_k
+    # (2) therefore injected items beyond the cut are NOT counted as
+    #     crowding the reader. Pre-fix every injected item sits inside the
+    #     40-window, so this strictness is what the widening hides.
+    assert census["injected_in_window"] < st_only["injected_merged"], (
+        "the census counted injected items the reader never received: "
+        f"in_window={census['injected_in_window']} "
+        f"merged={st_only['injected_merged']}")
+    assert 0 <= census["injected_in_window"] <= top_k
+
+    # the DEFAULT arm is untouched: its window stays the item cap (40), and
+    # nothing merged sits outside it
+    assert st_default["reader_window_displacement"]["window"] == 40
+    assert (st_default["reader_window_displacement"]["injected_in_window"]
+            == st_default["injected_merged"])
+
+
+def test_the_degrade_arms_census_the_prefix_the_reader_receives(
+        deep_seeded_sdk, monkeypatch):
+    """#10632 review ISSUE 1 (P2): the DEGRADE arms cut the same prefix.
+
+    ``retrieve_for_question`` truncates the delivered pool to ``top_k`` at
+    THREE sites: the pool-only arm, the D3(a)/S25 load-failure degrade
+    (``get_scorer`` returns ``None``) and the D8c score-failure degrade
+    (``rerank_hits`` reports ``applied: False``). The last two are decided by
+    the R6 stage, so the flag test that narrowed the window for the pool-only
+    arm could not see them: the window stayed the reader's item cap (40)
+    while the reader received at most ``top_k`` — so ``injected_in_window`` /
+    ``base_displaced`` over-reported crowding, and ``sessions_lost`` could
+    name a session as lost that the reader never had, all stamped
+    ``measured: True``. The window now follows the truncation SHAPE: each
+    cutting site declares its cut and the census is taken after R6.
+
+    Non-vacuity: pre-fix both arms report ``window: 40`` against a
+    ``len(hits) == top_k == 8`` surface, so the first assertion reds; and
+    every injected item sits inside 40, so ``injected_in_window`` equals
+    ``injected_merged`` and the second reds too. The applied arm is measured
+    beside them as the CONTROL: it re-selects rather than cuts a prefix, so
+    narrowing it would under-count every item the reranker lifted from below
+    the window — its window must stay the resolved item cap.
+    """
+    from tools.longmem_eval import rerank as _rerank
+    from tools.longmem_eval.retrieve import retrieve_for_question
+
+    q = _question()
+    top_k = 8
+
+    class _Boom:
+        def score(self, query, contents):
+            raise RuntimeError("predict exploded mid-run")
+
+    def _census(monkeypatch, arm, scorer_result):
+        monkeypatch.setattr(_rerank, "get_scorer",
+                            lambda model=None: scorer_result)
+        ret = retrieve_for_question(
+            deep_seeded_sdk, q, ks=(5,), top_k=top_k, pool_size=60,
+            session_reinjection=True, rerank=True)
+        assert ret["rerank_pass"]["applied"] is False, arm
+        # precondition: the reader's surface really IS the cut prefix, so a
+        # window wider than len(hits) censuses items nobody received
+        assert len(ret["hits"]) == top_k, (arm, len(ret["hits"]))
+        census = ret["session_reinjection_stats"]["reader_window_displacement"]
+        assert census["measured"] is True, (arm, census)
+        # (1) the window is the surface the reader receives, not the item cap
+        assert census["window"] == len(ret["hits"]) == top_k, (arm, census)
+        # (2) therefore items below the cut are NOT counted as crowding
+        injected_merged = ret["session_reinjection_stats"]["injected_merged"]
+        assert 0 < census["injected_in_window"] < injected_merged, (
+            arm, census, injected_merged)
+        return census
+
+    load_failure = _census(monkeypatch, "load-failure degrade",
+                           (None, "load failed: boom"))
+    score_failure = _census(monkeypatch, "score-failure degrade",
+                            (_Boom(), ""))
+    assert score_failure["window"] == load_failure["window"] == top_k
+
+    # CONTROL: the applied arm re-selects from the whole pool, so no prefix
+    # describes what the reader received — its window stays the item cap
+    monkeypatch.setattr(_rerank, "get_scorer",
+                        lambda model=None: (_rerank.FakeScorer(), ""))
+    applied = retrieve_for_question(
+        deep_seeded_sdk, q, ks=(5,), top_k=top_k, pool_size=60,
+        session_reinjection=True, rerank=True)
+    assert applied["rerank_pass"]["applied"] is True
+    assert (applied["session_reinjection_stats"]["reader_window_displacement"]
+            ["window"] == 40)
+
+
+def test_the_census_window_is_the_readers_item_cap_not_the_pool(
+        seeded_sdk, monkeypatch):
+    """#10540 (review P2): the WIRING is pinned, not only the pure function.
+
+    Every value assertion the census had before this test lived on the OFF /
+    TR / nothing-injected paths or on ``reader_window_displacement`` called
+    directly, so the wiring could be changed to census the POOL and nothing
+    reddened: ``window=len(_merged)`` leaves ``measured: True``, leaves
+    ``hits`` byte-identical, and (on the fixtures above, where the pool is
+    SHORTER than the reader cap) reports the same numbers, because there the
+    slice and the pool are the same list. That is the exact pre-#10540
+    defect — a pool-scope count wearing the reader-window key's name — and
+    the tests that exist to keep it out could not see it.
+
+    So the window is read at the CALL SITE, resolved SMALLER than the merged
+    pool so the two readings must diverge, and both the argument and the
+    resulting values are asserted. ``context_item_cap=3`` against a 9-item
+    merged pool: the reader's prefix is 3 items of one session, so
+    ``injected_in_window`` is 0 and ``sessions_before`` is 1. A pool-scope
+    census reports ``window: 9``, ``injected_in_window: 2`` and
+    ``sessions_before: 2`` on the same question — it reds on all three.
+
+    This complements, and does not replace, the pure-function tests: those
+    pin the prefix SEMANTICS, this pins that the semantics are reached with
+    the reader's cap. The seeding consequence of a tight cap (only session A
+    is in the 3-item seed window, so only A injects) is not what is under
+    test and is asserted only as a precondition.
+    """
+    from tools.longmem_eval.retrieve import retrieve_for_question
+    from tortoise import session_reinjection as _sr
+
+    seen: dict = {}
+    real = _sr.reader_window_displacement
+
+    def _spy(base_pool, merged, **kwargs):
+        seen["window"] = kwargs.get("window")
+        seen["merged_len"] = len(merged)
+        seen["base_len"] = len(base_pool)
+        return real(base_pool, merged, **kwargs)
+
+    monkeypatch.setattr(_sr, "reader_window_displacement", _spy)
+    tight = retrieve_for_question(
+        seeded_sdk, _question(), ks=(5,), top_k=10, pool_size=60,
+        context_item_cap=3, session_reinjection=True)
+    d = tight["session_reinjection_stats"]["reader_window_displacement"]
+
+    # precondition: the fixture actually separates the two readings — a pool
+    # that is SHORTER than the cap would make a pool-scope mutant a no-op
+    assert seen["window"] == 3, seen
+    assert seen["merged_len"] > seen["window"], seen
+    assert seen["base_len"] > seen["window"], seen
+
+    assert d["window"] == 3, d
+    assert d["measured"] is True, d
+    # window-scope values, and each is DIFFERENT from the pool-scope count
+    assert d["injected_in_window"] == 0, d
+    assert d["sessions_before"] == 1, d
+    # the default cap still resolves to the reader's 40 — the arm's own
+    # control, so a hardcoded 3 cannot pass this pair either
+    wide = retrieve_for_question(
+        seeded_sdk, _question(), ks=(5,), top_k=10, pool_size=60,
+        session_reinjection=True)
+    w = wide["session_reinjection_stats"]["reader_window_displacement"]
+    assert w["window"] == 40, w
+    assert seen["window"] == 40, seen
+

@@ -16,6 +16,17 @@
 # for every PR, making the gate structurally inert. Pinning `ref` to the PR
 # head is what makes the gate measure what it claims.
 # Follows redis-guard.yml conventions (checkout@v4, python3 tools/).
+#
+# ⚠️ THIS WORKFLOW IS `disabled_manually` (GitHub reports state=disabled_manually,
+# updated 2026-10-29T02:33:12Z; `finding-provenance` was disabled in the same
+# window). Nothing here runs for any PR until that is reversed by its own
+# reviewed decision — re-enabling restores a merge-path gate that was turned off
+# deliberately, so it is not a drive-by edit. Recorded here because a reader of
+# this file otherwise cannot learn it (#10634 review P1).
+# The `Closes-coherence` advisory step that #10597 added here has MOVED to
+# `.github/workflows/closes-coherence.yml` for exactly that reason; this job is
+# back to the drift measurement alone, and its `Ensure gh` step and
+# `pull-requests: read` grant went with the step (they existed only for it).
 name: drift-guard
 on:
   pull_request:
