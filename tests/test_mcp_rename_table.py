@@ -71,8 +71,9 @@ RETIRED_LITERAL: dict[str, str] = {
     # #4282 — the `graph_overview` container (approved row 9) absorbs these six, and
     # `tortoise_overview` itself retires into the container it used to be. Every pointer
     # names the container plus a section it dispatches, so it resolves in ONE hop.
-    "tortoise_audit": 'tortoise_graph_overview(section="audit")',
-    "tortoise_check_structure": 'tortoise_graph_overview(section="structure_check")',
+    # `tortoise_check_structure` is NOT here: absorbed as a SECTION while its door stays
+    # live, because it carries the #8482 wrap-envelope repair a `-> Any` container cannot.
+    "tortoise_audit": 'tortoise_graph_overview(section="audit", point_kinds=...)',
     "tortoise_dream_health": 'tortoise_graph_overview(section="dream_health")',
     "tortoise_overview": 'tortoise_graph_overview(section=...)',
     "tortoise_summarize_structure": 'tortoise_graph_overview(section="structure")',
@@ -476,11 +477,11 @@ def test_b1_states_plainly_that_there_are_no_disagreements() -> None:
     assert f"the same {len(RETIRED_LITERAL)} names" in _doc(), (
         "the Part B intro no longer states the redirect-map size the table covers"
     )
-    # 18 after #3540; 24 after #4282's `graph_overview` batch retired six more names
+    # 18 after #3540; 23 after #4282's `graph_overview` batch retired five more names
     # into the container (and `tortoise_overview` itself into its target). The pin moves
     # with each landed container batch.
-    assert len(RETIRED_LITERAL) == 24, (
-        f"the redirect map is {len(RETIRED_LITERAL)} names, not the landed 24"
+    assert len(RETIRED_LITERAL) == 23, (
+        f"the redirect map is {len(RETIRED_LITERAL)} names, not the landed 23"
     )
 
 

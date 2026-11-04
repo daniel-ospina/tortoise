@@ -5,7 +5,7 @@
 Every `file:line` in this document is **read from the source at build time**, so it cannot
 drift from the code it cites. The destination map is data in the generator; every count
 below is arithmetic computed against the **served registry** — the live tools plus the
-24 retired names, which still answer through the #3883 warning shim. The generator **fails the build**
+23 retired names, which still answer through the #3883 warning shim. The generator **fails the build**
 if the map and the registry disagree — a mismatch is a finding, not something to reconcile.
 
 **Registry: 100 tools → 88 absorbed into the 27 MCP targets · 1 absorbed into a builder-only SDK method (not on the MCP) · 2 tenancy (SDK/REST only) · 9 retired.**
@@ -48,7 +48,7 @@ something derivable from today's code.
 
 **18 merged targets. 5 of them have a method behind them today.** The other **13** are Phase 2 work, not renames.
 
-## Part B — every served name and its single destination (76 live + 24 retired)
+## Part B — every served name and its single destination (77 live + 23 retired)
 
 **Read-only** is the entry's MCP `readOnlyHint` — what a client uses to auto-approve,
 NOT what a key needs. A `no` here does not mean `graphs:write`: since #4122 the tier is
@@ -160,11 +160,11 @@ flag; see `canonical-mcp-tools.md` → *reads and writes never share a tool* for
 | 99 | `tortoise_update_point` | `tool_registry.py:658` | `update_point` | no | `update_knowledge` |
 | 100 | `tortoise_validate_domain` | `tool_registry.py:319` | `validate_domain` | yes | `graph_overview` |
 
-**24** of these are RETIRED names (#3883): off the advertised surface, but they
+**23** of these are RETIRED names (#3883): off the advertised surface, but they
 still answer through the warning shim, and each one's `Destination` is the destination of
-the replacement that warning names. The other **76** are live.
+the replacement that warning names. The other **77** are live.
 
-Listed so a reader can tell them apart from the live rows that share their destination: `tortoise_audit`, `tortoise_check_structure`, `tortoise_dream_health`, `tortoise_get`, `tortoise_get_events`, `tortoise_get_governance`, `tortoise_get_operator`, `tortoise_get_point`, `tortoise_health`, `tortoise_index_sessions`, `tortoise_ingest_corpus`, `tortoise_list_pointkinds`, `tortoise_list_sources`, `tortoise_list_tags`, `tortoise_onboarding_github_index`, `tortoise_onboarding_session_recording`, `tortoise_overview`, `tortoise_paginated_query`, `tortoise_query_points_by_tag`, `tortoise_stale`, `tortoise_status`, `tortoise_summarize_structure`, `tortoise_taxonomy`, `tortoise_validate_domain`
+Listed so a reader can tell them apart from the live rows that share their destination: `tortoise_audit`, `tortoise_dream_health`, `tortoise_get`, `tortoise_get_events`, `tortoise_get_governance`, `tortoise_get_operator`, `tortoise_get_point`, `tortoise_health`, `tortoise_index_sessions`, `tortoise_ingest_corpus`, `tortoise_list_pointkinds`, `tortoise_list_sources`, `tortoise_list_tags`, `tortoise_onboarding_github_index`, `tortoise_onboarding_session_recording`, `tortoise_overview`, `tortoise_paginated_query`, `tortoise_query_points_by_tag`, `tortoise_stale`, `tortoise_status`, `tortoise_summarize_structure`, `tortoise_taxonomy`, `tortoise_validate_domain`
 
 **A `⚠️` after a destination means the sibling SDK rename table**
 **(`docs/product/sdk-rename-table.md` (generated on demand) §C3b, and its C6 fold record) records that**

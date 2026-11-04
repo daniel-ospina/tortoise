@@ -50,12 +50,18 @@ CONTAINER = "tortoise_graph_overview"
 #: NOT in this set).
 RETIRED_INTO_CONTAINER = {
     "tortoise_overview",
-    "tortoise_check_structure",
     "tortoise_summarize_structure",
     "tortoise_validate_domain",
     "tortoise_audit",
     "tortoise_dream_health",
 }
+
+#: Absorbed, but its DOOR stays live this batch: `check_structure` is the one member
+#: with a WRAP envelope (`-> list[dict]`), so it carries the #8482 failure repair that a
+#: `-> Any` container cannot. The section and the door answer the same rows; retiring the
+#: door before the container has a declared envelope would move the repair off the
+#: advertised path. Pinned as a fact so the next lane cannot "tidy" it away silently.
+SECTION_ONLY_MEMBERS = {"tortoise_check_structure": "structure_check"}
 
 #: Pointers that predate this batch and had to be RE-POINTED, because they named the
 #: now-retired `tortoise_overview` and a two-hop pointer resolves nowhere.
@@ -188,10 +194,18 @@ class TestDefaultSummaryIsUnchanged:
 
         monkeypatch.setattr(ms, "_overview_section", _fake_section)
         ms.tortoise_graph_overview()
-        for section in ("topics", "validate_domain", "audit", "issue_insight", "dream_health"):
+        for section in ("topics", "validate_domain", "audit", "dream_health"):
             assert section not in seen, f"{section} entered the default summary"
 
-    def test_the_summary_still_carries_every_pre_existing_section(self, monkeypatch):
+    def test_the_summary_still_carries_exactly_the_eleven_pre_existing_keys(self, monkeypatch):
+        """The pin is a LITERAL, not a derivation.
+
+        Deriving the expectation from `_OVERVIEW_SECTIONS` and `_OVERVIEW_SUMMARY_SKIP`
+        would agree with any edit to those two constants — demonstrated: adding `health`
+        and `status` to the skip set kept a derived version of this test green while the
+        default envelope silently dropped to 9 keys. The eleven names below are what
+        `tortoise_overview()` returned before #4282, typed out.
+        """
         seen: list[str] = []
 
         def _fake_section(section, entity_id, days, limit, **kwargs):
@@ -200,6 +214,9 @@ class TestDefaultSummaryIsUnchanged:
 
         monkeypatch.setattr(ms, "_overview_section", _fake_section)
         result = ms.tortoise_graph_overview()
-        expected = [s for s in ms._OVERVIEW_SECTIONS if s not in ms._OVERVIEW_SUMMARY_SKIP]
+        expected = ["taxonomy", "structure", "structure_check", "pointkinds",
+                    "tags", "sources", "namespaces", "graphs", "health",
+                    "status", "stale"]
         assert seen == expected
-        assert set(result) == set(expected)
+        assert list(result) == expected
+        assert ms._OVERVIEW_DEFAULT_SUMMARY_KEYS == tuple(expected)

@@ -71,8 +71,7 @@ KNOWN_STALE_TOOL_NAMES = {
     },
     "how-to-use-tortoise": {
         "tortoise_fts_query",      # an SDK method name, never a tool
-        # #4282 → tortoise_graph_overview(section=...) — see the note above.
-        "tortoise_check_structure",
+        # #4282 → tortoise_graph_overview(section="structure") — see the note above.
         "tortoise_summarize_structure",
         "tortoise_list_pointkinds",  # retired #3883 → tortoise_graph_overview
         "tortoise_list_sources",     # retired #3883 → tortoise_graph_overview
@@ -81,12 +80,7 @@ KNOWN_STALE_TOOL_NAMES = {
     "research-domain": {
         # #4282 → tortoise_graph_overview(section=...) — see the note above.
         "tortoise_audit",
-        "tortoise_check_structure",
         "tortoise_overview",
-    },
-    "tortoise-decide": {
-        # #4282 → tortoise_graph_overview(section="structure_check") — see the note above.
-        "tortoise_check_structure",
     },
     "tortoise-file-finding": {"tortoise_list_sources"},
     # #4282: `tortoise/onboarding/SKILL.md` is the ONE served skill authored in THIS repo

@@ -1110,7 +1110,7 @@ def test_the_guard_reds_when_the_live_surface_grows_past_the_high_water_pin(tmp_
     # The pin is set ONE BELOW the live count so the run must red: the property
     # under test is "growth past the pin reds", not any particular number.
     # (#3540 moved the live count 82 -> 81, so the pin moves with it.)
-    doc["high_water_counts"] = {"tools": 75, "sdk_public_methods": 150}
+    doc["high_water_counts"] = {"tools": 76, "sdk_public_methods": 150}
     result = _run("tools/surface-guard.py", "--manifest", _write(doc, tmp_path))
     assert result.returncode == 1, "growth past the frozen pin did not red the gate"
     assert "high-water pin" in result.stdout, result.stdout
@@ -3652,10 +3652,11 @@ def test_the_live_surface_is_the_baseline_the_guard_froze():
     manifest = _manifest()
     # #3540 ruling B: 82 -> 81 (two per-source switches retired into ONE
     # consolidated tool — the surface SHRANK, which is the ruling's point).
-    # #4282: 81 -> 76 — the `graph_overview` container absorbs six advertised names
-    # and adds itself. The pin moves with every landed container batch until the
-    # approved 27 is reached.
-    assert live["mcp"] == manifest["counts"]["tools"] == 76
+    # #4282: 81 -> 77 — the `graph_overview` container absorbs FIVE advertised names
+    # and adds itself (`check_structure` is absorbed as a section while its door stays
+    # live, since it carries the #8482 wrap-envelope repair). The pin moves with every
+    # landed container batch until the approved 27 is reached.
+    assert live["mcp"] == manifest["counts"]["tools"] == 77
     # #4282 Phase 2.2 (#10053): 149 -> 150, the three approved-but-absent names now
     # having a `def` (+3) less `main`'s two retirements in #10012 (`graph_count` →
     # `_graph_count`, `org_list` deleted) (−2). The manifest pin records the same

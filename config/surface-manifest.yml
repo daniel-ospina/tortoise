@@ -49,7 +49,7 @@
 # a constant here.
 manifest_version: 1
 issue: 3863
-cut_at_commit: a8a228168ec4e1878a6ec35d0c2ace8426efeb80
+cut_at_commit: f60036084435b11925a5e51e940b71249937e253
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -694,9 +694,9 @@ approval_principal: daniel-ospina
 approval_pr: '4120'
 approval_date: '2026-09-18'
 counts:
-  tools: 76
+  tools: 77
   sdk_public_methods: 150
-  retired: 24
+  retired: 23
   keyword_distribution:
     fetch: 14
     create: 17
@@ -705,7 +705,7 @@ counts:
     list: 8
     find: 5
     trace: 2
-    check: 5
+    check: 6
     link: 5
     operate: 6
 high_water_counts:
@@ -713,13 +713,8 @@ high_water_counts:
   sdk_public_methods: 150
 retired:
 - name: tortoise_audit
-  use_instead: tortoise_graph_overview(section="audit")
+  use_instead: tortoise_graph_overview(section="audit", point_kinds=...)
   sdk_method: audit
-  http_policy: true
-  approval: null
-- name: tortoise_check_structure
-  use_instead: tortoise_graph_overview(section="structure_check")
-  sdk_method: check_structure
   http_policy: true
   approval: null
 - name: tortoise_dream_health
@@ -1894,8 +1889,8 @@ rows:
   class: agent-reachable
   cluster_canonical: tortoise_operator_action
 - name: tortoise_graph_overview
-  served_from: tortoise/mcp_server.py:01ef7a6ab2760bb9
-  served_attributes: 35f7cf6b070f96c9
+  served_from: tortoise/mcp_server.py:953485e30d404d48
+  served_attributes: 03bd1202c5a73326
   family: reasoning
   family_rank: 3
   served: http
@@ -2102,6 +2097,31 @@ rows:
   recommendation: keep
   basis: observed
   reason: not called over MCP, but used by tooling — removing it would break that
+  recommended_family: null
+  proposed: false
+  exemption: false
+  approval: null
+  class: agent-reachable
+  cluster_canonical: null
+- name: tortoise_check_structure
+  served_from: tortoise/mcp_server.py:4f597330997001ab
+  served_attributes: d1d847feeecfe0de
+  family: reasoning
+  family_rank: 3
+  served: http
+  sdk_method: check_structure
+  group_source: mapped
+  keyword: check
+  keyword_rank: 8
+  cluster: null
+  canonical: null
+  job: Check Gate 0→4 chain integrity (orphans, dangling refs).
+  dependency: declares TortoiseSDK.check_structure (resolves)
+  lifecycle: active
+  used_by: agents, eval-harness, tooling, docs
+  recommendation: keep
+  basis: observed
+  reason: called by agents
   recommended_family: null
   proposed: false
   exemption: false
@@ -3317,11 +3337,11 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.check_structure.
-  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_check_structure (retired)'
+  dependency: 'reached by 1 registered tool(s): tortoise_check_structure'
   lifecycle: active
   used_by: eval-harness, tooling, docs
   recommendation: keep
-  reason: reached by 0 registered tool(s) and 1 retired name(s)
+  reason: reached by 1 registered tool(s)
   recommended_family: null
   proposed: false
   exemption: false

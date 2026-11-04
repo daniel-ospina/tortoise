@@ -4896,21 +4896,38 @@ _OVERVIEW_SECTIONS = (
     "taxonomy", "structure", "structure_check", "pointkinds", "tags",
     "sources", "namespaces", "graphs", "topics", "health", "status",
     "stale",
-    # #4282 — the four sections the approved container `graph_overview` absorbs
+    # #4282 — the three sections the approved container `graph_overview` absorbs
     # (`docs/product/canonical-mcp-tools.md`, row 6). Each dispatches to the tool
     # body it replaces; none is re-implemented here.
-    "validate_domain", "audit", "issue_insight", "dream_health",
+    #
+    # `issue_insight` is deliberately NOT here: its Phase-0.1 destination
+    # (`tools/bridge_table.py` DESTINATION) is `search_knowledge`, so it travels with
+    # that container rather than this one, and the door is still live. Adding a second
+    # advertised door onto that read would also give one SDK method two different
+    # defaults — the container's shared `limit=50` against the door's `limit=2`.
+    "validate_domain", "audit", "dream_health",
 )
 
 #: Sections that REQUIRE an argument, so the no-`section` combined summary cannot
-#: call them. `topics` was the only one; #4282 added three more (`validate_domain`
-#: needs `domain`, `issue_insight` needs `title`). `audit` and `dream_health` take
-#: no argument but are ALSO kept out of the default summary on purpose: the summary
-#: a caller gets with no `section` must stay byte-identical to what `tortoise_overview`
-#: returned before this consolidation, and adding keys to it is a behaviour change
-#: nobody asked for. Pass the section explicitly for any of them.
-_OVERVIEW_SUMMARY_SKIP = frozenset(
-    {"topics", "validate_domain", "audit", "issue_insight", "dream_health"})
+#: call them. `topics` was the only one; #4282 added `validate_domain` (needs
+#: `domain`). `audit` and `dream_health` take no argument but are ALSO kept out of
+#: the default summary on purpose: the summary a caller gets with no `section` must
+#: stay byte-identical to what `tortoise_overview` returned before this
+#: consolidation, and adding keys to it is a behaviour change nobody asked for.
+#: Pass the section explicitly for any of them.
+#:
+#: PINNED LITERALLY, not derived: `_OVERVIEW_DEFAULT_SUMMARY_KEYS` below is the
+#: assertable form of "the default envelope did not move", and a test compares it to
+#: the pinned tuple — a derivation from these two constants would agree with any
+#: edit to them and could never fail.
+_OVERVIEW_SUMMARY_SKIP = frozenset({"topics", "validate_domain", "audit", "dream_health"})
+
+#: The exact keys (in dispatch order) the no-`section` summary returns. 11 before
+#: #4282 and 11 after it — that equality is the claim this constant makes testable.
+_OVERVIEW_DEFAULT_SUMMARY_KEYS = (
+    "taxonomy", "structure", "structure_check", "pointkinds", "tags", "sources",
+    "namespaces", "graphs", "health", "status", "stale",
+)
 
 
 #: #3510 — the no-arg combined summary reports DATA-PROPORTIONAL orient
@@ -5038,10 +5055,7 @@ def _overview_summary(rows: Any, group_field: str, out_field: str,
 def _overview_section(section: str, entity_id: str | None,
                       days: int, limit: int,
                       domain: str | None = None,
-                      point_kinds: list[str] | None = None,
-                      title: str | None = None,
-                      body: str | None = None,
-                      repo: str | None = None) -> Any:
+                      point_kinds: list[str] | None = None) -> Any:
     """Dispatch one overview section to its original tool body."""
     if section == "taxonomy":
         return tortoise_taxonomy()
@@ -5079,12 +5093,6 @@ def _overview_section(section: str, entity_id: str | None,
         return tortoise_validate_domain(domain)
     if section == "audit":
         return tortoise_audit(point_kinds=point_kinds)
-    if section == "issue_insight":
-        if not title:
-            return _SafeError(
-                {"error": "graph_overview(section='issue_insight') requires "
-                          "title"})
-        return tortoise_issue_insight(title, body=body, repo=repo, limit=limit)
     if section == "dream_health":
         # Keeps the sibling door's own transport guard: `dream_health` is the one
         # member excluded from tenant HTTP (`http_policy=False`), and the guard
@@ -5100,10 +5108,7 @@ def tortoise_overview(section: str | None = None,
                       days: int = 30,
                       limit: int = 50,
                       domain: str | None = None,
-                      point_kinds: list[str] | None = None,
-                      title: str | None = None,
-                      body: str | None = None,
-                      repo: str | None = None) -> Any:
+                      point_kinds: list[str] | None = None) -> Any:
     """Graph orientation in one call — consolidates the list_*/status/health/
     taxonomy/structure zoo (epic #888 W3, PR #912).
 
@@ -5160,8 +5165,7 @@ def tortoise_overview(section: str | None = None,
         return _SafeError({"error": f"overview: section must be a string, got "
                                     f"{type(section).__name__}"})
     return _overview_section(section.strip().lower(), entity_id, days, limit,
-                             domain=domain, point_kinds=point_kinds, title=title,
-                             body=body, repo=repo)
+                             domain=domain, point_kinds=point_kinds)
 
 
 def tortoise_graph_overview(section: str | None = None,
@@ -5169,10 +5173,7 @@ def tortoise_graph_overview(section: str | None = None,
                             days: int = 30,
                             limit: int = 50,
                             domain: str | None = None,
-                            point_kinds: list[str] | None = None,
-                            title: str | None = None,
-                            body: str | None = None,
-                            repo: str | None = None) -> Any:
+                            point_kinds: list[str] | None = None) -> Any:
     """What is in this memory graph and how it is shaped (#4282 row 6).
 
     The approved container name for the orientation family. `section` selects the
@@ -5183,8 +5184,14 @@ def tortoise_graph_overview(section: str | None = None,
       namespaces | graphs | topics | health | status | stale        (`overview`)
       validate_domain   requires `domain`   — was `tortoise_validate_domain`
       audit             takes  `point_kinds` — was `tortoise_audit`
-      issue_insight     requires `title`     — was `tortoise_issue_insight`
       dream_health                           — was `tortoise_dream_health`
+
+    `structure_check` KEEPS its own door live on purpose: that read is the one
+    member with a WRAP envelope (`-> list[dict]`), and this container returns
+    `Any`, so retiring the door would move the #8482 failure repair off the
+    advertised path — a `_safe` failure payload the array schema cannot carry.
+    The section and the door return the same rows; the door is what carries the
+    repair, and it retires once the container has a declared envelope.
 
     Omit `section` → the compact combined summary `tortoise_overview` returned.
     That default is deliberately UNCHANGED by this consolidation: the five
@@ -5194,8 +5201,7 @@ def tortoise_graph_overview(section: str | None = None,
     """
     return tortoise_overview(section=section, entity_id=entity_id, days=days,
                              limit=limit, domain=domain,
-                             point_kinds=point_kinds, title=title, body=body,
-                             repo=repo)
+                             point_kinds=point_kinds)
 
 
 _GET_TYPES = ("point", "operator", "entity", "event", "session",

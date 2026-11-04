@@ -75,27 +75,29 @@ class TestRegistryEquivalence:
         )
 
     def test_registry_count(self):
-        """76 live tools = 98 − the 16 owner-approved retirements (#3863) − 1 − 6 + 1.
+        """77 live tools = 98 − the 16 owner-approved retirements (#3863) − 1 − 5 + 1.
 
         The −1 is #3540 ruling B: the two per-source switches were consolidated into
         `tortoise_manage_sources`, which is the ruling's own requirement ("the surface
         ends up one tool fewer, not more"). The census is bumped per add — and, here,
         per approved CONSOLIDATION.
 
-        #4282 (this change): the `graph_overview` container absorbs six advertised
-        names (`overview`, `check_structure`, `summarize_structure`, `validate_domain`,
-        `audit`, `dream_health`) and adds itself — 81 − 6 + 1 = 76. The approved target
+        #4282 (this change): the `graph_overview` container absorbs FIVE advertised
+        names (`overview`, `summarize_structure`, `validate_domain`, `audit`,
+        `dream_health`) and adds itself — 81 − 5 + 1 = 77. `check_structure` is absorbed
+        as a SECTION while its door stays live, because it is the one member carrying the
+        #8482 wrap-envelope repair that a `-> Any` container cannot. The approved target
         is 27 advertised tools; `tools/surface-target-check.py` is what measures the
         distance to it, and this pin moves with every landed container batch.
         """
         from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
-        assert len(TOOL_REGISTRY) == 76, f"Expected 76, got {len(TOOL_REGISTRY)}"
+        assert len(TOOL_REGISTRY) == 77, f"Expected 77, got {len(TOOL_REGISTRY)}"
         names = {t.name for t in TOOL_REGISTRY}
         # The 16 #3863 retirements, the 2 per-source switches #3540 ruling B
-        # consolidated and the 6 #4282 container members are NOT live, and each one is
+        # consolidated and the 5 #4282 container members are NOT live, and each one is
         # declared retired (#3883).
         retired = {t.name for t in RETIRED_TOOL_REGISTRY}
-        assert len(retired) == 24, f"Expected 24 retired, got {len(retired)}"
+        assert len(retired) == 23, f"Expected 23 retired, got {len(retired)}"
         assert not (retired & names), f"Retired names still live: {retired & names}"
         # #405's `validate_domain` capability is not lost: #4282 retired the door into the
         # `graph_overview` container, which dispatches `section="validate_domain"`. Asserting

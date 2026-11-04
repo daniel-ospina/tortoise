@@ -254,6 +254,33 @@ Any deletion PR must use **26 / 111**.
 
 status: approved · principal: daniel-ospina · PR #10187 · date: 2026-10-27.
 
+**Amended 2026-11-03** (execution record, #4282): the **first container batch has landed**, so the
+surface is now **77 advertised tools** with **23** retired-forward entries — the 18 above plus five
+more. `tortoise_graph_overview` (row 6) absorbs `tortoise_overview`, `tortoise_summarize_structure`,
+`tortoise_validate_domain`, `tortoise_audit` and `tortoise_dream_health`.
+
+Two consequences for readers of the paragraph below, which is left as written because it records the
+2026-10-27 ruling, not the current state:
+
+1. The count there (**18**) and its `18 of 18 verified` are that day's measurement. The population is
+   **23** now, and it is still 23 of 23 verified — every pointer names a call that resolves.
+2. `tortoise_health` no longer redirects to `tortoise_overview`: that name is itself retired, and
+   `RETIRED_USE_INSTEAD` resolves ONE hop (aliases are not transitive — the same limit GitHub's own
+   `DeprecatedToolAliases` records). The pointer is `tortoise_graph_overview(section="health")`, and
+   the seven inbound pointers that named `tortoise_overview` were re-pointed in the same change so
+   none of them dead-ends. **A future container batch must do the same for every pointer that names
+   the container it retires** — a two-hop pointer resolves nowhere while the warning shim still serves
+   both names, which is why it fails silently.
+3. Row 6's absorb list is executed as five retirements, not six: `tortoise_check_structure` keeps its
+   own door live until the container has a **declared output envelope**. That read is the one member
+   with a wrap envelope (`-> list[dict]`) and it carries the #8482 failure repair for a payload the
+   array schema cannot otherwise express; a `-> Any` container cannot carry it, so retiring the door
+   first would move the repair off the advertised path. The `structure_check` section and the door
+   answer the same rows today.
+
+No SDK method is added, removed or renamed by that batch (150 public methods before and after); the
+SDK leg of this list is a separate change.
+
 ## Principle: reads and writes never share a tool
 
 On the customer-grantable surface, a tool is either **read** or **write** — never both, so

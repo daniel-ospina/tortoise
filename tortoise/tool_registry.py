@@ -2045,7 +2045,7 @@ RETIRED_USE_INSTEAD: dict[str, str] = {
     "tortoise_health": 'tortoise_graph_overview(section="health")',
     "tortoise_status": 'tortoise_graph_overview(section="status")',
     "tortoise_stale": 'tortoise_graph_overview(section="stale")',
-    # #4282 row 6 — the remaining five members the approved container absorbs. Each
+    # #4282 row 6 — the remaining four members the approved container absorbs. Each
     # was reachable only as its own tool; the section names above are the container's
     # own dispatch values, so every pointer names a call that resolves.
     #
@@ -2053,13 +2053,17 @@ RETIRED_USE_INSTEAD: dict[str, str] = {
     # is the finer-grained record where the two disagree: `tortoise_issue_insight` goes to
     # `search_knowledge`, and `tortoise_list_graphs` / `_namespaces` / `_topics` go to the
     # tenancy block and to `list_knowledge` respectively — so those four are NOT retired
-    # here. `docs/product/canonical-mcp-tools.md` describes them as absorbed transitively
+    # here. `tortoise_check_structure` is not retired either, and for a different reason:
+    # it is the one member with a WRAP envelope, so it carries the #8482 failure repair
+    # that a `-> Any` container cannot (see `tortoise_graph_overview`'s docstring). `docs/product/canonical-mcp-tools.md` describes them as absorbed transitively
     # through `overview`; the authored map names where each capability actually lands, and
     # that is the one `tools/mcp_rename_table.py` cross-checks against.
-    "tortoise_check_structure": 'tortoise_graph_overview(section="structure_check")',
     "tortoise_summarize_structure": 'tortoise_graph_overview(section="structure")',
     "tortoise_validate_domain": 'tortoise_graph_overview(section="validate_domain", domain=...)',
-    "tortoise_audit": 'tortoise_graph_overview(section="audit")',
+    # `point_kinds` is shown, not dropped: a caller migrating an `audit(point_kinds=[...])`
+    # call must keep its scope, and calling the container without it audits the whole
+    # graph (different per-check counts, different `exit_code`).
+    "tortoise_audit": 'tortoise_graph_overview(section="audit", point_kinds=...)',
     "tortoise_dream_health": 'tortoise_graph_overview(section="dream_health")',
     # Tier 2 — the entry's own description already named its replacement.
     "tortoise_paginated_query": "tortoise_query(offset=..., limit=...)",

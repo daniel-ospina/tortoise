@@ -22,11 +22,11 @@ not something to reconcile silently.
 | 2 | `tortoise_annotate_operator` | `tool_registry.py:686` | **no replacement** | `adjust_relationship` | absent |
 | 3 | `tortoise_approve_merge` | `tool_registry.py:546` | **no replacement** | `approve_merge` | absent |
 | 4 | `tortoise_assess_source` | `tool_registry.py:1232` | **no replacement** | `manage_source_trust` | absent |
-| 5 | `tortoise_audit` | `tool_registry.py:344` | `tortoise_graph_overview(section="audit")` | `graph_overview` | warning shim |
+| 5 | `tortoise_audit` | `tool_registry.py:344` | `tortoise_graph_overview(section="audit", point_kinds=...)` | `graph_overview` | warning shim |
 | 6 | `tortoise_backfill_v25` | `tool_registry.py:1395` | **no replacement** | `REMOVED` | absent |
 | 7 | `tortoise_belief_timeline` | `tool_registry.py:568` | **no replacement** | `check_confidence` | absent |
 | 8 | `tortoise_calibrate_summary` | `tool_registry.py:621` | **no replacement** | `check_confidence` | absent |
-| 9 | `tortoise_check_structure` | `tool_registry.py:311` | `tortoise_graph_overview(section="structure_check")` | `graph_overview` | warning shim |
+| 9 | `tortoise_check_structure` | `tool_registry.py:311` | **no replacement** | `graph_overview` | absent |
 | 10 | `tortoise_checkpoint` | `tool_registry.py:855` | **no replacement** | `mine_knowledge_from_session` | absent |
 | 11 | `tortoise_compute_confidence` | `tool_registry.py:579` | **no replacement** | `check_confidence` | absent |
 | 12 | `tortoise_create_document` | `tool_registry.py:1200` | **no replacement** | `create_entity` | absent |
@@ -119,9 +119,9 @@ not something to reconcile silently.
 | 99 | `tortoise_update_point` | `tool_registry.py:658` | **no replacement** | `update_knowledge` | absent |
 | 100 | `tortoise_validate_domain` | `tool_registry.py:319` | `tortoise_graph_overview(section="validate_domain", domain=...)` | `graph_overview` | warning shim |
 
-**100 served MCP tools, 29 destinations.** 24 retire **with a warning shim**; the other **76** are simply absent — no shim.
+**100 served MCP tools, 29 destinations.** 23 retire **with a warning shim**; the other **77** are simply absent — no shim.
 
-**`Retirement` is today's behaviour, not a forecast.** PR #4031 MERGED as `e3bb78a14` (2026-09-21), so the 24 `warning shim` names are
+**`Retirement` is today's behaviour, not a forecast.** PR #4031 MERGED as `e3bb78a14` (2026-09-21), so the 23 `warning shim` names are
 retired ON `main` and this column is what a caller experiences now. The map is read live from `tortoise.tool_registry.RETIRED_USE_INSTEAD` rather than pinned, so it cannot describe a plan that has since landed differently.
 
 The registry states what retiring a name DOES — quoted verbatim and in full:
@@ -185,7 +185,7 @@ The direction of the `get` retirement is an owner decision, recorded in the regi
 ## Part B — agreement with PR #4031's `RETIRED_USE_INSTEAD`
 
 PR #4031 encodes the *current-surface* redirects. This table encodes the *target-surface*
-destinations. They answer different questions about the same 24 names, and they must not
+destinations. They answer different questions about the same 23 names, and they must not
 contradict each other: a caller who follows a redirect to `tortoise_overview` lands
 on `graph_overview`, so if the 0.1 map sends the ORIGINAL name somewhere else the two
 artifacts disagree about which target absorbs it.
@@ -195,8 +195,7 @@ resolving *which* destination is right is a design decision, not a build step.
 
 | Current tool | 0.1 destination | PR #4031 says call | That name's 0.1 destination | Verdict |
 |---|---|---|---|---|
-| `tortoise_audit` | `graph_overview` | `tortoise_graph_overview(section="audit")` | `graph_overview` | AGREE |
-| `tortoise_check_structure` | `graph_overview` | `tortoise_graph_overview(section="structure_check")` | `graph_overview` | AGREE |
+| `tortoise_audit` | `graph_overview` | `tortoise_graph_overview(section="audit", point_kinds=...)` | `graph_overview` | AGREE |
 | `tortoise_dream_health` | `graph_overview` | `tortoise_graph_overview(section="dream_health")` | `graph_overview` | AGREE |
 | `tortoise_get` | `get_entity` | `tortoise_get_entity(id, type=...)` | `get_entity` | AGREE |
 | `tortoise_get_events` | `get_entity` | `tortoise_get_entity(None, type="events")` | `get_entity` | AGREE |
@@ -220,11 +219,11 @@ resolving *which* destination is right is a design decision, not a build step.
 | `tortoise_taxonomy` | `graph_overview` | `tortoise_graph_overview(section="taxonomy")` | `graph_overview` | AGREE |
 | `tortoise_validate_domain` | `graph_overview` | `tortoise_graph_overview(section="validate_domain", domain=...)` | `graph_overview` | AGREE |
 
-**24 of 24 agree; 0 disagree.**
+**23 of 23 agree; 0 disagree.**
 
 ### B1 — the disagreements
 
-**None — 0 findings.** The 0.1 map and the redirect agree on the target for all 24 names. This section is kept, not deleted: an explicit empty finding list stays machine-visible, and a section that silently vanished would hide the difference between *no disagreements* and *nobody looked*.
+**None — 0 findings.** The 0.1 map and the redirect agree on the target for all 23 names. This section is kept, not deleted: an explicit empty finding list stays machine-visible, and a section that silently vanished would hide the difference between *no disagreements* and *nobody looked*.
 
 ---
 
