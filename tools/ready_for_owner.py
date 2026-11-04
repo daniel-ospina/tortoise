@@ -202,11 +202,24 @@ EXPLICIT_CLEAN_OUTCOME_RE = re.compile(r"(?i)(?:^|[*\s])outcome:[ \t]*[*\s]*clea
 #: * `Outcome: 2 findings (1 × P1, 1 × P2)` / `Outcome: 3 issues — 2 blocking …` — the
 #:   reviewer's own verdict HEADER, which is how a merged review states its count.
 #: * `Verdict: ISSUES 1` — the same verdict stated mid-line rather than at column 0.
+#:
+#: ⛔ THE `severity` ALTERNATIVE IS UNANCHORED, like its two siblings. It was line-anchored,
+#: and the COMPOSED forms reviewers actually post in this repo (`**severity: P3 ·
+#: check_type: … · origin: diff**`, `- severity: P1`, `**Severity:** P1`, `> severity: P2`)
+#: then read NEUTRAL — a false PASS, the #10726 class this whole arm exists to close.
 FINDINGS_DECLARED_RE = re.compile(
-    r"(?im)(?:^\s*severity\s*:\s*\**(P0|P1|P2)\b"
+    r"(?i)(?:\bseverity\b\**\s*:?\s*\**\s*(P0|P1|P2)\b"
     r"|\boutcome\s*:\s*\**\s*([0-9]+)\s+(?:issues?|findings?)\b"
     r"|\bverdict\s*:\s*\**\s*ISSUES\s+([0-9]+)\b)"
 )
+
+#: A body that declares a COUNT must also declare a BLOCKING severity for the count to
+#: block: `**Outcome: 3 issues (0 blocking).**` and `2 findings (both P3), no blocking
+#: defect` are CLEAN reviews of a P3-only round, and reading the count alone blocked four
+#: such bodies measured across ten PRs — a permanent false NOT-READY, and a contradiction of
+#: this gate's own rule that a `[P3]` note does not block.
+ANY_SEVERITY_TOKEN_RE = re.compile(r"(?i)\bP([0-3])\b")
+ZERO_BLOCKING_RE = re.compile(r"(?i)\b0\s+blocking\b|\bno\s+blocking\b")
 
 #: A FORMAL change request is a blocking record even when the review body is empty — the
 #: findings may live entirely in inline comments, and an unresolved `CHANGES_REQUESTED`
@@ -331,7 +344,7 @@ class Probe:
     repo: str = DEFAULT_REPO
     head: str = ""
     base: str = "main"
-    is_draft: bool | None = False
+    is_draft: bool | None = None
     mergeable: str = "UNKNOWN"
     merge_state: str = ""
     head_committed_at: str = ""
@@ -755,7 +768,18 @@ def check_blocking_finding(probe: Probe) -> Check:
         if declared:
             severity = (declared.group(1) or "").upper()
             n = _int_or_none(declared.group(2) or declared.group(3)) or 0
-            blocking = bool(severity in {"P0", "P1", "P2"} or n > 0)
+            if severity:
+                blocking = severity in {"P0", "P1", "P2"}
+            else:
+                # A declared COUNT blocks only when the body also declares a blocking
+                # severity — read from the SAME sentence, not assumed from the count.
+                declined = bool(ZERO_BLOCKING_RE.search(text)) or not (
+                    BLOCKING_RE.search(text)
+                    or any(
+                        token in {"0", "1", "2"} for token in ANY_SEVERITY_TOKEN_RE.findall(text)
+                    )
+                )
+                blocking = n > 0 and not declined
         elif NON_CLEAN_RE.search(text) or (
             # The recorder's arm (2): loose `not…clean`, suppressed by an explicit
             # `Outcome: clean` — the SAME pairing `record-review.sh` applies, so this is
@@ -1202,12 +1226,20 @@ def _read_touched(gh: Gh, pr: int) -> tuple[tuple[str, ...], str]:
     # the check-run surface.)
     _pull = gh.api(f"pulls/{pr}")
     expected = _int_or_none(_pull.get("changed_files")) if isinstance(_pull, Mapping) else None
-    if expected is not None and len(names) < expected:
+    if expected is None:
+        # ⛔ An ABSENT `changed_files` is not "nothing to compare": the truncation witness
+        # cannot run, so the listing is UNWITNESSED. Same doctrine as
+        # `draft`/`merged`/`labels`/`state` — an absent field is never the passing side.
+        raise ReadError(
+            f"pulls/{pr}: the payload carries no `changed_files`, so the file listing's "
+            "completeness cannot be witnessed"
+        )
+    if len(names) < expected:
         raise ReadError(
             f"pulls/{pr}/files: read {len(names)} of {expected} changed files — "
             "the listing is TRUNCATED"
         )
-    return tuple(names), f"files={len(names)}/{expected if expected is not None else '?'}"
+    return tuple(names), f"files={len(names)}/{expected}"
 
 
 def declared_union(body: str) -> tuple[tuple[str, ...] | None, str]:
@@ -1551,6 +1583,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 recorded_diff=args.recorded_diff,
                 recorded_head=args.recorded_head,
             )
+        # ⛔ INSIDE the try: `evaluate()`, `render()` and `json.dumps` were OUTSIDE it, so a
+        # crash in a condition (or in a `--fixture` payload whose comment `id` is not an int)
+        # still printed a traceback and NO verdict line — the very shape the handler exists to
+        # make impossible.
+        verdict = evaluate(probe)
     except RateLimited as exc:
         # ⛔ The contract is "exactly one of READY-FOR-OWNER / NOT-READY", and a rate limit
         # used to print an EMPTY stdout — a third shape a caller grepping the line could not
@@ -1568,7 +1605,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         pr = args.pr if args.pr is not None else 0
         print(f"NOT-READY({pr}, failed={','.join(CONDITIONS)})")
         return 1
-    verdict = evaluate(probe)
     if args.json:
         print(json.dumps(verdict.to_dict(), indent=2, sort_keys=True))
     else:

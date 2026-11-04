@@ -776,6 +776,56 @@ def test_the_loose_arm2_still_fires_without_an_explicit_clean_outcome() -> None:
     _assert_fails("blocking-finding", "open-blocking-finding", comments=comments)
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        "**severity: P1 · check_type: fail-open · origin: diff**",
+        "- severity: P1",
+        "**Severity:** P1",
+        "> severity: P2",
+        "`check_type: claim-mismatch` · severity: P2 · origin: diff",
+    ],
+    ids=["composed-bold", "bullet", "bold-key-colon", "blockquote", "backticked-composed"],
+)
+def test_a_severity_declared_in_a_composed_or_adorned_form_is_blocking(body: str) -> None:
+    """ROUND-7 P2 (false PASS): the `severity` alternative was line-anchored while its two
+    siblings were not, so the COMPOSED forms reviewers actually post read NEUTRAL."""
+    comments = [{"id": 130, "created_at": "2026-11-04T11:40:00Z", "kind": "comment", "body": body}]
+    _assert_fails("blocking-finding", "open-blocking-finding", comments=comments)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "**Outcome: 3 issues (0 blocking).** All three are P3 notes.",
+        "**OUTCOME: 2 issues found (both P3), no blocking defect.**",
+        "**Outcome: 2 issues (both P3, both measured), no correctness/security/fail-open defect found.**",
+        "**Outcome: 2 findings (2 × P3).**",
+        "**OUTCOME: 2 findings, both P3 — nothing blocking.**",
+    ],
+    ids=["zero-blocking", "both-p3", "only-p3-measured", "count-times-p3", "both-p3-nothing"],
+)
+def test_a_p3_only_review_with_a_count_does_not_block(body: str) -> None:
+    """ROUND-7 P2 (false BLOCK): a declared COUNT blocked without reading the severities the
+    same sentence declares, so four real P3-only reviews measured across ten PRs read as an
+    OPEN BLOCKING FINDING — a permanent false NOT-READY, and a contradiction of this gate's
+    own `test_p3_only_note_is_not_blocking`."""
+    comments = [{"id": 140, "created_at": "2026-11-04T11:40:00Z", "kind": "comment", "body": body}]
+    assert _check("blocking-finding", comments=comments).passed is True, body
+
+
+def test_a_count_with_a_declared_blocking_severity_still_blocks() -> None:
+    comments = [
+        {
+            "id": 141,
+            "created_at": "2026-11-04T11:40:00Z",
+            "kind": "comment",
+            "body": "**Outcome: 2 findings (1 × P1, 1 × P3).**",
+        }
+    ]
+    _assert_fails("blocking-finding", "open-blocking-finding", comments=comments)
+
+
 @pytest.mark.parametrize("field", ["is_draft", "merged"])
 def test_an_omitted_draft_or_merged_flag_is_unreadable(field: str) -> None:
     """ROUND-6 P3: an ABSENT boolean defaulted to the passing side."""
@@ -790,6 +840,19 @@ def test_a_truncated_file_listing_is_unreadable() -> None:
         {
             "/files?per_page": [{"filename": "a.py"}],
             "pulls/": {"changed_files": 3},
+        }
+    )
+    with pytest.raises(rfo.ReadError):
+        rfo._read_touched(fake, 1)
+
+
+def test_an_unwitnessable_file_listing_is_unreadable() -> None:
+    """ROUND-7 P3: an ABSENT `changed_files` leaves the truncation witness unable to run —
+    an absent field is never the passing side."""
+    fake = _FakeGh(
+        {
+            "/files?per_page": [{"filename": "a.py"}],
+            "pulls/": {"state": "open"},
         }
     )
     with pytest.raises(rfo.ReadError):
@@ -1132,6 +1195,7 @@ def _gh_payloads(
             "state": "open",
             "merged": False,
             "labels": [],
+            "changed_files": 2,
             "body": body,
         },
     }
