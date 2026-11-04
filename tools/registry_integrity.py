@@ -140,6 +140,34 @@ def _walk(fname: str, node: yaml.Node, path: str, problems: list[str]) -> None:
             _walk(fname, item, f"{path}[]", problems)
 
 
+def check_registry_text(text: str, shown: str) -> list[str]:
+    """Every integrity problem in one registry TEXT. Empty list means clean.
+
+    The TEXT entry point exists because one caller holds the document in hand
+    rather than on disk: `tools/ci_timing.py::integrity_problems` validates the
+    REFRESHED manifest BEFORE `refresh_durations` writes it, so a path-based
+    check there would grade the file that is about to be REPLACED. Measured
+    (#10726 review): with a duplicate `.durations` key planted, a path check
+    reported it while the text path did not exist at all, so the weekly
+    `--refresh-durations` could persist exactly the manifest the required
+    `manifest-integrity` job then reds.
+
+    Same fail-closed rule as the path form: text that cannot be parsed returns
+    a problem, never an empty list.
+    """
+    try:
+        node = yaml.compose(text)
+    except yaml.YAMLError as exc:
+        return [f"{shown}: MALFORMED YAML ({exc})"]
+    if node is None:
+        return [f"{shown}: empty document"]
+    if not isinstance(node, yaml.MappingNode):
+        return [f"{shown}: top level is {type(node).__name__}, expected a mapping"]
+    problems: list[str] = []
+    _walk(shown, node, "", problems)
+    return problems
+
+
 def check_registry(path: Path | str) -> list[str]:
     """Every integrity problem in one registry file. Empty list means clean.
 
@@ -152,17 +180,7 @@ def check_registry(path: Path | str) -> list[str]:
         text = p.read_text(encoding="utf-8")
     except OSError as exc:
         return [f"{shown}: unreadable ({exc}) — a registry that cannot be read is not clean"]
-    try:
-        node = yaml.compose(text)
-    except yaml.YAMLError as exc:
-        return [f"{shown}: MALFORMED YAML ({exc})"]
-    if node is None:
-        return [f"{shown}: empty document"]
-    if not isinstance(node, yaml.MappingNode):
-        return [f"{shown}: top level is {type(node).__name__}, expected a mapping"]
-    problems: list[str] = []
-    _walk(shown, node, "", problems)
-    return problems
+    return check_registry_text(text, shown)
 
 
 def check(paths: list[Path] | None = None) -> list[str]:

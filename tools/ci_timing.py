@@ -3254,7 +3254,20 @@ def integrity_problems(manifest_text: str) -> list[str]:
                 + red
                 + cs.carve_shard_issues(manifest)
                 + cs.slow_shard_issues(manifest)
-                + cs.watchdog_headroom_issues(manifest))
+                + cs.watchdog_headroom_issues(manifest)
+                # #10726 review: the DUPLICATE-KEY walk must run on this side too.
+                # `config/ci-surfaces.yml` is `merge=union`, so a replay can leave
+                # the same `.durations` key twice; `yaml.safe_load` keeps the LAST
+                # while `render_refreshed_manifest` rewrites the FIRST in the TEXT.
+                # Composing it only into `--integrity` (the gate of record) left
+                # this pre-write gate blind to it: measured, with a duplicate
+                # planted, `--integrity` reported it and this function returned
+                # `[]` — so the weekly refresh could PERSIST a manifest the
+                # required `manifest-integrity` job immediately reds. It is graded
+                # on `manifest_text` (the document about to be written), not on the
+                # file it replaces.
+                + cs.duplicate_mapping_key_issues(
+                    text=manifest_text, shown="refreshed manifest"))
     wf_issues = cs.workflow_matrix_issues(cs.WORKFLOW, manifest)
     problems += wf_issues
     if not wf_issues:

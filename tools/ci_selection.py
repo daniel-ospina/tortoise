@@ -3623,7 +3623,12 @@ def duplicate_entries(manifest: dict) -> list[str]:
     return dupes
 
 
-def duplicate_mapping_key_issues(manifest_path: Path | None = None) -> list[str]:
+def duplicate_mapping_key_issues(
+    manifest_path: Path | None = None,
+    *,
+    text: str | None = None,
+    shown: str | None = None,
+) -> list[str]:
     """#5373: a duplicate MAPPING key — invisible to every reader in this module.
 
     :func:`load_manifest` goes through ``yaml.safe_load``, which keeps only the
@@ -3671,6 +3676,14 @@ def duplicate_mapping_key_issues(manifest_path: Path | None = None) -> list[str]
     than re-spelled, so the two entry points cannot disagree about what a
     duplicate is. A check that cannot run returns a problem and never an empty
     list: an unrunnable gate must not read as a passing one.
+
+    ``text`` grades a document held in memory instead of one on disk. It exists
+    for ``tools/ci_timing.py::integrity_problems``, which validates the
+    REFRESHED manifest BEFORE ``--refresh-durations`` writes it: a path-based
+    check there would grade the file that is about to be REPLACED and let the
+    weekly refresh persist a duplicate the required ``manifest-integrity`` job
+    then reds. Supplying ``text`` is the ONLY way to close that gap — the
+    duplicate does not have to exist on disk yet for it to be written.
     """
     path = Path(manifest_path or MANIFEST)
     tools_dir = str(Path(__file__).resolve().parent)
@@ -3680,6 +3693,8 @@ def duplicate_mapping_key_issues(manifest_path: Path | None = None) -> list[str]
         import registry_integrity
     except Exception as exc:  # pragma: no cover - it ships beside this file
         return [f"{path}: duplicate-key check UNAVAILABLE ({exc}) — not clean"]
+    if text is not None:
+        return registry_integrity.check_registry_text(text, shown or str(path))
     return registry_integrity.check([path])
 
 

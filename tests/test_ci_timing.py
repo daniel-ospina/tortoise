@@ -3801,6 +3801,48 @@ def test_integrity_problems_mirrors_the_spot_checked_validators() -> None:
             f"--integrity refuses: {problems}")
 
 
+def test_integrity_problems_catches_a_duplicate_durations_key() -> None:
+    """#10726 MUTATION PROOF: the refresh gate must SEE a duplicate mapping key.
+
+    `config/ci-surfaces.yml` is `merge=union`, so a replay can leave the same
+    `.durations` key in the file twice; `yaml.safe_load` keeps the LAST while
+    `render_refreshed_manifest` rewrites the FIRST in the TEXT. Before this
+    wiring `--integrity` reported the class and :func:`integrity_problems`
+    returned `[]` — so `--refresh-durations` (whose sole pre-write gate this
+    is) could PERSIST a manifest the required `manifest-integrity` job reds,
+    rewriting a weight the shard packer never reads.
+
+    Non-vacuous both ways, and graded on the TEXT rather than a path, because
+    the whole point is the document that has not been written yet: the path
+    form would grade the file the refresh is about to replace.
+
+    ⛔ THE PLANTED ROW CARRIES A DIFFERENT VALUE (0.9 vs the real 0.1), which is
+    load-bearing (#10648 review P3): with the SAME value this assertion would
+    hold under EITHER resolution order and pin only "the key parses". With 0.9
+    planted ahead of the real 0.1 row, `safe_load` returning 0.1 IS last-wins.
+    """
+    import ci_selection as cs
+
+    real = cs.MANIFEST.read_text()
+    assert ci_timing.integrity_problems(real) == []
+
+    anchor = "  test_7818_plan_record_5362.py: "
+    dup = "  test_7818_plan_record_5362.py: 0.9  # duplicate planted by this test\n"
+    at = real.index(anchor)
+    planted = real[:at] + dup + real[at:]
+
+    # The loader the shard packer uses cannot see it …
+    assert sum(1 for line in planted.splitlines()
+               if line.startswith(anchor)) == 2
+    # … but the refresh's pre-write gate does, by name.
+    problems = ci_timing.integrity_problems(planted)
+    assert any("duplicate mapping key 'test_7818_plan_record_5362.py'" in p
+               for p in problems), (
+        "the refresh's pre-write gate must compose the duplicate-key walk "
+        "(#5373) — otherwise --refresh-durations writes what --integrity "
+        "rejects")
+
+
 def test_integrity_problems_mirrors_the_listed_integrity_composition(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -3873,6 +3915,14 @@ def test_integrity_problems_mirrors_the_listed_integrity_composition(
         "watchdog_headroom_issues",
         "duration_coverage_issues",
         "duplicate_entries",
+        # #10726 review: the DUPLICATE-KEY walk (#5373) must run on BOTH entry
+        # points. It was added to `--integrity` alone, and this tuple — whose own
+        # docstring says it "must be extended when a validator is added" — was
+        # not extended, so the omission was invisible. Measured: with a duplicate
+        # `.durations` key planted, `--integrity` reported it and
+        # `integrity_problems` returned `[]`, i.e. `--refresh-durations` could
+        # persist a manifest the required `manifest-integrity` job reds.
+        "duplicate_mapping_key_issues",
         "workflow_matrix_issues",
         "workflow_halves_issues",
     )
