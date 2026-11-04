@@ -1280,7 +1280,8 @@ def test_the_bounce_does_not_append_a_SECOND_key_when_the_flow_already_has_one()
 
     # ⛔ WHITESPACE IS **NOT** BLANK HERE (review P2, #10757). Both readers this hop reconciles
     # test TRUTHINESS, and `" "` is truthy in both: the AS gate renders the page for
-    # `attempt_key=+` (`hosted_api.py:44884`, `if not request.query_params.get(...)`), and
+    # `attempt_key=+` (`hosted_api.oauth_authorize`'s gate, `if not request.query_params.get(...)`;
+    # `hosted_api.py:44918` at this head), and
     # `start.ts:255-256`
     # (`presentedKey || newAttemptKey()`) ADOPTS `" "`. A `.strip()` predicate minted a second
     # key for a flow that already had one and put the page and its own sign-in link on different
@@ -1330,8 +1331,8 @@ def test_the_bounce_does_not_append_a_SECOND_key_when_the_flow_already_has_one()
     from urllib.parse import unquote_plus
 
     for label, raw_enc, want in (
-        ("encoded name, blank value", f"client_id=c1&state=s1&%61ttempt_key=", None),
-        ("encoded name, real key", f"client_id=c1&state=s1&%61ttempt_key=K-enc", "K-enc"),
+        ("encoded name, blank value", "client_id=c1&state=s1&%61ttempt_key=", None),
+        ("encoded name, real key", "client_id=c1&state=s1&%61ttempt_key=K-enc", "K-enc"),
         ("encoded name blank beside a plain key",
          f"client_id=c1&state=s1&%61ttempt_key=&{CONSENT_ATTEMPT_KEY_PARAM}=K-plain", "K-plain"),
     ):
