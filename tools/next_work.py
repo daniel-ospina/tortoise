@@ -45,9 +45,11 @@ WHAT IS A WORK UNIT (mechanically, from records that already exist)
 WHAT IT EMITS, AND WHY THAT IS THE POINT
 ----------------------------------------
 A ranked list is a REPORT. This tool prints, for the top row, the exact command
-a runner would execute: which rail, which PR, which issue. That is the
-difference between a consumer and an actuator, and it is why the output has a
-``NEXT ACTION:`` block rather than a table alone.
+a runner would execute — which rail, which PR, which issue — or, when the top row
+needs a human decision (a review) or is waiting on a runner, the ACTION and then
+the first lower-ranked unit that DOES have a command. That is the difference
+between a consumer and an actuator, and it is why the output has a
+``NEXT ACTION`` block rather than a table alone.
 
 ⛔ IT DOES NOT INSTALL A TIMER, AND THE ``--help`` SAYS SO TOO.
 cmux authorises by ancestry, so a launchd timer cannot act on a pane. Proposing
@@ -97,8 +99,10 @@ Exit codes
        constituent, or the queue is empty) — there is no action, and that is an
        answer. Held and superseded rows are filtered out of the pick, so when the
        RANK LEADER is held the next pickable row is simply the `TOP` — and the
-       `RUNNABLE` line appears only when the top row itself has nothing to run
-       (its head is in a runner queue), naming the first unit that does
+       `RUNNABLE` line appears when the top row itself has nothing to run: NEEDS-TEST
+       (a runner), NEEDS-REVIEW (a human), or any other position without a rail. It
+       names the first unit that DOES have a command, and that unit's actual reason;
+       when NOTHING is runnable it says so and names no unit
     2  INCOMPLETE: a surface the decision depends on could not be read — the
        queue gate (``.mergify.yml``, at collection OR missing from a replayed
        snapshot), the claim registry (``claims.sh`` absent, its snapshot header
@@ -191,7 +195,11 @@ FOLD_LINE_RE = re.compile(
     # leading digit here made such a fold invisible to this reader — no fold unit,
     # and its constituents left pickable ahead of it, the ordering #10902 exists
     # to prevent.
-    r"^\s*fold-constituents:\s*([#0-9][#0-9,\s]*)",
+    # Capture to END OF LINE, then validate EVERY token. A character class that
+    # stops at the first non-token character is exactly how the prefix got
+    # harvested: `10543 (10641 dropped) #10820` captured `10543 ` and dropped the
+    # rest, which `batch_open.py` refuses as a line.
+    r"^\s*fold-constituents:\s*([^\n]*)",
     re.MULTILINE | re.IGNORECASE,
 )
 
@@ -224,6 +232,12 @@ class Snapshot:
     #: tool exists to prevent. `None` means the gate could not be read at
     #: collection; a replay of such a snapshot must EXIT 2, never fall open.
     gate: dict[str, Any] | None = None
+    #: The gate's own TEXT. The parsed fields alone cannot be re-validated: a
+    #: hand-written snapshot with `required_checks: []` produced "no unmet
+    #: conditions", so every PR became READY-TO-LAND and got a command while the
+    #: LIVE path exits 2 on the same config (`parse_config` refuses a rule that
+    #: names no check). Carrying the text means one parser on both paths.
+    gate_text: str = ""
     #: The claim namespace the KEYS were built with. `claims.sh` honours
     #: `CLAIM_NS`, so a process with a different value constructed DIFFERENT refs
     #: than the snapshot holds — every lookup missed, and a miss is the one branch
@@ -257,6 +271,7 @@ class Snapshot:
             "base": self.base,
             "config_source": self.config_source,
             "gate": self.gate,
+            "gate_text": self.gate_text,
             "claim_ns": self.claim_ns,
             "collected_at": self.collected_at,
             "issues": self.issues,
@@ -293,7 +308,8 @@ class Snapshot:
     @classmethod
     def from_json(cls, raw: dict[str, Any]) -> Snapshot:
         known = {
-            "repo", "base", "config_source", "gate", "claim_ns", "collected_at", "issues", "pulls",
+            "repo", "base", "config_source", "gate", "gate_text", "claim_ns", "collected_at",
+            "issues", "pulls",
             "check_runs", "attestation", "claims", "merge_tree", "local_holders",
             "unreadable",
         }
@@ -306,6 +322,18 @@ class Snapshot:
         # registry's own default; reading `CLAIM_NS` from the environment here
         # would re-open the seam that made a held unit look free on replay.
         snap.claim_ns = str(raw.get("claim_ns") or "refs/claims")
+        # Labels arrive as `[{"name": "x"}]` from GitHub and as `["x"]` from a hand
+        # written snapshot. The imported gate (`queue_resweep.unmet_conditions`)
+        # reads `.get("name")`, so the coercion has to happen HERE, at the one point
+        # every snapshot passes through — not in each reader.
+        for pr in snap.pulls or []:
+            if not isinstance(pr, dict):
+                continue
+            pr["labels"] = [
+                {"name": lb} if isinstance(lb, str) else lb
+                for lb in (pr.get("labels") or [])
+                if isinstance(lb, (str, dict))
+            ]
         return snap.normalize()
 
 
@@ -328,6 +356,12 @@ class Unit:
     holder: str | None = None
     #: The PR's head branch — the rails take it as their 4th argument.
     head_ref: str | None = None
+    #: Set when an EARLIER-ranked row already carries this row's action target
+    #: (the same PR, or the same issue when there is no PR). Two rows for one
+    #: mergeable artifact meant two identical commands: dispatch both and the same
+    #: PR is worked twice — the duplicate pick this tool exists to prevent, one
+    #: level below `pick`. The row stays, with the reason, and carries no command.
+    duplicate_of: str | None = None
 
     @property
     def sort_key(self) -> tuple[int, int, tuple[int, int]]:
@@ -350,7 +384,14 @@ class Unit:
         return (p, pos, order)
 
     @property
+    def action_target(self) -> str:
+        """What a command would act on. Two rows with the same target are one action."""
+        return f"pr:{self.pr}" if self.pr else f"issue:{self.issue}"
+
+    @property
     def pickable(self) -> bool:
+        if self.duplicate_of:
+            return False
         return self.reason not in (REASON_CLAIMED, REASON_SUPERSEDED)
 
     @property
@@ -362,22 +403,63 @@ class Unit:
         would be the actuator-that-cannot-deliver defect — measured 2026-11-04,
         when the CI queue itself was the blocker and every P0 sat in it.
         """
-        return self.pickable and self.position != "NEEDS-TEST"
+        # The positions that have a RUNNABLE rail. NEEDS-REVIEW (a reviewer + an
+        # evidence id) and NEEDS-TEST (a runner queue) have an ACTION, not a
+        # command — see `next_action`.
+        return self.pickable and self.position in ("READY-TO-LAND", "NEEDS-FIX", "NO-PR")
 
 
 def _labels(pr: dict[str, Any]) -> set[str]:
-    return {str((lb or {}).get("name") or "") for lb in (pr.get("labels") or [])}
+    """Label names, tolerating the plain-string form a hand-written snapshot uses.
+
+    `[{"name": "x"}]` is GitHub's shape; `["x"]` is the natural hand-written one.
+    The first version assumed the dict and raised AttributeError — a traceback and
+    exit 1, which this tool documents as "the queue was read and answered".
+    """
+    out: set[str] = set()
+    for label in pr.get("labels") or []:
+        if isinstance(label, str):
+            out.add(label)
+        elif isinstance(label, dict):
+            out.add(str(label.get("name") or ""))
+    out.discard("")
+    return out
 
 
 def _fold_constituents(pr: dict[str, Any]) -> set[int]:
-    """The constituents a fold DECLARES, from its machine-readable line only."""
+    r"""The constituents a fold DECLARES — parsed as `batch_open.py` parses them.
+
+    ⛔ AN UNPARSEABLE LINE IS REFUSED, NOT PREFIX-HARVESTED. `batch_open.py` returns
+    `[]` for a line whose tokens do not ALL match `#?\d+` — "a partial parse is how
+    the wrong PR gets closed". This reader used to keep the valid prefix, so
+    `fold-constituents: 10543 (10641 dropped) #10820` made it declare a fold,
+    suppress 10543 as SUPERSEDED-BY-FOLD (permanently "nothing left"), while the
+    owner tool refused to apply the fold at all. All tokens or none.
+    """
     out: set[int] = set()
     for block in FOLD_LINE_RE.findall(str(pr.get("fold_line") or "")):
-        for token in re.split(r"[,\s]+", block.strip()):
-            token = token.lstrip("#")
-            if token.isdigit():
-                out.add(int(token))
+        tokens = [t for t in re.split(r"[,\s]+", block.strip()) if t]
+        if not tokens:
+            continue
+        if not all(re.fullmatch(r"#?[0-9]+", t) for t in tokens):
+            return set()  # refused by the same rule batch_open.py applies
+        out |= {int(t.lstrip("#")) for t in tokens}
     return out
+
+
+def _fold_line_refused(pr: dict[str, Any]) -> bool:
+    """True when the body carries a `fold-constituents:` line that does not parse."""
+    line = str(pr.get("fold_line") or "")
+    if "fold-constituents" not in line.lower():
+        return False
+    blocks = FOLD_LINE_RE.findall(line)
+    if not blocks:
+        return False
+    for block in blocks:
+        tokens = [t for t in re.split(r"[,\s]+", block.strip()) if t]
+        if tokens and not all(re.fullmatch(r"#?[0-9]+", t) for t in tokens):
+            return True
+    return False
 
 
 def _open_pulls_for_issue(snap: Snapshot, issue: int) -> list[dict[str, Any]]:
@@ -429,8 +511,9 @@ def _abstention_reason(entry: object) -> str | None:
     is held or superseded", and could degrade to a merge command at exit 0 with a
     second pickable unit present. Both defects were measured on this change, both
     on the `--from` path (a hand-edited or older snapshot), and both came from the
-    two readers drifting. A present key with NO verdict is not `claim-absent`:
-    `claim-absent` is the one value that means freedom, and silence is not it.
+    two readers drifting. A present key with NO verdict is not `claim-absent`: the
+    three rc-0 verdicts (`claim-absent`, `claim-expired`, `claim-orphaned`) mean
+    freedom, and silence is none of them.
     """
     if not isinstance(entry, dict):
         return "the entry is not a verdict object"
@@ -474,8 +557,9 @@ def _claim_of(snap: Snapshot, *, issue: int | None, pr: int | None, head: str | 
     #:   claim-orphaned  rc 0  the holder cannot be a live lane     -> FREE
     #:   claim-held      rc 1  a live holder                       -> HOLDER
     #:   claim-unreadable rc 2 the registry could not answer       -> ABSTENTION
-    #: An abstention is NOT freedom (the doctrine this module states) and it is
-    #: not a silent note either: it blocks the row AND makes the run incomplete.
+    #: THREE values mean freedom (every rc-0 verdict of `claims.sh`), one means a
+    #: live holder, and one is an abstention. An abstention is NOT freedom and it
+    #: is not a silent note either: it blocks the row AND makes the run incomplete.
     FREE = ("claim-absent", "claim-expired", "claim-orphaned")
     for ref in refs:
         if ref not in snap.claims:
@@ -636,7 +720,7 @@ def build_units(snap: Snapshot, cfg: QueueConfig | None) -> list[Unit]:
             continue
 
         pr_number = int(pr["number"])
-        folds = fold_of.get(pr_number) or []
+        folds = sorted(fold_of.get(pr_number) or [])
         position, detail = _position_for_pr(snap, cfg, pr)
         if pr.get("_link") == "refs":
             detail.append("link: REFS only — merging this PR closes nothing (#10534)")
@@ -695,6 +779,11 @@ def build_units(snap: Snapshot, cfg: QueueConfig | None) -> list[Unit]:
         priority = PRIORITIES[min(inherited)] if inherited else FOLD_PRIORITY
         position, detail = _position_for_pr(snap, cfg, pr)
         holder, readable = _claim_of(snap, issue=None, pr=pr_number, head=str(pr.get("head") or ""))
+        if _fold_line_refused(pr):
+            detail.append(
+                "declared `fold-constituents:` line does not parse — refused WHOLE (the rule "
+                "`batch_open.py` applies), so this fold declares no constituents"
+            )
         if FOLD_LABEL not in labels:
             detail.append(
                 f"fold is UNLABELLED (`{FOLD_LABEL}` absent) — #10909's CI priority and the "
@@ -713,6 +802,15 @@ def build_units(snap: Snapshot, cfg: QueueConfig | None) -> list[Unit]:
         units.append(u)
 
     units.sort(key=lambda u: u.sort_key)
+    seen_targets: dict[str, str] = {}
+    for u in units:
+        if not u.pickable:
+            continue
+        first = seen_targets.get(u.action_target)
+        if first is None:
+            seen_targets[u.action_target] = u.key
+        else:
+            u.duplicate_of = first
     return units
 
 
@@ -743,40 +841,62 @@ def _title_looks_like_fold_without_evidence(snap: Snapshot) -> list[int]:
 
 # ── the next command: a consumer that ranks is a report; this makes it an actuator ──
 def next_command(unit: Unit, repo: str) -> str | None:
-    """The exact command a runner would execute for this row. None when there is none."""
+    """A shell command a runner can EXECUTE. ``None`` when there is nothing to run.
+
+    ⛔ A COMMENT IS NOT A COMMAND. `NEEDS-REVIEW` used to return
+    ``# review PR #N …, then: record-review.sh … --evidence comment:<id>`` — a
+    fully commented-out line that exits 0 having done nothing. A runner that
+    executes `next_command` saw success and no work, indistinguishable from having
+    done it. Anything that needs a human decision (a reviewer, an evidence comment
+    id) is an ACTION, not a command: see `next_action`.
+    """
     if not unit.pickable:
         return None
-    # The PR's head branch is what the harness rails take as their 4th argument, so
-    # a `<branch>` placeholder is NOT pasteable — in a shell `<branch>` is an input
-    # REDIRECTION, not a hole. When the snapshot lacks it, say so instead of
-    # emitting something that fails with "No such file or directory".
-    branch = unit.head_ref or f"<branch of PR #{unit.pr} unknown — read it with gh>"
+    # The rails take the branch as their 4th argument. When the snapshot does not
+    # carry it, resolve it IN THE COMMAND — a `<branch …>` placeholder parses as a
+    # shell input redirection, so the "command" would fail with "No such file".
+    branch = unit.head_ref
+    if branch:
+        branch_shell = f'"{branch}"'
+    else:
+        branch_shell = (
+            f'"$(gh pr view {unit.pr} --repo {repo} --json headRefName -q .headRefName)"'
+        )
+    if unit.kind == "fold" and unit.position == "READY-TO-LAND":
+        return f"bash scripts/orchestrator-harness/merge-one.sh . {repo} {unit.pr} {branch_shell}"
+    if unit.kind == "fold" and unit.position not in ("READY-TO-LAND", "NEEDS-REVIEW", "NEEDS-TEST"):
+        return f"bash scripts/orchestrator-harness/fix-one.sh . {repo} {unit.pr} {branch_shell}"
     if unit.kind == "fold":
-        target = f"PR #{unit.pr}"
-        if unit.position == "READY-TO-LAND":
-            return f"bash scripts/orchestrator-harness/merge-one.sh . {repo} {unit.pr} {branch}"
-        if unit.position == "NEEDS-REVIEW":
-            return (
-                f"# review {target} at {unit.head}, then: "
-                f"~/.pi/agent/scripts/record-review.sh {unit.pr} {unit.head} clean {repo} "
-                "--evidence comment:<review-comment-id>"
-            )
-        if unit.position == "NEEDS-TEST":
-            return f"# {target} is awaiting checks — nothing to dispatch until its head reports"
-        return f"bash scripts/orchestrator-harness/fix-one.sh . {repo} {unit.pr} {branch}"
+        return None
     if unit.position == "NO-PR":
         return f"bash scripts/orchestrator-harness/lane.sh --repo {repo} {unit.issue} lane/{unit.issue}"
     if unit.position == "READY-TO-LAND":
-        return f"bash scripts/orchestrator-harness/merge-one.sh . {repo} {unit.pr} {branch}"
+        return f"bash scripts/orchestrator-harness/merge-one.sh . {repo} {unit.pr} {branch_shell}"
+    if unit.position == "NEEDS-FIX":
+        return f"bash scripts/orchestrator-harness/fix-one.sh . {repo} {unit.pr} {branch_shell}"
+    return None
+
+
+def next_action(unit: Unit, repo: str) -> str | None:
+    """What to DO for a pickable row, when it is not a shell command.
+
+    A review, a wait, or a re-record are real work with no runnable invocation — an
+    evidence comment id does not exist until the review has happened. Saying so is
+    honest; emitting a comment-as-command is not.
+    """
+    if not unit.pickable:
+        return None
+    target = f"#{unit.issue}" if unit.kind == "issue" else f"fold PR #{unit.fold_pr}"
     if unit.position == "NEEDS-REVIEW":
         return (
-            f"# review PR #{unit.pr} at {unit.head}, then: "
-            f"~/.pi/agent/scripts/record-review.sh {unit.pr} {unit.head} clean {repo} "
-            "--evidence comment:<review-comment-id>"
+            f"dispatch a reviewer at {target} head {unit.head} ({repo}), then record it with "
+            f"record-review.sh {unit.pr} <current-head> clean {repo} --evidence comment:<id>"
         )
     if unit.position == "NEEDS-TEST":
-        return f"# PR #{unit.pr} is awaiting checks — nothing to dispatch until its head reports"
-    return f"bash scripts/orchestrator-harness/fix-one.sh . {repo} {unit.pr} {branch}"
+        return f"wait — {target} is in a runner queue; nothing to dispatch until its head reports"
+    if unit.duplicate_of:
+        return f"none — the same unit is already offered as #{unit.duplicate_of}"
+    return None
 
 
 #: Seconds between GitHub calls. The API throttles per-call and a queue sweep
@@ -968,7 +1088,9 @@ def _issue_numbers_in(slug: str) -> set[int]:
     `batch-2026-11-03` claimed issue **2026**. Both then read CLAIMED forever —
     the #8175 "an abandoned claim blocks its issue forever" class, re-entered
     through name matching. `collision_preflight.py`'s rule is anchored
-    (`fix/#?(\d{3,7})(?![0-9])(?:-|$)`); this keeps the boundary half AND drops
+    (`fix/#?(\d{3,7})(?![0-9])(?:-|$)`); this keeps the boundary half for the
+    range ISSUE numbers actually occupy ({3,6} — one digit tighter than that
+    anchored rule, which is anchored to a branch prefix this reader does not have) AND drops
     the two things that are provably not issue numbers: hash runs and dates.
     """
     cleaned = _DATE_SPAN_RE.sub(" ", slug)
@@ -992,8 +1114,12 @@ def _local_holders(repo_root: Path, snap: Snapshot | None = None) -> dict[str, l
     filter: a branch left behind with 0 commits ahead and a clean worktree
     produced nothing, and reading its name as a claim would block the issue
     forever — the defect the claim gate itself was fixed for in 2026-10. So a
-    branch counts only when it carries commits ahead of the base, which is the
-    same annotation `who-is-on` prints beside every holder.
+    branch counts when it carries commits ahead of the base, which is the same
+    annotation `who-is-on` prints beside every holder.
+
+    TWO DELIBERATE EXCEPTIONS, and both fail CLOSED (they may over-block, never
+    free something): a DETACHED worktree has no branch to measure, and an
+    unreadable ahead count cannot be shown to be zero. Both are counted.
     """
     holders: dict[str, list[str]] = {}
     proc = _run(
@@ -1247,6 +1373,7 @@ def collect(repo: str, repo_root: Path, *, base: str = "main") -> tuple[Snapshot
             text = on_disk.read_text(encoding="utf-8")
             source = f"{on_disk} (FALLBACK — origin/{base} unreadable)"
         cfg = parse_config(text)
+        snap.gate_text = text
         snap.config_source = source
         snap.base = cfg.base
         snap.gate = {
@@ -1403,29 +1530,71 @@ def render(
         out.append("  NONE — every measured unit is held or superseded. That is an answer, not an error.")
     else:
         out.append(f"  TOP       {_label(pick)}  ({pick.priority}, {pick.reason}, position {pick.position})")
-        out.append(f"            {next_command(pick, repo)}")
+        cmd = next_command(pick, repo)
+        if cmd:
+            out.append(f"  COMMAND   {cmd}")
+        else:
+            out.append(f"  ACTION    {next_action(pick, repo) or 'none'}")
         if runnable is not None and runnable.key != pick.key:
             out.append(f"  RUNNABLE  {_label(runnable)}  ({runnable.priority}, {runnable.reason})")
             out.append(f"            {next_command(runnable, repo)}")
-            out.append(
-                "            ^ the rank leader has nothing to run (its head is waiting on a "
-                "runner), so this is the first unit a lane can act on NOW."
-            )
+            # ⛔ NAME THE ACTUAL REASON. This said "its head is waiting on a"
+            # "runner" for EVERY top row without a command — so a NEEDS-REVIEW top
+            # row printed "dispatch a reviewer at #N" and, one line later, told the
+            # operator to wait for a runner that would never move it.
+            if pick.position == "NEEDS-REVIEW":
+                why = "the rank leader needs a REVIEW (see ACTION), so nothing runs until it has one"
+            elif pick.position == "NEEDS-TEST":
+                why = "the rank leader's head is waiting on a runner"
+            else:
+                why = f"the rank leader has no runnable command (position {pick.position})"
+            out.append(f"            ^ {why}; this is the first unit a lane can act on NOW.")
         elif runnable is None:
-            out.append("  RUNNABLE  none — every pickable unit is waiting on its own checks.")
+            out.append("  RUNNABLE  none — no pickable unit has a runnable command right now.")
         out.append("  CONSUME   The output is consumed by whoever holds an allowed channel.")
         out.append("            This tool DECIDES; it never acts, and it installs no timer —")
         out.append("            cmux authorises by ancestry, so a launchd timer cannot act on a pane.")
     out.append("")
     unlabelled_folds = _title_looks_like_fold_without_evidence(snap)
-    if unlabelled_folds:
+    # ⛔ TWO POPULATIONS, NEVER ONE COUNT OVER BOTH. "of them" means the TITLE-ONLY
+    # folds; the refused-line set is a different population (a LABELLED fold can
+    # carry an unparseable line too). The first version counted every pull, so the
+    # note printed "1 open PR(s) batch by TITLE ALONE (#912)" and then "2 of them …
+    # (#911, #912)" — a count larger than the population it referred to, naming a
+    # PR that was not in it.
+    refused_all = sorted(int(pr["number"]) for pr in snap.pulls if _fold_line_refused(pr))
+    refused_unlabelled = [n for n in refused_all if n in unlabelled_folds]
+    labelled_refused = [n for n in refused_all if n not in unlabelled_folds]
+    if unlabelled_folds or refused_all:
         out.append("QUEUE NOTE — the fold label path is INERT on this queue")
+    if unlabelled_folds:
         out.append(
             f"  {len(unlabelled_folds)} open PR(s) batch by TITLE ALONE "
             f"({', '.join('#' + str(n) for n in unlabelled_folds[:8])}"
             f"{' …' if len(unlabelled_folds) > 8 else ''}) and carry neither `{FOLD_LABEL}` nor a "
-            "`fold-constituents:` line."
+            "usable `fold-constituents:` line."
         )
+        if refused_unlabelled:
+            # ⛔ A LINE THAT IS PRESENT BUT DOES NOT PARSE IS NOT "NO LINE". The note
+            # used to say these PRs carry no line at all, sending a reader to add
+            # one that is already there in a form `batch_open.py` REFUSES (all
+            # tokens must be `#?\d+`, or the whole line is refused — "a partial
+            # parse is how the wrong PR gets closed"). Name it.
+            out.append(
+                f"  ⚠️ {len(refused_unlabelled)} of them DO carry a `fold-constituents:` line that "
+                f"does not parse ({', '.join('#' + str(n) for n in refused_unlabelled[:5])}) — that "
+                "line is refused whole, exactly as `batch_open.py` refuses it, so it declares no fold."
+            )
+    if labelled_refused:
+        # A LABELLED fold whose declared line is refused declares NOTHING, and its
+        # row would otherwise carry no trace: the label says "fold", the unit has no
+        # constituents, and the reason is nowhere.
+        out.append(
+            f"  ⚠️ {len(labelled_refused)} other open PR(s) carry a non-parsing "
+            f"`fold-constituents:` line ({', '.join('#' + str(n) for n in labelled_refused[:5])}) — "
+            "declared membership is refused whole, so nothing is superseded by them."
+        )
+    if unlabelled_folds or refused_all:
         remedy = (
             "run `uv run python tools/batch_open.py --fold <N> --label-only` to make the "
             "relationship mechanical"
@@ -1462,6 +1631,29 @@ def _label(u: Unit) -> str:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    """Entry point. ANY structural failure inside is INCOMPLETE (exit 2).
+
+    ⛔ THE GUARD IS THE OUTERMOST FRAME, NOT A BLOCK INSIDE IT. Wrapping only
+    `build_units`/`render` left `Snapshot.from_json` (which iterates `claims` and
+    `attestation`) and the `--from` gate branch escaping as a traceback with the
+    interpreter's exit 1 — which this tool documents as "the queue was read and
+    answered: nothing is pickable". Measured by a verifier on this change:
+    `claims: ["x"]`, `claims: "x"`, `attestation: [1, 2]`, `gate: "q"`, `gate: []`
+    and `gate_text: 7` each parsed as JSON, each exited 1. A mis-shaped snapshot is
+    "could not check", never "nothing to do".
+    """
+    try:
+        return _main(argv)
+    except (AttributeError, KeyError, TypeError, ValueError) as exc:
+        print(
+            f"next_work: INCOMPLETE — the snapshot could not be decided "
+            f"({type(exc).__name__}: {exc}). exit 2 is 'could not check'.",
+            file=sys.stderr,
+        )
+        return 2
+
+
+def _main(argv: Sequence[str] | None = None) -> int:
     p = argparse.ArgumentParser(
         prog="next_work.py",
         description=(
@@ -1473,7 +1665,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             "that just finished, a human. Deliberately NOT a timer: cmux authorises by ancestry, so "
             "a launchd job cannot act on a pane, and an actuator that cannot deliver is the defect "
             "this fleet keeps re-learning. The 'NEXT ACTION' block is the actuator half: the exact "
-            "command for the top row.\n\n"
+            "command for the top row — or, when the top row needs a review or is waiting on a "
+            "runner, the ACTION for it plus the first unit below it that DOES have a command.\n\n"
             "IDEMPOTENT BY CONSTRUCTION: the ordering key is total — (priority, position, number) — "
             "so two runs on one snapshot pick the same row; that is what stops two lanes taking the "
             "same PR. NO clock enters the decision: a claim lease's polarity is decided by claims.sh "
@@ -1534,14 +1727,36 @@ def main(argv: Sequence[str] | None = None) -> int:
             if msg not in snap.unreadable:
                 snap.unreadable.append(msg)
         else:
-            cfg = QueueConfig(
-                queue_name=str(snap.gate.get("queue_name") or "default"),
-                base=str(snap.gate.get("base") or "main"),
-                required_checks=tuple(snap.gate.get("required_checks") or ()),
-                required_labels=tuple(snap.gate.get("required_labels") or ()),
-                forbidden_labels=tuple(snap.gate.get("forbidden_labels") or ()),
-            )
-            snap.config_source = f"{snap.config_source} (from snapshot)"
+            # ⛔ THE SAME PARSER ON BOTH PATHS. Rebuilding a `QueueConfig` by hand
+            # from the parsed fields skipped every invariant `parse_config`
+            # enforces — a snapshot whose gate named NO required checks produced
+            # "no unmet conditions", so every PR was READY-TO-LAND with a command
+            # while the live path exits 2 on that very config. Replay the TEXT
+            # through the parser; if the snapshot has no text (an older writer),
+            # apply the one invariant that matters here: a gate with no checks is
+            # not a gate.
+            if snap.gate_text.strip():
+                try:
+                    cfg = parse_config(snap.gate_text)
+                except ConfigError as exc:
+                    cfg = None
+                    snap.unreadable.append(f"queue gate: the snapshot's text does not parse ({exc})")
+            elif not (snap.gate.get("required_checks") or ()):
+                cfg = None
+                snap.unreadable.append(
+                    "queue gate: the snapshot carries no gate text and names no required check — "
+                    "a gate that requires nothing makes every PR landable"
+                )
+            else:
+                cfg = QueueConfig(
+                    queue_name=str(snap.gate.get("queue_name") or "default"),
+                    base=str(snap.gate.get("base") or "main"),
+                    required_checks=tuple(snap.gate.get("required_checks") or ()),
+                    required_labels=tuple(snap.gate.get("required_labels") or ()),
+                    forbidden_labels=tuple(snap.gate.get("forbidden_labels") or ()),
+                )
+            if cfg is not None:
+                snap.config_source = f"{snap.config_source} (from snapshot)"
         repo = args.repo or snap.repo
     else:
         repo = _repo_slug(args.repo, repo_root)
@@ -1588,6 +1803,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                             "detail": u.detail,
                             "pickable": u.pickable,
                             "next_command": None if refused else next_command(u, repo),
+                            "next_action": None if refused else next_action(u, repo),
+                            "duplicate_of": u.duplicate_of,
                         }
                         for u in units
                     ],

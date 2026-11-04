@@ -1510,3 +1510,276 @@ def test_fold_constituents_may_carry_a_hash_prefix():
     fold_row = [u for u in rows if u.kind == "fold"]
     assert fold_row, "a `#`-prefixed constituent list was not read as a fold"
     assert all(u.reason == "SUPERSEDED-BY-FOLD" for u in rows if u.kind == "issue")
+
+
+# ── the replayed gate goes through the SAME parser (review round 5, #1) ────
+def test_a_replayed_gate_with_no_required_check_is_refused(tmp_path: Path):
+    """A gate that requires nothing makes every PR landable — on either path.
+
+    The live path exits 2 because `parse_config` refuses a queue rule naming no
+    `check-success`. The replay path rebuilt the config by hand and validated
+    nothing, so a snapshot with `required_checks: []` produced "no unmet
+    conditions" and a merge command for a PR whose CI did not exist at all.
+    """
+    raw = _rich_snapshot().to_json()
+    raw["gate"] = {**raw["gate"], "required_checks": []}
+    raw["gate_text"] = ""
+    raw["check_runs"] = {}
+    path = tmp_path / "empty-gate.json"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    assert _run_main(["--from", str(path), "--repo", REPO]) == 2
+
+
+def test_a_replayed_gate_text_is_parsed_by_the_one_parser(tmp_path: Path):
+    raw = _rich_snapshot().to_json()
+    raw["gate_text"] = "queue_rules:\n  - name: q\n    queue_conditions:\n      - nonsense-condition\n"
+    path = tmp_path / "bad-gate.json"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    assert _run_main(["--from", str(path), "--repo", REPO]) == 2
+
+
+# ── one ACTION TARGET, one command-bearing row (review round 5, #2) ───────
+def test_two_issues_sharing_a_pr_offer_only_one_command():
+    """One PR lands several issues (#10726 closes 7) — that is ONE action.
+
+    Both rows stayed pickable with the SAME command, so a consumer taking two rows
+    (the documented parallelism pattern) worked one PR twice — the duplicate pick
+    this tool exists to prevent, one level below `pick`.
+    """
+    s = snap(
+        issues=[issue(100), issue(101)],
+        pulls=[{**pull(2001, closes=[100, 101]), "head_ref": "fix/2001-thing"}],
+        check_runs={"a" * 40: all_green()},
+        attestation={"2001": {"verdict": "head"}},
+        merge_tree={"2001": {"clean": True}},
+    )
+    rows = units_for(s)
+    with_cmd = [u for u in rows if next_command(u, REPO)]
+    assert len(with_cmd) == 1, [(u.key, next_command(u, REPO)) for u in with_cmd]
+    other = next(u for u in rows if u is not with_cmd[0])
+    assert not other.pickable
+    assert other.duplicate_of == with_cmd[0].key
+
+
+def test_a_fold_and_its_issue_do_not_both_offer_a_command():
+    fold = {**pull(900, head="9" * 40, labels=[FOLD_LABEL], body="fold-constituents: 1001"),
+            "head_ref": "batch/fold-900"}
+    s = snap(
+        issues=[issue(100)],
+        pulls=[fold, pull(1001, closes=[100])],
+        check_runs={"9" * 40: all_green(), "a" * 40: all_green()},
+        attestation={"900": {"verdict": "head"}, "1001": {"verdict": "head"}},
+        merge_tree={"900": {"clean": True}, "1001": {"clean": True}},
+    )
+    cmds = [next_command(u, REPO) for u in units_for(s) if next_command(u, REPO)]
+    assert len(cmds) == len(set(cmds)), f"two rows emit one command: {cmds}"
+
+
+# ── a comment is not a command (review round 5, #3) ───────────────────────
+def test_needs_review_is_an_action_not_a_command():
+    """A commented-out line exits 0 having done nothing — indistinguishable from done."""
+    s = snap(
+        issues=[issue(100)],
+        pulls=[{**pull(1001, closes=[100]), "head_ref": "fix/100-thing"}],
+        check_runs={"a" * 40: all_green()},
+        attestation={"1001": {"verdict": "norecord"}},
+        merge_tree={"1001": {"clean": True}},
+    )
+    from tools.next_work import next_action
+
+    (row,) = units_for(s)
+    assert row.position == "NEEDS-REVIEW"
+    assert next_command(row, REPO) is None, "a shell comment was offered as a command"
+    action = next_action(row, REPO) or ""
+    assert "reviewer" in action and row.head in action + str(row.head)
+    assert not row.executable
+    text, _ = render(units_for(s), CFG, s, repo=REPO, top=5)
+    assert "ACTION" in text and "COMMAND" not in text.split("CONSUME")[0]
+
+
+# ── an unknown branch must still produce a pasteable command (round 5, #4) ─
+def test_an_unknown_branch_resolves_inside_the_command():
+    s = snap(
+        issues=[issue(100)],
+        pulls=[pull(1001, closes=[100])],  # no head_ref
+        check_runs={"a" * 40: all_green()},
+        attestation={"1001": {"verdict": "head"}},
+        merge_tree={"1001": {"clean": True}},
+    )
+    (row,) = units_for(s)
+    cmd = next_command(row, REPO) or ""
+    assert "<" not in cmd and ">" not in cmd, f"a <…> token is a shell redirection: {cmd}"
+    assert "headRefName" in cmd
+
+
+# ── the fold line follows batch_open.py's grammar exactly (round 5, #5) ───
+def test_an_unparseable_fold_line_is_refused_not_prefix_harvested():
+    from tools.next_work import _fold_constituents, _fold_line_refused
+
+    ok = {"fold_line": "fold-constituents: #1501, #1502"}
+    assert _fold_constituents(ok) == {1501, 1502}
+    assert not _fold_line_refused(ok)
+
+    refused = {"fold_line": "fold-constituents: 10543 (10641 dropped) #10820"}
+    assert _fold_constituents(refused) == set(), (
+        "batch_open.py refuses this line; prefix-harvesting it suppresses 10543 forever"
+    )
+    assert _fold_line_refused(refused)
+
+    none = {"fold_line": "Closes #1 #2"}
+    assert _fold_constituents(none) == set()
+    assert not _fold_line_refused(none)
+
+
+def test_an_unparseable_fold_line_does_not_supersede_a_constituent():
+    fold = pull(900, head="9" * 40, labels=[], body="fold-constituents: 1001 (dropped) #1502")
+    s = snap(
+        issues=[issue(100)],
+        pulls=[fold, pull(1001, closes=[100])],
+        check_runs={"9" * 40: all_green(), "a" * 40: all_green()},
+        attestation={"1001": {"verdict": "head"}},
+        merge_tree={"1001": {"clean": True}},
+    )
+    rows = units_for(s)
+    assert not [u for u in rows if u.kind == "fold"], "a refused fold line created a fold"
+    assert next(u for u in rows if u.issue == 100).reason != "SUPERSEDED-BY-FOLD"
+
+
+# ── a mis-shaped snapshot exits 2, not a traceback (round 5, #6) ──────────
+def test_a_mis_shaped_snapshot_exits_2(tmp_path: Path):
+    raw = _rich_snapshot().to_json()
+    for pr in raw["pulls"]:
+        pr["labels"] = ["ship-it"]  # hand-written form: plain strings
+    path = tmp_path / "string-labels.json"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    assert _run_main(["--from", str(path), "--repo", REPO]) in (0, 1), (
+        "plain-string labels are a legitimate hand-written shape and must be read"
+    )
+
+    raw2 = _rich_snapshot().to_json()
+    raw2["local_holders"] = ["not", "a", "mapping"]
+    path2 = tmp_path / "bad-holders.json"
+    path2.write_text(json.dumps(raw2), encoding="utf-8")
+    assert _run_main(["--from", str(path2), "--repo", REPO]) == 2
+
+
+# ── two folds claiming one constituent: the report must not depend on order ─
+def test_two_folds_for_one_constituent_report_the_lowest():
+    a = pull(901, head="9" * 40, labels=[FOLD_LABEL], body="fold-constituents: 1001")
+    b = pull(900, head="8" * 40, labels=[FOLD_LABEL], body="fold-constituents: 1001")
+    for pulls in ([a, b], [b, a]):
+        s = snap(issues=[issue(100)], pulls=[*pulls, pull(1001, closes=[100])])
+        row = next(u for u in units_for(s) if u.issue == 100)
+        assert row.fold_pr == 900
+
+
+# ── a mis-shaped snapshot exits 2 EVERYWHERE, including before the decision ──
+@pytest.mark.parametrize(
+    "mangle",
+    [
+        {"claims": ["x"]},
+        {"claims": "x"},
+        {"attestation": [1, 2]},
+        {"gate": "queue_rules:"},
+        {"gate": []},
+        {"gate_text": 7},
+        {"local_holders": ["not", "a", "mapping"]},
+        {"issues": "x"},
+        {"pulls": ["200"]},
+    ],
+)
+def test_any_mis_shaped_snapshot_exits_2(tmp_path: Path, mangle):
+    """Exit 1 means "the queue was read and answered". A shape the tool cannot
+    decide is "could not check" — and the guard must cover the LOAD, not just the
+    decision: `claims: ["x"]` used to raise out of `from_json` as a traceback with
+    the interpreter's own exit 1."""
+    raw = _rich_snapshot().to_json()
+    raw.update(mangle)
+    path = tmp_path / "mangled.json"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    assert _run_main(["--from", str(path), "--repo", REPO]) == 2, mangle
+
+
+def test_the_runnable_line_names_the_ACTUAL_reason():
+    """The parenthetical said "waiting on a runner" for every top row without a command.
+
+    A NEEDS-REVIEW top row printed "dispatch a reviewer at #N" and, one line later,
+    told the operator to wait for a runner that would never move it.
+    """
+    review_top = snap(
+        issues=[issue(100), issue(200)],
+        pulls=[pull(1001, closes=[100]), {**pull(2002, closes=[200], head="b" * 40)}],
+        check_runs={"a" * 40: all_green(), "b" * 40: _runs_for_position("NEEDS-FIX")},
+        attestation={"1001": {"verdict": "norecord"}, "2002": {"verdict": "head"}},
+        merge_tree={"1001": {"clean": True}, "2002": {"clean": True}},
+    )
+    text, pick = render(build_units(review_top, CFG), CFG, review_top, repo=REPO, top=5)
+    assert pick is not None and pick.position == "NEEDS-REVIEW"
+    assert "RUNNABLE" in text
+    assert "REVIEW" in text.split("RUNNABLE", 1)[1].split("\n", 1)[0] or "REVIEW" in text
+    assert "waiting on a runner" not in text, "the wrong cause was printed for a NEEDS-REVIEW top row"
+
+    test_top = snap(
+        issues=[issue(100), issue(200)],
+        pulls=[pull(1001, closes=[100]), pull(2002, closes=[200], head="b" * 40)],
+        check_runs={"a" * 40: _runs_for_position("NEEDS-TEST"), "b" * 40: _runs_for_position("NEEDS-FIX")},
+        attestation={"1001": {"verdict": "head"}, "2002": {"verdict": "head"}},
+        merge_tree={"1001": {"clean": True}, "2002": {"clean": True}},
+    )
+    text2, _ = render(build_units(test_top, CFG), CFG, test_top, repo=REPO, top=5)
+    assert "waiting on a runner" in text2
+
+
+def test_the_queue_note_distinguishes_a_missing_fold_line_from_a_refused_one():
+    """A line that does not parse is not "no line" — and `_fold_line_refused` was dead.
+
+    The note told a reader these PRs carry no `fold-constituents:` line and to add
+    one — when the line is already there in a form `batch_open.py` refuses whole.
+    """
+    prose = pull(901, head="9" * 40, labels=[], body="fold-constituents: 1001 (dropped) #1502")
+    prose["title"] = "batch: fold 32 open tortoise PRs into one validated tree"
+    s = snap(issues=[issue(100)], pulls=[prose, pull(1001, closes=[100])])
+    text, _ = render(build_units(s, CFG), CFG, s, repo=REPO, top=5)
+    assert "QUEUE NOTE" in text
+    assert "does not parse" in text
+    assert "#901" in text.split("does not parse", 1)[1] or "901" in text.split("QUEUE NOTE", 1)[1]
+
+
+def test_the_queue_note_counts_two_populations_separately():
+    """`N of them` must not name a PR that is not one of "them".
+
+    Measured: one title-only fold (#912) plus a LABELLED fold with a refused line
+    (#911) produced "1 open PR(s) batch by TITLE ALONE (#912)" followed by
+    "⚠️ 2 of them … (#911, #912)" — a count larger than the population it referred
+    to, naming a PR that was not in it.
+    """
+    labelled_refused = {
+        **pull(911, head="9" * 40, labels=[FOLD_LABEL], body="fold-constituents: 1001 (dropped)"),
+    }
+    labelled_refused["title"] = "batch: fold things"
+    title_only = {**pull(912, head="8" * 40, labels=[], body="fold-constituents: 1001 (dropped)")}
+    title_only["title"] = "batch: fold 32 open tortoise PRs into one validated tree"
+    s = snap(issues=[issue(100)], pulls=[labelled_refused, title_only, pull(1001, closes=[100])])
+    text, _ = render(build_units(s, CFG), CFG, s, repo=REPO, top=5)
+    note = text.split("QUEUE NOTE", 1)[1].split("TOP ", 1)[0]
+    assert "1 of them DO carry" in note, note
+    assert "1 other open PR(s) carry a non-parsing" in note, note
+    # the labelled one is reported in ITS own line, not inside the "of them" count
+    them = next(ln for ln in note.splitlines() if "of them DO carry" in ln)
+    assert "#912" in them and "#911" not in them, them
+
+
+def test_a_labelled_fold_with_a_refused_line_says_so_on_its_row():
+    """A label says "fold"; a refused line means it declares NOTHING. Say it."""
+    fold = {**pull(911, head="9" * 40, labels=[FOLD_LABEL], body="fold-constituents: 1001 (dropped)")}
+    s = snap(
+        issues=[],
+        pulls=[fold, pull(1001, closes=[100])],
+        check_runs={"9" * 40: all_green()},
+        attestation={"911": {"verdict": "head"}},
+        merge_tree={"911": {"clean": True}},
+    )
+    fold_row = next(u for u in units_for(s) if u.kind == "fold")
+    assert any("refused WHOLE" in d for d in fold_row.detail), fold_row.detail
+    text, _ = render(units_for(s), CFG, s, repo=REPO, top=5)
+    assert "non-parsing" in text
