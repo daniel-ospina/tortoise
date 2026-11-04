@@ -788,12 +788,14 @@ mechanisms:
       the base, and it is what makes `3k minutes`/`3000 minutes` (a FALSE
       ACCUSATION at the base) agree now. Pinned by
       `tests/test_state_value_verbatim_10360.py::test_a_magnitude_prefix_beside_a_unit_word_is_COMPOSED_not_refused`.
-      ⛔ The OPPOSITE direction is REFUSED, and it is a FALSE ACCUSATION: when the
-      magnitude side's unit is an UNMAPPED spelling (`5k millis`, `5k dys`) the
+      ⛔ The OPPOSITE direction is REFUSED, and it is a FALSE ACCUSATION: when
+      the magnitude side carries no MAPPED unit — either a spelling outside both
+      tables (`5k millis`, `5k dys`) or NO unit word at all (`5k` alone) — the
       binding is a bare `5k`, so `_magnitude_agrees`' `_K_ABBREVIATES` gate
       (`{"km", "kg"}`) refuses it against any KNOWN unit (`5000 ms`, `5000
-      days`) and the truthful point is withheld. PRE-EXISTING (`5k millis`
-      against `5000 hours` is refused at `origin/main` `525fde4a9` too); this
+      days`) and the truthful point is withheld. PRE-EXISTING in mechanism (`5k
+      millis` against `5000 hours` is refused at `origin/main` `525fde4a9` too);
+      this
       widen extended which right-hand units trigger it. ⛔ NOT fixed here on
       purpose: that gate's narrowness is a recorded decision (#10513 review P1 —
       `20k`/`20m` is 20 km against 20 metres), so splitting it needs that ruling
