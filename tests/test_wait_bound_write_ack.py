@@ -263,9 +263,12 @@ def test_a_PROPS_PAYLOAD_defeats_the_dedup_fold_so_it_is_never_called_safe():
     # same id but the second lands on the dedup-hit UPDATE leg, emits
     # `PointRevised` and bumps `updatedAt` — so the repeat is visible to a reader
     # even though it converged, and "repeating it converges" is the wrong promise.
-    for sibling in ({"authoredBy": "me"}, {"credibility": 0.8}):
+    for sibling in ({"authoredBy": "me"}, {"credibility": 0.8},
+                    {"credibility": 0}, {"credibility": 0.0}):
         assert safe("tortoise_create_point", {"content": "X", **sibling}) is False, (
-            f"{list(sibling)[0]} is folded into props by the handler")
+            f"{sibling} is folded into props by the handler — note `credibility=0`"
+            " is a real tier (T0), and `0 == False` in Python, so a truthiness test"
+            " reads it as absent while the handler folds it (`0 is not None`)")
 
 
 def test_a_STATE_conditional_writer_is_never_called_safe():
@@ -551,17 +554,24 @@ def test_approve_merge_is_not_advertised_as_repeatable():
     assert data["retry_rule"] == ms._WAIT_BOUND_RETRY_RULE_UNSAFE
 
 
-def test_a_getter_in_the_write_tier_is_repeatable():
-    """`tortoise_get_source_reliability` is a getter that writes a CACHE.
+def test_a_getter_that_RE_STORES_a_clock_dependent_value_is_not_repeatable():
+    """`tortoise_get_source_reliability` looks like a getter and is not one.
 
-    The `write` tier's default retry-safety is `False`, so the refusal THIS PR
-    adds would hand a caller the non-idempotent verdict for a reliability lookup
-    — "do NOT repeat it" — when repeating is the documented way to obtain the
-    value at all. Its recompute-then-write-through is convergent, and its entry
-    now declares it.
+    It refreshes a cache on the Source node, and the value it refreshes is
+    CLOCK-dependent — `mean = alpha / (alpha + beta)` over a recency-decayed
+    prior whose `now` defaults to the wall clock — so a repeat past the cache
+    interval re-derives and RE-STORES a different float (measured: 0.65087406 →
+    0.65087345 at +1 h → 0.65043060 at +30 d). An earlier revision of this PR
+    declared it repeatable on "a repeat converges on the same value", which that
+    measurement falsifies.
+
+    It is the same property this repo already uses to keep the `maintenance`
+    tier non-idempotent (`tortoise_compute_confidence`: "a repeat call re-stores
+    a re-derived score"), so the `write` tier default stands: a repeat is a real
+    write, and the refusal says so.
     """
     assert _error(ms._wait_bound_refusal_result(
-        "tortoise_get_source_reliability"))["data"]["retry_safe"] is True
+        "tortoise_get_source_reliability"))["data"]["retry_safe"] is False
 
 
 def test_an_unresolvable_write_name_still_fails_closed():

@@ -645,7 +645,7 @@ def _wait_bound_refused() -> bool:
 #:
 #: ⚠️ There is deliberately NO generic read-back recipe here, and that is a
 #: correctness decision rather than an omission. A single recipe CANNOT be sound
-#: across the write surface, and two ways it is unsound are both measured:
+#: across the write surface, and three ways it is unsound are all measured:
 #:
 #:   * ``tortoise_search`` (``entity_type="point"``) indexes ``content`` +
 #:     ``search_keys`` only, while ``sdk.create_operator`` writes a ``:Point``
@@ -806,14 +806,6 @@ def _call_carries_props(scope) -> bool:
     return bool(scope.get("props"))
 
 
-#: The `tortoise_create_point` arguments its handler folds INTO the props dict —
-#: `merged = dict(props or {}); if authoredBy: merged["authoredBy"] = authoredBy;
-#: if credibility is not None: merged["credibility"] = credibility`. They are
-#: therefore the SAME channel as `props`, and the seam cannot see the fold, so a
-#: call carrying one carries props.
-_PROPS_FOLDING_ARGUMENTS = ("authoredBy", "credibility")
-
-
 def _call_folds_siblings_into_props(arguments) -> bool:
     """Whether a named argument will be folded into props before the write.
 
@@ -828,7 +820,21 @@ def _call_folds_siblings_into_props(arguments) -> bool:
     """
     if not isinstance(arguments, dict):
         return False
-    return any(arguments.get(k) not in (None, "", False) for k in _PROPS_FOLDING_ARGUMENTS)
+    # ⛔ Mirror the handler's OWN fold conditions EXACTLY — `merged = dict(props or
+    # {}); if authoredBy: merged["authoredBy"] = authoredBy; if credibility is not
+    # None: merged["credibility"] = credibility`. A generic "is it truthy" test is
+    # WRONG here and fails OPEN: `credibility` is a documented numeric ladder
+    # ("T0-T4 or numeric 0-4") and `0 == False` in Python, so `credibility=0` read
+    # as absent while the handler folds it — measured, that shipped `retry_safe:
+    # true` for a call whose repeat then runs the dedup-hit word leg
+    # (`credibility_prior(0)` → `('T0', …)`, so `_word_applied` is set and
+    # `set_point_baseline` + `update_point` run): a real write on the "converged"
+    # path, in the failing direction.
+    if arguments.get("authoredBy"):                 # handler: `if authoredBy:`
+        return True
+    if arguments.get("credibility") is not None:     # handler: `is not None`
+        return True
+    return False
 
 
 def _declared_dry_run_default(name: str):
@@ -897,7 +903,8 @@ def _write_retry_safety(name: str, arguments=None) -> bool:
     dedup), while ``tortoise_create_operator`` and ``tortoise_ingest`` do not —
     for an operator because it has no dedup at all, and for ingest because no
     finite predicate can prove its bundle converges (see
-    ``_write_retry_safety``). That is exactly the asymmetry #10849 measured, and
+    ``_arguments_disable_convergence``). That is exactly the asymmetry #10849
+    measured, and
     the reason a blind retry duplicates an edge and double-counts its EP weight.
 
     Deriving it from the entry rather than listing names here is the #4170 rule:

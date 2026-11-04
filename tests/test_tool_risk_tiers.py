@@ -346,9 +346,14 @@ class TestHintsCannotDrift:
             # clients read as `idempotentHint`.
             ("tortoise_create_point", True),
             ("tortoise_create_source", True),
-            # the only GETTER in the write tier: a recompute-then-write-through
-            # of a stale cache converges on the same value (#10849 review).
-            ("tortoise_get_source_reliability", True),
+            # ⛔ `tortoise_get_source_reliability` is NOT here. It is a getter in
+            # the write tier, and an earlier revision of this PR declared it
+            # repeatable on "a repeat converges on the same value" — but the value
+            # is CLOCK-dependent (recency-decayed prior, `now` defaults to the wall
+            # clock), so a repeat past the cache interval re-stores a DIFFERENT
+            # float: 0.65087406 -> 0.65087345 at +1 h -> 0.65043060 at +30 d. Same
+            # property that keeps `compute_confidence` non-idempotent.
+            ("tortoise_get_source_reliability", False),
             # ⛔ `tortoise_ingest` is NOT here. Three readings each looked
             # convergent and each was falsified: its entities leg is append-only
             # for document/event, a bundle may arrive as a JSON string parsed

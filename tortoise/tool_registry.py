@@ -1266,16 +1266,17 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "cache-consistency-checked. NOTE: refreshes the reliability "
                     "cache on the Source node (write-through projection), so not read-only.",
         risk="write",
-        # ⛔ IDEMPOTENT, and it must say so (#10849 review). This is the only
-        # GETTER in the write tier, and until this line the `write` tier default
-        # advertised `idempotentHint: false` for it, so the refusal THIS PR adds
-        # would have handed a caller the non-idempotent verdict for a reliability
-        # lookup — "do NOT repeat it" — when repeating is the documented way to
-        # obtain the value at all. The operation is a recompute-then-write-through
-        # of a cache the SDK describes as "a documented projection — recomputed
-        # when stale": a repeat converges on the same value, which is exactly the
-        # retry-safety the flag means.
-        idempotent=True,
+        # ⛔ NOT idempotent, and an earlier revision of this PR declared it so
+        # (#10849 review). The reasoning was "a repeat converges on the same
+        # value" — but the value is CLOCK-dependent: `mean = alpha / (alpha +
+        # beta)` over `_compute_source_prior` → `aggregate_prior(recency_decay=…)`,
+        # whose `now` defaults to the wall clock, so a repeat past the cache
+        # interval re-derives and re-STORES a different float (measured 0.65087406
+        # → 0.65087345 at +1 h → 0.65043060 at +30 d). That is the same property
+        # this file already uses to keep the `maintenance` tier non-idempotent
+        # (`tortoise_compute_confidence`: "a repeat call re-stores a re-derived
+        # score"). So the `write` tier default stands: a repeat is a real write.
+        idempotent=False,
         http_policy=True,
         sdk_method="get_source_reliability",
     ),
