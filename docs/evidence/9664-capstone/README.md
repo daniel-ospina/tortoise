@@ -56,7 +56,7 @@ body is byte-identical under them), and again at `a310c1d9c` (2026-10-25) for th
 residuals — row 2b's *"the catalog union (#2714 indicator 3)"* clause and the
 starter set's `TORTOISE_STARTER_PACKS` override. Only **one printed row changes**
 there (2b's evidence line gains the write-gate reading the clause now measures:
-`None` admits, an explicit set constrains; every other row, and the `25 premises, 0
+`None` admits, an explicit set constrains; every other row, and the `26 premises, 0
 unmeasured sections` total, is unchanged); deployed
 `commit_sha 81f5594dce` — an
 ancestor of `origin/main` `2bf86487c1`, **39 commits behind** it

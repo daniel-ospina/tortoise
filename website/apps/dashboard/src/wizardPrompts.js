@@ -41,7 +41,8 @@ export const WIZARD_STEP2_TEXT = `Call tortoise_health to verify the connection,
 // RETIRED and `_RetiredToolTransform` strips retired names from `list_tools`
 // while still serving them on `get_tool` (tortoise/mcp_server.py;
 // tortoise/tool_registry.py retires it in favour of
-// `tortoise_overview(section="health")`). Shipping the shared body to a
+// `tortoise_graph_overview(section="health")`, the #4282 container). Shipping the
+// shared body to a
 // grant-based client asks it for a call it can never make, so the verify half of
 // its first job fails or reports a missing tool.
 //
@@ -51,7 +52,7 @@ export const WIZARD_STEP2_TEXT = `Call tortoise_health to verify the connection,
 // below gets the call every client can actually make, and the JS guard reds
 // until someone classifies it. The other polarity (default = legacy) would hand
 // a future grant-based harness a retired name silently, which is this very bug.
-export const ADVERTISED_VERIFY_FILE_STEP_TEXT = `Call tortoise_overview(section="health") to verify the connection, then tortoise_create_point to file my first memory.\nDocs: https://tortoise.premiselabs.co/docs`
+export const ADVERTISED_VERIFY_FILE_STEP_TEXT = `Call tortoise_graph_overview(section="health") to verify the connection, then tortoise_create_point to file my first memory.\nDocs: https://tortoise.premiselabs.co/docs`
 
 //: The leaves that write a config file (or run the installer) and therefore see
 //: the RETIRED name answered on `get_tool`. #2827's shared body is correct for
@@ -145,7 +146,7 @@ export function wizardPromptText(harness, step, key, mode) {
     // card forces it), so this sentence may not assert that it is installed — a
     // skipper would copy a first job that tells its agent to read a file it does
     // not have. The served document is named as the fallback instead.
-    // The verify call is `tortoise_overview(section="health")`, NOT the retired
+    // The verify call is `tortoise_graph_overview(section="health")`, NOT the retired
     // `tortoise_health`: a tool-grant client builds its grant from `tools/list`,
     // which does not advertise retired names (see ADVERTISED_VERIFY_FILE_STEP_TEXT).
     if (step === 1) return `You have Tortoise connected over MCP (the tortoise_* tools).\nRead the how-to-use-tortoise skill before your first write — it is the source of truth for how to add memories, the links between them, and when to use which. If it is not installed, read it at ${servedSkillUrl('how-to-use-tortoise')} first.\n${onboardingInstructions}\n${verifyFileStepText('chatgpt')}`

@@ -91,14 +91,27 @@ family_rank:
 # (create 18->17, operate 7->6, link 4->5 — `tortoise_manage_sources` derives
 # `link`). Recorded deliberately, per the note above: a change to the
 # distribution requires editing the registry AND recording the expectation here.
+#
+# #4282 (the `graph_overview` container, the first of the approved 27): six advertised
+# tools retired INTO one container, 81 live -> 76, and three keywords moved with them —
+# `list` 9 -> 8 (`tortoise_audit` derives `list`), `check` 8 -> 5 (`check_structure`,
+# `summarize_structure` and `validate_domain` derive `check`), `find` 6 -> 5
+# (`dream_health` derives `find`). `fetch` is UNCHANGED at 14: `tortoise_overview` (−1)
+# and `tortoise_graph_overview` (+1) both derive it, so the container trades one row for
+# another. Every number below is re-derived from the moved registry by
+# `tools/surface_manifest.py check`, which reds on any disagreement.
+# `tortoise_list_graphs` / `_namespaces` / `_topics` and `tortoise_issue_insight` are NOT
+# in this move: `tools/bridge_table.py`'s authored Phase-0.1 map sends them to the
+# tenancy block and to `list_knowledge` / `search_knowledge`, so they retire in the batch
+# that lands those containers.
 baseline_counts:
   fetch: 14
   create: 17
-  list: 9
-  check: 8
+  list: 8
+  check: 5
   operate: 6
   update: 8
-  find: 6
+  find: 5
   delete: 6
   link: 5
   trace: 2

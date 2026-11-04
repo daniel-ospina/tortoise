@@ -107,8 +107,11 @@ class TestTheRiskAxis:
         only thing this test may assert is a figure no code path can recompute.
         """
         reading = {e.name for e in served() if e.risk in ("read", MAINTENANCE_TIER)}
-        assert len(reading) == 51, sorted(reading)   # 48 read + 3 maintenance
-        assert len(served()) == 99, sorted(e.name for e in served())
+        # #4282: `tortoise_graph_overview` joins as a `read` (+1) while the six names it
+        # absorbed retire, so the SERVED set (live + retired shims) grows by exactly the
+        # one new entry: 99 -> 100 reading-eligible 51 -> 52.
+        assert len(reading) == 52, sorted(reading)   # 49 read + 3 maintenance
+        assert len(served()) == 100, sorted(e.name for e in served())
 
     def test_the_destructive_set_is_pinned_by_name(self):
         """`destructive` means "removes or overwrites user-authored state".

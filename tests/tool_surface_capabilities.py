@@ -282,6 +282,10 @@ NON_SDK_WRITER_TOOLS: frozenset[str] = frozenset({
     "tortoise_operator_action",
 })
 NON_SDK_READ_TOOLS: frozenset[str] = frozenset({
+    # #4282: the `graph_overview` container. It dispatches per `section` to the doors it
+    # absorbed, so it binds no single SDK method — the same shape `tortoise_overview` had
+    # before it retired into this container.
+    "tortoise_graph_overview",
     "tortoise_overview", "tortoise_get", "tortoise_onboarding_state",
     "tortoise_onboarding_github_status",
     # #4035: handler-served reads (declaration corrected to sdk_method="")

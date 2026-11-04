@@ -992,7 +992,7 @@ export function analyticsHarnessOf(leaf) {
 //     (harnesses.test.js). Six of them call `tortoise_health` (still answered on
 //     `get_tool`); chatgpt cannot, because its grant is built from `tools/list`
 //     and retired names are not advertised there, so its body names
-//     `tortoise_overview(section="health")` (wizardPrompts.js
+//     `tortoise_graph_overview(section="health")` (wizardPrompts.js
 //     ADVERTISED_VERIFY_FILE_STEP_TEXT / the legacy list). The workflows prompt is
 //     asserted too, but it embeds
 //     that same step-2 text, so it is a restatement, not second coverage;

@@ -399,7 +399,7 @@ def test_9660_chatgpt_first_job_names_only_ADVERTISED_tools():
     The step used to end with the SHARED verify body — "Call tortoise_health" —
     while three artifacts in the same tree said that call is impossible from
     ChatGPT: `tool_registry.py` retires `tortoise_health` in favour of
-    `tortoise_overview(section="health")`; `_RetiredToolTransform` serves retired
+    `tortoise_graph_overview(section="health")`; `_RetiredToolTransform` serves retired
     names on `get_tool` **without advertising them in `list_tools`**; and the
     onboarding document this journey hands over tells the agent to use the
     ADVERTISED form. The verify half of the journey's first action therefore
@@ -428,7 +428,7 @@ def test_9660_chatgpt_first_job_names_only_ADVERTISED_tools():
         f"{sorted(mentioned - advertised)}")
     # The substance, so a rewrite cannot satisfy the rule with a tool that is
     # advertised but does nothing for onboarding.
-    assert 'tortoise_overview(section="health")' in body, (
+    assert 'tortoise_graph_overview(section="health")' in body, (
         "the ChatGPT first job must verify through the advertised health section")
     assert "tortoise_create_point" in body, (
         "…and must still file the first memory, which is what marks it connected")
@@ -1232,7 +1232,10 @@ def test_skill_decide_protocol_tools_are_registered_mcp_tools():
     assert not missing, (
         f"decide-protocol tools not registered in mcp_server.py: {missing}")
     # the ranking read-out requires the EP computation + structure check
-    for required in ("tortoise_compute_confidence", "tortoise_check_structure",
+    # #4282: the structure check is reached through the `graph_overview` container
+    # now — `tortoise_check_structure` retired into it, and this protocol must run on
+    # the ADVERTISED names or a tool-grant client cannot follow it.
+    for required in ("tortoise_compute_confidence", "tortoise_graph_overview",
                      "tortoise_create_operator", "tortoise_health"):
         assert required in tokens, f"decide protocol must use {required}"
 

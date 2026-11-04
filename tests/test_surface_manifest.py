@@ -1110,7 +1110,7 @@ def test_the_guard_reds_when_the_live_surface_grows_past_the_high_water_pin(tmp_
     # The pin is set ONE BELOW the live count so the run must red: the property
     # under test is "growth past the pin reds", not any particular number.
     # (#3540 moved the live count 82 -> 81, so the pin moves with it.)
-    doc["high_water_counts"] = {"tools": 80, "sdk_public_methods": 150}
+    doc["high_water_counts"] = {"tools": 75, "sdk_public_methods": 150}
     result = _run("tools/surface-guard.py", "--manifest", _write(doc, tmp_path))
     assert result.returncode == 1, "growth past the frozen pin did not red the gate"
     assert "high-water pin" in result.stdout, result.stdout
@@ -3494,10 +3494,14 @@ def test_the_render_derives_the_uncalled_count_from_the_baseline(tmp_path, monke
     tool_rows = [r for r in doc["rows"] if not str(r.get("name", "")).startswith("sdk:")]
     committed_never = sum(1 for r in tool_rows if sm.observed_usage(r) == "never called")
     victim = next(r for r in tool_rows if sm.observed_usage(r) == "never called")
-    rest = [p.strip() for p in (victim.get("used_by") or "").split(",") if p.strip()]
-    victim["used_by"] = ", ".join(["agents", *[p for p in rest[1:] if p not in ("agents", "never called")]])
+    # ⛔ Pick the dropped row BEFORE the perturbation, not after. The flip below makes
+    # `victim` an `in use` row, so selecting afterwards could pick `victim` itself and the
+    # "they must differ" assertion below would compare a row with itself — which is what
+    # happened when a surface change (an inserted row) reordered the list (#4282).
     dropped = next(r for r in tool_rows if sm.observed_usage(r) == "in use")
     assert dropped is not victim, "the flipped row and the dropped row must differ"
+    rest = [p.strip() for p in (victim.get("used_by") or "").split(",") if p.strip()]
+    victim["used_by"] = ", ".join(["agents", *[p for p in rest[1:] if p not in ("agents", "never called")]])
     doc["rows"] = [r for r in doc["rows"] if r is not dropped]
 
     # Recompute from the PERTURBED document — assigning these above would make the check a
@@ -3648,7 +3652,10 @@ def test_the_live_surface_is_the_baseline_the_guard_froze():
     manifest = _manifest()
     # #3540 ruling B: 82 -> 81 (two per-source switches retired into ONE
     # consolidated tool — the surface SHRANK, which is the ruling's point).
-    assert live["mcp"] == manifest["counts"]["tools"] == 81
+    # #4282: 81 -> 76 — the `graph_overview` container absorbs six advertised names
+    # and adds itself. The pin moves with every landed container batch until the
+    # approved 27 is reached.
+    assert live["mcp"] == manifest["counts"]["tools"] == 76
     # #4282 Phase 2.2 (#10053): 149 -> 150, the three approved-but-absent names now
     # having a `def` (+3) less `main`'s two retirements in #10012 (`graph_count` →
     # `_graph_count`, `org_list` deleted) (−2). The manifest pin records the same

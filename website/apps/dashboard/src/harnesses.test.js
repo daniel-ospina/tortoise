@@ -271,12 +271,12 @@ test('DE2E-5: EVERY harness verifies through an ADVERTISED tool — the clause i
     'the leaves that keep the legacy `tortoise_health` body, listed by name')
   for (const h of rendered) {
     const step2 = wizardPromptText(h, 2, KEY, 'included') || ''
-    assert.match(step2, /tortoise_(health|overview)/, `${h}: rendered step 2 names the verify tool`)
+    assert.match(step2, /tortoise_(health|graph_overview)/, `${h}: rendered step 2 names the verify tool`)
     assert.match(step2, /tortoise_create_point/, `${h}: rendered step 2 files the first memory`)
     if (LEGACY_VERIFY_HARNESSES.includes(h)) {
       assert.match(step2, /tortoise_health/, `${h}: the shared body keeps the legacy name`)
     } else {
-      assert.match(step2, /tortoise_overview\(section="health"\)/,
+      assert.match(step2, /tortoise_graph_overview\(section="health"\)/,
         `${h}: the verify call is the ADVERTISED tool (tools/list), not the retired alias`)
       assert.ok(!step2.includes('tortoise_health'),
         `${h}: never the retired tortoise_health — it is absent from tools/list (#3883)`)

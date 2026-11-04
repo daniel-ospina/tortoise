@@ -49,7 +49,7 @@
 # a constant here.
 manifest_version: 1
 issue: 3863
-cut_at_commit: d05370918053f64ee4f970811233a1fbbac63394
+cut_at_commit: a8a228168ec4e1878a6ec35d0c2ace8426efeb80
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -503,7 +503,7 @@ response_fields:
     one'
   unchanged_when_off: n/a — not flag-gated; the key is ABSENT on a sourced or word-bearing write, and on every write
     whose fold actually applied, so that response stays byte-identical
-- response: tortoise_check_structure
+- response: tortoise_graph_overview
   field: _meta.tortoise_error
   emitted_when: 'only for the transport wait-bound refusal — the ONE producer whose failure payload is a `{code,
     message, data}` mapping the advertised schema cannot carry; re-homed verbatim (the wait bound''s `data.retry_after`
@@ -694,24 +694,39 @@ approval_principal: daniel-ospina
 approval_pr: '4120'
 approval_date: '2026-09-18'
 counts:
-  tools: 81
+  tools: 76
   sdk_public_methods: 150
-  retired: 18
+  retired: 24
   keyword_distribution:
     fetch: 14
     create: 17
     update: 8
     delete: 6
-    list: 9
-    find: 6
+    list: 8
+    find: 5
     trace: 2
-    check: 8
+    check: 5
     link: 5
     operate: 6
 high_water_counts:
   tools: 82
   sdk_public_methods: 150
 retired:
+- name: tortoise_audit
+  use_instead: tortoise_graph_overview(section="audit")
+  sdk_method: audit
+  http_policy: true
+  approval: null
+- name: tortoise_check_structure
+  use_instead: tortoise_graph_overview(section="structure_check")
+  sdk_method: check_structure
+  http_policy: true
+  approval: null
+- name: tortoise_dream_health
+  use_instead: tortoise_graph_overview(section="dream_health")
+  sdk_method: dream_health_check
+  http_policy: false
+  approval: null
 - name: tortoise_get
   use_instead: tortoise_get_entity(id, type=...)
   sdk_method: null
@@ -738,7 +753,7 @@ retired:
   http_policy: true
   approval: null
 - name: tortoise_health
-  use_instead: tortoise_overview(section="health")
+  use_instead: tortoise_graph_overview(section="health")
   sdk_method: health
   http_policy: true
   approval: null
@@ -753,17 +768,17 @@ retired:
   http_policy: false
   approval: null
 - name: tortoise_list_pointkinds
-  use_instead: tortoise_overview(section="pointkinds")
+  use_instead: tortoise_graph_overview(section="pointkinds")
   sdk_method: list_pointkinds
   http_policy: true
   approval: null
 - name: tortoise_list_sources
-  use_instead: tortoise_overview(section="sources")
+  use_instead: tortoise_graph_overview(section="sources")
   sdk_method: list_sources
   http_policy: true
   approval: null
 - name: tortoise_list_tags
-  use_instead: tortoise_overview(section="tags")
+  use_instead: tortoise_graph_overview(section="tags")
   sdk_method: list_tags
   http_policy: true
   approval: null
@@ -778,6 +793,11 @@ retired:
   sdk_method: null
   http_policy: true
   approval: null
+- name: tortoise_overview
+  use_instead: tortoise_graph_overview(section=...)
+  sdk_method: null
+  http_policy: true
+  approval: null
 - name: tortoise_paginated_query
   use_instead: tortoise_query(offset=..., limit=...)
   sdk_method: paginated_query
@@ -789,18 +809,28 @@ retired:
   http_policy: true
   approval: null
 - name: tortoise_stale
-  use_instead: tortoise_overview(section="stale")
+  use_instead: tortoise_graph_overview(section="stale")
   sdk_method: stale_points
   http_policy: true
   approval: null
 - name: tortoise_status
-  use_instead: tortoise_overview(section="status")
+  use_instead: tortoise_graph_overview(section="status")
   sdk_method: status
   http_policy: true
   approval: null
+- name: tortoise_summarize_structure
+  use_instead: tortoise_graph_overview(section="structure")
+  sdk_method: summarize_structure
+  http_policy: true
+  approval: null
 - name: tortoise_taxonomy
-  use_instead: tortoise_overview(section="taxonomy")
+  use_instead: tortoise_graph_overview(section="taxonomy")
   sdk_method: taxonomy
+  http_policy: true
+  approval: null
+- name: tortoise_validate_domain
+  use_instead: tortoise_graph_overview(section="validate_domain", domain=...)
+  sdk_method: validate_domain
   http_policy: true
   approval: null
 rows:
@@ -822,10 +852,10 @@ rows:
     for a single known ID use tortoise_get_point.'
   dependency: declares TortoiseSDK.query (resolves)
   lifecycle: active
-  used_by: agents, tooling, docs
+  used_by: never called, tooling, docs
   recommendation: keep
   basis: observed
-  reason: called by agents
+  reason: not called over MCP, but used by tooling — removing it would break that
   recommended_family: null
   proposed: false
   exemption: false
@@ -987,10 +1017,10 @@ rows:
     omit query, set kind → all Points of kind.'
   dependency: declares TortoiseSDK.tortoise_fts_query (resolves)
   lifecycle: active
-  used_by: agents, eval-harness, tooling, docs
+  used_by: never called, eval-harness, tooling, docs
   recommendation: keep
   basis: observed
-  reason: called by agents
+  reason: not called over MCP, but used by eval-harness, tooling — removing it would break that
   recommended_family: null
   proposed: false
   exemption: false
@@ -1356,35 +1386,6 @@ rows:
   approval: null
   class: agent-reachable
   cluster_canonical: null
-- name: tortoise_audit
-  served_from: tortoise/mcp_server.py:196e1fe0b1cd9e26
-  served_attributes: 7310e65a02933605
-  family: memory
-  family_rank: 1
-  served: http
-  sdk_method: audit
-  group_source: defaulted
-  keyword: list
-  keyword_rank: 5
-  cluster: null
-  canonical: null
-  job: 'Audit graph wiring quality — 8 checks: missing sourceKind (point-level legacy + Source-level canonical),
-    missing sourceDate, superseded points without a CORRECTS edge, live IMPL/NAND edges into superseded points,
-    naive-IMPL contradiction heuristic, low-confidence operators without mitigation, and legacy ''mitigates'' edges.
-    Returns structured JSON: per-check counts (uncapped) + capped samples + summary + exit_code (0 clean, 1 issues).
-    point_kinds: optional pointKind list to scope the audit.'
-  dependency: declares TortoiseSDK.audit (resolves)
-  lifecycle: active
-  used_by: never called, tooling, docs
-  recommendation: keep
-  basis: observed
-  reason: not called over MCP, but used by tooling — removing it would break that
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: null
 - name: tortoise_list_batch
   served_from: tortoise/mcp_server.py:719e932618e3cb36
   served_attributes: a7ef3c89c9e6bab0
@@ -1427,32 +1428,6 @@ rows:
   job: Batch discovery — the most recent distinct ingest batch_ids with their point/direct-edge counts (ordered
     by newest stamp, capped at limit, default 20).
   dependency: declares TortoiseSDK.list_batches (resolves)
-  lifecycle: active
-  used_by: never called, tooling, docs
-  recommendation: keep
-  basis: observed
-  reason: not called over MCP, but used by tooling — removing it would break that
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: null
-- name: tortoise_dream_health
-  served_from: tortoise/mcp_server.py:985bdbeeb36df6e0
-  served_attributes: 734ca6ea44c83df3
-  family: memory
-  family_rank: 1
-  served: stdio-only
-  sdk_method: dream_health_check
-  group_source: defaulted
-  keyword: find
-  keyword_rank: 6
-  cluster: null
-  canonical: null
-  job: 'Dream observability (epic 903-C7): zero-output silent-death alarm verdict + health record (last pass, coverage,
-    failure rate, region_attempts, warm-start savings). Embedded call-triggered evaluator.'
-  dependency: declares TortoiseSDK.dream_health_check (resolves)
   lifecycle: active
   used_by: never called, tooling, docs
   recommendation: keep
@@ -1918,9 +1893,9 @@ rows:
   approval: null
   class: agent-reachable
   cluster_canonical: tortoise_operator_action
-- name: tortoise_overview
-  served_from: tortoise/mcp_server.py:2c1311be31d70622
-  served_attributes: 057395375ee74063
+- name: tortoise_graph_overview
+  served_from: tortoise/mcp_server.py:01ef7a6ab2760bb9
+  served_attributes: 35f7cf6b070f96c9
   family: reasoning
   family_rank: 3
   served: http
@@ -1930,8 +1905,10 @@ rows:
   keyword_rank: 1
   cluster: null
   canonical: null
-  job: 'Graph orientation in one call — consolidates the list_*/status/health/taxonomy/structure zoo. section: taxonomy|structure|structure_check|pointkinds|tags|sources|namespaces|graphs|topics|health|status|stale.
-    Omit section → compact combined summary. topics requires entity_id.'
+  job: 'What is in this memory graph and how it is shaped — ONE orientation call (#4282 row 6). section: taxonomy|structure|structure_check|pointkinds|tags|sources|namespaces|graphs|topics|health|status|stale
+    (the consolidated list_*/status/health zoo); validate_domain (requires domain); audit (optional point_kinds);
+    issue_insight (requires title); dream_health. Omit section → a compact combined summary in the same envelope
+    this family has always returned. topics requires entity_id.'
   dependency: 'handler-served: no declared SDK link'
   lifecycle: active
   used_by: never called, tooling, docs
@@ -2131,31 +2108,6 @@ rows:
   approval: null
   class: agent-reachable
   cluster_canonical: null
-- name: tortoise_check_structure
-  served_from: tortoise/mcp_server.py:4f597330997001ab
-  served_attributes: d1d847feeecfe0de
-  family: reasoning
-  family_rank: 3
-  served: http
-  sdk_method: check_structure
-  group_source: mapped
-  keyword: check
-  keyword_rank: 8
-  cluster: null
-  canonical: null
-  job: Check Gate 0→4 chain integrity (orphans, dangling refs).
-  dependency: declares TortoiseSDK.check_structure (resolves)
-  lifecycle: active
-  used_by: never called, eval-harness, tooling, docs
-  recommendation: keep
-  basis: observed
-  reason: not called over MCP, but used by eval-harness, tooling — removing it would break that
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: null
 - name: tortoise_review_connections
   served_from: tortoise/mcp_server.py:5113550a59a294b2
   served_attributes: 249495af9a061d6d
@@ -2176,60 +2128,6 @@ rows:
     to the retrieval-NEAREST points — a focus filter, not an exact-match or relevance gate (mode=add also applies
     similarity_threshold; mode=prune has no similarity bar).'
   dependency: declares TortoiseSDK.review_connections (resolves)
-  lifecycle: active
-  used_by: never called, tooling, docs
-  recommendation: keep
-  basis: observed
-  reason: not called over MCP, but used by tooling — removing it would break that
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: null
-- name: tortoise_summarize_structure
-  served_from: tortoise/mcp_server.py:61ca73c0dc694f7a
-  served_attributes: 734ca6ea44c83df3
-  family: reasoning
-  family_rank: 3
-  served: http
-  sdk_method: summarize_structure
-  group_source: mapped
-  keyword: check
-  keyword_rank: 8
-  cluster: null
-  canonical: null
-  job: 'Structure summary — points on the graph across ALL point kinds (#2205). Returns {total, operators, gate0_jtbds..gate4_requirements,
-    gate_total}: total counts non-operator Points of every kind (not just the product-strategy gates), operators
-    is reported separately, gate keys stay the gate-kind breakdown, gate_total is the gate subtotal.'
-  dependency: declares TortoiseSDK.summarize_structure (resolves)
-  lifecycle: active
-  used_by: never called, tooling, docs
-  recommendation: keep
-  basis: observed
-  reason: not called over MCP, but used by tooling — removing it would break that
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: null
-- name: tortoise_validate_domain
-  served_from: tortoise/mcp_server.py:f14122a777d481c6
-  served_attributes: 1056f463ee0f2b95
-  family: reasoning
-  family_rank: 3
-  served: http
-  sdk_method: validate_domain
-  group_source: mapped
-  keyword: check
-  keyword_rank: 8
-  cluster: null
-  canonical: null
-  job: 'Validate a domain''s ontology integrity (issue #405) — advisory, read-only. Runs the domain''s graph-surface
-    rules (orphan useCase, dangling refs, draft hygiene) and returns enriched, actionable violations ({rule, kind,
-    ref, message, fix}) + drift warnings. Never modifies the graph; violations are warnings, not blocks.'
-  dependency: declares TortoiseSDK.validate_domain (resolves)
   lifecycle: active
   used_by: never called, tooling, docs
   recommendation: keep
@@ -3212,11 +3110,11 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.audit.
-  dependency: 'reached by 1 registered tool(s): tortoise_audit'
+  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_audit (retired)'
   lifecycle: active
   used_by: eval-harness, tooling, docs
   recommendation: keep
-  reason: reached by 1 registered tool(s)
+  reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
   proposed: false
   exemption: false
@@ -3419,11 +3317,11 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.check_structure.
-  dependency: 'reached by 1 registered tool(s): tortoise_check_structure'
+  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_check_structure (retired)'
   lifecycle: active
   used_by: eval-harness, tooling, docs
   recommendation: keep
-  reason: reached by 1 registered tool(s)
+  reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
   proposed: false
   exemption: false
@@ -4064,11 +3962,11 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.dream_health_check.
-  dependency: 'reached by 1 registered tool(s): tortoise_dream_health'
+  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_dream_health (retired)'
   lifecycle: active
-  used_by: tooling, docs
+  used_by: eval-harness, tooling, docs
   recommendation: keep
-  reason: reached by 1 registered tool(s)
+  reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
   proposed: false
   exemption: false
@@ -5884,7 +5782,7 @@ rows:
   job: Public SDK method TortoiseSDK.set_point_baseline.
   dependency: 'reached by 1 registered tool(s): tortoise_set_point_baseline'
   lifecycle: active
-  used_by: tooling, docs
+  used_by: eval-harness, tooling, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -6066,11 +5964,11 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.summarize_structure.
-  dependency: 'reached by 1 registered tool(s): tortoise_summarize_structure'
+  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_summarize_structure (retired)'
   lifecycle: active
   used_by: tooling, docs
   recommendation: keep
-  reason: reached by 1 registered tool(s)
+  reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
   proposed: false
   exemption: false
@@ -6434,11 +6332,11 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.validate_domain.
-  dependency: 'reached by 1 registered tool(s): tortoise_validate_domain'
+  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_validate_domain (retired)'
   lifecycle: active
   used_by: tooling, docs
   recommendation: keep
-  reason: reached by 1 registered tool(s)
+  reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
   proposed: false
   exemption: false

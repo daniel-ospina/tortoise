@@ -1136,15 +1136,18 @@ class TestDocsPageAndSkillConfig:
         # validation error at the one moment it is trying to orient itself.
         assert 'section="graphs"' in row, (
             "the row must name the advertised overview(section=\"graphs\") form")
-        assert "tortoise_overview" in active, (
+        # #4282: the advertised orientation tool is the `graph_overview` container;
+        # `tortoise_overview` retired into it, so asserting the old name would assert
+        # the surface shape the owner-approved target removes.
+        assert "tortoise_graph_overview" in active, (
             "the row names the advertised overview tool, so it must stay active")
-        assert active["tortoise_overview"].risk == "read", (
+        assert active["tortoise_graph_overview"].risk == "read", (
             "overview must stay read-risk — it is the orientation call")
         # …and callable by a CONNECTOR at all: the row asks the user to have the
         # agent call these, so an http-exposure flip (the #3883 class this suite
         # already guards for other tools) must fail here rather than silently
         # hiding the tool from a tool-grant client.
-        for name in ("tortoise_list_graphs", "tortoise_overview"):
+        for name in ("tortoise_list_graphs", "tortoise_graph_overview"):
             assert active[name].http_policy is True, (
                 f"step 8 asks the agent to call {name}; it must stay "
                 "http-exposed or a ChatGPT connector cannot make the call "
