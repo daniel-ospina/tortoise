@@ -655,10 +655,18 @@ class TestDistinguishingDifference:
         # refuse a fold between two claims that merely lost one.
         assert v2.distinguishing_difference("\u5f97\u308b \u00d7",
                                            "\u5f97\u308b") is None
-        # A claim read RAW (no NFC) against the same claim read NFD used to
-        # produce DIFFERENT script sets, so "ἀρχή" stopped folding with its own
-        # decomposed spelling — the same claim, stored twice forever.  `_scripts`
-        # now NFC-folds its input like every other boundary input does.
+        # The same claim in two spellings must fold: precomposed polytonic
+        # `ἀρχή` (U+1F00, inside the greek block) against its decomposed
+        # spelling (`α` + U+0313).
+        #
+        # ⚠️ INVARIANT pin, NOT the NFC one — do not read it as evidence that
+        # `_scripts` folds its input: it holds on BASE too (both spellings
+        # already resolve to {'greek'}, because U+0313 is a mark and so is not
+        # script-bearing either way) and it survives reverting `_fold_unicode`
+        # to the identity.  An earlier revision of this comment claimed the raw
+        # reading gave "DIFFERENT script sets" here; measured against
+        # `origin/main`'s module it does not, so that claim is withdrawn.  The
+        # leg below is the one the normalisation is load-bearing for.
         assert v2.fold_allowed("\u1f00\u03c1\u03c7\u03ae",
                                "\u03b1\u0313\u03c1\u03c7\u03ae")
         # ⚠️ THE DISCRIMINATING NFC LEG, and the Greek pair above is NOT one:
