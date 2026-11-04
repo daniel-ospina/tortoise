@@ -17502,7 +17502,10 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # query). Run inline it would park the single uvicorn worker on every REST
     # capture — including the store-only (#3892/#4258) and replay lanes that
     # reach here having done NO other I/O — the #2988/#3498 class this file
-    # offloads everywhere else (see :15456).
+    # offloads at its other request doors. (No line pointer here on purpose:
+    # ``create_api_key`` still runs its ``api_keys`` count INLINE on the loop —
+    # #10954 — so a bare ``see :NNNN`` would point a reader at a counter-example
+    # to this sentence, and a line number drifts on the next PR anyway.)
     #
     # ⛔ "Off the loop" is not the whole rule (main-repair, 2026-11-04, after
     # the #9567 round-12/13 pool split landed): `asyncio.to_thread` runs the
