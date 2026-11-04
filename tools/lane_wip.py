@@ -334,7 +334,7 @@ _SKIP_MARKERS = (
 )
 
 
-def _repo_root_with_remedy(reason: str) -> Path:
+def _repo_root_with_remedy(reason: str, *, advice: str = "") -> Path:
     """`_repo_root()` for a READ verb that has already lost its `--path`, with a real remedy.
 
     ⛔ "NOT INSIDE A GIT WORK TREE — NOTHING TO PIN" IS A PIN MESSAGE, ON A READ VERB, IN THE
@@ -343,6 +343,13 @@ def _repo_root_with_remedy(reason: str) -> Path:
     offered no remedy at all (measured end to end: pin a lane from outside any repository,
     `git worktree remove --force` that lane, then run the exact command `pin` printed -> the
     note, then `not inside a git work tree — nothing to pin`, rc 2).
+
+    ⛔ THE ADVICE IS NOT THE SAME FOR EVERY VERB. `recover` needs only a repository to read
+    the ref from, so any surviving path serves. `list` derives the LANE KEY from `--path`, so
+    a different `--path` is a DIFFERENT LANE — advising a bare `--path` there hands the reader
+    `lane <hub>-… has no wip pin` (measured, rc 0) over a lane that is pinned one ref away,
+    which is the false verdict this family of fixes exists to remove. `cmd_list` therefore
+    passes `advice=` naming `--all`.
     """
     try:
         return _repo_root()
@@ -350,7 +357,7 @@ def _repo_root_with_remedy(reason: str) -> Path:
         raise LaneWipError(
             f"{reason}, and you are NOT inside a repository here, so the pins cannot be read. "
             "Run this from a worktree of the repository that held it (the one you added it "
-            "from), or pass `--path <a surviving path in that repo>`"
+            f"from), or {advice or 'pass `--path <a surviving path in that repo>`'}"
         ) from exc
 
 
@@ -1349,7 +1356,11 @@ def cmd_list(args: argparse.Namespace) -> int:
                 "`tools/lane_wip.py list --all` reads the pins from this repo instead, "
                 "and `tools/lane_wip.py recipe` says what is still recoverable"
             )
-        root = _repo_root_with_remedy(f"{root} does not exist")
+        root = _repo_root_with_remedy(
+            f"{root} does not exist",
+            advice="pass `--path <a surviving path in that repo>` WITH `--all` (the LANE KEY "
+            "comes from `--path`, so a different `--path` is a different lane)",
+        )
     keyed = _lane_root(root)
     # ⛔ THE KEY COMES FROM THE PATH; THE REFS COME FROM A REPOSITORY. A lane that recreated
     # its own (gitignored) path with `mkdir -p` is a KEY, not a repo — and `for-each-ref`
@@ -1358,7 +1369,11 @@ def cmd_list(args: argparse.Namespace) -> int:
     if _inside_work_tree(keyed, what="repository"):
         root = keyed
     else:
-        root = _repo_root_with_remedy(f"{keyed} is not a repository")
+        root = _repo_root_with_remedy(
+            f"{keyed} is not a repository",
+            advice="pass `--path <a surviving path in that repo>` WITH `--all` (the LANE KEY "
+            "comes from `--path`, so a different `--path` is a different lane)",
+        )
         print(
             f"lane_wip: note — {keyed} is not a repository, so the pins are read from "
             f"{root}; the LANE KEY still comes from {keyed}",
@@ -1776,7 +1791,11 @@ def cmd_recover(args: argparse.Namespace) -> int:
     # exist — while the same ref resolved fine in its own repo. `cmd_list` was already
     # fixed for exactly this; `cmd_recover` was not, though `--path` is declared for every
     # subcommand. Fall back to this repo and SAY SO, rather than blaming the ref.
-    here = _resolve_path(Path(args.path), what="--path") if args.path else _repo_root()
+    here = (
+        _resolve_path(Path(args.path), what="--path")
+        if args.path
+        else _repo_root_with_remedy("this checkout is not inside a repository")
+    )
     asked = here
     if args.path and not here.is_dir():
         # ⛔ ONLY PRINT THE "read from here instead" NOTE ONCE WE KNOW THERE IS A HERE.
@@ -2304,9 +2323,13 @@ def cmd_recover(args: argparse.Namespace) -> int:
         # when `<pin>^2^{tree}` resolves to NOTHING (`_verify_opt` RAISES on a failed read, so
         # `""` is a real "no such tree"), and BOTH commands need exactly that object.
         # Measured on both shapes that reach here (the second parent's COMMIT pruned; only
-        # its TREE pruned): each printed command exited 128 `fatal: failed to unpack tree
-        # object`. The shape-specific route lives in `index_problem` itself; the sibling
-        # branch above verifies its `salvage` before printing, and this one did not.
+        # its TREE pruned): `read-tree <pin>^2` exits 128 `fatal: failed to unpack tree
+        # object <pin>^2`, and `show <pin>^2:<path>` exits 128 `fatal: path '<path>' does not
+        # exist in '<pin>^2'` — two DIFFERENT diagnostics, so do not quote one for both (a
+        # first draft of this comment did, and that is the sentence a maintainer would
+        # "verify" before reinstating a salvage command). The shape-specific route lives in
+        # `index_problem` itself; the sibling branch above verifies its `salvage` before
+        # printing, and this one did not.
         raise GitFailed(
             3,
             f"restored the WORKTREE of {sha[:12]} into {target}, but {index_problem}. "

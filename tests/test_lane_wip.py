@@ -2294,6 +2294,48 @@ def test_a_dead_path_from_outside_any_repository_offers_a_remedy(hub: Path) -> N
     assert "surviving path in that repo" in message, message
 
 
+def test_a_list_remedy_names_the_ALL_flag_its_lane_key_needs(hub: Path) -> None:
+    """`list --path <p>` derives the LANE KEY from `--path`, so bare `--path` advice lies.
+
+    Following "pass `--path <a surviving path in that repo>`" WITHOUT `--all` reads a
+    DIFFERENT lane and answers `lane <that path>-… has no wip pin` at rc 0 over a lane that is
+    pinned one ref away — the false "the work is gone" verdict. The advice must name `--all`.
+    """
+    plain = hub.parent / "not-a-repo-keyed"
+    plain.mkdir()
+    outside = hub.parent / "no-repo-listcaller"
+    outside.mkdir()
+
+    out = run_tool("list", "--path", str(plain), cwd=outside)
+    assert out.returncode != 0, out.stdout + out.stderr
+    message = out.stdout + out.stderr
+    assert "WITH `--all`" in message, message
+    assert "nothing to pin" not in message, message
+
+
+def test_recover_without_a_path_from_outside_any_repository_names_the_remedy(
+    hub: Path,
+) -> None:
+    """The last unguarded read-verb fallback: `recover <ref>` with no `--path`, in no repo.
+
+    It reached the bare `_repo_root()`, so the reader got `not inside a git work tree` and no
+    next step — while every sibling shape now names the route. The one command that works
+    (`--path <the repo>`) has to be discoverable from here too.
+    """
+    wt = dirty_lane(hub, "wt-nopath")
+    pinned = run_tool("pin", cwd=wt)
+    assert pinned.returncode == 0, pinned.stderr
+    ref = pin_ref(pinned.stdout)
+    outside = hub.parent / "no-repo-recover"
+    outside.mkdir()
+
+    out = run_tool("recover", ref, "--into", str(hub.parent / "wt-nopath-x"), cwd=outside)
+    assert out.returncode != 0, out.stdout + out.stderr
+    message = out.stdout + out.stderr
+    assert "you are NOT inside a repository here" in message, message
+    assert "surviving path in that repo" in message, message
+
+
 def test_pin_works_without_a_configured_git_identity(hub: Path) -> None:
     """A fresh CI/cell clone has no `user.email`; the pin writes commits, so it must not fail."""
     wt = dirty_lane(hub, "wt-noid")
