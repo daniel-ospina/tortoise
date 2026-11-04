@@ -2719,6 +2719,10 @@ def reap_orphans(own_name: str | None = None) -> list[str]:
             out.append(f"reap: kept {name} — this is THIS worktree's container")
             continue
         owner = slugs.get(name[len(NAME_PREFIX):])
+        # Whether `owner` came from the LABEL rather than the name record. Arm 1
+        # below cannot tell the difference from `owner` alone, and the two
+        # populations must NOT be treated alike there (see the client probe).
+        labelled_owner = False
         # The slug the container's OWN name encodes. `_live_lane_paths` gives the
         # slugs of every worktree a live process holds, in ANY clone on this host,
         # so this is how a cross-clone owner is still recognised as alive.
@@ -2739,6 +2743,7 @@ def reap_orphans(own_name: str | None = None) -> list[str]:
                 name, stamped.get("owner", ""), stamped.get("slug", ""))
             if trusted:
                 owner = trusted
+                labelled_owner = True
             elif why_not:
                 # Reported, not believed. A label that does not describe the
                 # container it sits on is not an ownership record (see
@@ -2764,6 +2769,34 @@ def reap_orphans(own_name: str | None = None) -> list[str]:
                        f"could not be examined (fail-closed, report only)")
             continue
         if owner is not None and present is False:
+            # ⛔ A LABEL-DERIVED owner must not skip the client probe. The name
+            # record can only produce arm 1 for a worktree `git worktree list`
+            # still lists, but the label reaches a NEW population: a worktree
+            # torn down (`git worktree remove --force` / `prune`) while the
+            # lane's process is STILL RUNNING. That process's cwd is a deleted
+            # directory, so `_live_lane_paths` cannot name it either — the
+            # container's own `CLIENT LIST` is the only thing left that knows a
+            # test run is in progress. On `origin/main` this population lands in
+            # the INDETERMINATE bucket, which ASKS (`_container_in_use`) and
+            # keeps an in-use container (#10693 review F1); without this probe
+            # the label would flip that from `kept` to `rm -f` and kill a live
+            # lane's database. Name-derived arm 1 is left exactly as main had
+            # it: this probe is scoped to the label.
+            if labelled_owner:
+                busy = (False if state in _TERMINAL_STATES
+                        else _container_in_use(name))
+                if busy:
+                    _touch_lease(name)   # observed use: the epoch follows the proof
+                    out.append(f"reap: kept {name} — its labelled worktree "
+                               f"{owner} is gone but it HAS an active client, "
+                               f"so a lane is still using it")
+                    continue
+                if busy is None:
+                    out.append(f"reap: kept {name} — its labelled worktree "
+                               f"{owner} is gone but the container could not "
+                               f"be asked whether it is in use; report only, "
+                               f"fail-closed")
+                    continue
             # Proof 1, the ONLY armed proof: the worktree that owns this
             # container is gone, so this is what #8180 authorises. #7357: the
             # facts are read BEFORE the removal — `rm -f` destroys the only
@@ -3363,7 +3396,13 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 
 def cmd_down(args: argparse.Namespace) -> int:
-    print(f"test-lane: {lane_name()} -> {stop()}", file=sys.stderr)
+    # ONE `repo_root()` read, inside `stop()`. Printing `lane_name()` here as
+    # well was a second read, and `repo_root()` degrades PER CALL to `Path.cwd()`
+    # on a git timeout — so the name printed could disagree with the container
+    # actually removed. `stop()` takes no argument by design (naming a target is
+    # how one lane would delete a peer's DB), so the fix is to print what it
+    # ACTED ON, not a separately-derived name.
+    print(f"test-lane: down -> {stop()}", file=sys.stderr)
     return 0
 
 
