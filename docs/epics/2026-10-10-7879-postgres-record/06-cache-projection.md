@@ -316,11 +316,11 @@ and adds a leg that a lexicon `summary` + a topics-derived `_searchText` SURVIVE
 the door with the rebuilt session Source still Source-FTS-indexed. Recorded as a
 follow-up obligation on #10853.
 
-**SIX touch points, not five — and two of them are callers rather than
+**SEVEN touch points, not five — and two of them are callers rather than
 enumerations** (#10867 review, ISSUE 2). An obligation that named only the
 projection's own names was a trap in both directions:
 
-* `episodic_source_declined_properties` (`cache_projection.py:1554`) is a
+* `episodic_source_declined_properties` (`cache_projection.py:1567`) is a
   **caller** of `episodic_source_prose_properties`, so deleting the latter alone
   leaves `NameError` on the `props` tail for every episodic row;
 * `record_serve.parity_difference` (`record_serve.py:1137-1151`) imports **both**

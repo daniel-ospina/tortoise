@@ -125,10 +125,19 @@ THE FOUR PROPERTIES, AND WHERE EACH LIVES
    not merely "converge" with it. `#10852` therefore deletes
    :data:`_EPISODIC_SOURCE_PROSE_COLUMNS`, both guard doors in
    :func:`_props_from_row`, :func:`episodic_source_prose_properties`,
-   :func:`is_episodic_source_node` and the `record_reconcile.scan_cache_view`
-   subtraction, and adds a leg that a lexicon `summary` + a topics-derived
-   `_searchText` SURVIVE the door and the rebuilt session Source is still
-   Source-FTS-indexed. Recorded on #10853 as the follow-up obligation.
+   :func:`episodic_source_declined_properties` (a CALLER of that last one —
+   read by the `props` tail door here and by `record_serve`),
+   :func:`is_episodic_source_node`, the `record_reconcile.scan_cache_view`
+   subtraction and `record_serve.parity_difference`'s fourth explanation (that
+   module imports both of the two names above, so deleting either alone is an
+   `ImportError` on every `Source` comparison, and leaving it in place keeps
+   explaining a real post-`#10852` gap away), and adds a leg that a lexicon
+   `summary` + a topics-derived `_searchText` SURVIVE the door and the rebuilt
+   session Source is still Source-FTS-indexed. Recorded on #10853 as the
+   follow-up obligation.
+
+   That is **seven** touch points and the count is not the contract — the check
+   is whether any REFERENCE survives; see the epic doc's grep-to-zero step.
 4. **A cold region reads ``not-hot``, never ``empty``.** ``declaration_for``
    writes the known-hot set **after** the writes and as a function of what was
    materialized, so a record key the projection did not write is not claimed
@@ -1269,9 +1278,13 @@ def _scalar(value: Any) -> Any:
 #: `record_reconcile` subtraction would keep that out of the mismatch count.
 #: So the rule is correct for a pre-fix row and wrong for a post-`#10852` one:
 #: `#10852` deletes this table, both guard doors in :func:`_props_from_row`,
-#: :func:`episodic_source_prose_properties`, :func:`is_episodic_source_node` and
-#: the `scan_cache_view` subtraction, and adds a leg that a lexicon `summary` +
-#: a topics-derived `_searchText` SURVIVE the door. Recorded on #10853.
+#: :func:`episodic_source_prose_properties`,
+#: :func:`episodic_source_declined_properties` (a CALLER of it),
+#: :func:`is_episodic_source_node`, the `scan_cache_view` subtraction and
+#: `record_serve.parity_difference`'s fourth explanation (the other caller), and
+#: adds a leg that a lexicon `summary` + a topics-derived `_searchText` SURVIVE
+#: the door. Seven names, and the list is not the contract — the epic doc's
+#: check is a grep for surviving REFERENCES. Recorded on #10853.
 _EPISODIC_SOURCE_PROSE_COLUMNS: frozenset[str] = frozenset({
     "summary", "_search_text",
 })
