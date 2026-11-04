@@ -187,15 +187,42 @@ def _label_hits_reads(
 
 
 def _population_drift(read: list[Path]) -> list[Path]:
-    """Every path in `read` that is not a tracked file under `tortoise/`.
+    """Every path in `read` that is INSIDE this checkout but not tracked under `tortoise/`.
 
     Sorted, so a failure names the offender instead of leaving the reader to
     reconstruct it from two truncated set reprs — the shape the CI failure at
     `6a938c002` arrived in (`Extra items in the left set: PosixPath('/proc/…')`,
     with neither side of the comparison visible).
+
+    ⛔ THE CHECKOUT BOUND IS LOAD-BEARING — it is the fix for a MEASURED false RED,
+    and removing it re-opens it. Every path `_label_hits()` can read is derived
+    from `git ls-files`, so it is a path under `REPO`; a recorded read OUTSIDE this
+    checkout therefore cannot be `_label_hits`'s, and it is not drift. It is
+    exactly what an ambient SAME-THREAD reader contributes instead: the spy
+    patches `Path.read_text` on the CLASS, and
+    `tortoise/embedded_reaper._pid_alive` (`embedded_reaper.py:991`) reads
+    `/proc/<pid>/stat` through it. Measured on two required jobs — `test (a)` of
+    run 41319892722 saw it from a FOREIGN thread (closed by `scope_to_thread`),
+    and `test (d)` of run 41910206285 saw it on the CALLING thread, which no
+    thread scoping can exclude. Filtering only the drift ASSERTION is not enough:
+    the same read reds `test_the_label_population_is_every_tracked_file_not_just_py`
+    (`assert not drifted`) and the scoped-population assertion beside
+    `test_a_read_from_another_thread_is_not_attributed_to_label_hits`, so both now
+    go through this one predicate.
+
+    The discriminating direction is untouched: every path a `_label_hits()` that
+    had wandered off the index could read is INSIDE the checkout (`stray` in
+    `test_a_same_thread_read_outside_the_index_is_still_drift`, an untracked file
+    under `tortoise/`), so it is still reported.
+
+    `is_relative_to` is the right test here rather than `resolve()`: it is
+    documented as string-based, neither accessing the filesystem nor treating
+    `..` specially (python.org, `PurePath.is_relative_to`), and every recorded
+    path is already absolute and `..`-free — so this adds no syscall to a hot
+    assertion and cannot raise on a path that does not exist.
     """
     tracked = set(_tracked_files_under(_TRACKED_DIR))
-    return sorted({p for p in read if p not in tracked})
+    return sorted({p for p in read if p.is_relative_to(REPO) and p not in tracked})
 
 
 def _checkout_history_is_complete() -> bool:
@@ -1238,14 +1265,15 @@ def test_a_read_from_another_thread_is_not_attributed_to_label_hits(monkeypatch)
         "reds the population control on a foreign path and reports a defect "
         "that is not there (CI: `/proc/2839/stat` from the reaper's sweep thread)"
     )
-    assert set(scoped) <= set(_tracked_files_under(_TRACKED_DIR)), (
+    assert not _population_drift(scoped), (
         "the scoped population drifted off the tracked set under tortoise/ — "
-        "the population §5's `git grep` sentence is stated in"
+        "the population §5's `git grep` sentence is stated in: "
+        + ", ".join(str(p) for p in _population_drift(scoped)[:5])
     )
 
 
-def test_a_same_thread_read_outside_the_index_is_still_drift(monkeypatch) -> None:
-    """Non-vacuity for the thread scoping, which is the half main's control cannot see.
+def test_a_same_thread_read_outside_the_index_is_still_drift(monkeypatch, tmp_path) -> None:
+    """Both directions of the checkout bound: in-repo-not-indexed reds, outside-repo does not.
 
     Scoping the recording to one thread is a way to make the population control
     unfalsifiable — record nothing, assert nothing — and
@@ -1267,30 +1295,71 @@ def test_a_same_thread_read_outside_the_index_is_still_drift(monkeypatch) -> Non
     zero test failures, no defect in this module. `/proc/<pid>/stat` is read by
     `tortoise/embedded_reaper._pid_alive` (`embedded_reaper.py:991`, via
     `Path.read_text`) and the spy patches the CLASS, so any such read that lands on
-    the calling thread inside the window is recorded as drift. That is the SAME
-    false-RED class this file's docstrings already record from `test (a)` of run
-    41319892722 — there it was a foreign THREAD, which is what `scope_to_thread`
-    fixes; here the ambient reader shared the calling thread, which no scoping can
-    exclude. Set equality would therefore be asserting that the whole process read
-    nothing else during `_label_hits()` — a claim about the environment, not about
-    the recorder.
+    the calling thread inside the window is recorded. That is the SAME false-RED
+    class this file's docstrings already record from `test (a)` of run 41319892722
+    — there it was a foreign THREAD, which is what `scope_to_thread` fixes; here
+    the ambient reader shared the calling thread, which no scoping can exclude.
+    Set equality would therefore be asserting that the whole process read nothing
+    else during `_label_hits()` — a claim about the environment, not about the
+    recorder.
 
-    The discriminating direction is preserved exactly: a recorder that drops every
-    path outside the tracked population (the hypothesis this test exists to kill)
-    loses `stray` and still reds here, while unrelated ambient reads no longer
-    manufacture a failure.
+    ⛔ **Relaxing that one assertion was only HALF the fix, and this test now pins
+    the other half.** The ambient read was still drift for every OTHER assertion
+    that consumes the population: `test_the_label_population_is_every_tracked_file_
+    not_just_py` asserts `not _population_drift(read)`, and the scoped-population
+    assertion beside `test_a_read_from_another_thread_is_not_attributed_to_label_
+    hits` did the same by hand — so ONE `/proc/<pid>/stat` on the calling thread
+    still reddened the required `test` job from the two tests next door. The bound
+    is now in `_population_drift` (inside the checkout), and both directions are
+    asserted here in ONE window so neither can be softened without the other
+    noticing:
+
+      * `stray`, INSIDE the checkout and outside the index → still drift (the
+        non-vacuity half: a recorder that drops every non-index path loses it and
+        reds);
+      * `outside`, OUTSIDE the checkout → recorded (asserted, so the window is not
+        empty) but NOT drift (no `git ls-files`-derived path can be out there, so
+        such a read is ambient by construction).
+
+    Fails before the bound: `outside in drifted` is True, so the last assertion
+    reds naming the tmp file — and `test_the_label_population_is_every_tracked_
+    file_not_just_py` reds as well on the ambient read it does not stage.
     """
     stray = REPO / "tests" / "test_substrate_map.py"
+    #: A real read OUTSIDE this checkout — the shape (not the location) of the
+    #: ambient reader that reddened two required jobs. A `tmp_path` rather than
+    #: `/proc/<pid>/stat` so the read SUCCEEDS on every platform: an `OSError`
+    #: here would leave it arguable whether the recorder saw a read at all.
+    outside = tmp_path / "an-ambient-read-outside-the-checkout.txt"
+    outside.write_text("read by a helper, never by `_label_hits`\n", encoding="utf-8")
+    assert not outside.is_relative_to(REPO), (
+        "the fixture wrote inside the checkout, so it cannot stand in for an "
+        "out-of-checkout ambient read"
+    )
 
-    def _a_stray_read() -> None:
+    def _a_stray_read_and_an_ambient_one() -> None:
         stray.read_text(encoding="utf-8")
+        outside.read_text(encoding="utf-8")
 
-    drifted = _population_drift(_label_hits_reads(monkeypatch, during=_a_stray_read))
+    read = _label_hits_reads(monkeypatch, during=_a_stray_read_and_an_ambient_one)
+    assert outside in read, (
+        "the recorder did not see the out-of-checkout read, so the assertion "
+        "below would be vacuous about the ambient direction"
+    )
+    drifted = _population_drift(read)
     assert stray in drifted, (
         "a read of a path outside the tracked index, made on the SAME thread, was "
         "NOT reported as drift — so a recorder that only ever records the tracked "
         "population would pass the sibling controls vacuously and report CLEAN for "
         "a `_label_hits` that had wandered off it; measured drift: "
+        + ", ".join(str(p) for p in drifted[:5])
+    )
+    assert outside not in drifted, (
+        "a read from OUTSIDE the checkout was reported as drift. No "
+        "`git ls-files`-derived path can be outside the checkout, so this read "
+        "cannot be `_label_hits`'s — it is an ambient same-thread reader (the "
+        "reaper's `/proc/<pid>/stat`, which reddened required `test (d)` of run "
+        "41910206285 and `test (a)` of run 41319892722); measured drift: "
         + ", ".join(str(p) for p in drifted[:5])
     )
 
