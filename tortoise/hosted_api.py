@@ -19773,12 +19773,18 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     session_id = payload.session_id
     reconcile = plan.reconcile
     # #7819: TRANSIENT write-time advisories this phase has to REPORT but that
-    # are not payload domain warnings — today the only one is
+    # are not payload domain warnings. TWO arrive on this seam today:
     # `temporal_not_applied`, raised when `create_point`'s dedup branch DROPS a
     # fold carrying a validity window because the content address resolves to a
-    # terminal claim. A dropped fold writes nothing, so without this the client
-    # gets a 200 whose `when` was silently not applied. The handler folds these
-    # into the response's `warnings[]` (#405's additive channel).
+    # terminal claim; and `terminal_fold_refused` (#10368), raised when the same
+    # branch DROPS a fold carrying any other prop or an authored word because the
+    # target is terminal. Each is a dropped fold — it writes nothing — so without
+    # this the client gets a 200 whose `when`/props were silently not applied.
+    # The channel is GENERIC (`_write_advisories.extend(_written.get("advisories")
+    # or [])` below), so a new code needs no change here; this sentence exists so
+    # a maintainer can learn what may arrive on `warnings[]` without reading the
+    # SDK's dedup branch. The handler folds these into the response's
+    # `warnings[]` (#405's additive channel).
     _write_advisories: list[dict] = []
     # #5363 (B): each supersede window is validated inside the points loop
     # below, PER ACTION and immediately BEFORE that action's successor is
