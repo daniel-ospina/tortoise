@@ -57,6 +57,10 @@
 # a constant here.
 manifest_version: 1
 issue: 3863
+# ⛔ ONE value, not two: the auto-merge of `origin/main` into this branch left a duplicate
+# key here (main's `ee2a15891…`, whose tree carries 81 tools, next to this branch's
+# `61af70a1ca`, whose tree carries the 76 recorded below). YAML keeps the LAST duplicate,
+# so the surviving value must be the one whose tree matches `counts.tools`.
 cut_at_commit: 61af70a1ca
 allowed_transforms:
 - _HTTPToolFilter
@@ -2293,7 +2297,7 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_session_capture
-  served_from: tortoise/mcp_server.py:9ea260bf4e6cd3cc
+  served_from: tortoise/mcp_server.py:bd6dbf27d57b404c
   served_attributes: a1b8417f6b1ea4c9
   family: sessions
   family_rank: 4

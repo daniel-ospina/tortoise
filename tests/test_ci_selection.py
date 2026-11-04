@@ -182,7 +182,7 @@ def test_docs_scanning_gates_stay_in_tier1():
     )
     assert "test_v4_declared_mechanisms.py" in tier1, (
         "#9778 review (P1): the declared-mechanism MEMBERSHIP gate derives the "
-        "declared set from the `<!-- v4-mechanism: <id> -->` markers in "
+        "declared set from the `<!-- v4-mechanism: <id> state: <state> -->` markers in "
         "docs/architecture/**/*.md — `docs/` is in NON_PYTHON_PREFIXES, so a "
         "docs-only diff runs tier1 only (EXTRACTOR-V4-ARCHITECTURE.md takes "
         "the early return, STORAGE-ARCHITECTURE.md selects `onboarding`, and "
@@ -4314,6 +4314,34 @@ def test_9664_capstone_runs_on_the_middleware_diff_that_can_break_it():
             api_sel)
 
 
+def test_10668_allowance_gate_evidence_runs_on_both_diff_classes():
+    # #10668 review P1: `tests/test_allowance_gate.py` is the evidence for the
+    # #9567 D11/D12 allowance gate, and it was registered in NO surface —
+    # `--integrity` printed `❌ manifest drift: ['test_allowance_gate.py']`
+    # (redding the REQUIRED `manifest-integrity` leg) and no leg ever selected
+    # it, so the suite would have stayed green if the gate were deleted (#10513
+    # / #1349 silent-drop class).
+    #
+    # Two modules carry the subject and they classify DIFFERENTLY: a
+    # `tortoise/quota.py` diff (the gate's primary door, `enforce_org_limit`)
+    # selects `api`, while `tortoise/allowance_gate.py` matches no SOURCE_PATTERN
+    # and falls through to the `core` fallback — and a match REPLACES the
+    # fallback, so neither arm alone covers both diff classes (#9192/#9664
+    # idiom).
+    #
+    # Mutation check: deleting the `api` arm fails the quota pair, deleting the
+    # `core` arm fails the allowance_gate pair.
+    api_sel = _sel(["tortoise/quota.py"])
+    assert api_sel["full"] is False, api_sel
+    assert api_sel["surfaces"] == ["api"], api_sel
+    assert "test_allowance_gate.py" in api_sel["test_files"], api_sel
+
+    core_sel = _sel(["tortoise/allowance_gate.py"])
+    assert core_sel["full"] is False, core_sel
+    assert core_sel["surfaces"] == ["core"], core_sel
+    assert "test_allowance_gate.py" in core_sel["test_files"], core_sel
+
+
 def test_source_currency_tool_change_selects_core_not_tier1():
     # #5581: tools/source_currency.py owns tests/test_source_currency_5581.py
     # (`core`) — the §4.6 aggregate, the sourced disclosure, and the flag-gated
@@ -4446,6 +4474,23 @@ def test_test_lane_tool_change_selects_core_not_tier1():
     assert "core" in r["surfaces"], r
     assert "test_test_lane_tool.py" in r["test_files"], r
     assert set(r["test_files"]) != _tier1()
+
+
+def test_container_reaper_change_selects_core_not_tier1():
+    # #10806 review P1: tools/container_reaper.py (the actuator) and
+    # tools/install-container-reaper-timer.sh (the clock that arms it) own
+    # tests/test_container_reaper.py (`core`). The flat "tools/" prefix swallowed
+    # both, so editing the dry-run allow-list, the `--apply` path or the
+    # deployed-vs-source pins selected NO surface and ran none of the safety
+    # cases — for a tool that DELETES containers. Same silent-drop class as
+    # #5084/#6138 above.
+    for changed in ("tools/container_reaper.py",
+                    "tools/install-container-reaper-timer.sh"):
+        r = _sel([changed])
+        assert r["full"] is False, (changed, r)
+        assert "core" in r["surfaces"], (changed, r)
+        assert "test_container_reaper.py" in r["test_files"], (changed, r)
+        assert set(r["test_files"]) != _tier1(), changed
 
 
 def test_queue_conflict_census_tool_change_selects_core_not_tier1():
