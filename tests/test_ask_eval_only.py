@@ -172,6 +172,7 @@ def test_n2_mcp_tools_list_serves_no_ask_tool(monkeypatch):
     registry-only restore)."""
     from tests.test_mcp_server_auth_modes import _mcp_post, _mounted_test_client
     from tortoise.mcp_server import create_http_app
+    from tortoise.tool_registry import get_http_allowed
 
     app = create_http_app(allowed_origins=["http://localhost:8000"],
                           auth_mode="none")
@@ -186,7 +187,23 @@ def test_n2_mcp_tools_list_serves_no_ask_tool(monkeypatch):
     # reason: #3540 consolidated two per-source switches (github_index,
     # session_recording) into `tortoise_manage_sources`, which is a net -1 on
     # the LISTED surface (2 retired, 1 added) — 75 listed before, 74 now.
-    assert len(names) >= 74, f"default surface shrank to {len(names)}"
+    # #4282 (the first container): `graph_overview` absorbs five LISTED names
+    # (`tortoise_overview`, `tortoise_audit`, `tortoise_validate_domain`,
+    # `tortoise_dream_health`, `tortoise_summarize_structure`) and adds itself —
+    # a net -4 on the LISTED surface, 75 listed before, 71 now.
+    assert len(names) >= 71, f"default surface shrank to {len(names)}"
+    # The floor is a proxy for the real invariant, and a proxy cannot tell a
+    # recorded consolidation from a silent drop. Pin the invariant itself: the
+    # default HTTP listing serves EXACTLY the registry's `http_policy` population
+    # — the same `get_http_allowed()` the `_HTTPToolFilter` reads (#454) — so a
+    # name the listing drops while the registry still allows it reds here, and so
+    # does an http-excluded tool leaking onto the tenant surface. The floor stays
+    # as the separate signal that the POPULATION shrank (both sides shrink
+    # together when an entry leaves the registry), which this equality cannot see.
+    assert set(names) == set(get_http_allowed()), (
+        "the default HTTP listing must be exactly the registry's http_policy "
+        f"population; listed-but-not-allowed={sorted(set(names) - set(get_http_allowed()))}, "
+        f"allowed-but-unlisted={sorted(set(get_http_allowed()) - set(names))}")
     assert _ASK_TOOL not in names
 
 
