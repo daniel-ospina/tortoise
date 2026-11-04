@@ -359,7 +359,9 @@ def _redirect_remedy(target: str, sent: Connection) -> str:
         return (
             f"record {_store_base(target)} as `api_url` in {sent.source} — a stored "
             f"credential takes its endpoint from that same file — or run the bridge "
-            f"from a directory whose store already names {target}."
+            f"from a directory whose store already names {target} (that store must "
+            f"not be committed: a git-tracked store is IGNORED as repo-controlled, "
+            f"#10796)."
         )
     return (
         f"point TORTOISE_MCP_URL at {target} directly so the credential goes out "

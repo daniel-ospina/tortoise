@@ -46,6 +46,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -147,6 +148,10 @@ def _redact_known(text: str, sent: Connection | None = None) -> str:
 #: credential stores already warned about (#5109) — one line per process.
 _WARNED_READABLE_STORES: set[str] = set()
 
+#: Stores already reported as repo-committed, so the per-request path prints the
+#: line once instead of on every MCP call.
+_WARNED_TRACKED_STORES: set[str] = set()
+
 #: one-off operator warnings already emitted, keyed by topic — never repeated.
 _WARNED_TOPICS: set[str] = set()
 
@@ -224,6 +229,12 @@ class Connection:
     key: str | None
     source: str | None
     sources: tuple[str, ...]
+    #: whether an ENDPOINT was DECLARED — by `TORTOISE_MCP_URL`, or by a store's
+    #: `api_url`. `url` is always populated, because the built-in default is a
+    #: FALLBACK rather than a configuration; a caller that must tell "configured
+    #: but down" from "never set up" (#3805) needs this flag, since "a URL
+    #: resolves" cannot answer it.
+    declared: bool = False
 
 
 def _credential_paths() -> tuple[Path, ...]:
@@ -239,8 +250,91 @@ def _credential_paths() -> tuple[Path, ...]:
     made the client blind to the store the hosted onboarding actually creates —
     no credential, the default endpoint, and a `MCP-KEY-EMPTY` naming stores the
     user never wrote.
+
+    NEVER RAISES. A candidate list is not a claim that a store EXISTS, so a
+    location that cannot be named is simply absent — the same "no config here"
+    the loop already `continue`s on. `Path.cwd()` raises `FileNotFoundError` for
+    a REMOVED working directory (a reaped worktree, and this module exists for
+    the long-lived process), and `Path.home()` raises `RuntimeError` when HOME is
+    unresolvable (a container on an arbitrary UID with no passwd entry). Those
+    are not hypothetical here: resolution runs PER REQUEST (#10605), so an
+    unguarded raise does not fail one probe — it breaks `status()`'s documented
+    never-raise contract, and every `list_tools`/`call_tool`, on every call.
     """
-    return (Path.cwd() / ".tortoise", Path.home() / ".tortoise" / "credentials.json")
+    candidates: list[Path] = []
+    with contextlib.suppress(OSError):
+        candidates.append(Path.cwd() / ".tortoise")
+    with contextlib.suppress(RuntimeError, OSError):
+        candidates.append(Path.home() / ".tortoise" / "credentials.json")
+    return tuple(candidates)
+
+
+#: How long git may take to answer whether it tracks a store. Bounded because
+#: this sits on the per-request resolution path: a wedged git must cost a
+#: credential, never a hang.
+_GIT_QUERY_TIMEOUT_S = 5.0
+
+
+def _in_a_git_work_tree(directory: Path) -> bool:
+    """Whether a `.git` entry sits at or above `directory`.
+
+    `.git` is a DIRECTORY in an ordinary checkout and a FILE in a linked
+    worktree or a submodule, so both count. Used only when git itself cannot be
+    run (`_git_tracks`): it answers "could anything here have committed the
+    file?" without needing git.
+    """
+    return any((candidate / ".git").exists() for candidate in (directory, *directory.parents))
+
+
+def _git_tracks(path: Path) -> bool:
+    """Whether git TRACKS `path` — i.e. whether the store arrived with the checkout.
+
+    A store `tortoise init --api-key` writes is GITIGNORED, so one git tracks came
+    from the REPOSITORY: a clone, a `git add -f`, or a hostile repo — the
+    attacker-controllable class `tortoise/__main__.py::_resolve_transmit_config`
+    (#3660) fails closed on, because such a file controls BOTH halves of the
+    identity (its `api_key` and its `api_url`) and would otherwise choose the host
+    a stored Bearer is sent to.
+
+    NO LOCK-INVERSION: a store outside any repository (a plain directory, a
+    tarball) cannot have been committed, so it is read as before. When git cannot
+    be asked at all, the question still gets answered mechanically — by looking
+    for a `.git` above the store — and an undeterminable case fails CLOSED.
+    """
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(path.parent), "ls-files", "--error-unmatch", "--", path.name],
+            capture_output=True,
+            text=True,
+            timeout=_GIT_QUERY_TIMEOUT_S,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return _in_a_git_work_tree(path.parent)
+    # 0 = tracked. 1 = not tracked by this repository. 128 = no repository here
+    # at all. The last two both mean "no repository can have committed it".
+    return completed.returncode == 0
+
+
+def _warn_if_store_is_git_tracked(path: Path) -> None:
+    """Warn once per process when a credential store is COMMITTED to a repository.
+
+    The store is IGNORED, not merely reported (#10796): a warning that still used
+    the credential would leave a cloned repo free to re-aim the endpoint, which is
+    the whole defect. The line exists so the operator learns WHY their store went
+    unread instead of seeing only the `MCP-KEY-EMPTY` that names it.
+    """
+    label = str(path)
+    if label in _WARNED_TRACKED_STORES:
+        return
+    _WARNED_TRACKED_STORES.add(label)
+    print(
+        f"⚠️  {label} is tracked by git — a repository can commit that file, so it "
+        f"is NOT trusted as a credential source and is IGNORED. Remove it from the "
+        f"repository (`git rm --cached {path.name}`) and let `tortoise init "
+        f"--api-key` write a gitignored store, or set TORTOISE_API_KEY.",
+        file=sys.stderr,
+    )
 
 
 def _warn_if_store_is_readable(path: Path) -> None:
@@ -285,6 +379,12 @@ def resolve_connection() -> Connection:
     none. A `TORTOISE_MCP_URL` from the environment is honoured only by an
     env-sourced credential, so a committed harness config cannot aim a stored key
     at a host of its choosing.
+
+    A store git TRACKS is not an identity source at all (#10796). Both halves of
+    this identity come from one file, so a repo that commits `./.tortoise` would
+    choose the key AND the host — exactly the shape #3660 fails closed on for the
+    transcript uploaders. Precedence itself is unchanged (#1708 D5): a store the
+    user's own `tortoise init` wrote is gitignored, so it is still read first.
     """
     sources: list[str] = []
     env_url = os.environ.get("TORTOISE_MCP_URL") or None
@@ -292,7 +392,10 @@ def resolve_connection() -> Connection:
         sources.append(name)
         value = os.environ.get(name)
         if value and value.strip():
-            return Connection(env_url or _DEFAULT_URL, value.strip(), name, tuple(sources))
+            return Connection(
+                env_url or _DEFAULT_URL, value.strip(), name, tuple(sources),
+                declared=bool(env_url),
+            )
 
     for path in _credential_paths():
         label = str(path)
@@ -302,6 +405,13 @@ def resolve_connection() -> Connection:
             # `./.tortoise` state dir) — "no config here", so the next candidate
             # wins (#1708 D5). Reading it would raise IsADirectoryError and be
             # reported as a CORRUPT store.
+            continue
+        if _git_tracks(path):
+            # Checked BEFORE the read: the file is repo-controlled, so it must not
+            # supply a key OR an `api_url`. Marked in `sources` so a later refusal
+            # reports the real state — ignored, not absent.
+            _warn_if_store_is_git_tracked(path)
+            sources[-1] = f"{label} (git-tracked: ignored)"
             continue
         try:
             config = json.loads(path.read_text())
@@ -317,20 +427,34 @@ def resolve_connection() -> Connection:
 
         _warn_if_store_is_readable(path)
         api_url = config.get("api_url")
-        if isinstance(api_url, str) and api_url.strip():
-            url = api_url.strip().rstrip("/") + "/mcp/"
-        else:
-            # #2369 D1.1, strictly: the store's own identity, or the BUILT-IN
-            # DEFAULT — never the environment. A harness config is committable, so
-            # a `TORTOISE_MCP_URL` it carries must not be able to aim a stored
-            # credential at a host of its choosing; a store that records no
-            # api_url therefore resolves to the default, not to whatever the env
-            # says. (An operator who does want a stored key at a non-default host
-            # records that host IN the store — `tortoise init` writes it.)
-            url = _DEFAULT_URL
-        return Connection(url, key.strip(), label, tuple(sources))
+        endpoint_declared = isinstance(api_url, str) and bool(api_url.strip())
+        # #2369 D1.1, strictly: the store's own identity, or the BUILT-IN DEFAULT —
+        # never the environment. A harness config is committable, so a
+        # `TORTOISE_MCP_URL` it carries must not be able to aim a stored credential
+        # at a host of its choosing; a store that records no api_url therefore
+        # resolves to the default, not to whatever the env says. (An operator who
+        # does want a stored key at a non-default host records that host IN the
+        # store — `tortoise init` writes it.)
+        url = (api_url.strip().rstrip("/") + "/mcp/") if endpoint_declared else _DEFAULT_URL
+        return Connection(
+            url, key.strip(), label, tuple(sources), declared=endpoint_declared,
+        )
 
-    return Connection(env_url or _DEFAULT_URL, None, None, tuple(sources))
+    return Connection(
+        env_url or _DEFAULT_URL, None, None, tuple(sources), declared=bool(env_url),
+    )
+
+
+def endpoint_declared() -> bool:
+    """True when an ENDPOINT is configured — `TORTOISE_MCP_URL`, or a store's `api_url`.
+
+    The client-boundary probe's contribution (#3805). The driver always resolves
+    SOME endpoint, because the built-in default is a FALLBACK rather than a
+    configuration — so "a URL resolves" cannot distinguish "configured but down"
+    from "never set up", and neither can `TORTOISE_MCP_URL` alone now that a
+    store's `api_url` is a first-class endpoint source (#10605).
+    """
+    return resolve_connection().declared
 
 
 def mcp_url() -> str:

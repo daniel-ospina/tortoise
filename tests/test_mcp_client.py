@@ -10,8 +10,11 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import subprocess
 import threading
 import time
+from pathlib import Path
 
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 
@@ -59,6 +62,32 @@ def _serve(app) -> str:
     finally:
         server.should_exit = True
         t.join(timeout=10)
+
+
+def _git_repo_with_store(tmp_path, payload: dict, *, commit: bool = False) -> Path:
+    """A real checkout carrying a project-local `./.tortoise` credential store.
+
+    `commit=True` reproduces the #10796 shape exactly: the store ARRIVED with the
+    checkout (`git add -f`, or a hostile repository), so it is repo-controlled.
+    `commit=False` is what `tortoise init --api-key` leaves behind — the store is
+    gitignored, so no repository can have committed it.
+    """
+    if shutil.which("git") is None:  # pragma: no cover - git is a CI dependency
+        pytest.skip("git is not installed, so a TRACKED store cannot be built")
+    repo = tmp_path / "checkout"
+    repo.mkdir()
+    (repo / ".tortoise").write_text(json.dumps(payload))
+    _git(repo, "init", "-q")
+    if commit:
+        _git(repo, "add", "-f", ".tortoise")
+    return repo
+
+
+def _git(repo: Path, *args: str) -> None:
+    completed = subprocess.run(
+        ["git", "-C", str(repo), *args], capture_output=True, text=True, check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
 
 
 def _mcp_app(record: list | None = None):
@@ -925,6 +954,84 @@ class TestCredentialResolution:
 
         assert mcp_client.list_tools()
         assert set(h for h in seen if h) == {"Bearer tt_project_local"}, seen
+
+    def test_a_git_tracked_project_store_is_not_a_credential_source(
+        self, isolated_home, monkeypatch, tmp_path, capsys,
+    ):
+        """A COMMITTED `./.tortoise` must not outrank the user's global store.
+
+        Both halves of this identity come from ONE file (`resolve_connection`'s
+        co-source rule), so a repository that commits `./.tortoise` would choose
+        the key AND the endpoint — the repo-controlled shape #3660 fails closed
+        on. Precedence itself is NOT reversed (#1708 D5): the store `tortoise
+        init --api-key` writes is gitignored, so it is still read first — pinned
+        by `test_the_project_local_store_is_read` just above.
+        """
+        from tortoise import mcp_client
+
+        (isolated_home / ".tortoise").mkdir(parents=True, exist_ok=True)
+        (isolated_home / ".tortoise" / "credentials.json").write_text(json.dumps(
+            {"api_key": "tt_legit_user_key", "api_url": "https://api.premiselabs.co"}))
+        repo = _git_repo_with_store(
+            tmp_path,
+            {"api_key": "tt_attacker", "api_url": "http://collector.evil:9999"},
+            commit=True,
+        )
+        monkeypatch.chdir(repo)
+
+        connection = mcp_client.resolve_connection()
+        assert connection.key == "tt_legit_user_key", connection
+        assert connection.url == "https://api.premiselabs.co/mcp/", connection
+        assert connection.source == str(
+            isolated_home / ".tortoise" / "credentials.json"), connection
+        # Named as IGNORED in the refusal's source list — not absent, not corrupt.
+        assert any("git-tracked: ignored" in s for s in connection.sources), connection.sources
+        assert "tracked by git" in capsys.readouterr().err
+
+    def test_an_untracked_project_store_still_wins_over_the_global_one(
+        self, isolated_home, monkeypatch, tmp_path,
+    ):
+        """Negative of the guard: the #1708 D5 store is still read FIRST.
+
+        Without this, the test above could be satisfied by deleting the
+        project-local candidate outright — which is the D5 reversal #10796
+        explicitly rules out.
+        """
+        from tortoise import mcp_client
+
+        (isolated_home / ".tortoise").mkdir(parents=True, exist_ok=True)
+        (isolated_home / ".tortoise" / "credentials.json").write_text(json.dumps(
+            {"api_key": "tt_global_key"}))
+        # A real repo, same store, but NOT committed — what `tortoise init` leaves.
+        repo = _git_repo_with_store(tmp_path, {"api_key": "tt_local_key"})
+        monkeypatch.chdir(repo)
+
+        connection = mcp_client.resolve_connection()
+        assert connection.key == "tt_local_key", connection
+        assert connection.source == str(repo / ".tortoise"), connection
+
+    def test_status_never_raises_when_the_working_directory_is_gone(
+        self, isolated_home, monkeypatch, tmp_path,
+    ):
+        """`status()` promises never to raise; a REAPED worktree must not break it.
+
+        Resolution runs PER REQUEST (#10605), so a `Path.cwd()` that raises does
+        not fail one probe — it fails every `status`, `available`, `list_tools`
+        and `call_tool`. `available()`'s caller (`integrations/crm/twenty/
+        bridge.py`) catches only ImportError/ValueError, so the minutes script
+        would CRASH where its own contract says it skips.
+        """
+        from tortoise import mcp_client
+
+        monkeypatch.setenv("TORTOISE_MCP_URL", "http://127.0.0.1:9/mcp")
+        doomed = tmp_path / "reaped-worktree"
+        doomed.mkdir()
+        monkeypatch.chdir(doomed)
+        doomed.rmdir()
+
+        payload = mcp_client.status()  # must NOT raise
+        assert payload["status"] == "tortoise_unavailable", payload
+        assert payload["url"] == "http://127.0.0.1:9/mcp", payload
 
     def test_a_directory_named_tortoise_is_not_a_corrupt_store(
         self, isolated_home, monkeypatch, tmp_path,

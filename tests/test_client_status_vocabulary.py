@@ -245,11 +245,35 @@ class TestProbeExecutesTheContract:
 
     def test_never_configured_probe_reports_unconfigured_exit_four(self, monkeypatch, capsys):
         monkeypatch.delenv("TORTOISE_MCP_URL", raising=False)
+        # `configured` is asked of the RESOLUTION, so pin it rather than depend on
+        # whatever store this machine happens to have (#3805, #10605).
+        monkeypatch.setattr(cli, "endpoint_declared", lambda: False)
         monkeypatch.setattr(cli, "status", _fake_status("tortoise_unavailable", error="boom"))
         assert cli.main(["status"]) == 4
         out = json.loads(capsys.readouterr().out)
         assert out["status"] == UNCONFIGURED
         assert out["configured"] is False
+
+    def test_a_store_declared_endpoint_that_is_DOWN_is_degraded_not_unconfigured(
+        self, monkeypatch, capsys,
+    ):
+        """An endpoint a STORE declares is configured — `degraded`, exit 3.
+
+        `configured` used to be `bool(TORTOISE_MCP_URL)`, which was adequate while
+        the environment was the only way to name an endpoint. Since #10605 a
+        store's `api_url` is a first-class endpoint source, so a down server that
+        a store points at was reported `unconfigured` (exit 4 — a policy gap) with
+        `url: None`, nulling the very endpoint the driver had resolved. That
+        inverts this module's load-bearing property: `degraded` and `unconfigured`
+        are never reported as each other.
+        """
+        monkeypatch.delenv("TORTOISE_MCP_URL", raising=False)
+        monkeypatch.setattr(cli, "endpoint_declared", lambda: True)
+        monkeypatch.setattr(cli, "status", _fake_status("tortoise_unavailable", error="boom"))
+        assert cli.main(["status"]) == 3
+        out = json.loads(capsys.readouterr().out)
+        assert out["status"] == DEGRADED
+        assert out["url"] == "http://localhost:8000/mcp", out
 
     def test_a_reachable_probe_is_never_a_failure_at_the_boundary(self, monkeypatch, capsys):
         """Negative: the reachable path can never emit the failure terms (the
