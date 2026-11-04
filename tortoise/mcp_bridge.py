@@ -97,6 +97,30 @@ _DEFAULT_TIMEOUT = 120.0
 
 _AUTH_STATUSES = (401, 403)
 
+#: Every credential value this process has PUT ON THE WIRE, newest last. A refusal
+#: is built from SERVER text, and the value a server echoes is the one it was
+#: given — which is not necessarily the one that resolves NOW: a key can rotate
+#: between the request that established a session and the 404 that ends it, and a
+#: refusal redacted against `connection.key` alone then printed the OLD value
+#: verbatim into the harness transcript (#10727 review, LEAK-ROTATION-*).
+#: Bounded because a long-lived bridge can see a rotation per request.
+_SENT_KEYS: list[str] = []
+_SENT_KEYS_MAX = 16
+
+
+def _remember_sent(key: str | None) -> None:
+    """Record a value this bridge has transmitted, for LATER redaction."""
+    if not key or key in _SENT_KEYS:
+        return
+    _SENT_KEYS.append(key)
+    del _SENT_KEYS[:-_SENT_KEYS_MAX]
+
+
+def _seen_keys(*extra: str | None) -> list[str]:
+    """Every value to redact against: what was sent, plus what is in hand."""
+    keys = [key for key in (*_SENT_KEYS, *extra) if key]
+    return list(dict.fromkeys(keys))
+
 
 def _log(message: str) -> None:
     """Diagnostics — stderr only, never a credential value."""
@@ -190,14 +214,14 @@ def _response_messages(
         # REDACT FIRST, then truncate: a cut that lands INSIDE the credential
         # leaves a fragment `str.replace` can no longer match, so redacting after
         # the slice leaks the value in parts.
-        snippet = redact(raw.decode("utf-8", "replace"), sent.key)[:400]
+        snippet = _redact_seen(raw.decode("utf-8", "replace"), sent.key)[:400]
         if not raw:
             return [], ""  # 202 Accepted: a notification/response was accepted, no reply
         try:
             body = json.loads(raw)
         except ValueError:
             _log(f"endpoint answered {response.status_code} with a non-JSON body: "
-                 f"{redact(raw.decode('utf-8', 'replace'), sent.key)[:200]!r}")
+                 f"{_redact_seen(raw.decode('utf-8', 'replace'), sent.key)[:200]!r}")
             return [], snippet
         # REDACT on this path too: the snippet is quoted into the no-reply error
         # below, and a 200 body can quote the credential as easily as a 401 can.
@@ -223,7 +247,7 @@ def _response_messages(
         try:
             message = json.loads(chunk)
         except ValueError:
-            _log(f"ignoring non-JSON event-stream payload: {redact(chunk, sent.key)[:120]}")
+            _log(f"ignoring non-JSON event-stream payload: {_redact_seen(chunk, sent.key)[:120]}")
             continue
         # FLATTEN at ingestion (#10727 review, P2): a JSON-RPC BATCH reply arrives
         # as a list in ONE event, while the non-SSE path above already returns a
@@ -255,7 +279,7 @@ def _refusal_message(status: int, body: str, sent: Connection) -> str:
         # REDACT before quoting: a server may echo the key it rejected, and this
         # message is written to the harness's transcript and logs. Quoting is the
         # evidence; the VALUE is never part of it.
-        detail += f": {redact(body.strip(), sent.key)[:400]}"
+        detail += f": {_redact_seen(body.strip(), sent.key)[:400]}"
     if sent.key is None:
         return (
             f"{REFUSAL_CODE}: the Tortoise MCP endpoint rejected this request "
@@ -282,7 +306,12 @@ def _redirect_refusal(response: httpx.Response, body: str, sent: Connection) -> 
     otherwise is the #10605 defect in mirror image — a message that is accurate
     about the status and useless about the cause.
     """
-    final = str(response.request.url)
+    # The final URL came from a SERVER `Location`, so it is untrusted text and
+    # gets the same treatment as the body two lines below: quote it, never the
+    # value. `response.request.url` is the URL of the request that actually
+    # failed, i.e. the redirect target, which a server is free to build from
+    # anything it saw — including the Authorization header it was just given.
+    final = _redact_seen(str(response.request.url), sent.key)
     detail = f"HTTP {response.status_code}"
     if body.strip():
         # REDACT FIRST, TRUNCATE SECOND — the order is the property (#1092).
@@ -291,7 +320,7 @@ def _redirect_refusal(response: httpx.Response, body: str, sent: Connection) -> 
         # characters would reach the harness transcript and the CI log. This site
         # is the reason the rule is stated as a rule and not as a habit: the
         # redirect refusal was added after every sibling site was repaired.
-        detail += f": {redact(body.strip(), sent.key)[:400]}"
+        detail += f": {_redact_seen(body.strip(), sent.key)[:400]}"
     if "/" in str(sent.source):
         # A FILE-sourced credential decides its OWN endpoint (co-source, #2369
         # D1.1), so "point TORTOISE_MCP_URL at it" is advice that cannot work: the
@@ -324,6 +353,10 @@ def _headers(connection: Connection, state: dict, payload: Any) -> dict[str, str
     }
     if connection.key:  # a blank resolution is absent, never `Bearer ` + nothing
         headers["Authorization"] = f"Bearer {connection.key}"
+        # REMEMBER it: a refusal is classified and built AFTER the request, and by
+        # then the key may already have rotated — the value the server echoes is
+        # the one it was sent, so redaction has to know about it too.
+        _remember_sent(connection.key)
     # `initialize` STARTS a session: carrying a previous id would make the server
     # answer 404 for a session we just asked to replace, so the one recovery a
     # harness can perform would be permanently impossible.
@@ -342,22 +375,41 @@ def _redact_any(text: str, *keys: str | None) -> str:
     return text
 
 
-def _redact_message(message: Any, key: str | None) -> Any:
+def _redact_seen(text: str, *extra: str | None) -> str:
+    """Redact against every value this bridge has SENT, not just the live one.
+
+    The single-key form was right for a value that cannot outlive its request and
+    wrong for everything a server can retain: a `Mcp-Session-Id` outlives the
+    credential that established it, and a body/proxy log can quote an older value
+    after a rotation. Both printed the old credential verbatim.
+    """
+    return _redact_any(text, *_seen_keys(*extra))
+
+
+def _redact_message(message: Any, *keys: str | None) -> Any:
     """`message` with any credential VALUE replaced, at any depth.
 
     A reply that ANSWERS the request id is relayed to stdout as-is, and a server
-    is free to quote the key it rejected inside `error.message`. Every other path
-    in this module redacts; this is the one that writes to the harness, so it is
-    the one that matters most.
+    is free to quote the key it rejected inside `error.message` — or as a KEY or a
+    list element. Every other path in this module redacts; this is the one that
+    writes to the harness, so it is the one that matters most, and "at any depth"
+    includes the keys.
     """
-    if not key:
+    keys = tuple(key for key in keys if key)
+    if not keys:
         return message
     if isinstance(message, str):
-        return redact(message, key)
+        return _redact_any(message, *keys)
     if isinstance(message, dict):
-        return {k: _redact_message(v, key) for k, v in message.items()}
+        # KEYS are server text too: a reply can carry the echoed value as a KEY.
+        # Redacting only the values left that sink open while this docstring
+        # promised "any credential VALUE replaced, at any depth".
+        return {
+            (_redact_any(k, *keys) if isinstance(k, str) else k): _redact_message(v, *keys)
+            for k, v in message.items()
+        }
     if isinstance(message, list):
-        return [_redact_message(item, key) for item in message]
+        return [_redact_message(item, *keys) for item in message]
     return message
 
 
@@ -438,15 +490,25 @@ def forward(client: httpx.Client, state: dict, payload: Any) -> list[Any]:
                 state["protocol_version"] = None
                 return _errors_for(
                     payload, -32002,
-                    f"HTTP 404 with Mcp-Session-Id {expired} — the MCP session "
-                    f"expired or the endpoint moved. The bridge has dropped that id, "
-                    f"so an `initialize` from the harness starts a fresh session.",
+                    # The id is SERVER-chosen: a server that echoed the bearer as
+                    # the session id would have the value printed on the next 404.
+                    # Redacted against EVERY value this bridge has sent, because a
+                    # session id outlives the credential that established it — a
+                    # rotation between `initialize` and this 404 left the old
+                    # value redacted against nothing.
+                    _redact_seen(
+                        f"HTTP 404 with Mcp-Session-Id {expired} — the MCP session "
+                        f"expired or the endpoint moved. The bridge has dropped that "
+                        f"id, so an `initialize` from the harness starts a fresh "
+                        f"session.",
+                        connection.key,
+                    ),
                 )
             if response.status_code >= 400:
                 return _errors_for(
                     payload, -32603,
                     f"MCP endpoint returned HTTP {response.status_code}: "
-                    f"{redact(response.read().decode('utf-8', 'replace'), connection.key)[:400]}",
+                    f"{_redact_seen(response.read().decode('utf-8', 'replace'), connection.key)[:400]}",
                 )
 
             messages, snippet = _response_messages(response, expected_ids, connection)
@@ -493,7 +555,7 @@ def forward(client: httpx.Client, state: dict, payload: Any) -> list[Any]:
                 # exists BECAUSE a relayed reply may quote the credential the server
                 # rejected. Applying the guard without it traded a silence for a
                 # leak on the busiest relay path, which is strictly worse.
-                relayed = [_redact_message(m, connection.key) for m in messages
+                relayed = [_redact_message(m, *_seen_keys(connection.key)) for m in messages
                            if isinstance(m, dict) and m.get("id") is not None
                            and _id_key(m["id"]) in expected_keys]
                 # ⛔ AND SO IS THE PROTOCOL-VERSION CAPTURE. It lives in the tail,
@@ -513,10 +575,10 @@ def forward(client: httpx.Client, state: dict, payload: Any) -> list[Any]:
     except httpx.HTTPError as exc:
         return _errors_for(
             payload, -32603,
-            f"MCP transport failure talking to {url}: {redact(str(exc), connection.key)}",
+            f"MCP transport failure talking to {url}: {_redact_seen(str(exc), connection.key)}",
         )
 
-    messages = [_redact_message(message, connection.key) for message in messages]
+    messages = [_redact_message(message, *_seen_keys(connection.key)) for message in messages]
     _capture_protocol_version(messages, state)
     return messages
 

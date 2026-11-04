@@ -15,6 +15,8 @@ License: Apache-2.0 (see client/LICENSE); engine remains BSL-1.1.
 from __future__ import annotations
 
 from tortoise.mcp_client import (
+    MCPCredentialHostMismatchError,
+    MCPCredentialNotCarriedError,
     MCPKeyEmptyError,
     available,
     call_tool,
@@ -26,6 +28,8 @@ from tortoise.mcp_client import (
 __version__ = "0.2.0"  # lockstep with tortoise-graph minor (docs/client-server-split.md)
 
 __all__ = [  # noqa: RUF022
+    "MCPCredentialHostMismatchError",
+    "MCPCredentialNotCarriedError",
     "MCPKeyEmptyError",
     "available",
     "call_tool",

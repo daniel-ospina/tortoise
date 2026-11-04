@@ -227,10 +227,12 @@ useless: it points at the credential's VALUE when the client never looked again
 
    A credential whose CO-SOURCED host is not this client's endpoint is
    **withheld**, never sent, and reported as `MCPCredentialHostMismatchError`
-   (`MCP-CREDENTIAL-HOST-MISMATCH`) — and only for an auth rejection: a daemon
-   that is down is an outage whatever the credential situation. Endpoints are
-   compared as endpoints (scheme, host, default port, path without a trailing
-   slash), so one endpoint spelled two ways never reads as two hosts.
+   (`MCP-CREDENTIAL-HOST-MISMATCH`) for both failure shapes it explains: an auth
+   rejection (the request went out bare) and a declined redirect (the hop is the
+   one a withheld credential must never take). It does NOT explain a transport
+   fault: a daemon that is down is an outage whatever the credential situation.
+   Endpoints are compared as endpoints (scheme, host, default port, path without
+   a trailing slash), so one endpoint spelled two ways never reads as two hosts.
 2. `tortoise/mcp_bridge.py` is a local **stdio ↔ Streamable-HTTP** bridge, so a
    harness can declare a command instead of a header:
 
@@ -249,8 +251,12 @@ useless: it points at the credential's VALUE when the client never looked again
    cause carries the remedy that can actually work for its source: an env key is
    pointed at the final URL, a stored key is given the `api_url` to record,
    because a stored credential takes its endpoint from its own file (#2369 D1.1).
-   Server text is quoted as evidence, but a credential VALUE echoed back by the
-   server is redacted before it reaches the harness's transcript or logs.
+   Server text is quoted as evidence, but any credential value the bridge has put
+   on the wire is redacted before the text reaches the harness's transcript or
+   logs — from every server-controlled place it can appear (a rejection body, a
+   redirect `Location`, a `Mcp-Session-Id`, a JSON key, an event-stream payload),
+   and against every value the bridge has sent, because a session id outlives the
+   credential that established it.
 
 **WHICH SOURCE IS ACTUALLY LIVE — stated, because "reads the live environment" is
 too generous.** The bridge is a CHILD process, so its environment is a snapshot

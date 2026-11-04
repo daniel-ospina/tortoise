@@ -66,6 +66,15 @@ class _Upstream:
         #: 307 every request to this URL — a CROSS-ORIGIN hop, which is what makes
         #: httpx drop the Authorization header (#10727 review, P2).
         self.redirect_to: str | None = None
+        #: Hand back the BEARER as the session id, so the 404 refusal (which quotes
+        #: the expired id) has the credential in it (#10727 review, LEAK-1).
+        self.session_echo = False
+        #: Answer the request's id with the credential as a dict KEY position —
+        #: redacting values only left it relayed verbatim (#10727 review, LEAK-2).
+        self.key_echo = False
+        #: Answer with this (status, body) instead of the normal reply, for the
+        #: sinks that quote a >=400 body (#10727 review, LEAK-ROTATION-4XX).
+        self.fail_with: tuple[int, str] | None = None
 
     async def __call__(self, scope, receive, send):
         if scope["type"] == "lifespan":
@@ -100,6 +109,11 @@ class _Upstream:
             await _respond(send, 200, None, content_type="text/event-stream", raw=(
                 b"data: " + json.dumps([reply]).encode() + b"\n\n"
             ))
+            return
+
+        if self.fail_with is not None:
+            status, text = self.fail_with
+            await _respond(send, status, {"error": text})
             return
 
         if self.expire and "mcp-session-id" in headers:
@@ -149,11 +163,20 @@ class _Upstream:
 
         method = payload.get("method") if isinstance(payload, dict) else None
         if method == "initialize":
+            session = headers.get("authorization", "").removeprefix("Bearer ") if self.session_echo else None
             await _respond(send, 200, {
                 "jsonrpc": "2.0", "id": payload["id"],
                 "result": {"protocolVersion": "2025-06-18", "capabilities": {},
                            "serverInfo": {"name": "stub", "version": "0"}},
-            }, extra_headers=[(b"mcp-session-id", b"sess-1")])
+            }, extra_headers=[(b"mcp-session-id", (session or "sess-1").encode())])
+            return
+        if self.key_echo:
+            await _respond(send, 200, {
+                "jsonrpc": "2.0", "id": payload["id"],
+                "result": {
+                    headers.get("authorization", ""): "the value in a KEY position",
+                },
+            })
             return
         if method == "tools/list":
             await _respond(send, 200, {
@@ -671,6 +694,138 @@ class TestFailureModes:
                 f"pad={pad}: a FRAGMENT of the value was emitted: {text[-80:]}")
             if pad <= 380:
                 assert "<redacted>" in text, f"pad={pad}: no evidence left: {text[-80:]}"
+
+    def test_a_redirect_target_that_echoes_the_credential_is_redacted(self):
+        """The final URL is SERVER text: a `Location` can carry the value.
+
+        `response.request.url` on a followed cross-origin hop IS the server's
+        `Location`, so quoting it quotes whatever the server chose to put there.
+        The client twin redacts its equivalent (`_redact_known(final, sent)`); this
+        builder interpolated it raw into the message the harness writes to a
+        transcript and a CI lane to a log — the same leak the truncate-before-
+        redact repair closed on the BODY, one field over.
+        """
+        import httpx as _httpx
+
+        from tortoise.mcp_bridge import _redirect_refusal
+        from tortoise.mcp_client import Connection
+
+        key = "tt" + "_echoed_in_the_location"
+        sent = Connection("http://h/mcp", key, "TORTOISE_API_KEY", ("TORTOISE_API_KEY",))
+        response = _httpx.Response(
+            401,
+            request=_httpx.Request(
+                "POST", f"http://other-origin/mcp?echoed_key={key}"),
+        )
+
+        text = _redirect_refusal(response, "", sent)
+
+        assert key not in text, f"the credential value was printed: {text}"
+        assert "<redacted>" in text, f"no redaction marker: {text}"
+        assert "other-origin" in text, (
+            f"the target must still be identifiable: {text}")
+
+    def test_a_session_id_that_echoes_the_credential_is_redacted(
+        self, upstream, home, bridge_factory,
+    ):
+        """The session id is SERVER-chosen text, and the 404 refusal quotes it.
+
+        A server may hand back the bearer as `Mcp-Session-Id` (or a proxy may
+        fold one into the other). When that session then expires, the -32002
+        message — relayed to the harness transcript on stdout and logged to
+        stderr — printed the value verbatim. The redirect refusal next door was
+        repaired one round earlier; this is the same class on a third sink.
+        """
+        _url, stub = upstream
+        stub.session_echo = True
+        key = "tt" + "_echoed_as_a_session_id"
+        bridge = bridge_factory({"TORTOISE_API_KEY": key})
+
+        bridge.send(_INITIALIZE)
+        assert bridge.read()["id"] == 1
+        stub.expire = True
+        bridge.send({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+        text = bridge.read()["error"]["message"]
+
+        assert key not in text, f"the credential value was printed: {text}"
+        assert "<redacted>" in text, f"no redaction marker: {text}"
+        assert "Mcp-Session-Id" in text, f"the evidence was dropped: {text}"
+
+    def test_a_reply_that_echoes_the_credential_as_a_KEY_is_redacted(
+        self, upstream, home, bridge_factory,
+    ):
+        """`_redact_message` promised "at any depth" but walked VALUES only.
+
+        A JSON object can carry the echoed value in a KEY position, which the
+        value-walk left untouched — and this is the sink that writes to the
+        harness, the one where the promise matters most.
+        """
+        _url, stub = upstream
+        stub.key_echo = True
+        key = "tt" + "_echoed_as_an_object_key"
+        bridge = bridge_factory({"TORTOISE_API_KEY": key})
+
+        bridge.send(_INITIALIZE)
+        assert bridge.read()["id"] == 1
+        bridge.send({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+        message = bridge.read()
+
+        rendered = json.dumps(message)
+        assert key not in rendered, f"the credential value was relayed: {rendered}"
+        assert "<redacted>" in rendered, f"no redaction marker: {rendered}"
+        assert "the value in a KEY position" in rendered, (
+            f"the evidence was dropped instead of redacted: {rendered}")
+
+    def test_a_rotated_away_credential_is_still_redacted_from_the_404(
+        self, upstream, home, bridge_factory,
+    ):
+        """A session id outlives the credential that established it.
+
+        The value a server echoes is the one it was GIVEN, not the one that
+        resolves NOW: rotate the store between `initialize` and the 404 and a
+        single-key redaction is a NO-OP (redacting against None changes nothing),
+        so the old credential was printed into the harness transcript. The bridge
+        remembers what it has sent and redacts against all of it.
+        """
+        url, stub = upstream
+        stub.session_echo = True
+        key = "tt" + "_rotated_away_before_the_404"
+        _write_credential(home, key, url[: -len("/mcp")])
+        bridge = bridge_factory()
+
+        bridge.send(_INITIALIZE)
+        assert bridge.read()["id"] == 1
+        # ROTATE: the store now names a different value (its api_url is unchanged,
+        # so the bridge keeps talking to the same endpoint).
+        _write_credential(home, "tt" + "_rotated_in_successor", url[: -len("/mcp")])
+        stub.expire = True
+        bridge.send({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+        text = bridge.read()["error"]["message"]
+
+        assert key not in text, f"the OLD credential value was printed: {text}"
+        assert "<redacted>" in text, f"no redaction marker: {text}"
+        assert "Mcp-Session-Id" in text, f"the evidence was dropped: {text}"
+
+    def test_a_rotated_away_credential_is_still_redacted_from_a_4xx_body(
+        self, upstream, home, bridge_factory,
+    ):
+        """Same rotation, different sink: a >=400 body is quoted verbatim."""
+        url, stub = upstream
+        stub.session_echo = True
+        key = "tt" + "_rotated_away_before_the_500"
+        _write_credential(home, key, url[: -len("/mcp")])
+        bridge = bridge_factory()
+
+        bridge.send(_INITIALIZE)
+        assert bridge.read()["id"] == 1
+        _write_credential(home, "tt" + "_rotated_in_successor", url[: -len("/mcp")])
+        stub.fail_with = (500, f"boom {key}")
+        bridge.send({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+        text = bridge.read()["error"]["message"]
+
+        assert key not in text, f"the OLD credential value was printed: {text}"
+        assert "<redacted>" in text, f"no redaction marker: {text}"
+        assert "boom" in text, f"the evidence was dropped: {text}"
 
     def test_an_expired_session_can_be_re_initialized(self, upstream, home, bridge_factory):
         """The recovery the 404 message promises must actually be possible.
