@@ -1263,10 +1263,14 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "DocumentCreated.",
         risk="write",
         # ⛔ NOT idempotent, and it must not say it is (#10849 review). The
-        # description says ":Source keyed by url", but the DOOR does not key by
-        # url: `sdk.create_document` mints a FRESH id per call
-        # (`did = self.ulid()`), and `_upsert_document` MERGEs the :Source on
-        # that id — so a retry writes a second Document Source and a second
+        # description ONCE said ":Source keyed by url"; that was wrong and is
+        # corrected above. ⛔ Note what "not keyed by url" does and does not mean:
+        # the CALLER supplies no url, and no url is a dedup handle —
+        # `sdk.create_document` mints a FRESH id per call (`did = self.ulid()`),
+        # and `_upsert_document` MERGEs the :Source on `{url: $id}`, i.e. on that
+        # server-minted id (which is why that module's own docstring can call a
+        # document "a `:Source` keyed `url = <document id>`" without contradicting
+        # this). So a retry writes a second Document Source and a second
         # `DocumentCreated` (the SDK's own note on `_create_entity`, #2296).
         # `write` tier already defaults to `idempotentHint: false`.
         http_policy=True,

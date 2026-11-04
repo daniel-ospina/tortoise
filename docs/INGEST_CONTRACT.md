@@ -814,9 +814,10 @@ mechanisms by which an identical resubmission writes again:
   operator).
 
 ⛔ **Three mechanisms, and NOT a complete set.** Two earlier versions of this
-section presented it as closed — one named only the entity legs, the next named
-only the operator case — and each was falsified by a case missing from it. Treat
-the set as OPEN: none of these warns (`append_only_items` in [§3.2](#32-warnings--the-thirteen-keys)
+section presented it as closed and each was falsified by a case missing from it:
+one named only the entity legs, and the next ADDED the operator case but still
+omitted the `pointKind` escape. Treat the set as OPEN: none of these warns
+(`append_only_items` in [§3.2](#32-warnings--the-thirteen-keys)
 is reserved vocabulary, not emitted today, so waiting for it learns nothing).
 
 ⛔ **Do not infer convergence from this document — read the response.** The
