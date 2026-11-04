@@ -377,48 +377,86 @@ class Refused(Exception):
     """A precondition the launcher itself enforces (never a rail verdict)."""
 
 
-def _gh(argv: list[str], cwd: Path) -> subprocess.CompletedProcess:
-    """Run `gh`; a MISSING BINARY is a failed query, never a crash.
+class _GhRun:
+    """The fields the `gh` call sites read, from one ALWAYS-RETURNING read.
 
-    Both callers below are best-effort (`_head_sha` already answers `unreadable`
-    on a non-zero exit, `_resolve_repo` refuses), but an absent `gh` raised
-    `FileNotFoundError` OUT of `launch()` — so the launcher died instead of
-    stamping its artifact, and every arm of `tests/test_rail_detach.py` read as
-    a failure on the #9018 fallback pool, whose `ubuntu-latest` is a bare runner
-    with a minimal non-login PATH and no `gh` (measured 2026-11-03: 20 red arms
-    on `pi-runner-vm-2`, `gh: No such file or directory`, on a PR whose diff
-    touches neither this tool nor its test). rc=127 is what a shell reports for
-    a missing command, so the callers' `returncode != 0` arms handle it — the
-    same shape `tools/who_is_on.py` already uses for `git`
+    ⛔ A MISSING `gh` BINARY IS AN UNREADABLE ANSWER, NOT A CRASH, and it was
+    measured on TWO pool boxes before anyone believed it. `subprocess.run(["gh",
+    …])` raises `FileNotFoundError` when the executable is not on `PATH`, and
+    neither call site caught it — so the launcher died instead of stamping its
+    artifact, and every arm of `tests/test_rail_detach.py` read as a failure on
+    a runner that has no `gh`. Both measurements are kept here because they are
+    the provenance of the same root and neither alone was believed:
+
+    * `test (d)` on the #9018 fallback pool (`pi-runner-vm-2`, 2026-11-03):
+      `FileNotFoundError: 'gh'`, 21 red arms, on a PR whose diff touches
+      neither this tool nor its test — a bare `ubuntu-latest` runner with a
+      minimal non-login PATH has no `gh`.
+    * `test (h)` on `pi-runner-vm-6`/Linux-ARM64, run `41732583553` (kept from
+      the other side of the #10622 merge): all 20 cases in
+      `tests/test_rail_detach.py` killed at this call.
+
+    The intent was already written into `_head_sha` (`else "unreadable"`) and
+    into `_resolve_repo`'s `Refused`; only the spawn itself was unguarded. The
+    `-> _GhRun` annotation is a CONTRACT, not a hint: this function NEVER
+    returns `None` (every spawn failure fabricates a run with a non-zero
+    `returncode`), so neither caller may carry an `out is not None` guard. A
+    guard that cannot fire is not defence in depth, it is a second, wrong
+    description of what this function returns.
+    """
+
+    def __init__(self, returncode: int, stdout: str = "", cause: str = "",
+                 stderr: str = "") -> None:
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+        self.cause = cause
+
+
+def _gh(argv: list[str], cwd: Path) -> _GhRun:
+    """Run `gh` and NEVER raise for a missing binary or an unspawnable argv.
+
+    ⛔ TWO SPAWN FAILURES, TWO ANSWERS — never one catch-all (review, `#10777`).
+    Only a `FileNotFoundError` whose `filename` is the EXECUTABLE means the
+    binary is not on `PATH`, and only that one may say so: the caller's remedy
+    is "install the GitHub CLI", which is wrong advice — and sends the operator
+    looking in the wrong place — when `gh` is installed but not executable
+    (`PermissionError`), or when the spawn failed for want of resources (an
+    `EAGAIN`/`ENOMEM` from `fork` under cell load, the same condition this file
+    already documents at the `SPAWNING` sentinel above). Both of those return
+    `126` (the shell's "found but could not execute") with the real cause, and
+    `127` is reserved for the command genuinely not being found.
+
+    A failed `chdir` also raises `FileNotFoundError`, but its `filename` is the
+    CWD, not `"gh"` — so it correctly lands on the 126 arm and reports the cwd.
+
+    `returncode=127` is the shell's own "command not found", so every existing
+    `returncode != 0` branch keeps its meaning and the missing binary cannot be
+    mistaken for a successful read — the same shape `tools/who_is_on.py`
+    already uses for `git`
     (`except FileNotFoundError: return 127, "", "<bin>: command not found"`).
-
-    ⛔ A SECOND, INDEPENDENT MEASUREMENT OF THE SAME DEFECT, kept from the other
-    side of this merge (#10622): `test (h)` on `pi-runner-vm-6`/Linux-ARM64, run
-    41732583553, killed all 20 cases in `tests/test_rail_detach.py` at this
-    call. Two pool boxes, one root — the missing binary, not a rail defect.
-
-    The `-> subprocess.CompletedProcess` annotation above is a CONTRACT, not a
-    hint: this function NEVER returns `None` (the `except` arm fabricates a
-    process with rc=127), so neither caller may carry an `out is not None`
-    guard. Two of them did for a while — inherited from the branch side of the
-    #10622 merge, where `_gh` was allowed to return `None` — and they were
-    unreachable branches contradicting their own annotation. Dropped rather
-    than kept: a guard that cannot fire is not defence in depth, it is a
-    second, wrong description of what this function returns.
     """
     try:
-        return subprocess.run(argv, cwd=str(cwd), capture_output=True, text=True)
-    except FileNotFoundError:
-        return subprocess.CompletedProcess(argv, 127, "",
-                                           "gh: command not found")
-
+        out = subprocess.run(
+            ["gh", *argv], cwd=str(cwd), capture_output=True, text=True,
+        )
+    except FileNotFoundError as exc:
+        if getattr(exc, "filename", "gh") == "gh":
+            # ⛔ THE CAUSE VOCABULARY IS BOTH SIDES' (merge of #10777 with main): this
+            # arm names the remedy in `cause` ("not on PATH" — install the CLI) while
+            # `stderr` carries the shell's own token `gh: command not found`, which
+            # main's callers and tests assert on. One fact, two readouts, so neither
+            # side's contract is dropped.
+            return _GhRun(127, cause="`gh` is not on PATH",
+                          stderr="gh: command not found")
+        return _GhRun(126, cause=f"could not run `gh` in {cwd}: {exc}")
+    except OSError as exc:
+        return _GhRun(126, cause=f"could not run `gh`: {exc}")
+    return _GhRun(out.returncode, out.stdout or "", stderr=out.stderr or "")
 
 def _resolve_repo(cwd: Path) -> str:
     env_repo = os.environ.get("GH_REPO", "")
-    out = _gh(
-        ["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
-        Path(cwd),
-    )
+    out = _gh(["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"], cwd)
     if out.returncode == 0 and out.stdout.strip():
         repo = out.stdout.strip()
         if env_repo and env_repo != repo:
@@ -429,11 +467,28 @@ def _resolve_repo(cwd: Path) -> str:
                 "unset GH_REPO rather than detaching a rail at an unknown target"
             )
         return repo
+    if out.returncode == 127:
+        # Names the failing COMMAND, the CAUSE and the REMEDY: a lane reading
+        # this must not have to guess whether the checkout or the tool is wrong.
+        raise Refused(
+            "could not resolve the repo from this checkout (`gh repo view` failed"
+            " — `gh` is not on PATH "
+            f"({(out.stderr or 'gh: command not found').strip()}; pass --repo, or "
+            "install the GitHub CLI)"
+        )
+    if out.returncode == 126:
+        # Found but not runnable — a DIFFERENT remedy from "install the CLI".
+        raise Refused(
+            "could not resolve the repo from this checkout — "
+            f"{out.cause or '`gh` could not be executed'} "
+            "(pass --repo, or fix the `gh` install)"
+        )
+    # Every other non-zero exit keeps main's stderr detail: the last line is the
+    # only thing that says WHY `gh repo view` failed (auth, network, no remote).
     detail = (out.stderr or "").strip().splitlines()
-    # ⛔ BOTH SIDES' WORDING (#10622 merge): this branch's test asserts the message
-    # says WHAT to fix ("installed", `test_a_missing_gh_is_a_REFUSAL_not_a_traceback`),
-    # and main's carries the stderr detail plus the two remedies. Taking either side
-    # alone fails the other's assertion or drops the operator's remedy.
+    # ⛔ BOTH SIDES' WORDING (#10622 merge): the branch side asserts the message
+    # says WHAT to fix ("installed"), main's carries the stderr detail plus the
+    # two remedies. Taking either side alone drops the operator's remedy.
     raise Refused(
         "could not resolve the repo from this checkout (`gh repo view` failed"
         + (f": {detail[-1]}" if detail else "")
@@ -443,11 +498,8 @@ def _resolve_repo(cwd: Path) -> str:
 
 
 def _head_sha(cwd: Path, repo: str, pr: int) -> str:
-    out = _gh(
-        ["gh", "pr", "view", str(pr), "--repo", repo, "--json", "headRefOid",
-         "-q", ".headRefOid"],
-        Path(cwd),
-    )
+    out = _gh(["pr", "view", str(pr), "--repo", repo, "--json", "headRefOid",
+               "-q", ".headRefOid"], cwd)
     return out.stdout.strip() if out.returncode == 0 else "unreadable"
 
 

@@ -48,7 +48,7 @@
 > the installer, so run it from a checkout **at the pin**: from a tree at any other commit it re-farms
 > bytes that are not the pin's, and advancing the pin alone leaves the farm stale. Direct invocation
 > from a pi session may be refused as `script-indirection`, with a message that never mentions drift
-> (agent-infra#3173, the #709 false positive) — so **a refusal is not a clean result**. Do **not** add
+> (agent-infra#3173, the agent-infra#709 false positive) — so **a refusal is not a clean result**. Do **not** add
 > a tortoise-side mirror — a second owner of that predicate was refused (tortoise#10722, closed
 > superseded); the farm arrays and `is_declared_local` live in agent-infra.
 
