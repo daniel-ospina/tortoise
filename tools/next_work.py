@@ -668,7 +668,17 @@ def _position_for_pr(
         elif verdict == "carry-patch":
             pos = "NEEDS-REVIEW"
             detail.append("attestation: carry-patch — re-record at this head (no review cycle owed)")
-        elif verdict in ("fresh", "norecord", "nodigest"):
+        elif verdict == "nodigest":
+            # `record-review.sh` exit 5: "the record has no usable digest — re-run
+            # the recorder at the head and let its carry arms decide (a CARRY, not
+            # a review)". Prescribing a review burned 20-40 minutes per occurrence
+            # and was the same defect as `carry-patch`'s, one value over.
+            pos = "NEEDS-REVIEW"
+            detail.append(
+                "attestation: nodigest — the record has no usable digest, so RE-RECORD "
+                "at this head (a carry, not a review)"
+            )
+        elif verdict in ("fresh", "norecord"):
             pos = "NEEDS-REVIEW"
             detail.append(f"attestation: {verdict} — a head-bound review is owed")
         else:
@@ -809,7 +819,18 @@ def build_units(snap: Snapshot, cfg: QueueConfig | None) -> list[Unit]:
         units.append(u)
 
     units.sort(key=lambda u: u.sort_key)
+    # ⛔ A HELD ROW STILL OWNS ITS TARGET. Marking duplicates only among PICKABLE
+    # rows let a claimed row be skipped before it registered its PR, so a second
+    # issue closed by the same PR was offered `merge-one.sh` for an artifact whose
+    # work is held — refused only at merge time, by the pr-<N> claim, instead of
+    # here. Blocked rows are registered FIRST and they block unconditionally: a
+    # CLAIMED or SUPERSEDED row's target is not free just because another row
+    # closing it looks ready.
     seen_targets: dict[str, str] = {}
+    for u in units:
+        if u.pickable:
+            continue
+        seen_targets.setdefault(u.action_target, u.key)
     for u in units:
         if not u.pickable:
             continue
@@ -868,26 +889,35 @@ def next_command(unit: Unit, repo: str) -> str | None:
     # raw into the one string this tool exists to hand a runner. `merge-one.sh`
     # documents this exact threat and solved it with `--argv`; the emitter must not
     # put the value back in the shell. `shlex.quote` is the one-line form.
+    # ⛔ EVERY VALUE IN THIS STRING IS UNTRUSTED, NOT JUST THE BRANCH. `repo` comes
+    # from `--repo`, from a remote URL (`_repo_slug`'s regex accepts `;`, `$(` and
+    # spaces), or from a `--from` snapshot; the first fix quoted the branch and left
+    # the five rail lines interpolating `{repo}` raw — measured: `evil/repo;touch
+    # /tmp/PWNED` split into two argv words and the second command RAN. One rule,
+    # applied to every value: `shlex.quote`, then build.
+    qrepo = shlex.quote(repo)
     branch = unit.head_ref
     if branch:
         branch_shell = shlex.quote(branch)
     else:
         branch_shell = (
-            f'"$(gh pr view {unit.pr} --repo {shlex.quote(repo)} --json headRefName '
-            "-q .headRefName)\""
+            f'"$(gh pr view {unit.pr} --repo {qrepo} --json headRefName -q .headRefName)\"'
         )
     if unit.kind == "fold" and unit.position == "READY-TO-LAND":
-        return f"bash scripts/orchestrator-harness/merge-one.sh . {repo} {unit.pr} {branch_shell}"
+        return f"bash scripts/orchestrator-harness/merge-one.sh . {qrepo} {unit.pr} {branch_shell}"
     if unit.kind == "fold" and unit.position not in ("READY-TO-LAND", "NEEDS-REVIEW", "NEEDS-TEST"):
-        return f"bash scripts/orchestrator-harness/fix-one.sh . {repo} {unit.pr} {branch_shell}"
+        return f"bash scripts/orchestrator-harness/fix-one.sh . {qrepo} {unit.pr} {branch_shell}"
     if unit.kind == "fold":
         return None
     if unit.position == "NO-PR":
-        return f"bash scripts/orchestrator-harness/lane.sh --repo {repo} {unit.issue} lane/{unit.issue}"
+        return (
+            f"bash scripts/orchestrator-harness/lane.sh --repo {qrepo} {unit.issue} "
+            f"lane/{unit.issue}"
+        )
     if unit.position == "READY-TO-LAND":
-        return f"bash scripts/orchestrator-harness/merge-one.sh . {repo} {unit.pr} {branch_shell}"
+        return f"bash scripts/orchestrator-harness/merge-one.sh . {qrepo} {unit.pr} {branch_shell}"
     if unit.position == "NEEDS-FIX":
-        return f"bash scripts/orchestrator-harness/fix-one.sh . {repo} {unit.pr} {branch_shell}"
+        return f"bash scripts/orchestrator-harness/fix-one.sh . {qrepo} {unit.pr} {branch_shell}"
     return None
 
 
@@ -901,6 +931,21 @@ def next_action(unit: Unit, repo: str) -> str | None:
     if not unit.pickable:
         return None
     target = f"#{unit.issue}" if unit.kind == "issue" else f"fold PR #{unit.fold_pr}"
+    if unit.position == "NEEDS-REVIEW" and any("nodigest" in d for d in unit.detail):
+        # The record carries no usable digest: re-mint at the head, no review owed.
+        return (
+            f"re-record {target} at head {unit.head} — the record has no usable digest, so "
+            f"record-review.sh {unit.pr} <current-head> clean {repo} needs NO new review"
+        )
+    if unit.position == "NEEDS-REVIEW" and any("UNREADABLE" in d for d in unit.detail):
+        # `--check-carry` exit 3: "the live diff could not be READ — RETRY, do NOT
+        # re-review". The row printed "abstention, not a clean record" and then
+        # asked for a review; a retry is what is owed.
+        return (
+            f"retry the attestation read for {target} at head {unit.head} "
+            f"(record-review.sh --check-carry {unit.pr} {repo}) — an UNREADABLE diff is a "
+            "RETRY, not a review"
+        )
     if unit.position == "NEEDS-REVIEW" and any("carry-patch" in d for d in unit.detail):
         # ⛔ `carry-patch` IS NOT A REVIEW CYCLE. `record-review.sh` exit 6 says
         # "RE-RECORD at the current head and do NOT run a review cycle" — the
@@ -965,6 +1010,13 @@ def _run(
         return subprocess.CompletedProcess(list(args), 127, "", str(exc))
 
 
+class _Incomplete(SystemExit):
+    """Raised to end the run with INCOMPLETE (2) from deep inside a collector."""
+
+    def __init__(self) -> None:
+        super().__init__(2)
+
+
 def _repo_slug(explicit: str | None, repo_root: Path | None = None) -> str:
     if explicit:
         return explicit
@@ -973,7 +1025,16 @@ def _repo_slug(explicit: str | None, repo_root: Path | None = None) -> str:
         m = re.search(r"[:/]([^/:]+/[^/]+?)(?:\.git)?\s*$", proc.stdout.strip())
         if m:
             return m.group(1)
-    raise SystemExit("next_work: could not resolve owner/name — pass --repo owner/name")
+    # ⛔ exit 2, NOT SystemExit(1). The interpreter's 1 means "the queue was read and
+    # no unit is pickable"; this run never read the queue. `main` cannot catch
+    # SystemExit, so raising it was the one remaining mis-grade of the same family
+    # as the missing and mis-shaped snapshot.
+    print(
+        "next_work: INCOMPLETE — could not resolve owner/name from origin; pass --repo "
+        "owner/name. exit 2 is 'could not check'.",
+        file=sys.stderr,
+    )
+    raise _Incomplete()
 
 
 def dedupe_issues(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1729,6 +1790,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         with contextlib.suppress(OSError):
             os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
         return 2
+    except SystemExit as exc:
+        # A deep `_Incomplete()` is already a code; anything else that exits here is
+        # still "could not check" rather than the interpreter's 1.
+        code = exc.code if isinstance(exc.code, int) else 2
+        return code if code != 1 else 2
     except (AttributeError, KeyError, TypeError, ValueError, OSError) as exc:
         print(
             f"next_work: INCOMPLETE — the snapshot could not be decided "

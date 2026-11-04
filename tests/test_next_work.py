@@ -621,9 +621,11 @@ def test_no_clock_seam_is_documented_or_accepted():
     the stronger one: claim leases are resolved by `claims.sh` at COLLECTION time,
     the snapshot records the verdict, and no clock enters the decision at all.
     """
-    with pytest.raises(SystemExit) as exc:
-        _run_main(["--from", "/dev/null", "--now", "1"])
-    assert exc.value.code != 0, "an undocumented-then-removed flag must not be silently accepted"
+    # argparse still refuses the flag; `main` now NORMALISES any SystemExit into the
+    # documented 2 (an unknown flag is "could not run", never "nothing is pickable").
+    assert _run_main(["--from", "/dev/null", "--now", "1"]) == 2, (
+        "an undocumented-then-removed flag must not be silently accepted"
+    )
     from tools.next_work import main  # noqa: F401  (imported for its parser)
 
     help_text = subprocess.run(
@@ -1967,3 +1969,144 @@ def test_a_broken_pipe_exits_2_not_120():
         timeout=120,
     )
     assert proc.returncode == 0, proc.stderr[-400:]
+
+
+# ── every interpolated value is shell-quoted, not just the branch ─────────
+HOSTILE_VALUES = [
+    "fix/100-$(tar${IFS}czf${IFS}/tmp/x${IFS}$HOME)",
+    "fix/100-`id`",
+    'fix/100-"quoted"',
+    "fix/100-;rm -rf /",
+    "fix/100-a b",
+    "fix/100-'single",
+    "fix/100-$HOME",
+    "fix/100-*",
+]
+
+
+@pytest.mark.parametrize("hostile", HOSTILE_VALUES)
+def test_a_hostile_branch_is_one_inert_argument(hostile):
+    """`git check-ref-format` permits `$(`, backticks, `"`, `;`, spaces and `*`.
+
+    A branch name is UNTRUSTED INPUT, and the emitted command is the one string
+    this tool exists to hand a runner. Two checks: the shell SPLITS it back to the
+    original value (so the rail receives it intact) and a real `sh` never
+    expands it (so nothing runs).
+    """
+    import shlex
+
+    s = snap(
+        issues=[issue(100)],
+        pulls=[{**pull(1001, closes=[100]), "head_ref": hostile}],
+        check_runs={"a" * 40: all_green()},
+        attestation={"1001": {"verdict": "head"}},
+        merge_tree={"1001": {"clean": True}},
+    )
+    (row,) = units_for(s)
+    cmd = next_command(row, REPO) or ""
+    argv = shlex.split(cmd)
+    assert argv[-1] == hostile, f"the ref is not recoverable as ONE argument: {argv}"
+
+    # a REAL shell, on the emitted fragment, must yield the literal value
+    proc = subprocess.run(
+        ["sh", "-c", f'set -- {shlex.quote(cmd)}; printf %s "$6"'],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert hostile in proc.stdout or proc.returncode == 0
+
+
+@pytest.mark.parametrize("hostile", HOSTILE_VALUES)
+def test_a_hostile_repo_slug_is_one_inert_argument(hostile):
+    """The first fix quoted the BRANCH and left five rail lines interpolating the repo.
+
+    `_repo_slug`'s regex accepts `;`, `$(` and spaces from a remote URL, and
+    `--repo`/`--from` carry it too. Measured: `evil/repo;touch /tmp/PWNED` split
+    into two argv words and the second command RAN.
+    """
+    import shlex
+
+    bad = f"evil/{hostile}"
+    s = snap(
+        issues=[issue(100)],
+        pulls=[{**pull(1001, closes=[100]), "head_ref": "fix/100-x"}],
+        check_runs={"a" * 40: all_green()},
+        attestation={"1001": {"verdict": "head"}},
+        merge_tree={"1001": {"clean": True}},
+    )
+    (row,) = units_for(s)
+    cmd = next_command(row, bad) or ""
+    argv = shlex.split(cmd)
+    assert bad in argv, f"the repo slug was not passed as ONE argument: {argv}"
+    assert argv[0] == "bash"
+    # nothing beyond the rail's own argv: the injected shell metacharacters must not
+    # have produced extra words that a shell would treat as commands
+    assert not any(a.startswith("touch") for a in argv), argv
+
+
+def test_an_unresolvable_repo_is_incomplete_not_nothing_to_do(tmp_path: Path, monkeypatch):
+    """exit 2 is "could not check"; exit 1 means the queue was read and answered."""
+    from tools import next_work
+
+    monkeypatch.setattr(next_work, "_run", lambda *a, **k: subprocess.CompletedProcess(
+        list(a[0]) if a else [], 128, "", "fatal: not a git repository"
+    ))
+    assert next_work.main([]) == 2
+
+
+# ── a held row still OWNS its action target (round 8, #2) ─────────────────
+def test_a_claim_on_one_issue_blocks_the_pr_it_shares_with_another():
+    """A CLAIMED row was skipped before registering its PR, so a co-closing row
+    re-offered `merge-one.sh` for an artifact whose work is held — refused only at
+    merge time by the pr-<N> claim instead of here."""
+    s = snap(
+        issues=[issue(100), issue(101), issue(102)],
+        pulls=[{**pull(2001, closes=[100, 101, 102]), "head_ref": "fix/2001-big"}],
+        check_runs={"a" * 40: all_green()},
+        attestation={"2001": {"verdict": "head"}},
+        merge_tree={"2001": {"clean": True}},
+        claims={"refs/claims/issue-100": {"verdict": "claim-held", "owner": "lane:1"}},
+    )
+    rows = units_for(s)
+    cmds = [next_command(u, REPO) for u in rows if next_command(u, REPO)]
+    assert cmds == [], f"a held PR was re-offered: {cmds}"
+    held = next(u for u in rows if u.issue == 100)
+    for other in (u for u in rows if u.issue in (101, 102)):
+        assert other.duplicate_of == held.key, other
+
+
+# ── nodigest / unreadable are not review debts (round 8, #3) ──────────────
+@pytest.mark.parametrize(
+    ("verdict", "want", "forbidden"),
+    [
+        ("nodigest", "re-record", "reviewer"),
+        ("carry-patch", "re-record", "reviewer"),
+        ("unreadable", "retry", "reviewer"),
+        ("norecord", "reviewer", "re-record"),
+        ("fresh", "reviewer", "re-record"),
+    ],
+)
+def test_each_attestation_verdict_gets_the_action_its_recorder_prescribes(
+    verdict, want, forbidden
+):
+    """`record-review.sh` is the authority on what each verdict owes.
+
+    exit 5 nodigest = "a CARRY, not a review"; exit 3 unreadable = "RETRY, do NOT
+    re-review"; exit 6 carry-patch = "RE-RECORD ... do NOT run a review cycle".
+    Only `norecord`/`fresh` owe a review. Offering a review for the others burned
+    20-40 minutes and nudged toward evidence that does not exist.
+    """
+    from tools.next_work import next_action
+
+    s = snap(
+        issues=[issue(100)],
+        pulls=[{**pull(1001, closes=[100]), "head_ref": "fix/100-x"}],
+        check_runs={"a" * 40: all_green()},
+        attestation={"1001": {"verdict": verdict}},
+        merge_tree={"1001": {"clean": True}},
+    )
+    (row,) = units_for(s)
+    action = (next_action(row, REPO) or "").lower()
+    assert want in action, action
+    assert forbidden not in action, action
