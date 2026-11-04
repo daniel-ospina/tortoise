@@ -1,5 +1,12 @@
 """``metering.get_capture_usage`` — the READER the extractor dimension lacked (#4051).
 
+⚠️ The reader is ONE function over TWO landed contracts. #4051 landed it first (columns +
+``capture_cost_usd``, zero-view degradation, never raises); the ``#9567`` D11/D12 branch defined a
+SECOND ``def get_capture_usage`` at the same insertion point (``measured`` /
+``unmeasured_reason``). Python does not error on a duplicate ``def`` — the last one wins silently —
+so the merge reconciled them into one body: every key #4051's landed tests assert, plus the presence
+fact the allowance gate cannot work without. Both halves are pinned below.
+
 WHY THIS FILE EXISTS. ``record_capture_usage`` has written ``capture_tokens_in`` /
 ``capture_tokens_out`` since #5045, and the owner ruling behind them (2026-09-26) is that the
 customer-visible extraction allowance is denominated in **tokens**. The columns had no reader:
@@ -69,9 +76,17 @@ def test_the_old_binding_could_not_have_been_a_reader():
         )
 
 
-# The two modules that DEFINE the reader, plus ``cost_dimensions.py`` — which names
-# it only as a declared ``Binding(..., READER)`` (a string, never a call).
+# The modules that DEFINE the reader, plus ``cost_dimensions.py`` — which names it
+# only as a declared ``Binding(..., READER)`` (a string, never a call).
 _ALLOWED = {"metering.py", "supabase_control.py", "cost_dimensions.py"}
+
+# ⚠️ §1b SUPERSEDED (#9567 D11/D12): the reader is no longer measurement-only. An
+# allowance cannot be enforced against a reader nothing may call, so the allowance
+# gate is now its ONE consumer — and that is asserted EXACTLY (below), not exempted
+# by name. An exemption for ``allowance_gate.py`` would let a SECOND call site (a
+# report, a dashboard, a tool) appear without reddening this pin; an exact equality
+# also reds if the gate stops reading it, which would be a fail-OPEN regression.
+_ENFORCEMENT_CONSUMERS = {"allowance_gate.py"}
 
 
 def _scan_capture_call_sites(root):
@@ -92,15 +107,25 @@ def _scan_capture_call_sites(root):
     return offenders, scanned
 
 
-def test_no_request_path_calls_the_reader():
-    """§1b scope: this is a measurement reader, not an enforcement hook.
+def test_the_gate_is_the_readers_only_consumer():
+    """§1b's scope is NARROWED, not dropped: the gate, and nothing else (#9567).
+
+    ``#4051`` §1b recorded this reader as measurement-only, with zero call sites.
+    The ``#9567`` change arms the ruled token dimension and has no other meter to
+    read, so the gate became a consumer — a scope change recorded in
+    ``docs/architecture/CONSUMPTION-MODEL.md`` §6 (with the reopen on ``#4051``),
+    not a silent one. The pin is kept, and made STRICTER than an exemption: the
+    offender list must be EXACTLY ``allowance_gate.py``. A blanket exemption for
+    that module would stay green when a report, dashboard or tool added a second
+    call site; an exact equality also reds if the gate stops reading the meter,
+    which is the fail-OPEN direction (a configured dimension with no reading).
 
     Scans EVERY module under ``tortoise/`` except the modules that DEFINE the
-    reader. A call site in ``hosted_api`` would put it on a request path and
-    make it a metered-response change; one in ``tool_registry`` / ``sdk`` /
-    ``hosted_mcp`` would add surface. All three are the #4051 exclusions, so the
-    pin covers the whole tree rather than the one obvious file (a review
-    finding: a one-file pin stays green while the reader is wired in elsewhere).
+    reader. A call site in ``hosted_api`` would put it on another request path;
+    one in ``tool_registry`` / ``sdk`` / ``hosted_mcp`` would add surface. All
+    three are the #4051 exclusions, so the pin covers the whole tree rather than
+    the one obvious file (a review finding: a one-file pin stays green while the
+    reader is wired in elsewhere).
 
     The FLOOR below is load-bearing, not decoration. ``rglob`` over a wrong
     root — or a moved package, or a rename — yields nothing, and then
@@ -122,9 +147,9 @@ def test_no_request_path_calls_the_reader():
         "the scope scan did not read tortoise/hosted_api.py, the module whose call "
         f"site would put the reader on a request path; read: {scanned[:5]}…"
     )
-    assert offenders == [], (
-        "get_capture_usage is a MEASUREMENT reader with no call sites (#4051 §1b); "
-        f"it is referenced in {offenders} — a call site makes it enforcement or surface"
+    assert set(offenders) == _ENFORCEMENT_CONSUMERS, (
+        "get_capture_usage must be read by the allowance gate and NOTHING else "
+        f"(#9567 narrows #4051 §1b); it is referenced in {offenders}"
     )
 
 
@@ -190,7 +215,8 @@ def test_supabase_read_maps_the_capture_columns():
         "capture_cost_usd": 0.0075,
     })
     got = sc.metering_get_capture_usage(fake, "org_x", start)
-    assert got == {"capture_calls": 4, "capture_tokens_in": 1400,
+    assert got == {"measured": True, "unmeasured_reason": None,
+                   "capture_calls": 4, "capture_tokens_in": 1400,
                    "capture_tokens_out": 320, "capture_cost_usd": 0.0075}
 
 
@@ -206,7 +232,8 @@ def test_supabase_read_is_zero_for_a_different_window_or_org():
         "capture_tokens_in": 1400, "capture_tokens_out": 320,
         "capture_cost_usd": 0.0075,
     })
-    zeros = {"capture_calls": 0, "capture_tokens_in": 0,
+    zeros = {"measured": False, "unmeasured_reason": "absent",
+             "capture_calls": 0, "capture_tokens_in": 0,
              "capture_tokens_out": 0, "capture_cost_usd": 0.0}
     assert sc.metering_get_capture_usage(fake, "org_other", start) == zeros
     assert sc.metering_get_capture_usage(
@@ -226,7 +253,8 @@ def test_supabase_branch_passes_the_window_start_to_the_control_plane(monkeypatc
 
     def _reader(cp, org_id, period_start):
         seen["args"] = (org_id, period_start)
-        return {"capture_calls": 7, "capture_tokens_in": 900,
+        return {"measured": True, "unmeasured_reason": None,
+                "capture_calls": 7, "capture_tokens_in": 900,
                 "capture_tokens_out": 100, "capture_cost_usd": 0.002}
 
     import tortoise.supabase_control as sc
@@ -261,6 +289,10 @@ def test_unresolvable_window_degrades_to_zeros(monkeypatch):
     # #923/#3825: an unresolvable window renders the zero view with a
     # placeholder label — never a month KEY that would read as a real period.
     assert view["period_start"] is None
+    # …and it is a FAULT, not an absence: flattening the two would let a broken
+    # clock read as "nothing spent" and disarm the allowance (fail OPEN).
+    assert view["measured"] is False
+    assert view["unmeasured_reason"] == "period_error"
 
 
 def test_registry_row_maps_to_the_capture_keys(monkeypatch):
@@ -273,6 +305,11 @@ def test_registry_row_maps_to_the_capture_keys(monkeypatch):
     assert view["capture_tokens_in"] == 1234
     assert view["capture_tokens_out"] == 567
     assert view["capture_cost_usd"] == pytest.approx(0.0042)
+    # ⚠️ the PRESENCE half (#4051 + #9567 reconciled on one function): a row IS a
+    # reading even when every counter in it is zero, and the gate may rely on it.
+    assert view["measured"] is True
+    assert view["unmeasured_reason"] is None
+    assert view["capture_tokens_total"] == 1801
     assert view["period"] == "2026-11"
     assert view["period_start"] == "2026-11-01T00:00:00+00:00"
 
@@ -285,6 +322,10 @@ def test_no_row_is_zeros_not_an_error(monkeypatch):
     view = metering.get_capture_usage("org_x")
     assert all(view[k] == 0 for k in _KEYS)
     assert view["period"] == "2026-11"
+    # "nobody has captured yet" — a named ABSENCE the gate treats as a zero for a
+    # cumulative flow, never as a measurement.
+    assert view["measured"] is False
+    assert view["unmeasured_reason"] == "absent"
 
 
 def test_null_columns_read_as_zero(monkeypatch):
@@ -307,3 +348,7 @@ def test_a_failed_read_degrades_and_never_raises(monkeypatch):
     monkeypatch.setattr(metering, "_reg_sdk", _boom)
     view = metering.get_capture_usage("org_x")
     assert all(view[k] == 0 for k in _KEYS)
+    # the zero view is kept (#923) AND the fault is NAMED — the gate refuses on
+    # this reason rather than reading a broken meter as zero usage.
+    assert view["measured"] is False
+    assert view["unmeasured_reason"] == "read_error"

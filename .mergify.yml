@@ -58,6 +58,15 @@
 #   queue_conditions (entry) : pricing-artifact, docs, test-isolation,
 #                              license-surface, legal-e2e, ai-review-gate
 #   merge_conditions (merge) : python-ci-gate
+#
+# ⚠️ A rule list is not only checks. `queue_conditions` also carries `base=main`
+# and `-draft`; the invariant above is over the `check-success=` names only
+# (`check-required-set.py` extracts them by that prefix), so a reader must NOT
+# "reconcile" the live set by deleting the non-check lines — that would re-open
+# #3016 (`-draft`) and the base guard at once.
+#
+# The entry list ALSO carries `-label=superseded-by-fold`, which names no check and
+# is therefore outside the union above (see the condition's own comment).
 
 # ── Parallel speculative checks — test several batches at once ────────────────
 #
@@ -92,6 +101,32 @@ merge_queue:
 # own RCV trade (reliability + velocity, accepting wasted runs). Use the label
 # only for changes that unblock others, never for preference.
 priority_rules:
+  # ⛔ #10897: A FOLD OUTRANKS EVERYTHING. This rule is FIRST because Mergify uses
+  # the FIRST matching rule when several match (`priority_rules` semantics), so a
+  # fold that also carries `queue-accelerator` resolves here, at 9000 rather than
+  # at the accelerator's `high` (3000; an unmatched PR is `medium`, 2000).
+  #
+  # WHY A NUMBER AND NOT `high`: this is a PRIORITY, not a permission. A fold's
+  # validation is the one run that certifies N constituents at once, so holding
+  # it behind the constituents it supersedes spends the whole fleet's CI on work
+  # the fold replaces. 9000 keeps a headroom band (1..10_000) for a future
+  # "production incident" class to sit above it without editing this rule.
+  #
+  # `allow_checks_interruption: true` is deliberate and it does spend CI time
+  # already paid for (an in-flight batch is cancelled), which is the same RCV
+  # trade the accelerator rule records below. It is bounded by the same rule: use
+  # the label only for a real fold, never for preference.
+  #
+  # WHAT THIS DOES NOT DO: it orders the QUEUE. It does not make a fold's
+  # workflow runs jump the GitHub Actions runner queue — that lever is the
+  # `fold_runner` seam in `tools/ci_selection.py` (see docs/ops/batch-integration.md
+  # §"Priority"), and the structural lever (a superseded constituent cannot enter
+  # the queue at all) is the sibling change on PR #10902.
+  - name: fold (batch gate)
+    conditions:
+      - label = batch-fold
+    priority: 9000
+    allow_checks_interruption: true
   - name: queue accelerator
     conditions:
       - label = queue-accelerator
@@ -137,6 +172,43 @@ queue_rules:
     queue_conditions:
       - base=main
       - -draft
+      # ⛔ A FOLD CONSTITUENT CANNOT ENTER THE QUEUE (owner's question, 2026-11-04).
+      # The batching rule says *"close the constituents (that is what stops them
+      # landing separately)"* — `tools/batch_open.py --apply` does that. This line
+      # closes the WINDOW before the tool runs, and the case where a constituent
+      # must stay open, so the mechanism does not depend on a tool having run.
+      #
+      # Why ENTRY and not merge: entry is where the CI cost is, and it is not a
+      # claim about label visibility. A `merge_conditions` failure only dequeues the
+      # PR AFTER the queue has built and validated a batch containing it (~37 min of
+      # CI already spent); an unmatched `queue_conditions` refuses it before any of
+      # that, and Mergify's documented lifecycle also DROPS an already-queued PR that
+      # stops matching `queue_conditions` — so the same line gates and drains. (It
+      # is NOT true that a label condition in `merge_conditions` could never become
+      # true: Mergify's docs say only the conditions FOR CHECKS are evaluated against
+      # the temporary queue PR; `label` remains the pull request's own attribute. The
+      # earlier version of this comment claimed otherwise and was wrong.)
+      #
+      # Why it is needed at all: `merge_protections_settings.auto_merge_conditions`
+      # below is `true`, so ANY PR matching these conditions is queued with no
+      # human click — including a constituent whose work an open fold already
+      # carries. Measured 2026-11-04: fold #10894 was open while #10543/#10610/#10575
+      # were all still open and eligible; fold #10880 likewise vs #10867/#10850.
+      # A constituent that wins that race lands its diff alone, and the fold then
+      # applies the same diff to a moved `main`, so its validated tree is no longer
+      # the tree that lands (docs/ops/batch-integration.md §Landing).
+      #
+      # This condition names NO check, so it is INERT to the configuration contract
+      # below: `_split_check` classifies by the `check-` prefix, so `queue ∪ merge`
+      # is unchanged and `tests/test_batch_gate.py` proves it name-for-name. Removing
+      # the line silently restores the disruption, which is why that test asserts it.
+      # Mergify's documented lifecycle drops an already-queued PR that stops
+      # satisfying these conditions, so applying the label should also drain the
+      # queue. ⚠️ That is Mergify's DOCUMENTED behaviour and is deliberately NOT
+      # claimed as measured here — the ENTRY gate above does not depend on it, so
+      # treat the drain as a bonus and verify it in the Mergify UI before relying
+      # on it for a live fold.
+      - -label=superseded-by-fold
       - check-success=pricing-artifact
       - check-success=docs
       - check-success=test-isolation
