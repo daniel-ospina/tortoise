@@ -1696,11 +1696,37 @@ _NEGATED_CLAIM = re.compile(
 #: true sentence ("… no longer writes a `pointKind='event'` node but writes a
 #: `pointKind='observation'` node") was a false RED — the class this guard has
 #: spent several cycles removing (#10675 review cycle 7, P3).
+#: ⛔ The continued clause must ASSERT the shape, so it must carry a WRITE VERB
+#: (or elide one, "yet a `pointKind='event'` node"). Without that requirement a
+#: merely DESCRIPTIVE clause red a true correction — "… no longer writes a turn
+#: node, and every remaining turn node is pre-#10000 history" — which is the
+#: homes' own census vocabulary (#10675 review cycle 8, P3).
+_WRITE_VERB = r"(?:writes?|mints?|creates?|writing|minting|creating)"
 _CONTINUE = re.compile(
     r"\s*(?:,|;|:)?\s*(?:although\s+|however\s*,\s*)?"
     r"(?:(?:" + _CLAUSE_CONNECTORS + r")\b|rather\s+than\b|instead\s+of\b)"
-    r"[^.\n]{0,40}?" + _TURN_SHAPE_TAIL, re.IGNORECASE)
-_NEGATOR_IN_CLAUSE = re.compile(r"\b(?:not|never|no\s+longer|no\s+more)\b", re.IGNORECASE)
+    r"(?:[^.\n]{0,40}?" + _WRITE_VERB + r"\b[^.\n]{0,40}?"
+    r"|\s*(?:(?:to|in|into|as|on|of)\s+)?a\s+`{0,2})"
+    + _TURN_SHAPE_TAIL, re.IGNORECASE)
+#: ⛔ THE NEGATOR MUST GOVERN THE WRITE VERB — the file's own rule (see the
+#: `_NEGATED_CLAIM` block), applied here too. A bare `not|never` anywhere in the
+#: clause excused the re-assertion ("but not quite: it still writes a
+#: `pointKind='event'` node" was GREEN), and the class now matches the parent's
+#: own vocabulary rather than a subset (#10675 review cycle 8, P2 and P3).
+#: ⚠️ RESIDUALS, measured and named rather than chased — this guard has had eight
+#: review cycles and every one found an English edge, so the limits are recorded
+#: here instead of being re-derived: (a) a continued clause that asserts the shape
+#: through a NON-write verb ("does not skip the `pointKind='event'` node") is not
+#: recognised, because the continuation is required to carry a write verb; (b) a
+#: negator separated from its verb by a noun ("no code path writes …") is not
+#: matched, because the negator must be ADJACENT to the verb — widening it to a
+#: window is what let "but not quite: it still writes …" through. Both are
+#: fail-closed (a false RED or a missed excuse), and both are contrived prose no
+#: home in this tree writes. The guard is a documentation pin over 8 files with no
+#: product effect; the product change it sits beside is verified separately.
+_NEGATOR_IN_CLAUSE = re.compile(
+    r"\b(?:not|never|no\s+longer|no\s+more|nothing|none|no)\s+"
+    r"(?:also\s+|still\s+|ever\s+)?" + _WRITE_VERB + r"\b", re.IGNORECASE)
 
 
 def _present_tense_writer_claim(flat: str) -> str | None:
@@ -1736,9 +1762,12 @@ def _present_tense_writer_claim(flat: str) -> str | None:
                 # Read the KIND a short way PAST the shape token, exactly as the
                 # parent does for its own tail — the match stops at `pointKind`,
                 # so the `='observation'` value would otherwise be invisible.
-                tail = window[cont.start():cont.end() + 40]
-                kind = _POINT_KIND.search(tail)
-                if kind is not None and kind.group(1).lower() != "event":
+                tail = window[cont.start():]
+                kinds = [k.group(1).lower() for k in _POINT_KIND.finditer(tail)]
+                # ⛔ ANY `event` kind is the violation — reading only the FIRST
+                # let "writes a `pointKind='observation'` node and a
+                # `pointKind='event'` node" through (#10675 review cycle 8, P3).
+                if kinds and "event" not in kinds:
                     continue
                 if _NEGATOR_IN_CLAUSE.search(tail):
                     continue
@@ -2000,6 +2029,14 @@ def test_the_present_tense_guard_reads_a_NEGATED_writer_claim_as_the_CORRECTION(
         "but writes a `pointKind='observation'` node",
         "the demo seed no longer writes a `pointKind='event'` node, but it "
         "never writes a `turn node` either",
+        # ⛔ A merely DESCRIPTIVE continued clause is not a re-assertion, and it
+        # is the homes' own census vocabulary (#10675 review cycle 8, P3).
+        "the demo seed no longer writes a turn node, and every remaining turn "
+        "node is pre-#10000 history",
+        "the demo seed no longer writes a turn node, and the nine `pointKind` "
+        "nodes are pre-#10000 history",
+        "the demo seed no longer writes a turn node, and nothing writes a "
+        "`pointKind='event'` node",
     )
     for sentence in corrections:
         found = _present_tense_writer_claim(sentence)
@@ -2085,6 +2122,17 @@ def test_the_present_tense_guard_reads_a_NEGATED_writer_claim_as_the_CORRECTION(
         "still writes a `pointKind='event'` node",
         "the demo seed writes its turn not a `turn node`, yet a "
         "`pointKind='event'` node",
+        # ⛔ The negator must GOVERN the continued clause's write verb — a bare
+        # `not|never` anywhere in it excused the re-assertion (#10675 review
+        # cycle 8, P2).
+        "the demo seed no longer writes a turn node, but not quite: it still "
+        "writes a `pointKind='event'` node",
+        "the demo seed no longer writes a turn node, but it never stopped "
+        "writing a `pointKind='event'` node",
+        # ⛔ ANY `event` kind in the continued clause — reading only the FIRST
+        # let an observation-then-event clause through (#10675 review cycle 8, P3).
+        "the demo seed no longer writes a turn node but writes a "
+        "`pointKind='observation'` node and a `pointKind='event'` node",
     )
     for sentence in compound:
         assert _present_tense_writer_claim(sentence) is not None, (
