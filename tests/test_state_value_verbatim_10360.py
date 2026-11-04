@@ -920,6 +920,62 @@ def test_the_unit_table_covers_every_unit_the_engine_can_fuse():
     assert set(v2._UNIT_WORDS) <= set(v2._UNIT_EQUIV)
 
 
+def test_the_unit_tables_carry_no_DUPLICATED_literal_row():
+    """A merge union can add a row TWICE and nothing at runtime notices.
+
+    `_UNIT_EQUIV` is a dict literal, so a duplicate key silently keeps the LAST
+    value: the two sides of a forward-merge can each add `"mile": "mi"` in a
+    disjoint hunk, git reports no conflict, and the tree reads as if it were
+    hand-written once. That is exactly what happened folding #10804 onto this
+    branch (the widen and the fold's `mile`/`miles` row), and a missing
+    re-derivation is invisible in every behavioural test because the duplicate
+    resolves to the same identity.
+
+    ⛔ This must read the SOURCE, not the runtime dict: by the time the literal
+    is evaluated the duplicate is gone. Non-vacuity — appending
+    `"mile": "mi",` to `_UNIT_EQUIV` in `tortoise/extractor_v2.py` reds this
+    with the key and both line numbers.
+    """
+    import ast
+    from pathlib import Path as _P
+
+    src = _P(v2.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    wanted = {"_UNIT_EQUIV", "_UNIT_WORDS"}
+    seen_nodes = 0
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+            continue
+        target = node.targets[0]
+        if not isinstance(target, ast.Name) or target.id not in wanted:
+            continue
+        value = node.value
+        if isinstance(value, ast.Call):        # frozenset({...})
+            value = value.args[0] if value.args else None
+        if isinstance(value, ast.Set):
+            literal = {(k.value, k.lineno) for k in value.elts
+                       if isinstance(k, ast.Constant)}
+        elif isinstance(value, ast.Dict):
+            literal = {(k.value, k.lineno) for k in value.keys
+                       if isinstance(k, ast.Constant)}
+        else:                                  # pragma: no cover - shape guard
+            raise AssertionError(
+                f"{target.id} is assigned a {type(value).__name__}, not a literal "
+                "— this pin reads the SOURCE, so its shape has to stay inspectable")
+        seen_nodes += 1
+        by_value: dict[object, list[int]] = {}
+        for val, lineno in literal:
+            by_value.setdefault(val, []).append(lineno)
+        dupes = {v: lines for v, lines in by_value.items() if len(lines) > 1}
+        assert not dupes, (
+            f"{target.id} declares the same key twice: {dupes} — a dict literal "
+            "keeps the last one silently, so this is a merge union that was never "
+            "de-duplicated, not a harmless repetition")
+    assert seen_nodes == 2, (
+        f"found {seen_nodes} of the two unit-table literals this pin covers — the "
+        "table was renamed or its shape changed, so this pin is now vacuous")
+
+
 def test_the_carve_outs_own_ADJACENT_time_units_are_judged():
     """Residual (d)'s ADJACENCY half, closed: a unit beside a value is judged.
 
