@@ -473,11 +473,10 @@ def _gh(argv: list[str], cwd: Path) -> _GhRun:
     The caller's remedy for a missing binary is "install the GitHub CLI", which is
     wrong advice — and sends the operator looking in the wrong place — when `gh`
     is installed but not executable (`PermissionError`), when the spawn failed for
-    want of resources (an `EAGAIN`/`ENOMEM` from `fork` under cell load, the same
-    condition this file already documents at the `SPAWNING` sentinel above), or
-    when the CWD is gone. Those return `126` (the shell's "found but could not
-    execute") with the real cause, and `127` is reserved for the command genuinely
-    not being found.
+    want of resources (an `EAGAIN`/`ENOMEM` from `fork` under cell load), or when
+    the CWD is gone. Those return `126` (the shell's "found but could not execute")
+    with the real cause, and `127` is reserved for the command genuinely not being
+    found.
 
     ⚠️ `filename == "gh"` earns NONE of that on its own: it separates *exec
     failed* from *`chdir` failed*, and no more. CPython passes the literal argv[0]
