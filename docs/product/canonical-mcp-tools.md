@@ -227,8 +227,8 @@ do not: a warning that names nothing serves a caller who does not exist. The **9
 > `tortoise_onboarding_demo_create`, `tortoise_onboarding_github_connect`,
 > `tortoise_onboarding_github_status` are no longer in `TOOL_REGISTRY` (76 live tools). The
 > remaining four — `tortoise_analyze`, `tortoise_backfill_v25`, `tortoise_packs_list`,
-> `tortoise_pack_install` — are still live and keep their own entries here. **The five REMOVED
-tools'** capabilities survive as hand-written REST
+> `tortoise_pack_install` — are still live and keep their own entries here.
+> **The five REMOVED tools'** capabilities survive as hand-written REST
 > routes in `tortoise/hosted_api.py` (`POST /v1/demo`, `GET|PATCH /v1/onboarding/state`,
 > `POST /v1/onboarding/seed`, `POST /v1/onboarding/github/connect`,
 > `GET /v1/onboarding/github/status`); `tortoise/selfhost_api.py` serves only the state and

@@ -845,7 +845,12 @@ def test_the_live_retirement_reasons_account_for_exactly_the_retired_rows() -> N
         "the Phase 3.2 deletion history must account for exactly the five dropped "
         f"`run_onboarding` tools; got {sorted(REMOVED_IN_PHASE_3_2)}"
     )
-    for name, reason in sorted(REMOVED_IN_PHASE_3_2.items()):
+    # A reason is only a PROOF if it names what authorises it — checked over the
+    # UNION of the live retirement map and the Phase 3.2 deletion history. The
+    # live four are the rows `_validate` actually reads (it requires *a* reason to
+    # exist, never that it names an authority), so leaving them out would let
+    # `REMOVALS["tortoise_analyze"] = "because I said so"` pass every gate green.
+    for name, reason in sorted({**REMOVALS, **REMOVED_IN_PHASE_3_2}.items()):
         assert reason.strip(), f"{name} carries an empty reason"
         assert "canonical" in reason or "settled" in reason, (
             f"{name}'s reason names no authority: {reason!r}"
@@ -885,9 +890,10 @@ def test_a_retirement_without_a_reason_fails_the_build(monkeypatch) -> None:
 
     # EVERY real retirement, one at a time — the per-name coverage the loop exists
     # for, restored after the set fell 9 -> 4 rather than replaced by one victim.
-    for name in sorted(bt.REMOVALS):
+    base_removals = dict(bt.REMOVALS)
+    for name in sorted(base_removals):
         monkeypatch.setattr(bt, "REMOVALS",
-                            {k: v for k, v in bt.REMOVALS.items() if k != name})
+                            {k: v for k, v in base_removals.items() if k != name})
         errs = bt._validate(bt._registry_rows())
         assert any("UNREASONED retirement" in e and name in e for e in errs), (
             f"the real retirement {name} with no reason did not red the build; "
@@ -905,13 +911,16 @@ def test_a_retirement_without_a_reason_fails_the_build(monkeypatch) -> None:
     )
 
     # …and RESTORING a reason must clear it for that name, so the guard is not a
-    # constant red. The four REAL retirements keep their own recorded reasons —
-    # asserting on the whole map without them would red on rows this test did not
-    # touch, which would make the arm right for the wrong reason.
+    # constant red. `bt.REMOVALS` was emptied just above, so the base for this arm
+    # is `bt.REMOVALS` as captured BEFORE the monkeypatch — the four REAL
+    # retirements (`tortoise_analyze`, `tortoise_backfill_v25`, `tortoise_packs_list`,
+    # `tortoise_pack_install`) are then reasoned again, and the only row that could
+    # still red is the victim.
+    real = dict(base_removals)
     monkeypatch.setattr(
         bt,
         "REMOVALS",
-        {**bt.REMOVALS, victim: "canonical-mcp-tools.md §Removed entirely — synthesised"},
+        {**real, victim: "canonical-mcp-tools.md §Removed entirely — synthesised"},
     )
     errs = bt._validate(rows)
     assert not any("UNREASONED retirement" in e and victim in e for e in errs), (
@@ -942,8 +951,9 @@ def test_a_stale_reason_fails_the_build(monkeypatch) -> None:
             f"retirement can leave a stale reason behind; got {errs}"
         )
 
-    # And the block must actually be REACHABLE. The real retirement set is empty
-    # since #4282 Phase 3.2, so synthesise one: with a `REMOVED` row present and no
+    # And the block must actually be REACHABLE. The real set still holds four rows,
+    # but a guard can be name-shaped; synthesise one more so the proof is not
+    # limited to the rows that already exist: with a `REMOVED` row present and no
     # reasons at all, that row must be reported unreasoned. This is what a deleted
     # guard cannot satisfy.
     rows2, victim = _synthetic_retirement(monkeypatch, bt)
@@ -973,9 +983,10 @@ def test_namespaced_destinations_are_rehomes_and_owe_no_retirement_reason() -> N
 def test_check_exits_nonzero_on_an_unreasoned_retirement(monkeypatch) -> None:
     """`--check` is the gate the migration runs through: it must exit non-zero.
 
-    The retirement is synthesised (`_synthetic_retirement`): since #4282 Phase 3.2 the
-    real `REMOVED` set is empty, and `--check` returning 0 on an empty set is correct,
-    not a missing proof.
+    The retirement is synthesised (`_synthetic_retirement`) so the arm is not
+    limited to the four real `REMOVED` rows (`tortoise_analyze`,
+    `tortoise_backfill_v25`, `tortoise_packs_list`, `tortoise_pack_install`) — a
+    name the code was never tuned against is what catches a name-shaped guard.
     """
     sys.path.insert(0, str(ROOT))
     from tools import bridge_table as bt

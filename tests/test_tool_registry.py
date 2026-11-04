@@ -75,12 +75,19 @@ class TestRegistryEquivalence:
         )
 
     def test_registry_count(self):
-        """81 live tools = 98 − the 16 owner-approved retirements (#3863) − 1.
+        """76 live tools = 98 − the 16 owner-approved retirements (#3863) − 1 − 5.
 
         The extra −1 is #3540 ruling B: the two per-source switches were
         consolidated into `tortoise_manage_sources`, which is the ruling's own
         requirement ("the surface ends up one tool fewer, not more"). The
         census is bumped per add — and, here, per approved CONSOLIDATION.
+
+        The final −5 is #4282 Phase 3.2: the five `run_onboarding` tools
+        (`tortoise_onboarding_state`, `_seed`, `_demo_create`,
+        `_github_connect`, `_github_status`) were DELETED from the registry on the
+        2026-09-22 owner ruling (`run_onboarding` dropped for `check_connection`),
+        so they are neither live nor retired — they have no replacement NAME to
+        redirect to. 81 − 5 = 76.
         """
         from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
         assert len(TOOL_REGISTRY) == 76, f"Expected 76, got {len(TOOL_REGISTRY)}"
