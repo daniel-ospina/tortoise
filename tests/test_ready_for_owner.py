@@ -101,6 +101,9 @@ def _fixture(**overrides: Any) -> dict[str, Any]:
         "is_draft": False,
         "mergeable": "MERGEABLE",
         "merge_state": "CLEAN",
+        "labels": [],
+        "pr_state": "open",
+        "merged": False,
         # 30 minutes before NOW — comfortably past the 15-minute settling bound.
         "head_committed_at": "2026-11-04T11:30:00Z",
         "body": "Refs #10900\n\nA normal PR body.",
@@ -401,6 +404,38 @@ def test_reversal_with_an_overrides_line_passes_that_arm() -> None:
     assert _check("exclusions", body=body).passed is True
 
 
+def test_a_queue_blocking_label_is_not_ready() -> None:
+    """`.mergify.yml`'s `queue_conditions` carry ONE non-check entry: `-label=superseded-by-fold`.
+
+    `tools/batch_open.py::label_only()` leaves fold constituents OPEN and labelled, and they
+    are green + reviewed + old by construction. The owner's UI merge bypasses Mergify, so
+    without this arm a constituent the queue REFUSES at entry would read READY-FOR-OWNER and
+    land separately — the exact outcome `.mergify.yml`'s own note records.
+    """
+    check = _assert_fails(
+        "exclusions", "queue-blocking-label:superseded-by-fold", labels=["superseded-by-fold"]
+    )
+    assert "superseded-by-fold" in check.raw
+
+
+def test_an_unrelated_label_does_not_block() -> None:
+    assert _check("exclusions", labels=["deploy:staging", "P1-severe"]).passed is True
+
+
+def test_unreadable_labels_are_unreadable() -> None:
+    check = _check("exclusions", labels=None)
+    assert check.passed is False
+    assert check.unreadable is True
+
+
+@pytest.mark.parametrize(("state", "merged"), [("closed", True), ("closed", False)])
+def test_a_closed_or_merged_pr_is_not_ready(state: str, merged: bool) -> None:
+    """Measured: #10916 (merged) printed READY-FOR-OWNER before this arm existed — a tab a
+    loop would open on a PR that cannot be merged."""
+    check = _assert_fails("exclusions", "not-open:", pr_state=state, merged=merged)
+    assert f"state={state}" in check.raw
+
+
 def test_unreadable_head_date_is_unreadable() -> None:
     check = _check("exclusions", head_committed_at="not-a-date")
     assert check.passed is False
@@ -533,6 +568,52 @@ def test_issues_verdict_is_a_blocking_record() -> None:
         }
     ]
     _assert_fails("blocking-finding", "open-blocking-finding", comments=comments)
+
+
+def test_a_clean_outcome_in_the_recorders_own_format_is_a_clear() -> None:
+    """`Outcome: clean` is the declaration `record-review.sh` reads. Recognising only
+    "NO ISSUES FOUND"/"CLEAN" left it invisible (measured: `last-clear=-` on #10962), so a
+    fixed finding could never be closed off and the PR read NOT-READY forever."""
+    comments = [
+        {
+            "id": 90,
+            "created_at": "2026-11-04T11:40:00Z",
+            "kind": "comment",
+            "body": "[P1] tortoise/sdk.py:412 — the fold drops the evidence",
+        },
+        {
+            "id": 91,
+            "created_at": "2026-11-04T11:55:00Z",
+            "kind": "comment",
+            "body": "**Outcome: CLEAN.** No blocking finding at the new head.",
+        },
+    ]
+    check = _check("blocking-finding", comments=comments)
+    assert check.passed is True, check.raw
+    assert "last-clear=91" in check.raw
+
+
+def test_a_later_approval_closes_an_earlier_change_request() -> None:
+    """Each item is graded on its own state, so without this an approved-after-changes PR
+    could never read READY again."""
+    comments = [
+        {
+            "id": 92,
+            "created_at": "2026-11-04T11:40:00Z",
+            "kind": "review",
+            "state": "CHANGES_REQUESTED",
+            "body": "",
+        },
+        {
+            "id": 93,
+            "created_at": "2026-11-04T11:55:00Z",
+            "kind": "review",
+            "state": "APPROVED",
+            "body": "LGTM now",
+        },
+    ]
+    check = _check("blocking-finding", comments=comments)
+    assert check.passed is True, check.raw
 
 
 def test_p3_only_note_is_not_blocking() -> None:
@@ -832,6 +913,9 @@ def _gh_payloads(
             "draft": False,
             "mergeable": True,
             "mergeable_state": "clean",
+            "state": "open",
+            "merged": False,
+            "labels": [],
             "body": body,
         },
     }
@@ -873,6 +957,35 @@ def test_collect_probe_marks_an_unreadable_declared_union(
     assert verdict.ready is False
 
 
+def test_collect_probe_routes_an_empty_declared_union_to_the_fail_arm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ROUND-3 P3: `if entries:` was falsy for `()`, so a MALFORMED marker took the
+    "no union declared" branch and `check_coverage` printed `union=pr-diff` and PASSED —
+    the `empty-declared-union` arm was fixture-only, unreachable from the live path."""
+    payloads = _gh_payloads(body="READY-GATE UNION: ,\n")
+    probe = _collect(monkeypatch, payloads)[0]
+    assert probe.union == ()
+    assert probe.union_unreadable is False
+    verdict = rfo.evaluate(probe)
+    coverage = next(c for c in verdict.checks if c.name == "coverage")
+    assert coverage.passed is False
+    assert coverage.reason == "empty-declared-union"
+    assert verdict.ready is False
+
+
+def test_collect_probe_reads_labels_and_pr_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The label guard `.mergify.yml` refuses at entry must be visible to the gate."""
+    payloads = _gh_payloads()
+    payloads["pulls/"] = dict(payloads["pulls/"], labels=[{"name": "superseded-by-fold"}])
+    probe = _collect(monkeypatch, payloads)[0]
+    assert probe.labels == ("superseded-by-fold",)
+    verdict = rfo.evaluate(probe)
+    exclusions = next(c for c in verdict.checks if c.name == "exclusions")
+    assert exclusions.passed is False
+    assert "queue-blocking-label" in exclusions.reason
+
+
 def test_collect_probe_scopes_the_union_to_the_named_pr(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -883,6 +996,91 @@ def test_collect_probe_scopes_the_union_to_the_named_pr(
     assert probe.union == ("tools/ready_for_owner.py", "tortoise/sdk.py")
     # The fixture's diff is exactly the union, so coverage passes…
     assert rfo.check_coverage(probe).passed is True, rfo.check_coverage(probe).reason
+
+
+def _tree_runner(monkeypatch: pytest.MonkeyPatch, returns: dict[str, subprocess.CompletedProcess]):
+    """Answer `git fetch/rev-parse/merge-tree` by subcommand."""
+
+    def fake_run(cmd, timeout, cwd=None):
+        for needle, proc in returns.items():
+            if needle in " ".join(cmd):
+                return proc
+        raise AssertionError(f"unexpected git command {' '.join(cmd)}")
+
+    monkeypatch.setattr(rfo, "_run", fake_run)
+
+
+def _proc(args: list[str], rc: int, out: str = "", err: str = "") -> subprocess.CompletedProcess:
+    return subprocess.CompletedProcess(args, rc, out, err)
+
+
+def test_read_tree_clean(monkeypatch: pytest.MonkeyPatch) -> None:
+    _tree_runner(
+        monkeypatch,
+        {
+            "fetch": _proc(["git"], 0),
+            "merge-tree": _proc(["git"], 0, "f" * 40 + "\n"),
+            "rev-parse": _proc(["git"], 0, HEAD + "\n"),
+        },
+    )
+    ok, raw = rfo._read_tree(None, 7, HEAD, REPO_ROOT)
+    assert ok is True
+    assert "merge-tree write-tree ok" in raw
+
+
+def test_read_tree_conflicts_are_dirty(monkeypatch: pytest.MonkeyPatch) -> None:
+    _tree_runner(
+        monkeypatch,
+        {
+            "fetch": _proc(["git"], 0),
+            "merge-tree": _proc(["git"], 1, "", "CONFLICT (content): tortoise/sdk.py"),
+            "rev-parse": _proc(["git"], 0, HEAD + "\n"),
+        },
+    )
+    ok, raw = rfo._read_tree(None, 7, HEAD, REPO_ROOT)
+    assert ok is False
+    assert "CONFLICTS" in raw
+
+
+def test_read_tree_refuses_when_the_fetched_head_is_not_the_live_head(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Comparing a stale local object would certify a tree nobody asked about."""
+    _tree_runner(
+        monkeypatch,
+        {
+            "fetch": _proc(["git"], 0),
+            "merge-tree": _proc(["git"], 0, "f" * 40 + "\n"),
+            "rev-parse": _proc(["git"], 0, "b" * 40 + "\n"),
+        },
+    )
+    ok, raw = rfo._read_tree(None, 7, HEAD, REPO_ROOT)
+    assert ok is None
+    assert "head moved mid-read" in raw
+
+
+def test_read_tree_unexpected_exit_is_unreadable(monkeypatch: pytest.MonkeyPatch) -> None:
+    _tree_runner(
+        monkeypatch,
+        {
+            "fetch": _proc(["git"], 0),
+            "merge-tree": _proc(["git"], 128, "", "fatal: bad object"),
+            "rev-parse": _proc(["git"], 0, HEAD + "\n"),
+        },
+    )
+    ok, raw = rfo._read_tree(None, 7, HEAD, REPO_ROOT)
+    assert ok is None
+    assert "exited 128" in raw
+
+
+def test_read_tree_unfetchable_pr_is_unreadable(monkeypatch: pytest.MonkeyPatch) -> None:
+    _tree_runner(
+        monkeypatch,
+        {"fetch": _proc(["git"], 1, "", "fatal: couldn't find remote ref")},
+    )
+    ok, raw = rfo._read_tree(None, 7, HEAD, REPO_ROOT)
+    assert ok is None
+    assert "git fetch" in raw
 
 
 def test_read_coverage_on_real_paths_does_not_call_a_core_smoke_file_uncovered() -> None:

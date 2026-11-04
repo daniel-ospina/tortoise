@@ -146,13 +146,25 @@ DECLARED_EXCLUSIONS: Mapping[int, str] = {
     ),
 }
 
+#: Labels that make the QUEUE refuse a PR at ENTRY (`.mergify.yml` `queue_conditions`).
+#: `superseded-by-fold` is the only non-check entry there; it is listed here by name so a
+#: change to that list is a visible edit rather than a silent divergence.
+QUEUE_BLOCKING_LABELS = frozenset({"superseded-by-fold"})
+
 #: A reviewer's blocking finding, in the shape ``scripts/review-pr.sh`` defines and
 #: ``code-review`` converges on: a line that LEADS with ``[P0]``/``[P1]``/``[P2]``
 #: (``[P1] tortoise/sdk.py:12 — …``). The token must be the line's FIRST word, which is
 #: what makes this a finding rather than prose that happens to mention a severity.
 BLOCKING_RE = re.compile(r"^\s*(?:[-*]\s*)?\**\[?(P0|P1|P2)\]?\**\s*(?=\S|$)", re.MULTILINE)
 ISSUES_RE = re.compile(r"^\s*ISSUES\s+(\d+)\b", re.MULTILINE)
-CLEAR_RE = re.compile(r"(?:^\s*CLEAN\b|NO ISSUES FOUND)", re.MULTILINE)
+#: A CLEAN outcome. ⛔ THE POSITIVE VOCABULARY IS THE RECORDER'S TOO: `Outcome: clean` is
+#: the declaration `scripts/record-review.sh` reads (its own suppress arm keys on it), and
+#: recognising only "NO ISSUES FOUND"/"CLEAN" left the fleet's dominant format invisible —
+#: measured on #10962, two clean verdicts in that format left `last-clear=-`, so once any
+#: finding had been posted the PR could NEVER be certified (a permanent false NOT-READY).
+CLEAR_RE = re.compile(
+    r"(?im)(?:^\s*CLEAN\b|NO ISSUES FOUND|(?:^|[*\s])outcome:[\t ]*[*\s]*clean\b)"
+)
 #: A CAPPED / ABORTED / DECLARED-NEGATIVE review exit. ⛔ THE VOCABULARY IS COPIED FROM
 #: `scripts/record-review.sh`, NOT INVENTED HERE: it is that script's arms (1) and (1b) —
 #: the two it applies UNCONDITIONALLY when deciding whether a review artifact is evidence
@@ -187,6 +199,7 @@ NON_CLEAN_RE = re.compile(
 #: findings may live entirely in inline comments, and an unresolved `CHANGES_REQUESTED`
 #: is GitHub's own record of "not clean yet".
 CHANGES_REQUESTED = "CHANGES_REQUESTED"
+APPROVED = "APPROVED"
 
 #: A PR that DECLARES it reverses a recorded decision. The `OVERRIDES:` line (AGENTS.md
 #: USER QUESTIONS PROTOCOL) is what such a departure must carry; without it the reversal
@@ -332,6 +345,12 @@ class Probe:
     #: PR comments + review bodies, chronological, each ``{id, created_at, kind, body}``.
     comments: tuple[Mapping[str, Any], ...] | None = None
     comments_raw: str = ""
+    #: The PR's label names, as read. ``None`` = unreadable.
+    labels: tuple[str, ...] | None = ()
+    labels_raw: str = ""
+    #: ``open``/``closed`` as GitHub states it, and whether it already merged.
+    pr_state: str = "open"
+    merged: bool = False
     #: Set by tests/callers that need a fixed clock; default = now (UTC).
     now: datetime = field(default_factory=lambda: datetime.now(UTC))
 
@@ -576,6 +595,29 @@ def check_exclusions(probe: Probe) -> Check:
     reasons: list[str] = []
     parts: list[str] = []
 
+    # The PR must still be OPEN and unmerged: a merged PR cannot be merged from the UI, and
+    # certifying one opens a dead tab (measured: #10916, merged, printed READY before this).
+    if probe.merged or probe.pr_state.lower() not in ("", "open"):
+        reasons.append(f"not-open:{probe.pr_state or 'unknown'}{'-merged' if probe.merged else ''}")
+        parts.append(f"state={probe.pr_state or 'unknown'} merged={str(probe.merged).lower()}")
+
+    if probe.labels is None:
+        return Check("exclusions", False, probe.labels_raw or "-", "unreadable", unreadable=True)
+
+    # ⛔ THE QUEUE-ENTRY GUARD. `.mergify.yml`'s `queue_conditions` carry ONE non-check
+    # condition — `-label=superseded-by-fold` — and it is the one entry this gate did not
+    # model, so a constituent PR left OPEN and labelled by `tools/batch_open.py` (its
+    # `label_only()` path: "gate queue entry, close nothing") was green + reviewed + old and
+    # read READY-FOR-OWNER, while the queue REFUSES it at entry. The owner merges from the
+    # UI, which bypasses Mergify entirely, so the constituent would land separately and the
+    # fold would re-apply the same diff to a moved main — the exact outcome recorded at
+    # `.mergify.yml`'s own `superseded-by-fold` note. A gate that can allow what the queue
+    # refuses is the false PASS this tool exists to prevent.
+    blocked_labels = sorted(set(probe.labels) & QUEUE_BLOCKING_LABELS)
+    if blocked_labels:
+        reasons.append("queue-blocking-label:" + ",".join(blocked_labels))
+        parts.append(f"labels={sorted(probe.labels)}")
+
     declared = DECLARED_EXCLUSIONS.get(probe.pr)
     if declared:
         reasons.append(f"declared-exclusion:#{probe.pr}")
@@ -671,7 +713,10 @@ def check_blocking_finding(probe: Probe) -> Check:
             blocking_seen += 1
             open_finding = item
             continue
-        if CLEAR_RE.search(text):
+        if CLEAR_RE.search(text) or str(item.get("state") or "").upper() == APPROVED:
+            # A formal APPROVAL is a clear in its own right — otherwise a change request
+            # at T1 could never be closed by an approval at T2, because each item is
+            # graded on its own state forever, and the PR would read NOT-READY to eternity.
             last_clear = item
             open_finding = None
     raw = (
@@ -1225,6 +1270,21 @@ def collect_probe(
     # `mergeStateStatus`. Read both, so the reported value is the same either way.
     probe.merge_state = str(pull.get("mergeable_state") or pull.get("mergeStateStatus") or "")
     probe.body = str(pull.get("body") or "")
+    probe.pr_state = str(pull.get("state") or "")
+    probe.merged = bool(pull.get("merged") or pull.get("merged_at"))
+    labels = pull.get("labels")
+    if isinstance(labels, list):
+        probe.labels = tuple(
+            str(entry.get("name"))
+            for entry in labels
+            if isinstance(entry, Mapping) and entry.get("name")
+        )
+        probe.labels_raw = f"labels={sorted(probe.labels)}"
+    else:
+        # An ABSENT `labels` key is not "no labels": the entry guard cannot be evaluated,
+        # so it is unreadable rather than silently empty.
+        probe.labels = None
+        probe.labels_raw = "pulls/N carried no labels array"
 
     try:
         probe.head_committed_at = _read_head_commit_date(gh, head)
@@ -1244,7 +1304,11 @@ def collect_probe(
     probe.touched, probe.touched_raw = _try(gh, lambda g: _read_touched(g, pr))
     if probe.body:
         entries, _union_raw = declared_union(probe.body)
-        if entries:
+        # ⛔ `is not None`, NOT truthiness: an empty/malformed `READY-GATE UNION:` line
+        # parses to `()`, and `if entries:` sent it down the "no union declared" branch —
+        # leaving the `empty-declared-union` fail arm unreachable from the live path
+        # (fixture-only), and silently certifying a fold PR with a broken marker.
+        if entries is not None:
             # A DECLARED union that cannot be resolved is UNREADABLE, never "no union":
             # both write `union is None`, and conflating them would disable the
             # hand-picked-subset arm behind one transient 502.
@@ -1360,7 +1424,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 recorded_head=args.recorded_head,
             )
     except RateLimited as exc:
+        # ⛔ The contract is "exactly one of READY-FOR-OWNER / NOT-READY", and a rate limit
+        # used to print an EMPTY stdout — a third shape a caller grepping the line could not
+        # parse. Every condition is unread, so every condition failed.
         print(f"GH-RATE-LIMITED({exc.endpoint})", file=sys.stderr)
+        pr = args.pr if args.pr is not None else 0
+        print(f"NOT-READY({pr}, failed={','.join(CONDITIONS)})")
         return 1
     verdict = evaluate(probe)
     if args.json:
@@ -1402,6 +1471,14 @@ def probe_from_dict(data: Mapping[str, Any]) -> Probe:
         merge_state=str(data.get("merge_state", "")),
         head_committed_at=str(data.get("head_committed_at", "")),
         body=str(data.get("body", "")),
+        # A fixture that omits `labels` means "no labels"; an explicit null means the
+        # READ was unreadable. The live collector is the authority on which happened.
+        labels=(
+            None if "labels" in data and data["labels"] is None else tuple(data.get("labels") or ())
+        ),
+        labels_raw=str(data.get("labels_raw", "")),
+        pr_state=str(data.get("pr_state", "open")),
+        merged=bool(data.get("merged", False)),
         tree=data.get("tree"),
         tree_raw=str(data.get("tree_raw", "")),
         groups=parsed_groups,
