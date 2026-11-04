@@ -17,9 +17,20 @@ The property pinned is a PAIR, because they are one datum: the capture derives
 `summary` would leave the identical sentence on the node under the column next
 door — the #10620-review naming, `_CONTENT_COLUMNS` calls them *"the SAME
 datum"*.
+
+⚠️ ONE LEG PER ROW-SIGNAL, and one for the shape that must NOT be caught. A
+single positive row carrying all the signals at once cannot tell which one
+fired: deleting any one branch of `_is_episodic_source_row` would leave the
+suite green. The last leg is the reason this matters — a transcript DOCUMENT
+carries `session_id` as a legitimate coordinate (`EventAPI.add_document` takes
+it; `tortoise/ingest.py` passes the frontmatter's `sessionId`), so a guard keyed
+on `session_id` dropped that document's own frontmatter `summary` (review P1 on
+this PR, measured).
 """
 
 from __future__ import annotations
+
+import pytest
 
 from tortoise import record_projection as rp
 from tortoise.cache_projection import node_from_row
@@ -102,6 +113,72 @@ def test_a_document_source_keeps_its_summary_and_search_text():
     assert node.props["summary"] == "A memo about the Q3 pricing change."
     assert node.props["_searchText"] == (
         "Q3 pricing memo A memo about the Q3 pricing change.")
+
+
+@pytest.mark.parametrize("signal", ["url", "source_kind", "is_episodic"])
+def test_each_episodic_signal_catches_the_prose_on_its_own(signal):
+    """One leg per signal: any ONE makes the row episodic on its own.
+
+    They are ORed because a LEGACY row is exactly the row that may be missing
+    one of them, so each signal has to carry the rule alone. A single positive
+    row setting all of them would leave every branch untested — deleting one
+    would keep the suite green.
+    """
+    # ⚠️ `url` is the label's CONTRACT KEY, so no row can omit it — and a leg
+    # for `source_kind`/`is_episodic` therefore needs a url that is NOT a
+    # `session:` ref, with the OTHER two signals ABSENT, or an earlier signal
+    # would do the work and the branch under test would never be reached. The
+    # non-session url is the legacy shape the OR exists for: a captured session's
+    # row whose url no longer spells the prefix.
+    overrides: dict[str, object] = {
+        "url": ("session:s-10853" if signal == "url"
+                else "https://example.com/legacy-session-s-10853"),
+        "source_kind": "agentSession" if signal == "source_kind" else None,
+        "is_episodic": True if signal == "is_episodic" else None,
+    }
+    row = _source_row(id="s-10853", summary=UTTERANCE, _search_text=UTTERANCE,
+                      **overrides)
+
+    node = node_from_row("Source", row)
+
+    assert "summary" not in node.props, (
+        f"the {signal!r} signal alone did not make the row episodic: the turn "
+        f"prose reached the node ({node.props.get('summary')!r})")
+    assert "_searchText" not in node.props, (
+        f"the {signal!r} signal alone did not make the row episodic: the prose "
+        f"survived as _searchText ({node.props.get('_searchText')!r})")
+
+
+def test_a_transcript_document_keeps_its_summary_even_though_it_has_a_session_id():
+    """⛔ THE MIRROR DEFECT — review P1 on this PR, pinned so it cannot return.
+
+    `session_id` is NOT an episodic signal. It is a legitimate DOCUMENT
+    coordinate: `EventAPI.add_document` accepts one (`tortoise/api.py`) and
+    `tortoise/ingest.py` passes a transcript's `sessionId` frontmatter into it,
+    so a transcript document is a `public.source` row with `source_kind` a
+    document kind, `summary` its own frontmatter summary, AND a non-empty
+    `session_id`. A guard keyed on `session_id` dropped that document's summary
+    — silently, on the recovery door, which is the defect class this change
+    exists to close, in the opposite direction.
+    """
+    row = _source_row(
+        url="corpus://transcripts/s-10853.md",
+        id="corpus://transcripts/s-10853.md",
+        source_kind="document",
+        document_kind="transcript",
+        session_id="s-10853",
+        title="Weekly rebuild transcript",
+        summary="A transcript whose frontmatter names its own summary.",
+        _search_text="Weekly rebuild transcript A transcript whose frontmatter…",
+    )
+    node = node_from_row("Source", row)
+
+    assert node.props["summary"] == (
+        "A transcript whose frontmatter names its own summary."), (
+        "a transcript DOCUMENT lost its own frontmatter summary: `session_id` "
+        "was treated as an episodic signal, so the guard fired on a document"
+    )
+    assert node.props["_searchText"].startswith("Weekly rebuild transcript")
 
 
 def test_the_record_row_is_not_mutated_by_the_projection():

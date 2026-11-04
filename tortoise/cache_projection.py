@@ -83,12 +83,16 @@ THE FOUR PROPERTIES, AND WHERE EACH LIVES
    A **fourth** declared exception is :data:`_EPISODIC_SOURCE_PROSE_COLUMNS`
    (#10853), and unlike the three above it narrows the field set instead of
    widening it: an EPISODIC Source's `summary`/`_searchText` are §9.1/D1 turn
-   prose, the record keeps them and the cache declines them. Two costs are
+   prose, the record keeps them and the cache declines them. Three costs are
    named at that table rather than implied: the journal fold still projects the
    value until #10000's capture-side change lands (so the two rebuild paths
-   disagree on that one column, in the ruling's direction, until then), and
-   graph-side FTS over a session Source's own utterances goes with the prose —
-   the record remains searchable, since the COLUMN is untouched.
+   disagree on that one column, in the ruling's direction, until then);
+   graph-side FTS over a session Source's own utterances goes with the prose
+   (the record remains searchable, since the COLUMN is untouched); and
+   `record-reconcile` now reports the disagreement (its RECORD side is built
+   through this same projector, so its truth side omits what a legacy cache
+   node still holds — the honest `divergent`, repaired by #10017's purge
+   census).
 4. **A cold region reads ``not-hot``, never ``empty``.** ``declaration_for``
    writes the known-hot set **after** the writes and as a function of what was
    materialized, so a record key the projection did not write is not claimed
@@ -1195,6 +1199,16 @@ def _scalar(value: Any) -> Any:
 #: title+summary+topics rule, so a guard that fired on every Source would
 #: un-index every document in the cache. The drop is a **projection** decision:
 #: the row is not mutated, so the record stays the authority for the value.
+#:
+#: ⚠️ A THIRD COST, named because it is an OBSERVATION instrument and silence
+#: there reads as "clean": `python -m tortoise record-reconcile` builds its
+#: RECORD side through :func:`read_record_view` → `node_from_row`, so the truth
+#: side now omits these two properties while the CACHE side (the live graph) may
+#: still hold them from an older build. `reconciliation.reconcile_views` is
+#: presence-aware, so such a Source reports `field_mismatches=2` and the sweep
+#: flips from clean to DIVERGENT — which is the true statement (the two sides DO
+#: disagree) and is repaired by the same #10017 purge census that clears the
+#: legacy rows, not by re-adding the projection.
 _EPISODIC_SOURCE_PROSE_COLUMNS: frozenset[str] = frozenset({
     "summary", "_search_text",
 })
@@ -1208,12 +1222,23 @@ _EPISODIC_SOURCE_PROSE_COLUMNS: frozenset[str] = frozenset({
 #: * `source_kind = 'agentSession'` — the kind the capture writes (`sk` in the
 #:   same statement) and the kind the ontology §4.6 gives a captured session;
 #: * `is_episodic` — the fold's own flag, TRUE only for a `session:` ref.
-#: * `session_id` present — the capture's session coordinate.
 #:
 #: They are ORed rather than ANDed because a LEGACY row is exactly the row that
 #: may be missing one of them: the whole defect class is "written by an older
-#: build", and requiring all four would let the oldest shapes through — the ones
-#: this exists for.
+#: build", and requiring all three would let the oldest shapes through — the
+#: ones this exists for.
+#:
+#: ⛔ `session_id` is DELIBERATELY NOT a signal, and it must not be added back.
+#: It is a legitimate **document** coordinate: `EventAPI.add_document` takes
+#: `session_id` (`api.py`), `tortoise/ingest.py` passes a transcript's
+#: `sessionId` frontmatter into it, and `DocumentCreated` is a `path=None`
+#: snapshot, so the value reaches `public.source.session_id` on a row whose url
+#: is a document (`source_path`/`corpus:`), not a `session:` ref. A guard keyed
+#: on it dropped a transcript DOCUMENT's own frontmatter summary — the exact
+#: regression a fresh review caught before this landed (#10853 review P1), and
+#: the mirror of the defect this table closes. It buys nothing either:
+#: `node_from_row` refuses a `source` row with no non-empty `url`, and every
+#: episodic writer spells that url `session:{id}`.
 _EPISODIC_SOURCE_URL_PREFIX = "session:"
 _EPISODIC_SOURCE_KIND = "agentSession"
 
@@ -1221,20 +1246,19 @@ _EPISODIC_SOURCE_KIND = "agentSession"
 def _is_episodic_source_row(row: Mapping[str, Any]) -> bool:
     """Is this `public.source` row a captured session's Source?
 
-    See :data:`_EPISODIC_SOURCE_URL_PREFIX` for the four signals and why they
-    are ORed. A NULL column is silence, never a negative: `_props_from_row`
-    drops NULLs anyway, so reading one as "not episodic" would be the only way
-    an all-NULL legacy row could smuggle prose past the guard.
+    See :data:`_EPISODIC_SOURCE_URL_PREFIX` for the three signals, why they are
+    ORed, and why `session_id` is not one of them. A NULL column is silence,
+    never a negative: `_props_from_row` drops NULLs anyway, so an all-NULL
+    legacy row that no signal names is the only shape that can still arrive
+    bare — and such a row cannot reach here at all, because `node_from_row`
+    requires the non-empty `url` that carries the first signal.
     """
     url = row.get("url")
     if isinstance(url, str) and url.startswith(_EPISODIC_SOURCE_URL_PREFIX):
         return True
     if row.get("source_kind") == _EPISODIC_SOURCE_KIND:
         return True
-    if row.get("is_episodic") is True:
-        return True
-    session_id = row.get("session_id")
-    return isinstance(session_id, str) and bool(session_id)
+    return row.get("is_episodic") is True
 
 
 def _props_from_row(table: str, row: Mapping[str, Any], *,
