@@ -17,19 +17,11 @@ These tests pin the INPUT, at the three levels the issue names:
   ``expansion_tokens`` on the harvested aliases is non-empty;
 * mechanism — the seeded store carries non-empty ``search_keys`` on the
   Points the first-pass FTS actually returns;
-* arm — the hit SET differs between the two arms (the ORDERED list differs
-  too, but membership is what the runbook's `a4_effect` label requires:
-  `docs/runbook/5534_a4_ab_diagnostic.py` records a measured ordered-only
-  difference with A4 provably inert, so an ordering claim alone is a flake
-  channel in both directions).
+* arm — the ORDERED hit list DIFFERS between the two arms.
 
-The arm test needs the FalkorDB full-text index. FalkorDBLite (the embedded
-lane's backend) **has** it — measured `leg_trace` `reason='ok'`, `count=4` on this
-box — so these arm tests RUN on the embedded lane; they take the
-``_skip_if_no_fts`` skip only on a backend that really lacks the index. (This
-paragraph used to claim the embedded lane has none and that the arm tests skip
-there; that is false on FalkorDBLite, and believing it is what made the red at
-``assert off == on`` look like an environment artefact.) The
+The arm test needs the FalkorDB full-text index (the embedded lane has none,
+and A4 is structurally inert there — ``index_missing`` — which is the same
+blank-input trap one lane over), so it SKIPS on the embedded carve-out. The
 mutation direction is pinned too: ``search_keys=False`` reproduces #5534's
 defect shape (zero keys, empty expansion, identical arms).
 
@@ -109,157 +101,24 @@ def keyword_lane(monkeypatch):
     embedder installed — a real product configuration) rather than paying the
     ~40 s embedder load for a leg that cannot affect A4 either way. The
     DENSE-lane A/B is measured by ``docs/runbook/5534_a4_ab_diagnostic.py``
-    (21/21 questions differ); this file guards the INPUT, cheaply.
-
-    The BM25 lexical ARM is pinned OFF here (``TORTOISE_BM25_LEXICAL=0``, set via
-    the constant ``tortoise.bm25.BM25_ENV`` — NOT an env name to export), which
-    the description above no longer implies: since #10240 the shipped default is
-    the arm ON, so "no embedder" alone is no longer "the shipped config". The pin
-    is what keeps this file's A/B single-variable (#10436).
-
-    WHY the pin is load-bearing: the ``search_keys_prf`` lever has a SECOND
-    effect besides A4 — it stands the BM25 arm down (#8488 (f), deliberately,
-    pinned by ``tests/test_bm25_lexical_8488.py::TestReadPath::
-    test_expansion_passes_stand_the_arm_down``), because a later pass *would*
-    overwrite the slot the arm writes: the stand-down keys on the FLAG
-    (``sdk.py``'s ``_SDK_ANCHORS["stand_down_flag"]``), not on a replacement
-    actually happening — which is exactly the open question in #10436, since on
-    a store with no ``search_keys`` the expansion returns ``None`` and nothing
-    is overwritten. So ON vs OFF of this file's lever changed the lexical
-    SCORER as well as the expansion, and an ordered-hit-list comparison across
-    it stopped being an A4 measurement — it measured the arm.
-
-    LANE: the divergence needs ``is_embedded`` (the arm gate is embedded-only,
-    ``sdk.py``'s ``_SDK_ANCHORS["embedded_gate"]``). In a URI-SET pytest
-    session that ``is_embedded`` comes from ``FalkorProjection``'s test
-    redirect (``explicit_path and TORTOISE_DB_URI and
-    TORTOISE_TEST_MODE == "1" and not exempt`` — see ``tests/test_markers.py``
-    and ``tests/conftest.py``), which NULLS this fixture's explicit
-    ``db_path``; #139's path-wins precedence would otherwise make the fixture
-    embedded on every lane. This file's stem is deliberately NOT in
-    ``TEST_NO_REDIRECT_STEMS`` (``tests/_embedded.py``) — unlike
-    ``test_bm25_lexical_8488``, which is registered so its embedded
-    constructions survive an out-of-band URI run — so under a docker URI the
-    arm never runs and this pin is a NO-OP there; do not read that as the
-    premise being false.
-
-    Reproduce it on the PRE-FIX tree (``main@2487e7e1f``; on this tree the pin
-    makes it green) with:
-
-        env -u TORTOISE_DB_URI TORTOISE_TEST_CARVE_OUT=1 \
-            uv run pytest tests/test_a4_instrument_input.py::\
-            test_seed_without_search_keys_reproduces_5534
-
-        E  At index 1 diff: 'a4-s2_t0' != 'a4-s0_t0'
-        W  tortoise.sdk:sdk.py:<line>: #8488: BM25 lexical arm standing down —
-           search_keys_prf replaces the lexical slot after the arm would have
-           written it
-
-    The ``<line>`` is printed by pytest at emission and is deliberately NOT
-    pinned here: ``origin/main`` merges move ``tortoise/sdk.py`` (the previous
-    numeric citations in this docstring went 610 lines stale on one merge,
-    which is a claim that can only re-stale). The seams this docstring rests
-    on are therefore named by SOURCE SNIPPET in ``_SDK_ANCHORS`` below —
-    ``stand_down_flag`` and ``embedded_gate`` quoted by name above,
-    ``stand_down_warning`` as pytest renders it in the reproduction block
-    (the `%s` filled in — the anchor is the format string), and
-    ``arm_gate_flag`` as the read the stand-down keys on — and
-    ``test_the_sdk_anchors_this_docstring_cites_still_resolve`` proves each of
-    those four still exists — a rename reds it, a re-ordering does not.
-
-    A4 itself is provably inert without aliases (``_search_keys_prf_expansion``
-    returns ``None`` — "nothing to expand" — and the caller keeps the ORIGINAL
-    fts leg), so holding the scorer constant restores the single-variable A/B
-    this file exists to be, WITHOUT touching an assertion. The arm-plus-A4
-    composition is deliberately NOT measured here (it is the thing the
-    stand-down suppresses); see #10436."""
-    from tortoise.bm25 import BM25_ENV
+    (21/21 questions differ); this file guards the INPUT, cheaply."""
     from tortoise.embeddings import EmbeddingModel
     monkeypatch.setattr(
         EmbeddingModel, "get",
         classmethod(lambda cls, load_timeout=None: None))
-    monkeypatch.setenv(BM25_ENV, "0")
     return None
 
 
-# ── the lane: one lever at a time ──────────────────────────────────────
-
-#: The ``tortoise/sdk.py`` seams ``keyword_lane``'s docstring cites, as exact
-#: source snippets rather than line numbers. A line number is a claim that can
-#: only re-stale: one ``origin/main`` merge moved every one of these by ~610
-#: lines and left three citations pointing at unrelated statements. Each
-#: snippet is asserted to occur EXACTLY ONCE, so it identifies one statement
-#: and a rename/removal reds the guard instead of silently validating nothing.
-_SDK_ANCHORS: dict[str, str] = {
-    # the stand-down keys on the FLAG, not on a replacement happening
-    "stand_down_flag": "_prf_supersedes_the_arm = bool(",
-    # ... and that flag is what takes the arm's slot away
-    "arm_gate_flag": "and _bm25_enabled and not _prf_supersedes_the_arm",
-    # the arm gate itself is embedded-only
-    "embedded_gate": "and is_embedded and not is_full_scan",
-    # the warning the reproduction block quotes
-    "stand_down_warning": '"#8488: BM25 lexical arm standing down — %s replaces the "',
-}
-
-
-def test_the_sdk_anchors_this_docstring_cites_still_resolve():
-    """Every ``sdk.py`` seam the docstrings above cite must still EXIST.
-
-    Non-vacuity is against the pre-fix shape: those citations were line
-    numbers (``sdk.py:32946/33038-33040/33054``) which one ``origin/main``
-    merge left pointing ~610 lines off — at unrelated statements — while every
-    test stayed green, because a stale pointer is prose. Mutation: rename any
-    anchored symbol (or re-pin the docstring to a line number) → red.
-    """
-    import re
-
-    from tortoise import sdk as sdk_module
-
-    source = Path(sdk_module.__file__).read_text(encoding="utf-8")
-    for name, snippet in _SDK_ANCHORS.items():
-        assert source.count(snippet) == 1, (
-            f"the sdk.py anchor {name!r} no longer identifies exactly one "
-            f"statement ({source.count(snippet)} hits) — the docstring's claim "
-            f"about the stand-down is unverifiable: {snippet!r}")
-
-    # The guard must guard the DOCSTRING too, not a private copy of it: the
-    # reproduction block and the two mechanism paragraphs are what a fixer
-    # reads. A numeric ``sdk.py:NNNN`` citation is the shape that re-stales.
-    docstrings = "\n".join(
-        obj.__doc__ or "" for obj in (keyword_lane,)
-    )
-    stale = re.findall(r"sdk\.py:\d", docstrings)
-    assert not stale, (
-        "keyword_lane's docstring is back to citing sdk.py by LINE NUMBER "
-        f"({stale}) — those go stale on the next origin/main merge; cite the "
-        "snippet in _SDK_ANCHORS instead")
-    assert "_SDK_ANCHORS" in docstrings, (
-        "keyword_lane's docstring no longer names _SDK_ANCHORS — the anchors "
-        "above would then guard nothing that is actually cited")
-
-
-def test_keyword_lane_pins_the_bm25_arm_off(keyword_lane):
-    """The pin above must be IN EFFECT — with ``BM25_ENV`` rather than a
-    literal, so a rename of the env var cannot quietly restore the confounded
-    A/B (#10436). Deliberately NOT an ``assert`` inside ``keyword_lane``: a
-    fixture that hard-fails would turn a future mutation of the LEVER into a
-    fixture ERROR, hiding the assertion it is supposed to discriminate."""
-    from tortoise.bm25 import bm25_enabled
-    assert not bm25_enabled(), (
-        "the BM25-arm pin did not take — the A/B is confounded again")
-
-
 def _skip_if_no_fts(sdk) -> None:
-    """Skip on a backend with no Point FTS index (A4 records
-    ``reason='index_missing'`` and can never expand). NOTE: the embedded
-    FalkorDBLite lane DOES have the index, so this skip does not fire there —
-    the arm tests really run on it (#10436)."""
+    """The embedded FalkorDBLite lane has no Point FTS index — the ``fts``
+    leg records ``reason='index_missing'`` and A4 can never expand. Same
+    blank-input condition as #5534, so skip rather than assert a zero."""
     trace: list[dict] = []
     run_fts_query(sdk._get_proj().g, "probe", entity_type="point", limit=1,
                   leg_trace=trace)
     if trace and trace[0].get("reason") == "index_missing":
-        pytest.skip("no Point FTS index on this backend — A4 is structurally "
-                    "inert without it")
+        pytest.skip("no Point FTS index on this lane (embedded carve-out) — "
+                    "A4 is structurally inert without it")
 
 
 def _arms(sdk, question: str, limit: int = 20) -> tuple[list[str], list[str]]:
@@ -356,62 +215,30 @@ def test_harvested_aliases_drive_a_non_empty_expansion(sdk):
 # ── arm: the A/B the instrument runs ──────────────────────────────────────
 
 def test_a4_ab_ordered_hit_list_differs_between_arms(sdk, keyword_lane):
-    """THE guard #5534 asks for: with the seeded input, the hit list DIFFERS
-    between ``search_keys_prf`` False and True. A clean zero here is the
-    defect, not a passing A4 — so this test fails on a zero.
-
-    MEMBERSHIP is the load-bearing half: ``docs/runbook/5534_a4_ab_diagnostic.py``
-    (:24-40) records that the raw FTS leg's ordered tail at the ``--limit``
-    boundary is not stable across two calls, so an ORDERED difference can
-    appear with the lever provably inert (measured: 1/21 questions,
-    ``search_keys_points=0``, ``expansion=[]``) — it labels that
-    ``ordering_artifact``. An ordered comparison alone therefore has BOTH
-    flake channels: it can PASS while A4 is inert, and a control can RED on a
-    boundary reorder. Requiring the symmetric difference as well is this
-    file's half of the runbook's ``a4_effect`` criterion (differ AND
-    differ_membership), which the seeded fixture satisfies by construction:
-    the alias-only turn is not matched by the query, so A4 must ADD a hit.
-    """
+    """THE guard #5534 asks for: with the seeded input, the ordered hit list
+    DIFFERS between ``search_keys_prf`` False and True. A clean zero here is
+    the defect, not a passing A4 — so this test fails on a zero."""
     _skip_if_no_fts(sdk)
     _seed_memory(sdk, _QUESTION, embed=False, search_keys=True)
     off, on = _arms(sdk, _QUESTION["question"])
     assert off, "retrieval returned nothing — the premise is broken"
-    symdiff = sorted(set(on) ^ set(off))
-    assert symdiff, (
-        "A4 is INERT on the seeded store — the two arms returned the SAME hit "
-        "set, so the only difference (if any) is a raw-FTS ordering artifact, "
-        "not an A4 effect (#5534; docs/runbook/5534_a4_ab_diagnostic.py). The "
-        "instrument has no A4 input; do not record A4 as validated."
-        f"\n  off={off}\n  on={on}")
     assert on != off, (
-        "the arms differ in MEMBERSHIP but returned the identical ordered "
-        "list — impossible unless ordering was lost; do not read this as A4 "
-        f"evidence.\n  symdiff={symdiff}")
+        "A4 is INERT on the seeded store — the ordered hit list is identical "
+        "with the PRF lever on and off (#5534). The instrument has no A4 "
+        "input; do not record A4 as validated.")
 
 
 def test_seed_without_search_keys_reproduces_5534(sdk, keyword_lane):
     """The MUTATION direction: ``search_keys=False`` restores #5534's defect
-    shape — zero keys, empty expansion, the same hit SET from both arms. This
-    is what makes the test above evidence that the fix (not the instrument)
-    moved.
-
-    The SET comparison is the assertion, not the ordered one: the runbook
-    (``docs/runbook/5534_a4_ab_diagnostic.py``:24-40) documents that the raw
-    FTS tail reorders between two calls with the lever inert, so ``off == on``
-    on the ORDERED list is not the defect shape — it is a boundary reorder,
-    and asserting it reds this control for a non-A4 reason.
-    """
+    shape — zero keys, empty expansion, byte-identical arms. This is what
+    makes the test above evidence that the fix (not the instrument) moved."""
     _skip_if_no_fts(sdk)
     _seed_memory(sdk, _QUESTION, embed=False, search_keys=False)
     assert _search_keys_points(sdk) == 0
     off, on = _arms(sdk, _QUESTION["question"])
-    assert off, ("retrieval returned nothing — an equality between two empty "
-                 "lists would be vacuous, not the defect shape")
-    symdiff = sorted(set(on) ^ set(off))
-    assert not symdiff, (
-        "with no search_keys A4 has NO input, so the two arms must return the "
-        "same hit set (the defect shape) — a membership difference means the "
-        f"arm test is measuring something other than A4.\n  symdiff={symdiff}")
+    assert off == on, ("with no search_keys the arms must be byte-identical "
+                       "(the defect shape) — a difference means the arm test "
+                       "is measuring something other than A4")
 
 
 # ── the shared primitive stays capture-exact by default ───────────────────

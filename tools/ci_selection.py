@@ -65,13 +65,7 @@ from pathlib import Path
 # 1.4.0 (#6135): the fast pool is split into N shards (config `fast_shards`)
 # instead of two hard-coded halves, and the push matrix is emitted as the whole
 # GHA matrix object (`fast_matrix`).
-#: Bumped whenever a change can alter WHICH files the selection reports as
-#: changed, so a recorded `selection.json` can be replayed against the function
-#: that produced it. 1.6.0 (#10409): a space- or comma-separated
-#: `--changed-files` value is now split into entries instead of being read as
-#: one path — a recorded selection made before this bump may name a
-#: concatenated "path" and must be read as the pre-fix reading.
-SELECTION_FN_VERSION = "1.6.0"
+SELECTION_FN_VERSION = "1.5.0"
 
 REPO = Path(__file__).resolve().parent.parent
 MANIFEST = REPO / "config" / "ci-surfaces.yml"
@@ -418,21 +412,6 @@ SOURCE_PATTERNS = {
                    # config/ falls through to `core`, where the gate is also
                    # registered.
                    "tools/served_skills_parity.py",
-                   # #10423: the ARCHIVE WRITER, on the same reasoning as the
-                   # entry above and by the same silent-drop class. #10423 made
-                   # `build_skill_archives.py` load-bearing beyond its own CLI:
-                   # `served_skills_parity.sync()` now calls
-                   # `write_stale_archives()`, so this file decides the bytes of
-                   # a COMMITTED artifact (`website/skills/*.skill`). `tools/` is
-                   # in NON_PYTHON_PREFIXES, so an edit to this file ALONE —
-                   # widening or weakening what `sync()` re-cuts — selected no
-                   # surface and fell to the docs-only tier-1 early return. The
-                   # guards still ran there (they are in `tier1`), so coverage
-                   # held by accident; this entry makes the owning surface
-                   # select them by design and adds the `onboarding` file set.
-                   # Pinned by tests/test_ci_selection.py::
-                   # test_the_archive_writer_selects_the_surface_that_guards_it.
-                   "tools/build_skill_archives.py",
                    # #3517: the capture disclosure's single source of truth and
                    # the non-LLM renderer. Both own guards registered below
                    # (`test_capture_disclosure_template.py`,
@@ -2385,30 +2364,7 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # and config/ci-surfaces.yml's `core`-home row.
              # Pinned by tests/test_ci_selection.py::
              # test_substrate_map_guard_runs_on_the_diffs_it_guards.
-             "tools/substrate_map_check.py",
-             # #10131 review P1: tools/ci_catch_history.py owns
-             # tests/test_ci_catch_history.py — registered `core` (the registration this
-             # PR adds) — but `tools/` is a flat NON_PYTHON_PREFIXES entry and no
-             # SOURCE_PATTERNS row matches the tool, so a TOOL-ONLY change filtered to
-             # `changed == []`, took the docs-only early return and fell to tier-1 smoke,
-             # where that file is NOT registered. The `core` row that registers the file is
-             # CLASSIFICATION only (#4348); it does not make a `tools/` path select `core`.
-             # MEASURED before this entry: `select(["tools/ci_catch_history.py"],
-             # "pull_request", load_manifest())` -> surfaces=[], full=False, n=68, guard
-             # ABSENT. The most likely follow-up to this exact instrument IS a change to the
-             # instrument (every finding class on #10131's reviews so far has been in a read
-             # path — `NEVER` licensing, the cleared-red loop, the wall bound), so the diff
-             # that can break the whole pin set was the one diff that ran none of it:
-             # the #1349/#3332/#3616 silent-drop class. (No count is stated here on purpose:
-             # the pin set moves with the file, and a literal would rot exactly the way the
-             # `durations` note's count did — `tests/test_ci_catch_history.py::
-             # test_the_durations_note_counts_the_tests_this_file_actually_has` RUNS its own
-             # command so that one cannot.) CORE_ALSO (not TOOL_CARVEOUTS)
-             # because the suite is hermetic (an archived runs.json, job JSON and in-memory
-             # zips — no DB, no network) and `core` is where it is registered. Pinned by
-             # tests/test_ci_selection.py::
-             # test_ci_catch_history_tool_change_selects_core_not_tier1.
-             "tools/ci_catch_history.py")
+             "tools/substrate_map_check.py")
 NON_PYTHON_PREFIXES = (
     "docs/", "website/", "product/", "legal/", "growth/", "engineering/",
     "finance-accounting/", "menu-bar/", "ux/", "data/", "operations/",
@@ -5856,169 +5812,6 @@ def _warn_unknown_paths(explain: dict) -> None:
             file=sys.stderr)
 
 
-def _split_changed_files(raw: str) -> list[str]:
-    """Split a `--changed-files` value into entries — newlines, commas, spaces (#10409).
-
-    THE DEFECT THIS FIXES. The only accepted form used to be newline-separated
-    (`args.changed_files.splitlines()`), so a caller who formatted the list the
-    way a shell usually takes one — space-separated, the shape of `"a.py b.py"`
-    — got ONE entry whose text was the whole list. That entry was then matched
-    as a path, and the answer was a CONFIDENT SELECTION about a path that does
-    not exist. Measured on `718ee3b49`:
-
-        --changed-files "tortoise/hosted_api.py tortoise/sdk.py tests/test_ci_selection.py"
-          -> surfaces=['api','onboarding']  full=false  378 test files
-        the same three paths, newline-separated
-          -> full=true, test_files=ALL
-
-    So the wrong answer was not the issue's `full: true` in every case — it is
-    whatever the FIRST token happens to prefix-match, and when that token is a
-    registered path the concatenation UNDER-SELECTS: `tortoise/sdk.py` (a
-    SHARED_MODULE, which forces the FULL matrix) and `tests/test_ci_selection.py`
-    were both reported as NOT changed, and 378 tests ran instead of the matrix.
-    Under-selection is the dangerous direction; a silent over-selection to FULL
-    only wastes runners. Neither is acceptable, and neither errors.
-
-    WHY THE WHOLE-VALUE-AS-A-PATH FORM IS NOT REFUSED: it is a documented inline
-    invocation (`--changed-files tortoise/hosted_api.py` — see `_warn_unknown_paths`
-    for the full argument). Splitting makes both forms select IDENTICALLY, which
-    removes the trap instead of policing it.
-
-    THE SPACE AMBIGUITY, AND HOW IT IS SETTLED. A path may legitimately contain
-    a space (“docs/release notes.md”), so splitting every space is a fix that
-    silently breaks a real path — and a path that is broken into two unknown
-    tokens escalates to the FULL matrix, i.e. it looks like caution. The
-    discriminator is therefore PATH EXISTENCE, in the same spirit as
-    `_is_outside_repo_file`: whitespace tokens are re-joined GREEDILY while the
-    joined candidate names an existing path, so `release notes.md` survives as
-    one entry whether it is the whole value or one entry inside a longer list.
-    Greedy longest-match is deterministic (one pass, left to right), and it
-    fails in the visible direction: the pieces of a genuinely-split path are
-    named as unknown paths on stderr by `_warn_unknown_paths`, never silently —
-    except for the one residual stated below.
-
-    RESIDUAL (stated, not hidden): a path that contains a space AND has been
-    DELETED in the diff no longer exists on disk, so it is split — its pieces
-    then read as unknown paths, which forces the fail-closed FULL matrix and is
-    named on stderr. Never a silent under-selection. The remedy is the one this
-    tool already documents: pass the list on stdin (`--changed-files -`), where
-    no tokenisation happens at all.
-
-    THE CONTRACT, stated for `--help` readers:
-      * one value, entries separated by newline, comma, or space — all three
-        are accepted and are indistinguishable in effect;
-      * a path containing a space or a comma is kept whole when it is the WHOLE
-        value or a whitespace-separated entry (it must exist in the tree for
-        that to be recognised). INSIDE a comma-separated list a comma is always
-        a separator — the pieces of such a path are named as unknown paths on
-        stderr, so the reading is visible rather than silent;
-      * `-` reads the list from stdin, one entry per line — unambiguous for any
-        path, including one with a space or a comma that no longer exists on
-        disk.
-    """
-    if raw == "-":
-        return [l.strip() for l in sys.stdin.read().splitlines() if l.strip()]  # noqa: E741
-    entries: list[str] = []
-    for line in raw.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        # A WHOLE LINE that names an existing path is one entry, before ANY
-        # separator question is asked — so a path carrying a comma or a space is
-        # protected by the same predicate, not by an assumption about which
-        # characters paths "never" contain (review P2).
-        if _names_existing_path(line):
-            entries.append(line)
-            continue
-        if not any(ch.isspace() for ch in line):
-            entries.extend(p for p in (x.strip() for x in line.split(",")) if p)
-            continue
-        entries.extend(_split_whitespace_keeping_spaced_paths(line))
-    return entries
-
-
-def _split_whitespace_keeping_spaced_paths(line: str) -> list[str]:
-    """Split *line* on whitespace, re-joining tokens that name ONE existing path.
-
-    GREEDY LONGEST MATCH, one left-to-right pass: from each token, extend while
-    the space-joined candidate still names an existing path. That is what keeps
-    `docs/release notes.md` whole — as the whole value, and as ONE entry inside a
-    longer list (`tortoise/sdk.py docs/release notes.md tests/x.py`), which a
-    whole-line existence check alone cannot see.
-
-    A COMMA IS A SEPARATOR BETWEEN TOKENS, AND INSIDE ONE TOO WHEN IT IS NOT PART
-    OF A PATH (review P2, measured). `_split_changed_files` folds commas for a line
-    with no whitespace; inside a whitespace-bearing line a token is kept whole when
-    it NAMES AN EXISTING PATH (`docs/a,b.md`) and folded on its commas when it does
-    not — the same existence predicate as the space case, not a second rule and not
-    an assumption that paths do not contain commas.
-
-    WHY THAT LAST CLAUSE IS NOT OPTIONAL. The first cut of this function only
-    stripped EDGE commas from a token, so
-    `"tortoise/hosted_api.py,tortoise/sdk.py tests/test_ci_selection.py"` kept
-    `tortoise/hosted_api.py,tortoise/sdk.py` as ONE entry — which PREFIX-MATCHES
-    the `tortoise/hosted_api.py` pattern, so it was not an unknown path, so
-    nothing warned, and the selection answered `full=false` with
-    `tortoise/sdk.py` (a SHARED_MODULE) reported as not changed: 885 tests instead
-    of the matrix, silently. That is the very defect this change exists to remove,
-    reintroduced by a separator the fix claimed to handle.
-
-    Deterministic by construction: the only input to the join is the filesystem,
-    the pass is left to right, and an extension is taken only on a positive hit —
-    so `tortoise/a.py tortoise/b.py` (no such joined path) splits, while
-    `release notes.md` (a real file) does not.
-    """
-    tokens = line.split()
-    groups: list[str] = []
-    i = 0
-    while i < len(tokens):
-        group = [tokens[i]]
-        j = i + 1
-        # JOIN ON THE RAW TOKENS, commas included: `release,` + `notes.md` is a
-        # single path (`release, notes.md`), and splitting or stripping the comma
-        # before this pass loses the only evidence that it was one entry.
-        while j < len(tokens) and _names_existing_path(" ".join([*group, tokens[j]])):
-            group.append(tokens[j])
-            j += 1
-        groups.append(" ".join(group))
-        i = j
-    out: list[str] = []
-    for group in groups:
-        if _names_existing_path(group):
-            out.append(group)
-            continue
-        # ONE implementation of "an edge comma is a separator": the comma FOLD
-        # below. A preceding `group.strip(",")` was inert — every shape it
-        # handled produced the identical list through this fold — and no fixture
-        # could distinguish it, so it was deleted rather than kept as an untested
-        # second operation (review P2).
-        if "," in group:
-            out.extend(p for p in (x.strip() for x in group.split(",")) if p)
-        elif group:
-            out.append(group)
-    return out
-
-
-def _names_existing_path(candidate: str) -> bool:
-    """True when *candidate* names a path that exists, read as a CHANGED path.
-
-    ONE base, deliberately: a `--changed-files` entry is a REPO-relative path —
-    that is what every `SOURCE_PATTERNS` row is written against — and an absolute
-    path already works through this base (`REPO / "/abs/p"` is `/abs/p`).
-
-    A CWD-relative fallback was tried and REMOVED (review P2): it made the parser
-    a function of the process working directory, so the same argument could yield
-    a different `changed_files` list — and therefore a different `selection.json`
-    — on two boxes, which is exactly what `SELECTION_FN_VERSION` exists to make
-    replayable. `_is_outside_repo_file` refuses CWD-relative resolution for this
-    same reason.
-    """
-    try:
-        return (REPO / candidate).exists()
-    except OSError:
-        return False
-
-
 def _is_outside_repo_file(c: str) -> bool:
     """True when *c* is an existing file OUTSIDE the checkout.
 
@@ -6059,11 +5852,7 @@ def _is_outside_repo_file(c: str) -> bool:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--changed-files", default="",
-                    help="changed files — newline-, comma-, or space-separated, "
-                         "all accepted and equivalent (#10409); a path containing "
-                         "a space is kept whole; `-` reads the list from stdin"
-                         " (one entry per line — unambiguous for any path)")
+    ap.add_argument("--changed-files", default="", help="newline-separated changed files")
     ap.add_argument("--event", default="pull_request", choices=["push", "pull_request", "schedule"])
     ap.add_argument("--integrity", action="store_true", help="verify manifest coverage")
     ap.add_argument("--surface-audit", action="store_true",
@@ -6233,10 +6022,9 @@ def main() -> int:
         print(json.dumps(result))
         return 0
 
-    # #10409: ONE splitter for every accepted form (newlines, commas, spaces; a
-    # path containing a space stays whole), so a caller's separator can no longer
-    # change WHICH FILES were treated as changed. See `_split_changed_files`.
-    changed = _split_changed_files(args.changed_files)
+    changed = [l.strip() for l in args.changed_files.splitlines() if l.strip()]  # noqa: E741
+    if args.changed_files == "-":
+        changed = [l.strip() for l in sys.stdin.read().splitlines() if l.strip()]  # noqa: E741
     explain: dict = {}
     result = select(changed, args.event, manifest, explain=explain)
     _warn_unknown_paths(explain)

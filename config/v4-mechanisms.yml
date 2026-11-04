@@ -129,8 +129,7 @@
 # router · #5010 fan-out cap · #2453 the verbatim state-value carve-out
 # (`state_value_carve_out`; #5064's Verification Checklist names it as one of
 # the three write-path behaviours to verify, and its omission from the compact
-# render was tracked at #9775 — the render half, closed; the enforcement half is
-# #10360).
+# render is tracked at #9775).
 
 version: 1
 
@@ -479,63 +478,56 @@ mechanisms:
       - docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md  # §7, the narrower-than-it-looks carve-out (#2453)
       - docs/architecture/STORAGE-ARCHITECTURE.md       # §7, the two-class retain table
     state: not-implemented
-    tracking_issue: 10360
+    tracking_issue: 9775
     note: >-
       The MECHANISM is the guarantee: a state value or a decision-relevant
       operational value (a measurement, deadline, threshold/TTL, version or
       count) survives extraction VERBATIM, so any mechanical filter must carry
       the carve-out rather than drop it. ⚠️ The state is `not-implemented` on
       purpose, and naming the halves is the whole point of the row:
-      WHAT EXISTS — the prompt-side carve-out, on EVERY path that builds a
-      prompt. `STATE_VALUE_CARVE_OUT` (`tortoise/extractor_v2.py`) is rendered
-      into S1 (`_granularity_text`), S2/S4 (`_render_master_core_only`,
-      `_render_master_verbose`) and — since `#9775` — S2/S4 compact
-      (`_render_master_compact`), which appends it and the user-personal-state
-      vocabulary it names UNCONDITIONALLY, OUTSIDE its `if story:` gate: the
-      compaction rule may drop HINTS (the matched-domain granularity block, the
-      story-selected pack sections), never the guarantee. That row used to record
-      an ABSENCE here; it now records the rule that keeps the absence from coming
-      back. `VALUE_FIDELITY_RULE` rides the S2/S4 `{anti_routine}` slot via
-      `_s2s4_rules()` — never S1, never a master render. Pinned, in five places
-      because each catches a different insertion: never-S1 by
+      WHAT EXISTS — the prompt-side carve-out. `STATE_VALUE_CARVE_OUT`
+      (`tortoise/extractor_v2.py`) is rendered into S1 (`_granularity_text`) and
+      S2/S4 (`_render_master_core_only`, `_render_master_verbose`), and
+      `VALUE_FIDELITY_RULE` rides the S2/S4 `{anti_routine}` slot via
+      `_s2s4_rules()` — never S1, never a master render. Pinned, in three
+      places because each catches a different insertion: never-S1 by
       `tests/test_extractor_v4_citation_rot.py`; the core-only render
-      byte-for-byte by `tests/test_extractor_v2.py`; the `VALUE_FIDELITY_RULE`
-      text absent from all three renders by
-      `tests/test_v4_declared_mechanisms.py::test_the_value_fidelity_rule_rides_the_s2s4_slot_and_no_master_render`
-      (which also asserts the rule still rides `_s2s4_rules()`, so the absence
-      cannot pass by vacancy — measured before that test: appending the rule to
-      `_render_master_verbose`, the DEFAULT render, shipped a second copy of one
-      instruction inside one prompt with every gate green); and — since `#9775` —
-      the carve-out PRESENT, whole, on every render path, the vocabulary it names
-      on all three master renders (S1 renders granularity, never the master
-      list), and through both dispatch entry points, by
-      `tests/test_v4_declared_mechanisms.py::test_every_render_path_carries_the_carve_out_the_guarantee_requires`
-      together with
-      `tests/test_v4_declared_mechanisms.py::test_the_dispatcher_prompts_carry_the_carve_out_once_and_compactly`
-      — the render-path pin over three story shapes (matched, `None`, unmatched)
-      precisely because a carve-out appended INSIDE the story gate passes the
-      matched case, and the dispatcher pin because that one never reaches a
-      dispatcher: it is the half that passes `core_only=False` EXPLICITLY (the
-      default resolves from `TORTOISE_CLASSIFY_LATER`, and with that flag on the
-      dispatcher half contributed NOTHING — measured), that proves the COMPACT
-      branch is the one rendered (`PACK KINDS` plus the compact master header),
-      and that asserts `count(...) == 1` on the real S2/S4 path. The mutation the
-      render-path pin is written to catch is the story-gated variant, not
-      deletion alone.
-      ⚠️ Pinned, and NOT read off a comment: the `SEAMS:` comment above
-      `SHORT_SESSION_FACT_RULE` belongs to a different constant and names S1 as
-      one of ITS seams, so citing it as authority for value-fidelity's never-S1
-      would say the opposite of what the row claims.
-      ⚠️ PRESENT-IN-A-PROMPT IS NOT THE GUARANTEE, and this row is where the
-      distinction is kept. The FILTER side is mechanical
-      (`tortoise/value_gate.py::identifier_only` is the SELECTION predicate that
-      drops identifier-like residues, `#4899`, and the EMBED gate reuses the same
-      rule set — row `embed_gate`), but nothing enforces RETENTION. VERBATIM
-      SURVIVAL is prompt-only (`#2453`'s own closing records this; the enforcement
-      half is `#10360`) and it is measured SHORT: 38/77 = 49.4% strict verbatim
-      survival on the flags-on arm against a 49/90 = 54.4% committed baseline
-      (`#5064` comment 2026-10-13, `#7949` E2). A row marked `implemented` would
-      make the prompt text read as the guarantee — the exact
+      byte-for-byte by `tests/test_extractor_v2.py`; and — added 2026-10-24,
+      because it was NOT pinned — the `VALUE_FIDELITY_RULE` text absent from all
+      three renders by
+      `tests/test_v4_declared_mechanisms.py::test_the_value_fidelity_rule_rides_the_s2s4_slot_and_no_master_render`,
+      which also asserts the rule still rides `_s2s4_rules()` so the absence cannot
+      pass by vacancy. Measured before that test: appending the rule to
+      `_render_master_verbose` (the DEFAULT render) shipped a second copy of the
+      instruction in one S2/S4 prompt with every gate green. ⚠️ It is pinned and
+      NOT read off a comment: the `SEAMS:` comment above `SHORT_SESSION_FACT_RULE`
+      belongs to a different constant and names S1 as one of ITS seams, so citing
+      it as authority for value-fidelity's never-S1 would say the opposite of what
+      the row claims. The FILTER side is
+      mechanical and is NOT what this row records as absent:
+      `tortoise/value_gate.py::identifier_only` is the SELECTION predicate
+      that drops identifier-like residues (`#4899`), and the EMBED gate reuses
+      the same rule set (row `embed_gate`). WHAT DOES NOT — (a) there is no
+      mechanical enforcement of the GUARANTEE: VERBATIM SURVIVAL is prompt-only
+      (#2453's own closing records this), and the strict-verbatim measurement is
+      38/77 = 49.4% on the flags-on arm against a 49/90 = 54.4% committed
+      baseline (#5064 comment 2026-10-13, #7949 E2);
+      (b) `_render_master_compact` — selected by the documented
+      `TORTOISE_EXTRACTOR_PROMPT=compact` opt-in — appends no
+      `STATE_VALUE_CARVE_OUT` at all, so one render path silently drops the
+      guarantee. ⚠️ The omission is MEASURED, not read off a comment: the
+      comment above the compact render's hint blocks
+      (`tortoise/extractor_v2.py:1175-1177`) only excludes them from the SHUFFLE
+      ("only the kind vocabulary randomizes") and then emits a FILTERED
+      `MEMORY GRANULARITY` block, so it neither says nor implies that the
+      carve-out is dropped —
+      `test_the_compact_render_omits_the_carve_out_the_row_records` is the
+      evidence, and the code comment that would say why does not exist yet. ⚠️ The row records the OMISSION,
+      not a justification for it: whether the compact render is deliberately out
+      of the carve-out's scope is #9775's decision, and the code-side comment
+      that decision would need does not exist yet — do not read "deliberately"
+      into this row. A row marked `implemented`
+      would make the prompt text read as the guarantee — the exact
       declared-implies-present defect this registry exists to catch.
 
   - id: atomic_point_write
@@ -610,33 +602,13 @@ mechanisms:
       declared mechanism is the `HOLD` disposition (invariant I1: an unresolved
       identity is NEVER asserted `new`), the run-level `HOLD` set carried to a
       later run, and the single S3-attach/S5-connect/S6-commit transaction (I3).
-      ⚠️ **WHAT EXISTS (#5095, the RECORD half — and it is deliberately NOT a
-      state flip):** `tortoise/failure_policy.py` reads the lookup's state
-      (`resolved` / `partial` / `unresolved`) off `search_graph`'s
-      `query_coverage` + `query_results` — the queries that ACTUALLY ran, which
-      `degraded` alone cannot express (a degraded lookup has zero priors; the
-      swallowed `query 2..N` failure is the partial shape, and on a real S2
-      output the shipped budget of 15 starves the 18th query in the POINT leg).
-      The renderer no longer invites `new`, `execute_embed`'s
-      `link_before_create` reports `found: null` for a candidate whose own query
-      did not run (per candidate, not per run), and `extract_session_v2` carries
-      an always-present `identity` block plus a warning that fires when a candidate's
-      own identity query did not run (a budget cut that touches only non-candidate
-      queries gets its own sentence — the two are different facts).
-      ⛔ **WHAT IS STILL ABSENT — and this is why the row stays
-      `not-implemented`:** nothing suppresses a create. I1's *"never mint it"*
-      needs a CREATE gate inside S5, and NOT `execute_embed({})`: that function
-      is the sole carrier for retractions (whose same-session leg needs no graph
-      lookup), supersessions and chain notes, so a wholesale suppression drops
-      memory I2 forbids dropping (#5095's PLAN-VERIFY round 1 measured it).
-      §4.4's carry-forward store also does not exist. Pinned by
-      `tests/test_5095_s3_identity_policy.py::TestTheRemainingAbsence`, which
-      asserts a CALL that the mint is still UNGATED (`execute_embed` commits a
-      Point and an entity for an unresolved lookup — the day a create gate lands
-      it reds and this row must flip), together with
-      `test_the_failure_policy_absence_is_pinned_to_the_mint_not_the_render`,
-      which pins the record half's presence and this row's state. #5087 (E1)
-      remains the code-owner of the mint half.
+      ⚠️ What RUNS is the INVERTED policy, pinned to the code by
+      `test_the_failure_policy_absence_is_pinned_to_the_inverted_render`: S3's
+      lookup degrades instead of raising (correct, #3679) and the renderer then
+      tells the model *"no existing items available; assume everything is new"* —
+      the duplication-manufacturing direction G3 names. #5087 (E1) is the code
+      half the design itself names, and this row is what makes the absence
+      visible instead of assumed.
       ⚠️ NOT registered as one mechanism: §4.4 also gives each of the eight
       steps its own direction and transaction boundary. Those are per-step
       policies of THIS mechanism, not eight more mechanisms, and a row per step
