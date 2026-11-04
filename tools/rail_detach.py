@@ -377,6 +377,28 @@ class Refused(Exception):
     """A precondition the launcher itself enforces (never a rail verdict)."""
 
 
+def _gh(argv: list[str], cwd: Path) -> subprocess.CompletedProcess:
+    """Run `gh`; a MISSING BINARY is a failed query, never a crash.
+
+    Both callers below are best-effort (`_head_sha` already answers `unreadable`
+    on a non-zero exit, `_resolve_repo` refuses), but an absent `gh` raised
+    `FileNotFoundError` OUT of `launch()` — so the launcher died instead of
+    stamping its artifact, and every arm of `tests/test_rail_detach.py` read as
+    a failure on the #9018 fallback pool, whose `ubuntu-latest` is a bare runner
+    with a minimal non-login PATH and no `gh` (measured 2026-11-03: 20 red arms
+    on `pi-runner-vm-2`, `gh: No such file or directory`, on a PR whose diff
+    touches neither this tool nor its test). rc=127 is what a shell reports for
+    a missing command, so the callers' `returncode != 0` arms handle it — the
+    same shape `tools/who_is_on.py` already uses for `git`
+    (`except FileNotFoundError: return 127, "", "<bin>: command not found"`).
+    """
+    try:
+        return subprocess.run(argv, cwd=str(cwd), capture_output=True, text=True)
+    except FileNotFoundError:
+        return subprocess.CompletedProcess(argv, 127, "",
+                                           "gh: command not found")
+
+
 def _resolve_repo(cwd: Path) -> str:
     """The checkout's `owner/name`, from `gh repo view`.
 
@@ -402,16 +424,10 @@ def _resolve_repo(cwd: Path) -> str:
     safe answer; `--repo owner/name` is the way through.
     """
     env_repo = os.environ.get("GH_REPO", "")
-    try:
-        out = subprocess.run(
-            ["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
-            cwd=str(cwd), capture_output=True, text=True,
-        )
-    except (FileNotFoundError, OSError):
-        raise Refused(
-            "could not resolve the repo from this checkout (`gh` is not on PATH) — "
-            "pass --repo owner/name"
-        ) from None
+    out = _gh(
+        ["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
+        Path(cwd),
+    )
     if out.returncode == 0 and out.stdout.strip():
         repo = out.stdout.strip()
         if env_repo and env_repo != repo:
@@ -422,7 +438,12 @@ def _resolve_repo(cwd: Path) -> str:
                 "unset GH_REPO rather than detaching a rail at an unknown target"
             )
         return repo
-    raise Refused("could not resolve the repo from this checkout (`gh repo view` failed)")
+    detail = (out.stderr or "").strip().splitlines()
+    raise Refused(
+        "could not resolve the repo from this checkout (`gh repo view` failed"
+        + (f": {detail[-1]}" if detail else "")
+        + ") — pass `--repo owner/name`, or install the `gh` CLI"
+    )
 
 
 def _head_sha(cwd: Path, repo: str, pr: int) -> str:
@@ -439,16 +460,15 @@ def _head_sha(cwd: Path, repo: str, pr: int) -> str:
     `_head_sha` and died with `FileNotFoundError: No such file or directory: 'gh'`
     (21 failures in `tests/test_rail_detach.py`, which its own docstring declares
     to be "no database, no network"). The launcher must not depend on a binary it
-    only uses to label a field.
+    only uses to label a field — `_gh` above now answers rc=127 for exactly that
+    case, so this function's `returncode != 0` arm covers it without a local
+    `try`/`except`.
     """
-    try:
-        out = subprocess.run(
-            ["gh", "pr", "view", str(pr), "--repo", repo, "--json", "headRefOid",
-             "-q", ".headRefOid"],
-            cwd=str(cwd), capture_output=True, text=True,
-        )
-    except (FileNotFoundError, OSError):
-        return "unreadable"
+    out = _gh(
+        ["gh", "pr", "view", str(pr), "--repo", repo, "--json", "headRefOid",
+         "-q", ".headRefOid"],
+        Path(cwd),
+    )
     return out.stdout.strip() if out.returncode == 0 else "unreadable"
 
 

@@ -22,6 +22,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -365,6 +366,69 @@ def test_child_invokes_only_the_one_lander(tmp_path):
     assert "AGENT_ADMIN_MERGE_OVERRIDE" not in body
 
 
+# ── the runner's TOOL CONTRACT: `gh` ABSENT is a failed query, not a crash ───
+def _path_without_gh(tmp_path: Path) -> str:
+    """A PATH that resolves what the rail needs but has NO `gh` on it.
+
+    #9018: `runs-on: ubuntu-latest` names a GitHub-hosted IMAGE, but the
+    fallback pool carries that same label on a bare runner whose service PATH is
+    a minimal non-login one — where `gh` is simply absent (measured 2026-11-03:
+    `test (a)` on `pi-runner-vm-2`, `FileNotFoundError: 'gh'`, 20 arms red on a
+    PR that touches neither this tool nor this file). Absence is SIMULATED here
+    rather than inherited, so the arm means the same thing on every runner.
+    """
+    b = tmp_path / "bin-no-gh"
+    b.mkdir(exist_ok=True)
+    for tool in ("bash", "sleep"):
+        src = shutil.which(tool)
+        assert src, f"{tool} must exist for this arm to mean anything"
+        (b / tool).symlink_to(src)
+    return str(b)
+
+
+def _cli(tmp_path: Path, *args: str) -> subprocess.CompletedProcess:
+    env = {k: v for k, v in os.environ.items()
+           if k not in rd.FORBIDDEN_ENV}   # the launcher refuses a carried bypass
+    env["PATH"] = _path_without_gh(tmp_path)
+    return subprocess.run(
+        [sys.executable, str(REPO_ROOT / "tools" / "rail_detach.py"), *args],
+        env=env, capture_output=True, text=True,
+    )
+
+
+def test_launch_without_the_gh_cli_starts_and_stamps_an_unreadable_head(tmp_path):
+    """The launcher must not CRASH on a runner with no `gh`.
+
+    Pre-fix `_head_sha`'s `subprocess.run(["gh", ...])` raised out of `launch()`,
+    so the CLI printed a traceback, wrote no artifact and returned 1 — the rail
+    never started at all on the bare pool. `HEAD=unreadable` is the honest stamp:
+    the head is a best-effort read (the rail's own log remains the primary
+    record), never a reason to refuse to detach.
+    """
+    co = make_checkout(tmp_path)
+    sd = tmp_path / "state"
+    proc = _cli(tmp_path, "start", "77", "--repo", "o/r", "--cwd", str(co),
+                "--state-dir", str(sd))
+    assert proc.returncode == 0, (proc.returncode, proc.stdout, proc.stderr)
+    assert proc.stdout.startswith("STARTED(#77, pid "), proc.stdout
+    art = rd.artifact_path(sd, "o/r", 77).read_text(encoding="utf-8")
+    assert "HEAD=unreadable" in art, art
+
+
+def test_collect_without_the_gh_cli_refuses_by_name_instead_of_tracebacking(tmp_path):
+    """No `--repo` and no artifact ⇒ refuse (rc 2), naming what is missing.
+
+    Pre-fix this arm exited 1 with `FileNotFoundError` — a read-only status verb
+    tracebacking, which is worse than any verdict (the fleet beat then gets no
+    state to act on). The artifact path never needs `gh` (the arm above).
+    """
+    proc = _cli(tmp_path, "collect", "778", "--state-dir", str(tmp_path / "state"))
+    assert proc.returncode == 2, (proc.returncode, proc.stdout, proc.stderr)
+    assert "could not resolve the repo" in proc.stderr
+    assert "command not found" in proc.stderr      # names the cause, not just the effect
+    assert "Traceback" not in proc.stderr
+
+
 # ── PROOF + MUTANT: detached survives the lane's group kill; undetached dies ──
 LANE = textwrap.dedent(
     """
@@ -455,11 +519,21 @@ def test_cli_collect_exit_codes(tmp_path, capsys):
     capsys.readouterr()
 
 
-def _path_without_gh(tmp_path: Path, monkeypatch) -> Path:
+def _path_without_gh_shim(tmp_path: Path, monkeypatch) -> Path:
     """Rebuild `PATH` from this box's own executables with every `gh` dropped.
 
     ⛔ The pin cannot pass by finding a real `gh`: it fails on the pre-fix code on
     ANY box, including one that has `gh` installed.
+
+    ⛔ DELIBERATELY A SECOND HELPER, NOT A REPLACEMENT FOR `_path_without_gh` ABOVE
+    (merge of `origin/main`, #10620). The two shims answer different questions and
+    both callers are load-bearing: `_path_without_gh` builds a MINIMAL PATH holding
+    only `bash` and `sleep` for `_cli`'s subprocess environment, while this one
+    mirrors the whole `PATH` minus `gh` for the in-process `monkeypatch` pins, and
+    it also clears `GH_REPO`. Merging them into one name meant the later definition
+    shadowed the earlier, so `_cli` called a two-argument helper with one argument
+    (`TypeError: missing 1 required positional argument: 'monkeypatch'`) — a silent
+    auto-merge break of work from BOTH sides, caught by running the suite.
     """
     shim = tmp_path / "nogh"
     shim.mkdir(exist_ok=True)
@@ -492,7 +566,7 @@ def test_a_missing_gh_degrades_the_head_annotation_instead_of_killing_the_launch
     every `collect` reported `lost`. Measured on a self-hosted runner with no `gh`:
     21 of this module's tests failed with `FileNotFoundError: ... 'gh'`.
     """
-    _path_without_gh(tmp_path, monkeypatch)
+    _path_without_gh_shim(tmp_path, monkeypatch)
 
     assert rd._head_sha(tmp_path, "o/r", 99) == "unreadable"
 
@@ -527,7 +601,7 @@ def test_a_missing_gh_refuses_the_default_repo_path_instead_of_crashing(
     `FileNotFoundError` and the `main()` line raises out of `start` instead of
     returning 4 — the test fails on ANY box, `gh` installed or not.
     """
-    _path_without_gh(tmp_path, monkeypatch)
+    _path_without_gh_shim(tmp_path, monkeypatch)
     co = make_checkout(tmp_path)
     sd = tmp_path / "state"
 
