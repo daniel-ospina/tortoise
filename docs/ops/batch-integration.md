@@ -1180,6 +1180,18 @@ left.
   — `tools/batch_open.py` on #10902 is the natural home, and until it does, a fold carrying ONLY
   `queue-accelerator` resolves at the accelerator's `high` (3000), which is priority but not this rule's
   9000.
+- **The label must be on the PR when the CI run is CREATED — the two halves read it at different
+  times.** The Mergify half is evaluated server-side against the live PR, so a label added later does
+  reach the queue. The runner half does not: both emitters read `CI_PR_LABELS:
+  ${{ join(github.event.pull_request.labels.*.name, ',') }}`, which is the **webhook payload snapshot
+  captured when the run was created** (`tools/ci_selection.py:4631` is a plain `os.environ.get`), and
+  `on: pull_request:` carries no `types:`, so labelling an existing PR starts **no new run**. Consequences,
+  in operator terms: apply `batch-fold` in the PR-create call (`labels:` on
+  `POST /repos/{o}/{r}/pulls` — the shape `tools/batch_open.py` should use when #10902 takes this over),
+  or push a commit after labelling so the `synchronize` event runs the emitters again. **A label added to
+  an idle fold PR changes its queue order but not its in-flight run**, and the runner half then returns
+  `identity` silently: the warning path covers only an *unusable declaration*, never a *label missing from
+  the snapshot*, which is indistinguishable from "this PR is not a fold".
 - A constituent **already queued** before its fold opened is not removed by mechanism 1; the label
   refuses the *next* evaluation, and the tool closes it. De-queueing a live batch is a human action.
 - No required check was added, removed or weakened to make any of this faster — priority is not
