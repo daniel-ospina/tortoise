@@ -239,6 +239,14 @@ def _no_ambient_store(monkeypatch, tmp_path):
     # (`./.tortoise`), which is a candidate too (#1708 D5).
     (tmp_path / "cwd").mkdir()
     monkeypatch.chdir(tmp_path / "cwd")
+    # ⛔ …and the OPT-IN that re-admits that store on a transmitting path (#10605 review, P3).
+    # `TORTOISE_MCP_ALLOW_PROJECT_STORE=1` is a *recommended* configuration (the docs tell an
+    # operator who keeps their credential in the project to set it), so an ambient one is
+    # inherited here and re-admits `./.tortoise` on exactly the paths this module pins as
+    # repo-proof. Measured with it exported:
+    # `TestCredentialResolution::test_a_repo_committed_store_cannot_aim_a_transmitting_path`
+    # failed. Fails CLOSED (a red guard, not a silent pass), hence P3.
+    monkeypatch.delenv("TORTOISE_MCP_ALLOW_PROJECT_STORE", raising=False)
 
 
 def _redirect_app(target: str):

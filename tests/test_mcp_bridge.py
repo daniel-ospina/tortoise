@@ -318,12 +318,23 @@ def upstream():
 
 @pytest.fixture
 def home(tmp_path, monkeypatch):
-    """An isolated HOME with no credential, and no ambient key in the env."""
+    """An isolated HOME with no credential, and no ambient key in the env.
+
+    ⛔ THE OPT-IN IS CLEARED TOO (#10605 review, P3). `TORTOISE_MCP_ALLOW_PROJECT_STORE=1` is a
+    *recommended* configuration — `tortoise/mcp_client.py` and `docs/client-server-split.md` both
+    tell an operator who keeps their credential in the project to set it — so an ambient one is
+    inherited by every `_Bridge` subprocess and by the two repo-store tests, which then red on
+    exactly the hosts where this security pin matters most. Measured with it exported:
+    `TestRepoCommittedStore::test_a_repo_committed_store_cannot_aim_the_bridge` and
+    `::test_the_skipped_project_store_is_named_not_silently_dropped` both failed. It fails CLOSED
+    (a red guard, not a silent pass), which is why it is P3 and not higher.
+    """
     directory = tmp_path / "home"
     directory.mkdir()
     monkeypatch.setenv("HOME", str(directory))
     monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
     monkeypatch.delenv("TORTOISE_MCP_API_KEY", raising=False)
+    monkeypatch.delenv("TORTOISE_MCP_ALLOW_PROJECT_STORE", raising=False)
     return directory
 
 
@@ -349,7 +360,8 @@ def _write_credential(home: Path, key: str, api_url: str | None = None) -> Path:
 class _Bridge:
     def __init__(self, url: str, home: Path, extra_env: dict[str, str] | None = None):
         env = {k: v for k, v in os.environ.items()
-               if k not in ("TORTOISE_API_KEY", "TORTOISE_MCP_API_KEY")}
+               if k not in ("TORTOISE_API_KEY", "TORTOISE_MCP_API_KEY",
+                            "TORTOISE_MCP_ALLOW_PROJECT_STORE")}
         env.update({"HOME": str(home), "TORTOISE_MCP_URL": url})
         env.update(extra_env or {})
         self.stderr_lines: list[str] = []
@@ -557,7 +569,8 @@ class TestRepoCommittedStore:
             }))
             env = {k: v for k, v in os.environ.items()
                    if k not in ("TORTOISE_API_KEY", "TORTOISE_MCP_API_KEY",
-                                "TORTOISE_MCP_URL")}
+                                "TORTOISE_MCP_URL",
+                                "TORTOISE_MCP_ALLOW_PROJECT_STORE")}
             env["HOME"] = str(home)
             subprocess.run(
                 [sys.executable, "-m", "tortoise.mcp_bridge"],
@@ -598,7 +611,8 @@ class TestRepoCommittedStore:
             }))
             env = {k: v for k, v in os.environ.items()
                    if k not in ("TORTOISE_API_KEY", "TORTOISE_MCP_API_KEY",
-                                "TORTOISE_MCP_URL")}
+                                "TORTOISE_MCP_URL",
+                                "TORTOISE_MCP_ALLOW_PROJECT_STORE")}
             env["HOME"] = str(home)
             env["TORTOISE_MCP_URL"] = upstream_url
             env["TORTOISE_MCP_ALLOW_PROJECT_STORE"] = spelling

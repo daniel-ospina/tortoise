@@ -282,10 +282,20 @@ of the harness's at spawn: a key exported in another shell after the session
 started is not visible to it. Re-reading the environment helps a process that
 sets its own `os.environ` mid-run (a notebook, a login flow); the source that
 genuinely rotates under a long-lived session — and the one a hosted user has on
-disk, written by `tortoise init` — is the **credential file**, re-read per
-request. The env leg is precedence, not liveness. Both stores are read: a user
-who onboarded through the CLI has the project-local one, and a client that read
-only the global file would report "no credential" for a key sitting on disk.
+disk, written by `tortoise init` — is the **GLOBAL credential file**
+(`~/.tortoise/credentials.json`), re-read per request. The env leg is precedence,
+not liveness.
+
+⛔ **Which stores are read is the TRANSMITTING split stated above — not both.** A
+transmitting resolution reads env plus the global file, and reaches
+`<cwd>/.tortoise` only when `TORTOISE_MCP_ALLOW_PROJECT_STORE` is truthy; a
+NON-transmitting read (`.key` redaction) does read both, project-local first.
+So a key that sits only in the project store is not "no credential" because
+nothing resolved — that store is SKIPPED on purpose, and still NAMED in
+`MCP-KEY-EMPTY`'s source list so the operator is told it was seen and why it
+was not used. (An earlier revision of this paragraph claimed "both stores are
+read" in a section documenting the bridge, which contradicted the paragraph
+above it and the code; corrected under #10605's review.)
 
 **CO-SOURCE (#2369 D1.1).** When the key comes from the credential file, the
 endpoint comes from that SAME file (`api_url`), never from a `TORTOISE_MCP_URL`
