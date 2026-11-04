@@ -205,9 +205,17 @@ def test_the_carrier_holds_the_redacted_text_not_the_raw_turn(captured):
         assert SECRET not in text, f"{key!r} carried the credential into the journal"
         assert "ghp_" not in text, f"{key!r} carried a credential-shaped run"
     # Positive half: the carrier is the REDACTED derivation, not a copy of the
-    # raw input — the redaction marker is visible where the secret was.
-    assert "[REDACTED:github_token]" in (record.get("summary") or ""), (
-        "the carrier's summary is not the redacted transcript's first utterance")
+    # raw input — the redaction marker is visible where the secret was. Since
+    # #10000 the carrier's ``summary`` is a descriptor over the session's TOPIC
+    # lexicon (§9.1/D1: the transcript's own sentences must not reach a node),
+    # so the marker is read on the field the vocabulary now travels in —
+    # ``topics``. What binds the control is unchanged: with the scrubber
+    # neutralised the raw token appears HERE instead of the marker, and the
+    # assertions above red.
+    assert "redacted" in (record.get("topics") or []) and "github_token" in (
+            record.get("topics") or []), (
+        "the carrier's topics are not the redacted transcript's vocabulary — "
+        f"{record.get('topics')!r}")
     # And it describes the SAME bytes the node stores (the #4911 rule: the hash
     # is taken over the redacted transcript).
     stored = _source_props(sdk._get_proj(), SOURCE_URL)

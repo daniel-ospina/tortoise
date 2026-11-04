@@ -4098,26 +4098,41 @@ _SESSION_SOURCE_STOPWORDS = frozenset({
 
 
 def _session_source_metadata(transcript: str) -> tuple[str, list[str]]:
-    """Derive cheap capture metadata (summary + topics) for the session Source
-    from the extraction transcript (#1352) — no LLM call, deterministic:
-    the summary is the first substantive utterance, topics are the top
-    frequent content words. Returns ("", []) for an empty transcript."""
+    """Derive the session Source's searchable TOPIC LEXICON (#1352, #10000).
+
+    ⛔ §9.1/D1 (owner ruling 2026-09-23) keeps a session's transcript in the
+    RECORD — *"not in the graph, not a `Document` node, not a `Point`"*. This
+    builder used to return the transcript's FIRST SUBSTANTIVE UTTERANCE as
+    ``summary``, which put raw turn prose on the session's ``:Source`` node AND
+    into the Source FTS index (``_searchText``) — measured in
+    ``docs/verify/2026-10-31-record-capstone.md`` §4 item 2, *"the second prose
+    passthrough onto a node"*. Redaction (#4911) does not close that: a scrubbed
+    sentence is still the session's sentence.
+
+    So the derived metadata is the session's TOPIC LEXICON — never a sentence and
+    never a quote: the six most frequent content words of the (already redacted)
+    transcript, rendered as one stable descriptor. Those words are vocabulary the
+    capture already derives, and they keep a captured session findable through
+    ``tortoise_fts_query(entity_type='source')`` — the regression #3518 closed,
+    and the reason this function must return SOMETHING for a non-empty
+    transcript. ``("", [])`` for an empty or wordless transcript.
+
+    ⛔ The descriptor is a FUNCTION OF THE TOPICS, never of the transcript's own
+    wording or word order, and it never quotes: a summary that echoed the
+    utterance back (even truncated, even redacted) is the defect this shape
+    exists to remove. ``tests/test_10000_source_prose.py`` scans every node's
+    string properties for the capture's own text and reds if it reaches anything
+    but the episodic turn store.
+    """
     if not transcript.strip():
         return "", []
-    summary = ""
-    for line in transcript.splitlines():
-        text = line.split(": ", 1)[1] if ": " in line else line
-        text = text.strip()
-        if len(text) >= 10:
-            summary = text[:200]
-            break
-    if not summary:
-        summary = transcript.strip()[:200]
     from collections import Counter
     words = re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}", transcript.lower())
     counts = Counter(w for w in words if w not in _SESSION_SOURCE_STOPWORDS)
     topics = [w for w, _ in counts.most_common(6)]
-    return summary, topics
+    if not topics:  # a transcript of pure stopwords/punctuation
+        return "", []
+    return "session capture topics: " + ", ".join(topics), topics
 
 
 #: #3518: the ONE searchable-text field on a :Source — the field the Source
@@ -16281,12 +16296,13 @@ class TortoiseSDK:
         references edge (test_backfill_sources.py).
 
         #4911: the transcript is SCRUBBED before anything is derived from it or
-        persisted. ``summary`` is the first substantive utterance and ``topics``
-        are the six most frequent content words — i.e. the session's own turn
-        text — so redacting only the turn Points left the SAME credential in
-        ``Source.summary`` / ``Source.topics`` on the same write (reproduced in
-        review). ``contentHash`` is taken over the redacted transcript too, so
-        the hash describes what is stored.
+        persisted. ``topics`` are the six most frequent content words and
+        ``summary`` is a descriptor built FROM them (#10000: it used to be the
+        first substantive utterance, i.e. raw turn prose on a node — see
+        ``_session_source_metadata``) — so redacting only the turn Points left
+        the SAME credential in ``Source.summary`` / ``Source.topics`` on the
+        same write (reproduced in review). ``contentHash`` is taken over the
+        redacted transcript too, so the hash describes what is stored.
 
         #3518: it also populates ``_searchText`` — the field the Source FTS
         index is declared on — via the shared ``_source_search_text`` rule

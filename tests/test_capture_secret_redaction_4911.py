@@ -820,8 +820,11 @@ def test_the_source_sink_scans_a_bounded_window(sdk, monkeypatch):
     secret's ABSENCE. Absence alone is satisfied VACUOUSLY by any arrangement in
     which the turn never reaches the summary, and it therefore did not bind the
     control: neutralising ``redact_secrets`` left this test GREEN. The non-str
-    turn is placed FIRST and kept short enough to be the first substantive
-    utterance, so it IS the summary — which makes the marker check load-bearing.
+    turn is placed FIRST, so its marked credential is what the Source's derived
+    vocabulary carries — which makes the marker check load-bearing. (Since
+    #10000 the derivation is the TOPIC lexicon, so the marker appears there as
+    the words ``redacted`` + the credential KIND name, never as the bracketed
+    literal that a prose ``summary`` used to hold.)
     """
     _keyless(monkeypatch)
     # #4897 round 6: capture every string the scrubber is handed on the Source
@@ -862,8 +865,13 @@ def test_the_source_sink_scans_a_bounded_window(sdk, monkeypatch):
     blob = (rows[0][0] or "") + " " + " ".join(rows[0][1] or [])
     # (a) the non-str turn's credential was COERCED, SCANNED and MARKED. This is
     #     the assertion that binds: with the scrubber neutralised the raw value
-    #     is here instead of the marker and this reds.
-    assert "[REDACTED:stripe_secret_key]" in blob, (
+    #     is here instead of the marker and this reds. Since #10000 the Source's
+    #     ``summary`` is a descriptor over the TOPIC lexicon rather than the
+    #     transcript's first utterance, so the marker is read as its two WORDS
+    #     on the carrier's own vocabulary (``redacted`` + the credential KIND
+    #     name) instead of the bracketed literal, which no longer appears in a
+    #     word-frequency field.
+    assert "redacted" in blob and "stripe_secret_key" in blob, (
         "a credential was dropped rather than marked — or the non-str turn was "
         f"never scanned: {blob!r}")
     assert secret not in blob, (

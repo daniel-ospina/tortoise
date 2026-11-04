@@ -4806,13 +4806,15 @@ def _narrative_statements(
         values["narrative"] = narrative
 
     # ⛔ `summary` is projected ONLY from a record that ALSO carries the
-    # narrative. The capture's own session `:Source` sets `summary` to the
-    # transcript's first substantive utterance (`sdk._session_source_metadata`),
-    # which is NOT the S1 narrative — projecting it unconditionally would let an
-    # order-independent row hold a prose snippet in the narrative's companion
-    # column, and would make `SessionText.verbatim_available` true for a session
-    # whose narrative is unknown. One carrier owns both columns, so they cannot
-    # mean different things.
+    # narrative. The capture's own session `:Source` carries a descriptor built
+    # from the session's TOPIC lexicon (`sdk._session_source_metadata`; it held
+    # the transcript's first substantive utterance until #10000 removed the
+    # prose route, §9.1/D1), which is NOT the S1 narrative — projecting it
+    # unconditionally would let an order-independent row hold a prose snippet in
+    # the narrative's companion column, and would make
+    # `SessionText.verbatim_available` true for a session whose narrative is
+    # unknown. One carrier owns both columns, so they cannot mean different
+    # things.
     if "narrative" in values:
         summary = carrier.get("summary")
         if isinstance(summary, str) and summary.strip():
