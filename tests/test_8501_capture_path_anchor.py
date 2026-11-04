@@ -38,28 +38,42 @@ CONV = [
     {"role": "user", "content": "ok"},
 ]
 
-#: The session ``:Source`` property set a capture produced BEFORE the fix. The
-#: early materialization must not change the node the capture lands: it now
+#: The session ``:Source``'s shape at THIS head — property for property.
+#:
+#: The early materialization must not change the node the capture lands: it now
 #: often CREATES the stub (rather than upgrading ``_link_source``'s), so it has
 #: to reproduce that stub's create-time shape (`title=url`, `canonicalUrl`,
-#: `urlAliases`, `is_episodic=true` for `session:` refs, ...) exactly.
-#: The session `:Source`'s shape (post-#8501) — property for property.
+#: `urlAliases`, `is_episodic=true` for `session:` refs, ...) exactly. The two
+#: exact-set assertions below are what holds it to that.
 #:
-#: ⛔ `summary` LEFT THIS SET DELIBERATELY (#10000 §9.1/D1), and the way it left
-#: is the point: this pin is exactly what caught it. `summary` was the
-#: transcript's first substantive utterance — a verbatim slice of the RAW turn
-#: text — and §9.1/D1 keeps the raw transcript out of the graph, so
-#: `sdk._materialize_session_source` no longer sets it AND no longer carries it on
-#: the `SourceCreated` record (a placed `public.source.summary` would be written
-#: back onto the node by the record→cache door); the node's searchable text stays
-#: on `_searchText`, D10/#3518's declared home. Nothing reads `summary` for a
-#: session Source. Removing it here is the pin being UPDATED on purpose, not
-#: silenced: a future key appearing or disappearing still reddens.
-_PRE_FIX_SOURCE_KEYS = {
+#: ⛔ `summary` is NOT in this set, deliberately — §9.1/D1's capture-path route
+#: (`#10000`). `sdk._session_source_metadata` derives it as the transcript's
+#: FIRST SUBSTANTIVE UTTERANCE, a verbatim slice of the RAW turn text, and
+#: `_materialize_session_source` used to write it to BOTH sides: the node
+#: (`s.summary=$sum`) and the `SourceCreated` carrier (`summary=…`, which the
+#: record→cache door would place back onto the node). Neither write remains. The
+#: node's searchable text still carries that same derivation, on `_searchText`
+#: (D10/`#3518`'s declared home), so the session stays findable; nothing reads
+#: `summary` for a session Source. Dropping it here was the pin being UPDATED on
+#: purpose, not silenced — a key appearing or disappearing still reddens.
+_SESSION_SOURCE_KEYS = {
     "_searchText", "canonicalUrl", "capturedAt", "contentHash", "eventId",
     "ingestedAt", "is_episodic", "sessionId", "sourceKind", "title",
     "topics", "updatedAt", "url", "urlAliases",
 }
+
+#: What a PRE-FIX build's capture actually wrote: `_SESSION_SOURCE_KEYS` plus
+#: `summary`. Measured against `origin/main:tortoise/sdk.py`, whose
+#: `_materialize_session_source` carried one more SET clause than this head does
+#: (`s.summary=$sum`, between `s.contentHash=$ch` and `s.topics=$topics`) and one
+#: more `SourceCreated` carrier key (`summary=`). Nothing else differs.
+#:
+#: ⛔ Read THIS one as ground truth for "what a node written by a pre-fix build
+#: already carries" — that is what the `#10853` residue sweep is sized against.
+#: It is deliberately NOT the same set as the shipped shape above: a residue
+#: sweep sized against the post-fix set would miss every node still holding the
+#: transcript's first utterance, so the two must not be collapsed into one.
+_PRE_FIX_SOURCE_KEYS = _SESSION_SOURCE_KEYS | {"summary"}
 
 
 @pytest.fixture()
@@ -182,10 +196,11 @@ def test_capture_path_source_shape_is_unchanged_by_the_early_materialization(pro
         params={"u": f"session:{res['session_id']}"}).result_set
     assert rows, "the session Source did not land"
     keys = set(rows[0][0])
-    assert keys == _PRE_FIX_SOURCE_KEYS, (
+    assert keys == _SESSION_SOURCE_KEYS, (
         "the early materialization changed the session Source's shape — "
-        f"missing={sorted(_PRE_FIX_SOURCE_KEYS - keys)} "
-        f"extra={sorted(keys - _PRE_FIX_SOURCE_KEYS)}")
+        f"missing={sorted(_SESSION_SOURCE_KEYS - keys)} "
+        f"extra={sorted(keys - _SESSION_SOURCE_KEYS)} (a PRE-FIX build wrote "
+        f"{sorted(_PRE_FIX_SOURCE_KEYS - _SESSION_SOURCE_KEYS)} more: #10853)")
 
 
 def test_a_recapture_neither_advances_nor_drops_the_anchor(prov):
@@ -421,9 +436,9 @@ def test_a_keyless_capture_lands_the_full_stub_shape(prov, monkeypatch):
         "the materializer are addressing different nodes (the "
         "`resolve_source_key` contract, #8501 review P3)")
     keys = set(rows[0][0])
-    assert keys == _PRE_FIX_SOURCE_KEYS, (
+    assert keys == _SESSION_SOURCE_KEYS, (
         "the keyless capture's Source shape diverged from the stub shape the "
-        f"extracting lane lands — missing={sorted(_PRE_FIX_SOURCE_KEYS - keys)} "
-        f"extra={sorted(keys - _PRE_FIX_SOURCE_KEYS)}. Before #8501 this lane "
+        f"extracting lane lands — missing={sorted(_SESSION_SOURCE_KEYS - keys)} "
+        f"extra={sorted(keys - _SESSION_SOURCE_KEYS)}. Before #8501 this lane "
         "carried no title/canonicalUrl/urlAliases/is_episodic at all; the "
         "change is intended, so this pin (not silence) is what keeps it")

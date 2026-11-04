@@ -1927,3 +1927,63 @@ a correct line from a wrong one. §9.1(b) now names a symbol per route
 pins both directions, each measured on the pre-fix text: a `file.py:NNNN` in the section reds (all
 four converted citations named), and a symbol that no longer resolves reds (measured by renaming
 `_upsert_document`).
+
+## §9.1's capture-path `summary` — the ruling STANDS, and TWO superseding proposals are PENDING (`#10000`)
+
+**The rule in §9.1 is unchanged and in force:** `summary`/`title` stay on the node — they are §4.4
+metadata, not the prose. **Nothing is adopted here and nothing in this entry authorises a change.** It
+exists because the capture path is the one route a measurement showed that sentence to be false on, and
+because TWO open proposals would each make it true by a different and mutually exclusive means. Until
+this entry, that fact lived only in review comments on one of the two PRs — where the lane holding the
+other could not see it, and where a merge order could have decided it.
+
+**The measured route.** `sdk._session_source_metadata` derives `summary` as the transcript's FIRST
+SUBSTANTIVE UTTERANCE — a verbatim slice of the RAW turn text, not authored metadata — and
+`_materialize_session_source` writes it twice: onto the node (`s.summary=$sum`, between
+`s.contentHash=$ch` and `s.topics=$topics`) and onto the `SourceCreated` carrier (`summary=…`), which
+the record→cache door places back onto a node, so replay re-created what the live write had done. Both
+writes are present on `main` as this entry is written.
+
+**Two proposals, exclusive, neither adopted** — each verified against its own head's source, not
+against its description:
+
+| | PR `#10858` | PR `#10852` |
+|---|---|---|
+| the node's `summary` | **removed** — no `s.summary=` clause at all | **kept**, `s.summary=CASE WHEN $sum <> '' …` |
+| the carrier's `summary` | **removed** — no `summary=` key | **kept**, `summary=stored_summary` |
+| the derivation | unchanged: the first substantive utterance | rewritten to a **topic lexicon**, never a verbatim slice |
+| where the utterance still reaches a node | `_searchText` — D10/`#3518`'s declared home, so the session stays findable | **nowhere on a node**: only the episodic turn store holds it |
+
+They cannot both be green on one `main`, which is the whole reason the choice is not a detail.
+`#10852`'s acceptance pin (`tests/test_10000_source_prose.py::_nodes_carrying`) walks
+`MATCH (n) RETURN labels(n), properties(n)` and exempts only the episodic turn store (`Point` **and**
+the `<session>_t<i>` id space), so on `#10858`'s tree it reports
+`['Source'] {'_searchText': '<the utterance>'}` as an offender. In the other direction `#10858`'s
+exact-set pins (`tests/test_8501_capture_path_anchor.py`'s `_SESSION_SOURCE_KEYS`,
+`tests/test_5097_capture_source_replay.py`, `tests/test_capture_session.py`) red on `#10852`'s tree,
+where `summary` is written.
+
+**The choice is the owner's, on `#10000`, and it is a real one.** The trade the two designs make is not
+symmetric: `#10858` reverses §9.1's sentence and therefore needs the owner's `OVERRIDES:` line recorded
+on `#10000`; `#10852` keeps the sentence true and needs none, at the cost of removing the utterance from
+the searchable field as well — so which is right depends on whether the capture's first utterance should
+stay FINDABLE on the Source or leave the graph entirely. That is exactly the question §9.1's sentence
+answers in one direction and the two proposals answer in two, so **landing either first would decide it
+by merge order.** It must not be decided that way.
+
+**What happens next, stated so a later reader does not have to infer it.**
+
+- The ruling is recorded on `#10000`, and **whichever proposal it adopts moves §9.1's sentence in the
+  SAME merge** — the design document and the code must not be able to disagree after a landing, which
+  is the failure this entry exists to prevent.
+- If it adopts `#10858`, this entry gains the ruling and cites the `OVERRIDES:` line from `#10000`;
+  §9.1's sentence is rewritten to state the design, and this entry keeps the narration.
+- If it adopts `#10852`, this entry records the refusal and §9.1 stands exactly as written.
+- **Until either happens, §9.1 governs.** A reader who finds the capture path writing `summary`
+  today should read that as §9.1 working as decided — not as a bug, and not as a settled departure.
+
+**The residue this does not touch, whatever the ruling.** A row a PRE-FIX build already placed in
+`public.source` keeps its `summary` and is restored onto the node by the same record→cache door. That is
+a **data migration**, not a code path, and it is `#10853`'s — which is why
+`tests/test_8501_capture_path_anchor.py` states `_PRE_FIX_SOURCE_KEYS` (`_SESSION_SOURCE_KEYS` plus
+`summary`) as a separate ground truth rather than reusing the shipped set.
