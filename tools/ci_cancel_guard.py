@@ -368,6 +368,12 @@ def _elapsed_override(raw: str | None) -> float | None:
     Both are refused here, and `render` says UNMEASURED instead of printing a number the
     tool did not measure (review cycle 1, R1).
 
+    ⛔ AND THE SEAM CANNOT REACH A POST AT ALL: `main` refuses `--fake-elapsed`
+    together with `--apply` (exit 64) before `evaluate` is called, because the one
+    thing this seam can do is satisfy the staleness comparison with a number it was
+    handed. The seam stays useful for the READ path (rendering, `--json`, the dry
+    run); it is not a way to act.
+
     The value is taken as the RAW STRING argparse handed over (not `type=float`), so a
     typo'd seam reaches THIS refusal instead of being rejected by argparse with the
     same exit code the exit table reserves for `a surface could not be read` — which is
@@ -506,6 +512,9 @@ def main(argv: list[str] | None = None) -> int:
     # ⛔ The seam is a STRING, parsed and validated by `_elapsed_override` — not
     # `type=float`, which would let argparse exit `2` ("a surface could not be read")
     # on a typo and make the guard's own refusal unreachable (round-4 review).
+    # ⛔ Refused together with `--apply` (see `main`): the seam exists to exercise the
+    # READ path, and the one property it must never be able to satisfy is the
+    # measurement that authorises a POST.
     parser.add_argument("--fake-elapsed", default=None,
                         help=argparse.SUPPRESS)  # test seam; see _elapsed_override
     args = parser.parse_args(argv)
@@ -520,6 +529,23 @@ def main(argv: list[str] | None = None) -> int:
         return 64
     if "*" in args.repo or "/" not in args.repo or args.repo.count("/") != 1:
         print(f"--repo must be owner/name (got {args.repo!r})", file=sys.stderr)
+        return 64
+    # ⛔ THE SEAM AND THE MUTATION ARE MUTUALLY EXCLUSIVE (review of #10929).
+    # `--fake-elapsed` short-circuits `evaluate` BEFORE it measures, and the only
+    # gate between a verdict and a real `POST /cancel` is `elapsed >= max_age`.
+    # Accepting both flags let a caller supply the age that clause 6 (the
+    # anti-TOCTOU staleness check — the property this tool exists for) is supposed
+    # to measure: measured pre-fix, `--fake-elapsed 59.9 --apply` reported
+    # `verdict: SUPERSEDED`, issued the POST and exited 0, while the honest path
+    # refused at `2.1s >= 1s` with no POST. A caller-supplied number may never
+    # satisfy a measurement, so the combination is refused as a USAGE error, and
+    # `64` is used rather than `2` because `2` means "a surface could not be read"
+    # (the seam is perfectly readable; the argv is wrong).
+    if args.fake_elapsed is not None and args.apply:
+        print(f"{_FAKE_ELAPSED_SEAM} is a test seam and cannot be combined with "
+              "--apply: a caller-supplied age would satisfy the staleness check "
+              "this tool measures. Run the seam without --apply (dry run), or "
+              "drop the seam and let the tool measure.", file=sys.stderr)
         return 64
     try:
         max_age = int(args.max_age)

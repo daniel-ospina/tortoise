@@ -375,12 +375,45 @@ def test_unreadable_run_is_fail_closed(fixture):
 
 
 def test_a_measurement_older_than_the_window_is_refused(fixture):
-    """The comparison must decide the POST: 61 s of staleness → refuse, not act."""
+    """The comparison must decide the verdict: 61 s of staleness → REFUSE.
+
+    ⛔ The seam is DRY-RUN ONLY (it may not be combined with `--apply` — see
+    `test_the_seam_can_never_authorise_a_post`), so the POST-bearing half of this
+    property is driven by `test_the_real_measurement_path_refuses_a_stale_comparison`,
+    which measures for real.
+    """
     fixture.apply("run.json", _run_meta(sha=HEAD_OLD))
     fixture.apply("prs.json", pr(PR_HEAD_MOVED))
-    r = guard(fixture, "41840910128", "--apply", "--fake-elapsed", "61")
+    r = guard(fixture, "41840910128", "--fake-elapsed", "61")
     assert r.returncode == 3
     assert "STALE" in r.stdout
+    assert fixture.cancelled() == []
+
+
+def test_the_seam_can_never_authorise_a_post(fixture):
+    """#10929 review: `--fake-elapsed` together with `--apply` was a GATE BYPASS.
+
+    `--fake-elapsed` short-circuits `evaluate` before it measures, and the only gate
+    between a PERMIT and a real `POST /cancel` is `elapsed >= max_age`. Measured
+    pre-fix against this same fixture: `--fake-elapsed 5 --apply` printed
+    `verdict: SUPERSEDED`, issued the POST and exited 0 — so clause 6, the
+    anti-TOCTOU staleness check this tool exists for, was satisfied by a
+    CALLER-SUPPLIED number — while the honest path refuses a stale comparison with
+    no POST at all.
+
+    The refusal is `64` (usage) and not `2`: the exit table reserves `2` for
+    FAIL-CLOSED, "a surface could not be read", and nothing here failed to read.
+
+    ⛔ Non-vacuity: delete the refusal in `main` and this case exits 0 with exactly
+    one POST recorded.
+    """
+    fixture.apply("run.json", _run_meta(sha=HEAD_OLD))
+    fixture.apply("prs.json", pr(PR_HEAD_MOVED))
+    fixture.apply("jobs.json", {"total_count": 0, "jobs": []})
+    r = guard(fixture, "41840910128", "--apply", "--fake-elapsed", "5")
+    assert r.returncode == 64, r.stdout + r.stderr
+    assert "--apply" in r.stderr, r.stderr
+    assert "FAIL-CLOSED" not in r.stderr, r.stderr
     assert fixture.cancelled() == []
 
 
@@ -415,7 +448,7 @@ def test_a_nan_or_negative_fake_age_is_refused(fixture):
     fixture.apply("prs.json", pr(PR_HEAD_MOVED))
     fixture.apply("jobs.json", {"total_count": 0, "jobs": []})
     for bad in ("nan", "-5", "inf"):
-        r = guard(fixture, "41840910128", "--apply", "--fake-elapsed", bad)
+        r = guard(fixture, "41840910128", "--fake-elapsed", bad)
         assert r.returncode == 2, bad + ": " + r.stdout + r.stderr
     assert fixture.cancelled() == []
 
@@ -537,7 +570,7 @@ def test_a_non_numeric_seam_value_is_refused_not_ignored(fixture):
     fixture.apply("run.json", _run_meta(sha=HEAD_OLD))
     fixture.apply("prs.json", pr(PR_HEAD_MOVED))
     fixture.apply("jobs.json", {"total_count": 0, "jobs": []})
-    r = guard(fixture, "41840910128", "--apply", "--fake-elapsed", "abc")
+    r = guard(fixture, "41840910128", "--fake-elapsed", "abc")
     assert r.returncode == 2, r.stdout + r.stderr
     assert "not a number" in r.stderr, r.stderr
     assert "FAIL-CLOSED" in r.stderr, r.stderr
@@ -566,15 +599,21 @@ def test_an_ambient_environment_value_cannot_reach_the_seam(fixture):
 
 def test_a_landed_cancel_is_attested_as_applied(fixture):
     """Round-3 finding 3b: nothing asserted `applied is True` on a landed POST, so
-    hard-coding `"applied": False` survived the suite."""
+    hard-coding `"applied": False` survived the suite.
+
+    ⛔ Driven on the REAL measurement path: the seam may not be combined with
+    `--apply` (see `test_the_seam_can_never_authorise_a_post`), so an exact `applied`
+    attestation has to come from a run the tool actually measured.
+    """
     fixture.apply("run.json", _run_meta(sha=HEAD_OLD))
     fixture.apply("prs.json", pr(PR_HEAD_MOVED))
     fixture.apply("jobs.json", {"total_count": 0, "jobs": []})
-    r = guard(fixture, "41840910128", "--json", "--apply", "--fake-elapsed", "5")
+    r = guard(fixture, "41840910128", "--json", "--apply")
     assert r.returncode == 0, r.stdout + r.stderr
     rec = json.loads([line for line in r.stdout.splitlines() if line.startswith("{")][-1])
     assert rec["applied"] is True
     assert rec["post_rc"] == 0
+    assert rec["elapsed_s"] is not None
     assert fixture.cancelled() == ["41840910128"]
 
 
