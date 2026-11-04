@@ -377,13 +377,33 @@ class Refused(Exception):
     """A precondition the launcher itself enforces (never a rail verdict)."""
 
 
+def _gh(argv: list[str], cwd: Path) -> subprocess.CompletedProcess[str] | None:
+    """Run `gh`, or return None when the BINARY is not on PATH.
+
+    ⛔ `subprocess.run(["gh", …])` raises `FileNotFoundError` when `gh` is absent,
+    which is a DIFFERENT event from `gh` failing — and only the second is a
+    verdict about the checkout. The fleet's self-hosted pool runs the suite on
+    images without `gh` (measured 2026-11-03: `test (h)` on
+    pi-runner-vm-6/Linux-ARM64, run 41732583553, killed all 20 cases in
+    `tests/test_rail_detach.py` at this call), so an unguarded subprocess turns
+    the two callers' documented degradations — `Refused` for the repo,
+    `unreadable` for the head — into a traceback that reads like a rail defect.
+    A missing binary IS a failed call here; both mean "this checkout cannot tell
+    me", which is what the callers already answer.
+    """
+    try:
+        return subprocess.run(argv, cwd=str(cwd), capture_output=True, text=True)
+    except FileNotFoundError:
+        return None
+
+
 def _resolve_repo(cwd: Path) -> str:
     env_repo = os.environ.get("GH_REPO", "")
-    out = subprocess.run(
+    out = _gh(
         ["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
-        cwd=str(cwd), capture_output=True, text=True,
+        cwd,
     )
-    if out.returncode == 0 and out.stdout.strip():
+    if out is not None and out.returncode == 0 and out.stdout.strip():
         repo = out.stdout.strip()
         if env_repo and env_repo != repo:
             # Mirrors the rail's own #2235 refusal: an inherited GH_REPO must
@@ -393,16 +413,20 @@ def _resolve_repo(cwd: Path) -> str:
                 "unset GH_REPO rather than detaching a rail at an unknown target"
             )
         return repo
-    raise Refused("could not resolve the repo from this checkout (`gh repo view` failed)")
+    raise Refused(
+        "could not resolve the repo from this checkout (`gh repo view` failed — "
+        "is `gh` installed and authenticated?)"
+    )
 
 
 def _head_sha(cwd: Path, repo: str, pr: int) -> str:
-    out = subprocess.run(
+    out = _gh(
         ["gh", "pr", "view", str(pr), "--repo", repo, "--json", "headRefOid",
          "-q", ".headRefOid"],
-        cwd=str(cwd), capture_output=True, text=True,
+        cwd,
     )
-    return out.stdout.strip() if out.returncode == 0 else "unreadable"
+    return (out.stdout.strip()
+            if out is not None and out.returncode == 0 else "unreadable")
 
 
 def _shquote(value: object) -> str:

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -348,6 +349,57 @@ def test_refuses_when_the_rail_script_is_absent(tmp_path):
     bare.mkdir()
     with pytest.raises(rd.Refused, match="link_agent_infra_scripts"):
         rd.launch(3, cwd=bare, state_dir=tmp_path / "state", repo="o/r")
+
+
+# ── a box with NO `gh` on PATH ──────────────────────────────────────────────
+#
+# `subprocess.run(["gh", …])` raises `FileNotFoundError` when the BINARY is
+# absent, and that killed every case in this module on the fleet's self-hosted
+# pool (measured 2026-11-03: `test (h)` on pi-runner-vm-6/Linux-ARM64, run
+# 41732583553 — 20 of 20 here, `FileNotFoundError: [Errno 2] … 'gh'`). The two
+# callers already have a documented degradation for "this checkout cannot tell
+# me" (`Refused` for the repo, `unreadable` for the head) — a missing binary is
+# that case, not a different one — so these pin both arms on a PATH that has the
+# shell tools the child needs and no `gh` at all.
+
+def no_gh_on_path(tmp_path, monkeypatch):
+    """A PATH with the child's shell tools but NOT `gh`."""
+    d = tmp_path / "bin-nogh"
+    d.mkdir()
+    for name in ("bash", "date", "env", "sh", "sleep"):
+        real = shutil.which(name)
+        assert real, f"{name} is missing from this test box"
+        (d / name).symlink_to(real)
+    monkeypatch.setenv("PATH", str(d))
+    return d
+
+
+def test_a_missing_gh_is_a_REFUSAL_not_a_traceback(tmp_path, monkeypatch):
+    """`gh` absent is a precondition the launcher enforces, never a crash."""
+    co = make_checkout(tmp_path)
+    no_gh_on_path(tmp_path, monkeypatch)
+    with pytest.raises(rd.Refused) as exc:
+        rd._resolve_repo(co)
+    assert "gh repo view" in str(exc.value)
+    assert "installed" in str(exc.value), (
+        "the refusal does not say WHAT to fix — a lane reading it has to guess "
+        f"whether the checkout or the tool is wrong: {exc.value}")
+
+
+def test_with_no_gh_the_rail_still_starts_and_the_head_reads_unreadable(tmp_path, monkeypatch):
+    """The rail must outlive the lane on a box that has no `gh` too.
+
+    A caller that passes `repo=` has already settled the one thing `gh` was
+    needed for, and the head is recorded as `unreadable` — the same value
+    `_head_sha` returns when `gh` runs and fails. Neither may become a crash.
+    """
+    co = make_checkout(tmp_path)
+    sd = tmp_path / "state"
+    no_gh_on_path(tmp_path, monkeypatch)
+    ln = launch(sd, co, pr=21)
+    assert ln.pid > 0, "the rail did not start without `gh`"
+    assert ln.head == "unreadable", ln.head
+    assert wait_state(sd, 21, rd.MERGED, timeout=20).state == rd.MERGED
 
 
 def test_child_invokes_only_the_one_lander(tmp_path):
