@@ -378,11 +378,40 @@ class Refused(Exception):
 
 
 def _resolve_repo(cwd: Path) -> str:
+    """The checkout's `owner/name`, from `gh repo view`.
+
+    ⛔ A MISSING `gh` IS A REFUSAL, NOT A TRACEBACK — the same boundary rule that
+    `_head_sha` below applies, applied to the SAME BINARY. `launch()` reaches this
+    function whenever `--repo` is not supplied, which is the CLI default
+    (`--repo` defaults to `None`), and `subprocess.run` raises
+    `FileNotFoundError` (an `OSError`) at exec when the executable is not on
+    `PATH`. Without the handler below, `rail_detach.py start <PR>` on a box with
+    no `gh` dies with a traceback BEFORE the spawn — which is exactly the failure
+    the `_head_sha` handler removes, still live on the path every operator takes.
+
+    So the absent binary is handled ONCE per call site and translated into the
+    launcher's own vocabulary: `Refused` is a precondition this launcher enforces
+    (`start` exits 4 with `✗ REFUSED — …`, `collect` exits 2), which is a
+    documented refusal — not a crash, and not silence. Both of this module's
+    `gh` call sites must answer the same way or the guarantee is false: a handler
+    on one of them only moves the crash, it does not remove it.
+
+    The repo is NOT optional the way the `HEAD=` annotation is — it names the
+    artifact, the log and the rail's own `--repo` argument — so degrading to a
+    placeholder would detach a rail at an unknown target. Refusing is the only
+    safe answer; `--repo owner/name` is the way through.
+    """
     env_repo = os.environ.get("GH_REPO", "")
-    out = subprocess.run(
-        ["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
-        cwd=str(cwd), capture_output=True, text=True,
-    )
+    try:
+        out = subprocess.run(
+            ["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
+            cwd=str(cwd), capture_output=True, text=True,
+        )
+    except (FileNotFoundError, OSError):
+        raise Refused(
+            "could not resolve the repo from this checkout (`gh` is not on PATH) — "
+            "pass --repo owner/name"
+        ) from None
     if out.returncode == 0 and out.stdout.strip():
         repo = out.stdout.strip()
         if env_repo and env_repo != repo:

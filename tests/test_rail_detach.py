@@ -14,7 +14,8 @@ outcomes — the `[False]` arm is the mutant (detachment off) and the rail dies
 with the lane, so a test that passes either way proves nothing.
 
 No database, no network: the "rail" is a stub script that says what the real one
-says, and the launcher never resolves a repo it was given.
+says, and the launcher never resolves a repo it was given — except in the
+`PATH`-without-`gh` pins, which exercise the repo-less default path deliberately.
 """
 from __future__ import annotations
 
@@ -454,22 +455,14 @@ def test_cli_collect_exit_codes(tmp_path, capsys):
     capsys.readouterr()
 
 
-def test_a_missing_gh_degrades_the_head_annotation_instead_of_killing_the_launch(
-        tmp_path, monkeypatch):
-    """⛔ AN ABSENT `gh` IS A SOFT MISS, NOT A CRASH (#10620 required check `test (a)`).
+def _path_without_gh(tmp_path: Path, monkeypatch) -> Path:
+    """Rebuild `PATH` from this box's own executables with every `gh` dropped.
 
-    `_head_sha` is a best-effort annotation on the artifact — the rail's verdict is
-    parsed from the rail's own log, never from `HEAD=`. Before this pin, a `gh` that
-    was not on PATH raised `FileNotFoundError` out of `launch()` BEFORE the spawn, so
-    every `collect` reported `lost`. Measured on a self-hosted runner with no `gh`:
-    21 of this module's tests failed with `FileNotFoundError: ... 'gh'`.
-
-    The PATH is rebuilt from this box's own executables with every `gh` dropped, so
-    the pin cannot pass by finding a real `gh` — it fails on the pre-fix code on ANY
-    box, including one that has `gh` installed.
+    ⛔ The pin cannot pass by finding a real `gh`: it fails on the pre-fix code on
+    ANY box, including one that has `gh` installed.
     """
     shim = tmp_path / "nogh"
-    shim.mkdir()
+    shim.mkdir(exist_ok=True)
     for d in os.environ.get("PATH", "").split(os.pathsep):
         if not d or not Path(d).is_dir():
             continue
@@ -482,7 +475,24 @@ def test_a_missing_gh_degrades_the_head_annotation_instead_of_killing_the_launch
             with contextlib.suppress(OSError):
                 link.symlink_to(exe)
     monkeypatch.setenv("PATH", str(shim))
+    # An inherited GH_REPO would otherwise be the only repo source left on the
+    # default path, and this pin is about the `gh` call, not that variable.
+    monkeypatch.delenv("GH_REPO", raising=False)
     assert not any(p.name.startswith("gh") for p in shim.iterdir())
+    return shim
+
+
+def test_a_missing_gh_degrades_the_head_annotation_instead_of_killing_the_launch(
+        tmp_path, monkeypatch):
+    """⛔ AN ABSENT `gh` IS A SOFT MISS, NOT A CRASH (#10620 required check `test (a)`).
+
+    `_head_sha` is a best-effort annotation on the artifact — the rail's verdict is
+    parsed from the rail's own log, never from `HEAD=`. Before this pin, a `gh` that
+    was not on PATH raised `FileNotFoundError` out of `launch()` BEFORE the spawn, so
+    every `collect` reported `lost`. Measured on a self-hosted runner with no `gh`:
+    21 of this module's tests failed with `FileNotFoundError: ... 'gh'`.
+    """
+    _path_without_gh(tmp_path, monkeypatch)
 
     assert rd._head_sha(tmp_path, "o/r", 99) == "unreadable"
 
@@ -493,3 +503,46 @@ def test_a_missing_gh_degrades_the_head_annotation_instead_of_killing_the_launch
     assert ln.pid > 0
     assert "HEAD=unreadable" in Path(ln.artifact).read_text()
     assert wait_state(sd, 99, rd.MERGED, timeout=20).state == rd.MERGED
+
+
+def test_a_missing_gh_refuses_the_default_repo_path_instead_of_crashing(
+        tmp_path, monkeypatch, capsys):
+    """⛔ THE SAME BOUNDARY, THE OTHER CALL SITE (#10620 finding 2).
+
+    `_resolve_repo` shells out to the SAME binary as `_head_sha`, and `launch()`
+    calls it whenever `--repo` is not supplied — the CLI default. A handler on
+    `_head_sha` alone therefore does not remove the crash, it moves it: measured
+    against the pre-fix code with a `gh`-free `PATH`,
+
+        _head_sha('/tmp', 'o/r', 1)   -> 'unreadable'                        (fixed)
+        _resolve_repo(Path('/tmp'))   -> RAISED FileNotFoundError … 'gh'     (not fixed)
+
+    The repo is not optional the way the annotation is — it names the artifact,
+    the log and the rail's own `--repo` — so the only safe answer is the
+    launcher's own `Refused`, which `start` already turns into exit 4 with
+    `✗ REFUSED — …` and `collect` into exit 2. Tested through BOTH surfaces,
+    because an exception class nobody catches is still a crash to the operator.
+
+    Non-vacuity: on the pre-fix code the `_resolve_repo` line below raises
+    `FileNotFoundError` and the `main()` line raises out of `start` instead of
+    returning 4 — the test fails on ANY box, `gh` installed or not.
+    """
+    _path_without_gh(tmp_path, monkeypatch)
+    co = make_checkout(tmp_path)
+    sd = tmp_path / "state"
+
+    with pytest.raises(rd.Refused) as exc:
+        rd._resolve_repo(co)
+    assert "gh" in str(exc.value) and "--repo" in str(exc.value)
+
+    # The default path end to end: no `--repo`, so `launch()` must resolve one.
+    # A traceback here is the bug; exit 4 + a named refusal is the contract.
+    rc = rd.main(["start", "98", "--cwd", str(co), "--state-dir", str(sd)])
+    assert rc == 4
+    assert "REFUSED" in capsys.readouterr().err
+    assert not rd.collect(sd, "o/r", 98), "a refused launch must not spawn a rail"
+
+    # `collect` goes through the same helper (its disk-first lookup misses here).
+    rc = rd.main(["collect", "98", "--state-dir", str(sd)])
+    assert rc == 2
+    assert "REFUSED" not in capsys.readouterr().err
