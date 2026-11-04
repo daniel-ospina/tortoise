@@ -1214,31 +1214,46 @@ _EPISODIC_SOURCE_PROSE_COLUMNS: frozenset[str] = frozenset({
 })
 
 
-#: The row-signals that make a Source EPISODIC. Any ONE suffices, and each is
-#: another writer's own spelling of the same fact, never a heuristic:
+#: The row-signals that make a Source EPISODIC, and they are TWO identity
+#: shapes — never a flag. This mirrors the repo's existing declaration of the
+#: same question rather than inventing a second one: `sdk.py` excludes document
+#: sources from its same-document review pool with exactly these two arms, and
+#: `session_source_migration._LEGACY_CANDIDATES` is the second arm's definition
+#: on the graph side. Both are cited there as *"the two session signals, both
+#: narrow enough to BE the identity"*.
 #:
-#: * `url LIKE 'session:%'` — the capture's own URL shape (`session:{id}`), and
-#:   the prefix `_mint_source_stub` uses to mint an episodic stub;
-#: * `source_kind = 'agentSession'` — the kind the capture writes (`sk` in the
-#:   same statement) and the kind the ontology §4.6 gives a captured session;
-#: * `is_episodic` — the fold's own flag, TRUE only for a `session:` ref.
+#: * `url LIKE 'session:%'` — the capture's own URL shape (`session:{id}`), the
+#:   prefix `_mint_source_stub` mints an episodic stub with, and the prefix
+#:   `derive_session_source_url` (file_indexer) lands on, so a migrated node
+#:   keeps it;
+#: * `source_kind = 'agentSession'` **on a separator-free bare-filename url** —
+#:   the pre-#4005 identity was `os.path.basename(ref.path)` (literally
+#:   `session.md`), and `_LEGACY_CANDIDATES` is its definition.
 #:
-#: They are ORed rather than ANDed because a LEGACY row is exactly the row that
-#: may be missing one of them: the whole defect class is "written by an older
-#: build", and requiring all three would let the oldest shapes through — the
-#: ones this exists for.
+#: ⛔ NEITHER FLAG IS A SIGNAL, and that is measured, not a preference — the
+#: three terms an earlier round of this change used all fire on DOCUMENTS, i.e.
+#: the mirror of the defect this table closes. `sdk.py` records the same lesson
+#: and its cost: keying on the flags *"silently disabled this exclusion on the
+#: corpus #9914 targets"*.
 #:
-#: ⛔ `session_id` is DELIBERATELY NOT a signal, and it must not be added back.
-#: It is a legitimate **document** coordinate: `EventAPI.add_document` takes
-#: `session_id` (`api.py`), `tortoise/ingest.py` passes a transcript's
-#: `sessionId` frontmatter into it, and `DocumentCreated` is a `path=None`
-#: snapshot, so the value reaches `public.source.session_id` on a row whose url
-#: is a document (`source_path`/`corpus:`), not a `session:` ref. A guard keyed
-#: on it dropped a transcript DOCUMENT's own frontmatter summary — the exact
-#: regression a fresh review caught before this landed (#10853 review P1), and
-#: the mirror of the defect this table closes. It buys nothing either:
-#: `node_from_row` refuses a `source` row with no non-empty `url`, and every
-#: episodic writer spells that url `session:{id}`.
+#: * `source_kind = 'agentSession'` ALONE is not episodic: `file_indexer`
+#:   classifies a transcript FILE from its frontmatter (`sessionId` present →
+#:   `agent_session` → `CLASSIFIER_TO_SOURCE_KIND` → `'agentSession'`, pinned at
+#:   §6.2/I26) and writes it on a per-FILE `corpus://` permalink, so a transcript
+#:   document IS an `agentSession` Source. That is why the legacy arm ALSO
+#:   requires a separator-free url.
+#: * `is_episodic = TRUE` is not episodic either: the capture commit stamps it on
+#:   every EXTERNAL source of `payload.sources` (`hosted_api`, step 4), and
+#:   `graph-scripts/backfill_is_episodic.py` stamps it on every Source reachable
+#:   from a session point.
+#: * `session_id` is not episodic: it is a legitimate DOCUMENT coordinate
+#:   (`EventAPI.add_document` takes one; `tortoise/ingest.py` passes a
+#:   transcript's `sessionId` frontmatter into it).
+#:
+#: A guard keyed on any of the three dropped a real document's own `summary` —
+#: the exact outcome `_EPISODIC_SOURCE_PROSE_COLUMNS` forbids (*"a guard that
+#: fired on every Source would un-index every document in the cache"*). All
+#: three were caught by review before this landed and each has a NEGATIVE leg.
 _EPISODIC_SOURCE_URL_PREFIX = "session:"
 _EPISODIC_SOURCE_KIND = "agentSession"
 
@@ -1246,19 +1261,18 @@ _EPISODIC_SOURCE_KIND = "agentSession"
 def _is_episodic_source_row(row: Mapping[str, Any]) -> bool:
     """Is this `public.source` row a captured session's Source?
 
-    See :data:`_EPISODIC_SOURCE_URL_PREFIX` for the three signals, why they are
-    ORed, and why `session_id` is not one of them. A NULL column is silence,
-    never a negative: `_props_from_row` drops NULLs anyway, so an all-NULL
-    legacy row that no signal names is the only shape that can still arrive
-    bare — and such a row cannot reach here at all, because `node_from_row`
-    requires the non-empty `url` that carries the first signal.
+    The two identity arms are declared at :data:`_EPISODIC_SOURCE_URL_PREFIX`,
+    together with the three flag-based terms that look plausible and are NOT
+    signals. A NULL column is silence, never a negative, and a row that neither
+    arm names is a DOCUMENT — the safe answer: a missed legacy session keeps its
+    prose on a node (the pre-existing defect), while a false positive silently
+    strips a document's own metadata and un-indexes it.
     """
     url = row.get("url")
     if isinstance(url, str) and url.startswith(_EPISODIC_SOURCE_URL_PREFIX):
         return True
-    if row.get("source_kind") == _EPISODIC_SOURCE_KIND:
-        return True
-    return row.get("is_episodic") is True
+    return (row.get("source_kind") == _EPISODIC_SOURCE_KIND
+            and isinstance(url, str) and "://" not in url and "/" not in url)
 
 
 def _props_from_row(table: str, row: Mapping[str, Any], *,
