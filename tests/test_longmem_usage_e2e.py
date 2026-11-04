@@ -53,7 +53,12 @@ def _require_embedder():
     """The deterministic mock pipeline still runs write-time embeddings —
     skip where the embedder is unavailable (CI without the HF cache)."""
     from tortoise.embeddings import EmbeddingModel
-    m = EmbeddingModel.get(load_timeout=120)
+    # No `load_timeout=` override: `tests/conftest.py` pins
+    # `EmbeddingModel._LOAD_TIMEOUT_S = 270.0` for the test lane, and an explicit
+    # per-call argument OVERRIDES it — a 120 s bound returned `None` ~7 s before
+    # a cold load finished, turning this probe into a skip that
+    # `tools/skip-guard.py` refuses (#2573).
+    m = EmbeddingModel.get()
     if m is None:
         pytest.skip("sentence-transformers / all-MiniLM-L6-v2 cache "
                     "not available — usage E2E skipped")
