@@ -1450,7 +1450,7 @@ def test_every_extractor_v2_cite_THE_RUNBOOK_publishes_resolves_at_this_head():
 
     # A number that belongs to a CROSS-FILE cite is not an `extractor_v2.py`
     # number — `_CROSS_FILE_CITES` verifies those and this map must not claim
-    # them (the bare-continuation regex cannot tell whose `:3055` it found).
+    # them (the bare-continuation regex cannot tell whose `:3070` it found).
     published -= {n for (_p, n) in _CROSS_FILE_CITES}
 
     unswept = sorted(published - set(_RUNBOOK_CITES))
