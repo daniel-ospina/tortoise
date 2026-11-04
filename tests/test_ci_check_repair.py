@@ -1840,7 +1840,7 @@ def test_the_zero_job_floor_is_past_the_measured_queue_wait():
 
     `docs/ops/ci-wall-clock.md` §1 line 50 (54 `python-ci` runs) measures the wait for a
     run's FIRST job: p50 29.9 min, p95 77.0 min, max 81.9 min. The budget derivation
-    this floor defers to is `tools/ci_queue_health.py:300`
+    this floor defers to is `tools/ci_queue_health.py:304`
     (`DEFAULT_MAX_PR_WAIT_SECONDS = 90 * 60.0`, "the first round number past" that max),
     and `ci-wall-clock.md` §6 lines 326-332 records the same derivation in its own
     words ("max first-job wait 81.9 min → 90 min, so it fires past the measured-normal
@@ -1934,7 +1934,7 @@ def test_a_MIXED_context_may_still_not_repair_under_a_congested_queue():
     It matters most for the UNMEASURED pole, which is why the first case passes
     `queue_starved=False, queue_congested=True` — the value `main()` derives from
     `queue_congestion_gate` when nothing measured the queue (`--no-queue-health`, a
-    failed read, `UNKNOWN`, `PR-UNWITNESSED`, a truncated feed). The documented promise
+    failed read, `UNKNOWN`, `PR-UNWITNESSED`, a truncated `OK`). The documented promise
     is that silence never authorises a cancel, and the sibling's conclusion is not a
     measurement of the queue.
 
@@ -1971,7 +1971,7 @@ def test_an_unmeasured_queue_never_authorises_the_cancel(monkeypatch, capsys, tm
 
     `read_queue_health` returns `None` on ANY exception, and `delays_pr` is
     `False`-by-design for the unmeasured verdicts (`UNKNOWN`, `PR-UNWITNESSED`, a
-    truncated feed). Folding either into the permissive branch meant the state where
+    truncated `OK`). Folding either into the permissive branch meant the state where
     congestion was NEVER MEASURED — positively correlated with the load that makes a
     cancel harmful, since a queue read is refused under exactly that load — was the
     state that switched cancel-then-rerun ON: an aged attempt-1 zero-job run is
@@ -2065,6 +2065,13 @@ def test_the_local_rail_reads_the_refused_count_into_its_signature(tmp_path):
         "the transition signature must carry the refusal, or it reads as a clean window")
     assert "Refused zero-job repairs: ${refused}" in launcher, (
         "and the notification must name it, or the transition says nothing useful")
+    # ⛔ P3 (review, rail-C): exit 1 gained a SECOND cause — a cancel refused because
+    # the queue reading did not certify it clear — and the single notification still
+    # said "even the local credential could not complete", pointing the operator at the
+    # credential when the remedy is to read the queue. Discriminating: pre-fix this
+    # branch test is absent and both causes share one message.
+    assert '[ "$refused" != "0" ]' in launcher, (
+        "the exit-1 notification must branch on the refusal count")
 
     out = tmp_path / "out.json"
     out.write_text(json.dumps({"needing_repair": 0, "repair_refused": 3}))
@@ -2180,6 +2187,108 @@ def test_a_measured_clear_queue_still_authorises_the_cancel(monkeypatch, capsys,
     assert summary["repair_refused"] == 0, (
         "nothing was refused: `zero_job_named=1, repair_refused=0` means 'named and "
         "repaired', which the old key could not say")
+
+
+def test_a_STRUCTURALLY_UNREPAIRABLE_attempt_is_never_recorded_as_REFUSED(
+        monkeypatch, capsys, tmp_path):
+    """⭐ P1 (review, rail-C): the loop bound must be checked BEFORE the gate.
+
+    `ZERO_JOB_MAX_REPAIRABLE_ATTEMPT`'s own docstring promises a later attempt "is
+    NAMED (`NO-VERDICT-WILL-ARRIVE`), never cancelled and never escalated". The
+    `crowded` branch sat ABOVE that bound, so a queued attempt-2 run — the fresh
+    attempt a previous window's repair created, which this tool will never cancel BY
+    DESIGN — was appended to `repair_refused`. `main()` escalates on any refusal under
+    an UNMEASURED queue, so one such run made EVERY window exit 1 forever while
+    nothing could ever repair it: the permanent false red the local fallback reads as
+    "not covered".
+
+    Discriminating: pre-fix the unit case yields `repair_refused == [4242]` and the
+    `main()` case exits 1 with `repair_refused=1`.
+    """
+    plan = R.classify(pr(), [],
+                      [aged_run(4242, jobs=0, age_s=9000.0, attempt=2,
+                                started_age_s=8700.0, path="ci.yml", name="CI")],
+                      ["docs"], EMITTERS, max_attempts=3,
+                      queue_starved=False, queue_congested=True,
+                      queue_congestion_measured=False)
+    assert [d["run"] for d in plan.no_verdict] == [4242], (
+        "refusing to act is not refusing to report — it is still NAMED")
+    assert plan.repair_refused == [], (
+        "the attempt a previous window created is owned by the QUEUE; recording it "
+        "as a refusal makes an unmeasured queue escalate it every window, forever")
+    assert plan.rerun == [] and plan.exhausted == []
+
+    # The window-level consequence: an UNMEASURED queue and nothing REFUSED is a
+    # discharged window (exit 0), because nothing is left that a later window could
+    # not repair by itself.
+    monkeypatch.setattr(R, "read_queue_health", lambda repo: None)
+    monkeypatch.setattr(R, "open_prs", lambda repo, include_drafts: [pr(1)])
+    monkeypatch.setattr(R, "check_runs_at", lambda repo, head: [])
+    monkeypatch.setattr(R, "runs_at_head", lambda repo, head: [
+        aged_run(4242, jobs=0, age_s=9000.0, attempt=2, started_age_s=8700.0,
+                 path="ci.yml", name="CI")])
+
+    code = R.main(["--repo", "o/r", "--no-live", "--apply", "--json",
+                   "--record", str(_flood_record(tmp_path))])
+    captured = capsys.readouterr()
+    summary = json.loads(captured.out)
+    assert code == 0, (
+        "an attempt the tool will NEVER act on must not pin the window red — that is "
+        "the alarm fatigue the red-surface doc measures at 31.3%")
+    assert summary["repair_refused"] == 0
+    assert summary["zero_job_named"] == 1, "it is still named in the record"
+    assert "REFUSED-REPAIR" not in captured.err
+
+
+def test_a_SPENT_BUDGET_still_escalates_under_a_congested_queue():
+    """⭐ P1 (review, rail-C) second harm: a spent budget must reach `exhausted`.
+
+    `report()` escalates on `p.exhausted` regardless of what else is true of the PR,
+    and it is the escalation that says "a human is needed". Routing a spent budget
+    through `repair_refused` instead made that escalation conditional on the queue
+    reading: a MEASURED congestion keeps exit 0 (correct for a refusal), so the spent
+    budget disappeared silently. Discriminating: pre-fix `exhausted == []`.
+    """
+    plan = R.classify(pr(), [],
+                      [aged_run(11, jobs=0, age_s=5700.0, attempt=1)],
+                      ["python-ci-gate"], EMITTERS, max_attempts=1,
+                      queue_starved=True, queue_congested=True)
+    assert "python-ci-gate" in plan.exhausted, (
+        "the budget is spent: re-running again is a loop, and a human must be told")
+    assert plan.rerun == [], "nothing may be re-run past the budget"
+    assert plan.repair_refused == [], (
+        "it was not REFUSED — there was nothing left to refuse")
+
+
+def test_zero_job_named_and_repair_refused_share_a_unit(monkeypatch, capsys, tmp_path):
+    """⭐ P2 (review): the two adjacent zero-job counters must count the SAME thing.
+
+    `zero_job_named` counted PLANS with at least one named run while `repair_refused`
+    counted RUNS, so ONE PR with TWO stalled zero-job runs printed
+    `zero_job_named=1, repair_refused=2` — "more repairs refused than runs named",
+    impossible under a shared unit, and it contradicted the comment block above the key
+    that compares the two. A one-run fixture (every earlier test) answers `1` under
+    either definition, which is why the wrong unit survived.
+
+    Discriminating: pre-fix `zero_job_named == 1` on this fixture.
+    """
+    monkeypatch.setattr(R, "read_queue_health", lambda repo: None)
+    monkeypatch.setattr(R, "open_prs", lambda repo, include_drafts: [pr(1)])
+    monkeypatch.setattr(R, "check_runs_at", lambda repo, head: [])
+    monkeypatch.setattr(R, "runs_at_head", lambda repo, head: [
+        aged_run(4242, jobs=0, age_s=9000.0, path="ci.yml", name="CI"),
+        aged_run(4243, jobs=0, age_s=9100.0, path="ci.yml", name="CI")])
+
+    R.main(["--repo", "o/r", "--no-live", "--apply", "--json",
+            "--record", str(_flood_record(tmp_path))])
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["needing_repair"] == 0, "the fixture must be the understating shape"
+    assert summary["zero_job_named"] == 2, (
+        "TWO runs were named — the key counts runs, like `repair_refused` beside it")
+    assert summary["repair_refused"] == 2
+    assert summary["zero_job_named"] >= summary["repair_refused"], (
+        "a refusal is a subset of the named runs; 'more refused than named' is the "
+        "symptom of the mismatched unit this test exists to prevent")
 
 
 def test_the_gate_refuses_every_unmeasured_queue_reading():

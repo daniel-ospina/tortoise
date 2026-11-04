@@ -351,7 +351,18 @@ if [ "$signature" != "$last" ]; then
     if [ "$rc" = 0 ]; then
         notify "ci-check-repair ran LOCALLY in ${mode_word} mode (${reason}). PRs needing repair: ${needing}. Refused zero-job repairs: ${refused}. The local fallback ran the same tools/ci_check_repair.py the workflow runs, exit 0."
     elif [ "$rc" = 1 ]; then
-        notify "ci-check-repair RAN LOCALLY and is STILL UNRESOLVED in ${mode_word} mode (${reason}). PRs needing repair: ${needing}. Refused zero-job repairs: ${refused}. Some PR needs a repair even the local credential could not complete; see $OUT_FILE."
+        # ⛔ EXIT 1 HAS TWO CAUSES and this message used to name only the first.
+        # `tools/ci_check_repair.py` returns 1 for a repair only a user credential can
+        # perform, AND for a zero-job cancel REFUSED because the queue reading did not
+        # certify it clear (`main()`: `args.apply and code == 0 and congestion is None
+        # and any(p.repair_refused ...)`). An operator reading "even the local
+        # credential could not complete" chases the credential while the actual cause is
+        # a queue nobody read — whose remedy is to read the queue.
+        if [ "$refused" != "0" ]; then
+            notify "ci-check-repair RAN LOCALLY and is STILL UNRESOLVED in ${mode_word} mode (${reason}). PRs needing repair: ${needing}. Refused zero-job repairs: ${refused}. A zero-job cancel was REFUSED because the queue reading did not certify it clear — read the queue (uv run python tools/ci_queue_health.py) rather than blaming the credential; an unreadable refused count (?) is itself one of these causes. See $OUT_FILE."
+        else
+            notify "ci-check-repair RAN LOCALLY and is STILL UNRESOLVED in ${mode_word} mode (${reason}). PRs needing repair: ${needing}. Refused zero-job repairs: ${refused}. Some PR needs a repair even the local credential could not complete; see $OUT_FILE."
+        fi
     else
         notify "ci-check-repair COULD NOT MEASURE locally (${reason}), exit=$rc. No further action was taken; any repair already issued is not undone. See $LOG_FILE."
     fi
