@@ -569,6 +569,19 @@ for three sends to one pane that were recorded as `OK` and never consumed.
 ### Git Workflow
 
 - **Before any commit:** invoke `commit-workflow` skill
+- **⛔ Never `git worktree remove --force` a dirty worktree — pin the work first.**
+  `worktree remove --force` on a worktree with uncommitted changes returns **0** and destroys the
+  content **irrecoverably**: an uncommitted line was never in the object DB, so there is no reflog
+  entry, no `git fsck --unreachable` commit and no repair recipe — measured on a lane carrying
+  ~4,500 uncommitted lines when its worktree vanished under a live reviewer process (#10812).
+  Unlike the `lane_stash` hazard below, this one is NOT recoverable after the fact. Run
+  `uv run python tools/lane_wip.py pin` first — before a long step, a reviewer hand-off, or any
+  `remove`/`rm -rf`/reaper window. It snapshots BOTH views (`lane_wip`'s scratch-index tree of
+  tracked modifications + untracked non-ignored files + deletions, and the real index tree) into
+  `refs/pi-lane-wip/<lane-key>/<n>` **without touching HEAD, the index or the working tree**, so a
+  pin is safe to take. `... list` shows the lane's pins, `... recover <ref> --into <path>` puts one
+  back (the positional is the pin ref or its sha, NOT an index), and `... recipe` prints the
+  recovery path instead of leaving it as folklore.
 - **⛔ Never run a bare `git stash pop` / `git stash apply` / `git stash drop` in a worktree lane.**
   `refs/stash` and its reflog live in the **common** git dir, so the stack is repo-GLOBAL: a peer
   lane's `git stash push` renumbers YOUR entry, and your unqualified `git stash pop` then applies

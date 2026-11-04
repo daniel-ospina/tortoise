@@ -2559,6 +2559,13 @@ surfaces:
   - test_backfill_references_5141.py
   - test_cache_projection.py
   - test_cache_projection_live.py
+  # #10853: the §9.1/D1 narrowing at the RECORD->CACHE door
+  # (`tortoise/cache_projection.py::_EPISODIC_SOURCE_PROSE_COLUMNS`) — an
+  # episodic Source must never project `summary`/`_searchText`. Registered on
+  # the same surface as the two cache-projection suites above for the same
+  # reason: `cache_projection.py` is the subject and this is the arm that pins
+  # the new rule, so a change to it runs here rather than going silently green.
+  - test_10853_session_source_prose.py
   # #4197: the saved-backlog ledger (`tortoise/capture_backlog.py`) and its
   # CLI surface (`tortoise/__main__.py`). `capture_backlog.py` matches no
   # named SOURCE_PATTERN, so it falls through to `core` — registering the
@@ -3544,6 +3551,17 @@ surfaces:
   # network/Docker/FalkorDB), so it is deliberately NOT carve_out-registered:
   # it is DB-free and runs on any lane, not embedded-only.
   - test_lane_stash.py
+  # #10812: a lane's UNCOMMITTED work is not in the object DB, so `git worktree
+  # remove --force` on a dirty worktree destroys it irrecoverably at rc=0 (the
+  # measured 4,500-line loss). This guards `tools/lane_wip.py`, which pins the
+  # working state into `refs/pi-lane-wip/<lane-key>/<n>` without touching HEAD,
+  # the real index or the working tree. Registered `core` with the paired
+  # `CORE_ALSO` entry in `tools/ci_selection.py` (the `tools/lane_stash.py`
+  # pattern): `tools/` is a flat NON_PYTHON_PREFIXES entry, so without it a
+  # tools-only diff selects NO surface and this pin never runs on the file it
+  # guards (the #1349/#3332/#3616 silent-drop class). Hermetic — real temp git
+  # repos and real worktrees, no network/Docker/FalkorDB.
+  - test_lane_wip.py
   # agent-infra#2344 (owner ruling): the runner-capacity guard. It owns
   # `tools/runner_autoscale.py` — the measured ceiling (cores 8→3, 4→2 plus the
   # additive memory arm), the five-way classification (OTHER-REPO / BUSY /
@@ -5852,6 +5870,11 @@ surfaces:
   # `CORE_ALSO` entry beside this one in `tools/ci_selection.py` — the
   # #1349/#3332/#3616 silent-drop class.
   - test_rail_detach.py
+  # #10920: the runner-label coverage gate. `tools/ci_runner_labels.py` parses every
+  # `runs-on:` in the tree and checks it against the committed runner snapshot
+  # (`config/ci-runner-labels.json`). Pure stdlib + PyYAML: no graph, no URI, no network,
+  # so the `core` fallback is its home and any diff touching it selects it.
+  - test_ci_runner_label_coverage.py
   ep:
   # #7951 (remaining doors) / review P1: DUAL-REGISTERED with `core` (below)
   # and the other exact-match surfaces. The write-door INVENTORY scans ALL of
@@ -8837,6 +8860,24 @@ durations:
   # published here re-stales silently — the per-reading counts stay only because a
   # reading is meaningless without the run it came from.
   test_lane_stash.py: 355.0
+  # #10812: a file ADDED BY A PR has no CI junit measurement (the refresher samples
+  # push-to-main runs only), so 92.0 is this branch's LOCAL reading under the
+  # `# unmeasured` convention: `TORTOISE_TEST_CARVE_OUT=1 uv run python -m pytest
+  # tests/test_lane_wip.py -q` -> "86 passed in 91.92s" on a fleet-loaded cell,
+  # measured 2026-11-04. Hermetic (temp git repos, real worktrees; no DB, no
+  # network), so the spread is host load. The row is needed for the WEIGHT, not
+  # for the #2876 coverage floor: `duration_coverage_issues` is clear WITH this row
+  # and clear WITHOUT it, so dropping it does not break the floor. ⛔ NO pool figure
+  # is restated here — see the #4387 rule a few hundred lines above: the fast pool
+  # grows as PRs add files, so a percentage or a per-shard total re-stales at every
+  # base merge (this note shipped the pre-forward-merge reading and was already
+  # wrong at the merge head, which is that rule firing). What dropping the row does
+  # is pack this file at `DEFAULT_FAST_WEIGHT` (2.0 s) instead of 92.0, taking ~90 s
+  # out of the fast-pool TOTAL: LPT re-packs, so all nine shards drop ~10 s each —
+  # NOT one named shard by 90 s. The shards are positional letters and `core` is a
+  # SURFACE name, so the shard holding this file loses only its own share and not
+  # the whole row. Refresh from the first post-merge push run that includes it.
+  test_lane_wip.py: 92.0
   # #5612: 12.2 is the HIGHER of two local readings of this file at head 4b112ccbc
   # (5.9 s / 12.2 s; hermetic — temp-dir journals + the committed fixture, no DB;
   # the spread is fleet I/O, same as #6144 above). Erring high is correct for
@@ -10125,6 +10166,10 @@ durations:
   test_5089_operator_prop_parity.py: 1.5
   test_5089_operator_status_parity.py: 0.6
   test_5097_capture_source_replay.py: 5.8
+  # #10853: new in this PR, so the refresher (which samples push-to-main junit)
+  # cannot have measured it — the flat `DEFAULT_FAST_WEIGHT` is the only honest
+  # row. `tools/ci_timing.py --refresh-durations` replaces it.
+  test_10853_session_source_prose.py: 2.0  # unmeasured — new in #10853
   test_5140_pending_extraction.py: 2.1
   # #5140 finding 8: the relabel migration's own suite (live-FalkorDB cases on
   # per-test graphs; two of the functions are parametrised, so the collected
