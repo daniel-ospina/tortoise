@@ -43853,8 +43853,19 @@ class TortoiseSDK:
     #: as not having happened. Nothing covered the RECEIPT denying it; a caller
     #: cannot detect that. Same code, because the vocabulary is not widened for
     #: a message difference, but the text may not claim a write did not happen.
+    #: ⚠️ The opening is deliberately shaped so it does NOT assert a caller prop
+    #: was carried: a `credibility=`-only fold reaches this same path with an
+    #: EMPTY caller-prop bag (the only prop in it by then is the fold's own
+    #: `updatedAt` stamp), so "carried a caller prop and an authored word" was
+    #: false for that shape — #10368 review P3, and the reason the two
+    #: sentences differ in voice. Every CONSEQUENCE sentence below is true of
+    #: both shapes: no caller prop was stored and `updatedAt` did not move on
+    #: either, because the write-point guard raises before the write. Pinned for
+    #: the prop-less shape by
+    #: `test_a_raced_word_only_fold_does_not_claim_a_caller_prop`.
     _TERMINAL_FOLD_REFUSED_RACED_WORD_MESSAGE: ClassVar[str] = (
-        "The dedup fold carried a caller prop and an authored word, and the "
+        "The dedup fold carried an authored word (a `credibility=`-only fold "
+        "reaches this path with no caller prop at all), and the "
         "point it resolved to became terminal while the fold was in flight; a "
         "dedup hit never writes onto a settled belief (#10368) — the CALLER'S "
         "PROPS were NOT applied (no caller prop was stored and `updatedAt` did "

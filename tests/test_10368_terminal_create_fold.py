@@ -34,6 +34,11 @@ terminalization_at_the_write_point_writes_nothing`). The authored-word leg's
 `set_point_baseline` write is the disclosed residual that window does not cover,
 so on THAT shape the receipt reports the word leg's own outcome instead of
 denying it (`test_a_raced_fold_that_already_wrote_the_authored_word_says_so`).
+
+For the specific case where that race receives an EMPTY caller-prop bag (a
+`credibility=`-only fold — the `updatedAt` stamp the refused leg adds is the
+fold's, not the caller's), `test_a_raced_word_only_fold_does_not_claim_a_caller_
+prop` pins that the receipt does not assert a prop nobody carried.
 """
 from __future__ import annotations
 
@@ -501,6 +506,69 @@ def test_a_raced_fold_that_already_wrote_the_authored_word_says_so(sdk, monkeypa
         f"the receipt must name the leg that did write: {message}")
     assert "updatedAt" in message and "credibility" in message, (
         "the receipt must name what is and is not unchanged: " + message)
+
+
+def test_a_raced_word_only_fold_does_not_claim_a_caller_prop(sdk, monkeypatch):
+    """#10368 review P3 — the raced text may not assert a prop nobody carried.
+
+    A `credibility=`-only fold reaches the SAME raced `except` with an EMPTY
+    caller-prop bag: the only prop in the bag by then is the fold's own
+    `updatedAt` stamp, added by the write leg the guard then refuses. The
+    message opened "The dedup fold carried a caller prop and an authored word",
+    which is false for that shape — and a receipt that describes a prop the
+    caller never passed is the same credibility defect as one that denies a
+    write that landed, one notch quieter.
+
+    Non-vacuous: the opening assertion reds on the pre-fix text (which contains
+    "carried a caller prop") while every consequence sentence it pins stays
+    true here — nothing was stored and `updatedAt` did not move, because the
+    write-point guard raises before the write. The two-sided companion above
+    keeps the word-bearing shape honest.
+    """
+    from tortoise.source_credibility import canonical_tier
+
+    content = _fresh_content("raced-word-only")
+    pid = sdk.create_point("statement", content, dedup=True)["id"]
+    sdk.retract_point(pid)
+    before = sdk.get_point(pid)
+    assert before["status"] == "retracted"
+    assert before.get("credibility") is None
+
+    calls: list[str] = []
+    _race_snapshot_against_write_point(sdk, monkeypatch, calls=calls)
+
+    # NO caller prop — the only prop reaching the write leg is the fold's own
+    # `updatedAt` stamp, which the write-point guard refuses before the write.
+    again = sdk.create_point("statement", content, dedup=True,
+                             credibility="gold")
+    after = sdk.get_point(pid)
+
+    assert again["id"] == pid, "a dedup HIT is still reported"
+    assert len(calls) >= 2, (
+        "the write point must take its OWN lifecycle read — the snapshot is not "
+        "a verification")
+    assert after["updatedAt"] == before["updatedAt"], (
+        "the refused write leg moved a settled claim's updatedAt — the "
+        "message's consequence sentence would then be false, not just its "
+        "opening")
+    assert after["status"] == "retracted"
+    # The word leg's disclosed residual, measured here for the prop-less shape.
+    assert after.get("credibility") == canonical_tier("gold"), (
+        "expected the authored-word leg's label on the raced path — if this "
+        "reds, the residual is CLOSED and the raced message must be retired")
+
+    adv = [a for a in (again.get("advisories") or [])
+           if a.get("code") == "terminal_fold_refused"]
+    assert adv, again
+    message = adv[0]["message"]
+    assert "carried a caller prop" not in message, (
+        "the receipt claims the caller carried a prop, and this fold carried "
+        f"none: {message}")
+    assert "PROPS AND WORD were not applied" not in message, (
+        "the receipt reused the NON-raced text on a fold whose word leg did "
+        f"write: {message}")
+    assert "DID LAND" in message, (
+        f"the receipt must name the leg that did write: {message}")
 
 
 def test_a_non_terminal_refusal_from_the_write_point_propagates(sdk, monkeypatch):
