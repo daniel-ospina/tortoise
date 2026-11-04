@@ -650,7 +650,7 @@ def _wait_bound_refused() -> bool:
 #:   * ``tortoise_search`` (``entity_type="point"``) indexes ``content`` +
 #:     ``search_keys`` only, while ``sdk.create_operator`` writes a ``:Point``
 #:     with ``{id, is_operator, op_type, direction, direction_basis, status}``,
-#:     plus ``label`` only ``if label:``, and NO ``content`` (``sdk.py:22382``) —
+#:     plus ``label`` only ``if label:``, and NO ``content`` (``sdk.py:22403``) —
 #:     so for EVERY created operator the recipe
 #:     returns nothing, "nothing" reads as "it did not commit", and the retry
 #:     duplicates the edge and double-counts its EP factor. That is the exact
@@ -682,9 +682,8 @@ def _wait_bound_refused() -> bool:
 #: lands while the ABANDONED first write is still running is not a repeat — both
 #: can read absent, and both create. The other two members do not share that
 #: mechanism and are not covered by this caveat: ``create_source`` converges in ONE
-#: conditional statement (`projection/entities.py`: `MERGE (s:Source {url:$id})`
-#: — the file's own note there is "pin d"; the "CONDITIONAL (single statement,
-#: pin b)" wording is `sdk.py`'s, at the door that calls it), and
+#: conditional statement, `_upsert_source`'s `MERGE (s:Source {url: $url})`
+#: (`projection/entities.py:6503`; that function's own note there is "pin d"), and
 #: ``onboarding_demo_create`` is
 #: sentinel-gated. Measured on the embedded lane: two in-process
 #: concurrent `create_point(..., dedup=True)` calls minted two nodes with the
@@ -783,12 +782,12 @@ def _arguments_disable_convergence(name: str, arguments) -> bool:
     #   * `entities` of type document/event are APPEND-ONLY (`sdk.py` "Document
     #     records are append-only — never deduped"; `docs/INGEST_CONTRACT.md` row
     #     1 `append_only_items`), and the SDK lowercases the type on BOTH legs
-    #     (`sdk.py:23696` admission, `sdk.py:27079` dispatch), so a case variant
+    #     (`sdk.py:23717` admission, `sdk.py:27100` dispatch), so a case variant
     #     reaches the writer too;
     #   * `bundle` may arrive as a JSON STRING — the handler calls
     #     `_parse(bundle)` after this seam runs and the served schema puts no
     #     `type` on it — so `json.dumps(...)` bypassed the whole check;
-    #   * and a bundle's points SPLAT `props` FLAT (`sdk.py:26626`: `[{kind,
+    #   * and a bundle's points SPLAT `props` FLAT (`sdk.py:26647`: `[{kind,
     #     content, ref?, status?, **props}]`), so a caller puts `is_operator`
     #     BESIDE `kind` rather than inside `props` — measured, that mints a
     #     second node while every key-allow-list reads it as props-free.

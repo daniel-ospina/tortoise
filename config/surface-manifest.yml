@@ -49,7 +49,7 @@
 # a constant here.
 manifest_version: 1
 issue: 3863
-cut_at_commit: e8d5d14a86249144f08c9ef5fd13b9eddcc38b50
+cut_at_commit: de53c5ee2501b45320c554970e1c51822f3051e6
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -114,49 +114,28 @@ response_fields:
     byte-identical
 - response: tortoise_search
   field: truncated
-  emitted_when: 'ALWAYS on the hosted GET /v1/search body — the #8447 truncation marker: true when the delivered
-    set is NOT the whole set this read matched (the `limit` cap cut rows, a downstream stage dropped them — a `min_confidence`
-    floor, a hit whose entity read came back empty — or a retrieval leg that was ASKED and never answered: it raised,
-    missed the collective deadline, or its circuit breaker refused); false only when nothing was dropped. It answers
-    "did I get everything this read matched?", NOT "did the cap fire?" — a row lost downstream is as unreachable
-    as one lost at the cap, so a cap-only reading would report a filtered-empty read COMPLETE. A leg that was NEVER
-    ASKED (no embedder installed, say) is not a drop: that is `status: degraded`, the recorded vocabulary, and marking
-    it here would make the field meaningless. Not flag-gated (unlike status / residency): its own decision is two
-    len() calls over lists the read already holds, and it additionally asks the retrieval path for a per-leg trace
-    when the caller supplied none — an append-only audit record, one entry per asked leg, that never changes which
-    rows are returned (a leg that was ASKED and never answered drops rows exactly as a cap does, so the proof is
-    not optional). Bounded, not free; and a default-off marker would still preserve the defect it fixes. Its ONE
-    home is tortoise/truncation.py; it is its OWN field and never a fifth read-status term (#7952 §17.2 forbids
-    one). OVERRIDES: the #1745 fail-safe default-OFF convention — there is no retrieval delta to measure on a response
-    marker, and a default-off marker is the silent-subset bug itself (precedent: #8487). The MCP tool `tortoise_search`
-    returns a bare list, so it does not carry the field; wrapping a list in an object is a declared return-type
-    change and therefore an MCP Surface Approval decision, not a consequence of this row'
+  emitted_when: 'ALWAYS on the hosted GET /v1/search body, and (since #8447 C2 / PR #10622) ALWAYS on the hosted
+    `GET /v1/points` body too — where `total_available` is NEVER emitted: the cut there is proved by an internal
+    `limit+1` probe row, so `exact` is false and only `truncated` is published. On /v1/search it is the #8447 truncation
+    marker: true when the delivered set is NOT the whole set this read matched (the `limit` cap cut rows, a downstream
+    stage dropped them — a `min_confidence` floor, a hit whose entity read came back empty — or a retrieval leg
+    that was ASKED and never answered: it raised, missed the collective deadline, or its circuit breaker refused);
+    false only when nothing was dropped. It answers "did I get everything this read matched?", NOT "did the cap
+    fire?" — a row lost downstream is as unreachable as one lost at the cap, so a cap-only reading would report
+    a filtered-empty read COMPLETE. A leg that was NEVER ASKED (no embedder installed, say) is not a drop: that
+    is `status: degraded`, the recorded vocabulary, and marking it here would make the field meaningless. Not flag-gated
+    (unlike status / residency): its own decision is two len() calls over lists the read already holds, and it additionally
+    asks the retrieval path for a per-leg trace when the caller supplied none — an append-only audit record, one
+    entry per asked leg, that never changes which rows are returned (a leg that was ASKED and never answered drops
+    rows exactly as a cap does, so the proof is not optional). Bounded, not free; and a default-off marker would
+    still preserve the defect it fixes. Its ONE home is tortoise/truncation.py; it is its OWN field and never a
+    fifth read-status term (#7952 §17.2 forbids one). OVERRIDES: the #1745 fail-safe default-OFF convention — there
+    is no retrieval delta to measure on a response marker, and a default-off marker is the silent-subset bug itself
+    (precedent: #8487). The MCP tool `tortoise_search` returns a bare list, so it does not carry the field; wrapping
+    a list in an object is a declared return-type change and therefore an MCP Surface Approval decision, not a consequence
+    of this row'
   unchanged_when_off: n/a — always emitted; the flag is never consulted, so it cannot be off. `results` and `count`
     keep their exact prior values and the parameter set is unchanged
-  emitted_when: 'ALWAYS on the hosted GET /v1/search body, and (since #8447 C2 / PR #10622) ALWAYS on
-    the hosted `GET /v1/points` body too — where `total_available` is NEVER emitted: the cut there is
-    proved by an internal `limit+1` probe row, so `exact` is false and only `truncated` is published.
-    On /v1/search it is the #8447 truncation marker: true when the
-    delivered set is NOT the whole set this read matched (the `limit` cap cut rows, a downstream stage
-    dropped them — a `min_confidence` floor, a hit whose entity read came back empty — or a retrieval leg that
-    was ASKED and never answered: it raised, missed the collective deadline, or its circuit breaker refused);
-    false only when nothing was dropped.
-    It answers "did I get everything this read matched?", NOT "did the cap fire?" — a row lost
-    downstream is as unreachable as one lost at the cap, so a cap-only reading would report a filtered-empty
-    read COMPLETE. A leg that was NEVER ASKED (no embedder installed, say) is not a drop: that is `status:
-    degraded`, the recorded vocabulary, and marking it here would make the field meaningless. Not flag-gated
-    (unlike status / residency): its own decision is
-    two len() calls over lists the read already holds, and it additionally asks the retrieval path for a per-leg
-    trace when the caller supplied none — an append-only audit record, one entry per asked leg, that never changes
-    which rows are returned (a leg that was ASKED and never answered drops rows exactly as a cap does, so the proof
-    is not optional). Bounded, not free; and a default-off marker would still preserve the defect it fixes.
-    Its ONE home is tortoise/truncation.py; it is its OWN field and never a fifth read-status term (#7952 §17.2
-    forbids one). OVERRIDES: the #1745 fail-safe default-OFF convention — there is no retrieval delta to measure on a
-    response marker, and a default-off marker is the silent-subset bug itself (precedent: #8487). The MCP tool
-    `tortoise_search` returns a bare list, so it does not carry the field; wrapping a list in an object is a declared
-    return-type change and therefore an MCP Surface Approval decision, not a consequence of this row'
-  unchanged_when_off: 'n/a — always emitted; the flag is never consulted, so it cannot be off. `results` and `count`
-    keep their exact prior values and the parameter set is unchanged'
 - response: tortoise_search
   field: total_available
   emitted_when: 'the hosted GET /v1/search body, ONLY when `truncated` is true AND the count is EXACT — i.e. no
@@ -1076,16 +1055,17 @@ rows:
   cluster: null
   canonical: null
   job: 'Create a Point node (statement, decision, vision, hypothesis, etc.). dedup=True (default) folds onto an
-    existing Point when the content matches. Calls carrying props, authoredBy or credibility are NOT advertised
-    as repeatable: convergence is not provable across the props channel (a props payload can take the node out of
-    the fold''s own predicate). Declaring extractedFrom materializes that :Source and links it (#8171); a fresh
-    write with no source and no provenance is advised (advisories: [{code: no_source, node_id, message}] — advisory
-    only, never a block). validTo accepts an ISO-8601 instant (representational variance such as ''2024-3-1'' or
-    ''2024/03/01'' is normalised silently), or a DECLARED no-date value — ''unknown'', TBD, TBA, TBC, N/A, NA, -,
-    --, an em dash, or ''?'' — which is stored as the canonical un-datable end (no end plus validToPrecision=''unknown'',
-    reading end_state=''unknown'') and echoed back as valid_to_shaped; None or omitted means the end is OPEN. An
-    impossible calendar day, a month outside 01-12, an epoch passed as a string, or prose with no recoverable date
-    is REFUSED, naming the fault and the accepted forms (#9202).'
+    existing Point when the content matches, but that is not unconditional: dedup=False mints a second Point, and
+    a props payload can take the node out of the fold''s own predicate. The idempotency hint below is per OPERATION;
+    whether a given call converges depends on its arguments, and a refused call reports the per-call verdict on
+    its own error payload. Declaring extractedFrom materializes that :Source and links it (#8171); a fresh write
+    with no source and no provenance is advised (advisories: [{code: no_source, node_id, message}] — advisory only,
+    never a block). validTo accepts an ISO-8601 instant (representational variance such as ''2024-3-1'' or ''2024/03/01''
+    is normalised silently), or a DECLARED no-date value — ''unknown'', TBD, TBA, TBC, N/A, NA, -, --, an em dash,
+    or ''?'' — which is stored as the canonical un-datable end (no end plus validToPrecision=''unknown'', reading
+    end_state=''unknown'') and echoed back as valid_to_shaped; None or omitted means the end is OPEN. An impossible
+    calendar day, a month outside 01-12, an epoch passed as a string, or prose with no recoverable date is REFUSED,
+    naming the fault and the accepted forms (#9202).'
   dependency: declares TortoiseSDK.create_point (resolves)
   lifecycle: active
   used_by: agents, tooling, docs

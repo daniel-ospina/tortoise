@@ -395,11 +395,13 @@ def test_a_forged_dry_run_prop_cannot_claim_a_preview():
     however the caller spells the request — otherwise a forged "nothing was
     written" sits over an executed write (the #3926 / #8135 class).
 
-    ⛔ This asserts a POSITIVE, not just "not a preview": `tortoise_get_point` is
-    a genuine READ, so it must be the WRITE-AMBIGUOUS answer (`unknown`), and an
-    implementation that dropped the declared-parameter gate would answer that by
-    accident. So the discriminating case is the one below it — a tool that does
-    NOT declare `dry_run` and is NOT a read, where the gate is what decides.
+    ⛔ The discriminating case is the SECOND assertion, not the first. A tool
+    outside the write set carries no `committed` key at all (its refusal is
+    `{"retry_after": 10}` plus the neutral message), so the `props` case alone
+    could pass under a gate-deleted implementation — `props` is simply not read
+    either way. `tortoise_create_point` DOES declare nothing for `dry_run` and IS
+    in the write set, so a real top-level `dry_run=True` there is the case that
+    separates "gated on the declared parameter" from "reads the raw dict".
     """
     forged = _error(ms._wait_bound_refusal_result(
         "tortoise_create_point", {"props": {"dry_run": True}}))["data"]
@@ -546,7 +548,7 @@ def test_an_ingest_bundle_with_append_only_entities_is_not_repeatable():
     # the RESOLUTION rather than an oversight: three review rounds each closed ONE
     # spelling of this hole (the append-only entities leg, the JSON-string bundle,
     # and the FLAT `props` splat), which is the signal that the enumeration is the
-    # defect. `sdk.py:26626` documents the points form as `{kind, content, ref?,
+    # defect. `sdk.py:26647` documents the points form as `{kind, content, ref?,
     # status?, **props}` — so `is_operator` sits BESIDE `kind`, not in `props`, and
     # no key allow-list sees it. The bundle's key space is open-ended, so the seam
     # reports what it knows ("not provable") instead of a claim it cannot ground.
@@ -660,9 +662,10 @@ def test_a_getter_that_RE_STORES_a_clock_dependent_value_is_not_repeatable():
     measurement falsifies.
 
     It is the same property this repo already uses to keep the `maintenance`
-    tier non-idempotent (`tortoise_compute_confidence`: "a repeat call re-stores
-    a re-derived score"), so the `write` tier default stands: a repeat is a real
-    write, and the refusal says so.
+    tier non-idempotent — `tortoise_compute_confidence`'s own note is "call 2
+    starts from the value call 1 stored (0.693315 -> 0.693320), so repeated calls
+    DO have an additional effect". So the `write` tier default stands: a repeat is
+    a real write, and the refusal says so.
     """
     assert _error(ms._wait_bound_refusal_result(
         "tortoise_get_source_reliability"))["data"]["retry_safe"] is False

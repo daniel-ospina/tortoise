@@ -266,10 +266,11 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         id="surface.create_point",
         description="Create a Point node (statement, decision, vision, hypothesis, etc.). "
                     "dedup=True (default) folds onto an existing Point when the content "
-                    "matches. Calls carrying props, authoredBy or credibility are NOT "
-                    "advertised as repeatable: convergence is not provable across the "
-                    "props channel (a props payload can take the node out of the fold's "
-                    "own predicate). "
+                    "matches, but that is not unconditional: dedup=False mints a second "
+                    "Point, and a props payload can take the node out of the fold's own "
+                    "predicate. The idempotency hint below is per OPERATION; whether a "
+                    "given call converges depends on its arguments, and a refused call "
+                    "reports the per-call verdict on its own error payload. "
                     "Declaring extractedFrom materializes that :Source and links it (#8171); "
                     "a fresh write with no source and no provenance is advised (advisories: "
                     "[{code: no_source, node_id, message}] — advisory only, never a block). "
@@ -699,7 +700,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         # operator over the same endpoints: `sdk.create_operator` has no
         # adoption/existence check — `_find_operator`, the adopt-by-endpoint-set
         # path `ingest` uses, is called from `ingest`'s connection loop only
-        # (`sdk.py:27318`, verified) — and its `_distinct_preserving_order`
+        # (`sdk.py:27339`, verified) — and its `_distinct_preserving_order`
         # collapse only removes repeats WITHIN one request. `ep.py` builds its
         # factor from the edge list, so the duplicate double-counts the claim's
         # EP weight. Declaring `idempotent=True` here (as this entry did until
@@ -1283,9 +1284,11 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         # whose `now` defaults to the wall clock, so a repeat past the cache
         # interval re-derives and re-STORES a different float (measured 0.65087406
         # → 0.65087345 at +1 h → 0.65043060 at +30 d). That is the same property
-        # this file already uses to keep the `maintenance` tier non-idempotent
-        # (`tortoise_compute_confidence`: "a repeat call re-stores a re-derived
-        # score"). So the `write` tier default stands: a repeat is a real write.
+        # this file already uses to keep the `maintenance` tier non-idempotent —
+        # `tortoise_compute_confidence`'s own note is "call 2 starts from the value
+        # call 1 stored (0.693315 -> 0.693320), so repeated calls DO have an
+        # additional effect". So the `write` tier default stands: a repeat is a
+        # real write.
         idempotent=False,
         http_policy=True,
         sdk_method="get_source_reliability",
