@@ -34,6 +34,20 @@ import pytest
 #: nothing else.
 MARKER = "TURNZEBRA10000SOURCEPROSE"
 
+#: The needle the prose guard scans for: the marker TOGETHER WITH the word that
+#: follows it in the captured turn — a phrase, not a token.
+#:
+#: ⛔ WHY A PHRASE AND NOT THE BARE MARKER. The shipped derivation is a TOPIC
+#: LEXICON, and a session's own words legitimately appear in it as single
+#: comma-joined tokens (§4.4 metadata, which is what keeps a capture findable —
+#: #3518). A bag of words can never contain a SPACE, so this needle is
+#: unreachable by the lexicon by construction, while every prose route carries
+#: it: the pre-fix verbatim copy, a lower-casing writer, a truncating writer.
+#: Scanning for the bare marker would report the lexicon itself — a false FAIL
+#: that would push the next fixer to delete the findability the lexicon exists
+#: for.
+PROSE_NEEDLE = f"{MARKER} the"
+
 
 @pytest.fixture()
 def sdk(tmp_path, monkeypatch):
@@ -50,7 +64,7 @@ def sdk(tmp_path, monkeypatch):
 
 
 def _nodes_carrying(sdk, needle: str) -> list[tuple[list[str], dict, object]]:
-    """Every node whose STRING properties contain ``needle``.
+    """Every node whose STRING properties contain ``needle``, CASE-INSENSITIVELY.
 
     Walks the live handle instead of a named field on purpose: the rule is
     about the text's presence on a node, so a hit on any label or property is
@@ -58,18 +72,26 @@ def _nodes_carrying(sdk, needle: str) -> list[tuple[list[str], dict, object]]:
     offending property (not the whole property map — it can carry embeddings),
     and the node's ``id`` so the caller can tell the turn store from any other
     node wearing the same label.
+
+    ⛔ CASE-INSENSITIVE IS LOAD-BEARING, not a convenience. The writer lowercases
+    every token (``transcript.lower()``), so a case-sensitive comparison let a
+    writer that copies the turn's PROSE and normalises it pass unseen — the
+    non-vacuity guard was satisfied solely by the turn store's upper-case copy
+    while three ``:Source`` properties carried the offender (measured: `#10852`
+    review, P1). Casing is the writer's choice; presence is the defect.
     """
+    folded = needle.lower()
     rows = sdk._get_proj().g.query(
         "MATCH (n) RETURN labels(n), properties(n)").result_set
     hits: list[tuple[list[str], dict, object]] = []
     for labels, props in rows:
         node_id = (props or {}).get("id")
         for key, value in (props or {}).items():
-            if isinstance(value, str) and needle in value:
+            if isinstance(value, str) and folded in value.lower():
                 hits.append((list(labels), {key: value}, node_id))
                 break
             if isinstance(value, list) and any(
-                    isinstance(x, str) and needle in x for x in value):
+                    isinstance(x, str) and folded in x.lower() for x in value):
                 hits.append((list(labels), {key: value}, node_id))
                 break
     return hits
@@ -93,7 +115,7 @@ def test_the_session_source_does_not_carry_the_transcript(sdk):
     session_id = "sess-source-prose-10000"
     _capture(sdk, session_id)
 
-    hits = _nodes_carrying(sdk, MARKER)
+    hits = _nodes_carrying(sdk, PROSE_NEEDLE)
     assert hits, (
         "the fixture did not capture anything — a scan that finds nothing "
         "anywhere proves nothing (the turn nodes must carry the marker)")
@@ -128,6 +150,79 @@ def _is_turn_store(labels: list[str], node_id: object, session_id: str) -> bool:
                              node_id) is not None)
 
 
+def test_the_guard_reports_a_lower_casing_writer(sdk):
+    """The prose guard is not case-blind: a normalising copy is still reported.
+
+    ⛔ THE REGRESSION THIS PINS. The scan used to compare case-sensitively while
+    the derivation lowercases every token, so a writer that copied the turn's
+    prose and lowercased it — one ``.lower()`` away from this file's own
+    derivation — produced ZERO offenders, and the non-vacuity guard was
+    satisfied solely by the turn store's upper-case copy. Measured at that head:
+    the ``:Source`` carried the marker in ``summary``, ``topics`` and
+    ``_searchText`` and the guard reported none of them (`#10852` review, P1).
+
+    The node is seeded rather than captured because the capture path heals it
+    (the recapture test proves that half); this one isolates the SCAN.
+    """
+    prose = (f"{MARKER} the raw transcript text must not live on a node"
+             .lower())
+    sdk._get_proj().g.query(
+        "MERGE (s:Source {url:$u}) SET s.summary=$s, s._searchText=$s",
+        params={"u": "session:sess-source-prose-lowercased-10000",
+                "s": prose})
+
+    hits = _nodes_carrying(sdk, PROSE_NEEDLE)
+    assert hits, (
+        "the guard did not see a lower-cased copy of the turn's prose — a "
+        "case-sensitive scan is blind to the writer this module ships, and its "
+        "non-vacuity guard can still pass on the turn store alone")
+    assert [(labels, props) for labels, props, _ in hits] == [
+        (["Source"], {"summary": prose})], (
+        f"the offender reported is not the normalising writer: {hits}")
+
+
+def test_the_guard_reds_on_the_pre_fix_derivation(sdk, monkeypatch):
+    """NON-VACUITY against the real pre-fix code, not a hypothetical writer.
+
+    ``816b37f1876``'s ``_session_source_metadata`` returned the transcript's
+    first substantive utterance VERBATIM — the route §9.1/D1 forbids. It is
+    monkeypatched in (the capture path resolves the module attribute at call
+    time) so this suite proves RED-before without a second checkout: the guard
+    must report the ``:Source`` that derivation produces.
+    """
+    from tortoise import sdk as sdk_mod
+
+    def pre_fix_derivation(transcript: str) -> tuple[str, list[str]]:
+        # Verbatim from `git show 816b37f1876:tortoise/sdk.py`.
+        if not transcript.strip():
+            return "", []
+        summary = ""
+        for line in transcript.splitlines():
+            text = line.split(": ", 1)[1] if ": " in line else line
+            text = text.strip()
+            if len(text) >= 10:
+                summary = text[:200]
+                break
+        if not summary:
+            summary = transcript.strip()[:200]
+        return summary, []
+
+    monkeypatch.setattr(sdk_mod, "_session_source_metadata",
+                        pre_fix_derivation)
+    session_id = "sess-source-prose-prefix-10000"
+    _capture(sdk, session_id)
+
+    offenders = [
+        (labels, props) for labels, props, node_id in _nodes_carrying(
+            sdk, PROSE_NEEDLE)
+        if not _is_turn_store(labels, node_id, session_id)
+    ]
+    assert offenders, (
+        "the guard passed the PRE-FIX derivation — a guard that cannot red on "
+        "the code it was written to police proves nothing about the fix")
+    assert any("Source" in labels for labels, _ in offenders), offenders
+
+
 def test_a_recapture_replaces_the_prose_a_pre_fix_write_left_behind(sdk):
     """A pre-fix node HEALS on re-capture — and the healing is the DERIVATION.
 
@@ -151,12 +246,13 @@ def test_a_recapture_replaces_the_prose_a_pre_fix_write_left_behind(sdk):
     proj.g.query(
         "MERGE (s:Source {url:$u}) SET s.summary=$sum, s._searchText=$st",
         params={"u": url, "sum": stale, "st": stale})
-    assert _nodes_carrying(sdk, MARKER), "the seeded pre-fix state is missing"
+    assert _nodes_carrying(sdk, f"{MARKER} stale"), (
+        "the seeded pre-fix state is missing")
 
     _capture(sdk, session_id)
 
     offenders = [(labels, props) for labels, props, node_id
-                 in _nodes_carrying(sdk, MARKER)
+                 in _nodes_carrying(sdk, f"{MARKER} stale")
                  if not _is_turn_store(labels, node_id, session_id)]
     assert not offenders, (
         "a re-capture left the pre-fix prose on the node — the capture's own "
@@ -198,10 +294,12 @@ def test_the_display_prefix_constant_is_pinned() -> None:
 def test_the_display_prefix_is_not_indexed(sdk):
     """The lexicon is indexed; the descriptor's constant prefix is not.
 
-    Measured pre-fix: two sessions with disjoint vocabularies (a migration plan
-    and a fencing budget) were BOTH returned for the query "session capture
-    topics" — the prefix alone answered a query neither transcript had anything
-    to do with.
+    Measured on an EARLIER CUT OF THIS PR: two sessions with disjoint
+    vocabularies (a migration plan and a fencing budget) were BOTH returned for
+    the query "session capture topics" — the prefix alone answered a query
+    neither transcript had anything to do with. (Not "pre-fix": on `main` no
+    prefix existed at all, so that query could not have matched either session —
+    the cut that introduced the prefix introduced the defect.)
     """
     sdk._materialize_session_source(
         "sess-prefix-migration", None, "2026-09-01T10:00:00+00:00",
@@ -252,9 +350,63 @@ def test_an_acknowledgement_only_session_still_derives_and_is_findable(sdk):
     assert rows["session:sess-ack-only"][1], rows
 
     assert "yes" in topics, topics
+    assert not ({"user", "assistant", "speaker"} & set(topics)), (
+        "the stopword-only fallback re-admitted the transcript's own framing "
+        f"labels into the lexicon (and so into the index): {topics!r}")
     found = [r["id"] for r in sdk.tortoise_fts_query(
         "yes", entity_type="source")]
     assert "session:sess-ack-only" in found, (topics, found)
+    # …and the constant pair is NOT in the index: under the OR-union it would
+    # make every acknowledgement-only session match a query for "user" — the
+    # same class of defect the display prefix is kept out of `_searchText` for.
+    framing_hits = [r["id"] for r in sdk.tortoise_fts_query(
+        "user", entity_type="source")]
+    assert "session:sess-ack-only" not in framing_hits, (topics, framing_hits)
+
+
+def test_the_lexicon_does_not_depend_on_the_transcript_word_order():
+    """The descriptor is a function of the word MULTISET, not of turn order.
+
+    ⛔ MEASURED PRE-FIX (`0f381f8e1`): ``Counter.most_common`` breaks ties by
+    first-encountered order, and nearly every word in a short session occurs
+    once — so the lexicon WAS the transcript's first six content words in the
+    transcript's own order, i.e. the session's opening instruction in a comma
+    list. Two orderings of the same words therefore produced different
+    descriptors, contradicting the module's own "never word order" claim
+    (`#10852` review, P1).
+    """
+    from tortoise.sdk import _session_source_metadata
+
+    utterance = "rotate the production database password tomorrow morning"
+    forward = _session_source_metadata(utterance)
+    backward = _session_source_metadata(
+        "morning tomorrow password database production the rotate")
+
+    assert forward == backward, (
+        "reordering the same words changed the descriptor — the tie-break is "
+        f"still the transcript's own order: {forward!r} vs {backward!r}")
+    # The utterance's OWN order must not survive as the descriptor either.
+    assert forward[0] != (DISPLAY_PREFIX
+                          + "rotate, production, database, password, "
+                            "tomorrow, morning"), forward
+    # …and it is still the six most frequent words, not an arbitrary six.
+    assert set(forward[1]) == {"rotate", "production", "database", "password",
+                               "tomorrow", "morning"}, forward
+
+
+def test_the_lexicon_still_prefers_the_most_frequent_words():
+    """Frequency outranks the tie-break, so sorting ties changed nothing else.
+
+    Sorting the ties by token must not be mistaken for sorting the WHOLE lexicon
+    alphabetically: a word said three times still leads its one-off neighbours.
+    """
+    from tortoise.sdk import _session_source_metadata
+
+    _, topics = _session_source_metadata(
+        "zebra zebra zebra apple mango turnip walnut radish")
+    assert topics[0] == "zebra", topics
+    assert topics == ["zebra"] + sorted(topics[1:]), topics
+    assert len(topics) == 6, topics
 
 
 def test_a_text_less_recapture_keeps_the_two_derived_columns_tied(sdk, tmp_path):

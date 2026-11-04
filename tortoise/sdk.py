@@ -36,7 +36,7 @@ import os
 import re
 import stat
 import unicodedata
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextvars import ContextVar
 from time import monotonic as _monotonic
 from typing import Any, ClassVar
@@ -4109,6 +4109,35 @@ _SESSION_SOURCE_STOPWORDS = frozenset({
 _SESSION_SOURCE_SUMMARY_PREFIX = "session capture topics: "
 
 
+#: #10000: the transcript's own FRAMING labels — the ``Speaker: text`` prefix
+#: ``_session_llm_transcript`` writes for every turn. They are not vocabulary the
+#: session used, so they may never become a topic: the stopword arm already drops
+#: the three it names, but the STOPWORD-ONLY fallback below reads the UNFILTERED
+#: word list, so it re-admitted ``user``/``assistant`` for every
+#: acknowledgement-only session — a constant token pair in the Source FTS index,
+#: i.e. the same measurable defect ``_SESSION_SOURCE_SUMMARY_PREFIX`` is kept out
+#: of ``_searchText`` to avoid (under the OR-union every such session would match
+#: a one-word source query for "user"). ``system``/``tool`` are reachable roles
+#: too (``_normalize_turn_role`` passes the role through, title-cased).
+_SESSION_SOURCE_FRAMING_TOKENS = frozenset({
+    "user", "assistant", "speaker", "system", "tool",
+})
+
+
+def _session_source_lexicon(counts: Mapping[str, int]) -> list[str]:
+    """The six most frequent words, ties broken by the TOKEN itself.
+
+    ⛔ ``Counter.most_common`` breaks ties by FIRST-ENCOUNTERED order, and in the
+    ordinary short-session shape (every content word occurring once) that made
+    the lexicon the transcript's first six content words IN TRANSCRIPT ORDER —
+    i.e. a (comma-separated) re-wording of the session's own opening instruction,
+    and the reason the docstring's order-independence claim was false. Sorting
+    the ties by the token makes the lexicon a function of the WORD MULTISET
+    alone: reordering the turns, or adding an identical turn, cannot change it.
+    """
+    return [w for w, _ in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:6]]
+
+
 def _session_source_metadata(transcript: str) -> tuple[str, list[str]]:
     """Derive the session Source's searchable TOPIC LEXICON (#1352, #10000).
 
@@ -4128,23 +4157,28 @@ def _session_source_metadata(transcript: str) -> tuple[str, list[str]]:
     ``tortoise_fts_query(entity_type='source')`` — the regression #3518 closed,
     and the reason this function must return SOMETHING for a non-empty
     transcript. ``("", [])`` only for a transcript with no word tokens at all
-    (empty, blank, punctuation-only).
+    (empty, blank, punctuation-only, or nothing but the ``Speaker:`` framing
+    labels).
 
-    ⛔ A STOPWORD-ONLY transcript ("ok" / "yes") takes the UNFILTERED frequency
+    ⛔ A STOPWORD-ONLY transcript ("ok" / "yes") takes the UNFILTERED content
     list rather than returning nothing. Returning nothing blanked an
     acknowledgement-only session's ``summary``, gave it no ``_searchText`` and
     left it unfindable — reintroducing the very #3518 regression the lexicon
     exists to prevent, as a side effect of a filter that is a precision
-    preference and not part of the §9.1/D1 rule. It is still a LEXICON
-    (frequency order, never word order, never a quotation), so it puts no
-    sentence on the node.
+    preference and not part of the §9.1/D1 rule. It is still a LEXICON, so it
+    puts no sentence on the node — but it drops the transcript's FRAMING labels
+    (``_SESSION_SOURCE_FRAMING_TOKENS``): those are the generator's ``Speaker:``
+    prefix, not words the session used, and indexing them put a constant
+    ``user, assistant`` pair on every acknowledgement-only session.
 
-    ⛔ The descriptor is a FUNCTION OF THE TOPICS, never of the transcript's own
-    wording or word order, and it never quotes: a summary that echoed the
-    utterance back (even truncated, even redacted) is the defect this shape
-    exists to remove. ``tests/test_10000_source_prose.py`` scans every node's
-    string properties for the capture's own text and reds if it reaches anything
-    but the episodic turn store.
+    ⛔ The descriptor is a function of the word MULTISET — frequency order, ties
+    broken by the token itself (``_session_source_lexicon``), so it does NOT
+    depend on the transcript's word order — and it never quotes: a summary that
+    echoed the utterance back (even truncated, even redacted) is the defect this
+    shape exists to remove. ``tests/test_10000_source_prose.py`` scans every
+    node's string properties for the capture's own TEXT and reds if it reaches
+    anything but the episodic turn store; a bag of the session's words is §4.4
+    metadata and is deliberately allowed, a fragment of its prose is not.
 
     ⛔ The DISPLAY value carries ``_SESSION_SOURCE_SUMMARY_PREFIX`` and the
     INDEXED value does not — the two are deliberately different strings, and
@@ -4161,13 +4195,15 @@ def _session_source_metadata(transcript: str) -> tuple[str, list[str]]:
     if not transcript.strip():
         return "", []
     from collections import Counter
-    words = re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}", transcript.lower())
+    words = [w for w in re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}",
+                                   transcript.lower())
+             if w not in _SESSION_SOURCE_FRAMING_TOKENS]
+    if not words:  # no word tokens at all (empty/blank/punctuation-only,
+        return "", []  # or nothing but the transcript's own Speaker: labels)
     counts = Counter(w for w in words if w not in _SESSION_SOURCE_STOPWORDS)
-    topics = [w for w, _ in counts.most_common(6)]
+    topics = _session_source_lexicon(counts)
     if not topics:  # stopword-only: fall back to the transcript's own vocabulary
-        topics = [w for w, _ in Counter(words).most_common(6)]
-    if not topics:  # no word tokens at all (empty/blank/punctuation-only)
-        return "", []
+        topics = _session_source_lexicon(Counter(words))
     return _SESSION_SOURCE_SUMMARY_PREFIX + ", ".join(topics), topics
 
 

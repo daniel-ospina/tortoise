@@ -206,17 +206,27 @@ def test_the_carrier_holds_the_redacted_text_not_the_raw_turn(captured):
         assert SECRET not in text, f"{key!r} carried the credential into the journal"
         assert "ghp_" not in text, f"{key!r} carried a credential-shaped run"
     # Positive half: the carrier is the REDACTED derivation, not a copy of the
-    # raw input — the redaction marker is visible where the secret was. Since
+    # raw input — the redaction marker's KIND name is where the secret was. Since
     # #10000 the carrier's ``summary`` is a descriptor over the session's TOPIC
     # lexicon (§9.1/D1: the transcript's own sentences must not reach a node),
     # so the marker is read on the field the vocabulary now travels in —
     # ``topics``. What binds the control is unchanged: with the scrubber
     # neutralised the raw token appears HERE instead of the marker, and the
     # assertions above red.
-    assert "redacted" in (record.get("topics") or []) and "github_token" in (
-            record.get("topics") or []), (
+    #
+    # ⛔ ASSERTED ON ONE WORD, DELIBERATELY. The lexicon is capped at six and its
+    # ties are broken alphabetically (#10852 P1: the old first-encountered
+    # tie-break made the lexicon the transcript's words IN TRANSCRIPT ORDER, so
+    # it was a re-wording of the utterance), so the exact membership past the two
+    # most frequent words is a function of the sort order and NOT of the
+    # property under test. ``github_token`` is the load-bearing word: the raw
+    # credential is ``ghp_…``, so this word can only come from
+    # ``[REDACTED:github_token]`` — and it survives the cap on this fixture (two
+    # words lead on frequency; it is the first of the count-1 ties).
+    topics = record.get("topics") or []
+    assert "github_token" in topics, (
         "the carrier's topics are not the redacted transcript's vocabulary — "
-        f"{record.get('topics')!r}")
+        f"{topics!r}")
     # And it describes the SAME bytes the node stores (the #4911 rule: the hash
     # is taken over the redacted transcript).
     stored = _source_props(sdk._get_proj(), SOURCE_URL)
