@@ -4054,7 +4054,13 @@ def test_the_runbook_inventory_matches_the_tree_and_says_the_read_refuses(tmp_pa
         "the `ubuntu-24.04` job count moved — re-derive the runbook's table with this pin: "
         f"{counts}"
     )
-    assert counts["ubuntu-latest"] == 75, (
+    # ⚠️ `76` is a MEASUREMENT at this head, and `closes-coherence.yml` is why it is one more than
+    # the `75` this pin carried at the fold's base `1730570510`: #10634's constituent added that
+    # workflow (one `ubuntu-latest` job) and, as with every other job count here, the pin and the
+    # runbook's table are re-derived TOGETHER rather than presumed. The `76` in the docstring above
+    # is a DIFFERENT measurement at an older head (`f83a7d1c1`, before that workflow existed) — same
+    # integer, unrelated job.
+    assert counts["ubuntu-latest"] == 76, (
         "the `ubuntu-latest` job count moved (the runbook states it as a dated measurement, and "
         "this arm is what makes 'dated' honest) — re-derive the table and this number together, do "
         f"not assume {counts['ubuntu-latest']} is right: {counts}"
