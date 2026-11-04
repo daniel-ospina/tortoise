@@ -1098,25 +1098,41 @@ def collect(state_dir: Path, repo: str, pr: int) -> RailState | None:
         # `CHILD_STARTED=`, which the child appends and which changes nothing a
         # verdict reads).
         fresh = art.read_text(encoding="utf-8", errors="replace")
-        # `CHILD_PID=` is the same race one process over: the wrapper can be
-        # killed in the instant between the spawn and the child naming itself, so
-        # a first read that missed it is not yet "no rail".
+        # ⛔ EVERY FIELD A PROBE READS IS PART OF THE "DID IT MOVE" TEST, or an
+        # adoption can hand the verdict a value no probe ever saw. `PID=`/`SID=` are
+        # appended by `launch` AFTER `Popen` returns — a SEPARATE write from the
+        # `SPAWNING=1` one — so a `collect` that lands between them reads "no pid".
+        # If that arrives during the probe and is adopted WITHOUT re-probing, the
+        # post-loop arms (keyed on `pid == 0`) skip the `SPAWNING` protection and
+        # conclude `lost` for a live wrapper: `start` accepts `lost`, so a second
+        # rail goes onto a PR that is still merging (#3061) and the truncation
+        # scopes its `✅ merged` out (#2235). So a newly-arrived pid forces another
+        # pass, exactly as a newly-arrived `CHILD_PID=` does.
         moved = (_attempt_exits(fresh) != snap.exits
+                 or (not snap.pid and bool(read_field(fresh, "PID")))
                  or (not snap.child and bool(read_field(fresh, "CHILD_PID"))))
         # ⛔ ADOPT THE FRESH SNAPSHOT ON EVERY EXIT FROM THE LOOP — INCLUDING THE
         # `break` — because `_read_snapshot` is what re-reads the LOG, and the log
-        # is where every word a verdict reads is written. The artifact does NOT
-        # move while a rail waits (it changes only at `CHILD_PID=`/`CHILD_STARTED=`
-        # and at `EXIT=`), so an artifact-only "did it move" test made this `break`
-        # conclude from a log read taken BEFORE the probe that had just said the
-        # writer was gone: a rail that printed `✅ merged …` and then died inside
-        # that window was reported `lost` — a few lines below the comment saying
-        # that cannot happen, and `lost` is the state `start` ACCEPTS (so the next
-        # beat truncates the log and the announcement is gone for good: #2235,
-        # #3061).
+        # is where every word a verdict reads is written. The artifact does not move
+        # while a rail WAITS (it changes only at `PID=`/`CHILD_PID=`/
+        # `CHILD_STARTED=` and at `EXIT=`), so an artifact-only "did it move" test
+        # made this `break` conclude from a log read taken BEFORE the probe that had
+        # just said the writer was gone: a rail that printed `✅ merged …` and then
+        # died inside that window was reported `lost` — a few lines below the
+        # comment saying that cannot happen, and `lost` is the state `start` ACCEPTS
+        # (so the next beat truncates the log and the announcement is gone for good:
+        # #2235, #3061).
         snap = _read_snapshot(art, logp_default, text=fresh)
         if not moved:
             break
+    # ⛔ THE SKELETON IS RE-DERIVED FROM THE ADOPTED SNAPSHOT. `st` was built at the
+    # TOP of the last iteration, from the snapshot the loop then replaced — so
+    # `since` (the `SPAWNING_TTL_S` age input), `pid`, `head` and `run_ids` would
+    # describe a read the verdict no longer uses. A re-launch that rewrites the
+    # artifact during the probe would be aged against the PREVIOUS attempt's
+    # `STARTED_AT` and read `lost`, with a reason claiming a launch that just
+    # started never spawned.
+    st = _state_from(snap, pr, art)
     text, log = snap.text, snap.log
     pid, child = snap.pid, snap.child
     # ⛔ `not exits` USED TO BE SPELLED HERE and could never be false — the `if

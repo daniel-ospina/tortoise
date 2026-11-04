@@ -682,6 +682,81 @@ def test_a_new_attempt_truncates_the_log(tmp_path):
         kill_group(ln.pid)
 
 
+def test_a_pid_that_lands_during_the_probe_is_probed_not_assumed_dead(tmp_path, monkeypatch):
+    """⛔ `PID=` IS A SEPARATE WRITE FROM `SPAWNING=1`, AND IT IS WHAT A PROBE READS.
+
+    `launch` writes `SPAWNING=1` + `ATTEMPT_ID`, spawns, and only THEN appends
+    `PID=`/`SID=`. A `collect` landing between those writes reads "no pid", and if
+    the pid arrives DURING the probe and is adopted without another pass, the
+    post-loop arms (keyed on `pid == 0`) skip the `SPAWNING` protection and
+    conclude `lost` for a LIVE wrapper — the state `start` ACCEPTS (#3061), plus
+    the truncation that scopes a real `✅ merged` out (#2235).
+
+    Reproduced without a race: the probe appends only `PID=<live wrapper>` and
+    answers gone for the unnamed read, then answers alive for the named one.
+    Pre-fix (no `PID` term in the move test) `lost`; post-fix `waiting` — and the
+    published pid must be the artifact's, not 0.
+    """
+    sd = tmp_path / "state"
+    sd.mkdir()
+    art = rd.artifact_path(sd, "o/r", 73)
+    logp = rd.log_path(sd, "o/r", 73)
+    art.write_text(f"PR=73\nREPO=o/r\nSTARTED_AT={rd._iso_now()}\nLOG={logp}\n"
+                   f"SPAWNING=1\nATTEMPT_ID=a73\n", encoding="utf-8")
+    logp.write_text(f"\n{rd.ATTEMPT_MARK} x attempt=a73 (detached) =====\n",
+                    encoding="utf-8")
+    wrapper = subprocess.Popen(["/bin/sleep", "20"], start_new_session=True,
+                               stdin=subprocess.DEVNULL,
+                               stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL)
+    try:
+        def probe(leader, child, marker, **_kw):
+            if leader == 0:
+                with art.open("a", encoding="utf-8") as fh:
+                    fh.write(f"PID={wrapper.pid}\nSID={wrapper.pid}\n")
+                return False                      # nothing named yet
+            return leader == wrapper.pid          # the named wrapper answers
+
+        monkeypatch.setattr(rd, "_rail_alive", probe)
+        st = rd.collect(sd, "o/r", 73)
+        assert st.state == rd.WAITING, st.as_dict()    # pre-fix: LOST
+        assert st.pid == wrapper.pid, st.as_dict()     # the published pid is real
+    finally:
+        wrapper.kill()
+        wrapper.wait()
+
+
+def test_a_relaunch_during_the_probe_is_aged_from_the_adopted_artifact(tmp_path, monkeypatch):
+    """The verdict's skeleton must describe the snapshot it concludes from.
+
+    `st` is built at the top of a loop iteration; the loop then ADOPTS a fresh
+    snapshot. Concluding from the old skeleton aged a re-launch that rewrote
+    `STARTED_AT` during the probe against the PREVIOUS attempt's stamp, so a launch
+    that had just begun with an hour-old predecessor read `lost` — "no rail ever
+    started" — for a rail that is inside its spawn window.
+    """
+    sd = tmp_path / "state"
+    sd.mkdir()
+    art = rd.artifact_path(sd, "o/r", 72)
+    logp = rd.log_path(sd, "o/r", 72)
+    old = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 3600))
+    art.write_text(f"PR=72\nREPO=o/r\nSTARTED_AT={old}\nLOG={logp}\n"
+                   f"SPAWNING=1\nATTEMPT_ID=a72\n", encoding="utf-8")
+    logp.write_text(f"\n{rd.ATTEMPT_MARK} x attempt=a72 (detached) =====\n",
+                    encoding="utf-8")
+
+    def probe(leader, child, marker, **_kw):
+        # a RE-LAUNCH rewrites the artifact mid-probe: fresh stamp, still spawning
+        art.write_text(f"PR=72\nREPO=o/r\nSTARTED_AT={rd._iso_now()}\nLOG={logp}\n"
+                       f"SPAWNING=1\nATTEMPT_ID=a72b\n", encoding="utf-8")
+        return False
+
+    monkeypatch.setattr(rd, "_rail_alive", probe)
+    st = rd.collect(sd, "o/r", 72)
+    assert st.state == rd.WAITING, st.as_dict()          # pre-fix: LOST
+    assert "launching" in st.reason, st.reason
+
+
 def test_a_merge_line_naming_another_pr_is_not_this_prs_merge(tmp_path):
     """⛔ EVERY SUCCESS LINE CARRIES ITS PR NUMBER, AND THE NUMBER WAS IGNORED.
 
