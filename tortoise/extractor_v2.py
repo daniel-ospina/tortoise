@@ -6227,9 +6227,9 @@ def _value_bindings(content: str, *,
             # ⚠️ A BARE MAGNITUDE PREFIX is itself a `_UNIT_WORDS` member, so
             # `20 k min` fused `k` and then stopped — the unit word AFTER it was
             # never reached, leaving `('20k')` against `('20000min')` and
-            # refusing a pair that is one value in two spellings (measured: 260
-            # such pairs over a same-value spelling grid, ALL of them this one
-            # shape — #10360 review cycle 2, P1). Consume the prefix first when
+            # refusing a pair that is one value in two spellings. The same-value
+            # spelling grid in `tests/test_state_value_verbatim_10360.py` is the
+            # pin (#10360 review cycle 2, P1). Consume the prefix first when
             # the value does not already carry one, then compose below.
             if seq[i + 1] in _MAGNITUDE_FACTORS \
                     and _MAGNITUDE_TAIL.search(value) is None:

@@ -817,7 +817,17 @@ mechanisms:
       `20 bytes`→`20 KB`, `20 ft`→`20 m`, `20 mph`→`20 kph`. That needs a NEW
       identity per unit (`d`/`w`/`mo`/`y`/`gb`/`mb`…), a different decision than
       completing the vocabulary that already existed, and it is the residual a
-      lane auditing "no unit-word fail-open remains" must read. A unit SPELLING
+      lane auditing "no unit-word fail-open remains" must read.
+      ⚠️ AND A PREFIXED VALUE WHOSE UNIT IS ATTACHED INSIDE THE SAME TOKEN BY A
+      HYPHEN IS STILL REFUSED (`20k-mile`, `20k-miles` against `20000 miles`),
+      withholding a truthful point: the token never reaches the fusion branch,
+      so `_value_core` reads core `20` + unit `kmile` and the pair diverges on
+      the CORE — the SAME failure shape this row repairs for the spaced form.
+      Measured, and identical on the pre-change tree, so it is named rather
+      than attributed to this change. ⛔ NOT repaired here: peeling the prefix
+      inside a token needs its own decision, because a hyphen is also a RANGE
+      separator (`20k-30k miles`), so a blanket peel would read a range as one
+      quantity. A unit SPELLING
       outside `_UNIT_EQUIV` also fails open on purpose, because refusing
       `800millis`/`800ms` is the false-accusation direction this rule must never
       take — and so does a unit CONVERSION inside a dimension (`90 seconds` vs

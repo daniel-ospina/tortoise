@@ -2020,8 +2020,8 @@ def test_the_composition_reads_a_SIGNED_or_SPACED_prefix_as_the_same_value():
       ``0.5``"): `.5k miles` → `.5kmiles`, same shape, against `500 miles`;
     * **a SPACED prefix**: `k` is itself a `_UNIT_WORDS` member, so `20 k min`
       fused `k` and STOPPED — the unit word after it was never reached, leaving
-      `('20k')` against `('20000min')`. The cycle-2 reviewer measured 260 refused
-      pairs of this single shape over its own spelling grid.
+      `('20k')` against `('20000min')`. The same-value spelling grid at the foot
+      of this file pins them tolerating.
 
     ⛔ And a THIRD revision still had it wrong (#10360 review cycle 3, P1): it
     admitted only `-`/U+2212 while `_reads_as_sign` admits the whole `Pd` family
