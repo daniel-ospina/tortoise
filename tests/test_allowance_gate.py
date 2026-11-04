@@ -902,8 +902,15 @@ def test_a_numeric_string_reading_is_COERCED_and_the_record_says_so():
 # configured BLOCKED dimension refuses without reading a meter, so this is a pure
 # unit assertion with no store and no instrument.
 
-def _mcp_lane(monkeypatch, limits: dict | None = None):
-    """Point `_enforce_quota` at a resolved MCP lane without a store or an SDK."""
+_UNSET = object()
+
+
+def _mcp_lane(monkeypatch, limits=_UNSET):
+    """Point `_enforce_quota` at a resolved MCP lane without a store or an SDK.
+
+    ``limits`` distinguishes an ABSENT ContextVar (pass ``None`` — the resolver
+    fallback) from "use the standard REST-shaped dict" (the default).
+    """
     from tortoise import mcp_auth, mcp_server
 
     class _Fixed:
@@ -915,8 +922,9 @@ def _mcp_lane(monkeypatch, limits: dict | None = None):
 
     # `_enforce_quota` imports these from `tortoise.mcp_auth` inside the call.
     monkeypatch.setattr(mcp_auth, "_current_org_id", _Fixed(ORG))
-    monkeypatch.setattr(mcp_auth, "_current_org_limits",
-                        _Fixed(limits if limits is not None else _rest_org()))
+    monkeypatch.setattr(
+        mcp_auth, "_current_org_limits",
+        _Fixed(_rest_org() if limits is _UNSET else limits))
     # The SDK argument is evaluated eagerly; nothing reads it — the armed BLOCKED
     # dimension refuses before any count.
     monkeypatch.setattr(mcp_server, "_get_org_sdk", lambda: None)
@@ -968,3 +976,33 @@ def test_the_mcp_write_lane_reads_the_resolver_only_for_a_GATED_resource(
 
     monkeypatch.setattr(quota, "resolve_org_limits", _boom)
     assert mcp_server._enforce_quota("api_keys") is None
+
+
+def test_the_resolver_fallback_does_not_read_the_resolver_a_SECOND_time(
+        monkeypatch):
+    """One gate = at most one resolver read, even on the `limits is None` fallback.
+
+    ``_enforce_quota`` resolves the limits itself when the middleware ContextVar
+    is empty, and that answer IS the resolver's — its shape carries whatever an
+    arming edit emits. Carrying it afterwards would issue the SAME control-plane
+    read twice for one gate (a PostgREST ladder in Supabase mode).
+
+    Mutation this REDs: drop the ``else:`` in ``_enforce_quota`` so
+    ``_carry_allowances`` runs on the fallback too, and the resolver is read
+    twice for a single pre-write gate.
+    """
+    mcp_server = _mcp_lane(monkeypatch, limits=None)
+    from tortoise import quota
+
+    calls: list[str] = []
+
+    def _resolver(org_id: str):
+        calls.append(org_id)
+        # The resolver's own shape: no allowance key configured anywhere.
+        return {"org_id": org_id, "tier": "free", "max_users": None,
+                "max_graphs": None, "max_points": None, "max_api_keys": None,
+                "max_sessions": None}
+
+    monkeypatch.setattr(quota, "resolve_org_limits", _resolver)
+    assert mcp_server._enforce_quota("points") is None
+    assert calls == [ORG], calls
