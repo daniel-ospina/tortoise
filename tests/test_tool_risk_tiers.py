@@ -362,7 +362,9 @@ class TestHintsCannotDrift:
             # The bundle's key space is open-ended → no finite predicate proves
             # it (#10849 reviews).
             ("tortoise_ingest", False),
-            ("tortoise_onboarding_demo_create", True),
+            # ⛔ `onboarding_demo_create` is pinned FALSE below: its SEED is
+            # sentinel-gated but its onboarding RECEIPT CAS-writes on every call.
+            ("tortoise_onboarding_demo_create", False),
             # ⛔ `tortoise_mitigate_operator` is pinned FALSE below, not omitted — its own description
             # says a re-assertion after withdrawal MINTS A NEW mitigation Point,
             # so convergence is conditional on the mitigation's current STATE —

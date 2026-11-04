@@ -1454,9 +1454,22 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
     ToolDefinition(
         name="tortoise_onboarding_demo_create",
         id="surface.onboarding_demo_create",
-        description="Create the demo epistemic graph (4 layers) for this team. Idempotent (Q4).",
+        description="Create the demo epistemic graph (4 layers) for this team. The "
+                    "SEED is sentinel-gated (a repeat files no new nodes), but the "
+                    "call is NOT idempotent: the handler then writes its onboarding "
+                    "receipt, whose CAS leg re-stores the state and advances "
+                    "state_version on every repeat.",
         risk="write",
-        idempotent=True,
+        # ⛔ NOT idempotent, though it read as one for several rounds of this PR
+        # (#10849 review). `_seed_demo_graph` is sentinel-gated, so the GRAPH does
+        # not change — but `tortoise_onboarding_demo_create` then calls
+        # `_update_onboarding_state(org_id, demo_created=True)` UNCONDITIONALLY, and
+        # `demo_created` is an OPERATIONAL key, so it takes the CAS leg
+        # (`SET t.onboarding_state = $state, t.state_version = $expected + 1`) with
+        # no value-unchanged short-circuit. A repeat therefore re-stores the state
+        # and advances the epoch: a real write, by the same standard that keeps
+        # `tortoise_get_source_reliability` out of this set.
+        idempotent=False,
         http_policy=True,
         sdk_method="",  # custom handler in mcp_server.py
         rest_spec=RestSpec(method="POST", path="/v1/demo"),

@@ -683,9 +683,14 @@ def _wait_bound_refused() -> bool:
 #: can read absent, and both create. The other two members do not share that
 #: mechanism and are not covered by this caveat: ``create_source`` converges in ONE
 #: conditional statement, `_upsert_source`'s `MERGE (s:Source {url: $url})`
-#: (`projection/entities.py:6503`; that function's own note there is "pin d"), and
-#: ``onboarding_demo_create`` is
-#: sentinel-gated. Measured on the embedded lane: two in-process
+#: (`projection/entities.py:6503`; that function's own note there is "pin d").
+#: ⛔ ``onboarding_demo_create`` is NOT one of them, though its seed is
+#: sentinel-gated: the handler then writes its RECEIPT unconditionally
+#: (`_update_onboarding_state(org_id, demo_created=True)`), `demo_created` is an
+#: OPERATIONAL key, and the CAS leg has no value-unchanged short-circuit — so
+#: every repeat re-stores the state and advances `state_version`. That is a real
+#: write, and it is why that tool is not declared idempotent. Measured on the
+#: embedded lane: two in-process
 #: concurrent `create_point(..., dedup=True)` calls minted two nodes with the
 #: identical `content_hash` in 14 of 20 rounds, while the sequential control
 #: converged on one id. That is the absent fourth precondition of #5064, tracked

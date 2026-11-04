@@ -49,7 +49,7 @@
 # a constant here.
 manifest_version: 1
 issue: 3863
-cut_at_commit: de53c5ee2501b45320c554970e1c51822f3051e6
+cut_at_commit: fe930a7ccac412aac0dece3ce0c0b781573a14d2
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -2576,7 +2576,9 @@ rows:
   keyword_rank: 2
   cluster: null
   canonical: null
-  job: Create the demo epistemic graph (4 layers) for this team. Idempotent (Q4).
+  job: 'Create the demo epistemic graph (4 layers) for this team. The SEED is sentinel-gated (a repeat files no
+    new nodes), but the call is NOT idempotent: the handler then writes its onboarding receipt, whose CAS leg re-stores
+    the state and advances state_version on every repeat.'
   dependency: 'handler-served: no declared SDK link'
   lifecycle: active
   used_by: never called, tooling, docs

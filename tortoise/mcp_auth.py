@@ -865,9 +865,10 @@ _TRANSPORT_WAIT_BOUND_WRITE_MESSAGE = (
     "write may still complete on the server, so this refusal is NOT a statement "
     "that nothing was written. Read error.data.committed — or, on a tool with a "
     "wrapped result, _meta.tortoise_error.data.committed — then follow its "
-    "retry_rule: a repeat is only ever safe for an operation that "
-    "converges, or for one that was a preview and wrote nothing. Wait for the "
-    "advertised delay before retrying."
+    "retry_rule: that field — not this message, and not the tool's idempotency "
+    "hint — is what decides whether a repeat is safe for THIS call, because a "
+    "converging operation can still be called in a way that does not converge. "
+    "Wait for the advertised delay before retrying."
 )
 
 
