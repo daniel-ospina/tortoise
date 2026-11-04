@@ -1862,6 +1862,20 @@ def test_ORPHAN_MAX_AGE_H_gates_the_unowned_arm(tmp_path, monkeypatch):
     assert "ownership is NOT determined" in joined, out
     assert "backstop is 24h" in joined, out
 
+    # Case 3 — the AGE FLOOR, isolated from the gap gate. The container is 1 h
+    # old (inside the 24 h backstop) while its lease gap is 40 h: only the
+    # `age_h < ORPHAN_MAX_AGE_H` comparison keeps it. Delete that comparison and
+    # this case reaps, so the mutation claim above is now true of the comparison
+    # itself, not merely of the constant.
+    removed.clear()
+    monkeypatch.setattr(tl, "_started_epoch", lambda _n: time.time() - 3600)
+    monkeypatch.setattr(tl, "_unused_gap", lambda _n, **k: 40.0)
+    out = tl.reap_orphans()
+    assert removed == [], (removed, out)
+    joined = "\n".join(out)
+    assert "ownership is NOT determined" in joined, out
+    assert "backstop is 24h" in joined, out
+
 
 def test_a_live_cross_clone_lane_spares_its_container_by_SLUG(tmp_path, monkeypatch):
     """The git blind spot, closed by /proc. A container owned by ANOTHER clone on
