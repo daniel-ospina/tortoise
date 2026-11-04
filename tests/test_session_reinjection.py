@@ -1070,9 +1070,17 @@ def test_the_pool_only_arm_censuses_the_prefix_the_reader_receives(
     ``min(eff_item_cap, top_k)`` is the tightest window that arm admits: the
     count becomes a CEILING there (nothing below the cut can reach the
     reader) — not the delivered set, because a skipped hit inside the prefix
-    still over-counts — and never an under-count. That narrowing is not
-    available to the R6 rerank arm, whose ``pool = selected`` re-SELECTS from
-    the whole pool.
+    still over-counts — and it UNDER-counts whenever ``top_k >
+    eff_item_cap``, because the cut then sits above the window and a skipped
+    hit frees a slot the reader walks past it with (the same under-count as
+    every other arm; ``retrieve.py`` states the condition). That narrowing is
+    not available to the R6 rerank arm, whose ``pool = selected`` re-SELECTS
+    from the whole pool.
+
+    ⛔ The window is derived from the truncation SHAPE, not from the
+    pool-only FLAG (#10632 review ISSUE 1): the same prefix cut happens on
+    the two R6 degrade arms, which no flag here can see — see
+    ``test_the_degrade_arms_census_the_prefix_the_reader_receives``.
 
     Non-vacuity: pre-fix the caller reports ``window: 40`` on this arm, so the
     first assertion reds (``assert 40 == 8``); pre-fix every injected item is
@@ -1124,6 +1132,78 @@ def test_the_pool_only_arm_censuses_the_prefix_the_reader_receives(
     assert st_default["reader_window_displacement"]["window"] == 40
     assert (st_default["reader_window_displacement"]["injected_in_window"]
             == st_default["injected_merged"])
+
+
+def test_the_degrade_arms_census_the_prefix_the_reader_receives(
+        deep_seeded_sdk, monkeypatch):
+    """#10632 review ISSUE 1 (P2): the DEGRADE arms cut the same prefix.
+
+    ``retrieve_for_question`` truncates the delivered pool to ``top_k`` at
+    THREE sites: the pool-only arm, the D3(a)/S25 load-failure degrade
+    (``get_scorer`` returns ``None``) and the D8c score-failure degrade
+    (``rerank_hits`` reports ``applied: False``). The last two are decided by
+    the R6 stage, so the flag test that narrowed the window for the pool-only
+    arm could not see them: the window stayed the reader's item cap (40)
+    while the reader received at most ``top_k`` — so ``injected_in_window`` /
+    ``base_displaced`` over-reported crowding, and ``sessions_lost`` could
+    name a session as lost that the reader never had, all stamped
+    ``measured: True``. The window now follows the truncation SHAPE: each
+    cutting site declares its cut and the census is taken after R6.
+
+    Non-vacuity: pre-fix both arms report ``window: 40`` against a
+    ``len(hits) == top_k == 8`` surface, so the first assertion reds; and
+    every injected item sits inside 40, so ``injected_in_window`` equals
+    ``injected_merged`` and the second reds too. The applied arm is measured
+    beside them as the CONTROL: it re-selects rather than cuts a prefix, so
+    narrowing it would under-count every item the reranker lifted from below
+    the window — its window must stay the resolved item cap.
+    """
+    from tools.longmem_eval import rerank as _rerank
+    from tools.longmem_eval.retrieve import retrieve_for_question
+
+    q = _question()
+    top_k = 8
+
+    class _Boom:
+        def score(self, query, contents):
+            raise RuntimeError("predict exploded mid-run")
+
+    def _census(monkeypatch, arm, scorer_result):
+        monkeypatch.setattr(_rerank, "get_scorer",
+                            lambda model=None: scorer_result)
+        ret = retrieve_for_question(
+            deep_seeded_sdk, q, ks=(5,), top_k=top_k, pool_size=60,
+            session_reinjection=True, rerank=True)
+        assert ret["rerank_pass"]["applied"] is False, arm
+        # precondition: the reader's surface really IS the cut prefix, so a
+        # window wider than len(hits) censuses items nobody received
+        assert len(ret["hits"]) == top_k, (arm, len(ret["hits"]))
+        census = ret["session_reinjection_stats"]["reader_window_displacement"]
+        assert census["measured"] is True, (arm, census)
+        # (1) the window is the surface the reader receives, not the item cap
+        assert census["window"] == len(ret["hits"]) == top_k, (arm, census)
+        # (2) therefore items below the cut are NOT counted as crowding
+        injected_merged = ret["session_reinjection_stats"]["injected_merged"]
+        assert 0 < census["injected_in_window"] < injected_merged, (
+            arm, census, injected_merged)
+        return census
+
+    load_failure = _census(monkeypatch, "load-failure degrade",
+                           (None, "load failed: boom"))
+    score_failure = _census(monkeypatch, "score-failure degrade",
+                            (_Boom(), ""))
+    assert score_failure["window"] == load_failure["window"] == top_k
+
+    # CONTROL: the applied arm re-selects from the whole pool, so no prefix
+    # describes what the reader received — its window stays the item cap
+    monkeypatch.setattr(_rerank, "get_scorer",
+                        lambda model=None: (_rerank.FakeScorer(), ""))
+    applied = retrieve_for_question(
+        deep_seeded_sdk, q, ks=(5,), top_k=top_k, pool_size=60,
+        session_reinjection=True, rerank=True)
+    assert applied["rerank_pass"]["applied"] is True
+    assert (applied["session_reinjection_stats"]["reader_window_displacement"]
+            ["window"] == 40)
 
 
 def test_the_census_window_is_the_readers_item_cap_not_the_pool(

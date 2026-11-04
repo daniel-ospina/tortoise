@@ -1322,6 +1322,12 @@ def test_the_pool_only_window_is_not_claimed_as_a_hard_ceiling():
 
     Non-vacuity: pre-fix the source says "never under-counts" and "the cut is
     below the reader's walk", so the first assertion reds.
+
+    #10632 review ISSUE 2 (P3): the SAME falsified sentence had survived in
+    the test that polices it — the pool-only arm's docstring in
+    ``tests/test_session_reinjection.py`` said the narrowed count is "never an
+    under-count". Pinning ``retrieve.py`` alone let the claim live on in the
+    prose of the file whose job is to keep it out, so BOTH files are read.
     """
     src = (ROOT / "tools" / "longmem_eval" / "retrieve.py").read_text(
         encoding="utf-8")
@@ -1335,6 +1341,14 @@ def test_the_pool_only_window_is_not_claimed_as_a_hard_ceiling():
     assert "walks past ``eff_item_cap``" in flat, (
         "the comment must say WHY it under-counts above that condition: the "
         "reader's walk extends past the window")
+    prose = " ".join((ROOT / "tests" / "test_session_reinjection.py")
+                     .read_text(encoding="utf-8").split())
+    assert "never an under-count" not in prose, (
+        "the test that polices the no-under-count claim cannot carry the "
+        "falsified sentence itself")
+    assert "UNDER-counts whenever ``top_k > eff_item_cap``" in prose, (
+        "the pool-only docstring must state the under-count condition the "
+        "source states, not only stop over-claiming")
 
 
 def test_the_pool_only_under_count_is_MEASURED_not_merely_asserted_in_prose():
