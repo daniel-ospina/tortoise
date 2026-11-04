@@ -708,6 +708,14 @@ def test_the_launcher_acts_on_a_failed_window_and_stays_idle_on_a_green_one(tmp_
     assert "--apply" in invoked, (
         "a failed window IS the handoff — the local fallback must run the tool "
         f"(#9365); invocations were {invoked!r}, log={log!r}")
+    # ...and it must run THIS checkout's tool. Without this leg the `env.pop("TORTOISE_REPO")`
+    # in `fire()` is unobserved — a host that exports TORTOISE_REPO (cell-1 exports
+    # it as the MAIN checkout) redirects the launcher, and every assertion above still
+    # passes while the pin reports on code the tree under test never contained (#10399,
+    # measured as #10830). Same runtime leg the sibling pin at :1056 already models.
+    assert str(Path(__file__).resolve().parents[1] / "tools/ci_check_repair.py") in invoked, (
+        "the launcher must run the checkout under test — an inherited TORTOISE_REPO "
+        f"redirects it at another checkout (#10830); invocations were {invoked!r}")
 
 
 def test_reopen_is_deferred_while_the_head_still_has_runs_in_flight(monkeypatch):
