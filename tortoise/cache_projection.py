@@ -47,13 +47,15 @@ THE FOUR PROPERTIES, AND WHERE EACH LIVES
    schema declares a column for it and does not refuse it. The property→column
    decision is **read from disk** — the schema (#7968) and the placement table
    (#7955) — never restated here, so a new column is a loud failure rather than
-   a silent drop. ⛔ **One declared NARROWING (#10853):** an EPISODIC Source —
-   EITHER identity arm, `_EPISODIC_SOURCE_URL_PREFIX` or
-   `_EPISODIC_SOURCE_KIND` — never carries the COLUMNS in
-   :data:`_EPISODIC_SOURCE_PROSE_COLUMNS` (`summary`, `_search_text`; graph
-   property `_searchText`) onto its node, because §9.1/D1 places captured turn
-   text in the record and never on a graph node — see that table for the rule,
-   its bound, and its costs.
+   a silent drop. ⛔ **One declared NARROWING (#10853, narrowed again by
+   #10965):** an EPISODIC Source — EITHER identity arm,
+   `_EPISODIC_SOURCE_URL_PREFIX` or `_EPISODIC_SOURCE_KIND` — never carries the
+   COLUMNS in :data:`_EPISODIC_SOURCE_PROSE_COLUMNS` (`summary`, `_search_text`;
+   graph property `_searchText`) onto its node **when the row holds the
+   pre-#10000 derivation**, because §9.1/D1 places captured turn text in the
+   record and never on a graph node. The decision is per ROW, from the row's own
+   values (#10000's rows carry the topic lexicon there, not prose) — see that
+   table for the rule, its bound, and its costs.
 3. **Rebuildable from the record alone.** The plan is a pure function of the
    record view: same view ⇒ same statements (idempotent), and the written field
    set equals the record view's field set exactly (never a superset). ⚠️ One
@@ -83,35 +85,35 @@ THE FOUR PROPERTIES, AND WHERE EACH LIVES
    field is covered on every writer the record can carry — with the residues the
    table names (birth-on-ON-MATCH, ordering, ambiguous names, a null clear).
    A **fourth** declared exception is :data:`_EPISODIC_SOURCE_PROSE_COLUMNS`
-   (#10853), and unlike the three above it narrows the field set instead of
-   widening it: an EPISODIC Source's `summary` and `_search_text` columns
-   (graph property `_searchText`) are §9.1/D1 turn prose, the record keeps them
-   and the cache declines them. Three costs, named here and at that table rather
-   than implied:
+   (#10853, narrowed by #10965), and unlike the three above it narrows the field
+   set instead of widening it: an EPISODIC Source's `summary` and `_search_text`
+   columns (graph property `_searchText`) are §9.1/D1 turn prose **on a
+   pre-#10000 row**, the record keeps them and the cache declines them. The drop
+   is decided per ROW, from the row itself, because #10000 replaced the
+   derivation: a post-#10000 `_search_text` is the session's topic lexicon —
+   exactly `", ".join(topics)` — and it IS projected, because it is the only field
+   the Source FTS index is declared on and dropping it would un-index a restored
+   session (#3518). `summary` stays declined on every row. Costs, named here and
+   at that table rather than implied:
 
-   * the **journal fold** still projects the value until #10000's capture-side
-     change lands, so the two rebuild paths disagree on that one column until
-     then — in the ruling's direction, and converging with it;
-   * **graph-side FTS** over a session Source's own utterances goes with the
-     prose. The value survives in the record and is retrievable by a column read
-     (`record_serve.read_node`, `record-text`); there is no record-side text
-     INDEX;
-   * **`record-reconcile`** builds its RECORD side through this same projector,
-     so its truth side omits what the cache holds. The population is NOT
-     "legacy": at this head the capture still writes and journals the pair, so
-     every session this build captures is in it. That is why the pair is marked
-     CACHE-OWNED for an episodic Source
-     (:func:`episodic_source_prose_properties`, consumed by
-     `record_reconcile.scan_cache_view`) and counted under its own `graph_only`
-     bucket — visible, and not a divergence against a record that is correct.
-     The graph side is repaired by a record-sourced re-projection
-     (`record-restore` / `rebuild_from_record`, which re-materialise through this
-     projector) — **for a node the projection CREATES**. The write is additive
+   * the **journal fold** projects the pair the capture wrote, and the record fold
+     now projects the same post-#10000 pair, so the two rebuild paths agree on
+     `_searchText`; they disagree only on `summary` (declined on the record door);
+   * **graph-side FTS** survives on a post-#10000 row (the lexicon is restored) and
+     goes, with the prose, on a legacy one — where there is no non-prose value to
+     keep;
+   * **`record-reconcile`** builds its RECORD side through this same projector, so
+     its truth side HOLDS `_searchText` for a post-#10000 row, and
+     `_partition_cache_owned` keeps every name the record side holds — so a
+     drifted `_searchText` is COMPARED and reds. `summary`, and a legacy row's
+     whole pair, remain CACHE-OWNED (:func:`episodic_source_prose_properties`,
+     consumed by `record_reconcile.scan_cache_view`) and are counted under their
+     own `graph_only` bucket — visible, and not a divergence against a record that
+     is correct. The repair for a legacy node is a re-capture (the capture now
+     overwrites the pair with the lexicon) or a record-sourced re-projection for a
+     node the projection CREATES: the write is additive
      (`MERGE … SET n += $props`, :func:`node_statement`), so a node that ALREADY
-     carries the pair keeps it across a re-projection; this arm stops the pair
-     being re-written, it does not clear an existing one. Clearing a populated
-     cache's stale pair needs an explicit property clear, and the sweep is
-     #10000's capture change.
+     carries the old pair keeps it across a re-projection.
 4. **A cold region reads ``not-hot``, never ``empty``.** ``declaration_for``
    writes the known-hot set **after** the writes and as a function of what was
    materialized, so a record key the projection did not write is not claimed
@@ -1190,33 +1192,51 @@ def _scalar(value: Any) -> Any:
     return value
 
 
-#: ⛔ §9.1/D1 AT THE PROJECTION DOOR (#10853) — the columns an EPISODIC
-#: (`session:`) Source may **not** carry onto its node, however the row was
-#: written.
+#: ⛔ §9.1/D1 AT THE PROJECTION DOOR (#10853, narrowed by #10965) — the columns an
+#: EPISODIC (`session:`) Source may **not** carry onto its node **when the row
+#: holds the PRE-#10000 derivation**.
 #:
-#: WHY THIS IS HERE AND NOT ONLY IN THE CAPTURE. `sdk._session_source_metadata`
-#: derives a *summary* from the transcript's first substantive utterance, and the
-#: capture writes it on the session `:Source` (`s.summary=$sum`). #10000's ruling
-#: (§9.1/D1) is that captured turn text lives in the RECORD, not on a graph node.
-#: The capture side of that is #10000's own change. This table is the OTHER door:
-#: every record-sourced READ and rebuild goes through :func:`node_from_row` —
+#: WHY THIS IS HERE AND NOT ONLY IN THE CAPTURE. A pre-#10000 capture derived BOTH
+#: columns from the transcript's first substantive utterance
+#: (`_session_source_metadata`, then `_source_search_text(summary=…)` — the
+#: capture path has no title) and wrote them on the session `:Source`
+#: (`s.summary=$sum`). #10000's ruling (§9.1/D1) is that captured turn text lives
+#: in the RECORD, not on a graph node. This table is the OTHER door: every
+#: record-sourced READ and rebuild goes through :func:`node_from_row` —
 #: `tortoise record-restore` and `rebuild_from_record` MATERIALISE a node with it,
 #: and `record_serve.read_node` answers the graph-engine-down read with
 #: the same map *because its contract is that the two cannot drift*. So a row
-#: written by a build that still placed the key would either re-materialise the
-#: prose **whatever build is reading it**, or make the served answer disagree
-#: with what a rebuild can carry — and nothing reds either way: a one-way
-#: divergence (`#10853`). Clearing the legacy rows would be a sweep that decays:
-#: at this head the capture still places the key, so the next capture of the same
-#: session writes the value straight back. A rule cannot decay.
+#: written by a build that still placed the sentence would re-materialise the
+#: prose **whatever build is reading it** — a one-way divergence (`#10853`). The
+#: rule cannot be a one-off sweep either: a session nobody re-captures keeps its
+#: row, so the decision belongs at the door.
 #:
-#: ⛔ THE PAIR IS ONE DATUM, which is why both COLUMNS are here (`summary`,
-#: `_search_text` — the graph property its mapping produces is `_searchText`). On
-#: the capture path there is no title, so `_source_search_text(summary=…)`
-#: resolves to the summary itself — dropping `summary` alone would leave the
-#: identical sentence on the node under `_searchText`, the "column next door" this
-#: module's own `_CONTENT_COLUMNS` note (record_projection) names as *"the SAME
-#: datum"*.
+#: ⭐ WHAT #10000 CHANGED, AND WHY THE PAIR IS NO LONGER ONE RULE. The capture now
+#: derives the session's TOPIC LEXICON — the most frequent content words of the
+#: (already redacted) transcript — and writes `summary` = a display DESCRIPTOR
+#: over it and `_searchText` = `", ".join(topics)`, both from the SAME list in ONE
+#: statement (`sdk._materialize_session_source`). So on a post-#10000 row
+#: `_search_text` is **not prose**: it is the lexicon, and it is the ONLY field
+#: the Source FTS index is declared on (`_FULLTEXT_INDEX_LABEL_FIELDS`), i.e. the
+#: field #3518's findability depends on. Dropping it by column NAME on such a row
+#: removes no prose and silently UN-INDEXES the session on the recovery door —
+#: the door whose entire purpose is that the value survives (#10965).
+#:
+#: ⛔ SO THE DROP IS DECIDED PER ROW, FROM THE ROW — and the test is EXACT, never a
+#: shape heuristic: the value IS `", ".join(topics)`, the join the capture computes
+#: from the very column that survives. A prose sentence is not that string; a
+#: prefix/suffix/"looks like a word list" test would re-index a legacy sentence
+#: whose opening words happened to match. See
+#: :func:`_episodic_source_search_text_is_the_lexicon`.
+#:
+#: ⛔ `summary` STAYS DECLINED ON EVERY ROW, and that is the stated residual
+#: (#10965), not an oversight: it is the same lexicon BEHIND
+#: `_SESSION_SOURCE_SUMMARY_PREFIX`, that prefix lives in the capture, and
+#: re-deriving it here would mean the projection importing the capture (a layering
+#: inversion). Without the prefix the descriptor is not mechanically separable
+#: from a prose sentence, so this column stays fail-closed. Cost, named: a
+#: record-restored (or served) session `:Source` carries no `summary` while a live
+#: one does.
 #:
 #: ⚠️ WHAT THIS DELIBERATELY DOES NOT TOUCH. `topics` is the capture's word
 #: lexicon (its most frequent content words), not a transcript slice, and it
@@ -1229,18 +1249,17 @@ def _scalar(value: Any) -> Any:
 #: ⚠️ THE THIRD COST, and it is an OBSERVATION instrument, where a permanent
 #: non-clean reads as noise: `python -m tortoise record-reconcile` builds its
 #: RECORD side through :func:`read_record_view` → `node_from_row`, so the truth
-#: side omits these two properties while the CACHE side holds them. That
-#: population is not "legacy" — at this head the capture still writes and
-#: journals them, so EVERY session this build captures would report
-#: `field_mismatches=2` forever. Left alone that is the class the reconciler
-#: itself grades P1 (*"a signal indistinguishable from noise is not
-#: observability"*), so the comparison is not left to carry it:
+#: side omits what this door declines while the CACHE side may hold it. Left as a
+#: `field_mismatch` that is the class the reconciler's own docstring grades P1
+#: (*"a signal indistinguishable from noise is not observability"*), so
 #: :func:`episodic_source_prose_properties` and
 #: `record_reconcile.scan_cache_view` mark the pair CACHE-OWNED for an episodic
-#: Source, and the reconciler counts them under `graph_only` — visible, and not
-#: a divergence against a record that is correct. The repair for the graph side
-#: is a record-sourced re-projection (`record-restore` / `rebuild_from_record`,
-#: which re-materialise through this projector), then #10000's capture change.
+#: Source and count it under `graph_only` — visible, and not a divergence against
+#: a record that is correct. ⭐ And the partition stays provenance-correct without
+#: a second predicate: `_partition_cache_owned` KEEPS every name the RECORD side
+#: holds, so on a post-#10000 row — where the record door now projects
+#: `_searchText` — the value is COMPARED (a drifted `_searchText` reds), while
+#: `summary`, and a legacy row's whole pair, stay cache-owned.
 _EPISODIC_SOURCE_PROSE_COLUMNS: frozenset[str] = frozenset({
     "summary", "_search_text",
 })
@@ -1343,6 +1362,42 @@ def _is_episodic_source_row(row: Mapping[str, Any]) -> bool:
             and isinstance(url, str) and "://" not in url and "/" not in url)
 
 
+def _episodic_source_search_text_is_the_lexicon(row: Mapping[str, Any]) -> bool:
+    """Is this row's `_search_text` the post-#10000 LEXICON derivation (#10965)?
+
+    The ONE mechanical question that separates the two derivations of the session
+    `:Source`'s pair, asked of the ROW rather than of the build that wrote it:
+    #10000's capture writes `_searchText = _source_search_text(topics=topics)`, and
+    `_source_search_text` renders a topic list as `", ".join(topics)`, storing
+    that same `topics` in the same statement. So the derivation is present iff the
+    stored text IS the join — compared as a STRING, exactly.
+
+    ⛔ EXACT EQUALITY, never a shape test. `startswith`, "contains no sentence",
+    "few words", or a case-folded compare would accept a legacy row's sentence
+    whose opening words happen to match the join, and re-index it — the §9.1/D1
+    prose this module declines, smuggled back by a heuristic. The near-miss shapes
+    are pinned in `tests/test_10853_session_source_prose.py`.
+
+    ⛔ FAIL-CLOSED ON EVERY UNCERTAIN SHAPE. A `topics` column that is not a list
+    of non-empty strings (NULL, a JSON string, a list with a hole, empty) cannot
+    prove the derivation, so the row is treated as legacy and the pair stays
+    declined. The cost of a false negative is a session that stays unfindable on
+    the recovery door until it is re-captured (visible, and named at the table);
+    the cost of a false POSITIVE is turn prose on a graph node, which nothing
+    reds — so the polarity is not a preference.
+    """
+    search_text = row.get("_search_text")
+    if not isinstance(search_text, str) or not search_text:
+        return False
+    topics = row.get("topics")
+    if not isinstance(topics, (list, tuple)) or not topics:
+        return False
+    tokens = [t for t in topics if isinstance(t, str) and t]
+    if len(tokens) != len(topics):
+        return False
+    return search_text == ", ".join(tokens)
+
+
 def is_episodic_source_node(props: Mapping[str, Any]) -> bool:
     """The same two identity arms, read off a CACHE node (graph property names).
 
@@ -1396,6 +1451,16 @@ def _props_from_row(table: str, row: Mapping[str, Any], *,
     projected = projected_columns(table)
     # §9.1/D1 (#10853): resolved ONCE per row, from the row itself.
     episodic_source = table == "source" and _is_episodic_source_row(row)
+    # ⛔ PROVENANCE, PER ROW (#10965) — never the column's NAME. On a post-#10000
+    # row `_search_text` is the topic lexicon (exactly `", ".join(topics)`), not
+    # prose, and it is the ONLY field the Source FTS index is declared on, so
+    # dropping it un-indexes a restored session. `summary` is NOT relaxed: the
+    # display prefix it carries is not re-derivable in this module, so the
+    # descriptor stays indistinguishable from a prose sentence here (the table
+    # above states that residual).
+    prose_columns = _EPISODIC_SOURCE_PROSE_COLUMNS
+    if episodic_source and _episodic_source_search_text_is_the_lexicon(row):
+        prose_columns = prose_columns - {"_search_text"}
     out: dict[str, Any] = {}
     tail_keys: set[str] = set()
     for column, value in row.items():
@@ -1417,10 +1482,11 @@ def _props_from_row(table: str, row: Mapping[str, Any], *,
             continue
         if column in bookkeeping_columns(table) or column in skip:
             continue
-        if episodic_source and column in _EPISODIC_SOURCE_PROSE_COLUMNS:
+        if episodic_source and column in prose_columns:
             # ⛔ §9.1/D1: a session `:Source` never carries turn prose, whatever
-            # build wrote the row. See `_EPISODIC_SOURCE_PROSE_COLUMNS` for the
-            # rule, its pre-existing-capture cost, and its bound.
+            # build wrote the row — decided by the row's own provenance, not by
+            # the column's name (#10965). See `_EPISODIC_SOURCE_PROSE_COLUMNS` for
+            # the rule, its pre-existing-capture cost, and its bound.
             continue
         if column in refused:
             # The EP carve-out and the projection-owned caches. Dropped BY NAME
@@ -1451,6 +1517,10 @@ def _props_from_row(table: str, row: Mapping[str, Any], *,
         # said, so a `_search_text` tail key is the snake spelling of the same
         # datum and would otherwise survive (`_search_text` IS a real column, so
         # the tail can carry that spelling where it cannot carry `_searchText`).
+        # ⭐ AND THE TAIL DOOR STAYS UNCONDITIONAL — it is NOT narrowed by the
+        # per-row provenance test (#10965): nothing DERIVES this pair into the
+        # tail (the writer classifies both names as COLUMNS), so a tail key is by
+        # construction unclassified prose the row smuggled round the column door.
         # ⛔ AND IT UNDOES ONLY WHAT THE TAIL ADDED. Rebuilding `out` wholesale
         # made this filter SUBSUME the column-loop guard above: deleting that
         # guard reddened nothing at all (measured — 20 passed), so the two doors

@@ -191,23 +191,33 @@ to have none.
 direction from the three widening exceptions the module names
 (`FOLD_ON_CREATE_DEFAULTS`, `DERIVED_FROM_RECORD`, `EVENT_STREAM_FOLDS`):
 `public.source.summary` and `public.source._search_text` are §9.1/D1 turn prose
-when the Source is a captured session, so
-`cache_projection._EPISODIC_SOURCE_PROSE_COLUMNS` declines to project them onto
-the node. The record keeps the values (the row is not mutated, and they are
-retrievable by a column read — `record_serve.read_node`, `record-text`; there is
-no record-side text INDEX), and `topics` — the capture's word lexicon — still
-projects.
+when the Source is a captured session **and the row holds the pre-#10000
+derivation**, so `cache_projection._EPISODIC_SOURCE_PROSE_COLUMNS` declines to
+project them onto the node. The record keeps the values (the row is not mutated,
+and they are retrievable by a column read — `record_serve.read_node`,
+`record-text`; there is no record-side text INDEX), and `topics` — the capture's
+word lexicon — still projects.
+
+⭐ **The decision is per ROW, from the row's own values (#10965).** #10000
+replaced the derivation: the capture now writes `summary` = a display DESCRIPTOR
+over the session's topic lexicon and `_searchText` = `", ".join(topics)`, both
+from the SAME list in one statement. So on a post-#10000 row `_search_text` is not
+prose — it is the lexicon, and it is the only field the Source FTS index is
+declared on, which makes dropping it an UN-INDEXING of every restored session on
+the recovery door rather than a §9.1/D1 measurement. `_search_text` is therefore
+projected when the row proves the derivation (exact equality with
+`", ".join(topics)` — never a shape test), and declined otherwise. `summary` stays
+declined on every row: it is the same lexicon behind `_SESSION_SOURCE_SUMMARY_PREFIX`,
+the prefix lives in the capture, and without it the descriptor is not mechanically
+separable from a prose sentence here — a stated residual, not an oversight.
 
 Why it lives here rather than only in the capture: every record-sourced read and
 rebuild goes through `cache_projection.node_from_row` — `tortoise record-restore`
 and `rebuild_from_record` materialise a node with it, and
 `record_serve.read_node` answers with the same map because its contract is
 that a served node and a rebuilt node cannot drift. So a row written by a build
-that still placed the key either re-creates the prose **whatever build is reading
-it** or makes the served answer disagree with the rebuild — the one-way divergence
-`#10853` measured. Sweeping the existing rows instead would decay: at this head
-the capture still writes the value, so the next capture of the same session writes
-it straight back.
+that still placed the sentence re-creates the prose **whatever build is reading
+it** — the one-way divergence `#10853` measured.
 
 ### Which rows are EPISODIC — two identity arms, and three flags that are NOT signals
 
@@ -235,30 +245,26 @@ disabled this exclusion on the corpus #9914 targets"*. Here the cost is worse �
 the prose guard would strip a document's own frontmatter summary and its
 title-derived `_searchText`, silently un-indexing it in the cache.
 
-### Three costs, named rather than implied
+### Costs, named rather than implied
 
-* the **journal fold** still projects the value until #10000's capture-side change
-  lands, so the two rebuild paths disagree on that one column until then — in the
-  ruling's direction, and converging with it;
-* graph-side FTS over a session Source's own utterances goes with the prose. The
-  value survives in the record (retrievable by a column read; there is no
-  record-side text index), and #10000 replaces the capture's summary with a topic
-  lexicon;
+* the **journal fold** projects the pair the capture wrote and the record fold now
+  projects the same post-#10000 pair, so the two rebuild paths agree on
+  `_searchText`; they disagree only on `summary` (declined on the record door);
+* graph-side FTS survives on a post-#10000 row — the lexicon is restored — and
+  goes, with the prose, on a legacy one, where there is no non-prose value to
+  keep. A legacy session stays unfindable on the recovery door until it is
+  re-captured (the capture now overwrites the pair with the lexicon);
 * `python -m tortoise record-reconcile` builds its RECORD side through the same
-  projector, so its truth side omits what the cache holds. **The population is not
-  "legacy"**: at this head the capture still writes and journals the pair, so
-  every session this build captures would report `field_mismatches` forever — the
-  "signal indistinguishable from noise" the reconciler's own docstring grades P1.
-  So `scan_cache_view` marks the pair CACHE-OWNED for an episodic Source
-  (`cache_projection.episodic_source_prose_properties()`) and the run counts it
-  under its own `graph_only` bucket: visible, and not a divergence against a
-  record that is correct. The graph side is repaired by a record-sourced
-  re-projection (`record-restore` / `rebuild_from_record`, which re-materialise
-  through this projector) — **for a node the projection CREATES**. The write is
-  additive (`MERGE … SET n += $props`), so a node that ALREADY carries the pair
-  keeps it across a re-projection: this arm stops the pair being re-written, it
-  does not clear one. Clearing a populated cache's stale pair needs an explicit
-  property clear, and the sweep is #10000's capture change.
+  projector, so its truth side HOLDS `_searchText` for a post-#10000 row — and
+  the cache-owned partition keeps every name the record side holds, so a drifted
+  `_searchText` is compared and reds. `summary`, and a legacy row's whole pair,
+  are CACHE-OWNED for an episodic Source
+  (`cache_projection.episodic_source_prose_properties()`) and counted under their
+  own `graph_only` bucket: visible, and not a divergence against a record that is
+  correct. The graph side of a legacy node is repaired by a record-sourced
+  re-projection (`record-restore` / `rebuild_from_record`) — **for a node the
+  projection CREATES**: the write is additive (`MERGE … SET n += $props`), so a
+  node that ALREADY carries the pair keeps it across a re-projection.
 
 ### The pin
 
