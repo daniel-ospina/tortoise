@@ -78,6 +78,7 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     )
 
 import argparse
+import errno
 import fcntl
 import json
 import os
@@ -423,6 +424,25 @@ class _GhRun:
         self.remedy = remedy
 
 
+def _oserror_remedy(exc: OSError) -> str:
+    """What to do about a spawn failure that is NOT a missing binary, by ERRNO.
+
+    ⛔ ONE REMEDY FOR EVERY CAUSE TELLS MOST CAUSES TO FIX THE WRONG THING (review,
+    `#10777`). The cause is already printed; the remedy has to match it, or the
+    operator is walked to the wrong repair — `chmod` for a worktree that no longer
+    exists, "reinstall `gh`" for a box that is simply out of process slots.
+    """
+    if exc.errno in (errno.EACCES, errno.EPERM):
+        return "make `gh` executable (`chmod +x`), or pass --repo"
+    if exc.errno in (errno.EAGAIN, errno.ENOMEM):
+        return ("the box could not spawn a process — retry when it is not loaded, "
+                "or pass --repo")
+    if exc.errno == errno.ENOTDIR:
+        return ("the working directory is not a directory — run from a live "
+                "checkout, or pass --repo")
+    return "check the working directory and the `gh` install, or pass --repo"
+
+
 def _gh(argv: list[str], cwd: Path) -> _GhRun:
     """Run `gh` and NEVER raise for a missing binary or an unspawnable argv.
 
@@ -484,7 +504,7 @@ def _gh(argv: list[str], cwd: Path) -> _GhRun:
                       remedy="install the GitHub CLI, or pass --repo")
     except OSError as exc:
         return _GhRun(126, cause=f"could not run `gh`: {exc}",
-                      remedy="repair the `gh` install, or pass --repo")
+                      remedy=_oserror_remedy(exc))
     return _GhRun(out.returncode, out.stdout or "", stderr=out.stderr or "")
 
 def _resolve_repo(cwd: Path) -> str:

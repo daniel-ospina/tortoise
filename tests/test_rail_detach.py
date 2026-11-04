@@ -492,6 +492,11 @@ def test_a_gh_that_cannot_execute_is_not_reported_as_missing(tmp_path, monkeypat
     `fork` under cell load. Collapsing both onto `127` told the operator to
     install a binary they already had, so only a genuine PATH miss may say
     "not on PATH"; everything else must name what actually happened.
+
+    ⛔ AND THE REMEDY IS ASSERTED, not just the cause (review, `#10777`): this
+    docstring claimed a `chmod` remedy that no path in the code printed, so the
+    claim was unfalsifiable from the artifact it describes. The `OSError` arm is
+    keyed by errno now, and this arm pins the word it promises.
     """
     bin_dir = tmp_path / "unejecutable-bin"
     bin_dir.mkdir()
@@ -503,9 +508,32 @@ def test_a_gh_that_cannot_execute_is_not_reported_as_missing(tmp_path, monkeypat
     msg = str(exc.value)
     assert "is not on PATH" not in msg, msg
     assert "pass --repo" in msg, msg
+    assert "chmod" in msg, (
+        f"the remedy must match the cause (it is present, just not executable): {msg}")
 
     # And the same call answers `unreadable` rather than raising on this arm.
     assert rd._head_sha(tmp_path, "o/r", 5) == "unreadable"
+
+
+def test_a_cwd_that_is_not_a_directory_is_not_a_broken_gh_install(tmp_path):
+    """An `ENOTDIR` cwd is ALSO an `OSError`, and "repair the install" is wrong for it.
+
+    Review, `#10777`: the chdir remedy was made per-cause, but only for the
+    `FileNotFoundError` arm — a cwd that is present-but-a-FILE lands on
+    `NotADirectoryError` and was still told to repair a `gh` install that is fine.
+    Same defect one branch over, so the `OSError` arm is keyed by errno too.
+    """
+    not_a_dir = tmp_path / "not-a-dir"
+    not_a_dir.write_text("x", encoding="utf-8")
+    out = rd._gh(["repo", "view"], not_a_dir)
+    assert out.returncode == 126, (out.returncode, out.cause)
+    assert "repair the `gh` install" not in out.remedy, out.remedy
+    assert "not a directory" in out.remedy, out.remedy
+    assert str(not_a_dir) in out.cause, out.cause
+
+    with pytest.raises(rd.Refused) as exc:
+        rd._resolve_repo(not_a_dir)
+    assert "repair the `gh` install" not in str(exc.value), str(exc.value)
 
 
 def test_a_failed_chdir_is_not_reported_as_a_missing_binary(tmp_path):
