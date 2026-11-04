@@ -388,7 +388,9 @@ def _gh(argv: list[str], cwd: Path) -> subprocess.CompletedProcess:
     with a minimal non-login PATH and no `gh` (measured 2026-11-03: 20 red arms
     on `pi-runner-vm-2`, `gh: No such file or directory`, on a PR whose diff
     touches neither this tool nor its test). rc=127 is what a shell reports for
-    a missing command, so the callers' `returncode != 0` arms handle it.
+    a missing command, so the callers' `returncode != 0` arms handle it — the
+    same shape `tools/who_is_on.py` already uses for `git`
+    (`except FileNotFoundError: return 127, "", "<bin>: command not found"`).
     """
     try:
         return subprocess.run(argv, cwd=str(cwd), capture_output=True, text=True)
