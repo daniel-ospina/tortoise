@@ -45,6 +45,7 @@ this suite does not assert they are closed.
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -259,6 +260,44 @@ def _count(proj, label: str, prop: str, value: str) -> int:
         f"MATCH (n:{label} {{{prop}:$v}}) RETURN count(n)",
         params={"v": value},
     ).result_set[0][0])
+
+
+#: A DROPPED INDEX IS RETIRED ASYNCHRONOUSLY (#10807). FalkorDB keeps a LABEL's
+#: fields in ONE index and REBUILDS that whole index when a field is dropped, so
+#: until the engine's indexer thread finishes, `CALL db.indexes()` lists the
+#: RETIRED row (still naming the dropped field) beside the new one, whose status
+#: reads `[Indexing] N/M: UNDER CONSTRUCTION`. Measured on an idle lane: 0.3 s to
+#: converge; on a loaded CI runner the same window outlived the read, and the
+#: fixture's own vacuity guard reported a drop that had LANDED as a failed one
+#: (`test (g)`, run 41817275671, `the fixture could not drop the Point range
+#: index`). The bound below is a runaway guard, not an expected wait.
+_INDEX_SETTLE_TIMEOUT_SECONDS = 120.0
+_INDEX_SETTLE_POLL_SECONDS = 0.1
+
+
+def _index_cells_after_settle(
+        proj,
+        timeout: float = _INDEX_SETTLE_TIMEOUT_SECONDS) -> set[str]:
+    """`CALL db.indexes()` cells, once no Point index reports a rebuild in flight.
+
+    The waiting is the point: a rebuild's retired row still carries the field
+    the fixture just dropped, so a read taken during it says "the drop did not
+    happen" about a drop that did. Nothing here is tolerant of a drop that
+    really failed — the caller's assertions are unchanged, and a bound that
+    expires returns the mid-rebuild read that makes them fire.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        rows = proj.g.ro_query("CALL db.indexes()").result_set
+        cells = {str(cell) for row in rows for cell in row}
+        rebuilding = any(
+            str(row[0]) == "Point"
+            and any("UNDER CONSTRUCTION" in str(cell) for cell in row)
+            for row in rows
+        )
+        if not rebuilding or time.monotonic() >= deadline:
+            return cells
+        time.sleep(_INDEX_SETTLE_POLL_SECONDS)
 
 
 def _journal_lines(path: Path) -> list[dict]:
@@ -849,11 +888,19 @@ def test_schema_ddl_survives_the_armed_guard(armed_sdk, enforced):
 
     # Remove the two indexes this test is about, so their presence afterwards is
     # the armed sweep's work and nothing else.
+    #
+    # ⛔ AND THE REMOVAL IS AWAITED, NOT ASSUMED (#10807). A drop REBUILDS the
+    # label's one index on the engine's indexer thread, and the retired row keeps
+    # naming the dropped field until it finishes — so the guard below could read a
+    # catalogue that still said `pointKind` about a drop that had landed, and
+    # refuse a GOOD fixture (measured: `test (g)`, run 41817275671, on a loaded
+    # runner; 0.3 s to converge idle). `_index_cells_after_settle` waits for the
+    # rebuild to finish; the assertions are unchanged, so a drop that really
+    # cannot happen still fails here loudly rather than passing vacuously.
     with _graph_metadata_write_scope("test-fixture: drop the indexes"):
         proj.g._g.query("DROP INDEX ON :Point(pointKind)")
         proj.g._g.query("CALL db.idx.fulltext.drop('Point')")
-    before = {str(cell) for row in proj.g.ro_query("CALL db.indexes()").result_set
-              for cell in row}
+    before = _index_cells_after_settle(proj)
     assert not any("pointKind" in c for c in before), (
         "the fixture could not drop the Point range index, so the assertion "
         f"below would pass vacuously; catalogue={sorted(before)}")
