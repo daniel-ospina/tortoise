@@ -1040,10 +1040,13 @@ def _wait_bound_refusal_result(name: str | None = None,
     non-write-set tools DO mutate: ``tortoise_compute_confidence`` /
     ``tortoise_get_confidence`` are ``maintenance``-tier and re-store a
     re-derived score on a repeat (why the tier refuses ``writes=True`` for them),
-    and ``tortoise_onboarding_state`` is ``read``-tier but its registry leg
-    ``_get_onboarding_state`` runs ``_cas_write_onboarding_state(org_id, state,
-    0)`` when the state is missing — the same CAS that got the
-    ``tortoise_manage_sources(action="list")`` read-only arm removed below. So the
+    and ``tortoise_onboarding_state`` was ``read``-tier but its registry leg
+    ``_get_onboarding_state`` ran ``_cas_write_onboarding_state(org_id, state,
+    0)`` when the state was missing — the same CAS that got the
+    ``tortoise_manage_sources(action="list")`` read-only arm removed below. (That
+    name left the surface in #4282 Phase 3.2 and is in neither registry, so it is
+    history here, not a live example — the two ``maintenance``-tier names above
+    carry the point.) So the
     non-write-set arm makes NO mutation claim either way; it only declines to add
     the write-ambiguity payload. For a
     WRITE it may not — the seam ABANDONS the dispatch rather than cancelling it
