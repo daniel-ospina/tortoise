@@ -2536,10 +2536,13 @@ def _declared_floors(manifest_text: str) -> dict[str, DeclaredFloor]:
 
     Absent → no declarations, so every caller and fixture that carries no such key
     keeps its output. UNREADABLE → `DurationsBridgeError`, NEVER "no declarations":
-    that fail-open reading is the #10575 P1 this mechanism exists to prevent, and
-    the refused shapes are enumerated in the body below (a `null` block, an EMPTY
-    block, a non-mapping container, a per-row non-numeric value, an unknown
-    declaration key, a non-boolean `pinned`).
+    that fail-open reading is the #10575 P1 this mechanism exists to prevent. The
+    refused shapes are enumerated in the body below — ALL EIGHT of them, and the count
+    is stated so this list cannot silently fall behind the code again (it under-counted
+    by two, the unparseable document and the non-string row name, until #10704 review
+    round 6): an unparseable document, a `null` block, an EMPTY mapping, a non-mapping
+    container, a row name that is not a string, a per-row non-numeric value, an unknown
+    declaration key, and a non-boolean `pinned`.
     """
     import yaml
     try:
