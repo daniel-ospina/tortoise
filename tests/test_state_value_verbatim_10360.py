@@ -1144,14 +1144,22 @@ def test_the_registry_row_names_the_residual_that_still_stands():
     # is about; the non-exempt arm applies the full list.
     tail = sentences[last + 1:]
     for sentence in tail:
-        exempt = ("spelling" in sentence
-                  and not _UNIT_TOKEN.search(sentence))
-        for pattern in (_SPELLING_SENTENCE_REOPENING if exempt
-                        else _ADJACENCY_REOPENING):
-            m = re.search(pattern, sentence)
-            assert m is None, (
-                f"the row says {m.group(0)!r}, which reopens the adjacency gap "
-                f"this table closed: {sentence!r}")
+        # ⛔ THE WAIVER IS CLAUSE-SCOPED, NOT SENTENCE-SCOPED (review cycle 10,
+        # MEASURED: with the waiver on the whole sentence,
+        # "The SPELLING gap is open, and the carve-out is still open." and
+        # "…, and the carve-out is not closed." both PASSED — they match the
+        # full list's own `is … open` arm, waived only because the FIRST clause
+        # is honestly about spelling). A waiver for an honest clause must not
+        # travel to the next one.
+        for clause in re.split(r";|,?\s+(?:and|but)\s+", sentence):
+            exempt = ("spelling" in clause
+                      and not _UNIT_TOKEN.search(clause))
+            for pattern in (_SPELLING_SENTENCE_REOPENING if exempt
+                            else _ADJACENCY_REOPENING):
+                m = re.search(pattern, clause)
+                assert m is None, (
+                    f"the row says {m.group(0)!r}, which reopens the adjacency "
+                    f"gap this table closed: {clause!r}")
     assert not tail or any("spelling" in s for s in tail), (
         "a sentence after the adjacency claim says something other than the "
         f"disclosed SPELLING residual — inspect it: {tail!r}")
