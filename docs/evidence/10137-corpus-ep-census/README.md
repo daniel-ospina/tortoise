@@ -160,10 +160,13 @@ Measured 2026-10-31 on `main@eac49c0dd9aababd01016325a34a327481dd006c`.
 > move the numbers is an operator minted over an **already-live** claim — i.e. a
 > **resumed / partial ingest**, which this pre-registered fresh sample contains
 > none of (`ingest_v2` skips a point it already wrote but still writes the
-> operator over it). An operator with no `:Point` *target* would also have been
-> missed under the old incident query, but `ingest_v2` cannot mint one: its
-> operator loop drops any endpoint outside the point set. Treat these cells as
-> pre-fix values until a re-cut says otherwise.
+> operator over it). The only shape the old incident query could not reach at all
+> is an operator with NO `:Point` endpoint whatsoever — not one with no `:Point`
+> *target*: that query matched `(o)-[:IMPL|NAND]->(c:Point)`, and the source is
+> written as an outgoing edge too (`idx:0`), so a promoted draft SOURCE reached
+> it exactly as a target did. `ingest_v2` can mint neither: its operator loop
+> drops any endpoint outside the point set. Treat these cells as pre-fix values
+> until a re-cut says otherwise.
 
 > **Line citations below are into the MEASUREMENT commit** —
 > `main@eac49c0dd9aababd01016325a34a327481dd006c`, the tree this run was taken
