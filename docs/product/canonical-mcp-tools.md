@@ -259,8 +259,8 @@ surface is now **77 advertised tools** with **23** retired-forward entries — t
 more. `tortoise_graph_overview` (row 6) absorbs `tortoise_overview`, `tortoise_summarize_structure`,
 `tortoise_validate_domain`, `tortoise_audit` and `tortoise_dream_health`.
 
-Two consequences for readers of the paragraph below, which is left as written because it records the
-2026-10-27 ruling, not the current state:
+Three consequences for readers of the paragraph below, which is left as written because it records
+the 2026-10-27 ruling, not the current state:
 
 1. The count there (**18**) and its `18 of 18 verified` are that day's measurement. The population is
    **23** now, and it is still 23 of 23 verified — every pointer names a call that resolves.

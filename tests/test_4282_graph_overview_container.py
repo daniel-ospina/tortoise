@@ -102,6 +102,69 @@ class TestDeclaration:
         assert entry.writes is False
 
 
+class TestSectionOnlyMembers:
+    """A member absorbed as a SECTION while its door stays LIVE must stay live.
+
+    `tortoise_check_structure` is the one such member: it carries the #8482 wrap-envelope
+    repair (its output is `-> list[dict]`, so it has a declared envelope; the container
+    returns `Any` and has none). If a later batch retires it, that repair moves off the
+    advertised path — silently, because the shim keeps answering. These two tests are what
+    make that failure loud; without them `SECTION_ONLY_MEMBERS` was prose that read like
+    coverage.
+    """
+
+    @pytest.mark.parametrize("door,section", sorted(SECTION_ONLY_MEMBERS.items()))
+    def test_the_door_is_still_advertised(self, door, section):
+        live = {t.name for t in TOOL_REGISTRY}
+        assert door in live, (
+            f"{door} is absorbed as section {section!r} but must stay LIVE until the "
+            f"container has a declared output envelope (see the container's docstring)")
+        assert door not in RETIRED_USE_INSTEAD, f"{door} must not be a retirement pointer"
+
+    @pytest.mark.parametrize("door,section", sorted(SECTION_ONLY_MEMBERS.items()))
+    def test_the_section_still_reaches_it(self, door, section, monkeypatch):
+        called = []
+        monkeypatch.setattr(ms, f"tortoise_{door.removeprefix('tortoise_')}",
+                            lambda *a, **k: called.append((a, k)) or {"ok": True})
+        ms.tortoise_graph_overview(section=section)
+        assert called, f"section {section!r} no longer dispatches to {door}"
+
+
+class TestArgumentForwarding:
+    """The container must FORWARD `days`/`limit`/`entity_id`, not re-default them.
+
+    Nothing covered the container's own pass-through before: the sibling suite exercises
+    `tortoise_overview`, so a swapped `days`/`limit` in the container's delegate would have
+    red nothing.
+    """
+
+    @pytest.fixture
+    def door(self, monkeypatch):
+        seen = {}
+
+        def _fake(*args, **kwargs):
+            seen["args"] = args
+            seen["kwargs"] = kwargs
+            return {"ok": True}
+
+        monkeypatch.setattr(ms, "tortoise_stale", _fake)
+        monkeypatch.setattr(ms, "tortoise_list_topics", _fake)
+        return seen
+
+    def test_days_and_limit_reach_the_stale_door(self, door):
+        ms.tortoise_graph_overview(section="stale", days=7, limit=9)
+        assert door["kwargs"] == {"days": 7, "limit": 9}, door
+
+    def test_entity_id_reaches_the_topics_door(self, door):
+        ms.tortoise_graph_overview(section="topics", entity_id="point-42")
+        assert door["args"] == ("point-42",), door
+
+    def test_topics_without_an_entity_id_refuses_before_the_door(self, door):
+        result = ms.tortoise_graph_overview(section="topics")
+        assert "entity_id" in result["error"]
+        assert door == {}, "a refusal must not reach the door"
+
+
 class TestEveryPointerResolvesInOneHop:
     @pytest.mark.parametrize("name", sorted(RETIRED_INTO_CONTAINER | set(REPOINTED)))
     def test_pointer_names_the_container(self, name):
@@ -150,10 +213,12 @@ class TestSectionRouting:
                 return {"door": label}
             return _fn
 
-        for label in ("validate_domain", "audit", "dream_health", "issue_insight",
-                      "check_structure", "summarize_structure", "taxonomy", "health",
-                      "status", "stale"):
-            monkeypatch.setattr(ms, f"tortoise_{label}", record(label), raising=False)
+        # ONLY the doors this file asserts. `issue_insight` is not in this batch at all,
+        # and patching a name with `raising=False` silently CREATES it if it ever goes
+        # away — a spy that cannot fail is not coverage.
+        for label in ("validate_domain", "audit", "dream_health",
+                      "check_structure", "summarize_structure"):
+            monkeypatch.setattr(ms, f"tortoise_{label}", record(label))
         return calls
 
     def test_validate_domain_needs_its_domain(self, spy):

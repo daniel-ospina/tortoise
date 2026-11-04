@@ -5084,7 +5084,8 @@ def _overview_section(section: str, entity_id: str | None,
         return tortoise_status()
     if section == "stale":
         return tortoise_stale(days=days, limit=limit)
-    # ── #4282: the four the approved `graph_overview` container absorbs ──────
+    # ── #4282: the three sections this batch adds (a fourth, `issue_insight`, is NOT
+    # in this batch — its destination is `search_knowledge`) ──────────────────
     if section == "validate_domain":
         if not domain:
             return _SafeError(
@@ -5112,13 +5113,16 @@ def tortoise_overview(section: str | None = None,
     """Graph orientation in one call — consolidates the list_*/status/health/
     taxonomy/structure zoo (epic #888 W3, PR #912).
 
-    section selects one orient surface:
+    section selects one orient surface. The full set is `_OVERVIEW_SECTIONS`:
       taxonomy | structure | structure_check | pointkinds | tags | sources |
-      namespaces | graphs | topics | health | status | stale
+      namespaces | graphs | topics | health | status | stale | validate_domain |
+      audit | dream_health
     Each section returns exactly what the legacy tool returned.
 
-    Omit section → compact combined summary: {section: result} for every
-    section except topics (which requires entity_id). The UNCAPPED sections
+    Omit section → compact combined summary: {section: result} for every section NOT in
+    `_OVERVIEW_SUMMARY_SKIP` — `topics` (requires entity_id) and the three #4282 additions
+    are excluded, so the default envelope stays the eleven keys it has always had
+    (`_OVERVIEW_DEFAULT_SUMMARY_KEYS`). The UNCAPPED sections
     whose size grows with the graph's ROWS rather than its shape (a fixed
     vocabulary) are reported as bounded counts, never as rows, so the summary
     stays compact as the graph grows (#3510). Each number in a section's
