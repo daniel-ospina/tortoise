@@ -12,7 +12,9 @@ hosted deployment's log said:
 
 A 302-write failure had no attributable cause on the deployment's own log. It
 now names the STATEMENT, its TABLE and COLUMNS with their values, and the
-entity/point id, on top of the driver's own `str(exc)`. `/health` also stopped
+entity/point id, plus the driver's PRIMARY message — never its `DETAIL`/`CONTEXT`,
+which quote the refused row and would put back the very value the attribution half
+withholds (`_primary_message`). `/health` also stopped
 answering `ok` while rows were being dropped — its verdict is
 `refusing: {reason, age_s}` inside a bounded window, `degraded`, and a reason's
 remedy (`#10185`, the open home for that half: a cumulative counter cannot say
@@ -68,7 +70,8 @@ class _BoomCursor:
     assert the attribution of a failure that never happens.
     """
 
-    def __init__(self, message: str, refuse_on: str = "INSERT INTO public.point") -> None:
+    def __init__(self, message: str | BaseException,
+                 refuse_on: str = "INSERT INTO public.point") -> None:
         self.message = message
         self.refuse_on = refuse_on
         self.executed: list[tuple[str, object]] = []
@@ -77,6 +80,8 @@ class _BoomCursor:
         self.executed.append((sql, params))
         if self.refuse_on not in sql:
             return
+        if isinstance(self.message, BaseException):
+            raise self.message
         raise RuntimeError(self.message)
 
 
@@ -84,6 +89,36 @@ _JSON_REFUSAL = (
     'invalid input syntax for type json\nDETAIL:  Token "err4032" is invalid.\n'
     "CONTEXT:  JSON data, line 1: err4032 release"
 )
+
+
+class _DriverDiag:
+    """The fields `psycopg2.extensions.Diagnostics` exposes on a driver error."""
+
+    def __init__(self, primary: str, detail: str | None = None,
+                 context: str | None = None) -> None:
+        self.message_primary = primary
+        self.message_detail = detail
+        self.context = context
+
+
+class _DriverError(Exception):
+    """A psycopg2-SHAPED refusal: SQLSTATE on `pgcode`, the fields on `diag`.
+
+    ``str(exc)`` is the DRIVER's own formatting — the primary message first, then
+    the optional ``DETAIL:`` and ``CONTEXT:`` lines — which is the shape that put
+    a refused value back into the very line this module withholds it from.
+    """
+
+    def __init__(self, primary: str, *, code: str = "22P02",
+                 detail: str | None = None, context: str | None = None) -> None:
+        self.pgcode = code
+        self.diag = _DriverDiag(primary, detail, context)
+        parts = [primary]
+        if detail:
+            parts.append(f"DETAIL:  {detail}")
+        if context:
+            parts.append(f"CONTEXT:  {context}")
+        super().__init__("\n".join(parts))
 
 
 def _point_record(key: str, search_keys: object) -> dict:
@@ -119,10 +154,11 @@ def test_a_failed_write_names_the_statement_table_and_columns(monkeypatch):
         "the failing COLUMN must be named — the driver's own message does not "
         f"contain it: {message}"
     )
-    assert "search_keys=err4032 release" not in message, (
-        "the user's text reached the log through the column — the ATTRIBUTION "
-        "must not pair the column with its value (the driver's own CONTEXT line "
-        f"may legitimately restate the value it refused): {message}"
+    assert "err4032 release" not in message, (
+        "the user's text reached the log — from the ATTRIBUTION (a column paired "
+        "with its value) or from the DRIVER's own `CONTEXT:`/`DETAIL:` fields, "
+        "which quote the very value that was refused: "
+        f"{message}"
     )
     assert "node_key=pt-err4032" in message, (
         f"the entity/point id must be named: {message}"
@@ -171,6 +207,122 @@ def test_the_attribution_pairs_columns_when_the_builder_declared_them():
 
     assert "node_key=pt-1" in text and "search_keys=<" in text, (
         f"an ordinary upsert names each column (values withheld where content): {text}"
+    )
+
+
+def test_the_driver_clause_carries_the_sqlstate_and_never_the_row_dump(monkeypatch):
+    """⛔ `str(exc)` on a driver error is NOT the terse message (#10648 review P2).
+
+    The protocol carries the primary message (`M`) *and* two optional fields that
+    quote the data: `DETAIL` (for `22P02`, the refused token) and `CONTEXT` (the
+    fragment being read). psycopg2's `str(exc)` is those fields CONCATENATED — so
+    interpolating it re-emitted `err4032 release` at the end of a line whose whole
+    job was to withhold it, while the attribution half carefully printed
+    `search_keys=<15 chars withheld>`.
+
+    This is the same rule the sibling record module already states and enforces for
+    its own driver messages (`record_backup._connection_failure`, #9601 review
+    cycle 9): the exception TYPE and the SQLSTATE, never the driver's text.
+    """
+    cursor = _BoomCursor(_DriverError(
+        "invalid input syntax for type json",
+        detail='Token "err4032" is invalid.',
+        context="JSON data, line 1: err4032 release"))
+    monkeypatch.setattr(record_projection, "scope_connection",
+                        lambda conn, org_id: cursor)
+
+    with pytest.raises(record_projection.RecordStatementError) as caught:
+        record_projection.replay([_point_record("pt-err4032", "err4032 release")],
+                                 object(), org_id="org-t", graph_id="graph-t",
+                                 position=False)
+
+    message = str(caught.value)
+    assert "22P02" in message, (
+        f"the SQLSTATE is what makes a fault classifiable — it must survive: {message}"
+    )
+    assert "invalid input syntax for type json" in message, (
+        f"the primary message IS the fault clause the 302-row drop lacked: {message}"
+    )
+    assert "err4032 release" not in message, (
+        f"the driver's `CONTEXT:` field quoted the refused value: {message}"
+    )
+    assert 'Token "err4032"' not in message, (
+        f"the driver's `DETAIL:` field quoted the refused token: {message}"
+    )
+    assert "DETAIL:" not in message and "CONTEXT:" not in message, (
+        f"neither optional field belongs on this line: {message}"
+    )
+
+
+def test_a_check_violation_never_carries_the_failing_row(monkeypatch):
+    """The other class of the same leak: a CHECK's DETAIL is the WHOLE ROW.
+
+    For `chk_*_props_*` PostgreSQL's `DETAIL` reads `Failing row contains (…)` —
+    i.e. every column of the row, `content` and `props` included, which are
+    exactly the two the attribution withholds. A withheld column name whose value
+    arrives one field later withholds nothing.
+    """
+    cursor = _BoomCursor(_DriverError(
+        'new row for relation "point" violates check constraint '
+        '"chk_point_props_no_derived"',
+        code="23514",
+        detail='Failing row contains (pt-1, org-t, graph-t, a private claim, '
+               '{"note": "secret"}).'))
+    monkeypatch.setattr(record_projection, "scope_connection",
+                        lambda conn, org_id: cursor)
+
+    with pytest.raises(record_projection.RecordStatementError) as caught:
+        record_projection.replay([_point_record("pt-1", "err4032 release")],
+                                 object(), org_id="org-t", graph_id="graph-t",
+                                 position=False)
+
+    message = str(caught.value)
+    assert "23514" in message, f"the SQLSTATE must survive: {message}"
+    assert "violates check constraint" in message, (
+        f"the primary message must survive: {message}"
+    )
+    assert "Failing row" not in message, (
+        f"the whole row reached the log through the driver's DETAIL: {message}"
+    )
+    assert "a private claim" not in message and "secret" not in message, (
+        f"`content`/`props` leaked through the row dump: {message}"
+    )
+
+
+def test_a_scope_failure_on_the_live_door_never_logs_the_drivers_detail(monkeypatch):
+    """The SAME withhold at the other seam: the wrap that reaches the log.
+
+    `replay()` raises `RecordStatementError` for a *statement* failure, but
+    `scope_connection()` runs before the first statement and its driver error
+    propagates raw into `RecordWriter.write`'s catch-all, which is what composes
+    the LIVE warning (`record_writer.py:_bounded_cause`). Both seams carry the
+    driver's text into a log stream, so both narrow it to the primary message.
+    """
+    refusal = _DriverError(
+        "invalid input syntax for type json",
+        detail='Token "err4032" is invalid.',
+        context="JSON data, line 1: err4032 release")
+
+    def _refuse_scope(conn, org_id):
+        raise refusal
+
+    monkeypatch.setattr(record_projection, "scope_connection", _refuse_scope)
+    writer = record_writer.RecordWriter(dsn="postgresql://u:p@db.example.com/db")
+
+    with pytest.raises(record_writer.RecordWriteError) as caught:
+        writer.write([_point_record("pt-err4032", "err4032 release")],
+                     org_id="org-t", graph_id="graph-t", conn=object(),
+                     position=False)
+
+    message = str(caught.value)
+    assert "invalid input syntax for type json" in message, (
+        f"the fault clause must survive the wrap: {message}"
+    )
+    assert "err4032 release" not in message, (
+        f"the live warning carried the driver's CONTEXT line: {message}"
+    )
+    assert "DETAIL:" not in message and "CONTEXT:" not in message, (
+        f"neither driver field belongs in the log: {message}"
     )
 
 
@@ -415,7 +567,8 @@ def test_the_next_leg_does_not_inherit_that_refusal():
     )
 
 
-def _health(monkeypatch, failures: dict[str, int], *, refusing=None) -> dict:
+def _health(monkeypatch, failures: dict[str, int], *, refusing=None,
+            refusing_raises: BaseException | None = None) -> dict:
     """The record block with the counters stubbed and the refusal state given.
 
     `refusing` is the OUTPUT of ``monitoring.record_refusing()`` — ``None`` for
@@ -423,6 +576,9 @@ def _health(monkeypatch, failures: dict[str, int], *, refusing=None) -> dict:
     window-based (#10185), so a cumulative count alone must NOT redden it; the
     two are passed separately here precisely because the block must not conflate
     them.
+
+    `refusing_raises` makes that read RAISE instead, which is the other half of
+    ``_record_health``'s "never raises" contract.
     """
     from tortoise import hosted_api, monitoring
 
@@ -431,7 +587,13 @@ def _health(monkeypatch, failures: dict[str, int], *, refusing=None) -> dict:
     # `_record_health` imports this name FROM `monitoring` at call time, so the
     # stub belongs on `monitoring` — patching `hosted_api` would bind a module
     # attribute the local import never reads, and the stub would be inert.
-    monkeypatch.setattr(monitoring, "record_refusing", lambda: refusing)
+    if refusing_raises is not None:
+        def _boom():
+            raise refusing_raises
+
+        monkeypatch.setattr(monitoring, "record_refusing", _boom)
+    else:
+        monkeypatch.setattr(monitoring, "record_refusing", lambda: refusing)
     monkeypatch.setattr(hosted_api, "_WATCHER", None)
     monkeypatch.setattr(hosted_api, "_WATCHER_START_ERROR", None)
     monkeypatch.setattr(hosted_api, "_WATCHER_EXPECTED", False)
@@ -478,6 +640,60 @@ def test_a_historical_refusal_does_not_degrade_forever(monkeypatch):
     assert record["record_write_failures"] == {"write_failed": 302}, (
         "NOTHING is reset or hidden: the history stays readable"
     )
+
+
+def test_an_unreadable_verdict_is_never_published_as_not_refusing(monkeypatch):
+    """A failed verdict read is its OWN cause, and NOT EVALUATED is not `false`.
+
+    `_record_health` promises it never raises, so the read is guarded — but the
+    pre-fix guard filed the cause in `error`, the one field whose documented
+    meaning is *a value was SET and the seam REFUSED it* (remedy: "fix the
+    DSN"), which is how #9548's operator got sent to rotate a healthy secret.
+    It also left `degraded` at `bool(None)` = `False`, publishing the claim "no
+    armed write was refused inside the window" about a read that never happened.
+
+    Both directions are pinned here: the cause lands in `refusal_error` (not in
+    `error`, not in `counters_error` — the counter snapshot WAS read), the
+    verdict reads `None`, and the endpoint still answers 200 with a degraded
+    `status` rather than 5xxing.
+    """
+    import asyncio
+
+    from tortoise import hosted_api
+
+    record = _health(monkeypatch, {"write_failed": 302},
+                     refusing_raises=RuntimeError("refusal state exploded"))
+
+    assert record["ok"] is False, (
+        "a surface that cannot read its own verdict must not read healthy"
+    )
+    assert record["error"] is None, (
+        "`error` means SET-and-REFUSED and its remedy is 'fix the DSN'; a "
+        "monitoring read filed there sends the operator to rotate a healthy secret"
+    )
+    assert "refusal state exploded" in record["refusal_error"], (
+        f"the cause needs its own key: {record.get('refusal_error')!r}"
+    )
+    assert record["counters_error"] is None, (
+        "the counter snapshot was READ — its key must not be borrowed to carry "
+        "a different read's failure"
+    )
+    assert "refusing" not in record, (
+        "an unevaluated read must not publish the `refusing` key at all: the "
+        f"block's own `null` means 'nothing is refusing' (#10648 P3) — {record.get('refusing')!r}"
+    )
+    assert record["degraded"] is None, (
+        "NOT EVALUATED is not 'not refusing': `false` here claims a quiet window "
+        "the block never checked"
+    )
+    assert record["degraded_reasons"] is None
+    assert record["record_write_failures"] == {"write_failed": 302}, (
+        "the failure must not hide the history it could read"
+    )
+
+    body = asyncio.run(hosted_api.health())
+    assert body["status"] == "degraded", body["record"]
+    assert body["record"]["ok"] is False, body["record"]
 
 
 @pytest.mark.parametrize("reason", [
@@ -709,6 +925,81 @@ def test_content_columns_are_named_but_never_quoted():
     )
 
 
+def test_the_same_document_title_is_withheld_by_BOTH_halves_of_the_line():
+    """⛔ ONE log line, ONE withhold rule — the halves must not disagree.
+
+    `record_writer._IDENTITY_CONTENT_KEYS` rules that a `source`'s `name` is its
+    document title and prints only `name=<N chars withheld>`. Two clauses later
+    on the SAME line, the attribution printed the string verbatim
+    (`name=Q3 pricing memo`), because `name` was never added to
+    `record_projection._CONTENT_COLUMNS` — a withhold true of each half and false
+    of the line (#10648 review P2). The column is still NAMED with its length;
+    `node_key`/`url` is what an operator chases, and those are printed.
+    """
+    from tortoise import record_writer
+
+    node = record_projection.Node("source", "Source", "node_key")
+    col_values, tail = record_projection._split_properties(
+        "source",
+        {"name": "Q3 pricing memo", "url": "https://example.test/memo",
+         "title": "Q3 pricing memo"},
+        columns=record_projection.table_columns(),
+        refused=record_projection.refused_props_names(),
+    )
+    assert "name" in col_values, (
+        "the premise: a source snapshot's `name` reaches the `name` COLUMN "
+        f"(got {sorted(col_values)})")
+
+    statement = record_projection._upsert_statement(
+        "o", "g", node, "https://example.test/memo", col_values, tail)
+    attribution = record_projection._statement_attribution(statement, 2, 2)
+    assert "INSERT INTO public.source" in attribution, attribution
+    assert "name=<15 chars withheld>" in attribution, (
+        "the attribution half still prints the datum the identity half "
+        f"withholds: {attribution}")
+    assert "name=Q3 pricing memo" not in attribution, attribution
+
+    # …and on the whole line the operator reads, both halves together: the
+    # identity clause, then the statement attribution.
+    identity = record_writer._record_identity(
+        {"type": "SourceCreated", "source": {"name": "Q3 pricing memo"}})
+    line = record_projection._failure_line(
+        attribution, record_projection._driver_fault(
+            _DriverError("permission denied for table source", code="42501")))
+    whole = f"record=SourceCreated {identity}: {line}"
+    assert "source.name=<15 chars withheld>" in whole, whole
+    assert "Q3 pricing memo" not in whole, (
+        f"a document title reached the one warning line: {whole}")
+
+
+def test_the_identity_withhold_list_is_a_subset_of_the_attribution_list():
+    """The two withhold lists are ONE rule, pinned mechanically (#10648 P2).
+
+    `_CONTENT_COLUMNS` is a maintained list (no schema can say whether a column's
+    value is the user's text), so a name added to `_IDENTITY_CONTENT_KEYS` for
+    the identity half can silently stay printable in the attribution half — which
+    is exactly how `name` was withheld on one side of a line and printed on the
+    other. The subset relation is the invariant: an identity key is content, so
+    the attribution must withhold the column of the same name.
+    """
+    from tortoise import record_writer
+
+    # The identity keys are PAYLOAD names (`eventId` is not a column; `event_id`
+    # is), so they are compared in the column's own form — `snake` is the SAME
+    # normalisation `_split_properties` applies before `_column_pair` ever sees
+    # the name. Comparing raw payload names would demand a `_CONTENT_COLUMNS`
+    # entry for `eventId`, which `test_content_columns_are_real_record_columns`
+    # would then (correctly) reject as a name no table has.
+    missing = sorted(
+        {record_projection.snake(key)
+         for key in record_writer._IDENTITY_CONTENT_KEYS}
+        - record_projection._CONTENT_COLUMNS)
+    assert not missing, (
+        f"identity field(s) {missing} are withheld by `_record_identity` but "
+        "PRINTED by `_statement_attribution` — the same value would appear twice "
+        "on one failure line, once withheld and once quoted")
+
+
 def test_content_columns_are_real_record_columns():
     """The withhold list may not rot into names no table has (#10620 cycle 3).
 
@@ -733,7 +1024,13 @@ def test_content_columns_are_real_record_columns():
         f"withheld name(s) that are not a column of any record table: {unknown} — "
         "a stale entry protects nothing")
     for required in ("content", "quote", "props", "_search_text", "title",
-                     "topics", "search_keys"):
+                     "topics", "search_keys",
+                     # #10648 review P2: the identity-NAME columns. `name` is
+                     # ruled content by `record_writer._IDENTITY_CONTENT_KEYS`
+                     # (a source's `name` IS its title); `canonical_name` is the
+                     # same datum on `object`, and `event.subject` /
+                     # `event.object` are an event's own participant text.
+                     "name", "canonical_name", "subject", "object"):
         assert required in record_projection._CONTENT_COLUMNS, (
             f"{required!r} carries the user's own text and must be withheld")
 
@@ -901,6 +1198,17 @@ MIGRATION_PATH = (Path(__file__).resolve().parent.parent
                   / "supabase" / "migrations"
                   / "20261102000002_record_point_search_keys_text.sql")
 
+#: Where the array arm's non-`str` element divergence is STATED. NOT the
+#: migration header: that file had already landed on `main` when the statement
+#: was written, and migrations are append-only history
+#: (`.github/scripts/check-migration-append-only` refuses an edit to a landed
+#: one), so the paragraph lives in the doc a future lane actually reads. The leg
+#: below pins it there (#10648 review P1).
+DIVERGENCE_DOC_PATH = (Path(__file__).resolve().parent.parent
+                       / "docs" / "epics"
+                       / "2026-10-10-7879-postgres-record"
+                       / "08-hosted-prerequisites.md")
+
 
 def _shipped_flatten_ddl() -> str:
     """The `USING` helper, EXTRACTED from the shipped migration — not a copy.
@@ -939,6 +1247,13 @@ def _shipped_flatten_ddl() -> str:
     # the conversion's job there is to PRESERVE the value — `ELSE NULL` would
     # drop it. Pinned so a rewrite of any arm goes red instead of silently
     # changing what an existing row becomes.
+    # ⚠️ A NON-`str` ARRAY ELEMENT is the fourth divergence and it is deliberately
+    # NOT a row here: the `assert actual == written` below holds `actual ==
+    # written` for every list in this matrix, and that equality is FALSE for
+    # `["a", null]` / `["a", {"k": "v"}]` by design. It has its own leg —
+    # `test_the_array_arms_non_str_elements_are_the_stated_divergence` — which
+    # asserts BOTH ends (the SQL text and the writer's Python-repr rule) so the
+    # exception is pinned rather than implied.
     ({"k": "v"}, None),                  # object: preserved, rendering-tolerant
     (42, "42"),                         # number: its own text form
     (True, "true"),                     # boolean: its own text form
@@ -1008,3 +1323,86 @@ def test_the_migration_converts_existing_rows_by_the_write_path_rule(value, expe
         # exists — so the test states both rather than letting the arms drift.
         with pytest.raises(record_projection.RecordProjectionError):
             record_projection._record_column_value("point", "search_keys", value)
+
+
+def test_the_array_arms_non_str_elements_are_the_stated_divergence():
+    """⛔ The ONE array shape where the migration's arm is not the write path.
+
+    `jsonb_array_elements_text` yields SQL `NULL` for a JSON `null` element and
+    the element's own JSON text for a nested object/array, so `["a", null]`
+    lands as `a` and `["a", {"k": "v"}]` as `a {"k": "v"}`. The write path's
+    `str(item)` would give `a None` / `a {'k': 'v'}` — PYTHON REPRS — and the
+    migration's header says, in as many words, why it does not reproduce them
+    (#10648 review P3). This leg asserts BOTH ends, so a change to either side
+    (the SQL arm or the writer's rule) goes red instead of quietly making the
+    converted column `replay(journal)`-divergent.
+
+    Reachability is low and that is why this is a documented divergence rather
+    than a rewrite: `search_keys` is `list[str]` in `commit_schema`, so only a
+    pre-existing `jsonb` row (the old `_jsonb_or_scalar` path, or a hand-written
+    row) can hold a non-`str` element.
+    """
+    conn = _record_schema_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(_shipped_flatten_ddl())
+            try:
+                cur.execute(
+                    "SELECT public.record_flatten_search_keys(%s::jsonb)",
+                    (json.dumps(["a", None]),))
+                null_element = cur.fetchone()[0]
+                cur.execute(
+                    "SELECT public.record_flatten_search_keys(%s::jsonb)",
+                    (json.dumps(["a", {"k": "v"}]),))
+                nested_element = cur.fetchone()[0]
+            finally:
+                cur.execute("DROP FUNCTION IF EXISTS "
+                            "public.record_flatten_search_keys(jsonb)")
+    finally:
+        conn.close()
+
+    # An element with NO text is dropped — never the literal `None`.
+    assert null_element == "a", (
+        f"a JSON `null` element converted to {null_element!r}; the arm drops an "
+        "element with no text (the write path would emit the repr `None`)")
+    # A nested element keeps ITS OWN text — never a Python repr.
+    assert nested_element is not None and nested_element.startswith("a "), (
+        f"a nested element converted to {nested_element!r}")
+    assert '"k"' in nested_element, (
+        f"the nested element's own content did not survive: {nested_element!r}")
+    assert "'k'" not in nested_element, (
+        f"the arm reproduced a PYTHON REPR in a persisted column: {nested_element!r}")
+
+    # …and the other end of the divergence, DB-free, so neither side can move
+    # without this leg following it.
+    assert record_projection._record_column_value(
+        "point", "search_keys", ["a", None]) == "a None"
+    assert record_projection._record_column_value(
+        "point", "search_keys", ["a", {"k": "v"}]) == "a {'k': 'v'}"
+
+
+def test_the_divergence_is_STATED_in_the_doc_the_next_lane_reads():
+    """The divergence must be READABLE, not just asserted (#10648 review P1/P3).
+
+    The paragraph is what a future lane reads before deciding the arm is "the
+    SAME rule" and tidying it. It used to live in the migration HEADER, which
+    cannot be edited: the file had already landed on `main`, and the repo's
+    append-only-migrations gate refuses an `M` on a landed one
+    (`.github/scripts/check-migration-append-only`). So the statement moved to
+    the doc the next lane reads, and this pins it THERE — names BOTH ends
+    (`a None` / `a {'k': 'v'}` on the Python side) so a rewrite of the text
+    cannot quietly drop the reason the arms differ.
+    """
+    stated = DIVERGENCE_DOC_PATH.read_text(encoding="utf-8")
+
+    assert "NON-`str` ELEMENT" in stated, (
+        "the divergence doc no longer states the non-`str` array-element "
+        "divergence, and the arm still diverges "
+        "(`test_the_array_arms_non_str_elements_are_the_stated_divergence`)")
+    for named in ("a None", "a {'k': 'v'}", "are_the_stated_divergence"):
+        assert named in stated, (
+            f"the divergence paragraph no longer names {named!r}, so a reader "
+            "cannot tell which shape is the exception")
+    assert "NON-`str` ELEMENT" not in MIGRATION_PATH.read_text(encoding="utf-8"), (
+        "the landed migration's header must stay UNEDITED (append-only "
+        "history); the statement belongs in the doc above")
