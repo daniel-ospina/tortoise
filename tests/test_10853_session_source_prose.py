@@ -8,7 +8,7 @@ ruling (§9.1/D1) is that captured turn text does not live on a graph node.
 ⛔ THE DOOR THIS FILE PINS IS NOT THE CAPTURE. Every record-sourced read and
 rebuild goes through `cache_projection.node_from_row`: `tortoise record-restore`
 and `rebuild_from_record` MATERIALISE a node with it, and
-`record_serve.fetch_record_node` answers with the same map because its contract
+`record_serve.read_node` answers with the same map because its contract
 is that a served node and a rebuilt node cannot drift. So a row written by a
 build that still placed the key either re-creates the prose on the graph or makes
 the served answer disagree with the rebuild — and nothing reds either way.
@@ -330,3 +330,49 @@ def test_a_document_source_with_the_pair_is_still_compared_field_by_field():
 
     assert result.report.field_mismatches == 1
     assert result.divergent == 1
+
+
+def test_the_props_tail_cannot_smuggle_the_prose_past_the_guard():
+    """The OPEN-SET door: `props` is written verbatim, so it must be filtered too.
+
+    Not reachable through today's writer (`record_projection` classifies both
+    names as COLUMNS, so they never reach the tail) — and filtered for that
+    reason, not despite it: a classification that moves is the #9710 class, and a
+    guard that stops guarding without reddening is worse than no guard. Review
+    P2 on this PR measured the hole before it was closed.
+    """
+    row = _captured_session_row(
+        props='{"summary": "TAIL PROSE", "_searchText": "TAIL INDEX"}')
+    node = node_from_row("Source", row)
+
+    assert "summary" not in node.props
+    assert "_searchText" not in node.props
+
+
+@pytest.mark.parametrize("shape", [
+    {"url": "session:s-1"},
+    {"url": "session.md", "source_kind": "agentSession"},
+    {"url": "corpus://t/weekly.md", "source_kind": "agentSession"},
+    {"url": "https://example.com/x", "source_kind": "document"},
+    {"url": "https://example.com/x", "source_kind": "document", "is_episodic": True},
+    {"url": "https://example.com/x", "session_id": "s-1"},
+])
+def test_the_row_and_node_predicates_agree_on_every_shape(shape):
+    """The reader must judge the row the projector wrote.
+
+    They are two functions over two vocabularies (column names vs graph property
+    names). If they disagree, the reconciler excludes the pair on a node the
+    projector did NOT decline (a permanently suppressed divergence) or fails to
+    exclude it on one it did. Pinned shape by shape rather than by construction,
+    because the construction is exactly what drifts.
+    """
+    from tortoise import cache_projection as cp
+
+    row = _source_row(**shape)
+    as_props = {}
+    for column, value in row.items():
+        if value is None:
+            continue
+        as_props[cp.canonical_property("source", column)] = value
+
+    assert cp.is_episodic_source_node(as_props) == cp._is_episodic_source_row(row)

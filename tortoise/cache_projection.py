@@ -1196,7 +1196,7 @@ def _scalar(value: Any) -> Any:
 #: The capture side of that is #10000's own change. This table is the OTHER door:
 #: every record-sourced READ and rebuild goes through :func:`node_from_row` —
 #: `tortoise record-restore` and `rebuild_from_record` MATERIALISE a node with it,
-#: and `record_serve.fetch_record_node` answers the graph-engine-down read with
+#: and `record_serve.read_node` answers the graph-engine-down read with
 #: the same map *because its contract is that the two cannot drift*. So a row
 #: written by a build that still placed the key would either re-materialise the
 #: prose **whatever build is reading it**, or make the served answer disagree
@@ -1283,6 +1283,11 @@ _EPISODIC_SOURCE_PROSE_COLUMNS: frozenset[str] = frozenset({
 #: three were caught by review before this landed and each has a NEGATIVE leg.
 _EPISODIC_SOURCE_URL_PREFIX = "session:"
 _EPISODIC_SOURCE_KIND = "agentSession"
+#: The KIND's property spelling, DERIVED for the same reason the prose set is:
+#: :func:`is_episodic_source_node` reads graph properties, and a hand-typed
+#: `sourceKind` would stop matching the row predicate the day the placement
+#: re-spells it — a permanent false `field_mismatches` no test would red.
+_EPISODIC_SOURCE_KIND_PROPERTY: str = canonical_property("source", "source_kind")
 
 
 def _is_episodic_source_row(row: Mapping[str, Any]) -> bool:
@@ -1314,7 +1319,7 @@ def is_episodic_source_node(props: Mapping[str, Any]) -> bool:
     url = props.get("url")
     if isinstance(url, str) and url.startswith(_EPISODIC_SOURCE_URL_PREFIX):
         return True
-    return (props.get("sourceKind") == _EPISODIC_SOURCE_KIND
+    return (props.get(_EPISODIC_SOURCE_KIND_PROPERTY) == _EPISODIC_SOURCE_KIND
             and isinstance(url, str) and "://" not in url and "/" not in url)
 
 
@@ -1393,6 +1398,18 @@ def _props_from_row(table: str, row: Mapping[str, Any], *,
             f"refused by the schema, and not record bookkeeping — refusing to "
             f"drop it silently"
         )
+    if episodic_source:
+        # ⛔ THE OPEN-SET DOOR (#10853 review). `props` is written verbatim, so a
+        # row whose tail carries the pair would land it on the node and the
+        # guard's own claim — *"whatever build wrote the row"* — would be false
+        # on that door. Not reachable through today's writer (`record_projection`
+        # classifies both names as COLUMNS, so they never reach the tail), and
+        # exactly for that reason it is filtered here rather than assumed: a
+        # classification that moves is the #9710 class, and a guard that stops
+        # guarding without reddening is worse than no guard.
+        declined = {canonical_property(table, c)
+                    for c in _EPISODIC_SOURCE_PROSE_COLUMNS}
+        out = {k: v for k, v in out.items() if k not in declined}
     return out
 
 
