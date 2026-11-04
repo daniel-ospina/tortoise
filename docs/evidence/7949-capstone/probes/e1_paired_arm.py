@@ -226,8 +226,18 @@ def main(argv: list[str] | None = None) -> int:
     head = resolve_head()
     prereg = read_preregistration(head)
     corpus_sha = corpus_pin(prereg)
-    floor = object_floor(prereg)
+    # ⛔ `min_before_share` FIRST — the two reads are not interchangeable. This
+    # driver refuses a malformed `e1_min_before_share` with its OWN `REFUSED:`
+    # message, but `object_floor` reads the same key through `parse_bars`, which
+    # raises a bare `ValueError` for the very shapes `min_before_share` exists to
+    # refuse (absent, non-numeric, `bool`). Reading the map-backed floor first
+    # made that ValueError an escaping helper exception and left the message below
+    # unreachable from `main()` — a run an operator cannot tell from a crash is
+    # not a refusal (`sysexits`: malformed INPUT is `EX_DATAERR`, not an internal
+    # error, #10610 review at `2d9e8608`). `object_floor` stays the bar READER for
+    # the count floor; it is simply no longer the first thing to touch the share.
     share_floor = min_before_share(prereg)
+    floor = object_floor(prereg)
     print(f"corpus fixtures_hash={corpus_sha} head={head}", flush=True)
     base = os.environ["TORTOISE_DB_URI"]
 
