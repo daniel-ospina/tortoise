@@ -4848,9 +4848,43 @@ def test_the_three_routes_to_the_e1_e2_verdict_state_the_records_verdict():
         + (f" while the frozen table says {table['E2']}" if table["E2"] != recorded
            else " and the frozen table now agrees with it")
         + f" — so the row must state exactly {sorted(expected)}: {e2_rows[0][:400]}")
-    assert survived in e2_rows[0] and e2a["artifact"] in e2_rows[0], (
-        f"the audit's E2a row does not carry the record's own count ({survived!r}) and "
-        f"artifact ({e2a['artifact']!r}): {e2_rows[0][:400]}")
+    # ⛔ BOLD STANDALONE TOKENS, not `"8 of 14" in row` (#10610 review at `42143b80`). The
+    # count appears TWICE in the row — once as the measured clause and once inside the re-run
+    # clause `**RED (8 of 14)**` — so a plain substring test is satisfied by the second while
+    # the first is mutated. Measured: rewriting the measured clause to `**7 of 14**` (or
+    # `**8 of 12**`) left this pin GREEN, with the row asserting two contradicting counts and
+    # the record refuting one. The bold-ratio SET makes a second, disagreeing figure
+    # impossible to carry.
+    bold_ratios = set(re.findall(r"\*\*(\d+) of (\d+)\*\*", e2_rows[0]))
+    expected_ratio = {(str(e2a["value_survived"]), str(e2a["frozen_units"]))}
+    assert bold_ratios == expected_ratio, (
+        f"the audit's E2a row states the bold counts {sorted(bold_ratios)}, but the record "
+        f"scores {sorted(expected_ratio)} — a second disagreeing count beside the record's "
+        f"is two measurements of one criterion: {e2_rows[0][:400]}")
+    assert e2a["artifact"] in e2_rows[0], (
+        f"the audit's E2a row does not carry the record's artifact ({e2a['artifact']!r}): "
+        f"{e2_rows[0][:400]}")
+
+    # The E2b row is COUNTED above but was never INSPECTED — so this diff's own new claim on
+    # it (E2b's bar is MET at 1/114, and the RED belongs to the composite via E2a) could be
+    # mutated to `3/114` with every pin green (measured at `42143b80`). Hold it to the record
+    # the same way: the figures it prints, and the half it attributes the RED to.
+    e2b = record["e2"]["e2b"]
+    fused = f"{e2b['fused']}/{e2b['atomic_points']}"
+    row_ratios = set(re.findall(r"(?<![\d/])(\d+/\d+)(?![\d/])", e2_rows[1]))
+    assert row_ratios == {fused}, (
+        f"the audit's E2b row states {sorted(row_ratios)}, but the record's fused figure is "
+        f"{fused!r} — E2b's own bar is MET and the row must say so on the record's numbers: "
+        f"{e2_rows[1][:400]}")
+    assert f"{e2b['share']:.6f}" in e2_rows[1], (
+        f"the audit's E2b row does not carry the record's fused share ({e2b['share']:.6f}): "
+        f"{e2_rows[1][:400]}")
+    assert e2b["below_floor"] is False and "MET" in e2_rows[1], (
+        "the record says E2b is NOT below its floor, so the audit's E2b row must state that "
+        f"its own bar is MET — otherwise the RED reads as E2b's verdict: {e2_rows[1][:400]}")
+    assert record["e2"].get("decided_by") == "E2a" and "E2a" in e2_rows[1], (
+        "the record attributes E2's FAIL to E2a, so the audit's E2b row must name the half "
+        f"that decides it: {e2_rows[1][:400]}")
     assert "SUPERSEDED" in e2_rows[0], (
         "the audit's E2a row does not mark the reading it replaced as SUPERSEDED — a "
         "superseded count left standing beside the live one is two present-tense "
