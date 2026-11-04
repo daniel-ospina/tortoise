@@ -152,7 +152,6 @@ COMMENT_MARKER = "gh-write-preflight"
 # `x-accepted-github-permissions` token GitHub reports for the endpoint.
 PERM_CONTENTS = "contents-write"
 PERM_PULL_REQUESTS = "pull_requests-write"
-PERM_ISSUES = "issues-write"
 
 # Documented rate-limit bodies. Ordered so the earliest, most specific wins; a
 # body match is a LAST resort behind the header checks, because the headers are
@@ -355,7 +354,7 @@ def _detail(res: HttpResult, prefix: str) -> str:
 # ── the gh layer ─────────────────────────────────────────────────────────────
 
 
-def gh(args: list[str], timeout: float) -> tuple[int, str]:
+def gh(args: list[str], timeout: float) -> tuple[int, str, str]:
     """Run `gh` and return (rc, merged output).
 
     ⛔ Invoked as `gh`, NOT by path: the harness `gh` in PATH is the shim that
@@ -519,7 +518,7 @@ def pick_pr(repo: str, explicit: int | None, timeout: float) -> int | None:
     return None
 
 
-def probe_contents(repo: str, timeout: float) -> tuple[Refusal | None, str]:
+def probe_contents(repo: str, timeout: float, repo_read_ok: bool) -> tuple[Refusal | None, str]:
     """Create and delete a throwaway ref: the `contents=write` probe."""
     sha, repo_res = default_branch_head(repo, timeout)
     if repo_res.status is not None and not (200 <= (repo_res.status or 0) < 300):
@@ -539,8 +538,17 @@ def probe_contents(repo: str, timeout: float) -> tuple[Refusal | None, str]:
         )
     ref = f"refs/heads/{REF_PREFIX}-{secrets.token_hex(6)}"
     made = api("POST", f"repos/{repo}/git/refs", {"ref": ref, "sha": sha}, timeout)
-    verdict = classify(made, PERM_CONTENTS, "contents", repo_read_ok=True)
+    verdict = classify(made, PERM_CONTENTS, "contents", repo_read_ok=repo_read_ok)
     if verdict is not None:
+        # ⛔ A POST THAT PRODUCED NO EXCHANGE MAY STILL HAVE CREATED THE REF. A
+        # timeout is `no-response` (a transport failure), and the write may have
+        # been applied before the connection died — so the tidiness debt is named
+        # here rather than left for someone to discover as a stray branch.
+        if verdict.reason == "no-response":
+            return verdict, (
+                f"create {ref} produced no response — it MAY have been created; "
+                f"check for {ref} and delete it"
+            )
         return verdict, f"create {ref} refused"
     # Cleanup is best effort and NEVER changes the verdict: the write already
     # succeeded, so the capability is proven; a failed delete is a tidiness
@@ -553,7 +561,7 @@ def probe_contents(repo: str, timeout: float) -> tuple[Refusal | None, str]:
 
 
 def probe_pull_requests(
-    repo: str, pr: int | None, timeout: float, comment_probe: bool
+    repo: str, pr: int | None, timeout: float, comment_probe: bool, repo_read_ok: bool
 ) -> tuple[Refusal | None, str]:
     """The `pull_requests=write` probe.
 
@@ -578,13 +586,27 @@ def probe_pull_requests(
             "no target PR",
         )
     if comment_probe:
+        # ⛔ THE COMMENT ROUTE IS THE ONE THAT NEEDS THE TARGET CHECK MOST (#10945
+        # review round 3, P2). `POST /issues/{n}/comments` authorizes against the
+        # TARGET RESOURCE, not the route — so on an ISSUE number it needs only
+        # `issues=write` and returns 201, and this branch would then report
+        # "writable" having never exercised `pull_requests=write`, which is
+        # precisely the leg whose 403 the rail's `--evidence` comment hits. The
+        # default PATCH branch is safe because it reads `GET /pulls/{n}` first;
+        # this one must do the same, and for the same reason.
+        target = api("GET", f"repos/{repo}/pulls/{pr}", None, timeout)
+        if target.status is None or not (200 <= target.status < 300):
+            return (
+                classify(target, PERM_PULL_REQUESTS, "pull_requests", repo_read_ok=repo_read_ok),
+                f"PR #{pr} is not a pull request this identity can read",
+            )
         made = api(
             "POST",
             f"repos/{repo}/issues/{pr}/comments",
             {"body": f"{COMMENT_MARKER}: automated token preflight, deleted immediately"},
             timeout,
         )
-        verdict = classify(made, PERM_PULL_REQUESTS, "pull_requests", repo_read_ok=True)
+        verdict = classify(made, PERM_PULL_REQUESTS, "pull_requests", repo_read_ok=repo_read_ok)
         if verdict is not None:
             return verdict, f"comment on PR #{pr} refused"
         cid = None
@@ -607,7 +629,7 @@ def probe_pull_requests(
     # the exact #10930 shape — invisible on the one path that produces it.
     if current.status is None or not (200 <= current.status < 300):
         return (
-            classify(current, PERM_PULL_REQUESTS, "pull_requests", repo_read_ok=True),
+            classify(current, PERM_PULL_REQUESTS, "pull_requests", repo_read_ok=repo_read_ok),
             f"read of PR #{pr} refused",
         )
     title = None
@@ -624,7 +646,7 @@ def probe_pull_requests(
             "no title",
         )
     res = api("PATCH", f"repos/{repo}/pulls/{pr}", {"title": title}, timeout)
-    verdict = classify(res, PERM_PULL_REQUESTS, "pull_requests", repo_read_ok=True)
+    verdict = classify(res, PERM_PULL_REQUESTS, "pull_requests", repo_read_ok=repo_read_ok)
     if verdict is not None:
         return verdict, f"no-op PATCH on PR #{pr} refused"
     # ⛔ VERIFY THE NO-OP CLAIM INSTEAD OF ASSERTING IT (#10945 review P2s, rounds
@@ -713,8 +735,9 @@ def main(argv: list[str] | None = None) -> int:
     # a verdict — `permissions.push: true` is true for a token that can write
     # nothing, which is the trap #10930 fell into.
     repo_res = api("GET", f"repos/{repo}", None, args.timeout)
+    repo_read_ok = bool(repo_res.status and 200 <= repo_res.status < 300)
     role: object = None
-    if repo_res.status and 200 <= repo_res.status < 300:
+    if repo_read_ok:
         try:
             role = json.loads(repo_res.body).get("permissions")
         except (ValueError, AttributeError):
@@ -728,10 +751,10 @@ def main(argv: list[str] | None = None) -> int:
     report["probe_pr"] = pr
 
     for name, fn in (
-        ("contents", lambda: probe_contents(repo, args.timeout)),
+        ("contents", lambda: probe_contents(repo, args.timeout, repo_read_ok)),
         (
             "pull_requests",
-            lambda: probe_pull_requests(repo, pr, args.timeout, args.comment_probe),
+            lambda: probe_pull_requests(repo, pr, args.timeout, args.comment_probe, repo_read_ok),
         ),
     ):
         verdict, detail = fn()

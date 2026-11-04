@@ -178,6 +178,10 @@ if path == "user":
     sys.exit(0)
 
 if method == "GET" and path == "repos/owner/repo":
+    if MODE == "repo404":
+        emit(404, "Not Found", {"X-Ratelimit-Remaining": "2603"},
+             json.dumps({"message": "Not Found", "status": "404"}))
+        sys.exit(0)
     emit(200, "OK", {"X-Ratelimit-Remaining": "2603"},
          json.dumps({"full_name": "owner/repo", "default_branch": "main",
                      "permissions": {"admin": True, "maintain": True, "push": True,
@@ -200,7 +204,7 @@ if method == "GET" and "/pulls/" in path:
         n = 0
     with open(counter, "w") as fh:
         fh.write(str(n + 1))
-    if MODE == "pr404":
+    if MODE in ("pr404", "repo404"):
         emit(404, "Not Found", {"X-Ratelimit-Remaining": "2603"},
              json.dumps({"message": "Not Found", "status": "404"}))
         sys.exit(0)
@@ -210,7 +214,12 @@ if method == "GET" and "/pulls/" in path:
               "X-Ratelimit-Remaining": "2603"},
              json.dumps({"message": "Resource not accessible by personal access token"}))
         sys.exit(0)
-    title = "changed by another actor" if (MODE == "retitle" and n >= 1) else "an unchanged title"
+    if MODE == "mangle" and n >= 1:
+        title = "an unchanged title (mangled)"
+    elif MODE == "retitle" and n >= 1:
+        title = "changed by another actor"
+    else:
+        title = "an unchanged title"
     emit(200, "OK", {"X-Ratelimit-Remaining": "2603"},
          json.dumps({"number": 4242, "title": title,
                      "updated_at": "2026-11-04T18:19:01Z"}))
@@ -218,13 +227,15 @@ if method == "GET" and "/pulls/" in path:
 
 # ── writes ────────────────────────────────────────────────────────────────────
 h = write_headers(path)
-if MODE in ("ok", "nopr", "pr404", "retitle", "reread403"):
+if MODE in ("ok", "nopr", "pr404", "retitle", "reread403", "mangle", "repo404"):
     if method == "DELETE":
         emit(204, "No Content", h)
     if method == "PATCH":
         # The PATCH's own response is what OUR write stored — the race-free half of
-        # the no-op check.
-        emit(200, "OK", h, json.dumps({"number": 4242, "title": title_field}))
+        # the no-op check. `mangle` models a write that stored something ELSE than
+        # was sent, which is the case that must be called OUR residue.
+        stored = title_field + " (mangled)" if MODE == "mangle" else title_field
+        emit(200, "OK", h, json.dumps({"number": 4242, "title": stored}))
     emit(201 if method == "POST" else 200, "Created",
          h, json.dumps({"id": 999, "ref": "refs/heads/probe"}))
 elif MODE in ("readonly-pat", "readonly-nopr"):
@@ -739,6 +750,51 @@ def test_the_noise_arm_also_pins_the_digest(fake_gh):
     expected = f"token=sha256:{hashlib.sha256(SECRET.encode()).hexdigest()[:12]}"
     res = fake_gh("ok", noise=True)
     assert expected in res.stdout, res.stdout
+
+
+def test_reporting_writable_requires_measuring_the_PR_leg_even_for_the_comment_probe(fake_gh):
+    """#10945 review round 3, P2. The comment route skipped the target check.
+
+    `POST /issues/{n}/comments` authorizes against the TARGET RESOURCE, so on an
+    ISSUE number it needs only `issues=write` and returns 201. `--comment-probe
+    --pr <issue#>` therefore reported exit 0 "writable" having never exercised
+    `pull_requests=write` — the exact leg whose 403 the rail's `--evidence`
+    comment hits — and pinged an unrelated issue's watchers doing it.
+    """
+    res = fake_gh("pr404", "--comment-probe")
+    assert res.returncode == ghwp.EXIT_UNAVAILABLE, res.stdout + res.stderr
+    assert "GH-WRITE-UNAVAILABLE(pr-not-visible)" in res.stderr
+    assert "GH-WRITE-PREFLIGHT OK" not in res.stdout
+
+
+def test_a_write_that_stored_something_else_is_OUR_residue_not_a_third_party_s(fake_gh):
+    """#10945 review round 3, P2. The `stored != title` arm had no test at all.
+
+    Deleting it left every test green, and the shipped behaviour would then be the
+    exact inversion of round 2's finding: a PATCH that mangled the title gets
+    blamed on "another actor … do not restore it", telling an operator to leave a
+    title this probe broke.
+    """
+    res = fake_gh("mangle")
+    assert res.returncode == ghwp.EXIT_WRITABLE, res.stdout + res.stderr
+    assert "our own write stored" in res.stdout, res.stdout
+    assert "residue: restore the title" in res.stdout
+    assert "another actor" not in res.stdout
+
+
+def test_an_unreadable_repo_is_not_a_pr_not_visible_refusal(fake_gh):
+    """#10945 review round 3, P2. `repo_read_ok` was a hardcoded literal.
+
+    It is now the MEASURED result of the role read. With the repo unreadable, both
+    probes must say `repo-not-visible` — the old hardcoded `True` made the PR leg
+    claim "the repository itself IS visible (the role read succeeded)", a fact it
+    had never measured, and pointed the operator at the PR number.
+    """
+    res = fake_gh("repo404")
+    assert res.returncode == ghwp.EXIT_UNAVAILABLE, res.stdout + res.stderr
+    assert res.stderr.count("GH-WRITE-UNAVAILABLE(repo-not-visible)") == 2, res.stderr
+    assert "pr-not-visible" not in res.stderr
+    assert "resource-not-found" not in res.stderr
 
 
 if __name__ == "__main__":
