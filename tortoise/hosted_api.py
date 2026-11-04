@@ -8989,14 +8989,47 @@ def _check_org_limit(org: dict, resource: str, *,
 
     ⚠️ For a resource in ``ALLOWANCE_GATED_RESOURCES`` that fill is ONE
     control-plane read, so an ``async def`` request path MUST run this call off
-    the event loop (``asyncio.to_thread`` / ``_graph_offload``) — a synchronous
-    read inline on this API's single uvicorn worker parks every concurrent
-    request (the #2988/#3498 class). Every call site does: the points doors ride
-    ``_check_org_limit_off_loop`` (which puts the fill on its OWN lane, see
-    below), and the capture door awaits
-    ``asyncio.to_thread(_check_org_limit, org, "sessions")`` (#9567 review
-    round 10). Both of the fill's fail-closed faults (a resolver fault, and the
-    gate's loud import-time drift) are mapped to this function's documented
+    the event loop — a synchronous read inline on this API's single uvicorn
+    worker parks every concurrent request (the #2988/#3498 class). AND it must
+    ride its OWN substrate's lane, not merely a worker thread: the fill is a
+    control-plane read and the count it feeds is a graph read, so
+    ``asyncio.to_thread`` (the loop's DEFAULT executor — the lane
+    ``_commit_sync``/``_seed_demo_sync`` already use) satisfies only half the
+    rule. The INVENTORY, stated exactly (a claim of "every call site" was
+    wrong here once already — main-repair 2026-11-04, review cycle 1):
+
+    * the async POINTS doors ride ``_check_org_limit_off_loop``, which hoists
+      the fill onto ``_cp_offload``/``_graph_offload`` by substrate and then
+      submits the count to the graph pool, as ``check_org_limit.points``;
+      the capture door rides the same twin as
+      ``check_org_limit.sessions`` (#9567 round 10 → main-repair 2026-11-04);
+    * the DOCUMENTS door does NOT use this function or that seam: it calls
+      ``enforce_org_limit(limits, "documents", …)`` directly, on a limits dict
+      its caller resolved inline (``resolve_org_limits`` on the event loop, in
+      the detached ``_run_docs_indexing`` task). That is a PRE-EXISTING
+      on-loop control-plane read of the #2988/#3498 class, named here so this
+      inventory is true and filed on its own rather than absorbed into a
+      capture-door repair;
+    * ``POST /v1/sessions/commit`` hoists the carry in the HANDLER, before its
+      per-graph lock is taken, and hands the stamped dict down (#9567 round 13);
+    * ``/v1/demo`` is one declared exception: it runs this call inside its
+      own per-org seed lock, on a worker thread, deliberately (see BOUNDARY 4 in
+      ``tortoise/allowance_gate.py``) — so its fill rides the loop's default
+      executor rather than a substrate pool. Naming it here is deliberate: the
+      exception is real, and a reader who assumes "every door" must not;
+    * TWO async doors run this function INLINE, with no offload at all, and they
+      are the worst cases rather than exceptions: ``create_api_key``
+      (``_check_org_limit(org, "api_keys")``) and ``rotate_api_key``
+      (``_check_org_limit(org, "api_keys", slot_credit=1)``). ``api_keys`` is
+      NOT in ``ALLOWANCE_GATED_RESOURCES``, so no CARRY runs — but the COUNT
+      does (``_session_user_org`` always emits an int ``max_api_keys``), which
+      is a PostgREST ``active_api_keys`` read or a registry
+      ``MATCH (k:APIKey …)`` on the single uvicorn worker. PRE-EXISTING, one
+      root, filed once with both sites as **#10954** — not absorbed into a
+      capture-door repair.
+
+    Both of the fill's fail-closed faults (a resolver fault, and the gate's
+    loud import-time drift) are mapped to this function's documented
     ``HTTPException(500, "Quota check failed: …")`` — never an unmapped 500.
 
     ⚠️ ONE control-plane read is the SUPABASE shape. In registry/self-host mode
@@ -17479,10 +17512,33 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # query). Run inline it would park the single uvicorn worker on every REST
     # capture — including the store-only (#3892/#4258) and replay lanes that
     # reach here having done NO other I/O — the #2988/#3498 class this file
-    # offloads everywhere else (see :15456). So it rides `asyncio.to_thread`,
-    # the same idiom the cohort cap three lines above uses; `to_thread` copies
-    # the context, so the tenant contextvars reach the gate intact. Safe on the
-    # MCP path too (it awaits this impl under its own loop in a worker thread).
+    # offloads at its other request doors. (No line pointer here on purpose:
+    # ``create_api_key`` AND ``rotate_api_key`` still run their ``api_keys``
+    # count INLINE on the loop — one root, #10954 — so a bare ``see :NNNN``
+    # would point a reader at a counter-example
+    # to this sentence, and a line number drifts on the next PR anyway.)
+    #
+    # ⛔ "Off the loop" is not the whole rule (main-repair, 2026-11-04, after
+    # the #9567 round-12/13 pool split landed): `asyncio.to_thread` runs the
+    # call on the LOOP'S DEFAULT EXECUTOR, which carries this file's graph-lane
+    # work (`_commit_sync`, `_seed_demo_sync`). The gate is TWO reads on TWO
+    # substrates — the allowance CARRY is a control-plane read, the COUNT is a
+    # graph read — and round 12's rule is that a read is submitted to the pool
+    # ITS OWN substrate lives in. Submitted as one blob to the default
+    # executor, a control-plane stall occupied a slot that the commit lane
+    # needs, and it answered `500 "Quota check failed"` where the identical
+    # stall on `/v1/points` answers `503 control_plane_unavailable` — one
+    # fault, two bodies, across two gated doors of one seam. So this door uses
+    # the SAME seam as the points doors (`_check_org_limit_off_loop`): carry on
+    # `_cp_offload`/`_graph_offload` by substrate, then the count on the graph
+    # pool. The CONTEXT story, stated exactly (review cycle 2 corrected an
+    # earlier over-claim): the COUNT and the registry-mode CARRY ride
+    # `_graph_offload`, which applies `confine_context` — the caller's
+    # contextvars reach them. The SUPABASE carry rides `_cp_offload`, whose
+    # control-plane pool does NOT copy the context, and needs none: the org id
+    # travels in the dict argument, and `supabase_control` declares no
+    # ContextVar. Safe on the MCP path for the same reason as before (the impl
+    # is awaited under its own loop in a worker thread).
     # #8906: `sdk=` is passed for the same reason as the points doors — this is a
     # TENANT-GRAPH resource, so an omitted sdk makes `_count_resource` mint
     # `org_{org_id}` (the org DEFAULT graph) while a graph-bound key's Sessions
@@ -17490,9 +17546,43 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # resolver emits `max_sessions: None` (#4010), so `enforce_org_limit` returns
     # before counting; the moment a finite session cap ships, an omitted sdk
     # re-arms #8906 on this door. Count on the handle the capture writes through.
-    # `to_thread` forwards kwargs, so the sdk reaches the count AND the fill
-    # rides the worker lane.
-    await asyncio.to_thread(_check_org_limit, org, "sessions", sdk=sdk)
+    # The seam forwards `sdk` verbatim to the count.
+    #
+    # ⚠️ DECLARED RESIDUAL (main-repair review cycle 1, P2): in Supabase mode the
+    # carry's bound miss now raises `_control_plane_unavailable()`, whose
+    # `message` is the SIGN-IN copy ("Sign-in is temporarily unavailable …", the
+    # copy-string contract with website/apps/dashboard/public/signup.html) — and
+    # this route records that message as the capture's last error
+    # (`_record_capture_last_error`). So a QUOTA stall on a capture renders as a
+    # sign-in failure. That copy is a repo-wide contract owned by the mint/claim
+    # path, so this repair does not unilaterally re-word it; the honest fix is a
+    # capture-shaped `unavailable=` factory threaded through
+    # `_carry_allowances_off_loop` (which already accepts one at `_cp_offload`),
+    # and it is named here rather than left for someone to discover from a
+    # dashboard line. The `error_code` (`control_plane_unavailable`) is correct
+    # either way.
+    #
+    # ⚠️ SECOND DECLARED RESIDUAL (main-repair review cycle 3, P1): for
+    # `resource="sessions"` the gate has a THIRD read, and it is a control-plane
+    # read that rides the GRAPH pool. `capture_extraction` is gated on
+    # `resources={"sessions"}` and its meter is `metering.get_capture_usage`,
+    # which in Supabase mode does two PostgREST round trips
+    # (`org_metering_anchor` + `metering_get_capture_usage`) — and it runs inside
+    # the `_graph_offload` submission that carries the count. With no
+    # `max_extraction_tokens` armed (every production resolver today) the
+    # dimension is absent and nothing is read, so this is LATENT, not live; the
+    # day a token allowance ships, a control-plane stall inside that submission
+    # exceeds `graph_offload_timeout_s()`, abandons a graph-pool worker holding
+    # its slot, and refuses a legitimate capture with
+    # `503 graph_unavailable` — the wrong dependency's copy, the round-12
+    # inversion in miniature. The proper fix is NOT local to this door: it needs
+    # the configured `capture_extraction` reading resolved inside the same
+    # control-plane submission as the carry and handed down, which means
+    # threading `meters=` through `quota.enforce_org_limit` (it calls
+    # `enforce_allowances(limits, org_id=…, resource=…)` with no meter
+    # override). Filed rather than absorbed: #10949.
+    await _check_org_limit_off_loop(org, "sessions",
+                                    op="check_org_limit.sessions", sdk=sdk)
     # Optional frontmatter-metadata validation (#1362) — warn-only, gated by
     # TORTOISE_VALIDATE_FRONTMATTER=1 (default OFF). The SessionRequest is a
     # payload (no frontmatter block), so the shape validator runs over a
