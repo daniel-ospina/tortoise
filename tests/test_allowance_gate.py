@@ -883,3 +883,88 @@ def test_a_numeric_string_reading_is_COERCED_and_the_record_says_so():
         enforce_allowances(_limits(max_extraction_tokens=10),
                            resource="sessions",
                            meters={"capture_extraction": _meter("50")})
+
+
+# ── #9567 D12 (review round 15) — the MCP WRITE lane, not just capture ────
+#
+# Round 9-14 closed the arming seam at the ONE REST convergence point and at
+# the MCP CAPTURE bridge. But `mcp_server._enforce_quota` is the pre-write gate
+# for every `_quota_gated` MCP tool (~19 `points` writers, `documents` too), and
+# it called `enforce_org_limit` DIRECTLY — never through
+# `hosted_api._check_org_limit`, and without carrying the keys itself. In
+# Supabase mode the dict it passes is `mcp_auth`'s `limits = org` (the
+# `resolve_api_key` dict, whose shape has no allowance key and no column to read
+# one from), so arming a dimension in the resolver REFUSED on the REST doors and
+# SERVED WITHOUT LIMIT on every MCP points/documents tool — the same fail-open
+# the capture bridge closed, one surface short.
+#
+# `graph_storage` is the armed dimension below because it is BLOCKED: a
+# configured BLOCKED dimension refuses without reading a meter, so this is a pure
+# unit assertion with no store and no instrument.
+
+def _mcp_lane(monkeypatch, limits: dict | None = None):
+    """Point `_enforce_quota` at a resolved MCP lane without a store or an SDK."""
+    from tortoise import mcp_auth, mcp_server
+
+    class _Fixed:
+        def __init__(self, value):
+            self._value = value
+
+        def get(self):
+            return self._value
+
+    # `_enforce_quota` imports these from `tortoise.mcp_auth` inside the call.
+    monkeypatch.setattr(mcp_auth, "_current_org_id", _Fixed(ORG))
+    monkeypatch.setattr(mcp_auth, "_current_org_limits",
+                        _Fixed(limits if limits is not None else _rest_org()))
+    # The SDK argument is evaluated eagerly; nothing reads it — the armed BLOCKED
+    # dimension refuses before any count.
+    monkeypatch.setattr(mcp_server, "_get_org_sdk", lambda: None)
+    return mcp_server
+
+
+def test_the_mcp_write_lane_carries_an_allowance_resolved_by_the_resolver(
+        monkeypatch):
+    """`_enforce_quota` must fill the keys the MCP lane did not carry.
+
+    Mutation this REDs: drop the ``_carry_allowances(limits, resource)`` call in
+    ``mcp_server._enforce_quota`` and the allowance configured through
+    ``quota.resolve_org_limits`` never reaches the tool — the gate sees an
+    ABSENT key, reads it as UNLIMITED, and the write is SERVED instead of
+    refused (``max_points`` is None here, so nothing else can refuse).
+    """
+    from tortoise import quota
+
+    mcp_server = _mcp_lane(monkeypatch)
+    monkeypatch.setattr(
+        quota, "resolve_org_limits",
+        lambda org_id: {"org_id": org_id, "tier": "free",
+                        "max_graph_storage_mb": 100})
+
+    with pytest.raises(QuotaCheckError) as exc:
+        mcp_server._enforce_quota("points")
+    detail = str(exc.value)
+    assert "graph_storage" in detail, detail
+    assert "blocked" in detail.lower(), detail
+
+
+def test_the_mcp_write_lane_reads_the_resolver_only_for_a_GATED_resource(
+        monkeypatch):
+    """An ungated resource (`api_keys`) must pay no control-plane read.
+
+    Mutation this REDs: drop the ``resource not in ALLOWANCE_GATED_RESOURCES``
+    guard in ``_carry_allowances`` and a key mint — which no declared dimension
+    gates — starts a resolver read whose fault would refuse an unrelated
+    operation.
+    """
+    mcp_server = _mcp_lane(monkeypatch, limits={
+        "org_id": ORG, "tier": "free", "max_users": None, "max_graphs": None,
+        "max_points": None, "max_api_keys": None, "max_sessions": None})
+
+    from tortoise import quota
+
+    def _boom(_org_id: str):
+        raise AssertionError("resolver must not be consulted")
+
+    monkeypatch.setattr(quota, "resolve_org_limits", _boom)
+    assert mcp_server._enforce_quota("api_keys") is None

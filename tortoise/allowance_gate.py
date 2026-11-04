@@ -70,17 +70,28 @@ invariant.
 
 **⚠️ HOW AN ALLOWANCE REACHES THE GATE (the arming seam).** The gate reads the
 limits dict it is GIVEN, so a key a surface never carried is not a warning — it
-is UNLIMITED. Two carriers, both enumerated from :data:`ALLOWANCE_KEYS`, close
-that on every surface: the MCP capture bridge carries them out of the resolved
-limits it already holds, and ``hosted_api._check_org_limit`` (the ONE REST
-convergence point) fills any key the lane's hand-assembled dict is missing from
-``quota.resolve_org_limits`` — the ONE resolver allowed to emit an allowance
-(#3874's rule: *"there is ONE resolver, so the two cannot drift"*). So arming an
-allowance in the resolver reaches BOTH lanes with no second edit, instead of
-refusing on MCP while REST silently serves past it. The REST fill runs in
-``_check_org_limit``, which REST doors must call OFF the event loop — it is one
-control-plane round-trip per gated request, not a dict lookup (#9567 review
-round 10).
+is UNLIMITED. Three carriers close that on every surface, and the two that
+enumerate from :data:`ALLOWANCE_KEYS` do so generically:
+
+* ``hosted_api._check_org_limit`` (the ONE REST convergence point) fills any key
+  the lane's hand-assembled dict is missing from ``quota.resolve_org_limits`` —
+  the ONE resolver allowed to emit an allowance (#3874's rule: *"there is ONE
+  resolver, so the two cannot drift"*).
+* ``mcp_server._enforce_quota`` (the pre-write gate for every ``_quota_gated``
+  MCP tool) does the same fill, because the MCP lane's ContextVar carries none
+  of the three in Supabase mode (``mcp_auth`` sets ``limits = org``, the
+  ``resolve_api_key`` dict, which has no allowance column). Without it, arming
+  in the resolver would REFUSE on REST and SERVE WITHOUT LIMIT on ~19 MCP
+  points/documents tools — the same fail-open, one surface short (#9567 review
+  round 15).
+* the MCP capture BRIDGE (``mcp_server.tortoise_session_capture``) carries them
+  out of the resolved limits dict it already holds.
+
+So arming an allowance in the resolver reaches BOTH lanes with no second edit,
+instead of refusing on one while the other silently serves past it. The REST
+fill runs in ``_check_org_limit``, which REST doors must call OFF the event
+loop — it is one control-plane round-trip per gated request, not a dict lookup
+(#9567 review round 10).
 
 **Three outcomes per configured dimension, and only three:**
 
