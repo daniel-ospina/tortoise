@@ -436,7 +436,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--repo", default=os.environ.get("CI_CANCEL_GUARD_REPO", DEFAULT_REPO))
     parser.add_argument("--apply", action="store_true", help="issue the cancel")
     parser.add_argument("--json", action="store_true")
-    parser.add_argument("--max-age", type=int, default=MAX_COMPARISON_AGE_S)
+    # ⛔ `--max-age` is a STRING argparse does not type-check, for the same reason as the
+    # seam below: `type=int` makes argparse exit `2` on a typo, and `2` is the code the
+    # exit table reserves for FAIL-CLOSED ("a surface could not be read") — so
+    # `--max-age abc` was indistinguishable from an unreadable GitHub surface to any
+    # caller that switches on the exit code (round-4 review, "related, same root").
+    parser.add_argument("--max-age", default=str(MAX_COMPARISON_AGE_S))
     parser.add_argument("--self-test", action="store_true")
     # ⛔ The seam is a STRING, parsed and validated by `_elapsed_override` — not
     # `type=float`, which would let argparse exit `2` ("a surface could not be read")
@@ -459,21 +464,27 @@ def main(argv: list[str] | None = None) -> int:
     if "*" in args.repo or "/" not in args.repo or args.repo.count("/") != 1:
         print(f"--repo must be owner/name (got {args.repo!r})", file=sys.stderr)
         return 64
-    if args.max_age <= 0:
+    try:
+        max_age = int(args.max_age)
+    except ValueError:
+        print(f"--max-age must be a whole number of seconds (got {args.max_age!r})",
+              file=sys.stderr)
+        return 64
+    if max_age <= 0:
         print("--max-age must be positive", file=sys.stderr)
         return 64
     run_id = int(args.run_id)
     try:
-        verdict, detail, elapsed, measured = evaluate(args.repo, run_id, args.max_age,
+        verdict, detail, elapsed, measured = evaluate(args.repo, run_id, max_age,
                                                       args.fake_elapsed)
     except Unreadable as exc:
         print(f"ci_cancel_guard: FAIL-CLOSED for run {run_id}: {exc} — cancelling NOTHING",
               file=sys.stderr)
         return 2
 
-    if verdict == "PERMIT" and elapsed >= args.max_age:
+    if verdict == "PERMIT" and elapsed >= max_age:
         verdict = "REFUSE"
-        detail["why"] = f"stale comparison ({elapsed:.1f}s ≥ {args.max_age}s)"
+        detail["why"] = f"stale comparison ({elapsed:.1f}s ≥ {max_age}s)"
 
     post_rc: int | None = None
     post_detail = ""
@@ -484,7 +495,7 @@ def main(argv: list[str] | None = None) -> int:
             post_rc, post_detail = 1, str(exc)
 
     text = render(run_id, verdict, detail, elapsed, args.apply, post_rc, post_detail,
-                  args.max_age, measured)
+                  max_age, measured)
     print(text)
     if args.json:
         print(json.dumps({"run": run_id, "verdict": verdict,

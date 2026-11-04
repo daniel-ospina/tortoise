@@ -595,3 +595,18 @@ def test_a_unicode_digit_run_id_is_a_usage_error(fixture):
 def test_usage_error_on_a_non_numeric_run_id(fixture):
     r = guard(fixture, "not-a-run-id", "--apply")
     assert r.returncode == 64
+
+
+def test_a_non_numeric_max_age_is_a_usage_error_not_a_fail_closed(fixture):
+    """Round-4 review, "related, same root": argparse's `type=int` exited `2` on a typo,
+    and `2` is the code the exit table reserves for FAIL-CLOSED — so a usage error was
+    indistinguishable from an unreadable GitHub surface to any caller switching on the
+    exit code. `--max-age` is validated by the tool now (pre-fix this exits 2)."""
+    fixture.apply("run.json", _run_meta(sha=HEAD_OLD))
+    fixture.apply("prs.json", pr(PR_HEAD_MOVED))
+    fixture.apply("jobs.json", {"total_count": 0, "jobs": []})
+    r = guard(fixture, "41840910128", "--apply", "--max-age", "abc")
+    assert r.returncode == 64, r.stdout + r.stderr
+    assert "FAIL-CLOSED" not in r.stderr, r.stderr
+    assert "max-age" in r.stderr, r.stderr
+    assert fixture.cancelled() == []
