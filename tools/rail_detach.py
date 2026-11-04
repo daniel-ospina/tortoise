@@ -591,8 +591,22 @@ def _resolve_repo(cwd: Path) -> str:
             + (f": {detail[-1]}" if detail else "")
             + ") — the `gh` on PATH ran and failed; pass --repo, or repair that `gh`"
         )
-    # Every other non-zero exit keeps main's stderr detail: the last line is the
+    if out.returncode == 0:
+        # ⛔ rc=0 IS NOT A SUCCESS HERE (review, `#10777`). The success guard above
+        # ALSO requires a non-empty repo, so a `gh` that exited 0 and printed
+        # nothing lands here — and it RAN, which is what proves it is installed.
+        # The generic arm below asks "is `gh` installed and authenticated?" and
+        # offers "install the `gh` CLI", the same message-vs-exit-code dishonesty
+        # this PR removes one branch above.
+        raise Refused(
+            "could not resolve the repo from this checkout (`gh repo view` exited 0 "
+            "but printed no repository) — the `gh` on PATH ran, so this is not an "
+            "install problem; pass `--repo owner/name` to name the artifact yourself"
+        )
+    # Every other NON-ZERO exit keeps main's stderr detail: the last line is the
     # only thing that says WHY `gh repo view` failed (auth, network, no remote).
+    # (rc=0 is handled above, so "non-zero" is a precondition this arm now
+    # actually has, not just a comment.)
     detail = (out.stderr or "").strip().splitlines()
     # ⛔ BOTH SIDES' WORDING (#10622 merge): the branch side asserts the message
     # says WHAT to fix ("installed"), main's carries the stderr detail plus the
