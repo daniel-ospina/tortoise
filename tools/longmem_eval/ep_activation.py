@@ -711,6 +711,10 @@ def _promote_operator_row(sdk, g, oid, promoted_ops, on_input) -> bool:
     endpoints = g.query(_SELECT_OPERATOR_ENDPOINTS,
                         params={"oid": oid}).result_set
     if not endpoints:
+        # ``all([])`` is True, so WITHOUT this the CAS below flips an operator
+        # that has no epistemic edge at all. The engine carries the same guard
+        # (``sdk.py:21341``, "no endpoints — nothing to gate on"); pinned by
+        # ``test_the_gate_refuses_an_operator_with_no_endpoints``.
         return False  # no endpoints — nothing to gate on (the SDK skips too)
     if not all((st or "live") == "live" for _, st, _rel, _labs in endpoints):
         return False  # keep draft until every endpoint is live (R16)

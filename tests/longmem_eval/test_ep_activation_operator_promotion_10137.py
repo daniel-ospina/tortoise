@@ -403,6 +403,89 @@ def test_the_gate_refuses_a_status_less_operator(sdk):
     )
 
 
+def test_the_gate_refuses_an_operator_with_no_endpoints(sdk):
+    """The empty-endpoint guard is load-bearing: ``all([])`` is ``True``.
+
+    The candidate sweep is a status predicate (``is_operator = true OR
+    op_type IS NOT NULL`` AND ``status = 'draft'``), so it can offer a node with
+    NO outgoing edge to an epistemic label at all — a hand-written or partially
+    migrated operator, which ``create_operator`` cannot mint (it writes one edge
+    per input slot, ``idx:0`` included) but a raw write can. Without the
+    ``if not endpoints: return False`` guard the gate falls through to
+    ``all((st or "live") == "live" for … in [])``, which is vacuously TRUE, and
+    the CAS then flips it.
+
+    MEASURED on this engine, on exactly the node this test builds: the endpoint
+    read returns ``[]``, ``all(...)`` over it returns ``True``, and
+    ``_PROMOTE_OPERATOR`` returns the id with the node's status ``'live'`` — so
+    dropping the guard journals an ``OperatorPromoted`` for an operator with no
+    endpoints and counts it in ``operators_promoted``.
+
+    The guard is the ENGINE's too (``sdk.py:21341`` — ``if not eps: continue  #
+    no endpoints — nothing to gate on``), so this is parity, not a harness
+    invention: a harness that promoted here would publish a promotion
+    production cannot produce.
+
+    Driven through ``_promote_operator_row`` directly, because ``activate_beliefs``
+    classifies the same node through the point sweep as well — the state is
+    reachable through the public flow but the gate call is what must refuse.
+    """
+    oid = "op-orphan-10137"
+    g = sdk._get_proj().g
+    g.query(
+        "CREATE (o:Point {id:$oid, is_operator:true, status:'draft'})",
+        params={"oid": oid},
+    )
+
+    # Preconditions, so a green here cannot be a green for the wrong reason:
+    # the sweep DOES offer the node, and the gate's own read finds no endpoint.
+    assert oid in [
+        r[0] for r in g.query(epa._SELECT_DRAFT_OPERATOR_IDS).result_set if r
+    ], (
+        "the candidate sweep no longer offers an endpoint-less draft operator, "
+        "so this test would pass without exercising the guard"
+    )
+    assert g.query(
+        epa._SELECT_OPERATOR_ENDPOINTS, params={"oid": oid}
+    ).result_set == [], (
+        "the fixture grew an epistemic endpoint — the empty-endpoint arm is not "
+        "reached and the guard is untested"
+    )
+
+    events: list[str] = []
+    marked: list[str] = []
+    real_emit = sdk._emit_event
+
+    def _counting_emit(type_, **kwargs):
+        events.append(type_)
+        return real_emit(type_, **kwargs)
+
+    sdk._emit_event = _counting_emit
+    try:
+        flipped = epa._promote_operator_row(sdk, g, oid, set(), marked.append)
+    finally:
+        sdk._emit_event = real_emit
+
+    assert flipped is False, (
+        "the gate promoted an operator with NO endpoints — the `if not "
+        "endpoints` guard is gone, and `all([])` is True, so the CAS flips a "
+        "node nothing can gate on"
+    )
+    assert _operator_status(sdk, oid) == "draft", (
+        "an endpoint-less operator went live; the engine keeps it draft "
+        "(sdk.py:21341) and a promotion the engine cannot produce must not be "
+        "published in operators_promoted (#10137)"
+    )
+    assert events.count("OperatorPromoted") == 0, (
+        f"the gate journalled {events!r} for an operator with no endpoints — "
+        "JSONL replay would re-apply a promotion with nothing behind it"
+    )
+    assert marked == [], (
+        f"the gate reported {marked!r} as a promoted endpoint for an operator "
+        "that has none"
+    )
+
+
 def test_the_gate_reads_every_operator_edge_not_just_impl(sdk):
     """A ``mitigated_by`` edge to a dead mitigation must block, as it does in the engine.
 
