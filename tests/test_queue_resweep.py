@@ -230,6 +230,78 @@ class TestConfig(unittest.TestCase):
             qr.parse_config(bad)
         self.assertIn("check-pending=docs", str(ctx.exception))
 
+    def test_a_label_exclusion_condition_parses_in_both_spellings(self):
+        """Mergify allows whitespace around the operator; both must parse.
+
+        The repository writes `label = queue-accelerator` in `priority_rules` and
+        `-label=superseded-by-fold` in `queue_conditions`. A parser that only
+        understood one spelling would read the gate on one line and silently miss
+        it on the other — a gate the sweep queues past.
+        """
+        for spelling in ("-label=superseded-by-fold", "-label = superseded-by-fold"):
+            text = FIXTURE_CONFIG.replace(
+                "      - check-success=docs", f"      - {spelling}\n      - check-success=docs"
+            )
+            parsed = qr.parse_config(text)
+            self.assertEqual(parsed.forbidden_labels, ("superseded-by-fold",), spelling)
+            self.assertEqual(parsed.required_labels, (), spelling)
+
+    def test_a_positive_label_condition_is_required_not_forbidden(self):
+        text = FIXTURE_CONFIG.replace(
+            "      - check-success=docs", "      - label=ready\n      - check-success=docs"
+        )
+        self.assertEqual(qr.parse_config(text).required_labels, ("ready",))
+
+
+class TestFoldConstituentGate(unittest.TestCase):
+    """A folded PR must not be swept INTO the queue ahead of its fold.
+
+    Owner's question, 2026-11-04: *"will we have a way to prioritise for CI queues
+    the combined ones? so their components don't land before and disrupt the
+    process?"* The queue condition is the gate; this sweep is the other actor that
+    can put a PR in the queue, so it has to honour the same condition or it is a
+    way around the gate.
+    """
+
+    def _cfg(self):
+        text = FIXTURE_CONFIG.replace(
+            "      - check-success=docs",
+            "      - -label=superseded-by-fold\n      - check-success=docs",
+        )
+        return qr.parse_config(text)
+
+    def test_a_labelled_constituent_is_refused_by_name(self):
+        unmet = qr.unmet_conditions(
+            pr(labels=("superseded-by-fold",)), all_green(), self._cfg()
+        )
+        self.assertEqual(len(unmet), 1, unmet)
+        self.assertIn("-label=superseded-by-fold", unmet[0])
+        self.assertIn(
+            "fold", unmet[0]
+        )  # the refusal must name WHY, not only which label
+
+    def test_an_unlabelled_pr_is_still_admitted(self):
+        """The gate must be surgical — otherwise the whole fleet stops landing."""
+        self.assertEqual(
+            qr.unmet_conditions(pr(), all_green(), self._cfg()), []
+        )
+
+    def test_a_constituent_is_never_posted_to(self):
+        """End to end: the verdict is SKIP-UNMET, and no queue command is posted."""
+        text = FIXTURE_CONFIG.replace(
+            "      - check-success=docs",
+            "      - -label=superseded-by-fold\n      - check-success=docs",
+        )
+        config = qr.parse_config(text)
+        constituent = pr(number=7, labels=("superseded-by-fold",))
+        client = FakeGithub([constituent], {"sha1": [all_green()]})
+        report = qr.run_sweep(client, "o/r", config, dry_run=False,
+                              sleep=lambda _s: None, now=Clock(), config_source="test")
+        outcome = next(o for o in report.outcomes if o.number == 7)
+        self.assertEqual(outcome.verdict, "SKIP-UNMET", outcome)
+        self.assertEqual(client.posted, [], "a fold constituent was posted a queue command")
+        self.assertNotIn("queue", " ".join(b for _n, b in client.posted))
+
     def test_missing_checks_is_an_error(self):
         bad = "queue_rules:\n  - name: main\n    queue_conditions:\n      - base=main\n      - -draft\n"
         with self.assertRaises(qr.ConfigError):
