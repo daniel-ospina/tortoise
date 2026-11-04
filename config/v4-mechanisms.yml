@@ -1165,7 +1165,9 @@ mechanisms:
       an always-present `identity` block plus a warning that fires when a candidate's
       own identity query did not run (a budget cut that touches only non-candidate
       queries gets its own sentence, and a lookup that ran NOTHING at all with no
-      candidate to check gets a third — the three are different facts).
+      candidate to check gets a third on any run that reaches the warning block —
+      the empty-conversation early return precedes it, so it emits none — and the
+      three are different facts).
       ⛔ **WHAT IS STILL ABSENT — and this is why the row stays
       `not-implemented`:** nothing suppresses a create. I1's *"never mint it"*
       needs a CREATE gate inside S5, and NOT `execute_embed({})`: that function
