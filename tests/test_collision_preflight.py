@@ -658,6 +658,13 @@ def _wait_for_deleted_cwd(pid: int, timeout: float = 10.0) -> None:
 #: `{real_ps}` and `{root}` are substituted at write time: the real `ps` is resolved
 #: BEFORE the shim is on `PATH` (so the shim cannot exec itself), and `root` is the
 #: checkout the reader is imported from.
+#:
+#: ⚠️ ON THE TOOL PATH THIS SHIM IS THE FALLBACK, NOT THE FIRST `ps`: `run_tool`
+#: prepends the SERVED stub (`_write_ps_stub`, `tool_subprocess_env`) ahead of it, so
+#: the child's `ps` is `psstub/ps` on every tool launch and this shim is what answers
+#: only if no table was served. It remains the suite's own whole-machine read in
+#: `_run_census_shim`, and it remains FIRST in `tool_env()` — those are two different
+#: environments, pinned separately (see `test_the_tool_subprocess_resolves_ps_to_the_served_stub`).
 CENSUS_PS_SHIM = r'''#!{python}
 """`ps` with this BOX's unattributable `pi` rows removed (see CENSUS_PS_SHIM)."""
 import os
@@ -1201,6 +1208,33 @@ class CollisionPreflightTest(unittest.TestCase):
         env["PATH"] = f"{self.census_dir}{os.pathsep}{env.get('PATH', '')}"
         return env
 
+    def tool_subprocess_env(self, env_extra: dict | None = None) -> dict:
+        """THE env a TOOL SUBPROCESS receives — `run_tool`'s ONE composition, in one place.
+
+        ⛔ THE SERVED PROCESS TABLE OUTRANKS THE CENSUS SHIM. `tool_env` puts
+        main's `ps` census shim first on `PATH` (it drops the BOX's
+        unattributable `pi` rows); a test that SERVES a table
+        (`set_process_table` / `add_process_row`) needs ITS rows to win, because
+        it models a live lane the shim could never invent. The stub therefore
+        goes ahead of the shim and `PS_STUB_ROWS` names the rows. Both stubs
+        neutralise the SAME ambient surface — whichever is first, the child's
+        `ps` is a stub and never the box's — so neither arm's guarantee is
+        weakened by the other; the order is what lets a test INJECT a row
+        (#10823) and still keep the census shim on the child's `PATH` behind it.
+
+        ⚠️ TWO LAYERS, TWO PINS, because they are different environments:
+        `tool_env()` is the BASE (census shim first) and this is what every tool
+        launch actually gets (served stub first). A pin that asserted the stub
+        order on `tool_env()` — or the shim order on this — would be green about
+        an environment no subprocess runs in (review round 9, P3), so
+        `test_the_tool_subprocess_resolves_ps_to_the_served_stub` pins THIS one by
+        running `which ps` in it via `run_tool`.
+        """
+        env = self.tool_env(env_extra)
+        env["PATH"] = f"{self.ps_dir}{os.pathsep}{env['PATH']}"
+        env["PS_STUB_ROWS"] = str(self.ps_dir / "rows")
+        return env
+
     def failing_rebuild_path(self) -> str:
         """A `PATH` on which a REBUILD's own reads fail locally (review P2).
 
@@ -1243,20 +1277,10 @@ class CollisionPreflightTest(unittest.TestCase):
                  extra_args: list[str] | None = None,
                  repo_arg: object = "__default__", cwd: Path | None = None,
                  gh_bin: Path | None = None):
-        env = self.tool_env(env_extra)
-        # ⛔ THE SERVED PROCESS TABLE OUTRANKS THE CENSUS SHIM. `tool_env` puts
-        # main's `ps` census shim first on `PATH` (it drops the BOX's
-        # unattributable `pi` rows); a test that SERVES a table
-        # (`set_process_table` / `add_process_row`) needs ITS rows to win, because
-        # it models a live lane the shim could never invent. The stub therefore
-        # goes ahead of the shim and `PS_STUB_ROWS` names the rows. Both stubs
-        # neutralise the SAME ambient surface — whichever is first, the child's
-        # `ps` is a stub and never the box's — so neither arm's guarantee is
-        # weakened by the other; the order is what lets a test INJECT a row
-        # (#10823) and still leave the census shim as the default (`tool_env`'s
-        # own pins still assert `census_dir` first there).
-        env["PATH"] = f"{self.ps_dir}{os.pathsep}{env['PATH']}"
-        env["PS_STUB_ROWS"] = str(self.ps_dir / "rows")
+        # The child's env comes from ONE place — never re-inline it here (see
+        # `tool_subprocess_env`): a second composition is how the pin whose subject
+        # is "what the TOOL runs with" stays green about an env nothing runs in.
+        env = self.tool_subprocess_env(env_extra)
         cmd = [PYTHON, str(TOOL), str(issue)]
         if repo_arg == "__default__":
             cmd += ["--repo", str(self.repo)]
@@ -9332,18 +9356,60 @@ class CollisionPreflightTest(unittest.TestCase):
             "census GAP that refuses every demotion on a busy box (see CENSUS_PS_SHIM)"
         ))
 
-    def test_the_tool_subprocess_runs_with_the_census_shim_first_on_path(self):
-        """The wiring, pinned: a shim that exists but is not on the child's `PATH` is inert."""
+    def test_the_census_shim_is_first_on_the_BASE_tool_env_path(self):
+        """`tool_env()`'s composition: the census shim is FIRST in the BASE env.
+
+        This pins the BASE layer only, and says so in its name: `run_tool` then puts
+        the SERVED `ps` stub ahead of it (`tool_subprocess_env`), so the shim is never
+        the child's first `ps` on a tool launch. The subprocess's own resolution is
+        pinned by `test_the_tool_subprocess_resolves_ps_to_the_served_stub` — a pin
+        named for the tool path has to RUN it (#9889's rule), and this one does not.
+        """
         env = self.tool_env()
         self.assertEqual(env["PATH"].split(os.pathsep)[0], str(self.census_dir),
-                         "the census shim must be FIRST on the tool's `PATH`")
+                         "the census shim must be FIRST on the BASE tool `PATH`")
         which = subprocess.run(["which", "ps"], capture_output=True, text=True, env=env,
                                check=False)
         self.assertEqual(which.stdout.strip(), str(self.census_dir / "ps"),
-                         "`ps` in the tool's environment must BE the shim")
+                         "`ps` in the BASE tool environment must BE the shim")
         # And the shim is only on the CHILD's path: this process keeps the real one, so
         # the decision-level pins above still mock the reader rather than the box.
         self.assertNotEqual(shutil.which("ps"), str(self.census_dir / "ps"))
+
+    def test_the_tool_subprocess_resolves_ps_to_the_served_stub(self):
+        """The env the TOOL actually receives — captured from the LAUNCH and RUN.
+
+        `tool_subprocess_env` puts the served stub ahead of the census shim, so on a
+        real tool launch the child's `ps` is `psstub/ps` and `CENSUS_PS_SHIM` never
+        executes. That is the ordering every other stub test depends on, and it was
+        previously unpinned on the path it describes.
+
+        Non-vacuity, both halves: if `run_tool` reverts to composing its env itself
+        (the pre-fix shape, `env = self.tool_env(env_extra)`), the spy is never called
+        and the first assertion fails; if the stub stops being prepended, `which ps`
+        resolves to the shim and the second fails.
+        """
+        seen: dict = {}
+        base = self.tool_subprocess_env
+
+        def spy(env_extra=None):
+            seen["env"] = env = base(env_extra)
+            return env
+
+        self.tool_subprocess_env = spy
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("env", seen, (
+            "run_tool must compose the child's env through tool_subprocess_env — "
+            "an inlined composition is the env this pin cannot see"
+        ))
+        env = seen["env"]
+        which = subprocess.run(["which", "ps"], capture_output=True, text=True, env=env,
+                               check=False)
+        self.assertEqual(which.stdout.strip(), str(self.ps_dir / "ps"),
+                         "the TOOL SUBPROCESS's `ps` must be the SERVED stub (#10823)")
+        self.assertIn(str(self.census_dir), env["PATH"].split(os.pathsep),
+                      "the census shim stays on the child's `PATH` behind the stub")
 
     @staticmethod
     def _write_fake_ps(path: Path, table: str) -> str:

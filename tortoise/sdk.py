@@ -12809,13 +12809,13 @@ class TortoiseSDK:
                 # ⚠️ THIS DEFECT WAS FIXED TWICE, INDEPENDENTLY: `origin/main`
                 # gates on `_caller_props = set(props) - {"content_hash"}` (#10841
                 # review, P3) and this fold gates on `_fold_words`, one name
-                # narrower. Both are the same repair and this one is the union:
-                # `_fold_words` is a SUBSET of `_caller_props`, so every hit that
-                # takes the read under main's gate still takes it here, and the
-                # evidence-only hit (an `extractedFrom` retrofit alone) is the
-                # only case that differs — it writes no word (see below), so the
-                # verdict it would read cannot be consulted and main's extra read
-                # buys nothing.
+                # narrower. Both are the same repair; the difference is the
+                # DIRECTION of the subset: `_fold_words` is a SUBSET of
+                # `_caller_props`, so every hit that takes the read HERE would
+                # also have taken it under main's gate, and the evidence-only hit
+                # (an `extractedFrom` retrofit alone) is the only case that
+                # differs — main reads a verdict there, this gate does NOT, and
+                # there is nothing to decide: that hit writes no prop and no word.
                 #
                 # `_fold_words` is the PRE-POP image of what
                 # `_terminal_fold_refused` reads after its own pops, so the two
