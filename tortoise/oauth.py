@@ -2766,7 +2766,6 @@ def consent_bounce_url(app_origin: str, raw_query: str) -> str:
       the cold start, where no key existed at all. Recorded here rather than left
       for the next lane to discover, and tracked as a follow-up issue.
     """
-    inner = CONSENT_START_PATH + (("?" + raw_query) if raw_query else "")
     # ⛔ APPEND ONLY WHERE NONE EXISTS. There are two callers and they are NOT alike: the bounce
     # (`hosted_api.oauth_authorize`) carries no key, but the page's own sign-in link
     # (`consent_page_html` → SIGNIN_URL) is rendered ONLY for a keyed flow, so ITS raw_query always
@@ -2799,12 +2798,21 @@ def consent_bounce_url(app_origin: str, raw_query: str) -> str:
     # constant. So: drop every blank pair (`unquote_plus(...).strip()`), then append the mint only
     # when no real value survived. Other segments stay BYTE-IDENTICAL (split/partition/join, never
     # a re-encode) because `redirect_uri` and `client_id` are compared byte-for-byte downstream.
+    #
+    # ⛔ THE KEY IS DECODED BEFORE IT IS COMPARED (fold review cycle 7, P3). `parse_qs` above
+    # decodes parameter NAMES, so `attempt%5Fkey=` IS a blank `attempt_key` to `has_real` — and to
+    # `start.ts`'s `URLSearchParams.get`, which decodes names too. Comparing the RAW key kept that
+    # segment, appended the mint AFTER it, and `searchParams.get` then read the blank FIRST value:
+    # the AS mint was inert for every percent-encoded spelling of the same parameter name, which is
+    # the same "the two halves disagree about which parameter this is" class as the cycle-6 fix
+    # below — one layer out. Both halves now apply ONE rule: decode, then compare.
     kept: list[str] = []
     for seg in (raw_query.split("&") if raw_query else []):
         if not seg:
             continue
         key, _sep, val = seg.partition("=")
-        if key == CONSENT_ATTEMPT_KEY_PARAM and not unquote_plus(val).strip():
+        if (unquote_plus(key) == CONSENT_ATTEMPT_KEY_PARAM
+                and not unquote_plus(val).strip()):
             continue
         kept.append(seg)
     base = "&".join(kept)

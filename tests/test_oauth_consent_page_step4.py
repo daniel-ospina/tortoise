@@ -1288,6 +1288,29 @@ def test_the_bounce_does_not_append_a_SECOND_key_when_the_flow_already_has_one()
         "a blank attempt_key ahead of a real one must be dropped, not preserved and "
         f"out-ranking it (start.ts reads the FIRST value): {pair_keys}")
 
+    # ⛔ (c) THE SAME PARAMETER UNDER A PERCENT-ENCODED *NAME* (fold review cycle 7, P3).
+    # `parse_qs` decodes parameter names, and so does `URLSearchParams` — so `attempt%5Fkey=` is a
+    # blank `attempt_key` to BOTH halves of this function's decision and to `start.ts`. The filter
+    # compared the RAW key, kept the segment, appended the mint AFTER it, and `searchParams.get`
+    # read the blank FIRST value: the AS mint was inert for every encoded spelling of the name.
+    encoded_blank = consent_bounce_url(
+        APP_ORIGIN, "client_id=c1&state=s1&attempt%5Fkey=")
+    inner_enc = parse_qs(urlsplit(parse_qs(urlsplit(encoded_blank).query)["next"][0]).query,
+                         keep_blank_values=True)
+    enc_keys = inner_enc[CONSENT_ATTEMPT_KEY_PARAM]
+    assert len(enc_keys) == 1 and enc_keys[0].strip(), (
+        "an encoded NAME (`attempt%5Fkey=`) is a blank attempt_key to `parse_qs` and to "
+        f"start.ts's URLSearchParams; it must be dropped, not out-rank the mint: {enc_keys}")
+    # (d) …and the mirror: an encoded name carrying a REAL key is a real key (no mint, not dropped).
+    encoded_real = consent_bounce_url(
+        APP_ORIGIN, "client_id=c1&state=s1&attempt%5Fkey="
+                    "&attempt%5Fkey=&" + CONSENT_ATTEMPT_KEY_PARAM + "=K1")
+    inner_enc_real = parse_qs(urlsplit(parse_qs(urlsplit(encoded_real).query)["next"][0]).query,
+                              keep_blank_values=True)
+    assert inner_enc_real[CONSENT_ATTEMPT_KEY_PARAM] == ["K1"], (
+        "a blank encoded pair must go and the real key must stand alone: "
+        f"{inner_enc_real[CONSENT_ATTEMPT_KEY_PARAM]}")
+
 
 def test_the_bounce_carries_the_attempt_key_the_flow_is_bound_to(api_client) -> None:
     """#10487: the AS mints the attempt key on the ONE leg where none exists yet.
