@@ -328,14 +328,29 @@ def test_the_gate_refuses_a_status_less_operator(sdk):
     The graph-wide candidate read is ``o.status = 'draft'`` on purpose. It must
     NOT grow an ``OR o.status IS NULL`` arm: the canonical read model treats an
     ABSENT status as LIVE (``live.py:278`` — the legacy-node rule), so a
-    status-less operator is already eligible for the factor graph and there is
-    nothing to promote. Flipping it would journal an ``OperatorPromoted`` for
-    every legacy operator on every sweep — the manifest/journal narrowing the
-    module's divergence note calls deliberate.
+    status-less operator is already eligible for the FACTOR graph and there is
+    nothing to promote.
 
-    Pinned here because the "restore parity with capture" edit is exactly
-    re-adding that arm, and the stub suite cannot see it: its candidate answer
-    comes from a hand-fed ``graph_operators`` list regardless of the query text.
+    ⛔ Pinned here precisely because "restore parity with capture" IS re-adding
+    that arm, so the cost model matters and "journal noise" is NOT it. Three
+    consequences, only the first of which is bookkeeping: no factor is lost (the
+    EP read already admitted it), the manifest/``operators_promoted``/journal
+    lose the flip, and — the one that actually matters — the strict grounding
+    selector reads ``MATCH (n:Point {status: 'live'})``
+    (``projection/grounding.py:19``, edges at ``:46``), so a status-less operator
+    and its ``IMPL``/``NAND`` edges are INVISIBLE to ``compute_grounding``
+    (``sdk.py:22350-22353`` says so verbatim; measured on an embedded graph:
+    one IMPL operator over two live claims gives 2 rows at ``status='live'`` and
+    0 after ``REMOVE o.status``, while ``ep._live_only`` still admits it). So
+    re-adding the arm silently changes the grounding values of the claims around
+    every legacy status-less operator — see the candidate query's own block.
+
+    The assertions here are the sweep/gate arms; the grounding consequence is
+    argued in the module, not asserted, because this module never calls
+    ``compute_grounding``.
+
+    The stub suite cannot see this arm at all: its candidate answer comes from a
+    hand-fed ``graph_operators`` list regardless of the query text.
     """
     premise = _claim(sdk, "premise", "live")
     conclusion = _claim(sdk, "conclusion", "live")
