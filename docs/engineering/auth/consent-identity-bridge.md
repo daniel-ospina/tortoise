@@ -173,8 +173,12 @@ both bypassable, which is worth recording because each looked complete:
   gating the fill alone re-opened the hole through the mint.
 
 The delivered rule is that **the flow belongs to a browser, not to whoever knows the `state`**:
-`/api/consent/start` mints a per-attempt key on the entry leg (32 random bytes), stores **only its
-SHA-256** on the row, and carries the raw key in the `selfPath` **return target**; the owner fill and the
+the `attempt_key` (32 random bytes) is minted on whichever leg reaches the flow with none present —
+by the AS on its bounce leg (`consent_bounce_url` in `tortoise/oauth.py`, so a COLD START has a key
+before the app ever sees the flow, #10487) and by `/api/consent/start` only when it is handed
+none — and only its **SHA-256** is stored on the row; the raw key travels in the carrier of
+the leg that produced it — the AS bounce's `next` for a key the AS minted, and the `selfPath`
+**return target** for one `/api/consent/start` adopted; the owner fill and the
 mint both require it. The key is INSERT-ONLY — written only when the row is created, never on a
 re-entry, so a later caller can never rotate it, because rotation *is* the takeover. A row that predates
 the column (its hash is `NULL`) is therefore **dead, never adoptable**: COALESCE-ing a key into it let the

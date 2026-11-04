@@ -41,7 +41,6 @@ from __future__ import annotations
 import base64
 import contextlib
 import hashlib
-import hmac
 import ipaddress
 import json
 import logging
@@ -50,7 +49,7 @@ import re
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import NoReturn
-from urllib.parse import parse_qs, urlencode, urlparse, urlsplit, urlunsplit
+from urllib.parse import parse_qs, unquote_plus, urlencode, urlparse, urlsplit, urlunsplit
 
 # #8218 — the client-identity decision (SCOPE §9 class 4(i)) is its own module so
 # the invariant has ONE enumerable home; the consent page only renders it.
@@ -2717,48 +2716,56 @@ def consent_app_origin() -> str | None:
     return None
 
 
-#: Domain separator for the FLOW-derived attempt key (#10487). The HMAC key is
-#: `CONSENT_TOKEN_SECRET`, so the label is what keeps this derivation from ever
-#: colliding with the token arm's own use of the same key — and what would let
-#: either side be rotated to a distinct secret later without a silent behaviour
-#: change on the other.
-CONSENT_ATTEMPT_KEY_DOMAIN = b"tortoise/consent-attempt-key/v1"
+def _is_attempt_key_segment(segment: str) -> bool:
+    """Does this RAW query segment name the attempt key — at all, blank or not?
 
+    The test is on the DECODED NAME, so a %-encoded spelling of the parameter
+    (``%61ttempt_key=``) is recognised rather than passing through as an unknown
+    segment.
 
-def consent_attempt_key(state: str) -> str | None:
-    """The attempt key the FLOW identified by `state` carries — or ``None``.
+    ⛔ IT DELIBERATELY IGNORES THE VALUE, and that is the whole point (review P3,
+    #10487). The hops that read this parameter do NOT agree about duplicates —
+    and they do not even agree about WHICH query they are reading:
 
-    ⛔ PER FLOW, NOT PER REQUEST (#10487). `/api/consent/start` is insert-only on
-    `attempt_key_hash`: the hash is written once and never rotated, and a caller
-    that presents a DIFFERENT key is answered `403 flow_not_yours`. So a key minted
-    afresh on every bounce poisoned the row for the flow's own next entry — the
-    back button, a refresh, and the bounce's own sign-in return all arrived with a
-    key nobody had stored. Deriving it from `state` (the row's KEY, so same row ⇒
-    same key) makes every re-entry present the value the row already holds.
+    * ``start.ts`` uses ``url.searchParams.get()`` → the **FIRST** value;
+    * ``hosted_api.oauth_authorize`` uses ``request.query_params.get()``, and
+      Starlette's ``MultiDict.__getitem__`` returns ``_dict[key]``, which
+      ``setlist`` fills with ``values[-1]`` → the **LAST** value;
+    * the mint gate below used to decide from ``any(...)`` → *some* value;
+    * the rendered page's own inline script reads the **caller's original**
+      query (``ATTEMPT_KEY_PARAM`` carries only the NAME — "the server does not
+      re-embed it", `consent_page_html`) → the **FIRST** value of the query this
+      function was HANDED, not of the URL it emits.
 
-    ⛔ AND STILL UNPREDICTABLE FROM `state`. `state` is client-chosen and public, so
-    a bare `sha256(state)` would be a key anyone could compute — the ownership
-    proof would then prove nothing. The missing input is the server secret:
-    ``HMAC-SHA256(CONSENT_TOKEN_SECRET, label || state)``. It is a PRF, so the
-    derivation leaks nothing about the secret and one flow's key says nothing
-    about another's.
+    A duplicate pair therefore makes the readers disagree about which key the
+    flow adopts, and the disagreement is not harmless: on the ONE caller that
+    can actually be handed one — the page's sign-in link (``consent_page_html``
+    → ``SIGNIN_URL``, whose ``raw_query`` is the caller's) —
+    ``attempt_key=&attempt_key=K2`` reads ``""`` for the page's first-value
+    reader and ``K2`` for the AS gate's last-value one. Dropping EVERY segment
+    that names the parameter and re-emitting exactly one makes first == last ==
+    any on the URL this function returns, so no reader of THAT URL can disagree
+    about which key the flow adopts.
 
-    ``None`` when no key can be DERIVED — `state` absent (nothing to key the row
-    by), or the secret unprovisioned, in which case the whole consent-token arm
-    answers 503 and a deterministic key would have to be computable from public
-    input to exist at all. The caller falls back to a random per-request key
-    there; that is a declared residual, not the default path.
+    ⛔ THIS DOES NOT FIX THE AS's OWN DUPLICATE GATE, and must not be read as
+    closing it. A pair is resolved by ``hosted_api.oauth_authorize``'s gate from
+    its LAST value before either branch is taken, so
+    ``attempt_key=&attempt_key=K2`` (blank FIRST) renders the PAGE — where the
+    page's own first-value read is still ``""`` and ``mint()`` aborts with no
+    sign-in link offered — while ``attempt_key=K2&attempt_key=`` (blank LAST)
+    takes the BOUNCE branch, where the collapse below adopts ``K2``. The page
+    branch ALSO calls this function (through ``consent_page_html`` →
+    ``SIGNIN_URL`` with the caller's raw query), and the collapse there is what
+    makes that sign-in link single-keyed — which is not the same thing as fixing
+    the page's own reader. The page-branch arm is a separate, PRE-EXISTING dead
+    end recorded in #10865, not closed by this hop.
+
+    The page's reader is the reason the collapse must keep a caller's real key
+    rather than always minting: it reads the input query, so the value this hop
+    emits has to be the value the flow already carries wherever one exists.
     """
-    if not state:
-        return None
-    from tortoise.consent_token import consent_token_secret
-    secret = consent_token_secret()
-    if not secret:
-        return None
-    mac = hmac.new(secret.encode("utf-8"),
-                   CONSENT_ATTEMPT_KEY_DOMAIN + b"\x00" + state.encode("utf-8"),
-                   hashlib.sha256).digest()
-    return base64.urlsafe_b64encode(mac).rstrip(b"=").decode("ascii")
+    name, _sep, _value = segment.partition("=")
+    return unquote_plus(name) == CONSENT_ATTEMPT_KEY_PARAM
 
 
 def consent_bounce_url(app_origin: str, raw_query: str) -> str:
@@ -2793,45 +2800,61 @@ def consent_bounce_url(app_origin: str, raw_query: str) -> str:
       in on a DIFFERENT `/auth` entry for the same flow (the back button, a
       refresh, this bounce's own return target) came back without it and was
       refused with `403 flow_not_yours`: the row was already claimed by a key
-      nobody could present.
-    * ⛔ THE KEY IS THE FLOW'S, DERIVED — `consent_attempt_key(state)` — because
-      the bounce is re-entered, not visited once. A key minted per REQUEST is the
-      same dead end one hop later: bounce #2 presents a value the insert-only row
-      never stored, and the visitor is refused exactly as before (#10487's back
-      button is still a re-entry). `state` is the row's key, so deriving from it
-      is what makes "the bounce, the sign-in return, and every re-entry carry the
-      same value" TRUE. It stays unpredictable because the HMAC key is the
-      server's — see `consent_attempt_key`.
-    * ⚠️ Declared residual: when `CONSENT_TOKEN_SECRET` is unprovisioned no
-      derivation is possible and the key falls back to a fresh
-      `secrets.token_urlsafe(32)`, i.e. the one-URL-only behaviour. That
-      deployment's consent-token arm answers 503 on every mint, so the key is not
-      the thing standing between it and working; it must not be, however, a
-      PREDICTABLE value derived from public input.
+      nobody could present. Generating the key HERE makes it the property of the
+      flow rather than of one emitted URL — the bounce, the sign-in return, and
+      every re-entry through a URL this hop emits carry the same value, so
+      `start` ADOPTS it on the insert and the insert-only row is never poisoned.
+      ⛔ IT IS MINTED PER REQUEST, so a SECOND fresh bounce of the same flow
+      yields a different key and does not own the row the first one wrote: a
+      Back-button return to the ORIGINAL keyless authorize URL is still
+      `403 flow_not_yours` for a signed-in visitor (#10865 — closing that needs a
+      RESUMABLE binding for an ownerless row, not a different mint). It is
+      `secrets`, not a counter: it is the browser's only proof of ownership, so
+      it must not be predictable from the `state` (which is client-chosen and
+      public).
     """
     inner = CONSENT_START_PATH + (("?" + raw_query) if raw_query else "")
-    # ⛔ APPEND ONLY WHERE NONE EXISTS. There are two callers and they are NOT alike: the bounce
-    # (`hosted_api.oauth_authorize`) carries no key, but the page's own sign-in link
-    # (`consent_page_html` → SIGNIN_URL) is rendered ONLY for a keyed flow, so ITS raw_query always
-    # carries one. Appending unconditionally emitted `…&attempt_key=K&attempt_key=<minted>`, which
-    # is benign today only because every reader takes the FIRST value — i.e. correctness would rest
-    # on a detail no consumer promises, and the day one takes the last, the page's sign-in leg
-    # presents the minted key instead of the row's and the visitor meets this very dead end again
-    # (#10487). A present-but-BLANK value counts as absent: it selects the bounce branch upstream
-    # (`if not key`), and start.ts reads `""` as no key at all.
-    if not any(v.strip() for v in parse_qs(raw_query, keep_blank_values=True)
-               .get(CONSENT_ATTEMPT_KEY_PARAM, [])):
-        presented = parse_qs(raw_query, keep_blank_values=True)
-        # The row is keyed by `state`, so the DERIVED key must be too: a re-entry
-        # whose other parameters differ (a retry that reorders `scope`, a client
-        # that adds a param) is still the same ROW, and a key derived from
-        # anything else would fail to match the hash it stores. Exactly one
-        # non-blank `state` is what `start` validates against; anything else is
-        # not a flow this server can key, and falls back to the residual below.
-        states = [s for s in presented.get("state", []) if s.strip()]
-        minted = consent_attempt_key(states[0]) if len(states) == 1 else None
-        inner += ("&" if "?" in inner else "?") + urlencode(
-            {CONSENT_ATTEMPT_KEY_PARAM: minted or secrets.token_urlsafe(32)})
+    # ⛔ EMIT EXACTLY ONE ATTEMPT-KEY SEGMENT — NEVER ZERO, NEVER TWO (review P3, #10487).
+    # The two callers are not alike: the bounce (`hosted_api.oauth_authorize`) carries no key,
+    # but the page's own sign-in link (`consent_page_html` → SIGNIN_URL) is rendered ONLY for a
+    # keyed flow, so ITS raw_query always carries one. Both must leave here with a single key
+    # the flow will actually adopt, because the hops that read it DISAGREE about duplicates:
+    # `start.ts` (`url.searchParams.get`) takes the FIRST value, and this server's own gate
+    # (`request.query_params.get`, Starlette `MultiDict.__getitem__` → `_dict[key] = values[-1]`)
+    # takes the LAST. A value-blind gate therefore satisfies neither: on the one caller that can be
+    # handed a duplicate (the page's sign-in link, whose `raw_query` is the caller's),
+    # `attempt_key=&attempt_key=K2` reads `""` for the first-value reader and `K2` for the
+    # last-value one, so which key the flow adopted depended on which hop you asked. Collapsing
+    # every segment that names the parameter to ONE makes first == last == any, so there is nothing
+    # to disagree about; `attempt_key=K1&attempt_key=K2` likewise collapses to the first (`K1`),
+    # which is the value the app was already adopting.
+    #
+    # ⛔ THE "ALREADY EXACTLY ONE, AND NON-BLANK" CASE IS LEFT BYTE-EXACT AND UNTOUCHED. That is
+    # the page's sign-in leg, i.e. the common path — it re-emits nothing.
+    #
+    # ⛔ EVERY OTHER SEGMENT IS PASSED THROUGH BYTE-EXACT when a rebuild IS needed. `state` and
+    # `redirect_uri` are compared byte-for-byte by the client, so re-encoding the query here would
+    # be the `+`/`%2B`/`%20` CSRF-mismatch class this function's docstring refuses everywhere else.
+    # Only the segments naming THIS parameter are dropped, and only the chosen key is re-encoded.
+    values = parse_qs(raw_query, keep_blank_values=True).get(CONSENT_ATTEMPT_KEY_PARAM, [])
+    # ⛔ "ABSENT" MEANS THE EMPTY STRING, NOT `.strip()` (review P2, #10757). Both readers this
+    # hop reconciles test the value's TRUTHINESS, and `" "` is truthy in BOTH: the AS gate
+    # (`hosted_api.py`, `oauth_authorize`: `if not request.query_params.get(
+    # CONSENT_ATTEMPT_KEY_PARAM)`) renders the page for `attempt_key=+`, and
+    # `start.ts:255-256`
+    # (`presentedKey || newAttemptKey()`) ADOPTS `" "` as the key. Treating whitespace as absent
+    # here minted a second key for a flow that already had one, so the page minted with `" "`
+    # while its own sign-in link carried the minted one — the two-readers-disagree defect this
+    # function exists to remove, and a `403 flow_not_yours` for a caller that used to work.
+    if len(values) != 1 or values[0] == "":
+        # Adopt a real key if the caller presented one (first non-empty wins, matching the
+        # consumers); otherwise mint. Minting beside a blank or duplicate value is what made the
+        # mint inert before, so only mint when there is genuinely nothing to adopt.
+        chosen = next((v for v in values if v), "") or secrets.token_urlsafe(32)
+        segments = [s for s in raw_query.split("&")
+                    if s and not _is_attempt_key_segment(s)]
+        segments.append(urlencode({CONSENT_ATTEMPT_KEY_PARAM: chosen}))
+        inner = CONSENT_START_PATH + "?" + "&".join(segments)
     return (app_origin.rstrip("/") + CONSENT_SIGNIN_PATH + "?"
             + urlencode({"next": inner}))
 
