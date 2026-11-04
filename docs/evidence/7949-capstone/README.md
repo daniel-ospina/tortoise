@@ -544,7 +544,7 @@ prior measurement was visible when the record said none was, and the 25-bound (t
 
 ## E1 / E2 — the `#9889` record: E1 still UNDECIDED (n=1 per arm), E2 would score 8 of 14 on a RE-RUN
 
-**These two rows no longer read `e1-e2.log`.** Their `evidence` is
+**These two rows no longer read `e1-e2.log` — no row the current builder emits does.** Their `evidence` is
 `docs/evidence/9889/e1-e2-scores.json`, produced in ONE invocation by
 `probes/e1_e2_scores.py` over the three `#9889` probes' own outputs, and the old
 log's parse path is deleted from `probes/capstone_measure.py` (`#9889` item 5).
@@ -582,7 +582,7 @@ predicate drops **0 of 61** Objects and **0 of 13** `^the <X>` with its positive
 controls alive, so the selection pass is not what moves E1's share — the
 removal/relocation ruling is (`#5333`).
 
-### What the superseded log said (kept as history, cited by no row)
+### What the superseded log said (kept as history, cited by no row the current builder emits)
 
 `e1-e2.log` was the only E1/E2 artifact for eleven days, and it says what it is:
 
@@ -650,7 +650,7 @@ removal/relocation (**#5333**).
 | file | what it is |
 |---|---|
 | `capstone.log` | the shipped REFUSAL record (`capstone_run.py`, stamped `027c8c1ab`): G0 refused before any model call, 5 rows, no numbers |
-| `capstone-measured-9152448d.log` | the SCORED run (`capstone_measure.py`, stamped `9152448d7`, generated 2026-11-02T12:16:06Z): 3 RED + 2 BLOCKED, every row carrying its artifact, all 8 steps witnessed |
+| `capstone-measured-9152448d.log` | the SCORED run (`capstone_measure.py`, stamped `9152448d7`, generated 2026-11-02T12:16:06Z): 3 RED + 2 BLOCKED, every row carrying its artifact, all 8 steps witnessed. ⛔ **Its E1/E2 rows PREDATE the `#9889` re-point.** The file is frozen at its own stamp and a row moves only by RE-RUNNING the probe (§"Two artifacts"), so it still carries both rows on the hard-coded `docs/evidence/7949-capstone/e1-e2.log` — E2 `BLOCKED` (`#10360`) — and its E1/E2 section header still reads "parsed out of the landed e1-e2.log", where the current builder emits "read out of the #9889 measurement record". Those two rows are what that run measured, NOT the current routing: the rows the builder emits today cite `docs/evidence/9889/e1-e2-scores.json` (§"E1 / E2 — the `#9889` record") |
 | `e5-rescore.json` | the E5 re-score artifact the E5 row cites (written by the probe) |
 
 ⛔ **Each earlier stamp is SUPERSEDED and its file is gone, deliberately.** `cf98e15f1` was written
@@ -828,7 +828,7 @@ witnessed steps is printed — an honest finding for `#7949`, never a guess.
   run you pick has not been decided (n >= 2 per arm is the next requirement). E2a's 14-unit
   denominator IS carried and scores **8/14**, so a RE-RUN of this probe makes E2 **RED**, not blocked. (The superseded
   `e1-e2.log` — 25 Objects, one arm, a corpus that is not the frozen one — is kept as history and
-  cited by no row.)
+  cited by no row the current builder emits.)
 - **No evidence that E3's `= 1.000` bar is reachable as registered.** It is not: `:Object`
   mention links are unanchored by design (#5199). The registered denominator of 2026-10-21 counted
   them; the amendment in `PRE-REGISTRATION.md` §10.1 re-registers it to the classes #5199 says the
