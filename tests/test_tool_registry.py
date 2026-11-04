@@ -869,6 +869,38 @@ class TestCapabilityModel:
             "a NON_SDK_WRITER_TOOLS member is not writer-annotated: "
             f"{sorted(NON_SDK_WRITER_TOOLS - writers)}")
 
+    def test_every_non_sdk_reader_is_still_served(self):
+        """`NON_SDK_READ_TOOLS` is "Kept exact" too, so its liveness needs the same arm.
+
+        #10914 review P3: the writer set got
+        `test_every_non_sdk_writer_is_still_served` for exactly this reason and the read
+        set got nothing, so a rename on the read side would leave the declaration
+        pointing at a name that resolves nowhere while every other check stayed silent —
+        `declared_set_violations` iterates live ENTRIES, never the declared names.
+
+        The two extra arms pin what makes the set *mean* "handler-served read": an
+        empty `sdk_method` (the binding is in hosted_api, outside the sdk.py
+        derivation) and no `writes` flag. A member that gains either belongs in
+        `NON_SDK_WRITER_TOOLS` — inheriting the reader exemption would let an
+        empty-binding WRITE escape the writer guards by being declared read.
+        """
+        from tool_surface_capabilities import NON_SDK_READ_TOOLS, served_registry
+
+        served = served_registry()
+        names = {e.name for e in served}
+        stale = sorted(NON_SDK_READ_TOOLS - names)
+        assert stale == [], (
+            f"NON_SDK_READ_TOOLS names no served tool: {stale} — delete or rename "
+            f"the entry")
+        rows = {e.name: e for e in served if e.name in NON_SDK_READ_TOOLS}
+        bound = sorted(n for n, e in rows.items() if e.sdk_method)
+        assert bound == [], (
+            f"a NON_SDK_READ_TOOLS member declares an sdk_method: {bound}")
+        writers = sorted(n for n, e in rows.items() if e.writes)
+        assert writers == [], (
+            f"a NON_SDK_READ_TOOLS member is writer-annotated: {writers} — it "
+            f"belongs in NON_SDK_WRITER_TOOLS")
+
     def test_guards_cover_the_served_set_not_only_the_live_one(self):
         """#3883: a retired name is still resolvable and callable by name, so the
         capability guards must see it. A live-only default left a retired entry's

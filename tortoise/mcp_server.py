@@ -3289,7 +3289,7 @@ def tortoise_paginated_query(kind: str | None = None,
 
 def tortoise_check_structure() -> list[dict]:
     """Check Gate 0→4 chain integrity (orphans, dangling refs).
-    Alias → overview(section='structure_check') (epic #888 W3)."""
+    Alias → graph_overview(section='structure_check') (epic #888 W3)."""
     return _safe(_get_org_sdk().check_structure)
 
 
@@ -3319,25 +3319,25 @@ def tortoise_summarize_structure() -> dict:
     Returns {total, operators, gate0_jtbds..gate4_requirements, gate_total}.
     total counts every non-operator kind (statements, observations, decisions,
     ...), not just the product-strategy gates; operators is reported
-    separately. Alias → overview(section='structure') (epic #888 W3)."""
+    separately. Alias → graph_overview(section='structure') (epic #888 W3)."""
     return _safe(_get_org_sdk().summarize_structure)
 
 
 def tortoise_list_pointkinds() -> list[dict]:
     """List all pointKinds present in the graph with counts. What EXISTS.
-    Alias → overview(section='pointkinds') (epic #888 W3)."""
+    Alias → graph_overview(section='pointkinds') (epic #888 W3)."""
     return _safe(_get_org_sdk().list_pointkinds)
 
 
 def tortoise_list_sources() -> list[dict]:
     """List all Sources with point counts. Where data came FROM.
-    Alias → overview(section='sources') (epic #888 W3)."""
+    Alias → graph_overview(section='sources') (epic #888 W3)."""
     return _safe(_get_org_sdk().list_sources)
 
 
 def tortoise_list_namespaces() -> list[dict]:
     """List installed pack namespaces.
-    Alias → overview(section='namespaces') (epic #888 W3)."""
+    Alias → graph_overview(section='namespaces') (epic #888 W3)."""
     return _safe(_get_org_sdk().list_namespaces)
 
 
@@ -3418,7 +3418,7 @@ def tortoise_pack_install(manifest_yaml: str) -> dict:
 
 def tortoise_list_tags() -> list[dict]:
     """List all Tag names with count of tagged Points. Where tags are USED.
-    Alias → overview(section='tags') (epic #888 W3)."""
+    Alias → graph_overview(section='tags') (epic #888 W3)."""
     return _safe(_get_org_sdk().list_tags)
 
 
@@ -4202,7 +4202,7 @@ def tortoise_list_graphs() -> list[str]:
     `org_{org_id}` / legacy `team_{org_id}` equality, plus each of the org's
     OTHER graphs' namespaces — no cross-tenant enumeration). Stdio: full list
     (operator context).
-    Alias → overview(section='graphs') (epic #888 W3).
+    Alias → graph_overview(section='graphs') (epic #888 W3).
 
     #9340: this is the DISCOVERY surface for the `graph` tool argument, so a
     workspace that holds more than one graph must be able to see them here. It
@@ -4238,14 +4238,14 @@ def tortoise_list_graphs() -> list[str]:
 def tortoise_status() -> dict:
     """Graph health + entity counts + FalkorDB connectivity.
     Returns {connected, counts: {Point, Event, ...}, total_entities}.
-    Alias → overview(section='status') (epic #888 W3).
+    Alias → graph_overview(section='status') (epic #888 W3).
     """
     return _safe(_get_org_sdk().status)
 
 
 def tortoise_health() -> dict:
     """Health check + basic metrics: graph_size, last_ingest, error_count, uptime.
-    Alias → overview(section='health') (epic #888 W3).
+    Alias → graph_overview(section='health') (epic #888 W3).
 
     #2202 (health-truthful): probes the SDK THIS server actually serves —
     the request-scoped org SDK over HTTP and the base SDK over stdio — so the
@@ -4340,13 +4340,13 @@ def tortoise_ingest_corpus(directory: str) -> dict:
 def tortoise_taxonomy() -> dict[str, int]:
     """Count entities by node label. Returns {Point: N, Event: N, Subject: N,
     Object: N, Source: N} (D10: a document is a Source, not a :Document node).
-    Alias → overview(section='taxonomy') (epic #888 W3)."""
+    Alias → graph_overview(section='taxonomy') (epic #888 W3)."""
     return _safe(_get_org_sdk().taxonomy)
 
 
 def tortoise_list_topics(entity_id: str) -> dict:
     """entityProfile lite for an entity. Returns {id, pointKind, neighbors, neighborCounts}.
-    Alias → overview(section='topics', entity_id=...) (epic #888 W3)."""
+    Alias → graph_overview(section='topics', entity_id=...) (epic #888 W3)."""
     return _safe(_get_org_sdk().list_topics, entity_id)
 
 
@@ -4472,7 +4472,7 @@ def tortoise_analyze(question: str,
 
 def tortoise_stale(days: int = 30, limit: int = 50) -> dict:
     """Find Points not updated in N days. Returns {stale, count, cutoff, limit}.
-    Alias → overview(section='stale', days=, limit=) (epic #888 W3)."""
+    Alias → graph_overview(section='stale', days=, limit=) (epic #888 W3)."""
     return _safe(_get_org_sdk().stale_points, days=days, limit=limit)
 
 

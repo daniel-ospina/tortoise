@@ -49,7 +49,7 @@
 # a constant here.
 manifest_version: 1
 issue: 3863
-cut_at_commit: 91441a986d61df34b7c7c046279495c931a83184
+cut_at_commit: 7469f0e75d12f8b6599a47a70fbb7adea052a1ca
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -1986,7 +1986,7 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_list_topics
-  served_from: tortoise/mcp_server.py:5587bba06df5db18
+  served_from: tortoise/mcp_server.py:4c6445d02db080db
   served_attributes: c17994837a1e8834
   family: reasoning
   family_rank: 3
@@ -2096,7 +2096,7 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_check_structure
-  served_from: tortoise/mcp_server.py:4f597330997001ab
+  served_from: tortoise/mcp_server.py:40375d9fd46546ee
   served_attributes: d1d847feeecfe0de
   family: reasoning
   family_rank: 3
@@ -2269,7 +2269,7 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_list_graphs
-  served_from: tortoise/mcp_server.py:4be83d1986fe278d
+  served_from: tortoise/mcp_server.py:c801e357d4cc1991
   served_attributes: 06490fe8c983ed26
   family: sessions
   family_rank: 4
@@ -2294,7 +2294,7 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_list_namespaces
-  served_from: tortoise/mcp_server.py:6a99f017417419c9
+  served_from: tortoise/mcp_server.py:8d60724242db9c2c
   served_attributes: d1d847feeecfe0de
   family: sessions
   family_rank: 4

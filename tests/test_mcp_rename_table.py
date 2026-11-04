@@ -68,11 +68,13 @@ RETIRED_LITERAL: dict[str, str] = {
     "tortoise_list_pointkinds": 'tortoise_graph_overview(section="pointkinds")',
     "tortoise_list_sources": 'tortoise_graph_overview(section="sources")',
     "tortoise_list_tags": 'tortoise_graph_overview(section="tags")',
-    # #4282 — the `graph_overview` container (approved row 9) absorbs these six, and
-    # `tortoise_overview` itself retires into the container it used to be. Every pointer
-    # names the container plus a section it dispatches, so it resolves in ONE hop.
-    # `tortoise_check_structure` is NOT here: absorbed as a SECTION while its door stays
-    # live, because it carries the #8482 wrap-envelope repair a `-> Any` container cannot.
+    # #4282 — the `graph_overview` container (approved row 6) absorbs these FIVE names
+    # here, and `tortoise_overview` itself retires into the container it used to be. Every
+    # pointer names the container plus a section it dispatches, so it resolves in ONE hop.
+    # (Row 6 names seven: the other two are NOT in this map — `tortoise_check_structure`
+    # is absorbed as a SECTION while its door stays live, because it carries the #8482
+    # wrap-envelope repair a `-> Any` container cannot, and `issue_insight` is not
+    # executed in this batch — its bridge destination is `search_knowledge`.)
     "tortoise_audit": 'tortoise_graph_overview(section="audit", point_kinds=...)',
     "tortoise_dream_health": 'tortoise_graph_overview(section="dream_health")',
     "tortoise_overview": 'tortoise_graph_overview(section=...)',
