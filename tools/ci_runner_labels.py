@@ -70,9 +70,22 @@ THE SNAPSHOT IS COMMITTED, NOT LIVE — AND IT IS A POINT-IN-TIME READ
 
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter BEFORE every other import — a module-level
+# 3.11+-only import (`from datetime import UTC` below) raises ImportError first,
+# with no attributable message, which is the exact harm #5128 was filed for.
+# `_guard_index` in tests/test_entry_point_python_guard.py pins the preamble
+# shape `[docstring] [__future__] import sys <guard>`.
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/ci_runner_labels.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/ci_runner_labels.py`"
+    )
+
 import json
 import re
-import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
