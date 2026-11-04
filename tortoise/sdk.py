@@ -12191,9 +12191,13 @@ class TortoiseSDK:
 
         Set dedup=True to fold onto an existing Point. ⛔ That is not a blanket
         idempotency claim, and not every repeat is a no-op: a call also carrying
-        ``props``/``credibility``/``authoredBy`` re-stores the node it folds onto
+        ``props`` or ``authoredBy`` re-stores the node it folds onto
         (``updatedAt`` moves), and a payload naming ``is_operator`` is outside the
-        fold's predicate entirely, so it mints a second Point. The dedup identity is
+        fold's predicate entirely, so it mints a second Point.
+        (``credibility`` alone does NOT re-store — measured byte-identical on a
+        dedup hit — but it rides into ``props``, so it still disqualifies the call
+        from being ADVERTISED as repeatable: the verdict is conservative where the
+        proof stops.) The dedup identity is
         ``(pointKind, content_hash)`` and — when a ``key`` is supplied —
         ``(pointKind, key)`` as well: a re-run under the same key FOLDS onto
         the point already holding it (within that pointKind) instead of

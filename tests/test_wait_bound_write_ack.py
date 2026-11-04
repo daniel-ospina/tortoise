@@ -555,7 +555,7 @@ def test_an_ingest_bundle_with_append_only_entities_is_not_repeatable():
     # the RESOLUTION rather than an oversight: three review rounds each closed ONE
     # spelling of this hole (the append-only entities leg, the JSON-string bundle,
     # and the FLAT `props` splat), which is the signal that the enumeration is the
-    # defect. `sdk.py:26647` documents the points form as `{kind, content, ref?,
+    # defect. `sdk.py:26655` documents the points form as `{kind, content, ref?,
     # status?, **props}` — so `is_operator` sits BESIDE `kind`, not in `props`, and
     # no key allow-list sees it. The bundle's key space is open-ended, so the seam
     # reports what it knows ("not provable") instead of a claim it cannot ground.
