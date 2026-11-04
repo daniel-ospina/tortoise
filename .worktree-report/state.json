@@ -1,0 +1,42 @@
+{
+  "base_sha": "d76d80ca4b966eb1b49dcb69de4c766b867e026f",
+  "branch": "feat/10130-affected-recipe",
+  "head_at_write": "47950050950672969729635d39dea184384ad6f8",
+  "issue": "10130",
+  "not_done": [
+    "PR not opened: the brief forbids new PRs while fold-all-t2 is in flight, so the orchestrator decides when feat/10130-affected-recipe lands. Nothing else outstanding."
+  ],
+  "started_at": "2026-11-03T06:17:16Z",
+  "suites": [
+    {
+      "command": "bash -lc \"uri=\\$(uv run python tools/test_lane.py uri 2>/dev/null | tail -3); eval \\\"\\$uri\\\"; uv run pytest tests/test_run_affected.py -q\"",
+      "counts": {
+        "passed": 22
+      },
+      "duration_s": 16.7,
+      "exit": 0,
+      "finished_at": "2026-11-03T06:17:36Z",
+      "label": "bash-lc-uri-uv-run-python-tools-test-lan",
+      "log": ".worktree-report/logs/01-bash-lc-uri-uv-run-python-tools-test-lan.log",
+      "log_sha256": "f75b15a285220bf5a721f271d8d75f2687dc6cc88554ef4f8f2bbcfb1a08926e",
+      "n": 1,
+      "started_at": "2026-11-03T06:17:19Z"
+    },
+    {
+      "command": "bash -lc \"uri=\\$(uv run python tools/test_lane.py uri 2>/dev/null | tail -3); eval \\\"\\$uri\\\"; uv run pytest tests/test_run_affected.py -q\"",
+      "counts": {
+        "passed": 22
+      },
+      "duration_s": 15.7,
+      "exit": 0,
+      "finished_at": "2026-11-03T06:21:25Z",
+      "label": "bash-lc-uri-uv-run-python-tools-test-lan",
+      "log": ".worktree-report/logs/02-bash-lc-uri-uv-run-python-tools-test-lan.log",
+      "log_sha256": "f4c43659bb72b02489f56392f402f5447d1c6298e04b0a880e4ed4504250cc93",
+      "n": 2,
+      "started_at": "2026-11-03T06:21:09Z"
+    }
+  ],
+  "version": 1,
+  "worktree": "/home/cmux/tortoise/.worktrees/fix-10130-affected-recipe"
+}
