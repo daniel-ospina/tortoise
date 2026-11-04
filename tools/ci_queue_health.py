@@ -389,16 +389,57 @@ class MeasureError(RuntimeError):
 
 @dataclass(frozen=True)
 class QueuedRun:
-    """One run, projected to the four fields the decision consumes."""
+    """One run, projected to the fields the decision consumes.
+
+    ⛔ A RUN IS NOT ALWAYS ITS FIRST ATTEMPT, AND THE AGE THAT DECIDES A WAIT IS
+    THE CURRENT ATTEMPT'S (#10641 review P1). `created_at` does not move on a
+    re-run — measured live by this repo's sibling module
+    (`ci_check_repair.attempt_age_seconds`: "attempt 2 of run 41523739094 created
+    21:41Z still reported `created_at` 20:56Z") — while `run_started_at` IS
+    attempt-scoped. This module had no way to express a re-run at all, and it is the
+    change that WIDENS the aged population to the two legs a re-run lands in
+    (`pending`/`requested`) while the repair path in `ci_check_repair` is what
+    CREATES those re-runs. Aging a seconds-old re-run attempt from a 90-minute-old
+    `created_at` is what turns a healthy queue into `FLOOD` (and then cancels real
+    runs through `trimmable`). The projection therefore carries both fields.
+    """
 
     id: int
     name: str
     event: str
     created_at: str
+    #: Which attempt `job_count`/`run_started_at` describe. Absent from the API
+    #: projection on some objects, hence the default of the first attempt.
+    run_attempt: int = 1
+    #: When the CURRENT attempt started (`run_started_at`), attempt-scoped. Empty
+    #: when GitHub has not stamped it — which is a fact, not a zero.
+    run_started_at: str = ""
 
     @property
     def is_pr(self) -> bool:
         return self.event in PR_EVENTS
+
+    def wait_age_seconds(self, now: datetime | None = None) -> float | None:
+        """Seconds since the run's CURRENT ATTEMPT started, or ``None`` if UNMEASURABLE.
+
+        The same rule `ci_check_repair.attempt_age_seconds` applies, for the same
+        reason (one derived quantity, one rule — a second interpretation of "how long
+        has this run waited" is how two instruments disagree):
+
+          * a stamped ``run_started_at`` → age from it, whatever the attempt;
+          * attempt 1 → age from ``created_at`` (the attempt start IS the creation);
+          * attempt ≥ 2 with no stamp → ``None``, ABSTAIN. ``created_at`` is then
+            attempt 1's age, so falling back to it reports a fresh attempt as an old
+            wait and is exactly the inflation this method exists to remove. ``None``
+            already means "not witnessed" everywhere downstream (`pr_wait_measured`,
+            `healthy()`'s `PR-UNWITNESSED`), so an unmeasurable age never drives a
+            verdict or a destructive act.
+        """
+        if self.run_started_at:
+            return age_seconds(self.run_started_at, now)
+        if self.run_attempt >= 2:
+            return None
+        return age_seconds(self.created_at, now)
 
 
 @dataclass(frozen=True)
@@ -465,6 +506,14 @@ class QueueHealth:
     #: (`wait_runs`), so this flag can never certify a wait that the verdict then drops
     #: on the floor (#10641 review P1).
     pr_wait_measured: bool = False
+    #: Ids of the waiting PR-event runs that INDIVIDUALLY satisfy the age clause this
+    #: reading's verdict is built on (`min_age_seconds` when no PR run is executing,
+    #: `max_pr_wait_seconds` when one is). The congestion verdict is a claim about a
+    #: WAIT, and these are the waits it is about — `congests_pr_apart_from` is the only
+    #: thing that can be said with them, and it exists so a gate on a DESTRUCTIVE act
+    #: can tell "the queue is busy with other work" from "the run I am about to repair
+    #: is itself the congestion" (#10641 review P1).
+    wait_witness_ids: tuple[int, ...] = ()
     #: Why the verdict is what it is, in one clause per clause of the rule, so a
     #: reader can check the decision instead of trusting it.
     reasons: tuple[str, ...] = ()
@@ -518,9 +567,19 @@ class QueueHealth:
             # `oldest=unmeasured` is the dimension that was not witnessed.
             oldest = self.oldest_pr_queued_age_seconds
             waited = f"{oldest:.0f}s" if oldest is not None else "unmeasured"
-            # ONE WORD FOR EVERY CUT LEG, because the reader's question is "was this
-            # reading complete?" — not "which leg was short?" (the reason line names
-            # the leg). Either flag falsifies the completeness claim the word makes.
+            # ⛔ ONE WORD FOR EVERY CUT LEG — THE READER'S QUESTION IS "was this
+            # reading complete?", NOT "which leg was short?" (the reason line names
+            # the leg). `feed=` was keyed on `truncated` alone, which `read_health`
+            # feeds ONLY from the queued/running legs
+            # (`truncated=queued_truncated or running_truncated`), while a cut
+            # `pending`/`requested` leg rides its own `pending_truncated` flag — and
+            # that flag ALONE is enough to reach this branch. So the reachable line
+            # was `CI: PR-UNWITNESSED(..., oldest=unmeasured, feed=read)` printed
+            # over a leg that WAS cut: a false claim in the ONE string the fleet
+            # samples (the job annotation, `summary["queue"]`), and the exact species
+            # this PR removes everywhere else. GitHub's run listing returns "up to
+            # 1,000 results" per filtered search, so a capped leg is a LOWER BOUND
+            # and may never be rendered as a completed read.
             feed = ("truncated" if (self.truncated or self.pending_truncated)
                     else "read")
             return (
@@ -666,6 +725,61 @@ class QueueHealth:
             return False
         return None
 
+    def congests_pr_apart_from(self, run_id: int) -> bool | None:
+        """Is PR work congested by something OTHER than `run_id`? THREE-VALUED.
+
+        The question the ZERO-JOB repair needs and `congests_pr` cannot answer
+        (#10641 review P1). That repair acts on a run that is queued/pending with a
+        MEASURED zero jobs, and it is gated on congestion because cancel-then-rerun
+        discards a queue position. But a zero-job run is stuck ABOVE the queue: it is
+        *in* the wait population (it is queued — it just never starts), so its own
+        presence is what `PR-STARVED`/`PR-BACKLOGGED` is witnessed by, and it can only
+        be aged into that class at ≥ `ZERO_JOB_MIN_AGE_S` (5400 s) — which is at or
+        above every threshold the age clause compares against. Measured on this head
+        (the pure core, no API): a lone `pending` target at 5700 s reads
+        `PR-STARVED oldest=5700.0 congests_pr=True`, so `congests_pr is False` was
+        UNREACHABLE whenever a repairable run existed and the repair could never fire
+        on the class it was written for. The wait cannot clear itself either — the
+        only act that would remove the witness is the one the gate refuses — so `exit
+        0` coexisted with a required check that could never be produced, which is
+        exactly what `docs/ci/ci-check-repair-red-surface.md` §Fact 2 declares unsound.
+
+        * ``False`` — the ONLY run witnessing this congestion is `run_id` itself. The
+          refusal is self-referential, and re-running that run is the act that clears
+          it.
+        * ``True``  — the congestion is witnessed independently of `run_id`: a `FLOOD`
+          (whose offender is non-PR work by construction, and a PR run will not start
+          while it holds the queue), a cut feed (the unseen oldest run may be the
+          witness), a leg that was not fully read (`pr_wait_measured` is `False`), or
+          simply another witness in `wait_witness_ids`.
+        * ``None``  — this reading cannot name its witness (`congests_pr` is `None`, or
+          the object does not carry `wait_witness_ids`). NOT a clearance: a caller must
+          treat `None` exactly as `congests_pr is None`, i.e. refuse.
+
+        ⛔ THIS IS NOT A LICENCE TO CANCEL DURING A CONGESTION. It narrows the refusal
+        to the case that can never resolve, and `True`/`None` still refuse. A residual
+        is stated rather than hidden: with N repairable targets, the non-oldest ones
+        are still refused in this window because the oldest is another witness — they
+        become the sole witness as each earlier one is repaired, so the class converges
+        over windows rather than deadlocking.
+        """
+        if self.congests_pr is None:
+            return None
+        if not self.delays_pr:
+            # No congestion at all: certainly none caused by this run.
+            return False
+        if self.verdict == FLOOD:
+            return True
+        if self.truncated or self.pending_truncated or not self.pr_wait_measured:
+            # The witness set is not a measurement of the whole wait, so "only this
+            # run is old" cannot be concluded from it.
+            return True
+        if not self.wait_witness_ids:
+            # A reading that does not carry its witness (an object built by hand, or
+            # a shape this version does not name) cannot answer. Fail closed.
+            return None
+        return any(rid != run_id for rid in self.wait_witness_ids)
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "verdict": self.verdict,
@@ -688,6 +802,10 @@ class QueueHealth:
             # `congests_pr` turns on, emitted so a consumer can tell a measured-clear
             # queue from one whose wait was never in the feed.
             "pr_wait_measured": self.pr_wait_measured,
+            # Which runs the congestion verdict is witnessed by, so a destructive
+            # caller can tell "busy with other work" from "the target is the
+            # witness" (`congests_pr_apart_from`) instead of re-deriving it.
+            "wait_witness_ids": list(self.wait_witness_ids),
             "starves_pr": self.starves_pr,
             "delays_pr": self.delays_pr,
             # Three-valued: `null` here means congestion was NOT measured, which is a
@@ -737,12 +855,18 @@ def _project(raw: Iterable[Mapping[str, Any]]) -> list[QueuedRun]:
         run_id = run.get("id")
         if not isinstance(run_id, int):
             continue
+        attempt = run.get("run_attempt")
         out.append(
             QueuedRun(
                 id=run_id,
                 name=str(run.get("name") or ""),
                 event=str(run.get("event") or ""),
                 created_at=str(run.get("created_at") or ""),
+                # `run_started_at` is the API's field name for the CURRENT
+                # attempt's start; `created_at` is attempt 1's creation and never
+                # moves — see `QueuedRun.wait_age_seconds`.
+                run_attempt=int(attempt) if isinstance(attempt, int) and attempt > 0 else 1,
+                run_started_at=str(run.get("run_started_at") or ""),
             )
         )
     return out
@@ -815,7 +939,15 @@ def classify_queue(
         else None
     )
 
-    ages = [age_seconds(run.created_at, now) for run in wait_runs]
+    # ⛔ THE AGE OF A WAIT IS THE AGE OF ITS CURRENT ATTEMPT (#10641 review P1).
+    # `created_at` never moves on a re-run, and this PR is what puts the legs a
+    # re-run lands in (`pending`/`requested`) into this population — so aging from
+    # `created_at` reports a seconds-old attempt as a 90-minute wait, flipping `OK`
+    # to `FLOOD`/`PR-STARVED` and (through `trimmable`) cancelling runs of OTHER
+    # workflows that are genuinely young. `wait_age_seconds` applies
+    # `ci_check_repair.attempt_age_seconds`' rule and ABSTAINS (`None`) on an
+    # unstamped re-run rather than returning attempt 1's age.
+    ages = [run.wait_age_seconds(now) for run in wait_runs]
     # ⛔ THE UNREADABLE RUNS ARE COUNTED, NOT DROPPED. `oldest_pr_age` is a max over a
     # FILTERED list, so a single unparseable timestamp disappears into the max — and
     # in the MIXED shape (one readable queued PR run beside one unreadable) the
@@ -831,6 +963,22 @@ def classify_queue(
     unreadable_pr_runs = sum(1 for age in ages if age is None)
     readable_pr_ages = [age for age in ages if age is not None]
     oldest_pr_age = max(readable_pr_ages) if readable_pr_ages else None
+
+    # ⛔ WHICH RUNS ARE THE WITNESS? (see `congests_pr_apart_from`). The congestion
+    # verdict is a claim about a WAIT, and the wait is one or more runs. Recording
+    # their ids lets a DESTRUCTIVE caller ask the only question that can distinguish
+    # "the queue is busy with other work" from "the run I am about to repair is
+    # itself the congestion" — a zero-job run is stuck ABOVE the queue, so refusing
+    # to re-run it because IT is waiting is a deadlock, not a fail-closed choice
+    # (#10641 review P1). The threshold is the one the deciding clause compares
+    # against, so the two can never drift: `starved_wait` (pr_running == 0) uses
+    # `min_age_seconds`, `backlogged_wait` (pr_running > 0) uses
+    # `max_pr_wait_seconds`.
+    witness_threshold = min_age_seconds if pr_running == 0 else max_pr_wait_seconds
+    wait_witness_ids: tuple[int, ...] = tuple(
+        run.id for run, age in zip(wait_runs, ages, strict=True)
+        if age is not None and age >= witness_threshold
+    )
 
     # ⛔ THE CLAUSES BELOW COMPARE `oldest_pr_age`, SO THEY MUST EVALUATE THE
     # POPULATION IT WAS MEASURED OVER (`wait_runs`) — NOT THE `queued` LEG ALONE
@@ -942,6 +1090,11 @@ def classify_queue(
             # (the feed is newest-first), so it cannot certify those legs either.
             "pr_wait_measured": (bool(wait_runs) and not unreadable_pr_runs
                                  and not pending_truncated),
+            # The runs that individually satisfy the age clause — see
+            # `congests_pr_apart_from`. Emitted so a destructive caller can tell a
+            # queue congested by OTHER work from one whose only witness is the run
+            # it is repairing, instead of inferring it.
+            "wait_witness_ids": wait_witness_ids,
             "truncated": truncated,
             "reasons": tuple(reasons),
         }

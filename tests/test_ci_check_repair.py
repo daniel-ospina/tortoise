@@ -2181,6 +2181,35 @@ def test_the_local_rail_reads_the_refused_count_into_its_signature(tmp_path):
     assert ran.stdout.strip() == "?", "an unreadable report must never print as 0"
 
 
+# ── the congestion gate's two poles, built by the module's OWN core ──────────
+#
+# ⛔ NEITHER POLE MAY BE A HAND-BUILT `QueueHealth` (#10641 review P2). Both were,
+# and the "measured clear" one could not be true of any repo: it declared
+# `pr_queued=1, oldest=60.0` while the scan was fed a `pending` PR run at 5700 s —
+# with that run present the oldest wait IS 5700 s and it sits in `pr_pending`, so
+# `classify_queue` answers `PR-STARVED`. A hand-built reading proves only that the
+# gate passes a pre-computed bool through; it cannot show the CLASS is reachable,
+# which is the one thing these fixtures exist to pin. Both now go through
+# `classify_queue`, so a change to the age clauses reddens them here.
+
+def _queue_run(rid, age_s=5700.0, event="pull_request", name="Python CI"):
+    from datetime import UTC, datetime, timedelta
+
+    from tools import ci_queue_health as Q
+
+    return Q.QueuedRun(
+        id=rid, name=name, event=event,
+        created_at=(datetime.now(UTC) - timedelta(seconds=age_s)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"))
+
+
+def _queue_reading(queued=(), in_progress=(), pending=()):
+    from tools import ci_queue_health as Q
+
+    return Q.classify_queue(list(queued), list(in_progress), None,
+                            pending=list(pending))
+
+
 def test_a_MEASURED_congested_refusal_does_not_escalate(monkeypatch, capsys, tmp_path):
     """The other pole of the escalation, so the fix is not "exit 1 on any refusal".
 
@@ -2190,16 +2219,26 @@ def test_a_MEASURED_congested_refusal_does_not_escalate(monkeypatch, capsys, tmp
     the queue has moved, is when the repair should fire. Escalating here would turn a
     healthy-but-busy repo into a red repair workflow plus a notification every 30
     minutes, which trains the reader to ignore the one signal that matters.
+
+    ⛔ AND THIS POLE MUST STAY A REFUSAL ONCE THE SELF-WITNESS EXEMPTION EXISTS. The
+    congestion here is carried by ANOTHER old wait as well as the target, so
+    `congests_pr_apart_from(target)` is `True` — the queue is busy with work that is
+    not the run under repair, and cancel-then-rerun would discard a queue position
+    behind a wait that only drains. Discriminating: making the exemption fire on
+    `congests_pr is True` alone reddens this test.
     """
     from tools import ci_queue_health as Q
 
-    congested = Q.QueueHealth(
-        verdict=Q.PR_BACKLOGGED, queued_total=4, in_progress_total=1,
-        dominant_workflow="finding-provenance", dominant_queued=3, pr_running=1,
-        pr_queued=1, oldest_pr_queued_age_seconds=9000.0, pr_wait_measured=True)
+    congested = _queue_reading(
+        queued=[_queue_run(700001, age_s=9000.0)],
+        in_progress=[_queue_run(700002, age_s=60.0)],
+        pending=[_queue_run(41480218593, age_s=5700.0)])
+    assert congested.verdict == Q.PR_BACKLOGGED, congested.reasons
     assert congested.congests_pr is True, "the fixture must be a MEASURED congestion"
     assert congested.starves_pr is False, (
         "PR CI IS executing — the fixture must not be a starvation reading as well")
+    assert congested.congests_pr_apart_from(41480218593) is True, (
+        "the OTHER old wait congests the queue independently of the target")
 
     monkeypatch.setattr(R, "read_queue_health", lambda repo: congested)
     monkeypatch.setattr(R, "open_prs", lambda repo, include_drafts: [pr(1)])
@@ -2214,7 +2253,10 @@ def test_a_MEASURED_congested_refusal_does_not_escalate(monkeypatch, capsys, tmp
     summary = json.loads(captured.out)
     assert summary["queue_congestion_measured"] is True
     assert summary["repair_refused"] == 1
+    assert summary["self_witness_repaired"] == 0, (
+        "the exemption must NOT fire when another old wait witnesses the congestion")
     assert summary["prs"][0]["rerun"] == [], "the cancel is still suppressed"
+    assert summary["prs"][0]["self_witness_rerun"] == []
     assert [d["measured"] for d in summary["prs"][0]["repair_refused"]] == [True], (
         "the witness for the OTHER pole: this refusal came from a congestion that "
         "was actually READ (#10641 review P2)")
@@ -2237,51 +2279,89 @@ def test_a_MEASURED_congested_refusal_does_not_escalate(monkeypatch, capsys, tmp
         "when the queue drains, with no credential and no manual unjam")
 
 
-def test_a_measured_clear_queue_still_authorises_the_cancel(monkeypatch, capsys,
-                                                            tmp_path):
-    """The other pole, so the fix is not a blanket refusal that would strand the class.
+def test_the_SOLE_witness_target_is_REPAIRED_not_stranded_forever(
+        monkeypatch, capsys, tmp_path):
+    """⛔ P1 (review): the cancel-then-rerun repair was UNREACHABLE for its own class.
 
-    A MEASURED, uncut reading that found the queue clear is the state this repair was
-    written for, and there the cancel must still fire — otherwise the zero-job class
-    goes unrepairable and the fix trades one fail-open for a fail-shut.
+    A zero-job run is stuck ABOVE the queue but is still IN the wait population, and
+    its own repair floor (`ZERO_JOB_MIN_AGE_S` = 5400 s) is at or above every threshold
+    the age clause compares against. So every reading that contained a repairable run
+    witnessed a congestion, `congests_pr` answered `True`, and the gate refused the one
+    act that would remove the witness. `main()` keeps exit 0 on a MEASURED congestion,
+    `.github/workflows/ci-check-repair.yml` concludes `success`, `workflow_state()`
+    maps that to `covered` and `tools/ci-check-repair-local.sh` goes idle — `exit 0`
+    beside a required check that can never be produced, which
+    `docs/ci/ci-check-repair-red-surface.md` §Fact 2 declares unsound.
 
-    ⛔ "CLEAR" NOW REQUIRES A WITNESS. The fixture carries a QUEUED PR-event run with
-    a readable age (`pr_queued=1`, `oldest_pr_queued_age_seconds`) and
-    `pr_wait_measured=True`, because `OK` with `pr_queued=0` is the state the module's
-    own reason line calls *not* evidence of health — the feed is filtered to
-    `status=queued`, so a `pending`/`waiting`/`requested` PR run is not in it (review
-    P1, fixed by `QueueHealth.pr_wait_measured`).
+    The fixture is the module's OWN core answering, with the target present, and it
+    composes the three layers the review asked to be pinned together:
+    `classify_queue` → `congests_pr_apart_from` → `classify()`. Measured on the pre-fix
+    head (pure core, no API, no venv): `verdict=PR-STARVED oldest=5700.0
+    congests_pr=True`, `repair_refused=[41480218593]`, `rerun=[]`.
+
+    The refusal is still CORRECT one shape over: the sibling test above carries a
+    second old wait and there the cancel stays suppressed — so this is not "always
+    exempt".
     """
     from tools import ci_queue_health as Q
 
-    clear = Q.QueueHealth(
-        verdict=Q.OK, queued_total=4, in_progress_total=0, dominant_workflow=None,
-        dominant_queued=0, pr_running=0, pr_queued=1,
-        oldest_pr_queued_age_seconds=60.0, pr_wait_measured=True)
-    assert clear.congests_pr is False, "the fixture must actually be a measured clear"
+    target = 41480218593
+    reading = _queue_reading(pending=[_queue_run(target, age_s=5700.0)])
+    assert reading.verdict == Q.PR_STARVED, reading.reasons
+    assert reading.congests_pr is True, (
+        "the queue IS congested — the question is BY WHAT")
+    assert reading.wait_witness_ids == (target,), (
+        "the reading must name the run its verdict is witnessed by")
+    assert reading.congests_pr_apart_from(target) is False, (
+        "nothing other than the target witnesses this congestion, so refusing it is "
+        "self-referential")
 
-    monkeypatch.setattr(R, "read_queue_health", lambda repo: clear)
+    # THE UNIT SEAM FIRST: the same classify() call WITHOUT the reading's answer still
+    # refuses, so the exemption is provably what changed, not something else in main().
+    refused = R.classify(pr(), [], [aged_run(target, jobs=0, age_s=5700.0,
+                                             path="ci.yml", name="CI")],
+                         ["docs"], EMITTERS, max_attempts=3,
+                         queue_starved=reading.starves_pr,
+                         queue_congested=R.queue_congestion_gate(reading.congests_pr),
+                         queue_congestion_measured=True)
+    assert [d["run"] for d in refused.repair_refused] == [target]
+    assert refused.rerun == [] and refused.self_witness == []
+
+    plan = R.classify(pr(), [], [aged_run(target, jobs=0, age_s=5700.0,
+                                          path="ci.yml", name="CI")],
+                      ["docs"], EMITTERS, max_attempts=3,
+                      queue_starved=reading.starves_pr,
+                      queue_congested=R.queue_congestion_gate(reading.congests_pr),
+                      queue_congestion_measured=True,
+                      queue_congestion_apart_from=reading.congests_pr_apart_from)
+    assert [r.id for r in plan.rerun] == [target], (
+        "the repair the module exists for must be reachable for its own target class")
+    assert plan.repair_refused == []
+    assert [r.id for r in plan.self_witness] == [target], (
+        "and the pass records WHY it acted while the reading said congested")
+
+    # …then END TO END, so the exit code, the summary and the record agree.
+    monkeypatch.setattr(R, "read_queue_health", lambda repo: reading)
     monkeypatch.setattr(R, "open_prs", lambda repo, include_drafts: [pr(1)])
     monkeypatch.setattr(R, "check_runs_at", lambda repo, head: [])
     monkeypatch.setattr(R, "runs_at_head", lambda repo, head: [
-        aged_run(41480218593, jobs=0, age_s=5700.0, path="ci.yml", name="CI")])
+        aged_run(target, jobs=0, age_s=5700.0, path="ci.yml", name="CI")])
 
     assert R.main(["--repo", "o/r", "--no-live", "--json",
                    "--record", str(_flood_record(tmp_path))]) == 0
-    summary = json.loads(capsys.readouterr().out)
-    assert summary["queue_congested"] is False
+    captured = capsys.readouterr()
+    summary = json.loads(captured.out)
+    assert summary["queue_congested"] is True, "the reading is still reported as read"
     assert summary["queue_congestion_measured"] is True
-    assert [r["run"] for r in summary["prs"][0]["rerun"]] == [41480218593]
-    # ⭐ P2 #10641 review: THIS is why the summary key is `zero_job_named` and not
-    # `no_verdict`-as-in-strandned. The run below was NAMED and then REPAIRED in the
-    # same pass, so it is counted by the name key while `repair_refused` is 0 — under
-    # the old name+comment pair this read as "one stranded, none refused".
+    assert summary["self_witness_repaired"] == 1
+    assert summary["repair_refused"] == 0, "nothing was stranded this window"
+    assert [r["run"] for r in summary["prs"][0]["rerun"]] == [target]
+    assert summary["prs"][0]["self_witness_rerun"] == [target]
+    assert "REFUSED-REPAIR" not in captured.err, (
+        "nothing was refused, so the notice must not fire")
     assert summary["zero_job_named"] == 1, (
-        "it was named as 'no verdict will arrive' and then repaired — the count "
-        "describes the NAMING, not the outcome")
-    assert summary["repair_refused"] == 0, (
-        "nothing was refused: `zero_job_named=1, repair_refused=0` means 'named and "
-        "repaired', which the old key could not say")
+        "it was named 'no verdict will arrive' and then repaired — the count describes "
+        "the NAMING, not the outcome")
 
 
 def test_a_STRUCTURALLY_UNREPAIRABLE_attempt_is_never_recorded_as_REFUSED(
