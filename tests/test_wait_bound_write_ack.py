@@ -926,14 +926,16 @@ async def test_the_seam_returns_the_write_contract_and_still_abandons(slow_dispa
 def test_the_citations_in_this_contract_are_SYMBOLS_not_sdk_line_numbers():
     """An `sdk.py:<line>` citation is a claim that rots on the next upstream edit.
 
-    This branch carried five of them. The `origin/main` merge alone shifted all five
-    by +104 (22427 → 22531) — one measured instance, and it is enough: a line number
-    is only meaningful against one revision, so across the life of a PR it is wrong
-    most of the time, and it stays WRONG silently, because prose cannot red a check.
-    ⛔ The per-commit history is NOT restated here on purpose: three attempts to
-    quantify it were each wrong in a different way (which citation moved, and by
-    how much, differs BETWEEN citations at the same commit), and a number the
-    reader is invited to check is a worse artifact than a mechanism they can.
+    This branch converted its own `sdk.py` line citations to symbols. One
+    `origin/main` merge shifted every one of them by +104 (22427 → 22531), and that
+    single instance is the whole argument: a line number is only meaningful against
+    one revision, so in a file that outlives the revision it can be stale with
+    nothing saying so — prose cannot red a check.
+
+    ⛔ No counting history is recorded here. An earlier version of this docstring
+    tried to and got it wrong (several times, in several ways of being wrong), which
+    is itself the demonstration: the rule below is what a reader can apply, and a
+    number they are invited to check is a worse artifact.
 
     The repo's own convention is the symbol (see
     `docs/architecture/STORAGE-ARCHITECTURE-CHANGELOG.md`: "the emitters are named
@@ -945,7 +947,8 @@ def test_the_citations_in_this_contract_are_SYMBOLS_not_sdk_line_numbers():
     `sdk.py:<digits>`. Line citations to OTHER modules already exist in these files
     from before this PR (`mcp_auth.py:515-538`, `mcp_server.py:1304`,
     `fastmcp/tools/base.py:363-369`, `record_read.py:1029`) and are not this
-    lane's debt to convert — `sdk.py` is the one cited five times here.
+    lane's debt to convert — `sdk.py` is the file whose citations this branch
+    converted.
     """
     import pathlib
     import re
