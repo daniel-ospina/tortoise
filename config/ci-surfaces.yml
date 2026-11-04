@@ -8838,7 +8838,7 @@ durations:
   test_orient_direct_consolidation.py: 11.5  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 11.2
   test_oauth_mcp.py: 14.9  # #9017 CI-junit 2026-10-18 (run 39165691659); was 12.4 — ci-timing junit-census+top-15 2026-11-02 (run 41375596528): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (12.4s) is a LOWER bound; kept 14.9
   test_oauth_consent_client_identity_8218.py: 2.7  # new in #8218; the same shape as the `test_oauth_consent_page_step4.py` row below, whose node-spawning harness this suite reuses. ONE row only: `durations` is a single global map keyed by file, so a second row would be a duplicate key a YAML loader silently collapses — per-surface reasoning belongs in `surfaces`, and this file is registered on `api` and `core` (see both entries; the `core` arm is the AST-enumeration half). What it covers: 16 cases — the reproduction and the count-based invariant both render the REAL page through `GET /oauth/authorize` and execute its inline script under node (~1-4 s per render, which is why the real reading will land above the default; measured 13.84 s for the whole file on this host 2026-11-01, recorded for the refresher, deliberately NOT used as the weight), plus two AST enumerations over the whole `tortoise/` package (every `oauth_clients` toucher, every `client_name` consumer) that red the suite when a new identity source is written. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it — ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 2.0
-  test_oauth_consent_page_step4.py: 3.1  # new in #3524 §9 step 4 (it REPLACES test_oauth_consent_pkce.py, deleted with the inline client it pinned) — a file a PR ADDS could not carry a CI junit reading when it landed (the refresher samples push-to-main runs only), so it took the flat `DEFAULT_FAST_WEIGHT` and NOT a dev-box reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348) — and the 2026-11-02 push-to-main sweep has since MEASURED it, so the 3.1 weight is that reading rather than the default (`was 2.0`). ONE row only: this suite is DUAL-REGISTERED (`api` + `onboarding`), but `durations` is a single global map keyed by file, so a second row would be a duplicate key a YAML loader silently collapses — ordering and per-surface comments belong in `surfaces`. What it covers: 58 cases — the bounce, the scope the page DISPLAYS being the one the token CARRIES (measured end to end) + return-target recovery, the real allowlist executed under node, the page's inline script executed under node (a dozen-plus cases spawn node, ~1-4 s each, which is why the real reading will land well above the default), the #6001 placeholder set ×8, #3443's four navigation arms plus its guard-removed control, the org preview's two identity arms and the #1701 R1 chooser, and the token-bound AS round trips. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it. — ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 2.0
+  test_oauth_consent_page_step4.py: 3.1  # new in #3524 §9 step 4 (it REPLACES test_oauth_consent_pkce.py, deleted with the inline client it pinned) — a file a PR ADDS could not carry a CI junit reading when it landed (the refresher samples push-to-main runs only), so it took the flat `DEFAULT_FAST_WEIGHT` and NOT a dev-box reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348) — and the 2026-11-02 push-to-main sweep has since MEASURED it, so the 3.1 weight is that reading rather than the default (`was 2.0`). ONE row only: this suite is DUAL-REGISTERED (`api` + `onboarding`), but `durations` is a single global map keyed by file, so a second row would be a duplicate key a YAML loader silently collapses — ordering and per-surface comments belong in `surfaces`. What it covers: 60 cases — the bounce, the scope the page DISPLAYS being the one the token CARRIES (measured end to end) + return-target recovery, the real allowlist executed under node, the page's inline script executed under node (a dozen-plus cases spawn node, ~1-4 s each, which is why the real reading will land well above the default), the #6001 placeholder set ×8, #3443's four navigation arms plus its guard-removed control, the org preview's two identity arms and the #1701 R1 chooser, and the token-bound AS round trips. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it. — ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 2.0
   test_mcp_server.py: 4.3  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 0.9 — ci-timing junit-census+top-15 2026-11-02 (run 41375596528): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (3.2s) is a LOWER bound; kept 4.3
   test_dashboard_client_paths_resolve.py: 2.6  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 9.5
   test_dashboard_login.py: 6.1  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 22.2
@@ -9471,37 +9471,32 @@ durations:
   # saturated box over-weights the shard on every future run.
   test_9190_journal_position.py: 1.1  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 6.0
   # #9548's guard, added by the #10671/#10675 batch: a new fast-pool file can
-  # never have a CI duration at PR time, so the next row carries a LOCAL
-  # measurement (the #2517/#4883/#9078 precedent — entered LOW so the
-  # duration-coverage floor is not spent; the first post-merge push re-measures
-  # it). Its own count citation and the measurement follow the row, because a
-  # continuation block belongs to the row ABOVE it (#10055's reader) — a
-  # citation parked above would be read as the PREVIOUS row's claim.
-  test_9548_record_search_keys_shape.py: 4.0
-  # Measured on this host 2026-11-03 at THIS head, DB-free (no
-  # `TEST_RECORD_DB_URI`, so the one Postgres leg SKIPS):
+  # never have a CI duration at PR time (`tools/ci_timing.py --refresh-durations`
+  # samples push-to-main runs only), so this row takes the header's flat
+  # `DEFAULT_FAST_WEIGHT` (2.0) and NOT a dev-box reading, which this map forbids
+  # as a SHARD-LAYOUT input (#2818/#3419/#4348) — exactly as the eight other
+  # files in `ADDED_BY_THIS_FOLD` do (`tests/test_ci_selection.py`). Its own
+  # count citation and the measurement follow the row, because a continuation
+  # block belongs to the row ABOVE it (#10055's reader) — a citation parked
+  # above would be read as the PREVIOUS row's claim.
+  test_9548_record_search_keys_shape.py: 2.0
+  # THIS file: 12 cases (`grep -c '^def test_'` -> 12; pytest collects 12 — the
+  # file has no parametrize, no pytestmark and no collect_ignore, so the count
+  # is static). 12 cases now because the #10692 review P2 added
+  # `test_the_pre_fix_binding_shape_is_still_readable_when_built_by_hand`, the
+  # pin for `Statement.value_types()`'s otherwise-unreachable
+  # `→jsonb(NOT a JSON document)` arm. The DB-free legs are the ones that run on
+  # the fast lane; the ONE Postgres leg SKIPS without `TEST_RECORD_DB_URI` (the
+  # #9551 job arms it, not this leg). MEASURED LOCALLY on this host 2026-11-03 at
+  # this head as a sanity bound, not as a weight:
   # `TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest
   # tests/test_9548_record_search_keys_shape.py -q -p no:cacheprovider` ->
-  # "10 passed, 1 skipped in 3.93s" at 11 cases. 12 cases now — the #10692
-  # review P2 added `test_the_pre_fix_binding_shape_is_still_readable_when_built
-  # _by_hand`, the pin for `Statement.value_types()`'s otherwise-unreachable
-  # `→jsonb(NOT a JSON document)` arm — so re-read at 12: "11 passed, 1 skipped
-  # in 3.45s". 12 cases (`grep -c '^def test_'` -> 12; pytest collects 12 — the
-  # file has no parametrize, no pytestmark and no collect_ignore, so the count
-  # is static). The weight is the FAST-POOL share
-  # (10 legs); the skipped leg's cost lands in the armed job once #10707 arms
-  # it, not here.
-  # #9078's guard, added by a PR: a new fast-pool file can never have a CI
-  # duration at PR time (`tools/ci_timing.py --refresh-durations` samples
-  # push-to-main runs), so this row carries a LOCAL measurement. Measured on
-  # this host 2026-10-20 at 34 tests, DB-free
-  # (`TORTOISE_TEST_CARVE_OUT=1`, `TORTOISE_DB_URI` unset, so the two
-  # Postgres legs skip): "2 passed, 34 deselected in 12.82s" for the pair
-  # this row and the #9190 sibling now cover, and the whole file ran
-  # 33-passed/2-skipped in 206s — the weight below is the FAST-POOL share,
-  # which is what the split packs. Entered LOW, the #2517/#4883 precedent
-  # for a newly-added file, so the duration-coverage floor is not spent; the
-  # first post-merge push re-measures it.
+  # "11 passed, 1 skipped in 3.45s" — ABOVE the 2.0 flat weight, so the flat
+  # reading UNDERSTATES it until a sweep replaces this row (the
+  # `test_state_value_verbatim_10360.py` precedent: the point of the row is
+  # existence + coverage, not an accurate shard weight).
+  # `tools/ci_timing.py --refresh-durations` replaces this from junit once a
+  # push-to-main sweep includes it.
   test_9078_record_written_by_production_path.py: 36.8  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 28.1
   # #9192: nine legs, DB-free (mounted FastMCP app over an embedded registry with
   # planted credentials; `write_records` is spied, never a real connection).
