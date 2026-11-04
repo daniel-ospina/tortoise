@@ -1144,7 +1144,7 @@ it does not deprioritise the job — it makes the eight non-`canary_producer` le
 **unstartable**, and those legs feed the required `python-ci-gate`, so the result is a red-less,
 progress-less pending check. `parse_fold_runner` cannot catch this: it validates the **shape** of the
 declaration, never the live pool — whether a runner carries a label is a fact about the fleet, not
-about the string (`tools/ci_selection.py:4485-4494`). So the fail-safe covers typos in the JSON, not
+about the string (`tools/ci_selection.py:4493-4500`). So the fail-safe covers typos in the JSON, not
 typo'd or invented labels. At this writing the pool offers `["self-hosted"]`,
 `["self-hosted", "self-hosted-x64"]`, or `["ubuntu-latest"]`.
 
