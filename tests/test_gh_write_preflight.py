@@ -19,8 +19,13 @@ Every test is hermetic — a local `http.server` stub, no network, no credential
 tool's `GH_WRITE_PREFLIGHT_API` seam makes that possible; it defaults to the real API.
 
 Run:
-    uv run python tests/test_gh_write_preflight.py      # standalone, no DB, no network
-    uv run pytest tests/test_gh_write_preflight.py      # same assertions under pytest
+    TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_gh_write_preflight.py -q
+    TORTOISE_TEST_CARVE_OUT=1 uv run python tests/test_gh_write_preflight.py   # standalone, no DB
+
+The carve-out is required: this file is stdlib-only and needs NO database, but the repo's default
+pytest session refuses to start without `TORTOISE_DB_URI` (epic #1647 P4) unless the carve-out is
+set — so `uv run pytest tests/test_gh_write_preflight.py` alone errors 24 times for a reason that has
+nothing to do with these tests.
 """
 
 from __future__ import annotations
@@ -115,10 +120,13 @@ class _Stub:
 
 def _env(stub_base: str, token: str | None) -> dict:
     env = {k: v for k, v in os.environ.items() if k not in ("GH_TOKEN", "GITHUB_TOKEN", "GH_HOST")}
-    # ⛔ XDG_CONFIG_HOME IS CONSULTED FIRST by the tool's hosts.yml resolution, so leaving it in the
-    # environment makes `test_no_credential_at_all` depend on the HOST's gh config rather than on the
-    # test's own setup (measured: with XDG_CONFIG_HOME pointing at a gh/hosts.yml the test fails).
+    # ⛔ BOTH CONFIG-DIR LEGS ARE STRIPPED, SO THE TESTS READ THE TEST'S OWN SETUP AND NOT THE HOST'S.
+    # The tool resolves `GH_CONFIG_DIR` → `XDG_CONFIG_HOME` → `~/.config`, so either variable left in
+    # would let a host gh config answer `test_no_credential_at_all` for it.
+    # MEASURED: with `XDG_CONFIG_HOME` holding a gh/hosts.yml the test fails; with `GH_CONFIG_DIR`
+    # holding one, 2 failed / 22 passed.
     env.pop("XDG_CONFIG_HOME", None)
+    env.pop("GH_CONFIG_DIR", None)
     env["HOME"] = "/tmp/gh-preflight-no-home"          # keeps hosts.yml out of the picture
     env["GH_WRITE_PREFLIGHT_API"] = stub_base
     if token is not None:
@@ -357,6 +365,16 @@ def test_sso_refusal_is_named():
         rc, out, _ = _run(s.base)
     assert rc != 0
     assert "sso-unauthorized" in out, out
+
+
+def test_write_probe_401_is_bad_credentials():
+    """The write-probe 401 branch must be pinned (review round-4 coverage gap: a mutant deleting it
+    survived the whole suite — live behaviour was right, but nothing asserted it)."""
+    with _Stub(issues=(401, {}, '{"message":"Bad credentials"}'), pulls=OK_PULLS) as s:
+        rc, out, _ = _run(s.base)
+    assert rc != 0
+    assert "bad-credentials" in out, out
+    assert "issues-write-missing" not in out, out
 
 
 def test_bad_credentials():

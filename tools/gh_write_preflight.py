@@ -104,12 +104,28 @@ The credential is NEVER printed, logged, or included in any output — not even 
 
 from __future__ import annotations
 
+import sys
+
+# ⛔ THE INTERPRETER GUARD IS THE FIRST STATEMENT AFTER THE DOCSTRING AND `__future__`, BEFORE EVERY
+# OTHER IMPORT (#5128). That position is load-bearing: a 3.12-only import or stdlib name raises an
+# UNATTRIBUTED error on an older interpreter, which reads as "this tool is broken" rather than
+# "your interpreter is too old". Pinned by `tests/test_entry_point_python_guard.py`.
+# `UP036` fires because `pyproject` already pins >=3.12, but that is exactly the point: the pin governs
+# the INSTALLED environment, not the AMBIENT `python3` a human types, and the ambient one is what this
+# guard exists for (#5128). It is a deliberate runtime guard, not an outdated version block.
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard, see above
+    raise SystemExit(
+        f"tools/gh_write_preflight.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/gh_write_preflight.py`"
+    )
+
 import argparse
 import contextlib
+import http.client
 import json
 import os
 import secrets
-import sys
 import urllib.error
 import urllib.request
 
@@ -249,7 +265,12 @@ def _request(url: str, token: str, method: str = "GET", body: bytes | None = Non
     except urllib.error.HTTPError as e:
         payload = e.read().decode("utf-8", "replace") if e.fp else ""
         return e.code, {k.lower(): v for k, v in (e.headers or {}).items()}, payload
-    except (urllib.error.URLError, TimeoutError, OSError) as e:
+    except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as e:
+        # ⛔ `http.client.HTTPException` IS NOT AN `OSError` (measured: `BadStatusLine` and
+        # `IncompleteRead` are both `HTTPException` and NEITHER subclasses `OSError`), so a proxy, a
+        # captive portal or a truncated response produced a raw TRACEBACK with EMPTY stdout — which
+        # breaks the documented contract (`GH-WRITE-UNAVAILABLE(<reason>)`) and gives a `--json`
+        # consumer `json.loads("")`. It failed closed, but without a verdict (review round 4).
         return 0, {}, str(e)
 
 
