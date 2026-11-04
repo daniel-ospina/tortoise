@@ -4409,6 +4409,11 @@ def _stub_start(monkeypatch, *, port: int = 16406):
     """
     monkeypatch.setattr(tl, "start", lambda _p=None: (LANE_FIXTURE_NAME, port))
     monkeypatch.setattr(tl, "_container_in_use", lambda _n: False)
+    # The module-wide fixture disables automatic reaping (`TORTOISE_TEST_LANE_REAP=0`)
+    # so no test touches the real box's containers; `run` now HONOURS that opt-out
+    # (#10813 review P2-4), so the run tests have to re-enable it for themselves.
+    # `start()` is stubbed above, so enabling it here cannot trigger a real sweep.
+    monkeypatch.setenv("TORTOISE_TEST_LANE_REAP", "1")
 
 
 def _capture_run(monkeypatch, *, returncode: int = 0) -> dict:
@@ -4723,6 +4728,19 @@ def test_an_UNREADABLE_peer_state_fails_CLOSED(lane, monkeypatch, capsys):
     monkeypatch.setattr(tl, "_peer_run_is_live", lambda _n: None)
     assert tl.main(["run", "--", "-q", "tests/"]) == 0
     assert reaped == [], "an unreadable peer state reaped anyway"
+
+
+def test_the_box_wide_opt_out_ALSO_keeps_the_container(lane, monkeypatch, capsys):
+    """`TORTOISE_TEST_LANE_REAP=0` gates `start()`'s sweep — it must gate the hook
+    too, or a lane that disabled automatic reaping on a box still loses its
+    container at the end of every `run` (#10813 review P2)."""
+    _stub_start(monkeypatch, port=16412)
+    monkeypatch.setenv("TORTOISE_TEST_LANE_REAP", "0")
+    reaped: list = []
+    monkeypatch.setattr(tl.subprocess, "run", lambda *a, **k: _R(0, "", ""))
+    monkeypatch.setattr(tl, "stop", lambda: (reaped.append(1), "removed")[1])
+    assert tl.main(["run", "--", "-q", "tests/"]) == 0
+    assert reaped == [], "the box-wide opt-out did not reach the exit hook"
 
 
 def test_a_FAILING_reap_never_changes_the_runs_verdict(lane, monkeypatch, capsys):

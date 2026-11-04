@@ -478,7 +478,13 @@ def reap(*, apply: bool, as_json: bool = False) -> int:
     rendered: list[str] = []
     for row in rows:
         age = _age_seconds(row, now)
-        verdict = verdicts.get(row["name"], "kept (not a candidate)")
+        verdict = verdicts.get(
+            row["name"],
+            # A swept population is empty when the sweep FAIL-CLOSED, so a default
+            # verdict here would report a decision nobody took — and the
+            # per-container line is what an operator greps (#10813 review P3).
+            "NOT DECIDED (the sweep did not run)" if skipped
+            else "kept (not a candidate)")
         freed = row["bytes"] if verdict.lower().startswith(
             ("removed", "would remove")) else None
         if freed:

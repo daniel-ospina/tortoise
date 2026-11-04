@@ -2473,7 +2473,16 @@ def _peer_run_is_live(name: str) -> bool | None:
             continue
         if pid == mine:
             continue
-        if _pid_alive(pid):
+        # PID REUSE: a marker left by a SIGKILLed run can name a pid the kernel
+        # has since given to an unrelated process, which would read "peer live"
+        # for as long as that process lives — a fail-closed leak with no
+        # self-healing path. A marker older than a day cannot be a live run
+        # (the longest measured lane is 15.6 h), so it is treated as stale.
+        try:
+            aged = (time.time() - entry.stat().st_mtime) > 24 * 3600
+        except OSError:
+            aged = False
+        if not aged and _pid_alive(pid):
             return True
         with contextlib.suppress(OSError):
             entry.unlink(missing_ok=True)
@@ -3530,7 +3539,12 @@ def cmd_run(args: argparse.Namespace) -> int:
     # default disposition terminates the process without unwinding, so this hook
     # would never run for a lane stopped the normal way — hence the handler below
     # (the child gets its own, since `exec` resets dispositions).
-    keep = bool(getattr(args, "keep_container", False))
+    # The box-wide opt-out (`TORTOISE_TEST_LANE_REAP=0`) must cover the HOOK as
+    # well as `start()`'s sweep: a lane that disabled automatic reaping here
+    # would otherwise still lose its container at the end of every `run`
+    # (#10813 review P2).
+    keep = (bool(getattr(args, "keep_container", False))
+            or os.environ.get("TORTOISE_TEST_LANE_REAP", "1") == "0")
     rc: int | None = None
     _prev_term = None
     try:
@@ -3538,7 +3552,18 @@ def cmd_run(args: argparse.Namespace) -> int:
     except (ValueError, OSError):        # not the main thread / unsupported
         _prev_term = None
     try:
-        with _run_marker(name):
+        with _run_marker(name) as _marker_written:
+            if not _marker_written:
+                # The marker dir is unwritable, so a PEER's presence cannot be
+                # established at all — and `_peer_run_is_live` would answer "no
+                # peer" for every concurrent run on the box, leaving only the
+                # 300 s client probe between a peer's live DB and `docker rm -f`.
+                # Unknown is not "none": keep the container and say so.
+                keep = True
+                print(f"test-lane: run marker could not be written under "
+                      f"{REAP_STATE_DIR} — the peer guard cannot see a "
+                      f"concurrent run, so {name} is NOT reaped on exit",
+                      file=sys.stderr)
             rc = subprocess.run(argv, env=env).returncode
     finally:
         if _prev_term is not None:
@@ -3550,8 +3575,8 @@ def cmd_run(args: argparse.Namespace) -> int:
             # (a `task` child shelled into the same worktree) shares this
             # container, and removing it would fail ITS run with connection
             # errors that read as test verdicts. `None` (unreadable) fails closed.
-            in_use = _container_in_use(name)
             try:
+                in_use = _container_in_use(name)
                 if in_use is None:
                     kept = True
                     print(f"test-lane: NOT reaping {name} on exit — its client "
@@ -3568,8 +3593,13 @@ def cmd_run(args: argparse.Namespace) -> int:
                 else:
                     print(f"test-lane: reaping {name} on exit -> {stop()}",
                           file=sys.stderr)
-            except SystemExit as _exc:
-                # The hook never speaks for the run.
+            except (SystemExit, Exception) as _exc:
+                # The hook never speaks for the run. `SystemExit` covers
+                # `stop()`'s refusals; `Exception` covers an OSError from a
+                # removed cwd or a closed stderr — both would otherwise REPLACE a
+                # real pytest verdict with a traceback (#10813 review P2).
+                # `KeyboardInterrupt` is deliberately NOT caught: it propagates,
+                # and the `finally` has already done its work.
                 kept = True
                 print(f"test-lane: could not reap {name} on exit ({_exc}); "
                       f"the scheduled reaper (tools/container_reaper.py) will "
