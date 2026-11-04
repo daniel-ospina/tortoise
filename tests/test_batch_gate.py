@@ -783,22 +783,74 @@ def test_a_constituent_head_absent_from_the_object_db_is_UNMEASURABLE(
 def test_content_contained_reports_an_uncomputable_diff_as_UNMEASURABLE(
     scratch_repo: Path,
 ) -> None:
-    """(b3b) The half the presence gate cannot cover: every commit present, diff still fails.
+    """(b3b) The half the presence gate cannot cover: every object PRESENT, diff still fails.
 
-    A shallow clone has the folded objects but not the merge base, so `git diff base...head`
-    exits non-zero while `_commit_present` is true for all three refs. Collapsing that into
-    `NOT-CONTAINED` re-opens the defect one layer down, so the function itself is tri-state
-    and this test calls it directly (bypassing the gate that would answer first).
+    A shallow clone has the objects but not the MERGE BASE, so `git diff base...head` exits
+    non-zero while `_commit_present` is true for every ref — the presence gate cannot see
+    this, and collapsing it into `NOT-CONTAINED` re-opens the defect one layer down. That
+    is why the function itself is tri-state, and this test constructs the shape for real:
+    two UNRELATED roots (`git commit-tree` with no parent) have no merge base, and all
+    three commits are present in the object DB (asserted, so the fixture cannot silently
+    degrade into the absent-object case the sibling test already covers).
 
     Discrimination proof: with the function returning `(bool, str)` — the pre-fix shape —
     the state is `False`/`True`, never the string `UNMEASURABLE`, and this test reds.
     """
-    base, const, fold = _three_way_fixture(scratch_repo)
-    state, detail = bo.content_contained(const, "0" * 40, fold, scratch_repo)
+    left = _commit(scratch_repo, {"a.txt": "left\n"}, [], "root-left")
+    right = _commit(scratch_repo, {"b.txt": "right\n"}, [], "root-right")
+    for sha in (left, right):
+        assert bo._commit_present(sha, scratch_repo), (
+            "the fixture must keep every object PRESENT — this test is about the diff "
+            "failing with the objects in hand, not about an absent ref"
+        )
+    assert not bo.is_ancestor(left, right, scratch_repo), "unrelated roots, by construction"
+
+    # The verdict path reaches it too: ``head`` is not an ancestor of ``fold``, and the
+    # base is present, so the CONTENT route runs and its diff cannot be computed.
+    verdict = bo.verdict_for(101, left, right, right, scratch_repo)
+    assert verdict.state == "UNMEASURABLE", (
+        f"an uncomputable diff is a failed measurement, not a containment verdict: {verdict}"
+    )
+
+    state, detail = bo.content_contained(left, right, right, scratch_repo)
     assert state == "UNMEASURABLE", (
         f"an uncomputable diff is a failed measurement, not a containment verdict: {state!r} ({detail})"
     )
     assert "could not compute the constituent diff" in detail, detail
+
+
+def test_an_absent_BASE_does_not_block_the_ANCESTRY_route(scratch_repo: Path) -> None:
+    """(b3c) The presence gate must not over-block: ancestry needs `head` and `fold_head` only.
+
+    `is_ancestor(head, fold_head)` is a graph query on two commits. It needs no diff and no
+    base, so requiring all three refs before it would convert a provable
+    `CONTAINED-ANCESTOR` into "could not measure" whenever the constituent's base is absent
+    — a fail-closed over-block that names the wrong remedy for a verdict already answered.
+    Two-stage presence is the fix; this pins the second stage down.
+
+    Discrimination proof: restore the one-stage gate (all of head/base/fold_head) and this
+    test reds with UNMEASURABLE instead of CONTAINED-ANCESTOR.
+    """
+    base = _commit(scratch_repo, {"f.txt": "one\n"}, [], "base")
+    head = _commit(scratch_repo, {"f.txt": "two\n"}, [base], "head")
+    fold = _commit(scratch_repo, {"f.txt": "two\n", "g.txt": "x\n"}, [head], "fold")
+    absent_base = "0" * 40
+    assert not bo._commit_present(absent_base, scratch_repo)
+
+    verdict = bo.verdict_for(101, head, absent_base, fold, scratch_repo)
+    assert verdict.state == "CONTAINED-ANCESTOR", (
+        "the ancestry proof needs neither the base nor a diff — an absent base must not "
+        f"downgrade it to 'could not measure': {verdict}"
+    )
+    assert verdict.closable is True, verdict
+
+    # …while the CONTENT route still refuses to guess: with no ancestry and the base
+    # absent there is nothing to reverse-apply, so it is UNMEASURABLE (exit 2), and the
+    # message names the BASE as what is missing.
+    unrelated = _commit(scratch_repo, {"h.txt": "other\n"}, [], "unrelated-root")
+    no_base = bo.verdict_for(102, head, absent_base, unrelated, scratch_repo)
+    assert no_base.state == "UNMEASURABLE", no_base
+    assert "BASE" in no_base.detail, no_base.detail
 
 
 def test_hint_constituents_still_sees_prose_but_is_never_acted_on() -> None:

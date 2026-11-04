@@ -658,19 +658,34 @@ def verdict_for(number: int, head: str, base: str, fold_head: str, cwd: Path) ->
     old order turned "this clone has not fetched that PR" into "the fold does not carry
     this work", which `_print_report` renders as "closing would destroy work" and
     `main` exits 1 (refused) for, instead of 2 (could not measure).
+    ⛔ PRESENCE IS CHECKED IN TWO STAGES, because the two routes need different
+    objects. ANCESTRY needs `head` and `fold_head` only; the content route needs
+    `base` as well (it computes `base...head`). Requiring all three up front would
+    turn a perfectly provable `CONTAINED-ANCESTOR` into "could not measure"
+    whenever the base is absent — an over-block, and the wrong remedy for a
+    verdict the ancestry proof already answers.
     """
-    missing = [sha for sha in (head, base, fold_head) if not _commit_present(sha, cwd)]
-    if missing:
+    missing_refs = [sha for sha in (head, fold_head) if not _commit_present(sha, cwd)]
+    if missing_refs:
         return Verdict(
             number,
             "UNMEASURABLE",
             "commit(s) absent from this checkout, so containment was never measured: "
-            + ", ".join(sha[:12] for sha in missing)
-            + " — fetch the constituent's head (this tool fetches the fold branch only) "
-            "and re-run",
+            + ", ".join(sha[:12] for sha in missing_refs)
+            + " — fetch the constituent's head and the fold head (this tool fetches the "
+            "fold branch only) and re-run",
         )
     if is_ancestor(head, fold_head, cwd):
         return Verdict(number, "CONTAINED-ANCESTOR", f"{head[:12]} is an ancestor of the fold")
+    # The CONTENT route needs the base too: it reverse-applies `base...head`.
+    if not _commit_present(base, cwd):
+        return Verdict(
+            number,
+            "UNMEASURABLE",
+            f"the constituent's BASE ({base[:12]}) is absent from this checkout, so its "
+            "diff could not be computed — the head is not an ancestor of the fold, and "
+            "a content proof needs the base. Fetch it and re-run",
+        )
     state, detail = content_contained(head, base, fold_head, cwd)
     return Verdict(number, state, detail)
 
