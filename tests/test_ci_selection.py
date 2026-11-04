@@ -14079,6 +14079,23 @@ def test_lane_stash_guard_runs_on_a_tools_only_change():
     assert "test_lane_stash.py" in r["test_files"], r
 
 
+def test_lane_wip_guard_runs_on_a_tools_only_change():
+    # #10812: `tests/test_lane_wip.py` (registered `core`) guards
+    # `tools/lane_wip.py` — the pin that snapshots a lane's UNCOMMITTED working
+    # state into `refs/pi-lane-wip/<lane-key>/<n>` so `git worktree remove
+    # --force` cannot destroy content that was never in the object DB (the
+    # measured 4,500-line loss). `tools/` is a flat NON_PYTHON_PREFIXES entry and
+    # the tool matches no SOURCE_PATTERNS row, so before the CORE_ALSO entry a
+    # tools-only diff was filtered out BEFORE the "not matched -> core" fallback:
+    # the pin never ran on the file it exists to hold (the #1349/#3332/#3616
+    # silent-drop class). Mutation check: removing the CORE_ALSO entry fails the
+    # arm below (surfaces == [] and the guard absent from test_files).
+    r = _sel(["tools/lane_wip.py"])
+    assert r["full"] is False, r
+    assert r["surfaces"] == ["core"], r
+    assert "test_lane_wip.py" in r["test_files"], r
+
+
 def test_rail_pin_runs_on_a_tools_only_change():
     # #2148: `tests/test_rail_detach.py` (registered `core`) pins the merge
     # rail's DURABILITY — the detached session that lets `admin-merge.sh`

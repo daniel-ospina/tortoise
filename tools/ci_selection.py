@@ -2267,6 +2267,17 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # `test_test_lane_tool.py`). Pinned by
              # tests/test_ci_selection.py::test_lane_stash_guard_runs_on_a_tools_only_change.
              "tools/lane_stash.py",
+             # #10812: `tools/lane_wip.py` pins a lane's UNCOMMITTED work into
+             # `refs/pi-lane-wip/<lane-key>/<n>` so `git worktree remove --force`
+             # cannot destroy content that was never in the object DB. It owns
+             # `tests/test_lane_wip.py`, registered `core`. Same shape as
+             # `tools/lane_stash.py` directly above: `tools/` is a flat
+             # NON_PYTHON_PREFIXES entry, so without this entry a tools-only diff
+             # comes back with `changed == []`, takes the docs-only early return,
+             # and the pin never runs on the file it guards — the
+             # #1349/#3332/#3616 silent-drop class. Pinned by
+             # tests/test_ci_selection.py::test_lane_wip_guard_runs_on_a_tools_only_change.
+             "tools/lane_wip.py",
              # #5612: the journal-growth measurement (`tools/journal_growth.py`)
              # and its probe
              # (`docs/evidence/5612-journal-growth/probes/corpus_growth_probe.py`)
