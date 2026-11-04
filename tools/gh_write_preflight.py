@@ -129,6 +129,17 @@ sha256 of the token, so a token *swap* is visible without the token being.
 
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import would fail first (the D9 shape, tools/longmem_eval/run.py).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/gh_write_preflight.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/gh_write_preflight.py`"
+    )
+
 import argparse
 import contextlib
 import hashlib
@@ -137,7 +148,6 @@ import os
 import re
 import secrets
 import subprocess
-import sys
 from dataclasses import dataclass, field
 
 # ── exit codes: a caller branches on these, so they are a contract ────────────
