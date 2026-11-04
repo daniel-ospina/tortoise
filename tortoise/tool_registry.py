@@ -265,7 +265,12 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         name="tortoise_create_point",
         id="surface.create_point",
         description="Create a Point node (statement, decision, vision, hypothesis, etc.). "
-                    "dedup=True (default): idempotent — returns existing Point if content matches. "
+                    "dedup=True (default) folds onto an existing Point when the content "
+                    "matches, but that is not unconditional: dedup=False mints a second "
+                    "Point, and a props payload can take the node out of the fold's own "
+                    "predicate. The idempotency hint below is per OPERATION; whether a "
+                    "given call converges depends on its arguments, and a refused call "
+                    "reports the per-call verdict on its own error payload. "
                     "Declaring extractedFrom materializes that :Source and links it (#8171); "
                     "a fresh write with no source and no provenance is advised (advisories: "
                     "[{code: no_source, node_id, message}] — advisory only, never a block). "
@@ -548,9 +553,19 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         id="surface.approve_merge",
         description="Review a dedup/temporal candidate — action=merge|reject. "
                     "Wiring deferred to promotion for live priors. WRITES "
-                    "review flags + wires edges (idempotent for repeats).",
+                    "review flags + wires edges. NOT idempotent for every branch: a "
+                    "repeat of a DEDUP review records its event again, so it is "
+                    "visible twice to poll_events (the temporal branch does guard "
+                    "one).",
         risk="write",
-        idempotent=True,
+        # ⛔ NOT idempotent for every branch (#10849 review). The TEMPORAL branch
+        # guards a re-approval ("re-approving with the SAME action is a no-op —
+        # no duplicate event"), but the DEDUP branch does not: after its
+        # already-linked check it falls through unconditionally to
+        # `_emit_event("DedupeRecorded"|"DedupeRejected", …)`, which writes a
+        # journal line AND a graph event record — so a retry is visible twice to
+        # `poll_events`. The two branches disagree; the flag is the half that is
+        # wrong, and a repeat is not safe until the guard matches.
         http_policy=True,
         sdk_method="approve_merge",
     ),
@@ -679,7 +694,19 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "semantics: the Layer-2 meaning (addresses, supports, refutes, "
                     "mutuallyExclusive, hasPart, related, …) — it resolves the direction.",
         risk="write",
-        idempotent=True,
+        # ⛔ NOT idempotent, and it must not say it is (#10849). The tier default
+        # (write → idempotentHint False) is the correct answer here, so this
+        # entry declares nothing. A retry of `create_operator` writes a SECOND
+        # operator over the same endpoints: `sdk.create_operator` has no
+        # adoption/existence check — `_find_operator`, the adopt-by-endpoint-set
+        # path `ingest` uses, is called from `ingest`'s connection loop only
+        # (`sdk.py:27339`, verified) — and its `_distinct_preserving_order`
+        # collapse only removes repeats WITHIN one request. `ep.py` builds its
+        # factor from the edge list, so the duplicate double-counts the claim's
+        # EP weight. Declaring `idempotent=True` here (as this entry did until
+        # #10849) advertised retry-safety to every MCP client through
+        # `idempotentHint`, and is the exact hint that turns the wait-bound
+        # refusal's "retry" into a duplicated edge.
         http_policy=True,
         sdk_method="create_operator",
     ),
@@ -709,7 +736,14 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "once it has been withdrawn (retracted/superseded/outdated/archived) a "
                     "re-assertion mints a NEW mitigation Point and returns its id.",
         risk="destructive",
-        idempotent=True,
+        # ⛔ NOT idempotent — its own description above says a re-assertion after
+        # withdrawal MINTS A NEW Point. So convergence is conditional on the
+        # mitigation's current STATE, which no argument predicate can see, in
+        # exactly the way this PR already ruled for `tortoise_onboarding_seed`.
+        # Advertising it as repeatable told a caller "repeating it converges"
+        # about a retry that mints a second mitigation (and, on an operator's
+        # edge strength, applies it twice) — #10849 review.
+        idempotent=False,
         http_policy=True,
         sdk_method="mitigate_operator",
     ),
@@ -1009,11 +1043,20 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "update_point(status='live'). promotion_policy='auto' preserves the #131 "
                     "promote-on-wire lifecycle (null-status sources only — an explicit draft "
                     "is never retro-promoted, #1088; terminal sources are never resurrected; "
-                    "deduped connections never retro-promote). Idempotent-ish: "
-                    "points dedup by content hash + kind, sources by url, operators by "
-                    "input set.",
+                    "deduped connections never retro-promote). NOT declared "
+                    "idempotent: points dedup by content hash + kind, sources by url "
+                    "and operators by input set, but the entities leg is append-only "
+                    "for document/event — a repeat can write a second Source.",
         risk="write",
-        idempotent=True,
+        # ⛔ NOT idempotent — and this is a corrected declaration, not a tier
+        # default (#10849 review). `ingest` looked convergent on three separate
+        # readings and each was falsified: its `entities` leg is append-only for
+        # document/event, a bundle may arrive as a JSON string parsed AFTER the
+        # MCP seam, and a bundle's points splat `props` FLAT beside `kind`, so a
+        # caller can pass `is_operator` outside `props` and defeat the fold. The
+        # bundle's key space is open-ended, so no finite predicate can prove it
+        # — a repeat is not safe to advertise.
+        idempotent=False,
         http_policy=True,
         sdk_method="ingest",
     ),
@@ -1200,10 +1243,18 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
     ToolDefinition(
         name="tortoise_create_document",
         id="surface.create_document",
-        description="Create a document — a :Source keyed by url (research, planDoc, "
-                    "meetingNotes, etc.).",
+        description="Create a document — a :Source (research, planDoc, "
+                    "meetingNotes, etc.). NOT keyed by url: every call mints a fresh "
+                    "id, so a repeat writes a second Source and a second "
+                    "DocumentCreated.",
         risk="write",
-        idempotent=True,
+        # ⛔ NOT idempotent, and it must not say it is (#10849 review). The
+        # description says ":Source keyed by url", but the DOOR does not key by
+        # url: `sdk.create_document` mints a FRESH id per call
+        # (`did = self.ulid()`), and `_upsert_document` MERGEs the :Source on
+        # that id — so a retry writes a second Document Source and a second
+        # `DocumentCreated` (the SDK's own note on `_create_entity`, #2296).
+        # `write` tier already defaults to `idempotentHint: false`.
         http_policy=True,
         sdk_method="create_document",
     ),
@@ -1226,6 +1277,19 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "cache-consistency-checked. NOTE: refreshes the reliability "
                     "cache on the Source node (write-through projection), so not read-only.",
         risk="write",
+        # ⛔ NOT idempotent, and an earlier revision of this PR declared it so
+        # (#10849 review). The reasoning was "a repeat converges on the same
+        # value" — but the value is CLOCK-dependent: `mean = alpha / (alpha +
+        # beta)` over `_compute_source_prior` → `aggregate_prior(recency_decay=…)`,
+        # whose `now` defaults to the wall clock, so a repeat past the cache
+        # interval re-derives and re-STORES a different float (measured 0.65087406
+        # → 0.65087345 at +1 h → 0.65043060 at +30 d). That is the same property
+        # this file already uses to keep the `maintenance` tier non-idempotent —
+        # `tortoise_compute_confidence`'s own note is "call 2 starts from the value
+        # call 1 stored (0.693315 -> 0.693320), so repeated calls DO have an
+        # additional effect". So the `write` tier default stands: a repeat is a
+        # real write.
+        idempotent=False,
         http_policy=True,
         sdk_method="get_source_reliability",
     ),
@@ -1327,9 +1391,9 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         name="tortoise_operator_action",
         id="surface.operator_action",
         description="Consolidated operator write action — action=mitigate|annotate. "
-                    "mitigate: reason + strength (0-1) — creates/updates the mitigation "
-                    "Point (idempotent). annotate: bias/precision/consistency/directness "
-                    "(0-1).",
+                    "mitigate: reason + strength (0-1) — creates/updates a CURRENT mitigation "
+                    "Point; a re-assertion after withdrawal MINTS A NEW Point, so NOT "
+                    "idempotent then. annotate: bias/precision/consistency/directness (0-1).",
         risk="destructive",
         http_policy=True,
         sdk_method="",  # custom handler in mcp_server.py (dispatches to sdk.mitigate_operator / sdk.annotate_operator; #3904)
@@ -1405,9 +1469,22 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
     ToolDefinition(
         name="tortoise_onboarding_demo_create",
         id="surface.onboarding_demo_create",
-        description="Create the demo epistemic graph (4 layers) for this team. Idempotent (Q4).",
+        description="Create the demo epistemic graph (4 layers) for this team. The "
+                    "SEED is sentinel-gated (a repeat files no new nodes), but the "
+                    "call is NOT idempotent: the handler then writes its onboarding "
+                    "receipt, whose CAS leg re-stores the state and advances "
+                    "state_version on every repeat.",
         risk="write",
-        idempotent=True,
+        # ⛔ NOT idempotent, though it read as one for several rounds of this PR
+        # (#10849 review). `_seed_demo_graph` is sentinel-gated, so the GRAPH does
+        # not change — but `tortoise_onboarding_demo_create` then calls
+        # `_update_onboarding_state(org_id, demo_created=True)` UNCONDITIONALLY, and
+        # `demo_created` is an OPERATIONAL key, so it takes the CAS leg
+        # (`SET t.onboarding_state = $state, t.state_version = $expected + 1`) with
+        # no value-unchanged short-circuit. A repeat therefore re-stores the state
+        # and advances the epoch: a real write, by the same standard that keeps
+        # `tortoise_get_source_reliability` out of this set.
+        idempotent=False,
         http_policy=True,
         sdk_method="",  # custom handler in mcp_server.py
         rest_spec=RestSpec(method="POST", path="/v1/demo"),

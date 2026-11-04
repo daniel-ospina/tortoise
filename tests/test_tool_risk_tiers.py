@@ -334,16 +334,45 @@ class TestHintsCannotDrift:
                      if e.idempotent is not None}
         assert overrides == {
             # write tier, idempotent by operation (dedup on content/identity)
-            ("tortoise_approve_merge", True),
+            # ⛔ `tortoise_approve_merge` is NOT here: its dedup branch falls
+            # through to `_emit_event` with no already-reviewed guard, so a retry
+            # appends a second DedupeRecorded/DedupeRejected (#10849 review).
             ("tortoise_checkpoint", True),
-            ("tortoise_create_document", True),
-            ("tortoise_create_operator", True),
+            # ⛔ `tortoise_create_document` is NOT here: the door mints a fresh
+            # ulid per call and `_upsert_document` MERGEs on that id, so a retry
+            # writes a second Document Source (#10849 review). It carried
+            # `idempotent=True` until then — a false retry-safety claim.
+            # ⛔ `tortoise_create_operator` is NOT here: it has no adoption path
+            # (`_find_operator` is `ingest`-only), so a repeat writes a second
+            # edge and double-counts the claim's EP weight. It carried
+            # `idempotent=True` until #10849 — a false retry-safety claim that
+            # clients read as `idempotentHint`.
             ("tortoise_create_point", True),
             ("tortoise_create_source", True),
-            ("tortoise_ingest", True),
-            ("tortoise_onboarding_demo_create", True),
-            # destructive tier, idempotent by operation (same id → same row)
-            ("tortoise_mitigate_operator", True),
+            # ⛔ `tortoise_get_source_reliability` is pinned FALSE below, not omitted — it is a getter in
+            # the write tier, and an earlier revision of this PR declared it
+            # repeatable on "a repeat converges on the same value" — but the value
+            # is CLOCK-dependent (recency-decayed prior, `now` defaults to the wall
+            # clock), so a repeat past the cache interval re-stores a DIFFERENT
+            # float: 0.65087406 -> 0.65087345 at +1 h -> 0.65043060 at +30 d. Same
+            # property that keeps `compute_confidence` non-idempotent.
+            ("tortoise_get_source_reliability", False),
+            # ⛔ `tortoise_ingest` is pinned FALSE below, not omitted — three readings each looked
+            # convergent and each was falsified: its entities leg is append-only
+            # for document/event, a bundle may arrive as a JSON string parsed
+            # after the MCP seam, and a bundle's points splat `props` FLAT beside
+            # `kind` (so `is_operator` defeats the fold from outside `props`).
+            # The bundle's key space is open-ended → no finite predicate proves
+            # it (#10849 reviews).
+            ("tortoise_ingest", False),
+            # ⛔ `onboarding_demo_create` is pinned FALSE below: its SEED is
+            # sentinel-gated but its onboarding RECEIPT CAS-writes on every call.
+            ("tortoise_onboarding_demo_create", False),
+            # ⛔ `tortoise_mitigate_operator` is pinned FALSE below, not omitted — its own description
+            # says a re-assertion after withdrawal MINTS A NEW mitigation Point,
+            # so convergence is conditional on the mitigation's current STATE —
+            # which no argument predicate can see (#10849 review).
+            ("tortoise_mitigate_operator", False),
             # maintenance tier, NOT idempotent: a repeat call re-stores a
             # re-derived score (#4122 measurement: 0.693315 -> 0.693320)
             ("tortoise_compute_confidence", False),
@@ -365,6 +394,92 @@ class TestHintsCannotDrift:
         # comparison in `TestTheReadThroughToolsRegressionPin`.
         assert get_write_tool_names() == expected == WRITE_TOOL_NAMES
         assert len(expected) == 48, sorted(expected)  # census, hard-coded
+
+
+class TestTheMitigationWriteIsNeverAdvertisedAsRepeatable:
+    """#10895 review — a write's HINT and its DESCRIPTION are two halves of one
+    served surface, and on this operation they disagreed.
+
+    `tortoise_mitigate_operator` is `idempotent=False` because its own description
+    says a re-assertion after withdrawal mints a NEW mitigation Point: convergence
+    is conditional on the mitigation's current STATE, which no argument predicate
+    can see. `tortoise_operator_action(action="mitigate")` dispatches to THE SAME
+    writer, yet its description still promised "creates/updates the mitigation
+    Point (idempotent)".
+
+    So a caller refused by the retry boundary read `retry_safe: false` in the
+    payload and "(idempotent)" in the very tool it had just called — `committed`
+    unknown, and the served prose telling it a retry converges. The hint was
+    already conservative; the description is the channel an LLM actually uses to
+    choose and re-issue a call, so the condition has to be stated there too.
+
+    Enforced by ENUMERATION over the handlers rather than by naming the two
+    entries: a future tool that reaches the same writer inherits the requirement
+    instead of reintroducing the defect one field over.
+    """
+
+    @staticmethod
+    def mitigation_writers() -> list[ToolDefinition]:
+        """Every served entry whose handler reaches `sdk.mitigate_operator`.
+
+        Read from the CODE, not from a list: `sdk_method` covers the direct
+        binding, and a handler-served entry (`tortoise_operator_action`) is found
+        by its source calling the same writer — the two are the same write.
+        """
+        import inspect
+
+        from tortoise import mcp_server
+
+        found: list[ToolDefinition] = []
+        for entry in served():
+            if entry.sdk_method == "mitigate_operator":
+                found.append(entry)
+                continue
+            handler = getattr(mcp_server, entry.name, None)
+            if handler is None:
+                continue
+            try:
+                source = inspect.getsource(handler)
+            except (OSError, TypeError):  # pragma: no cover — dynamic handlers
+                continue
+            if "mitigate_operator" in source:
+                found.append(entry)
+        return found
+
+    def test_the_enumeration_finds_both_doors_to_the_same_writer(self):
+        """Pinned by name so the enumeration cannot silently collapse to empty
+        and make the property below vacuously true."""
+        assert {e.name for e in self.mitigation_writers()} == {
+            "tortoise_mitigate_operator",   # the direct binding
+            "tortoise_operator_action",     # handler-served, same writer
+        }
+
+    def test_no_door_to_the_mitigation_write_claims_unqualified_idempotence(self):
+        """The condition, not just the hint. A bare "(idempotent)" is the false
+        claim; the withdrawal caveat is what makes the sentence true."""
+        offenders = [
+            (e.name, e.description)
+            for e in self.mitigation_writers()
+            if "(idempotent)" in e.description or "withdraw" not in e.description
+        ]
+        assert offenders == [], (
+            "a tool that reaches `mitigate_operator` advertises the write as "
+            "unconditionally repeatable, or omits the withdrawal condition: "
+            f"{offenders}"
+        )
+
+    def test_the_sdk_door_states_the_same_condition(self):
+        """The same claim served through the SDK docstring — the third channel.
+
+        `TortoiseSDK.operator_action` carried "strength (idempotent)" while its own
+        `mitigate_operator` docstring did not, so a caller reading either surface
+        got a different answer about the same write.
+        """
+        from tortoise.sdk import TortoiseSDK
+
+        doc = TortoiseSDK.operator_action.__doc__ or ""
+        assert "(idempotent)" not in doc
+        assert "withdraw" in doc, doc
 
 
 class TestTheReadThroughToolsRegressionPin:

@@ -103,10 +103,8 @@ from __future__ import annotations
 
 import sys
 
-# #5128: the RUNTIME guard precedes every 3.11+-only import, so an older interpreter
-# gets an attributable refusal instead of an ImportError from a line further down.
-# (Hoisted by #10914: it sat after `argparse`/`dataclasses`, which is the shape the
-# `tests/test_entry_point_python_guard.py` arm reds — same class as #10754.)
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
 if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     raise SystemExit(
         f"tools/batch_open.py requires Python >= 3.12 (got "

@@ -626,7 +626,404 @@ def _wait_bound_refused() -> bool:
     return bool(state.get(_WAIT_BOUND_REFUSED_KEY)) if state is not None else False
 
 
-def _wait_bound_refusal_result() -> ToolResult:
+#: The four retry rules shipped WITH a breached write's refusal. Exactly ONE is
+#: returned for any breached write, so a caller is never left to infer a retry
+#: protocol from prose. Which one, and why:
+#:
+#:   * NOT_SENT — no dispatch was started, so nothing was sent at all.
+#:   * PREVIEW  — the call declared itself a preview (``dry_run=True`` — explicit
+#:                or the handler's documented default — or ``tortoise_delete``
+#:                with no ``confirmation``) and wrote nothing, so a repeat is
+#:                safe REGARDLESS of idempotency.
+#:   * SAFE     — the registry declared the operation idempotent AND this call's
+#:                arguments did not switch that off.
+#:
+#: NOT_SENT and PREVIEW are the TWO arms that say "retry" for a tool the
+#: registry has not declared idempotent, and both are sound for the same reason:
+#: nothing was written in the first place.
+#:   * UNSAFE   — everything else: do not re-send.
+#:
+#: ⚠️ There is deliberately NO generic read-back recipe here, and that is a
+#: correctness decision rather than an omission. A single recipe CANNOT be sound
+#: across the write surface, and three ways it is unsound are all measured:
+#:
+#:   * ``tortoise_search`` (``entity_type="point"``) indexes ``content`` +
+#:     ``search_keys`` only, while ``sdk.create_operator`` writes a ``:Point``
+#:     with ``{id, is_operator, op_type, direction, direction_basis, status}``,
+#:     plus ``label`` only ``if label:``, and NO ``content`` (``sdk.py:22403``) —
+#:     so for EVERY created operator the recipe
+#:     returns nothing, "nothing" reads as "it did not commit", and the retry
+#:     duplicates the edge and double-counts its EP factor. That is the exact
+#:     tool #10849 measured, so a recipe here would have instructed the
+#:     duplicate it exists to prevent.
+#:   * the inversion is not even uniform across the destructive tier, so no one
+#:     sentence can describe it: for a hard delete (``DETACH DELETE``) and the
+#:     terminal-marking doors (``supersede`` / ``invalidate`` / ``retract``,
+#:     whose old node leaves the default ``include_terminal=False`` result set) a
+#:     search HIT means the write did NOT commit — inverted.
+#:   * and for ``update_point`` presence carries NO information at all: the node
+#:     exists BEFORE the write, so a HIT is what a not-committed update produces
+#:     exactly as much as a committed one (hit ⇒ committed is unsound); worse, a
+#:     generic revision of an already-terminal point is ACCEPTED
+#:     (``refuse_terminal=_temporal_restamp``) and the node stays terminal, so a
+#:     COMMITTED update can also be a MISS. The default result set excludes it
+#:     either way.
+#:
+#: So the machine-actionable answer is the one the registry can actually support:
+#: ``retry_safe``. An idempotent operation converges on a repeat and needs no
+#: read-back; a non-idempotent one must not be repeated at all, because no
+#: read-back can be offered for it here.
+#:
+#: ⛔ ``idempotent=True`` is a SEQUENTIAL claim, and the rule must not silently
+#: promote it to "re-send now". For the two members driven by a content fold that
+#: claim rests on a CHECK-THEN-WRITE with no uniqueness constraint behind it —
+#: ``create_point`` (`_resolve_dedup_hit(...)` then a separate `ulid()` + CREATE)
+#: and ``checkpoint`` (`_content_exists` then `create_point`). So a retry that
+#: lands while the ABANDONED first write is still running is not a repeat — both
+#: can read absent, and both create. The other two members do not share that
+#: mechanism and are not covered by this caveat: ``create_source`` converges in ONE
+#: conditional statement, `_upsert_source`'s `MERGE (s:Source {url: $url})`
+#: (`projection/entities.py:6503`; that function's own note there is "pin d").
+#: ⛔ ``onboarding_demo_create`` is NOT one of them, though its seed is
+#: sentinel-gated: the handler then writes its RECEIPT unconditionally
+#: (`_update_onboarding_state(org_id, demo_created=True)`), `demo_created` is an
+#: OPERATIONAL key, and the CAS leg has no value-unchanged short-circuit — so
+#: every repeat re-stores the state and advances `state_version`. That is a real
+#: write, and it is why that tool is not declared idempotent. Measured on the
+#: embedded lane: two in-process
+#: concurrent `create_point(..., dedup=True)` calls minted two nodes with the
+#: identical `content_hash` in 14 of 20 rounds, while the sequential control
+#: converged on one id. That is the absent fourth precondition of #5064, tracked
+#: as #9879 — not something this seam can fix, and exactly why this rule names the
+#: condition under which its promise holds instead of asserting it outright.
+#:
+#: A per-tool verify recipe is left to
+#: #10849's remaining half (making ``create_operator`` adopt on endpoint-set +
+#: label + direction the way ``ingest`` already does), which makes the question
+#: moot for the family that needs it most.
+_WAIT_BOUND_RETRY_RULE_SAFE = (
+    "this operation converges when repeated, so a retry is safe once the first "
+    "attempt can no longer be running. Do NOT re-send while it may still be in "
+    "flight: an overlapping attempt is not a repeat."
+)
+#: No dispatch was ever STARTED (the transport refused before this seam scheduled
+#: one, or the argument check bailed out having already been answered), so there
+#: is nothing to reconcile and re-sending is safe.
+_WAIT_BOUND_RETRY_RULE_NOT_SENT = (
+    "this request was refused before any work started, so nothing was written "
+    "and re-sending it is safe once the advertised delay has elapsed"
+)
+
+#: A call that is a PREVIEW wrote nothing, so none of the other rules describes
+#: it: "may have committed" is false for it, and "do NOT repeat it" forbids the
+#: one safe action — which is the action that matters most for a preview of a
+#: destructive operation. Two shapes are previews: ``dry_run=True`` on a tool
+#: that declares the parameter, and ``tortoise_delete`` with no ``confirmation``
+#: (its two-call design — the first call only mints the token).
+_WAIT_BOUND_RETRY_RULE_PREVIEW = (
+    "this call was a PREVIEW and wrote nothing, so repeating it is safe — no "
+    "reconciliation is needed"
+)
+
+#: ⛔ Deliberately does NOT say what a repeat would do (a duplicate is true for a
+#: creator; a re-issued hard delete returns ``False`` and is the door's own
+#: "no-op") and deliberately does NOT send the caller to a read-back (there is
+#: none on this surface for the family that needs it most). It states the rule
+#: for a write that ACTUALLY WROTE — a preview of one takes the PREVIEW arm
+#: instead, because it wrote nothing: do not re-send.
+#:
+#: ⛔ It is worded about THIS CALL, never about the operation, because the arm's
+#: population is MIXED. Most of it is write-set tools that declare no idempotency
+#: at all (``create_operator``, ``ingest``, …), for which "this operation is NOT
+#: idempotent" would be true. But the arm also takes declared-idempotent tools
+#: whose ARGUMENTS switched convergence off — ``create_point(dedup=False)``, or one
+#: carrying ``props``/``authoredBy``/``credibility`` — and there the registry DOES
+#: say the operation converges, served as ``idempotentHint: true``. A single rule
+#: true of every arm is therefore the one the file already uses elsewhere: "the
+#: declaration says the OPERATION converges; the ARGUMENTS decide whether this
+#: CALL does". So: no claim either way about the operation.
+_WAIT_BOUND_RETRY_RULE_UNSAFE = (
+    "this call is NOT safe to repeat — do NOT re-send it. The write may already "
+    "have committed, and nothing on this response tells you whether it did. "
+    "Reconcile by other means rather than re-sending."
+)
+
+
+#: The ARGUMENT, of the ones this seam reads, that most plainly turns a
+#: converging write into a diverging one: with ``dedup=False`` the SAME
+#: `tortoise_create_point` call mints a second Point
+#: instead of folding onto the existing one — its own docs say so ("pass a fresh
+#: key with ``dedup=False`` to mint a second point", #6110), and ``sdk.py`` gates
+#: the whole dedup branch on ``if dedup:``. A name-only verdict is therefore
+#: WRONG for the call in front of it: it would ship ``retry_safe: true`` — and a
+#: ``retry_rule`` reading "repeating it converges" — for the exact duplicate this
+#: whole contract exists to prevent.
+_CONVERGENCE_OFF_ARGUMENT = "dedup"
+
+
+def _arguments_disable_convergence(name: str, arguments) -> bool:
+    """Whether THIS call's arguments switch its convergence off (fail-closed).
+
+    ⛔ The arguments read here are the RAW PRE-VALIDATION dict, and FastMCP
+    COERCES them before the handler sees them (`dedup` is declared
+    ``{"type": "boolean"}`` in the served schema, so ``"false"``, ``"False"``,
+    ``"0"`` and ``"no"`` all arrive at the handler as ``False`` — measured, and
+    the same coercion ``tests/test_10084_graph_disclosure.py`` pins for
+    ``dry_run``). So a truthiness test on the raw value is WRONG in the dangerous
+    direction: ``"false"`` is truthy, would read as "still converges", and would
+    ship "a retry is safe" for a call that mints a second Point.
+
+    Therefore the read is fail-closed on TYPE, not on truthiness:
+      * key absent   → the tool's own default applies (``True``: converging);
+      * a real bool  → use it (FastMCP only ever hands the handler a bool);
+      * anything else → we cannot know what the handler will receive, so assume
+        the divergence case.
+    """
+    if not isinstance(arguments, dict):
+        return False
+    # ⛔ `tortoise_ingest` has NO safe arm, and that is the finding rather than a
+    # gap. Three separate review rounds each closed one spelling of the same
+    # hole, which is the signal that the enumeration itself is the defect:
+    #   * `entities` of type document/event are APPEND-ONLY (`sdk.py` "Document
+    #     records are append-only — never deduped"; `docs/INGEST_CONTRACT.md` row
+    #     1 `append_only_items`), and the SDK lowercases the type on BOTH legs
+    #     (`sdk.py:23717` admission, `sdk.py:27100` dispatch), so a case variant
+    #     reaches the writer too;
+    #   * `bundle` may arrive as a JSON STRING — the handler calls
+    #     `_parse(bundle)` after this seam runs and the served schema puts no
+    #     `type` on it — so `json.dumps(...)` bypassed the whole check;
+    #   * and a bundle's points SPLAT `props` FLAT (`sdk.py:26647`: `[{kind,
+    #     content, ref?, status?, **props}]`), so a caller puts `is_operator`
+    #     BESIDE `kind` rather than inside `props` — measured, that mints a
+    #     second node while every key-allow-list reads it as props-free.
+    # `batch_id` does not save any of this: it is a STAMP (`_stamp_batch_id`),
+    # never a dedup key. Since the bundle's key space is open-ended, no finite
+    # predicate can prove convergence — so ingest reports UNSAFE, and its
+    # registry `idempotent` flag is False for the same reason.
+    if name != "tortoise_create_point":
+        return False
+    if _call_carries_props(arguments) or _call_folds_siblings_into_props(arguments):
+        # ⛔ `props` DEFEATS the dedup fold, so no allow-list of prop keys can
+        # prove convergence. Measured: `create_point(content=X, props={"is_operator":
+        # True})` twice mints TWO nodes with DIFFERENT ids, because the fold's own
+        # predicate EXCLUDES operator nodes (`sdk.py`: `WHERE (n.is_operator IS
+        # NULL OR n.is_operator = false) AND (n.op_type IS NULL OR n.is_operator =
+        # false)`), and `is_operator` is neither server-managed nor stripped — it
+        # lands on the node via the plain props passthrough. Since `props` is
+        # caller-controlled and open-ended, the only sound rule is: convergence
+        # is PROVEN only for a props-free call.
+        # Over-blocking here costs a legitimate retry; under-blocking duplicates.
+        return True
+    if _CONVERGENCE_OFF_ARGUMENT not in arguments:
+        return False
+    value = arguments[_CONVERGENCE_OFF_ARGUMENT]
+    if isinstance(value, bool):
+        return not value
+    # A spelling the schema will coerce and we cannot evaluate: fail closed.
+    _log.warning(
+        "wait-bound refusal: non-boolean %s=%r on %s — treating the call as "
+        "non-converging", _CONVERGENCE_OFF_ARGUMENT, value, name)
+    return True
+
+
+def _call_carries_props(scope) -> bool:
+    """Whether this call/item carries a non-empty caller `props` payload.
+
+    `props` is an open channel onto the node, so a key inside it can change what
+    the writer DEDUPS on (measured: `is_operator` takes the node out of the dedup
+    fold's own predicate; `op_type` alone does NOT, because the second conjunct
+    is `n.is_operator = false`, which passes whatever `op_type` holds). A finite
+    allow-list of "safe" prop keys would have to be re-derived every time a prop
+    is added — so the sound question is only "is there any?".
+    """
+    if not isinstance(scope, dict):
+        return False
+    # Truthiness alone answers it: a non-empty dict (a nested `props={"props":
+    # {...}}` spelling included — the outer dict is non-empty) is a payload, and
+    # an empty one carries nothing. No recursion: it could only be reached with
+    # `{}`, where it answers False anyway.
+    return bool(scope.get("props"))
+
+
+def _call_folds_siblings_into_props(arguments) -> bool:
+    """Whether a named argument will be folded into props before the write.
+
+    ⛔ Measured: `create_point(content=x, authoredBy="me", dedup=True)` twice
+    returns the SAME id, but the second call lands on the dedup-hit UPDATE leg
+    (`sdk.py` `if props or _word_applied: self.update_point(pid, **props)`) and
+    emits `PointRevised`, bumping `updatedAt` — the one effect the props-free
+    dedup path is explicitly protected from ("must not bump updatedAt or
+    re-trigger EP dirty-marking"). So a repeat is NOT a no-op, and calling it
+    `retry_safe: true` / "repeating it converges" is the same over-claim that
+    got `tortoise_approve_merge` demoted in this PR.
+    """
+    if not isinstance(arguments, dict):
+        return False
+    # ⛔ Mirror the handler's OWN fold conditions EXACTLY — `merged = dict(props or
+    # {}); if authoredBy: merged["authoredBy"] = authoredBy; if credibility is not
+    # None: merged["credibility"] = credibility`. A generic "is it truthy" test is
+    # WRONG here and fails OPEN: `credibility` is a documented numeric ladder
+    # ("T0-T4 or numeric 0-4") and `0 == False` in Python, so `credibility=0` read
+    # as ABSENT while the handler folds it — and the call was then advertised
+    # `retry_safe: true` even though it carries a props payload.
+    #
+    # ⛔ Do not claim that repeat WRITES: measured with the handler's own argument
+    # shape, the second `create_point(kind, C, credibility=0, dedup=True)` produced
+    # a byte-identical node (no prop diff, `updatedAt` unchanged) and touched
+    # neither `set_point_baseline` nor `update_point` — the dedup-hit word leg is
+    # gated on `_existing_label and _existing.get("baseline_set")`, which a first
+    # write has already satisfied. The rule still blocks it, for the reason the
+    # `props` rule exists: the channel is caller-controlled, so convergence is not
+    # PROVABLE — not because this particular value diverges.
+    # ⛔ These are two DIFFERENT predicates and neither may absorb the other:
+    # `authoredBy` folds on TRUTHINESS (handler: `if authoredBy:`), `credibility`
+    # folds on PRESENCE (handler: `if credibility is not None:`) — `credibility=0`
+    # is the real T0 tier, and `0 == False` in Python.
+    #
+    # ⛔ `bool(...)` is load-bearing, not decoration: `arguments.get("authoredBy")`
+    # yields the RAW value (`"me"`), and SIM103's own "Fix safety" note says the
+    # unwrapped form changes behaviour whenever the condition is not already a
+    # Boolean — it would leak a string out of this `-> bool` function and out of
+    # `_write_retry_safety`, whose `retry_safe` cell is compared with `is True/False`.
+    return bool(arguments.get("authoredBy")) or (arguments.get("credibility") is not None)
+
+
+def _declared_dry_run_default(name: str):
+    """The served handler's declared `dry_run` default, or None.
+
+    Read from the same signature `_dry_run_tool_names` uses, so a tool whose
+    DEFAULT is the preview cannot be missed by a check that only looks for an
+    explicit `dry_run=True`.
+    """
+    fn = globals().get(name)
+    try:
+        param = inspect.signature(fn).parameters.get("dry_run")
+    except (TypeError, ValueError):  # pragma: no cover - non-callable
+        return None
+    return None if param is None else param.default
+
+
+#: The STRING spellings pydantic's bool coercion maps to ``True``. Taken from the
+#: coercion itself (`str_to_bool`: `s.lower()` looked up in a fixed table — note
+#: there is NO `.strip()`, so a padded string is REJECTED rather than coerced).
+#: ONLY the TRUE half is used below — see ``_coerces_to_true`` for why.
+_COERCES_TO_TRUE = frozenset({"true", "1", "yes", "on", "t", "y"})
+
+
+def _coerces_to_true(value) -> bool:
+    """Whether FastMCP will coerce this raw argument to ``True`` — and only that.
+
+    ⛔ The refusal runs on the PRE-VALIDATION dict, but the handler it stands in
+    for runs AFTER pydantic coerces it. So `{"dry_run": "true"}` — a spelling an
+    LLM client emits naturally, and one the served schema accepts — is a real
+    preview (the handler sees ``True`` and every write sits behind ``if not
+    dry_run``), while ``value is True`` is False for it. Measured: that shipped
+    ``committed: "unknown"`` + "this call is NOT safe to repeat" for six of the
+    seven ``dry_run`` tools, i.e. told a caller an unexecuted preview may have
+    committed and forbade re-sending it.
+
+    ⛔ ONLY the true-direction is admitted, and that asymmetry is load-bearing.
+    Reading ``"false"``/``"0"`` as ``False`` would let a caller's spelling move
+    the verdict toward "nothing was written"; leaving them unread can only fall
+    through to the conservative write arm.
+
+    The table is the coercion's OWN, checked against the pinned pydantic rather
+    than guessed. Two corrections a first attempt got wrong, both measured:
+    ``1.0`` IS coerced to ``True`` (a float is admitted, not only an int), and a
+    PADDED string (``" true "``) is REJECTED by the coercion rather than
+    accepted — so a ``.strip()`` here would claim a preview for a call that never
+    reaches the handler. A rejected spelling cannot fail open anyway: validation
+    refuses the call, so nothing is written.
+    """
+    # `bool` is a subclass of `int`, so these arms must come FIRST or `True` would
+    # be re-read as the number 1 (harmless) and `False` as 0 (also harmless) — but
+    # being explicit keeps the reading obvious.
+    if isinstance(value, bool):
+        return value is True
+    if isinstance(value, (int, float)):
+        return value == 1
+    if isinstance(value, str):
+        return value.lower() in _COERCES_TO_TRUE
+    return False
+
+
+def _arguments_say_preview(name: str, arguments) -> bool:
+    """Whether this call declares itself a preview, so it writes nothing.
+
+    A ``dry_run`` tool with ``dry_run=True`` returns a preview by construction —
+    "Nothing was written: this call was a preview" is the recorded contract
+    (#10084). Saying "the write may have committed" to such a caller is simply
+    false, and worse, it FORBIDS the one safe action (re-sending the preview),
+    which is the place a preview of a destructive operation matters most.
+
+    Gated on the tool's own declared ``dry_run`` parameter, never on the raw
+    argument dict. ⛔ The ``props={"dry_run": True}`` echo-forgery is real, but it
+    lives on the PAYLOAD reader (``_payload_says_preview`` / ``_is_preview``,
+    pinned by ``tests/test_10084_graph_disclosure.py``), NOT here: ``props`` stays
+    nested inside ``arguments``, so this reader never sees it. Verified rather
+    than assumed — deleting this gate leaves
+    ``_wait_bound_refusal_result("tortoise_create_point", {"props": {"dry_run":
+    True}})`` at ``committed: "unknown"``, i.e. this reader's answer does not
+    depend on the props channel either way.
+    """
+    if not isinstance(arguments, dict):
+        return False
+    if name in _dry_run_tool_names():
+        # ⛔ The DEFAULT is the preview for at least one tool: the served handler
+        # of `tortoise_backfill_v25` is `dry_run: bool = True`, so the no-argument
+        # call (its most common invocation, a read-only schema inspection) writes
+        # nothing — while `arguments.get("dry_run") is True` never fires for it.
+        # Read the DECLARED default instead of assuming "explicit True".
+        if _coerces_to_true(arguments.get("dry_run")):
+            return True
+        if "dry_run" not in arguments and _declared_dry_run_default(name) is True:
+            return True
+    # `tortoise_delete` is a TWO-CALL tool whose FIRST call is also a preview,
+    # and it is the surface's most destructive tool, so getting this wrong is the
+    # worst place to get it wrong: with no `confirmation`, its own contract says
+    # "CHANGES NOTHING: it reports … and returns a short-lived confirmation
+    # token bound to this id" (`_preview_delete`; the token is signed, it
+    # persists nothing). Reading only `dry_run` reported that call as a possible
+    # mutation and told the caller NOT to re-send it — which is the one call the
+    # delete cannot proceed without.
+    if name == "tortoise_delete":
+        return arguments.get("confirmation") is None
+    return False
+
+
+def _write_retry_safety(name: str, arguments=None) -> bool:
+    """Whether REPEATING a breached write is safe — derived, fail-closed.
+
+    The source of truth is the registry entry's own retry-safety declaration:
+    ``ToolDefinition.idempotent`` (#4122), read through the derived
+    ``entry.annotations.idempotentHint`` (``annotations_for_risk`` returns the
+    declared value when the entry sets one, else the tier's default — ``write``
+    defaults to ``False``). It already exists and is already maintained per
+    tool: ``tortoise_create_point`` declares ``idempotent=True`` (content-hash
+    dedup), while ``tortoise_create_operator`` and ``tortoise_ingest`` do not —
+    for an operator because it has no dedup at all, and for ingest because no
+    finite predicate can prove its bundle converges (see
+    ``_arguments_disable_convergence``). That is exactly the asymmetry #10849
+    measured, and
+    the reason a blind retry duplicates an edge and double-counts its EP weight.
+
+    Deriving it from the entry rather than listing names here is the #4170 rule:
+    a hand-maintained parallel list is what lets a new writer be silently
+    missing from it. The default is FAIL-CLOSED — a name the registry cannot
+    resolve is never advertised as safe to repeat.
+    """
+    entry = get_tool_by_name().get(name)
+    if entry is None:
+        return False
+    if not entry.annotations.idempotentHint:
+        return False
+    # The declaration says the OPERATION converges; the ARGUMENTS decide whether
+    # this CALL does. Both must hold.
+    return not _arguments_disable_convergence(name, arguments)
+
+
+def _wait_bound_refusal_result(name: str | None = None,
+                               arguments=None, *, dispatched: bool = True) -> ToolResult:
     """The ONE refusal result both wait-bound paths return.
 
     The message and the advertised delay come from the single module both
@@ -635,15 +1032,130 @@ def _wait_bound_refusal_result() -> ToolResult:
     paths now deliver it (the seam's own breach, and the already-refused
     short-circuit #9762 added) and a second construction is how the two drift
     apart.
+
+    ``name`` is the client-supplied tool name, and it decides whether this
+    refusal may present itself as a plain FAILURE (#10849). For a call OUTSIDE
+    the write set it may, and the shipped shape is returned unchanged. ⛔ That is
+    membership in the WRITE SET, not a statement that the tool is pure — several
+    non-write-set tools DO mutate: ``tortoise_compute_confidence`` /
+    ``tortoise_get_confidence`` are ``maintenance``-tier and re-store a
+    re-derived score on a repeat (why the tier refuses ``writes=True`` for them),
+    and ``tortoise_onboarding_state`` is ``read``-tier but its registry leg
+    ``_get_onboarding_state`` runs ``_cas_write_onboarding_state(org_id, state,
+    0)`` when the state is missing — the same CAS that got the
+    ``tortoise_manage_sources(action="list")`` read-only arm removed below. So the
+    non-write-set arm makes NO mutation claim either way; it only declines to add
+    the write-ambiguity payload. For a
+    WRITE it may not — the seam ABANDONS the dispatch rather than cancelling it
+    (see ``_await_under_mcp_wait_bound``), so the write can still commit after
+    the caller has been told the request failed. Measured on #10849: a
+    ``tortoise_create_point`` answered ``-32009`` at 12.45 s and the Point
+    existed on the next read.
+
+    So a WRITE refusal carries a two-valued outcome and a retry RULE,
+    additively — the ENVELOPE is unchanged (same ``code``, same ``message``,
+    ``retry_after`` still where it was), because ``tests/_verdict.py``
+    classifies the refusal by that envelope and a restructured one would read as
+    a genuine product failure on a busy host:
+
+    * ``data.committed`` — ``"unknown"`` for a write that may have been
+      dispatched (the seam cannot know, and saying so is the whole fix), or
+      ``"none"`` when nothing can have been committed. ``"none"`` has THREE
+      producers, all knowable at this call site: ``dispatched=False`` (no
+      dispatch was ever started), ``dry_run`` on a tool that declares it (the
+      explicit true or the handler's own default), and ``tortoise_delete`` with
+      no ``confirmation`` (its two-call design: the first call only mints the
+      token). There is deliberately NO "this call only reads" producer: an
+      argument that looks read-only cannot be trusted to be one — see
+      ``_arguments_say_preview``'s neighbourhood and #10849's review, where
+      ``tortoise_manage_sources(action="list")`` turned out to materialise
+      onboarding state through a CAS write.
+    * ``data.retry_safe`` — for a DISPATCHED write, the registry's own
+      retry-safety verdict for this call, so the caller does not have to
+      re-derive it from prose (a new writer defaults to UNSAFE). ⛔ On the
+      NOT_SENT and PREVIEW arms it is forced ``true`` WITHOUT consulting the
+      registry — nothing was written, so re-sending is safe whatever the
+      operation is; ``tortoise_delete`` (``idempotentHint: false``) is the
+      counter-example, and it returns ``true`` on both. ⛔ Derived from the NAME **and the ARGUMENTS**: a
+      converging declaration can be switched off by the call itself
+      (``tortoise_create_point(dedup=False)`` mints a second Point), and a
+      name-only verdict would ship "repeating it converges" to exactly the
+      duplicate this contract exists to prevent.
+    * ``data.retry_rule`` — the prose of that verdict, because ``retry_safe``
+      alone does not tell a caller what to do INSTEAD when it is false.
+
+    ⛔ ``error.message`` STAYS the neutral ``_TRANSPORT_WAIT_BOUND_MESSAGE`` on
+    EVERY arm; the write/read prose goes on ``content``, the human channel. That
+    split is load-bearing, not tidiness: the fleet's verdict contract
+    (``tests/_verdict.py::is_transport_wait_bound_refusal``) identifies a
+    wait-bound refusal by ``code == ERR_TIMEOUT`` **AND an exact equality on
+    ``error.message``**, and it is what converts a refusal on a busy host into
+    INCONCLUSIVE instead of a false red charged to the product (#5049 / #8579).
+    Putting the write message in ``error.message`` WOULD make that detector miss
+    every refused WRITE — the reachable class, since #10849's own measured
+    incident was a ``tortoise_create_point`` refused on the wire. (It is stated
+    as a hazard, not as history: no revision of this branch ever shipped it that
+    way — every commit from `e14945d59` on sets ``message`` to the neutral
+    constant.) The message field is the refusal's IDENTITY; the write consequence
+    is its PAYLOAD.
+
+    ⚠️ ``dispatched=False`` is passed by EXACTLY the two arms that never schedule
+    a dispatch (the ``transport_refused`` short-circuit, and the argument-check
+    fall-through that has already been answered). On those nothing was sent and
+    nothing can commit, so ALL THREE fields branch — ``committed: "none"``, a
+    re-send-safe rule, AND their own message
+    (``_TRANSPORT_WAIT_BOUND_NOT_SENT_MESSAGE``), because the dispatched-write
+    prose says the write "may still complete", which is false here. Leaving them uniform with the real breach was a defect
+    (#10849 review), not conservatism — for a non-idempotent write it told the
+    caller to reconcile a write it never issued AND to withhold the safe
+    re-send, i.e. it silently dropped it. Every other call site uses the
+    default, because there the dispatch really was started and abandoned.
     """
+    data: dict = {"retry_after": _mcp_auth._TRANSPORT_WAIT_RETRY_AFTER_S}
+    # The human channel. Not in the write set, so the shape it always had stands.
+    # NOT a claim that nothing was mutated: non-write-set tools can write (see the
+    # docstring's `_cas_write_onboarding_state` case).
+    prose = _mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE
+    if name and name in WRITE_TOOL_NAMES and not dispatched:
+        # The transport refused BEFORE any dispatch was scheduled, so nothing
+        # was sent and nothing can commit. That is KNOWABLE here — the caller
+        # need not reconcile anything, and withholding the safe re-send would
+        # silently drop a write the caller never even issued.
+        prose = _mcp_auth._TRANSPORT_WAIT_BOUND_NOT_SENT_MESSAGE
+        data.update({
+            "committed": "none",
+            "retry_safe": True,
+            "retry_rule": _WAIT_BOUND_RETRY_RULE_NOT_SENT,
+        })
+    elif name and name in WRITE_TOOL_NAMES:
+        prose = _mcp_auth._TRANSPORT_WAIT_BOUND_WRITE_MESSAGE
+        if _arguments_say_preview(name, arguments):
+            # A preview writes nothing BY CONSTRUCTION, so the honest outcome is
+            # "none" rather than "unknown", and repeating it is safe — which is
+            # the one action a caller most needs back for a destructive preview.
+            data.update({
+                "committed": "none",
+                "retry_safe": True,
+                "retry_rule": _WAIT_BOUND_RETRY_RULE_PREVIEW,
+            })
+        else:
+            retry_safe = _write_retry_safety(name, arguments)
+            data.update({
+                "committed": "unknown",
+                "retry_safe": retry_safe,
+                "retry_rule": (_WAIT_BOUND_RETRY_RULE_SAFE if retry_safe
+                               else _WAIT_BOUND_RETRY_RULE_UNSAFE),
+            })
     return ToolResult(
-        content=_mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE,
+        content=prose,
         # The REST JSON-RPC error payload, carried on the channel this surface
-        # has: same code, same message, same `data.retry_after`.
+        # has: same code, same message, same `data.retry_after`. ⛔ `message` is
+        # the NEUTRAL one on both arms — see the docstring: it is the refusal's
+        # identity for ``tests/_verdict.py``, not the place for the write prose.
         structured_content={"error": {
             "code": ERR_TIMEOUT,
             "message": _mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE,
-            "data": {"retry_after": _mcp_auth._TRANSPORT_WAIT_RETRY_AFTER_S},
+            "data": data,
         }},
         meta={_WAIT_BOUND_META_KEY: True},
         is_error=True,
@@ -779,7 +1291,7 @@ async def _await_under_mcp_wait_bound(name: str, arguments, *, version,
             "MCP tools/call %s already refused at the transport; this seam's "
             "refusal is redundant and no dispatch is started",
             _mcp_auth._sanitize_for_log(name))
-        return _wait_bound_refusal_result()
+        return _wait_bound_refusal_result(name, arguments, dispatched=False)
     # #4055 (P2): bind an opaque owner token for this dispatch, then create the
     # dispatch task INSIDE the binding so it copies the token. A one-time
     # embedder load this dispatch triggers stamps that token as the load's
@@ -879,7 +1391,7 @@ async def _await_under_mcp_wait_bound(name: str, arguments, *, version,
         _log.warning(
             "transport wait bound (%.0fs) exceeded: MCP tools/call %s — "
             "refusing legibly", _mcp_auth._TRANSPORT_WAIT_BOUND_S, safe_name)
-    return _wait_bound_refusal_result()
+    return _wait_bound_refusal_result(name, arguments)
 
 
 def _enforce_mcp_tool_scope(name: str) -> None:
@@ -2126,7 +2638,7 @@ async def _wrapped_call_tool(name: str, arguments: dict[str, Any] | None = None,
             # and FALL THROUGH, so the classification below still labels the row
             # (`refused`/`transport_wait_bound`) and the refusal is repaired by
             # the same envelope path as every other one.
-            result = _wait_bound_refusal_result()
+            result = _wait_bound_refusal_result(name, arguments, dispatched=False)
         else:
             result = await _await_under_mcp_wait_bound(
                 name, arguments, version=version, task_meta=task_meta,
@@ -3072,7 +3584,11 @@ def tortoise_create_point(kind: str, content: str,
     write) and hands completion to the canonical fork-aware gate — no
     separate ceremony needed, and no step the write did not observe (#3784).
 
-    dedup=True (default): idempotent — returns existing Point if content matches.
+    dedup=True (default) folds onto an existing Point when the content matches.
+    ⛔ That is NOT a blanket idempotency claim: a call carrying props, authoredBy
+    or credibility is not advertised as repeatable, because convergence is not
+    provable across the props channel (a props payload can take the node out of
+    the fold's own predicate).
     dedup=False: force-create even if content is identical.
 
     Decision parts (#2199) — pointKind option/criterion/evidence/decision
@@ -4655,8 +5171,9 @@ def tortoise_operator_action(action: str, id: str, reason: str | None = None,
     """Consolidated operator write action — action=mitigate|annotate.
 
     mitigate: reason (required) + strength (0-1, default 0.5) — creates/updates
-    the mitigation Point (idempotent). annotate: bias/precision/consistency/
-    directness (all required, 0-1).
+    a CURRENT mitigation Point (idempotent only while it is current: a
+    re-assertion after withdrawal mints a NEW Point). annotate:
+    bias/precision/consistency/directness (all required, 0-1).
     """
     if action == "mitigate":
         if not reason:
@@ -4913,8 +5430,9 @@ def tortoise_ingest(bundle: Any = None, granularity: str = "bulk",
     the strict grounding selector while a rebuild produced 'live'). Deduped
     connections never retro-promote (promotion fires on FIRST edge creation
     only).
-    Idempotent-ish: points dedup by content hash + kind, sources by url,
-    operators by input set.
+    ⛔ NOT declared idempotent: points dedup by content hash + kind, sources by
+    url and operators by input set — but the entities leg is APPEND-ONLY for
+    document/event, so a repeat can write a second Source.
     """
     bundle = _parse(bundle)
     if bundle is None:
@@ -5432,8 +5950,14 @@ def tortoise_approve_merge(candidate_id: str,
     action='merge' → content: wire the alreadyDecided IMPL (draft prior) or
     defer to promotion (live prior); temporal: defer the NAND/supersede to
     promotion. action='reject' → the candidate stays separate and is no
-    longer surfaced. Idempotent for repeated identical reviews.
+    longer surfaced.
+
+    ⛔ NOT idempotent for every branch: the temporal branch guards a repeat of the
+    same action, but the dedup branch emits its DedupeRecorded/DedupeRejected
+    event unconditionally after the already-linked check — so a retry is visible
+    twice to poll_events.
     """
+
     return _safe(_get_org_sdk().approve_merge, candidate_id, action=action)
 
 
