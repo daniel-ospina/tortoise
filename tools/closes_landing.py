@@ -607,8 +607,10 @@ class _Fence:
     OUTER container first, so such an item ends on a RAW dedent — consuming a
     `>` marker before measuring it read a column-0 `>` as the container's own,
     missed the dedent, and kept the fence open over top-level prose (#10634
-    review). A marker-line fence has its item INSIDE the quote, so it leaves
-    this 0 and is measured after the prefix via `close_base`.
+    review). A marker-line fence has its item INSIDE the quote, so this value is
+    POPULATED but UNUSED there (`_fence_candidate("> ", "- ```", [])` returns 4)
+    and the line is measured after the prefix via `close_base` instead. "Unused at
+    this depth" — not "never set"; the depth branch below is what makes it moot.
 
     `item_depth` is the depth the enclosing ITEM was opened at, and it is what
     selects WHICH of the two numbers above applies — not whether `item_col_raw`
@@ -812,10 +814,13 @@ def strip_code(body: str, strict: bool = False) -> str:
       §4.5 ends the block at "the end of the containing block", and an item's
       content line may sit BELOW the opener's column and still be inside the
       block) — and a fence may open ON the marker line itself, at the item's
-      content column (#10634 review P1). That comparison is made in ONE space:
-      the raw line with at most the fence's OWN blockquote depth consumed, so a
-      `>` inside the block stays literal and a marker cannot move the item's
-      edge (see `_fence_line_column`);
+      content column (#10634 review P1). That comparison is made in exactly ONE
+      space PER BRANCH: the raw line with at most the fence's OWN blockquote
+      depth consumed for an item OUTSIDE the blockquote (`item_col_raw`), or the
+      `rest` residual against `close_base` for an item at this depth — selected
+      by the item's DEPTH, never by which field happens to be set. A `>` inside
+      the block therefore stays literal and a marker cannot move the item's edge
+      (see `_fence_line_column`);
     * containers are compared by DEPTH, never by the raw prefix string: `>`, `> `,
       `  > ` are one container to CommonMark, and comparing strings meant a legal
       closer was never recognised (review c10-1);

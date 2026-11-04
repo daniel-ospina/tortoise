@@ -974,19 +974,30 @@ def test_no_module_level_name_is_REBOUND_because_the_second_copy_wins():
     only flags an uppercase name that is NEVER loaded (`_LIST_MARKER_RE` is loaded
     at both `_fence_candidate` call sites), and `ruff`'s `E,F,B,UP,I,SIM,RUF` set
     has no rule for a module-level rebind (`ruff check tools/closes_landing.py` is
-    green over it). So the class is closed here: any name bound twice at module
-    scope reds, whatever its case and whether or not it is loaded.
+    green over it). So the class is closed here for the forms that can collide:
+    an assignment target, `def` or `class` bound twice at module scope reds,
+    whatever its case and whether or not it is loaded.
 
-    ⚠️ BOTH SCOPES ARE SCANNED, and the second one is not a nicety: the #10703
-    forward merge of `origin/main` produced two byte-identical copies of
-    `test_a_stray_run_costs_the_RENDERER_its_pairing_not_a_lost_claim` in THIS
-    file (both sides had added the same test, git kept both). pytest collects the
-    LAST binding, so the first copy never ran — a guard that silently weakens
-    itself, which is the fail-open direction this file exists to refuse. Only
-    `ruff F811` caught it, and this suite is the one a maintainer extends by
-    copy-paste.
+    ⚠️ What this scan does NOT cover, stated because an unqualified "anything
+    bound twice" would be a claim the mechanism does not produce: `import` /
+    `from … import` (ruff's `F811` owns a duplicate import), and `for` / `with …
+    as` / tuple-unpack TARGETS at module scope (they bind names this walk does not
+    collect). Those are narrower than the three forms above and lint-covered where
+    it matters; the sentence above therefore names the forms it measures.
 
-    `origin/main` binds it ONCE, so the duplicate was introduced on this branch.
+    ⚠️ BOTH SCOPES ARE SCANNED, and the second one is not a nicety: while resolving
+    the #10703 forward merge of `origin/main`, the conflicted WORKING TREE carried
+    two byte-identical copies of
+    `test_a_stray_run_costs_the_RENDERER_its_pairing_not_a_lost_claim` in this file
+    (both sides had added the same test and git kept both); pytest collects the
+    LAST binding, so the first copy would never have run. Only `ruff F811` caught
+    it, and this suite is the one a maintainer extends by copy-paste. (The
+    committed merge carries ONE copy — the duplicate existed in the resolution
+    tree, not in a commit — so this guard is the durable answer, not a record of a
+    committed defect.)
+
+    `origin/main` binds `_LIST_MARKER_RE` ONCE, so the duplicate was introduced on
+    this branch.
     """
     seen: dict[Path, dict[str, list[int]]] = {}
     for source in (MODULE_PATH, Path(__file__)):
@@ -1041,15 +1052,18 @@ def test_no_property_is_DEAD_because_its_docstring_can_claim_the_live_rule():
     ⚠️ KEYED BY CLASS, not by bare name — a bare-name dict silently COLLAPSES a
     name two classes both define, and this module already contains the shape:
     `PullRequest.merged` (`tools/closes_landing.py:472`) and `MergedPR.merged`
-    (`:1715`) are both `@property`, so a bare-name map holds 5 entries for 6
-    properties and the shadowed one is never evaluated at all (#10703 review).
+    are both `@property`, so a bare-name map holds 5 entries for 6 properties and
+    the shadowed one is never evaluated at all (#10703 review). The citation is
+    the SYMBOL, not a line number, on purpose: the line moved once already inside
+    this fix round.
 
     Residual, stated rather than implied: `loaded` is a set of attribute NAMES,
     because the AST cannot tell which object an `x.merged` load is on without
-    type inference. So a property name carried by two classes is read as live when
-    EITHER one is loaded. The report is class-qualified so that masking is visible
-    in the output; closing it would need the receiver's type, which this file does
-    not have.
+    type inference. So a property name carried by two classes is treated as live
+    whenever EITHER one is loaded. The class-qualified report makes an ambiguous
+    name attributable WHEN IT REDS; a masked dead property is not reported at all,
+    which is precisely why this residual is written down rather than glossed.
+    Closing it would need the receiver's type, which this file does not have.
     """
     tree = ast.parse(MODULE_PATH.read_text())
     properties: dict[str, int] = {}
@@ -1100,10 +1114,10 @@ def test_the_closed_unmerged_arm_is_stated_ONCE_because_a_dead_copy_reads_as_liv
     arms = [node for node in ast.walk(ast.parse(MODULE_PATH.read_text()))
             if isinstance(node, ast.If) and _is_closed_unmerged_default_arm(node.test)]
     assert len(arms) == 1, (
-        f"`classify` states the closed-unmerged/default-branch arm {len(arms)} times "
-        f"({[node.lineno for node in arms]}): a second copy after a `continue` is "
-        f"unreachable, and the copy a maintainer repairs is then the one that never "
-        f"runs")
+        f"the MODULE states the closed-unmerged/default-branch arm {len(arms)} "
+        f"times ({[node.lineno for node in arms]}): a second copy after a "
+        f"`continue` is unreachable, and the copy a maintainer repairs is then the "
+        f"one that never runs")
 
 
 def _is_closed_unmerged_default_arm(test: ast.expr) -> bool:
