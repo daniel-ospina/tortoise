@@ -2972,7 +2972,7 @@ surfaces:
   - test_bridge_table.py
   - test_entity_identity.py
   - test_ci_verdict.py
-  # #10930: the owner-facing merge-readiness gate — six conditions over the tree, the
+  # #10962/#10968: the owner-facing merge-readiness gate — six conditions over the tree, the
   # required checks, the review record, coverage, the declared exclusions and open blocking
   # findings. Registered under `core` beside its sibling instruments `test_ci_verdict.py`
   # (whose grouping it consumes) and `test_worktree_report.py`: the suite is pure/offline
@@ -9886,7 +9886,7 @@ durations:
   test_ci_last_failed.py: 2.0  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 1.9
   test_ci_manifest.py: 12.5  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 0.9
   test_ci_verdict.py: 0.2
-  test_ready_for_owner.py: 2.0  # #10930: a NEW file has no CI junit measurement (a file that
+  test_ready_for_owner.py: 2.0  # #10962/#10968: a NEW file has no CI junit measurement (a file that
   # never ran cannot appear in an artifact), so this is `DEFAULT_FAST_WEIGHT`, NOT a local
   # reading — a local wall is forbidden as a shard-layout input (#2818/#3419/#9003). The
   # local private-lane wall at this PR's head was ~9.4 s for 122 offline tests, stated only so

@@ -4954,7 +4954,7 @@ def test_gh_write_preflight_tool_change_fails_closed_to_full():
     # change came back `surfaces: []`, `full: false` with `test_gh_write_preflight.py` ABSENT from
     # `test_files` — select() took the docs-only early return, which BYPASSES the
     # `if not matched: matched.add("core")` fallback. Measured on this very change: a lane improving
-    # the tool would have got a GREEN PR whose own 25 arms never ran. Registering
+    # the tool would have got a GREEN PR whose own arms never ran. Registering
     # tests/test_gh_write_preflight.py under `core` in ci-surfaces.yml does NOT cover this: it applies
     # to edits of the TEST file, not of the tool (measured: `--changed-files -` with the tool path
     # alone returned surfaces=[] full=False).
