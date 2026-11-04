@@ -46,14 +46,18 @@ TOOL = REPO_ROOT / "tools" / "gh_write_preflight.py"
 OK_READ = (200, {}, '{"full_name":"daniel-ospina/tortoise","default_branch":"main"}')
 OK_ISSUES = (422, {}, '{"message":"Invalid request.","status":"422"}')
 OK_PULLS = (422, {}, '{"message":"Validation Failed","errors":[{"field":"head","code":"invalid"}],"status":"422"}')
+# MEASURED 2026-11-04 on a live box: POST /git/refs with an unresolvable sha answers 422
+# "Object does not exist" when authorised, 403 when refused, and matching-refs stays empty either way.
+OK_CONTENTS = (422, {}, '{"message":"Object does not exist","status":"422"}')
 READONLY_403 = (403, {}, '{"message":"Resource not accessible by personal access token","status":"403"}')
 
 
 class _Stub:
     """A GitHub API stub. Records (method, path, body) so a test can assert the probe SHAPE."""
 
-    def __init__(self, read=OK_READ, issues=OK_ISSUES, pulls=OK_PULLS, reject_tokens=()):
-        self.read, self.issues, self.pulls = read, issues, pulls
+    def __init__(self, read=OK_READ, issues=OK_ISSUES, pulls=OK_PULLS, contents=OK_CONTENTS,
+                 reject_tokens=()):
+        self.read, self.issues, self.pulls, self.contents = read, issues, pulls, contents
         self.reject_tokens = set(reject_tokens)   # bearer tokens this stub REFUSES on the write probes
         self.redirect_writes = False
         self.seen: list[tuple[str, str, str]] = []
@@ -84,6 +88,8 @@ class _Stub:
                     status, headers, body = stub.issues
                 elif method == "POST" and len(parts) == 4 and parts[3] == "pulls":
                     status, headers, body = stub.pulls
+                elif method == "POST" and len(parts) == 5 and parts[3] == "git" and parts[4] == "refs":
+                    status, headers, body = stub.contents
                 else:                                    # anything unexpected is a test failure signal
                     status, headers, body = 400, {}, '{"message":"unexpected probe path"}'
                 payload = body.encode()
@@ -160,6 +166,36 @@ def test_issues_writable_but_pull_requests_refused_is_the_bug():
     assert "GH-WRITE-UNAVAILABLE(pull-requests-write-missing)" in out, out
 
 
+def test_issues_and_pull_requests_writable_but_contents_refused_is_also_the_bug():
+    """THE SECOND RED CASE — review round 6, and it was a live FALSE PASS.
+
+    Merging a PR and creating a ref are charged to `contents: write`, NOT `pull_requests: write`.
+    MEASURED 2026-11-04 on a live box: `PUT /pulls/{n}/merge` and `POST /git/refs` both answer
+    `x-accepted-github-permissions: contents=write`, and a token with `Contents: read` was refused
+    by `git push` outright. So a fine-grained PAT minted `Issues: write` + `Pull requests: write` +
+    `Contents: read` — an ordinary grant, recorded in #10930 in the wild as
+    `X-Accepted-Github-Permissions: contents=read` — passed the two-surface version of this tool and
+    then could not publish its branch at all. The tool must refuse it.
+    """
+    with _Stub(issues=OK_ISSUES, pulls=OK_PULLS, contents=READONLY_403) as s:
+        rc, out, _ = _run(s.base, token="github_pat_dummy_finegrained")
+    assert rc != 0, f"a token that cannot push a branch PASSED the preflight — that is a false pass: {out}"
+    assert "GH-WRITE-UNAVAILABLE(contents-write-missing)" in out, out
+
+
+def test_contents_is_probed_as_a_write_surface():
+    """The contents probe must hit POST /git/refs — the same permission the merge is charged to."""
+    with _Stub() as s:
+        rc, _, _ = _run(s.base)
+        seen = list(s.seen)
+    assert rc == 0
+    refs = [body for m, p, body in seen if m == "POST" and p.endswith("/git/refs")]
+    assert refs, f"no contents (git/refs) write probe ran: {[p for m, p, _ in seen]}"
+    payload = json.loads(refs[0])
+    assert payload["ref"].startswith("refs/heads/gh-write-preflight-"), payload
+    assert set(payload["sha"]) == {"0"}, f"the sha must be unresolvable so no ref is created: {payload}"
+
+
 def test_pull_requests_writable_but_issues_refused_is_named_too():
     """A landing also CLOSES issues, so a PR-only token is refused, with the opposite name."""
     with _Stub(issues=READONLY_403, pulls=OK_PULLS) as s:
@@ -168,11 +204,23 @@ def test_pull_requests_writable_but_issues_refused_is_named_too():
     assert "GH-WRITE-UNAVAILABLE(issues-write-missing)" in out, out
 
 
-def test_both_surfaces_refused_is_token_read_only():
-    with _Stub(issues=READONLY_403, pulls=READONLY_403) as s:
+def test_all_three_surfaces_refused_is_token_read_only():
+    with _Stub(issues=READONLY_403, pulls=READONLY_403, contents=READONLY_403) as s:
         rc, out, _ = _run(s.base)
     assert rc != 0
     assert "token-read-only" in out, out
+
+
+def test_two_refused_of_three_names_the_earliest_blocker_and_hides_nothing():
+    """`token-read-only` means ALL THREE. Two refused must name the one that blocks the lane soonest,
+    and the message must still disclose the other — collapsing it into `token-read-only` would state
+    something false (one surface IS writable)."""
+    with _Stub(issues=OK_ISSUES, pulls=READONLY_403, contents=READONLY_403) as s:
+        rc, out, _ = _run(s.base)
+    assert rc != 0
+    assert "token-read-only" not in out, out
+    assert "contents-write-missing" in out, out          # earliest in landing order
+    assert "pull_requests" in out, f"the also-refused surface must be disclosed: {out}"
 
 
 # ── the trap that made the first version blind: assert the PR surface is really probed ──────────
@@ -191,6 +239,7 @@ def test_probes_the_pull_requests_surface_not_only_issues():
     paths = [p for _, p, _ in posts]
     assert any(p.endswith("/pulls") for p in paths), f"no pull-requests write probe: {paths}"
     assert any(p.endswith("/issues") for p in paths), f"no issues write probe: {paths}"
+    assert any(p.endswith("/git/refs") for p in paths), f"no contents write probe: {paths}"
     # …and it must NOT be a mutating label delete (the old, blind shape).
     assert not any(m == "DELETE" for m, _, _ in seen), f"a DELETE probe reappeared: {seen}"
 
@@ -200,12 +249,13 @@ def test_write_probes_cannot_create_anything():
 
     * issues probe → an EMPTY body (an issue needs a title, so validation must reject it)
     * pulls  probe → a head ref that cannot exist, under `refs/heads/gh-write-preflight-<hex>`
+    * refs   probe → an UNRESOLVABLE sha, so the ref itself cannot be created
     """
     with _Stub() as s:
         rc, _, _ = _run(s.base)
         seen = list(s.seen)
     assert rc == 0
-    issues_body = pulls_body = None
+    issues_body = pulls_body = refs_body = None
     for method, path, body in seen:
         if method != "POST":
             continue
@@ -213,11 +263,15 @@ def test_write_probes_cannot_create_anything():
             issues_body = body
         elif path.endswith("/pulls"):
             pulls_body = body
+        elif path.endswith("/git/refs"):
+            refs_body = body
     assert issues_body in ("", "{}"), f"the issues probe sent a body that could CREATE an issue: {issues_body!r}"
     assert pulls_body, "no pulls probe body recorded"
     payload = json.loads(pulls_body)
     assert payload["head"].startswith("refs/heads/gh-write-preflight-"), payload
     assert payload["base"] == "main", payload
+    assert refs_body, "no contents (git/refs) probe body recorded"
+    assert set(json.loads(refs_body)["sha"]) == {"0"}, refs_body
 
 
 # ── classification: a 403 is either a permission or a rate limit, and they must not be confused ─
@@ -552,7 +606,7 @@ def test_json_mode_reports_the_same_verdict_and_never_leaks_the_credential():
     res = json.loads(p.stdout)
     assert res["ok"] is False
     assert res["reason"] == "pull-requests-write-missing", res
-    assert res["surfaces"] == {"issues": 422, "pull_requests": 403}, res
+    assert res["surfaces"] == {"issues": 422, "pull_requests": 403, "contents": 422}, res
     assert secret not in p.stdout and secret not in p.stderr, "the credential leaked into the output"
 
 

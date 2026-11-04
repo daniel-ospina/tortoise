@@ -46,6 +46,28 @@ WHAT IT PROBES, AND WHY EACH CHOICE IS THE ONE IT IS
    ⛔ Zero side effect: the head ref cannot exist, so no PR can be created. (The random name is what
    makes that a property rather than a hope.)
 
+4. **CONTENTS WRITE** — `POST /repos/{o}/{r}/git/refs` with a random branch name and an
+   **unresolvable sha** (`000…0`).
+   MEASURED 2026-11-04 ON A LIVE BOX: `422 "Object does not exist"` when authorised, `403` when not,
+   and `GET /git/matching-refs/heads/gh-write-preflight` returns **`[]`** after both — the ref is
+   never created, in either outcome.
+   ⛔ **THIS PROBE IS NOT BELT-AND-BRACES — WITHOUT IT THE TOOL FALSE-PASSES.** Merging a PR and
+   creating a ref are charged to `contents: write`, NOT `pull_requests: write`. MEASURED, headers
+   included, on `PUT /pulls/{n}/merge` and on `POST /git/refs`, both answering
+   `x-accepted-github-permissions: contents=write` (the merge attempt returned `403` with
+   `x-ratelimit-remaining: 3313` — a permission, not a limit). So a fine-grained PAT minted with
+   `Issues: write` + `Pull requests: write` and `Contents: read` — an ordinary grant, and one #10930
+   records in the wild as `X-Accepted-Github-Permissions: contents=read` — passes the two probes
+   above and is then refused by `git push` and by the merge. A landing lane CANNOT PUBLISH ITS
+   BRANCH at all under that token, so the two-surface version of this tool reported `GH-WRITE-OK`
+   over a credential that can do none of the landing work. #10930 says it directly: *"a preflight
+   that proves only `pull_requests: write` is not sufficient — the instrument must probe
+   `contents: write` too. That choice is load-bearing, not belt-and-braces."*
+   Rejected alternative: create-then-delete a real throwaway ref. It is side-effecting *by
+   construction* and it leaves debris when the delete fails, which is exactly the class of failure
+   a preflight must not introduce. The unresolvable sha proves the permission gate and creates
+   nothing.
+
    Alternatives rejected, with the measurement behind each:
      * `DELETE .../labels/<name>` — this is what the FIRST version used. It is an **issues**
        resource, so it passes a token with `Issues: write` and no `Pull requests: write` — i.e. it
@@ -68,7 +90,10 @@ WHAT IT PROBES, AND WHY EACH CHOICE IS THE ONE IT IS
    nothing for a missing permission. The discriminator is the body plus the headers
    (`x-ratelimit-remaining: 0`, `retry-after`), never the bare status code.
 
-5. **REDIRECTS ARE NEVER FOLLOWED.** Only `422` counts as "authorised"; a 2xx on a must-be-invalid
+5. **RATE LIMIT** is checked from the READ response *before* any write probe, and again from each
+   probe's own response, for the reason in the paragraph below.
+
+6. **REDIRECTS ARE NEVER FOLLOWED.** Only `422` counts as "authorised"; a 2xx on a must-be-invalid
    payload is evidence the response did not come from GitHub's validation path. See `_WRITE_OK`.
 
 REASONS (`GH-WRITE-UNAVAILABLE(<reason>)`), each with its own fix
@@ -81,10 +106,17 @@ REASONS (`GH-WRITE-UNAVAILABLE(<reason>)`), each with its own fix
   rate-limited                 403/429 with rate-limit wording / remaining==0 / retry-after
                                NOT a permission problem — do not re-mint the token for it
   server-error                 5xx from GitHub — a service fault, not a verdict about the token
-  token-read-only              403 "Resource not accessible by …" on BOTH surfaces
-  pull-requests-write-missing  issues writable, PRs refused  ← THE #10930 BUG
-                               fix: re-mint the fine-grained PAT with `Pull requests: write`
-  issues-write-missing         PRs writable, issues refused (a landing also closes issues)
+  token-read-only              403 "Resource not accessible by …" on ALL THREE surfaces
+  contents-write-missing       contents refused  ← CANNOT PUSH A BRANCH OR MERGE
+                               fix: re-mint with `Contents: write`
+  pull-requests-write-missing  PRs refused  ← THE #10930 BUG (verdict comment, closes)
+                               fix: re-mint with `Pull requests: write`
+  issues-write-missing         issues refused (a landing also closes issues)
+
+  When more than one surface is refused (but not all three) the reason names the FIRST in landing
+  order — `contents` → `pull_requests` → `issues` — because that is the one that blocks the lane
+  soonest; `detail` and the `surfaces` map name every refused surface, so nothing is hidden. Every
+  one of these is fixed by the same action: re-mint the token carrying ALL THREE write permissions.
   sso-unauthorized             403 naming SAML/SSO — authorise the token for the org
   forbidden                    4xx that is neither a permission refusal nor a known class (e.g. 410
                                Issues-disabled, 400 from a proxy, 451) — NOT charged to the token
@@ -97,7 +129,8 @@ USAGE
   uv run python tools/gh_write_preflight.py --repo "$OR" --json
   GH_WRITE_PREFLIGHT_API=http://127.0.0.1:PORT uv run python tools/gh_write_preflight.py …   # test seam
 
-  exit 0 = GH-WRITE-OK(issues+pull-requests writable)    exit 1 = GH-WRITE-UNAVAILABLE(<reason>)
+  exit 0 = GH-WRITE-OK(issues+pull-requests+contents writable)
+  exit 1 = GH-WRITE-UNAVAILABLE(<reason>)
 
 The credential is NEVER printed, logged, or included in any output — not even truncated.
 """
@@ -421,49 +454,78 @@ def preflight(repo: str, api_base: str, token: str, source: str) -> dict:
     pulls = _write_probe(f"{api_base}/repos/{repo}/pulls", token, pulls_body)
     result["surfaces"]["pull_requests"] = pulls["status"]
 
-    issues_ok, pulls_ok = issues["ok"], pulls["ok"]
+    # ── 5. CONTENTS WRITE — a random ref name and an unresolvable sha, so no ref can be created.
+    # ⛔ LOAD-BEARING, NOT BELT-AND-BRACES. Merging a PR and creating a ref are charged to
+    # `contents: write`, not `pull_requests: write` — measured on PUT /pulls/{n}/merge and
+    # POST /git/refs, both answering `x-accepted-github-permissions: contents=write`. A token with
+    # Issues+PR write and Contents: read therefore passed the two probes above and was then refused
+    # by `git push`: a lane could not publish its branch at all while this tool said GH-WRITE-OK.
+    # MEASURED: 422 "Object does not exist" authorised, 403 refused, and matching-refs stays empty.
+    bogus_ref = f"gh-write-preflight-{secrets.token_hex(8)}"
+    contents_body = json.dumps({"ref": f"refs/heads/{bogus_ref}", "sha": "0" * 40}).encode()
+    contents = _write_probe(f"{api_base}/repos/{repo}/git/refs", token, contents_body)
+    result["surfaces"]["contents"] = contents["status"]
 
-    # ── 5. Verdict. ⛔ ONLY A `not-permitted` PROBE MAY PRODUCE A PERMISSION VERDICT.
+    issues_ok, pulls_ok, contents_ok = issues["ok"], pulls["ok"], contents["ok"]
+
+    # ── 6. Verdict. ⛔ ONLY A `not-permitted` PROBE MAY PRODUCE A PERMISSION VERDICT.
     # This is deliberately a ONE-item allow-list and not a list of known non-permission reasons.
     # It used to be the latter, which meant every status nobody had thought of — a 410 (Issues
     # disabled on the repo), a 400 from a proxy/WAF, a 451 — fell through to `forbidden` and was then
-    # PROMOTED to `pull-requests-write-missing` / `issues-write-missing`, sending the operator to
-    # re-mint a perfectly good token. A list of known-bad reasons fails open for the unknown ones;
-    # naming the ONE reason that is allowed to claim a missing permission fails closed instead.
-    for name, probe in (("issues", issues), ("pull_requests", pulls)):
+    # PROMOTED to a missing-permission verdict, sending the operator to re-mint a perfectly good
+    # token. A list of known-bad reasons fails open for the unknown ones; naming the ONE reason that
+    # is allowed to claim a missing permission fails closed instead.
+    for name, probe in (("issues", issues), ("pull_requests", pulls), ("contents", contents)):
         if not probe["ok"] and probe["reason"] != "not-permitted":
             result.update(reason=probe["reason"], detail=f"on the {name} surface: {probe['detail']}")
             return result
 
-    if issues_ok and pulls_ok:
-        result.update(ok=True, reason="issues+pull-requests writable",
-                      detail=f"both write surfaces authorised (issues HTTP {issues['status']}, "
-                             f"pull_requests HTTP {pulls['status']})")
+    if issues_ok and pulls_ok and contents_ok:
+        result.update(ok=True, reason="issues+pull-requests+contents writable",
+                      detail=f"all three write surfaces authorised (issues HTTP {issues['status']}, "
+                             f"pull_requests HTTP {pulls['status']}, contents HTTP {contents['status']})")
         return result
 
-    # ── 6. Both refused → the token cannot write at all; one refused → name WHICH permission.
-    # Every probe reaching here is `not-permitted`, so the naming below is a real statement about
-    # which permission is missing rather than a guess about an unrecognised status.
-    if not issues_ok and not pulls_ok:
+    # ── 7. Name WHICH permission is missing. Every probe reaching here is `not-permitted`, so the
+    # naming below is a real statement about which permission is missing rather than a guess about an
+    # unrecognised status. All three refused is a different fact from one refused.
+    surfaces = (("issues", issues_ok, issues), ("pull_requests", pulls_ok, pulls),
+                ("contents", contents_ok, contents))
+    refused = [name for name, ok, _ in surfaces if not ok]
+    statuses = ", ".join(f"{name} HTTP {probe['status']}" for name, _ok, probe in surfaces)
+    if len(refused) == 3:
         result.update(reason="token-read-only",
-                      detail=f"both write surfaces refused (issues HTTP {issues['status']}, "
-                             f"pull_requests HTTP {pulls['status']}): {pulls['detail']}")
+                      detail=f"all three write surfaces refused ({statuses}): {contents['detail']}")
         return result
-    if not pulls_ok:
-        result.update(reason="pull-requests-write-missing",
-                      detail=f"issues are writable (HTTP {issues['status']}) but PULL REQUESTS are not "
-                             f"(HTTP {pulls['status']}: {pulls['detail']}) — a landing lane posts its verdict "
-                             f"comment on a PR, so it would fail at the closure step")
-        return result
-    result.update(reason="issues-write-missing",
-                  detail=f"pull requests are writable (HTTP {pulls['status']}) but ISSUES are not "
-                         f"(HTTP {issues['status']}: {issues['detail']}) — a landing also closes issues")
+
+    # Landing order: a lane pushes a branch first, then comments on the PR, then closes issues. Naming
+    # the earliest blocker is the one that actually stops it; `detail` and `surfaces` name all of them.
+    _MISSING = {
+        "contents": ("contents-write-missing",
+                     "CONTENTS are not writable — the lane cannot push its branch or merge at all, so it "
+                     "would fail before it could comment"),
+        "pull_requests": ("pull-requests-write-missing",
+                          "PULL REQUESTS are not writable — a landing lane posts its verdict comment on a "
+                          "PR, so it would fail at the closure step"),
+        "issues": ("issues-write-missing",
+                   "ISSUES are not writable — a landing also closes issues"),
+    }
+    for name in ("contents", "pull_requests", "issues"):             # landing order, earliest first
+        if name in refused:
+            reason, why = _MISSING[name]
+            writable = ", ".join(n for n, ok, _ in surfaces if ok) or "none"
+            result.update(reason=reason,
+                          detail=f"{why}. Writable: {writable}; refused: {', '.join(refused)} "
+                                 f"({statuses})")
+            return result
+    result.update(reason="forbidden", detail=f"unrecognised surface state: {refused}")
     return result
 
 
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(
-        description="Prove this lane's credential can WRITE (issues AND pull requests) before it does any work.")
+        description="Prove this lane's credential can WRITE (issues, pull requests, contents) before it "
+                    "does any work.")
     ap.add_argument("--repo", default=os.environ.get("OR", ""), help="owner/name (default: $OR)")
     ap.add_argument("--api-base", default=os.environ.get("GH_WRITE_PREFLIGHT_API", DEFAULT_API),
                     help="API base URL (test seam; default https://api.github.com)")
@@ -489,15 +551,20 @@ def main(argv: list[str]) -> int:
         if res.get("surfaces"):
             print(f"  surfaces: issues={res['surfaces'].get('issues')} "
                   f"pull_requests={res['surfaces'].get('pull_requests')} "
+                  f"contents={res['surfaces'].get('contents')} "
                   f"(422 = authorised+rejected, 403 = refused)", file=sys.stderr)
         if res.get("scopes"):
             print(f"  oauth scopes: {res['scopes']}", file=sys.stderr)
         elif res["token_shape"].startswith("fine-grained"):
             print("  oauth scopes: (none sent — fine-grained PATs carry PER-RESOURCE permissions, not scopes)",
                   file=sys.stderr)
-        print("  fix per reason: pull-requests-write-missing→re-mint with `Pull requests: write` · "
-              "rate-limited→wait (shared account), do NOT re-mint · token-read-only→re-mint with write · "
-              "bad-credentials→re-source · no-credential→supply one · sso→authorise for org", file=sys.stderr)
+        print("  fix per reason: contents-write-missing→re-mint with `Contents: write` · "
+              "pull-requests-write-missing→re-mint with `Pull requests: write` · "
+              "issues-write-missing→re-mint with `Issues: write` · "
+              "rate-limited→wait (shared account), do NOT re-mint · "
+              "token-read-only→re-mint with all three write permissions · "
+              "bad-credentials→re-source · no-credential→supply one · sso→authorise for org",
+              file=sys.stderr)
         return 1
     return 0
 
