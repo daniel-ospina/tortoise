@@ -620,6 +620,16 @@ def test_a_non_numeric_max_age_is_a_usage_error_not_a_fail_closed(fixture):
 _ONE_CASE = "-k test_dry_run_is_the_default_and_posts_nothing"
 _ONE_FAILING_CASE = "-k test_current_head_cancel_is_refused"
 
+#: The exact environment the docker half of `python-ci.yml` hands the `test` job:
+#: a live-ish URI on an ephemeral port, `TORTOISE_TEST_EXPECT_URI=1` beside it (set IFF
+#: the URI is), and an EMPTY `CARVE_OUT` (the docker leg does not opt into the carve-out).
+#: Measured red on `test (b)` before `_self_test()` popped the EXPECT_URI declaration.
+_DOCKER_HALF = {
+    "TORTOISE_DB_URI": "docker://:falkordb@localhost:34123/tortoise_test_matrix",
+    "TORTOISE_TEST_EXPECT_URI": "1",
+    "TORTOISE_TEST_CARVE_OUT": "",
+}
+
 
 def test_self_test_passes_on_a_host_with_no_database(fixture):
     """Round-6 finding 2: `--self-test` inherited the environment unchanged, so the
@@ -640,6 +650,31 @@ def test_self_test_passes_on_a_host_with_no_database(fixture):
     assert "1 passed" in r.stdout, r.stdout
 
 
+def test_the_self_test_survives_the_docker_half_environment(fixture):
+    """The docker half of `python-ci.yml` exports `TORTOISE_TEST_EXPECT_URI=1` BESIDE
+    its URI, and `tests/conftest.py::_assert_backend_identity` fails any session that
+    declares it while carrying no URI. `--self-test` pops the URI (this suite is
+    hermetic), so before this fix it left the DECLARATION behind and the child session
+    died at setup — `conftest.py:1791`, "TORTOISE_TEST_EXPECT_URI=1 but
+    TORTOISE_DB_URI unset", zero guard cases run — while the tool reported it as a red
+    suite. MEASURED on `test (b)` at `98e3a2a7b6`: both self-test cases red that way.
+
+    That declaration is a claim about the OUTER session; a nested child that is
+    deliberately URI-less must not inherit it (and the URI gate must NOT learn to accept
+    CARVE_OUT beside EXPECT_URI — that would let a docker leg green-pass embedded).
+
+    Pre-fix this fails: the child errors with the EXPECT_URI message, rc is 70, and no
+    case passes.
+    """
+    r = guard(fixture, "--self-test",
+              env={**_DOCKER_HALF, "PYTEST_ADDOPTS": _ONE_CASE})
+    out = r.stdout + r.stderr
+    assert r.returncode == 0, out
+    assert "1 passed" in r.stdout, out
+    assert "TORTOISE_TEST_EXPECT_URI" not in out, out
+    assert "TORTOISE_DB_URI" not in out, out
+
+
 def test_a_red_self_test_is_70_never_the_post_failure_1(fixture, tmp_path):
     """Round-6 finding 2, second half: a red suite returned pytest's `1`, which this
     file's exit table reserves for `1 = the cancel POST failed` — so a caller switching
@@ -647,14 +682,17 @@ def test_a_red_self_test_is_70_never_the_post_failure_1(fixture, tmp_path):
 
     The child suite is forced RED without touching the tool: `CI_CANCEL_GUARD_TOOL`
     points the case at a foil that always exits 0, so `test_current_head_cancel_is_refused`
-    (expecting 3) fails. The carve-out is supplied HERE so this case discriminates the
-    exit-CODE mapping alone — the other case pins the carve-out propagation. Pre-fix: the
-    red child exits 1 and the tool forwards 1.
+    (expecting 3) fails. The carve-out AND the docker half's URI/EXPECT_URI pair are
+    supplied HERE so this case discriminates the exit-CODE mapping alone whatever shape
+    the parent session runs in — the sibling case pins the environment neutralisation.
+    Pre-fix: the red child exits 1 and the tool forwards 1 (and, under the docker-half
+    shape, it errored at setup instead of failing, so this assertion reds too).
     """
     foil = tmp_path / "foil_guard.py"
     foil.write_text("#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n")
     r = guard(fixture, "--self-test",
-              env={"TORTOISE_TEST_CARVE_OUT": "1",
+              env={**_DOCKER_HALF,
+                   "TORTOISE_TEST_CARVE_OUT": "1",
                    "CI_CANCEL_GUARD_TOOL": str(foil),
                    "PYTEST_ADDOPTS": _ONE_FAILING_CASE})
     assert r.returncode == 70, r.stdout + r.stderr

@@ -439,9 +439,22 @@ def _self_test() -> int:
     `TORTOISE_DB_URI` is POPPED rather than trusted: this file must not use a database,
     and leaving a set-but-wedged URI in place would let the #6073 tripwire fail the
     session, reintroducing the same misattribution from the other direction.
+
+    `TORTOISE_TEST_EXPECT_URI` is popped for the SAME reason, one variable further out:
+    the docker half of `python-ci.yml` exports `TORTOISE_TEST_EXPECT_URI=1` beside its
+    URI, and `tests/conftest.py`'s `_assert_backend_identity` fails any session that
+    declares it while carrying no URI. That declaration is a claim about the OUTER
+    session — a nested child that is deliberately URI-less must not inherit it, or the
+    documented verb reports the outer lane's gate as this tool's own red suite (measured
+    on `test (b)`: both self-test cases, `conftest.py:1791`, zero guard cases run).
+
+    ⛔ The child is neutralised HERE, never in `conftest.py`: teaching the URI gate to
+    accept `CARVE_OUT=1` beside `EXPECT_URI=1` would let a docker leg silently green-pass
+    on the embedded lane — the exact vacuous pass `EXPECT_URI` exists to close.
     """
     env = dict(os.environ)
     env.pop("TORTOISE_DB_URI", None)
+    env.pop("TORTOISE_TEST_EXPECT_URI", None)
     env["TORTOISE_TEST_CARVE_OUT"] = "1"
     proc = subprocess.run(
         [sys.executable, "-m", "pytest",
