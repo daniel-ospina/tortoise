@@ -1089,6 +1089,24 @@ _CONVERTED_CLIENT_SEAMS: dict[str, tuple[int, frozenset[str]]] = {
         "test_upload_malformed_json_500",
         "test_upload_empty_body_500",
         "test_tenant_a_pack_invisible_to_tenant_b"})),
+
+    # ── #10714: the #8582 sweep's last uncovered `POST /v1/register` caller ──
+    # Same seam, same declaration: `POST /v1/register` is NOT in
+    # `hosted_api._TRANSPORT_WAIT_BOUND_EXEMPT`, so reverting this fixture to
+    # `TestClient` puts the transport refusal back into an `assert 504 == 200`
+    # product FAIL. This file was missed by the #8802/#8818 sweeps and no entry
+    # existed, so the parametrized pin above generated NO case for it and the
+    # file went unchecked — the mechanism `_CONVERTED_CLIENT_SEAMS`'s own
+    # docstring warns about. The refusal is MEASURED, not hypothetical: `test
+    # (d)` of run 41747137960 answered `TestRegisterCaptcha::`
+    # `test_fail_open_without_secret_key` with a 504 after 60.41 s (an embedded
+    # `redislite` start inside the handler, widened to a 60 s bound by
+    # `tests/_embedded.py`, blocking the event loop past the product's own 10 s
+    # `WaitBoundMiddleware`) — in a file no part of that PR touched.
+    # 0 plain constructions: unlike the entries above, this file has no refusal
+    # pin of its own, so nothing here legitimately needs a client that observes
+    # a 504. The `client` fixture is the file's only construction.
+    "tests/test_turnstile_signup.py": (0, frozenset({"client"})),
 }
 
 
