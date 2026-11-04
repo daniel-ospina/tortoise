@@ -1762,7 +1762,8 @@ def test_a_same_size_rewrite_after_a_quiet_fold_still_drops_the_map(
             sdk.close()
 
 
-def test_a_journal_replaced_during_a_fold_is_not_memoised(tmp_path, monkeypatch):
+def test_a_journal_replaced_during_a_fold_is_not_memoised(tmp_path, monkeypatch,
+                                                          caplog):
     """A REPLACEMENT under the fold must DROP the map, never re-bind it.
 
     ``resume`` and ``seam`` are observations of whichever file sat at the path
@@ -1778,7 +1779,16 @@ def test_a_journal_replaced_during_a_fold_is_not_memoised(tmp_path, monkeypatch)
 
     Non-vacuity: on the pre-fix tree the memo survives the replacement and the
     next call reports an id only the REPLACED file ever held as journal-known.
+
+    ⛔ AND THE CROSSING CALL ITSELF MUST ANSWER FROM THE NEW FILE (review round
+    16, finding 1). The invalidation used to be applied to the MEMO but not to
+    this call's answer: the map was dropped and then read anyway, so the very
+    call that DETECTED the replacement answered ``known.get(id, False)`` out of
+    the file that had just been moved away. With ``new-0100`` — present in the
+    replacement, absent from the live graph — the pre-fix answer is ``False``
+    (a typo, silent) where the truth is ``journal_known`` (a real loss).
     """
+    from tortoise import monitoring
     from tortoise.log import EventLog
 
     sdk, journal = _sdk_journaled(tmp_path, "midfoldReplace")
@@ -1832,7 +1842,26 @@ def test_a_journal_replaced_during_a_fold_is_not_memoised(tmp_path, monkeypatch)
 
         monkeypatch.setattr(EventLog, "mention_lines", spy)
 
-        assert sdk.update_point(str(uuid.uuid4()), confidence=0.9) == {}
+        # ── the CROSSING call: it discovers the replacement, so its answer
+        #    must describe the file that is there NOW ──
+        known_before = monitoring.silent_revision_loss_counts().get(
+            "journal_known", 0)
+        caplog.clear()
+        with caplog.at_level("WARNING"):
+            assert sdk.update_point("new-0100", confidence=0.9) == {}
+        assert monitoring.silent_revision_loss_counts().get(
+            "journal_known", 0) == known_before + 1, (
+            "the call that DETECTS the replacement must answer from the new "
+            "journal: `new-0100` is journal-known there and absent from the "
+            "live graph, so the loss must be reported — answering out of the "
+            "discarded map silences it (the #10515 indicator 1 failure)")
+        assert any("the journal still holds the id" in r.getMessage()
+                   for r in caplog.records), (
+            "the crossing call's report must be journal_known and LOUD")
+        assert scans[:] == [(None, 0), (b"new-0100", 0)], (
+            "the discarded map must be re-derived from the file that is "
+            "there NOW, needle-filtered (bounded memory) rather than a full "
+            f"re-fold: {scans}")
         new_stat = os.stat(journal)
         assert (new_stat.st_dev, new_stat.st_ino) != (
             old_stat.st_dev, old_stat.st_ino), (
@@ -1856,6 +1885,90 @@ def test_a_journal_replaced_during_a_fold_is_not_memoised(tmp_path, monkeypatch)
             f"over a prefix of the old one: {scans[before:]}")
         assert sdk._journal_knows_point("new-0007") is True, (
             "the file that is actually there must answer for its own records")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+def test_a_map_present_id_is_unjudged_when_the_fold_loses_the_file(
+        tmp_path, monkeypatch, caplog):
+    """#10543 review round 16, finding 1 (second site): the RETAINED MAP is evidence.
+
+    When the resume fold raises ``FileNotFoundError`` the answer used to be
+    ``narrowed.get(point_id, False)`` — and on the resume path ``narrowed`` is
+    empty by construction, so it was ALWAYS ``False``: an id the retained map
+    held as PRESENT answered "a typo" (silent). The map was folded from records
+    that named this point, so the honest answer to a journal that went away
+    under the fold is UNJUDGED (``None`` ⇒ ``journal_unreadable``) — the same
+    vocabulary round 7 established for a file removed mid-flight.
+
+    The sidecar is deleted WITH the journal here on purpose: with the sidecar in
+    place ``carried_records()`` already reports the loss, so the arms would be
+    indistinguishable and this test would pass on the pre-fix tree.
+
+    Non-vacuity: on the pre-fix tree the crossing call increments nothing (it
+    reports the id as a typo); ``_journal_carried_records`` answers ``False``
+    because the sidecar is gone, so only the MAP arm can save it.
+    """
+    from tortoise import monitoring
+    from tortoise.log import EventLog
+
+    sdk, journal = _sdk_journaled(tmp_path, "midfoldGone")
+    try:
+        # ⛔ INITIALISE THE PROJECTION FIRST. The embedded lane AUTO-REPLAYS a
+        # journal into an EMPTY db on first use, so records appended BEFORE
+        # that point end up in the live graph and the ABSENT arm never runs —
+        # the failure mode that makes this test vacuous rather than wrong.
+        sdk._get_proj()
+        log = sdk._get_event_log()
+        pid = "held-0007"
+        log.append({"type": "PointAdded", "point": {"id": pid}})
+        assert not sdk.get_point(pid), (
+            "the live graph must NOT hold the point — the journal alone does")
+
+        # a first absent write folds the journal and RETAINS the map from it
+        assert sdk.update_point(str(uuid.uuid4()), confidence=0.9) == {}
+        memo = sdk._journal_presence_memo
+        assert memo is not None, "the fixture needs a RETAINED map to test"
+        assert memo['known'].get(pid) is True, (
+            f"the map must hold the id as PRESENT: {memo['known'].get(pid)}")
+
+        # an append makes the next call RESUME (a fold that starts above byte 0)
+        log.append({"type": "PointAdded", "point": {"id": "grow-9999"}})
+
+        real = EventLog.mention_lines
+
+        def vanish(self, needle=None, start=0):
+            if start and needle is None:
+                # the journal AND its position sidecar go away UNDER the fold
+                for path in (journal, journal + ".position"):
+                    with contextlib.suppress(FileNotFoundError):
+                        os.unlink(path)
+                raise FileNotFoundError(journal)
+            return real(self, needle, start)
+
+        monkeypatch.setattr(EventLog, "mention_lines", vanish)
+
+        before = monitoring.silent_revision_loss_counts().get(
+            "journal_unreadable", 0)
+        known_before = monitoring.silent_revision_loss_counts().get(
+            "journal_known", 0)
+        caplog.clear()
+        with caplog.at_level("WARNING"):
+            assert sdk.update_point(pid, confidence=0.9) == {}
+        assert monitoring.silent_revision_loss_counts().get(
+            "journal_unreadable", 0) == before + 1, (
+            "a journal whose file went away under the fold cannot be judged, "
+            "and the retained map said it HELD this id — answering \"a typo\" "
+            "is the silence #10515 indicator 1 forbids")
+        assert monitoring.silent_revision_loss_counts().get(
+            "journal_known", 0) == known_before, (
+            "the map proves the journal CARRIED the id but cannot prove it "
+            "still does, so this is UNREADABLE, not known")
+        assert any("FILE is gone" in r.getMessage()
+                   for r in caplog.records), (
+            "the loss must be LOUD in the log, not only in a counter")
+        assert sdk._journal_presence_memo is None
     finally:
         with contextlib.suppress(Exception):
             sdk.close()
@@ -4712,7 +4825,8 @@ def test_a_fifo_at_the_journal_path_cannot_park_the_presence_scan(tmp_path):
         """)
     try:
         done = subprocess.run([sys.executable, "-c", code, str(fifo)],
-                             capture_output=True, text=True, timeout=120)
+                             capture_output=True, text=True, timeout=120,
+                             cwd=str(_REPO))
     except subprocess.TimeoutExpired:
         pytest.fail(
             "the presence scan PARKED on a FIFO at the journal path: the scan's "
@@ -4743,3 +4857,82 @@ def test_the_presence_scan_still_follows_a_symlinked_journal(tmp_path):
     link = tmp_path / "journal.jsonl"
     os.symlink(real, link)
     assert list(MentionScan(link)) == [b'{"id": "a"}', b'{"id": "b"}']
+
+
+def test_a_fifo_at_the_journal_path_cannot_park_the_absent_write(tmp_path):
+    """#10702 review (P2-1): the SCAN refusing is only half the claim.
+
+    ``MentionScan._open``'s reason for existing is that this scan runs on
+    ``update_point``'s ABSENT-write path, synchronously inside an HTTP-exposed
+    call — and the scan-level test above never exercises that half. What a
+    caller needs is that the whole door still answers: ``{}`` and no raise, the
+    loss reported as UNJUDGED (``journal_unreadable`` — the tri-state's THIRD
+    value, never ``False``/"a typo"), and ``journal_known`` untouched.
+
+    ⛔ RUN IN A SUBPROCESS for the same reason as the scan-level case: pre-fix
+    the failure mode is a permanent WAIT inside the open, which would hang the
+    suite rather than fail it. ``cwd`` is the repo root so the child resolves
+    ``import tortoise`` from the checkout rather than inheriting whatever
+    directory pytest was launched from.
+
+    Non-vacuity: with ``_open`` back to a plain ``open`` the child never prints
+    and ``subprocess.run`` times out — and a fix that dropped the ``S_ISREG``
+    refusal (or let the ``OSError`` escape ``update_point``) reddens the reply
+    or the counter assertions instead.
+    """
+    code = textwrap.dedent(
+        """
+        import json, os, sys, uuid
+        from tortoise import monitoring
+        from tortoise.sdk import TortoiseSDK
+
+        db_path, journal = sys.argv[1], sys.argv[2]
+        sdk = TortoiseSDK(
+            None if os.environ.get("TORTOISE_DB_URI") else db_path,
+            namespace=f"test_7405_fifo_{uuid.uuid4().hex[:8]}",
+            event_log_path=journal)
+        try:
+            # materialise the lane BEFORE the FIFO exists: an embedded lane
+            # AUTO-REPLAYS a journal into an empty db, and a replay would park
+            # on the FIFO in the fixture rather than in the code under test
+            sdk._get_proj()
+            os.mkfifo(journal)
+            pid = str(uuid.uuid4())
+            before = monitoring.silent_revision_loss_counts()
+            reply = sdk.update_point(pid, confidence=0.9)
+            after = monitoring.silent_revision_loss_counts()
+            print(json.dumps({
+                "reply": reply,
+                "tri": sdk._journal_knows_point(pid),
+                "unreadable": (after.get("journal_unreadable", 0)
+                               - before.get("journal_unreadable", 0)),
+                "known": (after.get("journal_known", 0)
+                          - before.get("journal_known", 0)),
+            }))
+        finally:
+            sdk.close()
+        """)
+    try:
+        done = subprocess.run(
+            [sys.executable, "-c", code,
+             str(tmp_path / "fifo.db"), str(tmp_path / "journal.fifo")],
+            capture_output=True, text=True, timeout=180, cwd=str(_REPO))
+    except subprocess.TimeoutExpired:
+        pytest.fail(
+            "`update_point` PARKED on a FIFO at the journal path: the "
+            "ABSENT-write scan's open waited for a writer, so every absent "
+            "write on this lane never returns — the failure "
+            "`_read_regular_range`'s O_NONBLOCK exists to prevent")
+    assert done.returncode == 0, (
+        "a FIFO at the journal path must be REPORTED, never waited on and "
+        f"never raised: rc={done.returncode} out={done.stdout!r} "
+        f"err={done.stderr[-1200:]!r}")
+    seen = json.loads(done.stdout.strip().splitlines()[-1])
+    assert seen["reply"] == {}, (
+        "the documented ABSENT-arm reply is `{}`: an unreadable journal is a "
+        f"REPORT, not a 500: {seen}")
+    assert seen["tri"] is None, (
+        "an unreadable journal is UNJUDGED — the tri-state's third value. "
+        f"`False` is \"a typo\" and silences the loss: {seen}")
+    assert seen["unreadable"] == 1 and seen["known"] == 0, (
+        f"the loss must be counted as journal_unreadable alone: {seen}")

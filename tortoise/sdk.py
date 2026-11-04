@@ -10335,7 +10335,26 @@ class TortoiseSDK:
             # own sidecar, read through the LOG HANDLE (see
             # `EventLog.carried_records`); its absence is not proof of early
             # life, so this only ever ADDS a report, never invents one.
-            if self._journal_carried_records(log):
+            #
+            # ⛔ AND THE RETAINED MAP IS THE SECOND WITNESS (review round 16,
+            # finding 1). On the RESUME path `narrowed` is empty by
+            # construction, so the answer below used to be `False` — "a typo"
+            # — for an id the RETAINED MAP held as PRESENT. A map that says
+            # ``True`` was folded from records that named this point, so the
+            # honest answer to a journal whose file just went away is UNJUDGED
+            # (``None``), not the silence this whole method exists to end:
+            # `journal_unreadable` is the vocabulary's own word for "nothing
+            # can be judged here". The INVERSE map value (``False``) is NOT the
+            # same case — it is a record the map READ (a delete, a merge
+            # loser), so answering that silently is what its evidence says.
+            #
+            # The retained map describes a file that is GONE, so it is dropped
+            # rather than left to answer a later call: an unlink frees the
+            # inode, and a re-created path can be handed the same
+            # `(st_dev, st_ino)` back — the one identity a memo cannot tell
+            # apart from the file it was folded from.
+            self._journal_presence_memo = None
+            if self._journal_carried_records(log) or known.get(point_id) is True:
                 _logger.warning(
                     "the journal at %r carried records but its FILE is gone — "
                     "an absent live read is reported as UNJUDGED rather than "
@@ -10372,8 +10391,23 @@ class TortoiseSDK:
             # `mv`, a restore) — so `resume`/`seam` describe the NEW file while
             # `known` came from the OLD one. Memoising would serve another file's
             # records; one re-fold costs less.
+            #
+            # ⛔ AND THE RE-FOLD IS THE ANSWER, NOT JUST THE MEMO'S FATE (review
+            # round 16, finding 1). The comment above already says this map is
+            # not a prefix of the current file — and the next line used to
+            # answer THIS call out of it anyway, so a rotation/`mv`/restore that
+            # landed during the fold could silence a ``journal_known`` loss for
+            # exactly the call that DETECTED it (`known[point_id] is False` from
+            # the OLD file while the NEW one holds a ``PointAdded``). `open()`
+            # binds the inode, so the fd the fold read keeps the old file while
+            # a fresh read of the PATH resolves to the new one — rename(2):
+            # "Open file descriptors for oldpath are also unaffected"
+            # (<https://man7.org/linux/man-pages/man2/rename.2.html>). So the
+            # discarded map is re-derived from the file that is there NOW,
+            # needle-filtered: bounded memory, one pass, and an answer that
+            # describes THIS path rather than the one that was moved away.
             self._journal_presence_memo = None
-            return known.get(point_id, False)
+            return self._journal_presence_needle(log, point_id)
         self._journal_presence_memo = {
             'log': log, 'ident': stat_after[:2], 'folded_to': resume,
             'mtime_ns': stat_after[3], 'known': known, 'seam': seam,
@@ -10448,6 +10482,40 @@ class TortoiseSDK:
         if not isinstance(got, (bytes, bytearray)):
             return False        # `None` = this path cannot answer ⇒ re-fold
         return got == expected
+
+    def _journal_presence_needle(self, log, point_id: str):
+        """Re-fold the journal AS IT IS NOW, filtered to *point_id* (#10543 r16).
+
+        The honest answer once the retained map has been declared
+        untrustworthy: the map is dropped from the memo AND from this call's
+        answer, because it was folded from a file the path no longer names.
+        Filtered to the one id, so the pass is bounded in memory (at most one
+        entry) and single-purpose.
+
+        Three outcomes, the same vocabulary the rest of this method uses:
+        ``True``/``False`` from the records that are there now, and ``None``
+        (UNJUDGED ⇒ ``journal_unreadable``) when the re-read cannot answer — a
+        file that went away with records behind it, or any failure. ``False`` is
+        reserved for the shape its own evidence supports: a journal that carried
+        nothing, whose absent id really is just a typo.
+        """
+        state: dict[str, bool] = {}
+        try:
+            _journal_presence_state(
+                log, state, 0, needle=str(point_id).encode('utf-8'))
+        except FileNotFoundError:
+            # The SAME two facts the fold's own FileNotFoundError arm splits: a
+            # path nothing ever wrote is a typo (silent), a journal that carried
+            # records and then went away is UNJUDGED.
+            return None if self._journal_carried_records(log) else False
+        except Exception:  # noqa: BLE001, RUF100 — unjudged, never "a typo"
+            _logger.warning(
+                "the journal could not be re-read to check whether %r is a "
+                "known point; an absent live read is reported as UNJUDGED "
+                "rather than asserted to be a typo (#10515)",
+                point_id, exc_info=True)
+            return None
+        return state.get(point_id, False)
 
     @staticmethod
     def _journal_carried_records(log) -> bool:
