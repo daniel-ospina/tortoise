@@ -140,14 +140,14 @@ from tortoise.sdk import TortoiseSDK
 
 HOSTED_API = Path(__file__).resolve().parent.parent / "tortoise" / "hosted_api.py"
 
-# A stall long enough to be unambiguous, short enough to keep CI quick.
+# A stall long enough to be unambiguous, short enough to keep CI quick. It is
+# also the TIMEOUT on the condition wait below, so it bounds the run.
 STALL_S = 2.0
-# The loop's own tick period while the read is blocked.
+# The loop's own tick period — the poll interval the driver uses while it waits
+# for the request to reach the blocking call. NOT a sample rate for measuring the
+# stall: a wall-clock tick count measures the HOST's scheduler as much as this
+# code (see `test_read_route_does_not_freeze_the_event_loop`).
 TICK_S = 0.02
-# Ticks completed INSIDE the blocking window. A blocked loop yields 0 (the
-# next tick can only run once the freeze releases); a free loop yields
-# ~STALL_S/TICK_S = 100. Loose on purpose — see the write file's rationale.
-MIN_TICKS_IN_STALL = 10
 
 _SEEDED_POINT = "read-loop-3718-point"
 _SEEDED_SESSION = "read-loop-3718-session"
@@ -348,9 +348,18 @@ class _RequestScopedProbe:
     scan walks async bodies only); those are part of the declared residual.
     """
 
-    def __init__(self, monkeypatch, ha_mod, state: dict, *, block: bool):
+    def __init__(self, monkeypatch, ha_mod, state: dict, *, block: bool,
+                 release: threading.Event | None = None):
         self._state = state
         self._block = block
+        # ⛔ WHEN `release` IS GIVEN THE STALL IS A CONDITION WAIT, NOT A SLEEP.
+        # The worker returns as soon as the event is set — so the test can release
+        # it from the LOOP after a concurrent request has been served, and the
+        # measurement stops depending on how much CPU the host grants this
+        # process. `STALL_S` is then the timeout (the backstop that keeps a
+        # never-released wait from hanging the suite), the same idiom
+        # `_stall_the_default_executor` uses below.
+        self._release = release
         self._owned: list = state.setdefault("sdks", [])
         self._real_get_proj = TortoiseSDK._get_proj
 
@@ -428,7 +437,14 @@ class _RequestScopedProbe:
             if self._block:
                 self._state["entered"] = time.perf_counter()
                 try:
-                    time.sleep(STALL_S)  # stand-in for a slow FalkorDB round trip
+                    if self._release is None:
+                        time.sleep(STALL_S)  # stand-in for a slow round trip
+                    elif "released_by_loop_request" not in self._state:
+                        # THE FIRST blocking call is the one that measures; a later
+                        # one would overwrite the reading (last-write-wins) and, if
+                        # the first had timed out, report the loosened state instead.
+                        self._state["released_by_loop_request"] = self._release.wait(
+                            timeout=STALL_S)
                 finally:
                     self._state["exited"] = time.perf_counter()
             return self._real_get_proj(self_sdk, *args, **kwargs)
@@ -887,38 +903,44 @@ def test_read_route_does_not_freeze_the_event_loop(client, monkeypatch):
 
     The loop-responsiveness half of the invariant, on one representative read
     (``GET /v1/points`` — the endpoint the issue's measured reproduction used).
-    Two assertions that fail on the inline shape:
 
-    * ``ticks_in_stall >= MIN_TICKS_IN_STALL`` — the loop kept scheduling while
-      the read was blocked (inline yields 0: the ticker's next wake-up cannot
-      run until the freeze releases).
-    * ``/health`` answered INSIDE the blocking window — the user-visible
-      consequence: a concurrent client is served DURING the read, not queued
-      behind it. /health is pure in-memory (#2850), so a delay in it can only
-      come from the loop being blocked, never from a saturated executor.
+    ⛔ THE ASSERTION IS A CONDITION, NOT A TICK COUNT — measured 2026-11-03.
+    This case used to sample a 20 ms ticker inside the stall window and require
+    `>= 10` of ~100 ticks. That measures the HOST's scheduler as much as this
+    code: on a CPU-starved self-hosted runner the process is granted no
+    timeslice for the whole window and the count is ZERO with no defect present
+    — the sibling `test_dataplane_lane_loop_responsiveness.py` red-ed exactly
+    that way (`only 0 tick(s) during a 2.0s blocked graph call`) on PR #10783, a
+    branch that changes no hosted code. The stall is now released by the LOOP
+    SERVING `/health`, so the signal is "the loop ran while the graph read was
+    held", not "the host gave us 10 slices". A frozen loop cannot serve
+    `/health`, so the wait can only run to its `STALL_S` timeout and the
+    assertion names that — including on the inline shape.
+
+    The user-visible consequence is the same property in the vocabulary of the
+    request: a concurrent client is SERVED DURING the read, not queued behind
+    it. /health is pure in-memory (#2850), so a delay in it can only come from
+    the loop being blocked, never from a saturated executor.
+
+    RESIDUAL, filed rather than silently left (#10815):
+    `test_graph_write_loop_responsiveness.py`, `test_capture_loop_responsiveness.py`
+    and `test_notify_offloop_4456.py` still count wall-clock ticks the same way.
     """
     import tortoise.hosted_api as ha_mod
     from tortoise.hosted_api import app
 
     _seed_read_surface()
     state: dict = {}
-    _RequestScopedProbe(monkeypatch, ha_mod, state, block=True)
+    # Set by the driver FROM THE LOOP once `/health` has been answered; the
+    # request's blocking region waits on it with `STALL_S` as its backstop.
+    release = threading.Event()
+    _RequestScopedProbe(monkeypatch, ha_mod, state, block=True, release=release)
     request_kwargs = {"method": "GET", "url": "/v1/points"}
 
     async def _drive():
-        ticks: list[float] = []
-        stop = {"done": False}
-
-        async def _ticker():
-            while not stop["done"]:
-                ticks.append(time.perf_counter())
-                await asyncio.sleep(TICK_S)
-
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport,
                                      base_url="http://test") as ac:
-            tick = asyncio.create_task(_ticker())
-            await asyncio.sleep(TICK_S * 2)  # ticker mid-sleep before the read
             # The request WINDOW owns the probe's SDKs (#3718): with the
             # construction off the loop the SDK is built on a worker thread, so
             # a main-thread-only ownership rule would silently stop observing
@@ -938,32 +960,29 @@ def test_read_route_does_not_freeze_the_event_loop(client, monkeypatch):
             read_in_flight = not read.done()
             health = await ac.get("/health")
             health_done = time.perf_counter()
+            # RELEASE THE STALL FROM THE LOOP — this line runs only because the
+            # loop scheduled it, which is the measurement.
+            release.set()
             response = await read
             state["active"] = False
-            stop["done"] = True
-            await tick
-        return ticks, health, health_done, response, read_in_flight
+        return health, health_done, response, read_in_flight
 
-    ticks, health, health_done, response, read_in_flight = asyncio.run(_drive())
+    health, health_done, response, read_in_flight = asyncio.run(_drive())
 
     assert state.get("ran_on_loop") is False, (
         "list_points ran its synchronous FalkorDB read ON the event loop "
         "(#3718)")
 
-    entered, exited = state["entered"], state["exited"]
-    in_stall = [t for t in ticks if entered < t < exited]
-    assert len(in_stall) >= MIN_TICKS_IN_STALL, (
-        f"the event loop completed only {len(in_stall)} tick(s) during a "
-        f"{STALL_S:.1f}s blocked read (need {MIN_TICKS_IN_STALL}) — the read "
-        f"is blocking the event loop, so every concurrent request waits for "
-        f"the graph round trip (#3718)")
+    exited = state["exited"]
+    assert state.get("released_by_loop_request") is True, (
+        "the /health probe did NOT reach the loop while the graph read was "
+        f"blocked: the stall ran its full {STALL_S:.1f}s timeout instead of "
+        "being released by a SERVED request — the read is holding the event "
+        "loop, so every concurrent request waits for the graph round trip "
+        f"(#3718); /health answered {health_done - exited:+.3f}s relative to "
+        "the block's release (negative = it queued behind the block)")
 
     assert health.json()["status"] in {"ok", "degraded"}, health.text
-    assert health_done < exited, (
-        "the /health probe was NOT served while the read was blocked "
-        "(answered %.0fms AFTER the block released) — a concurrent request "
-        "queued behind the graph read instead of being served (#3718)"
-        % ((health_done - exited) * 1000))
     assert read_in_flight, (
         "the read had already returned before /health was issued, so this run "
         "proves nothing about a request served DURING the blocking window "
