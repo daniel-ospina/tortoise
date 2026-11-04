@@ -291,18 +291,22 @@ def test_an_applied_fold_costs_the_measured_lifecycle_reads(sdk, monkeypatch):
     Why the double read is not collapsed into one (a fixer's option the #10368
     review offered): handing this read's rows to `update_point`'s guard would
     make the guard classify a snapshot taken BEFORE the authored-word leg's
-    `set_point_baseline` write and before anything else in `update_point`.
-    Re-verifying at the write point is the guard's whole value — the same
-    reason a database re-evaluates a predicate against the row version at
-    UPDATE time instead of trusting the earlier search — so the cost is the
-    price of the safety property, and it is DISCLOSED, not hidden.
+    `set_point_baseline` write and before anything else in `update_point` — a
+    writer that trusts a pre-write snapshot is the defect that guard exists to
+    catch — so the cost is DISCLOSED, not hidden.
 
-    ⛔ AND THAT RE-VERIFICATION IS ARMED BY THE FOLD (#10368 review P2).
-    `update_point` scopes `refuse_terminal` to `_TEMPORAL_RESTAMP_PROPS`, which
-    an applied fold never carries, so its read classified and acted on nothing
-    until the fold started setting `_FOLD_REFUSES_TERMINAL_WRITE` around this
-    one write. The race that made the difference is pinned in
-    `test_a_fold_that_races_a_terminalization_at_the_write_point_writes_nothing`.
+    ⛔ AND THE SECOND READ ONLY RE-VERIFIES BECAUSE THE FOLD ARMS IT (#10368
+    review P2). `update_point` passes
+    `refuse_terminal=_temporal_restamp` (keyed on `_TEMPORAL_RESTAMP_PROPS`,
+    which is empty on every fold that reaches here), so left alone that guard
+    reads the same fan-out, computes the terminal verdict and does NOT act on
+    it. The fold now sets `_FOLD_REFUSES_TERMINAL_WRITE` around its one write,
+    which is what turns that read into a refusal; the race it closes is pinned
+    in `test_a_fold_that_races_a_terminalization_at_the_write_point_writes_nothing`.
+    The arming is PARTIAL and says so: it sits at this fold's `update_point`
+    call, AFTER the authored-word leg's `set_point_baseline` write, so that leg's
+    window remains a disclosed residual (see the block above the fold in
+    `sdk.py`).
     """
     from tortoise.live import LIFECYCLE_FANOUT_QUERY
 

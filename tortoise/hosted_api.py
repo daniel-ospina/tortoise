@@ -18816,11 +18816,13 @@ def _commit_response(
     * the payload's DOMAIN integrity warnings, derived from the payload alone
       — deterministic per payload, so an idempotent re-commit returns the
       same ones;
-    * WRITE-TIME advisories (``temporal_not_applied``, #7819;
-      ``terminal_fold_refused``, #10368; and ``narrative_not_recorded``, #10000
-      — observed while the writes ran: a dedup fold dropped on an already-terminal
-      claim wrote NOTHING, and a
-      commit whose `SessionNarrated` carrier did not reach the record left
+    * WRITE-TIME advisories (`_temporal_not_applied_advisory`, #7819;
+      `_terminal_fold_refused_advisory`, #10368; and
+      `_narrative_home_advisory` — observed while the writes ran: a
+      dedup fold DROPPED because the target already carries a validity window
+      (`temporal_not_applied`) or because a dedup HIT would write onto a
+      settled claim (`terminal_fold_refused`) wrote NOTHING of what it carried,
+      and a commit whose `SessionNarrated` carrier did not reach the record left
       §9.1's narrative outside its home, which `_report_narrative_home` says
       rather than letting a 200 imply it landed). ⚠️ That list is today's
       POPULATION, not a closed vocabulary: this handler forwards every code the
@@ -19435,17 +19437,21 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     now = datetime.now(UTC).isoformat()
     session_id = payload.session_id
     reconcile = plan.reconcile
-    # #7819: TRANSIENT write-time advisories this phase has to REPORT but that
-    # are not payload domain warnings — `temporal_not_applied` (a fold carrying
-    # a validity window dropped because the content address resolves to a
-    # terminal claim), `terminal_fold_refused` (#10368, the same dedup branch
-    # dropping a caller's props and/or authored word onto a settled claim), and
+    # #7819 / #10368: TRANSIENT write-time advisories this phase has to REPORT
+    # but that are not payload domain warnings — `temporal_not_applied`, raised
+    # when `create_point`'s dedup branch DROPS a fold carrying a validity window
+    # because the content address resolves to a terminal claim,
+    # `terminal_fold_refused`, raised when a dedup HIT would write caller props
+    # and/or an authored word onto that same settled claim, and
     # `narrative_not_recorded` (#10000). The set is NOT closed and this comment
-    # does not enumerate it: the extend below is code-agnostic, so a new code
-    # reaches `warnings[]` with no change here. A dropped fold writes nothing,
-    # so without this the client gets a 200 whose `when` was silently not
-    # applied. The handler folds these into the response's `warnings[]`
-    # (#405's additive channel).
+    # does not enumerate it: both fold codes are forwarded here
+    # CODE-AGNOSTICALLY (the `extend` below), so a new one needs no change to
+    # this line — and a code list in PROSE here is exactly what goes stale, which
+    # is why the producers (`_temporal_not_applied_advisory`,
+    # `_terminal_fold_refused_advisory`, `_narrative_home_advisory`) are named
+    # rather than promised. A dropped fold writes nothing, so without this the
+    # client gets a 200 whose `when` was silently not applied. The handler folds
+    # these into the response's `warnings[]` (#405's additive channel).
     _write_advisories: list[dict] = []
     # #5363 (B): each supersede window is validated inside the points loop
     # below, PER ACTION and immediately BEFORE that action's successor is

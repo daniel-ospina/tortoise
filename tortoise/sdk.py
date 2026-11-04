@@ -12737,6 +12737,13 @@ class TortoiseSDK:
                 # the row version at UPDATE time instead of reusing the earlier
                 # search).
                 #
+                # ⛔ THE HOISTED READ REMAINS THE ONLY REFUSAL *BEFORE* THE
+                # AUTHORED-WORD LEG. The arming above happens at this fold's
+                # `update_point` call, which runs AFTER `set_point_baseline`, so
+                # deleting the read above as "redundant with the guard's own
+                # read" deletes the only pre-word refusal on this path
+                # (#10368 review P2).
+                #
                 # ⚠️ DISCLOSED RESIDUAL, the one this read does NOT cover: the
                 # authored-word leg writes FIRST (the `set_point_baseline`
                 # above) through its own baseline writer rather than this
@@ -12744,7 +12751,9 @@ class TortoiseSDK:
                 # THAT window can still land the weak body. Closing it needs a
                 # write-point predicate inside the baseline writer itself; it is
                 # not reopened here, and the window named is the one that
-                # remains — not "every leg".
+                # remains — not "every leg". Arming is therefore PARTIAL by
+                # construction, and this comment says so rather than letting a
+                # partial arming read as full coverage.
                 #
                 # ⛔ The predicate is what this fold would APPLY, never the raw
                 # bag. `content_hash` is DERIVED (written near the top of this
