@@ -227,8 +227,9 @@ the same class reached by a variable-name mismatch).
    rather than a captured string), reading `TORTOISE_API_KEY`, then the fleet
    alias `TORTOISE_MCP_API_KEY`, then the stored credentials in the recorded
    #1708 D5 order: the PROJECT-LOCAL `./.tortoise` that `tortoise init --api-key`
-   writes, then `~/.tortoise/credentials.json`. A project-local store that git
-   TRACKS is skipped rather than read (see the trust boundary below). A rotation
+   writes, then `~/.tortoise/credentials.json`. A store that sits in a repository
+   is skipped rather than read — tracked, or inside a work tree when git cannot
+   say (see the trust boundary below). A rotation
    therefore reaches the wire on the next call with no rebuild and no restart. A
    blank value is "no credential", never an `Authorization: Bearer` header with
    nothing after the scheme; if the endpoint then rejects the call, the client raises
@@ -276,12 +277,16 @@ request. The env leg is precedence, not liveness. Both stores are read: a user
 who onboarded through the CLI has the project-local one, and a client that read
 only the global file would report "no credential" for a key sitting on disk.
 **One exception, and it is a trust boundary rather than a precedence rule: a
-store git TRACKS is IGNORED.** Both halves of the identity come from one file
-(`api_key` and `api_url`), so a repository that commits `./.tortoise` would
-choose the key *and* the host its requests go to — the shape `#3660` fails closed
-on. A store `tortoise init` writes is gitignored, so the ordinary project-local
-store is unaffected; the ignored one is named in the refusal's source list and
-warned about once on stderr.
+store that sits in a repository is IGNORED.** Both halves of the identity come
+from one file (`api_key` and `api_url`), so a repository that commits
+`./.tortoise` would choose the key *and* the host its requests go to — the shape
+`#3660` fails closed on. Precisely: a store git TRACKS is skipped, and so is one
+inside a git work tree when git cannot be run at all to say whether it is tracked
+(the fail-closed arm; a store in no repository is read as before). The
+global store is vetted the same way whenever a `.git` sits above it. A store
+`tortoise init` writes is gitignored, so the ordinary project-local store is
+unaffected *where git can answer*; the ignored one is named in the refusal's
+source list and warned about once on stderr.
 
 **CO-SOURCE (#2369 D1.1).** When the key comes from the credential file, the
 endpoint comes from that SAME file (`api_url`), never from a `TORTOISE_MCP_URL`

@@ -41,10 +41,11 @@ credentials — the PROJECT-LOCAL `./.tortoise` that `tortoise init --api-key`
 writes, then `~/.tortoise/credentials.json` (#1708 D5 order: the first key found
 wins) — on EVERY forwarded request, so a rotation, a refresh, or a key added
 after the session started takes effect on the next call. ONE exception, and it is
-a trust boundary rather than a precedence rule: a project-local store git TRACKS
-is IGNORED, because both halves of the identity come from that one file
-(`api_key` and `api_url`), so a repository that commits it would choose the key
-AND the host — the shape `#3660` fails closed on.
+a trust boundary rather than a precedence rule: a store that sits in a repository
+is IGNORED — tracked, or inside a work tree when git cannot say — because both
+halves of the identity come from that one file (`api_key` and `api_url`), so a
+repository that commits it would choose the key AND the host — the shape `#3660`
+fails closed on.
 
 A blank resolution is never sent as an empty header. It sends nothing, and if
 the endpoint rejects the call the bridge answers with the named
@@ -676,12 +677,14 @@ def _live_key() -> str | None:
     """The credential that resolves RIGHT NOW, or `None` if resolution fails.
 
     The FAULT path must not be able to fault. `resolve_connection()` is
-    never-raise by construction (its only fallible step, `_credential_paths()`,
-    swallows an unlocatable store), but a handler that calls it unguarded is one
-    future addition away from re-raising out of `main()` — and a bridge that dies
-    with a traceback writes no JSON-RPC error, so the harness waits forever for an
-    answer it will never get. Suppressing here costs a redaction key at worst; it
-    never costs the frame.
+    never-raise by construction — `_credential_paths()` swallows an unlocatable
+    store, the store read/parse catches EVERY failure (including the
+    `RecursionError` a deeply nested store raises), and every warning goes through
+    `_warn` — but a handler that calls it unguarded is one future addition away
+    from re-raising out of `main()`, and a bridge that dies with a traceback
+    writes no JSON-RPC error, so the harness waits forever for an answer it will
+    never get. Suppressing here costs a redaction key at worst; it never costs the
+    frame.
     """
     try:
         return resolve_connection().key

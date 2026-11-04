@@ -162,11 +162,19 @@ _LAST_SENT: list[Connection | None] = [None]
 
 
 def _warn_once(topic: str, message: str) -> None:
-    """Write a one-off operator warning to stderr (never raises, never repeats)."""
+    """Write a one-off operator warning to stderr (never raises, never repeats).
+
+    Routed through `_warn`, not `print`: this writer is the one behind
+    `_announce_withheld`, which runs AFTER a successful request on both public
+    paths (`_run_guarded` and `_GuardedClient.__aexit__`). An unguarded write
+    there does not merely lose a diagnostic — it turns a result the client
+    already holds into a `BrokenPipeError`, and `status()`'s broad `except`
+    converts a probe that SUCCEEDED into `tortoise_unavailable`.
+    """
     if topic in _WARNED_TOPICS:
         return
     _WARNED_TOPICS.add(topic)
-    print(f"[tortoise-mcp] {message}", file=sys.stderr)
+    _warn(f"[tortoise-mcp] {message}")
 
 
 class MCPCredentialHostMismatchError(RuntimeError):
@@ -399,8 +407,8 @@ def _warn_if_store_is_git_tracked(path: Path) -> None:
         return
     _WARNED_TRACKED_STORES.add(label)
     _warn(
-        f"⚠️  {label} is tracked by git, or sits in a git work tree git could not "
-        f"read — either way a repository can commit that file, so it is NOT "
+        f"⚠️  {label} is tracked by git, or sits in a git work tree that could not "
+        f"be checked — either way a repository can commit that file, so it is NOT "
         f"trusted as a credential source and is IGNORED. Remove it from the "
         f"repository (`git rm --cached {path.name}`) and let `tortoise init "
         f"--api-key` write a gitignored store, or set TORTOISE_API_KEY."
@@ -478,7 +486,13 @@ def resolve_connection() -> Connection:
             # wins (#1708 D5). Reading it would raise IsADirectoryError and be
             # reported as a CORRUPT store.
             continue
-        if repo_controlled and _git_tracks(path):
+        # The project-local candidate is ALWAYS vetted (a repository can commit
+        # it). The global store is vetted only when a `.git` sits above it: the
+        # ordinary host pays no `git` spawn per request, while a `$HOME` that IS a
+        # checkout is still covered — a dotfiles repo tracking
+        # `.tortoise/credentials.json` would otherwise supply both halves from one
+        # committed file, the #10796 shape on this candidate.
+        if (repo_controlled or _in_a_git_work_tree(path.parent)) and _git_tracks(path):
             # Checked BEFORE the read: the file is repo-controlled, so it must not
             # supply a key OR an `api_url`. Marked in `sources` so a later refusal
             # reports the real state — ignored, not absent. The label says
@@ -489,7 +503,16 @@ def resolve_connection() -> Connection:
             continue
         try:
             config = json.loads(path.read_text())
-        except (OSError, ValueError) as exc:
+        except Exception as exc:
+            # ANY failure to obtain config from this path IS "this store is not
+            # readable config", so the catch is deliberately total. `read_text`
+            # raises OSError; `json.loads` raises ValueError for malformed JSON
+            # and **RecursionError** (a RuntimeError, NOT a ValueError) for
+            # deeply nested input — which escaped this handler, escaped
+            # `resolve_connection`, and reached `status()` and the bridge's
+            # `main()` as a traceback. That made "never raises" false and made a
+            # bridge die without answering the frame it was meant to answer.
+            #
             # Named, not erased (#1708 D6): the label carries the failure, so a
             # later refusal shows the real state instead of "no key anywhere".
             sources[-1] = f"{label} ({type(exc).__name__}: {exc})"

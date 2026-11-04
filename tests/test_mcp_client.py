@@ -1130,21 +1130,131 @@ class TestCredentialResolution:
         connection = mcp_client.resolve_connection()
         assert connection.key == "tt_legit_user_key", connection
 
-    def test_the_git_query_cannot_consume_the_bridge_protocol_pipe(
+    def test_the_git_query_is_harnessed_so_it_cannot_touch_the_protocol_pipe(
         self, isolated_home, monkeypatch, tmp_path,
     ):
-        """The query runs on the bridge's stdin — it must never read from it.
+        """Assert the CALL ITSELF, because `ls-files` cannot be made to misbehave.
 
         `mcp_bridge.forward` -> `resolve_connection` runs in the process whose
-        STDIN IS the JSON-RPC protocol pipe. An inherited stdin is not read by
-        `ls-files` today, but `GIT_TERMINAL_PROMPT` and `stdin=DEVNULL` make that
-        a property of the call rather than a hope about git's behaviour.
+        STDIN IS the JSON-RPC protocol pipe, and whose environment may carry
+        `GIT_*` that redirect the repository or the index. Asserting on git's
+        output cannot prove either protection: `ls-files` never reads stdin and
+        never prompts, so a test that only checked the return value stays green
+        with BOTH protections removed. The call's own arguments are the property.
         """
         from tortoise import mcp_client
 
         repo = _git_repo_with_store(tmp_path, {"api_key": "tt_local"}, commit=True)
+        monkeypatch.setenv("GIT_INDEX_FILE", "/tmp/elsewhere/index")
         monkeypatch.setenv("GIT_TERMINAL_PROMPT", "1")
+        seen: dict = {}
+        real_run = mcp_client.subprocess.run
+
+        def _spy(argv, **kwargs):
+            seen["env"] = dict(kwargs.get("env") or {})
+            seen["stdin"] = kwargs.get("stdin")
+            return real_run(argv, **kwargs)
+
+        monkeypatch.setattr(mcp_client.subprocess, "run", _spy)
         assert mcp_client._git_tracks(repo / ".tortoise") is True
+
+        assert seen["stdin"] is mcp_client.subprocess.DEVNULL, seen
+        assert not [k for k in seen["env"] if k.startswith("GIT_") and k != "GIT_TERMINAL_PROMPT"], (
+            f"ambient GIT_* leaked into the query: {sorted(seen['env'])}")
+        assert seen["env"].get("GIT_TERMINAL_PROMPT") == "0", seen["env"]
+
+    def test_a_tracked_GLOBAL_store_is_ignored_too(
+        self, isolated_home, monkeypatch, tmp_path,
+    ):
+        """The other candidate: a `$HOME` that is itself a checkout.
+
+        A dotfiles repository can track `~/.tortoise/credentials.json`, and then
+        one committed file supplies both halves of the identity on the GLOBAL
+        candidate — the same #10796 shape. The store is only vetted when a `.git`
+        sits above it, so the ordinary host still pays no `git` spawn per request.
+        """
+        from tortoise import mcp_client
+
+        home = isolated_home
+        (home / ".tortoise").mkdir(parents=True, exist_ok=True)
+        store = home / ".tortoise" / "credentials.json"
+        store.write_text(json.dumps({
+            "api_key": "tt_attacker", "api_url": "http://collector.evil:9999",
+        }))
+        _git(home, "init", "-q")
+        _git(home, "add", "-f", ".tortoise/credentials.json")
+
+        connection = mcp_client.resolve_connection()
+        assert connection.key is None, connection
+        assert connection.url == mcp_client._DEFAULT_URL, connection
+        assert any("repo-controlled: ignored" in s for s in connection.sources), connection.sources
+
+    def test_an_ordinary_global_store_is_never_probed_with_git(
+        self, isolated_home, monkeypatch,
+    ):
+        """Negative: no `.git` above HOME means no spawn, and the key is read.
+
+        This is what keeps the per-request path cheap, and what stops a `$HOME`
+        that merely SITS inside a work tree from losing a credential no
+        repository had a reason to control.
+        """
+        from tortoise import mcp_client
+
+        store = isolated_home / ".tortoise" / "credentials.json"
+        store.parent.mkdir(parents=True, exist_ok=True)
+        store.write_text(json.dumps({"api_key": "tt_global_key"}))
+
+        def _boom(*_a, **_k):
+            raise AssertionError("git was spawned for an ordinary global store")
+
+        monkeypatch.setattr(mcp_client.subprocess, "run", _boom)
+        assert mcp_client.resolve_connection().key == "tt_global_key"
+
+    def test_a_deeply_nested_store_is_NAMED_not_raised(
+        self, isolated_home, monkeypatch, tmp_path,
+    ):
+        """`json.loads` raises RecursionError — a RuntimeError, not a ValueError.
+
+        A store is attacker-influenced input, so its parse failure must land in
+        the #1708 D6 "named, not erased" arm like any other: escaping here broke
+        `status()`'s never-raise contract AND killed the bridge with a traceback
+        before it could answer its frame — the failure its fault handler exists
+        to prevent.
+        """
+        from tortoise import mcp_client
+
+        monkeypatch.setenv("TORTOISE_MCP_URL", "http://127.0.0.1:9/mcp")
+        store = isolated_home / ".tortoise" / "credentials.json"
+        store.parent.mkdir(parents=True, exist_ok=True)
+        store.write_text("[" * 200_000 + "]" * 200_000)
+
+        connection = mcp_client.resolve_connection()  # must NOT raise
+        assert connection.key is None, connection
+        assert any("RecursionError" in s for s in connection.sources), connection.sources
+        payload = mcp_client.status()  # must NOT raise either
+        assert payload["status"] == "tortoise_unavailable", payload
+
+    def test_warn_once_cannot_raise_after_a_successful_run(
+        self, monkeypatch,
+    ):
+        """The third stderr writer: it runs AFTER the result is in hand.
+
+        `_announce_withheld` is called on the success path, so an unguarded write
+        there turns a completed request into a `BrokenPipeError`; `status()`'s
+        broad `except` would then report a probe that SUCCEEDED as
+        `tortoise_unavailable`.
+        """
+        import io
+
+        from tortoise import mcp_client
+
+        class _Raising(io.StringIO):
+            def write(self, _data):
+                raise BrokenPipeError(32, "Broken pipe")
+
+        mcp_client._WARNED_TOPICS.clear()
+        monkeypatch.setattr(mcp_client.sys, "stderr", _Raising())
+        mcp_client._warn_once("unit-test-topic", "a withheld credential")
 
     def test_status_never_raises_when_stderr_itself_faults(
         self, isolated_home, monkeypatch, tmp_path,
