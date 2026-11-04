@@ -3401,3 +3401,59 @@ def test_the_json_record_carries_no_verdict_for_machine_readers(monkeypatch, cap
     assert "NO-VERDICT-WILL-ARRIVE" not in captured.out, (
         "the notice must never enter the --json stream (it would break json.load in "
         "tools/ci-check-repair-local.sh and the workflow's step summary)")
+
+
+# ── 17. the remedy lines must reach a human IN PRODUCTION (#10766) ──────────
+#
+# Both callers pass `--json` — `.github/workflows/ci-check-repair.yml:170`
+# (`--apply --json`) and `tools/ci-check-repair-local.sh` (`--json`, its stderr
+# appended to the durable log). While the STARVED and needs-credential lines sat
+# inside the `else` branch, NEITHER ever printed there: the two states that say
+# "no per-PR repair can help you" were the two whose remedy text was withheld.
+# These tests drive the real entry point in the mode production uses, so moving
+# the prints back into the format branch fails them.
+
+def test_the_starved_remedy_prints_under_json_too(monkeypatch, capsys, tmp_path):
+    """#10766: `--json` is the only mode both callers use — the remedy must survive it."""
+    monkeypatch.setattr(R, "read_queue_health", lambda repo: _flood_health())
+    monkeypatch.setattr(R, "open_prs", lambda repo, include_drafts: [pr(1)])
+    monkeypatch.setattr(R, "check_runs_at", lambda repo, head: [])
+    monkeypatch.setattr(R, "runs_at_head", lambda repo, head: [run(10, "ci.yml", "queued")])
+
+    assert R.main(["--repo", "o/r", "--no-live", "--json",
+                   "--record", str(_flood_record(tmp_path))]) == 0
+    captured = capsys.readouterr()
+    summary = json.loads(captured.out)      # the stdout stream stays ONE document
+    assert summary["starved"] == 1
+    assert "STARVED" in captured.err, (
+        "the STARVED sentence is the only place the unjam remedy is named, and "
+        "`--json` is the only mode both production callers use")
+    assert "ci_queue_health.py" in captured.err, (
+        "naming the state without the action leaves the reader with nothing to do")
+    assert "STARVED" not in captured.out, (
+        "it must never enter the --json stream (json.load in tools/ci-check-repair-local.sh)")
+
+
+def test_the_credential_remedy_prints_under_json_too(monkeypatch, capsys, tmp_path):
+    """#10766, the exit-1 half: the exit code alone never says what to do about it."""
+    # NOT `can_trigger_events()` from the environment: the point is the automatic
+    # token, which is what CI runs under, and a stray env var must not decide this.
+    monkeypatch.setattr(R, "can_trigger_events", lambda: False)
+    monkeypatch.setattr(R, "open_prs", lambda repo, include_drafts: [pr(1)])
+    monkeypatch.setattr(R, "check_runs_at", lambda repo, head: [])
+    monkeypatch.setattr(R, "runs_at_head", lambda repo, head: [])
+    rec = tmp_path / "required-contexts.json"
+    rec.write_text(json.dumps({
+        "required_contexts": ["docs"],
+        "emitters": {"docs": [["ci.yml", "docs"]]},
+    }))
+
+    assert R.main(["--repo", "o/r", "--no-live", "--no-queue-health", "--json",
+                   "--apply", "--record", str(rec)]) == 1
+    captured = capsys.readouterr()
+    summary = json.loads(captured.out)
+    assert summary["prs"][0]["needs_user_actor"] is True
+    assert "credential that can trigger events" in captured.err, (
+        "exit 1 means 'a user credential is needed'; without this line the caller "
+        "sees only a non-zero exit")
+    assert "credential that can trigger events" not in captured.out
