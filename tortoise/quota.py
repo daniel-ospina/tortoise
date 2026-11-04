@@ -1004,6 +1004,20 @@ def _count_resource(org_id: str, resource: str, sdk=None) -> int:
 
         # ── Tenant-graph-scoped counts (sessions, points) ──
         if sdk is None:
+            # #8906: this fallback is the DEFAULT graph `org_{org_id}`, NOT the
+            # request's — a custom-graph-bound key writes elsewhere. So a caller
+            # reaching here for a tenant-graph resource with a RESOLVED request
+            # SDK absent is counting a graph the request MAY NOT WRITE — for a
+            # graph-bound key, and for a promoted default; for the bound-DEFAULT
+            # and org-wide classes whose default IS ``org_{org_id}`` the graph
+            # coincides, and the cost there is a SECOND HANDLE, not a wrong
+            # count. See `enforce_org_limit`'s `sdk:`/`sdk_factory:` docs for the
+            # full contract. ⚠️ The ONE deliberate exception is
+            # `hosted_api._gate_sdk_for`'s unresolved-binding arm, which answers
+            # `None` ON PURPOSE (no write can occur — `_data_sdk` refuses 403 —
+            # so substituting a graph here WOULD be a fail-open widening); it
+            # reaches this line by design and is not the defect this comment
+            # describes.
             sdk = _make_sdk(namespace=org_id)
         if resource == "documents":
             # #1726 Slice 1, re-pointed by D10 (ONTOLOGY v3.15 §4.4): the
@@ -1170,14 +1184,67 @@ def enforce_org_limit(limits: dict | None, resource: str, sdk=None, *,
             `int()` refuses it and it is refused here too.
         resource: "points" | "api_keys" | "sessions" | "users" | "graphs"
             | "documents".
-        sdk: pre-built org SDK (REST callers already hold one) — optional.
+        sdk: the pre-built SDK this request WRITES through — pass it for every
+            resource, and it WINS over `sdk_factory` when given (a caller that
+            already holds the handle must not build a second one). ⛔ For a
+            TENANT-GRAPH resource (`points`, `sessions`, `documents`) never let
+            the count land on `_count_resource`'s `namespace=org_id`
+            construction: that is the org's DEFAULT graph ``org_{org_id}`` —
+            while a CUSTOM-graph-bound key writes its own
+            ``graph_namespace`` (``org_{org_id}_{gid}``). Those two graphs differ
+            for that credential class by construction, so such a count compares
+            the cap against a graph the request never touches: a full default
+            graph refuses writes to an EMPTY bound graph (a permanent refusal)
+            and a full bound graph is admitted while the default is small (a cap
+            hole). This was #8906, live on every REST points door. Pass the
+            request's own SDK; where a caller cannot, `sdk_factory` below is
+            what keeps the count on the write's graph. The invariant is MCP's
+            house rule verbatim ("count on the SAME org SDK the tool writes to …
+            so the count and the write can never target different databases"),
+            and the omission is silent — nothing fails loudly when a new door
+            forgets it, which is why the contract is stated HERE rather than at
+            each caller.
+            ⚠️ The bound-DEFAULT class is NOT a lane rule — a bound-default key
+            agrees with ``org_{org_id}`` only while the org's storage key is
+            ``org_{org_id}``. Its namespace IS the org's STORAGE KEY
+            (``organizations.graph_name``), which the hosted org-provisioning
+            paths (``create_org`` / ``register_user`` / ``agent_signup`` / tenant
+            onboarding) set to ``org_{org_id}`` since #1903; the hosted default
+            ``graphs`` row COPIES that key rather than constructing it
+            (``supabase_control.insert_graph``), so a legacy/pre-guard key bound
+            to the default node opens whatever the key holds and agrees with
+            ``org_{org_id}`` only while it is ``org_{org_id}``. That is not
+            hypothetical in the hosted lane either: a pre-#1903 org whose
+            storage key is ``team_{…}`` diverges, and ``hosted_api`` already
+            guards that class
+            (``_make_sdk(namespace=org_id)`` "would therefore open, and so MINT, a
+            different, absent graph"). In the SELFHOST/registry lane
+            ``sdk.org_create`` stores ``graph_name = org_{name}`` (#2023 — the
+            divergence is called out in ``hosted_api._data_sdk``'s docstring), so
+            a bound-default key there diverges from ``org_{org_id}`` exactly as
+            a custom binding does.
+            Registry resources (``api_keys``/``users``/``graphs``) are
+            unaffected BY THE COUNT: they resolve the registry either way — a
+            passed registry-named sdk is reused and any other sdk is discarded
+            (``_count_resource``'s registry arm), so the number is the same.
         sdk_factory: #4051 — called ONLY if and when the count is actually
-            taken, for callers that must count the graph the write will open but
-            must not build an SDK when the limit is unlimited (the capture lane's
-            `sessions` gate is vacuous by #4010 and counted nothing before this —
-            it must not start building a graph handle to prove it). Mutually
-            exclusive with `sdk`: a non-None `sdk` wins and the factory is never
-            called.
+            taken, and only when no `sdk` was passed: for callers that must
+            count the graph the write will open but must not build an SDK when
+            the limit is unlimited (the capture lane's `sessions` gate is vacuous
+            by #4010 and counted nothing before this — it must not start
+            building a graph handle to prove it). Mutually exclusive with `sdk`:
+            a non-None `sdk` wins and the factory is never called.
+            ``hosted_api._gate_sdk_for`` is that factory, and it mirrors the
+            OPENER's own call forms — a bound key's own binding, a promoted
+            default's namespace — so an omitted sdk counts the graph the write
+            lands in for every credential that HAS a write graph. Two arms are
+            the deliberate exceptions, both recorded in ``_gate_sdk_for``'s
+            docstring: the registry-scoped resources and an UNRESOLVED binding
+            answer ``None`` (for the latter no write can occur — ``_data_sdk``
+            refuses 403 — so substituting a graph would be a fail-open
+            widening). The REST doors pass `sdk=` anyway, for identity (one
+            handle for the count and the write) rather than because the fallback
+            is wrong.
         slot_credit: #4355 — how many slots this write RELEASES as part of the
             same operation, so the admission check is evaluated against the
             post-release count. It exists for exactly ONE caller: the
