@@ -775,7 +775,8 @@ mechanisms:
       (#10360 review cycle 4 P3, measured): `_CLOCK_FORM` anchors on `$`, so a
       colon form with a fused unit word after it is NOT excluded —
       `the lap took 1:23 seconds` now reads the value as the RATIO core `1/23`
-      with unit `s`, and refuses against `83 seconds`. The pre-existing
+      with unit `s`, and refuses against `83 seconds` (pinned by
+      `test_the_registry_rows_measured_disclosures_are_pinned`). The pre-existing
       `27:12 minutes` already behaved this way; what is new is that the fused
       units reach it. The verdict (a conversion is a different identity) is
       deliberate; the RATIO core is not a duration, and separating the two is
@@ -853,7 +854,8 @@ mechanisms:
       pinned by
       `test_the_composition_does_not_smuggle_the_SEPARATOR_decision_back_in`.
       ⚠️ The composition CHANGED one truthful pair's verdict, disclosed rather
-      than implied: `20k m` against `20 km` (20 km, two ways) now REFUSES. ⛔ The
+      than implied: `20k m` against `20 km` (20 km, two ways) now REFUSES (pinned
+      by `test_the_registry_rows_measured_disclosures_are_pinned`). ⛔ The
       cause is stated the way it was MEASURED (#10360 review cycle 5 P3 — the
       first wording had it backwards): the old tolerance came from the two sides
       collapsing into the SAME identity, not from different ones — `20k`+`m`
@@ -968,7 +970,10 @@ mechanisms:
       gated on `_K_ABBREVIATES` (`km`/`kg`), so a unit-STATING side now refuses
       against a BARE `Nk` side for every other unit: `3000 ms` vs `3k`,
       `20000 miles` vs `20k`, `2000 seconds` vs `2k` are REFUSED, while
-      `3000 kg` vs `3k` and `3000 km` vs `3k` are tolerated — i.e. the verdict
+      `3000 kg` vs `3k` and `3000 km` vs `3k` are tolerated (all seven pinned by
+      `test_the_registry_rows_measured_disclosures_are_pinned`, which asserts the
+      refusals AND the two controls, so the disclosure cannot be satisfied by a
+      rule that refuses every bare `Nk`) — i.e. the verdict
       still depends on the unit's spelling. ⛔ This is NOT repaired here: the
       `_K_ABBREVIATES` gate is a DELIBERATE, pinned bound
       (`test_a_bare_magnitude_prefix_is_tolerated_only_against_a_DIFFERENT_unit`

@@ -100,9 +100,14 @@ BATTERY = (
     # units are VALUE, not form: a minutes->hours rewrite is refused, while a
     # unit SPELLED differently is not (review P2 on the first round).
     ("the TTL is 20 minutes", "the TTL is 20 hours", True, "unit rewritten"),
-    # `_value_bindings` fuses only the units in its own `_UNIT_WORDS`, so the
-    # judged form is the fused one (`800ms`); a unit written APART is not
-    # fused by the engine and therefore not a unit identity here either.
+    # `_value_bindings` fuses only the units in its own `_UNIT_WORDS`. A unit
+    # word that IS in that set is fused whether it is written ATTACHED or
+    # APART (`800ms` ≡ `800 ms`) — since #10360 `ms`/`msec`/`minute`/`second`/
+    # `hour`/`mile` are members, so both forms are unit identities and both are
+    # judged. ⛔ Before #10360 the second half of this comment was true (an
+    # apart-written unit WAS unfused and so named no identity); it is corrected
+    # here rather than left, because a reader looking for how to exploit an
+    # apart-written unit would have been told the gap still exists.
     ("the timeout is 800ms", "the timeout is 800s", True, "unit rewritten 2"),
     ("the TTL is 20 minutes", "the TTL is 20 mins", False, "unit spelling"),
     ("the p95 is 0.5 seconds", "the p95 is .5 seconds", False, "leading dot"),
@@ -1954,6 +1959,52 @@ def test_a_magnitude_prefix_COMPOSES_with_the_unit_word_that_follows_it():
     # end to end: the truthful point is WRITTEN, not withheld
     result = _write("the fleet drove 20000 miles", "the fleet drove 20k miles")
     assert result["payload"]["points"], result["warnings"]
+
+
+def test_the_registry_rows_measured_disclosures_are_pinned():
+    """Every behaviour `config/v4-mechanisms.yml` DISCLOSES is held by an assert.
+
+    The `state_value_carve_out` row is the residual ledger an auditor reads, and
+    this file's own convention is that a disclosure in that row is pinned here —
+    otherwise closing or re-breaking the behaviour leaves the row silently
+    asserting the old state, which is the "guarantee documented, mechanism
+    absent" defect #10360 exists to remove.
+
+    Found by the #10801 rebase review (P2): the three claims below were accurate
+    when measured and pinned NOWHERE — `grep` found no test naming any of them.
+    The pairs are asserted at the level the row states them, which is why the
+    existing `3000 ms` / `3k ms` case in the composition test does NOT cover the
+    `3000 ms` / bare `3k` claim: a unit-STATING side and a BARE `Nk` side are
+    different questions, and only the second is what the row discloses.
+    """
+    # ⚠️ The FALSE-ACCUSATION disclosures — truthful pairs this rule now refuses,
+    # stated as such in the row rather than left to be found. If a repair makes
+    # one of these tolerate again, this reds and the row has to move with it.
+    for content, quote in (
+        # `:840` — the composition gave a prefixed value a CONCRETE unit, so
+        # `20 km` written two ways no longer collapses to one identity.
+        ("the drive is 20k m", "the drive is 20 km"),
+        # `:761` — a colon form with a fused unit word after it is NOT excluded:
+        # the clock form anchors on `$`, so the core is read as a RATIO.
+        ("the lap took 1:23 seconds", "the lap took 83 seconds"),
+        # `:953` — a unit-STATING side against a BARE `Nk` side, refused for
+        # every unit whose abbreviation the `_K_ABBREVIATES` bridge does NOT
+        # gate (that gate is the deliberate bound, not an oversight).
+        ("the timeout is 3000 ms", "the timeout is 3k"),
+        ("the fleet drove 20000 miles", "the fleet drove 20k"),
+        ("the delay was 2000 seconds", "the delay was 2k"),
+    ):
+        assert v2._value_slot_divergence(content, quote), (content, quote)
+
+    # …and the two CONTROLS the same sentence states: for `km`/`kg` the factor
+    # bridge fires, so the same shape TOLERATES. Without these the disclosure
+    # above could be satisfied by a rule that refuses every `Nk`, which is not
+    # what the row claims and would refuse truthful points wholesale.
+    for content, quote in (
+        ("the load is 3000 kg", "the load is 3k"),
+        ("the trip is 3000 km", "the trip is 3k"),
+    ):
+        assert v2._value_slot_divergence(content, quote) == (), (content, quote)
 
 
 def test_the_composition_reads_a_SIGNED_or_SPACED_prefix_as_the_same_value():
