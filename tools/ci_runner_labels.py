@@ -75,6 +75,10 @@ import sys
 # #5128: refuse a <3.12 interpreter before the imports below — `from datetime import UTC`
 # is module-level and 3.11+, so an older interpreter raises ImportError there before any
 # later guard could run (the guard must be the first statement after the docstring).
+# ⛔ The invocation named below is the SCRIPT form, which is the one that works here:
+# `tests/test_entry_point_python_guard.py` treats a top-level `tools/<x>.py` as a loose
+# script (a package module needs a directory chain under `tools/`), so
+# `-m tools.ci_runner_labels` is NOT this file's invocation.
 if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     raise SystemExit(
         f"tools/ci_runner_labels.py requires Python >= 3.12 (got "

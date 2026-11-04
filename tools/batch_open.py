@@ -117,6 +117,10 @@ import sys
 # raises ImportError on an old interpreter before any LATER-placed guard could
 # run. This file imports no `datetime` today; the guard is hoisted anyway so the
 # rule holds uniformly instead of being re-litigated per import list.
+# ⛔ The invocation named below is the SCRIPT form, which is the one that works
+# here: `tests/test_entry_point_python_guard.py` treats a top-level
+# `tools/<x>.py` as a loose script (a package module needs a directory chain
+# under `tools/`), so `-m tools.batch_open` is NOT this file's invocation.
 if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     raise SystemExit(
         f"tools/batch_open.py requires Python >= 3.12 (got "
