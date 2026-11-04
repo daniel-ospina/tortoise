@@ -2720,7 +2720,7 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # file in this PR and no `core`-registered test guards it, so its
              # `api` registration downgrades nothing (#10727 review).
              "tortoise/mcp_client.py",
-             # #2148: `tools/` is a flat NON_PYTHON_PREFIXES entry and no
+             # [agent-infra#2148](dispatch): `tools/` is a flat NON_PYTHON_PREFIXES entry and no
              # SOURCE_PATTERNS row matches `tools/rail_detach.py`, so a
              # TOOL-ONLY change filtered to `changed == []` and took the
              # docs-only early return — the durability pin registered under

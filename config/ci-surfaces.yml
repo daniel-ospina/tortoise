@@ -5875,19 +5875,30 @@ surfaces:
   # row), so before this fix the guard ran on `ep`-matching diffs only — not even
   # on the `tortoise/` arm the comment described.
   - test_substrate_map.py
-  # #2148: `tests/test_rail_detach.py` pins the rail's DURABILITY — that
+  # [agent-infra#2148](dispatch, not this repo's #2148 — here that number is
+  # the tier-2 cost gates): `tests/test_rail_detach.py` pins the rail's DURABILITY — that
   # `scripts/admin-merge.sh` runs in its own session (setsid) and outlives the
   # lane that launched it, plus the fail-closed verdict vocabulary (a rail with
   # no `EXIT=` line is `lost`, never `merged`; `ALREADY MERGED` never fabricates
   # a `merge_sha`) and the `flock` duplicate-rail guard. Before this row the file
   # was in NO surface, so `ci_selection.py --integrity` listed it as drift
   # (redding the REQUIRED `manifest-integrity` leg) and no leg selected the suite
-  # at all — the 25 tests the change rests on had zero CI signal.
+  # at all — the whole suite the change rests on had zero CI signal.
   #
   # `core` is the right home: the subject is `tools/rail_detach.py`, and the
   # suite is hermetic (synthetic stub rail, temp dirs, no DB/network/FalkorDB),
-  # so it is deliberately NOT carve_out-registered. ⚠️ The registration alone
-  # does NOT make the pin run on the file it guards: `tools/` is a flat
+  # so it is deliberately NOT carve_out-registered. ⚠️ The MODULE makes one
+  # bounded, informational `gh pr view` per launch (the artifact's `HEAD`), so
+  # the suite stubs `gh` on PATH via an autouse fixture — without it the file
+  # made one real API call PER TEST (~1.9 s each on a quota-exhausted box) and
+  # was neither hermetic nor fast. ⛔ Both counts in this row are stated WITHOUT
+  # a test count on purpose: the numbers this row first carried ("the 25 tests",
+  # "25 real API calls") were re-derived at every revision and were stale again
+  # each time a test was added — the fix is to drop the number, not to refresh
+  # it.
+  #
+  # The registration alone does NOT make the pin run on the file it guards:
+  # `tools/` is a flat
   # `NON_PYTHON_PREFIXES` entry, and `tools/rail_detach.py` matches no
   # `SOURCE_PATTERNS` row, so a tool-only diff filters to `changed == []` and
   # takes the docs-only early return (measured: `select(["tools/rail_detach.py"])`
