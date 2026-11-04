@@ -629,13 +629,16 @@ async def test_onboarding_state_without_team_context_is_recorded_as_a_failure(
     left the MCP surface), and every surviving **tool** caller of the helper now
     guards `org_id is None` with its OWN literal before calling in —
     `tortoise_manage_sources` answers at its first guard and never reaches
-    `_sources_view`. The one surviving reader that DOES reach the branch is
-    `_sources_view()` itself, below. So the helper's
-    branch has no dispatch-level caller left, and pinning it through a
-    `tortoise_manage_sources` dispatch would assert a payload that dispatch
-    produced itself (measured: reverting `_SafeError` here leaves that dispatch
-    arm green). It is pinned where it IS reachable instead — `_sources_view()`, the
-    one surviving reader — and the two halves are stated separately because they
+    `_sources_view`. The one surviving **served** reader that DOES reach the
+    branch is `_sources_view()`, below. `tortoise_onboarding_state()` reaches it
+    too — it is unregistered, but its body is retained and
+    `tests/test_onboarding_selfhost_w12.py` still drives it — so "no
+    dispatch-level caller left" means no SERVED one, not that the branch is dead.
+    Pinning the refusal through a `tortoise_manage_sources` dispatch would assert
+    a payload that dispatch produced itself (measured: reverting `_SafeError`
+    here leaves that dispatch arm green). It is pinned where a SERVED path
+    reaches it instead — `_sources_view()` — and the two halves are stated
+    separately because they
     are two different producers:
 
     1. the SERVED tool's own no-team-context refusal is classified
