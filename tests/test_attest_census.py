@@ -1458,12 +1458,14 @@ def test_a_flush_that_fails_only_at_exit_is_rc_2_not_120(monkeypatch, tmp_path):
     assert ac.main(["--reviews-dir", str(tmp_path), "--no-gate", "--out", str(tmp_path / "o.md")]) == 2
 
 
-def _run_with_shim(tmp_path, extra_args, stdout, preexec_fn=None):
+def _run_with_shim(tmp_path, extra_args, stdout, preexec_fn=None, stderr=subprocess.PIPE, env_extra=None,
+                   out_name="o.md"):
     """Run the REAL entry point against a `gh` shim, with `stdout` as the child's fd 1.
 
-    A subprocess is not optional for these two cases: one needs fd 1 CLOSED at interpreter start
-    (CPython then sets `sys.stdout = None`), and the other needs the failure to happen at SHUTDOWN,
-    after `main` has returned. Neither can be modelled by patching `sys.stdout` in-process.
+    A subprocess is not optional for these cases: one needs fd 1 CLOSED at interpreter start
+    (CPython then sets `sys.stdout = None`), one needs fd 2 closed (so `sys.stderr` is None, and
+    `print(file=None)` falls back to stdout), and one needs the failure to happen at SHUTDOWN,
+    after `main` has returned. None of the three can be modelled by patching `sys.stdout` in-process.
     """
     shim = tmp_path / "bin"
     shim.mkdir(exist_ok=True)
@@ -1473,12 +1475,18 @@ def _run_with_shim(tmp_path, extra_args, stdout, preexec_fn=None):
     reviews = tmp_path / "reviews"
     reviews.mkdir(exist_ok=True)
     env = dict(os.environ)
+    # ⛔ `env_extra` is applied BEFORE the PATH prefix, not after: a caller's env snapshot carries
+    # its own PATH, and merging it afterwards silently discards the shim — the child then runs the
+    # REAL `gh`, hits the network, and fails for a reason that has nothing to do with what the test
+    # is about (measured cycle 21: an LC_ALL=C arm went rc 2 on "undecodable output", 214 bytes from
+    # `gh` instead of the shim's two).
+    env.update(env_extra or {})
     env["PATH"] = shim.as_posix() + os.pathsep + env.get("PATH", "")
     cmd = [
         sys.executable, str(TOOL), *extra_args,
-        "--reviews-dir", str(reviews), "--no-gate", "--out", str(tmp_path / "o.md"),
+        "--reviews-dir", str(reviews), "--no-gate", "--out", str(tmp_path / out_name),
     ]
-    return subprocess.run(cmd, cwd=str(tmp_path), env=env, stdout=stdout, stderr=subprocess.PIPE,
+    return subprocess.run(cmd, cwd=str(tmp_path), env=env, stdout=stdout, stderr=stderr,
                           timeout=120, preexec_fn=preexec_fn)
 
 
@@ -1486,27 +1494,69 @@ def test_a_closed_fd1_is_rc_2_not_1(tmp_path):
     """`1>&-` makes CPython set `sys.stdout = None`, where `print()` SILENTLY no-ops — so only the
     `flush()` in `_emit_report` raises, and `AttributeError` was not in its `except`.
 
-    MEASURED (#10687 review cycle 19): `… --out o.md 1>&-` went **rc 0 → rc 1** on this commit
-    versus both its parent and `origin/main` — a contract regression introduced by the very call
-    that closes the size-dependent escape. Both surfaces are checked, because that is exactly how
-    the previous one of these hid.
+    MEASURED (#10687 review cycle 19): `… --out o.md 1>&-` went **rc 0 → rc 1** on the parent commit
+    versus `origin/main` — a contract regression introduced by the very call that closes the
+    size-dependent escape. Both surfaces are checked, because that is exactly how the previous one
+    of these hid.
+
+    ⛔ The `expect_out` arm is not decoration. `--json` NEVER writes `--out` (it returns before the
+    write), so a bare `exists()` assertion is (a) satisfied by the previous arm's leftover file and
+    (b) FAILS on correct code if the arms are reordered or parametrized. Measured, cycle 21: with
+    `return 2` injected at the head of the `--json` branch — the exact arm the original bug lived on
+    — both arms stayed green.
     """
 
     def _close_fd1():
         os.close(1)
 
-    for args in ([], ["--json"]):
-        proc = _run_with_shim(tmp_path, args, None, preexec_fn=_close_fd1)
+    for args, expect_out in (([], True), (["--json"], False)):
+        arm = tmp_path / ("json" if args else "markdown")
+        arm.mkdir()
+        proc = _run_with_shim(arm, args, None, preexec_fn=_close_fd1)
         assert proc.returncode == 2, (
             f"{args or ['markdown']}: a closed fd 1 must be rc 2, never 1 or 120 "
             f"(got {proc.returncode})\nstderr={proc.stderr[-1500:]!r}"
         )
         assert b"Traceback" not in proc.stderr, proc.stderr[-1500:]
-        # ⛔ The report must EXIST, or this test passes vacuously: any early rc 2 (a failing `gh`
-        # exec, an unreadable registry) would satisfy the assertions above without the child ever
-        # reaching the print. Measured #10687 cycle 20 — an injected `return 2` before the report
-        # left this test GREEN while its dead-reader sibling reddened.
-        assert (tmp_path / "o.md").exists(), "the child never reached the report — this pin is vacuous"
+        # ⛔ The MARKDOWN arm is the one this can prove progress on: it writes `--out` before
+        # emitting, so a child that bailed early leaves no file. `--json` returns BEFORE that write,
+        # so its `expect_out=False` is the documented behaviour rather than a progress signal —
+        # stated plainly because an assertion that reads as a pin but cannot fail on that arm is the
+        # exact defect this test was accused of twice (cycles 19 and 21).
+        assert (arm / "o.md").exists() is expect_out, (
+            f"--out presence must be {expect_out} on the {args or ['markdown']} arm "
+            f"(present={(arm / 'o.md').exists()}); on the markdown arm this is what proves the child "
+            "reached the emit rather than bailing early"
+        )
+
+
+def test_the_c_locale_plus_a_closed_fd2_plus_a_non_ascii_out_is_rc_0(tmp_path):
+    """The triad that was rc 1: closed fd 2 + C locale + a non-ASCII `--out`.
+
+    With fd 2 closed, `sys.stderr` is None and `print(..., file=None)` falls back to STDOUT — so
+    under a C-locale argv (non-ASCII `--out` decoded to lone surrogates) the courtesy message raised
+    `UnicodeEncodeError` AFTER a complete census. `errors="backslashreplace"` on stdout's
+    `reconfigure` is what closes it, and this is that guard's ONLY mutation proof: revert it and
+    this reds (measured cycle 21: HEAD 0, parent 1, origin/main 1).
+    """
+
+    def _close_fd2():
+        os.close(2)
+
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("PYTHONIOENCODING", "PYTHONUTF8", "PYTHONCOERCECLOCALE", "LC_ALL", "LANG")}
+    # The C locale makes the child decode argv as ASCII, turning `café` into lone surrogates.
+    env.update({"LC_ALL": "C", "LANG": "C", "PYTHONCOERCECLOCALE": "0", "PYTHONUTF8": "0"})
+    out_name = "caf\u00e9-census.md"
+    proc = _run_with_shim(
+        tmp_path, [], subprocess.DEVNULL, preexec_fn=_close_fd2, stderr=None, env_extra=env,
+        out_name=out_name,
+    )
+    assert proc.returncode == 0, (
+        f"a closed fd 2 + C locale + a non-ASCII --out must be rc 0 (got {proc.returncode}); "
+        "the courtesy message must be escaped, not raise"
+    )
+    assert (tmp_path / out_name).exists(), "the census itself must still complete"
 
 
 def test_a_small_report_against_a_dead_reader_is_rc_2_not_120(tmp_path):
