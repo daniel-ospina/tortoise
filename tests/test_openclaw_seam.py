@@ -189,6 +189,60 @@ def test_openclaw_home_is_the_plugin_directory_and_honours_state_dir(monkeypatch
         "ignored it would write where OpenClaw never looks and report success")
 
 
+def test_seam_target_remedy_reads_the_openclaw_state_dir_guard(tmp_path):
+    """`assert_seam_target` is exported for the whole artifact REGISTRY, so its
+    remedy must derive the harness's OWN guard root.
+
+    #10241 review cycle 6: the refusal was computed with Pi's root (`$HOME`)
+    for every harness, while `_install_openclaw` guards the OpenClaw STATE
+    directory.  The two differ exactly for the ordinary shape "I linked the
+    installed plugin at the copy in my repo" — the target sits under `$HOME`
+    but outside `~/.openclaw` — so the message promised a
+    `tortoise install openclaw` the installer REFUSES.  That is #5351's defect
+    ("the other one recommends a command that fails") re-introduced for the
+    sibling harness, and it is latent today only because nothing wires the
+    assertion for OpenClaw yet; the body says the helper "works for it", which
+    is what the next lane will rely on.
+
+    Mutation: pass `Path(home)` / `label="install home"` to `_symlink_escape`
+    instead of `_install_guard(harness, home)` — the in-`$HOME` leaf is then
+    accepted, `refused` is `""`, and both the sentence and the label go RED.
+
+    SCOPE: this fixture covers the ENTRY leaf, which is what the remedy models.
+    `_install_openclaw` also guards `openclaw.json`, so a shape whose settings
+    file escapes the state dir is refused while this message says nothing about
+    it — latent, tracked as the settings half of #10332 (the `_install_guard`
+    docstring records the same limitation next to the code).
+    """
+    home = tmp_path / "home"
+    plugin_dir = openclaw_home(home)
+    plugin_dir.mkdir(parents=True)
+    # Under $HOME, OUTSIDE the state directory.
+    repo_copy = home / "my-repo" / capture_install.OPENCLAW_ENTRY_NAME
+    repo_copy.parent.mkdir(parents=True)
+    expected = hook_install.read_hook_version(
+        hook_install.ARTIFACT_CONTRACTS["openclaw"].source)
+    newer = (expected + 1) if expected else 9999
+    repo_copy.write_bytes(
+        f"// tortoise-hook-version: {newer}\n"
+        "// tortoise session capture from a newer CLI\n".encode())
+    (plugin_dir / capture_install.OPENCLAW_ENTRY_NAME).symlink_to(repo_copy)
+
+    # The PREMISE, from the installer itself rather than from this test's
+    # reading of the guard: this shape is refused.
+    refusal = install_capture("openclaw", home=home, dry_run=True)
+    assert not refusal.ok, "the OpenClaw installer accepted the link"
+    assert "OpenClaw state dir" in (refusal.error or ""), refusal.error
+
+    msg = capture_install.assert_seam_target("openclaw", home=home)
+
+    assert msg, "a NEWER plugin linked outside the state dir passed"
+    assert "NEWER" in msg, msg
+    assert "cannot reach it as things stand" in msg, (
+        "the remedy promised an install the installer refuses: " + msg)
+    assert "OpenClaw state dir" in msg, msg
+
+
 def test_capture_seam_declares_the_shipped_entry():
     assert capture_install.CAPTURE_SEAM["openclaw"] == SEAM_ARTIFACT
     assert (REPO_ROOT / SEAM_ARTIFACT).is_file()

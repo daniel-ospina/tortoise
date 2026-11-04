@@ -423,9 +423,19 @@ def _is_loopback(hostname: str) -> bool:
     if hostname.lower() == "localhost":
         return True
     try:
-        return ipaddress.ip_address(hostname).is_loopback
+        ip = ipaddress.ip_address(hostname)
     except ValueError:
         return False
+    # IPv4-MAPPED IPv6 (``::ffff:127.0.0.1``) is loopback iff its embedded IPv4 address is, and
+    # CPython only reports that on 3.11.13+/3.12.7+ (gh-117566) — while ``requires-python`` here is
+    # ``>=3.12``. Normalising FIRST makes the verdict identical on every supported interpreter,
+    # exactly as ``_parse_bind_ip`` does for ``--bind`` (#719). Without it this predicate flips
+    # with the interpreter's PATCH level: on 3.12.0–3.12.6 it refuses a loopback redirect that the
+    # AS accepts. The guard is test_the_loopback_verdict_does_not_depend_on_the_interpreter_patch_level
+    # — the cross-half table only bites on a buggy stdlib.
+    if getattr(ip, "ipv4_mapped", None) is not None:
+        ip = ip.ipv4_mapped
+    return ip.is_loopback
 
 
 # Bytes we refuse to reason about in a redirect URI, checked BEFORE any

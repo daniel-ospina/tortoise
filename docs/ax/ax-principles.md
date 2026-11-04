@@ -79,15 +79,16 @@ plain statement that there is nothing to do.
 
 ## 3. Worked examples
 
-`#10158` is the one measured live in this tree. `#9202` is included because it is the ruling this
-document's placement section comes from — its read half is fixed and no longer reproduces, and it stays
-OPEN on the residuals its own row lists. The rest are cited from their own issues, `#1418` in
-`daniel-ospina/agent-infra`, and `#5734` is a human-UX analogue rather than an instance of the rule.
+`#10158` and `#9202` are both included because their read halves are now fixed and neither
+reproduces: `#10158`'s record is exempt and the issue is CLOSED, `#9202`'s reads `unknown` and it
+stays OPEN only on the residuals its own row lists. The rest are cited from their own issues,
+`#1418` in `daniel-ospina/agent-infra`, and `#5734` is a human-UX analogue rather than an instance
+of the rule.
 
 | Surface | What it was | Which rule |
 |---|---|---|
 | **#9202** — a stored-but-un-datable END | read `end_state: "known"`, reporting an unknown as a known. **Read half FIXED** — `#10009` (`73d110a2f5`) makes it read `unknown` per the owner's ruling B, pinned in `tests/test_2350_validity_precision.py`; write door `#10079` shapes or refuses on the guarded caller doors (`create_point`, `update_point`) **only**. What keeps the issue OPEN are distinct residuals, and they are not interchangeable: `update_entity`'s Point arms are the **unguarded** route (#9649); `supersede_point`'s numeric `valid_from` kwarg is a **deliberate** exemption recorded in `docs/ONTOLOGY.md` §4.7 / #5360; and how an **epoch** bound *renders* stays reserved to **#9741** (open) | the reported-state analogue of rule 2's second part — and the reason §4 exists |
-| **#10158** — the rebuild abort | prescribes *"Reconcile the journal (a missing creation event, an out-of-order append, or an unjournaled producer)"* — verbatim from `NonFoldedEventsError` at `tortoise/projection/nonfolded.py:386` — for a record nothing can ever address: no missing creation exists, nothing is out of order, there is no producer to journal, and retrying reproduces it | the admission test — **the prescribed repair is not performable for this record.** Whether the shape must therefore stop refusing is #10158's own question, **not decided here** (see §6) |
+| **#10158** — the rebuild abort | prescribes *"Reconcile the journal (a missing creation event, an out-of-order append, or an unjournaled producer)"* — verbatim from `_RECONCILE_REMEDY`, the third part of `NonFoldedEventsError` in `tortoise/projection/nonfolded.py` (cited by NAME, never by line) — for a record nothing can ever address: no missing creation exists, nothing is out of order, there is no producer to journal, and retrying reproduces it. **FIXED** — `#10204` implements the owner's `#3590` amendment (comment `6453059051`), so a record addressing its target by an unestablished **id** is now **EXEMPT** (`object-superseded-unregistered`: recorded, reported, run passes) rather than refused with an unperformable remedy; a record carrying **no address at all** separately refuses under `object-superseded-no-address`, with the remedy an operator *can* perform. `#10158` is closed by that ruling | the admission test — **the prescribed repair is not performable for this record**, so the refusal goes rather than the remedy being reworded (the ruling is §6's) |
 | `daniel-ospina/agent-infra` #1418 | a checkpoint whose *"remedy (rebase) is the tool it blocks"* | admission test |
 | #9365 · #7541 | a red *"no agent can clear"*; a terminal verdict with no follow-on stage | admission test |
 | #5734 (human-UX analogue) | *"no dead end, per-cause actionable copy"* | rule 2, the same rule before it had a name |
@@ -182,13 +183,15 @@ reading this page as having decided it would be wrong in either direction.
 - **Not a licence to guess a meaning** — see §2.
 - **Not a mandate for silent repair.** Shaping that *supplies a meaning* is echoed in the reply (§1);
   only a pure re-spelling of the same value may pass silently.
-- **⚠️ Open, and not decided anywhere in this document:** whether an assertion addressing its target
-  **by id** and the same assertion **by name** are one intent in two spellings is **#10158's
-  question**. It is a reopen of the D2 bound recorded on **#3590** (`6428025133`), argued there with
-  the owner; the opposite branch (the refusal stays, and the id-only case is deliberately outside the
-  bound) is an equally live outcome. §2's format argument is about *tokens*, not about which component
-  of an identity may stand in for the whole.
-- **⚠️ And the home this document points at does not settle it either.** #10183 carries a *derived*
-  sentence in the opposite direction — "a record asserting its target by id only vs by name is one
-  assertion in two spellings". That sentence is **corrected on the issue**: it does not decide
-  #10158, and the bound on #3590 does. Citing the home for the principle is not citing it for this.
+- **⚠️ Decided by the owner, and recorded where the gate reads it:** whether an assertion addressing
+  its target **by id** and the same assertion **by name** are one intent in two spellings is
+  **#10158's question**, and it was answered by the `#3590` D2 amendment (comment `6453059051`, whose
+  `OVERRIDES:` line names the retired clause) and implemented on `#10204`: they are one assertion in
+  two spellings, and an id-only record whose addresses the journal established none of is exempt. The
+  opposite branch (the refusal stays, the id-only case outside the bound) is **not** a live outcome —
+  it is the clause the owner reversed. §2's format argument is about *tokens*, not about which
+  component of an identity may stand in for the whole.
+- **A record with NO address is still refused**, and that is not the rejected branch returning: it
+  carries nothing checkable, so "the journal never established it" is unfalsifiable and the refusal's
+  third part is performable (supply the name or id). The `#10183` evidence for that split is on
+  `#10204`; citing a home for the principle is not citing it for a ruling.

@@ -1252,6 +1252,19 @@ class TestInvestorsProgressCopy:
             "(PR #9283)")
 
 
+#: Directories under the website scan roots that hold BUILD OUTPUT or vendored code,
+#: never a declaration or a page of ours. Shared by both mono scans so they cannot
+#: drift: `dist/` is the dashboard's and blog-admin's bundle, `node_modules/` the
+#: installed tree, and `.wrangler/` (`.gitignore:7`) is what `wrangler dev` emits —
+#: a bundled copy of `website/functions/**`, so a stale bundle carries the PRE-FIX
+#: blog sheet verbatim. Scanning it made both mono guards RED over a correct tree on
+#: any machine that had run the site's own dev server, and told the developer to add
+#: `font-family` to generated code (#10254 review). The repo's other scans already
+#: skip it for the same reason (`tests/test_cross_subdomain_cookie_sync.py:237`,
+#: `tests/test_no_legacy_token_path.py:44`).
+BUILD_OUTPUT_DIRS = ("node_modules", "dist", ".wrangler")
+
+
 class TestMonospaceStackRendersAsAMonoFace:
     """Every mono font declaration must resolve to a real mono face on macOS Chrome (#6870).
 
@@ -1317,7 +1330,7 @@ class TestMonospaceStackRendersAsAMonoFace:
     ROOTS = ("website", "apps")
     MODULES = ("tortoise/oauth.py", "tortoise/render.py")
     #: build output and vendored trees that no declaration of ours lives in
-    SKIP_DIRS = ("node_modules", "dist")
+    SKIP_DIRS = BUILD_OUTPUT_DIRS
     #: everything under here that emits a mono declaration must be in `MODULES`
     PY_ROOT = "tortoise"
 
@@ -2363,3 +2376,898 @@ class TestShortViewportBeatsScrollInsteadOfClipping:
                     "auto }}` companion. The id selector out-ranks "
                     "`.beat.pe-on`, so the visibility-gated rule is defeated "
                     "and the beat can never receive the scroll gesture.")
+
+
+class TestARenderedCodeElementGetsAMonoFace:
+    """A page that renders `<code>`/`<pre>` must give the ELEMENT a mono family (#6870).
+
+    `TestMonospaceStackRendersAsAMonoFace` proves every *declaration* is right, and
+    that is not enough: a `<code>` or `<pre>` element with NO matching rule inherits
+    nothing — the user-agent's `font-family: monospace` beats inheritance — so it
+    renders in Courier even when `--mono` is perfect everywhere in the file.
+
+    That is exactly how the blog renderer and the 404 page survived the first pass:
+    measured with CDP `CSS.getPlatformFontsForNode`, the blog's `<code>`/`<pre>` and
+    `website/404.html`'s `<code>` were **Courier** while every sibling page was
+    **Menlo**, because those two files rendered the element and never styled it.
+
+    Scope is the self-contained page: a file under `ROOTS` carrying its own `<style>`
+    block, i.e. the marketing pages, the 404, and the blog renderer's inline sheet. A
+    React component styled by a separate stylesheet is out of scope — this test cannot
+    see across files, and pretending otherwise would pin nothing. Two more emitters are
+    self-contained with their own sheet and are deliberately OUTSIDE `ROOTS` because
+    they are not pages this tree serves for reading: `tortoise/oauth.py:2145` (the MCP
+    consent page) and `tortoise/render.py:94` (the renderer's own document), both of
+    which the sibling declaration guard scans. Neither renders `<code>`/`<pre>` today,
+    so no live element is missed — and
+    `test_the_out_of_root_emitters_render_no_code` pins that precondition, so growing
+    one there reds with the repair named instead of slipping past this scan.
+
+    WHAT THIS PINS: every self-contained page that renders `<code>`/`<pre>` carries a
+    rule naming that element whose family resolves to a mono face. That is the shape
+    the defect had — the element existed and nothing styled it.
+
+    WHAT IT DOES NOT PIN, stated because a guard is trusted for what it claims: CSS is
+    not modelled, it is pattern-matched. It does not evaluate `@media`/`@supports`
+    conditions or a `<style media=…>` attribute, does not model `<noscript>`, does not
+    parse CSS strings (so a `/*` inside `content:"…"` is treated as a comment), and
+    reads `font-family` plus the `font:` shorthand rather than resolving the cascade.
+    A page could therefore satisfy it and still render Courier under some condition.
+    Each of those is latent — no page in this tree carries such a shape — and closing
+    them properly means parsing CSS, not adding a fifth regex.
+
+    One thing it DOES model, because it is the defect's own shape: the family list is
+    **ordered**. The browser takes the first family it has installed (MDN
+    `font-family`; the generics are always installed), so a mono face named *after* a
+    family Chrome certainly reaches is not the face the element gets —
+    `code{font-family:'SF Mono', monospace, Menlo}` renders **Courier**, which is
+    #6870 with `Menlo` one keystroke too late. The list is walked in priority order and
+    refused when a Courier-attracting token (`monospace`, `courier`, `serif`,
+    `sans-serif`) is reached before any `Menlo`; `ui-monospace` is not one of them,
+    because Chrome drops it and the shipped stacks therefore carry it first. What is
+    still not modelled: whether a *named* face is installed (a guard cannot know), and
+    per-character fallback — so a named serif chosen in plain sight stays GREEN, which
+    is the layout-decision boundary the sibling class records.
+
+    Four ways an earlier version of this guard went GREEN over a page that renders a
+    non-mono face, each closed here:
+
+    1. **Inert text.** It read the file as text, so a `/* … */` comment inside the
+       sheet, a `<style>` inside an HTML comment, a `<style>` inside a `<script>`
+       string, and a `<style>` inside `<template>` each counted as styling. The
+       document is blanked for comments, script bodies and template bodies before any
+       sheet is read.
+    2. **`var(--mono)` with nothing to resolve to.** The token was accepted without
+       asking whether the page defines `--mono` at all, or whether the value it
+       defines is a mono face (`--mono: Georgia, serif` passed). The declaration is
+       now resolved through the page's own definitions, two hops, and must land on a
+       mono face — and a `var()` **fallback** is read only when the token is missing,
+       so `--mono: Georgia, serif` with `font-family: var(--mono, Menlo)` is REFUSED
+       instead of being credited through fallback text CSS never substitutes
+       (`var(--mono, …Menlo…)` ships 4x in
+       `website/apps/dashboard/src/index.css:583,753,919,996`). A reference that
+       resolves to nothing invalidates the **whole** declaration at computed-value
+       time, and that signal is propagated out of the resolver's recursion instead of
+       being dropped as empty text, so `--mono: var(--nope)` plus
+       `font-family: Menlo, var(--mono)` is refused rather than credited through the
+       trailing face the browser never applies. The accepted face is `Menlo` alone,
+       because the sibling class measured `'SF Mono'` and `SFMono-Regular` as Times on
+       this repo's Chromium (`TestMonospaceStackRendersAsAMonoFace`, above) — crediting
+       them re-blessed the Courier defect on the one route the sibling guard cannot see.
+    3. **A rule that styles the element only in context.** `.art-body pre code` — and
+       `pre.anything code` — says nothing about an inline `<code>` in a paragraph, so
+       that pairing is skipped; everything else is the cascade.
+    4. **A custom property NAME read case-blind.** The resolver folded custom property
+       names, so `:root{--Mono:Menlo} code{font-family:var(--MONO)}` resolved to
+       `Menlo` and went GREEN. css-variables-1 §2 is explicit that custom property
+       names are **not** ASCII case-insensitive and are equal only when identical —
+       `--foo` and `--FOO` are distinct properties — so CSS computes the
+       guaranteed-invalid value, invalidates `font-family` at computed-value time, and
+       the element renders the UA `monospace`: Courier, the #6870 face. Names now match
+       exactly; only the family *value* is folded, which css-fonts makes
+       case-insensitive (#10254 review, round 13).
+
+    Three ways it wrongly REFUSED a correct page, all closed: a rule wrapped in
+    `@media`, a `font-family: var(--code-font)` indirection, and the element with a
+    class or attribute (`code.inline{…}`). The rule match is innermost-only, the
+    indirection resolves, a `font:` shorthand naming a mono face is accepted, and the
+    last compound may carry a class/id/attribute/pseudo.
+
+    One residual does fail GREEN, and it is named here rather than implied: a custom
+    property is collected from **every** rule that declares it, regardless of the
+    selector, and resolved for every element — but custom properties inherit
+    (css-variables-1, the `--*` property table: `Inherited: yes`), so a token declared
+    on a scoped rule does not reach a `<code>` outside that scope.
+    `.art-body{--mono:Menlo} code{font-family:var(--mono)}` is therefore credited here,
+    while a browser computes the guaranteed-invalid value for a `code` outside
+    `.art-body`, invalidates the whole declaration, and renders the inherited family.
+    Latent, not live — eight of the nine subjects define `--mono` in `:root`
+    (`404.html:17`, `faq.html:24`, … `_lib.ts:1098`) and the ninth,
+    `website/apps/dashboard/public/404.html`, resolves no `var()` at all: its `code{}`
+    rule names `ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace` directly
+    (`:41-42`), so there is no token for this limit to mis-resolve. Eight, not nine, at
+    this head (#10254 review, round 11). And keying `defined` by declaring selector
+    would mean modelling which ancestors an element has, i.e. the CSS parse this guard
+    deliberately does not do. Pinned by
+    `test_a_scoped_token_is_credited_and_that_is_a_documented_limit`, so closing it is a
+    deliberate edit and never a silent change (#10254 review, round 9).
+
+    Known residual, deliberately not modelled: a page rendering `<code>` **only**
+    inside `<pre>` is refused, because the `pre code` pairing is skipped
+    unconditionally. It fails RED, never green, and no page in this tree is shaped
+    that way. A `var()` nested inside a fallback (`var(--a, var(--b, Menlo))`) is *not*
+    a residual — the reference is matched paren by paren and substituted recursively,
+    which is what css-variables-1 §"replace a var()" step 3 does (the fallback is
+    itself substituted), so the family that is credited is the one the browser would
+    compute. Truncating at the first `)` instead credited `--brand: Georgia, serif` +
+    `font-family: var(--mono, var(--brand, Menlo))` as mono (#10254 review, round 6).
+    """
+
+    #: the trees this guard scans. `apps/` is NOT an empty declaration: it contributes
+    #: 2 of the `MIN_DECIDABLE` subjects today — `apps/graph-viz/index.html` (a page
+    #: that carries its own `<style>` and renders no `<code>`/`<pre>` YET) and
+    #: `apps/graph-viz/src/components/ontology/HierarchyChart.tsx` (own `<style>`, not a
+    #: page) — while the only `apps/` file that DOES render the element,
+    #: `apps/graph-viz/src/components/ontology/OntologyView.tsx`, carries no own sheet,
+    #: so it is not decidable here. MEASURED 2026-10-29 (#10254 review, round 12): the
+    #: earlier wording ("`apps/` yields no self-contained page today") was stale — the
+    #: top-level `apps/` root already carries sheets, and dropping it takes the ratchet
+    #: to 19 < `MIN_DECIDABLE`. So removing it must be a deliberate edit that moves the
+    #: floor too, never a silent narrowing (see `_sources`); each root's contribution is
+    #: pinned by `test_every_page_it_can_decide_on_selects_this_guard`.
+    ROOTS = ("website", "apps")
+    #: measured 2026-10-28 at this tree: 9 self-contained pages carry `<code>`/`<pre>`
+    #: (faq, privacy, 404, self-hosted, security, docs, license,
+    #: apps/dashboard/public/404.html, and the blog renderer `_lib.ts`). The floor sits
+    #: ON the measurement on purpose: a gap between the floor and the count is what lets
+    #: the scan narrow without a red, so removing a page must move this number.
+    MIN_PAGES = 9
+    #: measured 2026-10-28 at this tree: 21 files under `ROOTS` carry their own `<style>`
+    #: block — the set `test_every_page_it_can_decide_on_selects_this_guard` ratchets. A
+    #: SEPARATE constant because it is a separate population: reusing `MIN_PAGES` as that
+    #: test's floor left a 12-page gap, which is the narrowing this file forbids. Equal to
+    #: the measurement on purpose, for the same reason.
+    MIN_DECIDABLE = 21
+
+    SUFFIXES = (".html", ".css", ".js", ".ts", ".jsx", ".tsx")
+    RENDERS_CODE = re.compile(r"<(code|pre)\b", re.IGNORECASE)
+    #: only the page's own sheet is author CSS for this guard. Inert text is stripped
+    #: first: `<script>` strings, `<template>` bodies (not rendered), HTML comments.
+    STYLE = re.compile(r"<style[^>]*>(.*?)</style>", re.DOTALL | re.IGNORECASE)
+    INERT = re.compile(r"<script\b[^>]*>.*?</script>|<template\b[^>]*>.*?</template>",
+                       re.DOTALL | re.IGNORECASE)
+    COMMENT = re.compile(r"/\*.*?\*/|<!--.*?-->", re.DOTALL)
+    #: INNERMOST rules only: a body containing `{` means the match is an at-rule
+    #: prelude wrapping another rule, and the inner one is the rule that styles it
+    RULE = re.compile(r"([^{}]+)\{([^{}]*)\}", re.DOTALL)
+    #: `font-family` and the `font:` shorthand — the shorthand smuggles a family past
+    #: a font-family-only scan, the lesson the sibling class already learned
+    FAMILY = re.compile(r"(?:font-family|font)\s*:\s*([^;}]*)", re.IGNORECASE)
+    VAR_DEF = re.compile(r"(--[\w-]+)\s*:\s*([^;}]*)")
+    #: the tokens a family VALUE asks for — the population the scoped-token limit below
+    #: applies to. Deliberately not `--mono`-only: the guard credits `var(--anything)`,
+    #: so `--code-font` declared on a scoped rule is the same hole under another name.
+    VAR_REF = re.compile(r"var\(\s*(--[\w-]+)", re.IGNORECASE)
+    #: the selector's LAST compound must be the element itself — `.code{}` is the big
+    #: "404" glyph, and `.art-body pre{font-family:inherit}` inherits rather than sets.
+    #: The element may carry a class, id, attribute or pseudo — `code.inline{…}` styles
+    #: `<code>`, so only a following TAG character disqualifies the compound
+    ELEMENT_LAST = re.compile(r"(?:code|pre|kbd|samp)(?![a-zA-Z0-9_-])", re.IGNORECASE)
+    TAG = re.compile(r"([a-zA-Z][\w-]*)")
+    #: a real face, NOT the `monospace` keyword: on macOS Chrome that keyword IS
+    #: Courier, which is the defect. The sibling guard requires Menlo by name for the
+    #: same reason, and accepting the keyword let `var(--mono, monospace)` pass with
+    #: `--mono` undefined or set to a serif.
+    #: `Menlo` is the ONLY name here, and that is measured rather than assumed: the
+    #: sibling class (`TestMonospaceStackRendersAsAMonoFace`, above) records CDP
+    #: `CSS.getPlatformFontsForNode` on this repo's Chromium that `'SF Mono'` → Times
+    #: and `SFMono-Regular` → Times while
+    #: `Menlo` → Menlo, and #6870's availability probe records `'SF Mono'` as not
+    #: exposed to web content. Crediting those two names made this guard GREEN over
+    #: `font-family: var(--mono, 'SF Mono', monospace)` — Courier-class, the exact
+    #: defect #6870 is about — on the `var()`-fallback route the sibling guard skips
+    #: (it ignores any value containing `var(--mono`), so nothing else caught it
+    #: (#10254 review, round 8).
+    MONO = ("menlo",)
+    #: The mirror of `MONO`: a family that makes Chrome reach a NON-mono face before
+    #: any mono face named after it can apply. `font-family` is an ORDERED list and
+    #: the browser uses "the first font in the list that is installed" (MDN
+    #: `font-family`; the generics are always installed), so `Menlo` appended AFTER
+    #: `monospace` is not the face the element gets — `monospace` IS Courier on macOS
+    #: Chrome, the #6870 face. Matching `menlo` anywhere in the resolved value, with
+    #: position ignored, made this guard GREEN over
+    #: `code{font-family:'SF Mono', monospace, Menlo}` — the defect one keystroke too
+    #: late (#10254 review).
+    #: `ui-monospace` is deliberately NOT an attractor: it is a hyphenated generic
+    #: Chrome drops (the sibling's measured table above), which is exactly why the
+    #: shipped stacks carry it first. The boundaries are word-ish, not a substring test,
+    #: so `ui-monospace` cannot match `monospace` and `sans-serif` cannot be read as the
+    #: bare `serif` generic. A NAMED face such as `Georgia` is not here either: naming a
+    #: serif face in plain sight is a layout decision, which is the boundary the sibling
+    #: class records — only the generics/Courier are the Courier defect.
+    COURIER_ATTRACTING = re.compile(
+        r"(?<![\w-])(?:sans-serif|monospace|courier|serif)(?![\w-])")
+
+    @staticmethod
+    def _families(value):
+        """The family tokens of `value`, in the order the browser tries them.
+
+        `font-family` is a comma-separated list, and a `font:` shorthand prefixes the
+        same list with size/weight/line-height — so `font:12px Menlo` is one token that
+        must still be read as Menlo. Split on top-level commas only, so a comma inside a
+        quoted family name (`'Foo, Bar'`) does not split it.
+        """
+        tokens, buf, quote = [], [], None
+        for ch in value:
+            if quote:
+                buf.append(ch)
+                if ch == quote:
+                    quote = None
+            elif ch in "\"'":
+                quote = ch
+                buf.append(ch)
+            elif ch == ",":
+                tokens.append("".join(buf))
+                buf = []
+            else:
+                buf.append(ch)
+        tokens.append("".join(buf))
+        return [t.strip() for t in tokens if t.strip()]
+
+    def _is_mono(self, value, defined, depth=0):
+        """Does `value` give the element a mono face, once the page's tokens are substituted?"""
+        # substitute BEFORE reading any face: a `var()` reference names no family of
+        # its own, so a keyword found in the un-substituted text is not a decision
+        # about what the element computes to. Reading the raw string first is how
+        # `var(--mono, Menlo)` was credited while `--mono: Georgia, serif` — the face
+        # Chrome actually used — went unread (PR #10254 review, round 3).
+        substituted = self._substitute(value, defined, depth)
+        if substituted is None:
+            # invalid at computed-value time (css-variables-1 §2.2: a guaranteed-invalid
+            # value in a property value makes the property invalid at computed-value
+            # time). The declaration does not apply, the element inherits, and the UA
+            # `monospace` — Courier — wins. Never a face, whichever names it carried.
+            return False
+        # the FAMILY VALUE is folded here and only here: font family names are ASCII
+        # case-insensitive (css-fonts-4), unlike the custom property NAMES the resolver
+        # matches, which keep their casing.
+        v = substituted.strip().lower()
+        if not v or v in ("inherit", "unset", "initial", "revert"):
+            # inheriting is the failing case for an element with no author rule: the
+            # UA `monospace` sheet would win. A parent that IS mono is out of scope.
+            return False
+        # Walk the list in PRIORITY order, not `any(name in value)`: the browser takes
+        # the FIRST family it has installed, so a mono face named after a family the
+        # browser certainly reaches is not the face the element gets. The first token
+        # that names a mono face is a pass; a Courier-attracting token reached first is
+        # a refusal; anything else (an unavailable named face, `ui-monospace`, a serif
+        # face chosen in plain sight) is passed over, exactly as the browser passes it.
+        for family in self._families(v):
+            if any(m in family for m in self.MONO):
+                return True
+            if self.COURIER_ATTRACTING.search(family):
+                return False
+        return False
+
+    @staticmethod
+    def _var_reference(text, start):
+        """`(name, fallback, end)` for the `var(` at `text[start]`, matched paren by paren.
+
+        `end` is the index of its closing `)`. The fallback is split at the first
+        *top-level* comma, so `var(--mono, var(--brand, Menlo))` yields the fallback
+        `var(--brand, Menlo)` — whole, not truncated at the inner `)`.
+
+        There is deliberately no `var(...)` regex here: parens cannot be counted by one,
+        and truncating at the first `)` is how an earlier version credited a serif named
+        only inside an unresolved fallback (#10254 review, round 6).
+
+        `None` for an unbalanced reference: that is a parse error in CSS, so the whole
+        declaration is dropped and no family in it applies — the caller refuses it
+        rather than reading the residue as text.
+
+        The returned NAME keeps the author's casing. Custom property names are the one
+        identifier family CSS does NOT fold: css-variables-1 §2, "Unlike other CSS
+        properties, custom property names are not ASCII case-insensitive. Instead,
+        custom property names are only equal to each other if they are identical to
+        each other" — `--foo` and `--FOO` are two distinct properties. Lowercasing the
+        name here made this guard disagree with the browser in the fail-GREEN
+        direction: `:root{--Mono:Menlo} code{font-family:var(--MONO)}` is the
+        guaranteed-invalid value with no fallback, so `font-family` is invalid at
+        computed-value time and the element renders the UA `monospace` — Courier, i.e.
+        #6870 itself — while the collapsed key resolved it to `Menlo` (#10254 review,
+        round 13). Only the FAMILY VALUE is case-insensitive (css-fonts), and `_is_mono`
+        is where that fold belongs.
+        """
+        depth, i = 0, start + 3
+        while i < len(text):
+            if text[i] == "(":
+                depth += 1
+            elif text[i] == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            i += 1
+        else:
+            return None
+        inner = text[start + 4:i]
+        depth, comma = 0, None
+        for j, ch in enumerate(inner):
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+            elif ch == "," and depth == 0:
+                comma = j
+                break
+        if comma is None:
+            return inner.strip(), None, i
+        return inner[:comma].strip(), inner[comma + 1:], i
+
+    def _substitute(self, value, defined, depth=0):
+        """`value` with its `var()` references replaced the way CSS replaces them.
+
+        A **defined** custom property is substituted and its fallback is *dead text*:
+        css-variables-1 §"Using Cascading Variables" makes the second argument the
+        substitution value only "when the value of the referenced custom property is
+        the guaranteed-invalid value", i.e. missing or invalid. Crediting a fallback
+        regardless is a false green and not a hypothetical one: the live idiom
+        `font-family: var(--mono, ui-monospace, …Menlo…)` ships 4x in
+        `website/apps/dashboard/src/index.css` (583, 753, 919, 996), so any page that
+        also defined `--mono` as a serif would pass this guard while macOS Chrome
+        rendered the serif.
+
+        Reference resolution is recursive and paren-balanced, because the fallback is
+        itself substituted (css-variables-1 "replace a var()" step 3): `var(--a,
+        var(--b, Menlo))` computes to whatever `--b` is, so the family this guard may
+        credit is the one the browser would actually use — reading the fallback as
+        flat text credited a serif sitting inside it (#10254 review, round 6).
+
+        A missing token falls back. A reference that resolves to nothing — missing with
+        no fallback, defined as empty, or a chain past the depth cap — makes the whole
+        declaration invalid at computed-value time (CSS does not fall through to the
+        next family in the list), so the element inherits and the guard goes RED. That
+        is the safe direction: over-detection, never a false green.
+
+        Returns `None` for that invalid case rather than `""`, so the flag survives the
+        recursion. Returning empty *text* lost it one hop down — `--mono: var(--nope)`
+        with `font-family: Menlo, var(--mono)` came back as `Menlo,`, which reads as a
+        mono face although CSS invalidates the whole declaration and the element renders
+        Courier (#10254 review, round 8).
+        """
+        out, i, invalid = [], 0, False
+        while i < len(value):
+            if value[i:i + 4].lower() != "var(":
+                out.append(value[i])
+                i += 1
+                continue
+            ref = self._var_reference(value, i)
+            if ref is None:
+                # unbalanced `var(`: a parse error, so CSS drops the WHOLE declaration
+                # and no family written in it applies. Refuse rather than credit the
+                # residue's text (`Menlo, var(--mono` would otherwise read as mono).
+                invalid = True
+                break
+            name, fallback, end = ref
+            resolved = defined.get(name)
+            chosen = resolved if resolved is not None else fallback
+            if chosen is None or not chosen.strip() or depth >= 2:
+                invalid = True
+                i = end + 1
+                continue
+            substituted = self._substitute(chosen, defined, depth + 1)
+            # `None` is the recursion's invalid signal — propagate it, do not append it
+            # as text, which is how the flag was lost one hop down. A leftover `var(`
+            # is the same refusal (an unresolved reference is not a face).
+            if substituted is None or "var(" in substituted.lower():
+                invalid = True
+            else:
+                out.append(substituted)
+            i = end + 1
+        return None if invalid else "".join(out)
+
+    def _elements_styled_mono(self, css):
+        """The element names (`code`, `pre`) that some rule gives a mono family."""
+        # keyed by the author's exact name: custom property names are case-SENSITIVE
+        # (css-variables-1 §2 — `--foo` and `--FOO` are distinct), so folding case
+        # here resolves a reference the browser invalidates (#10254 review, round 13).
+        # `value` is left raw too; family-value folding is `_is_mono`'s job.
+        defined = {name.strip(): value for name, value in self.VAR_DEF.findall(css)}
+        # the LAST matching rule wins the cascade, so a later
+        # `code{font-family:inherit}` must un-style it, not be ignored
+        last_family = {}
+        for selectors, body in self.RULE.findall(css):
+            families = self.FAMILY.findall(body)
+            if not families:
+                continue
+            family = families[-1]
+            for sel in selectors.split(","):
+                parts = re.split(r"[\s>+~]+", sel.strip())
+                last = parts[-1]
+                match = self.ELEMENT_LAST.match(last)
+                if not match:
+                    continue
+                # the compound may carry a class/id/attr/pseudo — the ELEMENT is the tag
+                element = match.group(0).lower()
+                # `pre code` (and `pre.anything code`) styles code *inside* pre; it is
+                # not the generic style for an inline <code>, so it must not decide it
+                if element == "code" and len(parts) > 1:
+                    tag = self.TAG.match(parts[-2])
+                    if tag and tag.group(1).lower() == "pre":
+                        continue
+                last_family[element] = family
+        return {e for e, fam in last_family.items() if self._is_mono(fam, defined)}
+
+    def test_no_self_contained_page_renders_code_or_pre_unstyled(self):
+        repo = Path(__file__).resolve().parent.parent
+        offenders, checked = [], 0
+        for path in self._sources(repo):
+            text = path.read_text(errors="replace")
+            if not self.RENDERS_CODE.search(text):
+                continue
+            # blank the whole DOCUMENT first: a `<style>` inside a `<script>` string, a
+            # `<template>` body, or an HTML comment is inert, and blanking only the
+            # extracted sheets missed the last two
+            css = "\n".join(self.STYLE.findall(
+                self.COMMENT.sub(" ", self.INERT.sub(" ", text))))
+            if not css.strip():
+                continue
+            checked += 1
+            # per element, not "some rule somewhere": the blog styled `pre` and left
+            # inline `code` to the UA sheet, which passed a set-level check
+            rendered = {e.lower() for e in self.RENDERS_CODE.findall(text)}
+            missing = sorted(rendered - self._elements_styled_mono(css))
+            if missing:
+                offenders.append(f"{path.relative_to(repo)} ({', '.join('<' + m + '>' for m in missing)})")
+        # the floor is the MEASURED count (9 self-contained pages today), not a guess: it
+        # has no slack, so deleting or moving a page is a deliberate act that moves this
+        # number with it, instead of narrowing the scan silently (PR #10254 review).
+        assert checked >= self.MIN_PAGES, (
+            f"only {checked} self-contained page(s) found under "
+            f"{'/'.join(self.ROOTS)} — the scan is not looking at the right tree")
+        assert not offenders, (
+            "these pages render these elements but no rule in their own <style> gives the ELEMENT "
+            "a mono family, so the user-agent's `monospace` applies and macOS Chrome renders Courier "
+            "(issue #6870):\n  " + "\n  ".join(offenders) +
+            "\nAdd e.g. `code{font-family:var(--mono)}` AND make sure that page defines `--mono` as a "
+            "mono face (an undefined var() invalidates the declaration and the element inherits).")
+
+    @staticmethod
+    def _sources(repo):
+        # os.walk with a pruned `dirnames`, NOT `rglob`: rglob materialises the whole
+        # tree, `node_modules` included, before any filter can run (see the sibling
+        # class's note — it is the same walk, and the same cost).
+        # `.wrangler` is in this set for the reason the shared constant records: it is
+        # a gitignored COPY of `website/functions/**`, so a stale bundle contains the
+        # pre-fix blog sheet and both tests in this class failed on generated code
+        # (#10254 review P3).
+        skip = BUILD_OUTPUT_DIRS
+        for root_name in TestARenderedCodeElementGetsAMonoFace.ROOTS:
+            root = repo / root_name
+            # fail closed: a missing root would narrow the scan silently
+            assert root.is_dir(), (
+                f"{root_name}/ is gone — update ROOTS in "
+                f"{TestARenderedCodeElementGetsAMonoFace.__name__}")
+            for dirpath, dirnames, filenames in os.walk(root):
+                dirnames[:] = [d for d in dirnames if d not in skip]
+                for name in filenames:
+                    if Path(name).suffix not in TestARenderedCodeElementGetsAMonoFace.SUFFIXES:
+                        continue
+                    yield Path(dirpath) / name
+
+    def test_every_page_it_can_decide_on_selects_this_guard(self):
+        """The REVERSE direction: a page this guard can DECIDE on must RUN it when changed.
+
+        Registration in `config/ci-surfaces.yml` only makes this file CLASSIFIED;
+        selection is what makes it RUN. Declaring `apps/` in `ROOTS` and stopping
+        there is exactly the silent-drop class `#1349/#3332/#3616` name: the guard
+        grows a subject whose diff selects no leg that runs it, so the regression it
+        exists for merges GREEN and main goes red only on the next trunk run.
+
+        MEASURED at the head this landed (#10254 review P2), over the files this scan
+        actually reads (`_sources`, node_modules/dist pruned): 21 of the files under
+        `ROOTS` carry their own `<style>` block — the set this guard can decide on —
+        and 20 of those already selected this surface. `apps/graph-viz/index.html` was
+        the only one that did not (`select([…]) -> surfaces=[], full=False`, guard ABSENT;
+        `apps/` is in `NON_PYTHON_PREFIXES` and matched no `SOURCE_PATTERNS` row, so
+        the diff filtered to `changed == []` and took the docs-only tier-1 early
+        return). That page renders no `<code>`/`<pre>` today, which is why it had to
+        be derived rather than noticed.
+
+        The subject set is the own-`<style>` set, NOT the `<code>`-rendering set: a
+        page becomes decidable the moment it renders the element, so ratcheting only
+        the pages that render it today would leave the next one free to arrive
+        unguarded. Derived from what the scan actually reads, so it cannot rot.
+        """
+        from tools.ci_selection import load_manifest, select
+
+        repo = Path(__file__).resolve().parent.parent
+        manifest = load_manifest()
+        guard = Path(__file__).name
+        missing = []
+        decidable = 0
+        # per-root census: a root that contributes ZERO is the shape the `ROOTS`
+        # comment used to (wrongly) describe for `apps/`, and it is the shape that
+        # makes a declared root decorative rather than a subject set (#10254 review,
+        # round 12).
+        by_root = {root: 0 for root in self.ROOTS}
+        for path in sorted(self._sources(repo)):
+            text = path.read_text(errors="replace")
+            # same blanking order the guard uses: inert text is not a sheet
+            if not self.STYLE.search(self.COMMENT.sub(" ", self.INERT.sub(" ", text))):
+                continue
+            decidable += 1
+            rel = path.relative_to(repo).as_posix()
+            by_root[Path(rel).parts[0]] += 1
+            selection = select([rel], "pull_request", manifest)
+            if guard not in selection["test_files"]:
+                missing.append(f"{rel} (selected surfaces: {selection['surfaces'] or 'none'})")
+        assert decidable >= self.MIN_DECIDABLE, (
+            f"only {decidable} page(s) carry their own <style> under "
+            f"{'/'.join(self.ROOTS)} — the scan is not looking at the right tree")
+        # Every DECLARED root must actually contribute subjects. `apps/` carries 2 of
+        # the 21 today (`apps/graph-viz/index.html`, `HierarchyChart.tsx`), which is the
+        # fact the `ROOTS` comment states; if that ever drops to 0 the root is
+        # decorative and the comment is stale again — move the floor and the comment
+        # together instead of letting this assert be the only record (#10254 round 12).
+        assert all(count for count in by_root.values()), (
+            "a declared root carries no own-<style> subject: "
+            f"{by_root!r} over ROOTS={'/'.join(self.ROOTS)} — dropping or emptying a "
+            "root narrows the scan; if the narrowing is intended, move MIN_DECIDABLE "
+            "and the ROOTS comment in the same edit")
+        assert not missing, (
+            "these pages carry their own <style> block, so this guard would DECIDE on "
+            "them if they rendered `<code>`/`<pre>` — but editing one selects no leg "
+            "that runs this guard, so the Courier regression (#6870) would merge green "
+            "on exactly the diff that causes it. Add the path to "
+            "SOURCE_PATTERNS['onboarding'] in tools/ci_selection.py, naming a CONCRETE "
+            "path — select() matches with startswith and has no glob support:\n  "
+            + "\n  ".join(missing))
+
+    def test_a_var_fallback_is_dead_text_when_the_token_is_defined(self):
+        """The resolver's own cases, pinned so the guard cannot silently un-fix (#10254 review).
+
+        Probes, not pages: each `css` string is a whole sheet handed to the resolver, and the
+        expectation is what CSS would compute for a `<code>` under it. The third and fourth rows
+        are the false greens the review measured — a mono face named ONLY in a fallback that the
+        browser never substitutes, because `--mono` is defined to a serif.
+        """
+        cases = [
+            # (why, css, is `code` given a mono face?)
+            ("defined serif, mono fallback — fallback is dead text (css-variables §3)",
+             ":root{--mono:Georgia,serif} code{font-family:var(--mono, Menlo)}", False),
+            ("same, quoted face)",
+             ":root{--mono:Georgia,serif} code{font-family:var(--mono, 'SF Mono')}", False),
+            ("same, the live dashboard idiom",
+             ":root{--mono:Georgia,serif} "
+             "code{font-family:var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace)}", False),
+            ("defined mono, fallback unused",
+             ":root{--mono:Menlo,monospace} code{font-family:var(--mono, Georgia)}", True),
+            # Custom property NAMES are case-sensitive (css-variables-1 §2: "custom
+            # property names are not ASCII case-insensitive … only equal to each other
+            # if they are identical to each other"), so a reference differing in case is
+            # the guaranteed-invalid value, not the token. These three were GREEN while
+            # the resolver folded the name — and CSS computes exactly the #6870 face
+            # (no fallback → invalid at computed-value time → inherit → UA `monospace`,
+            # which is Courier on macOS Chrome). Pinned in BOTH directions, and only the
+            # family VALUE is folded (`menlo` matches `Menlo`).
+            ("a case-differing reference is the guaranteed-invalid value, NOT the token",
+             ":root{--Mono:Menlo} code{font-family:var(--MONO)}", False),
+            ("…the other way round: `--mono` declared, `--MONO` asked for",
+             ":root{--mono:Menlo} code{font-family:var(--MONO)}", False),
+            ("…and it is not rescued by an unrelated `--mono` elsewhere",
+             ":root{--MONO:Menlo;--mono:Georgia,serif} code{font-family:var(--Mono)}", False),
+            ("a case-differing reference falls back like any other missing token",
+             ":root{--Mono:Menlo} code{font-family:var(--MONO, Menlo)}", True),
+            ("the IDENTICAL name resolves — case is preserved, never folded away",
+             ":root{--Mono:Menlo} code{font-family:var(--Mono)}", True),
+            ("missing token — the fallback IS substituted",
+             "code{font-family:var(--mono, Menlo)}", True),
+            ("defined serif, no fallback to rescue it",
+             ":root{--mono:Georgia,serif} code{font-family:var(--mono)}", False),
+            ("token defined as an unresolvable var() → RED, never green",
+             ":root{--mono:var(--nope)} code{font-family:var(--mono, Menlo)}", False),
+            ("a later `font:` shorthand resets the family",
+             ":root{--mono:Menlo} code{font-family:var(--mono)} code{font:12px Georgia}", False),
+            ("`inherit` is the failing case, not a pass",
+             "code{font-family:inherit}", False),
+            ("bare `monospace` IS Courier on macOS Chrome — not a mono face here",
+             "code{font-family:var(--mono, monospace)}", False),
+            # `'SF Mono'` and `SFMono-Regular` are measured as Times on macOS Chrome in
+            # this very file (`TestMonospaceStackRendersAsAMonoFace`, CDP on this repo's
+            # Chromium) and #6870
+            # records `'SF Mono'` as not exposed to web content. This route — a mono
+            # name in a `var()` fallback — is the one the sibling declaration guard
+            # cannot see, because it skips values containing `var(--mono`.
+            ("`'SF Mono'` in a fallback is Times, not mono — #6870's own measurement",
+             "code{font-family:var(--mono, 'SF Mono', 'Cascadia Code', monospace)}", False),
+            ("`SFMono-Regular` on its own is Times too",
+             "code{font-family:SFMono-Regular}", False),
+            # A family list is ORDERED: the browser takes the first family it has
+            # installed, so a mono face appended AFTER a family Chrome always reaches
+            # is not the face the element gets. `monospace` IS Courier here, so these
+            # are #6870 itself — and they were GREEN while `menlo` was matched
+            # anywhere in the value (#10254 review).
+            ("a mono face appended after the generic IS the #6870 face again",
+             "code{font-family:monospace, Menlo}", False),
+            ("the generic via the live dashboard's `var()` fallback shape",
+             "code{font-family:var(--mono, ui-monospace, monospace, Menlo)}", False),
+            ("`'SF Mono'`, the generic, then `Menlo` — the defect one keystroke late",
+             "code{font-family:'SF Mono', monospace, Menlo}", False),
+            ("a serif generic reached before the mono face",
+             "code{font-family:serif, Menlo}", False),
+            # …and the other direction, so the ordered rule cannot false-red what
+            # ships: `ui-monospace` is a generic Chrome DROPS
+            # (`TestMonospaceStackRendersAsAMonoFace`), so the
+            # real stack — which carries it first — still resolves to `Menlo`.
+            ("the shipped stack: `ui-monospace` first is not a Courier attractor",
+             "code{font-family:ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace}",
+             True),
+            ("`Menlo` before the generic still wins — order, not presence",
+             "code{font-family:Menlo, monospace}", True),
+            ("a `font:` shorthand naming the mono face is still accepted",
+             "code{font:italic bold 12px/1.4 Menlo}", True),
+        ]
+        for why, css, expect in cases:
+            got = "code" in self._elements_styled_mono(css)
+            assert got == expect, (
+                f"{'false green' if got else 'false red'}: {why}\n  css: {css}\n"
+                f"  guard says mono={got}, CSS computes mono={expect}")
+
+    def test_a_scoped_token_is_credited_and_that_is_a_documented_limit(self):
+        """The one fail-GREEN shape this guard documents instead of fixing (#10254 r9).
+
+        `VAR_DEF` collects `--x: …` from every rule whatever selector declares it, and
+        `_elements_styled_mono` resolves any `var(--x)` against that flat map. A custom
+        property INHERITS (css-variables-1, the `--*` property table: `Inherited: yes`),
+        so a token declared on `.art-body` does not reach a `<code>` outside it: the
+        reference there is the guaranteed-invalid value, the declaration is invalid at
+        computed-value time, and the element renders its PARENT's family — not the mono
+        face this guard credits.
+
+        This is the opposite direction from the two residuals the class docstring
+        states, which both fail RED. It stays a documented LIMIT because keying
+        `defined` by declaring selector means modelling which ancestors an element has;
+        and it is latent today — eight of the nine subjects define `--mono` in `:root`,
+        and the ninth (`website/apps/dashboard/public/404.html`) names the family list
+        directly in its `code{}` rule (`:41-42`) and resolves no `var()` at all, so this
+        limit has no token there to mis-resolve. Eight, not nine, at this head (#10254
+        review, round 11). The assertion is written to RED the moment the limit is
+        closed, so closing it is a deliberate edit and this probe is deleted with the
+        docstring bullet, rather than the shape being re-derived as a finding for the
+        fourth time.
+        """
+        probes = [
+            # (why, css) — each is GREEN here; the CSS computes no mono face for `code`
+            ("token declared on a scoped ancestor rule",
+             ".art-body{--mono:Menlo} code{font-family:var(--mono)}"),
+            ("token declared inside a conditional group",
+             "@media print{:root{--mono:Menlo}} code{font-family:var(--mono)}"),
+        ]
+        for why, css in probes:
+            assert "code" in self._elements_styled_mono(css), (
+                f"the documented declaring-scope limit CHANGED ({why}): the guard now "
+                f"REFUSES a token whose declaring selector it cannot prove reaches the "
+                f"element. That is the fail-safe direction, so update the "
+                f"`WHAT IT DOES NOT PIN` bullet and delete this probe.\n  css: {css}")
+
+    #: selectors that reach EVERY element, so a token declared on one is not scoped:
+    #: `:root` is the html element (all elements inherit from it), `html` is itself, and
+    #: `*` matches everything. Only the third has real cascade caveats, and none of them
+    #: can leave an element without the token, which is what this ratchet asks.
+    DOCUMENT_WIDE_SELECTORS = frozenset({":root", "html", "*"})
+
+    @classmethod
+    def _scoped_family_tokens(cls, css):
+        """Tokens a family value asks for that are declared only on a SCOPED rule.
+
+        The documented fail-GREEN limit is `VAR_DEF` collecting a custom property from
+        any rule whatever its selector. It is a limit and not a bug because a token on
+        `:root` reaches every element (custom properties inherit, css-variables-1; MDN
+        `--*`: "custom properties are scoped to the element(s) they are declared on",
+        `Inherited: yes`), so the flat map and a browser agree on every page in this
+        tree. This helper is the mechanical form of that sentence: it returns
+        `[(token, declaring_selectors)]` for every token a `font-family`/`font` value
+        references whose declaring rules are NOT document-wide. Non-empty = the limit is
+        LIVE on that sheet, i.e. the class docstring's "latent, not live" no longer
+        holds and the flat map can credit a face the element never computes.
+        """
+        declared = {}
+        for selectors, body in cls.RULE.findall(css):
+            for name, _value in cls.VAR_DEF.findall(body):
+                declared.setdefault(name.strip(), set()).update(
+                    s.strip() for s in selectors.split(",") if s.strip())
+        referenced = set()
+        for _selectors, body in cls.RULE.findall(css):
+            for family in cls.FAMILY.findall(body):
+                referenced.update(t.strip() for t in cls.VAR_REF.findall(family))
+        return [
+            (token, sorted(declared[token])) for token in sorted(referenced)
+            # a token declared nowhere is a different defect (the guard refuses it, fail
+            # closed), and it is not this one: there is no scope to be wrong about.
+            if token in declared and not declared[token] <= cls.DOCUMENT_WIDE_SELECTORS
+        ]
+
+    def test_the_scoped_token_limit_is_latent_on_every_page_it_decides_on(self):
+        """Every `var()` family on a page it DECIDES on resolves a document-wide token.
+
+        The class docstring justifies leaving the declaring-scope limit unmodelled with a
+        MEASURED claim — "latent, not live" — and that claim was wrong in the tree twice
+        while it was hand-written prose: round 10 and round 11 both re-measured "all nine
+        subjects define `--mono` in `:root`" as EIGHT of nine
+        (`website/apps/dashboard/public/404.html` names the family list directly and
+        resolves no `var()`, so the limit cannot be tripped there). A count in a comment
+        is not a guard; this is. It REDs the moment a page hands an element a family
+        through a token declared on a scoped selector, which is the day the limit stops
+        being latent — and the repair is then either moving the token to `:root` or
+        stating the limit as LIVE.
+        """
+        repo = Path(__file__).resolve().parent.parent
+        offenders, checked = [], 0
+        for path in self._sources(repo):
+            text = path.read_text(errors="replace")
+            if not self.RENDERS_CODE.search(text):
+                continue
+            css = "\n".join(self.STYLE.findall(
+                self.COMMENT.sub(" ", self.INERT.sub(" ", text))))
+            if not css.strip():
+                continue
+            checked += 1
+            for token, scopes in self._scoped_family_tokens(css):
+                offenders.append(
+                    f"{path.relative_to(repo)}: {token} declared on "
+                    f"{', '.join(scopes)} — a family value asks for it")
+        assert checked >= self.MIN_PAGES, (
+            f"only {checked} self-contained page(s) found under "
+            f"{'/'.join(self.ROOTS)} — the scan is not looking at the right tree")
+        assert not offenders, (
+            "the documented declaring-scope limit is no longer LATENT — these pages "
+            "feed a `code`/`pre` family through a token declared only on a scoped rule, "
+            "so the guard credits a face the browser never computes for the element "
+            "(custom properties inherit: a token on `.art-body` does not reach a "
+            "`<code>` outside it, so the reference is the guaranteed-invalid value and "
+            "the whole declaration is invalid at computed-value time):\n  "
+            + "\n  ".join(offenders)
+            + "\nMove the token to `:root` (or another document-wide selector), or "
+              "state the limit as LIVE in the class docstring and extend "
+              "`test_a_scoped_token_is_credited_and_that_is_a_documented_limit` — "
+              "closing it silently is the one thing this file forbids.")
+
+    def test_the_scoped_token_predicate_separates_the_three_shapes(self):
+        """Non-vacuity for the ratchet above: it must RED the scoped shape and only it.
+
+        Without this, `_scoped_family_tokens` returning `[]` on the real tree is
+        indistinguishable from a predicate that returns `[]` always — the failure mode
+        the sibling class records for a guard whose subject went missing.
+        """
+        assert self._scoped_family_tokens(
+            ":root{--mono:Menlo} code{font-family:var(--mono)}") == []
+        assert self._scoped_family_tokens(
+            "code{font-family:Menlo}") == []          # the ninth subject's shape
+        scoped = self._scoped_family_tokens(
+            ".art-body{--mono:Menlo} code{font-family:var(--mono)}")
+        assert scoped == [("--mono", [".art-body"])], (
+            "the ratchet above no longer recognises the documented limit's own shape — "
+            f"its clean verdict on the real tree means nothing. Got {scoped!r}")
+        # and the `var()`-under-another-name route, which the flat map covers equally
+        assert self._scoped_family_tokens(
+            "main{--code-font:Menlo} code{font-family:var(--code-font)}"
+        ) == [("--code-font", ["main"])]
+
+    def test_a_nested_var_is_resolved_the_way_the_browser_resolves_it(self):
+        """A `var()` inside a fallback, and an unresolvable reference in a list (#10254 r6).
+
+        The fallback of a `var()` is *itself substituted* by css-variables-1 §"replace a
+        var()" step 3, so `var(--mono, var(--brand, Menlo))` computes to whatever
+        `--brand` is. Reading the fallback as flat text — the reference regex stopped at
+        the first `)`, so it never saw `Menlo` as living inside another `var()` — credited
+        a **serif** as a mono face: the round-6 review's false green, reproduced against
+        this class's own logic before it was fixed.
+
+        The last two rows are the other direction of the same mistake: a reference that
+        resolves to nothing invalidates the **whole** declaration at computed-value time,
+        and CSS does not then fall through to the next family in the list — so a trailing
+        `Menlo` written after an unresolvable `var()` is not a face the element gets.
+        """
+        cases = [
+            # (why, css, is `code` given a mono face?)
+            ("a serif inside the fallback's own var() — the round-6 false green",
+             ":root{--brand:Georgia,serif} "
+             "code{font-family:var(--mono, var(--brand, Menlo))}", False),
+            ("the same shape, inner token missing → the browser uses its fallback",
+             "code{font-family:var(--mono, var(--brand, Menlo))}", True),
+            ("the same shape, `--mono` defined → the outer fallback is dead text",
+             ":root{--mono:Menlo} code{font-family:var(--mono, var(--brand, Menlo))}", True),
+            ("the same shape, `--mono` defined as a serif",
+             ":root{--mono:Georgia,serif} "
+             "code{font-family:var(--mono, var(--brand, Menlo))}", False),
+            ("an unresolvable `var()` invalidates the whole list, not just its slot",
+             "code{font-family:var(--mono), Menlo}", False),
+            ("a token whose own value carries an unresolvable var() is guaranteed-invalid",
+             ":root{--mono:Menlo,var(--nope)} code{font-family:var(--mono)}", False),
+            # the invalid signal has to survive the recursion: returning empty *text*
+            # appended `Menlo,` for the next family, so a declaration CSS invalidates
+            # whole read as a mono face (round 8's false green)
+            ("an invalid token voids the declaration around it — the trailing face is dead",
+             ":root{--mono:var(--nope)} code{font-family:Menlo, var(--mono)}", False),
+            ("the same, leading face first",
+             ":root{--mono:var(--nope)} code{font-family:var(--mono), Menlo}", False),
+            ("an unbalanced var( is a parse error, so no family in the value applies",
+             "code{font-family:Menlo, var(--mono}", False),
+        ]
+        for why, css, expect in cases:
+            got = "code" in self._elements_styled_mono(css)
+            assert got == expect, (
+                f"{'false green' if got else 'false red'}: {why}\n  css: {css}\n"
+                f"  guard says mono={got}, CSS computes mono={expect}")
+
+    #: the self-contained emitters this guard's `ROOTS` does NOT reach, each carrying the
+    #: `<style>` block that makes it a page the sibling declaration guard scans.
+    OUT_OF_ROOT_EMITTERS = ("tortoise/oauth.py", "tortoise/render.py")
+
+    def test_the_out_of_root_emitters_render_no_code(self):
+        """The scope limit is stated, so its precondition is pinned instead of assumed.
+
+        `Scope` above names two self-contained emitters that carry their own sheet but
+        sit outside `ROOTS` (`tortoise/`, not `website/` + `apps/`), and that sentence is
+        only true while neither renders a `<code>`/`<pre>`: an element there is one this
+        scan cannot see, so the Courier defect (#6870) would have no guard on that
+        surface at all. A narrow, deliberate exclusion is exactly the kind of claim that
+        rots silently, so the precondition is measured here rather than trusted.
+
+        Non-vacuity: the same predicate is applied first to the pages INSIDE `ROOTS`, and
+        must find at least `MIN_PAGES` of them — a predicate that had stopped seeing
+        elements would otherwise pass this test by finding nothing anywhere.
+
+        The exclusion itself is pinned by the two properties that actually make these
+        emitters invisible to this scan, each with the mutation that reds it. Asserted
+        over `inside` instead — the shape this test shipped with — it could never fire:
+        `inside` is derived from `_sources`, i.e. from `ROOTS`, so no member of it can be
+        a path outside `ROOTS`, and an assertion no edit can falsify pins nothing
+        (#10254 review P3). Being outside `ROOTS` is one half; the other is that `.py` is
+        not in `SUFFIXES`, so the walk would not read them even under a widened root.
+        """
+        repo = Path(__file__).resolve().parent.parent
+
+        def _visible(rel):
+            text = (repo / rel).read_text(errors="replace")
+            return self.COMMENT.sub(" ", self.INERT.sub(" ", text))
+
+        scanned = {p.relative_to(repo).as_posix() for p in self._sources(repo)}
+        inside = [rel for rel in sorted(scanned) if self.RENDERS_CODE.search(_visible(rel))]
+        assert len(inside) >= self.MIN_PAGES, (
+            "this predicate finds no element even on the pages this guard scans "
+            f"({inside}) — it is not measuring what it claims")
+
+        under_root = [rel for rel in self.OUT_OF_ROOT_EMITTERS
+                      if rel.split("/")[0] in self.ROOTS]
+        assert not under_root, (
+            f"{under_root} now sit under a `ROOTS` entry ({self.ROOTS}) — the scope note "
+            "in this class says they are outside it, so either narrow `ROOTS` back or "
+            "adopt the emitter the way the message below describes")
+        readable = [rel for rel in self.OUT_OF_ROOT_EMITTERS
+                    if Path(rel).suffix in self.SUFFIXES]
+        assert not readable, (
+            f"{readable} carry a suffix this scan reads ({self.SUFFIXES}) — the suffix "
+            "set is half of why these emitters are invisible here, so adopting `.py` "
+            "makes the scope note's justification false even while `ROOTS` is unchanged")
+        reachable = [rel for rel in self.OUT_OF_ROOT_EMITTERS if rel in scanned]
+        assert not reachable, (
+            f"{reachable} are yielded by `_sources` — this scan reads a page the scope "
+            "note claims it cannot, so the exclusion is no longer deliberate")
+
+        grew = []
+        for rel in self.OUT_OF_ROOT_EMITTERS:
+            text = _visible(rel)
+            assert self.STYLE.search(text), (
+                f"{rel} no longer carries its own `<style>` block — the scope note in "
+                "this class names it as a self-contained page, so either the note or "
+                "this list is now stale")
+            if self.RENDERS_CODE.search(text):
+                grew.append(rel)
+        assert not grew, (
+            "these self-contained emitters sit OUTSIDE this guard's ROOTS and have grown "
+            "a `<code>`/`<pre>` element — that element has no mono rule this scan can "
+            "see, which is the #6870 defect on a surface with no guard. Either give the "
+            "element a mono family inside the emitter, or declare the file in `ROOTS` "
+            "and extend the ratchet, so the exclusion stays deliberate:\n  "
+            + "\n  ".join(grew))

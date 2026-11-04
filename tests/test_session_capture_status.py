@@ -626,4 +626,10 @@ def test_new_columns_appended_at_end():
         "s.id", "s.created_at", "s.turn_count", "s.actor_user_id", "s.harness",
         "s.machine_id", "s.model", "s.capture_ok", "s.capture_extractor",
         "s.client_captured_at", "s.client_captured_at_source", "s.capture_lane",
+        # #10000 review P2: APPENDED and NOT served (sess[12]) — the id-space
+        # tail witness `record_read.session_turns` needs, because `turn_count`
+        # is a WINDOW length and cannot see a missing highest turn. It is last
+        # for the same reason every other append is: the wire mapping is
+        # positional, so a NEW column may only ever go at the end.
+        "s.turn_max_index",
     ], detail_sel

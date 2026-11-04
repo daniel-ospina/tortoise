@@ -1615,6 +1615,56 @@ def test_the_readmes_line_citations_resolve_to_the_symbols_they_name():
         assert symbol.split(".")[-1] in text, (
             f"README cites `{symbol}` at extractor_v2.py:{lineno}, which reads "
             f"{text.strip()!r} — the line moved and the cite did not")
+    # (c) The probe's eight bare step cites (#10211). They name a SYMBOL and a
+    # bare `:NNNN` with no filename, so rule (b) cannot see them (it reads the
+    # README) and the bundle's own sweep cannot either (`_BUNDLE_CITE` requires
+    # `file.py:line`). Nothing watched them: `#10243` moved `extractor_v2.py` by
+    # +88 and all eight went stale while both pin files stayed green. Same rule
+    # as (b), applied to the file that carries them.
+    probe = re.sub(r"`{2}", "`", PROBE.read_text())
+    step_pairs = re.findall(
+        r"`([A-Za-z_][\w.]*)`(?:\s*/\s*`([A-Za-z_][\w.]*)`)?"
+        r"\s*\((?:S[\d.]+(?:\+S\d+)?|the gap filler),[^`]*`:(\d+)`",
+        probe)
+    assert len(step_pairs) >= 8, (
+        f"the probe's step list is gone or was reformatted: {step_pairs}")
+    for first, second, lineno in step_pairs:
+        text = sources["extractor_v2"][int(lineno) - 1]
+        named = [s.split(".")[-1] for s in (first, second) if s]
+        assert any(sym in text for sym in named), (
+            f"the probe cites `{first}`"
+            + (f" / `{second}`" if second else "")
+            + f" at extractor_v2.py:{lineno}, which reads {text.strip()!r} — "
+            "the line moved and the cite did not")
+    # (d) The probe's ENTRY-POINT sentence, the same (def, call) pair rule (a)
+    # pins in the README (#10021 review). Rule (c) covers only the probe's eight
+    # bare STEP cites, so this sentence — the one that names the entry point a
+    # reader reproduces from — was the ONLY cite in the bundle that nothing
+    # re-checked. It rotted exactly as rule (a)'s README twin did: the
+    # re-derivation moved the `def` half to 13236 and left `called at :11682`
+    # untouched, so `capstone_run.py:19` and `README.md:615` stated two
+    # different, both-wrong call sites for one fact, and both pin files stayed
+    # green. Two documents stating one fact is a claim that can only be pinned
+    # where each one states it.
+    #
+    # Non-vacuity: the pre-fix probe reads `(``sdk.py:13236``, called at
+    # ``:11682``)`, and `sdk.py:11682` at this head is
+    # `from tortoise.commit_schema import compute_client_commit_id` — so the
+    # call-site assertion reds there. It is the assertion that was already red
+    # in the README before this round; the pin now covers the second site too.
+    probe_entry = re.search(r"`sdk\.py:(\d+)`, called at `:(\d+)`", probe)
+    assert probe_entry, (
+        "the probe's entry-point cite moved or was reformatted; re-derive it, "
+        "do not drop the pin")
+    p_def, p_call = (int(n) for n in probe_entry.groups())
+    assert sources["sdk"][p_def - 1].lstrip().startswith("def _extract_session_v2("), (
+        f"the probe cites the _extract_session_v2 def at sdk.py:{p_def}, which "
+        f"is {sources['sdk'][p_def - 1].strip()!r} — the line moved and the "
+        "cite did not")
+    assert "self._extract_session_v2(" in sources["sdk"][p_call - 1], (
+        f"the probe cites the call at sdk.py:{p_call}, which is "
+        f"{sources['sdk'][p_call - 1].strip()!r} — the line moved and the cite "
+        "did not")
 
 
 def test_the_readme_stamps_the_shipped_log_at_the_logs_own_head():

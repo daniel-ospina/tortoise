@@ -30,7 +30,7 @@ sys.path.insert(0, sys_path)
 
 import pytest  # noqa: E402
 
-from tortoise.sdk import TortoiseSDK, _entity_name_id  # noqa: E402
+from tortoise.sdk import TortoiseSDK  # noqa: E402
 
 
 def _nodes(proj, label, *props):
@@ -64,9 +64,15 @@ class TestSharedNameDoesNotCollapseIds:
                 "objectKind:'company', title:'TWO', status:'live'})"
             )
 
-            created = sdk.create_object("Acme", "company")
-            created_id = created["id"]
-            assert created_id == _entity_name_id("Object", "Acme")
+            # ⛔ #3590 D2: a name held by TWO LIVE carriers is not something a
+            # create may pick between — `resolve_or_mint` refuses it — so this
+            # pins the FOLD with an EXPLICIT-id write, which is the channel that
+            # legally produces a third carrier of a shared name. The property
+            # under test is unchanged: the fold must not re-id the carriers.
+            created = sdk.create_entity("object", "Acme", objectKind="company",
+                                        _server_id="carrier-3",
+                                        is_episodic=False)
+            created_id = created["node"]["id"]
 
             rows = _nodes(proj, "Object", "name")
             ids = _ids(rows)
@@ -95,7 +101,9 @@ class TestSharedNameDoesNotCollapseIds:
                 "objectKind:'company', status:'superseded'})"
             )
 
-            created_id = sdk.create_object("Beta", "company")["id"]
+            created_id = sdk.create_entity(
+                "object", "Beta", objectKind="company",
+                _server_id="carrier-2", is_episodic=False)["node"]["id"]
 
             rows = _nodes(proj, "Object", "status")
             ids = _ids(rows)
@@ -115,7 +123,9 @@ class TestSharedNameDoesNotCollapseIds:
             proj.g.query("CREATE (s:Subject {id:'sub-decoy-1', name:'Bob', status:'live'})")
             proj.g.query("CREATE (s:Subject {id:'sub-decoy-2', name:'Bob', status:'live'})")
 
-            created_id = sdk.create_subject("Bob")["id"]
+            created_id = sdk.create_entity(
+                "subject", "Bob", _server_id="sub-3",
+                is_episodic=False)["node"]["id"]
 
             rows = _nodes(proj, "Subject", "name")
             ids = _ids(rows)
@@ -132,7 +142,9 @@ class TestSharedNameDoesNotCollapseIds:
             proj.g.query("CREATE (o:Object {id:'decoy-1', name:'Acme', status:'live'})")
             proj.g.query("CREATE (o:Object {id:'decoy-2', name:'Acme', status:'live'})")
 
-            created_id = sdk.create_object("Acme", "company", lane="x")["id"]
+            created_id = sdk.create_entity(
+                "object", "Acme", objectKind="company", lane="x",
+                _server_id="carrier-3", is_episodic=False)["node"]["id"]
 
             assert _by_id(proj, "Object", created_id, "lane") == [["x"]]
             assert _by_id(proj, "Object", "decoy-1", "lane") == [[None]], (
@@ -159,16 +171,29 @@ class TestSingleCarrierPathIsUnchanged:
             sdk.close()
 
     def test_create_twice_stays_idempotent_when_the_name_is_shared(self, tmp_path):
-        """A 2-carrier name does not break the create's idempotency."""
+        """A shared name is REFUSED, on every call — it is never a pick.
+
+        The pre-#3590 contract minted a THIRD node here (the id was derived from
+        the name, so a create never had to choose a carrier). Since #3590 D2 a
+        create RESOLVES to a single live holder or mints on an EMPTY name; a name
+        held by two live carriers is ambiguity a create may not resolve for the
+        caller (`route-then-refuse`, R8). The old body — "a 2-carrier name does
+        not break the create's idempotency" — asserted the retired behaviour, so
+        it is the refusal that is pinned now, on BOTH calls: the first refusal
+        must not have written a third carrier either.
+        """
+        from tortoise.entity_identity import AmbiguousEntityName
+
         sdk = TortoiseSDK(str(tmp_path / "g.db"))
         try:
             proj = sdk._get_proj()
             proj.g.query("CREATE (o:Object {id:'decoy-1', name:'Acme', status:'live'})")
             proj.g.query("CREATE (o:Object {id:'decoy-2', name:'Acme', status:'live'})")
-            first = sdk.create_object("Acme", "company")["id"]
-            second = sdk.create_object("Acme", "company")["id"]
-            assert first == second
-            assert len(_nodes(proj, "Object")) == 3, _nodes(proj, "Object")
+            for _ in range(2):
+                with pytest.raises(AmbiguousEntityName):
+                    sdk.create_object("Acme", "company")
+            assert sorted(_ids(_nodes(proj, "Object"))) == ["decoy-1", "decoy-2"], (
+                f"a refused create still wrote a carrier: {_nodes(proj, 'Object')}")
         finally:
             sdk.close()
 
@@ -198,7 +223,10 @@ class TestFoldSeam:
             proj = sdk._get_proj()
             proj.g.query("CREATE (o:Object {id:'decoy-1', name:'Acme', status:'live'})")
             proj.g.query("CREATE (o:Object {id:'decoy-2', name:'Acme', status:'live'})")
-            canonical = _entity_name_id("Object", "Acme")
+            # The id this registration carries is the fixture's own choice:
+            # #3590 retired the name-derived id, and the test's point is that
+            # the fold writes the record's OWN id, never a carrier it guesses.
+            canonical = "obj-applied-acme"
             proj.apply(
                 {
                     "type": "ObjectRegistered",
@@ -213,6 +241,72 @@ class TestFoldSeam:
             assert len(set(ids)) == len(ids), ids
         finally:
             sdk.close()
+
+
+    @pytest.mark.parametrize("label,creation", [
+        ("Object", "ObjectRegistered"),
+        ("Subject", "SubjectAdded"),
+    ])
+    def test_the_1_to_2_registration_keeps_both_carriers_in_the_ENTITY_fold(
+            self, tmp_path, label, creation):
+        """The 1→2 registration: NO collapse, so the earlier id still folds.
+
+        `_upsert_object` / `_upsert_subject` MERGE on the record's own `id`
+        (#3590), so `[Reg(A, name), Reg(B, name)]` leaves TWO live nodes under
+        one name. `_fold_journal_entities`' carrier arm used to `clear()` the
+        set on the SECOND registration (the pre-#3590 name-keyed MERGE re-id'd
+        the node onto the LAST id), which evicted `A` — and the state-op guard
+        then recorded a NON-EXEMPT `state-op-miss` for a state op the graph
+        folds, i.e. it refused a legal journal on every replay engine
+        (#9876 review P1, `check-fail-closed-false-refusal`).
+
+        Pinned against the REPLAYED GRAPH, never against the model alone: the
+        graph keeps both ids and folds the state op onto `A`.
+        """
+        import copy
+
+        from tortoise.consistency import _fold_journal_entities
+        from tortoise.projection.nonfolded import (
+            collect_non_folded,
+            refused_events,
+        )
+
+        first, second = f"{label[:3].lower()}-first", f"{label[:3].lower()}-second"
+        events = [
+            {"type": creation, "id": first, "name": "Acme"},
+            # The 1→2 transition: a fresh id under an ALREADY held name.
+            {"type": creation, "id": second, "name": "Acme"},
+            # A state op on the FIRST carrier — the node the old `clear()`
+            # evicted from the carrier set.
+            {"type": "EntityMutated", "label": label, "id": first,
+             "op": "restatus", "state": {"status": "archived"}},
+        ]
+
+        sdk = TortoiseSDK(str(tmp_path / "g.db"))
+        try:
+            proj = sdk._get_proj()
+            for rec in events:
+                proj.apply(rec)
+            graph_ids = sorted(_ids(_nodes(proj, label)))
+            graph_status = _by_id(proj, label, first, "status")
+        finally:
+            sdk.close()
+
+        assert graph_ids == sorted([first, second]), graph_ids
+        assert graph_status == [["archived"]], graph_status
+
+        with collect_non_folded() as entries:
+            entities, _deleted, _ambiguous = _fold_journal_entities(
+                copy.deepcopy(events))
+        assert [str(e) for e in refused_events(entries)] == [], (
+            "the ENTITY reference fold refused a journal the graph folds — it "
+            "collapsed one name onto its LAST id: "
+            f"{[str(e) for e in refused_events(entries)]}"
+        )
+        assert entities[(label, first)]["status"] == "archived", (
+            "the reference fold did not apply the state op the graph folded "
+            f"onto the FIRST carrier: {entities[(label, first)]}"
+        )
 
 
 class TestReplayModelsSeeTheMentionStubs:
@@ -241,7 +335,7 @@ class TestReplayModelsSeeTheMentionStubs:
         )
 
         name = "Acme"
-        stub = _entity_name_id("Object", name)
+        stub = "obj-stub-acme"      # a journal fixture states its own id
         events = [
             # Mints `(stub, name)` — a carrier with NO registration record.
             {"type": "EventRecorded", "eventId": "ev-1",
@@ -287,7 +381,7 @@ class TestReplayModelsSeeTheMentionStubs:
         )
 
         name = "Bob"
-        stub = _entity_name_id("Subject", name)
+        stub = "sub-stub-bob"       # a journal fixture states its own id
         events = [
             {"type": "EventRecorded", "eventId": "ev-1",
              "event": {"eventId": "ev-1", "eventKind": "mentioned",
@@ -346,7 +440,7 @@ class TestReplayModelsSeeTheMentionStubs:
             refused_events,
         )
 
-        stub = _entity_name_id(label, name)
+        stub = f"fixture-stub-{label.lower()}"   # a fixture-owned id
         other = "obj-x" if label == "Object" else "sub-x"
         creation = ("ObjectRegistered" if label == "Object" else "SubjectAdded")
         events = [

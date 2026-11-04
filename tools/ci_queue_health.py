@@ -40,10 +40,17 @@ SIX STATES, DELIBERATELY NOT INTERCHANGEABLE
               ``CI: OK(queued=54, pr_running=2, pr_queued=32)`` with the oldest
               queued PR run at **527 minutes** — a clean bill of health printed
               for a repo whose REQUIRED ``python-ci-gate`` answers in hours. It has
-              no action available — the governor's WHOLE action surface is a
-              trim-safe OFFENDER's queued runs, and a queued PR run is never a
-              candidate — so it is WARNED about, never acted on, and exits 0 for
-              the same reason PR-STARVED does. Its reason line therefore reports
+              no action available — and the bound is the CLAUSE ORDER, not the trim
+              scope: the state requires ``pr_running > 0`` and the governor's block
+              sits BELOW that clause, so the governor is unreachable from here (the
+              scope does not bound it — a trim-safe OFFENDER leading this same queue
+              DOES license trims once no PR run is executing; a queued PR run is
+              never a candidate in any case) — so it is WARNED about, never acted
+              on, and exits 0 for the same reason PR-STARVED does. That no-action
+              claim is scoped to the READING: ``classify_queue`` is pure, and a run
+              that cancelled pre-action FLOOD candidates before this reading reports
+              them in ``cancelled`` (and in the workflow's transition line). Its
+              reason line therefore reports
               the queue's leader and that leader's trim-safety as FACTS, never as a
               claim about what the queue is made of (the #9118 P2-2 class: this
               clause is reachable with a trim-safe workflow holding the queue's
@@ -55,12 +62,16 @@ SIX STATES, DELIBERATELY NOT INTERCHANGEABLE
               job cancellation (Actions limits, "Job queue time"), which for a
               required merge check is indistinguishable from a hang.
   PR-STARVED  per REPO — no PR-event run is executing and a queued PR-event run
-              has waited past ``min_age_seconds``, but the queue's largest share
-              is NOT a trim-safe offender (it is PR work itself, or a workflow no
-              allow-list covers). It is the same "PR CI is not running" reality
-              as FLOOD with no action available, so it is WARNED about and never
-              reported as ``OK``: a flood inflates the PR backlog it starves, so
-              this is the LATE STAGE of the measured incident, not a corner case.
+              has waited past ``min_age_seconds``, and the dominance clause
+              declined: the queue's largest non-PR share is below the dominance
+              floor, OR below the PR share (the queue is PR-dominated). A
+              trim-safe offender may well be PRESENT in the second case, so this
+              is not "nothing could be blamed" — the reason line names the clause
+              that declined. It is the same "PR CI is not running" reality
+              as FLOOD with no trim reached for THIS READING, so it is WARNED about
+              and never reported as ``OK``: a flood inflates the PR backlog it
+              starves, so this is the LATE STAGE of the measured incident, not a
+              corner case.
               (ISSUE 3 of the #9118 review: clause order used to return ``OK``
               here, which is a clean bill of health for a CI that is not running.)
   PR-UNWITNESSED
@@ -79,8 +90,13 @@ SIX STATES, DELIBERATELY NOT INTERCHANGEABLE
               is not a measured starvation, and inferring STARVED from it would be
               the same inference this state exists to refuse. `FLOOD` and
               `PR-STARVED` ARE measured starvation — the same "PR CI is not running"
-              reality, differing only in whether an action is available — so both
-              reach the per-PR report (#9118 review, the late-stage blind spot).
+              reality — and the one thing they do NOT share is whether the reading
+              reaches the governor's block: FLOOD's always does, and it trims only
+              when the leader is trim-safe (a FLOOD led by an untrimmable workflow
+              reaches the block and trims NOTHING), while PR-STARVED's returns ABOVE
+              it. So the seam is this reading's REACH, not action availability:
+              either way both reach the per-PR report (#9118 review, the late-stage
+              blind spot).
 
 The truncation note, MEASURED rather than assumed (it is what makes
 PR-UNWITNESSED necessary):
@@ -169,11 +185,16 @@ Exit codes (fail-closed, matching ``tools/ci_check_repair.py``):
      REPORTED (post-action) verdict, so a cleared queue is 0 and the pre-action
      state line stays available in ``pre_action_state_line`` with ``cleared``
      naming the difference. ``PR-STARVED`` is also 0: the state is real and
-     warned about, but no action is available (nothing trim-safe to blame).
-     ``PR-BACKLOGGED`` is 0 for exactly that reason — the only runs this tool may
-     cancel belong to a trim-safe OFFENDER, and a queued PR run is never a
-     candidate, so there is nothing to cancel, and the alarm is its state line
-     plus the workflow's annotation.
+     warned about, and the reading reaches no trim — the dominance clause is what
+     declined, which is NOT the same as "nothing could have been blamed".
+     ``PR-BACKLOGGED`` is 0 for exactly that reason — the bound is the CLAUSE
+     ORDER: this state requires ``pr_running > 0`` and the governor's block sits
+     BELOW that clause, so the state reaches no cancellation at all (its
+     candidates are a trim-safe OFFENDER's queued runs, and a queued PR run is
+     never one), and the alarm is its state line plus the workflow's annotation.
+     A cancellation this invocation made BEFORE this reading is reported in
+     ``cancelled``/``pre_action_state_line``; the reading never speaks for the
+     invocation.
      ``PR-UNWITNESSED`` is 0 for the same reason — an action already happened
      before the verdict was reached, and the honest claim is "not witnessed",
      which is warned about rather than turned into a red run nobody can clear by
@@ -254,10 +275,12 @@ EXIT_UNMEASURABLE = 2
 #: PR-UNWITNESSED joins them: it is measured-and-incomplete, not unmeasurable,
 #: and no action can clear it, so it is announced (state line + `::warning`).
 #: PR-BACKLOGGED joins them for the same reason PR-STARVED did: its whole content
-#: is "a queued PR run waited N minutes", and the only runs this tool may cancel
-#: belong to a trim-safe OFFENDER — a queued PR run is never a candidate. A red
-#: run nobody can clear by acting is noise, not an alarm; the alarm is the state
-#: line plus the workflow annotation.
+#: is "a queued PR run waited N minutes", and the state reaches no cancellation —
+#: it requires `pr_running > 0`, and the governor's block sits BELOW that clause,
+#: so the CLAUSE ORDER is what bounds it (its candidates are a trim-safe OFFENDER's
+#: queued runs, and a queued PR run is never one). A red run nobody can clear by
+#: acting is noise, not an alarm; the alarm is the state line plus the workflow
+#: annotation.
 EXIT_FOR = {
     OK: EXIT_OK,
     FLOOD: EXIT_FLOOD,
@@ -278,11 +301,16 @@ DEFAULT_MAX_PR_WAIT_SECONDS = 90 * 60.0
 
 #: The verdicts that name a MEASURED PR starvation: PR work has a queued run that
 #: has waited past the age floor and nothing of it is executing. They differ only
-#: in whether an action is available (FLOOD has a trim-safe offender, PR-STARVED
-#: does not), which is NOT a difference in what the per-PR report is looking at,
-#: so both — and only these two — are threaded into `ci_check_repair`. A verdict
-#: that is NOT in this set (OK, UNKNOWN, PR-UNWITNESSED) must never produce a
-#: per-PR STARVED claim: each of those leaves starvation unmeasured or disproved.
+#: in whether THIS READING reaches the governor's block — FLOOD's always does, and
+#: it trims only when its leader is trim-safe (a FLOOD led by an untrimmable
+#: workflow reaches the block and trims NOTHING); PR-STARVED's returns ABOVE the
+#: block, though a trim-safe offender MAY still be present there, merely below the
+#: dominance floor or dominated by PR work. So "no offender to blame" is NOT what
+#: bounds it, and neither is action availability — the clause order is — which is
+#: NOT a difference in what the per-PR report is looking at, so both — and only
+#: these two — are threaded into `ci_check_repair`. A verdict that is NOT in this set (OK, UNKNOWN,
+#: PR-UNWITNESSED) must never produce a per-PR STARVED claim: each of those leaves
+#: starvation unmeasured or disproved.
 STARVING_VERDICTS = frozenset({FLOOD, PR_STARVED})
 #: (PR-BACKLOGGED is deliberately NOT a member — see `QueueHealth.starves_pr`.)
 
@@ -455,7 +483,10 @@ class QueueHealth:
         The single seam `tools/ci_check_repair.py` keys its per-PR STARVED state on,
         so the two instruments cannot disagree about whether PR CI is running: both
         verdicts witness a queued PR run past the age floor with nothing executing.
-        They differ only in whether the governor has something to trim, which is not
+        They differ only in whether THIS READING reaches the governor's block —
+        FLOOD's always does, and it trims only when its leader is trim-safe (a FLOOD
+        led by an untrimmable workflow reaches it and trims NOTHING); PR-STARVED's
+        returns ABOVE it — which is a difference in what the reading can DO, not in
         what the per-PR report is asking. Everything else (OK, UNKNOWN,
         PR-UNWITNESSED) leaves starvation unmeasured or disproved and is False.
 
@@ -711,7 +742,16 @@ def classify_queue(
         # work" would point the operator away from the one workflow the governor
         # could trim, and would contradict the reason line above it. So the leader
         # and its trim-safety are reported as FACTS (the shape `no_flood()` uses),
-        # and the no-action clause states what actually bounds the governor.
+        # and the no-action clause states what ACTUALLY bounds the governor: the
+        # clause ORDER (`pr_running != 0` returns above the governor's block), not
+        # the trim scope — because in this very shape the scope DOES license trims
+        # (the same queue with no PR run executing is a FLOOD whose `trimmable` is
+        # non-empty), and naming the scope as the bound would be a second false
+        # claim beside the one this clause exists to remove. The claim is scoped to
+        # THIS READING (`classify_queue` is pure): the invocation may have cancelled
+        # pre-action FLOOD candidates before this reading was taken, and `main()`
+        # reports those in `cancelled` — so an invocation-scoped "nothing was
+        # cancelled" here would contradict the payload it is printed in.
         reasons.append(
             f"PR-BACKLOGGED: PR CI IS executing ({pr_running} run(s)), but the oldest "
             f"queued PR-event run has waited {backlogged_wait:.0f}s "
@@ -719,8 +759,12 @@ def classify_queue(
             f"checks cannot answer inside that wait. Largest share: "
             f"'{global_leader or 'unknown'}' ({global_max} of {len(queued)}); "
             f"trim-safe offender present: {bool(set(non_pr_tally) & TRIM_SAFE)} — "
-            f"no run was trimmed: the governor only cancels a trim-safe OFFENDER's "
-            f"queued runs, and a queued PR run is never a candidate"
+            f"no run was trimmed for this reading: this state is reached only while "
+            f"a PR-event run is executing, and the governor's block sits BELOW that "
+            f"clause, so this reading reaches no governor block. In any case its candidates "
+            f"are a trim-safe OFFENDER's queued runs, and a queued PR run is never a "
+            f"candidate (a cancellation this invocation made BEFORE this reading is "
+            f"reported in 'cancelled', not here)"
         )
         return health(PR_BACKLOGGED)
 
@@ -747,8 +791,9 @@ def classify_queue(
             f"(> {min_age_seconds:.0f}s), so PR CI is NOT RUNNING. Largest share: "
             f"'{global_leader or 'unknown'}' ({global_max} of {len(queued)}); "
             f"trim-safe offender present: {bool(set(non_pr_tally) & TRIM_SAFE)} — "
-            f"no run was trimmed, and the reason line above names the condition "
-            f"that declined to act"
+            f"no run is trimmed in this reading, and the reason line above names "
+            f"the condition that declined to act (a cancellation this invocation "
+            f"made BEFORE this reading is reported in 'cancelled', not here)"
         )
         return health(PR_STARVED)
 
@@ -970,8 +1015,8 @@ def build_parser() -> argparse.ArgumentParser:
         prog="ci_queue_health.py",
         description=(
             "The REPO-LEVEL CI queue state (#9115) — FLOOD names the workflow that "
-            "is starving PR CI; PR-STARVED says PR CI is not running with nothing "
-            "trim-safe to blame; PR-BACKLOGGED says PR CI IS running and the "
+            "is starving PR CI; PR-STARVED says PR CI is not running and the "
+            "dominance clause declined; PR-BACKLOGGED says PR CI IS running and the "
             "backlog behind it is past any measured wait (#10237). Exit: 0 "
             "OK/PR-STARVED/PR-BACKLOGGED, 1 FLOOD, 2 could not measure."
         ),

@@ -18,13 +18,17 @@ without touching GitHub. Four things these tests exist to keep true:
      keeps removing, and here it would hide the silence the tool exists to hear.
   5. **The alarm follows the REPORTED verdict, not "did the governor act".** A
      flood that still stands after a successful governor run is a real state and
-     exits 1; and a queue where PR CI is not running but no offender can be
-     blamed is `PR-STARVED`, never `OK`.
+     exits 1; and a queue where PR CI is not running and a queued PR run has
+     waited past the age floor is `PR-STARVED` — never `OK` — when the dominance
+     clause declines. A trim-safe offender may well be PRESENT there (below the
+     dominance floor, or dominated by PR work), so "no offender can be blamed" is
+     NOT what decides it: the declining CLAUSE is.
 """
 from __future__ import annotations
 
 import dataclasses
 import json
+import re
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -33,6 +37,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from tools import ci_check_repair as R
 from tools import ci_queue_health as Q
 
 NOW = datetime(2026, 10, 19, 3, 30, 0, tzinfo=UTC)
@@ -68,6 +73,78 @@ def classify(queued, in_progress=(), **kwargs):
     return Q.classify_queue(queued, list(in_progress), NOW, **kwargs)
 
 
+def _rendered_annotation(line):
+    """What bash makes of a DOUBLE-QUOTED `echo` line's backticks.
+
+    Inside double quotes a backtick pair is still COMMAND SUBSTITUTION: bash
+    executes the text between them and replaces it with that command's stdout
+    (bash manual §3.5.4). The backslash-escaped form (backslash before a
+    backtick) is the only way to render a LITERAL backtick there — with the
+    old-style form, backslash keeps its literal meaning only before a dollar
+    sign, a backtick, or a backslash. So collapse the escaped pairs to a literal
+    backtick, then elide every remaining backtick span exactly as the shell
+    would; what is left is the message the operator reads (#10264 P1).
+    """
+    out, in_substitution, i = [], False, 0
+    while i < len(line):
+        char = line[i]
+        if char == "\\" and line[i + 1:i + 2] == "`":
+            if not in_substitution:
+                out.append("`")        # an ESCAPED backtick never terminates
+            i += 2
+            continue
+        if char == "`":
+            in_substitution = not in_substitution
+        elif not in_substitution:
+            out.append(char)
+        i += 1
+    return "".join(out)
+
+
+def _flatten_workflow(text, *, strip_comment_markers=True):
+    """The workflow as ONE lowercased line, optionally without per-line `# ` markers.
+
+    `strip_comment_markers=False` is the naive normalisation a guard falls into: a
+    claim wrapped across two comment lines keeps the continuation's leading `#`, so
+    the phrase stops being findable (it normalises to `nothing the # governor may
+    cancel`). Both branches live in THIS function so the control below exercises the
+    same expression the guard does — see `test_the_no_action_clause_names_the_bound_
+    that_actually_binds`.
+    """
+    if strip_comment_markers:
+        return " ".join(line.lstrip("# ").strip() for line in text.splitlines()).lower()
+    return " ".join(text.split()).lower()
+
+
+#: `elif [ "$verdict" = "<VERDICT>" ]; then` — the arm that renders one verdict.
+_ARM_START_RE = re.compile(r'^\s*elif \[ "\$verdict" = "([A-Z-]+)" \]; then\s*$')
+#: Anything that ends the arm: the next branch, the closing `fi`, or the trailer echo.
+_ARM_END_RE = re.compile(r'^\s*(?:el)?if \[ |^\s*fi\s*$|^\s*echo "ci-queue-health exit=')
+
+
+def _verdict_arms(workflow_text):
+    """`{verdict: arm body}` for every `elif [ "$verdict" = "<V>" ]` arm.
+
+    Guards that need "this arm still does X" must read the ARM, not a file-wide
+    occurrence count of the text: a count reds the suite when an unrelated arm
+    legitimately starts using the same fragment (#10264 review P3).
+    """
+    arms, current = {}, None
+    for line in workflow_text.splitlines():
+        start = _ARM_START_RE.match(line)
+        if start:
+            current = start.group(1)
+            arms[current] = []
+            continue
+        if current is None:
+            continue
+        if _ARM_END_RE.match(line):
+            current = None
+            continue
+        arms[current].append(line)
+    return {verdict: "\n".join(lines) for verdict, lines in arms.items()}
+
+
 # ── the incident: one reporting workflow, no PR run executing ──────────────
 
 def test_the_9115_shape_is_a_flood_naming_the_offender():
@@ -87,14 +164,19 @@ def test_a_deep_queue_of_pr_work_is_not_a_flood_but_it_is_not_OK_either():
     `OK` BEFORE the `pr_running`/age clauses ran, so this exact shape — 20 PR-event
     runs queued, oldest waiting 20 min, `pr_running = 0` — was reported as
     `CI: OK(queued=26, ...)` with a green workflow. That is "PR CI is not running",
-    the state #9115 was filed for. The governor still must not act (there is no
-    trim-safe offender to blame), so it is its own state, warned about, exit 0.
+    the state #9115 was filed for. The governor must not act — and NOT because
+    nothing is blameable: this queue DOES carry a trim-safe offender (6
+    `finding-provenance` runs, 1 excess over `keep=5`), and the same share with no
+    PR work would be a FLOOD that trims it. What declines is the
+    `offender_queued < global_max` clause — the queue is dominated by PR work — so
+    the governor is never reached. It is its own state, warned about, exit 0.
     """
     queued = starving_pr_runs(20) + flood_queued(6)
     health = classify(queued)
     assert health.verdict == Q.PR_STARVED
     assert health.verdict != Q.FLOOD
-    assert health.trimmable == ()          # nothing trim-safe to blame -> no action
+    assert health.trimmable == ()          # the dominance clause declined, NOT "nothing to blame"
+    assert any("trim-safe offender present: True" in reason for reason in health.reasons)
     assert any("dominated by PR work" in reason for reason in health.reasons)
     assert health.state_line == (
         "CI: PR-STARVED(queued=26, pr_running=0, pr_queued=20, oldest=1200s)"
@@ -289,11 +371,57 @@ def test_governor_never_trims_an_issue_body_gate_run():
                for reason in health.reasons)
 
 
+def test_the_seam_is_whether_the_reading_reaches_the_governor():
+    """PR #10264 review P3: this seam was stated as the OFFENDER, and it is false both ways.
+
+    The seam test above used to say FLOOD and PR-STARVED *"differ only in whether a
+    trim-safe offender exists"* — the very sentence this PR retires from the tool's
+    reason lines, and the belief that produced the wrong bound in `0fbcde5`. Prose
+    was the one surface no guard covered, so it survived the sweep: the code moved
+    away from it and the suite stayed green. Each direction below is DERIVED from
+    `classify` rather than transcribed, so the sentence reds here the day the code
+    and the prose part company again.
+    """
+    # (1) FLOOD when NO trim-safe offender exists anywhere in the queue: the leader is
+    # a workflow outside TRIM_SAFE, so there is nothing to blame and nothing to trim.
+    no_offender = classify(flood_queued(12, name="publish-selfhost", event="push")
+                           + starving_pr_runs(1))
+    assert no_offender.verdict == Q.FLOOD
+    assert no_offender.trimmable == ()
+    # (2) PR-STARVED when a trim-safe offender IS present — merely below the dominance
+    # floor, with the PR runs above it. `trimmable` is empty because the reading never
+    # reached the governor, NOT because there was no offender to act on.
+    starved = classify(flood_queued(5, start=1005)
+                       + starving_pr_runs(6, age_seconds=9000))
+    assert starved.verdict == Q.PR_STARVED
+    assert starved.trimmable == ()
+    assert "trim-safe offender present: True" in " ".join(starved.reasons)
+    # both witness the SAME wait, which is why offender existence cannot be the seam ...
+    assert no_offender.oldest_pr_queued_age_seconds is not None
+    assert starved.oldest_pr_queued_age_seconds is not None
+    # ... and the docstring that defines the seam must name the discriminator that
+    # survives, not the one that does not. Flattened, so an honest reflow is not red.
+    seam = " ".join(
+        (test_the_starvation_seam_is_the_two_measured_verdicts_only.__doc__ or "").split()
+    ).lower()
+    assert "whether this reading reaches the governor" in seam
+    assert "differ only in whether a trim-safe offender exists" not in seam
+
+
 def test_the_starvation_seam_is_the_two_measured_verdicts_only():
     """`starves_pr` is the ONE vocabulary the two instruments share (#9118).
 
     FLOOD and PR-STARVED both witness a queued PR run past the age floor with
-    nothing executing; they differ only in whether a trim-safe offender exists.
+    nothing executing; they differ only in whether THIS READING reaches the
+    governor's block — FLOOD's always does, and it trims only when its leader is
+    trim-safe (a FLOOD led by an untrimmable workflow reaches the block and trims
+    NOTHING), while a PR-STARVED reading is declined ABOVE the governor and reaches
+    it not at all. So neither the offender's existence nor action availability is
+    the seam. The OFFENDER is not the seam in either direction: a FLOOD can carry
+    no trim-safe offender at all,
+    and a PR-STARVED reading can have one present (below the dominance floor, or
+    dominated by PR work) — which is why "no offender to blame" is NOT what bounds
+    it. Both are derived in `test_the_seam_is_whether_the_reading_reaches_the_governor`.
     OK, UNKNOWN and PR-UNWITNESSED do not witness it, and must never be threaded
     into `ci_check_repair` as starvation.
     """
@@ -308,6 +436,95 @@ def test_the_starvation_seam_is_the_two_measured_verdicts_only():
         oldest_pr_queued_age_seconds=None,
     )
     assert unknown.starves_pr is False
+
+
+#: Statements of the FLOOD/PR-STARVED seam that this PR RETIRES, as the sentences
+#: that were actually written (flattened before matching). An absence assertion is
+#: the only guard that can reach a `#:` comment, where an attribute pin cannot; each
+#: entry is a CLAIM rather than a wording, so reflowing one is free and restoring the
+#: claim is not.
+_RETIRED_SEAM_CLAIMS = (
+    "action is available",
+    "something to trim",
+    "offender to trim",
+    "blamed is `pr-starved`",
+)
+
+
+def _flat_prose(text: str) -> str:
+    """Whitespace-insensitive form, so an honest reflow is not a red."""
+    return " ".join(text.split()).lower()
+
+
+def _starving_verdicts_comment() -> str:
+    """The `#:` block immediately above `STARVING_VERDICTS` — a comment, not an attr.
+
+    Sliced out of the file the module was loaded from, so the surface this guard
+    reads is the surface a reader reads: a transcribed copy of the comment would be
+    a second statement of the claim, i.e. the drift it exists to catch.
+    """
+    lines = Path(Q.__file__).read_text(encoding="utf-8").splitlines()
+    decl = next(i for i, line in enumerate(lines) if line.startswith("STARVING_VERDICTS = "))
+    start = decl
+    while start and lines[start - 1].startswith("#:"):
+        start -= 1
+    return "\n".join(lines[start:decl])
+
+
+#: EVERY surface that states the seam, with the claim it owes. Enumerated rather than
+#: sampled: a guard that certifies five surfaces while a sixth still teaches the
+#: retired model reads as "the seam is stated correctly everywhere", and the surface
+#: it misses is exactly the one the next guard or consumer keys on.
+_SEAM_PROSE_SURFACES = (
+    ("tools/ci_queue_health.py module docstring", "reaches the governor",
+     lambda: Q.__doc__ or ""),
+    ("tools/ci_queue_health.py STARVING_VERDICTS comment", "reaches the governor",
+     _starving_verdicts_comment),
+    ("QueueHealth.starves_pr docstring", "reaches the governor",
+     lambda: Q.QueueHealth.starves_pr.__doc__ or ""),
+    ("tools/ci_check_repair.classify docstring", "reaches the governor",
+     lambda: R.classify.__doc__ or ""),
+    ("this module's docstring (item 5)", "dominance clause declines",
+     lambda: __doc__ or ""),
+)
+
+
+def test_every_surface_that_states_the_seam_states_governor_reach_not_availability():
+    """PR #10264 review P3: the seam's correction landed where the diff was editing.
+
+    The PR retired "the trim scope is the bound" and, with it, the causal model that
+    FLOOD and PR-STARVED *"differ only in whether an action is available"* — on the
+    surfaces it happened to touch. Five others kept stating it, in files this PR
+    modifies, including the `starves_pr` docstring that DEFINES the seam and the
+    `tests` module docstring that states what the suite exists to keep true. Prose is
+    the one surface no runtime assertion covers, so the corrected claim and the
+    retired one are both pinned here, and the discriminator the prose names is
+    derived from `classify` below rather than trusted.
+    """
+    for name, claim, read in _SEAM_PROSE_SURFACES:
+        flat = _flat_prose(read())
+        assert claim in flat, f"{name} no longer states the seam: expected {claim!r}"
+        for retired in _RETIRED_SEAM_CLAIMS:
+            assert retired not in flat, f"{name} still states the retired claim {retired!r}"
+
+    # The discriminator the prose now names, DERIVED: a FLOOD's reading evaluates the
+    # governor's block and trims when the leader is trim-safe ...
+    trims = classify(flood_queued(12) + starving_pr_runs(1))
+    assert trims.verdict == Q.FLOOD
+    assert trims.trimmable
+    # ... a FLOOD whose leader sits outside TRIM_SAFE reaches the SAME block and trims
+    # NOTHING, which is why "an action is available" cannot be the seam ...
+    no_action = classify(flood_queued(12, name="publish-selfhost", event="push")
+                         + starving_pr_runs(1))
+    assert no_action.verdict == Q.FLOOD
+    assert no_action.trimmable == ()
+    # ... and a PR-STARVED reading with a trim-safe offender PRESENT also trims
+    # nothing, because it returns ABOVE the block. So two readings that both trim
+    # nothing carry OPPOSITE verdicts: reach separates them, the action does not.
+    starved = classify(flood_queued(5, start=1005) + starving_pr_runs(6, age_seconds=9000))
+    assert starved.verdict == Q.PR_STARVED
+    assert starved.trimmable == ()
+    assert "trim-safe offender present: True" in " ".join(starved.reasons)
 
 
 def test_governor_never_trims_the_workflow_dispatch_recovery_run():
@@ -699,12 +916,18 @@ def test_the_workflow_annotations_carry_the_state_line_in_the_message():
     # every state the tool can report has an annotation branch
     assert 'verdict" = "PR-STARVED"' in wf
     assert 'verdict" = "PR-UNWITNESSED"' in wf
+    # ... including the arm `#10253` added. THIS PR did not add the state, so the
+    # assertion passes against the pre-PR workflow too: it is a FUTURE-regression
+    # guard, not evidence that this diff is covered (#10264 review P3 — the earlier
+    # comment claimed "the sixth state this PR added", which is false).
+    assert 'verdict" = "PR-BACKLOGGED"' in wf
 
 
 # ── PR-STARVED through the CLI ────────────────────────────────────────────
 
 def test_pr_starved_is_exit_0_with_its_own_state_line(monkeypatch, capsys):
-    """Measured, warned about, and NOT red: there is nothing the governor may cancel."""
+    """Measured, warned about, and NOT red: the dominance clause declines, so the
+    governor is never reached — which is not the same as nothing being blameable."""
     starved = classify(starving_pr_runs(20) + flood_queued(6))
     assert starved.verdict == Q.PR_STARVED
     monkeypatch.setattr(Q, "read_health", lambda *a, **k: starved)
@@ -778,10 +1001,23 @@ def test_a_pr_backlog_past_the_wait_budget_is_not_ok_while_pr_ci_is_serving():
 def test_a_backlogged_queue_has_no_action_so_it_exits_0_and_is_warned_not_red():
     """Same reasoning as PR-STARVED: measured, real, and nothing may be cancelled.
 
-    The governor's whole action surface is a trim-safe OFFENDER's queued runs, and
-    a backlogged queue is BY DEFINITION made of the PR work the governor exists to
-    protect. A red run nobody can clear by acting is not an alarm, it is noise, so
-    the alarm is the state line and the workflow's annotation.
+    The bound is the CLAUSE ORDER, not the trim scope. `PR-BACKLOGGED` requires
+    `pr_running > 0`, and the governor's block sits BELOW the `pr_running != 0`
+    clause, so it is unreachable from here and no trim was considered FOR THIS
+    READING. The governor's candidates are a trim-safe OFFENDER's queued runs in
+    any case — a queued PR run is never one — but a leader MAY be a trim-safe
+    offender that the scope would license trims on, which is why the reason line
+    reports the leader as a FACT instead of asserting the queue is made of PR work
+    (the #9118 P2-2 class). This test's own queue is NOT that shape: it holds 20
+    PR-event runs and no non-PR run at all, so with no PR run executing it is
+    `PR-STARVED` with `trimmable == ()` (both halves pinned by
+    `test_a_starved_queue_is_starved_not_backlogged`). The measured trim-safe-leader
+    shape — the same queue with no PR run executing, a FLOOD whose governor trims 5
+    of 10 — is the fixture of
+    `test_the_no_action_clause_names_the_bound_that_actually_binds`, and that is
+    where the measurement belongs. A red run nobody can clear by acting is not an
+    alarm, it is noise, so the alarm is the state line and the workflow's
+    annotation.
     """
     health = classify(starving_pr_runs(20, age_seconds=9000),
                       in_progress=serving_pr_runs(1))
@@ -818,6 +1054,12 @@ def test_a_starved_queue_is_starved_not_backlogged():
     health = classify(starving_pr_runs(20, age_seconds=9000))
     assert health.verdict == Q.PR_STARVED
     assert not any("PR-BACKLOGGED" in r for r in health.reasons)
+    # The sibling half of the citation the backlogged test's docstring makes
+    # (#10264 review, non-blocking): this queue holds no non-PR run, so the
+    # classifier reaches `no_flood()` and there is nothing to trim. Asserted
+    # here so the docstring's `trimmable == ()` claim is pinned by the test it
+    # names, not merely by the PR-BACKLOGGED arm of the test that cites it.
+    assert health.trimmable == ()
 
 
 def test_a_truncated_feed_still_reports_a_witnessed_backlog():
@@ -887,6 +1129,210 @@ def test_a_backlogged_queue_reports_its_leader_as_a_fact_not_a_composition():
     assert "being served" not in joined
     # ... and the no-action clause names what actually bounds the governor.
     assert "a queued PR run is never a candidate" in joined
+
+
+def test_the_no_action_clause_names_the_bound_that_actually_binds():
+    """PR #10253 review P3-2: the bound is the CLAUSE ORDER, not the trim scope.
+
+    In the trim-safe-leader shape the reason line used to end "no run was trimmed:
+    the governor only cancels a trim-safe OFFENDER's queued runs" — but the scope
+    does NOT bind here, it LICENSES: this exact queue with no PR run executing is a
+    FLOOD whose governor trims 5 of the 10 `finding-provenance` runs. What bounds
+    it is the clause order (`pr_running != 0` returns above the governor's block).
+    Both halves are asserted, so the reason can neither name the wrong bound nor
+    go back to claiming nothing was trimmable.
+    """
+    queued = flood_queued(10) + starving_pr_runs(4, age_seconds=9000)
+
+    # the same queue, no PR run executing: the governor DOES act on this offender,
+    # so "the trim scope is the bound" would be a false claim in the state above.
+    flood = classify(queued)
+    assert flood.verdict == Q.FLOOD
+    assert len(flood.trimmable) == 5
+    assert all(run.name == "finding-provenance" for run in flood.trimmable)
+
+    # one PR run executing: PR-BACKLOGGED, nothing trimmed, and the reason names
+    # the clause order — not the scope — as what bounded it.
+    health = classify(queued, in_progress=serving_pr_runs(1))
+    assert health.verdict == Q.PR_BACKLOGGED
+    assert health.trimmable == ()
+    joined = " ".join(health.reasons)
+    assert "the governor's block sits BELOW that clause" in joined
+    # scoped to the READING, never to the invocation: the same payload can carry
+    # cancellations this run made before this reading (`cancelled`), so an
+    # invocation-scoped "no trim was ever considered" contradicts the artifact.
+    assert "no run was trimmed for this reading" in joined
+    # ⛔ "the governor was never reached" would be an INVOCATION claim, and one the
+    # payload can contradict: when this run cancelled pre-action FLOOD candidates
+    # the governor WAS reached, in the pre-action read. Scope it to the reading
+    # (#10264 review P3).
+    assert "this reading reaches no governor block" in joined
+    assert "the governor was never reached" not in joined
+    assert "no trim was ever considered" not in joined
+    # the scope is described as the candidate rule, never as the bound
+    assert "its candidates are a trim-safe OFFENDER's queued runs" in joined
+
+
+def test_a_reading_that_followed_a_trim_never_claims_the_invocation_trimmed_nothing(
+        monkeypatch, capsys):
+    """PR #10264 review P3: the no-action claim is READING-scoped, not invocation-scoped.
+
+    `classify_queue` is pure, and `main()` cancels the PRE-action FLOOD candidates
+    and then reports a POST-action re-read. A runner slot freeing during the
+    cancellations is a race the tool already models (`flood_stands_after_action`),
+    and it is reachable: the reported reading can be `PR-BACKLOGGED` while the very
+    same JSON carries `"cancelled": [ids]`. So the reason may say *"no run was
+    trimmed FOR THIS READING"* and never *"no trim was ever considered"* — the
+    latter is an invocation claim the reading cannot support, and the workflow's
+    annotation must read `cancelled` from the payload instead of asserting it.
+    """
+    flood = classify(flood_queued(10) + starving_pr_runs(4, age_seconds=9000))
+    assert flood.verdict == Q.FLOOD and len(flood.trimmable) == 5
+    backlogged = classify(flood_queued(10) + starving_pr_runs(4, age_seconds=9000),
+                          in_progress=serving_pr_runs(1))
+    assert backlogged.verdict == Q.PR_BACKLOGGED and backlogged.trimmable == ()
+
+    monkeypatch.setattr(Q, "cancel_run", lambda repo, run_id: (True, "cancelled"))
+    monkeypatch.setattr(Q, "read_health", _readings(flood, backlogged))
+    assert Q.main(["--apply", "--json"]) == Q.EXIT_OK
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["verdict"] == "PR-BACKLOGGED"
+    assert payload["cancelled"] == [1000, 1001, 1002, 1003, 1004]
+    assert payload["cleared"] is True
+    # the artifact does not contradict itself: the reason is about the reading,
+    # and the trims it did make are named by `cancelled` beside it.
+    joined = " ".join(payload["reasons"])
+    assert "no run was trimmed for this reading" in joined
+    assert "no trim was ever considered" not in joined
+    assert "Nothing was cancelled" not in joined
+
+    # ... and the workflow's annotation is payload-derived for the same reason.
+    wf = (Path(__file__).resolve().parents[1]
+          / ".github/workflows/ci-queue-health.yml").read_text()
+    warnings = [line for line in wf.splitlines() if "::warning" in line]
+    assert warnings
+    assert not any("Nothing was cancelled" in line for line in warnings)
+    assert 'cancelled_count="$(python3 -c "import json; print(len(' in wf
+    assert '[ "$cancelled_count" -gt 0 ]' in wf
+
+
+def test_a_starved_reading_after_a_trim_never_claims_the_invocation_trimmed_nothing():
+    """PR #10264 review P2: the SAME invocation-scoped claim survived in PR-STARVED.
+
+    `PR-STARVED` is a legal POST-action verdict, not only a pre-action one. The
+    sequence below is DETERMINISTIC and needs no stub — it is exactly what the tool
+    sees before and after its own cancels at the default `keep=5`:
+
+      PRE  10 `finding-provenance` + 6 queued `pull_request` runs, none executing
+           -> FLOOD, and the governor trims the 5 OLDEST (ids 1000-1004, because
+           `keep=5` keeps the NEWEST five).
+      POST the five runs this invocation TRIMMED have left the queued feed and the
+           five it KEPT (ids 1005-1009) remain: the offender is now 5 of 11 and the
+           6 PR runs dominate
+           -> `offender_queued < global_max` -> `PR-STARVED`, `trimmable == ()`,
+              while `cancelled` still names [1000-1004].
+
+    So the reason may not say "no run was trimmed": the same run page prints
+    `was CI: FLOOD(...) -> cleared 5 of 5` three steps above it. This is the same
+    class the PR fixes for `PR-BACKLOGGED`, one arm over — fixing only that arm left
+    the operator-facing alarm contradicting its own payload.
+    """
+    pre = flood_queued(10) + starving_pr_runs(6, age_seconds=9000)
+    post = flood_queued(5, start=1005) + starving_pr_runs(6, age_seconds=9000)
+
+    flood = classify(pre)
+    assert flood.verdict == Q.FLOOD
+    assert [r.id for r in flood.trimmable] == [1000, 1001, 1002, 1003, 1004]
+    # the KEPT runs are exactly the ones that survive into the post-action feed
+    trimmed = {t.id for t in flood.trimmable}
+    kept = {r.id for r in pre if r.name == "finding-provenance" and r.id not in trimmed}
+    assert {r.id for r in post if r.name == "finding-provenance"} == kept
+
+    starved = classify(post)
+    assert starved.verdict == Q.PR_STARVED
+    assert starved.trimmable == ()
+    joined = " ".join(starved.reasons)
+    # scoped to the READING; the invocation's own trims are named by `cancelled`
+    assert "no run is trimmed in this reading" in joined
+    assert "reported in 'cancelled', not here" in joined
+    assert "no run was trimmed" not in joined
+    # the clause above is named, and it is the dominance clause here — NOT
+    # "nothing can be blamed", which is false while a trim-safe offender is present
+    assert "another workflow holds more of the queue" in joined
+    assert "trim-safe offender present: True" in joined
+    assert "Largest share: 'Python CI' (6 of 11)" in joined
+
+    # ... and BOTH no-action arms are payload-derived, sharing one lead
+    wf = (Path(__file__).resolve().parents[1]
+          / ".github/workflows/ci-queue-health.yml").read_text()
+    # ⛔ COMMENT-STRIPPED, NORMALISED **AND LOWERCASED**, over the WHOLE FILE — not
+    # per line, and not just the `echo` lines. Three ways a naive guard goes inert
+    # here (#10264 reviews P2/P3 — every one of these was measured):
+    #   1. it scanned only `::warning` lines, but the retired claim also lived in
+    #      the file's own HEADER prose;
+    #   2. `" ".join(wf.split())` alone is NOT enough, because a claim wrapped
+    #      across two comment lines keeps the continuation's `#`, so it normalises
+    #      to "nothing the # governor may cancel". Stripping each line's LEADING
+    #      `# ` first is what makes the phrase contiguous again;
+    #   3. exact-case patterns miss a claim restored SENTENCE-INITIALLY —
+    #      "Nothing the governor may cancel." is the most likely reintroduction and
+    #      matched none of them, so everything is lowercased.
+    flat = _flatten_workflow(wf)
+    assert "nothing the governor may cancel" not in flat
+    assert "no trim-safe offender can be blamed" not in flat
+    assert "no trim-safe offender to blame" not in flat
+    # THE CONTROL — derived from the MECHANISM, never transcribed from the file's
+    # own prose wrapping. The property the guard needs is "step 2 is load-bearing":
+    # a claim straddling a comment line break is contiguous ONLY after the `# `-strip.
+    # A hand-written control reds the suite the day a comment is REFLOWED, which is
+    # an honest edit this test would then refuse (#10264 review P3, measured: joining
+    # two header comment lines onto one turned the previous control's second half
+    # False). So the sample straddles BY CONSTRUCTION, and it goes through the SAME
+    # helper the guard uses — a regression of the helper (dropping the strip) still
+    # reds this control, which is what makes it a control rather than a restatement.
+    sample = "# the bound the governor cannot cross\n# on one long comment line\n"
+    straddling = "the bound the governor cannot cross on one long comment line"
+    assert straddling in _flatten_workflow(sample)           # the strip joins it
+    assert straddling not in _flatten_workflow(
+        sample, strip_comment_markers=False)                 # ... and only the strip
+    # ... and the real file still carries comment prose for that strip to act on
+    assert any(line.lstrip().startswith("#") for line in wf.splitlines())
+    # THE ANNOTATION ITSELF must survive the SHELL, not just this text comparison.
+    # Every guard above is text-level, and no amount of normalisation interprets
+    # the shell — which is what let the P1 through: the `PR-BACKLOGGED` line wrote
+    # `it requires `pr_running > 0` …` inside DOUBLE quotes, so bash performed
+    # COMMAND SUBSTITUTION on it (bash manual §3.5.4: "the first backquote not
+    # preceded by a backslash terminates the command substitution"), rendering
+    # "it requires , and the governor's block sits below that clause", running a
+    # non-existent `pr_running`, and creating a stray file named `0` from the
+    # `> 0` redirect — green, because `set -e` never sees the substitution's
+    # status. `\`` is the only literal backtick in a double-quoted string, so any
+    # backtick left after removing the escaped pairs is EXECUTED. (#10264 review
+    # P1, measured in bash.)
+    anns = [line for line in wf.splitlines()
+            if line.strip().startswith('echo "::')]
+    # the exit-0/1 arms, so this scan cannot silently select nothing and pass
+    assert len(anns) >= 5, anns
+    assert [line for line in anns if "`" in line.replace("\\`", "")] == []
+    # ... and the arm that exists to name the CLAUSE ORDER must still name it once
+    # the shell has had its way with the line. Pinned on the RENDERED text, not the
+    # source text: the unescaped form contains `pr_running > 0` in the file and
+    # still loses it at runtime, which is exactly the shape that shipped.
+    backlogged = next(line for line in anns if "PR CI IS executing" in line)
+    assert "pr_running > 0" in _rendered_annotation(backlogged)
+    # ... and BOTH no-action arms speak from the PAYLOAD. Pinned on the ARMS, not on
+    # `wf.count("${cancel_lead}") == 2`: a file-wide count reds the suite the day a
+    # third arm legitimately reuses the lead — a false block on an honest edit — while
+    # it says nothing about the property that matters, which is "each of these arms
+    # reads `cancelled` instead of asserting it" (#10264 review P3).
+    arms = _verdict_arms(wf)
+    no_action = [v for v in ("PR-STARVED", "PR-BACKLOGGED") if v in arms]
+    assert no_action == ["PR-STARVED", "PR-BACKLOGGED"], sorted(arms)
+    for verdict in no_action:
+        body = arms[verdict]
+        assert "${cancel_lead}" in body, (verdict, body)
+        assert "This run cancelled nothing" not in body, (verdict, body)
 
 
 def test_an_unmeasured_pr_wait_while_pr_ci_executes_is_not_ok():

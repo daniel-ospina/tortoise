@@ -1485,6 +1485,152 @@ def test_the_spec_names_the_behavioural_guard_for_all_four_properties() -> None:
     )
 
 
+def _section_23_jti_store(spec: str) -> str:
+    """§2.3's `jti`-store paragraph, located by its own subject, and asserted found.
+
+    Bounded by the next bold-led paragraph (`**Signing key.**`) rather than by line numbers, so a
+    reflow of the section cannot silently turn this guard into a no-op on an empty string.
+    """
+    start = spec.find("**The `jti` store.**")
+    assert start != -1, (
+        "§2.3 no longer opens a 'The `jti` store.' paragraph — this guard has lost its subject, "
+        "which is not the same thing as the defect it exists to catch"
+    )
+    end = spec.find("**Signing key.**", start)
+    assert end > start, (
+        "§2.3's `jti`-store paragraph is no longer followed by '**Signing key.**' — the section "
+        "has been restructured and this guard's bounds need re-deriving, not deleting"
+    )
+    return spec[start:end]
+
+
+def test_the_spec_records_the_jti_mechanism_as_DECIDED_not_open() -> None:
+    """§2.3 must record the mechanism that SHIPPED, because §9 points a reader at it.
+
+    The defect this pins (raised on this PR, and real at `e618904d3` before this fix): §2.3 kept
+    its PRE-decision form — "Options, in order of preference … **(a) is preferred** … This is the
+    one open *mechanism* choice in this spec, and it is deliberately recorded rather than
+    assumed" — while `ControlPlaneJtiStore` shipped option **(b)**, the migration that backs it
+    says so, and §9 step 1's row tells the reader "the mechanism choice is §2.3".
+
+    The cost is not cosmetic: (a)'s argument is architectural, so a lane reading §2.3 as written
+    builds option (a) — a SECOND single-use store for the same guarantee, with its own secret
+    surface — and nothing in the record says the choice was taken. The fix is a RELAY, not a
+    reversal: the (a)-vs-(b) comparison stays, and the historical "open" wording is allowed to
+    survive as a QUOTED history (that is the lineage the next reader needs to understand why the
+    paragraph changed). What must be true is that the section states the adopted option, names the
+    artifact that ships it, gives the reason, and no longer ASSERTS the choice is open.
+    """
+    section = _section_23_jti_store(SPEC.read_text())
+    flat = " ".join(section.split())
+
+    # The relay's concrete subject: the option that shipped, and the artifact that ships it.
+    assert "**(b) is DECIDED" in flat, (
+        "§2.3 does not record (b) as the DECIDED mechanism — §9 step 1 points a reader here for "
+        "the choice, so leaving it unstated is the stale-flag shape this guard exists for"
+    )
+    for artifact in ("ControlPlaneJtiStore", "20261030000001_oauth_consent_tickets.sql"):
+        assert artifact in flat, (
+            f"§2.3's decided record does not name {artifact!r}, so it claims a decision without "
+            "naming anything that carries it"
+        )
+    # The artifact the section names must EXIST — a decided record citing a missing migration is
+    # the same fiction as an anchor pointing at a deleted line.
+    assert (REPO / "supabase/migrations/20261030000001_oauth_consent_tickets.sql").is_file(), (
+        "§2.3 cites migration 20261030000001_oauth_consent_tickets.sql, which is not in the tree"
+    )
+    # …and the reason, because "decided" without a WHY is the state that gets re-litigated.
+    assert "Why (b) and not (a)" in flat, (
+        "§2.3 records the decision without its reason — the comparison has to stay readable, or "
+        "the next lane re-opens a choice that was taken for a stated reason"
+    )
+    # …and the departure is MARKED, so a lane holding the earlier preference (or a vendor page
+    # arguing for (a)) meets the ruling where the adoption would happen instead of "tidying it up".
+    assert "**OVERRIDES:**" in flat, (
+        "§2.3 reverses a recorded preference without the OVERRIDES marker AGENTS.md requires — an "
+        "unmarked departure reads as an accident of history, not as a ruling"
+    )
+
+    # The pre-decision FRAMING must be gone: a preference ORDER is what made (a) look buildable.
+    assert "in order of preference" not in flat, (
+        "§2.3 still orders the two mechanisms by preference, which reads as 'not yet decided' "
+    )
+    # The open-claim SENTENCE must be gone. It is matched with its own opening, because the
+    # historical quotation of the phrase is deliberately kept (see the docstring) — deleting the
+    # lineage is not what this guard asks for.
+    assert "This is the one open" not in flat, (
+        "§2.3 still ASSERTS that the mechanism choice is open, while the code ships option (b)"
+    )
+
+
+def _section_still_open(spec: str) -> str:
+    """The doc's `## Still open` list, located by its own heading, and asserted found.
+
+    This is the ONE list a lane scopes against first, which is why a stale entry there costs more
+    than the same stale entry anywhere else: it is read as the work inventory. Bounded by the next
+    `## ` heading (or EOF) rather than by line numbers, so a reflow cannot turn the guard below
+    into a no-op on an empty string.
+    """
+    start = spec.find("## Still open")
+    assert start != -1, (
+        "the spec no longer has a '## Still open' section — this guard has lost its subject, which "
+        "is not the same thing as the defect it exists to catch"
+    )
+    end = spec.find("\n## ", start + 1)
+    return spec[start:] if end == -1 else spec[start:end]
+
+
+def test_the_still_open_list_does_not_reopen_the_DECIDED_jti_mechanism() -> None:
+    """`## Still open` must not list the `jti` mechanism as unchosen after §2.3 decided it.
+
+    The defect this pins (raised on this PR at `3f1d32ec0`): §2.3 records **(b) is DECIDED, and
+    shipped** and §9 step 1's row is DELIVERED, while `## Still open` still carried
+
+        - **The `jti` store mechanism** (§2.3) — preferred shape recorded; not chosen by an owner.
+
+    On `origin/main` that bullet was TRUE (§2.3 there presents the choice as open) — this PR's own
+    edits are what made it false, and the relay landed in §2.3/§9 and missed the one list a
+    scoping lane reads first. The cost is the same one that motivated the §2.3 relay: a lane that
+    trusts the open-items list re-opens a shipped mechanism choice and builds a SECOND single-use
+    store for the same guarantee.
+
+    Deleting the whole section is NOT an acceptable way to satisfy this: the section's other
+    entries are real open items (`#8218`, `#3529`), so the found-assert and the positive arm below
+    keep the guard anchored to a section that still says something.
+
+    Measured non-vacuity: with the bullet re-inserted verbatim and nothing else changed, this test
+    FAILS on the open-claim arm; it passes only once the bullet is gone.
+    """
+    section = _section_still_open(SPEC.read_text())
+    flat = " ".join(section.split())
+
+    # The section must still be a live inventory — otherwise "no jti claim here" is satisfied by
+    # emptying it, and the guard would pass on a doc that lost its open-items list entirely.
+    assert "#8218" in flat, (
+        "`## Still open` no longer names #8218 (attested client identity) — if the section was "
+        "emptied to satisfy this guard, the open items were lost rather than relayed"
+    )
+
+    # The bullet's own subject, and its own open-claim wording. Both are matched so a re-worded
+    # restatement (`the jti mechanism is still open` / `not chosen by an owner`) cannot slip past.
+    assert "`jti` store mechanism" not in flat, (
+        "`## Still open` still lists the `jti` store mechanism — §2.3 records (b) as DECIDED and "
+        "`ControlPlaneJtiStore` ships it, so a lane scoping from this list builds the second "
+        "single-use store the §2.3 relay exists to prevent"
+    )
+    assert "not chosen by an owner" not in flat, (
+        "`## Still open` still ASSERTS that a mechanism choice is unchosen — the only mechanism "
+        "choice in this spec (§2.3) is decided and shipped"
+    )
+
+    # …and the cross-check that makes the pair a contradiction guard rather than two independent
+    # string checks: the section §2.3 lives in must still read as DECIDED.
+    assert "**(b) is DECIDED" in " ".join(_section_23_jti_store(SPEC.read_text()).split()), (
+        "§2.3 no longer reads as DECIDED, so the relay has moved back — this guard's premise is "
+        "gone, not satisfied"
+    )
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # §2 / §9 step 2 — the token arm on `POST /oauth/consent`, EXECUTED
 #
@@ -1664,6 +1810,65 @@ def bearer_refuses(monkeypatch):
         raise HTTPException(status_code=401, detail="Missing session token")
 
     monkeypatch.setattr("tortoise.hosted_api.verify_session_jwt", _refuse)
+
+
+def test_startup_installs_the_SHARED_register(bridge_client, mint_spy, bearer_refuses) -> None:
+    """§9 step 1's OTHER half: the wiring, not the class.
+
+    `ControlPlaneJtiStore` being correct proves nothing about the deployment if the startup hook
+    never installs it — `consent_jti_store()` falls back to `ProcessLocalJtiStore` SILENTLY, so
+    every machine answers "first use" for a nonce another machine already spent and one consent
+    yields N authorization codes. The cross-machine test installs the store itself, so it proves
+    the class and not the wiring; this test boots the real app and drives a redemption through it.
+
+    MEASURED, two-sided: passes here, and FAILS at the `isinstance` below with "the AS started
+    with a PER-PROCESS register — cross-machine replay is unbounded" if the
+    `install_shared_consent_jti_store()` call is deleted from `_lifespan` (`tortoise/hosted_api.py`).
+    The RPC assertion further down is a SECOND, independent arm and is NOT the one that fires for
+    that mutation — it fires if the store is installed but the redemption never reaches the
+    control plane (e.g. a store that short-circuits locally). Note that deleting the call leaves
+    every other consent test green, which is exactly why this pin has to exist.
+    """
+    from tortoise.consent_token import ControlPlaneJtiStore, consent_jti_store
+
+    tc, cp = bridge_client                      # entering the client runs the real `_lifespan`
+    client_id = _register_client(tc)["client_id"]
+    _, challenge = _pkce()
+    bind = _bind(client_id, challenge)
+
+    assert isinstance(consent_jti_store(), ControlPlaneJtiStore), (
+        "the AS started with a PER-PROCESS register — cross-machine replay is unbounded, and no "
+        "other consent test notices because they install the store themselves")
+
+    assert _post_token(tc, mint_consent_token(user_id=_U1, email="u@example.com", bind=bind),
+                       bind).status_code == 200
+    assert any(fn == "consume_oauth_consent_ticket" for fn, _ in cp.rpc_calls), (
+        "the redemption never reached the control plane — per-process again")
+
+
+def test_the_startup_hook_still_calls_the_installer() -> None:
+    """The AST seam, alongside the behavioural pin above (`tests/test_8098_webhook_retry_sweep.py`
+    is the precedent): the wiring must be a real statement in `_lifespan`, not a comment, and the
+    behavioural test cannot tell a call from an equivalent side effect that a refactor removed.
+    """
+    from pathlib import Path
+
+    import tortoise.hosted_api as ha
+
+    tree = ast.parse(Path(ha.__file__).resolve().read_text(), filename="hosted_api.py")
+    lifespan = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "_lifespan")
+    calls = [
+        node for node in ast.walk(lifespan)
+        if isinstance(node, ast.Call)
+        and ((isinstance(node.func, ast.Name) and node.func.id == "install_shared_consent_jti_store")
+             or (isinstance(node.func, ast.Attribute)
+                 and node.func.attr == "install_shared_consent_jti_store"))
+    ]
+    assert len(calls) == 1, (
+        "expected exactly one `install_shared_consent_jti_store()` call in `_lifespan` — zero "
+        "silently restores per-process single-use across Fly machines (replay), and two is ambiguous")
 
 
 def test_a_bound_token_mints_the_code_with_the_tokens_identity_and_bound_params(

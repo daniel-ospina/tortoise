@@ -2,10 +2,11 @@
 
 A name is a MUTABLE natural key. Under #3590 D2 two live ``:Object``/
 ``:Subject`` carriers may hold one name at the same time (same-name
-coexistence is legal and is produced by explicit-id writers — and, measured in
-this file, by a rename through the public ``update_entity``), so a read that
-resolves a name as if it were an identity has a choice the caller never
-expressed. The historic answers were both wrong:
+coexistence is legal and is produced by explicit-id writers and by
+legacy/foreign raw writers — the rename door that USED to produce it is now
+refused by D3, so the one pin below builds the shape with a raw write), so a
+read that resolves a name as if it were an identity has a choice the caller
+never expressed. The historic answers were both wrong:
 
 * **union** — ``MATCH (o:Object) WHERE o.name = $topic`` returns every carrier,
   so two identities' Points/edges are folded into one value;
@@ -95,6 +96,7 @@ class TestBeliefTimelineIdentityRead:
         returns BOTH companies' decisions — a rename made the name ambiguous
         and the name-keyed read unioned the two carriers' Points."""
         sdk = sdk_factory()
+        proj = sdk._get_proj()
         acme = sdk.create_object("Acme", "company")
         beta = sdk.create_object("Beta", "company")
         _about_decision(sdk, "Acme should ship in Q1", acme["id"])
@@ -104,9 +106,19 @@ class TestBeliefTimelineIdentityRead:
         assert [t["content"] for t in before] == ["Acme should ship in Q1"], (
             f"one live carrier must resolve to its own chain: {before}")
 
-        # The rename that produces the D2 shape through a PUBLIC door: "Beta"
-        # is a different identity, and its name is now the same natural key.
-        sdk.update_entity(beta["id"], name="Acme")
+        # The rename that produces the D2 shape. ⛔ This used to go through the
+        # PUBLIC door (`sdk.update_entity(beta["id"], name="Acme")`); #3590 D3
+        # now REFUSES that (``NameAlreadyHeld`` — a live holder would make the
+        # name ambiguous with no by-name repair path), so the D2 state it
+        # produced is no longer reachable through a rename. The STATE is still
+        # legal (D2: same-name coexistence, and explicit-id writers create it),
+        # so it is built the way a legacy/foreign writer builds it — the pin's
+        # subject is the name-keyed READ, not the door that produced the shape.
+        proj.g.query("MATCH (o:Object {id:$id}) SET o.name = 'Acme'",
+                     params={"id": beta["id"]})
+        assert {r[0] for r in proj.g.query(
+            "MATCH (o:Object {name:'Acme'}) RETURN o.id").result_set} == {
+                acme["id"], beta["id"]}, "fixture did not produce the D2 shape"
 
         try:
             after = sdk.belief_timeline("Acme")
@@ -280,9 +292,19 @@ class TestCanonicalIdIsNotReReadByName:
             obj = sdk.create_object("Acme Widget", "company")
             subj = sdk.create_entity("subject", "Acme Team",
                                      subjectKind="core:team")["node"]
-            # The deterministic canonical ids the write path supplied.
-            assert obj["id"].startswith("obj-")
-            assert subj["id"].startswith("sub-")
+            # The write path supplied the id, and #3590 made it OPAQUE — so the
+            # contract is "an id the write determined", not the retired
+            # ``obj-<sha26(name)>`` prefix this pin asserted before the model
+            # change. Both halves still bite: the id is not the name, and it is
+            # the id stored on the node written FOR this name (a name-keyed
+            # refetch could have returned another same-name carrier's row).
+            assert obj["id"] != "Acme Widget", obj["id"]
+            assert subj["id"] != "Acme Team", subj["id"]
+            assert proj.g.query(
+                "MATCH (o:Object {name:'Acme Widget'}) RETURN o.id"
+            ).result_set == [[obj["id"]]], (
+                "the create returned an id that is not the id on the node it "
+                "wrote")
             stored = proj.g.query(
                 "MATCH (n) WHERE n.id IN $ids RETURN n.id",
                 params={"ids": [obj["id"], subj["id"]]}).result_set

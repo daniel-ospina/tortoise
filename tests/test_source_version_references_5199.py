@@ -513,11 +513,23 @@ def test_document_call_sites_express_derivation_not_containment():
     literal_labels: list[tuple[str, int, str]] = []
     for rel in files:
         tree = ast.parse((root / rel).read_text(encoding="utf-8"))
+        calls = [n for n in ast.walk(tree)
+                 if isinstance(n, ast.Call)
+                 and isinstance(n.func, ast.Attribute)
+                 and n.func.attr == "link_source_to_entity"]
+        # The label VARIABLES that reach a document call site's third argument.
+        # The conditional-assignment arm below must be scoped to these: a bare
+        # `label = A if c else B` is not a document call site, and matching every
+        # such assignment picks up writers that pass their label somewhere else
+        # entirely (``hosted_api``'s name-refusal probe passes it to
+        # ``refuse_ambiguous_create``, where neither ``Subject`` nor ``Object`` is
+        # a derivation label and neither should be — #9876).
+        call_label_names = {
+            arg.id for n in calls if len(n.args) >= 3
+            for arg in (n.args[2],) if isinstance(arg, ast.Name)}
         for node in ast.walk(tree):
             if (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Attribute)
-                and node.func.attr == "link_source_to_entity"
+                node in calls
                 and len(node.args) >= 3
                 and isinstance(node.args[2], ast.Constant)
                 and isinstance(node.args[2].value, str)
@@ -529,7 +541,8 @@ def test_document_call_sites_express_derivation_not_containment():
                 and isinstance(node.value, ast.IfExp)
                 and isinstance(node.value.orelse, ast.Constant)
                 and isinstance(node.value.orelse.value, str)
-                and any(isinstance(t, ast.Name) and t.id == "label" for t in node.targets)
+                and any(isinstance(t, ast.Name) and t.id in call_label_names
+                        for t in node.targets)
             ):
                 literal_labels.append((rel, node.lineno, node.value.orelse.value))
 

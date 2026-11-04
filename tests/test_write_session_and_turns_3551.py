@@ -52,13 +52,18 @@ _SDK_SID = "equiv-sdk"
 _HOSTED_SID = "equiv-hosted"
 
 #: The pre-refactor W2 ``:Session`` MERGE text (no harness/actor/machine/model
-#: inputs supplied). Byte-identical after the extraction.
+#: inputs supplied). Byte-identical after the extraction — EXCEPT the
+#: `turn_max_index` clause, which #10000 later changed from a monotone-up CASE to
+#: a plain assignment (the session's LIVE id-space end; the stale-turn sweep
+#: bounds itself with the PRIOR mark, read before the MERGE, and the record read's
+#: tail witness must describe the live state — see `sdk._write_session_and_turns`).
+#: The re-pin is deliberate: the extraction's contract is that BOTH lanes emit the
+#: same text, which this still asserts.
 _SDK_SESSION_CYPHER = (
     "MERGE (s:Session {id:$sid}) SET "
     "s.created_at=coalesce(s.created_at, $now), s.turn_count=$tc, "
     "s.is_episodic=true, "
-    "s.turn_max_index=CASE WHEN s.turn_max_index IS NULL "
-    "OR s.turn_max_index < $tmi THEN $tmi ELSE s.turn_max_index END"
+    "s.turn_max_index=$tmi"
 )
 #: The pre-refactor W1 ``:Session`` MERGE text — the SAME base clauses plus the
 #: conditional harness/machine_id/model clauses this request supplied.
@@ -66,8 +71,7 @@ _HOSTED_SESSION_CYPHER = (
     "MERGE (s:Session {id:$sid}) SET "
     "s.created_at=coalesce(s.created_at, $now), s.turn_count=$tc, "
     "s.is_episodic=true, "
-    "s.turn_max_index=CASE WHEN s.turn_max_index IS NULL "
-    "OR s.turn_max_index < $tmi THEN $tmi ELSE s.turn_max_index END, "
+    "s.turn_max_index=$tmi, "
     "s.harness=$harness, "
     "s.machine_id=coalesce(s.machine_id, $mid), "
     "s.model=coalesce(s.model, $model)"

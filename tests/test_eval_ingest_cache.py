@@ -128,18 +128,48 @@ def test_prompt_digest_covers_the_vet_switch(monkeypatch):
     assert runner.extractor_prompt_digest() != off
 
 
+def test_prompt_digest_covers_the_seam_and_value_gate_switches(monkeypatch):
+    """#5087: ``TORTOISE_S2_DECISION_SEAM`` arms S2.2 (it IS the arbiter) and the
+    S2.3 tail, so it changes extraction output; ``TORTOISE_VALUE_GATE`` removes
+    identifier-only candidates outright. Either one toggled between QA cycles
+    with the digest unchanged serves the other arm's cached graph — the
+    silent-stale-HIT bug the tuple's docstring forbids."""
+    for flag in ("TORTOISE_S2_DECISION_SEAM", "TORTOISE_VALUE_GATE"):
+        monkeypatch.delenv(flag, raising=False)
+        off = runner.extractor_prompt_digest()
+        monkeypatch.setenv(flag, "1")
+        assert runner.extractor_prompt_digest() != off, (
+            f"{flag} changes extraction output but does not move the ingest "
+            f"fingerprint — a cached graph would be reused across the two arms")
+        monkeypatch.delenv(flag, raising=False)
+
+
 def test_prompt_digest_knobs_are_names_the_extractor_reads():
     """The tuple rotted once — it listed ``TORTOISE_LABEL_SEED`` while the
     extractor reads ``TORTOISE_LABEL_ORDER_SEED``, so the shuffle seed sat
     silently outside the fingerprint. Pin every
-    entry to a name the extractor source actually contains: a dead entry is
-    exactly the maintenance failure that leaks a stale cache hit."""
+    entry to a name some module on the extractor's own gate path actually
+    contains: a dead entry is exactly the maintenance failure that leaks a
+    stale cache hit.
+
+    The corpus is the extractor PLUS the gate modules it delegates those
+    switches to: ``value_gate`` owns ``TORTOISE_VALUE_GATE`` and
+    ``s2_decision_seam`` owns ``TORTOISE_S2_DECISION_SEAM``. Only the former is a
+    string absent from ``extractor_v2`` entirely (the seam flag happens to appear
+    there in docstrings, which a substring check counts) — but that accident is
+    not something to rely on, and reading only ``extractor_v2`` would have
+    false-red'd a correct ``TORTOISE_VALUE_GATE`` addition, which is how that gap
+    survived this long.
+    """
     import inspect
 
     from tortoise import extractor_v2 as v2
-    src = inspect.getsource(v2)
+    from tortoise import kind_classifier, s2_decision_seam, value_gate, vet_gate
+
+    src = "".join(inspect.getsource(m) for m in (
+        v2, vet_gate, value_gate, kind_classifier, s2_decision_seam))
     dead = [n for n in runner.INGEST_CACHE_PROMPT_ENVS if n not in src]
-    assert not dead, f"dead digest knob(s) not read by extractor_v2: {dead}"
+    assert not dead, f"dead digest knob(s) not read by the extractor's gate path: {dead}"
 
 
 def test_ingest_fingerprint_sensitive_to_every_input(tmp_path):
@@ -209,6 +239,43 @@ def test_ingest_code_fingerprint_real_files_deterministic():
     (the value the runner reads at run start)."""
     assert runner.ingest_code_fingerprint() == \
         runner.ingest_code_fingerprint()
+
+
+def test_the_header_names_every_file_the_fingerprint_hashes():
+    """#10072 review: the header above ``INGEST_CACHE_CODE_FILES`` is the only
+    description a maintainer gets of what invalidates a cached ingest, and it
+    went stale TWICE in one PR — a fourth file was appended (this PR's
+    ``s2_decision_seam.py``) while the prose still enumerated three, and an
+    earlier round left a stale ``three`` in the reading function's docstring.
+
+    Reddens on the pre-fix file: ``s2_decision_seam.py`` is in the tuple and
+    absent from the header. Counted numerals are NOT pinned (they are what went
+    stale); the NAME correspondence is, because a name is checkable and a count
+    is not.
+    """
+    import inspect
+    import re
+
+    src = inspect.getsource(runner)
+    # the comment block that introduces the tuple, up to the assignment
+    head = src[:src.index("INGEST_CACHE_CODE_FILES = (")]
+    header = head[head.rindex("#: Files whose content IS"):]
+    # a stale spelled-out cardinal is the SECOND half of the same defect: the
+    # prose said "three" beside a tuple of four.
+    spelled = {2: "two", 3: "three", 4: "four", 5: "five", 6: "six"}
+    stale = [w for n, w in spelled.items()
+             if n != len(runner.INGEST_CACHE_CODE_FILES)
+             and re.search(rf"\b{w}\b", header)]
+    assert not stale, (
+        f"the header spells {stale} while the tuple holds "
+        f"{len(runner.INGEST_CACHE_CODE_FILES)} files — drop the numeral or fix it")
+    missing = [p.name for p in runner.INGEST_CACHE_CODE_FILES
+               if p.name not in header]
+    assert not missing, (
+        "the header above INGEST_CACHE_CODE_FILES does not name every file the "
+        f"fingerprint hashes — missing: {missing}. The prose is what a "
+        "maintainer reads to decide whether their edit invalidates cached "
+        "ingests (#10072 review; this exact omission was one).")
 
 
 def test_cache_hit_decision_rules():

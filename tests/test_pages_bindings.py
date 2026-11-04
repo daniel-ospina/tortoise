@@ -967,6 +967,26 @@ EXPECTED_CLASSIFICATION = {
         "BLOG_ORIGIN": ("recommended", ["production"]),
         # required: api/v1/[[path]].ts answers `503 proxy_not_configured` without it
         "API_ORIGIN": ("required", ["production"]),
+        # #3524 §9 step 1/3 — the consent bridge's HMAC key. `required` rather than
+        # `recommended`, and deliberately UNLIKE CONTACT_INTAKE_URL above — on AVAILABILITY
+        # grounds: without it every mint answers a typed 503, so the whole consent arm is dead.
+        # ⛔ It is NOT the anti-forgery control, and reading it as one is how the real control
+        # gets loosened: a token signed with a key the AS does not hold is refused on every
+        # redemption (`401 invalid_token`) — an outage, not an oracle; it cannot assert a `sub`
+        # the AS accepts. The forgery control is `consent_token_secret_problem()` in
+        # `tortoise/consent_token.py`, which refuses a blank, padded, too-short or REUSED value
+        # (the anon key is public — the consent page embeds it in HTML). §2.3 requires the
+        # deploy preflight to fail closed until the key exists. The ORDERING cost is real and
+        # accepted: the operator provisions it in the Pages project before/with the deploy that
+        # ships functions/api/consent/token.ts, or that deploy fails this gate (#3616's
+        # direction of failure).
+        "CONSENT_TOKEN_SECRET": ("required", ["production"]),
+        # #3524 §9 step 3: the two knobs the mint/bounce routes read. Both have correct
+        # in-code defaults, so `recommended` — the same classification (and reasoning) as
+        # APP_ORIGIN/AUTH_CALLBACK_URL above. Declared because a knob whose stated purpose is
+        # to DIFFER per deployment is the one an undeclared surface lets drift with no gate.
+        "CONSENT_AS_ORIGIN": ("recommended", ["production"]),
+        "CONSENT_TOKEN_ISSUER": ("recommended", ["production"]),
     },
 }
 

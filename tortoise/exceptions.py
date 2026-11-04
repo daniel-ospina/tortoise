@@ -414,6 +414,45 @@ class UnsupportedCypherOperatorError(ValueError):
         )
 
 
+class NameAlreadyHeld(ValueError):
+    """#3590 — a rename would put two LIVE entities on one natural key.
+
+    The name is a mutable NATURAL KEY (decision doc R2): not an identity, but
+    still a key a by-name resolve has to answer for, and `entity_identity`
+    refuses to guess when two or more live entities hold one name. Allowing a
+    rename onto a held name would therefore not rename anything useful — it
+    would make every later `create_object`/`create_subject` and by-name read of
+    that name ambiguous, with no by-name repair path (the name is
+    create-poisoned).
+
+    Raised by ``TortoiseSDK._refuse_ambiguous_rename`` BEFORE any write, so a
+    refusal leaves the graph untouched. A rename onto a TERMINAL holder's name
+    is allowed — that holder is a different incarnation, not a live competitor.
+    """
+
+    def __init__(self, label: str, name: str, holder_ids, target_id: str):
+        self.label = str(label)
+        self.name = str(name)
+        # ⛔ A competitor row may carry NO id: an id-less LIVE carrier is a real
+        # holder (``entity_identity.live_name_holder_ids`` is row-per-holder and
+        # yields ``None`` for it) and it is exactly the shape the create ADOPTS.
+        # It is LABELLED here rather than filtered out (#9876 review F1) — the
+        # count in this message is how many live rows are in the way, so
+        # dropping one would report the graph as less ambiguous than it is
+        # (``str(None)`` would instead read as a carrier whose id is "None").
+        self.holder_ids = tuple(
+            "<id-less live carrier>" if h is None else str(h)
+            for h in holder_ids)
+        self.target_id = str(target_id)
+        super().__init__(
+            f"cannot rename {self.label} {self.target_id!r} to {self.name!r}: "
+            f"{len(self.holder_ids)} other live {self.label} "
+            f"already hold(s) that name {list(self.holder_ids)} — a live "
+            f"holder would make the name ambiguous (route-then-refuse) and "
+            f"create-poison it. Rename the holder first, or use a free name "
+            f"(#3590 D3).")
+
+
 class UnrepresentableNumberError(ValueError):
     """#4647/#7174 — a Cypher PARAM holds a number the store would ALTER.
 

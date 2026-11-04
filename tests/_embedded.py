@@ -459,6 +459,24 @@ TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
     # registries are one set in two homes
     # (tests/test_ci_selection.py::test_carve_out_mirrors_test_no_redirect_stems).
     "test_mechanism_write_path_9963",
+    # #3590 round-5 review F3: the minted-identity acceptance pins. The `sdk`
+    # fixture builds `TortoiseSDK(<tmp_path>/t.db, event_log_path=…)` BY DB PATH
+    # and its tests drive `rebuild_all(...)` against that store, so a URI-set
+    # lane would discard the path, connect the construction to the server, and
+    # the `rebuild == live` property this file exists to prove would never be
+    # measured. ⛔ NO test count is stated here on purpose (#9876 review P3):
+    # the file is re-derived at every revision — this sentence quoted "four of
+    # its nine" while the file held 21 tests, the same drift the
+    # `config/ci-surfaces.yml` durations row for this file already guards
+    # against. `pytest --collect-only` is the authority; a comment is not. The
+    # file carries NO module-level `embedded_only`
+    # marker, so the load-bearing reason is the REDIRECT, not a skip (the #7852
+    # W1 shape). Mirror of the `carve_out:` entry in config/ci-surfaces.yml and
+    # of the declaration in
+    # tests/test_markers.py::test_no_redirect_stems_registry_exact — the three
+    # are one set in three homes (`test_ci_selection.py::
+    # test_carve_out_mirrors_test_no_redirect_stems` pins the first two).
+    "test_3590_minted_identity_acceptance",
     # #6871: the operator's INPUT set (idx=0 source, idx>=1 targets), the source
     # edge being EP's factor source slot, and the canonical evidence read never
     # surfacing a point as its own supporter. The fixture builds

@@ -428,9 +428,30 @@ def test_prior_turn_count_read_failure_does_not_500_a_recapture(
     assert r1.status_code == 200, r1.text
 
     real_query = _GuardedGraph.query
+    # ⛔ THE NEEDLE MUST NAME THE ONE READ THIS LEG INJECTS INTO (#10000). It
+    # names the prior-count read, which #10000 rewrote to read the session's own
+    # turn account beside the node count (an armed deployment writes no turn
+    # node, so a bare walk reads 0 for every session and a replay is billed as a
+    # write). #10021 review P2 split that query's two arms — `turn_max_index` is
+    # an INDEX and `turn_count` a COUNT, so the `coalesce(...)` that made one
+    # value of them could not be converted correctly — and this leg is where
+    # that re-point shows up.
+    #
+    # ⛔ TWO READS PROJECT THE MARK, SO THE MARK ALONE NAMES NEITHER. A bare
+    # `s.turn_max_index` also matches `sdk._write_session_and_turns`' prior-mark
+    # read (the #1920 stale-turn bound), which spans an implicit string-literal
+    # concatenation — so a line-grep misses it, and this leg passed `assert
+    # fired` on the WRONG read while injecting a graph failure into the
+    # stale-turn sweep as well. What is unique to the prior-count read is the
+    # pair: the node walk it counts beside the mark it reads. Re-point the needle
+    # when that read's query changes; never delete the leg, and never widen it
+    # back to the mark alone — `assert len(fired) == 1` below is what says so.
+    needle = "WHERE t.is_episodic = true RETURN s.turn_max_index"
+    fired: list[str] = []
 
     def flaky(self, cypher, *a, **kw):
-        if "is_episodic = true RETURN count(t)" in cypher:
+        if needle in cypher:
+            fired.append(cypher)
             raise RuntimeError("transient graph error (test)")
         return real_query(self, cypher, *a, **kw)
 
@@ -440,6 +461,15 @@ def test_prior_turn_count_read_failure_does_not_500_a_recapture(
         "conversation": conv, "session_id": "s-priorread"})
     assert r2.status_code == 200, r2.text
     assert r2.json()["extraction_mode"] == "no-provider", r2.json()
+    assert fired, (
+        "the injected failure never fired — the prior-count read's cypher moved "
+        f"and `{needle}` no longer names it; re-point this needle, do not delete "
+        "the leg (without it this leg pins nothing)")
+    assert len(fired) == 1, (
+        f"the needle matched {len(fired)} reads — it must name ONLY the "
+        "prior-count read; a match on `sdk._write_session_and_turns`' prior-mark "
+        "read injects a graph failure into the stale-turn sweep as well, so this "
+        "leg would go on passing after ITS read moved")
     assert meter, (
         "the failed prior-count read must fall back to 0 and let the meter "
         "OVER-count — never 500 and never silently skip"

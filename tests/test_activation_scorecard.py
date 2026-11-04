@@ -661,6 +661,39 @@ def test_graph_legs_window_operators_are_half_open():
     assert "$until" not in LIFETIME_MEMORY_QUERY, LIFETIME_MEMORY_QUERY
 
 
+def test_a_session_whose_turns_are_record_rows_still_counts_as_stored():
+    """#10000: the turn count has TWO sources, and the report takes the larger.
+
+    §9.1/D1 moved the raw turns out of the graph and into the Postgres record, so
+    the graph keeps the Session's `turn_count` counter and **no** turn node. A
+    funnel that counted only `CONTAINS -> Point {pointKind:'event'}` would report
+    `stored_sessions = 0` and `turn_points_total = 0` for sessions whose
+    transcript was captured perfectly — a counter silently reading zero, which is
+    the one thing this lane may not publish.
+
+    Measured on the armed shape (`turn_count: 3`, no turn node): one session
+    stored, three turn points — and the GRAPH-only shape does not double-count
+    (nodes 2 + counter 2 is two turns, not four).
+    """
+    from tortoise.activation_scorecard import FUNNEL_QUERY, stage_counts
+
+    # Both sources must be in the query: a column dropped here reddens rather
+    # than silently reverting the metric to zero.
+    assert "coalesce(s.turn_count, 0)" in FUNNEL_QUERY, FUNNEL_QUERY
+    assert "count(DISTINCT t)" in FUNNEL_QUERY, FUNNEL_QUERY
+
+    since, until = "2026-09-16T00:00:00+00:00", "2026-09-17T00:00:00+00:00"
+    stages, detail = stage_counts(
+        [("armed", "2026-09-16T01:00:00+00:00", 0, 3, 1)], since, until)
+    assert stages["stored"]["value"] == 1, stages
+    assert detail["stored_sessions"] == 1, detail
+    assert detail["turn_points_total"] == 3, detail
+    # The graph-only shape: max(2 nodes, 2 counted) is 2.
+    _, detail = stage_counts(
+        [("graph", "2026-09-16T01:00:00+00:00", 2, 2, 1)], since, until)
+    assert detail["turn_points_total"] == 2, detail
+
+
 def test_window_boundaries_match_the_analytics_leg():
     """The other half: a Session exactly ON `since` counts, exactly on `until`
     does not — the same half-open rule the analytics leg now uses."""

@@ -620,23 +620,39 @@ class TestConnectIssueObjectsAboutObject:
             "MATCH (o:Object {id:'13'}) RETURN o.issue_number").result_set
         assert row[0][0] == "N/A"  # defensive cast stored the raw value
 
-    def test_connect_issue_objects_hash_fallback_and_bare_string(self, sdk):
+    def test_connect_issue_objects_mints_an_id_for_a_nameless_reference(self, sdk):
+        """A reference carrying NEITHER id nor number is minted an OPAQUE id.
+
+        Was ``…_hash_fallback_and_bare_string``, which asserted the retired
+        ``issue_<sha256(title)[:8]>`` derivation. #3590 retired every
+        name-derived id (a rename minted a second Object and a delete+
+        re-create resurrected the first), so the guarantee to pin is the one
+        that survives: the door still materialises the Object, journals it (so
+        replay reproduces it), and its id is a MINTED one — never the name,
+        never a digest of it.
+        """
         ev = sdk.create_event("AgentSession", eventKind="AgentSession", session_id="s1")
-        import hashlib
-        expected_id = f"issue_{hashlib.sha256('no ids here'.encode()).hexdigest()[:8]}"  # noqa: UP012
         meta = {
-            "issues": [{"title": "no ids here"}],        # neither id nor number → hash fallback
+            "issues": [{"title": "no ids here"}],        # neither id nor number
             "prs": ["just-a-string-pr"],                 # bare string item
         }
         n = sdk._connect_issue_objects(ev["eventId"], meta)
         assert n == 2
-        # hash-fallback Object: issue_<sha256(title)[:8]>, objectKind issue, props default None
-        row = sdk._get_proj().g.query(
-            "MATCH (o:Object {id:$oid}) RETURN o.objectKind, o.repo, o.issue_number, o.url",
-            params={"oid": expected_id}).result_set
-        assert row == [["issue", None, None, None]]  # lists, not tuples
+        proj = sdk._get_proj()
+        # the issue Object: objectKind issue, props default None, id opaque
+        row = proj.g.query(
+            "MATCH (e:Event {eventId:$eid})-[:aboutObject]->(o:Object {objectKind:'issue'}) "
+            "RETURN o.id, o.name, o.repo, o.issue_number, o.url",
+            params={"eid": ev["eventId"]}).result_set
+        assert len(row) == 1, row
+        oid, oname, orepo, onum, ourl = row[0]
+        assert (oname, orepo, onum, ourl) == ("no ids here", None, None, None)
+        assert oid != oname, "an id must never be the name (#3590)"
+        # a minted ULID, not a name digest: the retired spelling was
+        # `issue_<sha256(name)[:8]>`, which is 6 + 8 hex chars.
+        assert len(oid) > 20 and "_" not in oid, oid
         # bare-string PR Object: objectKind pr, props default None, one edge
-        pr = sdk._get_proj().g.query(
+        pr = proj.g.query(
             "MATCH (e:Event {eventId:$eid})-[:aboutObject]->(o:Object {objectKind:'pr'}) "
             "RETURN o.name, o.repo, o.issue_number, o.url",
             params={"eid": ev["eventId"]}).result_set

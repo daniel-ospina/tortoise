@@ -299,10 +299,14 @@ def _inject_session_state(session_id: str, *, value_nodes_created: int = 0,
 def _seed_objects(client, session_id: str, names: list[str]) -> None:
     """Prior-commit seeding of LIVE Objects by name — the superseded side
     must pre-exist the supersession commit (the commit under test only
-    carries the supersession records). The names ride payload.entities
-    (create_entity mints the canonical obj-<sha26(name)> ids); one net-new
-    point keeps the payload non-empty. Must 200 — a failed seed would
-    invalidate the guard under test."""
+    carries the supersession records). The names ride payload.entities and
+    `create_entity` mints an OPAQUE id for each — since #3590 it is NOT
+    derived from the name: `ids.entity_name_id` is gone, `ids.ulid()` is the
+    mint, and the `obj-<sha26(name)>` spelling survives only in
+    `legacy_ids._derived_legacy_handle` (an offline legacy-key normaliser,
+    never an entity create path) — so nothing here may assert on the id's
+    spelling. One net-new point keeps the payload non-empty. Must 200 — a
+    failed seed would invalidate the guard under test."""
     raw = _raw_payload(1, session_id=session_id, points=[
         {"id": f"pt_{content_hash('seed:' + session_id)}",
          "content": f"seed point {session_id}",
@@ -2190,7 +2194,16 @@ class Test6bEntitySupersessionGuards:
         erase it from recall's default view)."""
         _seed_objects(client, "g6e-seed", ["e-old"])
         oid = _object_row("e-old")[0][2]
-        assert oid and oid.startswith("obj-"), oid
+        # ⛔ #3590: the create mints an OPAQUE id (`ids.ulid()`), so nothing here
+        # may assert the retired `obj-<sha26(name)>` spelling — `_seed_objects`'
+        # own docstring states the same rule. What the guard needs is that the
+        # reference IS the alias (an id addressing the Object whose NAME is the
+        # successor string); asserting the two differ keeps the fixture from
+        # degenerating into the same-string case, where every successor
+        # candidate trivially equals the target for a reason that has nothing
+        # to do with the id/name alias arm under test.
+        assert oid and isinstance(oid, str), oid
+        assert oid != "e-old", oid
         r = _supersede_commit(client, "g6e-fold", oid, "e-old",
                               evidence="self-reference via id/name alias",
                               entities=[])
@@ -4164,3 +4177,239 @@ class Test5475CommitDoorKindRefusal:
             entities=[{"name": "EpicAlpha", "kind": "dev:epic",
                        "passes_frequency_gate": True}]))
         assert r.status_code == 200, r.text
+
+
+# ── #9876 — the create-side AMBIGUITY refusal on the hosted COMMIT path ──────
+#
+# `entity_identity.resolve_or_mint` REFUSES a name that two or more LIVE
+# entities hold (route-then-refuse, R8). `_execute_commit_writes` reaches it at
+# step 6 — after steps 2/2b/3/3b/4/5 have journaled and written — so before the
+# fix the refusal escaped as the fail-closed 500 whose detail says "the commit
+# is replay-safe (retry with the same client_commit_id)". That advice is wrong
+# twice over for this shape: the refusal is DETERMINISTIC (a same-payload retry
+# re-raises identically), and it lands on top of a half-written commit — the
+# #2422/#7925 partial-mutation class the SDK bundle door already closes with a
+# bundle-wide ambiguity loop (`sdk._validate_bundle`).
+#
+# These pins cover both halves, in the same shape #5363 uses for the inverted
+# supersede window: (A) the 422 mapping on the boundary, and (B) the PRE-WRITE
+# probe that makes the refusal write NOTHING at all.
+
+_AMBIGUOUS_NAME = "Alpha"
+
+
+def _add_idless_live_carrier(name: str) -> None:
+    """A second LIVE carrier of *name* that carries NO id — the legacy / raw
+    / foreign ``MERGE (n:Label {name:…})`` row. It is the shape that makes the
+    count and the report disagree if either filters on truthy ids (#8018), so
+    the refusal's evidence is asserted against it."""
+    _team_sdk()._get_proj().g.query(
+        # ⛔ CREATE, not MERGE: a MERGE on the name pattern would MATCH the
+        # seeded id-carrying carrier and stamp it instead of opening the second
+        # live row this shape needs.
+        "CREATE (o:Object {name:$n, status:'live'})", params={"n": name})
+
+
+def _node_counts() -> dict[str, int]:
+    g = _team_sdk()._get_proj().g
+    labels = ("Point", "Object", "Source", "Session", "CommitRecord", "Event")
+    return {label: g.query(f"MATCH (n:{label}) RETURN count(n)").result_set[0][0]
+            for label in labels}
+
+
+class Test9876AmbiguousEntityNameOnCommit:
+    """#9876 — a commit naming an entity two LIVE carriers hold is refused
+    BEFORE the first write, as an actionable 422."""
+
+    def test_a_commit_naming_a_doubly_held_entity_422s_and_writes_nothing(
+            self, client):
+        """(B) the pre-write probe: clean 422, NOTHING written — not even a
+        :CommitRecord — and the conflicting carriers are named.
+
+        Fails without the fix: the status is 500 (the retry-advising
+        fail-closed detail) and the commit is half-written (Events/Points/
+        Sources/Session/CommitRecord counts all move)."""
+        _seed_objects(client, "g9876-a", [_AMBIGUOUS_NAME])
+        _add_idless_live_carrier(_AMBIGUOUS_NAME)
+        before = _node_counts()
+        raw = _raw_payload(1, session_id="g9876-a2")
+        _finalize(raw)
+        r = client.post("/v1/sessions/commit", json=raw)
+
+        assert r.status_code == 422, r.text
+        detail = r.json()["detail"]
+        assert detail["error_code"] == "AMBIGUOUS_ENTITY_NAME", r.text
+        assert detail["label"] == "Object"
+        assert detail["name"] == _AMBIGUOUS_NAME
+        # the evidence: BOTH live carriers, the id-less one NAMED rather than
+        # filtered away (the count that refused is live ROWS)
+        assert len(detail["candidate_ids"]) == 2, detail
+        assert "<id-less>" in detail["candidate_ids"], detail
+        assert "rename or retire" in detail["message"], detail
+        # a deterministic refusal must never ship the retry advice
+        assert "retry" not in json.dumps(detail).lower()
+
+        # ⛔ NOTHING of the commit landed — including the :CommitRecord, which
+        # is what makes a corrected payload a genuine FIRST attempt instead of
+        # a re-adjudication without the first-adjudication hard-25 band.
+        assert _node_counts() == before, (
+            f"the refused commit wrote: {_node_counts()} vs {before}")
+        # and it neither adopted nor minted a third carrier of the name
+        rows = _object_row(_AMBIGUOUS_NAME)
+        assert len(rows) == 2, rows
+
+    def test_a_refusal_escaping_the_precheck_is_still_a_422(self, client,
+                                                            monkeypatch):
+        """(A) the boundary of last resort — with the pre-write probe disabled
+        the refusal still reaches `sdk.create_entity` at step 6 (a concurrent
+        create between probe and write, or a leg the probe does not enumerate),
+        and it must map to the same 422, never the retry-advising 500.
+
+        Fails without the fix: the status is 500, not 422."""
+        import tortoise.hosted_api as ha_mod
+        monkeypatch.setattr(ha_mod, "_refuse_ambiguous_commit_entities",
+                            lambda sdk, reconcile: None)
+        _seed_objects(client, "g9876-b", [_AMBIGUOUS_NAME])
+        _add_idless_live_carrier(_AMBIGUOUS_NAME)
+        r = _commit(client, _raw_payload(1, session_id="g9876-b2"))
+
+        assert r.status_code == 422, r.text
+        detail = r.json()["detail"]
+        assert detail["error_code"] == "AMBIGUOUS_ENTITY_NAME", r.text
+        assert detail["name"] == _AMBIGUOUS_NAME
+        assert len(detail["candidate_ids"]) == 2, detail
+        assert "retry" not in json.dumps(detail).lower()
+
+    def test_a_terminal_carrier_beside_a_live_one_is_not_a_refusal(
+            self, client):
+        """Over-fix guard: a TERMINAL carrier of the same name does not block
+        the create (R5 — another incarnation), so the commit must still land.
+
+        FAIL-ON: a probe that counts ROWS instead of LIVE rows (`MATCH
+        (o:Object {name:$n})` with no terminal exclusion) 422s a legal commit
+        the writer accepts."""
+        _seed_objects(client, "g9876-c", [_AMBIGUOUS_NAME])
+        _team_sdk()._get_proj().g.query(
+            "CREATE (o:Object {name:$n, status:'superseded', "
+            "               id:'obj-buried-alpha'})",
+            params={"n": _AMBIGUOUS_NAME})
+        r = _commit(client, _raw_payload(1, session_id="g9876-c2"))
+        assert r.status_code == 200, r.text
+        assert r.json()["duplicate"] is False, r.text
+
+    def test_an_idempotent_repost_is_never_refused(self, client):
+        """Over-fix guard on the PLACEMENT: the probe sits AFTER the L1 replay
+        return, so re-POSTing an already-written payload still answers
+        `duplicate:true` even once the name it names has become doubly held.
+
+        FAIL-ON: probe placed above the replay return → the same re-POST 422s
+        and a client's documented idempotent retry fails on a commit that
+        already succeeded."""
+        first = _raw_payload(1, session_id="g9876-d")
+        assert _commit(client, first).status_code == 200
+        assert _commit_record(first["client_commit_id"])[0] == "fully_written"
+        # the name the committed payload created is now doubly held
+        _add_idless_live_carrier(_AMBIGUOUS_NAME)
+
+        again = dict(first)  # identical payload ⇒ identical client_commit_id
+        r = client.post("/v1/sessions/commit", json=again)
+        assert r.status_code == 200, r.text
+        assert r.json()["duplicate"] is True, r.text
+
+
+# ── #9876 review — the LIVE pass must classify an about-edge MENTION the way
+# the replay pass does ───────────────────────────────────────────────────────
+
+_ABOUT_NAME = "Ghost"
+
+
+class Test9876AboutMentionDisposition:
+    """A commit's ``events[].about_entities`` name is ATTRIBUTION, so its miss
+    takes the EXEMPT ``unfolded-mention`` shape on BOTH passes.
+
+    ``hosted_api`` step 6a resolves each deferred about name with
+    ``resolve_fold_name``. The replay pass resolves the same reference with
+    ``mention=True`` (``projection/entities.py:4896`` status-fold target,
+    ``:5275`` ``EventRecorded.object``), and D1's ``unfolded-mention`` row
+    enumerates *"an about-edge name"* as an exempt ATTRIBUTION use — so a
+    non-exempt record here is one reference with two dispositions: exactly the
+    live/replay parity break R8 forbids (*one journal → one disposition on
+    every surface*), and a report claiming a fold refused something for a write
+    where nothing was folded.
+    """
+
+    def test_a_mention_that_races_an_ambiguous_carrier_records_the_exempt_shape(
+            self, client, monkeypatch):
+        """The reachable live miss: a second carrier appears BETWEEN the
+        pre-write probe and step 6a — the race the probe/422 boundary admits by
+        design (see ``test_a_refusal_escaping_the_precheck_is_still_a_422``).
+
+        FAIL-ON (pre-fix): step 6a omits ``mention=True``, so this records
+        ``ambiguous-entity-name`` — a NON-exempt refusal — while replay of the
+        same event records the exempt shape."""
+        from tortoise.projection import nonfolded
+        from tortoise.projection.nonfolded import (
+            SHAPE_AMBIGUOUS_ENTITY_NAME,
+            SHAPE_UNFOLDED_MENTION,
+            SHAPE_UNREGISTERED_REFERENCE,
+        )
+
+        recorded: list = []
+        real_record = nonfolded.record_non_folded
+
+        def _spy(shape, **fields):
+            entry = real_record(shape, **fields)
+            recorded.append(entry)
+            return entry
+
+        # `resolve_fold_name` imports the symbol at CALL time, so patching the
+        # module attribute is what a live commit actually sees.
+        monkeypatch.setattr(nonfolded, "record_non_folded", _spy)
+
+        real_create = TortoiseSDK.create_entity
+
+        def _create_then_split(self, kind, name, **kw):
+            """Step 6 registers the entity; the SECOND live carrier of the same
+            name lands right after it, before step 6a resolves."""
+            out = real_create(self, kind, name, **kw)
+            if name == _ABOUT_NAME:
+                self._get_proj().g.query(
+                    "CREATE (o:Object {name:$n, status:'live'})",
+                    params={"n": name})
+            return out
+
+        monkeypatch.setattr(TortoiseSDK, "create_entity", _create_then_split)
+
+        raw = _raw_payload(1, session_id="g9876-e")
+        raw["entities"] = [
+            {"name": _AMBIGUOUS_NAME, "kind": "Project",
+             "passes_frequency_gate": True},
+            {"name": _ABOUT_NAME, "kind": "core:other",
+             "passes_frequency_gate": True},
+        ]
+        raw["events"] = [{
+            "id": f"ev_{content_hash('a mention of a name two carriers hold')[:62]}",
+            "eventKind": "decision",
+            "content": "a mention of a name two carriers hold",
+            "confidence": 0.5,
+            "about_entities": [_ABOUT_NAME],
+            "source_ref": "session.md",
+        }]
+        r = _commit(client, raw)
+        assert r.status_code == 200, r.text
+
+        mentions = [e for e in recorded
+                    if f"name={_ABOUT_NAME!r}" in (e.detail or "")]
+        assert mentions, (
+            "the live about-edge miss recorded nothing — the probe below cannot "
+            "distinguish the two dispositions if step 6a never ran")
+        shapes = {e.shape for e in mentions}
+        assert SHAPE_UNFOLDED_MENTION in shapes, (
+            "the live pass recorded the about-edge mention NON-exemptly "
+            f"({sorted(shapes)}); replay records {SHAPE_UNFOLDED_MENTION} for "
+            "the same reference — one reference, two dispositions")
+        assert SHAPE_AMBIGUOUS_ENTITY_NAME not in shapes, (
+            "an about-edge MENTION was recorded as an identity refusal — a "
+            "write that folded nothing is reported as a refused fold")
+        assert SHAPE_UNREGISTERED_REFERENCE not in shapes, (
+            "an about-edge MENTION was recorded as an identity refusal")

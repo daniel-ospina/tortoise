@@ -26,7 +26,43 @@
 #   `current_mode` read `local`, so on a healthy GitHub-hosted day the gate runs `fallback_off`.
 #   Since `agent-infra#2327` (PR #2338) that is harmless here: each body is derived from the
 #   runner's OWN host label (`labels_for`), so it strips `ubuntu-latest` and keeps `self-hosted-x64`
-#   — never stamping `self-hosted-arm64`. The label stays gate-following; see `--repair-labels`.
+#   — never stamping `self-hosted-arm64`. The label stays gate-following, but ONLY the gate can
+#   DETACH it: `--repair-labels` can add it back and can never take it away, so an explicit
+#   `--fallback off` on the repair path is REFUSED rather than accepted and then ignored (see the
+#   repair block below, and the EXIT contract).
+#
+# OVERRIDES: the rule above — that an x64 runner carrying `ubuntu-latest` is a DEFECT to be
+#   stripped, and `--repair-labels` implementing it by PUTting exactly the COMPUTED set (a
+#   REPLACE) — assumed the ARM64 pool carries the fallback label. It does not: the five ARM64
+#   runners were STRIPPED of `ubuntu-latest` on the evidence in open owner-decision issue #6897
+#   (ARM boxes won `ubuntu-latest` jobs and died in "Set up job" on a codeload timeout, turning one
+#   shard per run into a FALSE RED). So NOTHING answers `ubuntu-latest` today, while the REQUIRED
+#   aggregate `python-ci-gate` still asks for it — and a repair that REPLACES the set strips the
+#   label from the one pool left. A repair therefore UNIONS the runner's current labels with the
+#   computed set, so it can never REMOVE `ubuntu-latest` or any custom label a workflow targets.
+#   ⛔ Restoring the label on ARM is NOT part of this — #6897 measured that wrong.
+#   ⛔ AND A UNION CANNOT DETACH, so `--repair-labels --fallback off` is REFUSED (exit 2, before any
+#   read or PUT) instead of being accepted and then doing nothing to `ubuntu-latest`: on a healthy
+#   hosted day the gate's state IS `off`, and the pre-refusal path printed `removed=[]`, said
+#   `relabelled …`, and exited 0 while the label it was asked to detach stayed attached. Detaching
+#   is the gate's writer (`fallback_off`, agent-infra) and, by hand, the per-label verb
+#   `DELETE repos/$REPO/actions/runners/<id>/labels/ubuntu-latest`.
+#
+#   ⛔ THE UNION IS NOT UNCONDITIONAL, and the two exceptions are NOT the fallback label's. A
+#   literal union would also make BOTH defects below permanent, and each is a false PASS rather
+#   than a queue delay: (a) a VERSION-PINNED HOSTED label (`ubuntu-24.04`, `ubuntu-22.04-arm`, …) —
+#   the label a leg pins to ESCAPE this pool, so keeping it un-pins `test-slow` / `workflow-lint` /
+#   `finding-provenance` / `mirror-images` onto a bare box whose PATH lacks their tools (measured
+#   2026-10-24: exit 127, `gh: command not found`); (b) a FOREIGN ARCH MARKER (`self-hosted-arm64`
+#   on this x64 box) — the pre-#2327 damage a repair is expected to HEAL. (b) is ALWAYS dropped; (a)
+#   only under `CI_RUNNER_OS_LABEL=off`/unset (KEPT under `on|auto`). Both are PRINTED, never
+#   silently skipped. `_preserve_labels` drops both but reads NO flag: ONE writer here (#10275).
+#   `ubuntu-latest` is in neither class (it carries no version) and is always kept.
+#   ⚠️ THAT FLAG IS READ HERE AND NOWHERE ELSE IN THIS TREE, and nothing WRITES it: the install-side
+#   reader/emitter ships with #10275, still open. So `CI_RUNNER_OS_LABEL` unset — nothing in this
+#   tree exports it — takes the `off` arm and DROPS the pin. A repair with no exported flag therefore
+#   IS #6897's recorded revert (`CI_RUNNER_OS_LABEL=off` **plus** `--repair-labels`), not a no-op: it
+#   prints `version-pinned, not kept=[…]` BEFORE the PUT. Export `CI_RUNNER_OS_LABEL=on` to KEEP one.
 #
 # ⛔ ARCH LABELS ARE NOT INTERCHANGEABLE. A runner is registered with `self-hosted-x64`
 #   (its own distinct pool marker, mirroring `self-hosted-arm64`) — NEVER with
@@ -40,8 +76,8 @@
 # USAGE
 #   tools/install-ci-runner-x64.sh --count 2                  # install/repair runners 1..2
 #   tools/install-ci-runner-x64.sh --count 2 --dry-run        # plan + headroom arithmetic only
-#   tools/install-ci-runner-x64.sh --repair-labels --count 2  # re-sync labels to the gate's state
-#   tools/install-ci-runner-x64.sh --status                   # remote view + local units
+#   tools/install-ci-runner-x64.sh --status                   # remote view + label coverage + units
+#   tools/install-ci-runner-x64.sh --repair-labels --count 2  # UNION the computed labels in (drops a version pin unless CI_RUNNER_OS_LABEL=on + a foreign arch marker; refuses --fallback off — it cannot DETACH)
 #   tools/install-ci-runner-x64.sh --uninstall --count 2      # deregister + remove
 #   tools/install-ci-runner-x64.sh --print-labels             # the label set config.sh would get
 #   tools/install-ci-runner-x64.sh --help
@@ -54,14 +90,19 @@
 #   the same exit code as "the install broke".
 #     0  ok
 #     1  usage — bad flag, bad --count, bad sizing override. Nothing was attempted.
-#     2  GUARD refused — headroom / arch / undecidable fallback / a `--uninstall` target that is
-#        not provably a runner install. Nothing was downloaded, registered or removed; re-run
-#        with a smaller --count, on an x86_64 host, with an explicit --fallback, or with the
+#     2  GUARD refused — headroom / arch / undecidable fallback / `--repair-labels --fallback off`
+#        (a repair only UNIONS, so it cannot DETACH the fallback label) / an `--uninstall` target
+#        that is not provably a runner install. Nothing was downloaded, registered or removed;
+#        re-run with a smaller --count, on an x86_64 host, with --fallback auto|on, or with the
 #        right CI_RUNNER_BASE.
 #     3  OPERATION failed — download, sha256 verify, extract, token mint, config.sh, svc.sh (a
 #        failed systemd unit removal, or a failed `config.sh remove`, included — that target is then
 #        LEFT intact rather than deleted out from under an enabled unit or a live registration), a
-#        tool missing from PATH, or a failed remote read (`--status`).
+#        tool missing from PATH, a failed remote read (`--status`), or a PER-RUNNER refusal inside
+#        the repair loop (an unreadable label set, an illegal label, an empty union): that runner is
+#        skipped and the rest of the batch still runs, because an earlier runner may ALREADY have
+#        been relabelled and exit 2 promises "nothing was changed".
+#        (`--repair-labels` against a `gh` that returns no id is 3 for the same reason.)
 set -uo pipefail
 
 # The help text is the file's OWN header, cut at the closing `set` line rather than a frozen line
@@ -71,6 +112,10 @@ set -uo pipefail
 usage() { awk '/^# USAGE/{p=1} /^set -uo pipefail$/{p=0} p' "$0" | sed 's/^# \{0,1\}//'; }
 
 REPO="${CI_RUNNER_REPO:-daniel-ospina/tortoise}"
+# The checkout this script lives in. `--status`'s label-coverage reads `.github/workflows` from
+# HERE, never from the caller's cwd — an operator runs this from anywhere.
+SELF_DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd)"
+REPO_ROOT_DIR="$(cd "$SELF_DIR/.." 2>/dev/null && pwd)"
 BASE="${CI_RUNNER_BASE:-/opt/gh-runner-x64}"
 NAME_PREFIX="${CI_RUNNER_NAME_PREFIX:-pi-runner-x64}"
 # Where `svc.sh install` writes the unit, and the ONE path this script stats to decide whether a
@@ -218,12 +263,156 @@ resolve_labels() { # sets LABELS; exit 2 when the state cannot be read
   esac
 }
 
+# ── label algebra: the UNION a repair PUTs ─────────────────────────────────────
+# Host-derived labels GitHub OWNS. They come back in every runner's label list, they cannot be set
+# by hand (HTTP 422 `Cannot set labels that duplicate existing read-only labels`, measured
+# 2026-10-27), and they are not part of the custom set this script manages — so they are filtered
+# out of the PUT body. Dropping them is not a loss: GitHub re-derives them from the host.
+# ⛔ EXACT SPELLINGS ONLY, deliberately. Matching these case-insensitively (with `tr`) would also
+# swallow a CUSTOM label an operator created — e.g. a `linux` or `x64` of their own — and filtering
+# a label out of the PUT body IS a removal, which is the one thing this block must never do.
+# GitHub returns the reserved spellings below and refuses to have them re-set; nothing else is
+# touched.
+is_host_label() {
+  case "$1" in
+    self-hosted|Linux|macOS|Windows|X64|ARM64|ARM) return 0 ;;
+  esac
+  return 1
+}
+# Is $2 already in the comma-separated list $1? (`case`, not an array: bash 3.2 has no assoc arrays.)
+list_has() { case ",$1," in *",$2,"*) return 0 ;; esac; return 1; }
+# Is $1 an ARCH/POOL marker that is NOT this box's (`self-hosted-*` other than `$ARCH_LABEL`)?
+# It must be dropped by a repair: `self-hosted-arm64` is a CUSTOM label (GitHub returns only
+# `self-hosted`, `Linux`/`macOS`/`Windows` and `X64`/`ARM64`/`ARM` as read-only), so a union that
+# keeps it leaves an x86 box advertising an arm64 pool — the false PASS this file forbids at
+# `:67-74`, and the pre-#2327 stamp a repair exists to heal. `--repair-labels` therefore always
+# puts back THIS arch's marker and only this one, which is what `_preserve_labels` re-derives too. ⛔ MATCHED CASE-INSENSITIVELY (`tr`), UNLIKE `is_host_label` ABOVE — the exact-case rule does NOT transfer to this class: docs.github.com "apply labels" states "Labels are case-insensitive", and a CUSTOM label's spelling is whatever created it, so `Self-Hosted-Arm64` / `SELF-HOSTED-ARM64` ARE the arm64 marker and still answer a lower-case `runs-on:` — an exact-case test here is how a mixed-case stamp escapes both heal paths and keeps the false PASS alive.
+is_foreign_arch_label() {
+  case "$(printf '%s' "$1" | tr 'A-Z' 'a-z')" in
+    "$ARCH_LABEL") return 1 ;;
+    self-hosted-*) return 0 ;;
+  esac
+  return 1
+}
+# Is $1 a VERSION-PINNED HOSTED label (`ubuntu-24.04`, `ubuntu-22.04-arm`, …)? Same class/shape as
+# `tools/runner_autoscale.py::VERSION_PINNED_HOSTED_LABEL` — one invariant, two writers. The pool
+# claims `ubuntu-latest` and NEVER an `ubuntu-<version>` (`docs/ops/ci-runner-x64.md:67`) — that is
+# the label a leg pins to escape this pool; `ubuntu-2204-tools` is NOT in the class (boundary test in
+# `tests/test_runner_autoscale.py`), hence both ends anchored. ⛔ A HERE-STRING, never a builtin
+# writer piped into a quiet grep (#841): under `pipefail` the quiet grep's early exit leaves the
+# writer with SIGPIPE and the PIPELINE non-zero over text that DID match — a false negative here would drop this carve-out and put a version pin back on the pool. `repo-harnesses` enforces the shape.
+is_version_pinned_hosted_label() {
+  grep -qiE '^ubuntu-[0-9]+(\.[0-9]+)*(-arm)?$' <<<"$1"
+}
+
+# ── label coverage: which `runs-on:` labels does the pool actually answer? ────
+# A `runs-on:` label that NO runner answers does not fail — it does not run. GitHub leaves the run
+# `pending` with ZERO materialised jobs, so there is no red check and no green one: the required
+# aggregate simply never appears and every PR is blocked with nothing to look at (measured
+# 2026-10-27 on `python-ci-gate`, the repo's ONLY required condition: runs 40898791192 and
+# 40901844458, status `pending`, jobs=0, the check absent from every PR head). This block exists so
+# that state is READ instead of inferred from a silent queue.
+#
+# ⚠️ A ZERO IS NOT ALWAYS A FAULT — a hosted label (`ubuntu-latest`, `ubuntu-24.04`) is normally
+# served by GitHub-hosted capacity, so 0 self-hosted answers is the healthy case on a hosted day.
+# It is still printed loudly, because when hosted capacity does not materialise the failure is
+# completely silent, and the operator's next question is exactly "who answers this label?".
+# ── the workflow files this reader may read ─────────────────────────────────
+# GitHub accepts BOTH `.yml` and `.yaml`. Globbing only `*.yml` silently dropped a `.yaml`
+# workflow, so the coverage block below printed "every one has an online self-hosted answer" over a
+# file it never read — the same false-clean one level down that this whole block exists to expose.
+# ⛔ EXISTING FILES ONLY, and that is not cosmetic: `set -o pipefail` is on (`:106`) and a glob that
+# matches nothing is passed through LITERALLY, so handing `…/*.yaml` to grep makes grep exit 2 on a
+# missing path and the whole read report "cannot read" on a tree that HAS workflows (measured while
+# fixing this: every label-coverage arm went SKIPPED). One path per line; empty when there are none.
+workflow_files() {
+  local wf="$REPO_ROOT_DIR/.github/workflows" f
+  [ -d "$wf" ] || return 1
+  for f in "$wf"/*.yml "$wf"/*.yaml; do
+    if [ -f "$f" ]; then printf '%s\n' "$f"; fi
+  done
+}
+
+workflow_labels() { # the distinct `runs-on:` scalars the workflows use, one per line
+  local files f
+  files="$(workflow_files)" || return 1
+  [ -n "$files" ] || return 1
+  # `|| true`: a file with no `runs-on:` line makes grep exit 1, and under pipefail that would fail
+  # the whole read instead of contributing nothing.
+  while IFS= read -r f; do
+    grep -hE '^[[:space:]]*runs-on:' "$f" 2>/dev/null || true
+  done <<<"$files" \
+    | sed -E 's/^[[:space:]]*runs-on:[[:space:]]*//; s/[[:space:]]+#.*$//' \
+    | tr -d '"' | tr -d "'" | tr -d ' ' \
+    | tr ',' '\n' | sed -E 's/^\[//; s/\]$//' \
+    | sed '/^$/d' | sort -u
+}
+
+# How many `runs-on:` keys are written as a YAML BLOCK LIST (`runs-on:` then `- a` lines) — a shape
+# this scalar reader cannot see, counted so the report can SAY so instead of reading as complete.
+unreadable_runs_on_keys() {
+  local files f n=0 c
+  files="$(workflow_files)" || { printf '0'; return 0; }
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    c="$(grep -cE '^[[:space:]]*runs-on:[[:space:]]*(#.*)?$' "$f" 2>/dev/null || true)"
+    case "$c" in ''|*[!0-9]*) c=0 ;; esac
+    n=$((n + c))
+  done <<<"$files"
+  printf '%d' "$n"
+}
+
+label_coverage() { # $1 = the runner rows (name<TAB>status<TAB>busy=…<TAB>label,label,…)
+  local rows="$1" labels label pair on off n=0 zero="" wf="$REPO_ROOT_DIR/.github/workflows" unreadable
+  if ! labels="$(workflow_labels)" || [ -z "$labels" ]; then
+    say "label-coverage: cannot read a \`runs-on:\` label from $wf/*.yml or $wf/*.yaml — SKIPPED (this makes NO claim about any label)"
+    return 0
+  fi
+  # A `runs-on:` written as a YAML block list (`runs-on:` then `- a` lines) is not a scalar this
+  # reader can see. Say so instead of counting a surface it did not read — an unread label that
+  # silently reads as healthy is the failure this whole block exists to expose.
+  unreadable="$(unreadable_runs_on_keys)"
+  say "label-coverage — answering ONLINE self-hosted runners, per \`runs-on:\` label the workflows use:"
+  for label in $labels; do
+    # a matrix expression (`${{ … }}`) is not a label; it is resolved per job at run time.
+    case "$label" in *'${{'*) continue ;; esac
+    n=$((n + 1))
+    pair="$(printf '%s\n' "$rows" | awk -F'\t' -v want="$label" '
+      NF >= 4 { k = split($4, a, ","); for (i = 1; i <= k; i++) if (a[i] == want) { if ($2 == "online") on++; else off++ } }
+      END { printf "%d %d", on + 0, off + 0 }')"
+    on="${pair%% *}"; off="${pair##* }"
+    say "  $label → $on online, $off offline"
+    if [ "$on" -eq 0 ]; then
+      zero="${zero:+$zero }$label"
+      say "     ⚠️  NO RUNNER ANSWERS '$label'. A job pinned to it then depends entirely on GitHub-hosted capacity — and when that does not materialise the run sits \`pending\` with ZERO jobs: no red, no green, the required check simply never appears (measured: python-ci-gate, runs 40898791192 / 40901844458)."
+    fi
+  done
+  if [ "$n" -eq 0 ]; then
+    # ⛔ AN EMPTY SURFACE IS NOT A GREEN ONE: when no label could be counted there is nothing to
+    # have answered, so the block says it read nothing rather than "every one is covered".
+    say "label-coverage: read NO \`runs-on:\` label — this makes NO claim about coverage"
+  elif [ -n "$zero" ]; then
+    say "label-coverage: $n label(s) read — NO online self-hosted answer for: $zero"
+  else
+    say "label-coverage: $n label(s) read — every one has an online self-hosted answer"
+  fi
+  if [ "${unreadable:-0}" -gt 0 ]; then
+    say "label-coverage: ${unreadable} \`runs-on:\` key(s) use the YAML BLOCK-LIST form, which this reader does not parse — they are NOT counted above"
+  fi
+}
+
+# The runner-row selector `--status` prints, and the label-coverage block counts from: name, status,
+# busy flag, and the label list. It is a VARIABLE on purpose — bash 3.2 cannot parse this jq program
+# written inline inside a `"$( … )"` capture (`unexpected EOF while looking for matching "`,
+# measured on 3.2.57); through a variable it is plain nested quoting and parses.
+RUNNER_ROWS_JQ='.runners[] | "\(.name)\t\(.status)\tbusy=\(.busy)\t\([.labels[].name]|join(","))"'
+
 # ── status ─────────────────────────────────────────────────────────────────────
 if [ "$MODE" = status ]; then
   need gh
-  gh api "repos/$REPO/actions/runners?per_page=100" \
-    --jq '.runners[] | "\(.name)\t\(.status)\tbusy=\(.busy)\t\([.labels[].name]|join(","))"' \
-    || exit 3
+  runners="$(gh api "repos/$REPO/actions/runners?per_page=100" --jq "$RUNNER_ROWS_JQ")" || exit 3
+  if [ -n "$runners" ]; then printf '%s\n' "$runners"; fi
+  label_coverage "$runners"
   for i in $(seq 1 "$COUNT"); do
     d="$(runner_dir "$i")"
     [ -f "$d/.runner" ] || continue
@@ -236,9 +425,33 @@ if [ "$MODE" = status ]; then
 fi
 
 # ── repair: re-apply the gate-following label set to already-registered runners ──
-# This is the documented repair when the pre-#2327 gate has relabelled these runners: it puts
-# back the arch marker and syncs the fallback label to the gate's state, without re-registering.
+# ⛔ A REPAIR UNIONS; IT CAN NEVER REMOVE A LABEL A WORKFLOW NEEDS. This block used to PUT exactly
+# the set `resolve_labels` computed, so every repair silently REPLACED the runner's labels. With
+# the ARM64 pool stripped of `ubuntu-latest` (#6897) `--fallback auto` now computes
+# `self-hosted-x64` alone — so a repair removed `ubuntu-latest` from the x64 pool, which is the
+# label the REQUIRED `python-ci-gate` aggregate is pinned to. The run then sat `pending` with ZERO
+# materialised jobs (no red, no green, every PR blocked), and a label restored by hand did not
+# survive the next repair (measured 2026-10-27: gone within ~25 minutes, twice).
+#
+# So: read the runner's CURRENT labels, union the computed set INTO them, and PUT THAT. Two classes
+# are NOT carried into the union — a VERSION-PINNED HOSTED label (`ubuntu-<version>`, which a leg
+# pins to escape this pool) and a FOREIGN ARCH MARKER (`self-hosted-*` other than this box's) —
+# because keeping either makes a false PASS permanent; both are PRINTED on the `— not kept=` line.
+# The host-derived labels GitHub owns (`self-hosted`, `Linux`/`macOS`/`Windows`, `X64`/`ARM64`/`ARM`)
+# are not sent either: the API refuses them (HTTP 422 `Cannot set labels that duplicate existing
+# read-only labels`), and they are PRINTED, never silently dropped. The before/after sets and the
+# derived `removed=` list are printed BEFORE the PUT, so a removal is visible in the output rather
+# than inferred from a queue that never moves.
 if [ "$MODE" = repair ]; then
+  # ⛔ AN EXPLICIT `--fallback off` IS REFUSED, NOT ACCEPTED-AND-IGNORED. The union never subtracts,
+  # so this invocation cannot do the one thing it asks for: it used to print `removed=[]`, say
+  # `relabelled … → self-hosted-x64,ubuntu-latest` and exit 0 while the label stayed attached. The
+  # refusal is BEFORE any read and any PUT (exit 2 is the honest code: nothing was changed), and it
+  # names the path that CAN detach. `auto` already covers the operator's real intent — on a healthy
+  # hosted day it computes `self-hosted-x64` alone and the union simply keeps what is there.
+  if [ "$FALLBACK" = off ]; then
+    die "--repair-labels only UNIONS: it cannot DETACH $FALLBACK_LABEL, so --fallback off would be accepted and then do nothing to it. Use --fallback auto (a repair follows the gate by ADDING), or detach the label on purpose: gh api -X DELETE repos/$REPO/actions/runners/<id>/labels/$FALLBACK_LABEL" 2
+  fi
   need gh
   resolve_labels
   rc=0
@@ -246,18 +459,137 @@ if [ "$MODE" = repair ]; then
     d="$(runner_dir "$i")"
     [ -f "$d/.runner" ] || { say "skip: $d is not configured"; continue; }
     agent="$(sed -n 's/.*"agentName": "\([^"]*\)".*/\1/p' "$d/.runner")"
-    id="$(gh api --paginate "repos/$REPO/actions/runners" --jq ".runners[]|select(.name==\"$agent\")|.id" | head -1)"
+    # ONE read, so the id and the label set cannot disagree: `id<TAB>label,label,…`.
+    detail="$(gh api --paginate "repos/$REPO/actions/runners" --jq ".runners[]|select(.name==\"$agent\")|\"\(.id)\t\([.labels[].name]|join(\",\"))\"" | head -1)"
+    id="$(printf '%s' "$detail" | cut -f1)"
+    current="$(printf '%s' "$detail" | cut -f2)"
     # An operation that was ATTEMPTED and failed is 3, never 1: the EXIT contract above reserves 1
     # for "usage — nothing was attempted", and a caller keying on it would read a failed relabel as a
     # bad flag (measured: `--repair-labels` against a `gh` that returns no id exited 1).
     case "$id" in ''|*[!0-9]*) say "WARNING: $agent not found in the repo's runners"; rc=3; continue ;; esac
-    body="$(printf '{"labels":["%s"]}' "$(printf '%s' "$LABELS" | sed 's/,/","/g')")"
-    if [ "$DRY" = 1 ]; then say "dry-run: would PUT $body to runner $id ($agent)"; continue; fi
-    if printf '%s' "$body" | gh api -X PUT "repos/$REPO/actions/runners/$id/labels" --input - >/dev/null 2>&1; then
-      say "relabelled $agent → $LABELS"
-    else
-      say "WARNING: relabel FAILED for $agent (id $id)"; rc=3
+    # ⛔ AN UNREADABLE LABEL SET IS A REFUSAL, NEVER "the computed set, then". Falling back to the
+    # computed set IS the replace this block exists to stop: on a failed read it would drop
+    # `ubuntu-latest` by the same silent route, with only the transport error to show for it.
+    # ⛔ AND IT REFUSES **THIS RUNNER**, NOT THE BATCH: a `die` here exits the whole script, so with
+    # `--count 2` runner 1's PUT could already have succeeded when runner 2 hit this guard and the
+    # caller would receive exit 2 = "Nothing was downloaded, registered or removed" for a run that
+    # relabelled a runner. The pre-fix loop met the analogous per-runner condition with
+    # `say WARNING; rc=3; continue`, and the three guards inside this loop keep that contract.
+    if [ -z "$current" ]; then
+      say "WARNING: cannot read the current labels of $agent (id $id) — refusing to PUT a set that may REPLACE the labels this runner already carries (a replace is how $FALLBACK_LABEL was lost). Nothing was changed for this runner; re-run once the read succeeds."; rc=3; continue
     fi
+    # ⛔ GLOBBING OFF WHILE A LABEL SET IS SPLIT. Every loop below walks a comma-separated list with
+    # an UNQUOTED expansion, so a label carrying `*`, `?` or `[` is expanded against the operator's
+    # cwd before the loop ever sees it — and the vendor's PUT schema declares no pattern, so the
+    # charset that stops one arriving is server-side only. Measured: `current=…,*` became
+    # `after=[self-hosted-x64,DECOY-1.txt,DECOY-2.log]` with `removed=[]`, and the PUT then attached
+    # the operator's own filenames to the runner as labels — a write the `removed=` line cannot show.
+    # `set -f` makes the split literal, so such a label reaches the illegal-label guard below and
+    # REFUSES the runner. It is restored after the last split (before the `relabelled` line); a
+    # `continue` on a refusal path leaves it set, and every such path either re-sets it at the top of
+    # the next iteration or leaves it to `exit` at the end of this block — nothing past the loop runs.
+    set -f
+    after=""; host_skipped=""; arch_dropped=""; pinned_dropped=""; pinned_kept=""; host_arch=""
+    for l in $(printf '%s' "$current" | tr ',' ' '); do
+      if is_host_label "$l"; then
+        # the ONE honest witness of the box's architecture: GitHub derives these from the HOST.
+        case "$l" in ARM|ARM64) host_arch="$l" ;; X64) host_arch="X64" ;; esac
+        host_skipped="${host_skipped:+$host_skipped,}$l"; continue
+      fi
+      # ⛔ THE TWO NAMED CARVE-OUTS (see the header). Dropping them is a REMOVAL, so each is
+      # PRINTED — a union that silently kept a false arch claim or a version pin is the defect this
+      # loop's own `removed=` line exists to expose.
+      if is_foreign_arch_label "$l"; then arch_dropped="${arch_dropped:+$arch_dropped,}$l"; continue; fi
+      # ⛔ THE VERSION-PIN CARVE-OUT IS THE FLAG'S `off` STATE, NOT AN UNCONDITIONAL DROP. #6897's
+      # `OVERRIDES:` marker suspends the version-pin invariant for as long as hosted deadlocks, it
+      # measures the departure as APPLIED (2026-10-29: 7 of 7 x64 runners carry `ubuntu-24.04`), and
+      # it records the revert as `CI_RUNNER_OS_LABEL=off` **plus** `--repair-labels`. A repair that
+      # dropped the pin whatever the flag said reached that revert with NO SWITCH INVOLVED: the next
+      # manual heal would have reverted an applied owner departure while the operator read a warning
+      # about a label their own box had been asked to claim. So the box's choice is READ here, under
+      # the same name and values the install-side contract uses (#10275): `on|auto` keeps the pin
+      # (the mitigation IS this box's state), `off`/unset drops it (the pre-departure invariant, and
+      # what `_preserve_labels` drops on re-registration). An unrecognised value is read as `off` —
+      # the invariant-consistent side, never a silent keep — and says so, once per such label.
+      if is_version_pinned_hosted_label "$l"; then
+        case "${CI_RUNNER_OS_LABEL:-off}" in
+          on|auto) pinned_kept="${pinned_kept:+$pinned_kept,}$l" ;;
+          off) pinned_dropped="${pinned_dropped:+$pinned_dropped,}$l"; continue ;;
+          *) pinned_dropped="${pinned_dropped:+$pinned_dropped,}$l"
+             say "WARNING: CI_RUNNER_OS_LABEL='$CI_RUNNER_OS_LABEL' is not on|auto|off — read as off, so the version pin '$l' is not kept"; continue ;;
+        esac
+      fi
+      list_has "$after" "$l" || after="${after:+$after,}$l"
+    done
+    # ⛔ THE KEEP-HALF IS ARCH-BLIND WITHOUT THIS GUARD, which re-creates #6897's own defect on the
+    # labels it was measured on. The union keeps `ubuntu-latest` ON PRINCIPLE, but on a runner whose
+    # read-only host label says ARM64 that keep hands an `ubuntu-latest` job to an arm64 box — the
+    # measured failure (job won by the ARM pool, died in "Set up job" on a codeload timeout, one
+    # shard per run turned into a FALSE RED per shard) that got the ARM pool stripped in the first
+    # place. The repair may be run from any host and against any install, so the runner's own
+    # `ARM64`/`ARM` label is the one witness a caller cannot talk it out of: this runner is refused
+    # (rc 3, nothing written) rather than PUT `self-hosted-x64` and `ubuntu-latest` onto an arm64
+    # registration. An absent arch label keeps the pre-existing path — the API always returns one.
+    case "$host_arch" in
+      ARM|ARM64) say "WARNING: $agent reports the read-only host label '$host_arch', so it is not an x86_64 runner: this repair would add $ARCH_LABEL to it and KEEP $FALLBACK_LABEL there, which is the #6897 false red (an arm64 box wins a $FALLBACK_LABEL job and dies in Set up job). Nothing was changed for this runner — relabel it from the x86_64 host that owns it, or deregister it."; rc=3; continue ;;
+    esac
+    for l in $(printf '%s' "$LABELS" | tr ',' ' '); do
+      list_has "$after" "$l" || after="${after:+$after,}$l"
+    done
+    # DERIVED, never asserted: what the PUT would REMOVE, computed from the two sets alone. A union
+    # removes nothing EXCEPT the two carved-out classes above, so a value here must be one of those
+    # and nothing else — printed BEFORE the PUT, which is the whole point (a removal must be visible
+    # in the output, not inferred from a job that never appears).
+    removed=""
+    for l in $(printf '%s' "$current" | tr ',' ' '); do
+      is_host_label "$l" && continue
+      list_has "$after" "$l" || removed="${removed:+$removed,}$l"
+    done
+    # A label outside GitHub's own charset would build a malformed JSON body; refuse rather than PUT
+    # one — and never skip it, because skipping a CURRENT label IS the removal this block forbids.
+    illegal=""
+    for l in $(printf '%s' "$after" | tr ',' ' '); do
+      case "$l" in *[!A-Za-z0-9._-]*) illegal="$l" ;; esac
+    done
+    if [ -n "$illegal" ]; then
+      say "WARNING: label '$illegal' on $agent is not a legal runner label (alphanumeric, '.', '_', '-') — refusing to build a request body from it. Nothing was changed for this runner."; rc=3; continue
+    fi
+    # ⚠️ KEPT DELIBERATELY, AND UNREACHABLE BY CONSTRUCTION at this head: the union can only be empty
+    # if the COMPUTED set is, and `resolve_labels` always emits at least `$ARCH_LABEL` — the modes are
+    # pinned by `test_the_computed_set_is_never_empty_which_is_what_makes_the_empty_union_guard_dead`.
+    # It stays because the array it refuses to send is not harmless: the vendor's own Set-custom-labels
+    # parameter note reads "you can pass an empty array to remove all custom labels", i.e. exactly the
+    # strip this block exists to stop, and the guard costs one line against a future edit to
+    # `resolve_labels`.
+    if [ -z "$after" ]; then
+      say "WARNING: the union of $agent's current labels and the computed set ($LABELS) is EMPTY — refusing to PUT an empty label set, which would strip the runner. Nothing was changed for this runner."; rc=3; continue
+    fi
+    say "labels for $agent (id $id):"
+    say "  before=[$current]"
+    say "  after =[$after]"
+    say "  host-owned, not sent=[$host_skipped] alien-arch, not kept=[$arch_dropped] version-pinned, not kept=[$pinned_dropped] version-pinned, kept=[$pinned_kept]"
+    say "  removed=[$removed]  (CI_RUNNER_OS_LABEL=${CI_RUNNER_OS_LABEL:-off} decides the version-pin carve-out)"
+    body="$(printf '{"labels":["%s"]}' "$(printf '%s' "$after" | sed 's/,/","/g')")"
+    if [ "$DRY" = 1 ]; then say "dry-run: would PUT $body to runner $id ($agent)"; set +f; continue; fi
+    # ⛔ `relabelled` IS A CLAIM ABOUT THE SERVER'S STATE, NOT ABOUT THE PUT'S EXIT STATUS. A whole-set
+    # relabel on this pool has already printed `set_labels ok=16 fail=0` while the label it reported
+    # attaching was still absent (#6897) — an exit status says a request was accepted, never that it
+    # took effect, and the two differ exactly when the repair matters. The Set verb's own 200 carries
+    # the runner's RESULTING label set, so it is read back through `--jq` and every label this repair
+    # asked for must be in it; anything else is exit 3 with the returned set in the message, never a
+    # `relabelled` line over a state nobody looked at.
+    if ! relabelled_now="$(printf '%s' "$body" | gh api -X PUT "repos/$REPO/actions/runners/$id/labels" --input - --jq '[.labels[].name]|join(",")' 2>/dev/null)"; then
+      say "WARNING: relabel FAILED for $agent (id $id)"; rc=3; continue
+    fi
+    missing=""
+    for l in $(printf '%s' "$after" | tr ',' ' '); do
+      list_has "$relabelled_now" "$l" || missing="${missing:+$missing,}$l"
+    done
+    set +f
+    if [ -n "$missing" ]; then
+      say "WARNING: the PUT for $agent (id $id) was ACCEPTED but the label set GitHub returned does not carry $missing (returned=[$relabelled_now]) — the write did NOT take effect (#6897 measured ok=16 fail=0 for a label that was never attached). Nothing is claimed about this runner; re-read it with --status before trusting the queue."; rc=3; continue
+    fi
+    say "relabelled $agent → $after (read back from the PUT's own response)"
   done
   exit "$rc"
 fi

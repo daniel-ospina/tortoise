@@ -960,7 +960,12 @@ def test_a_corrupt_entity_identity_skip_is_LOGGED_on_rebuild(superseded, caplog)
     sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
 
     assert "skipping Subject" in caplog.text, caplog.text
-    assert "name (MERGE key)" in caplog.text, caplog.text
+    # #3590: `name` is a property now (the id is the MERGE key), so the
+    # reporter names the property that failed — asserting the retired
+    # `"name (MERGE key)"` spelling pins the identity role #3590 moved, not the
+    # "the survival is not silent" property this test exists for.
+    assert "carries a name" in caplog.text, caplog.text
+    assert "PRESENT but not writable" in caplog.text, caplog.text
 
 
 def test_an_unwritable_row_merge_key_is_skipped_by_the_fold_not_forwarded(caplog):
@@ -1048,7 +1053,16 @@ def test_a_MISSING_id_is_not_reported_as_an_unwritable_name(caplog):
     # A present id but a corrupt MERGE key: the corrupt case IS reported.
     handler._upsert_subject({"id": "s-1", "name": "bad\x00name"})
     assert "skipping Subject" in caplog.text, caplog.text
-    assert "name (MERGE key)" in caplog.text, caplog.text
+    # ⛔ #3590: `name` is NOT the MERGE key any more — the id is. The reporter
+    # must still name the identity that ACTUALLY failed (`name`), and must not
+    # name the healthy one (`id (MERGE key)`, which resolved fine). Asserting
+    # the retired `"name (MERGE key)"` spelling would pin the identity role
+    # #3590 moved, not the property this test exists for.
+    assert "carries a name" in caplog.text, caplog.text
+    assert "PRESENT but not writable" in caplog.text, caplog.text
+    assert "id (MERGE key)" not in caplog.text, (
+        f"the reporter blamed the id, which is present and writable: "
+        f"{caplog.text!r}")
 
 
 def test_the_clause_classifier_PINS_each_round7_and_8_fix():

@@ -3768,12 +3768,75 @@ FIVE_MAIN_HEALTH_CONTEXTS = [
     "legal-e2e",
 ]
 WORKFLOWS_DIR = ROOT / ".github" / "workflows"
+MARKDOWNLINT_PRODUCER = ROOT / ".github" / "scripts" / "docs-markdownlint.sh"
+
+#: The producer's ARGV invocation. It must START the command word (`xargs`), so the
+#: header's quoted pre-#10265 form and the trailing `echo` that merely says "xargs
+#: rewrites it" cannot satisfy the pin — anchoring here is what makes the finder
+#: measure the command instead of a prose mention of one (#4449).
+_XARGS_INVOCATION = re.compile(r"^\s*xargs\b")
 
 
 def _load_workflow(name):
     import yaml  # third-party, not in the module's stdlib-only import set
 
     return yaml.safe_load((WORKFLOWS_DIR / name).read_text())
+
+
+def _markdownlint_argv_consumer(producer_text: str | None = None) -> str:
+    """The line that feeds the changed-markdown list to the linter as ARGV.
+
+    #10265 moved the transport OUT of both `Markdownlint` steps' `run:` bodies and
+    into `.github/scripts/docs-markdownlint.sh`, so the two tests that pin "the
+    changed-markdown list is DATA, never shell text" (#4449) must read it THERE.
+    Reading the step for it is what broke: the step's surviving mentions of
+    `xargs` are prose in its comments ("NUL-delimited ARGV via xargs", "GNU xargs
+    … rewrites it") and its `echo`, which is exactly why a bare `"xargs" in run`
+    would stay green over a step that had lost the transport altogether.
+    """
+    text = (
+        MARKDOWNLINT_PRODUCER.read_text(encoding="utf-8")
+        if producer_text is None
+        else producer_text
+    )
+    for line in text.splitlines():
+        if _XARGS_INVOCATION.match(line):
+            return line.strip()
+    raise AssertionError(
+        f"no xargs invocation in {MARKDOWNLINT_PRODUCER.name} — the changed-markdown "
+        "list is no longer consumed as NUL-delimited ARGV (#4449)"
+    )
+
+
+def _assert_markdownlint_consumes_the_list_as_nul_argv(
+    step_run: str, nul_path: str, producer_text: str | None = None
+) -> None:
+    """#4449/#10265: the list is DATA — a file of NUL-terminated names → ARGV.
+
+    BOTH halves are pinned, because #10265 split the contract in two: the step
+    hands the producer a `--files-from` FILE (the `xargs` call used to be inline
+    here), and the producer feeds that file NUL-delimited on the linter's stdin.
+    Pinning only the first half would go green on a producer that pasted the list
+    into a command line, which is the injection #4449 closed.
+    """
+    assert ".github/scripts/docs-markdownlint.sh" in step_run, (
+        "the `docs` lint steps must invoke the producer we own (#10265): the "
+        "ARGV-transport half of this pin reads that script, so a step that "
+        f"inlines something else is unpoliced here — {step_run!r}"
+    )
+    assert f'--files-from "$RUNNER_TEMP/{nul_path}"' in step_run, (
+        "the changed-markdown list must reach the linter as a FILE, never as "
+        f"text expanded into the command line (#4449) — {step_run!r}"
+    )
+    argv = _markdownlint_argv_consumer(producer_text)
+    assert "xargs -0" in argv, (
+        "the list must be consumed NUL-delimited, or any filename containing a "
+        f"space or newline splits into two arguments (#4449) — {argv!r}"
+    )
+    assert "<" in argv, (
+        "the list must arrive on STDIN from the file the step named, not be "
+        f"expanded into the command line (#4449) — {argv!r}"
+    )
 
 
 def _on_block(workflow):
@@ -3899,7 +3962,12 @@ def test_docs_job_main_health_uses_a_safe_post_merge_gate():
     lint = next(
         s for s in steps if str(s.get("name", "")).startswith("Markdownlint (main health")
     )
-    assert "xargs -0" in lint["run"]
+    # #10265: the NUL-delimited ARGV transport moved into the producer we own —
+    # the same MOVE `tests/test_docs_lint_baseline.py` took for the capture pin,
+    # not a relaxation. The step now names a FILE and the producer feeds it to the
+    # linter NUL-delimited; `xargs -0` in THIS `run:` would only match the comments
+    # that still say so.
+    _assert_markdownlint_consumes_the_list_as_nul_argv(lint["run"], "changed-md.nul")
     assert "${{ steps.changed_mh" not in lint["run"]
     link = next(
         s for s in steps if str(s.get("name", "")).startswith("Link check (main health")
@@ -3993,10 +4061,18 @@ def test_docs_job_guards_tracked_generated_artifacts_on_every_pr():
         "pip install -e . --quiet\n"
         "python3 tools/bridge_table.py --check\n"
         "python3 tools/mcp_rename_table.py --check\n"
-        "python3 tools/sdk_surface.py --check"
+        "python3 tools/sdk_surface.py --check\n"
+        # #5086: the substrate map's doc↔tree guard joins this step for the same
+        # `#4454` reason (a docs-only edit selects no surface, and `docs` is the
+        # only required context with no `paths:` filter), plus its own: its
+        # `measured_at_commit` ancestry claim needs HISTORY, and this job is the
+        # one that checks out at `fetch-depth: 0` (#5086 review P1-1). It is
+        # listed INSIDE the exact list rather than exempted — the exactness of
+        # this assertion is the whole point.
+        "python3 tools/substrate_map_check.py --check"
     )
     assert code.strip() == expected, (
-        "the drift step must invoke EXACTLY the installer plus the three "
+        "the drift step must invoke EXACTLY the installer plus the four "
         "`--check` commands — no shell operator, no wrapper, no trailing "
         f"anything, or a real failure reports green (#2656); got {code!r}"
     )
@@ -4142,7 +4218,7 @@ def test_docs_job_pr_path_never_interpolates_filenames():
         was satisfied by the ``sed -z`` two lines later, and a bare
         ``"|| true" in run`` by the ``grep -c . ... || true`` in the count
         line, so deleting ``-z`` or the tolerance from the ``git diff`` left
-        the whole suite green. Command continuations (``\``) are joined.
+        the whole suite green. Command continuations (``\\``) are joined.
         """
         code = [ln for ln in run.splitlines() if not ln.lstrip().startswith("#")]
         for i, ln in enumerate(code):
@@ -4194,9 +4270,32 @@ def test_docs_job_pr_path_never_interpolates_filenames():
     lint = next(
         s for s in steps if str(s.get("name", "")) == "Markdownlint (changed files)"
     )
-    assert "xargs -0" in lint["run"], (
-        "markdownlint must consume the NUL list as ARGV, not as expanded text"
+    _assert_markdownlint_consumes_the_list_as_nul_argv(lint["run"], "pr-md.nul")
+    # PROBE (non-vacuity): the producer half must RED on both shapes that look
+    # like the transport and are not it — a space-split (`xargs "$BIN"`, which
+    # tears any filename containing a space or newline into two arguments) and a
+    # command line the list is never read off (`xargs -0` with no `<`). Without
+    # this the widened pin would be satisfied by the WORD `xargs` alone.
+    _producer_ok = (
+        'bash .github/scripts/docs-markdownlint.sh \\\n'
+        '  --files-from "$RUNNER_TEMP/pr-md.nul"\n'
     )
+    for broken, why in (
+        ('xargs "$BIN" <"$FILES_FROM"\n', "consumed NUL-delimited"),
+        ('xargs -0 "$BIN" >"$TMP_REPORT" 2>&1\n', "must arrive on STDIN"),
+    ):
+        with pytest.raises(AssertionError, match=why):
+            _assert_markdownlint_consumes_the_list_as_nul_argv(
+                _producer_ok, "pr-md.nul", producer_text=broken
+            )
+    # … and the FINDER: a leftover comment mentioning `xargs -0` must not satisfy
+    # it. That is the pre-#10265 shape this pin replaced — the transport gone from
+    # the body while its description survived in the comments.
+    with pytest.raises(AssertionError, match="no xargs invocation"):
+        _markdownlint_argv_consumer(
+            "# NUL-delimited ARGV via xargs -0 — a filename is data (#4449).\n"
+            "xargs_helper() { :; }\n"
+        )
     assert "steps.changed.outputs.files" not in lint["run"]
     assert "${{ steps.changed" not in lint["run"]
 

@@ -97,6 +97,16 @@ export interface Env {
   SESSIONS?: D1Database;
   /** Origin of the app (dashboard). Topology as configuration, not as literals. */
   APP_ORIGIN?: string;
+  /** #3524 §9: the consent bridge's HMAC key. Absent ⇒ the mint route answers 503 (§2.3). */
+  CONSENT_TOKEN_SECRET?: string;
+  /**
+   * #3524 §2.1 `iss` — the minting origin the AS accepts. The AS resolves this from the SAME knob
+   * and the same literal default, and compares it byte-exactly, so this is deliberately NOT derived
+   * from `APP_ORIGIN` — set it only when the AS's own `CONSENT_TOKEN_ISSUER` is set to match.
+   */
+  CONSENT_TOKEN_ISSUER?: string;
+  /** #3524 §10 — the AS origin allowed to call the mint route with credentials. */
+  CONSENT_AS_ORIGIN?: string;
 }
 
 /**

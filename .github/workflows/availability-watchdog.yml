@@ -128,7 +128,7 @@ jobs:
     # rule is recorded (docs/ops/ci-runner-x64.md:25-26) and honoured by the
     # installer — `resolve_labels()` can emit only `self-hosted-x64` or
     # `self-hosted-x64,ubuntu-latest` (tools/install-ci-runner-x64.sh), asserted
-    # at `tests/test_ci_runner_x64_install.py:127`, and the re-registration path
+    # at `tests/test_ci_runner_x64_install.py:181`, and the re-registration path
     # strips a version-pinned hosted label (`_preserve_labels`,
     # tools/runner_autoscale.py).
     # ⛔ BUT the pin is OBSERVED, NOT GUARANTEED: no test in this repo reads the

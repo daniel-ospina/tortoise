@@ -4102,6 +4102,14 @@ def _install_capture_seam(args, install_capture) -> int:
         dry_run=getattr(args, "dry_run", False),
     )
     if not result.ok:
+        # The actions are printed BEFORE the failure line (#10241): a failed
+        # install can still have written state — a `.bak` of the user's own
+        # seam, a legacy extension renamed to `.tortoise-capture.disabled/` —
+        # and a user told only "FAILED" cannot find it. Hiding completed,
+        # irreversible-from-their-side writes is how a report becomes a lie in
+        # the opposite direction from `#3808 R13`'s.
+        for action in result.actions:
+            print(action)
         print(f"Capture install FAILED for {args.harness}: {result.error}",
               file=sys.stderr)
         return 1
@@ -4992,6 +5000,11 @@ def _upgrade_artifact_seam(args, root, home) -> int:
               file=_sys.stderr)
         return 1
     if not result.ok:
+        # Same rule as `_install_capture_seam` (#10241): a failed repair may
+        # still have written state (a `.bak`, a renamed legacy extension), so
+        # the actions are printed before the failure line.
+        for action in result.actions:
+            print(action)
         print(result.error, file=_sys.stderr)
         return 1
     prefix = "[dry-run] " if dry_run else ""

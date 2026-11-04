@@ -595,9 +595,10 @@ def test_supersede_does_not_delete_the_successors_own_confidence(sdk):
     an exotic one: `supersede_point` is the RESTATEMENT path, so a restated claim
     about the same subject is bound to the same Subject by `bind_point_subjects`
     and BOTH edges exist. With an unconditional carry the retired point's value
-    wins and the successor's live value is destroyed — and the
-    `DirectEdgeRepoint` descriptor carries no `attrs`, so the overwritten value is
-    journaled nowhere and cannot be rebuilt.
+    wins and the successor's live value is destroyed — and at the time the
+    `DirectEdgeRepoint` descriptor carried no `attrs`, so the overwritten value
+    was journaled nowhere and could not be rebuilt (it carries them since
+    `#10139`).
 
     Pre-#9417 this could not happen: the transfer was a bare MERGE, which leaves a
     pre-existing edge untouched. The carry must therefore be `ON CREATE SET`:

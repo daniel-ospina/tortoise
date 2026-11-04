@@ -665,6 +665,11 @@ jobs:
           [ -n "$TORTOISE_BACKUP_KEY_PREVIOUS" ] && GH_PRESENT="$GH_PRESENT TORTOISE_BACKUP_KEY_PREVIOUS"
           [ -n "$TORTOISE_ENCRYPTION_KEY" ] && GH_PRESENT="$GH_PRESENT TORTOISE_ENCRYPTION_KEY"
           [ -n "$TORTOISE_LINK_INTENT_SECRET" ] && GH_PRESENT="$GH_PRESENT TORTOISE_LINK_INTENT_SECRET"
+          # #3524 §9 step 1: the consent token's HMAC key. Declared in
+          # .github/scripts/fly-managed-secrets.txt, so the provenance gate fails closed
+          # until this probe line exists AND the GitHub secret exists — a `gh-secret:`
+          # declaration with no probe line reads as ABSENT (#4334).
+          [ -n "$CONSENT_TOKEN_SECRET" ] && GH_PRESENT="$GH_PRESENT CONSENT_TOKEN_SECRET"
           [ -n "$TORTOISE_RECORD_DSN" ] && GH_PRESENT="$GH_PRESENT TORTOISE_RECORD_DSN"
           [ -n "$TORTOISE_SECRET_PEPPER" ] && GH_PRESENT="$GH_PRESENT TORTOISE_SECRET_PEPPER"
           [ -n "$TURNSTILE_SECRET_KEY" ] && GH_PRESENT="$GH_PRESENT TURNSTILE_SECRET_KEY"
@@ -745,6 +750,9 @@ jobs:
           TORTOISE_BACKUP_KEY_PREVIOUS: ${{ secrets.TORTOISE_BACKUP_KEY_PREVIOUS }}
           TORTOISE_ENCRYPTION_KEY: ${{ secrets.TORTOISE_ENCRYPTION_KEY }}
           TORTOISE_LINK_INTENT_SECRET: ${{ secrets.TORTOISE_LINK_INTENT_SECRET }}
+          # #3524 §9 step 1 — CONSENT_TOKEN_SECRET is read by the provenance gate's probe
+          # above, so it must be in scope for this step as well as the propagation step.
+          CONSENT_TOKEN_SECRET: ${{ secrets.CONSENT_TOKEN_SECRET }}
           TORTOISE_RECORD_DSN: ${{ secrets.TORTOISE_RECORD_DSN }}
           TORTOISE_SECRET_PEPPER: ${{ secrets.TORTOISE_SECRET_PEPPER }}
           TURNSTILE_SECRET_KEY: ${{ secrets.TURNSTILE_SECRET_KEY }}
@@ -865,6 +873,11 @@ jobs:
           TORTOISE_AUDIT_DSN: ${{ secrets.TORTOISE_AUDIT_DSN }}
           TORTOISE_LINK_INTENT_SECRET: ${{ secrets.TORTOISE_LINK_INTENT_SECRET }}
           TORTOISE_RECORD_DSN: ${{ secrets.TORTOISE_RECORD_DSN }}
+          # #3524 §9 step 1: the PROPAGATION step's own env. Its `ARGS+=` line below reads
+          # `$CONSENT_TOKEN_SECRET` from THIS block, so omitting it here is the #4126 shape
+          # exactly — the propagation is a permanent no-op that stages nothing, the deploy
+          # stays green, and the verifier answers 503 forever with no gate able to see it.
+          CONSENT_TOKEN_SECRET: ${{ secrets.CONSENT_TOKEN_SECRET }}
           GH_CLIENT_ID: ${{ secrets.GH_CLIENT_ID }}
           GH_CLIENT_SECRET: ${{ secrets.GH_CLIENT_SECRET }}
           GH_CALLBACK_URL: ${{ secrets.GH_CALLBACK_URL }}
@@ -1006,6 +1019,11 @@ jobs:
           # BLOCKS the deploy (#4126/#4259).
           [ -n "$TORTOISE_AUDIT_DSN" ] && ARGS+=(TORTOISE_AUDIT_DSN="$TORTOISE_AUDIT_DSN")
           [ -n "$TORTOISE_LINK_INTENT_SECRET" ] && ARGS+=(TORTOISE_LINK_INTENT_SECRET="$TORTOISE_LINK_INTENT_SECRET")
+          # #3524 §9 step 1: the consent token's HMAC key. Staged like every other
+          # gh-secret: name — an unset GitHub secret stages nothing, and the verifier then
+          # answers a typed 503 `temporarily_unavailable` (fail-closed) rather than minting
+          # against a default. A HARDCODED default here would be a forgeable consent.
+          [ -n "$CONSENT_TOKEN_SECRET" ] && ARGS+=(CONSENT_TOKEN_SECRET="$CONSENT_TOKEN_SECRET")
           [ -n "$SENTRY_DSN" ] && ARGS+=(SENTRY_DSN="$SENTRY_DSN")
           # #9548 / epic #7879 R1: the Postgres record's arming surface.
           # Presence-based (`record_writer.RECORD_DSN_ENV`) — unset ⇒ NOT_ARMED ⇒

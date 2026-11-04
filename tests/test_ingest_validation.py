@@ -398,17 +398,41 @@ class TestPhase1Phase2Parity:
                      "is_operator": True},
                 ],
                 "connections": [{"from": "p1", "to": "pO", "operator": "IMPL"}]},
-            "bundle-local entity resolving to a terminal holder (direct edge)": {
-                "entities": [
-                    {"ref": "oA", "type": "object", "name": "Live one"},
-                    {"ref": "oT", "type": "object",
-                     "name": "Terminal object"},
-                ],
-                "connections": [{"from": "oA", "to": "oT",
-                                 "operator": "IMPL"}]},
+            # ⛔ RETIRED (#3590 round-5 review F1): this case used to assert that
+            # a bundle-local entity naming a TERMINAL-ONLY holder is refused in
+            # both phases, because the write MERGEd onto that terminal node by
+            # name. The create now resolves over LIVE carriers only, so such a
+            # name MINTS a fresh live Object and the direct edge is legal — no
+            # violation is left to have parity about. The positive shape is
+            # pinned by `test_a_bundle_minting_past_a_terminal_holder_is_accepted`
+            # below.
         }
         for name, bundle in cases.items():  # noqa: B007
             self._assert_both_phases(sdk, bundle)
+
+    def test_a_bundle_minting_past_a_terminal_holder_is_accepted(self, sdk):
+        """#3590 round-5 review (F1): a terminal-only holder does not block a mint.
+
+        `resolve_or_mint` resolves over LIVE carriers, so a name whose only
+        carrier is terminal is a DIFFERENT incarnation (R5) and the create mints
+        a fresh live node. Phase 1 used to read its `#7925` axes off that
+        terminal carrier, so it refused the bundle with "resolves to terminal"
+        — a false block describing a mechanism (name-MERGE) the change removed.
+        Parity here is the ABSENCE of a violation in both phases.
+        """
+        sdk.create_object("Terminal object")
+        _query(sdk, "MATCH (n:Object {name:$n}) SET n.status='superseded'",
+               {"n": "Terminal object"})
+        bundle = {
+            "entities": [
+                {"ref": "oA", "type": "object", "name": "Live one"},
+                {"ref": "oT", "type": "object", "name": "Terminal object"},
+            ],
+            "connections": [{"from": "oA", "to": "oT", "operator": "IMPL"}],
+        }
+        assert sdk._validate_bundle(bundle, promotion_policy="gated") == []
+        res = sdk.ingest(bundle)
+        assert res["created"]["connections"] == 1
 
     def test_gated_operator_connections_accepted_under_parity(self, sdk):
         # CYCLE-26: check-5's fail-closed policy-feasibility rejection is

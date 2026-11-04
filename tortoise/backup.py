@@ -733,11 +733,19 @@ def restore(backup_dir: str, db_path: str,
                 # engine, and it replayed one record at a time with NO journal
                 # context — so `apply()`'s ObjectSuperseded refusal gate (keyed on
                 # `journal_object_surviving is not None`) was SKIPPED and an
-                # id-only absent-target supersede restored silently, while
-                # `rebuild_all` refuses the identical journal. Supply the same
-                # whole-journal keys `rebuild`/`recover_from_log` supply, and
-                # feature-detect the kwargs (an `apply(ev)`-only injected backend
-                # must not be handed a kwarg it does not accept).
+                # unaddressable supersede restored silently, while `rebuild_all`
+                # refuses the identical journal. Supply the same whole-journal
+                # keys `rebuild`/`recover_from_log` supply, and feature-detect the
+                # kwargs (an `apply(ev)`-only injected backend must not be handed
+                # a kwarg it does not accept).
+                #
+                # ⚠️ #10204: the shape this wiring protects is now
+                # `object-superseded-no-address` (and every established-address
+                # miss). An ID-ONLY record whose id nothing established is EXEMPT
+                # since the address-keyed amendment, but it is exempt only
+                # because `object_established` reaches the classifier — without
+                # this line the SAME record refuses as a plain miss, so it pins
+                # the wiring just as well as the no-address shape does.
                 journal_object_surviving = journal_object_surviving_keys(records)
                 # #3590 D2: the journal's own addressability oracle, so this
                 # engine's supersede gate agrees with `rebuild_all`'s sweep.

@@ -54,6 +54,17 @@ _STALE_TRACKED_CLAIM = re.compile(
 _NOT_TRACKED = re.compile(
     r"\b(?:not|never|no\s+longer)\s+(?:\*\*)?tracked\b|\buntracked\b", re.I
 )
+#: An agent-infra script cited by its LINE NUMBER `<script>:<line>`. agent-infra is deployed and
+#: re-pinned on every box, so those numbers resolve to unrelated code within a push or two; only
+#: the QUOTED assignment is durable. PR #10250 review ROUND 10 ISSUE 2 (P3) measured the decay:
+#: `harness-up:548`/`:682` pointed at `hu_path_state` and a `REPO`/`REPO_SRC` comment, and
+#: `cloud-cell-bringup.sh:815` sat at 971 on the box's own pin. Scoped to agent-infra's script
+#: names — an in-repo path cited by line (`check-deploy-staleness.sh:47`) does not move.
+_AGENT_INFRA_LINE_CITATION = re.compile(
+    r"(?<![\w.-])(?:harness-up|harness-apply-pass|harness-refresh|harness-exec"
+    r"|cloud-cell-bringup(?:\.test)?|cloud-cell-supervisor|multi-repo-controller)"
+    r"(?:\.sh)?:\d+"
+)
 
 
 def run_tool(
@@ -101,6 +112,22 @@ def git(*args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["git", *args], cwd=REPO_ROOT, capture_output=True, text=True
     )
+
+
+def load_tool_module():
+    """Import the tool as a MODULE (not as a subprocess), exactly as the drift gate does.
+
+    ``tools/agent_infra_drift_check.py`` IMPORTS this module and calls ``link_main``, so a
+    behaviour that only exists in a subprocess is a behaviour the gate does not have. Loading by
+    FILE PATH keeps the tool's own filename (and therefore ``if __name__ == "__main__"``) intact.
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("_lais_under_test", TOOL)
+    assert spec is not None and spec.loader is not None, f"cannot load {TOOL} as a module"
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 @pytest.fixture()
@@ -243,6 +270,44 @@ class TestScriptsPointerIsNotTracked:
             + "\nReword to the machine-local shape — \"gitignored, not tracked; materialised "
             "from $AGENT_INFRA_PATH\" — because a stale claim is how the tracked blob gets "
             "re-derived and re-added."
+        )
+
+
+class TestAgentInfraCitations:
+    """A pointer into agent-infra must survive agent-infra moving."""
+
+    def test_no_agent_infra_script_is_cited_by_line_number(self) -> None:
+        """PR #10250 review ROUND 10 ISSUE 2 (P3): a citation that no longer resolves re-stales.
+
+        RED before the fix, measured in this file: `harness-up:548` and `:682` justified the
+        `CELL_HOME` precedence, and `cloud-cell-bringup.sh:815` the two-line record. On the box's
+        own pin those numbers land on `hu_path_state`, a `REPO`/`REPO_SRC` comment, and a printf
+        that had moved to 971 — i.e. the whole justification for `default_pin_path()` pointed at
+        code that says nothing of the kind.
+
+        The rule is the repo's own: a claim that outlives its fact gets re-derived as fact (see
+        `test_no_comment_still_claims_the_pointer_is_tracked`, the same class one file over).
+        agent-infra is a DEPLOYED corpus — every box carries a different pin — so the durable
+        citation is the QUOTED assignment, never the line it happened to sit on.
+
+        SCOPE: the tool's own text, for agent-infra's script names only. A bare `:548` beside an
+        already-named script, and an in-repo path cited by line, are both out of scope. This test
+        module is out of scope too, and deliberately: it QUOTES the pre-fix forms as history, so
+        scanning it would either self-fail or need so many exemptions that it guarded nothing.
+        """
+        text = TOOL.read_text()
+        offenders = [
+            f"{TOOL.name}:{text.count(chr(10), 0, match.start()) + 1}: {match.group(0)}"
+            for match in _AGENT_INFRA_LINE_CITATION.finditer(text)
+        ]
+        assert not offenders, (
+            "these cite an agent-infra script by LINE NUMBER, which does not survive the corpus "
+            "being re-pinned on another box (`harness-up:548` resolved to `hu_path_state`, and "
+            "`cloud-cell-bringup.sh:815` to a printf that had moved to 971):\n  "
+            + "\n  ".join(offenders)
+            + "\nCite the script AND the quoted assignment it makes, e.g. "
+            + "`harness-up` and its "
+            + '`PIN_SHA_FILE="${HARNESS_PIN:-${CELL_HOME}/.pi/agent/state/HARNESS-PIN}"`.'
         )
 
 
@@ -668,3 +733,1108 @@ class TestDriftGateCheckCommand:
         )
         # And the vendored copy was respected, not deleted.
         assert (repo / "scripts" / "local-tool.sh").exists()
+
+
+def git_commit(infra: Path, message: str) -> str:
+    """Commit whatever is in ``infra`` and return the new HEAD sha.
+
+    A throwaway ``git init`` tree, never this checkout: the pin comparison is about a CHECKOUT's
+    ancestry, so the fixture has to BE a checkout. Identity is passed per-invocation so a machine
+    with no ``user.email`` configured does not turn this into an environment test.
+    """
+    # A commit needs a change: append a line so each call is a distinct tree state (a bare
+    # `commit` after another commit fails with "nothing to commit", which would make every
+    # multi-commit fixture below an error instead of a scenario).
+    with (infra / "commit.log").open("a") as fh:
+        fh.write(message + "\n")
+    subprocess.run(["git", "-C", str(infra), "add", "."], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(infra), "-c", "user.email=test@example.com",
+         "-c", "user.name=test", "-c", "commit.gpgsign=false", "commit", "-q", "-m", message],
+        check=True, capture_output=True,
+    )
+    return subprocess.run(
+        ["git", "-C", str(infra), "rev-parse", "HEAD"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+
+
+@pytest.fixture()
+def git_infra(fake_infra: Path) -> Path:
+    """``fake_infra`` as a real git checkout with one commit, branch ``main``."""
+    subprocess.run(
+        ["git", "-C", str(fake_infra), "init", "-q", "-b", "main"],
+        check=True, capture_output=True,
+    )
+    git_commit(fake_infra, "initial")
+    return fake_infra
+
+
+@pytest.fixture()
+def git_shim(tmp_path: Path) -> dict[str, str]:
+    """A ``git`` on PATH that delegates to the real one EXCEPT ``merge-base --is-ancestor``.
+
+    That one question exits **128** — git's ERROR status, which ``git-merge-base(1)`` documents as
+    distinct from 1 = "not an ancestor": *"Errors are signaled by a non-zero status that is not
+    1."* PR #10250 review ROUND 8 ISSUE 2 (P3): the classifier accepted only status 0, so an error
+    fell through to ``PIN_DIVERGED`` → exit **1** (DRIFT) with ``git fetch && git checkout <pin>``
+    printed as the remedy. A shim is the only way to reach that branch without a 20 s
+    ``GIT_TIMEOUT`` hang, and everything else must stay REAL git — the verdict is only reached
+    through genuine ``rev-parse``/``cat-file`` answers.
+    """
+    real = shutil.which("git")
+    assert real, "no git on PATH — this module cannot be tested without one"
+    shim_dir = tmp_path / "git-shim"
+    shim_dir.mkdir()
+    shim = shim_dir / "git"
+    shim.write_text(
+        "#!/bin/sh\n"
+        # Iterate the argv: the tool always calls `git -C <dir> <verb> …`, so the verb may be at
+        # any position (and `--is-ancestor` is unambiguous anywhere in a git argv).
+        'for arg in "$@"; do\n'
+        '  if [ "$arg" = "--is-ancestor" ]; then\n'
+        '    echo "fatal: unable to read tree (shim: git cannot answer)" >&2\n'
+        "    exit 128\n"
+        "  fi\n"
+        "done\n"
+        f'exec "{real}" "$@"\n'
+    )
+    shim.chmod(0o755)
+    return {"PATH": f"{shim_dir}{os.pathsep}{os.environ.get('PATH', '/usr/bin:/bin')}"}
+
+
+class TestPinAgreement:
+    """#10114 — a correct link into a checkout that is NOT the pinned tree is the silent no-op.
+
+    Measured on the box this was written on (2026-10-28): ``$AGENT_INFRA_PATH`` HEAD ``91a3b29b``
+    was **23 commits behind** ``~/.pi/agent/state/HARNESS-PIN`` (``7ab68295…``), carried every
+    tool this repo documents, and both ``--check`` and ``diagnose()`` reported nothing — so a lane
+    materialised ``scripts/`` into a tree the box does not run. These tests pin the answer to the
+    question that was never asked, in BOTH directions: a stale checkout must be named, and a
+    checkout that carries the pin must not be (a guard that cries drift on a healthy tree is the
+    other way this fails).
+    """
+
+    def _home(self, tmp_path: Path, pin: str | None = None) -> Path:
+        """A HOME with (or without) the box-wide pin record, and nothing else inherited."""
+        home = tmp_path / "home"
+        state = home / ".pi" / "agent" / "state"
+        state.mkdir(parents=True)
+        if pin is not None:
+            (state / "HARNESS-PIN").write_text(pin + "\n")
+        return home
+
+    def _env(self, home: Path, **extra: str) -> dict[str, str]:
+        """The real environment minus any pin it happens to carry.
+
+        Load-bearing: this machine HAS a ``HARNESS-PIN``, so a test that inherited it would
+        compare a throwaway fixture against a real pin and pass or fail for the wrong reason.
+        ``CELL_HOME`` is cleared for the SAME reason and is the sharper instance of it: the base
+        ``default_pin_path()`` honours is ``${CELL_HOME:-$HOME}``, this fleet box sets
+        ``CELL_HOME``, and it carries a record that disagrees with ``$HOME``'s — so a fixture that
+        redirected only ``HOME`` would be compared against the REAL cell's pin and pass for the
+        wrong reason (or fail for one).
+        """
+        env = {**os.environ, "HOME": str(home), "HARNESS_PIN": "", "CELL_HOME": ""}
+        env.update(extra)
+        return env
+
+    def _cell_home(self, tmp_path: Path, pin: str | None = None) -> Path:
+        """A ``CELL_HOME`` with (or without) the pin record ``harness-up`` reads there.
+
+        Distinct from ``_home`` only in NAME — the path shape is identical, which is exactly why
+        the two bases are confusable and why the tool must pick the one the fleet picks.
+        """
+        cell = tmp_path / "cell-home"
+        state = cell / ".pi" / "agent" / "state"
+        state.mkdir(parents=True)
+        if pin is not None:
+            (state / "HARNESS-PIN").write_text(pin + "\n")
+        return cell
+
+    def _pin_check(self, repo: Path, infra: Path, env: dict[str, str], *args: str):
+        return run_tool(
+            "--pin-check", "--repo", str(repo), "--infra", str(infra), *args, env=env
+        )
+
+    def test_a_checkout_at_the_pin_passes_and_says_which_pin(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        pin = git_commit(git_infra, "the pinned commit")
+        env = self._env(self._home(tmp_path, pin))
+        result = self._pin_check(repo, git_infra, env)
+        assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
+        assert "pin: ok" in result.stdout, result.stdout
+        assert pin[:12] in result.stdout, "the verdict does not name the pin it compared against"
+
+    def test_a_checkout_that_carries_the_pin_passes(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """The pin need not be HEAD: a checkout AHEAD of it still contains the pinned bytes."""
+        pin = git_commit(git_infra, "the pinned commit")
+        git_commit(git_infra, "work after the pin")
+        env = self._env(self._home(tmp_path, pin))
+        result = self._pin_check(repo, git_infra, env)
+        assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
+        assert "carries the pin" in result.stdout, result.stdout
+
+    def test_a_checkout_BEHIND_the_pin_is_exit_1_and_names_the_distance(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """The measured #10114 shape: the box is pinned ahead of the tree `scripts/` resolves to."""
+        behind = subprocess.run(
+            ["git", "-C", str(git_infra), "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        pin = git_commit(git_infra, "the commit the box runs")
+        subprocess.run(
+            ["git", "-C", str(git_infra), "checkout", "-q", behind], check=True, capture_output=True
+        )
+        env = self._env(self._home(tmp_path, pin))
+
+        result = self._pin_check(repo, git_infra, env)
+        assert result.returncode == 1, (result.returncode, result.stdout, result.stderr)
+        assert "BEHIND" in result.stdout, result.stdout
+        assert "1 commits BEHIND" in result.stdout, (
+            f"the stated distance is missing, so the finding is not actionable: {result.stdout}"
+        )
+        assert "git checkout" in result.stderr, (
+            f"no remedy printed — a drift finding without its fix is a mystery: {result.stderr}"
+        )
+
+    def test_a_DIVERGED_checkout_is_exit_1(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """Neither an ancestor: not behind, not ahead — a different line entirely."""
+        subprocess.run(
+            ["git", "-C", str(git_infra), "checkout", "-q", "-b", "other"],
+            check=True, capture_output=True,
+        )
+        other = git_commit(git_infra, "a local line main never took")
+        subprocess.run(
+            ["git", "-C", str(git_infra), "checkout", "-q", "main"], check=True, capture_output=True
+        )
+        pin = git_commit(git_infra, "the pinned line")
+        subprocess.run(
+            ["git", "-C", str(git_infra), "checkout", "-q", other], check=True, capture_output=True
+        )
+        env = self._env(self._home(tmp_path, pin))
+
+        result = self._pin_check(repo, git_infra, env)
+        assert result.returncode == 1, (result.returncode, result.stdout, result.stderr)
+        assert "DIVERGED" in result.stdout, result.stdout
+
+    def test_a_git_ERROR_at_the_ancestry_step_is_cannot_verify_not_drift(
+        self, repo: Path, git_infra: Path, tmp_path: Path, git_shim: dict[str, str]
+    ) -> None:
+        """ROUND 8 ISSUE 2 (P3): a git that cannot ANSWER is UNKNOWN, never "diverged".
+
+        The checkout here genuinely carries the pin, so no drift exists to report; only the
+        ancestry question fails (the shim exits 128 = git's error status). The pre-fix tool read
+        that as "not an ancestor" twice and printed ``DIVERGED`` + ``git fetch && git checkout`` —
+        sending an operator to rewrite a checkout over what may be a hung or broken git, which
+        this module itself calls "a worse failure than the one being reported".
+        """
+        pin = git_commit(git_infra, "the pinned commit")
+        git_commit(git_infra, "work after the pin")
+        env = self._env(self._home(tmp_path, pin), **git_shim)
+
+        result = self._pin_check(repo, git_infra, env)
+        assert result.returncode == 2, (
+            "a git ERROR is 'cannot verify' (2), never drift (1) — rc="
+            f"{result.returncode}, stdout={result.stdout!r}, stderr={result.stderr!r}"
+        )
+        assert "pin: git-error" in result.stdout, result.stdout
+        assert "cannot verify" in result.stdout, result.stdout
+        assert "DIVERGED" not in result.stdout, (
+            f"a git that could not answer was reported as a diverged checkout: {result.stdout!r}"
+        )
+        assert "remedy" not in result.stderr, (
+            f"a cannot-verify verdict printed a `git checkout` remedy: {result.stderr!r}"
+        )
+
+    def test_git_output_this_process_cannot_DECODE_is_cannot_verify_not_drift(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """ROUND 11/12 note, FIXED: an UNDECODABLE git answer is not a stale checkout.
+
+        ``_git`` ran ``subprocess.run(..., text=True)`` with no ``errors=``, so stdout **and** stderr
+        were decoded ``strict`` (the ``io.TextIOWrapper`` default per the ``subprocess`` docs).
+        ``UnicodeDecodeError`` is a ``ValueError``, so it was caught by neither
+        ``except (OSError, subprocess.SubprocessError)`` inside ``_git`` nor
+        ``except (OSError, RuntimeError)`` in ``main``: it escaped as a TRACEBACK and the
+        interpreter exited **1** — this tool's DRIFT class, whose printed meaning is "your checkout
+        is stale, ``git fetch && git checkout <pin>``". Measured on the pre-fix tool: ``rc=1`` with
+        ``UnicodeDecodeError`` in the traceback; at this head, ``pin: git-error`` and ``rc=2``.
+
+        A shim is the only way to reach it (a monkeystamped ``_git`` would prove the mapping, not the
+        decode): the byte has to come out of GIT, and git's other answers here are ASCII by
+        construction (hex shas, counts), so no real checkout can carry one on a test host. The shim
+        answers ``--is-ancestor`` with a ``fatal:`` message carrying a raw ``\377`` (0xff — not
+        valid UTF-8, and a ``fatal:`` line embedding a non-UTF-8 path is the natural carrier) and
+        git's error status; every other question is REAL git, so the checkout genuinely carries the
+        pin and there is no drift to report.
+        """
+        real = shutil.which("git")
+        assert real, "no git on PATH — this module cannot be tested without one"
+        shim_dir = tmp_path / "git-undecodable"
+        shim_dir.mkdir()
+        shim = shim_dir / "git"
+        shim.write_text(
+            "#!/bin/sh\n"
+            'for arg in "$@"; do\n'
+            '  if [ "$arg" = "--is-ancestor" ]; then\n'
+            # `printf` expands \377 to the single byte 0xff on both dash and bash.
+            "    printf 'fatal: bad object \\377\\n' >&2\n"
+            "    exit 128\n"
+            "  fi\n"
+            "done\n"
+            f'exec "{real}" "$@"\n'
+        )
+        shim.chmod(0o755)
+        pin = git_commit(git_infra, "the pinned commit")
+        git_commit(git_infra, "work after the pin")
+        env = self._env(
+            self._home(tmp_path, pin),
+            PATH=f"{shim_dir}{os.pathsep}{os.environ.get('PATH', '/usr/bin:/bin')}",
+        )
+
+        result = self._pin_check(repo, git_infra, env)
+        assert result.returncode == 2, (
+            "an UNDECODABLE git answer is 'cannot verify' (2), never drift (1) — rc="
+            f"{result.returncode}, stdout={result.stdout!r}, stderr={result.stderr!r}"
+        )
+        assert "pin: git-error" in result.stdout, result.stdout
+        assert "cannot verify" in result.stdout, result.stdout
+        assert "Traceback" not in result.stderr, (
+            f"a decode failure escaped as a traceback instead of a verdict: {result.stderr!r}"
+        )
+        assert "DIVERGED" not in result.stdout, (
+            f"a git whose answer could not be DECODED was reported as a diverged checkout: "
+            f"{result.stdout!r}"
+        )
+        assert "remedy" not in result.stderr, (
+            f"a cannot-verify verdict printed a `git checkout` remedy: {result.stderr!r}"
+        )
+
+    def test_a_checkout_that_predates_the_pin_entirely_is_drift_not_unknown(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """The Aug-7 trap: the pin is not even an OBJECT in the checkout.
+
+        This is the case a naive `rev-list --count` reports as `0` (it counts nothing that is
+        reachable) and reads as current — the false pass this whole test class exists against.
+        """
+        env = self._env(self._home(tmp_path, "0" * 40))
+        result = self._pin_check(repo, git_infra, env)
+        assert result.returncode == 1, (result.returncode, result.stdout, result.stderr)
+        assert "does not contain the pinned commit" in result.stdout, result.stdout
+
+    def test_an_EMPTY_pin_is_cannot_verify_not_no_pin(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """A pin file that exists and says nothing must never read as "unpinned".
+
+        The file is the box's own statement about the commit it runs; empty means the statement
+        is broken, which is exit 2 (cannot verify), never the ``no-pin`` pass.
+        """
+        env = self._env(self._home(tmp_path, ""))
+        result = self._pin_check(repo, git_infra, env)
+        assert result.returncode == 2, (result.returncode, result.stdout, result.stderr)
+        assert "EMPTY" in result.stdout, result.stdout
+
+    def test_a_pin_named_but_missing_is_cannot_verify(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """``--pin`` is AUTHORITATIVE: a missing file must not fall back to the default record."""
+        env = self._env(self._home(tmp_path))
+        missing = tmp_path / "no-such-pin"
+        result = self._pin_check(repo, git_infra, env, "--pin", str(missing))
+        assert result.returncode == 2, (result.returncode, result.stdout, result.stderr)
+        assert str(missing) in result.stdout, result.stdout
+
+    def test_a_non_git_checkout_is_cannot_verify(self, repo: Path, fake_infra: Path, tmp_path: Path) -> None:
+        """`~/orchestrator` on the measured box had no `.git` at all — that is UNKNOWN, not OK."""
+        env = self._env(self._home(tmp_path, "a" * 40))
+        result = self._pin_check(repo, fake_infra, env)
+        assert result.returncode == 2, (result.returncode, result.stdout, result.stderr)
+        assert "not a git checkout" in result.stdout, result.stdout
+
+    def test_no_pin_recorded_is_a_STATED_pass_not_silence(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """A GitHub runner records no pin. That is an answer, so it is printed — not assumed."""
+        env = self._env(self._home(tmp_path))
+        result = self._pin_check(repo, git_infra, env)
+        assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
+        assert "pin: no-pin" in result.stdout, result.stdout
+        assert "no harness pin recorded" in result.stdout, result.stdout
+
+    def test_the_CELL_HOME_record_is_the_one_read(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """The base ``harness-up`` resolves is ``${CELL_HOME:-$HOME}``, so this tool must too.
+
+        RED on the pre-fix tool: it read ``Path.home()`` alone, so a ``HOME`` holding no record
+        answered ``pin: no-pin`` → exit **0** over a box whose ``CELL_HOME`` DOES record a pin —
+        a false PASS whose remedy is nothing, for a checkout that may be arbitrary stale. The
+        verdict is asserted explicitly because ``no-pin`` also exits 0, so a bare
+        ``returncode == 0`` cannot tell the pass from the false pass.
+        """
+        pin = git_commit(git_infra, "the commit the cell's controller runs")
+        env = self._env(self._home(tmp_path), CELL_HOME=str(self._cell_home(tmp_path, pin)))
+        result = self._pin_check(repo, git_infra, env)
+        assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
+        assert "pin: no-pin" not in result.stdout, (
+            f"the CELL_HOME record was ignored, so a box that records a pin read as unpinned: "
+            f"{result.stdout}"
+        )
+        assert "pin: ok" in result.stdout, result.stdout
+        assert pin[:12] in result.stdout, "the verdict does not name the pin it compared against"
+
+    def test_a_CELL_HOME_drift_is_not_downgraded_to_no_pin(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """The fail-OPEN shape specifically: drift must stay drift, not become a stated pass.
+
+        A pass that says "nothing records a pin here" over a ``CELL_HOME`` that records one is
+        worse than silence — it is an affirmative wrong answer, and it is the exact defect
+        #10114 exists to remove one layer up.
+        """
+        behind = subprocess.run(
+            ["git", "-C", str(git_infra), "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        pin = git_commit(git_infra, "the commit the cell's controller runs")
+        subprocess.run(
+            ["git", "-C", str(git_infra), "checkout", "-q", behind], check=True, capture_output=True
+        )
+        env = self._env(self._home(tmp_path), CELL_HOME=str(self._cell_home(tmp_path, pin)))
+        result = self._pin_check(repo, git_infra, env)
+        assert result.returncode == 1, (result.returncode, result.stdout, result.stderr)
+        assert "no-pin" not in result.stdout, result.stdout
+        assert "BEHIND" in result.stdout, result.stdout
+
+    def test_an_unexpandable_pin_path_is_cannot_verify_not_drift(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """``~nosuchuser`` must be 2 (cannot verify), never 1 (drift) and never a traceback.
+
+        ``Path.expanduser()`` raises ``RuntimeError`` — not ``OSError``/``ValueError`` — so it
+        escaped ``main``'s ``ConfigError`` handler and the interpreter exited **1**: this tool's
+        DRIFT class, whose printed remedy is ``git fetch && git checkout`` for a pin path that
+        merely does not resolve. It also crashed ``tools/agent_infra_drift_check.py``, which
+        imports this module and wraps only ``ConfigError``.
+        """
+        env = self._env(self._home(tmp_path), HARNESS_PIN="~definitely-no-such-user-xyz/pin")
+        result = self._pin_check(repo, git_infra, env)
+        assert result.returncode == 2, (
+            "an unresolvable ~ in the pin path is 'cannot verify' (2) — rc="
+            f"{result.returncode}, stdout={result.stdout!r}, stderr={result.stderr!r}"
+        )
+        assert "Traceback" not in result.stderr, result.stderr
+        assert "Traceback" not in result.stdout, result.stdout
+        # ⛔ The rc alone does NOT pin this behaviour (PR #10250 review ROUND 8 ISSUE 1, P2):
+        # ``--pin-check`` does not exist on the pre-fix tool, so argparse rejects the unknown flag
+        # with status 2, empty stdout and NO traceback — every assertion above holds there, on a
+        # tool this test claims to be RED against. The verdict PRINTED to stdout is the only
+        # discriminator: it can only come from ``pin_state`` classifying the unexpandable path.
+        assert "pin: unreadable" in result.stdout, (
+            "the run exited 2 without ever printing a pin verdict, so this test cannot tell the "
+            f"`_expand` guard from argparse rejecting the flag: {result.stdout!r}"
+        )
+        assert "cannot verify" in result.stdout, result.stdout
+        # Not the DRIFT class, whose remedy would send an operator to rewrite the checkout.
+        assert "remedy" not in result.stderr, result.stderr
+
+    def test_the_explicit_pin_flag_also_survives_an_unexpandable_path(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """``--pin`` takes the same ``_expand`` path — a caller-supplied ``~`` must not crash it.
+
+        Same vacuity trap as its sibling above (ROUND 8 ISSUE 1, P2), plus the question the flag
+        is authoritative about: the NAMED path must be the one reported, never the default record.
+        """
+        env = self._env(self._home(tmp_path))
+        result = self._pin_check(
+            repo, git_infra, env, "--pin", "~definitely-no-such-user-xyz/pin"
+        )
+        assert result.returncode == 2, (result.returncode, result.stdout, result.stderr)
+        assert "Traceback" not in result.stderr, result.stderr
+        assert "pin: unreadable" in result.stdout, (
+            "the run exited 2 without a pin verdict, so this test cannot tell the `_expand` "
+            f"guard from argparse rejecting the unknown flag: {result.stdout!r}"
+        )
+        assert "~definitely-no-such-user-xyz/pin" in result.stdout, (
+            "the verdict does not name the path --pin was given, so an unexpandable explicit pin "
+            f"was silently replaced by the default record: {result.stdout!r}"
+        )
+        assert "cannot verify" in result.stdout, result.stdout
+        assert "remedy" not in result.stderr, result.stderr
+
+    def test_the_env_pin_is_honoured(self, repo: Path, git_infra: Path, tmp_path: Path) -> None:
+        """``HARNESS_PIN`` is the harness's own variable name — not an invented one."""
+        base = subprocess.run(
+            ["git", "-C", str(git_infra), "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        git_commit(git_infra, "the pin the env names")
+        pin_file = tmp_path / "elsewhere-pin"
+        pin_file.write_text(base + "\n")
+        env = self._env(self._home(tmp_path), HARNESS_PIN=str(pin_file))
+        result = self._pin_check(repo, git_infra, env)
+        assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
+        assert "carries the pin" in result.stdout, result.stdout
+
+    def test_pin_check_never_touches_the_pointer(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """The assertion mode must not create a link as a side effect of being asked.
+
+        The verdict is asserted FIRST: a bare negative is satisfied by any early exit — argparse
+        rejecting an unknown flag on the pre-fix tool, a ``ConfigError``, a crash in ``pin_state``
+        — so without it the test cannot tell "the assertion mode ran and changed nothing" from
+        "the tool never ran".
+        """
+        pin = git_commit(git_infra, "the pinned commit")
+        env = self._env(self._home(tmp_path, pin))
+        result = self._pin_check(repo, git_infra, env)
+        assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
+        assert "pin: ok" in result.stdout, result.stdout
+        assert not os.path.lexists(repo / "scripts"), (
+            "--pin-check materialised the pointer; an assertion mode must change nothing"
+        )
+
+    def test_check_still_passes_on_a_stale_checkout_but_no_longer_stays_silent(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """``--check``'s documented contract is the POINTER (AGENTS.md), so it must stay 0.
+
+        The defect was never that the pointer was wrong — it was that a correct pointer into a
+        stale tree read as "setup is fine". So the exit code is unchanged and the staleness is
+        now a ``!`` note, which is what a lane actually sees during setup.
+        """
+        behind = subprocess.run(
+            ["git", "-C", str(git_infra), "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        pin = git_commit(git_infra, "the commit the box runs")
+        subprocess.run(
+            ["git", "-C", str(git_infra), "checkout", "-q", behind], check=True, capture_output=True
+        )
+        env = self._env(self._home(tmp_path, pin))
+        run_tool("--repo", str(repo), "--infra", str(git_infra), env=env)
+
+        result = run_tool("--check", "--repo", str(repo), "--infra", str(git_infra), env=env)
+        assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
+        assert "BEHIND" in result.stderr, (
+            f"a correct link into a stale checkout reported nothing on stderr: {result.stderr!r}"
+        )
+        assert "--pin-check" in result.stderr, (
+            "the note does not name the mode that turns it into a verdict"
+        )
+
+    def test_materialise_names_the_drift_it_still_proceeds_through(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """A stale checkout does not block SETUP (the link is correct), but it is never silent."""
+        behind = subprocess.run(
+            ["git", "-C", str(git_infra), "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        pin = git_commit(git_infra, "the commit the box runs")
+        subprocess.run(
+            ["git", "-C", str(git_infra), "checkout", "-q", behind], check=True, capture_output=True
+        )
+        env = self._env(self._home(tmp_path, pin))
+        result = run_tool("--repo", str(repo), "--infra", str(git_infra), env=env)
+        assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
+        assert (repo / "scripts").is_symlink()
+        assert "BEHIND" in result.stderr, result.stderr
+
+    def test_a_corrupted_pin_is_cannot_verify_not_a_stale_checkout(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """A pin that is not a commit id must not be reported as drift.
+
+        Both branches of that mistake are expensive: "behind" sends an operator to
+        `git checkout <garbage>`, and "ok" would be the false pass this module exists against.
+        """
+        env = self._env(self._home(tmp_path, "not-a-sha"))
+        result = self._pin_check(repo, git_infra, env)
+        assert result.returncode == 2, (result.returncode, result.stdout, result.stderr)
+        assert "not a commit id" in result.stdout, result.stdout
+
+    def test_a_pin_with_non_utf8_bytes_is_cannot_verify_not_drift(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """PR #10250 review ISSUE 1 (P2) — the corrupt-BYTES pin, which no test reached.
+
+        ``Path.read_text()`` raises ``UnicodeDecodeError``, a ``ValueError`` and **not** an
+        ``OSError``, so it escaped ``pin_state``'s handler, escaped ``main``'s ``ConfigError``
+        catch, and the interpreter exited **1** — the DRIFT class, whose repair sends an operator
+        to `git fetch && git checkout`. The corrupt-TEXT pin above never reaches the byte-level
+        case: it decodes fine and is caught by ``PIN_SHA_RE``. Both are "cannot verify" (2).
+        """
+        binary_pin = tmp_path / "binary-pin"
+        binary_pin.write_bytes(b"\xff\xfe\x00binary")
+        env = self._env(self._home(tmp_path))
+        result = self._pin_check(repo, git_infra, env, "--pin", str(binary_pin))
+        assert result.returncode == 2, (
+            f"a pin that cannot be DECODED must be 'cannot verify' (2), not drift (1) — "
+            f"rc={result.returncode}, stdout={result.stdout!r}, stderr={result.stderr!r}"
+        )
+        assert "cannot verify" in result.stdout, result.stdout
+        assert "Traceback" not in result.stderr, (
+            f"the pin read crashed instead of returning a verdict: {result.stderr}"
+        )
+
+    def test_check_and_pin_check_together_are_REFUSED_not_half_answered(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """PR #10250 review ISSUE 1 (P2) — the combination must not silently answer ONE question.
+
+        ``--check`` and ``--pin-check`` are two different assertions, and ``AGENTS.md``'s setup
+        block lists them on adjacent lines, so passing both is the natural thing for a lane to
+        do. ``main`` answers the PIN question first and returns, so before the
+        ``mutually_exclusive_group`` the combination exited **0** on a box whose pin was clean
+        while the pointer assertion never ran. This fixture is exactly that box: the pin is fine
+        and the pointer is absent, so a green exit here would be a pass over a setup that is
+        broken — the fail-open family this whole module is against.
+        """
+        pin = git_commit(git_infra, "the pinned commit")
+        env = self._env(self._home(tmp_path, pin))
+        assert not os.path.lexists(repo / "scripts"), "the fixture already has a pointer"
+
+        result = run_tool(
+            "--check", "--pin-check", "--repo", str(repo), "--infra", str(git_infra), env=env
+        )
+        assert result.returncode == 2, (
+            f"the two assertion modes must be REFUSED together (this tool's config-error class, "
+            f"2) instead of half-answered — rc={result.returncode}, stdout={result.stdout!r}, "
+            f"stderr={result.stderr!r}"
+        )
+        assert "--check" in result.stderr and "--pin-check" in result.stderr, (
+            "the refusal does not name both flags, so the caller cannot tell what to split: "
+            f"{result.stderr!r}"
+        )
+        # ⛔ PR #10250 review ROUND 6 ISSUE 4 (P3): every assertion ABOVE holds on ``origin/main``'s
+        # tool, where ``--pin-check`` does not exist at all — argparse exits 2, its usage line
+        # contains ``--check``, and ``unrecognized arguments: --pin-check`` contains the other.
+        # Measured on the pre-fix tool: rc=2, stdout 0 bytes, both substrings present, no pointer.
+        # This phrase is the only one that separates "the guard REFUSED the combination" from "one
+        # of the flags does not exist", so without it the test pins nothing it claims to.
+        assert "not allowed with" in result.stderr, (
+            "the refusal is not argparse's mutually-exclusive one, so this test cannot tell a "
+            "REFUSED combination from a flag that does not exist: " f"{result.stderr!r}"
+        )
+        assert "pin:" not in result.stdout, (
+            "one question was answered anyway — that is the silent half-answer, and it is what "
+            f"turns a broken pointer into a green exit: {result.stdout!r}"
+        )
+        assert not os.path.lexists(repo / "scripts"), "the refusal materialised the pointer"
+
+    def test_check_quiet_stays_quiet_even_over_a_stale_checkout(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """PR #10250 review ISSUE 2 (P3) — ``--quiet`` must still mean silent.
+
+        Its help says "only exit status and errors", and the drift note is neither: it is a
+        warning beside a green exit code. Both callers that pass ``--quiet``
+        (``.husky/pre-commit`` and ``tools/agent_infra_drift_check.py``) key on it meaning
+        silent, and the scoping artifact's Wiring row for the CI drift gate states the wrapper
+        "stays green and prints nothing" — true under the guard, true-by-accident without it
+        (a GitHub runner records no pin). Visibility is not traded away: every NON-quiet run
+        still prints the note (``test_check_still_passes_on_a_stale_checkout_but_no_longer_stays_silent``)
+        and ``test_materialise_names_the_drift_it_still_proceeds_through``), and ``--pin-check``
+        turns the same fact into a verdict.
+        """
+        behind = subprocess.run(
+            ["git", "-C", str(git_infra), "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        pin = git_commit(git_infra, "the commit the box runs")
+        subprocess.run(
+            ["git", "-C", str(git_infra), "checkout", "-q", behind], check=True, capture_output=True
+        )
+        env = self._env(self._home(tmp_path, pin))
+        run_tool("--repo", str(repo), "--infra", str(git_infra), env=env)
+
+        result = run_tool(
+            "--check", "--quiet", "--repo", str(repo), "--infra", str(git_infra), env=env
+        )
+        assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
+        assert result.stdout == "", f"--quiet printed the state line: {result.stdout!r}"
+        assert result.stderr == "", (
+            f"--quiet printed the drift note, so the flag no longer means what its help says: "
+            f"{result.stderr!r}"
+        )
+
+    def test_materialise_quiet_prints_nothing_even_over_a_stale_checkout(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """The CI wiring row, pinned: the drift gate calls materialise ``--quiet`` and is SILENT.
+
+        ``tools/agent_infra_drift_check.py:103`` materialises with ``--quiet`` and does not
+        redirect its stderr, so an unguarded ``diagnose()`` loop reaches CI output on any box
+        that records a pin. The note must still print on a non-quiet materialise — the sibling
+        test above pins that half — so this guards the flag, not the visibility.
+        """
+        behind = subprocess.run(
+            ["git", "-C", str(git_infra), "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        pin = git_commit(git_infra, "the commit the box runs")
+        subprocess.run(
+            ["git", "-C", str(git_infra), "checkout", "-q", behind], check=True, capture_output=True
+        )
+        env = self._env(self._home(tmp_path, pin))
+
+        result = run_tool("--quiet", "--repo", str(repo), "--infra", str(git_infra), env=env)
+        assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
+        assert (repo / "scripts").is_symlink(), "the quiet materialise did not create the link"
+        assert result.stdout == "", f"--quiet printed the action line: {result.stdout!r}"
+        assert result.stderr == "", (
+            f"--quiet printed the drift note through the CI wrapper's path: {result.stderr!r}"
+        )
+
+    def test_a_two_line_pin_record_is_read_from_LINE_ONE(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """PR #10250 review ROUND 6 ISSUE 1 (P2) — the record shape the FLEET actually writes.
+
+        ``~/.pi/agent/state/HARNESS-PIN`` is not a sha file, it is a sha PLUS an ISO timestamp:
+        agent-infra's ``scripts/cloud-cell-bringup.sh`` writes it with
+        ``printf '%s\\n%s\\n' "$got" "$(date -u +%FT%TZ)"``, and its own suite pins that shape as a
+        contract (``cloud-cell-bringup.test.sh``: "HARNESS-PIN line 1 is the FULL sha … line 2 is
+        the timestamp"). Reading the whole file and ``strip()``-ing it leaves the INTERIOR newline
+        in place, so ``PIN_SHA_RE`` could never match: every cloud-cell box got
+        ``pin: unreadable`` → exit 2 over a perfectly VALID record, ``--pin-check`` could never
+        answer ok/behind/diverged there, and the ``--check`` drift note degraded to
+        ``pin: UNKNOWN`` on exactly the boxes #10114 is about. Measured RED at the pre-fix head.
+        """
+        pin = git_commit(git_infra, "the pinned commit")
+        home = self._home(tmp_path)
+        (home / ".pi" / "agent" / "state" / "HARNESS-PIN").write_text(
+            f"{pin}\n2026-10-28T00:00:00Z\n"
+        )
+        env = self._env(home)
+
+        result = self._pin_check(repo, git_infra, env)
+        assert result.returncode == 0, (
+            "a pin record carrying the fleet's own timestamp line must read as 'ok', not as a "
+            f"corrupt one — rc={result.returncode}, stdout={result.stdout!r}"
+        )
+        assert "pin: ok" in result.stdout, result.stdout
+        assert pin[:12] in result.stdout, "the verdict does not name the pin it compared against"
+
+        # The other half of the same defect: `--check` said "pin: UNKNOWN" here, so the #10114
+        # symptom this PR exists to close survived on every box the bring-up script provisioned.
+        check = run_tool("--check", "--repo", str(repo), "--infra", str(git_infra), env=env)
+        assert "pin: UNKNOWN" not in check.stderr, (
+            f"the drift note cannot read a valid two-line pin and reports it as unknown: "
+            f"{check.stderr!r}"
+        )
+
+    def test_the_REMEDY_never_embeds_the_records_timestamp(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """``pin_remedy`` reads the same record, so fixing only ``pin_state`` prints a broken command.
+
+        The whole-file read meant a two-line record would be pasted into the printed fix as
+        ``git checkout <sha>\\n2026-10-28T00:00:00Z`` — a command that cannot run. Both readers now
+        share ``_pin_sha_line``, and this pins the second one.
+        """
+        behind = subprocess.run(
+            ["git", "-C", str(git_infra), "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        pin = git_commit(git_infra, "the commit the box runs")
+        subprocess.run(
+            ["git", "-C", str(git_infra), "checkout", "-q", behind], check=True, capture_output=True
+        )
+        home = self._home(tmp_path)
+        (home / ".pi" / "agent" / "state" / "HARNESS-PIN").write_text(
+            f"{pin}\n2026-10-28T00:00:00Z\n"
+        )
+        env = self._env(home)
+
+        result = self._pin_check(repo, git_infra, env)
+        assert result.returncode == 1, (result.returncode, result.stdout, result.stderr)
+        assert "BEHIND" in result.stdout, result.stdout
+        assert f"git checkout {pin}" in result.stderr, result.stderr
+        assert "2026-10-28" not in result.stderr, (
+            f"the printed remedy embeds the record's timestamp and cannot run: {result.stderr!r}"
+        )
+
+    @pytest.mark.skipif(
+        hasattr(os, "geteuid") and os.geteuid() == 0,
+        reason="root ignores directory permissions, so the unexaminable-parent case cannot be staged",
+    )
+    def test_an_UNEXAMINABLE_pin_record_is_cannot_verify_never_DRIFT(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """PR #10250 review ROUND 6 ISSUE 2 (P2), direction A — the traceback that exits 1.
+
+        ``Path.exists()`` re-raises every ``OSError`` except ``ENOENT``/``ENOTDIR``/``ELOOP``, so
+        an unsearchable parent escaped ``resolve_pin`` as a ``PermissionError`` TRACEBACK and the
+        interpreter exited **1** — this tool's DRIFT class, whose remedy sends an operator to
+        ``git fetch && git checkout`` over a filesystem permission problem. ``resolve_pin`` runs on
+        EVERY mode, so it also took down the previously-working materialise path, including the
+        in-process call in ``tools/agent_infra_drift_check.py`` (which wraps only
+        ``ConfigError``). Exit 2 is the honest answer: this record exists, it just cannot be read.
+        """
+        pin = git_commit(git_infra, "the pinned commit")
+        home = self._home(tmp_path, pin)
+        state = home / ".pi" / "agent" / "state"
+        state.chmod(0o000)
+        try:
+            result = self._pin_check(repo, git_infra, self._env(home))
+        finally:
+            state.chmod(0o755)  # so pytest can clean tmp_path up
+
+        assert result.returncode == 2, (
+            f"an unexaminable record is 'cannot verify' (2), never drift (1) — "
+            f"rc={result.returncode}, stdout={result.stdout!r}, stderr={result.stderr!r}"
+        )
+        assert "cannot verify" in result.stdout, result.stdout
+        assert "Traceback" not in result.stderr, (
+            f"the pin probe crashed instead of returning a verdict: {result.stderr}"
+        )
+
+    def test_a_pin_entry_that_cannot_be_EXAMINED_is_never_no_pin(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """PR #10250 review ROUND 6 ISSUE 2 (P2), direction B — the false PASS.
+
+        ``Path.exists()`` answers ``False`` for ``ELOOP``, so a record that IS there as a
+        self-referential or dangling link was reported as ``no-pin`` → exit **0**: a pass
+        claiming the box "records no pin" over a record the tool merely could not examine. The
+        module already refuses this two branches later ("an EMPTY pin is not 'no pin'"), and the
+        fleet reader it mirrors has a dedicated state for it (``harness-up``: "pin: UNEXAMINABLE
+        … cannot-verify is never an absent pin", exit 2).
+        """
+        home = self._home(tmp_path)
+        record = home / ".pi" / "agent" / "state" / "HARNESS-PIN"
+        record.symlink_to(record.name)  # self-referential: the entry exists, resolution loops
+        result = self._pin_check(repo, git_infra, self._env(home))
+        assert result.returncode == 2, (result.returncode, result.stdout, result.stderr)
+        assert "pin: no-pin" not in result.stdout, (
+            f"a record that cannot be examined was reported as 'no pin recorded': {result.stdout!r}"
+        )
+        assert "cannot verify" in result.stdout, result.stdout
+
+        record.unlink()
+        record.symlink_to(tmp_path / "no-such-target")  # dangling: same class
+        result = self._pin_check(repo, git_infra, self._env(home))
+        assert result.returncode == 2, (result.returncode, result.stdout, result.stderr)
+        assert "pin: no-pin" not in result.stdout, result.stdout
+
+    def test_a_directory_nested_inside_a_repo_is_not_treated_as_a_checkout(
+        self, repo: Path, fake_infra: Path, tmp_path: Path
+    ) -> None:
+        """PR #10250 review ROUND 6 ISSUE 3 (P3) — ``git -C`` answers about the ENCLOSING repo.
+
+        git's own manual: ``rev-parse`` "require[s] you to run this command inside a git
+        repository **or a working tree that is under the control of a git repository**". So a
+        plain directory with no ``.git`` of its own — a vendored copy is exactly that shape — was
+        compared using the PARENT repo's HEAD, and here the pin IS that HEAD, which is the false
+        ``ok`` (measured: ``pin: ok … carries the pin``, rc=0, on a directory that is not a
+        checkout at all). The other direction gave a drift verdict whose printed remedy
+        (``cd <vendored dir> && git fetch``) cannot run. The sibling test above passes only
+        because its fixture sits OUTSIDE any repo.
+        """
+        enclosing = fake_infra.parent
+        subprocess.run(
+            ["git", "-C", str(enclosing), "init", "-q", "-b", "main"],
+            check=True, capture_output=True,
+        )
+        # A commit in the enclosing repo, so `rev-parse --verify HEAD` SUCCEEDS there — that is
+        # what made the wrong answer a false pass rather than an error.
+        pin = git_commit(enclosing, "the enclosing repo's commit")
+        env = self._env(self._home(tmp_path, pin))
+
+        result = self._pin_check(repo, fake_infra, env)
+        assert result.returncode == 2, (
+            "a directory with no .git of its own is 'cannot verify' (2) even when it is nested "
+            f"inside a repo — rc={result.returncode}, stdout={result.stdout!r}"
+        )
+        assert "not a git checkout" in result.stdout, result.stdout
+        assert "pin: ok" not in result.stdout, (
+            f"the enclosing repository's HEAD was used as this directory's HEAD: {result.stdout!r}"
+        )
+
+    def test_git_that_cannot_be_RUN_at_the_pin_object_step_is_cannot_verify(
+        self, git_infra: Path, tmp_path: Path, monkeypatch
+    ) -> None:
+        """The other half of ROUND 8 ISSUE 2: ``_git`` returning ``None`` must not read as DRIFT.
+
+        ``_git`` returns ``None`` when git could not be RUN at all (``OSError``, or the 20 s
+        ``GIT_TIMEOUT`` — which exists because #10114 was measured at load average 94). The
+        pre-fix ``cat-file`` step folded that into ``PIN_ABSENT`` → exit **1** + a
+        ``git checkout`` remedy, i.e. a hung git reported as "the checkout predates the pin".
+
+        IN PROCESS, not via a subprocess: a shim cannot produce a *spawn failure*, a 20 s hang is
+        not a test, and ``pin_state`` is the unit under test — its whole contract is the mapping
+        from a git answer to a state. The monkeypatched module is loaded by file path, so this
+        cannot touch any other module's state.
+        """
+        module = load_tool_module()
+        pin = tmp_path / "pin"
+        pin.write_text("a" * 40 + "\n")
+        real_git = module._git
+
+        def git_cannot_be_asked(infra: Path, *args: str):
+            if args and args[0] == "cat-file":
+                return None  # what `_git` returns for OSError / TimeoutExpired
+            return real_git(infra, *args)
+
+        monkeypatch.setattr(module, "_git", git_cannot_be_asked)
+        state, detail = module.pin_state(git_infra.resolve(), pin)
+        assert state in module.PIN_CANNOT_VERIFY, (
+            f"a git that could not be asked about the pin object was classified {state!r}, which "
+            f"is exit 1 DRIFT with a `git checkout` remedy: {detail}"
+        )
+        assert state not in module.PIN_DRIFT, detail
+        assert "cannot verify" in detail, detail
+
+        # And the sibling outcome is NOT swallowed: a git that ANSWERS "no such object" is
+        # still drift (pinned by `test_a_checkout_that_predates_the_pin_entirely_is_drift_not_unknown`).
+        monkeypatch.setattr(module, "_git", real_git)
+        state, detail = module.pin_state(git_infra.resolve(), pin)
+        assert state == module.PIN_ABSENT, (state, detail)
+
+    def test_git_that_cannot_be_RUN_at_the_toplevel_step_is_cannot_verify(
+        self, git_infra: Path, tmp_path: Path, monkeypatch
+    ) -> None:
+        """The LAST site of ROUND 8 ISSUE 2's conflation (PR #10250 review ROUND 13 ISSUE 1).
+
+        ``_git`` returns ``None`` when git could not be RUN (``OSError``), timed out
+        (``GIT_TIMEOUT``), or answered in bytes this process cannot decode. The pre-fix
+        ``--show-toplevel`` step folded all three into ``root = ""`` and returned
+        ``PIN_NOT_A_REPO`` — the verdict *"<dir> is not a git checkout"*, a positive finding
+        ABOUT the directory, printed on a box whose real fault is a hung or missing git. The exit
+        code was right (both states are cannot-verify = 2); the verdict an operator acts on was
+        not.
+
+        IN PROCESS, for the same reason as its ``cat-file`` sibling: a shim cannot produce a spawn
+        failure, and ``pin_state``'s whole contract is the mapping from a git answer to a state.
+        Non-vacuity: on the pre-fix code this reds on ``state == PIN_GIT_ERROR`` AND on the
+        ``"is not a git checkout"`` negative, because the pre-fix verdict says exactly that.
+        """
+        module = load_tool_module()
+        pin = tmp_path / "pin"
+        pin.write_text("a" * 40 + "\n")
+        real_git = module._git
+
+        def git_cannot_be_asked(infra: Path, *args: str):
+            if args[:2] == ("rev-parse", "--show-toplevel"):
+                return None  # what `_git` returns for OSError / TimeoutExpired / bad bytes
+            return real_git(infra, *args)
+
+        monkeypatch.setattr(module, "_git", git_cannot_be_asked)
+        state, detail = module.pin_state(git_infra.resolve(), pin)
+        assert state == module.PIN_GIT_ERROR, (
+            f"a git that could not be asked whether the directory is a checkout was classified "
+            f"{state!r} instead of cannot-verify: {detail}"
+        )
+        assert "is not a git checkout" not in detail, (
+            f"a question git never answered was reported as a finding about the directory: {detail}"
+        )
+        assert "cannot verify" in detail, detail
+
+    def test_git_that_cannot_be_RUN_at_the_HEAD_step_is_cannot_verify(
+        self, git_infra: Path, tmp_path: Path, monkeypatch
+    ) -> None:
+        """The sibling of the ``--show-toplevel`` case, one step down (ROUND 13 ISSUE 1).
+
+        ``head is None`` (no answer) and ``head.returncode != 0`` (an answer: git could not read
+        HEAD) were one condition returning ``PIN_NOT_A_REPO``. Non-vacuity: the pre-fix code
+        returns ``PIN_NOT_A_REPO`` for the ``None`` case, so the ``state == PIN_GIT_ERROR``
+        assertion reds.
+        """
+        module = load_tool_module()
+        pin = tmp_path / "pin"
+        pin.write_text("a" * 40 + "\n")
+        real_git = module._git
+
+        def git_cannot_be_asked(infra: Path, *args: str):
+            if args[:3] == ("rev-parse", "--verify", "HEAD"):
+                return None
+            return real_git(infra, *args)
+
+        monkeypatch.setattr(module, "_git", git_cannot_be_asked)
+        state, detail = module.pin_state(git_infra.resolve(), pin)
+        assert state == module.PIN_GIT_ERROR, (state, detail)
+        assert "is not a git checkout" not in detail, detail
+        assert "cannot verify" in detail, detail
+
+        # And the sibling outcome is NOT swallowed: a git that ANSWERS "no HEAD" (an unborn
+        # branch in a fresh `git init`) is still a finding about the checkout, not a git error.
+        monkeypatch.setattr(module, "_git", real_git)
+        empty = tmp_path / "empty-repo"
+        empty.mkdir()
+        subprocess.run(
+            ["git", "-C", str(empty), "init", "-q", "-b", "main"],
+            check=True, capture_output=True,
+        )
+        state, detail = module.pin_state(empty.resolve(), pin)
+        assert state == module.PIN_NOT_A_REPO, (state, detail)
+
+
+
+class TestDefaultPinPathIsCallTime:
+    """The pin path must be resolved at CALL time — the only shape a subprocess suite cannot see.
+
+    ``default_pin_path()``'s own docstring claims it is "a function, not a constant" so that a
+    module-level constant cannot freeze the pin path of whichever machine imported the module
+    first. Every other test here spawns a FRESH interpreter (``run_tool``/``run_wrapper`` →
+    ``subprocess``), and a fresh interpreter re-imports the module under its own redirected
+    ``HOME``/``CELL_HOME`` — so replacing the function body with a module-level constant passes
+    that entire suite unchanged. Measured (PR #10250 review): it did.
+
+    That gap is not cosmetic: ``tools/agent_infra_drift_check.py`` IMPORTS this module rather than
+    exec'ing it, so an import-time constant there is a check that answers for the wrong box for
+    the whole life of the process. This class loads the module IN PROCESS and moves the bases,
+    which is the only shape that distinguishes a function from a frozen constant.
+    """
+
+    @staticmethod
+    def _load():
+        """Import the tool as a MODULE (not as a subprocess), exactly as the drift gate does."""
+        return load_tool_module()
+
+    def test_home_is_read_at_call_time(self, tmp_path: Path, monkeypatch) -> None:
+        module = self._load()
+        monkeypatch.delenv(module.CELL_HOME_ENV, raising=False)
+
+        monkeypatch.setenv("HOME", str(tmp_path / "home-a"))
+        first = module.default_pin_path()
+        monkeypatch.setenv("HOME", str(tmp_path / "home-b"))
+        second = module.default_pin_path()
+
+        assert first == tmp_path / "home-a" / module.PIN_RELATIVE, first
+        assert second == tmp_path / "home-b" / module.PIN_RELATIVE, (
+            f"the pin path did not follow HOME after import, so it was frozen at import time: "
+            f"{first} → {second}"
+        )
+
+    def test_cell_home_wins_over_home_at_call_time(self, tmp_path: Path, monkeypatch) -> None:
+        """``${CELL_HOME:-$HOME}`` — the base ``harness-up`` resolves, read per call."""
+        module = self._load()
+
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        monkeypatch.setenv(module.CELL_HOME_ENV, str(tmp_path / "cell-home"))
+        assert module.default_pin_path() == tmp_path / "cell-home" / module.PIN_RELATIVE
+
+        monkeypatch.setenv(module.CELL_HOME_ENV, "")
+        assert module.default_pin_path() == tmp_path / "home" / module.PIN_RELATIVE, (
+            "an EMPTY CELL_HOME must fall back to HOME, not resolve to a relative path"
+        )
+
+        monkeypatch.delenv(module.CELL_HOME_ENV, raising=False)
+        assert module.default_pin_path() == tmp_path / "home" / module.PIN_RELATIVE
+
+
+    def test_the_third_term_is_the_one_harness_up_uses(self, tmp_path: Path, monkeypatch) -> None:
+        """With ``HOME`` unset the controller falls back to ``/tmp/cell-home`` — so must this tool.
+
+        ``harness-up``'s chain is ``CELL_HOME="${CELL_HOME:-}"`` followed by
+        ``[ -n "$CELL_HOME" ] || CELL_HOME="${HOME:-/tmp/cell-home}"`` (quoted by ASSIGNMENT — the
+        script is deployed per box and its line numbers do not survive a re-pin; see
+        ``TestAgentInfraCitations``). Omitting the
+        last term does not fail loudly: ``Path.home()`` silently answers with the PASSWD entry
+        (``/home/cmux`` on this fleet box) while the controller answers ``/tmp/cell-home``, so the
+        tool judges a different file in exactly the environment (a bare service/container with no
+        ``HOME``) where nobody is reading the output.
+        """
+        module = self._load()
+        monkeypatch.delenv(module.CELL_HOME_ENV, raising=False)
+        monkeypatch.delenv("HOME", raising=False)
+        assert module.default_pin_path() == Path(module.DEFAULT_CELL_HOME) / module.PIN_RELATIVE, (
+            "with HOME unset the base must be harness-up's own fallback, not Path.home()'s "
+            f"passwd lookup ({Path.home()})"
+        )
+
+
+class TestEmptyAndUnresolvableArguments:
+    """A passed-but-EMPTY or unresolvable path is a caller error, never a silent substitution.
+
+    Every case here was measured on the tree it fixes. They share one shape — ``if explicit:``
+    (truthiness) makes ``--flag ''`` indistinguishable from "no flag", and ``pathlib`` raises
+    ``RuntimeError`` (not ``OSError``/``ValueError``) for an unresolvable ``~user`` or a symlink
+    loop — so each produced a GREEN or a TRACEBACK where the contract promises exit 2.
+    """
+
+    def _env(self, tmp_path: Path, **extra: str) -> dict[str, str]:
+        home = tmp_path / "home"
+        (home / ".pi" / "agent" / "state").mkdir(parents=True)
+        env = {**os.environ, "HOME": str(home), "HARNESS_PIN": "", "CELL_HOME": ""}
+        env.update(extra)
+        return env
+
+    def test_an_EMPTY_infra_is_an_error_not_the_current_directory(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """``--infra ''`` must not be read as ``.`` — measured: it exited **0** against the CWD."""
+        result = run_tool("--check", "--repo", str(repo), "--infra", "", env=self._env(tmp_path))
+        assert result.returncode == 2, (result.returncode, result.stdout, result.stderr)
+        assert "EMPTY" in result.stderr, result.stderr
+        assert "ok:" not in result.stdout, (
+            f"an empty --infra was judged against the CWD instead of being refused: {result.stdout!r}"
+        )
+
+    def test_an_EMPTY_pin_does_not_name_the_default_record(self, tmp_path: Path) -> None:
+        """``--pin ''`` must not fall through to ``$HARNESS_PIN``/the box record.
+
+        ``--infra`` is a REAL checkout here on purpose: with ``--infra ''`` too, the infra guard
+        fires first and the test would pass even if the ``--pin`` guard regressed — a vacuous
+        pass of exactly the kind this file's ``run_tool`` asserts against.
+        """
+        infra = tmp_path / "infra"
+        (infra / "scripts").mkdir(parents=True)
+        result = run_tool(
+            "--pin-check", "--repo", str(tmp_path), "--infra", str(infra), "--pin", "",
+            env=self._env(tmp_path),
+        )
+        assert result.returncode == 2, (result.returncode, result.stdout, result.stderr)
+        assert "--pin was passed but is EMPTY" in result.stderr, (
+            f"the empty --pin did not reach its own guard: {result.stderr!r}"
+        )
+
+    def test_an_unresolvable_infra_is_exit_2_not_a_traceback(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """``expanduser()`` raises ``RuntimeError`` — it must surface as exit 2, never exit 1."""
+        result = run_tool(
+            "--check", "--repo", str(repo), "--infra", "~definitely-no-such-user-xyz/ai",
+            env=self._env(tmp_path),
+        )
+        assert result.returncode == 2, (
+            f"rc={result.returncode} stdout={result.stdout!r} stderr={result.stderr!r}"
+        )
+        assert "Traceback" not in result.stderr, result.stderr
+
+    def test_an_unresolvable_AGENT_INFRA_PATH_default_is_exit_2(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        result = run_tool(
+            "--check", "--repo", str(repo),
+            env=self._env(tmp_path, AGENT_INFRA_PATH="~definitely-no-such-user-xyz/ai"),
+        )
+        assert result.returncode == 2, (result.returncode, result.stdout, result.stderr)
+        assert "Traceback" not in result.stderr, result.stderr
+
+    def test_an_unresolvable_repo_is_exit_2_not_drift(self, tmp_path: Path) -> None:
+        """A symlink loop raises ``RuntimeError`` from ``Path.resolve()``, outside the old ``try``.
+
+        Exit 1 means "the link is missing, dangling, or points somewhere else" — a repo path that
+        cannot be RESOLVED is none of those, and its printed remedy (``git checkout``) cannot run.
+        """
+        loop = tmp_path / "loop"
+        loop.symlink_to(loop)
+        result = run_tool(
+            "--check", "--repo", str(loop), "--infra", str(tmp_path), env=self._env(tmp_path)
+        )
+        assert result.returncode == 2, (result.returncode, result.stdout, result.stderr)
+        assert "Traceback" not in result.stderr, result.stderr

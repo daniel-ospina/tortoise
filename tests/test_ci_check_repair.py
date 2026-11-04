@@ -1579,13 +1579,16 @@ def test_main_threads_a_measured_flood_into_the_report(monkeypatch, capsys, tmp_
 def test_main_reports_a_PR_STARVED_reading_as_starved_too(monkeypatch, capsys, tmp_path):
     """ISSUE 2 of the #9118 final review: the late stage must not go blind.
 
-    `PR-STARVED` is the repo-level reading for "no PR-event run is executing, a
-    queued PR run has waited past the age floor, and the queue's largest share is
-    not a trim-safe offender". It differs from `FLOOD` only in whether the governor
-    has something to trim, not in whether PR CI is running — so keying the per-PR
-    seam on `FLOOD` alone left exactly the state the module calls the LATE STAGE of
-    the measured incident reading as `pending` and therefore dropped from the
-    report (#9115's original silence, one level down).
+    `PR-STARVED` is the repo-level reading for "no PR-event run is executing and a
+    queued PR run has waited past the age floor, while no governor block is
+    reached" — the offender's share is below the dominance floor, or below
+    `global_max` with PR work holding more of the queue, so a trim-safe offender
+    CAN be present and the reason line names the clause that declined. It differs
+    from `FLOOD` only in whether this reading reaches the governor, not in whether
+    PR CI is running — so keying the per-PR seam on `FLOOD` alone left exactly the
+    state the module calls the LATE STAGE of the measured incident reading as
+    `pending` and therefore dropped from the report (#9115's original silence, one
+    level down).
     """
     from datetime import UTC, datetime, timedelta
 

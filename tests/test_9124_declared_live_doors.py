@@ -455,6 +455,16 @@ _UNRESOLVED = {
     "_capture_stamp_targets",
     "_read_capture_passthrough_props",
     "_reachable_claim_count",
+    # #3590: `_refuse_ambiguous_rename` interpolates the LABEL into its probe
+    # (`f"MATCH (n:{label} {{id: $id}}) RETURN n.name"` over a literal
+    # `("Object", "Subject")` loop), so the resolver cannot unfold the
+    # statement — hence this set rather than a silent read. Checked by hand:
+    # the only handle reaches are that `MATCH … RETURN n.name` read (twice, once
+    # per label) and `entity_identity.live_name_holder_ids`, which is itself a
+    # read; no SET/CREATE/MERGE/DELETE/REMOVE, no write procedure, and the
+    # function appends no record — it exists to REFUSE the write before
+    # `_journal_entity_mutation` runs.
+    "_refuse_ambiguous_rename",
     "_review_pool",
     "_review_prune",
     "_reverse_bfs_neighbors",

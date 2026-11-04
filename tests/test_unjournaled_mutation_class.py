@@ -262,10 +262,9 @@ def _assert_round_trip(sdk, events, caplog):
 class TestPropertyMutationRoundTrip:
     """Mechanism 1: rename / restatus / revise / removal, one seam."""
 
-    # `rename` is NOT here: #3377 is deferred to #4769 (journalling a `name`
-    # change renames the node before the deferred `ObjectSuperseded` sweep
-    # matches on that name, dropping a legacy id-less supersede). See
-    # `test_a_name_change_is_not_journaled_and_says_so`.
+    # `rename` keeps its own row (`test_a_name_change_is_journaled_and_round_
+    # trips`): #3377's producer half landed with #3590, so the withhold that
+    # kept it out of this parametrization is GONE.
     @pytest.mark.parametrize("op,prop,new", [
         ("restatus", "status", "archived"),
         ("revise", "objectKind", "risks"),
@@ -524,20 +523,20 @@ class TestPropertyMutationRoundTrip:
         assert _props(sdk2, "Object", oid2, "status")["status"] == "archived", (
             "control: without the delete the post-supersede op IS restored")
 
-    def test_a_name_change_is_not_journaled_and_says_so(self, env, caplog):
-        """#3377 is DEFERRED (#4769) — and the deferral must be LOUD.
+    def test_a_name_change_is_journaled_and_round_trips(self, env, caplog):
+        """#3377's producer half LANDED with #3590 — the withhold is gone.
 
-        Journalling a `name` change renames the node in pass 1b, before the
-        deferred `ObjectSuperseded` sweep matches on that name, so a legacy
-        id-less supersede is dropped (`rebuild_all` returns the object
-        status='live' while live and `apply()` keep 'superseded'). Rather than
-        ship that regression, the producer withholds the record — and warns on
-        every matching occurrence, so the withhold is a declared deferral and not
-        the silent loss this lane exists to fix.
+        ⛔ The pre-#3590 producer WITHHELD a `name` change from the journal and
+        warned (#4769): journalling it renamed the node in pass 1b, BEFORE the
+        deferred `ObjectSuperseded` sweep matched on that name, so a legacy
+        id-less supersede was dropped. #3590 retires every name-keyed
+        resolution — the supersede sweep matches by ID now — so a journaled
+        rename can no longer swallow a supersede, while withholding it left the
+        rename silently reverted by every rebuild.
 
-        This row is the pin for that contract: it asserts the write still
-        applies to the graph, that NO `EntityMutated` record is written for it,
-        and that a warning naming #4769 is emitted.
+        FAILS IF: the name change stops being journalled (the reversion this
+        file exists to remove), the record stops being labelled `rename`, or
+        the round trip loses the new name.
         """
         sdk, events = env
         oid = sdk.create_entity("object", name="A",
@@ -545,36 +544,36 @@ class TestPropertyMutationRoundTrip:
         before = len(_mutations(events))
         caplog.clear()
         with caplog.at_level("WARNING"):
-            # NAME-ONLY: a write carrying other keys journals THOSE (see
-            # `test_a_name_bearing_write_still_journals_its_other_keys`).
             sdk.update_entity(oid, name="B")
 
         assert _props(sdk, "Object", oid, "name")["name"] == "B", \
-            "the live write must still apply — only the JOURNAL is withheld"
-        assert len(_mutations(events)) == before, \
-            "a `name` change must not be journalled while #3377 is deferred"
-        msgs = " ".join(r.getMessage() for r in caplog.records)
-        assert "#4769" in msgs and "NOT journaled" in msgs, (
-            "the deferral must be loud and name its tracking issue: " f"{msgs}")
+            "the live write must apply"
+        recs = [r for r in _mutations(events) if r.get("id") == oid]
+        assert len(_mutations(events)) == before + 1, (
+            "a `name` change must be journalled — withholding it reverts the "
+            f"rename on every rebuild: {_mutations(events)[before:]}")
+        assert recs[-1]["op"] == "rename", recs[-1]["op"]
+        assert recs[-1]["state"] == {"name": "B"}, recs[-1]["state"]
+        assert "NOT journaled" not in " ".join(r.getMessage()
+                                                for r in caplog.records), \
+            "the retired #4769 withhold warning must not come back"
 
-        # ...and it warns on EVERY occurrence, not once per process: a one-shot
-        # net would leave the second and later reverts silent, which is the
-        # failure mode this whole lane exists to remove.
-        caplog.clear()
-        with caplog.at_level("WARNING"):
-            sdk.update_entity(oid, name="C")
-        assert any("#4769" in r.getMessage() for r in caplog.records), \
-            "a repeat `name` change must warn again, not go silent"
+        _assert_round_trip(sdk, events, caplog)
+        assert _props(sdk, "Object", oid, "name")["name"] == "B", \
+            "rebuild reverted the journaled rename"
 
-    def test_a_name_bearing_write_still_journals_its_other_keys(self, env,
-                                                                caplog):
-        """The withhold must be exactly `name` wide — #3312 for the rest.
+    def test_a_name_bearing_write_journals_every_key_it_applied(self, env,
+                                                                 caplog):
+        """#3312 — the whole applied map rides ONE record, `name` included.
 
-        Withholding the WHOLE map (the first cut of this fix) reopened #3312 for
-        the ordinary call `update_entity(id, name=..., status=...)`: the status
-        rode along with the withheld record and was silently reverted by
-        `rebuild_all`. Only `name` moves the node in front of the deferred
-        name-keyed supersede sweep, so only `name` needs withholding.
+        ⛔ Restated for #3590. The pre-#3590 producer journalled the OTHER keys
+        and dropped `name` (the #4769 withhold); with the withhold retired the
+        record is a `rename` whose `state` carries every applied key, so the
+        ordinary call `update_entity(id, name=..., status=...)` replays both
+        halves instead of only the non-name ones.
+
+        FAILS IF: the `name` is withheld again (a rebuild then reverts it), or
+        the sibling keys it journals alongside are dropped.
         """
         sdk, events = env
         oid = sdk.create_entity("object", name="A",
@@ -587,22 +586,26 @@ class TestPropertyMutationRoundTrip:
                       "name")["name"] == "B", "live write still applies"
 
         recs = [r for r in _mutations(events) if r.get("id") == oid]
-        assert recs, "the non-`name` keys must still journal"
+        assert recs, "the write must journal"
         state = recs[-1]["state"]
-        assert "name" not in state, (
-            "`name` must NOT be journalled while #3377 is deferred: " f"{state}")
-        assert state == {"status": "archived", "confidence": 0.9}, state
-        assert recs[-1]["op"] == "restatus", recs[-1]["op"]
+        assert state == {"name": "B", "status": "archived",
+                         "confidence": 0.9}, state
+        assert recs[-1]["op"] == "rename", recs[-1]["op"]
 
-        # The payload of this test: the status SURVIVES a rebuild.
+        # The payload of this test: BOTH halves SURVIVE a rebuild.
         sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
-        got = _props(sdk, "Object", oid, "status", "confidence")
-        assert got == {"status": "archived", "confidence": 0.9}, (
-            "#3312 must be closed for a name-BEARING write too: " f"{got}")
+        got = _props(sdk, "Object", oid, "name", "status", "confidence")
+        assert got == {"name": "B", "status": "archived",
+                       "confidence": 0.9}, (
+            "#3312 must hold for a name-BEARING write: " f"{got}")
 
     def test_a_name_write_that_matched_nothing_does_not_cry_wolf(self, env,
                                                                  caplog):
-        """A no-op must not warn that a mutation will be reverted."""
+        """A no-op must not warn that a mutation will be reverted.
+
+        The #4769 withhold warning is gone (#3590 journals the rename), so the
+        property is the general one: a write that matched no node is silent.
+        """
         sdk, _events = env
         caplog.clear()
         with caplog.at_level("WARNING"):
@@ -983,27 +986,35 @@ class TestLegacyJournalShapes:
     other direction). Both directions are asserted.
     """
 
-    def test_legacy_name_keyed_supersede_beats_an_earlier_state_op(
+    def test_a_deferred_supersede_journalled_last_beats_an_earlier_state_op(
             self, env):
-        """Supersede journalled LAST must win — the guard must NOT re-fold."""
+        """Supersede journalled LAST must win — the guard must NOT re-fold.
+
+        ⛔ #3590 retires the name-keyed shape these rows were built on (a
+        name-only `ObjectSuperseded` is `object-superseded-miss` now), so the
+        record carries the target's ID — the shape the deferred sweep folds.
+        What the pair pins is unchanged and is about ORDER: the sweep runs after
+        the inline state folds, so it must not clobber a LATER state op and must
+        not be undone by an EARLIER one.
+        """
         sdk, events = env
         oid = sdk.create_entity("object", name="Legacy",
                                 objectKind="k")["node"]["id"]
         sdk.update_entity(oid, status="archived")
-        _append_raw(events, type="ObjectSuperseded", name="Legacy",
+        _append_raw(events, type="ObjectSuperseded", id=oid, name="Legacy",
                     supersedes_by="other", session_id="s", evidence="e")
 
         sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
         assert _props(sdk, "Object", oid, "status")["status"] == "superseded", (
-            "the state fold overwrote a LATER name-keyed supersede")
+            "the state fold overwrote a LATER supersede")
 
-    def test_state_op_after_a_legacy_name_keyed_supersede_wins(self, env):
+    def test_state_op_after_a_deferred_supersede_wins(self, env):
         """The converse: the state op journalled LAST must win, so the guard
         must re-fold it rather than being disabled entirely."""
         sdk, events = env
         oid = sdk.create_entity("object", name="Legacy",
                                 objectKind="k")["node"]["id"]
-        _append_raw(events, type="ObjectSuperseded", name="Legacy",
+        _append_raw(events, type="ObjectSuperseded", id=oid, name="Legacy",
                     supersedes_by="other", session_id="s", evidence="e")
         sdk.update_entity(oid, status="archived")
 

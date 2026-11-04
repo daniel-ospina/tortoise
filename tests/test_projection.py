@@ -2622,8 +2622,31 @@ def test_document_version_does_not_double_bump_across_the_two_folds(live_proj):
 
 
 def test_upsert_event_uses_dict_kind(live_proj):
-    """#125: structured uses {name, kind} → Object objectKind from kind field."""
+    """#125 / #3590 D1: a structured ``uses {name, kind}`` entry resolves to the
+    REGISTERED Object, wires the edge, and stamps the entry's kind on it.
+
+    ⚠️ MIGRATED (#3590 D1, owner RULED 2026-10-26). This pin used to rely on the
+    fold MINTING the Object from the mention (``id = name``) and then stamping
+    ``objectKind`` from the entry's ``kind``. D1 retires the mint — a bare
+    mention creates nothing — so the target must exist, and the pin registers it
+    FIRST and keeps asserting the #125 half that is still real: the dict entry's
+    ``kind`` is NOT ignored. The uses writer applies it as
+    ``SET o.objectKind=coalesce($kind, o.objectKind)`` (``entities.py:5418``),
+    which is why the registration below carries a DIFFERENT kind
+    (``capability``): if that stamp is dropped the assertion reads
+    ``capability`` and the pin REDs, so it cannot pass on the registration alone.
+
+    What D1 changed here is the MISS side, pinned by the string sibling below and
+    by ``test_falkor_subject_stub_resolves_canonical_id``: an unregistered
+    ``uses[]`` name resolves to no live holder, drops its link and records the
+    exempt ``unfolded-mention``.
+    """
     proj = live_proj
+    # ``object_kind`` (snake) is the key ``_upsert_object`` reads
+    # (``entities.py:4027``) — ``objectKind`` is in ``_OBJECT_HANDLED`` and is
+    # therefore dropped, which is why the registration spells it this way.
+    proj.apply({"type": "ObjectRegistered", "id": "obj-uses-1",
+                "name": "tortoise-capture", "object_kind": "capability"})
     proj.apply({"type": "EventRecorded", "event": {
         "id": "evt-1", "eventKind": "sessionCaptured",
         "subject": "agent-pi", "object": "doc-1", "objectType": "Document",
@@ -2698,8 +2721,20 @@ def test_upsert_event_document_source_kind_repairs_a_pre_fix_null(live_proj):
 
 
 def test_upsert_event_legacy_string_uses_still_works(live_proj):
-    """#125 backward compat: legacy string uses still create Object objectKind='other'."""
+    """#125 backward compat / #3590 D1: a legacy STRING ``uses`` still wires,
+    and names NO kind.
+
+    ⚠️ MIGRATED with its dict-shape sibling above: the string form used to mint
+    the Object (with ``objectKind='other'``, the fabricated default #9572
+    retired). D1 retires the mint, so the pin now asserts the compat claim that
+    is still real — a bare string parses into the same edge a one-element dict
+    would — against a registered target, and asserts the #9572 half: a kind-less
+    entry must NOT reset the discriminator its registration gave it
+    (``objectKind`` stays ``tool``, not the mint's old ``other``).
+    """
     proj = live_proj
+    proj.apply({"type": "ObjectRegistered", "id": "obj-uses-legacy",
+                "name": "legacy-tool", "object_kind": "tool"})
     proj.apply({"type": "EventRecorded", "event": {
         "id": "evt-3", "eventKind": "review", "subject": "agent-pi",
         "object": "thing-1", "uses": "legacy-tool"}})
@@ -2708,67 +2743,123 @@ def test_upsert_event_legacy_string_uses_still_works(live_proj):
         "RETURN o.name, o.objectKind"
     ).result_set
     assert rows and rows[0][0] == "legacy-tool", rows
-    assert rows[0][1] == "other", rows
+    assert rows[0][1] == "tool", rows
 
 
 def test_falkor_subject_stub_resolves_canonical_id():
-    """#1918: a Subject stub minted before the canonical registration (the
-    webhook name-stub) must adopt the canonical id when SubjectAdded lands —
-    parity with the #1155 Object fix (_upsert_object ON MATCH
-    o.id=coalesce($id, o.id)). Pre-fix: _upsert_subject ON MATCH only set
-    subjectKind/embedding, so MATCH (s:Subject {id:$sid}) wiring silently
-    matched nothing. #7936: the stub's OWN id is now the canonical
-    `sub-<sha256>` value; this test's canonical spelling (`subject:alice`) is
-    deliberately different, so the ON MATCH id write is what heals it."""
+    """#1918, as it stands AFTER #3590: a name-stub and a canonical registration
+    of the same name are TWO entities, and id-keyed wiring resolves the one it
+    names.
+
+    ⚠️ MIGRATED (#3590 D1, owner RULED 2026-10-26) — the guarantee this pin used
+    to state is RETIRED WITH THE NAME KEY, and the retirement is asserted here
+    rather than deleted, because the shape it covered still exists in journals.
+
+    What it used to assert: a Subject stub minted before the canonical
+    registration (the webhook name-stub, ``id = name``) was healed by
+    ``SubjectAdded`` — ``_upsert_subject`` MERGEed on ``name`` and stamped the
+    canonical id on the node it matched (#1155's Object fix, mirrored). At this
+    head ``_upsert_subject`` MERGEs on ``id`` (:3929 ``merge_key = "id"`` —
+    ONE node per id, always, because a name held by N nodes made the name-keyed
+    MERGE stamp one id onto EVERY carrier: duplicate-id corruption, #8864).
+    So the fold no longer matches the stub at all: the registration lands as its
+    OWN node and the name is left with two live carriers.
+
+    Two consequences are asserted, and both are the DESIGNED ones:
+
+    * the #1918 TARGET still holds — ``MATCH (s:Subject {id:$sid})`` now finds
+      the registration, so the id-based wiring pass that silently matched
+      nothing pre-#1918 does match (evt-participant below);
+    * a by-NAME mention of the now-ambiguous name wires NEITHER carrier: it
+      drops its link and records the exempt ``unfolded-mention`` (D1: an
+      unresolvable mention drops its link, records the miss, and mints
+      nothing). Live resolution of that name is refused by the create door
+      (``refuse_if_ambiguous``); the fold's job is only to never guess.
+
+    ⛔ Do not "fix" this by restoring a name-keyed heal: that is the
+    duplicate-id path #8864 removed. The stub itself is #8914's to move.
+
+    MUTATION: make ``_upsert_subject`` MERGE on ``name`` again → the two-carrier
+    assertion REDs (one node, id rewritten) and the dropped mention REDs (the
+    name resolves to one holder). Delete the fold's ambiguity arm in
+    ``entity_identity.resolve_fold_name`` → the mention wires one of the two
+    carriers and the ``unfolded-mention`` record disappears.
+    """
     if _skip_if_no_falkor():
         pytest.skip("redislite falkordb unavailable")
     proj = _shared_proj()  # wipes all graphs on every call
 
-    # EventRecorded lands FIRST → mints a Subject name-stub under the
-    # deterministic `sub-<sha256>` id (#7936; the webhook path,
-    # _event_plain_merge). The CANONICAL id below is a DIFFERENT spelling
-    # (`subject:alice`), so it is not yet present on any node — which is the
-    # point: the ON MATCH id write, not the stub value, does the healing.
-    proj.apply({"type": "EventRecorded", "event": {
-        "id": "evt-1918", "eventKind": "meeting.held",
-        "subject": "alice", "object": "",
-        "startedAt": "2026-08-28T10:00:00Z",
-        "endedAt": "2026-08-28T11:00:00Z"}})
+    from tortoise.projection.edges import _mint_subject_stub
+    from tortoise.projection.nonfolded import (
+        SHAPE_UNFOLDED_MENTION,
+        collect_non_folded,
+    )
+
+    # The pre-registration stub, built with the ONE construction that still
+    # mints one (``edges._mint_subject_stub`` — #3590's bounded exception: the
+    # fold-side about-name stub kept so ``how:"name"`` records already in a
+    # journal stay replayable, filed as #8914).
+    _mint_subject_stub(proj.g, "alice")
     stub_id = proj.g.query(
         "MATCH (s:Subject {name:'alice'}) RETURN s.id").result_set
-    assert stub_id and stub_id[0][0] != "subject:alice", stub_id
-    # id-based wiring by the CANONICAL id matches nothing pre-fix.
+    assert stub_id == [["alice"]], stub_id  # ``id = name`` — the construction
+
+    # Nothing carries the canonical spelling yet, which is the #1918 premise:
+    # id-based wiring by ``$sid`` MATCHed nothing before the registration.
     pre = proj.g.query(
         "MATCH (s:Subject {id:'subject:alice'}) RETURN s.name").result_set
     assert pre == [], pre
 
-    # SubjectAdded arrives later with the canonical id.
     proj.apply({"type": "SubjectAdded", "id": "subject:alice",
                 "name": "alice", "subject_kind": "person",
                 "createdAt": "2026-08-28T10:05:00Z"})
 
-    # The node carries the canonical id now — MATCH (s:Subject {id:$sid})
-    # wiring resolves the subject.
+    # The #1918 target: the registration is addressable by ITS id.
     rows = proj.g.query(
         "MATCH (s:Subject {id:'subject:alice'}) RETURN s.name, s.subjectKind"
     ).result_set
     assert rows and rows[0] == ["alice", "person"], rows
 
-    # A LATER id-based wiring pass (participatesIn by participant id) now
-    # matches — the bug's target: 0 subject wiring silently missing.
+    # …and it did NOT heal the stub: the id-keyed MERGE addresses a different
+    # node, so the name now has TWO live carriers, byte-identical in ``name``.
+    carriers = proj.g.query(
+        "MATCH (s:Subject {name:'alice'}) RETURN s.id ORDER BY s.id"
+    ).result_set
+    assert carriers == [["alice"], ["subject:alice"]], carriers
+
+    # A by-NAME mention of that ambiguous name wires NEITHER: the link drops,
+    # the miss is recorded as the exempt unfolded-mention, nothing is minted.
+    with collect_non_folded() as entries:
+        proj.apply({"type": "EventRecorded", "event": {
+            "id": "evt-1918-ambiguous", "eventKind": "meeting.held",
+            "subject": "alice", "object": "",
+            "startedAt": "2026-08-28T12:00:00Z",
+            "endedAt": "2026-08-28T13:00:00Z"}})
+    shapes = [e.shape for e in entries]
+    assert shapes.count(SHAPE_UNFOLDED_MENTION) == 1, shapes
+    wired_by_name = proj.g.query(
+        "MATCH (s:Subject)-[r]->(e:Event {eventId:'evt-1918-ambiguous'}) "
+        "RETURN s.id, type(r)").result_set
+    assert wired_by_name == [], wired_by_name
+    assert proj.g.query(
+        "MATCH (s:Subject) RETURN count(s)").result_set == [[2]]
+
+    # An ID-based wiring pass does resolve — the bug's exact target (0 subject
+    # wiring silently missing), now against the canonical node only.
     proj.apply({"type": "EventRecorded", "event": {
         "id": "evt-1918b", "eventKind": "meeting.held",
         "subject": "", "object": "",
         "participants": ["subject:alice"],
-        "startedAt": "2026-08-28T12:00:00Z",
-        "endedAt": "2026-08-28T13:00:00Z"}})
+        "startedAt": "2026-08-28T14:00:00Z",
+        "endedAt": "2026-08-28T15:00:00Z"}})
     wired = proj.g.query(
         "MATCH (s:Subject {id:'subject:alice'})-[:participatesIn]->(e:Event) "
         "RETURN e.eventId ORDER BY e.eventId").result_set
-    # evt-1918's edge came from the name-fallback at event time; evt-1918b's
-    # edge came from the id-based MATCH AFTER canonicalization — the bug's
-    # exact target (post-fix both land on the one canonical node).
-    assert wired == [["evt-1918"], ["evt-1918b"]], wired
+    assert wired == [["evt-1918b"]], wired
+    assert proj.g.query(
+        "MATCH (s:Subject {id:'alice'})-[:participatesIn]->(e:Event) "
+        "RETURN e.eventId").result_set == [], (
+        "the id-based wiring matched the STUB as well")
 
 
 def test_upsert_document_includes_source_path(live_proj):

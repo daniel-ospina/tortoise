@@ -29,6 +29,26 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
+
+def _utcnow() -> datetime:
+    """One clock read for the timestamptz comparisons (#3524 §9 step 1)."""
+    return datetime.now(UTC)
+
+
+def _ts(value: object) -> datetime:
+    """Parse a timestamptz the fake holds — an ISO-8601 string from PostgREST, or a datetime.
+
+    A row written by the registry-lane doubles may hold a raw epoch number
+    (``timestamptz_fidelity=False``); that shape is not used by the consent-ticket rows,
+    so an unparseable value is raised rather than guessed — a silent default here would
+    make a prune test pass for the wrong reason.
+    """
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=UTC)
+    if isinstance(value, (int, float)):
+        return datetime.fromtimestamp(float(value), tz=UTC)
+    return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+
 # #1719 (Task 3): columns whose PostgREST filter values are cast to uuid —
 # a non-UUID literal 22P02s (HTTP 400) in prod. Default-on fidelity makes
 # the fake raise the SAME RuntimeError surface the real query() raises, so
@@ -109,6 +129,12 @@ TIMESTAMPTZ_COLUMNS: set[tuple[str, str]] = {
     ("blog_posts", "published_at"),
     ("blog_posts", "reviewed_at"),
     ("blog_posts", "updated_at"),
+    # #3524 steps 1/3 (migration 20261030000001): the shared consent-jti register.
+    # `expires_at` is the fence the prune compares and `redeemed_at` the audit instant —
+    # both `timestamptz` in the migration, so a numeric write must be REFUSED here too
+    # (the #4243 class: the fake accepting what PostgREST 400s).
+    ("oauth_consent_tickets", "expires_at"),
+    ("oauth_consent_tickets", "redeemed_at"),
     # #2636 connectors (migration 20261001000003): the three timestamptz
     # columns the fake must type-check like the real seam.
     ("connectors", "created_at"),
@@ -643,6 +669,34 @@ class FakeControlPlane:
         abuse_suspend/abuse_unsuspend RPCs (teams.suspended_at/flagged_at).
         """
         self.rpc_calls.append((fn, dict(body or {})))
+        if fn == "consume_oauth_consent_ticket":
+            # #3524 §9 step 1: the shared single-use register, emulated the way the SQL
+            # decides it — ONE statement, so the CONSTRAINT picks the winner rather than a
+            # read-then-write (which two machines can both win). A replay returns False.
+            #
+            # This double deliberately models the ATOMICITY, not a query shape: a lane that
+            # re-implemented the store as SELECT-then-INSERT would still pass here because
+            # the emulation is single-threaded — so the property this table guarantees
+            # (Postgres serialising the conflict) is stated in the migration, and what the
+            # tests below prove is the STORE's contract around it (frame, message, and that
+            # a non-boolean answer is never read as pass-or-replay).
+            p = body or {}
+            jti = p.get("p_jti")
+            rows = self.tables.setdefault("oauth_consent_tickets", [])
+            now = _utcnow()
+            # The bounded prune the RPC performs first (LIMIT 500, oldest first).
+            expired = sorted(
+                (r for r in rows if _ts(r.get("expires_at")) < now),
+                key=lambda r: _ts(r.get("expires_at")))
+            for row in expired[:500]:
+                rows.remove(row)
+            if not isinstance(jti, str) or not jti:
+                return False
+            if any(r.get("jti") == jti for r in rows):
+                return False
+            rows.append({"jti": jti, "expires_at": p.get("p_expires_at"),
+                         "redeemed_at": now.isoformat()})
+            return True
         if fn in ("redeem_oauth_code", "rotate_oauth_refresh"):
             # #3025: the two mint RPCs are ONE transaction each, so they are
             # emulated atomically — see `_rpc_oauth_mint`. A seam-level injector
