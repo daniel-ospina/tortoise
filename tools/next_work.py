@@ -158,6 +158,10 @@ if str(_ROOT) not in sys.path:
 # implementation here would be a second definition of "ready", which is the
 # defect class this fleet pays for repeatedly (two readers of one gate drifting
 # apart). So the gate is imported, not copied.
+from tools.batch_open import (  # noqa: E402 — the sys.path insert above must run first
+    declared_constituents_line,
+    parse_constituents,
+)
 from tools.queue_resweep import (  # noqa: E402 — the sys.path insert above must run first
     ConfigError,
     GhCli,
@@ -192,23 +196,13 @@ REASON_SUPERSEDED = "SUPERSEDED-BY-FOLD"
 CONSTITUENT_LABEL = "superseded-by-fold"
 FOLD_LABEL = "batch-fold"
 
-#: `tools/batch_open.py`'s explicit machine-readable constituent line. It is DATA
-#: (a declared list), not prose: that tool states why the fold's TITLE must never
-#: be parsed for it ("Deriving the close list from that prose would close a PR the
-#: fold never carried").
-FOLD_LINE_RE = re.compile(
-    # `batch_open.py`'s own grammar accepts `#<n>` tokens (`#?\d+`), so a body
-    # reading `fold-constituents: #501, #502` IS a fold to that tool. Requiring a
-    # leading digit here made such a fold invisible to this reader — no fold unit,
-    # and its constituents left pickable ahead of it, the ordering #10902 exists
-    # to prevent.
-    # Capture to END OF LINE, then validate EVERY token. A character class that
-    # stops at the first non-token character is exactly how the prefix got
-    # harvested: `10543 (10641 dropped) #10820` captured `10543 ` and dropped the
-    # rest, which `batch_open.py` refuses as a line.
-    r"^\s*fold-constituents:\s*([^\n]*)",
-    re.MULTILINE | re.IGNORECASE,
-)
+#: ⛔ THE FOLD-LINE GRAMMAR IS NOT DEFINED HERE, ON PURPOSE. Three rounds of
+#: hand-matching `tools/batch_open.py` produced three divergences (a `\n` crossed by
+#: `\s*`, a `fold-constituents :` that tool accepts and a local regex missed, `\d`
+#: vs `[0-9]`), each unsafe in the same direction: being STRICTER than the tool
+#: that ACTS leaves a constituent pickable ahead of its fold (#10902), because the
+#: acting tool wins. `_fold_constituents` calls that tool's own parser, so there is
+#: nothing here to drift — and no regex left for a reader to re-derive one from.
 
 #: `claims.sh`'s own default (`CLAIM_NS`). A claim ref is `<CLAIM_NS>/<key>`; the
 #: key alone addresses nothing.
@@ -363,7 +357,12 @@ class Unit:
     holder: str | None = None
     #: The PR's head branch — the rails take it as their 4th argument.
     head_ref: str | None = None
-    #: Set when an EARLIER-ranked row already carries this row's action target
+    #: A draft is OUTSIDE the queue's reach (`-draft` is a live entry condition) and
+    #: is normally a human mid-authoring. It gets an ACTION, never a command: a
+    #: fixer pushed at a draft is the duplicate dispatch this tool prevents.
+    draft: bool = False
+    #: Set when a BLOCKED row (claimed / superseded — it registers first and always)
+    #: or an earlier-ranked pickable row already carries this row's action target
     #: (the same PR, or the same issue when there is no PR). Two rows for one
     #: mergeable artifact meant two identical commands: dispatch both and the same
     #: PR is worked twice — the duplicate pick this tool exists to prevent, one
@@ -413,7 +412,11 @@ class Unit:
         # The positions that have a RUNNABLE rail. NEEDS-REVIEW (a reviewer + an
         # evidence id) and NEEDS-TEST (a runner queue) have an ACTION, not a
         # command — see `next_action`.
-        return self.pickable and self.position in ("READY-TO-LAND", "NEEDS-FIX", "NO-PR")
+        return (
+            self.pickable
+            and not self.draft
+            and self.position in ("READY-TO-LAND", "NEEDS-FIX", "NO-PR")
+        )
 
 
 def _labels(pr: dict[str, Any]) -> set[str]:
@@ -434,61 +437,41 @@ def _labels(pr: dict[str, Any]) -> set[str]:
 
 
 def _fold_constituents(pr: dict[str, Any]) -> set[int]:
-    r"""The constituents a fold DECLARES — parsed as `batch_open.py` parses them.
+    r"""The constituents a fold DECLARES — from `batch_open.py`'s OWN parser.
 
-    ⛔ AN UNPARSEABLE LINE IS REFUSED, NOT PREFIX-HARVESTED. `batch_open.py` returns
-    `[]` for a line whose tokens do not ALL match `#?\d+` — "a partial parse is how
-    the wrong PR gets closed". This reader used to keep the valid prefix, so
-    `fold-constituents: 10543 (10641 dropped) #10820` made it declare a fold,
-    suppress 10543 as SUPERSEDED-BY-FOLD (permanently "nothing left"), while the
-    owner tool refused to apply the fold at all. All tokens or none.
+    ⛔ THE GRAMMAR IS THE ACTING TOOL'S, NOT A COPY OF IT. Three rounds of "match
+    batch_open exactly" produced three divergences (a `\n` crossed by `\s*`, a
+    `fold-constituents :` the owner tool accepts and this one missed, `\d` vs
+    `[0-9]`), every one of them unsafe in the same direction: being STRICTER than
+    the tool that acts means a constituent stays pickable and can land ahead of its
+    fold (#10902), because the acting tool wins. So the parser is imported — the
+    same rule this module already applies to the queue gate.
+
+    Two behaviours come with it and both are wanted:
+      * the fold is never its OWN constituent (`batch_open`: "the fold's own number
+        is never a constituent" — otherwise the row supersedes itself and the
+        work-carrying fold vanishes);
+      * the FIRST matching line decides; a malformed later line is not a refusal,
+        because it is not the line the owner tool reads.
     """
-    out: set[int] = set()
-    for block in FOLD_LINE_RE.findall(str(pr.get("fold_line") or "")):
-        tokens = [t for t in re.split(r"[,\s]+", block.strip()) if t]
-        if not tokens:
-            continue
-        if not all(re.fullmatch(r"#?[0-9]+", t) for t in tokens):
-            return set()  # refused by the same rule batch_open.py applies
-        out |= {int(t.lstrip("#")) for t in tokens}
-    return out
+    body = str(pr.get("fold_line") or "")
+    own = pr.get("number")
+    return set(parse_constituents(body, int(own) if own is not None else None))
 
 
 def _fold_line_refused(pr: dict[str, Any]) -> bool:
-    """True when the body carries a `fold-constituents:` line that does not parse."""
-    line = str(pr.get("fold_line") or "")
-    if "fold-constituents" not in line.lower():
-        return False
-    blocks = FOLD_LINE_RE.findall(line)
-    if not blocks:
-        return False
-    for block in blocks:
-        tokens = [t for t in re.split(r"[,\s]+", block.strip()) if t]
-        if tokens and not all(re.fullmatch(r"#?[0-9]+", t) for t in tokens):
-            return True
-    return False
+    """True when the body carries a `fold-constituents:` line `batch_open` refuses.
 
-
-def _open_pulls_for_issue(snap: Snapshot, issue: int) -> list[dict[str, Any]]:
-    """Every open PR that the repository itself records as naming this issue.
-
-    Two mechanical sources, both written by GitHub, neither parsed from prose
-    here: `closingIssuesReferences` (what the PR would CLOSE on merge) and the
-    issue's own `cross-referenced` timeline (what it REFERENCES). The gap
-    between them is real and measured — #10534 found 18 of 18 PRs naming a P0/P1
-    used `Refs`, so a consumer that read only closing keywords would call every
-    P0 `NO-PR` and be confidently wrong. The distinction is carried into the
-    reason so a row whose only link is a `Refs` says so.
+    `declared_constituents_line` says whether a line EXISTS; the parser says whether
+    it yielded anything. A line that does not parse AND one that parses yet yields
+    nothing (an empty value, or a line naming only the fold itself) both count as a
+    refusal — the same distinction `batch_open`'s own CLI draws.
     """
-    hits: list[dict[str, Any]] = []
-    for pr in snap.pulls:
-        if issue in {int(n) for n in (pr.get("closing_issues") or [])}:
-            hits.append({**pr, "_link": "closes"})
-        elif issue in {int(n) for n in (pr.get("refs_issues") or [])}:
-            hits.append({**pr, "_link": "refs"})
-    # Newest PR first: the highest number is the most recent attempt, and an
-    # older abandoned PR is not the thing to hand a lane.
-    return sorted(hits, key=lambda p: int(p["number"]), reverse=True)
+    body = str(pr.get("fold_line") or "")
+    if declared_constituents_line(body) is None:
+        return False
+    own = pr.get("number")
+    return not parse_constituents(body, int(own) if own is not None else None)
 
 
 def _fold_index(snap: Snapshot) -> dict[int, list[int]]:
@@ -506,6 +489,28 @@ def _fold_index(snap: Snapshot) -> dict[int, list[int]]:
         if CONSTITUENT_LABEL in labels:
             fold_of.setdefault(int(pr["number"]), [])
     return fold_of
+
+
+def _open_pulls_for_issue(snap: Snapshot, issue: int) -> list[dict[str, Any]]:
+    """Every open PR that the repository itself records as naming this issue.
+
+    Two mechanical sources, both written by GitHub, neither parsed from prose
+    here: `closingIssuesReferences` (what the PR would CLOSE on merge) and the
+    issue's own `cross-referenced` timeline (what it REFERENCES). The gap between
+    them is real and measured — #10534 found 18 of 18 PRs naming a P0/P1 used
+    `Refs`, so a consumer that read only closing keywords would call every P0
+    `NO-PR` and be confidently wrong. The distinction is carried into the reason
+    so a row whose only link is a `Refs` says so.
+    """
+    hits: list[dict[str, Any]] = []
+    for pr in snap.pulls:
+        if issue in {int(n) for n in (pr.get("closing_issues") or [])}:
+            hits.append({**pr, "_link": "closes"})
+        elif issue in {int(n) for n in (pr.get("refs_issues") or [])}:
+            hits.append({**pr, "_link": "refs"})
+    # Newest PR first: the highest number is the most recent attempt, and an older
+    # abandoned PR is not the thing to hand a lane.
+    return sorted(hits, key=lambda p: int(p["number"]), reverse=True)
 
 
 def _abstention_reason(entry: object) -> str | None:
@@ -532,22 +537,25 @@ def _abstention_reason(entry: object) -> str | None:
     return None
 
 
-def _claim_of(snap: Snapshot, *, issue: int | None, pr: int | None, head: str | None) -> tuple[str | None, bool]:
+def _claim_of(
+    snap: Snapshot, *, issue: int | None, pr: int | None, head: str | None
+) -> tuple[str | None, bool]:
     """(holder description or None, registry_readable).
 
     Keys are the registry's own: `issue-<N>` (agent-infra#1850), `pr-<N>`
     (agent-infra#1952) and `<pr>-<sha12>` (content-addressed, rec 1). A verdict
-    that is not explicitly `claim-absent` is an ABSTENTION — it does not prove
-    freedom, so it must never be read as one.
+    that is not one of the three rc-0 verdicts (`claim-absent`, `claim-expired`,
+    `claim-orphaned`) is NOT freedom: `claim-unreadable` is an ABSTENTION (it blocks
+    the row AND makes the run incomplete), and an unknown word — `claim-held` or
+    anything this reader has never seen — is a HOLDER. Neither proves freedom.
+
+    ⛔ THE FULL REF, NOT THE BARE KEY. `claims.sh` indexes `refs/claims/<key>`
+    (claim_snapshot writes `${CLAIM_NS}/${key}`) and its reader matches field 1
+    EXACTLY, so asking for `pr-10852` answered `claim-absent` for a key that is
+    HELD — and `claim-absent` is a word this module reads as freedom. Measured by a
+    verifier: PRs #10852 and #10889 were `claim-held` by a live box and both came
+    out `READY-TO-LAND` with an executable command.
     """
-    # ⛔ THE FULL REF, NOT THE BARE KEY. `claims.sh` indexes
-    # `refs/claims/<key>` (claim_snapshot writes `${CLAIM_NS}/${key}`) and its
-    # reader matches field 1 EXACTLY, so asking for `pr-10852` answered
-    # `claim-absent` for a key that is HELD — and `claim-absent` is the one word
-    # this module reads as freedom. Measured by a verifier on this change: PRs
-    # #10852 and #10889 were `claim-held` by a live box at that moment and both
-    # came out `READY-TO-LAND` with an executable command. The miss is silent,
-    # which is exactly why the addressing is spelled out here.
     # NO ENV FALLBACK: the namespace is data. `refs/claims` is claims.sh's own default.
     ns = snap.claim_ns or "refs/claims"
     refs: list[str] = []
@@ -591,10 +599,8 @@ def _claim_of(snap: Snapshot, *, issue: int | None, pr: int | None, head: str | 
     if issue is not None:
         local_keys.append(f"issue:{issue}")
     if pr is not None:
-        # A fold has NO issue, so `issue:` keys cannot cover it — measured by a
-        # reviewer: a fold held only by a local branch read free. `_local_holders`
-        # now records both keyings for every number a slug names, so the PR half
-        # is live rather than the dead lookup it was before.
+        # A fold has NO issue, so `issue:` keys cannot cover it — a fold held only
+        # by a local branch read free. `_local_holders` records both keyings.
         local_keys.append(f"pr:{pr}")
     for key in local_keys:
         for desc in snap.local_holders.get(key, []):
@@ -607,7 +613,7 @@ def _position_for_pr(
     cfg: QueueConfig | None,
     pr: dict[str, Any],
 ) -> tuple[str, list[str]]:
-    """The position of one PR — the repo's own gate first, then attestation, then merge."""
+    """The position of one PR — gate first, then attestation, then merge, in that order."""
     detail: list[str] = []
     head = str(pr.get("head") or "")
     if cfg is None:
@@ -629,8 +635,7 @@ def _position_for_pr(
     # version sorted only `completed/…` and `in flight`, so everything else fell
     # through to READY-TO-LAND: a DRAFT PR, or one based on another branch, was
     # the tool's BEST position and was handed an executable command — a PR the
-    # queue will refuse, advertised as the closest to done. Anything structural
-    # the gate names is work on the PR, so it is NEEDS-FIX with the reason kept.
+    # queue will refuse, advertised as the closest to done.
     fails = [c for c in blocking if "completed/" in c and "completed/success" not in c]
     in_flight = [c for c in blocking if "in flight" in c or "no check-run" in c]
     structural = [c for c in blocking if c not in fails and c not in in_flight]
@@ -641,24 +646,6 @@ def _position_for_pr(
         pos = "NEEDS-TEST"
     else:
         pos = "READY-TO-LAND"
-
-    mt = snap.merge_tree.get(str(pr["number"])) or {}
-    clean = mt.get("clean")
-    if clean is False:
-        pos = "NEEDS-FIX"
-        detail.append(f"merge-tree: {mt.get('why') or 'conflict against base'}")
-    elif clean is None:
-        # ⛔ ABSTENTION, HANDLED LIKE EVERY OTHER ABSTENTION. This used to append
-        # a note and leave the position alone, so an unmeasured tree could still
-        # be READY-TO-LAND with a command — while the neighbouring unreadable
-        # attestation was correctly downgraded. Two abstentions, opposite
-        # handling: a merge that was never tested read as the safest row.
-        if pos == "READY-TO-LAND":
-            pos = "NEEDS-TEST"
-        detail.append(
-            f"merge-tree: UNMEASURED ({mt.get('why') or 'head not available locally'}) "
-            "— cannot be shown to merge, so it is not landable"
-        )
 
     if pos == "READY-TO-LAND":
         att = snap.attestation.get(str(pr["number"])) or {}
@@ -671,8 +658,7 @@ def _position_for_pr(
         elif verdict == "nodigest":
             # `record-review.sh` exit 5: "the record has no usable digest — re-run
             # the recorder at the head and let its carry arms decide (a CARRY, not
-            # a review)". Prescribing a review burned 20-40 minutes per occurrence
-            # and was the same defect as `carry-patch`'s, one value over.
+            # a review)". Prescribing a review burned 20-40 minutes per occurrence.
             pos = "NEEDS-REVIEW"
             detail.append(
                 "attestation: nodigest — the record has no usable digest, so RE-RECORD "
@@ -689,6 +675,23 @@ def _position_for_pr(
                 f"({att.get('why') or verdict or 'record-review.sh --check-carry gave no verdict'}) "
                 "— abstention, not a clean record"
             )
+
+    # ⛔ THE MERGE ABSTENTION RUNS LAST, AND ONLY DOWNGRADES. It used to run FIRST,
+    # so a PR with an unmeasured tree AND a missing review reported NEEDS-TEST
+    # ("waiting on a runner") and the review that was actually owed was never
+    # surfaced — the opposite of the documented order (gate → attestation → merge).
+    mt = snap.merge_tree.get(str(pr["number"])) or {}
+    clean = mt.get("clean")
+    if clean is False:
+        pos = "NEEDS-FIX"
+        detail.append(f"merge-tree: {mt.get('why') or 'conflict against base'}")
+    elif clean is None:
+        if pos == "READY-TO-LAND":
+            pos = "NEEDS-TEST"
+        detail.append(
+            f"merge-tree: UNMEASURED ({mt.get('why') or 'head not available locally'}) "
+            "— cannot be shown to merge, so it is not landable"
+        )
     return (pos, detail)
 
 
@@ -778,6 +781,7 @@ def build_units(snap: Snapshot, cfg: QueueConfig | None) -> list[Unit]:
             pr=pr_number, head=str(pr.get("head") or "") or None,
             position=position, reason=reason, detail=detail, holder=holder,
             head_ref=str(pr.get("head_ref") or "") or None,
+            draft=bool(pr.get("draft")),
         )
         if not readable:
             u.detail.append("claim registry UNREADABLE — this row's freedom is not provable")
@@ -806,13 +810,32 @@ def build_units(snap: Snapshot, cfg: QueueConfig | None) -> list[Unit]:
                 f"fold is UNLABELLED (`{FOLD_LABEL}` absent) — #10909's CI priority and the "
                 "queue's own fold ordering do not see it"
             )
+        # ⛔ A FOLD CAN ITSELF BE A CONSTITUENT of a bigger fold. The issue path
+        # applies this rule and the fold path did not, so a `batch-fold` PR carrying
+        # `superseded-by-fold` — or declared in an outer fold's line — computed
+        # READY-TO-LAND and was handed the command that lands it SEPARATELY and
+        # ahead of the fold that carries it: the #10902 failure this tool exists to
+        # prevent, for a PR the repo's own entry gate refuses. `_position_for_pr`
+        # strips the constituent condition from `blocking` (the superseded row still
+        # has a position), so the rule must be applied HERE.
+        outer = sorted(fold_of.get(pr_number) or [])
+        is_constituent = bool(outer) or CONSTITUENT_LABEL in labels
+        if is_constituent:
+            detail.append(
+                f"constituent of open fold #{outer[0]} — the OUTER fold is the unit"
+                if outer
+                else f"carries `{CONSTITUENT_LABEL}` with no open fold named — it is not a unit"
+            )
         u = Unit(
             key=f"fold:{pr_number}", kind="fold", issue=None, fold_pr=pr_number,
             priority=priority, title=str(pr.get("title") or ""),
             pr=pr_number, head=str(pr.get("head") or "") or None,
-            position=position, reason=REASON_CLAIMED if holder else position,
+            position=position,
+            reason=REASON_SUPERSEDED if is_constituent
+            else (REASON_CLAIMED if holder else position),
             detail=detail, holder=holder,
             head_ref=str(pr.get("head_ref") or "") or None,
+            draft=bool(pr.get("draft")),
         )
         if not readable:
             u.detail.append("claim registry UNREADABLE — this row's freedom is not provable")
@@ -878,7 +901,9 @@ def next_command(unit: Unit, repo: str) -> str | None:
     done it. Anything that needs a human decision (a reviewer, an evidence comment
     id) is an ACTION, not a command: see `next_action`.
     """
-    if not unit.pickable:
+    if not unit.pickable or unit.draft:
+        # A draft is the AUTHOR's; the queue refuses it at entry and a fixer would
+        # be a second lane on a human's branch.
         return None
     # The rails take the branch as their 4th argument. When the snapshot does not
     # carry it, resolve it IN THE COMMAND — a `<branch …>` placeholder parses as a
@@ -931,6 +956,11 @@ def next_action(unit: Unit, repo: str) -> str | None:
     if not unit.pickable:
         return None
     target = f"#{unit.issue}" if unit.kind == "issue" else f"fold PR #{unit.fold_pr}"
+    if unit.draft:
+        return (
+            f"none — {target} is a DRAFT, so the queue will not take it and a fixer must not "
+            "be dispatched at the author's branch"
+        )
     if unit.position == "NEEDS-REVIEW" and any("nodigest" in d for d in unit.detail):
         # The record carries no usable digest: re-mint at the head, no review owed.
         return (
@@ -1829,7 +1859,8 @@ def _main(argv: Sequence[str] | None = None) -> int:
             "queue gate from .mergify.yml (via tools/queue_resweep.py), refs/claims (via "
             "scripts/orchestrator-harness/claims.sh), record-review.sh --check-carry, and "
             "git merge-tree --write-tree (which fetches a PR head it does not have locally into "
-            "refs/pi-next-work/<pr> — the one local ref this tool creates). Never the `mergeable` "
+            "refs/pi-next-work/pr-<n> after trying `git fetch origin <sha>`; `claims.sh` also "
+            "maintains refs/claims-cache/*). Never the `mergeable` "
             "flag; never comment prose."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1956,7 +1987,7 @@ def _main(argv: Sequence[str] | None = None) -> int:
                             "reason": u.reason,
                             "holder": u.holder,
                             "detail": u.detail,
-                            "pickable": u.pickable,
+                            "pickable": False if refused else u.pickable,
                             "next_command": None if refused else next_command(u, repo),
                             "next_action": None if refused else next_action(u, repo),
                             "duplicate_of": u.duplicate_of,

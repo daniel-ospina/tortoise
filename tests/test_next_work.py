@@ -1657,6 +1657,9 @@ def test_an_unparseable_fold_line_is_refused_not_prefix_harvested():
     assert _fold_constituents(ok) == {1501, 1502}
     assert not _fold_line_refused(ok)
 
+    # A well-formed parenthetical TAIL is prose and is STRIPPED (batch_open's rule)
+    assert _fold_constituents({"fold_line": "fold-constituents: 10543 (10641 dropped)"}) == {10543}
+    # …but text AFTER the tail is refused whole
     refused = {"fold_line": "fold-constituents: 10543 (10641 dropped) #10820"}
     assert _fold_constituents(refused) == set(), (
         "batch_open.py refuses this line; prefix-harvesting it suppresses 10543 forever"
@@ -1669,7 +1672,7 @@ def test_an_unparseable_fold_line_is_refused_not_prefix_harvested():
 
 
 def test_an_unparseable_fold_line_does_not_supersede_a_constituent():
-    fold = pull(900, head="9" * 40, labels=[], body="fold-constituents: 1001 (dropped) #1502")
+    fold = pull(900, head="9" * 40, labels=[], body="fold-constituents: 1001 (dropped) #99999")
     s = snap(
         issues=[issue(100)],
         pulls=[fold, pull(1001, closes=[100])],
@@ -1773,7 +1776,7 @@ def test_the_queue_note_distinguishes_a_missing_fold_line_from_a_refused_one():
     The note told a reader these PRs carry no `fold-constituents:` line and to add
     one — when the line is already there in a form `batch_open.py` refuses whole.
     """
-    prose = pull(901, head="9" * 40, labels=[], body="fold-constituents: 1001 (dropped) #1502")
+    prose = pull(901, head="9" * 40, labels=[], body="fold-constituents: 1001 (dropped) #99999")
     prose["title"] = "batch: fold 32 open tortoise PRs into one validated tree"
     s = snap(issues=[issue(100)], pulls=[prose, pull(1001, closes=[100])])
     text, _ = render(build_units(s, CFG), CFG, s, repo=REPO, top=5)
@@ -1791,10 +1794,10 @@ def test_the_queue_note_counts_two_populations_separately():
     to, naming a PR that was not in it.
     """
     labelled_refused = {
-        **pull(911, head="9" * 40, labels=[FOLD_LABEL], body="fold-constituents: 1001 (dropped)"),
+        **pull(911, head="9" * 40, labels=[FOLD_LABEL], body="fold-constituents: 1001 (dropped) #99999"),
     }
     labelled_refused["title"] = "batch: fold things"
-    title_only = {**pull(912, head="8" * 40, labels=[], body="fold-constituents: 1001 (dropped)")}
+    title_only = {**pull(912, head="8" * 40, labels=[], body="fold-constituents: 1001 (dropped) #99999")}
     title_only["title"] = "batch: fold 32 open tortoise PRs into one validated tree"
     s = snap(issues=[issue(100)], pulls=[labelled_refused, title_only, pull(1001, closes=[100])])
     text, _ = render(build_units(s, CFG), CFG, s, repo=REPO, top=5)
@@ -1808,7 +1811,7 @@ def test_the_queue_note_counts_two_populations_separately():
 
 def test_a_labelled_fold_with_a_refused_line_says_so_on_its_row():
     """A label says "fold"; a refused line means it declares NOTHING. Say it."""
-    fold = {**pull(911, head="9" * 40, labels=[FOLD_LABEL], body="fold-constituents: 1001 (dropped)")}
+    fold = {**pull(911, head="9" * 40, labels=[FOLD_LABEL], body="fold-constituents: 1001 (dropped) #99999")}
     s = snap(
         issues=[],
         pulls=[fold, pull(1001, closes=[100])],
@@ -1945,7 +1948,7 @@ def next_work_module_file() -> str:
     return mod.__file__ or ""
 
 
-def test_a_broken_pipe_exits_2_not_120():
+def test_a_broken_pipe_exits_2_not_120(tmp_path: Path):
     """The documented contract is 0/1/2; a piped run was exiting 120.
 
     `print` only fills the buffer, so the closed-pipe error surfaced at the
@@ -1953,22 +1956,33 @@ def test_a_broken_pipe_exits_2_not_120():
     code on the same command family (<8 KB → 0, 8,489 B → 120, 58,653 B → 120,
     `--json` on the same data → 2). The flush is now inside the guard and stdout
     is pointed at devnull so the shutdown flush has somewhere to go.
+
+    ⛔ WHAT THIS PINS, EXACTLY: the documented exit for a broken pipe. It does NOT
+    isolate the `dup2` epilogue — `BrokenPipeError` subclasses `OSError`, so the
+    general catch-all also answers 2 (measured: removing the dedicated handler
+    alone leaves this green). Removing the WHOLE guard chain reds it. The docstring
+    said otherwise once; it says this now.
     """
     raw = _rich_snapshot().to_json()
     # big enough to exceed a pipe buffer
-    raw["issues"] = raw["issues"] + [issue(1000 + i) for i in range(400)]
-    path = Path("/tmp/next-work-pipe-test.json")
-    path.write_text(json.dumps(raw), encoding="utf-8")
+    # big enough to GUARANTEE an EPIPE: a 64 KB pipe buffer swallows a small report
+    # whole, and then the exit is honestly 0 because nothing broke.
+    raw["issues"] = raw["issues"] + [issue(1000 + i) for i in range(8000)]
     root = Path(__file__).resolve().parent.parent
+    # ⛔ `bash -o pipefail`, and run against a TMP fixture: a bare `cmd | head -1`
+    # returns HEAD's status, so the earlier form asserted nothing about the tool
+    # (deleting the whole BrokenPipeError handler left the suite green). Round 9.
+    path = tmp_path / "pipe.json"
+    path.write_text(json.dumps(raw), encoding="utf-8")
     proc = subprocess.run(
-        f"{sys.executable} {root}/tools/next_work.py --from {path} --repo {REPO} | head -1",
-        shell=True,
+        ["bash", "-o", "pipefail", "-c",
+         f"{sys.executable} {root}/tools/next_work.py --from {path} --repo {REPO} | head -1"],
         capture_output=True,
         text=True,
         cwd=root,
         timeout=120,
     )
-    assert proc.returncode == 0, proc.stderr[-400:]
+    assert proc.returncode == 2, f"expected the documented INCOMPLETE, got {proc.returncode}"
 
 
 # ── every interpolated value is shell-quoted, not just the branch ─────────
@@ -2007,14 +2021,16 @@ def test_a_hostile_branch_is_one_inert_argument(hostile):
     argv = shlex.split(cmd)
     assert argv[-1] == hostile, f"the ref is not recoverable as ONE argument: {argv}"
 
-    # a REAL shell, on the emitted fragment, must yield the literal value
-    proc = subprocess.run(
-        ["sh", "-c", f'set -- {shlex.quote(cmd)}; printf %s "$6"'],
-        capture_output=True,
-        text=True,
-        timeout=30,
+    # ⛔ EXECUTE THE EMITTED STRING, with the rail replaced by `printf`. An earlier
+    # version wrapped the WHOLE command in `shlex.quote`, so the shell saw one word
+    # and the assertion held for every input. This one expands for real: an
+    # unquoted `$( … )` or `` `id` `` changes the output, so the guard discriminates.
+    fragment = cmd.replace(
+        "bash scripts/orchestrator-harness/merge-one.sh . ", "printf '%s\\n' ", 1
     )
-    assert hostile in proc.stdout or proc.returncode == 0
+    proc = subprocess.run(["sh", "-c", fragment], capture_output=True, text=True, timeout=30)
+    lines = proc.stdout.split("\n")
+    assert hostile in lines, f"a shell did not receive the literal ref: {proc.stdout!r}"
 
 
 @pytest.mark.parametrize("hostile", HOSTILE_VALUES)
@@ -2043,6 +2059,13 @@ def test_a_hostile_repo_slug_is_one_inert_argument(hostile):
     # nothing beyond the rail's own argv: the injected shell metacharacters must not
     # have produced extra words that a shell would treat as commands
     assert not any(a.startswith("touch") for a in argv), argv
+    # execute it: an unquoted slug would split into extra words and the literal
+    # slug would not survive as one line
+    fragment = cmd.replace(
+        "bash scripts/orchestrator-harness/merge-one.sh . ", "printf '%s\\n' ", 1
+    )
+    proc = subprocess.run(["sh", "-c", fragment], capture_output=True, text=True, timeout=30)
+    assert bad in proc.stdout.split("\n"), f"a shell did not receive the literal slug: {proc.stdout!r}"
 
 
 def test_an_unresolvable_repo_is_incomplete_not_nothing_to_do(tmp_path: Path, monkeypatch):
@@ -2110,3 +2133,99 @@ def test_each_attestation_verdict_gets_the_action_its_recorder_prescribes(
     action = (next_action(row, REPO) or "").lower()
     assert want in action, action
     assert forbidden not in action, action
+
+
+# ── a fold can itself be a CONSTITUENT of a bigger fold (round 9, #1) ─────
+def test_a_fold_that_is_a_constituent_is_not_pickable():
+    """The #10902 failure, one level up.
+
+    The issue path applied `superseded`; the fold path did not, so a `batch-fold`
+    PR carrying `superseded-by-fold` computed READY-TO-LAND and was handed the
+    command that lands it SEPARATELY and ahead of the fold carrying it — for a PR
+    the repo's own entry gate refuses.
+    """
+    inner = pull(900, head="9" * 40, labels=[FOLD_LABEL, CONSTITUENT_LABEL],
+                 body="fold-constituents: 1001")
+    s = snap(
+        issues=[issue(100)],
+        pulls=[inner, pull(1001, closes=[100])],
+        check_runs={"9" * 40: all_green(), "a" * 40: all_green()},
+        attestation={"900": {"verdict": "head"}, "1001": {"verdict": "head"}},
+        merge_tree={"900": {"clean": True}, "1001": {"clean": True}},
+    )
+    rows = units_for(s)
+    inner_row = next(u for u in rows if u.kind == "fold")
+    assert inner_row.reason == "SUPERSEDED-BY-FOLD", inner_row
+    assert next_command(inner_row, REPO) is None
+    assert not any(next_command(u, REPO) for u in rows)
+
+
+def test_an_outer_fold_supersedes_the_fold_it_declares():
+    inner = pull(900, head="9" * 40, labels=[FOLD_LABEL], body="fold-constituents: 1001")
+    outer = pull(901, head="8" * 40, labels=[FOLD_LABEL], body="fold-constituents: 900")
+    s = snap(
+        issues=[], pulls=[inner, outer],
+        check_runs={"9" * 40: all_green(), "8" * 40: all_green()},
+        attestation={"900": {"verdict": "head"}, "901": {"verdict": "head"}},
+        merge_tree={"900": {"clean": True}, "901": {"clean": True}},
+    )
+    rows = units_for(s)
+    inner_row = next(u for u in rows if u.fold_pr == 900)
+    assert inner_row.reason == "SUPERSEDED-BY-FOLD"
+    pick = next(u for u in rows if u.pickable)
+    assert pick.fold_pr == 901, "the OUTER fold is the unit"
+
+
+# ── a DRAFT is not something a fixer is dispatched at (round 9, #2) ───────
+def test_a_draft_gets_an_action_not_a_command():
+    """`-draft` is a live entry condition and a draft is normally a human mid-work."""
+    from tools.next_work import next_action
+
+    s = snap(
+        issues=[issue(100)],
+        pulls=[{**pull(1001, closes=[100], draft=True), "head_ref": "fix/100-wip"}],
+        check_runs={"a" * 40: all_green()},
+        attestation={"1001": {"verdict": "head"}},
+        merge_tree={"1001": {"clean": True}},
+    )
+    (row,) = units_for(s)
+    assert row.draft and row.pickable
+    assert next_command(row, REPO) is None, "a fixer was dispatched at a draft"
+    assert not row.executable
+    assert "DRAFT" in (next_action(row, REPO) or "")
+
+
+# ── the documented order is gate → attestation → merge (round 10) ─────────
+def test_a_missing_review_is_surfaced_even_when_the_merge_is_unmeasured():
+    """The merge abstention ran FIRST, so an owed review was reported as "waiting".
+
+    Measured before the fix: unmeasured merge_tree + attestation `norecord` →
+    NEEDS-TEST / "wait — in a runner queue", and the review that was actually owed
+    never appeared. The documented order (gate → attestation → merge) now holds.
+    """
+    s = snap(
+        issues=[issue(100)],
+        pulls=[{**pull(1001, closes=[100]), "head_ref": "fix/100-x"}],
+        check_runs={"a" * 40: all_green()},
+        attestation={"1001": {"verdict": "norecord"}},
+        merge_tree={"1001": {"clean": None, "why": "head not available locally"}},
+    )
+    (row,) = units_for(s)
+    assert row.position == "NEEDS-REVIEW", row.detail
+    assert any("attestation: norecord" in d for d in row.detail)
+    assert any("UNMEASURED" in d for d in row.detail), "the merge note must still be recorded"
+
+
+def test_json_refused_run_ships_no_pickable_row(tmp_path: Path, capsys):
+    """A machine consumer keying on `pickable` must not act on a REFUSED run."""
+    from tools import next_work
+
+    raw = _rich_snapshot().to_json()
+    raw["unreadable"] = ["GH-TIMEOUT(search:P0-blocker)"]
+    path = tmp_path / "refused.json"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    assert next_work.main(["--from", str(path), "--repo", REPO, "--json"]) == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["refused"] is True
+    assert payload["units"], "the rows are still reported"
+    assert all(u["pickable"] is False for u in payload["units"])
