@@ -84,9 +84,23 @@ Usage::
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter BEFORE the imports below — this module is a
+# PACKAGE module, so its only working invocation is `python -m` (run as a script,
+# `sys.path[0]` is this file's own directory and the `tools.longmem_eval` import
+# dies), and a module-level 3.11+-only import would fail before a later guard
+# could run. The refusal names the invocation that works, not the one that does
+# not (#5136).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/longmem_eval/window_arm_baseline.py requires Python >= 3.12 "
+        f"(got {sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python -m tools.longmem_eval.window_arm_baseline`"
+    )
+
 import argparse
 import json
-import sys
 from pathlib import Path
 from typing import Any
 
