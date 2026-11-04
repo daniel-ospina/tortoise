@@ -656,6 +656,16 @@ def test_the_launcher_acts_on_a_failed_window_and_stays_idle_on_a_green_one(tmp_
         "#!/usr/bin/env bash\n"
         'case " $* " in\n'
         '  *" --workflow-state "*)\n'
+        # ⛔ DRAIN STDIN BEFORE EXITING. The launcher feeds this call through a PIPE
+        # (`printf "%s" "$runs" | "$PYTHON_BIN" "$TOOL" --workflow-state ...`) under
+        # `set -uo pipefail`. A stub that exits without reading closes the read end
+        # while `printf` is still writing, so `printf` takes SIGPIPE and the pipeline
+        # reports 141 - `workflow_covered` then returns 1 with a `covered` WF_STATE and
+        # falls into the `*)` arm, i.e. "RAN ... and did not succeed". Measured red
+        # ~1 in 25 runs before this line; the REAL tool drains stdin
+        # (`json.load(sys.stdin)`), so draining is what makes the stub model
+        # production rather than a race.
+        '    cat >/dev/null 2>&1 || true\n'
         '    printf "%s\\n" "${STUB_STATE}"; exit "${STUB_RC}" ;;\n'
         'esac\n'
         '# the launcher\'s inline interpreter-version guard\n'
@@ -1857,7 +1867,7 @@ def test_the_zero_job_floor_is_past_the_measured_queue_wait():
     this floor defers to is `tools/ci_queue_health.py`'s `DEFAULT_MAX_PR_WAIT_SECONDS`
     (`= 90 * 60.0`, "the first round number past" that max) — cited by symbol, because a
     line citation here drifted in the very commit that added the paragraph above it,
-    and `ci-wall-clock.md` §6 lines 326-332 records the same derivation in its own
+    and `ci-wall-clock.md` §6 lines 342-344 records the same derivation in its own
     words ("max first-job wait 81.9 min → 90 min, so it fires past the measured-normal
     population rather than on it"). The floor was
     1200 s, i.e. it selected the MEDIAN wait, and the repair for this class is

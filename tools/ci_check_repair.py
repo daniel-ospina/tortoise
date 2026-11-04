@@ -195,7 +195,7 @@ QUEUED_STATUSES = frozenset({"queued", "waiting", "requested", "pending"})
 #: `tools/ci_queue_health.py`'s `DEFAULT_MAX_PR_WAIT_SECONDS` (`= 90 * 60.0`) is the
 #: DERIVED VALUE — cited by SYMBOL, not by line, because line citations in this file
 #: have drifted three times; and `docs/ops/ci-wall-clock.md` §6
-#: (lines 326-332) records that derivation in its own words — *"The budget's default is
+#: (lines 342-344) records that derivation in its own words — *"The budget's default is
 #: derived from this document's own §1 measurement (max first-job wait 81.9 min →
 #: 90 min), so it fires past the measured-normal population rather than on it."* 5400 s
 #: sits on the same side of the same measurement: past the measured maximum, so a run
@@ -1035,16 +1035,6 @@ def classify(pr: dict, checks: list[dict], all_runs: list[Run], required: list[s
                         plan.exhausted.append(ctx)
                     continue
                 if crowded:
-                    # ⛔ THE STRUCTURAL BOUND IS EVALUATED FIRST, even though it is written
-                    # below: a run past `ZERO_JOB_MAX_REPAIRABLE_ATTEMPT` is a fresh
-                    # attempt waiting for a slot, and NO queue reading — clear,
-                    # congested, or unmeasured — would authorise cancelling it. Calling
-                    # that a congestion refusal attributes it to a gate that could not
-                    # have helped, and repeats the notice's "read the queue" remedy every
-                    # cadence on windows where reading the queue cannot change the answer.
-                    # (Measured: attempt 2 + a MEASURED-CLEAR queue => rerun=[] refused=[].)
-                    if r.run_attempt > ZERO_JOB_MAX_REPAIRABLE_ATTEMPT:
-                        continue
                     # THE REFUSAL IS RECORDED, NOT SILENT. This run was named a
                     # zero-job repair candidate above and is now not repaired; without
                     # this entry `repair_refused` would be 0 and the REFUSED-REPAIR
@@ -2245,9 +2235,24 @@ def main(argv: list[str] | None = None) -> int:
               "running. No per-PR repair can clear this: unjam the queue with "
               "`uv run python tools/ci_queue_health.py --apply`.", file=sys.stderr)
     if code != 0:
-        print("ci-check-repair: some repairs need a credential that can trigger events "
-              "(the local fallback covers this) — the per-PR detail is in the report",
-              file=sys.stderr)
+        # ⛔ EXIT 1 HAS TWO CAUSES (#10831 review P3) and this line used to name only the
+        # first. `main()` returns 1 for a repair only a user credential can perform, AND
+        # for a zero-job cancel REFUSED because the queue reading did not certify it clear
+        # (`args.apply and code == 0 and congestion is None and any(p.repair_refused ...)`).
+        # An operator reading "a credential" on the second cause chases a credential that
+        # would not change the outcome — the remedy there is to READ THE QUEUE, and the
+        # refusal notice above already says so. `tools/ci-check-repair-local.sh` branches
+        # its notification on the same ground; these two must not disagree.
+        if summary.get("repair_refused"):
+            print("ci-check-repair: some repairs need a credential that can trigger events, "
+                  "and a zero-job cancel was REFUSED because the queue reading did not "
+                  "certify it clear — read the queue rather than blaming the credential "
+                  "for the refusal; the per-PR detail is in the report",
+                  file=sys.stderr)
+        else:
+            print("ci-check-repair: some repairs need a credential that can trigger events "
+                  "(the local fallback covers this) — the per-PR detail is in the report",
+                  file=sys.stderr)
     return code
 
 

@@ -1194,18 +1194,18 @@ def test_an_ok_with_nothing_queued_cannot_certify_the_queue_clear():
     Discriminating power: this test reddens the moment `congests_pr` drops its
     `pr_wait_measured` clause — `OK and not truncated` alone answers `False`.
     """
-    # The explicit `no PR-event run is QUEUED` clause (offender at/over the dominance
-    # floor, no PR run queued) ...
+    # The explicit `no PR-event run is WAITING (queued or pending)` clause (offender
+    # at/over the dominance floor, no PR run waiting in either leg) ...
     quiet = classify(flood_queued(12))
     assert quiet.verdict == Q.OK
     assert quiet.pr_queued == 0
-    assert any("no PR-event run is QUEUED" in r for r in quiet.reasons), (
+    assert any("no PR-event run is WAITING" in r for r in quiet.reasons), (
         "the fixture must be the clause under test")
     assert quiet.pr_wait_measured is False, (
-        "there was no queued PR-event run, so no wait was read")
+        "there was no PR-event run waiting, so no wait was read")
     assert quiet.congests_pr is None, (
-        "'nothing I could see is queued' is not a measured-clear queue — a "
-        "pending / waiting / requested PR run is invisible to a status=queued feed")
+        "'nothing I could see is waiting' is not a measured-clear queue — the "
+        "clause reads BOTH legs, so it is only a fact once both were read")
     # The REPORTING polarity is untouched: it still claims no congestion it did not read.
     assert quiet.delays_pr is False
     # ...and the fact is emitted, so a JSON consumer can tell the two OKs apart.
@@ -1268,6 +1268,73 @@ def test_pending_pr_runs_are_part_of_the_WAIT_POPULATION():
         "a destructive cancel must not be authorised by a clearance that never read "
         "the population it acts on")
     assert with_leg.to_dict()["pr_pending"] == 12
+
+
+def test_the_PENDING_LEG_ALONE_is_a_witness_that_refuses_the_cancel():
+    """⭐ P1 (#10831 review): the leg joined the POPULATION but not the WITNESSES.
+
+    `wait_runs` was widened to `queued + pending` for the age clauses and for
+    `pr_wait_measured`, but the two congestion witnesses still carried a
+    `pr_queued_runs` conjunct — so a queue whose ONLY PR wait sat in `pending` passed
+    both witnesses, returned `OK`, and `congests_pr` answered `False`, which is the
+    value that AUTHORISES the destructive cancel-then-rerun.
+
+    Measured at the pre-fix head (this exact fixture):
+
+        verdict=OK  pr_queued=0  pr_pending=12
+        oldest_pr_queued_age_seconds=14400  pr_wait_budget_seconds=5400
+        pr_wait_measured=True  congests_pr=False   -> gate False -> AUTHORISED
+
+    i.e. a PR wait 2.7x its own budget certified the queue CLEAR. That is the exact
+    harm `queue_congestion_gate` exists to prevent: the run's queue position is
+    discarded, an attempt is spent, and load is added to the very wait the gate
+    protects.
+
+    Every pre-existing test missed it because each one carries a YOUNG QUEUED run, so
+    the pending leg was only ever exercised as a term that RAISES the verdict — never
+    as the sole witness. This one has no queued PR run at all.
+
+    Discriminating: restoring the `pr_queued_runs` conjunct on either witness returns
+    `congests_pr=False` here and reddens this test.
+    """
+    old_pending = [run(7000 + i, "Python CI", event="pull_request",
+                       age_seconds=4 * 3600) for i in range(12)]
+
+    # (a) PR CI IS executing — `backlogged_wait` is the only clause that can speak.
+    serving = classify(flood_queued(12),
+                       in_progress=[run(1, "Python CI", event="pull_request",
+                                        age_seconds=60)],
+                       pending=old_pending)
+    assert serving.pr_queued == 0, "the fixture must have NO queued PR run"
+    assert serving.pr_pending == 12
+    assert serving.oldest_pr_queued_age_seconds >= 4 * 3600 - 60
+    assert serving.pr_wait_measured is True
+    assert serving.verdict == Q.PR_BACKLOGGED, (
+        "four hours of pending PR wait beside an executing PR run is a backlog")
+    assert serving.congests_pr is True, (
+        "PR CI is measurably past its own wait budget — the destructive cancel must "
+        "be REFUSED here, not authorised by a clearance that never read this leg")
+
+    # (b) Nothing PR is executing — `starved_wait` is the only clause that can speak.
+    # The offender is held BELOW the dominance floor so the FLOOD clause cannot answer
+    # first; the question here is the starved witness, and `flood_queued(12)` would
+    # legitimately return `FLOOD` (the governor's own arm) instead.
+    starved = classify(flood_queued(4), pending=old_pending)
+    assert starved.pr_queued == 0 and starved.pr_pending == 12
+    assert starved.verdict == Q.PR_STARVED, (
+        "no PR run executing and a 4 h pending wait is PR CI NOT RUNNING")
+    assert starved.congests_pr is True, (
+        "the same population, the same answer: a wait was read, and it is past the bound")
+
+    # (c) The CONTROL that keeps the fix from over-refusing: a YOUNG pending wait is
+    # not congestion, so the gate must still be able to say CLEAR.
+    young = classify(flood_queued(12),
+                     in_progress=[run(1, "Python CI", event="pull_request",
+                                      age_seconds=60)],
+                     pending=[run(7100, "Python CI", event="pull_request",
+                                  age_seconds=60)])
+    assert young.verdict == Q.OK
+    assert young.congests_pr is False
 
 
 def test_a_CUT_pending_leg_cannot_certify_the_queue_clear():
