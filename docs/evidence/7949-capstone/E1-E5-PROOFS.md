@@ -40,8 +40,8 @@ unknown". The blockers are named with the artefact that has to move first.
 |---|---|---|---|---|
 | **E1** volume falls | **none** — the mechanism does not exist. Nearest pin: `tests/test_e1_e2_measurement.py::test_the_shipped_arm_moves_the_share_by_exactly_zero` | green | the shipped S2.2 selection path moves the `^the <X>` share by **exactly 0.0** through the real pipeline. It pins the **absence** of E1's mechanism, which is why E1 is `REFUTED` and not "unmeasured" | ✔ measured: making `value_gate.mechanical_verdict` discard definite descriptions moves the share `0.600000 → 0.333333` and the pin reds |
 | **E2** *mechanism* — the carve-out reaches the prompt | `tests/test_extractor_v2.py::TestMasterList::test_operational_value_carve_out_surfaces`; `tests/test_value_gate_4899.py::test_2453_decision_relevant_identifier_survives` | green | the operational/state value carve-out is rendered into the **real** S1 slot and the **real** S2/S4 master list (verbose *and* core-only), and the mechanical predicate cannot fire on a decision-relevant value. This is **not** a registered criterion — `E2a` is the survival count below — it is the mechanism the survival criterion depends on | ✔ measured: deleting the carve-out append in the verbose render reds it (`OPERATIONAL-VALUE CARVE-OUT` absent from the rendered master list) |
-| **E2a** values *strictly survive* a capture (bar `>= 13 of 14`) | **none** — and the property does not hold: **1/14** value-bearing units survives (`#9775`) | red | nothing. The loss is **upstream of the filter** (OFF arm 2/14 vs ON 1/14, gate drops 0), i.e. an extraction/render loss, not a selection loss — `#9775`. ⚠️ Two different claims, kept apart: `#9775` **reports** 1/14, while the bundle's README marks the row **BLOCKED** because the frozen **14-unit denominator is carried by no committed artifact** (`README.md:61`) — a reported count is not a certified one | — (no test can prove a property the pipeline does not have) |
-| **E2b** the *fusion* control (bar `<= 0.05`) | **none** — no test executes it; the figure exists only as an artifact reading | not RED | the registered anti-gaming control: surviving planted units whose matched `Point` also matches another distinct surviving unit. The artifact figure is **1/114 = 0.008772** (`README.md:61`) — **a proxy, not the criterion**: `README.md:615-616` records that 1/114 is *"printed, and NOT used to green the row, because the artifact counts atomic Points, not surviving planted units"*, so it does **not** certify the registered denominator, and `README.md:66-67` states plainly that neither E1's nor E2's proxy may become the verdict. The row is BLOCKED with `E2a`, and for the same reason: no committed artifact carries the registered denominators | — (a criterion that must stay *low*; what it needs is an artifact on its registered denominator, not a proof) |
+| **E2a** values *strictly survive* a capture (bar `>= 13 of 14`) | **none** — and the property does not hold: **1/14** value-bearing units survives (`#9775`) | red | nothing. The loss is **upstream of the filter** (OFF arm 2/14 vs ON 1/14, gate drops 0), i.e. an extraction/render loss, not a selection loss — `#9775`. ⚠️ Two different claims, kept apart: `#9775` **reports** 1/14, while the bundle's README marks the row **BLOCKED** because the frozen **14-unit denominator is carried by no committed artifact** (`README.md:69`) — a reported count is not a certified one | — (no test can prove a property the pipeline does not have) |
+| **E2b** the *fusion* control (bar `<= 0.05`) | **none** — no test executes it; the figure exists only as an artifact reading | not RED | the registered anti-gaming control: surviving planted units whose matched `Point` also matches another distinct surviving unit. The artifact figure is **1/114 = 0.008772** — **a proxy, not the criterion**: `README.md:670-671` records that 1/114 is *"printed, and NOT used to green the row, because the artifact counts atomic Points, not surviving planted units"*, so it does **not** certify the registered denominator, and the verdict table's own closing paragraph states plainly that neither E1's nor E2's proxy may become the verdict. (The figure itself is the E2 verdict-table cell.) The row is BLOCKED with `E2a`, and for the same reason: no committed artifact carries the registered denominators | — (a criterion that must stay *low*; what it needs is an artifact on its registered denominator, not a proof) |
 | **E3** every derivation carries its anchor | `tests/test_8501_capture_path_anchor.py::test_capture_anchors_every_extractedfrom_link`; `tests/test_graph_census_7949.py::test_the_session_source_to_event_reference_anchor_is_counted` | green | on a **real `capture_session`**: every `(Point)-[:extractedFrom]->` link records the version it was read from, and `references` anchored == total | ✔ measured: making the anchor never stamp a version reds it with the unanchored rows printed |
 | **E3** `:Object` included | `tests/test_graph_census_7949.py::test_an_object_reached_only_by_aboutObject_has_no_derivation_link` | green (as a **reported gap**) | the capture's `:Object` carries **no derivation link at all** (`with_derivation_link == 0`), so E3's literal "every derived node" bar is unreachable **as registered** — an owner metric decision (`#9736`), not a defect a lane may repair | n/a — the pin exists so a change in this fact is noticed, not to green the row |
 | **E4** planted operator edges wired + persisted | **none on the unpatched leg.** `tests/eval/write_path/test_write_path_operator_lane.py` monkeypatches `extract_session_v2` and says so in its own docstring | red (5 of 15) | nothing about the product: a patched extractor cannot say whether the extractor *forms* the operators | — (the criterion is not implemented; no proof is possible) |
@@ -163,8 +163,8 @@ a *pin that stops one step short*, which is exactly what this file exists to nam
 
 ## Why no row can be GREEN — the structural cap, re-verified here
 
-`tools/capstone_verdict_check.py:134` declares `STEPS = ("S0", "S1", "S2.1", "S2.2",
-"S2.3", "S3", "S5", "S6")`, and `_step_accounting` (`:605`) refuses a GREEN row whose
+`tools/capstone_verdict_check.py:136` declares `STEPS = ("S0", "S1", "S2.1", "S2.2",
+"S2.3", "S3", "S5", "S6")`, and `_step_accounting` (`:607`) refuses a GREEN row whose
 run left a REQUIRED step out: the rule is `missing = [s for s in required if s not in
 observed]`, reported as `GREEN with steps not observed in the run: …`. (Those two inner
 cites are deliberately NOT line numbers — #10215's own review rounds moved them twice
@@ -240,9 +240,9 @@ what would have to move:
 | E4 | the planted edges are not formed: 5 of 15 wired-and-persisted on the frozen corpus (`#8503`'s own criterion reports 5/14 with `wp02` excluded as the pre-registered exclusion, `#9873`; the frozen denominator is **15** and every receipt reads `planted=15` — the remaining misses are content-level as well as connect-level), and the receipt's retrievability rate is still unmeasured (`#9596`) | `#8503` CLOSED / `#9596` **OPEN** |
 | E5 | the epic's own wording is **met** (falsifier run + written back; both halves now test-pinned). The **pre-registered** outcome floor is not: raw recovery 0.4800 against a `>= 0.80` bar, on an n of 25 that must be reconciled with the record's 29 marker sentences — `#5087` carries that reconciliation (`#9738`, which this row cited until 2026-11-02, CLOSED that morning on its own §10 *record* correction, which is not a measurement of this number). Reporting that as GREEN is the one thing this bundle exists to refuse | `#5087` **OPEN** (`#9738` closed 2026-11-02 on its own §10 record correction, which is NOT a measurement of this number) |
 
-### One measured correction to the scoreboard's E4 row, not applied to it
+### One measured correction to the scoreboard's E4 row — applied to the row, not edited into the shipped log
 
-The E4 row cites `tests/eval/write_path/receipts/w2b-operator-2026-10-19.json`
+Until 2026-11-02 the E4 row cited `tests/eval/write_path/receipts/w2b-operator-2026-10-19.json`
 (`edge_correct` **2** of 15), whose own `corpus_hash` is `sha256:943a99ec…` — **not**
 the frozen pin. **Three** later receipts landed with `#9873` (`2cba48d3c`) on the **frozen**
 corpus (`sha256:dd7e8520…cb035dc`, re-derived from this tree and matched against
@@ -253,7 +253,7 @@ corpus (`sha256:dd7e8520…cb035dc`, re-derived from this tree and matched again
 | `w2b-operator-2026-10-24-8503-preleg.json` | 2026-10-24T05:46:51Z | 15 | **5** | frozen pin |
 | `w2b-operator-2026-10-24-8503-a.json` | 2026-10-24T06:03:47Z | 15 | **5** | frozen pin |
 | `w2b-operator-2026-10-24-8503-b.json` | 2026-10-24T06:10:47Z | 15 | **5** | frozen pin |
-| `w2b-operator-2026-10-19.json` (cited by the row) | 2026-10-19T01:39:26Z | 15 | 2 | `943a99ec…` |
+| `w2b-operator-2026-10-19.json` (cited by the row until 2026-11-02) | 2026-10-19T01:39:26Z | 15 | 2 | `943a99ec…` |
 
 The figure does not depend on which frozen receipt is read.
 
@@ -261,6 +261,17 @@ E4 is therefore **5 of 15**, not 2 of 15, and the fresher figure is measured on 
 pre-registered corpus. The verdict does not move — the bar is 15 of 15 — and the
 number is **not** edited into the shipped log: a row moves by re-running the probe
 and removing the file it replaces. This note is the correction that rule permits.
+
+⛔ **APPLIED 2026-11-02 — the defect is closed mechanically, not by this paragraph.**
+`probes/capstone_measure.py::select_e4_receipt` now selects E4's receipt by the receipt's OWN
+`corpus_hash`: the newest match on the frozen pin wins, no match REFUSES (naming the pin and every
+candidate scanned) rather than falling back to "the newest file", and an absent pin refuses. The
+row's `evidence` follows that selection instead of a filename constant, so the row can no longer
+cite an artifact it was not measured from — which is what let this note exist while the row
+published `2/15`. Pinned by `tests/test_7949_capstone_measure.py`
+(`test_the_e4_row_reads_a_receipt_on_the_frozen_pin_and_not_the_old_constant`,
+`test_main_builds_the_e4_row_from_the_selector_and_never_from_the_constant`,
+`test_a_row_with_no_evidence_path_is_refused_not_defaulted_to_the_constant`).
 
 ---
 
