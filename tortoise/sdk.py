@@ -22694,8 +22694,9 @@ class TortoiseSDK:
         """Consolidated operator write action (epic #888 W2, PR #912).
 
         action='mitigate' → mitigate_operator(id=..., reason=..., strength=)
-            Creates/updates the mitigation Point modulating an operator's edge
-            strength (idempotent).
+            Creates/updates a CURRENT mitigation Point modulating an operator's
+            edge strength. NOT idempotent after withdrawal: a re-assertion mints
+            a NEW mitigation Point (the sibling MCP tools say the same).
         action='annotate' → annotate_operator(id=..., bias=..., precision=...,
             consistency=..., directness=...) — structured epistemic dims.
 

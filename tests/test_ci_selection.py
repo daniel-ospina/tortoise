@@ -10599,9 +10599,22 @@ def test_drift_gate_cannot_skip_the_test_matrix():
 
     # --- 4. the aggregate still FAILS, and never swallows it --------------
     gate = jobs["python-ci-gate"]
+    # #10911: `always()` is load-bearing here for a SECOND reason beyond #2656, so it
+    # stays literal. A cancelled run re-arms an `always()` job into a permanent `queued`
+    # state, which is a real wedge — but `${{ !cancelled() }}` is NOT the fix: a skipped
+    # REQUIRED check reports Success to branch protection and is counted non-red by
+    # `admin-merge.sh` NON_RED_CONC, i.e. a false PASS on the merge path. The "not
+    # skippable on a cancelled run" half is pinned in tests/test_ci_new_failure_gate.py
+    # ::test_the_required_aggregate_must_not_be_skippable_on_a_cancelled_run; the
+    # "skipped counts non-red" half is pinned against the rail's own set at
+    # tests/fixtures/rail_surface_tokens.json by
+    # tests/test_merge_throughput.py::test_surface_token_sets_match_the_committed_rail_record
+    # (always runs), and re-verified against the LIVE rail by
+    # ::test_rail_surface_token_sets_match. Cite the constant, not a rail line number —
+    # the record's own `_read_at_rail_lines` already shows those drift between checkouts.
     assert gate.get("if") in _always, (
-        "python-ci-gate must run even when the drift job fails — `if: always()`"
-        " is what lets it report the failure (#2656)")
+        "python-ci-gate must run even when the drift job fails (#2656), and must not be "
+        "skippable on a cancelled run (#10911) — `skipped` is a green required check")
     assert not gate.get("continue-on-error"), (
         "the required aggregate must not be continue-on-error (#2656)")
     gate_steps = gate.get("steps", [])
