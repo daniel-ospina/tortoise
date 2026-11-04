@@ -522,7 +522,7 @@ def test_a_gh_that_cannot_execute_is_not_reported_as_missing(tmp_path, monkeypat
     assert rd._head_sha(tmp_path, "o/r", 5) == "unreadable"
 
 
-def test_the_spawn_remedy_is_keyed_by_errno():
+def test_the_spawn_remedy_is_keyed_by_errno(tmp_path):
     """Every branch of `_oserror_remedy` names ITS OWN repair (review, `#10777`).
 
     Deleting a branch used to leave the suite green: only the EACCES and ENOTDIR
@@ -541,6 +541,35 @@ def test_the_spawn_remedy_is_keyed_by_errno():
     generic = rd._oserror_remedy(OSError(errno.E2BIG, "too big"))
     assert "check the working directory" in generic, generic
 
+    # ⛔ THE ERRNO IS NOT THE CAUSE ON ITS OWN (review, `#10777`): an `EACCES` on
+    # the WORKING DIRECTORY must not be answered with `chmod +x` on a `gh` that is
+    # fine. `filename` carries which object failed, and it must decide first.
+    cwd_denied = rd._oserror_remedy(PermissionError(errno.EACCES, "denied", str(tmp_path)))
+    assert "chmod" not in cwd_denied, cwd_denied
+    assert "working directory" in cwd_denied, cwd_denied
+
+
+def test_an_unreadable_cwd_is_not_a_broken_gh_install(tmp_path):
+    """`EACCES` on the CWD is a directory problem, never a `gh` problem.
+
+    Review, `#10777`: keying the remedy on errno alone re-created the defect this
+    helper exists to prevent — `chmod 000` on a directory used as `cwd` raises
+    `PermissionError(errno=13, filename=<cwd>)`, and the operator was told to
+    `chmod +x` a binary that is fine. The exception already carries which object
+    failed, so the object decides before the errno.
+    """
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    locked.chmod(0o000)
+    try:
+        out = rd._gh(["repo", "view"], locked)
+    finally:
+        locked.chmod(0o700)
+    assert out.returncode == 126, (out.returncode, out.cause)
+    assert "chmod" not in out.remedy, out.remedy
+    assert "working directory" in out.remedy, out.remedy
+    assert str(locked) in out.cause, out.cause
+
 
 def test_a_real_gh_that_exits_127_is_not_reported_as_missing(tmp_path, monkeypatch):
     """`gh` exiting 127 is a REFUSAL BY the binary, never evidence it is absent.
@@ -548,7 +577,7 @@ def test_a_real_gh_that_exits_127_is_not_reported_as_missing(tmp_path, monkeypat
     Review, `#10777`: `_gh` answers 127 for two unrelated conditions — a fabricated
     PATH miss (which carries a `cause`) and a REAL process that exited 127 (which
     never does) — and the refusal collapsed them, so an operator whose `gh` shim
-    refused (`gh-shim: REFUSING to exec … — pass AGENT_GH_REAL`, the fleet's own
+    refused (`gh-shim: REFUSING to exec … — unset AGENT_GH_REAL`, the fleet's own
     shim does exactly this) was told the binary was not installed.
     """
     bin_dir = tmp_path / "gh-127-bin"

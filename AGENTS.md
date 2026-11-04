@@ -41,11 +41,12 @@
 > one installer grades the farm at all**: `pi-bootstrap/setup.sh` runs the checker as its last leg and
 > fails the install on the checker's `1` alone — on `2` (cannot verify) or `3` (no deploy can fix it)
 > it prints `this is NOT a pass` and still ends with `Done!`, and with the checker **absent** it prints
-> `farm drift NOT verified` and still ends with `Done!`, so a checkout older than the checker reports
-> nothing at all and the install still says success — while `cell-install.sh` has no farm-**drift**
+> `farm drift NOT verified` and still ends with `Done!`, so the farm verdict is MISSING rather than
+> negative and the install reports success either way — while `cell-install.sh` has no farm-**drift**
 > leg: it does install and verify the farm (`install_farms`, then `verify_layer` `cmp`-ing each
-> declared file), but only against the tree it just installed from, so it cannot see a farm left stale
-> by an older install. Second, **the grader
+> declared file against `$INFRA_ROOT`), but that comparison is against whatever checkout it RESOLVED,
+> never against the PIN — so a farm that matches an OLDER checkout reads as verified while the pin has
+> moved on. Second, **the grader
 > reads the farm the installer's base names, which need not be the one this box executes**: a
 > `$HOME`-rooted run on a `CELL_HOME`-rooted box grades `$HOME/.pi/agent/scripts`, so neither its `OK`
 > nor its `COULD NOT VERIFY` says anything about the executed farm. That farm is materialised only by

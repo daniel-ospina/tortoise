@@ -425,21 +425,33 @@ class _GhRun:
 
 
 def _oserror_remedy(exc: OSError) -> str:
-    """What to do about a spawn failure that is NOT a missing binary, by ERRNO.
+    """What to do about a spawn failure that is NOT a missing binary.
 
     ⛔ ONE REMEDY FOR EVERY CAUSE TELLS MOST CAUSES TO FIX THE WRONG THING (review,
     `#10777`). The cause is already printed; the remedy has to match it, or the
     operator is walked to the wrong repair — `chmod` for a worktree that no longer
     exists, "reinstall `gh`" for a box that is simply out of process slots.
+
+    ⛔ AND THE ERRNO ALONE IS NOT THE CAUSE EITHER (review, `#10777`): `EACCES`
+    says *something* was not permitted, and WHICH OBJECT failed is carried on
+    `filename` — the CWD for a `chdir` failure, the binary for an exec failure.
+    Keying on errno alone told an unreadable WORKING DIRECTORY to `chmod +x` a
+    `gh` that was fine, which is the very defect this function's first paragraph
+    describes. The object is therefore checked before the errno.
     """
+    target = getattr(exc, "filename", None)
+    cwd_side = target not in (None, "", "gh")
+    if exc.errno == errno.ENOTDIR:
+        return ("the working directory is not a directory — run from a live "
+                "checkout, or pass --repo")
+    if cwd_side:
+        return ("the working directory could not be used — run from a live "
+                "checkout, or pass --repo")
     if exc.errno in (errno.EACCES, errno.EPERM):
         return "make `gh` executable (`chmod +x`), or pass --repo"
     if exc.errno in (errno.EAGAIN, errno.ENOMEM):
         return ("the box could not spawn a process — retry when it is not loaded, "
                 "or pass --repo")
-    if exc.errno == errno.ENOTDIR:
-        return ("the working directory is not a directory — run from a live "
-                "checkout, or pass --repo")
     return "check the working directory and the `gh` install, or pass --repo"
 
 
@@ -535,7 +547,7 @@ def _resolve_repo(cwd: Path) -> str:
         # `#10777`). A fabricated run always carries a `cause`; a real one never
         # does — so this arm is the only place a process's own 127 can land. The
         # fleet's own `gh` shim exits 127 with a printed repair (`gh-shim: REFUSING
-        # to exec … — pass AGENT_GH_REAL`), and telling that operator "not on PATH —
+        # to exec … — unset AGENT_GH_REAL`), and telling that operator "not on PATH —
         # install the GitHub CLI" is a false diagnosis of a binary the same message
         # proves was found and run.
         detail = (out.stderr or "").strip().splitlines()
