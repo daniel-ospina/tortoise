@@ -2527,7 +2527,10 @@ def _assert_the_text_is_in_exactly_one_store(proj, needle: str, *, in_graph: boo
     substantive utterance into a `summary` (`sdk._session_source_metadata`) and,
     until #10000's §9.1/D1 fix, wrote it on the session `:Source`
     (`s.summary=$sum`) — a `:Source.summary` hit was a route this scan could not
-    see. That write is GONE (both the live SET and the replay fold), and the
+    see. That write is GONE (the live `SET` and the `SourceCreated` carrier —
+    the replay fold `_upsert_source` never carried a `summary` clause at all: the
+    carrier's extra-props passthrough is what reached the node, which is why
+    closing the carrier closes BOTH doors and why that fix edits no fold), and the
     route now has its own pin in this file
     (`test_a_captured_session_source_keeps_the_transcript_out_of_summary`), so the
     class is covered without widening these six names. The scan therefore guards

@@ -4101,7 +4101,19 @@ def _session_source_metadata(transcript: str) -> tuple[str, list[str]]:
     """Derive cheap capture metadata (summary + topics) for the session Source
     from the extraction transcript (#1352) — no LLM call, deterministic:
     the summary is the first substantive utterance, topics are the top
-    frequent content words. Returns ("", []) for an empty transcript."""
+    frequent content words. Returns ("", []) for an empty transcript.
+
+    ⛔ WHERE THE SUMMARY GOES — read this before assuming the session `:Source`
+    carries it. The summary is the transcript's FIRST SUBSTANTIVE UTTERANCE,
+    i.e. the prose §9.1/D1 keeps out of the graph, so since #10000's fix the
+    caller (`_materialize_session_source`) does NOT write it as a `summary`
+    property: it reaches exactly one place, the Source's declared searchable
+    field `_searchText` (`_source_search_text(summary=…)`, #3518/D10), which is
+    what keeps the session findable. `topics` still ride the node as metadata.
+    A CALLER-authored `summary` — `create_source(summary=…)`, a DOCUMENT's
+    authored summary — is a different, untouched door: this function's output is
+    derived, never authored.
+    """
     if not transcript.strip():
         return "", []
     summary = ""

@@ -3,7 +3,8 @@
 **Verdict: `PARTIAL` — turns as a graph tier are REMOVED and both prose tiers' record home is proven,
 while the PROSE's absence from the graph is NOT proven on either tier (the `story_arc` route was closed
 by #10389, which landed on `main` **after** this run; the `create_event` door #10428 and the
-`:Source.summary` route remain open).**
+`:Source.summary` route remain open — a fix for that last route is PREPARED on #10858 and is **not on
+`main`** while its `OVERRIDES:` ruling is pending on #10000; see the annotation at §4 item 2).**
 
 Read that precisely: **no turn `Point` node and no turn `CONTAINS` edge exists on the armed arm** — that
 is what was measured, and it is the tier §9.1/D1 names. The *prose itself* still reaches two nodes
@@ -189,12 +190,25 @@ and **refuses** the bypassing role rather than merely testing under a different 
    it is recorded on **#10000** (last comment) as the second prose passthrough onto a node, and this
    run reproduces it independently on the deployed tree.
 
+   ⚠️ **STATUS ANNOTATION — added later, NOT part of the measurement above.** Read this item against
+   the tree you are on. The capture path no longer writes `s.summary` in PR #10858, which removes the
+   write from both the live `SET` and the `SourceCreated` carrier (the replay fold `_upsert_source`
+   never carried a `summary` clause — the carrier's passthrough is what reached the node). That PR is
+   **prepared but UNRULED**: `docs/architecture/STORAGE-ARCHITECTURE.md:527` (§9.1/D1) still says
+   *"`summary`/`title` stay on the node"*, and the `OVERRIDES:` line that would authorise the departure
+   is requested on #10000. So **on `main` this route is still OPEN**, and the 80 B reading above stays
+   true of the tree this run measured (`b101355a8` / the pre-#10389 branch). Whoever re-runs the
+   capstone on a post-#10858 tree re-measures this item rather than carrying it forward; the pin that
+   keeps it closed, once that lands, is
+   `tests/test_10000_turns_record_only.py::test_a_captured_session_source_keeps_the_transcript_out_of_summary`.
+
 ⇒ **`PARTIAL`**, and specifically: **the turn TIER is gone from the graph (no turn node, no turn
 `CONTAINS` edge) and both prose tiers have a working Postgres home — proven; the prose's ABSENCE from
 the graph is not proven on either tier.** The `story_arc` gap was #10389 — **landed on `main` as
 `718ee3b49` after this run**, so it is closed on `main` and still open on the `b101355a8` tree these arms
 measured (§4, item 1). Still open: the `create_event` door (**#10428**) and the `:Source.summary` route
-recorded on #10000, not this measurement. The probe was **not** narrowed to
+recorded on #10000, not this measurement — a fix for that one is prepared on #10858 and unruled (§4,
+item 2 annotation), so it is still open on `main`. The probe was **not** narrowed to
 make the composite claim pass.
 
 ## 5. What this covers of #9567's DoD, and what it does not
