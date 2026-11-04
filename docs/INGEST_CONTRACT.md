@@ -15,8 +15,9 @@ The ingest surface writes a whole **bundle** — points, entities, sources, and
 the connections between them — in one coherent call that is **duplicate-averse**
 on points, sources and connections. It is NOT idempotent end to end: `document`
 and `event` entities are append-only occurrence records, and re-ingesting them
-appends again *by design*, reported as `append_only_items`
-([§3.2](#32-warnings--the-thirteen-keys)). Both retry sections below
+appends again *by design* — **silently**, with no warning key to look for (the
+`append_only_items` token in [§3.2](#32-warnings--the-thirteen-keys) is reserved
+vocabulary, not observable today). Both retry sections below
 ([§7](#7-kill-recovery), [§15](#15-timeout--failure)) carry that exception
 explicitly. This document is the granular customer contract for that surface:
 bundle shape, worked examples with the exact response shape, the full error
@@ -206,7 +207,9 @@ Key points:
   bundle items (it is server-managed — a bundle carrying it is a violation).
 - **`created` / `deduped`** each count `{points, entities, sources, connections}`.
   Re-submitting the identical bundle returns the same ids with everything in
-  `deduped`.
+  `deduped` — **except** for `document`/`event` entities, which are append-only
+  occurrence records: those are counted in `created` again, with no warning
+  ([§15](#15-timeout--failure)).
 - **`ids["connections"]`** — the connection descriptor contract. A connection
   routed to an **operator** appends the bare operator-id string:
   `mitigation`/`reify:true`, and — since #8499 — **any plain IMPL/NAND whose
@@ -331,10 +334,15 @@ enumeration** — a warning key outside this table is a divergence; report it.
 > recorded here and pinned in `tests/test_ingest_conformance.py`.
 >
 > **Which keys are emitted today.** Row 6 (`mitigation_strength_change`) is
-> emitted by `ingest()`'s mitigation path since #5244. Rows 3 and 4
-> (`mitigation_orphan_residue`, `mitigation_drift_duplicate`) describe
-> crash-orphan re-link and post-re-key drift; **no write door emits them yet** —
-> they are reserved vocabulary for those recovery flows, not observable today.
+> emitted by `ingest()`'s mitigation path since #5244. Rows 3, 4 and 1
+> (`mitigation_orphan_residue`, `mitigation_drift_duplicate`,
+> `append_only_items`) are **reserved vocabulary, not observable today**: no
+> write door emits them. ⛔ Row 1 in particular is not a signal you can wait for —
+> the append-only `document`/`event` legs append **silently**
+> (`sdk.ingest`: `existed = []  # … append-only — never deduped`), so a
+> resubmission that duplicates them returns a normal response with
+> `warnings: []`. Rows 3 and 4 are reserved for their crash-orphan recovery
+> flows. Everything above is pinned in `tests/test_ingest_conformance.py`.
 
 ---
 
@@ -434,16 +442,20 @@ corrected content is a different logical item.
 
 ## 7. Kill recovery
 
-**Transport death → retry idempotency is the contract.**
+**Transport death → resubmission is duplicate-averse, and that is the
+contract** (except the append-only entity legs — [§15](#15-timeout--failure)).
 
 If the ingest call dies mid-flight (client killed, network drop, server
 SIGKILL), you get **no response** — but the write may have partially
 committed. The recovery signal is a single rule:
 
-> **Re-submit the identical bundle, unpatched.** Convergence is exactly-once:
-> items that committed dedup, items that didn't commit are created, and the
-> whole logical bundle carries **one `batch_id`** across kill + retry
+> **Re-submit the identical bundle, unpatched.** Points, sources and connections
+> converge: items that committed dedup, items that didn't commit are created, and
+> the whole logical bundle carries **one `batch_id`** across kill + retry
 > (`batch_id` is content-derived, not per-call — a retry mints the same id).
+> ⛔ **Not exactly-once for `document`/`event` entities** — those are append-only
+> and a resubmission appends a second one, silently. A bundle carrying them is
+> the one case where "how many did I create?" cannot be answered by the retry.
 
 - The killed call returns no structured error; there is nothing to parse.
 - **Metering note:** a transport-killed call commits its writes but is never
@@ -459,8 +471,9 @@ committed. The recovery signal is a single rule:
   A timeout is the same class as transport death: re-send the identical bundle;
   if it committed, the duplicate-averse legs come back `deduped`, confirming
   presence. The append-only `document`/`event` legs are the exception — a
-  resubmission appends them again (`append_only_items`, [§3.2](#32-warnings--the-thirteen-keys)),
-  so an ambiguous timeout on a bundle containing them can leave a second
+  resubmission appends them again, silently (no warning key: `append_only_items`
+  in [§3.2](#32-warnings--the-thirteen-keys) is reserved vocabulary, not observable
+  today), so an ambiguous timeout on a bundle containing them can leave a second
   occurrence record.
 
 ---
@@ -478,8 +491,8 @@ with the exact retry action:
 | 4 | `ERR_QUOTA_SERVER` `{error, code}` | Transient quota-counting failure (fail-closed). | **Backoff-retry** (transient). |
 | 5 | `ERR_UNAUTHORIZED` `{error, code}` | 401 — missing/invalid `Bearer tt_<key>`. | **Fix credentials; never retry.** |
 | 6 | `ERR_REGISTRY` `{error, code}` | 503 — team registry (key→team resolution) unavailable. The `-32099` **static-auth-misconfigured** variant ("Static auth misconfigured: no API key set") is a server configuration problem. | Transient → **backoff-retry**. The `-32099` static-misconfig variant → **operator fix (config), don't retry**. |
-| 7 | Phase-2 failure `{error}` — **no code** | A write failed mid-commit; partial state is committed. The error names the section/index/item; it carries the already-computed `batch_id`. | **Re-send converges** — the retry dedups what committed and writes the rest. Audit via `batch_id` first if you like. |
-| 8 | Transport death — **no response** | The call may have committed anything. | **Re-send the identical bundle**; exactly-once convergence ([§7](#7-kill-recovery)). |
+| 7 | Phase-2 failure `{error}` — **no code** | A write failed mid-commit; partial state is committed. The error names the section/index/item; it carries the already-computed `batch_id`. | **Re-send converges** for points/sources/connections — the retry dedups what committed and writes the rest. ⛔ Not for `document`/`event` entities: those append, so a re-send can leave two ([§15](#15-timeout--failure)). Audit via `batch_id` first if you like. |
+| 8 | Transport death — **no response** | The call may have committed anything. | **Re-send the identical bundle**; duplicate-averse convergence on points/sources/connections, and the append-only `document`/`event` exception ([§7](#7-kill-recovery), [§15](#15-timeout--failure)). |
 | 9 | `EmbeddedStoreBusyError` — named class prefix in `{error}` (**planned**) | Cross-process contention on an embedded store (another process holds the db). **planned:** fail-fast with a named error replaces today's blocking flock-with-timeout handling. | **planned:** do **NOT** retry until the holder exits. Unlike phase-2 partial-state errors, re-sending while the store is busy does **not** converge — it re-errors. (Fail-fast replaces the old silent second-daemon behavior.) |
 
 **planned:** `ERR_BUNDLE_INVALID` is a new exported constant classified as a
@@ -767,16 +780,25 @@ strand run-1 residue.
 
 **The exception, stated once.** `document` and `event` entities are append-only
 occurrence records (`sdk.ingest` never dedups them), so a resubmission that
-follows an ambiguous timeout can append a second one and will report
-`append_only_items` ([§3.2](#32-warnings--the-thirteen-keys)). "Resubmit the identical bundle" is
-therefore the right move when the bundle carries no `document`/`event` entities,
-and a bundle-with-duplicates audit when it does.
+follows an ambiguous timeout can append a second one — **silently**, because no
+warning key reports it (`append_only_items` in [§3.2](#32-warnings--the-thirteen-keys) is reserved
+vocabulary, not emitted today, and the response comes back with `warnings: []`).
+"Resubmit the identical bundle" is therefore the right move when the bundle
+carries no `document`/`event` entities, and a bundle-with-duplicates audit when it
+does.
 
 **Over the MCP surface, do not infer this from the timeout alone.** A call
-refused on the transport wait bound carries the verdict explicitly:
-`error.data.committed` (`"unknown"` — the write may still be running) and
-`error.data.retry_safe` (a bool) with `error.data.retry_rule`. `tortoise_ingest`
-reports `retry_safe: false`, which is this exception stated mechanically — read
+refused on the transport wait bound carries the verdict explicitly, in
+`error.data.committed`, `error.data.retry_safe` and `error.data.retry_rule`:
+
+| `retry_rule` | `committed` | What it means |
+|---|---|---|
+| `NOT_SENT` | `"none"` | Nothing was dispatched — `retry_safe: true`, re-send freely. |
+| `PREVIEW` | `"none"` | The call declared itself a preview — a `dry_run` argument on one of the seven tools that has a `dry_run` parameter (its declared default counts), or `tortoise_delete` with no `confirmation` token — so it wrote nothing: `retry_safe: true`. |
+| `SAFE` | `"unknown"` | Dispatched and may have committed; the call is one whose SEQUENTIAL repeat converges — `retry_safe: true`. (The precondition is real: a repeat that lands while the abandoned first attempt is still running is not a repeat.) |
+| `UNSAFE` | `"unknown"` | Dispatched and may still be running, and a repeat is NOT provably convergent — `retry_safe: false`. |
+
+`tortoise_ingest` is `UNSAFE`, which is this exception stated mechanically: read
 `retry_rule`, and do not re-send while that first attempt can still be running.
 
 ---

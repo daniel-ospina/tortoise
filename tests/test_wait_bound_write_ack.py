@@ -530,7 +530,10 @@ def test_an_ingest_bundle_with_append_only_entities_is_not_repeatable():
 
     The SDK shape-validates the entity leg but DEDUPS nothing on it: "Document
     records are append-only — never deduped", same for `event`
-    (`docs/INGEST_CONTRACT.md` row 1 `append_only_items`). So a retry mints a
+    (`sdk.py` — `existed = []` on both legs). The append is SILENT: no warning
+    key reports it (`docs/INGEST_CONTRACT.md`'s `append_only_items` token is
+    reserved vocabulary, not emitted today), so a caller gets `warnings: []` and
+    a `created.entities` count. So a retry mints a
     NEW `:Source` for a document — and a new `:Event` occurrence for an event,
     which can also gain a NEW operator where the bundle wires one to it (a
     document cannot: a `:Source` is refused as a connection endpoint — the ERRORS
