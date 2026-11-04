@@ -70,9 +70,23 @@ THE SNAPSHOT IS COMMITTED, NOT LIVE — AND IT IS A POINT-IN-TIME READ
 
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — `from datetime import
+# UTC` is a 3.11+ name, so on an older interpreter this module would die with an
+# unattributed ImportError before any later-placed guard could run (D9 shape).
+# ⛔ The invocation named is the SCRIPT form: `tests/test_entry_point_python_guard.py`
+# treats `tools/<x>.py` as a loose script (a package module needs a directory chain
+# under `tools/`), so `-m tools.ci_runner_labels` is NOT this file's invocation.
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/ci_runner_labels.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/ci_runner_labels.py`"
+    )
+
 import json
 import re
-import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
