@@ -1579,10 +1579,12 @@ def test_a_fold_onto_a_dead_claim_keeps_its_terminalizer_stamp(prov):
     for an id that ALREADY EXISTS, and the replay's recreate anchor refuses a
     terminalizer stamp at or before a creation ("it died with the replaced
     node"). A fold replaces NOTHING — and folding onto a DEAD claim is not
-    exotic, it is authorised by this very branch: `#7819` is scoped to
-    ``_TEMPORAL_RESTAMP_PROPS`` ("a fold that carries no temporal prop keeps
-    applying, exactly like any other revision of a dead claim"), and
-    ``_find_point_by_content`` applies no status/outdated filter. So the
+    exotic, it is authorised by this very branch: `#7819` refused only a
+    TEMPORAL fold ("a fold that carries no temporal prop keeps applying"), and
+    `#10368` has since narrowed that to the CALLER'S props and authored word —
+    this PROVENANCE retrofit is deliberately exempt (#7704's ruling) and still
+    folds onto a terminal point. ``_find_point_by_content`` applies no
+    status/outdated filter. So the
     ordinary create → supersede → re-ingest-from-a-second-source sequence below
     lost the stamp in the rebuild: ``status``/``validTo`` came back from the
     fold's own snapshot, but ``outdated``/``expiredAt`` (``_POINT_DENY`` — no
