@@ -12,11 +12,16 @@ aboutObjects: tortoise-ingest, tortoise-mcp
 # Ingest Contract (`tortoise_ingest` / `sdk.ingest`)
 
 The ingest surface writes a whole **bundle** — points, entities, sources, and
-the connections between them — in one coherent, idempotent call. This document
-is the granular customer contract for that surface: bundle shape, worked
-examples with the exact response shape, the full error surface with the retry
-action per error class, quota semantics, and what to do when you ingest the
-wrong thing.
+the connections between them — in one coherent call that is **duplicate-averse**
+on points, sources and connections. It is NOT idempotent end to end: `document`
+and `event` entities are append-only occurrence records, and re-ingesting them
+appends again *by design*, reported as `append_only_items`
+([§3.2](#32-warnings--the-thirteen-keys)). Both retry sections below
+([§7](#7-kill-recovery), [§15](#15-timeout--failure)) carry that exception
+explicitly. This document is the granular customer contract for that surface:
+bundle shape, worked examples with the exact response shape, the full error
+surface with the retry action per error class, quota semantics, and what to do
+when you ingest the wrong thing.
 
 **How to read this doc.** The ingest surface is extended by epic #902 (this
 release): the response gains `batch_id` and `warnings`, the tool gains the
@@ -450,9 +455,13 @@ committed. The recovery signal is a single rule:
   mitigation stamps survive with no manual rebuild (see
   [quickstart-selfhosted.md](quickstart-selfhosted.md) — the default embedded
   mode has no AOF window, so the JSONL journal is the durability contract).
-- **Timeout ≠ failure — resubmission is idempotent.** A timeout is the
-  same class as transport death: re-send the identical bundle; if it
-  committed, you get an all-`deduped` response confirming presence.
+- **Timeout ≠ failure — resubmission is duplicate-averse, not idempotent.**
+  A timeout is the same class as transport death: re-send the identical bundle;
+  if it committed, the duplicate-averse legs come back `deduped`, confirming
+  presence. The append-only `document`/`event` legs are the exception — a
+  resubmission appends them again (`append_only_items`, [§3.2](#32-warnings--the-thirteen-keys)),
+  so an ambiguous timeout on a bundle containing them can leave a second
+  occurrence record.
 
 ---
 
@@ -726,8 +735,9 @@ Combined cross-epic upgrade notes (epic #902 ingest + epic #900 index).
 - **Path: `tortoise_ingest_corpus` → `tortoise_ingest`.** Corpus/file-driven
   ingestion moves to the bundle surface: convert your corpus walk into a
   bundle (points + entities + sources + connections) and call
-  `tortoise_ingest` — you get the coherent multi-section write, idempotent
-  retry, `batch_id` audit, and the full error contract of this document. The
+  `tortoise_ingest` — you get the coherent multi-section write, duplicate-averse
+  retry (with the `document`/`event` exception in [§15](#15-timeout--failure)),
+  `batch_id` audit, and the full error contract of this document. The
   corpus tools remain for the transition window only.
 
 **Behavior changes (this release):** the eight breaks in
@@ -746,14 +756,28 @@ Point-bearing pair.
 
 ## 15. Timeout ≠ failure
 
-> **Timeout ≠ failure — resubmission is idempotent.**
+> **Timeout ≠ failure — resubmission is duplicate-averse, not idempotent.**
 
 If an ingest call times out, you do not know whether it committed. Re-send
-the identical bundle: committed items dedup (all-`deduped` counts confirm
-presence), missed items are created, and one `batch_id` spans the whole
-logical bundle. Never "fix" a timeout by editing the bundle before retrying
-— a modified retry is a different logical bundle and can strand run-1
-residue.
+the identical bundle: committed points, sources and connections dedup
+(all-`deduped` counts confirm presence), missed items are created, and one
+`batch_id` spans the whole logical bundle. Never "fix" a timeout by editing the
+bundle before retrying — a modified retry is a different logical bundle and can
+strand run-1 residue.
+
+**The exception, stated once.** `document` and `event` entities are append-only
+occurrence records (`sdk.ingest` never dedups them), so a resubmission that
+follows an ambiguous timeout can append a second one and will report
+`append_only_items` ([§3.2](#32-warnings--the-thirteen-keys)). "Resubmit the identical bundle" is
+therefore the right move when the bundle carries no `document`/`event` entities,
+and a bundle-with-duplicates audit when it does.
+
+**Over the MCP surface, do not infer this from the timeout alone.** A call
+refused on the transport wait bound carries the verdict explicitly:
+`error.data.committed` (`"unknown"` — the write may still be running) and
+`error.data.retry_safe` (a bool) with `error.data.retry_rule`. `tortoise_ingest`
+reports `retry_safe: false`, which is this exception stated mechanically — read
+`retry_rule`, and do not re-send while that first attempt can still be running.
 
 ---
 

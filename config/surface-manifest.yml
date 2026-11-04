@@ -49,7 +49,7 @@
 # a constant here.
 manifest_version: 1
 issue: 3863
-cut_at_commit: 074a7d508196a220e5f2b8d258d33cf53d943cee
+cut_at_commit: 089d690c9fbf209af37c0bc0b645bfb593c6cf8e
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -1833,7 +1833,7 @@ rows:
   cluster_canonical: tortoise_delete
   cluster_note: group `delete` is split across ['graph', 'memory']; proposed family `memory` — waits for your approval
 - name: tortoise_operator_action
-  served_from: tortoise/mcp_server.py:846fa9aff00cf4fe
+  served_from: tortoise/mcp_server.py:d4a400bdc7a89ba7
   served_attributes: 07f3aa2bf8138e28
   family: graph
   family_rank: 2
@@ -1845,9 +1845,9 @@ rows:
   cluster: operator-action
   canonical: true
   job: 'Consolidated operator write action — action=mitigate|annotate. mitigate: reason + strength (0-1) — creates/updates
-    the mitigation Point, and is NOT idempotent (a re-assertion after a withdrawal mints a NEW Point — same SDK
-    call as tortoise_mitigate_operator, which is not declared idempotent either). annotate: bias/precision/consistency/directness
-    (0-1).'
+    the mitigation Point. Idempotent for a CURRENT mitigation (a second call updates it in place); not idempotent
+    after a withdrawal (a re-assertion mints a NEW Point) — the same state-conditional SDK call as tortoise_mitigate_operator.
+    annotate: bias/precision/consistency/directness (0-1).'
   dependency: 'handler-served: no declared SDK link'
   lifecycle: active
   used_by: never called, tooling, docs

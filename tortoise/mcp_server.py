@@ -897,10 +897,14 @@ def _declared_dry_run_default(name: str):
     return None if param is None else param.default
 
 
-#: The STRING spellings pydantic's bool coercion maps to ``True``. Taken from the
-#: coercion itself (`str_to_bool`: `s.lower()` looked up in a fixed table — note
-#: there is NO `.strip()`, so a padded string is REJECTED rather than coerced).
-#: ONLY the TRUE half is used below — see ``_coerces_to_true`` for why.
+#: The STRING spellings pydantic's bool coercion maps to ``True``. The coercion is
+#: implemented in `pydantic_core`'s Rust layer, so there is no Python symbol to
+#: name: this table is MEASURED through the real seam
+#: (`coerce_task_arguments` on a live tool signature) over the pinned pydantic,
+#: and re-measured whenever that pin moves. Two properties it encodes: the
+#: comparison is case-insensitive, and there is NO `.strip()` — so a padded
+#: string is REJECTED rather than coerced. ONLY the TRUE half is used below — see
+#: ``_coerces_to_true`` for why the halves are not symmetric.
 _COERCES_TO_TRUE = frozenset({"true", "1", "yes", "on", "t", "y"})
 
 
@@ -5098,13 +5102,17 @@ def tortoise_operator_action(action: str, id: str, reason: str | None = None,
     """Consolidated operator write action — action=mitigate|annotate.
 
     mitigate: reason (required) + strength (0-1, default 0.5) — creates/updates
-    the mitigation Point, and is NOT idempotent: a re-assertion after a
-    withdrawal mints a NEW Point. annotate: bias/precision/consistency/
-    directness (all required, 0-1).
+    the mitigation Point. Idempotent for a CURRENT mitigation — a second call
+    updates it in place; NOT idempotent after a withdrawal, where a re-assertion
+    mints a NEW Point. annotate: bias/precision/consistency/directness (all
+    required, 0-1).
 
     ⛔ `mitigate` and `tortoise_mitigate_operator` reach the SAME
-    `mitigate_operator` SDK call, so this description must not claim more for it
-    than that tool's own does.
+    `mitigate_operator` SDK call (`sdk.py` — "a second call updates the existing
+    CURRENT mitigation … does not create a duplicate"), so this description must
+    not claim more for it than that tool's own does, in EITHER direction. That
+    call is state-conditional, so the flat `idempotentHint` is `False` on both
+    while both descriptions state the condition.
     """
     if action == "mitigate":
         if not reason:
