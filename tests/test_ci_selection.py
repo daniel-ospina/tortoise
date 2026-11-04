@@ -1393,7 +1393,6 @@ _SELF_GUARD_DEBT: dict[str, str] = {
     "tests/test_github_map.py": "tortoise/github_map.py",
     "tests/test_kind_classifier.py": "tortoise/kind_classifier.py",
     "tests/test_kind_index.py": "tortoise/kind_index.py",
-    "tests/test_mcp_client.py": "tortoise/mcp_client.py",
     "tests/test_sentry.py": "tortoise/sentry.py",
     "tests/test_source_credibility.py": "tortoise/source_credibility.py",
     "tests/test_subgraph_render.py": "tortoise/subgraph_render.py",
@@ -2520,6 +2519,75 @@ def test_kind_vocabulary_guard_runs_on_a_docs_only_ontology_edit():
         ["docs/ONTOLOGY.md"], "pull_request", stripped)["test_files"]
 
 
+def test_the_split_doc_guards_run_on_the_doc_itself(monkeypatch):
+    """#10605 review (P2): both §8a guards must be selected by a §8a-only edit.
+
+    `docs/client-server-split.md` §8a is the subject of TWO guards, and one does
+    not imply the other:
+
+      * `tests/test_mcp_bridge.py::test_no_artifact_restates_the_refuted_capture_mechanism`
+        (registered `api`) pins the four refuted phrases and REQUIRES
+        "re-runs at every connect" + "process.env";
+      * `tests/test_client_status_vocabulary.py::test_the_artifacts_no_longer_call_the_driver_a_one_word_failure_reporter`
+        (registered `core`) pins the `BearerAuth` PROHIBITION.
+
+    `docs/` is a flat NON_PYTHON_PREFIXES entry and this path was no
+    SOURCE_PATTERNS row and no CORE_ALSO member, so a split-doc-only edit
+    filtered to `changed == []` and took the docs-only early return
+    (`surfaces=[]`, tier-1 smoke): re-adding "expanded once at process start",
+    deleting "re-runs at every connect", or restoring "Client + BearerAuth"
+    merged GREEN with both guards asleep — on the exact scenario the first
+    guard's own docstring names ("so the plausible-but-wrong sentence cannot
+    come back in a later tidy-up"). Same #1349/#3332/#3616 silent-drop class.
+
+    Both halves are needed because a named-surface match REPLACES the `core`
+    fallback: the `api` entry alone drops `test_client_status_vocabulary.py`.
+    """
+    doc = REPO / "docs" / "client-server-split.md"
+    assert doc.exists(), "the guarded doc is gone: docs/client-server-split.md"
+
+    r = _sel(["docs/client-server-split.md"])
+    assert r["full"] is False
+    assert sorted(r["surfaces"]) == ["api", "core"], (
+        f"a docs/client-server-split.md-only edit selects {r['surfaces']} — the "
+        "doc reached the docs-only tier-1 early return, so neither §8a guard runs "
+        "on the only change that can break it (SOURCE_PATTERNS['api'] / CORE_ALSO "
+        "entry removed?)"
+    )
+    assert "test_mcp_bridge.py" in r["test_files"], (
+        "a docs/client-server-split.md-only edit does not run "
+        "tests/test_mcp_bridge.py, so the refuted capture phrases can come back "
+        "into §8a in a later tidy-up"
+    )
+    assert "test_client_status_vocabulary.py" in r["test_files"], (
+        "a docs/client-server-split.md-only edit does not run "
+        "tests/test_client_status_vocabulary.py, so `Client + BearerAuth` can be "
+        "restored into §8a unnoticed"
+    )
+
+    # Non-vacuity, one arm per half: each entry is load-bearing on its own, so
+    # neither assertion above can be satisfied by the other entry.
+    api_paths = tuple(p for p in cs.SOURCE_PATTERNS["api"]
+                      if p != "docs/client-server-split.md")
+    monkeypatch.setattr(cs, "SOURCE_PATTERNS",
+                        {**cs.SOURCE_PATTERNS, "api": api_paths})
+    without_api = _sel(["docs/client-server-split.md"])
+    assert "test_mcp_bridge.py" not in without_api["test_files"], (
+        "with the api entry removed the bridge guard is STILL selected — the "
+        "`api` half of the pair is dead config"
+    )
+    monkeypatch.undo()
+
+    core_also = tuple(p for p in cs.CORE_ALSO if p != "docs/client-server-split.md")
+    monkeypatch.setattr(cs, "CORE_ALSO", core_also)
+    without_core = _sel(["docs/client-server-split.md"])
+    assert "core" not in without_core["surfaces"], (
+        "with the CORE_ALSO entry removed `core` is STILL selected — the "
+        "`core` half of the pair is dead config"
+    )
+    assert "test_client_status_vocabulary.py" not in without_core["test_files"]
+
+
 def test_session_import_change_selects_the_window_guard():
     """#3575 P1-A: `tortoise/session_import/` maps to no named surface, so a
     parsers.py change selects `core` via the fallback. The window guard must be
@@ -3152,6 +3220,59 @@ def test_temporal_leg_change_runs_its_pins_and_keeps_the_core_pool():
     assert "core" in r["surfaces"], (
         "a temporal_leg-only diff dropped the core pool (CORE_ALSO entry removed?)",
         r["surfaces"])
+
+
+def test_mcp_client_change_keeps_the_core_pool_that_guards_its_words():
+    # #10605 / PR #10727 review (P2). `tortoise/mcp_client.py` was registered as
+    # an exact SOURCE_PATTERNS["api"] entry so that `tests/test_mcp_client.py`
+    # (its named self-guard, formerly a `_SELF_GUARD_DEBT` row) runs on a
+    # client-only diff. A named-surface match REPLACES the `core` fallback
+    # (#2938), and nothing added the other half — so the same edit DOWNGRADED the
+    # selection. MEASURED with the repo's own selector: on origin/main a
+    # `tortoise/mcp_client.py`-only diff selected `['core']` / 735 test files;
+    # at the PR head it selected `['api']` / 337. Among the dropped files are the
+    # only two `core`-registered suites that execute the shipped
+    # `tortoise-client` CLI against THIS module's driver words —
+    # `tests/test_client_status_vocabulary.py` (`available | empty | degraded |
+    # unconfigured`, and this PR adds the third word to `status()`) and
+    # `tests/test_client_cli_probe.py` (`client/tortoise_client/cli.py` imports
+    # `describe_failure` from here) — plus
+    # `tests/test_uri_env_mutations_declared.py`, whose registry this PR edits.
+    # The #2938/#1349 silent-drop class, in the other direction: the fix for one
+    # silent drop created another.
+    #
+    # Mutation check: deleting the `tortoise/mcp_client.py` row from `CORE_ALSO`
+    # puts surfaces back to `['api']` and drops both CLI guards -> the third and
+    # fourth asserts red. Deleting the SOURCE_PATTERNS row instead fails the
+    # first two (the self-guard half this PR legitimately adds).
+    #
+    # `test_files` is the STRING "ALL" under the FULL matrix, so coverage goes
+    # through `runs()` — promoting the module to `SHARED_MODULES` is a strictly
+    # WIDER selection and must not red this pin. Pool sizes are DATED ANCHORS;
+    # the suite grows, so no count is asserted.
+    r = _sel(["tortoise/mcp_client.py"])
+
+    def runs(name: str) -> bool:
+        return r["full"] is True or name in r["test_files"]
+
+    assert "api" in r["surfaces"], (
+        "a mcp_client-only diff must select `api`, where its own guard "
+        "(`tests/test_mcp_client.py`) is registered "
+        "(SOURCE_PATTERNS['api'] entry removed?)", r["surfaces"])
+    assert runs("test_mcp_client.py"), (
+        "a mcp_client-only diff does not run the module's own guard "
+        "(SOURCE_PATTERNS['api'] entry removed?)", r)
+    assert "core" in r["surfaces"], (
+        "a mcp_client-only diff dropped the core pool it selects on main "
+        "(CORE_ALSO entry removed?) — the `api` match REPLACES the `core` "
+        "fallback (#2938)", r["surfaces"])
+    for guard in ("test_client_status_vocabulary.py",
+                  "test_client_cli_probe.py"):
+        assert runs(guard), (
+            f"a mcp_client-only diff does not run {guard}, the core-registered "
+            "suite that executes the `tortoise-client` CLI against this "
+            "module's driver words (CORE_ALSO entry for "
+            "`tortoise/mcp_client.py` removed?)", r)
 
 
 def test_supabase_control_change_selects_the_org_purge_rpc_guard():
@@ -6333,6 +6454,257 @@ def test_the_opt_in_reaches_every_matrix_emitter_in_the_changes_job():
     assert not missing, (
         "every step that emits `fast_matrix` must see CI_SHARD_ROUTING, or the "
         f"opt-in is silently ignored on that path (#10186): {missing} of {names}")
+
+
+#: The comma-joined label expression the emitters must carry — the ONE value
+#: `_label_set` can parse out of an env var (a raw label list or a bare
+#: `…labels` reference is not it, and would make the seam silently inert).
+EXACT_PR_LABELS_EXPR = "${{ join(github.event.pull_request.labels.*.name, ',') }}"
+
+#: The declaration reference the emitters must carry. Pinned EXACTLY, not as a
+#: substring: `vars.CI_FOLD_RUNNER_LABELS_OLD` contains the name and resolves to an
+#: UNSET variable — which is silently the inert path (no warning, every row keeps
+#: its own runner), so a rename on either side would ship a lever that does nothing
+#: behind a green suite.
+EXACT_FOLD_DECLARATION_EXPR = "${{ vars.CI_FOLD_RUNNER_LABELS }}"
+
+
+def test_the_fold_lever_reaches_every_matrix_emitter_in_the_changes_job():
+    """#10897: the SAME one-lever-every-emitter rule, for the fold runner class.
+    The lever is read from the environment by
+    `resolve_fold_runner(os.environ.get("CI_PR_LABELS"), …, os.environ.
+    get("CI_FOLD_RUNNER_LABELS"))`, so an emitter that does not carry BOTH
+    variables keeps the normal runner class for every fold — silently, and on
+    exactly the event type a fold uses. `split` OVERRIDES `push-matrix`'s output
+    on tier-2 PRs, so wiring one and not the other is the #10186 defect exactly.
+
+    Job scope stays barred (`test_the_changes_job_carries_no_job_scope_env`): the
+    capstone gate lives in this job.
+
+    The EXACT expression is pinned for `CI_PR_LABELS`, not a substring: a value
+    that merely CONTAINS the word `labels` (a raw label list, a step output of
+    that name) is not the comma-joined string `_label_set` parses, so a looser
+    check would leave the seam dead in production with this pin green.
+    """
+    wf = _load_python_ci()
+    emitters = [
+        step for step in wf["jobs"]["changes"]["steps"]
+        if "--emit-push-matrix" in str(step.get("run") or "")
+        or "--split" in str(step.get("run") or "")
+    ]
+    names = [s.get("name") for s in emitters]
+    assert len(emitters) >= 2, f"expected both matrix emitters; discovered {names}"
+    # ⛔ EXACT expression, not a substring. `"labels" in value` passes for any
+    # value carrying the word — `${{ github.event.pull_request.labels }}`, a step
+    # output named `labels` — i.e. a value that is NOT the comma-joined label LIST
+    # `_label_set` expects, so the seam would be dead in production behind a green
+    # suite. That is the same class the sibling pin below closes for the
+    # declaration, one key over.
+    problems = []
+    for step in emitters:
+        env = _effective_step_env(wf, "changes", step)
+        if env.get("CI_PR_LABELS", "").strip() != EXACT_PR_LABELS_EXPR:
+            problems.append(
+                f"{step.get('name')}: CI_PR_LABELS is {env.get('CI_PR_LABELS')!r}, "
+                f"expected {EXACT_PR_LABELS_EXPR!r}")
+        if env.get("CI_FOLD_RUNNER_LABELS", "").strip() != EXACT_FOLD_DECLARATION_EXPR:
+            problems.append(
+                f"{step.get('name')}: CI_FOLD_RUNNER_LABELS is "
+                f"{env.get('CI_FOLD_RUNNER_LABELS')!r}, expected {EXACT_FOLD_DECLARATION_EXPR!r}")
+    assert not problems, (
+        "a fold PR must be able to reach its runner class from EVERY emitter that "
+        f"publishes `fast_matrix` (#10897): {problems}")
+
+
+# ── #10897: the fold's runner class resolves to a label ARRAY, or not at all ──
+#
+# `runs-on` is `fromJSON(matrix.runner)`, so the value that matters is the JSON
+# string the selector emits per row. These tests aim at the two ways it can go
+# wrong and neither is visible by reading the code:
+#   * a declaration that parses into something that is NOT a label array (an
+#     empty list, a bare string, a number, `[null]`) — `fromJSON` of that yields
+#     a `runs-on` no runner can match, i.e. a job that never starts;
+#   * the seam leaking onto NON-fold PRs, which would move main's rows and break
+#     every lane-parity comparison the merge rail does.
+
+
+def test_the_fold_runner_seam_is_inert_by_default(monkeypatch):
+    """No label, or no declaration -> the row's own runner, byte-identical.
+
+    ⛔ `CI_SHARD_ROUTING` is CLEARED here as well as the fold variables, and not
+    defensively: an operator or developer with the documented `pool-split` opt-in
+    exported has rows on two classes, so asserting "every row is the hosted label"
+    would red on an untouched suite — a false red on the one lever's own pin
+    (`test_the_opt_in_*` does the same for the same reason).
+    """
+    monkeypatch.delenv(cs.PR_LABELS_ENV, raising=False)
+    monkeypatch.delenv(cs.FOLD_RUNNER_ENV, raising=False)
+    monkeypatch.delenv(cs.SHARD_ROUTING_ENV, raising=False)
+    manifest = cs.load_manifest()
+    legs = cs.push_legs(manifest)
+    rows = cs.fast_matrix_include(legs["shards"])["include"]
+    assert [r["runner"] for r in rows] == [json.dumps(cs.SHARD_RUNNER_HOSTED)] * len(rows)
+
+    # a fold label with NO declaration declared is still inert
+    monkeypatch.setenv(cs.PR_LABELS_ENV, cs.FOLD_LABEL)
+    rows = cs.fast_matrix_include(legs["shards"])["include"]
+    assert [r["runner"] for r in rows] == [json.dumps(cs.SHARD_RUNNER_HOSTED)] * len(rows)
+
+
+def test_a_fold_seam_with_no_label_never_moves_a_pool_split_row(monkeypatch):
+    """The seam is inert for NON-fold PRs IN BOTH ROUTING MODES, not just the default.
+
+    A seam that only honours "inert" under `hosted-only` would silently rewrite
+    main's rows for every operator who opted into the split — and lane parity (the
+    merge rail's job-name subtraction) compares against those rows.
+    """
+    manifest = cs.load_manifest()
+    legs = cs.push_legs(manifest)
+    for mode in ("hosted-only", "pool-split"):
+        monkeypatch.setenv(cs.SHARD_ROUTING_ENV, mode)
+        monkeypatch.delenv(cs.PR_LABELS_ENV, raising=False)
+        monkeypatch.delenv(cs.FOLD_RUNNER_ENV, raising=False)
+        baseline = [r["runner"] for r in cs.fast_matrix_include(legs["shards"])["include"]]
+        monkeypatch.setenv(cs.PR_LABELS_ENV, "docs,test")
+        monkeypatch.setenv(cs.FOLD_RUNNER_ENV, '["self-hosted", "fold"]')
+        rows = [r["runner"] for r in cs.fast_matrix_include(legs["shards"])["include"]]
+        assert rows == baseline, mode
+
+
+def test_a_declared_fold_class_routes_the_matrix_through_the_real_emitter(monkeypatch):
+    """The ACTIVE path is exercised through `fast_matrix_include`, not just the helper.
+
+    Calling `resolve_fold_runner` directly leaves two mutations invisible to the
+    whole suite: the caller swapping its arguments (the inert cases carry
+    `labels=None`, so identity still holds) and a typo in `CI_PR_LABELS` /
+    `CI_FOLD_RUNNER_LABELS` (the constants the environment is read by). Either one
+    leaves the seam DEAD IN PRODUCTION with a green suite — the #10186 shape this
+    change exists downstream of.
+    """
+    manifest = cs.load_manifest()
+    legs = cs.push_legs(manifest)
+    monkeypatch.setenv(cs.SHARD_ROUTING_ENV, "hosted-only")
+    monkeypatch.setenv(cs.PR_LABELS_ENV, f"docs,{cs.FOLD_LABEL}")
+    monkeypatch.setenv(cs.FOLD_RUNNER_ENV, '["self-hosted", "fold"]')
+    rows = cs.fast_matrix_include(legs["shards"])["include"]
+    fold_class = json.dumps(["self-hosted", "fold"])
+    hosted = json.dumps(cs.SHARD_RUNNER_HOSTED)
+    # every leg takes the fold class EXCEPT the canary producer, which
+    # `fast_shard_runner` rule 1 pins (see the next test)
+    assert [r["runner"] for r in rows] == [fold_class] * (len(rows) - 1) + [hosted]
+
+
+def test_a_fold_never_moves_the_canary_producer_row(monkeypatch):
+    """`fast_shard_runner` rule 1 says the producer is ALWAYS the hosted label.
+
+    The producer's artifacts feed the canary streak, which is a comparison of
+    TESTS across runs; routing it onto a different class would make it a
+    comparison of runner classes — the failure measured 2026-10-27..30, when run
+    `40986603502` (head `5a2ae6aa1`) had `test (i)`, the canary, taken by
+    `pi-runner-vm-5` (ARM64) and killed at 32m12s at its own watchdog. The
+    runbook's residual table records that row (`docs/ops/ci-runner-x64.md`, the
+    `pool-split` residuals) — cited WITHOUT a line number on purpose: this branch
+    edits that runbook, and a `path:line` into a file under edit decays silently
+    the moment anything is inserted above it. The sentinel that verifies the row
+    still says this lives in `tests/test_ci_runner_x64_install.py`'s
+    `symbol_citations`, so the relay is checked while the address cannot go stale.
+    A fold therefore gets priority on the legs that carry the wall, and the
+    producer stays where the streak expects it.
+    """
+    manifest = cs.load_manifest()
+    legs = cs.push_legs(manifest)
+    monkeypatch.setenv(cs.SHARD_ROUTING_ENV, "hosted-only")
+    monkeypatch.setenv(cs.PR_LABELS_ENV, cs.FOLD_LABEL)
+    monkeypatch.setenv(cs.FOLD_RUNNER_ENV, '["self-hosted", "fold"]')
+    rows = cs.fast_matrix_include(legs["shards"])["include"]
+    producers = [r for r in rows if r["canary_producer"]]
+    assert len(producers) == 1, "exactly one row is the canary producer"
+    assert producers[0]["runner"] == json.dumps(cs.SHARD_RUNNER_HOSTED)
+
+
+def test_the_fold_declaration_warns_once_not_once_per_row(monkeypatch, capsys):
+    """`::warning::` is capped at 10 per STEP — 9 identical rows would mask later ones."""
+    manifest = cs.load_manifest()
+    legs = cs.push_legs(manifest)
+    monkeypatch.setenv(cs.PR_LABELS_ENV, cs.FOLD_LABEL)
+    monkeypatch.setenv(cs.FOLD_RUNNER_ENV, "not a label array")
+    rows = cs.fast_matrix_include(legs["shards"])["include"]
+    assert len(rows) > 1
+    assert capsys.readouterr().err.count("::warning::") == 1
+
+
+def test_the_workflow_env_names_the_selection_constants():
+    """The workflow's env KEYS are the constants the selector reads — one binding.
+
+    The emitter test pins the literal EXPRESSIONS; that proves the workflow carries
+    the right strings, not that they are the strings `fast_matrix_include` reads.
+    Renaming a constant would leave every other test green and the lever dead.
+    """
+    wf = _load_python_ci()
+    emitters = [
+        step for step in wf["jobs"]["changes"]["steps"]
+        if "--emit-push-matrix" in str(step.get("run") or "")
+        or "--split" in str(step.get("run") or "")
+    ]
+    assert emitters
+    for step in emitters:
+        env = _effective_step_env(wf, "changes", step)
+        assert cs.PR_LABELS_ENV in env, (step.get("name"), cs.PR_LABELS_ENV)
+        assert cs.FOLD_RUNNER_ENV in env, (step.get("name"), cs.FOLD_RUNNER_ENV)
+
+
+def test_a_declared_fold_class_routes_every_row_of_a_fold():
+    """A fold + a valid declaration -> EVERY row carries the declared array."""
+    labels = "docs, batch-fold"
+    assert cs.resolve_fold_runner(
+        labels, '["ubuntu-latest"]', '["self-hosted", "fold"]'
+    ) == '["self-hosted", "fold"]'
+    # it IS a label array once parsed — not just a string that looks like one
+    assert json.loads(cs.resolve_fold_runner(
+        labels, '["ubuntu-latest"]', '["self-hosted","fold"]')) == ["self-hosted", "fold"]
+    # a list argument resolves the same way as the workflow's comma-joined form
+    assert cs.resolve_fold_runner(
+        ["batch-fold"], '["ubuntu-latest"]', '["x"]') == '["x"]'
+    # label matching is case-folded: GitHub labels are case-insensitive
+    assert cs.resolve_fold_runner(
+        "BATCH-FOLD", '["ubuntu-latest"]', '["x"]') == '["x"]'
+
+
+@pytest.mark.parametrize("declaration", [
+    "",                                   # absent
+    "   ",                                # blank
+    "not json",                           # unparsable
+    '"self-hosted"',                     # a bare string is not a label array
+    "[]",                                 # EMPTY array -> fromJSON('[]') = no runs-on
+    "[null]",                             # null entry
+    '[""]',                               # empty label
+    '[1, 2]',                             # non-strings
+    '{"self-hosted": true}',             # an object
+])
+def test_an_unusable_fold_declaration_falls_back_never_routes_a_dead_label(declaration):
+    """Fail-SAFE: a bad setting costs the priority, never the job.
+
+    `[]` is the entry that matters most: it parses, it is a list, and it would
+    emit `runs-on: fromJSON("[]")` — a job no runner can ever pick up.
+    """
+    assert cs.resolve_fold_runner("batch-fold", '["ubuntu-latest"]', declaration) \
+        == '["ubuntu-latest"]'
+
+
+def test_a_non_fold_pr_keeps_its_own_runner_even_with_a_declaration():
+    assert cs.resolve_fold_runner("docs", '["self-hosted","self-hosted-x64"]',
+                                  '["self-hosted","fold"]') \
+        == '["self-hosted","self-hosted-x64"]'
+
+
+def test_a_warning_names_an_unusable_declaration(capsys):
+    """Silence would make a mis-set variable indistinguishable from 'nobody set it'."""
+    cs.resolve_fold_runner("batch-fold", '["ubuntu-latest"]', "oops")
+    err = capsys.readouterr().err
+    assert "::warning::" in err and cs.FOLD_RUNNER_ENV in err
+    # …and a merely ABSENT declaration is not a warning (that is every run today)
+    cs.resolve_fold_runner("batch-fold", '["ubuntu-latest"]', "")
+    assert capsys.readouterr().err == ""
 
 
 def test_the_changes_job_carries_no_job_scope_env():
@@ -9921,9 +10293,22 @@ def test_drift_gate_cannot_skip_the_test_matrix():
 
     # --- 4. the aggregate still FAILS, and never swallows it --------------
     gate = jobs["python-ci-gate"]
+    # #10911: `always()` is load-bearing here for a SECOND reason beyond #2656, so it
+    # stays literal. A cancelled run re-arms an `always()` job into a permanent `queued`
+    # state, which is a real wedge — but `${{ !cancelled() }}` is NOT the fix: a skipped
+    # REQUIRED check reports Success to branch protection and is counted non-red by
+    # `admin-merge.sh` NON_RED_CONC, i.e. a false PASS on the merge path. The "not
+    # skippable on a cancelled run" half is pinned in tests/test_ci_new_failure_gate.py
+    # ::test_the_required_aggregate_must_not_be_skippable_on_a_cancelled_run; the
+    # "skipped counts non-red" half is pinned against the rail's own set at
+    # tests/fixtures/rail_surface_tokens.json by
+    # tests/test_merge_throughput.py::test_surface_token_sets_match_the_committed_rail_record
+    # (always runs), and re-verified against the LIVE rail by
+    # ::test_rail_surface_token_sets_match. Cite the constant, not a rail line number —
+    # the record's own `_read_at_rail_lines` already shows those drift between checkouts.
     assert gate.get("if") in _always, (
-        "python-ci-gate must run even when the drift job fails — `if: always()`"
-        " is what lets it report the failure (#2656)")
+        "python-ci-gate must run even when the drift job fails (#2656), and must not be "
+        "skippable on a cancelled run (#10911) — `skipped` is a green required check")
     assert not gate.get("continue-on-error"), (
         "the required aggregate must not be continue-on-error (#2656)")
     gate_steps = gate.get("steps", [])
@@ -13304,6 +13689,23 @@ def test_lane_stash_guard_runs_on_a_tools_only_change():
     assert "test_lane_stash.py" in r["test_files"], r
 
 
+def test_lane_wip_guard_runs_on_a_tools_only_change():
+    # #10812: `tests/test_lane_wip.py` (registered `core`) guards
+    # `tools/lane_wip.py` — the pin that snapshots a lane's UNCOMMITTED working
+    # state into `refs/pi-lane-wip/<lane-key>/<n>` so `git worktree remove
+    # --force` cannot destroy content that was never in the object DB (the
+    # measured 4,500-line loss). `tools/` is a flat NON_PYTHON_PREFIXES entry and
+    # the tool matches no SOURCE_PATTERNS row, so before the CORE_ALSO entry a
+    # tools-only diff was filtered out BEFORE the "not matched -> core" fallback:
+    # the pin never ran on the file it exists to hold (the #1349/#3332/#3616
+    # silent-drop class). Mutation check: removing the CORE_ALSO entry fails the
+    # arm below (surfaces == [] and the guard absent from test_files).
+    r = _sel(["tools/lane_wip.py"])
+    assert r["full"] is False, r
+    assert r["surfaces"] == ["core"], r
+    assert "test_lane_wip.py" in r["test_files"], r
+
+
 def test_rail_pin_runs_on_a_tools_only_change():
     # #2148: `tests/test_rail_detach.py` (registered `core`) pins the merge
     # rail's DURABILITY — the detached session that lets `admin-merge.sh`
@@ -13319,6 +13721,22 @@ def test_rail_pin_runs_on_a_tools_only_change():
     assert r["full"] is False, r
     assert r["surfaces"] == ["core"], r
     assert "test_rail_detach.py" in r["test_files"], r
+
+
+def test_runner_label_gate_runs_on_a_tools_only_change():
+    # #10920: `tests/test_ci_runner_label_coverage.py` (registered `core`) pins the CI
+    # runner-label coverage gate — the AND semantics its R1 is built on, the per-row
+    # matrix reading, and R2 (an x86_64 image claimed only by non-X64 hosts). `tools/` is
+    # a flat NON_PYTHON_PREFIXES entry and `tools/ci_runner_labels.py` matches no
+    # SOURCE_PATTERNS row, so before the CORE_ALSO entry a tool-only diff was filtered
+    # out BEFORE the "not matched -> core" fallback: a PR that deleted R2 or weakened
+    # the AND check would run `python-ci-gate` GREEN with none of the gate's own pins
+    # (the #1349/#3332/#3616 silent-drop class). Mutation check: removing the CORE_ALSO
+    # entry fails the arms below (surfaces == [] and the pin absent from test_files).
+    r = _sel(["tools/ci_runner_labels.py"])
+    assert r["full"] is False, r
+    assert r["surfaces"] == ["core"], r
+    assert "test_ci_runner_label_coverage.py" in r["test_files"], r
 
 
 def test_turn_parity_census_guard_runs_on_a_tools_only_change():

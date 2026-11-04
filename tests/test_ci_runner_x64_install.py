@@ -4667,6 +4667,17 @@ def test_the_relays_a_sibling_test_file_makes_land_on_what_they_name():
             "tests/test_capstone_preregistration_9075.py",
             r"and job scope is now forbidden by `test_the_changes_job_carries_no_job_scope_env`",
         ),
+        (
+            # the runbook's `pool-split` residual table: the canary row the producer exemption
+            # cites (#10897). Cited by SYMBOL for the reason this pin's own rule gives — the
+            # target is a file THIS BRANCH EDITS (the four `python-ci.yml:NNNN` re-cites and the
+            # #10237 canary paragraph), so a number would need re-deriving on every edit and
+            # would decay silently between them. The sentinel is the row's own claim, so a
+            # reworded or removed row reds rather than pointing at a blank line.
+            _CITING_TEST_FILE,
+            "docs/ops/ci-runner-x64.md",
+            r"`test \(i\)` \(\*\*the canary\*\*\) was taken by `pi-runner-vm-5` \(ARM64\) and killed at 32 m 12 s",
+        ),
     ]
 
     ref = re.compile(r"((?:tests/[A-Za-z0-9_/]+\.py)|(?:docs/ops/ci-runner-x64\.md)):(\d+)")

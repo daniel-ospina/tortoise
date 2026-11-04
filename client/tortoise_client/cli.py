@@ -27,10 +27,13 @@ this surface only:
 
 The four terms are `tortoise.status_vocabulary` — the ONE recorded
 client-boundary term set, imported rather than redeclared (the client wheel
-stages that module as a shared file). The driver (`tortoise/mcp_client.py`) is
-deliberately UNCHANGED: it has two outcomes and no notion of a missing endpoint,
-so this probe supplies the missing fact and maps the driver's word onto the
-recorded set. The pre-#3805 words (`ok` / `tortoise_unavailable` /
+stages that module as a shared file). The driver (`tortoise/mcp_client.py`) has
+two outcomes of its own: the pre-#3805 outage word `tortoise_unavailable` (kept
+verbatim, translated by `status_vocabulary.resolve`) and — since #10605 — the
+recorded `unconfigured` term for a credential-less auth refusal, because "this
+client has no key" is a set-up gap rather than an outage. Everything else the
+probe reports is derived here: the driver still has no notion of a missing
+ENDPOINT. The pre-#3805 words (`ok` / `tortoise_unavailable` /
 `not_configured`) are translated, never re-minted — see
 `status_vocabulary.resolve` (and `LEGACY_WORDS` for the flat table).
 
@@ -43,11 +46,16 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 
 from tortoise import status_vocabulary as vocab
-from tortoise.mcp_client import call_tool, list_tools, status
+from tortoise.mcp_client import (
+    call_tool,
+    describe_failure,
+    endpoint_declared,
+    list_tools,
+    status,
+)
 
 # ── Exit codes (#3832 / D5, vocabulary #3805) ───────────
 # Supersedes #526's exit-0 clause FOR THE CLI PROBE ONLY. The library below is
@@ -75,29 +83,38 @@ _STATUS_EXIT_CODES = {
 def _probe_payload() -> dict:
     """The probe payload, carrying the recorded client-boundary term (#3805).
 
-    The driver (`tortoise.mcp_client.status`) is deliberately UNCHANGED: it has
-    no notion of a missing endpoint (an unset TORTOISE_MCP_URL falls back to
-    the self-host default) and reports `tortoise_unavailable` for any failure
-    to answer. Splitting 'we were never pointed at a memory' (`unconfigured`)
-    from 'the memory is down' (`degraded`) is a presentation decision of this
-    probe — the exact boundary the D5 landing draws — so the driver keeps its
-    contract and its callers keep skipping cleanly, while the human/agent
-    surface gets a distinct signal.
+    The driver (`tortoise.mcp_client.status`) has no notion of a missing
+    ENDPOINT (an unset TORTOISE_MCP_URL falls back to the self-host default), so
+    `configured` below is this probe's contribution, and it decides the driver's
+    two-outcome outage word only. It is asked of the RESOLUTION
+    (`mcp_client.endpoint_declared`), not of the environment: since #10605 an
+    endpoint can also be DECLARED by a store's `api_url`, and deriving it from
+    `TORTOISE_MCP_URL` alone reported a store-configured, genuinely-down server
+    as `unconfigured` (exit 4, a policy gap) with `url: None` — inverting the
+    load-bearing property that `degraded` and `unconfigured` are never reported as
+    each other (#3805). The one term the DRIVER owns is the credential-less
+    refusal (`unconfigured`, #10605): it already arrives here as a recorded term
+    and is passed through untouched, which is why this probe never has to guess
+    whether a missing key was the cause.
 
-    BOUNDARY, stated rather than implied: on THIS probe, 'TORTOISE_MCP_URL is
-    unset' IS the definition of unconfigured. A self-hoster who runs the
-    default daemon without setting the variable and then loses that daemon
-    reads as `unconfigured`, not `degraded` — the endpoint was never declared,
-    so the probe cannot tell 'intended the default' from 'never set up' and does
-    not pretend to. Set TORTOISE_MCP_URL (even to the default) to move a down
-    daemon into the can't-reach-it state.
+    BOUNDARY, stated rather than implied: for the UNAVAILABLE word, "no endpoint
+    that this client will USE is declared" IS the definition of unconfigured on
+    this probe — `declared` describes the RESOLVED connection, so it is false when
+    neither `TORTOISE_MCP_URL` nor the store that supplies the credential records
+    an `api_url`. (A store may record an `api_url` and still yield `declared:
+    False`: with no usable `api_key` in it the store is not a credential source and
+    its endpoint is never read.) A self-hoster who runs the default daemon having
+    declared nothing, and then loses that daemon, reads as `unconfigured`, not
+    `degraded` — the probe cannot tell "intended the default" from "never set
+    up" and does not pretend to. Declare an endpoint (even the default) to move a
+    down daemon into the can't-reach-it state.
 
     The rewritten payload drops `url` (the driver filled in the UNCONFIGURED
     default, so keeping it would advertise an endpoint the probe just said was
     never configured) and adds `configured: false`.
     """
     payload = status()
-    configured = bool(os.environ.get("TORTOISE_MCP_URL"))
+    configured = endpoint_declared()
     term = vocab.resolve(payload.get("status"), configured=configured)
     if term == vocab.STATUS_UNCONFIGURED and not configured:
         return {**payload, "status": term, "configured": False, "url": None}
@@ -125,7 +142,9 @@ def _cmd_list_tools(_args: argparse.Namespace) -> int:
     try:
         tools = list_tools()
     except Exception as exc:  # noqa: BLE001, RUF100
-        print(f"tortoise unavailable: {exc}", file=sys.stderr)
+        # The server may echo the credential it rejected; print evidence, never
+        # the VALUE (#10605).
+        print(f"tortoise unavailable: {describe_failure(exc)}", file=sys.stderr)
         return _EXIT_ERR
     for name in tools:
         print(name)
@@ -143,7 +162,7 @@ def _cmd_call(args: argparse.Namespace) -> int:
     try:
         result = call_tool(args.tool, arguments)
     except Exception as exc:  # noqa: BLE001, RUF100
-        print(f"call failed: {exc}", file=sys.stderr)
+        print(f"call failed: {describe_failure(exc)}", file=sys.stderr)
         return _EXIT_ERR
     if getattr(result, "is_error", None):
         print(json.dumps({"is_error": True, "result": str(result)}, indent=2))

@@ -503,7 +503,14 @@ response_fields:
     pointKind is declared only on another layer (an Event kind — e.g. pointKind=''core:deployment'') written as
     a point — the point LANDS with that kind (#1934 warn-not-block) and the message names `create_event`. This door
     never re-labels (a Point is a different record, not a relabel of an entity), so `kind_layer_routed` cannot fire
-    here. Both codes ride the SAME key on the dedup-hit return, so a re-run reports them together rather than dropping
+    here. A FOURTH code rides it too (#10368): `terminal_fold_refused`, when the write DEDUP-hits a point that is
+    already a terminal claim and the fold carries NO temporal prop while it would write anything else — a caller
+    prop and/or an authored word — because a dedup hit never writes onto a settled belief: on the content leg the caller never named the
+    point (a content coincidence picked the target), and a `key`-resolved hit is an identity match, not a licence
+    to rewrite a settled record (#6110 decides identity; ingest already refuses the same fold, #10377). The whole fold is dropped, the HIT is still reported, and the
+    message names `update_point` as the addressed route that does revise a dead claim deliberately. The journaled
+    provenance retrofit (#7704) still folds, so an evidence-bearing re-run keeps its source. All of these codes ride
+    the SAME key on the dedup-hit return, so a re-run reports them together rather than dropping
     one'
   unchanged_when_off: n/a — not flag-gated; the key is ABSENT on a sourced or word-bearing write, and on every write
     whose fold actually applied, so that response stays byte-identical

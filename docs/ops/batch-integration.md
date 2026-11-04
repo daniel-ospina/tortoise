@@ -5,7 +5,7 @@ domain: platform
 doc_status: live
 subjects.team: epistemic-team
 aboutSubjects: batch-integration, ci-wall-clock, ci-headroom-guards
-aboutObjects: tortoise, "#10399", "#2148", .mergify.yml, .github/workflows/python-ci.yml, .github/workflows/post-merge-validation.yml, config/ci-surfaces.yml, tools/batch_open.py, superseded-by-fold
+aboutObjects: tortoise, "#10399", "#10897", "#2148", .mergify.yml, .github/workflows/python-ci.yml, .github/workflows/post-merge-validation.yml, config/ci-surfaces.yml, tools/batch_open.py, superseded-by-fold
 created: 2026-10-31
 updated: 2026-11-04
 ---
@@ -1189,6 +1189,137 @@ branch. The batch PR therefore still owes those contexts — the batch run is th
 will pass, not a substitute for them, and this doctrine does not ask for an exemption. What it removes
 is waiting on each constituent PR's own CI before batching; what it adds is a full-suite run that the
 rail's tiered selection does not perform.
+
+## Priority — a fold's CI and landing outrank its constituents (#10897)
+
+**The owner's question (2026-11-04):** *"will we have a way to prioritise for CI queues the
+combined ones? so their components don't land before and disrupt the process?"*
+
+**The gap it names is structural, not a matter of speed.** Nothing in this document, and nothing in
+`.mergify.yml`, knew that a constituent PR was *already contained* in a fold. So a constituent stayed
+queue-eligible, and it could be merged **ahead of** the fold: a fragment lands, `main` moves under the
+fold's own validation run, and the landed pool is then a composition no run has certified — the exact
+failure the batch exists to prevent, arriving through the one door the doctrine left open.
+
+Three mechanisms answer it. **Two of them are STRUCTURAL and live on PR #10902** — they remove the
+work rather than reordering it, and they are the larger half of the answer:
+
+| mechanism | what it does | where |
+|---|---|---|
+| **1. Entry gate** | a superseded constituent cannot ENTER the queue (`-label=superseded-by-fold` in `queue_conditions`) | `.mergify.yml`, PR #10902 |
+| **2. Close at fold-open** | `tools/batch_open.py` proves the constituent's head is contained in the fold's tree, then labels, comments and closes it | `tools/batch_open.py`, PR #10902 |
+| **3. CI priority for the fold** | the fold's own matrix rows get their own runner class, and the fold is ordered first in the queue | this change |
+
+Entry, not merge, is where mechanism 1 must bite: a PR blocked at entry never costs a CI cycle, while
+one blocked at merge has already spent the queue's validation run — and under the queue's own
+`batch_size` it spends that run for the PRs it was batched with. (Same reasoning `-draft` carries in
+[Landing](#landing--main-must-still-be-the-tree-you-tested): the draft gates ENTRY.)
+
+### 3. The fold's own CI gets its own class — opt-in, fail-safe, OFF today
+
+GitHub does not prioritise jobs in a runner queue: a run starts when a runner carrying **every** label
+in `runs-on` is free. A label no runner carries therefore does not deprioritise the job — it makes it
+**unstartable**, and an unstartable required check reads as "still queued": a red-less, progress-less
+hang, strictly worse than waiting.
+
+**Measured 2026-11-04:** this fleet carries `self-hosted`, `self-hosted-x64`, the arch/OS ornaments and
+the gate-following `ubuntu-latest` fallback (`tools/install-ci-runner-x64.sh`,
+`scripts/ci_runner_gate.sh`). **There is no dedicated fold capacity**, so shipping
+`runs-on: [self-hosted, fold]` as the default would hang every fold.
+
+So the decision lives in Python, where it is unit-tested, and the operator declares the class:
+
+```text
+CI_FOLD_RUNNER_LABELS = '["self-hosted", "self-hosted-x64"]'   # a repo variable; unset = seam inert
+```
+
+⛔ **Declare a class the pool really carries.** `["self-hosted", "fold"]` is the tempting value and it
+is precisely the failure this section opens with: `fold` is carried by **no runner on this fleet**, so
+it does not deprioritise the job — it makes the eight non-`canary_producer` legs of every fold
+**unstartable**, and those legs feed the required `python-ci-gate`, so the result is a red-less,
+progress-less pending check. `parse_fold_runner` cannot catch this: it validates the **shape** of the
+declaration, never the live pool — whether a runner carries a label is a fact about the fleet, not
+about the string (`tools/ci_selection.py:4493-4500`). So the fail-safe covers typos in the JSON, not
+typo'd or invented labels. At this writing the pool offers `["self-hosted"]`,
+`["self-hosted", "self-hosted-x64"]`, or `["ubuntu-latest"]`.
+
+⚠️ **Every one of those is a deliberate choice with a cost, and none is free.** `["ubuntu-latest"]` is
+main's current label but is also attached to the self-hosted pool as a FALLBACK whenever GitHub-hosted
+looks unhealthy **or the hosted queue is deep enough to stall work** (owner ruling #9878;
+`scripts/ci_runner_gate.sh`), so it is not a hosted-only class; a `self-hosted` class in either form
+removes the GitHub-hosted half of the race, so a **pool-side** stall — an outage on the box, or a
+contended box — holds the fold's required legs PENDING with nothing to answer them, the exposure
+`docs/ops/ci-runner-x64.md` records for every pool-only departure (`:773-779`); and the pool is
+MEASURABLY slower than hosted, in both of its architectures. On the x64 box, `test-slow (a)` over the
+same 365 nodeids took **1352.5 s against 246.5 s hosted — 5.49×** (`docs/ops/ci-runner-x64.md:208`); the
+ARM64 VMs resolve `ubuntu-latest` to a **~2× slower** class (`python-ci.yml:1844`) and one of them
+killed the canary at **32m12s of a 30m budget** (`python-ci.yml:1911`) — the same failure this section
+cites as the reason the `canary_producer` row is exempt. A priority mechanism that routes a fold onto a
+slower or stalled class makes the fold slower, which is the opposite of its purpose. Declare the class
+**and** the reason the fold may have it: on this fleet that reason is "dedicated fold capacity exists",
+and it does not yet.
+
+`tools/ci_selection.py::resolve_fold_runner` then, per matrix row:
+
+- PR has no `batch-fold` label → the row's own `runner`, **byte-identical** to main's;
+- fold + a usable declaration → every row carries that label array (a real `fromJSON`-able array —
+  `runs-on` is already per-row data, so no workflow rewrite) — **except the `canary_producer` row**;
+- fold + an unusable one (`[]`, a bare string, `[null]`, junk) → falls back and warns, once per
+  matrix (not once per row: `::warning::` annotations are capped at 10 per step). `[]` is the entry
+  that matters: it parses, it is a list, and it would emit a `runs-on` no runner can match.
+
+The `canary_producer` exemption is not a nicety: `fast_shard_runner` rule 1 pins the last shard to the
+hosted label precisely because the producer's artifacts feed the canary streak, and that streak is a
+comparison of TESTS across runs. Moving the producer onto another class would turn it into a
+comparison of runner classes — the failure measured 2026-10-27..30, when run `40986603502` (head
+`5a2ae6aa1`) had `test (i)`, the canary, taken by `pi-runner-vm-5` (ARM64) and killed at 32m12s of a
+30m budget (`docs/ops/ci-runner-x64.md:847`, `:888`). A fold gets priority on the legs that carry the
+wall; the producer stays where the streak expects it.
+
+`CI_PR_LABELS` and `CI_FOLD_RUNNER_LABELS` ride **both** matrix emitters (`Emit push matrix`,
+`Tier-2 duration split`) at STEP scope. Job scope is barred — `tests/test_capstone_preregistration_9075.py`
+refuses any `env:` above the capstone gate step, because such a key can hook the gate's interpreter —
+and a lever carried by one emitter is dead on exactly the event a fold uses (#10186's shape).
+
+**What is live today is the ordering, not the class.** Until capacity is dedicated, a fold is prioritised
+inside the queue: `.mergify.yml` `priority_rules` puts `label = batch-fold` **first**, at `9000` against
+the accelerator's `high` (`3000`; unmatched is `medium`, `2000`), with `allow_checks_interruption: true`.
+Mergify uses the FIRST matching rule, so the order — not the number alone — is what makes a fold that
+also carries `queue-accelerator` resolve at 9000.
+
+**The trade-off, stated rather than glossed:** `allow_checks_interruption` cancels checks already running,
+spending CI time already paid for — the same RCV trade the accelerator rule records, bounded the same
+way (use the label for a real fold, never for preference). And the structural levers (mechanisms 1 + 2)
+are what actually shrink the queue a fold waits behind; ordering only decides who goes first in what is
+left.
+
+### What this does not claim
+
+- **The `batch-fold` label must exist, and nothing applies it automatically yet.** Both halves of
+  mechanism 3 key on it, so on a repository where it has not been created the rule can never match and
+  the runner-class seam can never fire: an inert mechanism, not a wrong one. Create it once
+  (`batch-fold`, "A batch/fold PR — CI priority + queue precedence"), or let the fold tooling apply it
+  — `tools/batch_open.py` on #10902 is the natural home, and until it does, a fold carrying ONLY
+  `queue-accelerator` resolves at the accelerator's `high` (3000), which is priority but not this rule's
+  9000.
+- **The label must be on the PR when the CI run is CREATED — the two halves read it at different
+  times.** The Mergify half is evaluated server-side against the live PR, so a label added later does
+  reach the queue. The runner half does not: both emitters read `CI_PR_LABELS:
+  ${{ join(github.event.pull_request.labels.*.name, ',') }}`, which is the **webhook payload snapshot
+  captured when the run was created** (`tools/ci_selection.py:4631` is a plain `os.environ.get`), and
+  `on: pull_request:` carries no `types:`, so labelling an existing PR starts **no new run**. Consequences,
+  in operator terms: apply `batch-fold` in the PR-create call (`labels:` on
+  `POST /repos/{o}/{r}/pulls` — the shape `tools/batch_open.py` should use when #10902 takes this over),
+  or push a commit after labelling so the `synchronize` event runs the emitters again. **A label added to
+  an idle fold PR changes its queue order but not its in-flight run**, and the runner half then returns
+  `identity` silently: the warning path covers only an *unusable declaration*, never a *label missing from
+  the snapshot*, which is indistinguishable from "this PR is not a fold".
+- A constituent **already queued** before its fold opened is not removed by mechanism 1; the label
+  refuses the *next* evaluation, and the tool closes it. De-queueing a live batch is a human action.
+- No required check was added, removed or weakened to make any of this faster — priority is not
+  permission. `queue_conditions ∪ merge_conditions` still equals the live required set, name for name
+  (`check-required-set.py`; pinned in `tests/test_mergify_config_guard.py`), and the priority rule names
+  no check at all.
 
 ## Prior art this matches (and where it diverges)
 

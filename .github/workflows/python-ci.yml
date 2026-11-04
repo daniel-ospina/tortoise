@@ -396,6 +396,18 @@ jobs:
         id: push-matrix
         env:
           CI_SHARD_ROUTING: ${{ vars.CI_SHARD_ROUTING }}
+          # #10897: the FOLD runner class. `CI_PR_LABELS` is the PR's label list as
+          # the selector's input (empty on a push — `github.event.pull_request`
+          # does not exist there, and `join` over a missing path is empty, which
+          # is exactly the fail-safe we want: no labels, no routing).
+          # `CI_FOLD_RUNNER_LABELS` is the operator's declared class, and it is
+          # resolved in `tools/ci_selection.py::resolve_fold_runner` — NOT in an
+          # expression — so the decision is unit-tested, and an unusable value
+          # falls back to the row's own runner instead of routing a required
+          # check onto a label no runner carries (the unstartable-job failure,
+          # which is worse than a queue). Unset = this seam is inert.
+          CI_PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+          CI_FOLD_RUNNER_LABELS: ${{ vars.CI_FOLD_RUNNER_LABELS }}
         run: |
           MATRIX=$(python3 tools/ci_selection.py --emit-push-matrix)
           # #1472 regression fix: SPACE-JOINED strings inside the matrix (the
@@ -452,6 +464,11 @@ jobs:
         if: github.event_name == 'pull_request' && steps.select.outputs.full == 'false'
         env:
           CI_SHARD_ROUTING: ${{ vars.CI_SHARD_ROUTING }}
+          # #10897: emitter #2 of 2 — the fold runner class must be visible HERE
+          # too, or a tier-2 fold PR (every PR) silently keeps the normal class,
+          # i.e. a dead lever on the only event type that carries the label.
+          CI_PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+          CI_FOLD_RUNNER_LABELS: ${{ vars.CI_FOLD_RUNNER_LABELS }}
         run: |
           SPLIT=$(echo '${{ steps.select.outputs.test_files }}' | python3 tools/ci_selection.py --split)
           echo "fast_matrix=$(echo "$SPLIT" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["fast_matrix"]))')" >> "$GITHUB_OUTPUT"
@@ -4305,6 +4322,24 @@ jobs:
   ci-introduced-failure:
     # `always()`: this must run when the legs FAILED — that is the only case it exists
     # for. Without it the default `success()` would skip it on exactly the red runs.
+    #
+    # OVERRIDES: GitHub documents `${{ !cancelled() }}` as the alternative where
+    # `always()` keeps a job alive through cancellation — it would make this job conclude
+    # `skipped` instead of re-arming. Refused deliberately (#10911): a skipped verdict
+    # lands in the aggregate's `skipped` arm (this job's row carries the `-` selector),
+    # which REDs the required check.
+    #
+    # ⛔ DO NOT "fix" this to `${{ !cancelled() }}`. MEASURED 2026-11-04T12:03-12:22Z:
+    # `cancel-in-progress` above cancels a superseded PR run, GitHub RE-EVALUATES job
+    # `if` during cancellation, and `always()` is true there — so a cancelled run
+    # re-arms this job and pins it `queued`, blocking that PR's own newer run
+    # in the same concurrency group. That wedge is real. But the `if:` is not where it
+    # is fixed: this job is NOT a required context, and skipping it turns every
+    # cancelled run into a RED required check, which is a worse trade than the wedge.
+    # The wedge belongs where the verdict is CONSUMED.
+    #
+    # Pinned exactly by tests/test_ci_new_failure_gate.py
+    # ::test_both_jobs_stay_literal_always.
     if: always()
     # EXACTLY the arms that produce a TEST failure set — the only class #9984 lets the
     # predicate excuse. The gate's own deferrable set is this same list (pinned by
@@ -4420,6 +4455,28 @@ jobs:
           fi
 
   python-ci-gate:
+    # OVERRIDES: GitHub documents `${{ !cancelled() }}` as the alternative where
+    # `always()` keeps a job alive through cancellation. Refused deliberately (#10911):
+    # a SKIPPED required check reports Success to branch protection and the rail counts
+    # `skipped` non-red (its NON_RED_CONC, recorded in
+    # tests/fixtures/rail_surface_tokens.json), so it converts a throughput wedge into
+    # a bypass.
+    #
+    # ⛔ `always()` MUST stay non-skippable. This IS the required context
+    # (`merge_conditions`), and the measured wedge (#10911) — a cancelled run leaves ONE
+    # of these two jobs permanently `queued` (the verdict job in the runs this lane
+    # sampled, this aggregate in others) — fails SAFE: the required context never posts
+    # a conclusion. The rail then REFUSES BY NAME
+    # (`check-unresolved:<name>:<status>/<conclusion>`) at
+    # `ADMIN_MERGE_CHECK_UNRESOLVED_BOUND` (default 3600 s; `admin-merge.sh` assigns
+    # `CHECK_UNRESOLVED_BOUND` from it), which exists for precisely this shape — its own
+    # doc block says a run "that is queued because the whole pool is saturated never
+    # stops moving, so no progress-based clock can ever reach it". Making the gate
+    # skippable would replace that refusal with a green check.
+    #
+    # Pinned exactly by tests/test_ci_new_failure_gate.py
+    # ::test_both_jobs_stay_literal_always, and behaviourally by
+    # ::test_the_required_aggregate_must_not_be_skippable_on_a_cancelled_run.
     if: always()
     needs: [changes, manifest-integrity, workflow-lint, test, test-slow, test-carve-out, test-concurrency-falkor, packs-compile, test-track-b, test-d14-hosted-api, test-record-postgres, surface-guard, ci-introduced-failure]
     runs-on: ubuntu-latest
