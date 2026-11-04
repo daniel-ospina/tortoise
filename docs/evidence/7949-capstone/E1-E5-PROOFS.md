@@ -82,7 +82,7 @@ hold["delta_recall_pp"], …)`), so an unpinned leg was an unpinned verdict. Fou
 the `#10108` review, measured both ways (`+8.0` and `Δrecall +9.0` now red); the cell
 is pinned by `_DELTA_CELL`.
 
-⚠️ **Three more gaps of the same shape were found by the two review rounds that
+⚠️ **Four more gaps of the same shape were found by the three review rounds that
 followed**, and each was measured before being closed — recorded because every one is
 a *pin that stops one step short*, which is exactly what this file exists to name:
 
@@ -120,6 +120,20 @@ a *pin that stops one step short*, which is exactly what this file exists to nam
    count, a unique-table assertion, and `_RATE_ROWS` for the four rows that print a
    rate today — and each is measured red, while a row written `||` (a valid empty
    final cell) and a rate ADDED to a row that prints none both stay GREEN.
+4. **The guards above were scoped, and the scope was the hole.** Measured GREEN
+   before the fix, all four: a **duplicated `#### ⚠️ REPLICATED 2026-10-18`
+   subsection** above the real one (`_block` reads the FIRST match, so the corrupted
+   real copy was never read — the exact shape a conflict resolution that keeps both
+   sides produces); an **arms row relabelled** (`**raw arm (as built)**`) with a
+   correct `**raw**` decoy above it (`_row` keys on the exact label, so it validated
+   the decoy while the block published `72.0%` and `319` claims); a `78.9%` → `79%`
+   re-render, which is CORRECT at the printed integer precision but red because four
+   assertions still hardcoded a `0.05` tolerance instead of `_lup_tol` — the false
+   RED this pin's own doctrine forbids; and a negative `Δprecision` written with the
+   Unicode minus §10 already uses, which `_DELTA_CELL` refused with "can no longer
+   be read". Now: `_block` requires exactly one marker and ends at a level-1..4
+   heading, the arms table is guarded by physical rows and label ORDER, every
+   numeric comparison uses `_lup_tol`, and `_DELTA_CELL` accepts `−`. All measured.
 
 ---
 

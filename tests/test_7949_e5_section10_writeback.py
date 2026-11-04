@@ -41,10 +41,11 @@ row's subset label, n / both losses / **Δloss and its Δprecision / Δrecall le
 while publishing a branch-1 firing the run does not have), the
 `#### ⚠️ REPLICATED 2026-10-18` heading itself
 (deleted or renamed reds, named in the failure), a DUPLICATED, deleted,
-column-misaligned or fork-ordered table row, a second `| split |` table placed
-above the real one, a printed rate dropped from one of the four split rows that
-carry one, or the scorer's own thresholds (an instrument change with no
-write-back).
+column-misaligned or fork-ordered table row, a second `| split |` or `| arm |`
+table, a duplicated `#### ⚠️ REPLICATED 2026-10-18` subsection (only the first is
+read), a relabelled or extra arms row hiding behind a correct decoy, a printed rate
+dropped from one of the four split rows that carry one, or the scorer's own
+thresholds (an instrument change with no write-back).
 
 It does NOT pin the prose beside the tables, the split table's `other` column
 (except the decision-input row's Δ legs, which the registered rule reads), or the
@@ -90,7 +91,7 @@ _RATE_CELL = re.compile(r"^(\d+(?:\.\d+)?)\s*%$")
 #: `evaluate_branches` reads all three legs (`score_qualifiers.py:760-761`) — a pin
 #: that stops before this cell leaves the verdict's other two inputs free.
 _DELTA_CELL = re.compile(
-    r"^Δprecision\s*([+-]?\d+(?:\.\d+)?)\s*,\s*Δrecall\s*([+-]?\d+(?:\.\d+)?)$")
+    r"^Δprecision\s*([+\-\u2212]?\d+(?:\.\d+)?)\s*,\s*Δrecall\s*([+\-\u2212]?\d+(?:\.\d+)?)$")
 
 
 def _rate(cell: str, *, row: str) -> float:
@@ -151,13 +152,26 @@ def _ratio_cell(cell: str, *, row: str) -> tuple[float, int, int]:
 
 
 def _block(doc: str, marker: str) -> str:
-    """The text from `marker` to the next `####` heading (or the section's end)."""
-    assert marker in doc, (
-        f"§10 no longer carries the {marker!r} subsection — E5's write-back is "
-        "gone. Re-publish the replicated run (and its table) before closing "
-        "#7949; do not delete this pin")
+    """The text from `marker` to the next level-1..4 heading.
+
+    Both bounds are asserted rather than assumed (`#10108` review round 8):
+
+    * **Exactly one** `marker` in the document. `doc.split(marker, 1)` reads the
+      FIRST one, so a duplicated subsection — which is what a conflict resolution
+      that keeps both sides of a conflicting hunk produces — leaves the copy that is
+      never read free to publish anything: measured, a duplicated block with the
+      REAL copy's `holdout | bound` Δ corrupted to `+99.9 pp` stayed GREEN.
+    * The window ends at a level-1..4 heading, not at the literal `"\n####"` — that
+      prefix also matches `#####`, so a `#####` sub-heading anywhere inside the
+      subsection would silently truncate the window and take the tables with it.
+    """
+    occurrences = doc.count(marker)
+    assert occurrences == 1, (
+        f"§10 carries {occurrences} {marker!r} subsections, expected exactly 1 — "
+        "only the FIRST is read, so a duplicated copy could publish anything "
+        "while this pin validated the other one")
     tail = doc.split(marker, 1)[1]
-    return tail.split("\n####", 1)[0]
+    return re.split(r"^#{1,4}\s", tail, maxsplit=1, flags=re.M)[0]
 
 
 def _row(block: str, first_cell_pattern: str) -> list[str]:
@@ -175,18 +189,68 @@ def _row(block: str, first_cell_pattern: str) -> list[str]:
 #: green — measured (`#10108` review P2): swapping `recall` / `precision` in the
 #: header, deleting the header row, and renaming `qualifier loss` → `distortion` all
 #: left the pin GREEN while the table said something the run does not.
-_ARM_HEADER = ("qualifier loss", "distortion", "recall", "precision",
+_ARM_HEADER = ("arm", "qualifier loss", "distortion", "recall", "precision",
                "claims emitted")
 
 
-def _header_cells(block: str) -> list[str]:
-    """The cells of the arms table's header row (the one beginning `| arm |`)."""
-    found = re.findall(r"^\|\s*arm\s*\|(.*)\|\s*$", block, re.M)
-    assert len(found) == 1, (
-        "expected exactly one `| arm | ... |` header row under "
-        f"{_REPLICATED!r}, found {len(found)} — without it the cells below are "
-        "read by POSITION and a relabelled column publishes the wrong figure")
-    return [c.strip().replace("*", "") for c in found[0].split("|")]
+def _table(block: str, first_cell: str) -> list[list[str]]:
+    """Every row of the one `| <first_cell> | ... |` table in `block`, header first.
+
+    A dedicated reader rather than `_row()` because a table has SEVERAL rows and
+    `_row()`'s exactly-one-match invariant is a per-LABEL guard. Three properties
+    are asserted, each because it was measured missing (`#10108` rounds 6-8):
+
+    * **exactly one table** with this first header cell — a second (or forked) table
+      above the real one would be the only one read;
+    * the rows are read as ROWS, so a duplicated row cannot collapse onto a key and
+      hide a corrupted twin;
+    * one leading and one trailing pipe are stripped, never `str.strip('|')` — that
+      eats every trailing pipe, so a row whose empty last cell is written `||`
+      (valid GFM, the same row as `| |`) would read as a cell short.
+    """
+    header = re.compile(rf"^\|\s*{re.escape(first_cell)}\s*\|", re.M)
+    occurrences = len(header.findall(block))
+    assert occurrences == 1, (
+        f"§10 carries {occurrences} `| {first_cell} | ... |` table(s) under "
+        f"{_REPLICATED!r}, expected exactly 1 — only the FIRST would be read, so a "
+        "second (or forked) table could publish different figures while this pin "
+        "validated the other one")
+    lines = block.splitlines()
+    start = next(i for i, line in enumerate(lines) if header.match(line))
+    rows = []
+    for line in lines[start:]:
+        stripped = line.strip()
+        if not stripped.startswith("|"):
+            break
+        body = stripped[1:-1] if stripped.endswith("|") else stripped[1:]
+        cells = [c.strip().replace("*", "") for c in body.split("|")]
+        if all(c and set(c) <= set("-: ") for c in cells):
+            continue  # the `|---|---|…` separator
+        rows.append(cells)
+    return rows
+
+
+def _arms_table(block: str) -> list[list[str]]:
+    """§10's arms table, header first — with its two rows pinned by LABEL.
+
+    `_row()`'s per-label guard alone is not enough (`#10108` review round 8): it
+    finds the row whose first cell is exactly `**raw**`, so RELABELLING the real row
+    (`**raw arm (as built)**`) and adding a correct decoy `**raw**` row above it left
+    the pin GREEN while the table published `72.0%` and `319` claims. The physical
+    row count and the label ORDER close that, exactly as they do for the split table.
+    """
+    rows = _table(block, "arm")
+    assert rows and rows[0] == list(_ARM_HEADER), (
+        f"§10's arms table header is {rows[0] if rows else None!r}; the registered "
+        f"table is {list(_ARM_HEADER)!r}. The cells below are read by POSITION, "
+        "so a relabelled column publishes a different figure as green")
+    labels = [row[0] for row in rows[1:]]
+    assert labels == ["raw", "narrative"], (
+        f"§10's arms table publishes rows labelled {labels!r}, expected "
+        "['raw', 'narrative'] in that order. A relabelled row is not read by the "
+        "cell checks below, which key on the exact label, so it could publish a "
+        "different figure behind a correct decoy")
+    return rows
 
 
 #: A Δ cell in percentage points: `+10.0 pp`, `−13.3 pp`, `0 pp`. Parsed, never
@@ -245,39 +309,12 @@ _RATE_ROWS = frozenset({("holdout", "all"), ("holdout", "bound"),
 def _split_table(block: str) -> list[list[str]]:
     """Every row of §10's split table, header first, `**` stripped.
 
-    A dedicated reader rather than `_row()` because six rows share two first cells
-    (`holdout`, `tuning`) — `_row()`'s exactly-one-match invariant is the right
-    guard for the arms table and the wrong one here.
+    `_table()` does the reading (unique table, physical rows, one-pipe stripping);
+    this name is what the caller reads. The table has six rows sharing two first
+    cells (`holdout`, `tuning`), which is why `_row()`'s per-label guard is the wrong
+    invariant here — the row count and the header are the guards.
     """
-    lines = block.splitlines()
-    assert len(re.findall(r"^\|\s*split\s*\|", block, re.M)) == 1, (
-        "§10 carries more than one `| split | ... |` table under "
-        f"{_REPLICATED!r} — only the FIRST would be read, so a second (or a "
-        "forked) table could publish different figures while this pin validated "
-        "the other one. Exactly one is required")
-    for index, line in enumerate(lines):
-        if re.match(r"^\|\s*split\s*\|", line):
-            break
-    else:  # pragma: no cover — the count above already proved it exists
-        raise AssertionError(
-            "§10 no longer carries the `| split | ... |` table under "
-            f"{_REPLICATED!r} — the table the decision input is published in is "
-            "gone, so this pin would be comparing nothing")
-    rows = []
-    for line in lines[index:]:
-        stripped = line.strip()
-        if not stripped.startswith("|"):
-            break
-        # Strip ONE leading and ONE trailing pipe, never `str.strip('|')` — that
-        # eats every trailing pipe, so a row whose last cell is empty and written
-        # `||` (valid GFM, the same row as `| |`) would read as a cell SHORT and
-        # red as "misaligned" (`#10108` review P3, measured).
-        body = stripped[1:-1] if stripped.endswith("|") else stripped[1:]
-        cells = [c.strip().replace("*", "") for c in body.split("|")]
-        if all(c and set(c) <= set("-: ") for c in cells):
-            continue  # the `|---|---|…` separator
-        rows.append(cells)
-    return rows
+    return _table(block, "split")
 
 
 def _split_loss_cell(cell: str, *, row: str) -> tuple[int, float | None, float | None]:
@@ -402,21 +439,19 @@ def test_section10_publishes_the_numbers_the_registered_falsifier_produces(tmp_p
 
     block = _block(DOC.read_text(), _REPLICATED)
 
-    # The HEADER first: every arm cell below is compared by POSITION, so a header
-    # edit that swaps two labels publishes the wrong figure under the right number
-    # and would otherwise stay green (`#10108` review P2 — measured: swapping
-    # `recall` / `precision`, deleting the header row, and renaming `qualifier
-    # loss` → `distortion` all left the pin GREEN while the table said something
-    # the run does not).
-    assert _header_cells(block) == list(_ARM_HEADER), (
-        f"§10's arms table header is {_header_cells(block)!r}; the registered "
-        f"table is {list(_ARM_HEADER)!r}. The cells below are read by POSITION, "
-        "so a relabelled column publishes a different figure as green — restore "
-        "the column order (or re-derive the pin if the registration moved)")
+    # The arms TABLE first: its header, its two rows and their labels by POSITION.
+    # Every arm cell below is compared by POSITION, so a header edit that swaps two
+    # labels publishes the wrong figure under the right number, and a RELABELLED row
+    # (keyed on the exact label by `_row()`) can publish anything behind a correct
+    # decoy — measured GREEN before this guard (`#10108` review P2/P3: swapping
+    # `recall`/`precision`, deleting the header row, renaming `qualifier loss` →
+    # `distortion`, and relabelling the real `raw` row while adding a correct `**raw**`
+    # decoy all left the pin GREEN while the table said something the run does not).
+    arms = _arms_table(block)
 
-    # The arms' cells are compared as NUMBERS on the document's own grid, not as
-    # text (`#10108` review P3 — the same class the holdout row's `_loss_cell`
-    # already fixes). A TEXT compare reds when a factually-correct re-publication
+    # The arms' cells are compared as NUMBERS on the precision the document printed,
+    # not as text (`#10108` review P3 — the same class the holdout row already
+    # fixes). A TEXT compare reds when a factually-correct re-publication
     # is formatted differently (`52%` for `52.0%`, `13 of 25` for `13/25`), and
     # the tempting repair for that red is to edit §10 to fit the test instead of
     # the test to fit the document. Every figure the document publishes is still
@@ -441,12 +476,12 @@ def test_section10_publishes_the_numbers_the_registered_falsifier_produces(tmp_p
                 "epic's E5 write-back and every figure quoted from it are now "
                 "unsourced — re-derive the table from a fresh run (and say so in "
                 "the row's note); do not edit the pin")
-        assert abs(rate - agg["loss_rate"] * 100) <= 0.05, (
+        assert abs(rate - agg["loss_rate"] * 100) <= _lup_tol(got[0]), (
             f"§10's {arm} row publishes {rate}% loss; the registered falsifier "
             f"produced {agg['loss_rate'] * 100:.4g}% (cell {got[0]!r})")
 
         distortion = _rate(got[1], row=f"{arm} distortion")
-        assert abs(distortion - agg["distortion_rate"] * 100) <= 0.05, (
+        assert abs(distortion - agg["distortion_rate"] * 100) <= _lup_tol(got[1]), (
             f"§10's {arm} row publishes {distortion}% distortion; the "
             f"registered falsifier produced "
             f"{agg['distortion_rate'] * 100:.4g}% (cell {got[1]!r})")
@@ -458,7 +493,7 @@ def test_section10_publishes_the_numbers_the_registered_falsifier_produces(tmp_p
             assert (hit, total) == (pr[hit_key], pr[total_key]), (
                 f"§10's {arm} row publishes {label} {hit}/{total} (cell {cell!r}); "
                 f"the registered falsifier produced {pr[hit_key]}/{pr[total_key]}")
-            assert abs(pct - (pr[hit_key] / pr[total_key]) * 100) <= 0.05, (
+            assert abs(pct - (pr[hit_key] / pr[total_key]) * 100) <= _lup_tol(cell), (
                 f"§10's {arm} row publishes {label} {pct}%; the registered "
                 f"falsifier produced "
                 f"{pr[hit_key] / pr[total_key] * 100:.4g}% (cell {cell!r})")
@@ -488,7 +523,8 @@ def test_section10_publishes_the_numbers_the_registered_falsifier_produces(tmp_p
     for published, key, label in (
             (m.group(1), "delta_precision_pp", "Δprecision"),
             (m.group(2), "delta_recall_pp", "Δrecall")):
-        assert abs(float(published) - holdout[key]) <= 0.05, (
+        assert abs(float(published.replace("\u2212", "-")) - holdout[key]) \
+            <= _lup_tol(published), (
             f"§10's holdout row publishes {label} {published}; the registered "
             f"falsifier produced {holdout[key]:+.4g} — the decision input's "
             "precision/recall legs move `evaluate_branches`, so the row's "
