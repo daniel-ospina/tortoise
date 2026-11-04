@@ -80,7 +80,7 @@ RETIRED_LITERAL: dict[str, str] = {
     "tortoise_validate_domain": 'tortoise_graph_overview(section="validate_domain", domain=...)',
     "tortoise_paginated_query": "tortoise_query(offset=..., limit=...)",
     "tortoise_query_points_by_tag": "tortoise_query(tag=...)",
-    "tortoise_stale": 'tortoise_graph_overview(section="stale")',
+    "tortoise_stale": 'tortoise_graph_overview(section="stale", days=..., limit=...)',
     "tortoise_status": 'tortoise_graph_overview(section="status")',
     "tortoise_taxonomy": 'tortoise_graph_overview(section="taxonomy")',
 }

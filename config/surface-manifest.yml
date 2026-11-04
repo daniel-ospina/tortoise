@@ -49,7 +49,7 @@
 # a constant here.
 manifest_version: 1
 issue: 3863
-cut_at_commit: 2ae8b8f0afd8b4ce7af08e49a22c93898d184d01
+cut_at_commit: 6fa1198d7bb864be07788d475eb3b060d248b47e
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -804,7 +804,7 @@ retired:
   http_policy: true
   approval: null
 - name: tortoise_stale
-  use_instead: tortoise_graph_overview(section="stale")
+  use_instead: tortoise_graph_overview(section="stale", days=..., limit=...)
   sdk_method: stale_points
   http_policy: true
   approval: null
@@ -1889,7 +1889,7 @@ rows:
   class: agent-reachable
   cluster_canonical: tortoise_operator_action
 - name: tortoise_graph_overview
-  served_from: tortoise/mcp_server.py:953485e30d404d48
+  served_from: tortoise/mcp_server.py:baadcaea6747a211
   served_attributes: 03bd1202c5a73326
   family: reasoning
   family_rank: 3
@@ -1903,7 +1903,7 @@ rows:
   job: 'What is in this memory graph and how it is shaped — ONE orientation call (#4282 row 6). section: taxonomy|structure|structure_check|pointkinds|tags|sources|namespaces|graphs|topics|health|status|stale
     (the consolidated list_*/status/health zoo); validate_domain (requires domain); audit (optional point_kinds);
     dream_health. Omit section → a compact combined summary in the same envelope this family has always returned.
-    topics requires entity_id.'
+    topics requires entity_id; stale takes days (default 30) and limit (default 50).'
   dependency: 'handler-served: no declared SDK link'
   lifecycle: active
   used_by: agents, tooling, docs

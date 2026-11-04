@@ -680,7 +680,7 @@ def _drift_warnings(domain: str) -> list[dict]:
             "fix": (
                 "install or repair the `investment-portfolio-manager` pack "
                 "(tortoise pack validate) and re-run "
-                "tortoise_validate_domain"
+                "tortoise_graph_overview(section=\"validate_domain\", domain=...)"
             ),
         })
     spec = domain_chain_spec(domain)

@@ -1364,7 +1364,8 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "stale (the consolidated list_*/status/health zoo); validate_domain "
                     "(requires domain); audit (optional point_kinds); dream_health. "
                     "Omit section → a compact combined summary in the same envelope "
-                    "this family has always returned. topics requires entity_id.",
+                    "this family has always returned. topics requires entity_id; "
+                    "stale takes days (default 30) and limit (default 50).",
         risk="read",
         http_policy=True,
         sdk_method="",  # custom handler in mcp_server.py (dispatches per section)
@@ -2043,7 +2044,10 @@ RETIRED_USE_INSTEAD: dict[str, str] = {
     "tortoise_taxonomy": 'tortoise_graph_overview(section="taxonomy")',
     "tortoise_health": 'tortoise_graph_overview(section="health")',
     "tortoise_status": 'tortoise_graph_overview(section="status")',
-    "tortoise_stale": 'tortoise_graph_overview(section="stale")',
+    # `days`/`limit` are shown for the same reason `point_kinds` is: the door took them
+    # (`tortoise_stale(days=30, limit=50)`), so a migrating caller that omits them silently
+    # narrows its window and row cap.
+    "tortoise_stale": 'tortoise_graph_overview(section="stale", days=..., limit=...)',
     # #4282 row 6 — the remaining four members the approved container absorbs. Each
     # was reachable only as its own tool; the section names above are the container's
     # own dispatch values, so every pointer names a call that resolves.

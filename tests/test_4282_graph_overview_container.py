@@ -4,11 +4,13 @@ The approved target (`docs/product/beta-sdk-surface.md` row 9) has ONE orientati
 tool: *"What is in this memory graph and how it is shaped. Returns a named-section
 envelope, not a flat dict."* `docs/product/canonical-mcp-tools.md` row 6 names what it
 absorbs, and `tools/bridge_table.py`'s authored Phase-0.1 `DESTINATION` map says where
-each absorbed name lands. This file is the gate on the container's own four properties.
+each absorbed name lands. FIVE of row 6's seven names retire into the container; the
+other two are accounted for in `SECTION_ONLY_MEMBERS` and in the note below. This file
+is the gate on the container's own four properties.
 
 WHAT THIS IS THE GATE ON
 
-  1. **The container is advertised and its absorbed siblings are not.** The six names
+  1. **The container is advertised and its absorbed siblings are not.** The five names
      that retired in this batch leave `TOOL_REGISTRY` — a caller reaching them lands on
      the warning shim, which is #3883's contract, not a name vanishing.
   2. **Every pointer RESOLVES in one hop.** A retired name's replacement names the
@@ -23,8 +25,8 @@ WHAT THIS IS THE GATE ON
      re-implemented: the narrow doors are still the readers.
   4. **The default summary did not move.** `tortoise_graph_overview()` with no `section`
      returns exactly the envelope `tortoise_overview()` returned before this change —
-     the five argument-taking or newly-absorbed sections stay out of it. A container
-     that grew its default payload would be a behaviour change nobody asked for.
+     the FOUR sections in `_OVERVIEW_SUMMARY_SKIP` stay out of it. A container that grew
+     its default payload would be a behaviour change nobody asked for.
   5. **A section that needs an argument refuses by name** rather than calling its door
      with `None` and letting the failure surface as an unrelated error.
 
@@ -194,6 +196,9 @@ class TestDefaultSummaryIsUnchanged:
 
         monkeypatch.setattr(ms, "_overview_section", _fake_section)
         ms.tortoise_graph_overview()
+        assert len(ms._OVERVIEW_SUMMARY_SKIP) == 4, (
+            "the skip set is FOUR sections; a fifth means one was added without this "
+            "pin moving, and the default envelope is not 11 keys any more")
         for section in ("topics", "validate_domain", "audit", "dream_health"):
             assert section not in seen, f"{section} entered the default summary"
 

@@ -5194,7 +5194,7 @@ def tortoise_graph_overview(section: str | None = None,
     repair, and it retires once the container has a declared envelope.
 
     Omit `section` → the compact combined summary `tortoise_overview` returned.
-    That default is deliberately UNCHANGED by this consolidation: the five
+    That default is deliberately UNCHANGED by this consolidation: the four
     argument-taking or newly-absorbed sections stay out of it
     (`_OVERVIEW_SUMMARY_SKIP`), so a caller who passes no section sees exactly the
     envelope it saw before.
