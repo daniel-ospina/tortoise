@@ -101,16 +101,7 @@ CI cost is.
 
 from __future__ import annotations
 
-import argparse
-import json
-import re
-import shutil
-import subprocess
 import sys
-import tempfile
-from collections.abc import Callable
-from dataclasses import dataclass, field
-from pathlib import Path
 
 if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     raise SystemExit(
@@ -118,6 +109,16 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
         f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
         f"`uv run python tools/batch_open.py`"
     )
+
+import argparse
+import json
+import re
+import shutil
+import subprocess
+import tempfile
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from pathlib import Path
 
 
 REPO = Path(__file__).resolve().parent.parent

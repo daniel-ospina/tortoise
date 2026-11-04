@@ -69,7 +69,11 @@ removed (a graph is a key in the keyspace — gone with it), and a re-run is a
 *new LLM realization*, not these numbers. So for these two records the head, the
 corpus hash and the two floors are the **prose facts in the section above**
 (`54922a800f96…`, `fixtures_hash=sha256:dd7e8520…`, `e1_objects` 30,
-`e1_min_before_share` 0.20) rather than fields of the artifact. No published
+`e1_min_before_share` 0.20) rather than fields of the artifact. Because that is
+the one operand E1's bar is a fraction of, the score record states it too: its
+`before_arm_provenance` block names both artifacts, the four pin fields they
+lack and the ones they carry, and why the after arm's corpus is re-verified
+while theirs is not. No published
 number moves: both OFF populations clear both floors (78 and 69 Objects;
 0.3590 and 0.5652), and the falsifier's claim is `value_survived` 8/14 → 14/14
 (recovered 6 of 6), which was the injected count in the record as committed.
@@ -258,8 +262,8 @@ metric's own precision.
 3. **The ON arm here is n=1.** Two OFF runs, one ON run. A second ON run was not
    taken inside this pass, so the ON arm's own spread is unmeasured — read the
    ON share as one realization, not as the arm's value.
-4. **The E1/E2 rows in the verdict table USED to parse `e1-e2.log`; they no
-   longer do.** This was written as an open limitation when the probes landed
+4. **The E1/E2 rows in the verdict table USED to parse `e1-e2.log`; no row the
+   builder emits does.** This was written as an open limitation when the probes landed
    (#10342); the re-point followed and is landed
    (`docs/evidence/7949-capstone/probes/capstone_measure.py` cites
    `E1_E2_SCORES` for both rows, and `E1E2_LOG` no longer exists there). Kept as
@@ -314,20 +318,53 @@ GRAPHS (the ON log's own `# graph:` line — its `# head:` is equal either way, 
 the head cannot catch it), when the falsifier's SCORED `with_anchor` block is
 not the run the E2a record was taken on (a graph is `capstone_on_<head>_<stamp>`,
 so a SIBLING run of the same head is a different run, and naming the head is not
-enough), when a `with_anchor` block is present but EMPTY (a record that never
+enough), when the TWO before artifacts name the SAME graph (two copies of one
+run are one realization, not two — and `decidable` is the SET of pairings, so
+two copies of one reading can only ever agree and would report a DECIDED E1 off
+the replication the design requires and never got), when a before artifact
+carries no graph at all (an absent run cannot be told apart from a duplicated
+one), when the falsifier's SCORED `with_anchor` block does not DECLARE the
+injection it is credited for (`injected_anchor is not True` — an un-injected
+reading that reaches 14/14 is the inert counter under another name), when a
+share is not the fraction its OWN `bare_definite` / `objects` counts give (on
+either arm — the share is the one number E1's bar is scored on, and nothing may
+edit it while the counts printed beside it stand), when a `with_anchor` block is present but EMPTY (a record that never
 wrote its counter is not the flat shape that has no block), when its `as_written`
 block carries no graph — an absent provenance is not an inherited one — sits on another run, or reads counts other than the E2a
 record's (that block IS the E2a reading), when the value-gate positive controls
-are dead, or
+are dead, when a BEFORE artifact that names a pin names one other than the
+frozen `fixtures_hash` / `e1_objects` / `e1_min_before_share` (E1's bar is a
+fraction of that share, so its corpus and its floors are part of the bar —
+`#9076`), or
 when the ON run's corpus is not the pre-registration's frozen `fixtures_hash` —
 so a row can never cite a corpus the record did not freeze, a denominator the
 record did not freeze, or a population from another run.
+
+**One provenance is disclosed rather than refused, and the record says so.**
+The two before artifacts predate the four pin fields the shipped
+`e1_paired_arm.py` writes (see "Which probe revision produced each artifact"),
+so *their* corpus is a producer-time fact — G1 — that the pair cannot re-prove,
+while the after arm's corpus is re-verified from `on-arm.log` on every run. A
+`required` field would delete the only before arm this bundle has (the graphs
+lived in a removed container, and a re-run is a new LLM realization, not these
+numbers), so the driver instead **refuses a before artifact that names a
+different corpus or floor** — the case that can lie — and carries the absence
+into the record as `before_arm_provenance`: `status`, `pin_fields`, and per arm
+`fixtures_hash` / `pin_fields_present` / `pin_fields_absent`. That is why the
+asymmetry is visible to a reader of `e1-e2-scores.json` and not only to a reader
+of this file. It does not move any number — E1 is `REFUSED` at n=1, so nothing
+scores green off these arms — and it becomes material at the **n >= 2** below,
+where the first DECIDED E1 will be computed from before shares whose corpus the
+record cannot show; re-recording the pair at the shipped probe closes it.
 
 **E1's refusal is a measurement, not a gap.** Two independent OFF realizations
 (0.3590, 0.5652) and one ON realization (0.2131) can be paired two ways, and the
 two pairings give different verdicts. At n=1 per arm the verdict would depend on
 which before run is chosen, so the aggregate is `REFUSED` with both pairings
-printed. The next requirement is **n >= 2 per arm**.
+printed. The next requirement is **n >= 2 per arm** — and the two realizations
+have to BE two runs: the driver refuses a before pair taken on the same graph,
+because two copies of one OFF record pair identically, which would turn this
+refusal into a decided `FAIL` off a single realization.
 
 **The counts reach the rows.** The capstone's E2 row now carries E2a's count over
 the FROZEN 14 (`8 of 14` today; the bar is `>= 13 of 14`), and E1's carries the
