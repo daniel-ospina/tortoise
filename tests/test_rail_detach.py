@@ -897,6 +897,54 @@ def test_identity_uses_the_child_stamp_and_not_the_launch_age(tmp_path):
         rail.wait()
 
 
+def test_the_ticks_anchor_is_exact_and_step_immune(tmp_path):
+    """⛔ THE FAIL-DANGER DIRECTION, MEASURED — A CLOCK STEP MUST NOT RELEASE A LIVE RAIL.
+
+    `btime` moves with `settimeofday`, so a FORWARD wall step makes a live process look
+    NEWER than the artifact's timestamp (`lstart` / `btime + starttime`). Comparing wall
+    epochs therefore reports a LIVE rail as `lost`, and `lost` is the state `start`
+    accepts — a second rail on a PR that is still merging (#3061), plus an artifact
+    truncation that scopes the first rail's merge line out. That is why the anchor is
+    the kernel's `starttime` ticks, which never move: two probes of one process always
+    agree, and a recycled pid always differs.
+
+    Arm 1 is the step case exactly: ticks MATCH a live process while the wall stamp is an
+    hour old. Arm 2 is the recycle case: ticks differ by one while the wall stamp is
+    fresh — so the ticks answer decides in both directions, independently of the clock.
+    """
+    sd = tmp_path / "state"
+    sd.mkdir()
+    art = rd.artifact_path(sd, "o/r", 92)
+    logp = rd.log_path(sd, "o/r", 92)
+    rail = subprocess.Popen(["/bin/sleep", "20"], start_new_session=True,
+                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL)
+    try:
+        ticks = rd._proc_start_ticks(rail.pid)
+        if ticks is None:
+            pytest.skip("no procfs on this box — the ticks anchor cannot exist here")
+        old = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 3600))
+        now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+        # arm 1 — ticks MATCH a live process, wall stamp an hour old (a forward step)
+        art.write_text(f"PR=92\nREPO=o/r\nSTARTED_AT={old}\nLOG={logp}\nSPAWNING=1\n"
+                       f"CHILD_PID={rail.pid}\nCHILD_STARTED={old}\n"
+                       f"CHILD_START_TICKS={ticks}\n", encoding="utf-8")
+        st = rd.collect(sd, "o/r", 92)
+        assert st.state == rd.WAITING, st.as_dict()   # wall-only pre-fix: LOST
+
+        # arm 2 — ticks DIFFER by one, wall stamp FRESH: still a stranger
+        art.write_text(f"PR=92\nREPO=o/r\nSTARTED_AT={now}\nLOG={logp}\nSPAWNING=1\n"
+                       f"CHILD_PID={rail.pid}\nCHILD_STARTED={now}\n"
+                       f"CHILD_START_TICKS={ticks - 1}\n", encoding="utf-8")
+        st = rd.collect(sd, "o/r", 92)
+        assert st.state == rd.LOST, st.as_dict()      # wall-only pre-fix: WAITING
+        assert "RECYCLED" in st.reason
+    finally:
+        rail.kill()
+        rail.wait()
+
+
 def test_a_live_named_rail_with_no_child_started_keeps_the_documented_wedge(tmp_path):
     """The identity test must DEGRADE when the stamp is absent, not guess.
 

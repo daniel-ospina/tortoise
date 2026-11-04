@@ -37,8 +37,9 @@ THE ARTIFACT (durable, tool-owned)
     ${CELL_HOME:-$HOME}/.pi/agent/state/rail/rail-<owner-repo>-<pr>.md
 
 `KEY=VALUE` lines, appended in place: PR/REPO/HEAD/STARTED_AT/PID/SID/LOG/CWD,
-then `CHILD_PID=` (written by the RAIL itself) and `CHILD_STARTED=`,
-then `EXIT=`/`FINISHED_AT=` when the rail exits. `VERDICT` and `MERGE_SHA` are
+then `CHILD_PID=` (written by the RAIL itself), `CHILD_STARTED=` and
+`CHILD_START_TICKS=` (the rail's own `/proc` starttime, the step-immune identity
+anchor), then `EXIT=`/`FINISHED_AT=` when the rail exits. `VERDICT` and `MERGE_SHA` are
 DERIVED at collect time from the rail's own log lines (`✅ merged PR #N at <sha>`,
 `ALREADY MERGED`) rather than re-asking the API — the artifact must be readable
 when the network is not, and the rail's own words are the primary record.
@@ -171,14 +172,21 @@ SPAWNING_TTL_S = 60
 # unrailable wedge this module exists to remove: `lost` is both true and
 # recoverable. Same duration as the spawn window, for the same reason.
 GROUP_CLAIM_GRACE_S = SPAWNING_TTL_S
-# How far a process's OWN start time may exceed the artifact's `CHILD_STARTED=`
-# before it is provably a different process (`_pid_is_a_stranger`). The stamp has
-# 1-second resolution and the wrapper writes it immediately after the fork, so a
-# LIVE rail can read a second or two "newer" than the stamp; the slack covers that
-# plus local clock slew. Deliberately generous in the SAFE direction: too large
-# leaves the documented wedge (which fails closed), too small could read a live
-# merging rail as `lost` and let a second rail through (#3061).
-IDENTITY_SLACK_S = SPAWNING_TTL_S
+# How far a pid's own start time may exceed the artifact's `CHILD_STARTED=` before
+# it is provably a different process — used ONLY on the wall-clock fallback, i.e. a
+# box with no procfs (macOS), because there the rail cannot record
+# `CHILD_START_TICKS=` (see `child_script`) and identity has to be reconstructed from
+# timestamps. The stamp has 1-second resolution and is written immediately after the
+# fork, so the slack covers that plus a forward wall STEP of up to this size — a
+# step is the residual failure mode on this path, and it can only ever make a rail
+# look NEWER. Deliberately its own literal, NOT the spawn TTL: the two quantities
+# are unrelated, and aliasing them would silently widen one when the other moves.
+IDENTITY_SLACK_S = 5
+# Field 22 of `/proc/<pid>/stat` is `starttime`, in clock ticks since boot. It is
+# the kernel's monotonic record of when that pid started: it does not move with the
+# wall clock, so comparing it is exact — no slack, no step sensitivity — which is
+# why the ticks path is preferred over the timestamp path wherever procfs answers.
+PROC_STARTTIME_FIELD = 22
 
 # Every `gh` call here is INFORMATIONAL and every one of them is bounded. An
 # unbounded one is not a slow read, it is a WEDGE: `_head_sha` runs while this
@@ -291,6 +299,13 @@ def _ps(*args: str) -> str | None:
         out = subprocess.run(
             ["ps", *args], capture_output=True, text=True,
             timeout=PS_PROBE_TIMEOUT_S,
+            # ⛔ PIN THE LOCALE: `lstart` is a HUMAN-READABLE date, and `_pid_started_epoch`
+            # parses its month name. Under a localized `LC_TIME` (es_ES and friends) every
+            # parse would fail, `_pid_started_epoch` would answer None, and the
+            # recycled-pid identity test would silently degrade to "keep the claim" on
+            # exactly the boxes this fallback exists for. Pinned here so the claim that the
+            # parse is C-locale is a fact rather than an assumption.
+            env={**os.environ, "LC_ALL": "C", "LANG": "C"},
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -323,28 +338,44 @@ def _proc_stat_letter(pid: int) -> str | None:
         return None
 
 
-def _pid_started_epoch(pid: int) -> float | None:
-    """When `pid`'s process STARTED, as a Unix epoch, or None when unmeasurable.
+def _proc_start_ticks(pid: int) -> int | None:
+    """`/proc/<pid>/stat` field 22 (`starttime`, clock ticks since boot), or None
+    where there is no procfs.
 
-    ⛔ THIS IS THE ONLY IDENTITY A PID OFFERS. `kill(pid, 0)` answers "some process
-    owns this number now", never "it is still OUR process", and every comparable
-    implementation detects pid reuse exactly this way: record the start time and
-    compare it on each probe. A process cannot have started before it was forked,
-    so a start time LATER than the recorded one proves the number was recycled.
-
-    procfs answers exactly (field 22 `starttime`, in clock ticks since boot,
-    against `btime`); a box WITHOUT procfs (macOS — where the lanes run) asks the
-    local `ps` for `lstart` in the C locale. Both are bounded
-    (`PS_PROBE_TIMEOUT_S`); anything unparseable is None and the caller keeps the
-    claim.
+    This is the identity anchor because it is MONOTONIC: it is stamped by the
+    kernel at fork and never moves, so one process always answers the same value
+    and a recycled pid always answers a different one. Wall-clock timestamps
+    cannot do this — `btime` moves with `settimeofday`, so a forward step makes a
+    LIVE process look newer than it is (the fail-danger direction here).
     """
     try:
         raw = Path(f"/proc/{pid}/stat").read_text()
         # Split after the LAST `) `: the comm field may contain spaces AND parens,
-        # so a positional split over the whole line reads the wrong field — the
-        # same reason `_proc_stat_letter` does it this way. Field 3 (state) is
-        # element 0 here, so field 22 (starttime) is element 19.
-        starttime = int(raw.rsplit(") ", 1)[1].split()[19])
+        # so a positional split over the whole line reads the wrong field — the same
+        # reason `_proc_stat_letter` does it this way. Field 3 (state) is element 0,
+        # so field 22 is element 19.
+        return int(raw.rsplit(") ", 1)[1].split()[PROC_STARTTIME_FIELD - 3])
+    except (OSError, IndexError, ValueError):
+        return None
+
+
+def _pid_started_epoch(pid: int) -> float | None:
+    """When `pid`'s process started, as a Unix EPOCH in the CURRENT wall clock, or
+    None when unmeasurable.
+
+    ⛔ ONLY A FALLBACK, and only where procfs cannot answer (macOS): the epoch is
+    wall-clock derived (`btime` + ticks on Linux, `lstart` otherwise), so a clock
+    STEP after the artifact's stamp shifts it. `_pid_is_a_stranger` therefore tries
+    the monotonic ticks FIRST and lands here only when they are unavailable.
+
+    procfs answers exactly (field 22 ticks + `btime`); without it the local `ps` is
+    asked for `lstart` in the C locale. Both are bounded (`PS_PROBE_TIMEOUT_S`);
+    anything unparseable is None and the caller keeps the claim.
+    """
+    try:
+        starttime = _proc_start_ticks(pid)
+        if starttime is None:
+            raise OSError("no procfs")
         hz = os.sysconf("SC_CLK_TCK")
         btime = None
         for line in Path("/proc/stat").read_text().splitlines():
@@ -360,35 +391,48 @@ def _pid_started_epoch(pid: int) -> float | None:
     if not out or not out.strip():
         return None
     try:
-        # `lstart` is LOCAL time in the C locale; `ps` pads the day ("Nov  3") and
-        # strptime collapses the run of whitespace for us.
+        # `lstart` is LOCAL time in the C locale — `_ps` pins `LC_ALL=C` so the
+        # month name is parseable; `ps` pads the day ("Nov  3") and strptime
+        # collapses the run of whitespace for us.
         return time.mktime(time.strptime(" ".join(out.split()),
                                          "%a %b %d %H:%M:%S %Y"))
     except (ValueError, OverflowError):
         return None
 
 
-def _pid_is_a_stranger(pid: int, recorded_iso: str) -> bool:
+def _pid_is_a_stranger(pid: int, recorded_iso: str,
+                       recorded_ticks: str = "") -> bool:
     """True ONLY when `pid` provably belongs to a process that started AFTER the
     rail was forked — i.e. the rail's pid number was RECYCLED.
 
-    ⛔ ONE-SIDED BY DESIGN. It can conclude "this is not our rail" and never "this
+    ⛔ ONE-SIDED BY DESIGN: it can conclude "this is not our rail" and never "this
     is", so an unmeasurable probe returns False (keep the claim) — the same
     fail-direction discipline as `_ps_stat` and `_in_group`. It therefore cannot
     produce a false `lost`, and it never expires a LIVE rail however long the
-    runner queue takes: the rail's own start time is fixed, and elapsed time never
-    changes it.
+    runner queue takes: the rail's own start record is fixed and no elapsed time
+    ever changes it.
 
-    `recorded_iso` is the artifact's `CHILD_STARTED=`, written by the wrapper
-    immediately AFTER the fork, so our rail started at or before it.
-    `IDENTITY_SLACK_S` covers that stamp's 1-second resolution, the fork-to-`printf`
-    gap, and clock slew in the safe direction. A BACKWARD step larger than the
-    slack is the one way a live rail could read `lost` here — which is why the
-    slack is generous rather than tight; a rail killed and recycled INSIDE the
-    window stays the documented wedge, and a wedge fails closed.
+    TWO EVIDENCE SOURCES, strongest first:
+
+    1. `CHILD_START_TICKS=` (written from the rail's own `/proc` entry) against the
+       probed pid's ticks — MONOTONIC, so it is exact: equal ⇒ same process,
+       different ⇒ recycled. No slack, and no wall-clock sensitivity, which is what
+       keeps a clock STEP from reading a live rail as `lost`.
+    2. `CHILD_STARTED=` (a wall timestamp) against the probed pid's start EPOCH —
+       only where there is no procfs. This path IS step-sensitive by construction:
+       a forward step larger than `IDENTITY_SLACK_S` makes a live rail look newer
+       than its stamp, i.e. a stranger. That is a known, documented residual on the
+       no-procfs box class (the rail cannot read its own ticks there), and it is
+       the reason the slack exists rather than a tight bound.
+
+    Either source unmeasurable ⇒ False (keep the claim).
     """
     if pid <= 0:
-        return True
+        return False        # nothing to test ⇒ keep the claim, per the contract above
+    recorded = _int_or_none(recorded_ticks)
+    current = _proc_start_ticks(pid)
+    if recorded is not None and current is not None:
+        return current != recorded
     started = _pid_started_epoch(pid)
     if started is None:
         return False
@@ -826,7 +870,8 @@ def collect(state_dir: Path, repo: str, pr: int) -> RailState | None:
             return st
         if child > 0 and _pid_alive(child, ""):
             child_started = read_field(text, "CHILD_STARTED")
-            if _pid_is_a_stranger(child, child_started):
+            child_ticks = read_field(text, "CHILD_START_TICKS")
+            if _pid_is_a_stranger(child, child_started, child_ticks):
                 st.state = LOST
                 st.reason = (f"the pid the rail named (CHILD_PID={child}) started "
                              "AFTER this rail was forked, so it is a DIFFERENT "
@@ -1033,6 +1078,17 @@ def child_script(rail: Path, repo: str, pr: int, logp: Path, art: Path,
         f">> {_shquote(logp)} 2>&1 &\n"
         f"child=$!\n"
         f"printf 'CHILD_STARTED=%s\\n' \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" >> {_shquote(art)}\n"
+        # ⛔ A STEP-IMMUNE IDENTITY ANCHOR, WRITTEN FROM THE RAIL'S OWN /proc entry.
+        # `CHILD_STARTED` is a WALL timestamp, and `btime` moves with wall-clock
+        # STEPS, so comparing wall epochs makes a FORWARD step look like a pid
+        # recycle — a live rail reads `lost` and `start` then accepts a second rail
+        # (#3061). Field 22 (starttime, in clock ticks since boot) is the kernel's
+        # own monotonic record of when THIS pid started, and it never moves: two
+        # probes of one process always agree, and a recycled pid always differs. So
+        # where procfs answers, identity is EXACT and needs no slack. Empty where
+        # there is no procfs (macOS) — the reader then falls back to the wall stamp.
+        f"printf 'CHILD_START_TICKS=%s\\n' "
+        f"\"$(awk '{{print $22}}' /proc/$child/stat 2>/dev/null)\" >> {_shquote(art)}\n"
         f"wait \"$child\"; rc=$?\n"
         f"printf 'EXIT_ATTEMPT=%s\\nEXIT=%s\\nFINISHED_AT=%s\\n' "
         f"{_shquote(attempt)} \"$rc\" \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" >> {_shquote(art)}\n"
