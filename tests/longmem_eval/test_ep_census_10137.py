@@ -1593,7 +1593,7 @@ def test_committed_census_rederives_its_own_aggregate():
     (key set and ORDER only, never a value): keys alone let a cell carry a
     number no row supports.
 
-    ⚠️ Three things are RESIDUALLY un-derived, by the artifact's own limits
+    ⚠️ Two things are RESIDUALLY un-derived, by the artifact's own limits
     rather than by choice, and this pin cannot close them: the
     ``questions_in_run`` / ``questions_failed`` pair, checked only against each
     other and the ratio (the `questions_in_run - questions ==
