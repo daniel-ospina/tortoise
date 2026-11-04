@@ -610,6 +610,36 @@ status() {
     probe_rc=$?
     if [ "$probe_rc" = "0" ]; then
       echo "probe: OK (exit 0) — $(printf '%s' "$probe_out" | tail -1 | cut -c1-200)"
+      # ⛔ EXIT 0 IS NOT "THE POOL IS FINE", AND THE OPERATOR MUST BE TOLD WHICH IT IS. The probe
+      # runs `--status`, whose contract is exit 0 for every answer (it changes nothing by design —
+      # see the tool's EXIT block), so a WEDGED pool or an UNREADABLE job history arrives here as a
+      # green exit carrying a non-capacity verdict. Reporting only "OK" hid the state, and the
+      # first fix attempt (making `--status` return 6/2) REFUSED to arm the schedule on the one box
+      # that most needs it, naming a measurement failure that had not happened. So: arm it, and say
+      # what the pass will report each interval.
+      # ⛔ PROMISE THE STATE, NOT A NUMBER (review round 4, P3). This `case` matches the JSON KEY
+      # `wedged`, which says the POOL is wedged — it does NOT say the VERDICT. The override in
+      # `tools/runner_autoscale.py` fires only when the pass has no failure of its own
+      # (`record["verdict"] in (…benign…) and record.get("problem_kind") != "no-listener"`), so a
+      # wedged pool that ALSO fails to grow reports `under-target`/exit **4** with
+      # `"wedged": [...]` still in the record — pinned by this PR's own
+      # `test_a_wedged_box_that_ALSO_failed_to_grow_keeps_exit_4`. "every fire will report exit 6"
+      # was therefore false in exactly the co-occurrence that PR calls the NORMAL shape. `main`'s
+      # ladder returns 1/3/2/4/5 BEFORE the exit-6 arm, so the honest sentence names 6 and says
+      # what outranks it.
+      case "$probe_out" in
+        *wedged*)
+          echo "NOTE: the pool is WEDGED — MEASURED, not a measurement failure. A fire exits 6 when" >&2
+          echo "      nothing else about it has already decided the code; a pass whose own verdict is" >&2
+          echo "      `refused`, `unmeasurable`, `action-failed`, `under-target`+`no-listener` or" >&2
+          echo "      `fill-refused-by-provisioner` reports THAT code and still names the registrations" >&2
+          echo "      (the tool's EXIT block says which). Repair it as docs/ops/ci-runner-x64.md" >&2
+          echo "      describes; the schedule is armed so the state stops being invisible." >&2 ;;
+        *uncertified*)
+          echo "NOTE: the job outcomes were UNREADABLE — capacity cannot be certified either way. A" >&2
+          echo "      fire exits 2 when nothing else about it has already decided the code, and keeps" >&2
+          echo "      doing so until 'gh' can read them (a --status probe stays exit 0 by design)." >&2 ;;
+      esac
     else
       echo "probe: FAILED (exit $probe_rc) — this schedule would fire and do NOTHING:" >&2
       echo "       $(printf '%s' "$probe_out" | tail -1 | cut -c1-300)" >&2
@@ -795,8 +825,30 @@ if [ "${AUTOSCALE_SKIP_PROBE:-0}" != "1" ]; then
     echo "REFUSED: the guard cannot MEASURE on this box, so a schedule here would fire and do nothing." >&2
     echo "         probe said: $(printf '%s' "$probe_out" | tail -1)" >&2
     echo "         fix that reading (gh on PATH, memory readable), or AUTOSCALE_SKIP_PROBE=1 to arm it anyway." >&2
+    echo "         ⛔ a WEDGED pool or an UNREADABLE job history is NOT this case: the probe runs the" >&2
+    echo "         tool's --status mode, which reports those as exit 0 (verdict=wedged/uncertified, exit" >&2
+    echo "         6/2 on a REAL pass) precisely so this probe does not refuse the box that needs it." >&2
     exit 2
   fi
+  # ⛔ ARMING A WEDGED BOX IS THE POINT, AND SILENTLY ARMING IT IS NOT. The probe's exit 0 says
+  # "this schedule can measure", not "the pool serves jobs": a wedged pool (or an unreadable job
+  # history) answers `--status` green by contract, so the operator gets the state named here instead
+  # of a later surprise. Nothing is refused — the schedule is exactly what stops the state being
+  # invisible.
+  case "$probe_out" in
+    # ⛔ Same rule as `status()`'s advisory: `*wedged*` matches the KEY, so it cannot promise the
+    # CODE — an exit-code promise here was false on a wedged pool that also failed to grow (exit 4,
+    # pinned by `test_a_wedged_box_that_ALSO_failed_to_grow_keeps_exit_4`).
+    *wedged*)
+      echo "NOTE: the pool is WEDGED — MEASURED, not a measurement failure. Arming the schedule so" >&2
+      echo "      every fire REPORTS the state; a fire exits 6 when nothing else about it has already" >&2
+      echo "      decided the code, and otherwise reports that failure's own code (the tool's EXIT" >&2
+      echo "      block says which). Repair it as docs/ops/ci-runner-x64.md describes." >&2 ;;
+    *uncertified*)
+      echo "NOTE: the job outcomes were UNREADABLE — every fire reports the state; a fire exits 2 when" >&2
+      echo "      nothing else about it has already decided the code, and keeps doing so until 'gh' can" >&2
+      echo "      read them (a --status probe stays exit 0 by design)." >&2 ;;
+  esac
 fi
 mkdir -p "$STATE_DIR" "$INSTALL_DIR" || exit 1
 install -m 0755 "$TOOL" "$INSTALLED" || { echo "ERROR: could not install the runnable copy" >&2; exit 1; }

@@ -632,12 +632,42 @@ class Refused(Exception):
     """A precondition the launcher itself enforces (never a rail verdict)."""
 
 
+def _gh(argv: list[str], cwd: Path,
+        timeout: float | None = None) -> subprocess.CompletedProcess:
+    """Run `gh`; a MISSING BINARY is a failed query, never a crash.
+
+    Both callers below are best-effort (`_head_sha` already answers `unreadable`
+    on a non-zero exit, `_resolve_repo` refuses), but an absent `gh` raised
+    `FileNotFoundError` OUT of `launch()` — so the launcher died instead of
+    stamping its artifact, and every arm of `tests/test_rail_detach.py` read as
+    a failure on the #9018 fallback pool, whose `ubuntu-latest` is a bare runner
+    with a minimal non-login PATH and no `gh` (measured 2026-11-03: 20 red arms
+    on `pi-runner-vm-2`, `gh: No such file or directory`, on a PR whose diff
+    touches neither this tool nor its test). rc=127 is what a shell reports for
+    a missing command, so the callers' `returncode != 0` arms handle it — the
+    same shape `tools/who_is_on.py` already uses for `git`
+    (`except FileNotFoundError: return 127, "", "<bin>: command not found"`).
+
+    `timeout` is threaded through for the callers that must stay BOUNDED (the
+    merge of #10691's `GH_PROBE_TIMEOUT_S` bound onto main's helper): the bound
+    and the absent-binary answer are two halves of one call, so a caller that
+    needs the bound must not fall back to a raw `subprocess.run` and lose the
+    127.
+    """
+    try:
+        return subprocess.run(argv, cwd=str(cwd), capture_output=True, text=True,
+                              timeout=timeout)
+    except FileNotFoundError:
+        return subprocess.CompletedProcess(argv, 127, "",
+                                           "gh: command not found")
+
+
 def _resolve_repo(cwd: Path) -> str:
     env_repo = os.environ.get("GH_REPO", "")
     try:
-        out = subprocess.run(
+        out = _gh(
             ["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
-            cwd=str(cwd), capture_output=True, text=True,
+            Path(cwd),
             timeout=GH_PROBE_TIMEOUT_S,
         )
     except subprocess.TimeoutExpired:
@@ -667,7 +697,12 @@ def _resolve_repo(cwd: Path) -> str:
                 "unset GH_REPO rather than detaching a rail at an unknown target"
             )
         return repo
-    raise Refused("could not resolve the repo from this checkout (`gh repo view` failed)")
+    detail = (out.stderr or "").strip().splitlines()
+    raise Refused(
+        "could not resolve the repo from this checkout (`gh repo view` failed"
+        + (f": {detail[-1]}" if detail else "")
+        + ") — pass `--repo owner/name`, or install the `gh` CLI"
+    )
 
 
 def _head_sha(cwd: Path, repo: str, pr: int) -> str:
@@ -675,10 +710,10 @@ def _head_sha(cwd: Path, repo: str, pr: int) -> str:
     nothing gates on it — and BOUNDED, because this call is made while the
     duplicate-rail flock is held (see GH_PROBE_TIMEOUT_S)."""
     try:
-        out = subprocess.run(
+        out = _gh(
             ["gh", "pr", "view", str(pr), "--repo", repo, "--json", "headRefOid",
              "-q", ".headRefOid"],
-            cwd=str(cwd), capture_output=True, text=True,
+            Path(cwd),
             timeout=GH_PROBE_TIMEOUT_S,
         )
     except (subprocess.TimeoutExpired, OSError, subprocess.SubprocessError):
