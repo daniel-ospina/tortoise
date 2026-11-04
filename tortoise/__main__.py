@@ -3125,6 +3125,19 @@ def _mask_display_target(value: str) -> str:
     return masked[:min(cuts)] + "…"
 
 
+def _endpoint_is_readable(value: object) -> bool:
+    """Does ONE side's api_url parse as an endpoint at all? (the pair's question)
+
+    `_same_endpoint` answers for a PAIR, so it folds "the CLI's value is not a URL"
+    and "the harness's value is not a URL" into the same `None`. The `host-unknown`
+    message has to name WHICH side is unreadable (or that both are), so the
+    per-side question is asked through the SAME parser rather than re-deriving
+    parseability a second way: `x` vs `x` is `True` for a parseable endpoint and
+    `None` for an unparseable one.
+    """
+    return _same_endpoint(value, value) is not None
+
+
 def _same_endpoint(a: object, b: object) -> bool | None:
     """Do two configured api_urls name the SAME endpoint?
 
@@ -3333,7 +3346,7 @@ def _cmd_config(args) -> int:
     import shlex as _shlex
     import sys as _sys
 
-    from tortoise.config import is_db_uri
+    from tortoise.config import is_db_uri, looks_like_uri_userinfo
 
     json_mode = bool(getattr(args, "json", False))
     payload: dict = {"status": "ok", "credential": {}, "graph_store": {},
@@ -3671,12 +3684,15 @@ def _cmd_config(args) -> int:
         if db_source == "default":
             graph_store["note_default"] = (
                 "nothing is configured — this is the resolved default")
-        # AUTHORITY FORM, not "contains a colon": `//token@host/x.db` carries a
-        # token as the user with no `:` at all. A filesystem path (`/tmp/me@work/…`)
-        # does not start with `//`, so it stays legible — which is why the
-        # predicate is written this way rather than as "any `@`".
-        userinfoish = (uri.startswith("//")
-                       and "@" in uri.split("/", 2)[-1].split("/", 1)[0])
+        # AUTHORITY FORM **or** USERINFO COLLAPSED INTO A PATH — one shared
+        # predicate (`looks_like_uri_userinfo` in `tortoise/config.py`), because this
+        # report and that module's log line were two hand-written copies of a
+        # `startswith("//")` test and BOTH leaked `/user:pw@host/x.db`: the value is
+        # ABSOLUTE here, and `os.path.abspath` collapses a leading `///` to `/`, so
+        # the `//` test never fired and the password was printed as a plain path.
+        # Not a bare `@` test either — `/tmp/me@work/db.fdb` and `/tmp/a:b.db` are
+        # legal paths, pinned as legible below.
+        userinfoish = looks_like_uri_userinfo(uri)
         if is_db_uri(uri) or "://" in uri or userinfoish:
             graph_store["target"] = _mask_display_target(uri)
             if graph_store["target"].startswith("<"):
@@ -4082,12 +4098,27 @@ def _cmd_config(args) -> int:
               " both api_url values are not URLs (or are empty). Check the two"
               " api_url lines above — a missing scheme (`https://host`) is the usual"
               " cause.")
-        if isinstance(api_url, str) and api_url == harness_url_raw:
-            # Only when the two RAW values are identical is a joint failure real.
-            print("     Both surfaces carry that same value, so BOTH fail the same"
-                  " way.")
+        if _endpoint_is_readable(api_url):
+            if _endpoint_is_readable(harness_url_raw):
+                # Unreachable through `same-key-host-unknown` (that relation
+                # means at least one side is unparseable), kept so a future
+                # relation change cannot silently print neither branch.
+                print("     Both surfaces carry a parseable api_url.")
+            else:
+                print("     Only one side is affected — the HARNESS's api_url does"
+                      " not parse, so the CLI's endpoint above is the one in use.")
+        elif _endpoint_is_readable(harness_url_raw):
+            print("     Only one side is affected — the CLI's api_url does not"
+                  " parse, so the harness's endpoint above is the one in use.")
         else:
-            print("     Only one side is affected — see the api_url lines above.")
+            # BOTH raw values are unparseable, so BOTH sides fail the same way.
+            # Equality of the two raw strings was used as a proxy for this and is
+            # only SUFFICIENT, never necessary: two DIFFERENT non-URLs
+            # (`host-one.example`, `host-two.example`) are a joint failure too, and
+            # the old branch told the reader "Only one side is affected" there —
+            # the false statement this test now pins against.
+            print("     BOTH api_url values are unreadable, so BOTH fail the same"
+                  " way — a refusal on one is reproduced on the other.")
     elif relation == "same-key-different-host":
         print("  → the SAME key as the CLI but a DIFFERENT endpoint — a refusal on"
               " one says nothing about the other")

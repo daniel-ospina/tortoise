@@ -1902,6 +1902,12 @@ def test_the_db_uri_log_line_does_not_print_a_query_credential(
     "/tmp/x.db?password=hunter2",
     "//u:hunter2@host/x.db",          # #2987: absolute, scheme dropped, authority kept
     "//hunter2@host/x.db",            # …and a TOKEN as the user, with no colon
+    # #10655 review P0: the COLLAPSED forms. `resolve_db_path` hands back an
+    # ABSOLUTE path and `os.path.abspath` collapses a leading `///` to `/`, so the
+    # `startswith("//")` test this predicate used to be never fired and the log
+    # line printed the password. Measured red before the fix, green after.
+    "///u:hunter2@host/x.db",
+    "////u:hunter2@host/x.db",
 ])
 def test_the_db_uri_log_line_does_not_print_a_userinfo_credential(
         monkeypatch, capsys, caplog, tmp_path, hostile):
@@ -1926,6 +1932,56 @@ def test_a_resolved_path_with_a_colon_is_still_a_path(monkeypatch, capsys, tmp_p
     store = json.loads(capsys.readouterr().out)["graph_store"]
     assert store["target_kind"] == "embedded file path"
     assert store["target"].endswith("a:b.db")
+
+
+@pytest.mark.parametrize("var, value", [
+    # The AUTHORITY form arrives as an absolute path with the `//` COLLAPSED by
+    # `os.path.abspath` (`///u:pw@host/x.db` -> `/u:pw@host/x.db`).
+    ("TORTOISE_DB_URI", "///tester:hunter2@host/x.db"),
+    ("TORTOISE_DB_URI", "////tester:hunter2@host/x.db"),
+    # A `TORTOISE_DB_PATH` is absolute already, so it never had a `//` at all.
+    ("TORTOISE_DB_PATH", "/tester:hunter2@host/x.db"),
+])
+def test_a_userinfo_dsn_collapsed_into_an_absolute_path_is_redacted(
+        monkeypatch, capsys, tmp_path, var, value):
+    """#10655 review P0 — the report printed the DB PASSWORD to stdout.
+
+    The predicate was `uri.startswith("//") and "@" in <authority>`, written to
+    keep `/tmp/me@work/db.fdb` legible. But the value the report carries came back
+    from a SUCCESSFUL `_resolve_db_target()`, which returns an ABSOLUTE path — and
+    `os.path.abspath` collapses a leading `///` to `/`. So `///u:pw@host/x.db`
+    arrived as `/u:pw@host/x.db`, the `//` test never fired, and the verb whose
+    whole job is to MASK credentials printed this as an ordinary embedded-file
+    path: `target=/u:pw@host/x.db  (TORTOISE_DB_PATH, embedded file path)`.
+
+    Measured RED on the pre-fix head (`\"target\": \"/tester:hunter2@host/x.db\"`).
+    """
+    _global(tmp_path)
+    monkeypatch.setenv(var, value)
+    assert _run(("config", "show", "--json")) == 0
+    cap = capsys.readouterr()
+    assert "hunter2" not in cap.out + cap.err
+    store = json.loads(cap.out)["graph_store"]
+    assert "hunter2" not in json.dumps(store)
+    assert store["target"].startswith("<")
+    assert store["target_kind"] == "unrecognised (redacted)"
+
+
+def test_an_at_sign_without_a_password_boundary_stays_legible(
+        monkeypatch, capsys, tmp_path):
+    """The other side of the P0 fix: `/tmp/me@work/db.fdb` is a legal path.
+
+    The tree's display masker fails closed on ANY `@`, so a bare-`@` predicate here
+    would redact this path — and it would also redact `/tmp/a:b.db`. The rule is
+    therefore the `user:password@` BOUNDARY (a `:` before the last `@`), not the
+    presence of `@`.
+    """
+    _global(tmp_path)
+    monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "me@work" / "db.fdb"))
+    assert _run(("config", "show", "--json")) == 0
+    store = json.loads(capsys.readouterr().out)["graph_store"]
+    assert store["target_kind"] == "embedded file path"
+    assert "me@work" in store["target"]
 
 
 def test_the_whitespace_relation_carries_the_endpoint_verdict(
@@ -2212,6 +2268,33 @@ def test_the_same_unparseable_value_on_both_sides_says_so(
     assert _run() == 0
     out = capsys.readouterr().out
     assert "BOTH fail the same way" in out
+
+
+def test_two_DIFFERENT_unparseable_api_urls_are_still_a_joint_failure(
+        monkeypatch, capsys, tmp_path):
+    """#10655 review P2 — "Only one side is affected" was false here.
+
+    The branch was `if api_url == harness_url_raw`, so only two IDENTICAL raw values
+    were called a joint failure, and the comment claimed identity was the rule.
+    Identity is SUFFICIENT, never necessary: two different non-URLs are both
+    unparseable, so both surfaces fail the same way and neither side is "the"
+    affected one. This is the class commits 83ad68e6b / 0562490ae closed — "cannot
+    parse" is UNKNOWN, never "different".
+
+    Measured RED on the pre-fix head: store `api_url=host-one.example`, harness
+    `apiUrl=host-two.example` printed "Only one side is affected".
+    """
+    _global(tmp_path)
+    _harness(tmp_path, json.dumps({"apiKey": GLOBAL_KEY,
+                                   "apiUrl": "host-two.example",
+                                   "cloud": True, "autoCapture": True}))
+    _write(tmp_path / ".tortoise" / "credentials.json",
+           json.dumps({**json.loads(GLOBAL), "api_url": "host-one.example"}))
+    assert _run() == 0
+    out = capsys.readouterr().out
+    assert "cannot be made" in out
+    assert "BOTH fail the same way" in out
+    assert "Only one side is affected" not in out
 
 
 def test_an_empty_api_url_env_is_disclosed(monkeypatch, capsys, tmp_path):
