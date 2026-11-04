@@ -788,6 +788,15 @@ mechanisms:
       the base, and it is what makes `3k minutes`/`3000 minutes` (a FALSE
       ACCUSATION at the base) agree now. Pinned by
       `tests/test_state_value_verbatim_10360.py::test_a_magnitude_prefix_beside_a_unit_word_is_COMPOSED_not_refused`.
+      ⛔ A SECOND, SEPARATE tolerance, and it comes from the COMPOSITION arm
+      rather than from that unknown-suffix path: `the ride was 20kms` against
+      `… 20000 ms` REFUSED at `origin/main` `525fde4a9` and TOLERATES here,
+      because `_composed_identity` reads `k`+`ms` as a kilo-MILLISECOND. ⛔ The
+      unit tables do NOT endorse that reading — UCUM and Pint both forbid a
+      prefix on an already-prefixed atom — so this is the arm choosing fail-open
+      over a refusal on an AMBIGUOUS colloquial spelling, not a new unit. The
+      colloquially-correct `20kms`/`20km` is unaffected (it stays tolerated) and
+      `20kms`/`20000 m` stays REFUSED at both heads.
       ⛔ The OPPOSITE direction is REFUSED, and it is a FALSE ACCUSATION: when
       the magnitude side carries no MAPPED unit — either a spelling outside both
       tables (`5k millis`, `5k dys`) or NO unit word at all (`5k` alone) — the
