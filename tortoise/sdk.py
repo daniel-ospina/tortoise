@@ -12190,10 +12190,17 @@ class TortoiseSDK:
         """Create a new Point node. Raises ValueError if kind is invalid.
 
         Set dedup=True to fold onto an existing Point. ⛔ That is not a blanket
-        idempotency claim, and not every repeat is a no-op: a call also carrying
-        ``props`` or ``authoredBy`` re-stores the node it folds onto
-        (``updatedAt`` moves), and a payload naming ``is_operator`` is outside the
-        fold's predicate entirely, so it mints a second Point.
+        idempotency claim, and not every repeat is a no-op: a payload naming
+        ``is_operator`` is outside the fold's predicate entirely, so it mints a
+        second Point (``pointKind`` mints one too, by a different route — the
+        passthrough WINS over the positional kind the fold scopes on), and a call
+        whose props SURVIVE this door's own pops re-stores the node it folds onto,
+        so ``updatedAt`` moves. ⛔ Which props those are is not "all of them":
+        ``status``, ``dedup`` and ``credibility`` are popped before the re-store
+        gate, so a ``status``-only repeat is a pure no-op — measured, same id and
+        an identical ``updatedAt``. An enumeration here has been wrong in both
+        directions; the RULE is provability, and the pops are why no enumeration
+        is stable.
         (``credibility`` is different, and the difference is instructive. It is
         keyword-only HERE, and the dedup path POPS it before forwarding. The MCP
         handler folds it into ``merged`` and splats that — which binds this same

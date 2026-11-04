@@ -36,6 +36,7 @@ remove.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 
 import pytest
 
@@ -226,14 +227,69 @@ def test_retry_safe_is_derived_from_the_registry_not_a_second_list():
         "double-counts the claim's EP weight (#10849)")
 
 
+#: The three verdicts above, as literals. Kept ONLY so the derivation test below can
+#: prove it is not the thing being consulted: if `_write_retry_safety` read a table
+#: like this instead of the registry, flipping a registry entry would change nothing.
+_LITERAL_EXPECTATIONS = {
+    "tortoise_create_point": True,
+    "tortoise_checkpoint": True,
+    "tortoise_create_source": True,
+}
+
+
+def test_the_verdict_FOLLOWS_a_flipped_registry_entry(monkeypatch):
+    """Derivation, EXERCISED — not just asserted against literals.
+
+    ⛔ The sibling test's name promises the verdict is "derived from the registry,
+    not a second list", and its body asserted three fixed values — which a
+    hand-kept `{"tortoise_create_point": True, "tortoise_checkpoint": True,
+    "tortoise_create_source": True}` table reproduces exactly, leaving the suite
+    green while the derivation it describes is gone. A reviewer showed precisely
+    that: the name over-described the assertions.
+
+    So this flips the DECLARATION on a frozen `ToolDefinition` (via
+    `dataclasses.replace`, then a monkeypatched lookup) in BOTH directions and
+    requires the verdict to follow. A second list cannot pass this: it does not
+    read the entry, so flipping the entry changes nothing.
+    """
+    real = ms.get_tool_by_name()
+
+    def verdict_with(target: str, idempotent):
+        patched = dict(real)
+        patched[target] = dataclasses.replace(real[target], idempotent=idempotent)
+        monkeypatch.setattr(ms, "get_tool_by_name", lambda: patched)
+        return _error(ms._wait_bound_refusal_result(target))["data"]["retry_safe"]
+
+    # A tool the registry does NOT declare idempotent: flaring it True must make
+    # the verdict True (the arguments carry nothing that switches convergence off).
+    assert real["tortoise_create_operator"].annotations.idempotentHint is False
+    assert verdict_with("tortoise_create_operator", True) is True, (
+        "the verdict did not follow the registry entry — something other than the "
+        "declaration decides it, which is the parallel-list failure #4170 names")
+    assert verdict_with("tortoise_create_operator", False) is False
+
+    # ...and the reverse for one it DOES declare, so a constant True cannot pass.
+    assert real["tortoise_create_point"].annotations.idempotentHint is True
+    assert verdict_with("tortoise_create_point", False) is False, (
+        "hard-coded True survived a withdrawn declaration")
+    assert verdict_with("tortoise_create_point", True) is True
+
+    # The literals above must agree with the real registry, or this file is pinning
+    # a stale copy of it.
+    for name, expected in _LITERAL_EXPECTATIONS.items():
+        assert real[name].annotations.idempotentHint is expected
+
+
 def test_any_PROPS_PAYLOAD_makes_convergence_unprovable_so_it_is_never_called_safe():
     """`props` is an OPEN caller channel onto the node, so it is never called safe.
 
     ⛔ The claim is UNPROVABILITY, not "props defeats the fold" — that would be
     false for most payloads (see the counter-examples below, which fold onto one
-    id) and the test name would then over-describe the population it drives. Two
-    payloads are known to mint a second node and neither bounds the set; that is
-    precisely why the rule is provability.
+    id) and the test name would then over-describe the population it drives.
+    Payloads are known to mint a second node by at least two different routes
+    (``is_operator`` leaves the fold; ``pointKind`` wins over the queried kind),
+    and no enumeration bounds the set — which is precisely why the rule is
+    provability rather than a list.
 
     Measured through the real MCP door, `create_point(content=X,
     props={"is_operator": True})` twice mints TWO nodes with DIFFERENT ids (and
@@ -567,7 +623,7 @@ def test_an_ingest_bundle_with_append_only_entities_is_not_repeatable():
     # the RESOLUTION rather than an oversight: three review rounds each closed ONE
     # spelling of this hole (the append-only entities leg, the JSON-string bundle,
     # and the FLAT `props` splat), which is the signal that the enumeration is the
-    # defect. `sdk.py:26664` documents the points form as `{kind, content, ref?,
+    # defect. `sdk.py:26671` documents the points form as `{kind, content, ref?,
     # status?, **props}` — so `is_operator` sits BESIDE `kind`, not in `props`, and
     # no key allow-list sees it. The bundle's key space is open-ended, so the seam
     # reports what it knows ("not provable") instead of a claim it cannot ground.

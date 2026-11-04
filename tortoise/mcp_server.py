@@ -650,7 +650,7 @@ def _wait_bound_refused() -> bool:
 #:   * ``tortoise_search`` (``entity_type="point"``) indexes ``content`` +
 #:     ``search_keys`` only, while ``sdk.create_operator`` writes a ``:Point``
 #:     with ``{id, is_operator, op_type, direction, direction_basis, status}``,
-#:     plus ``label`` only ``if label:``, and NO ``content`` (``sdk.py:22420``) —
+#:     plus ``label`` only ``if label:``, and NO ``content`` (``sdk.py:22427``) —
 #:     so for EVERY created operator the recipe
 #:     returns nothing, "nothing" reads as "it did not commit", and the retry
 #:     duplicates the edge and double-counts its EP factor. That is the exact
@@ -787,12 +787,12 @@ def _arguments_disable_convergence(name: str, arguments) -> bool:
     #   * `entities` of type document/event are APPEND-ONLY (`sdk.py` "Document
     #     records are append-only — never deduped"; `docs/INGEST_CONTRACT.md` row
     #     1 `append_only_items`), and the SDK lowercases the type on BOTH legs
-    #     (`sdk.py:23734` admission, `sdk.py:27122` dispatch), so a case variant
+    #     (`sdk.py:23741` admission, `sdk.py:27129` dispatch), so a case variant
     #     reaches the writer too;
     #   * `bundle` may arrive as a JSON STRING — the handler calls
     #     `_parse(bundle)` after this seam runs and the served schema puts no
     #     `type` on it — so `json.dumps(...)` bypassed the whole check;
-    #   * and a bundle's points SPLAT `props` FLAT (`sdk.py:26664`: `[{kind,
+    #   * and a bundle's points SPLAT `props` FLAT (`sdk.py:26671`: `[{kind,
     #     content, ref?, status?, **props}]`), so a caller puts `is_operator`
     #     BESIDE `kind` rather than inside `props` — measured, that mints a
     #     second node while every key-allow-list reads it as props-free.
@@ -3532,10 +3532,15 @@ def tortoise_create_point(kind: str, content: str,
     ``authoredBy`` or ``credibility`` is not advertised as repeatable — and the
     three are NOT disqualified for the same reason, so do not collapse them:
 
-    * ``props`` naming ``is_operator`` takes the node OUT of the fold's own
-      predicate (measured: two ids). Because ``props`` is caller-controlled and
-      open-ended, no prop allow-list can prove convergence.
-    * ``authoredBy`` (like any other prop) folds onto the SAME id, but the
+    * ``props`` is caller-controlled and open-ended, so no prop allow-list can
+      prove convergence. Two measured shapes, in OPPOSITE directions:
+      ``is_operator`` takes the node OUT of the fold's predicate and ``pointKind``
+      wins over the positional kind the fold scopes on — both mint a second id —
+      while ``confidence``/``label``/``op_type`` fold onto one id. No finite list
+      either way, which is why the rule is provability.
+    * ``authoredBy`` (not "any other prop": ``status`` and ``dedup`` are popped
+      before the re-store gate, so a ``status``-only repeat is a pure no-op —
+      measured, identical ``updatedAt``) folds onto the SAME id, but the
       dedup-hit path then runs ``update_point`` and emits ``PointRevised``,
       bumping ``updatedAt`` — a repeat that is not a no-op.
     * ``credibility`` alone is byte-identical on a repeat (measured, on both
