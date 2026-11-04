@@ -51,6 +51,10 @@ _TESTS_ROOT = Path(__file__).resolve().parent
 #   "assertion"        — the test ASSERTS the SDK's namespace→graph mapping
 #                        (test_namespace_uri_mode, test_sdk_legacy_coverage);
 #                        the literal must stay byte-for-byte.
+#   "synthetic-source" — the literal rides a SOURCE STRING handed to
+#                        `ast.parse` (or the explanation around it), never a
+#                        construction; there is nothing to rename and nothing
+#                        for the redirect to resolve.
 # The swept (renamed) sites are the test_-prefixed literals/constants the
 # guard passes on their own — the table documents the residual declarations.
 ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
@@ -137,6 +141,25 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     # test reads. Same `prod-coupled` class as its neighbours above.
     "test_3516_client_captured_at.py": {"registry": "prod-coupled"},
     "test_agent_signup.py": {"registry": "prod-coupled"},
+    # #10046: the two `namespace="registry"` matches in this module are TEXT fed
+    # to `ast.parse`, never a construction. `test_a_literal_namespace_is_not_an
+    # _org_scoped_site` hands the record-tenant scanner a synthetic source
+    # snippet and asserts the round-3 predicate excludes a string-literal
+    # namespace; the other is the same literal quoted in that test's own
+    # docstring. Both are kept byte-for-byte `"registry"` ON PURPOSE — that is
+    # the spelling PROD resolves and the exact shape the doubled-predicate P1
+    # mis-counted — so they are declared here rather than renamed to a `test_*`
+    # namespace, which would make the pin exercise a spelling no prod lane uses
+    # (and the docstring `grep` a literal it no longer explains). The guard greps
+    # file TEXT, so it cannot tell this from a real construction; MEASURED:
+    # without this row it reds on BOTH of those matches — the docstring sample
+    # and the `registry = 'def f():\n    return _make_sdk(namespace="registry")'`
+    # string — → `test-slow (e)` → python-ci-gate, which is how it was found.
+    # ⛔ NO LINE NUMBERS, deliberately (#10723 review F3): an earlier revision
+    # cited them and they were stale by the very next head, because both matches
+    # ride the END of a file that keeps growing. Name the construct, not the
+    # line — the same rule `tortoise/mcp_auth.py`'s anchors now follow.
+    "test_10047_record_every_lane.py": {"registry": "synthetic-source"},
     # #7677: the retry-idempotency tests drive REAL org creation through the
     # registry control plane — `_make_sdk(namespace="registry")._get_registry()`
     # is the same construction the endpoint under test uses, and the behaviour
