@@ -3197,11 +3197,14 @@ _DREAM_QUEUE_TTL_S = 600
 # other `to_thread` sites on that pool are enough on their own to park every
 # worker during a burst (prod is 2 vCPU →
 # `min(32, cpu+4)` = 6) and stall unrelated tenants BEFORE their handlers —
-# #10618 removed the last PER-REQUEST tenant of that pool (`first_api_call` and
-# `_abuse_post_auth`, both awaited on every authenticated request; they ride the
-# bounded telemetry lane now), which shortens no fuse: the shared pool is still
-# unbounded-wait and still `min(32, cpu+4)`. While `/health` stays green by
-# design (#2850), nothing would notice. That
+# #10618 removed the last PER-REQUEST tenant of that pool on THIS (REST/hosted)
+# auth path (`first_api_call` and `_abuse_post_auth`, both awaited on every
+# authenticated request; they ride the bounded ``abuse`` lane now), which
+# shortens no fuse: the shared pool is still unbounded-wait and still
+# `min(32, cpu+4)`. It is not empty of per-request hops — the `/mcp` side still
+# awaits `abuse.check_new_country` there (pre-existing, tracked as #10720) — so
+# read this as "one tenant moved", never "the hazard is gone". While `/health`
+# stays green by design (#2850), nothing would notice. That
 # is the #3060 starvation path relocated, not removed. Dream therefore gets its
 # OWN pool: it can only ever starve itself.
 #
@@ -3228,8 +3231,10 @@ _DREAM_EXECUTOR = ThreadPoolExecutor(
 # is an unbounded all-time scan of an org's Sessions + CONTAINS (the windowed
 # funnel rides the same hand-off), so this is the "long / stallable" class the
 # comment at the top of this file says must NOT share the loop's default
-# executor with ~80 other `to_thread` sites and the auth middleware's abuse
-# hooks. Its own small pool means a slow graph can only starve the scorecard.
+# executor with ~80 other `to_thread` sites (the auth path's per-request abuse
+# hooks were among them until #10618 moved them to the bounded ``abuse`` lane —
+# the pool itself is unchanged: `min(32, cpu+4)` with an unbounded wait). Its
+# own small pool means a slow graph can only starve the scorecard.
 _SCORECARD_EXECUTOR = ThreadPoolExecutor(
     max_workers=max(1, min(_int_env("TORTOISE_SCORECARD_WORKERS", 2), 8)),
     thread_name_prefix="activation-scorecard")
@@ -6310,6 +6315,14 @@ def _record_health() -> dict:
       * ``counters_error`` — why the counter snapshot could not be read, or ``None``.
         Kept distinct from ``error`` so the documented pairing
         (*``error`` non-null ⇔ set-but-unusable value*) stays true.
+      * ``refusal_error`` — why the refusal VERDICT could not be read, or ``None``.
+        The same reasoning, one field further: ``record_refusing()`` is not a
+        DSN, and a failed read of it published as ``error`` would send an
+        operator to rotate a secret that is fine (#9548 review P2's exact
+        misdiagnosis). ⚠️ When it is non-``null`` the verdict was NOT
+        EVALUATED, so ``degraded`` is ``None`` and not ``False`` — ``False``
+        states "no armed write was refused inside the window", which is a claim
+        a read that never happened cannot make.
       * ``tenancy_error`` — why ``single_tenant_declared`` could not be read, or
         ``None``. ``False`` means "multi-tenant", which is the SAFE answer, so
         publishing it for a read that failed would render a broken safety check
@@ -6370,8 +6383,10 @@ def _record_health() -> dict:
                 "record_non_journal_skips": None,
                 "record_position_unproven": None,
                 "degraded": None, "degraded_reasons": None,
-                "refusing": None,
+                # No ``refusing``: nothing was evaluated, so the key is ABSENT
+                # rather than ``None`` (#10648 review P3).
                 "counters_error": reason, "tenancy_error": reason,
+                "refusal_error": reason,
                 "fetched_at": datetime.now(UTC).isoformat(),
                 "error": reason}
     # NOTE the shape: keys are assigned, never `**counters`-spread. A spread
@@ -6398,12 +6413,21 @@ def _record_health() -> dict:
         # with no verdict is a counter nobody reads.
         "degraded": None,
         "degraded_reasons": None,
-        # WHAT is refusing and HOW LONG AGO, or ``None``. ``degraded`` is this
-        # block's boolean; ``refusing`` is its identity, so an operator reading
-        # a red deployment never has to guess which arm tripped.
-        "refusing": None,
+        # ⛔ NOT SEEDED HERE (#10648 review P3). WHAT is refusing and HOW LONG
+        # AGO is set on the SUCCESS path only — ``{"reason", "age_s"}`` or
+        # ``None``. ``degraded`` is this block's boolean; ``refusing`` is its
+        # identity, so an operator reading a red deployment never has to guess
+        # which arm tripped. An unevaluated read publishes neither: a seeded
+        # ``None`` would state "nothing is refusing" for a read that never
+        # happened, which is the same fail-open as ``degraded: false``.
         "counters_error": None,
         "tenancy_error": None,
+        # WHY the refusal verdict could not be read, or ``None``. Its own key for
+        # the reason ``counters_error``/``tenancy_error`` have one: ``error`` is
+        # reserved for a value that was SET and REFUSED, and filing a failed
+        # monitoring read there is what sends an operator to rotate a healthy
+        # secret (#9548 review P2, #10648 review — observation 1).
+        "refusal_error": None,
         "error": None,
         # WHEN this block was read. A consumer that keeps the body (an operator
         # capturing the arming evidence for a destructive run, #10017's purge
@@ -6479,19 +6503,42 @@ def _record_health() -> dict:
         # a monitoring fix into a 500 on the endpoint Fly probes. No current
         # raiser exists (`record_refusing` touches one module global and
         # `time.monotonic`); the guard is the contract, not a bug workaround.
+        refusal_error = None
         try:
             refusing = record_refusing()
         except Exception as exc:  # liveness must answer, always
             refusing = None
+            refusal_error = f"refusal state unreadable: {str(exc)[:160]}"
             block["ok"] = False
-            block["error"] = f"refusal state unreadable: {str(exc)[:160]}"
-        block["refusing"] = refusing
-        reason = refusing["reason"] if refusing else None
-        block["degraded"] = bool(refusing)
-        block["degraded_reasons"] = (
-            {reason: failures.get(reason, 0)} if isinstance(reason, str) else {})
-        if refusing:
-            block["ok"] = False
+            # NOT ``error``: that field's documented meaning is *a value was SET
+            # and the seam REFUSED it*, and a monitoring read is neither — the
+            # runbook's remedy for ``error`` is "fix the DSN", which is the
+            # wrong runbook row for an unreadable module global (#10648 review,
+            # observation 1).
+            block["refusal_error"] = refusal_error
+        if refusal_error is not None:
+            # ⛔ NOT EVALUATED is not "not refusing" — of ``degraded`` *and* of
+            # ``refusing`` (#10648 review P3). ``degraded`` stays ``None`` (the
+            # documented "could not be evaluated"), and ``refusing`` is not
+            # published AT ALL: the block's own ``None`` is the documented
+            # "nothing is refusing", which is exactly the claim a read that
+            # raised cannot make. So ABSENCE and "not evaluated" are one fact
+            # here, and a consumer keying on ``refusing is None`` for *now* can
+            # never read a failed read as a quiet window — the fail-open shape
+            # #10185 exists to end, one field over from an unread counter
+            # reading as a zero. ``refusal_error`` beside it is non-null, which
+            # is how the two unevaluated causes stay distinguishable.
+            block["degraded"] = None
+            block["degraded_reasons"] = None
+        else:
+            block["refusing"] = refusing
+            reason = refusing["reason"] if refusing else None
+            block["degraded"] = bool(refusing)
+            block["degraded_reasons"] = (
+                {reason: failures.get(reason, 0)}
+                if isinstance(reason, str) else {})
+            if refusing:
+                block["ok"] = False
     try:
         block["single_tenant_declared"] = record_writer.single_tenant_declared()
     except Exception as exc:
@@ -7159,9 +7206,10 @@ async def get_current_org(request: Request) -> dict:
         # tortoise/analytics.py); distinct_id is the key creator's user UUID
         # (joins web + server funnels), with org_id fallback for legacy/
         # bootstrap keys that predate created_by.
-        # #10618: activation telemetry, so it rides the bounded telemetry lane
-        # — NOT the loop's shared default executor, which is what made this
-        # per-request hop able to park a request BEFORE its handler.
+        # #10618: activation telemetry, so it rides the bounded ``abuse`` lane
+        # (`_telemetry_hook_off_loop`) — NOT the loop's shared default executor,
+        # which is what made this per-request hop able to park a request BEFORE
+        # its handler.
         if first_api_call_pending(org_id):
             try:  # noqa: SIM105
                 await _telemetry_hook_off_loop(
@@ -7351,9 +7399,10 @@ async def _get_current_org_supabase(request: Request, token: str) -> dict:
         # #528: activation telemetry — first successful API auth per org.
         # created_by (key creator's user UUID) joins web + server funnels,
         # with org_id fallback for keys that predate created_by.
-        # #10618: activation telemetry, so it rides the bounded telemetry lane
-        # — NOT the loop's shared default executor, which is what made this
-        # per-request hop able to park a request BEFORE its handler.
+        # #10618: activation telemetry, so it rides the bounded ``abuse`` lane
+        # (`_telemetry_hook_off_loop`) — NOT the loop's shared default executor,
+        # which is what made this per-request hop able to park a request BEFORE
+        # its handler.
         if first_api_call_pending(org_id):
             try:  # noqa: SIM105
                 await _telemetry_hook_off_loop(
@@ -7368,7 +7417,7 @@ async def _get_current_org_supabase(request: Request, token: str) -> dict:
         request.state.tier = org["tier"]
         _publish_default_namespace(org)
         # #308: R3 read velocity + R4 geo (best-effort). #10618: it rides the
-        # bounded telemetry lane, never the loop's shared default executor —
+        # bounded ``abuse`` lane, never the loop's shared default executor —
         # this hook is awaited on EVERY authenticated request.
         await _abuse_post_auth(request, org)
         # #2600: canonical actor_user_id alias (UUID-gated, reads created_by
@@ -9219,7 +9268,7 @@ async def _abuse_post_auth(request: Request, org: dict) -> None:
     """Async wrapper — never raises into the auth path.
 
     #10618: awaited on EVERY authenticated request, so it rides the bounded
-    ``telemetry`` lane (``_telemetry_hook_off_loop``) and never the loop's
+    ``abuse`` lane (``_telemetry_hook_off_loop``) and never the loop's
     shared default executor. ``request.headers``/``request.method`` are read
     HERE, on the loop: ``Request`` is not thread-safe and a worker must not
     touch it.
@@ -9243,7 +9292,7 @@ def _abuse_record_points_sync(org: dict, n: int) -> None:
 
 async def _abuse_record_points(request: Request, org: dict, n: int) -> None:
     try:  # noqa: SIM105
-        # #10618: the bounded telemetry lane, never the shared default pool.
+        # #10618: the bounded ``abuse`` lane, never the shared default pool.
         await _telemetry_hook_off_loop(
             functools.partial(_abuse_record_points_sync, org, n),
             op="abuse.record_points")
@@ -9259,7 +9308,7 @@ def _abuse_evaluate_keys_sync(org_id: str) -> None:
 
 async def _abuse_evaluate_keys(org_id: str) -> None:
     try:  # noqa: SIM105
-        # #10618: the bounded telemetry lane, never the shared default pool.
+        # #10618: the bounded ``abuse`` lane, never the shared default pool.
         await _telemetry_hook_off_loop(
             functools.partial(_abuse_evaluate_keys_sync, org_id),
             op="abuse.evaluate_keys")
@@ -11668,7 +11717,18 @@ async def list_points(
     # GET /v1/points/{id}, not by list. No include param on REST v1 (surface
     # minimal).
     conditions.append("(n.status IS NULL OR n.status <> 'retracted')")
-    params: dict = {"limit": limit}
+    # #8447 (C2): this route capped at ``limit`` and answered
+    # ``{"points": …, "count": len(results)}`` — a FULL page was byte-identical
+    # to a COMPLETE one, and there is no offset and no cursor on this surface, so
+    # a row past the cap was unreachable by any follow-up call. That is the
+    # defect #8447 exists for, on the highest-traffic list route.
+    #
+    # The probe is how the marker is PROVED without a second round trip: ask the
+    # store for one row MORE than the caller asked for and drop it. ``limit+1``
+    # is an INTERNAL probe, never a caller-visible cap — the caller's bound still
+    # governs what is delivered, so the route's ``le=1000`` stays the caller's
+    # ceiling and no cap VALUE changes here (only its marking).
+    params: dict = {"limit": limit + 1}
     if kind:
         conditions.append("n.pointKind = $kind")
         params["kind"] = kind
@@ -11695,13 +11755,36 @@ async def list_points(
     rows = await _read_offload(
         lambda: sdk._get_proj().g.query(query, params=params).result_set,
         op="list_points")
+    # The candidate set AS THE PROBE CAN SEE IT — capped at ``limit+1``, so the
+    # population is BOUNDED, while the VERDICT (``candidates > returned``) is
+    # decided rather than estimated: it is true iff the store held more rows
+    # than the caller asked for.
+    # That boundedness is why ``exact=False`` below and why ``total_available``
+    # is withheld — publishing ``limit+1`` as a total is a lower bound wearing a
+    # total's clothes (``truncation.py``). Do NOT pass ``exact=True`` here.
+    candidates = len(rows)
     results = []
-    for r in rows:
+    for r in rows[:limit]:
         d = r[0]
         if "pointKind" in d:
             d["kind"] = d.pop("pointKind")
         results.append(d)
-    return {"points": results, "count": len(results)}
+    from tortoise.truncation import mark_truncation, truncation_field
+
+    # ``exact=False``: the probe proves THERE ARE MORE, not HOW MANY. An exact
+    # total would need a second COUNT over the whole graph, and publishing the
+    # probe's own ``limit+1`` as ``total_available`` would be a lower bound
+    # wearing a total's clothes (`truncation.py`). So a truncated page here takes
+    # the contract's THIRD state — incomplete, total unknown — and a complete one
+    # is positively marked complete rather than left un-marked.
+    trunc_out: dict = {}
+    mark_truncation(trunc_out, returned=len(results),
+                    candidates=candidates, exact=False)
+    body: dict = {"points": results, "count": len(results)}
+    # ⚠️ ``count`` keeps its exact prior meaning — rows DELIVERED — so a caller
+    # that ignores the new field is unaffected; ``truncated`` is the instrument.
+    body.update(truncation_field(trunc_out))
+    return body
 
 
 @app.get("/v1/points/{point_id}")
@@ -22227,8 +22310,9 @@ _RETENTION_MAX_ORGS = 1000
 #: self-inflicted `org_read_timeout`. The read is a control-plane HTTP walk of
 #: up to `max_pages` round trips per org, which is the "long / stallable"
 #: class the #3060 doctrine above says must NOT share the loop's default
-#: executor with ~80 other `to_thread` sites and the auth middleware's abuse
-#: hooks.
+#: executor with ~80 other `to_thread` sites (the auth path's per-request abuse
+#: hooks left that pool in #10618; its width and its unbounded wait did not
+#: change, so the doctrine stands).
 _RETENTION_MAX_CONCURRENCY = 4
 
 
