@@ -541,6 +541,40 @@ def test_a_mode_only_constituent_the_fold_does_not_carry_is_NOT_contained(
     assert verdict.closable is False, verdict
 
 
+def test_a_git_level_failure_is_UNMEASURABLE_not_NOT_contained(
+    scratch_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """⛔ rc > 1 IS "THE MEASUREMENT DID NOT RUN", not a containment verdict.
+
+    `git apply` answers rc=1 for "the patch does not apply" — that IS the
+    measurement, and NOT-CONTAINED is its honest name. Every other code means it
+    never ran: `_run` reports a missing binary as 127 and a hang as 124, and git uses
+    128 for a broken repo/index. The old arm folded all of them into NOT-CONTAINED, so
+    a timed-out `git` told the operator "REFUSED … closing would destroy work" and
+    exited 1, while the tool's own contract reserves exit 2 / UNMEASURABLE for a
+    comparison that could not be made.
+
+    Discrimination proof: revert the added `returncode > 1` arm and this case reports
+    NOT-CONTAINED instead of UNMEASURABLE.
+    """
+    base = _commit(scratch_repo, {"f.txt": "one\ntwo\nthree\n"}, [], "base")
+    const = _commit(scratch_repo, {"f.txt": "one\nTWO\nthree\n"}, [base], "const")
+    fold = _commit(scratch_repo, {"f.txt": "one\nTWO\nthree\n"}, [base], "fold")
+    monkeypatch.chdir(scratch_repo)
+    real_run = bo._run
+
+    def fake_run(argv, **kwargs):
+        if "--reverse" in argv:
+            return subprocess.CompletedProcess(
+                argv, 124, "", "git: did not finish within 300s")
+        return real_run(argv, **kwargs)
+
+    monkeypatch.setattr(bo, "_run", fake_run)
+    verdict = bo.verdict_for(101, const, base, fold, scratch_repo)
+    assert verdict.state == "UNMEASURABLE", verdict
+    assert verdict.closable is False, verdict
+
+
 def test_a_named_repo_is_threaded_into_every_gh_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

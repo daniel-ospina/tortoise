@@ -636,6 +636,23 @@ def content_contained(head: str, base: str, fold_head: str, cwd: Path) -> tuple[
                 "reverse-apply reported a CONFLICT in the fold tree — the change is "
                 f"not contained: {(applied.stderr or applied.stdout).strip()[:300]}"
             )
+        if applied.returncode > 1:
+            # ⛔ rc > 1 IS "THE MEASUREMENT DID NOT HAPPEN", NOT A VERDICT (#10941 review).
+            # `git apply` uses rc=1 for "the patch does not apply", and THAT is the
+            # measurement answering NOT-CONTAINED. Every other code means the
+            # comparison never ran: `_run` reports a missing binary as 127 and a hang
+            # as 124, and git itself uses 128 for a broken repo/index. Folding those
+            # into NOT-CONTAINED told the operator "REFUSED … closing would destroy
+            # work" and exited 1 ("at least one NOT contained") about a comparison
+            # that was never made — contradicting the tool's own contract, which
+            # reserves exit 2 / UNMEASURABLE for exactly this. Reproduced with a
+            # monkeypatched rc=124: the operator was told a timed-out `git` meant the
+            # work was missing.
+            return "UNMEASURABLE", (
+                "reverse-apply did not run: "
+                f"git exited {applied.returncode} — "
+                f"{(applied.stderr or applied.stdout).strip()[:200]}"
+            )
         return "NOT-CONTAINED", f"reverse-apply failed: {applied.stderr.strip()[:300]}"
     finally:
         if added:
