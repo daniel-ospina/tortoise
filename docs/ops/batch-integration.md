@@ -186,9 +186,11 @@ removal. The age figures are a backstop over that evidence, never a substitute f
 worktree that was removed, moved, or is briefly on an unmounted mount therefore reads as "owner gone".
 (#10712's ownership LABEL narrows this — such a container is attributed rather than left
 indeterminate — but it does not turn a directory read into a liveness proof.) The container IS asked
-for an attached client before every proof-1 removal and is spared on `True` or on an unreadable
-answer, so a live client is not the gap; the gap is that the client probe can only see a client that
-answers it. That residual is **#10697**; close it before widening this default.
+for an attached client before every proof-1 removal **of a container docker reports as RUNNING**, and
+is spared on `True` or on an unreadable answer (a TERMINAL container cannot have a client, so the probe
+is skipped there rather than failing on a dead server). So a live client is not the gap; the gap is
+that the client probe can only see a client that answers it. That residual is **#10697**; close it
+before widening this default.
 
 The **same lane** must serve Phase 1 and Phase 3. A batch measured on a different lane from its
 baseline is not comparable to it.

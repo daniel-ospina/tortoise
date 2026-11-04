@@ -2607,9 +2607,12 @@ def _pid_started_after(pid: int, when: float) -> bool | None:
     # A MARGIN, because the two answers are easy to mis-align by a tick: `btime`
     # is whole seconds and the tick count is 10 ms-grained, so this clock can sit
     # a fraction BEHIND the file's mtime. The asymmetry decides the margin — a
-    # false "reused" removes the container of a LIVE peer run (the destructive
-    # failure), while a missed reuse only leaves the marker in place for the age
-    # fallback to collect.
+    # false "reused" removes the container of a LIVE peer `run` (the destructive
+    # failure), while a missed reuse — a NEW process wearing the pid inside those
+    # 2 s — leaves the marker reading "peer live" until that pid exits. It only
+    # ever SPARES, so it cannot remove anything; and `aged` deliberately does not
+    # collect it either, because `aged` applies only where this function answered
+    # `None`, which is precisely not the case where it missed.
     return started > when + 2.0
 
 
