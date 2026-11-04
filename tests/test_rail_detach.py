@@ -19,6 +19,7 @@ says, and the launcher never resolves a repo it was given.
 from __future__ import annotations
 
 import ast
+import errno
 import json
 import os
 import shutil
@@ -487,16 +488,22 @@ def test_a_gh_that_cannot_execute_is_not_reported_as_missing(tmp_path, monkeypat
     """Two spawn failures, two answers (review, #10777).
 
     A `gh` that is PRESENT but not executable raises `PermissionError` — not the
-    `FileNotFoundError` of a PATH miss — and its remedy is `chmod`, never
-    "install the GitHub CLI". The same is true of an `EAGAIN`/`ENOMEM` from
-    `fork` under cell load. Collapsing both onto `127` told the operator to
-    install a binary they already had, so only a genuine PATH miss may say
-    "not on PATH"; everything else must name what actually happened.
+    `FileNotFoundError` of a PATH miss — and its remedy is `chmod +x`, never
+    "install the GitHub CLI" (a binary that is present is not a binary that is
+    missing). ⛔ Before the split that failure escaped `launch()` entirely, as a
+    `PermissionError` traceback, and no version of `_gh` ever answered it with
+    `127`: the mutant that folds `except OSError` into the 127 arm is what tells
+    the operator to install a binary they already have, and this arm is what reds
+    on that mutant.
+
+    `EAGAIN`/`ENOMEM` from `fork` under cell load is a THIRD cause with its own
+    remedy ("retry when it is not loaded"), asserted in
+    `test_the_spawn_remedy_is_keyed_by_errno` — deliberately not a `chmod`.
 
     ⛔ AND THE REMEDY IS ASSERTED, not just the cause (review, `#10777`): this
-    docstring claimed a `chmod` remedy that no path in the code printed, so the
-    claim was unfalsifiable from the artifact it describes. The `OSError` arm is
-    keyed by errno now, and this arm pins the word it promises.
+    docstring once claimed a `chmod` remedy that no path in the code printed, so
+    the claim was unfalsifiable from the artifact it describes. The `OSError` arm
+    is keyed by errno now, and this arm pins the word it promises.
     """
     bin_dir = tmp_path / "unejecutable-bin"
     bin_dir.mkdir()
@@ -513,6 +520,61 @@ def test_a_gh_that_cannot_execute_is_not_reported_as_missing(tmp_path, monkeypat
 
     # And the same call answers `unreadable` rather than raising on this arm.
     assert rd._head_sha(tmp_path, "o/r", 5) == "unreadable"
+
+
+def test_the_spawn_remedy_is_keyed_by_errno():
+    """Every branch of `_oserror_remedy` names ITS OWN repair (review, `#10777`).
+
+    Deleting a branch used to leave the suite green: only the EACCES and ENOTDIR
+    arms were reachable from a test, so the `EAGAIN`/`ENOMEM` and generic
+    fallbacks could be re-collapsed onto another cause's advice with nothing to
+    notice. This arm calls the helper directly, which is the only way to reach a
+    fork failure without inducing one.
+    """
+    assert "chmod" in rd._oserror_remedy(PermissionError(errno.EACCES, "denied"))
+    assert "chmod" in rd._oserror_remedy(PermissionError(errno.EPERM, "denied"))
+    eagain = rd._oserror_remedy(OSError(errno.EAGAIN, "try again"))
+    assert "loaded" in eagain, eagain
+    assert "chmod" not in eagain, eagain
+    assert "loaded" in rd._oserror_remedy(OSError(errno.ENOMEM, "out of memory"))
+    assert "not a directory" in rd._oserror_remedy(OSError(errno.ENOTDIR, "nope"))
+    generic = rd._oserror_remedy(OSError(errno.E2BIG, "too big"))
+    assert "check the working directory" in generic, generic
+
+
+def test_a_real_gh_that_exits_127_is_not_reported_as_missing(tmp_path, monkeypatch):
+    """`gh` exiting 127 is a REFUSAL BY the binary, never evidence it is absent.
+
+    Review, `#10777`: `_gh` answers 127 for two unrelated conditions — a fabricated
+    PATH miss (which carries a `cause`) and a REAL process that exited 127 (which
+    never does) — and the refusal collapsed them, so an operator whose `gh` shim
+    refused (`gh-shim: REFUSING to exec … — pass AGENT_GH_REAL`, the fleet's own
+    shim does exactly this) was told the binary was not installed.
+    """
+    bin_dir = tmp_path / "gh-127-bin"
+    bin_dir.mkdir()
+    stub = bin_dir / "gh"
+    stub.write_text(
+        "#!/bin/sh\n"
+        'echo "gh-shim: refusing to exec an unresolvable gh" >&2\n'
+        "exit 127\n",
+        encoding="utf-8")
+    stub.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bin_dir))
+
+    out = rd._gh(["repo", "view"], tmp_path)
+    assert out.returncode == 127, (out.returncode, out.cause)
+    assert out.cause == "", (
+        "a real process's exit code must not be given a fabricated cause: "
+        f"{out.cause!r}")
+
+    with pytest.raises(rd.Refused) as exc:
+        rd._resolve_repo(tmp_path)
+    msg = str(exc.value)
+    assert "not on PATH" not in msg, msg
+    assert "install the GitHub CLI" not in msg, msg
+    assert "ran and refused" in msg, msg
+    assert "unresolvable gh" in msg, msg
 
 
 def test_a_cwd_that_is_not_a_directory_is_not_a_broken_gh_install(tmp_path):
