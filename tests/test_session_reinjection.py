@@ -249,15 +249,22 @@ def _require_one_leg_mix(*rets, test: str) -> None:
     """Refuse to compare reads the box served from DIFFERENT legs.
 
     Two outcomes, and the difference between them is the DEGRADATION, not the
-    difference (#10675 review, P3):
+    difference (#10675 review, P3). ⚠️ Both outcomes are reachable ONLY when
+    the mixes DISAGREE — the early return below fires first, so a pair that
+    degraded IDENTICALLY is compared and publishes a verdict rather than
+    skipping (#10675 review cycle 5, P3: this docstring claimed "a degraded
+    read → skip" without that qualifier, so the next reader would have believed
+    the identical-degraded case was skipped and never re-derived it. It is
+    stated, not changed: a skip there would put the load-dependent red straight
+    back, and an identical mix is by construction comparable).
 
-    * **A degraded read → skip.** One read lost a leg to the environment (the
-      measured CI red: run 41741210621, ``test (i)``, an FTS ``timeout`` at
-      1220 ms > 500 ms, so that read answered from the corpus-wide
-      ``tfidf_snapshot`` pool). The arm differential is unmeasurable in that
-      state, and comparing anyway is what produced the load-dependent RED this
-      module pins out. Skipped with BOTH mixes AND both degradation lists
-      named (never silently).
+    * **A degraded read AND disagreeing mixes → skip.** One read lost a leg to
+      the environment (the measured CI red: run 41741210621, ``test (i)``, an
+      FTS ``timeout`` at 1220 ms > 500 ms, so that read answered from the
+      corpus-wide ``tfidf_snapshot`` pool). The arm differential is
+      unmeasurable in that state, and comparing anyway is what produced the
+      load-dependent RED this module pins out. Skipped with BOTH mixes AND both
+      degradation lists named (never silently).
     * **NO degraded read → FAIL.** Both reads were served cleanly and their
       leg mixes still disagree, so the divergence is the ARMS' doing — a code
       change (e.g. one arm reaching ``hybrid_search`` with a different

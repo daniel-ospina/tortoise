@@ -1477,6 +1477,17 @@ _TURN_SHAPE_NARRATIVE_HOMES = (
     # `#10000`) exists only on this branch's own prior commits — which is why
     # the entry was added, and is not a claim about the base.
     "tools/longmem_eval/ep_activation.py",
+    # ⛔ The file that WROTE the deleted turn writer, and the largest narrative
+    # about it — the single most likely home for a restatement, and it was
+    # outside the population (#10675 review cycle 5, P3). Its absence was
+    # justified on the grounds that it would owe the positive half (a `#10000`
+    # marker beside every turn-shape seed mention) and that a false RED there
+    # blocks on prose. That reason does not reproduce on this tree: MEASURED,
+    # its seed mentions carry no sentence matching `_TURN_SHAPE_VOCABULARY`, so
+    # it owes no marker, and `_present_tense_writer_claim` over the whole file
+    # is None — adding it reds neither half. A population assertion that omits
+    # its likeliest member is the shape this tuple exists to prevent.
+    "tortoise/hosted_api.py",
 )
 
 #: Homes that name the demo/sample seed for a reason that is NOT about the
@@ -1604,12 +1615,14 @@ _POINT_KIND = re.compile(
 #: gap — where it excused a real violation. "the demo seed writes a turn, writes
 #: no duplicate, and writes a `pointKind='event'` node" was GREEN. Removed
 #: (#10675 review cycle 4, P3); the lookahead still covers the after-verb form.)
-#: ⛔ A CLAUSE BOUNDARY IS NOT PUNCTUATION (`[^,;]` alone): `and`, `but` and
-#: `yet` cross a clause exactly as `,` does, and the comma before them is
-#: OPTIONAL — so a gap that stopped only at punctuation still passed "… no longer
-#: writes turn text to the graph BUT STILL writes a `pointKind='event'` node",
-#: measured end-to-end (#10675 review cycle 3, P2: GREEN). `_NEGATED_CLAUSE_GAP`
-#: therefore refuses a connector token as well as `,`/`;`.
+#: ⛔ A CLAUSE BOUNDARY IS NOT PUNCTUATION, AND IT IS NOT ONLY `,`/`;`: `and`,
+#: `but` and `yet` cross a clause exactly as `,` does, and the comma before them
+#: is OPTIONAL. Nor is the set closed at the dash: a COLON, an ASCII hyphen and
+#: an OPENING PARENTHESIS all start a new clause in this tree's prose, and a gap
+#: that let them through kept the half-correction GREEN — measured (#10675 review
+#: cycle 5, P2): "… no longer writes turn text to the graph: it still writes a
+#: `pointKind='event'` node" and its " - " and "(…)" twins. Every one of them is
+#: a clause separator, so every one of them terminates the walk.
 #: ⛔ AND A DASH IS A CLAUSE SEPARATOR TOO, not an odd character: `—`/`–` is
 #: this tree's dominant one (it appears throughout the comment block that states
 #: this rule), so `[^,;]` alone still crossed it — "… no longer writes turn text
@@ -1632,21 +1645,24 @@ _POINT_KIND = re.compile(
 #: that cycle 1 filed and cycle 3 nearly reintroduced (#10675 review cycle 4,
 #: P3: the comment said "spelled once" while it was spelled twice).
 #: ⛔ CONTRASTS ARE CORRECTIONS TOO, and they were RED: "writes the turns to
-#: Postgres RATHER THAN a turn node", "INSTEAD OF a `pointKind='event'` node"
-#: and "NOT TO a `turn node`" state §9.1/D1 accurately and are what the homes
-#: should say, so they are excused. ⚠️ The marker must INTRODUCE the shape: the
-#: walk below goes from the marker to the shape, so "writes a `pointKind='event'`
-#: node RATHER THAN Postgres rows" is still a violation — pinned as an arm
-#: rather than left to inspection (#10675 review cycle 4, P3).
+#: Postgres RATHER THAN a turn node", "INSTEAD OF a `pointKind='event'` node",
+#: "NOT TO a `turn node`" and — the most natural English of the four — "NOT A
+#: `turn node`" / "NOT INTO a …" / "NOT AS a …" state §9.1/D1 accurately and are
+#: what the homes should say, so they are excused. An enumerated list missed
+#: `not a`, which is why the preposition after `not` is a CLASS rather than one
+#: more alternative (#10675 review cycle 5, P3). ⚠️ The marker must INTRODUCE
+#: the shape: the walk below goes from the marker to the shape, so "writes a
+#: `pointKind='event'` node RATHER THAN Postgres rows" is still a violation —
+#: pinned as an arm rather than left to inspection.
 _TURN_SHAPE_TAIL = r"(?:pointKind|\bturn\s+node\b)"
 _NEGATED_CLAUSE_GAP = (
     r"(?:(?!(?:but|yet|and|although|while|whereas|however|instead)\b)"
-    r"[^,;\u2014\u2013]){0,60}?")
+    r"[^,;:()!?\u2014\u2013-]){0,60}?")
 _NEGATED_CLAIM = re.compile(
     r"\b(?:not|never|no\s+longer|no\s+more)\s+(?:also\s+|still\s+|ever\s+)?"
     r"(?:writes?|mints?|creates?)\b" + _NEGATED_CLAUSE_GAP + _TURN_SHAPE_TAIL
     # A contrast marker INTRODUCING the shape ("rather than a turn node").
-    + r"|\b(?:rather\s+than|instead\s+of|not\s+to|never\s+a)\s+"
+    + r"|\b(?:rather\s+than|instead\s+of|not\s+(?:to|a|as|into|in|on))\s+"
     + _NEGATED_CLAUSE_GAP + _TURN_SHAPE_TAIL,
     re.IGNORECASE)
 
@@ -1907,6 +1923,12 @@ def test_the_present_tense_guard_reads_a_NEGATED_writer_claim_as_the_CORRECTION(
         "since #10000 the demo seed writes its turns to Postgres instead of a "
         "`pointKind='event'` node",
         "the demo seed writes turn text to Postgres, not to a `turn node`",
+        # ⛔ `not a` / `not into` / `not as` — the most natural English contrast,
+        # which an enumerated preposition list missed (#10675 review cycle 5, P3).
+        "the demo seed writes turn text to Postgres, not a `turn node`",
+        "the demo seed writes turn text to Postgres, not into a "
+        "`pointKind='event'` node",
+        "the demo seed writes turn text to Postgres, not as a `turn node`",
     )
     for sentence in corrections:
         found = _present_tense_writer_claim(sentence)
@@ -1961,6 +1983,15 @@ def test_the_present_tense_guard_reads_a_NEGATED_writer_claim_as_the_CORRECTION(
         # INTRODUCE the thing being denied.
         "the demo seed writes a `pointKind='event'` node rather than Postgres "
         "rows",
+        # ⛔ COLON / ASCII HYPHEN / PARENTHESIS each start a new clause, and a
+        # gap that let them through kept the half-correction GREEN (#10675
+        # review cycle 5, P2).
+        "since #10000 the demo seed no longer writes turn text to the graph: it "
+        "still writes a `pointKind='event'` node per turn",
+        "since #10000 the demo seed no longer writes turn text to the graph - "
+        "it still writes a `pointKind='event'` node per turn",
+        "since #10000 the demo seed no longer writes turn text to the graph (it "
+        "still writes a `pointKind='event'` node)",
     )
     for sentence in compound:
         assert _present_tense_writer_claim(sentence) is not None, (
