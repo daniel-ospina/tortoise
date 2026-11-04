@@ -1,0 +1,258 @@
+"""#10137 — an operator minted over ALREADY-LIVE claims must still become a factor.
+
+The bug this file pins is the belief layer contributing nothing on a question
+that has BOTH evidence and an operator.
+
+``activate_beliefs`` promoted draft operators only when they were incident to a
+Point promoted in the SAME pass (``... c.id IN $ids``). An operator whose
+endpoints were already live was therefore promoted by NOTHING: no point is
+draft, so that query matched none, and ``sdk.promote_point`` cannot stand in —
+it refuses an operator node (``{blocked: True, reason: 'is_operator'}``) rather
+than sweeping its endpoints (``sdk.py::promote_point``).
+``ep._live_only('o.status')`` then keeps the draft operator out of the factor
+graph for ever.
+
+That is not an exotic graph. ``ingest_v2`` mints every operator with
+``promote_source=False`` (→ ``status='draft'``) and gates its POINT writes on an
+``_existing_point_ids`` batch probe, so any RESUMED/partial ingest skips the
+points an earlier pass already wrote while still writing the draft operator over
+them. (The ``create_operator`` default is ``promote_source=True``, which writes
+``status='live'`` — this is the INGEST's posture, not every writer's.)
+
+Reproduced on an embedded graph before the fix (premise carries a real
+``set_point_baseline(6.0, 2.0)``, conclusion is its IMPL target)::
+
+    operators: 1, factors: 0, no_op_reason: 'no_ep_factors'
+    premise   posterior (6.0, 2.0)   confidence 0.75     (its own baseline)
+    conclusion posterior (None, None) confidence unmeasured
+
+so the belief layer contributed nothing while the graph held both the evidence
+and the operator that should carry it. After the fix::
+
+    operators: 1, factors: 1, no_op_reason: None
+    conclusion posterior (1.5714, 1.0717)  confidence 0.5945
+
+The assertions below are on that OBSERVABLE — the conclusion claim's persisted
+confidence — not on the query text, so a different route to the same wiring
+still passes.
+
+Hermetic embedded harness (``tests/test_dream_noop_3139.py`` pattern): a temp
+``TortoiseSDK`` path, no server, no network, no dataset.
+"""
+from __future__ import annotations
+
+import shutil
+import sys
+import tempfile
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+
+from tools.longmem_eval import ep_activation as epa  # noqa: E402, RUF100
+from tortoise.sdk import TortoiseSDK  # noqa: E402, RUF100
+
+#: A real move is >= 0.03 (#10137's own calibration: an IMPL over the uniform
+#: prior lands ~1.9e-15 from neutral, a genuine contribution 0.03+).
+_REAL_MOVE = 0.03
+#: The measured confidence the evidenced premise pushes its conclusion to. Pinned
+#: so a silent change to the IMPL message math surfaces here rather than as a
+#: shifted benchmark number.
+_CONCLUSION_CONFIDENCE = 0.5945
+
+
+@pytest.fixture
+def sdk():
+    d = tempfile.mkdtemp(prefix="tortoise_10137_promo_")
+    s = TortoiseSDK(str(Path(d) / "test.db"))
+    yield s
+    s.close()
+    shutil.rmtree(d, ignore_errors=True)
+
+
+def _claim(sdk: TortoiseSDK, text: str, status: str) -> str:
+    return sdk.create_point("statement", text, dedup=False, status=status)["id"]
+
+
+def _operator_status(sdk: TortoiseSDK, oid: str) -> str | None:
+    """The operator node's persisted ``status`` — the wiring, read back."""
+    rows = sdk._get_proj().g.query(
+        "MATCH (o:Point {id:$oid}) RETURN o.status", params={"oid": oid}
+    ).result_set
+    return rows[0][0] if rows else None
+
+
+def _confidence(sdk: TortoiseSDK, pid: str) -> float | None:
+    return epa.read_confidence(sdk.get_point(pid) or {})
+
+
+def _assert_contributed(sdk, manifest, conclusion, oid) -> None:
+    """The observable: the operator is LIVE, it was selected as a factor, and
+    its conclusion's persisted confidence moved off the neutral prior."""
+    assert manifest["operators_promoted"] == 1, (
+        "the draft operator was not promoted — operators_promoted="
+        f"{manifest['operators_promoted']} (operators census "
+        f"{manifest['operators']}). A draft operator is excluded from the "
+        "factor graph by ep._live_only('o.status'), so the belief layer cannot "
+        "reach its conclusion (#10137)."
+    )
+    status = _operator_status(sdk, oid)
+    assert status == "live", f"operator {oid} status is {status!r}, not 'live'"
+    assert manifest["factors"] == 1, (
+        f"the pass selected {manifest['factors']} factor(s), expected 1 — "
+        f"no_op_reason={manifest['no_op_reason']!r}"
+    )
+    assert manifest["no_op_reason"] is None, (
+        "a pass that promoted a live factor still reports a no-op reason "
+        f"{manifest['no_op_reason']!r}"
+    )
+    conf = _confidence(sdk, conclusion)
+    assert conf is not None, (
+        "the conclusion claim is still UNMEASURED after an operator over live "
+        "claims was activated — the belief layer contributed nothing (#10137)"
+    )
+    assert conf > 0.5 + _REAL_MOVE, (
+        f"the conclusion reads {conf!r}; its evidenced premise (0.75) should "
+        "have pushed it above the neutral prior"
+    )
+    assert conf == pytest.approx(_CONCLUSION_CONFIDENCE, abs=5e-4), (
+        f"conclusion confidence {conf!r} != the pinned "
+        f"{_CONCLUSION_CONFIDENCE} — the IMPL message math moved"
+    )
+
+
+def test_an_operator_minted_over_live_claims_moves_its_conclusion(sdk):
+    """The failure shape, smallest case: nothing is draft, so the incident-only
+    promotion sweep had no candidate and the factor never existed."""
+    premise = _claim(sdk, "premise", "live")
+    conclusion = _claim(sdk, "conclusion", "live")
+    sdk.set_point_baseline(premise, 6.0, 2.0)
+    oid = sdk.create_operator(
+        "IMPL", premise, [conclusion],
+        direction="unidirectional", promote_source=False,
+    )["id"]
+
+    manifest = epa.activate_beliefs(sdk)
+
+    assert manifest["points_promoted"] == 0, (
+        "both claims were already live, so no point should be promoted — a "
+        "non-zero count means the fixture stopped testing the live-point path"
+    )
+    _assert_contributed(sdk, manifest, conclusion, oid)
+
+
+def test_a_resumed_ingest_operator_is_promoted_on_the_next_pass(sdk):
+    """The realistic path: pass 1 promotes the drafts and finds no factor; the
+    resumed ingest then mints an operator over those now-live claims."""
+    premise = _claim(sdk, "premise", "draft")
+    conclusion = _claim(sdk, "conclusion", "draft")
+    first = epa.activate_beliefs(sdk)
+    assert first["operators"] == 0 and first["no_op_reason"] == "no_ep_factors", (
+        "pass 1 runs over an operator-less graph, so it must report the "
+        f"structural no-op; read {first['operators']} operators / "
+        f"{first['no_op_reason']!r}"
+    )
+
+    # …the resumed ingest writes the operator over claims pass 1 already made live
+    sdk.set_point_baseline(premise, 6.0, 2.0)
+    oid = sdk.create_operator(
+        "IMPL", premise, [conclusion],
+        direction="unidirectional", promote_source=False,
+    )["id"]
+    assert _operator_status(sdk, oid) == "draft", (
+        "create_operator(promote_source=False) must mint a DRAFT operator — "
+        "the precondition this test exists for"
+    )
+
+    manifest = epa.activate_beliefs(sdk)
+
+    assert manifest["points_promoted"] == 0, (
+        "pass 2 has nothing draft to promote, which is exactly why the "
+        "incident-only sweep found no operator candidate"
+    )
+    _assert_contributed(sdk, manifest, conclusion, oid)
+
+
+def test_an_all_draft_graph_still_promotes_its_operators(sdk):
+    """No regression on the census path: the sweep is additive and a graph whose
+    claims are all draft reaches the same state it reached before."""
+    premise = _claim(sdk, "premise", "draft")
+    conclusion = _claim(sdk, "conclusion", "draft")
+    sdk.set_point_baseline(premise, 6.0, 2.0)
+    oid = sdk.create_operator(
+        "IMPL", premise, [conclusion],
+        direction="unidirectional", promote_source=False,
+    )["id"]
+
+    manifest = epa.activate_beliefs(sdk)
+
+    assert manifest["points_promoted"] == 2
+    _assert_contributed(sdk, manifest, conclusion, oid)
+
+
+def test_the_gate_still_refuses_an_operator_with_a_draft_endpoint(sdk):
+    """R16 is not widened by the sweep. ``activate_beliefs`` promotes every
+    draft Point in phase 1a, so the public flow cannot reach this state — the
+    gate is pinned directly through ``_promote_operator_row``, because a future
+    "simplification" of the gate is exactly the change that would let a live
+    edge inherit a draft endpoint.
+
+    The falsifier named in the assertion is the one this change actually
+    shipped on its first pass: spelling the liveness predicate in CYPHER (as a
+    ``WHERE`` over ``coalesce(x.status, 'live') <> 'draft'``). That spelling
+    admits every TERMINAL status (retracted / superseded / outdated / archived,
+    and the legacy ``deprecated``), which the SDK's ``(st or "live") ==
+    "live"`` blocks — so the gate must stay the Python comparison, not a Cypher
+    predicate.
+    """
+    premise = _claim(sdk, "premise", "live")
+    conclusion = _claim(sdk, "conclusion", "draft")
+    oid = sdk.create_operator(
+        "IMPL", premise, [conclusion],
+        direction="unidirectional", promote_source=False,
+    )["id"]
+
+    # Drive the gate directly: a public ``activate_beliefs`` call would promote
+    # the draft conclusion in phase 1a and then (correctly) promote the operator.
+    marked: list[str] = []
+    epa._promote_operator_row(
+        sdk, sdk._get_proj().g, oid, set(), marked.append,
+    )
+
+    assert _operator_status(sdk, oid) == "draft", (
+        "the operator went live while its conclusion endpoint is still draft — "
+        "R16 says a draft endpoint blocks promotion (#10137)"
+    )
+    assert marked == [], (
+        f"the gate reported {marked!r} as promoted while an endpoint was draft"
+    )
+
+
+def test_the_gate_refuses_a_terminal_endpoint(sdk):
+    """The half-fixed gate, pinned. A draft-only predicate (``<> 'draft'``)
+    admits a RETRACTED endpoint, goes live over it, journals an
+    ``OperatorPromoted``, and then ``ep.py`` strips the terminal input so the
+    manifest publishes ``operators_promoted: 1, factors: 0`` — the exact
+    "promoted but no factor" reading this change exists to make impossible.
+    Reachable on the population this change targets: a resumed ingest writing an
+    operator over a claim a human has since retracted.
+    """
+    premise = _claim(sdk, "premise", "live")
+    conclusion = _claim(sdk, "conclusion", "live")
+    sdk.retract_point(conclusion)
+    oid = sdk.create_operator(
+        "IMPL", premise, [conclusion],
+        direction="unidirectional", promote_source=False,
+    )["id"]
+
+    marked: list[str] = []
+    epa._promote_operator_row(
+        sdk, sdk._get_proj().g, oid, set(), marked.append,
+    )
+
+    assert _operator_status(sdk, oid) == "draft", (
+        "the operator went live over a TERMINAL endpoint — the gate admits "
+        "every non-draft status instead of requiring 'live' (#10137)"
+    )
+    assert marked == []
