@@ -165,7 +165,8 @@ def test_reaper_reaps_an_unowned_container_and_keeps_a_live_owner(
     alive.mkdir()
     monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
     monkeypatch.setattr(tl, "_docker", lambda *a, **k: _R(
-        0, "fdb-lane-dead\nfdb-lane-alive\nfdb-lane-mine\n", "") if a[0] == "ps"
+        0, "fdb-lane-dead\texited\nfdb-lane-alive\texited\nfdb-lane-mine\texited\n", "")
+        if a[0] == "ps"
         else _R(0, "", ""))
     monkeypatch.setattr(tl, "_worktree_slugs",
                         lambda: {"dead": str(dead), "alive": str(alive)})
@@ -602,7 +603,12 @@ def test_reaper_reports_NO_termination_facts_for_a_RUNNING_owner_gone_removal(
     own `live` flag exists to prevent exactly that, and `start()` refuses to
     append any report to an unreadable state). Mutation: read the facts
     unconditionally and this fails; the terminal-state evidence test above still
-    passes, so only this one pins the distinction."""
+    passes, so only this one pins the distinction.
+
+    ⛔ The removal also needs the SECOND proof (#10841 review, P1): a running
+    container is only removed once the gap proves nobody is using it. Both are
+    stubbed here so the facts rule is what the assertion isolates.
+    """
     removed: list = []
 
     def fake(*a, **k):
@@ -618,6 +624,8 @@ def test_reaper_reports_NO_termination_facts_for_a_RUNNING_owner_gone_removal(
     monkeypatch.setattr(tl, "_container_in_use", lambda _n: False)
     monkeypatch.setattr(tl, "_termination_report",
                         lambda _n, live: "KILLED FOR MEMORY (OOMKilled=true)")
+    monkeypatch.setattr(tl, "_container_in_use", lambda _n: False)
+    monkeypatch.setattr(tl, "_unused_gap", lambda _n: 5.0)
     out = tl.reap_orphans()
     assert removed == [("-f", "fdb-lane-lively")], (removed, out)
     assert "KILLED FOR MEMORY" not in out[0], out
@@ -1972,6 +1980,16 @@ def test_proof_1_SPARES_a_container_a_live_client_is_using(monkeypatch):
     deleted on the 15-minute clock. `_container_in_use` is the one liveness datum
     that does not need to know the owner, and `None` (unreadable) must spare too:
     unreadable is not "unused".
+
+    ⛔ The PROBE is this test's subject and it is unchanged. The REMOVAL rung below
+    it is not: #10806 landed this probe on `origin/main` while the fold landed
+    `0abaa51a5` ("the ownership label needs USE proof"), which widened the
+    owner-gone arm's second proof to both owner sources — docker's own TERMINAL
+    state, OR no attached client ACROSS `OWNER_GRACE_H`. The two never saw each
+    other, and a bare "answered `False`" is no longer sufficient proof on its own,
+    because a lane between two steps answers exactly that. So the probe assertions
+    are kept verbatim and the removal rung now proves BOTH halves: first sighting
+    keeps, a full client-free grace removes.
     """
     removed: list = []
 
@@ -1993,9 +2011,21 @@ def test_proof_1_SPARES_a_container_a_live_client_is_using(monkeypatch):
         assert "removed fdb-lane-lively" not in out, out
         assert removed == [], (
             f"a container reporting {answer!r} for its clients was removed")
-    # …and with no client it IS removed, so the gate has not disabled proof 1.
+    # …and with no client it IS removable, so the gate has not disabled proof 1 —
+    # but only on the SECOND rung of the ladder the fold added (0abaa51a5): the
+    # owner being gone is evidence about OWNERSHIP, never about USE.
     monkeypatch.setattr(tl, "_container_in_use", lambda _n: False)
-    assert "removed fdb-lane-lively" in "\n".join(tl.reap_orphans())
+
+    # No client, but nothing observed unused yet: a lane between steps.
+    monkeypatch.setattr(tl, "_unused_gap", lambda _n: None)
+    out = "\n".join(tl.reap_orphans())
+    assert removed == [], out
+    assert "first sighting" in out, out
+
+    # …and now BOTH proofs hold: owner gone AND no client across the full grace.
+    monkeypatch.setattr(tl, "_unused_gap", lambda _n: tl.OWNER_GRACE_H + 1.0)
+    out = "\n".join(tl.reap_orphans())
+    assert "removed fdb-lane-lively" in out, out
     assert removed == ["fdb-lane-lively"], removed
 
 
@@ -2022,7 +2052,7 @@ def test_start_sweeps_orphans_and_reports_them_on_stderr(
 
     def fake(*a, **k):
         if a[0] == "ps":
-            return _R(0, "fdb-lane-dead\n", "")
+            return _R(0, "fdb-lane-dead\texited\n", "")
         if a[0] == "run":
             return _R(0, "deadbeef\n", "")
         if a[0] == "port":
@@ -5170,88 +5200,93 @@ def test_the_NAME_and_the_ownership_LABEL_come_from_ONE_root_read(monkeypatch,
     assert name == tl.container_name(labels[tl.LABEL_SLUG]), (name, labels)
 
 
-def test_an_ownership_LABEL_makes_a_DEREGISTERED_worktree_still_reapable(
+def test_an_ownership_LABEL_makes_a_DEREGISTERED_worktree_reapable_ON_PROOF(
         monkeypatch, tmp_path):
-    """THE LEAK, closed at the root.
+    """THE LEAK, closed at the root — without firing on a live database.
 
     `git worktree remove` destroys the only record `_worktree_slugs()` has, so
     the container used to be INDETERMINATE — reported and kept, for days. The
     label says which worktree created it, so the owner is DETERMINED and GONE,
-    which is exactly the proof #8180 authorises armed.
+    which is the ownership proof #8180 authorises armed.
+
+    ⛔ That proof is about OWNERSHIP, not about USE (#10841 review, P1). A lane
+    container OUTLIVES its worktree by design, so a RUNNING container whose
+    worktree directory was deleted can still have a pytest running against the
+    URI it exported — and the promotion out of the report-only INDETERMINATE
+    bucket must not turn into a bare `rm -f`. So the label buys the SECOND
+    proof ladder the INDETERMINATE arm already demands (docker's own TERMINAL
+    state, or no attached client across `OWNER_GRACE_H`), never a removal on
+    ownership alone. One arm per rung, in order, and the removal is LAST.
     """
     gone = tmp_path / "deleted-worktree"
-    removed: list = []
     name = tl.container_name(tl.slug_for(gone))
     assert not gone.exists()
 
-    def fake(*a, **k):
-        if a[0] == "ps":
-            return _R(0, _labelled_row(name, "running", gone), "")
-        if a[0] == "rm":
-            removed.append(a)
-        return _R(0, "", "")
-
-    monkeypatch.setattr(tl, "_docker", fake)
-    # git answered: nothing claims this container any more (the teardown).
-    monkeypatch.setattr(tl, "_worktree_slugs", lambda: {})
-    monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
-    # The container itself says NO client is attached. This is stubbed rather
-    # than left to `fake` (whose `exec` answers "" ⇒ `_container_in_use` returns
-    # None ⇒ fail-closed KEEP), because "nothing is using it" is a POSITIVE
-    # premise of the removal asserted below, not an ambient default.
-    monkeypatch.setattr(tl, "_container_in_use", lambda _n: False)
-    out = tl.reap_orphans()
-    joined = "\n".join(out)
-    assert [c[1:3] for c in removed] == [("-f", name)], (removed, out)
-    assert "owning worktree" in joined and "is gone" in joined, out
-
-
-def test_a_LABEL_cannot_kill_a_LIVE_lane_whose_worktree_was_torn_down(
-        monkeypatch, tmp_path):
-    """#10712 review P1: the label must not outrank a live CLIENT.
-
-    The label reaches a population `origin/main` never put on arm 1: a worktree
-    torn down (`git worktree remove --force` / `prune`) while the lane's process
-    is STILL RUNNING. That process's cwd is a deleted directory, so
-    `_live_lane_paths` cannot name it — the container's own `CLIENT LIST` is the
-    only remaining evidence that a test run is in progress.
-
-    On `origin/main` this container is INDETERMINATE, which ASKS and keeps an
-    in-use container (#10693 review F1). Without the client probe in arm 1 the
-    label flips that to `rm -f`: a live lane's database killed mid-run. The
-    probe is scoped to label-derived owners, so name-derived arm 1 is unchanged.
-
-    MUTATION: delete the `if labelled_owner:` probe block and this goes red with
-    `removed == [('rm', '-f', name)]`. A `None` answer (could not ask) must keep
-    it too — unreadable is not "unused".
-    """
-    gone = tmp_path / "deleted-worktree"
-    assert not gone.exists()
-
-    def _sweep_with_client(answer):
-        """(removed argv list, joined report) for one `_container_in_use` answer."""
+    def sweep(state, busy, gap):
         removed: list = []
-        name = tl.container_name(tl.slug_for(gone))
+        touched: list = []
 
         def fake(*a, **k):
             if a[0] == "ps":
-                return _R(0, _labelled_row(name, "running", gone), "")
+                return _R(0, _labelled_row(name, state, gone), "")
             if a[0] == "rm":
                 removed.append(a)
             return _R(0, "", "")
 
         monkeypatch.setattr(tl, "_docker", fake)
+        # git answered: nothing claims this container any more (the teardown).
         monkeypatch.setattr(tl, "_worktree_slugs", lambda: {})
         monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
-        monkeypatch.setattr(tl, "_container_in_use", lambda _n: answer)
-        return removed, "\n".join(tl.reap_orphans())
+        monkeypatch.setattr(tl, "_termination_report", lambda _n, live: "")
+        monkeypatch.setattr(tl, "_container_in_use", lambda _n: busy)
+        monkeypatch.setattr(tl, "_unused_gap", lambda _n: gap)
+        monkeypatch.setattr(tl, "_touch_lease", touched.append)
+        return removed, "\n".join(tl.reap_orphans()), touched
 
-    for answer, expected in ((True, "active client"), (None, "could not be asked")):
-        removed, joined = _sweep_with_client(answer)
-        assert removed == [], (
-            "the label reaped a container a live lane is using", answer, joined)
-        assert expected in joined, (answer, joined)
-        assert "is gone" in joined, joined
+    # 1. A live client: the database is being used RIGHT NOW by whatever pytest
+    #    the deleted worktree left running. Deleting it is the module's stated
+    #    worst bug, and it is the exact pre-fix behaviour this arm pins AGAINST.
+    removed, out, touched = sweep("running", True, None)
+    assert removed == [], out
+    assert "HAS an active client" in out, out
+    assert touched == [name], (touched, out)   # observed use refreshes the lease
+
+    # 1b. An UNREADABLE client answer is not "no client". `busy is None` means the
+    #     probe could not ask, so the leg must report and stop — the same
+    #     fail-closed direction the INDETERMINATE arm takes, with its own
+    #     message. P3 from the #10841 review: the sweep matrix covered True,
+    #     False+no-gap, False+short-gap, False+full-gap and `exited`, but not
+    #     `None`, so this branch (and its wording) had no pin at all.
+    #     Mutation: fold `None` into the `if busy:` / `if gap_h is None:` path —
+    #     with no gap either it reports "first sighting" instead, and this fails.
+    removed, out, touched = sweep("running", None, None)
+    assert removed == [], out
+    assert "could not be asked whether a client is using it" in out, out
+    assert "fail-closed" in out, out
+    assert touched == [], (touched, out)   # an unreadable answer is not observed use
+
+    # 2. No client, but nothing observed unused yet — a lane between steps.
+    removed, out, _ = sweep("running", False, None)
+    assert removed == [], out
+    assert "first sighting" in out, out
+
+    # 3. A client-free gap shorter than the grace is still not proof.
+    removed, out, _ = sweep("running", False, 0.5)
+    assert removed == [], out
+    assert "0.5h" in out and "grace" in out, out
+
+    # 4. …and now BOTH proofs hold: owner gone AND no client across a full
+    #    grace. This is the removal the label earns.
+    removed, out, _ = sweep("running", False, 5.0)
+    assert [c[1:3] for c in removed] == [("-f", name)], (removed, out)
+    assert "owning worktree" in out and "is gone" in out, out
+    assert "served no client for 5.0h" in out, out
+
+    # 5. Docker's own state is proof on its own: a stopped container cannot be a
+    #    live client (`docker exec` into it always fails), so it needs no gap.
+    removed, out, _ = sweep("exited", True, None)
+    assert [c[1:3] for c in removed] == [("-f", name)], (removed, out)
+    assert "owning worktree" in out and "is gone" in out, out
 
 
 def test_a_LABEL_whose_SLUG_disagrees_with_the_container_is_not_evidence(
@@ -5332,13 +5367,6 @@ def test_a_corroborated_label_whose_owner_EXISTS_beats_the_age_backstop(
     monkeypatch.setattr(tl, "_live_lane_paths", lambda: set())
     monkeypatch.setattr(tl, "_container_in_use", lambda _n: False)
     monkeypatch.setattr(tl, "_unused_gap", lambda _n: 40.0)
-    # The container's state at the MOMENT OF ACTION, which arm 3 re-reads. Left
-    # unstubbed, `fake` answers "" ⇒ `container_state` reports `unknown` ⇒ the
-    # re-read keeps it fail-closed, and then "not removed" would be explained by
-    # an unreadable state instead of by the label — the docstring's claim that
-    # "the same fixture without the label reaches `rm -f`" would be false
-    # (#10712 review P2). Answer with the state the sweep already saw.
-    monkeypatch.setattr(tl, "container_state", lambda _n: "running")
     monkeypatch.setenv(tl.OWNER_INDETERMINATE_REAP_ENV, "1")   # age arm ARMED
     out = tl.reap_orphans()
     joined = "\n".join(out)

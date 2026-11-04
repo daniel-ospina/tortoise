@@ -419,6 +419,17 @@ def _strip_inline_code(text: str, *, strict: bool = False) -> str:
         while i < n and text[i] == "`":
             i += 1
         run = i - opener
+        if _escaped(text, opener):
+            # ⛔ A BACKSLASH-ESCAPED BACKTICK IS NOT A DELIMITER. GFM renders
+            # ``\`Closes #100\``` as PROSE carrying a live `Closes #100` — the
+            # backslashes escape the backticks, so there is no code span at all.
+            # Blanking it anyway reported nothing and exited 0 over a `Closes`
+            # the renderer honours, which on a non-default base is exactly the
+            # missed-warning this module exists to prevent (#10841 review, P2).
+            # It is not a run either, so it neither opens a span nor closes a
+            # `pending` one: emitted verbatim, and the scan continues past it.
+            out.append(text[opener:i])
+            continue
         if not strict and run in pending:
             # This run CLOSES a literal one earlier in the paragraph, so it is
             # not an opener and nothing on this line is inside a span opened
@@ -453,6 +464,35 @@ def _strip_inline_code(text: str, *, strict: bool = False) -> str:
         ))
         i = closer + run
     return "".join(out)
+
+
+def _escaped(text: str, pos: int) -> bool:
+    """Is ``text[pos]`` backslash-ESCAPED — an ODD number of backslashes before it?
+
+    Odd, not simply "there is a backslash": CommonMark's escape is ONE backslash,
+    so a doubled backslash escapes the BACKSLASH and the character after it is a
+    real delimiter, while a single one escapes the delimiter itself. Counting
+    parity separates the two; a bare ``text[pos - 1] == "\\"`` test reads the
+    first case right and the second backwards.
+
+    ⚠️ It is applied to an OPENER only, and the asymmetry is the renderer's, not
+    an oversight: the inline scan consumes ``\\`` + ``x`` as one literal
+    character, so an escaped backtick never reaches the code-span rule — while a
+    span's CLOSER is found by matching backtick strings in the raw remainder, a
+    search that knows nothing about escapes. Measured against markdown-it:
+    ``\\`Closes #100\\``` renders as prose, `` `Closes #100\\` `` renders as
+    ``<code>Closes #100\\</code>``. Guarding the closer too would leave a span the
+    renderer honours unblanked — a false warning, which is the direction this
+    arm must not move (it would also disagree with
+    `test_the_parser_agrees_with_a_real_commonmark_renderer`).
+    """
+    backslashes = 0
+    k = pos - 1
+    while k >= 0 and text[k] == "\\":
+        backslashes += 1
+        k -= 1
+    return backslashes % 2 == 1
+
 
 MAX_STACK_DEPTH = 20
 
@@ -604,8 +644,16 @@ class _Fence:
     There is deliberately no raw-coordinate item column: two review rounds
     carried one alongside this field and ended up comparing a `rest` indent with
     a raw column (and then the reverse), each time buying a false `lands`.
-    `container_col` derives the raw column from these two fields, so there is
-    only ONE number in each space and no way to mix them.
+    Everything a dedent or a closer is measured against is therefore ONE of the
+    fields above, in the space that field already holds — `close_base` against a
+    `residual` indent (the item's column past the prefix), `item_col_raw` against
+    a RAW `indent` (an item that sits outside the quote). There is deliberately
+    no DERIVED third number either: the only derived column this class ever
+    carried (`len(prefix) + close_base`, the raw column of the container's
+    content) existed solely for a subtraction that charged the marker's
+    allowance twice, and it was deleted with that subtraction (#10841 review,
+    P2). A derived column kept beside the two real ones is how the next reader
+    re-derives it and re-introduces the double count.
 
     `item_col_raw` is the enclosing item's content column in RAW coordinates,
     and is set ONLY when that item sits OUTSIDE the fence's blockquote (its
@@ -631,13 +679,6 @@ class _Fence:
     in_list: bool
     item_col_raw: int = 0
     item_depth: int = 0
-
-    @property
-    def container_col(self) -> int:
-        """The containing block's content column in RAW coordinates — where a
-        line's content has to start to still be inside this block. A closer's
-        "up to three spaces" (§4.5) is measured from here."""
-        return len(self.prefix) + self.close_base
 
 
 def _fence_line_column(line: str, depth: int) -> tuple[int, int, int]:
@@ -861,8 +902,10 @@ def strip_code(body: str, strict: bool = False) -> str:
             # (for a fence opened inside a list item) the item did.
             #
             # Both tests are measured in ONE coordinate space — the RAW line,
-            # with at most the fence's own blockquote depth consumed — because
-            # that is the space `container_col` lives in. Two review cycles did
+            # with at most the fence's own blockquote depth consumed — so each
+            # compares against the column the field it names already holds
+            # (`close_base` / `item_col_raw`), never a derived raw column. Two
+            # review cycles did
             # this in two spaces at once (a raw indent against a `rest` column,
             # then a `rest` indent against a raw column) and each way bought a
             # false `lands` on one family of shapes while losing a real claim on
@@ -901,7 +944,7 @@ def strip_code(body: str, strict: bool = False) -> str:
                 # ⚠️ BOTH sides are in ONE space. `residual` is the indent after
                 # this line's own markers, which is the space `close_base` holds
                 # (the item's column past the prefix). Subtracting a RAW column
-                # (`column - container_col`) instead charged the MARKER'S allowance
+                # from `residual` instead charged the MARKER'S allowance
                 # twice — the opener's `  > ` is 4 raw columns, the closer's `> `
                 # only 2, so a 4-space-indented run `>     ``` ` came out 2 columns
                 # past the container and closed a fence the renderer keeps open:
