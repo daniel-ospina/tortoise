@@ -721,6 +721,86 @@ def test_an_unmeasurable_constituent_is_NOT_reported_as_a_refusal(
     assert "COULD NOT MEASURE" in out, out
 
 
+def test_a_constituent_head_absent_from_the_object_db_is_UNMEASURABLE(
+    scratch_repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """(b3) NOT having fetched a PR is not evidence about the fold — and must not say it is.
+
+    `main` fetches ONLY the fold branch, so on a fresh hub or a new lane worktree a
+    constituent's head is simply absent. `merge-base --is-ancestor` on an absent commit
+    exits 128 (indistinguishable from "not an ancestor") and `git diff` then dies before
+    comparing anything, so the pre-fix order filed the constituent as `NOT-CONTAINED` and
+    the report printed
+
+        REFUSED (not contained in the fold — closing would destroy work): [101]
+
+    with exit **1**, on a run where nothing was measured. Both are contract breaches in
+    the module's own words: exit 2 is "could not measure", and the docstring says an
+    UNMEASURABLE constituent "never prints the 'closing would destroy work' line".
+
+    Discrimination proof — MEASURED, and it names which defence carries what. The fix has
+    two, and they OVERLAP on this scenario: the presence gate in `verdict_for` and the
+    tri-state return of `content_contained`. Disarming EITHER one alone stays green here,
+    because the other still classifies the run as UNMEASURABLE. The gate is the clearer
+    message (it names the absent commits and the fetch to run, and spawns no worktree on
+    a ref that cannot resolve); the tri-state is the one that covers the case the gate
+    CANNOT see — every commit present, but no merge base in a shallow clone, where only
+    the diff itself fails. That half has its own test immediately below, and reverting
+    both defences reds this one.
+    """
+    base, const, fold = _three_way_fixture(scratch_repo)
+    absent = "0" * 40  # a well-formed sha this repo has never fetched
+    assert not bo._commit_present(absent, scratch_repo), "the fixture sha must be absent"
+
+    verdict = bo.verdict_for(101, absent, base, fold, scratch_repo)
+    assert verdict.state == "UNMEASURABLE", (
+        "a head that is not in the object DB is a failed MEASUREMENT, not a containment "
+        f"verdict — got {verdict}"
+    )
+    assert verdict.closable is False, verdict
+
+    # And it must be FILED as unmeasured, which is what decides both the printed line
+    # and the exit status (1 = refused, 2 = could not measure).
+    report = bo.Report(fold=10917, fold_head=fold)
+    bo._file_verdict(report, verdict)
+    assert report.unmeasured == [101] and report.refused == [], (
+        f"filed as a refusal, which prints the false claim: {report}"
+    )
+    bo._print_report(report, dry_run=True)
+    out = capsys.readouterr().out
+    assert "closing would destroy work" not in out, out
+    assert "COULD NOT MEASURE" in out, out
+
+    # The genuinely-measured answer is unchanged: an absent merge base measured nothing,
+    # but a PRESENT head whose diff conflicts is still a real NOT-CONTAINED.
+    conflicting = bo.verdict_for(102, const, base, fold, scratch_repo)
+    assert conflicting.state == "NOT-CONTAINED", (
+        "a present head against a conflicting fold must stay a real refusal — the fix "
+        f"must not turn every hard case into 'could not measure': {conflicting}"
+    )
+
+
+def test_content_contained_reports_an_uncomputable_diff_as_UNMEASURABLE(
+    scratch_repo: Path,
+) -> None:
+    """(b3b) The half the presence gate cannot cover: every commit present, diff still fails.
+
+    A shallow clone has the folded objects but not the merge base, so `git diff base...head`
+    exits non-zero while `_commit_present` is true for all three refs. Collapsing that into
+    `NOT-CONTAINED` re-opens the defect one layer down, so the function itself is tri-state
+    and this test calls it directly (bypassing the gate that would answer first).
+
+    Discrimination proof: with the function returning `(bool, str)` — the pre-fix shape —
+    the state is `False`/`True`, never the string `UNMEASURABLE`, and this test reds.
+    """
+    base, const, fold = _three_way_fixture(scratch_repo)
+    state, detail = bo.content_contained(const, "0" * 40, fold, scratch_repo)
+    assert state == "UNMEASURABLE", (
+        f"an uncomputable diff is a failed measurement, not a containment verdict: {state!r} ({detail})"
+    )
+    assert "could not compute the constituent diff" in detail, detail
+
+
 def test_hint_constituents_still_sees_prose_but_is_never_acted_on() -> None:
     """(b2) The prose hint is retained for the refusal message only."""
     body = "batch(x): land #10543 #10610 (#10641 dropped)"
