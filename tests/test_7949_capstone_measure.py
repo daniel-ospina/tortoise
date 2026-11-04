@@ -1345,11 +1345,12 @@ def _duplicate_duration_keys(manifest_text: str) -> dict[str, int]:
 
     MAP-WIDE on purpose. This predicate used to be a filter for one hard-coded
     key (`test_7949_capstone_measure.py`), so the pin below — named and
-    documented for "one row per file" — was green against a map carrying
-    TWENTY-TWO duplicate keys (#10894 review, findings 1-2: 5 on the branch head,
-    22 once merged with `origin/main`). It read one row of a 1,258-row map and
-    reported the map clean; the required `manifest-integrity` check was red the
-    whole time. A pin whose name is broader than its filter is a FALSE PASS.
+    documented for "one row per file" — was green against a map carrying TWELVE
+    duplicate keys (#10894 review, findings 1-2: 12 on the merged tree
+    `ada1c9fda`, 1,254 rows over 1,242 distinct, repaired in `479a86568`). It
+    read one row of that map and reported the map clean; the required
+    `manifest-integrity` check was red the whole time. A pin whose name is
+    broader than its filter is a FALSE PASS.
     """
     node = yaml.compose(manifest_text)
     durations = next((v for k, v in node.value if k.value == "durations"), None)
@@ -1369,8 +1370,8 @@ def test_the_durations_map_carries_one_row_per_file():
     pin that reads one line of a file that carries two cannot claim the file is
     clean (the manifest's own 51st pin names this class).
 
-    `#10894`: the same defect came back at MAP scale — 5 duplicates on the
-    branch head, 22 once merged with `main` — and this pin was green through all
+    `#10894`: the same defect came back at MAP scale — 12 duplicate keys on the
+    merged tree — and this pin was green through all
     of it because it only ever looked at its own key. It is now map-wide, and
     NON-VACUOUS: the detector is required to reject a synthetic duplicated row,
     so the assertion cannot pass because the detector stopped looking.

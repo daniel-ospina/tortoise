@@ -107,12 +107,22 @@ def test_a_duplicate_key_inside_a_nested_mapping_is_refused(tmp_path: Path) -> N
 
     The arms above duplicate the ROOT mapping and a `surfaces:` sequence, so they
     pass on a `_walk` that never descends. `config/ci-surfaces.yml` meanwhile
-    carried 22 duplicate keys inside `durations:` (5 on the branch head, 22 on
-    the merged tree — the `merge=union` shape at a depth this suite did not
-    reach), and the required `manifest-integrity` job went RED on the PR with
-    nothing here naming the class: `safe_load` kept the last weight and the
-    shard packer used it. A duplicated WEIGHT is the silent half — the file still
-    parses, so no other check can see it.
+    carried **12** duplicate keys inside `durations:` — 1,254 rows over 1,242
+    distinct, on this PR's own merged tree `ada1c9fda` (`merge=union` keeps BOTH
+    sides of a retimed block, at a depth this suite did not reach), repaired in
+    `479a86568`. The required `manifest-integrity` job
+    (`python-ci.yml:528`) runs `tools/registry_integrity.py` at every depth, so
+    it was RED for it — but nothing in THIS suite named the class, so a reviewer
+    reading only the tests saw a green tree: `safe_load` kept the last weight and
+    the shard packer used it. A duplicated WEIGHT is the silent half — the file
+    still parses, so no other check can see it.
+
+    (Figures re-derived at `ada1c9fda`: `check_registry()` returns 12, and
+    `yaml.compose` counts 1,254/1,242. Earlier drafts of this docstring and of
+    `9d1bd7144`'s message quoted "5 on the branch head, 22 on the merged tree" and
+    "1,258 rows / 1,236 distinct" — measurements of an intermediate tree that no
+    longer exists and that the branch head itself had already deduped. Quote only
+    what `git show <sha>:config/ci-surfaces.yml` still reproduces.)
     """
     victim = tmp_path / "ci-surfaces.yml"
     victim.write_text(
