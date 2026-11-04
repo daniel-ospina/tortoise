@@ -24,6 +24,8 @@ RED before the fix (measured on `816b37f1876`), GREEN after.
 """
 from __future__ import annotations
 
+import re
+
 import pytest
 
 #: A token that exists nowhere else, so a hit cannot be a coincidence. The
@@ -47,24 +49,28 @@ def sdk(tmp_path, monkeypatch):
         sdk.close()
 
 
-def _nodes_carrying(sdk, needle: str) -> list[tuple[list[str], dict]]:
+def _nodes_carrying(sdk, needle: str) -> list[tuple[list[str], dict, object]]:
     """Every node whose STRING properties contain ``needle``.
 
     Walks the live handle instead of a named field on purpose: the rule is
     about the text's presence on a node, so a hit on any label or property is
-    the same defect wearing a different name.
+    the same defect wearing a different name. Returns the labels, the ONE
+    offending property (not the whole property map — it can carry embeddings),
+    and the node's ``id`` so the caller can tell the turn store from any other
+    node wearing the same label.
     """
     rows = sdk._get_proj().g.query(
         "MATCH (n) RETURN labels(n), properties(n)").result_set
-    hits: list[tuple[list[str], dict]] = []
+    hits: list[tuple[list[str], dict, object]] = []
     for labels, props in rows:
+        node_id = (props or {}).get("id")
         for key, value in (props or {}).items():
             if isinstance(value, str) and needle in value:
-                hits.append((list(labels), {key: value}))
+                hits.append((list(labels), {key: value}, node_id))
                 break
             if isinstance(value, list) and any(
                     isinstance(x, str) and needle in x for x in value):
-                hits.append((list(labels), {key: value}))
+                hits.append((list(labels), {key: value}, node_id))
                 break
     return hits
 
@@ -93,8 +99,8 @@ def test_the_session_source_does_not_carry_the_transcript(sdk):
         "anywhere proves nothing (the turn nodes must carry the marker)")
 
     offenders = [
-        (labels, props) for labels, props in hits
-        if not _is_turn_store(labels)
+        (labels, props) for labels, props, node_id in hits
+        if not _is_turn_store(labels, node_id, session_id)
     ]
     assert not offenders, (
         "the transcript reached a node that is NOT the episodic turn store — "
@@ -102,16 +108,24 @@ def test_the_session_source_does_not_carry_the_transcript(sdk):
         + "\n".join(f"  {labels} {props}" for labels, props in offenders))
 
 
-def _is_turn_store(labels: list[str]) -> bool:
+def _is_turn_store(labels: list[str], node_id: object, session_id: str) -> bool:
     """The episodic turn nodes are the one place a capture's text belongs.
 
-    `_write_capture_turns` MERGEs `(t:Point {id: '<session>_t<i>'})`, i.e. a
-    `:Point` — so the exemption is exactly the Point label. Everything else
-    (`:Source`, `:Session`, `:Event`, …) is a derived record of the session and
-    must not echo its text.
+    `_write_capture_turns` MERGEs `(t:Point {id: '<session>_t<i>'})`
+    (`_capture_turn_id`), so the exemption is the Point label **and** that id
+    space — never the label alone.
+
+    ⛔ §9.1/D1 says the transcript is "not in the graph, not a `Document` node,
+    **not a `Point`**", so a `:Point` holding a capture's words for any other
+    reason is the same defect wearing the label the ruling names in bold:
+    exempting `Point` wholesale would make this guard blind to exactly that
+    route, while its own scope claims say otherwise. The id bound costs nothing
+    — in a capture, `<session>_t0` is the ONLY Point that carries the marker.
     """
-    return labels == ["Point"] or (
-        "Point" in labels and len(labels) == 1)
+    return (list(labels) == ["Point"]
+            and isinstance(node_id, str)
+            and re.fullmatch(re.escape(session_id) + r"_t\d+",
+                             node_id) is not None)
 
 
 def test_a_recapture_replaces_the_prose_a_pre_fix_write_left_behind(sdk):
@@ -141,8 +155,9 @@ def test_a_recapture_replaces_the_prose_a_pre_fix_write_left_behind(sdk):
 
     _capture(sdk, session_id)
 
-    offenders = [(labels, props) for labels, props in _nodes_carrying(sdk, MARKER)
-                 if not _is_turn_store(labels)]
+    offenders = [(labels, props) for labels, props, node_id
+                 in _nodes_carrying(sdk, MARKER)
+                 if not _is_turn_store(labels, node_id, session_id)]
     assert not offenders, (
         "a re-capture left the pre-fix prose on the node — the capture's own "
         "derivation (a topic lexicon, non-NULL for any transcript with content) "
@@ -267,3 +282,26 @@ def test_a_text_less_recapture_keeps_the_two_derived_columns_tied(sdk):
         f"value: {summary!r} vs the indexed {search!r}")
     assert search == before_search, (search, before_search)
     assert summary == DISPLAY_PREFIX + search, (summary, search)
+def test_a_point_that_is_not_a_turn_is_reported_not_exempted(sdk):
+    """The exemption is the TURN-STORE id space, never the `Point` label.
+
+    §9.1/D1 names `Point` explicitly ("not in the graph, not a `Document` node,
+    not a `Point`"), so an exemption keyed on the label alone would make this
+    guard blind to the one route the ruling writes down in bold — and the two
+    scope claims above would be false. This pins the narrow predicate: a
+    `:Point` outside `<session>_t<i>` is an OFFENDER.
+    """
+    session_id = "sess-source-prose-pointexempt-10000"
+    sdk._get_proj().g.query(
+        "MERGE (p:Point {id:'point-not-a-turn-10000'}) SET p.text=$t",
+        params={"t": MARKER})
+    _capture(sdk, session_id)
+
+    hits = _nodes_carrying(sdk, MARKER)
+    assert len(hits) >= 2, f"the seeded non-turn Point is missing: {hits}"
+    offenders = [(labels, props) for labels, props, node_id in hits
+                 if not _is_turn_store(labels, node_id, session_id)]
+    assert offenders, (
+        "a non-turn `:Point` carrying the capture's text was EXEMPTED — the "
+        "predicate must bound the exemption to the turn-store ids, because "
+        "§9.1/D1 forbids the transcript on a `Point` too")
