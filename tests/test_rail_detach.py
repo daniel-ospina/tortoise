@@ -533,6 +533,54 @@ def test_a_failed_chdir_is_not_reported_as_a_missing_binary(tmp_path):
     assert str(missing) in out.cause, (
         f"the cause must name the CWD that could not be entered: {out.cause}")
 
+    # ⛔ THE REMEDY IS PINNED TOO, not just the returncode (review, #10777): the
+    # 126 arm used to append one hard-coded "fix the `gh` install" for every cause,
+    # which is wrong advice for a reaped worktree — there is nothing wrong with the
+    # `gh` install. Nothing asserted the message half, so it stayed wrong.
+    with pytest.raises(rd.Refused) as exc:
+        rd._resolve_repo(missing)
+    msg = str(exc.value)
+    assert str(missing) in msg, msg
+    assert "fix the `gh` install" not in msg, (
+        f"a missing CWD is not a broken `gh` install: {msg}")
+    assert "live checkout" in msg, msg
+
+
+def test_a_gh_on_path_with_a_dead_shebang_is_not_reported_as_missing(tmp_path, monkeypatch):
+    """`filename == "gh"` is NOT evidence the binary is absent (review, #10777).
+
+    CPython passes the literal argv[0] for ANY exec failure of a bare name, so a
+    `gh` that IS on `PATH` but whose shebang interpreter is gone raises the same
+    `FileNotFoundError(filename="gh")` as a PATH miss. Measured 2026-11-04 with the
+    broken candidate as the SOLE `PATH` entry: `shutil.which("gh")` resolves it and
+    `subprocess` still will not run it, so the predicate alone answered 127 "not on
+    PATH — install the GitHub CLI" for a binary the operator already had, which is
+    the misdiagnosis the 126 arm exists to prevent.
+
+    ⚠️ With a WORKING `gh` later on `PATH`, glibc's `execvp` silently skips this
+    candidate and runs the later one — so this arm must own `PATH` completely or it
+    pins nothing.
+    """
+    bin_dir = tmp_path / "dead-shebang-bin"
+    bin_dir.mkdir()
+    gh = bin_dir / "gh"
+    gh.write_text("#!/nonexistent/interp\necho hi\n", encoding="utf-8")
+    gh.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bin_dir))
+    assert shutil.which("gh") == str(gh), (
+        "precondition: the binary IS on PATH, or this arm tests the PATH-miss case")
+
+    out = rd._gh(["repo", "view"], tmp_path)
+    assert out.returncode == 126, (out.returncode, out.cause)
+    assert "is not on PATH" not in out.cause, out.cause
+    assert str(gh) in out.cause, out.cause
+
+    with pytest.raises(rd.Refused) as exc:
+        rd._resolve_repo(tmp_path)
+    msg = str(exc.value)
+    assert "not on PATH" not in msg, msg
+    assert "install the GitHub CLI" not in msg, msg
+
 
 def test_the_ghless_path_helper_stages_the_tools_it_is_asked_for(tmp_path):
     """`_path_without_gh(tmp, "cat")` must stage `cat` — a shadowed form raised TypeError.

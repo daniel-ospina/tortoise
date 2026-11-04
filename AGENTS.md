@@ -42,8 +42,10 @@
 > fails the install on the checker's `1` alone — on `2` (cannot verify) or `3` (no deploy can fix it)
 > it prints `this is NOT a pass` and still ends with `Done!`, and with the checker **absent** it prints
 > `farm drift NOT verified` and still ends with `Done!`, so a checkout older than the checker reports
-> nothing at all and the install still says success — while `cell-install.sh` has no farm leg,
-> its own `verify_layer` comparing only against the tree it just installed from. Second, **the grader
+> nothing at all and the install still says success — while `cell-install.sh` has no farm-**drift**
+> leg: it does install and verify the farm (`install_farms`, then `verify_layer` `cmp`-ing each
+> declared file), but only against the tree it just installed from, so it cannot see a farm left stale
+> by an older install. Second, **the grader
 > reads the farm the installer's base names, which need not be the one this box executes**: a
 > `$HOME`-rooted run on a `CELL_HOME`-rooted box grades `$HOME/.pi/agent/scripts`, so neither its `OK`
 > nor its `COULD NOT VERIFY` says anything about the executed farm. That farm is materialised only by

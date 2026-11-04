@@ -82,6 +82,7 @@ import fcntl
 import json
 import os
 import re
+import shutil
 import subprocess
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -409,29 +410,41 @@ class _GhRun:
     """
 
     def __init__(self, returncode: int, stdout: str = "", cause: str = "",
-                 stderr: str = "") -> None:
+                 stderr: str = "", remedy: str = "") -> None:
         self.returncode = returncode
         self.stdout = stdout
         self.stderr = stderr
         self.cause = cause
+        #: What the OPERATOR should do about it. Carried on the run rather than
+        #: hard-coded at the call site, because the remedy differs per cause: a
+        #: missing binary is "install it", a missing CWD is "run from a live
+        #: checkout", and a 126 for a broken shebang is "repair the install".
+        #: One message for three causes tells two of them to fix the wrong thing.
+        self.remedy = remedy
 
 
 def _gh(argv: list[str], cwd: Path) -> _GhRun:
     """Run `gh` and NEVER raise for a missing binary or an unspawnable argv.
 
     ⛔ TWO SPAWN FAILURES, TWO ANSWERS — never one catch-all (review, `#10777`).
-    Only a `FileNotFoundError` whose `filename` is the EXECUTABLE means the
-    binary is not on `PATH`, and only that one may say so: the caller's remedy
-    is "install the GitHub CLI", which is wrong advice — and sends the operator
-    looking in the wrong place — when `gh` is installed but not executable
-    (`PermissionError`), or when the spawn failed for want of resources (an
-    `EAGAIN`/`ENOMEM` from `fork` under cell load, the same condition this file
-    already documents at the `SPAWNING` sentinel above). Both of those return
-    `126` (the shell's "found but could not execute") with the real cause, and
-    `127` is reserved for the command genuinely not being found.
+    The caller's remedy for a missing binary is "install the GitHub CLI", which is
+    wrong advice — and sends the operator looking in the wrong place — when `gh`
+    is installed but not executable (`PermissionError`), when the spawn failed for
+    want of resources (an `EAGAIN`/`ENOMEM` from `fork` under cell load, the same
+    condition this file already documents at the `SPAWNING` sentinel above), or
+    when the CWD is gone. Those return `126` (the shell's "found but could not
+    execute") with the real cause, and `127` is reserved for the command genuinely
+    not being found.
+
+    ⚠️ `filename == "gh"` earns NONE of that on its own: it separates *exec
+    failed* from *`chdir` failed*, and no more. CPython passes the literal argv[0]
+    for any exec failure of a bare name, so "is on `PATH` with a dead shebang"
+    arrives looking exactly like "is not on `PATH`" — which is why the second
+    question is asked separately, of `shutil.which`, before any message says
+    "not on PATH" (measured 2026-11-04, sole candidate).
 
     A failed `chdir` also raises `FileNotFoundError`, but its `filename` is the
-    CWD, not `"gh"` — so it correctly lands on the 126 arm and reports the cwd.
+    CWD, not `"gh"` — so it lands on the 126 arm and reports the cwd.
 
     `returncode=127` is the shell's own "command not found", so every existing
     `returncode != 0` branch keeps its meaning and the missing binary cannot be
@@ -444,17 +457,34 @@ def _gh(argv: list[str], cwd: Path) -> _GhRun:
             ["gh", *argv], cwd=str(cwd), capture_output=True, text=True,
         )
     except FileNotFoundError as exc:
-        if getattr(exc, "filename", "gh") == "gh":
-            # ⛔ THE CAUSE VOCABULARY IS BOTH SIDES' (merge of #10777 with main): this
-            # arm names the remedy in `cause` ("not on PATH" — install the CLI) while
-            # `stderr` carries the shell's own token `gh: command not found`, which
-            # main's callers and tests assert on. One fact, two readouts, so neither
-            # side's contract is dropped.
-            return _GhRun(127, cause="`gh` is not on PATH",
-                          stderr="gh: command not found")
-        return _GhRun(126, cause=f"could not run `gh` in {cwd}: {exc}")
+        if getattr(exc, "filename", "gh") != "gh":
+            # A failed `chdir` raises the SAME exception type, but its `filename`
+            # is the CWD. The remedy is a live checkout — never "install the CLI".
+            return _GhRun(
+                126, cause=f"could not run `gh` in {cwd}: {exc}",
+                remedy="the working directory is gone — run from a live checkout, "
+                       "or pass --repo",
+            )
+        # ⛔ `filename == "gh"` CANNOT DISTINGUISH "absent" FROM "not executable":
+        # CPython passes the literal argv[0] for ANY exec failure of a bare name, so
+        # a `gh` that IS on PATH but whose shebang interpreter is gone arrives here
+        # identically (measured 2026-11-04, sole candidate: `shutil.which("gh")`
+        # resolves it, `subprocess` does not run it — and glibc's `execvp` only hides
+        # the case when a WORKING `gh` sits later on `PATH`). Ask the question
+        # separately, so "install the GitHub CLI" is never printed at a binary the
+        # operator already has.
+        found = shutil.which("gh")
+        if found:
+            return _GhRun(
+                126, cause=f"`gh` is on PATH ({found}) but could not be executed",
+                remedy="repair the `gh` install, or pass --repo",
+            )
+        return _GhRun(127, cause="`gh` is not on PATH",
+                      stderr="gh: command not found",
+                      remedy="install the GitHub CLI, or pass --repo")
     except OSError as exc:
-        return _GhRun(126, cause=f"could not run `gh`: {exc}")
+        return _GhRun(126, cause=f"could not run `gh`: {exc}",
+                      remedy="repair the `gh` install, or pass --repo")
     return _GhRun(out.returncode, out.stdout or "", stderr=out.stderr or "")
 
 def _resolve_repo(cwd: Path) -> str:
@@ -474,17 +504,18 @@ def _resolve_repo(cwd: Path) -> str:
         # Names the failing COMMAND, the CAUSE and the REMEDY: a lane reading
         # this must not have to guess whether the checkout or the tool is wrong.
         raise Refused(
-            "could not resolve the repo from this checkout (`gh repo view` failed"
+            "could not resolve the repo from this checkout (`gh repo view` failed)"
             " — `gh` is not on PATH "
-            f"({(out.stderr or 'gh: command not found').strip()}; pass --repo, or "
-            "install the GitHub CLI)"
+            f"({(out.stderr or 'gh: command not found').strip()}): pass --repo, or "
+            "install the GitHub CLI"
         )
     if out.returncode == 126:
-        # Found but not runnable — a DIFFERENT remedy from "install the CLI".
+        # Found but not runnable — a DIFFERENT remedy from "install the CLI", and
+        # the remedy travels on the run because a missing CWD is a third one.
         raise Refused(
             "could not resolve the repo from this checkout — "
             f"{out.cause or '`gh` could not be executed'} "
-            "(pass --repo, or fix the `gh` install)"
+            f"({out.remedy or 'pass --repo, or fix the `gh` install'})"
         )
     # Every other non-zero exit keeps main's stderr detail: the last line is the
     # only thing that says WHY `gh repo view` failed (auth, network, no remote).
