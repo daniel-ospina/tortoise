@@ -396,6 +396,18 @@ jobs:
         id: push-matrix
         env:
           CI_SHARD_ROUTING: ${{ vars.CI_SHARD_ROUTING }}
+          # #10897: the FOLD runner class. `CI_PR_LABELS` is the PR's label list as
+          # the selector's input (empty on a push — `github.event.pull_request`
+          # does not exist there, and `join` over a missing path is empty, which
+          # is exactly the fail-safe we want: no labels, no routing).
+          # `CI_FOLD_RUNNER_LABELS` is the operator's declared class, and it is
+          # resolved in `tools/ci_selection.py::resolve_fold_runner` — NOT in an
+          # expression — so the decision is unit-tested, and an unusable value
+          # falls back to the row's own runner instead of routing a required
+          # check onto a label no runner carries (the unstartable-job failure,
+          # which is worse than a queue). Unset = this seam is inert.
+          CI_PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+          CI_FOLD_RUNNER_LABELS: ${{ vars.CI_FOLD_RUNNER_LABELS }}
         run: |
           MATRIX=$(python3 tools/ci_selection.py --emit-push-matrix)
           # #1472 regression fix: SPACE-JOINED strings inside the matrix (the
@@ -452,6 +464,11 @@ jobs:
         if: github.event_name == 'pull_request' && steps.select.outputs.full == 'false'
         env:
           CI_SHARD_ROUTING: ${{ vars.CI_SHARD_ROUTING }}
+          # #10897: emitter #2 of 2 — the fold runner class must be visible HERE
+          # too, or a tier-2 fold PR (every PR) silently keeps the normal class,
+          # i.e. a dead lever on the only event type that carries the label.
+          CI_PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+          CI_FOLD_RUNNER_LABELS: ${{ vars.CI_FOLD_RUNNER_LABELS }}
         run: |
           SPLIT=$(echo '${{ steps.select.outputs.test_files }}' | python3 tools/ci_selection.py --split)
           echo "fast_matrix=$(echo "$SPLIT" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["fast_matrix"]))')" >> "$GITHUB_OUTPUT"
