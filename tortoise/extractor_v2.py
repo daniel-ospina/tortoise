@@ -13246,9 +13246,9 @@ def _script_of(ch: str) -> str | None:
     a refused identity difference into a permitted `number` SUPERSEDE); and
     finally a LETTER that no block names, which is searched one level deeper
     under NFD — a precomposed letter belongs to its BASE's script — before it is
-    an unknown script.  A NON-LETTER is not a script, and neither is a modifier
-    letter (Lm) **in no `_SCRIPT_BLOCKS` range** — an Lm INSIDE one does carry
-    that block (`ー` U+30FC is `kana`).
+    an unknown script.  A NON-LETTER **in no `_SCRIPT_BLOCKS` range** is not a
+    script, and neither is a modifier letter (Lm) in no range — one INSIDE a
+    listed block does carry it (`١` U+0661 is `arabic`, `ー` U+30FC is `kana`).
     """
     if ch.isascii():
         return "latin" if ch.isalpha() else None
