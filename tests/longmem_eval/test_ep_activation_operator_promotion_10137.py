@@ -339,9 +339,11 @@ def test_the_gate_refuses_a_status_less_operator(sdk):
     selector reads ``MATCH (n:Point {status: 'live'})``
     (``projection/grounding.py:19``, edges at ``:46``), so a status-less operator
     and its ``IMPL``/``NAND`` edges are INVISIBLE to ``compute_grounding``
-    (``sdk.py:22350-22353`` says so verbatim; measured on an embedded graph:
-    one IMPL operator over two live claims gives 2 rows at ``status='live'`` and
-    0 after ``REMOVE o.status``, while ``ep._live_only`` still admits it). So
+    (``sdk.py:22350-22353`` says so verbatim). MEASURED on an embedded graph,
+    one IMPL operator over two live claims — and the two reads move differently,
+    so name the right one: the NODE read (``:19``) goes 3 → 2 after
+    ``REMOVE o.status`` (the claims stay live, so it cannot reach 0), while the
+    EDGE read (``:46``) goes 2 → 0; ``ep._live_only`` still admits the node. So
     re-adding the arm silently changes the grounding values of the claims around
     every legacy status-less operator — see the candidate query's own block.
 
@@ -396,3 +398,42 @@ def test_the_gate_refuses_a_status_less_operator(sdk):
     assert "status" not in (sdk.get_point(oid) or {}), (
         "the sweep WROTE a status onto a legacy operator instead of leaving it"
     )
+
+
+def test_the_gate_reads_every_operator_edge_not_just_impl(sdk):
+    """A ``mitigated_by`` edge to a dead mitigation must block, as it does in the engine.
+
+    ``mitigate_operator`` mints ``(op)-[:mitigated_by]->(m)`` alongside the
+    ``IMPL`` edges (``sdk.py:22814``), and the engine's R16 gate reads EVERY
+    outgoing edge to an epistemic label (``sdk.py:21338-21347``). So an IMPL
+    operator over two live claims whose mitigation was RETRACTED has two live
+    IMPL endpoints and one dead third edge — the engine keeps it ``draft``.
+
+    Reading only ``-[:IMPL|NAND]->`` here promoted it (measured before the fix:
+    engine 3 rows → refuse, narrow read 2 rows → ``True`` and the operator went
+    ``live``). Narrowing the EDGE SET makes a gate WEAKER, not stricter, so the
+    harness published an ``operators_promoted`` the engine cannot produce — the
+    one invariant this gate exists to hold.
+    """
+    premise = _claim(sdk, "premise", "live")
+    conclusion = _claim(sdk, "conclusion", "live")
+    oid = sdk.create_operator(
+        "IMPL", premise, [conclusion],
+        direction="unidirectional", promote_source=False,
+    )["id"]
+    result = sdk.mitigate_operator(oid, "a caveat a human has since withdrawn")
+    mid = result.get("point_id") or result.get("id")
+    sdk.retract_point(mid)
+
+    marked: list[str] = []
+    promoted = epa._promote_operator_row(
+        sdk, sdk._get_proj().g, oid, set(), marked.append,
+    )
+
+    assert promoted is False, (
+        "the gate promoted an operator whose MITIGATION is retracted — the "
+        "endpoint read is narrower than the engine's, which makes it weaker, "
+        "not stricter (#10137)"
+    )
+    assert _operator_status(sdk, oid) == "draft"
+    assert marked == []

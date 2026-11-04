@@ -112,16 +112,20 @@ class _FakeGraph:
         # operator reachable ONLY through the graph-wide sweep gets a synthetic
         # live endpoint, which is exactly the shape it models: endpoints that
         # were live before the operator existed.
-        self.op_endpoints: dict[str, list[tuple[str, str | None]]] = {}
+        self.op_endpoints: dict[str, list[tuple[str, str | None, str]]] = {}
         for cid, oids in self.op_map.items():
             for oid in oids:
-                self.op_endpoints.setdefault(oid, []).append((cid, "live"))
+                self.op_endpoints.setdefault(oid, []).append((cid, "live", "IMPL"))
         for oid in self.graph_operators:
-            self.op_endpoints.setdefault(oid, [(f"{oid}-src", "live")])
+            self.op_endpoints.setdefault(
+                oid, [(f"{oid}-src", "live", "IMPL")])
         # #10137: an explicit override is the ONLY way to model a non-live
         # endpoint — the default map is all-live on purpose, so a test that
         # wants the gate to BLOCK passes ``op_endpoints={"op1": [("c1",
-        # "draft")]}`` (or "retracted"/"outdated"/…) and gets it. Without this
+        # "draft", "IMPL")]}`` (or "retracted"/"outdated"/…) and gets it — and
+        # the third slot is the edge type, so a non-``IMPL``/``NAND`` endpoint
+        # (``hasPart``, ``mitigated_by``) can be modelled: it GATES like any
+        # other, it just is not a factor input. Without this
         # hook the comment below would promise an affordance that does not
         # exist, and a draft-endpoint falsifier written against it would raise
         # TypeError instead of going red.
@@ -152,14 +156,15 @@ class _FakeGraph:
             # ``OperatorPromoted`` — ``cas_lost`` is how a test says so.
             oid = params.get("oid")
             return _Result([] if oid in self.cas_lost else [[oid]])
-        if "RETURN x.id, x.status" in c:
-            # #10137: the R16 endpoint read. The DEFAULT map (``op_endpoints``
-            # built in ``__init__``) is all-live, modelling the ordinary graph;
-            # a test that needs the gate to block passes ``op_endpoints=``
-            # explicitly. There is no other override hook.
+        if "RETURN x.id, x.status, type(r)" in c:
+            # #10137: the R16 endpoint read — the ENGINE's read (unlabeled, all
+            # outgoing edges), returning ``(id, status, rel_type)``. The DEFAULT
+            # map (``op_endpoints`` built in ``__init__``) is all-live IMPL,
+            # modelling the ordinary graph; a test that needs the gate to block
+            # passes ``op_endpoints=`` explicitly. There is no other hook.
             oid = params.get("oid")
-            return _Result([[eid, st]
-                            for eid, st in self.op_endpoints.get(oid, [])])
+            return _Result([[eid, st, rel]
+                            for eid, st, rel in self.op_endpoints.get(oid, [])])
         if "RETURN DISTINCT o.id" in c:
             # #10137: the ONE draft-operator query — the graph-wide sweep, which
             # takes no params. (The per-chunk incident query it replaced is
@@ -325,7 +330,7 @@ def test_activate_does_not_promote_a_sweep_operator_with_a_terminal_endpoint():
     reaching ``_PROMOTE_OPERATOR`` without going through the gate at all.
     """
     sdk, _graph = _make([], total=0, graph_operators=["op_live"],
-                        op_endpoints={"op_live": [("dead", "retracted")]})
+                        op_endpoints={"op_live": [("dead", "retracted", "IMPL")]})
 
     manifest = epa.activate_beliefs(sdk)
 

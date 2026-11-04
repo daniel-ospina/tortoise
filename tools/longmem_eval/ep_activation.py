@@ -77,6 +77,8 @@ import logging
 import math
 import time
 
+from tortoise.live import epistemic_disjunction
+
 logger = logging.getLogger(__name__)
 
 #: EP engine label for the manifest — names the entry point actually used.
@@ -163,9 +165,13 @@ _PROMOTE_OPERATOR = (
 #: ``ingest_v2`` (it mints every operator with an explicit ``'draft'``), and
 #: this module never calls ``compute_grounding``, so the census is unaffected —
 #: but a caller that grounds AFTER activating does see different values.
-#: MEASURED on an embedded graph: one IMPL operator over two live claims yields
-#: 2 rows from that selector at ``status='live'`` and 0 after ``REMOVE o.status``
-#: — while ``ep._live_only('o.status')`` still admits the status-less node.
+#: MEASURED on an embedded graph (one IMPL operator over two live claims), and
+#: the TWO reads move differently — name the right one: the ``:19`` NODE read
+#: returns 3 live rows → 2 after ``REMOVE o.status`` (the claims are still live,
+#: so it can never reach 0), while the ``:46`` EDGE read returns 2 → 0 (the
+#: operator's ``IMPL`` edges leave the live-only matrix entirely). ``ep.py``'s
+#: ``_live_only('o.status')`` still admits the status-less node. Quote 2 → 0 for
+#: the edge read, 3 → 2 for the node read.
 _SELECT_DRAFT_OPERATOR_IDS = (
     "MATCH (o:Point) "
     "WHERE (o.is_operator = true OR o.op_type IS NOT NULL) "
@@ -173,12 +179,32 @@ _SELECT_DRAFT_OPERATOR_IDS = (
     "RETURN DISTINCT o.id"
 )
 
-#: An operator's endpoints, ``(id, status)``, matched UNLABELED — #7853 widened
-#: the SDK's R16 gate to all four epistemic labels, so a draft ``:Subject`` /
-#: ``:Object`` / ``:Event`` endpoint must block promotion here too.
+#: An operator's endpoints, ``(id, status, rel_type)``: the ENGINE's read, edge
+#: set included — UNLABELED (``WHERE epistemic_disjunction``, #7853), so a draft
+#: ``:Subject`` / ``:Object`` / ``:Event`` endpoint blocks promotion here, and
+#: so does a ``hasPart`` / ``mitigated_by`` endpoint, exactly as it does in
+#: ``sdk._promote_incident_operators`` (``sdk.py:21338-21347``).
+#:
+#: ⛔ Reading ONLY ``-[:IMPL|NAND]->`` was tried and is WRONG, because narrowing
+#: the EDGE SET makes the gate WEAKER, not stricter: ``mitigate_operator`` mints
+#: ``(op)-[:mitigated_by]->(m)`` (``sdk.py:22814``), so an IMPL operator whose
+#: mitigation was retracted has two live IMPL endpoints and a dead third edge —
+#: a narrow read admits it and promotes an operator the engine keeps draft.
+#: MEASURED on an embedded graph: engine read 3 rows (``live, live, retracted``)
+#: → refuses; the narrow read 2 rows (``live, live``) → ``_promote_operator_row``
+#: returned True and flipped it. A harness that gates more loosely than the
+#: engine publishes promotions production cannot produce. The edge TYPE is
+#: returned only so ``on_input`` can dirty-mark the EP-relevant ones (EP builds
+#: factors from ``IMPL``/``NAND`` alone — ``ep.py`` never reads ``hasPart`` /
+#: ``mitigated_by``), NOT to gate on it.
+#: The only operator edges EP builds factors from (``ep.py`` has no ``hasPart`` /
+#: ``mitigated_by`` arm): the endpoints ``on_input`` dirty-marks.
+_FACTOR_EDGE_TYPES = frozenset({"IMPL", "NAND"})
+
 _SELECT_OPERATOR_ENDPOINTS = (
-    "MATCH (o:Point {id:$oid})-[:IMPL|NAND]->(x) "
-    "RETURN x.id, x.status"
+    "MATCH (o:Point {id:$oid})-[r]->(x) "
+    "WHERE " + epistemic_disjunction("x") + " "
+    "RETURN x.id, x.status, type(r)"
 )
 
 # ── EP-state census (non-operator claims only) ────────────────────────────
@@ -623,18 +649,16 @@ def _promote_operator_row(sdk, g, oid, promoted_ops, on_input) -> bool:
     comparing in Python mirrors the SDK's SHAPE instead (read → compare → CAS
     SET), one round trip per candidate.
 
-    The endpoint read itself is deliberately NARROWER than the SDK's:
-    ``-[:IMPL|NAND]->`` only, because only those edges form a factor (the SDK
-    also sweeps a part/whole operator's ``hasPart`` and a mitigation's
-    ``mitigated_by`` endpoints, which EP never propagates through). On every
-    shape ``create_operator`` mints, narrowing only makes the gate more
-    conservative: an IMPL/NAND operator has exactly the same endpoints either
-    way, and a part/whole operator picked up by the graph-wide sweep resolves to
-    no endpoints, fails ``if not endpoints``, and stays draft — the status it
-    already held. (In general, requiring all of a SUBSET to be live is a WEAKER
-    test, so a hand-built node carrying both an ``IMPL`` and a ``hasPart`` edge
-    could go live over a draft ``hasPart`` endpoint; no writer here mints that
-    shape.) The candidate set is bounded by the graph's draft operators.
+    The endpoint read is the ENGINE's, edge set included (see
+    ``_SELECT_OPERATOR_ENDPOINTS``), because the engine's R16 gate is this
+    gate's authority: a harness that gates more loosely publishes promotions
+    production cannot produce, and one that gates more strictly hides them. An
+    earlier draft read ``-[:IMPL|NAND]->`` only — "only those edges form a
+    factor" — and that was wrong for exactly this reason: narrowing the edge set
+    made the gate WEAKER, so an IMPL operator whose mitigation had been retracted
+    (two live IMPL endpoints, one dead ``mitigated_by`` edge) was promoted here
+    while the engine kept it draft. Measured: engine 3 rows → refuse, narrow 2
+    rows → promoted.
 
     ``on_input`` is called once per endpoint id so the caller can dirty-mark the
     claims the newly-live factor connects (a raw status flip is invisible to an
@@ -646,15 +670,18 @@ def _promote_operator_row(sdk, g, oid, promoted_ops, on_input) -> bool:
                         params={"oid": oid}).result_set
     if not endpoints:
         return False  # no endpoints — nothing to gate on (the SDK skips too)
-    if not all((st or "live") == "live" for _, st in endpoints):
+    if not all((st or "live") == "live" for _, st, _rel in endpoints):
         return False  # keep draft until every endpoint is live (R16)
     flipped = g.query(_PROMOTE_OPERATOR, params={"oid": oid}).result_set
     if not flipped:
         return False  # lost a race — a concurrent writer already flipped it
     promoted_ops.add(oid)
     sdk._emit_event("OperatorPromoted", id=oid, point=sdk.get_point(oid))
-    for eid, _st in endpoints:
-        if eid:
+    for eid, _st, rel in endpoints:
+        # Only IMPL/NAND endpoints are factor inputs; a hasPart / mitigated_by
+        # endpoint gated the promotion but is not something EP propagates
+        # through, so marking it dirty would be a no-op churn.
+        if eid and rel in _FACTOR_EDGE_TYPES:
             on_input(eid)
     return True
 
@@ -802,7 +829,9 @@ def activate_beliefs(sdk, *, namespace: str | None = None,
     #     edges are INVISIBLE to ``compute_grounding`` while an explicitly-live
     #     one is not (``sdk.py:22350-22353``). A status-less operator this pass
     #     used to normalise now stays status-less, so a later grounding run sees
-    #     a different matrix. Not reachable from ``ingest_v2`` (explicit
+    #     a different matrix. Quote the EDGE read (2 → 0), not the node read
+    #     (3 → 2): the claims stay live, so only the edge selector can reach 0.
+    #     Not reachable from ``ingest_v2`` (explicit
     #     ``'draft'``) and this module never grounds, so no census cell moves —
     #     see the candidate query's block for the scope and the measurement.
     # So keeping the incident query would NOT have been a free no-op; it is

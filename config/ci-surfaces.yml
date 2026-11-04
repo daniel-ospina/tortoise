@@ -9168,8 +9168,8 @@ durations:
   # input (#2818/#3419), and so is a hand-written case count — this file's count
   # moved during its own review, and the map's neighbouring rows keep recording
   # that such counts re-stale. Re-derive from the file if you need it.
-  # (#2818/#3419). `tools/ci_timing.py --refresh-durations` re-bases it after
-  # the next push-to-main sweep.
+  # `tools/ci_timing.py --refresh-durations` re-bases it after the next
+  # push-to-main sweep.
   longmem_eval/test_ep_activation_operator_promotion_10137.py: 2.0
   longmem_eval/test_probe_v2.py: 0.1
   test_alert_store.py: 0.3  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 0.1
