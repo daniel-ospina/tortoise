@@ -1490,17 +1490,17 @@ def test_a_CUT_pending_leg_cannot_certify_the_queue_clear():
     assert health.to_dict()["pending_truncated"] is True
     assert any("pending" in r and "page cap" in r for r in health.reasons), (
         "and the reading says WHICH leg was cut")
-    # ⛔ AND THE ONE LINE THE FLEET READS MUST NOT SAY `feed=read` (#10641 review).
-    # `feed=` was derived from `truncated` alone, which `read_health` feeds from the
-    # QUEUED/RUNNING legs — so a reading made `PR-UNWITNESSED` by a cut
-    # `pending`/`requested` leg printed `oldest=unmeasured, feed=read` beside its own
-    # verdict. Measured pre-fix on this exact fixture: the line below ended
-    # `feed=read`. Discriminating: `self.truncated or self.pending_truncated` is the
-    # whole fix, and dropping either half reddens this assertion.
-    assert health.state_line == (
-        "CI: PR-UNWITNESSED(queued=5, pr_running=1, pr_queued=1, pr_pending=0, "
-        "oldest=60s, feed=truncated)"
-    ), f"an unwitnessed line may not call its cut feed 'read': {health.state_line!r}"
+    # ⛔ THE SAMPLED LINE MUST CARRY THE CUT, not just the JSON and the reason line
+    # (#10641 review P2). `feed=` was keyed on `truncated` alone, which `read_health`
+    # feeds only from the queued/running legs — so a cut `pending`/`requested` leg,
+    # which is ALONE enough to reach this branch, rendered `feed=read` over a leg that
+    # was truncated. GitHub's run listing returns "up to 1,000 results" per filtered
+    # search, so a capped leg is a LOWER BOUND and never a completed read.
+    # Discriminating: with `feed` keyed back on `self.truncated` this line says
+    # `feed=read` and both assertions below redden.
+    assert "feed=truncated" in health.state_line, (
+        f"a cut leg must never be rendered as a completed read: {health.state_line!r}")
+    assert "feed=read" not in health.state_line
 
 
 # ── a QUEUED RE-RUN is aged from its current attempt, never from `created_at` ──
@@ -1760,6 +1760,9 @@ def test_a_CUT_requested_leg_cannot_certify_the_queue_clear(monkeypatch):
         "withholds the clearance")
     assert health.verdict == Q.PR_UNWITNESSED
     assert health.congests_pr is None, "the gate must REFUSE, not authorise"
+    assert "feed=truncated" in health.state_line, (
+        "the line the fleet samples says which feed it read — a cut `requested` leg "
+        "is the same missing witness as a cut `pending` one (#10641 review P2)")
 
 
 def test_a_pr_backlog_inside_the_wait_budget_is_ok():

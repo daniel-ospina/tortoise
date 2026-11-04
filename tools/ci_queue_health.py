@@ -541,6 +541,17 @@ class QueueHealth:
         downstream claim about it false") this module removes everywhere else. The
         `to_dict()` field, the reason line and the comparability sentence above all
         already assume `pr_pending` travels with the line; now it does.
+
+        ⛔ AND `feed=` MUST WITNESS BOTH TRUNCATION FLAGS (#10641 review P2). This
+        branch had THREE causes but `feed=` knew only one of them: `truncated` is
+        fed solely from the queued/running legs (`read_health`:
+        `truncated=queued_truncated or running_truncated`), while a cut
+        `pending`/`requested` leg rides its own `pending_truncated` flag — and it is
+        ALONE enough to reach this branch. Measured on the cut-pending fixture:
+        `CI: PR-UNWITNESSED(..., feed=read)` printed over a leg that WAS cut, which
+        is a false claim in the ONE string the fleet samples. GitHub's run listing
+        returns "up to 1,000 results" per filtered search, i.e. a capped leg is a
+        LOWER BOUND — a summary line may never render it as a completed read.
         """
         if self.verdict == FLOOD:
             return (
@@ -556,17 +567,19 @@ class QueueHealth:
             # `oldest=unmeasured` is the dimension that was not witnessed.
             oldest = self.oldest_pr_queued_age_seconds
             waited = f"{oldest:.0f}s" if oldest is not None else "unmeasured"
-            # ⛔ BOTH LEGS FEED THIS FIELD (#10641 review, claim honesty). `feed=`
-            # said `read` whenever the QUEUED feed was uncut, and this PR added a
-            # THIRD cause for `PR-UNWITNESSED`: `healthy()` now returns it on
-            # `pending_truncated` alone, where `truncated` is `False` by construction
-            # (`read_health` feeds that one from the queued/running legs only). The
-            # reachable line was therefore
-            # `CI: PR-UNWITNESSED(..., oldest=unmeasured, feed=read)` for a reading
-            # whose `pending`/`requested` leg WAS cut at the page cap — an unwitnessed
-            # verdict printed beside the word `read`, in the ONE string the fleet
-            # samples. The claim this branch makes is about the WAIT, and the wait is
-            # both legs, so the witness must be both legs too.
+            # ⛔ ONE WORD FOR EVERY CUT LEG — THE READER'S QUESTION IS "was this
+            # reading complete?", NOT "which leg was short?" (the reason line names
+            # the leg). `feed=` was keyed on `truncated` alone, which `read_health`
+            # feeds ONLY from the queued/running legs
+            # (`truncated=queued_truncated or running_truncated`), while a cut
+            # `pending`/`requested` leg rides its own `pending_truncated` flag — and
+            # that flag ALONE is enough to reach this branch. So the reachable line
+            # was `CI: PR-UNWITNESSED(..., oldest=unmeasured, feed=read)` printed
+            # over a leg that WAS cut: a false claim in the ONE string the fleet
+            # samples (the job annotation, `summary["queue"]`), and the exact species
+            # this PR removes everywhere else. GitHub's run listing returns "up to
+            # 1,000 results" per filtered search, so a capped leg is a LOWER BOUND
+            # and may never be rendered as a completed read.
             feed = ("truncated" if (self.truncated or self.pending_truncated)
                     else "read")
             return (
