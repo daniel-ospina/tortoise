@@ -99,8 +99,10 @@ Two honest limits on that 10%:
    (`tools/longmem_eval/measurement_posture.py`).
    The belief-eligible denominator exists. What did **not** carry it was this bundle's probe — its
    `cells` block is an allow-list, and the new cells were never added to it (#10493's own *residual
-   1*, closed 2026-11-03). `census.json` now carries the nine keys as **UNKNOWN** — the eight summed
-   ones with `_unread: 24`, the ratio as `null` — because the 24-question run predates #10493 and its
+   1*, closed 2026-11-03). `census.json` now carries the nine keys as **UNKNOWN**: the five value
+   keys (`points_substrate`, `belief_eligible_total`, `belief_eligible_with_ep`,
+   `belief_eligible_unmeasured`, `belief_eligible_ratio`) are `null`, and the four `_unread`
+   companions are `24` — because the 24-question run predates #10493 and its
    manifests never measured them — **not zero**,
    and not obtainable by re-probing this run: the cells are read off the manifests, and these
    manifests never carried them. The next **post-#10493** run through `probes/census.py` emits the
@@ -130,8 +132,9 @@ Two honest limits on that 10%:
 **Errata discipline.** `census.json` is a run's artifact, so its measured cells are never edited. The
 nine `points_substrate` / `belief_eligible_*` keys were APPENDED on 2026-11-03 with values **derived
 by the repo's own aggregator** (`measurement_posture.summarize_belief_activation`) over this
-artifact's committed `per_question` rows — which is why they read `null` with `_unread: 24` rather
-than a number: that run never measured the eligibility population. No pre-existing cell was touched,
+artifact's committed `per_question` rows — which is why the value keys read `null` while their
+`_unread` companions read `24`: that run never measured the eligibility population, so neither side
+carries a number. No pre-existing cell was touched,
 and `test_committed_census_rederives_its_own_aggregate` re-derives all 28 from the committed rows.
 
 **Disclosure of what this artifact can and cannot re-derive:** `census.json` carries the run totals

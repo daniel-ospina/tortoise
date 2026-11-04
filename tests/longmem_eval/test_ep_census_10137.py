@@ -786,8 +786,8 @@ def test_census_probe_discloses_failed_questions_behind_the_ratio(tmp_path):
     """A crashed run's checkpoint must not read as ``N/N`` over its survivors
     (#10137 review, P2). ``summarize_belief_activation`` only ever sees
     ``outcomes``, so the failure population is read from the input itself
-    (``run.py:2797`` writes ``failures``; a report carries ``n_failed``) and
-    published beside it.
+    (``run.py`` writes each checkpoint's ``failures`` key; a report carries
+    ``n_failed``) and published beside it.
 
     Non-vacuous: the pre-fix probe reported ``questions_in_run: 2`` for this
     input and no ``questions_failed`` at all — the ablation was invisible."""
@@ -827,7 +827,8 @@ def test_census_probe_counts_an_overlapped_qid_once(tmp_path):
     by one worker and failed by another lands in both lists (``report.py:1407-
     1410``), and ``_merge_checkpoint`` unions the two independently, the
     ``remove_failures`` tombstone being present only when the writer knew it was
-    a ``--retry-failed`` re-attempt (``run.py:2699-2729``). Counting
+    a ``--retry-failed`` re-attempt (``_merge_checkpoint``'s ``remove_failures``
+    parameter, honored in its tombstone loop). Counting
     ``len(outcomes) + len(failures)`` would publish this 2-question population
     as a 3-question run, and the gap the README calls "the disclosure" could
     not see it, because the gap was ``questions_failed`` BY CONSTRUCTION.
