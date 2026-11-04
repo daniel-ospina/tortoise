@@ -1549,15 +1549,15 @@ class TestCredentialResolution:
         from tortoise import mcp_client
 
         def status_error(code: int, path: str) -> httpx.HTTPStatusError:
-            # The message shape httpx itself produces (x._client.py):
-            #   f"{error_type} '{code} {reason}' for url '{response.url}'"
+            # The message is httpx's OWN (`raise_for_status()`), not a hand-built
+            # string: the defect this pins lives in the text the library produces,
+            # so the test must fail if that text stops carrying the URL — or if it
+            # starts carrying something a hand-written fixture would miss.
             request = httpx.Request("POST", f"http://127.0.0.1:9{path}")
             response = httpx.Response(code, request=request)
-            return httpx.HTTPStatusError(
-                f"Client error '{code} {response.reason_phrase}' for url '{request.url}'",
-                request=request,
-                response=response,
-            )
+            with pytest.raises(httpx.HTTPStatusError) as caught:
+                response.raise_for_status()
+            return caught.value
 
         wrong_path = status_error(404, "/401/mcp")
         # The trap has to be PRESENT in the text, or this test is vacuous.
