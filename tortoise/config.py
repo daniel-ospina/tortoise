@@ -488,10 +488,26 @@ def resolve_db_path(explicit: str | None = None) -> str:
         expanded = os.path.expanduser(uri)
         if not os.path.isabs(expanded):
             raise ValueError(RELATIVE_PATH_ERROR.format(path=uri))
+        # #5109: CLI output is captured verbatim into a transcript, and this value
+        # can carry a credential — in a query/fragment (`…/x.db?password=…`) or in
+        # USERINFO at the head of an absolute value (`//u:pw@host/x.db`, the #2987
+        # shape that drops the scheme but keeps the authority). Cut the query, then
+        # apply the same userinfo rule the display maskers apply; the two halves are
+        # both needed or one shape leaks while the other is redacted. The predicate
+        # is written out rather than imported: `__main__` imports THIS module, so a
+        # masker import here would cycle.
+        _shown = uri.split("?", 1)[0].split("#", 1)[0]
+        # AUTHORITY FORM, not "does it contain a colon": `//token@host/x.db` carries
+        # a token as the user with no `:` at all, and the tree's own masker fails
+        # closed on ANY `@` in a scheme-less value. Requiring a colon was narrower
+        # than that rule and leaked this shape on all three streams.
+        if _shown.startswith("//") and "@" in _shown.split("/", 2)[-1].split("/", 1)[0]:
+            _shown = "<redacted: userinfo-shaped>"
         logger.warning(
             "TORTOISE_DB_URI=%r is a file path (no supported scheme: %s) — "
             "treating as embedded DB path (backward compat)",
-            uri, ", ".join(f"{s}://" for s in SUPPORTED_URI_SCHEMES))
+            _shown,
+            ", ".join(f"{s}://" for s in SUPPORTED_URI_SCHEMES))
         return _abs(uri)
 
     # 4. default
