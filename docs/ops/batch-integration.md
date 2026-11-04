@@ -981,6 +981,10 @@ uv run python tools/batch_open.py --fold <batch PR> --label-only
 uv run python tools/batch_open.py --fold <batch PR> --apply
 ```
 
+Pass `--repo <owner>/<name>` whenever the checkout you are standing in is not the repository you
+mean: every `gh` call is pinned to it, so a wrong `--repo` fails loudly instead of mutating
+same-numbered PRs in the repository you happen to be in.
+
 The tool closes a constituent **only** when its work is provably in the batch tree, by one of two
 routes: `CONTAINED-ANCESTOR` (`git merge-base --is-ancestor`) or `CONTAINED-CONTENT` (reverse-apply
 the constituent's own diff inside a scratch worktree of the batch head — the route that survives a

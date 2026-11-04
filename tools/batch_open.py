@@ -534,10 +534,18 @@ def verdict_for(number: int, head: str, base: str, fold_head: str, cwd: Path) ->
 # ---------------------------------------------------------------------------
 
 
-def _gh(argv: list[str]) -> tuple[int, str]:
-    proc = subprocess.run(
-        ["gh", *argv], capture_output=True, text=True, check=False, timeout=GH_TIMEOUT_S
-    )
+def _gh(argv: list[str], repo: str | None = None) -> tuple[int, str]:
+    """Run `gh`, pinned to `repo` when one was named.
+
+    ⛔ `--repo` is INJECTED, never merely parsed. It used to be declared on the
+    CLI and then never read, so `--apply --repo other/repo` labelled, commented on
+    and CLOSED same-numbered PRs in whatever repository the operator happened to
+    stand in — with a comment asserting containment that was about a different
+    repo's PR. Naming a target and silently mutating a different one is the same
+    class of false record as a false containment proof.
+    """
+    full = ["gh", *argv, *(["--repo", repo] if repo else [])]
+    proc = subprocess.run(full, capture_output=True, text=True, check=False, timeout=GH_TIMEOUT_S)
     return proc.returncode, (proc.stdout if proc.returncode == 0 else proc.stderr)
 
 
@@ -546,7 +554,14 @@ def _gh(argv: list[str]) -> tuple[int, str]:
 #: being harvested — see `parse_constituents`.
 _CONSTITUENTS_LINE = re.compile(r"\s*fold-constituents\s*:\s*(.*)$")
 _CONSTITUENT_TOKEN = re.compile(r"#?(\d+)")
-_CONSTITUENT_SEPARATOR = re.compile(r"^[\s,]*(?:#?\d+[\s,]*)*$")
+
+#: A single token: `#<digits>` or `<digits>`. Validation SPLITS and checks each
+#: token rather than matching the whole tail with a repeated group. The obvious
+#: `^(?:#?\d+[\s,]*)*$` backtracks EXPONENTIALLY when a long digit run is
+#: followed by a non-token character (measured: 16 digits 4 ms, 20 -> 64 ms,
+#: 22 -> 0.27 s, 24 -> 1.08 s, doubling per digit), so a malformed operator line
+#: would wedge the tool for hours. Splitting is linear and cannot backtrack.
+_CONSTITUENT_TOKEN_ONLY = re.compile(r"#?\d+\Z")
 
 
 def parse_constituents(body: str, fold: int | None = None) -> list[int]:
@@ -585,7 +600,8 @@ def parse_constituents(body: str, fold: int | None = None) -> list[int]:
         value = re.sub(r"\(.*$", " ", value)  # an unterminated parenthetical
         if not value.strip():
             return []
-        if not _CONSTITUENT_SEPARATOR.match(value):
+        tokens = [tok for tok in re.split(r"[\s,]+", value.strip()) if tok]
+        if not tokens or not all(_CONSTITUENT_TOKEN_ONLY.match(tok) for tok in tokens):
             # Something other than the token grammar is on the line (a word, a
             # bare issue reference in prose, a link). Refuse the LINE, do not
             # harvest from it — a partial parse is how the wrong PR gets closed.
@@ -595,14 +611,29 @@ def parse_constituents(body: str, fold: int | None = None) -> list[int]:
     return []
 
 
+def declared_constituents_line(body: str) -> str | None:
+    """The raw `fold-constituents:` line, or None if the body carries none.
+
+    Exists so the CLI can tell "you never declared the constituents" apart from
+    "you declared them in a form this tool refuses". Reporting the first when the
+    second is true sends the operator looking for a line that is already there.
+    """
+    for line in body.splitlines():
+        if _CONSTITUENTS_LINE.match(line):
+            return line.strip()
+    return None
+
+
 def hint_constituents(body: str, fold: int) -> list[int]:
     """Prose `#NNNN` references — a HINT for the refusal message, never acted on."""
     return sorted({int(n) for n in re.findall(r"#(\d+)", body) if int(n) != fold})
 
 
-def fetch_fold(number: int) -> tuple[int, str, str, str]:
+def fetch_fold(number: int, repo: str | None = None) -> tuple[int, str, str, str]:
     """(exit, head_sha, head_branch, body) for a PR."""
-    code, out = _gh(["pr", "view", str(number), "--json", "headRefOid,headRefName,body,state"])
+    code, out = _gh(
+        ["pr", "view", str(number), "--json", "headRefOid,headRefName,body,state"], repo
+    )
     if code != 0:
         return 2, "", "", ""
     try:
@@ -612,9 +643,9 @@ def fetch_fold(number: int) -> tuple[int, str, str, str]:
     return 0, doc.get("headRefOid", ""), doc.get("headRefName", ""), doc.get("body", "")
 
 
-def constituent_refs(number: int) -> tuple[str, str] | None:
+def constituent_refs(number: int, repo: str | None = None) -> tuple[str, str] | None:
     """(head_sha, base_sha) for a constituent PR, or None if unreadable."""
-    code, out = _gh(["pr", "view", str(number), "--json", "headRefOid,baseRefOid"])
+    code, out = _gh(["pr", "view", str(number), "--json", "headRefOid,baseRefOid"], repo)
     if code != 0:
         return None
     try:
@@ -672,7 +703,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     cwd = Path(args.cwd)
-    code, fold_head, fold_branch, body = fetch_fold(args.fold)
+    code, fold_head, fold_branch, body = fetch_fold(args.fold, args.repo)
     if code != 0:
         print(f"cannot read fold #{args.fold} — nothing measured is never a pass", file=sys.stderr)
         return 2
@@ -690,14 +721,29 @@ def main(argv: list[str] | None = None) -> int:
         )
     if not constituents:
         hint = hint_constituents(body, args.fold)
-        print(
-            f"fold #{args.fold} declares no constituents: its body carries no "
-            f"`fold-constituents: <n>, <n>` line and no --constituent was given.\n"
-            f"The prose references {hint} are a HINT only — a fold title routinely "
-            f"names a PR that was deliberately NOT folded, so this tool will not "
-            f"close on a guess. Add the line to the fold body, or pass --constituent.",
-            file=sys.stderr,
-        )
+        declared = declared_constituents_line(body)
+        if declared is not None:
+            # The line EXISTS and was refused. Saying "you have no line" here would
+            # send the operator hunting for something that is already in the body.
+            reason = (
+                f"its `fold-constituents:` line is present but could not be read "
+                f"unambiguously: {declared!r}\n"
+                f"It must carry ONLY `#<n>`/`<n>` tokens separated by commas and/or "
+                f"whitespace (a parenthetical tail is stripped; any other text "
+                f"refuses the line). Refusing an ambiguous line is deliberate — "
+                f"harvesting the numbers out of prose is how the wrong PR gets "
+                f"closed. Rewrite the line, or pass --constituent."
+            )
+        else:
+            reason = (
+                f"its body carries no `fold-constituents: <n>, <n>` line and no "
+                f"--constituent was given.\n"
+                f"The prose references {hint} are a HINT only — a fold title "
+                f"routinely names a PR that was deliberately NOT folded, so this "
+                f"tool will not close on a guess. Add the line to the fold body, or "
+                f"pass --constituent."
+            )
+        print(f"fold #{args.fold} declares no usable constituents: {reason}", file=sys.stderr)
         return 2
 
     # Ensure the fold head is readable locally; a shallow/missing ref would make
@@ -709,7 +755,7 @@ def main(argv: list[str] | None = None) -> int:
 
     verdicts: list[Verdict] = []
     for number in constituents:
-        refs = constituent_refs(number)
+        refs = constituent_refs(number, args.repo)
         if refs is None:
             verdicts.append(
                 Verdict(number, "UNMEASURABLE", "could not read the constituent's head/base")
@@ -725,7 +771,9 @@ def main(argv: list[str] | None = None) -> int:
     # fold only — never to a constituent (a constituent is being closed; giving it
     # priority would accelerate exactly the landing this change prevents).
     if args.apply and not args.label_only:
-        acc_code, acc_err = _gh(["pr", "edit", str(args.fold), "--add-label", FOLD_LABEL])
+        acc_code, acc_err = _gh(
+            ["pr", "edit", str(args.fold), "--add-label", FOLD_LABEL], args.repo
+        )
         if acc_code != 0:
             print(
                 f"could not apply {FOLD_LABEL} to fold #{args.fold}: {acc_err[:200]}",
@@ -734,11 +782,17 @@ def main(argv: list[str] | None = None) -> int:
             return 2
 
     if args.label_only:
-        report = label_only(verdicts, args.fold, fold_head, gh=_gh, dry_run=False)
+        report = label_only(
+            verdicts,
+            args.fold,
+            fold_head,
+            gh=lambda argv: _gh(argv, args.repo),
+            dry_run=False,
+        )
         _print_report(report, dry_run=False)
         return 1 if report.errors else 0
 
-    report = execute(plan, gh=_gh, dry_run=not args.apply)
+    report = execute(plan, gh=lambda argv: _gh(argv, args.repo), dry_run=not args.apply)
     _print_report(report, dry_run=not args.apply)
 
     if report.errors:

@@ -459,9 +459,12 @@ def test_a_CONFLICTING_fold_tree_is_NOT_reported_as_contained(
     a status-only reading said CONTAINED-CONTENT and `--apply` closed a PR whose
     work no fold carries — irreversible, with a comment asserting a falsehood.
 
-    The fix drops `--3way` and additionally refuses any conflict marker, so this
-    test fails on either regression: a reintroduced three-way apply, or a return
-    to trusting the exit status alone.
+    The fix drops `--3way` and additionally refuses any conflict marker. Those are
+    two independent defences, so this test fails only when BOTH regress — measured:
+    restoring `--3way` alone stays green because the belt catches it, and removing
+    the belt as well reds this test. `test_the_conflict_marker_is_refused_whatever_
+    the_exit_status` below covers the belt on its own, so neither defence can be
+    dropped without a red.
     """
     base, const, fold = _three_way_fixture(scratch_repo)
     monkeypatch.chdir(scratch_repo)
@@ -491,6 +494,91 @@ def test_a_genuinely_contained_change_still_proves_out(scratch_repo: Path) -> No
     verdict = bo.verdict_for(101, const, base, fold, scratch_repo)
     assert verdict.state == "CONTAINED-CONTENT", verdict
     assert verdict.closable is True
+
+
+def test_a_named_repo_is_threaded_into_every_gh_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """(e) `--repo` must TARGET the calls, not merely be parsed.
+
+    Measured defect: `--repo` was declared on the CLI and never read, so
+    `--apply --repo other/repo` labelled, commented on and CLOSED same-numbered
+    PRs in whatever repository the operator happened to stand in — with a comment
+    asserting containment about a different repo's PR. Naming a target and
+    silently mutating another one records a falsehood on the wrong repository, the
+    same class as a false containment proof.
+
+    Every mutating and reading `gh` invocation is asserted to carry the flag, so a
+    future call added without it fails here.
+    """
+    seen: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        seen.append(list(argv))
+
+        class R:
+            returncode = 0
+            stdout = (
+                '{"headRefOid": "' + "a" * 40 + '", "headRefName": "b", '
+                '"body": "fold-constituents: 101", "baseRefOid": "' + "c" * 40 + '"}'
+            )
+            stderr = ""
+
+        return R()
+
+    monkeypatch.setattr(bo.subprocess, "run", fake_run)
+    monkeypatch.delenv("GH_REPO", raising=False)
+    bo._gh(["pr", "close", "101"], "other-org/other-repo")
+    assert seen, "no gh call recorded"
+    assert seen[-1][-2:] == ["--repo", "other-org/other-repo"], seen[-1]
+
+
+def test_gh_without_a_repo_adds_no_flag() -> None:
+    """(e) The default is unchanged: no `--repo` means gh's own inference."""
+    seen: list[list[str]] = []
+
+    class R:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    original = bo.subprocess.run
+    bo.subprocess.run = lambda argv, **kw: seen.append(list(argv)) or R()
+    try:
+        bo._gh(["pr", "view", "1"])
+    finally:
+        bo.subprocess.run = original
+    assert seen and "--repo" not in seen[-1], seen
+
+
+def test_a_refused_constituents_line_is_reported_as_REFUSED_not_absent() -> None:
+    """(e) Do not send the operator looking for a line that is already present.
+
+    `declared_constituents_line` is what lets the CLI distinguish "never declared"
+    from "declared in a form this tool refuses" — reporting the first when the
+    second is true is a wrong diagnostic about the operator's own body.
+    """
+    refused = "fold-constituents: 10543 and also 10610\n"
+    assert bo.declared_constituents_line(refused) is not None
+    assert bo.parse_constituents(refused, fold=900) == []
+    assert bo.declared_constituents_line("no line here\n") is None
+
+
+def test_the_constituent_tokenizer_is_linear_not_exponential() -> None:
+    """(e) A malformed long digit run must not wedge the tool.
+
+    The first strict grammar (a repeated whole-line group) backtracks EXPONENTIALLY on a
+    long digit run followed by a non-token character — measured 24 digits at 1.08 s
+    and doubling per digit, i.e. hours for a 40-digit typo. Fail-closed is not
+    enough if the tool hangs, so the parse must stay linear.
+    """
+    import time
+
+    hostile = "fold-constituents: " + "1" * 400 + "x\n"
+    started = time.monotonic()
+    assert bo.parse_constituents(hostile, fold=900) == []
+    elapsed = time.monotonic() - started
+    assert elapsed < 1.0, f"parse took {elapsed:.2f}s on a 400-digit line — backtracking"
 
 
 def test_the_conflict_marker_is_refused_whatever_the_exit_status(
