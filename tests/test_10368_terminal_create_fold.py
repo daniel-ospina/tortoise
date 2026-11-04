@@ -39,6 +39,14 @@ For the specific case where that race receives an EMPTY caller-prop bag (a
 `credibility=`-only fold — the `updatedAt` stamp the refused leg adds is the
 fold's, not the caller's), `test_a_raced_word_only_fold_does_not_claim_a_caller_
 prop` pins that the receipt does not assert a prop nobody carried.
+
+And the #7819 half is not exempt from the race: a TEMPORAL fold reaches the write
+point on that same stale snapshot, so it must report `temporal_not_applied` there
+exactly as it does without a race — never `terminal_fold_refused`, whose
+documented trigger is "the fold carries NO temporal prop"
+(`test_a_raced_temporal_fold_reports_the_temporal_advisory`), with the word-leg
+narrowing
+(`test_a_raced_temporal_fold_that_wrote_the_authored_word_says_so`).
 """
 from __future__ import annotations
 
@@ -567,6 +575,112 @@ def test_a_raced_word_only_fold_does_not_claim_a_caller_prop(sdk, monkeypatch):
     assert "PROPS AND WORD were not applied" not in message, (
         "the receipt reused the NON-raced text on a fold whose word leg did "
         f"write: {message}")
+    assert "DID LAND" in message, (
+        f"the receipt must name the leg that did write: {message}")
+
+
+def test_a_raced_temporal_fold_reports_the_temporal_advisory(sdk, monkeypatch):
+    """#10368 review P3 — the CODE is decided by the fold, never by the timing.
+
+    A fold carrying a temporal prop skips the #7819 refusal only because the
+    SNAPSHOT said "live"; when the write point disagrees, the fold lands in the
+    raced handler. That handler used to label every raced fold
+    `terminal_fold_refused` — whose documented trigger is "the fold carries NO
+    temporal prop" — so a client branching on the documented trigger looked for
+    the wrong advisory on exactly the fold that DOES carry a window. The
+    #7819 code is now emitted on the raced path too, which is what makes the
+    documented trigger true wherever it fires, and the default sentence
+    ("NOTHING was applied") stays accurate here because no word leg ran.
+
+    Non-vacuous: pre-fix this test reds on the code assertion (the reply
+    carried `terminal_fold_refused`), and the stored assertions make sure the
+    window really did not land.
+    """
+    content = _fresh_content("raced-temporal")
+    pid = sdk.create_point("statement", content, dedup=True)["id"]
+    sdk.retract_point(pid)
+    before = sdk.get_point(pid)
+    assert before["status"] == "retracted"
+
+    calls: list[str] = []
+    _race_snapshot_against_write_point(sdk, monkeypatch, calls=calls)
+
+    again = sdk.create_point("statement", content, dedup=True,
+                             validFrom="2030-01-01")
+    after = sdk.get_point(pid)
+
+    assert again["id"] == pid, "a dedup HIT is still reported"
+    assert len(calls) >= 2, (
+        "the write point must take its OWN lifecycle read — the snapshot is not "
+        "a verification")
+    assert "terminal_fold_refused" not in _advisory_codes(again), (
+        "a fold that DOES carry a temporal prop reported the code whose "
+        f"documented trigger is 'no temporal prop': {again.get('advisories')}")
+    assert "temporal_not_applied" in _advisory_codes(again), again
+    assert after.get("validFrom") == before.get("validFrom"), (
+        "the refused temporal fold stored a window on a settled claim")
+    assert after["updatedAt"] == before["updatedAt"], (
+        "the refused temporal fold moved a settled claim's updatedAt")
+    assert after["status"] == "retracted"
+    _adv = next(a for a in again["advisories"]
+                if a.get("code") == "temporal_not_applied")
+    assert "NOTHING was applied" in _adv["message"], (
+        "no word leg ran on this fold, so the default all-drop sentence is the "
+        f"true one: {_adv['message']}")
+
+
+def test_a_raced_temporal_fold_that_wrote_the_authored_word_says_so(sdk, monkeypatch):
+    """#7819 + #10368 review P3 — the raced TEMPORAL receipt may not deny a write.
+
+    Same window as its `terminal_fold_refused` sibling: a `validFrom` +
+    `credibility=` fold races a terminalization, the temporal refusal is skipped
+    on the stale snapshot, the authored-word leg writes through its own baseline
+    writer, and the write point refuses the temporal props. Reporting the
+    default "NOTHING was applied" there would deny a write that landed — the
+    #8400 class — so the raced temporal shape carries its own sentence while
+    keeping the #7819 code.
+
+    Non-vacuous: the message assertion reds on the pre-fix all-drop text, and
+    the stored assertions MEASURE the disclosed residual (the word really does
+    land; this test does not pretend the window is closed).
+    """
+    from tortoise.source_credibility import canonical_tier
+
+    content = _fresh_content("raced-temporal-word")
+    pid = sdk.create_point("statement", content, dedup=True)["id"]
+    sdk.retract_point(pid)
+    before = sdk.get_point(pid)
+    assert before["status"] == "retracted"
+    assert before.get("credibility") is None
+
+    calls: list[str] = []
+    _race_snapshot_against_write_point(sdk, monkeypatch, calls=calls)
+
+    again = sdk.create_point("statement", content, dedup=True,
+                             validFrom="2030-01-01", credibility="gold")
+    after = sdk.get_point(pid)
+
+    assert again["id"] == pid, "a dedup HIT is still reported"
+    assert "terminal_fold_refused" not in _advisory_codes(again), (
+        "the raced TEMPORAL fold reported the no-temporal-prop code: "
+        f"{again.get('advisories')}")
+    assert "temporal_not_applied" in _advisory_codes(again), again
+    # The temporal prop really was stopped …
+    assert after.get("validFrom") == before.get("validFrom"), (
+        "the refused temporal fold stored a window on a settled claim")
+    assert after["updatedAt"] == before["updatedAt"], (
+        "the refused temporal fold moved a settled claim's updatedAt")
+    # … and the WORD leg really did land (measured, not argued).
+    assert after.get("credibility") == canonical_tier("gold"), (
+        "expected the authored-word leg's label on the raced path — if this "
+        "reds, the residual is CLOSED and the raced message must be retired")
+
+    _adv = next(a for a in again["advisories"]
+                if a.get("code") == "temporal_not_applied")
+    message = _adv["message"]
+    assert "NOTHING was applied" not in message, (
+        "the receipt reused the all-drop sentence on a fold whose word leg had "
+        f"already written, so it denies a write that happened: {message}")
     assert "DID LAND" in message, (
         f"the receipt must name the leg that did write: {message}")
 

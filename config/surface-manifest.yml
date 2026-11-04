@@ -505,11 +505,15 @@ response_fields:
     point (a content coincidence picked the target), and a `key`-resolved hit is an identity match, not a licence
     to rewrite a settled record (#6110 decides identity; ingest already refuses the same fold, #10377). The whole fold is dropped, the HIT is still reported, and the
     message names `update_point` as the addressed route that does revise a dead claim deliberately. The journaled
-    provenance retrofit (#7704) still folds, so an evidence-bearing re-run keeps its source. One shape emits the SAME
+    provenance retrofit (#7704) still folds, so an evidence-bearing re-run keeps its source. The code is decided by the
+    FOLD''s own shape, never by the timing: a fold that carries a temporal prop reports `temporal_not_applied` instead,
+    on the non-raced AND the raced path alike, so this trigger sentence holds wherever it fires. One shape emits the SAME
     code with a NARROWER message: a fold that RACES a terminalization (a retract/supersede landing after the fold''s
     snapshot but at or before its write point) reports only the leg that was actually stopped — the caller''s props
     were not applied, while an authored word the fold had ALREADY written through the server-owned baseline leg DID
-    land, so that text says the stored record is NOT unchanged and names the properties carrying the word. Denying a
+    land, so that text says the stored record is NOT unchanged and names the properties carrying the word. The raced
+    temporal shape carries the same narrowing under the #7819 code: the window was not applied and the authored word
+    did land. Denying a
     write that happened is the #8400 class this refusal exists to close, so the receipt may not overclaim the drop.
     All of these codes ride
     the SAME key on the dedup-hit return, so a re-run reports them together rather than dropping

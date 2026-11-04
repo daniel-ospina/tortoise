@@ -13222,6 +13222,16 @@ class TortoiseSDK:
                 # the only leg that refusal stopped. Tracked here so the return
                 # can report the word leg's own outcome instead of denying it.
                 _raced_word_landed = False
+                # #10368 review P3: and the RACED verdict must report the code
+                # the fold's OWN class earns. A fold carrying a temporal prop
+                # skips the #7819 refusal above only because the snapshot said
+                # "live"; when the write point disagrees it lands here, and this
+                # arm used to re-label it `terminal_fold_refused` — a code whose
+                # documented trigger is "the fold carries NO temporal prop". A
+                # client branching on the documented trigger then looked for the
+                # wrong advisory. The code is decided by the fold, not by the
+                # timing (see the return below).
+                _raced_temporal = False
                 if _terminal_fold_refused:
                     _logger.warning(
                         "create_point: dedup resolved to point %s, which is "
@@ -13275,6 +13285,9 @@ class TortoiseSDK:
                             raise
                         _terminal_fold_refused = True
                         _raced_word_landed = _word_applied
+                        # A temporal fold reports the #7819 code, exactly as it
+                        # would have without the race — NOT `terminal_fold_refused`.
+                        _raced_temporal = bool(_temporal)
                         # No end receipt for a write that did not happen
                         # (#9202/#10079): a raced fold must not report
                         # `valid_to_shaped` either.
@@ -13292,6 +13305,28 @@ class TortoiseSDK:
                     finally:
                         _FOLD_REFUSES_TERMINAL_WRITE.reset(_ftok)
                         _WARN_SUPPRESS.reset(_tok)
+                # The advisory CODE is decided by the FOLD, never by the timing
+                # (#10368 review P3): a fold carrying a temporal prop reports
+                # `temporal_not_applied` on the raced path exactly as it does
+                # without a race, so the documented trigger of
+                # `terminal_fold_refused` ("NO temporal prop") holds wherever it
+                # fires. Only the MESSAGE narrows when the authored-word leg had
+                # already written, because then "NOTHING was applied" is false.
+                _refusal_advisory: dict = {}
+                if _terminal_fold_refused:
+                    if _raced_temporal:
+                        _refusal_advisory = self._temporal_not_applied_advisory(
+                            pid,
+                            message=(
+                                self._TEMPORAL_NOT_APPLIED_RACED_WORD_MESSAGE
+                                if _raced_word_landed else None))
+                    else:
+                        _refusal_advisory = (
+                            self._terminal_fold_refused_advisory(
+                                pid,
+                                message=(
+                                    self._TERMINAL_FOLD_REFUSED_RACED_WORD_MESSAGE
+                                    if _raced_word_landed else None)))
                 return _with_end_receipt(
                     {**self.get_point(pid),
                      # `_merge_advisories`, never a second `**` splat: BOTH the
@@ -13300,12 +13335,7 @@ class TortoiseSDK:
                      # drop one (#9964).
                      **_merge_advisories(
                          _kind_layer_advisory(_layer_note, pid),
-                         (self._terminal_fold_refused_advisory(
-                              pid,
-                              message=(
-                                  self._TERMINAL_FOLD_REFUSED_RACED_WORD_MESSAGE
-                                  if _raced_word_landed else None))
-                          if _terminal_fold_refused else {}))},
+                         _refusal_advisory)},
                     _end_receipt)
 
         # Issue #52 — warn when caller passes an explicit non-ULID id
@@ -43928,6 +43958,26 @@ class TortoiseSDK:
         "unchanged."
     )
 
+    #: #7819 + #10368 — the RACED variant of the sentence above, and the exact
+    #: mirror of `_TERMINAL_FOLD_REFUSED_RACED_WORD_MESSAGE`: a fold carrying a
+    #: TEMPORAL prop (plus an authored word) reaches the write point with the
+    #: authored-word leg ALREADY written, because that leg is gated on the same
+    #: stale snapshot and writes through its own baseline writer. Only the
+    #: temporal prop was stopped. The default text ("NOTHING was applied") is
+    #: TRUE whenever no word landed — it is used for that shape — and FALSE here,
+    #: so this text says what actually happened rather than denying it (#8400).
+    _TEMPORAL_NOT_APPLIED_RACED_WORD_MESSAGE: ClassVar[str] = (
+        "The dedup fold carried a temporal prop and an authored word, and the "
+        "point this content addresses became terminal while the fold was in "
+        "flight; a settled claim's window cannot be re-stamped (#7819) — the "
+        "TEMPORAL PROPS were NOT applied and `updatedAt` did not move. "
+        "⛔ THE AUTHORED WORD DID LAND: it is written through the server-owned "
+        "baseline writer BEFORE the write point that refused, so "
+        "`ep_alpha`/`ep_beta`, the `baseline_*` provenance and the "
+        "`credibility` label now carry it. THE STORED RECORD IS NOT UNCHANGED — "
+        "read the point back before treating this as a drop."
+    )
+
     #: #10368 — the OTHER half of the same refusal: a dedup fold carrying a
     #: non-temporal prop on a terminal claim. A separate code from
     #: `temporal_not_applied` because the honest message differs: no window was
@@ -43983,18 +44033,30 @@ class TortoiseSDK:
         "update_point(<id>, ...), the addressed door."
     )
 
-    def _temporal_not_applied_advisory(self, node_id: str | None) -> dict:
+    def _temporal_not_applied_advisory(
+            self, node_id: str | None, *,
+            message: str | None = None) -> dict:
         """The `temporal_not_applied` advisory payload (#7819).
 
         ADVISORY ONLY — a dropped fold has already written nothing; this only
         makes the drop OBSERVABLE to the caller (`create_point` returns it on a
         COPY of the dedup snapshot, and the hosted commit receipt folds it into
         `warnings`). Never raises, never blocks.
+
+        ``message`` overrides the default text for the shape the default
+        mis-describes (#7819 + #10368 review P3): a TEMPORAL fold that raced a
+        terminalization after its authored-word leg had already written. The
+        CODE is unchanged — the raced shape reports the same code the NON-raced
+        shape reports for the same fold, which is what makes the documented
+        trigger (`terminal_fold_refused` fires only on a fold with NO temporal
+        prop) true by construction — and the override is applied by the caller
+        that knows the facts, never derived here, so this factory stays a pure
+        formatter.
         """
         return {"advisories": [{
             "code": "temporal_not_applied",
             "node_id": node_id,
-            "message": self._TEMPORAL_NOT_APPLIED_MESSAGE,
+            "message": message or self._TEMPORAL_NOT_APPLIED_MESSAGE,
             "advisory": True,
         }]}
 

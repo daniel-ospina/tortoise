@@ -7983,9 +7983,11 @@ def _owns_point(label: object) -> bool:
 #: (`_POINT_DENY` — no payload can restore them), leaving a dead claim with no
 #: `outdated` flag: the state `entities.py` names as "an invalidated Point with no
 #: `outdated` flag — a dead claim served". Measured on the shape the fold's own
-#: branch authorises (`#7819` is scoped to `_TEMPORAL_RESTAMP_PROPS`, so a fold
-#: carrying no temporal prop applies to a dead claim exactly as any revision
-#: does): create → supersede (or invalidate) → re-ingest the same content from a
+#: branch authorises — a fold ONTO a dead claim (`#7819` refused only a TEMPORAL
+#: fold, and `#10368` has since narrowed the APPLYING set to the caller's generic
+#: props and authored word; this PROVENANCE retrofit is deliberately exempt from
+#: that narrowing by `#7704`'s owner ruling, and still folds onto a terminal
+#: point): create → supersede (or invalidate) → re-ingest the same content from a
 #: second source folds onto the dead id, and a `rebuild_all` then dropped
 #: `outdated`/`expiredAt` while `check_consistency` reds with an action ("replay
 #: the journal") that reproduces the same graph.
