@@ -129,6 +129,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -855,12 +856,19 @@ def next_command(unit: Unit, repo: str) -> str | None:
     # The rails take the branch as their 4th argument. When the snapshot does not
     # carry it, resolve it IN THE COMMAND — a `<branch …>` placeholder parses as a
     # shell input redirection, so the "command" would fail with "No such file".
+    # ⛔ THE BRANCH IS UNTRUSTED INPUT. `git check-ref-format` ALLOWS `$(`, backticks,
+    # `"` and `;` in a ref name, and double quotes EXECUTE `$( )` — measured: a head
+    # ref of `fix/100-$(tar${IFS}czf${IFS}/tmp/x${IFS}~/.pi/agent)` was interpolated
+    # raw into the one string this tool exists to hand a runner. `merge-one.sh`
+    # documents this exact threat and solved it with `--argv`; the emitter must not
+    # put the value back in the shell. `shlex.quote` is the one-line form.
     branch = unit.head_ref
     if branch:
-        branch_shell = f'"{branch}"'
+        branch_shell = shlex.quote(branch)
     else:
         branch_shell = (
-            f'"$(gh pr view {unit.pr} --repo {repo} --json headRefName -q .headRefName)"'
+            f'"$(gh pr view {unit.pr} --repo {shlex.quote(repo)} --json headRefName '
+            "-q .headRefName)\""
         )
     if unit.kind == "fold" and unit.position == "READY-TO-LAND":
         return f"bash scripts/orchestrator-harness/merge-one.sh . {repo} {unit.pr} {branch_shell}"
@@ -887,6 +895,16 @@ def next_action(unit: Unit, repo: str) -> str | None:
     if not unit.pickable:
         return None
     target = f"#{unit.issue}" if unit.kind == "issue" else f"fold PR #{unit.fold_pr}"
+    if unit.position == "NEEDS-REVIEW" and any("carry-patch" in d for d in unit.detail):
+        # ⛔ `carry-patch` IS NOT A REVIEW CYCLE. `record-review.sh` exit 6 says
+        # "RE-RECORD at the current head and do NOT run a review cycle" — the
+        # reviewed PATCH is byte-identical, only the rendered diff moved. Offering
+        # "dispatch a reviewer … --evidence comment:<id>" wasted a review AND
+        # nudged toward the fabricated-evidence shape the recorder warns about.
+        return (
+            f"re-record at {target} head {unit.head} — the reviewed PATCH is unchanged, so "
+            f"record-review.sh {unit.pr} <current-head> clean {repo} needs NO new review"
+        )
     if unit.position == "NEEDS-REVIEW":
         return (
             f"dispatch a reviewer at {target} head {unit.head} ({repo}), then record it with "
@@ -894,8 +912,6 @@ def next_action(unit: Unit, repo: str) -> str | None:
         )
     if unit.position == "NEEDS-TEST":
         return f"wait — {target} is in a runner queue; nothing to dispatch until its head reports"
-    if unit.duplicate_of:
-        return f"none — the same unit is already offered as #{unit.duplicate_of}"
     return None
 
 
@@ -1310,18 +1326,46 @@ def _merge_tree(repo_root: Path, base: str, pr: dict[str, Any], snap: Snapshot) 
         return
     have = _run(["git", "cat-file", "-e", f"{head}^{{commit}}"], timeout=GIT_TIMEOUT, cwd=repo_root)
     if have.returncode != 0:
-        fetched = _run(
-            ["git", "fetch", "--no-tags", "origin", f"+refs/pull/{number}/head:refs/pi-next-work/pr-{number}"],
-            timeout=GIT_TIMEOUT,
-            cwd=repo_root,
-        )
+        target = head
+        # ⛔ THE MEASUREMENT MUST BE BOUND TO THE HEAD IT IS FILED UNDER. The fetch
+        # used to take `refs/pull/N/head` and merge THAT ref, never comparing it to
+        # `pr["head"]` — so a PR pushed between `list_pulls` and this call was
+        # measured at a DIFFERENT commit than the one whose check-runs and
+        # attestation were read, and `merge_tree` is keyed by PR number only.
+        # Measured: snapshot head 6aaaf759 conflicted with main while
+        # refs/pull/7/head (782737d0) merged clean → recorded `clean: True`.
+        fetched = _run(["git", "fetch", "--no-tags", "origin", head], timeout=GIT_TIMEOUT, cwd=repo_root)
+        if fetched.returncode != 0:
+            fetched = _run(
+                ["git", "fetch", "--no-tags", "origin",
+                 f"+refs/pull/{number}/head:refs/pi-next-work/pr-{number}"],
+                timeout=GIT_TIMEOUT,
+                cwd=repo_root,
+            )
+            if fetched.returncode == 0:
+                tip = _run(
+                    ["git", "rev-parse", f"refs/pi-next-work/pr-{number}"],
+                    timeout=GIT_TIMEOUT,
+                    cwd=repo_root,
+                )
+                got = (tip.stdout or "").strip()
+                if got and got != head:
+                    snap.merge_tree[str(number)] = {
+                        "clean": None,
+                        "why": (
+                            f"the PR head moved during the sweep — snapshot says {head[:8]}, "
+                            f"the remote has {got[:8]} — the tree that would merge was not measured"
+                        ),
+                    }
+                    return
+                target = f"refs/pi-next-work/pr-{number}"
         if fetched.returncode != 0:
             snap.merge_tree[str(number)] = {
                 "clean": None,
                 "why": f"head {head[:8]} not available locally and the fetch failed",
             }
             return
-        head = f"refs/pi-next-work/pr-{number}"
+        head = target
     merged = _run(["git", "merge-tree", "--write-tree", base, head], timeout=GIT_TIMEOUT, cwd=repo_root)
     if merged.returncode == 0:
         snap.merge_tree[str(number)] = {"clean": True, "why": "merge-tree clean"}
@@ -1372,6 +1416,16 @@ def collect(repo: str, repo_root: Path, *, base: str = "main") -> tuple[Snapshot
             on_disk = repo_root / ".mergify.yml"
             text = on_disk.read_text(encoding="utf-8")
             source = f"{on_disk} (FALLBACK — origin/{base} unreadable)"
+            # ⛔ A FAILED READ IS NOT A MEASURED STATE. Reading the checkout's own
+            # copy may pick up an uncommitted edit — a removed `check-success`, a
+            # dropped `-label=superseded-by-fold` — and then "no unmet conditions"
+            # means READY-TO-LAND with a merge command, while this module's own
+            # exit-2 list says an unreadable gate is INCOMPLETE. The positions are
+            # still computed (from the fallback, labelled), but the run refuses.
+            snap.unreadable.append(
+                f"queue gate: origin/{base}:.mergify.yml could not be read — fell back to "
+                f"{on_disk}, which may be an uncommitted local edit"
+            )
         cfg = parse_config(text)
         snap.gate_text = text
         snap.config_source = source
@@ -1399,7 +1453,12 @@ def collect(repo: str, repo_root: Path, *, base: str = "main") -> tuple[Snapshot
     snap.issues = dedupe_issues(found)
 
     try:
-        pulls = client.list_pulls(repo, snap.base)
+        # ⛔ NO BASE FILTER. `queue_resweep.list_pulls` takes `base=main`, so a PR
+        # targeting another branch was absent from this list — the issue whose only
+        # open PR is `release/1.x` read NO-PR and got a `lane.sh` dispatch, while
+        # `_position_for_pr` has a `base=main (actual …)` branch that could never
+        # fire. Every open PR is enumerated; the gate decides the base.
+        pulls = client._get_list(f"repos/{repo}/pulls", "state=open")
     except GhError as exc:
         pulls = []
         _unreadable(snap, "open pulls", exc)
@@ -1644,7 +1703,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     """
     try:
         return _main(argv)
-    except (AttributeError, KeyError, TypeError, ValueError) as exc:
+    except BrokenPipeError:
+        # `next_work.py | head -1` closes the pipe. The interpreter's own exit 1
+        # would read as "the queue was read and nothing is pickable" on a run that
+        # was never written — the same mis-grade as the mis-shaped snapshot.
+        return 2
+    except (AttributeError, KeyError, TypeError, ValueError, OSError) as exc:
         print(
             f"next_work: INCOMPLETE — the snapshot could not be decided "
             f"({type(exc).__name__}: {exc}). exit 2 is 'could not check'.",

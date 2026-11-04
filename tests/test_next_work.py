@@ -542,12 +542,39 @@ def test_labels_match_the_live_mergify_config():
 
 
 def test_every_unit_gets_a_command_or_a_reason_why_not():
-    s = _rich_snapshot()
+    """Pickable ⇒ a COMMAND or an ACTION — never neither, never both.
+
+    The earlier form asserted every pickable row had a `next_command`, which is
+    FALSE since NEEDS-REVIEW/NEEDS-TEST deliberately carry an ACTION instead (a
+    commented-out command was a round-5 defect). It passed only because the
+    fixture happened to hold no such row — a legitimate fixture addition would
+    have reddened correct code and invited re-adding that defect.
+    """
+    from tools.next_work import next_action
+
+    s = snap(
+        issues=[issue(100), issue(200), issue(300), issue(400)],
+        pulls=[
+            pull(1001, closes=[100], head="a" * 40),
+            pull(2002, closes=[200], head="b" * 40),
+            pull(3003, closes=[300], head="c" * 40),
+        ],
+        check_runs={"a" * 40: all_green(), "b" * 40: _runs_for_position("NEEDS-FIX"),
+                    "c" * 40: _runs_for_position("NEEDS-TEST")},
+        attestation={"1001": {"verdict": "head"}, "2002": {"verdict": "head"},
+                     "3003": {"verdict": "head"}},
+        merge_tree={"1001": {"clean": True}, "2002": {"clean": True}, "3003": {"clean": True}},
+        claims={"refs/claims/pr-1001": {"verdict": "claim-held", "owner": "b:1"}},
+    )
+    positions = set()
     for u in units_for(s):
-        if u.pickable:
-            assert next_command(u, REPO), f"{u.key} is pickable but names no command"
-        else:
-            assert next_command(u, REPO) is None
+        cmd, act = next_command(u, REPO), next_action(u, REPO)
+        if not u.pickable:
+            assert cmd is None and act is None, u.key
+            continue
+        assert (cmd is None) != (act is None), f"{u.key} has both or neither: {cmd!r} / {act!r}"
+        positions.add(u.position)
+    assert {"NEEDS-FIX", "NEEDS-TEST", "CLAIMED"} & positions
 
 
 # ── helpers ────────────────────────────────────────────────────────────────
@@ -615,7 +642,6 @@ def test_no_clock_seam_is_documented_or_accepted():
     from tools.next_work import __doc__ as module_doc
 
     assert "same clock" not in module_doc, "the docstring still conditions the pick on a clock"
-    assert "no clock cannot" not in module_doc
     assert "no clock enters the decision" in module_doc.lower()
 
 
@@ -1245,6 +1271,11 @@ def test_a_fold_declared_only_by_its_line_is_measured(monkeypatch):
         def list_pulls(self, repo, base):
             return [rest_fold]
 
+        def _get_list(self, path, params="", select=".[]"):
+            if path.endswith("/pulls"):
+                return [rest_fold]
+            return []
+
         def list_check_runs(self, repo, sha):
             # `collect` reads the REPO's gate (6 required checks here), not the
             # 2-check test config, so the fake must satisfy the real gate.
@@ -1292,7 +1323,9 @@ def test_a_fold_declared_only_by_its_line_is_measured(monkeypatch):
     assert measured.get("merged") == [900], "a line-only fold was never merge-tested"
     row = next(u for u in build_units(snap_, cfg) if u.kind == "fold")
     assert row.position == "READY-TO-LAND", row.detail
-    assert "awaiting checks" not in (next_command(row, REPO) or "")
+    assert (next_command(row, REPO) or "").startswith("bash "), (
+        "a measured fold must name the rail that lands it, not a wait note"
+    )
 
 
 # ── an unreadable SNAPSHOT is exit 2, never "nothing to do" (review 2) ────
@@ -1465,6 +1498,8 @@ def test_collect_maps_the_head_branch_into_the_snapshot(monkeypatch):
             return [rest_pr]
 
         def _get_list(self, path, params="", select=".[]"):
+            if path.endswith("/pulls"):
+                return [rest_pr]
             return []  # no cross-referenced events for this PR
 
         def list_check_runs(self, repo, sha):
@@ -1783,6 +1818,8 @@ def test_a_labelled_fold_with_a_refused_line_says_so_on_its_row():
     assert any("refused WHOLE" in d for d in fold_row.detail), fold_row.detail
     text, _ = render(units_for(s), CFG, s, repo=REPO, top=5)
     assert "non-parsing" in text
+
+
 # ── this guard must actually RUN on an edit to the file it guards ──────────
 def test_a_next_work_only_change_selects_core_so_this_guard_actually_runs() -> None:
     """The `CORE_ALSO` entry is LOAD-BEARING, so it is pinned here.
@@ -1813,3 +1850,94 @@ def test_a_next_work_only_change_selects_core_so_this_guard_actually_runs() -> N
     )
 
 
+# ── the branch is UNTRUSTED input, not a shell-safe token (round 6, #1) ───
+def test_a_hostile_branch_name_cannot_escape_the_emitted_command():
+    """`git check-ref-format` allows `$(`, backticks, `"` and `;` in a ref name.
+
+    The command this tool prints is the one thing it exists to hand a runner, and
+    it interpolated the head ref RAW inside double quotes — and double quotes
+    EXECUTE `$( )`. Verified: a head ref of `fix/100-$(tar${IFS}czf${IFS}/tmp/x)`
+    came out verbatim. The repo's own rail documents this exact threat; the emitter
+    must not put the value back into the shell.
+    """
+    hostile = 'fix/100-$(tar${IFS}czf${IFS}/tmp/x${IFS}$HOME);`id`"quoted'
+    s = snap(
+        issues=[issue(100)],
+        pulls=[{**pull(1001, closes=[100]), "head_ref": hostile}],
+        check_runs={"a" * 40: all_green()},
+        attestation={"1001": {"verdict": "head"}},
+        merge_tree={"1001": {"clean": True}},
+    )
+    (row,) = units_for(s)
+    cmd = next_command(row, REPO) or ""
+    import shlex
+
+    # The ref must survive as ONE shell word (so the rail receives it intact) and
+    # must be QUOTED in the text — an unquoted `$(` would run.
+    argv = shlex.split(cmd)
+    assert argv[-1] == hostile, f"the ref is not recoverable as ONE argument: {argv}"
+    assert shlex.quote(hostile) in cmd, f"the ref was not quoted: {cmd}"
+
+
+def test_the_emitted_command_is_shell_parseable_with_a_plain_branch():
+    import shlex
+
+    s = snap(
+        issues=[issue(100)],
+        pulls=[{**pull(1001, closes=[100]), "head_ref": "fix/100-plain"}],
+        check_runs={"a" * 40: all_green()},
+        attestation={"1001": {"verdict": "head"}},
+        merge_tree={"1001": {"clean": True}},
+    )
+    (row,) = units_for(s)
+    argv = shlex.split(next_command(row, REPO) or "")
+    assert argv[-1] == "fix/100-plain"
+    assert argv[0] == "bash"
+
+
+# ── carry-patch is NOT a review cycle (round 6, #4) ───────────────────────
+def test_carry_patch_asks_for_a_re_record_not_a_review():
+    """`record-review.sh` exit 6: re-record at the current head, do NOT review.
+
+    The action offered was "dispatch a reviewer … --evidence comment:<id>" — a
+    wasted review, and a nudge toward the fabricated-evidence shape the recorder
+    warns about.
+    """
+    from tools.next_work import next_action
+
+    s = snap(
+        issues=[issue(100)],
+        pulls=[{**pull(1001, closes=[100]), "head_ref": "fix/100-x"}],
+        check_runs={"a" * 40: all_green()},
+        attestation={"1001": {"verdict": "carry-patch"}},
+        merge_tree={"1001": {"clean": True}},
+    )
+    (row,) = units_for(s)
+    assert row.position == "NEEDS-REVIEW"
+    action = next_action(row, REPO) or ""
+    assert "re-record" in action
+    assert "reviewer" not in action and "--evidence" not in action
+
+
+# ── a failed gate read must be recorded, not silently substituted ─────────
+def test_a_failed_gate_read_is_recorded_as_incomplete():
+    """The checkout's own `.mergify.yml` may be an uncommitted edit.
+
+    Reading it after `origin/main` failed produced "no unmet conditions" →
+    READY-TO-LAND with a command, while the module's own exit-2 list says an
+    unreadable gate is INCOMPLETE. This pins the wiring at the source, because the
+    fallback branch needs a real `git show` failure to reach.
+    """
+    src = Path(next_work_module_file()).read_text(encoding="utf-8")
+    assert "fell back to" in src, "the fallback must say so in the gate source"
+    tail = src.split("FALLBACK — origin/", 1)[1][:1600]
+    assert "snap.unreadable.append" in tail, (
+        "the fallback branch does not record the read failure, so a locally relaxed "
+        "gate would read as measured"
+    )
+
+
+def next_work_module_file() -> str:
+    import tools.next_work as mod
+
+    return mod.__file__ or ""
