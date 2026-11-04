@@ -260,7 +260,14 @@ Environment=TORTOISE_TEST_LANE_POLICY_SHA256=$POLICY_SHA
 # ⛔ CLEAR the arming vars: the unit sets none, but a manager-level
 # \`DefaultEnvironment=\` would arm a proof with no installer re-run and no pin
 # change — an armed deletion nobody can see in this file (#10813 review).
-UnsetEnvironment=TORTOISE_TEST_LANE_REAP_LANE_GONE TORTOISE_TEST_LANE_REAP_OWNER_INDETERMINATE TORTOISE_TEST_LANE_REAP_STOPPED
+# \`TORTOISE_TEST_LANE_REAP\` is cleared for the same reason, one step further: it
+# is the BOX-WIDE switch, and honouring an ambient value here would let an env var
+# that a test harness exports silently disarm — or re-arm — a destructive unit,
+# while \`tools/container_reaper.py\` never reads it, so the documented "set this
+# and nothing is reaped" would be false for exactly this clock (#10813 round-3
+# review P2-2). What this unit does is a function of the installed files and
+# their pins; arming or disarming it is an INSTALLER act, not an env act.
+UnsetEnvironment=TORTOISE_TEST_LANE_REAP TORTOISE_TEST_LANE_REAP_LANE_GONE TORTOISE_TEST_LANE_REAP_OWNER_INDETERMINATE TORTOISE_TEST_LANE_REAP_STOPPED
 # ⛔ \`WorkingDirectory=\` takes NO quoting — systemd reads the quotes as part of the
 # path ("path is not absolute: \"/home/…\"") and the unit is a fatal error.
 # \`ExecStart=\` DOES, and a checkout path with a space needs it there.

@@ -752,7 +752,12 @@ def test_the_rendered_unit_pins_the_sha256_of_the_reaper_it_installs():
     assert "Persistent=true" in r.stdout, r.stdout
     # …and the arming guard: a manager-level `DefaultEnvironment=` must not be
     # able to arm a deletion proof behind the installer's back.
-    assert ("UnsetEnvironment=TORTOISE_TEST_LANE_REAP_LANE_GONE "
+    # The box-wide switch is cleared too, or an ambient `TORTOISE_TEST_LANE_REAP`
+    # would silently disarm (or re-arm) a destructive unit that never reads it —
+    # making the documented "set this and nothing is reaped" false for the clock
+    # (#10813 round-3 review P2-2).
+    assert ("UnsetEnvironment=TORTOISE_TEST_LANE_REAP "
+            "TORTOISE_TEST_LANE_REAP_LANE_GONE "
             "TORTOISE_TEST_LANE_REAP_OWNER_INDETERMINATE "
             "TORTOISE_TEST_LANE_REAP_STOPPED") in r.stdout, r.stdout
 

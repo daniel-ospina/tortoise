@@ -5438,3 +5438,115 @@ def test_pid_reuse_is_decided_by_WHEN_the_process_started_not_by_an_age():
     finally:
         child.kill()
         child.wait()
+
+
+def test_an_EMPTY_opt_out_disables_reaping(monkeypatch):
+    """`TORTOISE_TEST_LANE_REAP=` is what `export X=${SOMETHING_UNSET}` produces.
+
+    `start()` used to enable only on a literal `"1"`, so an empty value meant OFF;
+    reading it as ON would silently ARM a deletion switch for an operator whose
+    "off" was spelled with an empty value — the fail-open direction, on the one
+    variable whose job is to disarm this tool (#10813 round-3 review P3-4).
+
+    Mutation: drop `""` from `_REAP_OFF` and this reds.
+    """
+    monkeypatch.setenv("TORTOISE_TEST_LANE_REAP", "")
+    assert tl._reap_enabled() is False
+    monkeypatch.setenv("TORTOISE_TEST_LANE_REAP", "   ")
+    assert tl._reap_enabled() is False          # whitespace-only is the same word
+    monkeypatch.setenv("TORTOISE_TEST_LANE_REAP", "1")
+    assert tl._reap_enabled() is True
+    monkeypatch.delenv("TORTOISE_TEST_LANE_REAP")
+    assert tl._reap_enabled() is True
+
+
+def test_a_DISAGREEING_container_name_refuses_the_run(lane, monkeypatch, capsys):
+    """The marker opens before `start()`, so the two names must be the SAME one.
+
+    `name` comes from `_lane_identity()` and `start()` derives the container
+    again; if a `repo_root()` read degrades between them the two records describe
+    different worktrees, and the peer guard would then protect the wrong
+    container. Refusing is the only honest answer (#10813 review P2-2).
+
+    Mutation: delete the `started_name != name` arm and this run proceeds.
+    """
+    _stub_start(monkeypatch)
+    reaped: list = []
+    monkeypatch.setattr(tl.subprocess, "run", lambda *a, **k: _R(0, "", ""))
+    monkeypatch.setattr(tl, "stop", lambda: (reaped.append(1), "removed")[1])
+    monkeypatch.setattr(tl, "start", lambda _p=None: ("fdb-lane-somethingelse", 16412))
+    with pytest.raises(SystemExit) as exc:
+        tl.main(["run", "--", "-q", "tests/"])
+    assert "refusing to run" in str(exc.value)
+    assert reaped == [], "a run that could not name its own container reaped anyway"
+    assert not list(tl.REAP_STATE_DIR.glob("*.run.*")), "the marker was left behind"
+
+
+def test_a_start_that_RAISES_stamps_no_lease(lane, monkeypatch):
+    """The `finally` now runs on paths it never reached before (the marker opens
+    before `start()`), so it must not re-stamp a lease for a container that was
+    never created — a write into the real `~/.pi/agent/state/lane-reap/` naming
+    nothing (#10813 review P3-4).
+
+    Mutation: drop `and started` from the `kept and started` guard and this reds
+    (the box-wide opt-out makes `kept` True).
+    """
+    monkeypatch.setenv("TORTOISE_TEST_LANE_REAP", "0")     # keeps `keep` True
+    leases: list = []
+    monkeypatch.setattr(tl, "_touch_lease", lambda n: leases.append(n))
+
+    def _boom(_p=None):
+        raise SystemExit("test-lane: docker is not answering")
+
+    monkeypatch.setattr(tl, "start", _boom)
+    with pytest.raises(SystemExit):
+        tl.main(["run", "--", "-q", "tests/"])
+    assert leases == [], f"a lease was stamped for a container start() never made: {leases}"
+
+
+def test_a_live_peer_older_than_the_age_bound_is_STILL_a_peer(lane, monkeypatch):
+    """The age is a FALLBACK for a platform that cannot answer, not a second vote.
+
+    `_pid_started_after` can PROVE a pid was not reused (the process started
+    before the marker was written). An unconditional age term let the clock
+    override that proof, so a genuine live `run` older than 24 h was declared
+    stale, its marker unlinked, and an exiting peer's hook then `docker rm -f`'d
+    the container under it — on exactly the population this change exists for (a
+    wedged, long-lived lane). #10813 round-3 review P2-1.
+
+    The two axes are separated on purpose: `_pid_started_after`'s own answers are
+    pinned on a REAL child (see
+    `test_pid_reuse_is_decided_by_WHEN_the_process_started_not_by_an_age`), so
+    here it is stubbed to the one answer that matters — a POSITIVE "not reused" —
+    while the marker is 25 h old. A 25 h-old marker beside a 1 s-old process
+    would be pid reuse, which is why this cannot be built from a live child.
+
+    Mutation: make `aged` unconditional again and this reds.
+    """
+    monkeypatch.setattr(tl, "_pid_started_after", lambda pid, when: False)
+    monkeypatch.setattr(tl, "_pid_alive", lambda pid: True)
+    tl.REAP_STATE_DIR.mkdir(parents=True, exist_ok=True)
+    marker = tl._run_marker_path(LANE_FIXTURE_NAME, 424242)
+    marker.write_text("424242\n")
+    old = time.time() - 25 * 3600
+    os.utime(marker, (old, old))
+    assert tl._peer_run_is_live(LANE_FIXTURE_NAME) is True, (
+        "a peer the tool PROVED was not pid-reused was declared stale by the clock")
+    assert marker.exists(), "a live peer's marker was deleted"
+
+
+def test_a_marker_naming_pid_0_or_negative_is_not_a_live_peer(lane):
+    """`os.kill(0, 0)` and `os.kill(-1, 0)` SUCCEED — they address a process
+    GROUP, not a process — and `/proc/0` does not exist, so a marker named
+    `<name>.run.0` (a truncated write, or a hand-edited state dir) read as "peer
+    live" forever with no self-healing path. Same permanent-block class as pid
+    reuse. #10813 round-3 review P3-5.
+
+    Mutation: drop the `pid <= 0` arm and this reds (and the marker survives).
+    """
+    tl.REAP_STATE_DIR.mkdir(parents=True, exist_ok=True)
+    for bogus in (0, -1):
+        marker = tl.REAP_STATE_DIR / f"{LANE_FIXTURE_NAME}.run.{bogus}"
+        marker.write_text(f"{bogus}\n")
+        assert tl._peer_run_is_live(LANE_FIXTURE_NAME) is False, bogus
+        assert not marker.exists(), f"a pid-{bogus} marker blocked reaping forever"

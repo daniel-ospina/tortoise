@@ -15,11 +15,13 @@ updated: 2026-11-03
 **Status:** armed on cells · **Owner surface:** `tools/test_lane.py`,
 `tools/container_reaper.py`, `tools/install-container-reaper-timer.sh`
 **Issue lineage:** #5084 (private lane) → #8180 (ownership proofs) → #10693 / #10712
-(the lane-gone proof, and the ownership labels stamped into the container) — **#10712 is
-on `main` as of the rebase onto `0e02acae9`, and this tool writes those labels**, so the
-backstop reads a stamped owner where the name record has stopped resolving. The rest of
-the documentation below still describes the tool as it behaves on a box whose checkout
-predates the labels: it works without them → #10806 (this doc: the actuator + the clock)
+(the lane-gone proof, and the ownership labels stamped into the container) → #10806
+(this doc: the actuator + the clock)
+
+Note that #10712 is on `main` as of the rebase onto `0e02acae9`, and this tool writes
+those labels: the backstop reads a stamped owner where the name record has stopped
+resolving, which is why the `paused`/`created` classification below is stated for BOTH
+ownership arms.
 
 ---
 
@@ -149,10 +151,17 @@ never disagree about what an orphan is.
   the other two. Consequence, so nobody is surprised: a lane killed mid-turn
   leaves its worktree in place, so the timer **reports** that container every 15
   minutes and does not remove it; an `exited` container holding one of the
-  `PORT_RANGE` ports is likewise reported, not released. Arming them is one
-  environment line each (`TORTOISE_TEST_LANE_REAP_LANE_GONE`,
-  `…_OWNER_INDETERMINATE`, `…_STOPPED`) — a decision for the #8180 ruling, not
-  for this tool.
+  `PORT_RANGE` ports is likewise reported, not released. Arming them is a
+  decision for the #8180 ruling, not for this tool — and for the DEPLOYED unit it
+  is not an environment line: the unit clears all three variables
+  (`UnsetEnvironment=`, so a manager-level `DefaultEnvironment=` cannot arm a
+  deletion behind the installer's back), and on systemd ≥ 235 that directive is
+  applied as the FINAL step, undoing even the unit's own `Environment=`
+  assignments. Setting `TORTOISE_TEST_LANE_REAP_LANE_GONE=1` in the shell
+  therefore does nothing to the timer (fail-closed: the proof stays withheld).
+  To arm one you delete its name from `UnsetEnvironment=` in the installed unit
+  and re-run the installer — a pin change, visible in the file, which is the
+  whole point of the clearance.
 * ⛔ **A container stranded in the MAIN checkout is exempt by design and forever.**
   The sweep never removes "this worktree's own" container, and the timer's
   `WorkingDirectory` is the main checkout — so a `run` there that is SIGKILLed

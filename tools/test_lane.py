@@ -2542,15 +2542,35 @@ def _peer_run_is_live(name: str) -> bool | None:
         # protection to a clock, and a peer's hook may then remove their
         # container mid-suite. A pid the kernel has REUSED was necessarily
         # started AFTER the marker was written, so that comparison settles it
-        # with no guessed bound. The age rule stays as the fallback for a
-        # platform without `/proc` (macOS), where the question cannot be asked —
-        # fail-closed in the same direction as before (it can only spare).
+        # with no guessed bound.
+        #
+        # ⛔ …AND THE AGE IS THEN ONLY A FALLBACK (#10813 review round 3 P2-1).
+        # It is a fallback for a platform that cannot answer (`/proc` absent —
+        # macOS), NOT a second vote: an unconditional `not aged` term let the
+        # clock OVERRIDE a positive "this pid was not reused" on Linux, so a
+        # genuine live peer older than 24 h was still declared stale and its
+        # container removed — the destructive direction, on the population the
+        # bound was never meant to reach. `_pid_started_after` answers `None`
+        # only when it cannot look, which is exactly when the age may speak.
+        #
+        # ⛔ A PID OF `0` OR LESS NEVER NAMES A RUN (#10813 review round 3 P3-5).
+        # A truncated write or a hand-edited state dir can leave `<name>.run.0`;
+        # `os.kill(0, 0)` and `os.kill(-1, 0)` succeed (they address a process
+        # GROUP, not a process), and `/proc/0` does not exist, so the marker
+        # would read "peer live" forever with no self-healing path — the same
+        # permanent-block class the reuse check exists to remove.
+        if pid <= 0:
+            with contextlib.suppress(OSError):
+                entry.unlink(missing_ok=True)
+            continue
         try:
             mtime = entry.stat().st_mtime
         except OSError:
             mtime = None
-        reused = mtime is not None and _pid_started_after(pid, mtime)
-        aged = mtime is not None and (time.time() - mtime) > 24 * 3600
+        started_after = None if mtime is None else _pid_started_after(pid, mtime)
+        reused = started_after is True
+        aged = (started_after is None and mtime is not None
+                and (time.time() - mtime) > 24 * 3600)
         if not reused and not aged and _pid_alive(pid):
             return True
         with contextlib.suppress(OSError):
