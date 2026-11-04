@@ -126,6 +126,24 @@ def _q(qid: str) -> dict:
     return next(q for q in _mini() if q["question_id"] == qid)
 
 
+def _assert_census_answered(res: dict, *, arm: str = "evidence-contract") -> None:
+    """#10810: a FAULTED census must never be read as a failed CONTRACT arm.
+
+    ``census_error`` is the gate's fault reason — the census query raised, or its
+    two independent shapes never agreed — so an ``in res["reasons"]`` assertion
+    about a contract reason silently degrades into "this arm did not fire" when the
+    census itself breaks, and the reader chases the fixture instead of the census.
+    Measured on this PR's required `test-carve-out (c)`: ``assert
+    'evidence_mark_census' in ['census_error']`` — nothing in that message said the
+    census had faulted. Every census-red test calls this BEFORE its own assertion.
+    """
+    assert GATE_REASON_CENSUS_ERROR not in res["reasons"], (
+        f"#10810: the census FAULTED, so the {arm} arm this test measures never ran — "
+        "this is not a verdict about that reason. Suspect the fixture's embedded "
+        f"instance (#10328), not the gate's logic. reasons={res['reasons']!r}"
+    )
+
+
 # ── pure predicates ─────────────────────────────────────────────────────────
 
 def test_classify_ratio_healthy_exact():
@@ -463,6 +481,7 @@ def test_gate_evidence_mark_loss_only_red():
                       "created_point_ids": [
                           f"lme:{q['question_id']}:s1:t0",
                           f"lme:{q['question_id']}:s1:t1"]})
+    _assert_census_answered(res)
     assert GATE_REASON_EVIDENCE_MARK_CENSUS in res["reasons"]
 
 
@@ -512,6 +531,7 @@ def test_gate_per_session_floor_red_on_reduced_set():
         ingest_stats={"turns": 6, "chunks": 0, "points": 0,
                       "evidence_points": 1,
                       "per_session_evidence_points": {"1": 8}})
+    _assert_census_answered(res)
     assert GATE_REASON_EVIDENCE_MARK_CENSUS in res["reasons"]
 
 
@@ -564,6 +584,7 @@ def test_gate_floor_legacy_shape():
         ingest_stats={"turns": 11, "chunks": 0, "evidence_turns": 8,
                       "evidence_points": 8,
                       "per_session_evidence_points": {"1": 8}})
+    _assert_census_answered(res2)
     assert GATE_REASON_EVIDENCE_MARK_CENSUS in res2["reasons"]
 
 
@@ -582,6 +603,7 @@ def test_gate_floor_multi_session_red_on_any():
         ingest_stats={"turns": 15, "chunks": 0, "points": 0,
                       "evidence_points": 10,
                       "per_session_evidence_points": {"0": 8, "1": 8}})
+    _assert_census_answered(res)
     assert GATE_REASON_EVIDENCE_MARK_CENSUS in res["reasons"]
 
 
@@ -612,6 +634,7 @@ def test_gate_floor_tolerance_boundary():
         ingest_stats={"turns": 15, "chunks": 0, "points": 0,
                       "evidence_points": below,
                       "per_session_evidence_points": {"1": expected}})
+    _assert_census_answered(res2)
     assert GATE_REASON_EVIDENCE_MARK_CENSUS in res2["reasons"]
 
 
@@ -628,6 +651,7 @@ def test_gate_lost_mark_cross_check_red_flags_mark_stripped():
         ingest_stats={"turns": 6, "chunks": 0, "points": 0,
                       "evidence_points": 0,
                       "per_session_evidence_points": {"1": 5}})
+    _assert_census_answered(res)
     assert GATE_REASON_EVIDENCE_MARK_CENSUS in res["reasons"]
 
 
@@ -881,6 +905,44 @@ def test_read_verify_persistent_fault_is_census_error_never_loss():
 class _FakeResult:
     def __init__(self, result_set):
         self.result_set = result_set
+
+
+def test_a_faulted_census_reports_itself_instead_of_the_contract_arm(monkeypatch):
+    """#10810: the guard the census-red tests rely on, exercised both ways.
+
+    The CI shape this pins, made deterministic: the mark-census read raises, the
+    gate answers its FAULT reason, and a bare ``in res["reasons"]`` assertion
+    would then read as "the contract arm did not fire" — which is what cost this
+    repo a lane cycle on `test-carve-out (c)` (`assert 'evidence_mark_census' in
+    ['census_error']`, PR #10895). ``_assert_census_answered`` is what every
+    census-red test now calls first, so the fault names ITSELF.
+
+    Non-vacuity: the fault is injected, not assumed — the pre-fix tests had no
+    such assertion at all, so the red arm below cannot pass without the guard.
+    """
+    q = _q("mini_ie_user_001")
+    sdk = _fresh_sdk()
+    _seed_question(sdk._get_proj(), q["question_id"], {0: 3, 1: 8},
+                   marks={1: 1})
+    monkeypatch.setattr(
+        "tools.longmem_eval.retrieve.evidence_mark_count",
+        lambda *a, **kw: (_ for _ in ()).throw(
+            RuntimeError("#10810 probe: the census query failed")))
+    res = run_integrity_gate(
+        sdk._get_proj(), q, q["question_id"],
+        ingest_stats={"turns": 11, "chunks": 0, "evidence_turns": 8,
+                      "evidence_points": 8,
+                      "per_session_evidence_points": {"1": 8}})
+    assert GATE_REASON_CENSUS_ERROR in res["reasons"], (
+        "the injected fault must surface as the gate's FAULT reason: "
+        f"reasons={res['reasons']!r}")
+    with pytest.raises(AssertionError, match="#10810"):
+        _assert_census_answered(res)
+
+    # …and the guard is SILENT on a result the census really answered, so it
+    # cannot red a healthy arm (the direction that would make it a false block).
+    _assert_census_answered({"reasons": [GATE_REASON_EVIDENCE_MARK_CENSUS]})
+    _assert_census_answered({"reasons": []})
 
 
 # ── falsification trigger (pure, full 6-input truth table) ──────────────────
