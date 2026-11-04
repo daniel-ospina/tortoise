@@ -46,8 +46,9 @@ WHAT IT EMITS, AND WHY THAT IS THE POINT
 ----------------------------------------
 A ranked list is a REPORT. This tool prints, for the top row, the exact command
 a runner would execute — which rail, which PR, which issue — or, when the top row
-needs a human decision (a review), is waiting on a runner, or is a DRAFT, the
-ACTION and then the first lower-ranked unit that DOES have a command. That is the difference
+needs a human decision (a review), is waiting on a runner, has an UNMEASURED merge
+tree, or is a DRAFT, the ACTION and then the first lower-ranked unit that DOES have
+a command. That is the difference
 between a consumer and an actuator, and it is why the output has a
 ``NEXT ACTION`` block rather than a table alone.
 
@@ -102,8 +103,9 @@ Usage
 
 Exit codes
     0  the queue was fully read and a next action was decided. When the top row has
-       nothing to run — NEEDS-TEST (a runner), NEEDS-REVIEW (a human), or a DRAFT
-       (the author's) — the block prints that row's ``ACTION`` and then the first
+       nothing to run — NEEDS-TEST (a runner, or a merge tree that could not be
+       measured), NEEDS-REVIEW (a human), or a DRAFT (the author's) — the block
+       prints that row's ``ACTION`` and then the first
        lower-ranked unit that DOES have a command; when NOTHING is runnable it says
        so and names no unit
     1  the queue was read but NO unit is pickable — every one is held, is a fold
@@ -197,6 +199,12 @@ REASON_SUPERSEDED = "SUPERSEDED-BY-FOLD"
 #: in one place cannot silently make this reader blind.
 CONSTITUENT_LABEL = "superseded-by-fold"
 FOLD_LABEL = "batch-fold"
+
+#: The REQUIRED CHECK whose red means "a review is owed", not "code must change".
+#: `.mergify.yml`: "`ai-review-gate` is red by design until a review is recorded,
+#: which IS the enforcement". `tests/test_next_work.py` asserts this constant is
+#: still named by the live gate, so a rename cannot silently reclassify it.
+REVIEW_GATE_CHECKS = frozenset({"ai-review-gate"})
 
 #: ⛔ THE FOLD-LINE GRAMMAR IS NOT DEFINED HERE, ON PURPOSE. Three rounds of
 #: hand-matching `tools/batch_open.py` produced three divergences (a `\n` crossed by
@@ -406,14 +414,15 @@ class Unit:
     def executable(self) -> bool:
         """Pickable AND there is something to run now.
 
-        `NEEDS-TEST` is a real position but not an action: the head is waiting on
-        a runner, and no dispatch changes that. Reporting it as the next action
+        `NEEDS-TEST` is a real position but not an action: either the head is
+        waiting on a runner (checks in flight) or the merge tree could not be
+        MEASURED, and no dispatch changes either. Reporting it as the next action
         would be the actuator-that-cannot-deliver defect — measured 2026-11-04,
         when the CI queue itself was the blocker and every P0 sat in it.
         """
         # The positions that have a RUNNABLE rail. NEEDS-REVIEW (a reviewer + an
-        # evidence id) and NEEDS-TEST (a runner queue) have an ACTION, not a
-        # command — see `next_action`.
+        # evidence id) and NEEDS-TEST (a runner queue, or an unmeasured merge tree)
+        # have an ACTION, not a command — see `next_action`.
         return (
             self.pickable
             and not self.draft
@@ -642,16 +651,40 @@ def _position_for_pr(
     in_flight = [c for c in blocking if "in flight" in c or "no check-run" in c]
     structural = [c for c in blocking if c not in fails and c not in in_flight]
 
-    if fails or structural:
+    # ⛔ A RED REVIEW GATE IS NOT A CODE PROBLEM. `.mergify.yml` says
+    # `check-success=ai-review-gate` "is red by design until a review is recorded,
+    # which IS the enforcement" — so a red review gate means A REVIEW (or a
+    # re-record) IS OWED, not that code must change. Bucketing it with the failing
+    # checks made the tool dispatch a FIXER at a PR whose reviewer left no findings,
+    # and made its own NEEDS-REVIEW ladder unreachable on the live gate (gate-green
+    # ⇒ attestation bound ⇒ READY-TO-LAND; gate-red ⇒ NEEDS-FIX). Measured by a
+    # reviewer on the live queue: #10858 (`norecord`), #10833 and #10575 (`fresh`)
+    # were all handed `fix-one.sh`.
+    review_red = [c for c in fails if any(f"check-success={n}:" in c for n in REVIEW_GATE_CHECKS)]
+    other_fails = [c for c in fails if c not in review_red]
+
+    att = snap.attestation.get(str(pr["number"])) or {}
+    verdict = str(att.get("verdict") or "")
+
+    if other_fails or structural:
         pos = "NEEDS-FIX"
+    elif review_red and verdict not in ("head", "carry"):
+        # Red by design: the record does not bind this head. The attestation block
+        # below decides whether a review or a re-record is owed.
+        pos = "NEEDS-REVIEW"
+    elif review_red:
+        # The record DOES bind the head, so a red review gate is a real failure.
+        pos = "NEEDS-FIX"
+        detail.append(
+            "review gate red while a head-bound record exists — that is a real failure, "
+            "not a review debt"
+        )
     elif in_flight:
         pos = "NEEDS-TEST"
     else:
         pos = "READY-TO-LAND"
 
-    if pos == "READY-TO-LAND":
-        att = snap.attestation.get(str(pr["number"])) or {}
-        verdict = str(att.get("verdict") or "")
+    if pos in ("READY-TO-LAND", "NEEDS-REVIEW"):
         if verdict in ("head", "carry"):
             detail.append(f"attestation: {verdict}")
         elif verdict == "carry-patch":
@@ -875,6 +908,10 @@ def build_units(snap: Snapshot, cfg: QueueConfig | None) -> list[Unit]:
             seen_targets[u.action_target] = u.key
         else:
             u.duplicate_of = first
+            u.detail.append(
+                f"not offered: duplicate of #{first} — the same action target is already "
+                "carried by that row, so this one has no command"
+            )
     return units
 
 
@@ -914,6 +951,10 @@ def next_command(unit: Unit, repo: str) -> str | None:
     done it. Anything that needs a human decision (a reviewer, an evidence comment
     id) is an ACTION, not a command: see `next_action`.
     """
+    if not repo:
+        # A command with an empty slug is not "the exact command a runner would
+        # execute" — a hand-written snapshot with no `repo` produced `'' 1001`.
+        return None
     if not unit.pickable or unit.draft:
         # A draft is the AUTHOR's; the queue refuses it at entry and a fixer would
         # be a second lane on a human's branch.
@@ -1003,6 +1044,13 @@ def next_action(unit: Unit, repo: str) -> str | None:
         return (
             f"dispatch a reviewer at {target} head {unit.head} ({repo}), then record it with "
             f"record-review.sh {unit.pr} <current-head> clean {repo} --evidence comment:<id>"
+        )
+    if unit.position == "NEEDS-TEST" and any("merge-tree: UNMEASURED" in d for d in unit.detail):
+        # Nothing is in a runner queue here; the tree could not be measured (head
+        # unavailable, the PR moved mid-sweep, the base is missing). Say THAT.
+        return (
+            f"retry the sweep for {target} — the merge tree could not be measured "
+            f"({next(d for d in unit.detail if 'UNMEASURED' in d)}), so nothing hosts a wait"
         )
     if unit.position == "NEEDS-TEST":
         return f"wait — {target} is in a runner queue; nothing to dispatch until its head reports"
@@ -1716,6 +1764,13 @@ def render(
             # operator to wait for a runner that would never move it.
             if pick.position == "NEEDS-REVIEW":
                 why = "the rank leader needs a REVIEW (see ACTION), so nothing runs until it has one"
+            elif pick.position == "NEEDS-TEST" and any(
+                "merge-tree: UNMEASURED" in d for d in pick.detail
+            ):
+                why = (
+                    "the rank leader's merge tree could not be MEASURED (see ACTION) — "
+                    "nothing is in a runner queue"
+                )
             elif pick.position == "NEEDS-TEST":
                 why = "the rank leader's head is waiting on a runner"
             else:
@@ -1866,8 +1921,8 @@ def _main(argv: Sequence[str] | None = None) -> int:
             "a launchd job cannot act on a pane, and an actuator that cannot deliver is the defect "
             "this fleet keeps re-learning. The 'NEXT ACTION' block is the actuator half: the exact "
             "command for the top row — or, when the top row needs a review, is waiting on a "
-            "runner, or is a DRAFT, the ACTION for it plus the first unit below it that DOES "
-            "have a command.\n\n"
+            "runner, has an UNMEASURED merge tree, or is a DRAFT, the ACTION for it plus the "
+            "first unit below it that DOES have a command.\n\n"
             "IDEMPOTENT BY CONSTRUCTION: the ordering key is total — (priority, position, "
             "(kind, number)), where an issue is (0, n) and a fold is (1, pr) — "
             "so two runs on one snapshot agree on the row. That is AGREEMENT, not exclusion: two "

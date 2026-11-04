@@ -2266,3 +2266,133 @@ def test_a_true_merge_verdict_still_lands():
     (row,) = units_for(s)
     assert row.position == "READY-TO-LAND"
     assert (next_command(row, REPO) or "").startswith("bash ")
+
+
+# ── a red review gate means A REVIEW IS OWED, not "fix the code" (r14 #1) ──
+def _live_gate_runs(*, review_red: bool) -> list[dict]:
+    """Runs for the REAL gate: every check green except `ai-review-gate`."""
+    names = ["pricing-artifact", "docs", "test-isolation", "license-surface",
+             "legal-e2e", "ai-review-gate"]
+    return [
+        {
+            "id": i,
+            "name": n,
+            "status": "completed",
+            "conclusion": "failure" if (review_red and n == "ai-review-gate") else "success",
+            "app": {"slug": "github-actions"},
+        }
+        for i, n in enumerate(names)
+    ]
+
+
+def _live_cfg():
+    from tools.next_work import parse_config
+
+    return parse_config((Path(__file__).resolve().parent.parent / ".mergify.yml").read_text())
+
+
+def test_a_red_review_gate_asks_for_a_review_not_a_fixer():
+    """`.mergify.yml`: `ai-review-gate` is "red by design until a review is recorded".
+
+    Bucketing it with the failing checks made the tool dispatch a FIXER at a PR
+    whose reviewer left no findings, and made NEEDS-REVIEW unreachable on the live
+    gate (gate-green ⇒ record bound ⇒ READY-TO-LAND; gate-red ⇒ NEEDS-FIX).
+    Measured live: #10858 (`norecord`), #10833 and #10575 (`fresh`) each got
+    `fix-one.sh`.
+    """
+    from tools.next_work import next_action
+
+    s = snap(
+        issues=[issue(100)],
+        pulls=[{**pull(1001, closes=[100]), "head_ref": "fix/100-x"}],
+        check_runs={"a" * 40: _live_gate_runs(review_red=True)},
+        attestation={"1001": {"verdict": "norecord"}},
+        merge_tree={"1001": {"clean": True}},
+    )
+    (row,) = build_units(s, _live_cfg())
+    assert row.position == "NEEDS-REVIEW", row.detail
+    assert next_command(row, REPO) is None, "a fixer was dispatched at a review debt"
+    assert "reviewer" in (next_action(row, REPO) or "")
+
+
+def test_a_red_review_gate_with_a_bound_record_is_a_real_failure():
+    """The complement: if the record IS bound, a red review gate is not a debt."""
+    s = snap(
+        issues=[issue(100)],
+        pulls=[{**pull(1001, closes=[100]), "head_ref": "fix/100-x"}],
+        check_runs={"a" * 40: _live_gate_runs(review_red=True)},
+        attestation={"1001": {"verdict": "head"}},
+        merge_tree={"1001": {"clean": True}},
+    )
+    (row,) = build_units(s, _live_cfg())
+    assert row.position == "NEEDS-FIX", row.detail
+
+
+def test_a_real_check_failure_is_still_needs_fix():
+    runs = _live_gate_runs(review_red=False)
+    runs[1]["conclusion"] = "failure"  # docs
+    s = snap(
+        issues=[issue(100)],
+        pulls=[{**pull(1001, closes=[100]), "head_ref": "fix/100-x"}],
+        check_runs={"a" * 40: runs},
+        attestation={"1001": {"verdict": "norecord"}},
+        merge_tree={"1001": {"clean": True}},
+    )
+    (row,) = build_units(s, _live_cfg())
+    assert row.position == "NEEDS-FIX"
+
+
+def test_the_review_gate_names_are_still_in_the_live_config():
+    """A rename in `.mergify.yml` must not silently reclassify the review debt."""
+    from tools.next_work import REVIEW_GATE_CHECKS
+
+    cfg = _live_cfg()
+    for name in REVIEW_GATE_CHECKS:
+        assert name in cfg.required_checks, (
+            f"{name!r} is no longer a required check — a red review gate would read as a code failure"
+        )
+
+
+def test_an_empty_repo_slug_emits_no_command():
+    """`'' 1001` is not the exact command a runner would execute."""
+    s = snap(
+        issues=[issue(100)],
+        pulls=[{**pull(1001, closes=[100]), "head_ref": "fix/100-x"}],
+        check_runs={"a" * 40: all_green()},
+        attestation={"1001": {"verdict": "head"}},
+        merge_tree={"1001": {"clean": True}},
+    )
+    (row,) = units_for(s)
+    assert next_command(row, "") is None
+
+
+def test_an_unmeasured_merge_does_not_pretend_a_runner_queue():
+    from tools.next_work import next_action
+
+    s = snap(
+        issues=[issue(100)],
+        pulls=[{**pull(1001, closes=[100]), "head_ref": "fix/100-x"}],
+        check_runs={"a" * 40: all_green()},
+        attestation={"1001": {"verdict": "head"}},
+        merge_tree={"1001": {"clean": None, "why": "head not available locally"}},
+    )
+    (row,) = units_for(s)
+    assert row.position == "NEEDS-TEST"
+    action = next_action(row, REPO) or ""
+    assert "runner queue" not in action
+    assert "merge tree could not be measured" in action
+
+
+def test_executable_documents_both_no_action_causes():
+    """The `executable` docstring must not claim every NEEDS-TEST is a runner wait.
+
+    It said "the head is waiting on a runner" while `next_action` correctly says
+    "nothing is in a runner queue" for an UNMEASURED merge tree. A gloss that names
+    one of two causes is the class of sentence this file keeps having to correct, so
+    it is pinned rather than trusted.
+    """
+    from tools.next_work import Unit
+
+    doc = (Unit.executable.__doc__ or "").lower()
+    assert "runner" in doc
+    assert "measured" in doc, "the docstring omits the unmeasured-merge-tree cause"
