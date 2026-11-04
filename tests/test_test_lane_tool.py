@@ -5251,6 +5251,20 @@ def test_an_ownership_LABEL_makes_a_DEREGISTERED_worktree_reapable_ON_PROOF(
     assert "HAS an active client" in out, out
     assert touched == [name], (touched, out)   # observed use refreshes the lease
 
+    # 1b. An UNREADABLE client answer is not "no client". `busy is None` means the
+    #     probe could not ask, so the leg must report and stop — the same
+    #     fail-closed direction the INDETERMINATE arm takes, with its own
+    #     message. P3 from the #10841 review: the sweep matrix covered True,
+    #     False+no-gap, False+short-gap, False+full-gap and `exited`, but not
+    #     `None`, so this branch (and its wording) had no pin at all.
+    #     Mutation: fold `None` into the `if busy:` / `if gap_h is None:` path —
+    #     with no gap either it reports "first sighting" instead, and this fails.
+    removed, out, touched = sweep("running", None, None)
+    assert removed == [], out
+    assert "could not be asked whether a client is using it" in out, out
+    assert "fail-closed" in out, out
+    assert touched == [], (touched, out)   # an unreadable answer is not observed use
+
     # 2. No client, but nothing observed unused yet — a lane between steps.
     removed, out, _ = sweep("running", False, None)
     assert removed == [], out
