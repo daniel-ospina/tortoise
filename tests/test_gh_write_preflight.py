@@ -488,11 +488,83 @@ def test_no_credential_is_hermetic_against_xdg_config_home():
 
 # ── the GREEN case, the usage guard, and credential hygiene ─────────────────────────────────────
 def test_fully_writable_token_passes():
-    """Both surfaces authorised → GH-WRITE-OK."""
+    """Both surfaces authorised → GH-WRITE-OK, and the line NAMES the endpoint it measured."""
     with _Stub() as s:
         rc, out, _ = _run(s.base, token="gho_dummy_writecapable")
     assert rc == 0, f"a fully write-capable token was refused: {out}"
     assert "GH-WRITE-OK" in out, out
+    # ⛔ review round 7: a pass measured against something that is not GitHub is not a pass, so the
+    # verdict must say WHAT it is a verdict about — in the human line, not only under --json.
+    assert s.base in out, f"the OK line does not name the endpoint that answered: {out}"
+
+
+def test_non_loopback_api_base_is_refused_before_anything_is_contacted():
+    """The blocking round-7 defect: an env-overridable base made `GH-WRITE-OK` a verdict about
+    something that is not GitHub.
+
+    MEASURED on the pre-fix head with the suite's own stub as the "API" and a token that is not a
+    credential at all: `GH_WRITE_PREFLIGHT_API=http://127.0.0.1:40933`, token
+    `ghp_NOT_A_REAL_CREDENTIAL` → rc 0, `GH-WRITE-OK(issues+pull-requests+contents writable)`, and no
+    output naming the base. Here the base is a host that is neither GitHub nor loopback, so the ONLY
+    acceptable outcome is a refusal that happens before any request: reason `usage`, no OK line, and —
+    because `_validate_api_base` runs ahead of the probe — no DNS or TCP contact at all.
+
+    Pre-fix, this same invocation reached the network and reported `GH-WRITE-UNAVAILABLE(transport)`,
+    i.e. it both sent the credential nobody had vetted and blamed the token's environment for it.
+    """
+    with _Stub() as s:
+        rc, out, err = _run("http://api.github.example.com", token="ghp_NOT_A_REAL_CREDENTIAL")
+        seen = list(s.seen)
+    assert rc != 0, f"an unvetted endpoint produced a PASS: {out}"
+    assert "GH-WRITE-UNAVAILABLE(usage)" in out, out
+    assert "GH-WRITE-OK" not in out, out
+    assert "api.github.example.com" in out, out
+    assert seen == [], f"the tool contacted something before validating the base: {seen}"
+    assert "Traceback" not in err, err
+
+
+def test_api_base_carrying_credentials_is_refused_and_never_echoed():
+    """`user:pass@` in the base is (a) refused and (b) NOT reprinted in the refusal (review round 7).
+
+    Reachability is the point: this base names the LIVE stub, so a tool without the check would run
+    the whole probe sequence against it and print `GH-WRITE-OK` for `ghp_NOT_A_REAL_CREDENTIAL` — the
+    stub records every request, so `seen == []` is the direct evidence that the refusal happened
+    before the credential left the process.
+    """
+    with _Stub() as s:
+        rc, out, err = _run(f"http://user:hunter2@{s.base.split('//', 1)[1]}",
+                            token="ghp_NOT_A_REAL_CREDENTIAL")
+        seen = list(s.seen)
+    assert rc != 0, f"a credential-bearing base produced a PASS: {out}"
+    assert "GH-WRITE-UNAVAILABLE(usage)" in out, out
+    assert "GH-WRITE-OK" not in out, out
+    assert seen == [], f"the credential was sent to a base that must have been refused first: {seen}"
+    assert "hunter2" not in out and "hunter2" not in err, (out, err)
+
+
+def test_api_base_validation_table():
+    """The accepted/refused table, pinned at the unit level so a weakened rule reddens here first.
+
+    Deliberately includes the near-misses a prefix/string test would wave through: a lookalike host,
+    a plain-`http` GitHub host, an empty host, a bare `?`/`#` (which parse to an EMPTY query/fragment),
+    a real non-`.1` loopback, and a non-numeric port.
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("gh_write_preflight", TOOL)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    accepted = [mod.DEFAULT_API, mod.DEFAULT_API + "/", "http://127.0.0.1:9", "http://127.0.0.2:9",
+                "http://localhost:9", "http://[::1]:9", "https://127.0.0.1:9"]
+    for base in accepted:
+        assert mod._validate_api_base(base) == "", base
+
+    refused = ["", "https://evil.example.com", "http://api.github.com", "https://api.github.com.evil.example",
+               "http://127.0.0.1:9?x=1", "http://127.0.0.1:9#frag", "http://user:pw@127.0.0.1:9",
+               "127.0.0.1:9", "http://127.0.0.1:notaport", "https://"]
+    for base in refused:
+        assert mod._validate_api_base(base) != "", f"accepted a base it must refuse: {base!r}"
 
 
 def test_nested_users_entry_does_not_lend_a_peer_token():
@@ -607,6 +679,9 @@ def test_json_mode_reports_the_same_verdict_and_never_leaks_the_credential():
     assert res["ok"] is False
     assert res["reason"] == "pull-requests-write-missing", res
     assert res["surfaces"] == {"issues": 422, "pull_requests": 403, "contents": 422}, res
+    # ⛔ review round 7: the machine-readable verdict must carry the endpoint too, or a consumer
+    # holding the artifact cannot tell a measurement of GitHub from a measurement of anything else.
+    assert res["api_base"] == s.base, res
     assert secret not in p.stdout and secret not in p.stderr, "the credential leaked into the output"
 
 

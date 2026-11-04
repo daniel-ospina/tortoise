@@ -121,13 +121,24 @@ REASONS (`GH-WRITE-UNAVAILABLE(<reason>)`), each with its own fix
   forbidden                    4xx that is neither a permission refusal nor a known class (e.g. 410
                                Issues-disabled, 400 from a proxy, 451) — NOT charged to the token
   transport                    could not reach the API — NOT a verdict about the token
-  usage                        bad arguments
+  usage                        bad arguments — including an `--api-base` / `$GH_WRITE_PREFLIGHT_API`
+                               that is neither DEFAULT_API nor a loopback stub, or one carrying a query,
+                               a fragment, or `user:pass@` credentials. Nothing is contacted first.
+
+⛔ **THE ENDPOINT IS PART OF THE VERDICT, AND IT IS VALIDATED BEFORE THE TOKEN MOVES.** `api_base` is
+in the result (`--json` → `"api_base"`) and in the `GH-WRITE-OK` line, because a pass measured against
+something that is not GitHub is not a pass: point the base at any server that answers `422` and the
+tool would otherwise print `GH-WRITE-OK(issues+pull-requests+contents writable)` for a token that
+cannot write anything. So a non-default base is accepted ONLY when it is loopback (`127.0.0.0/8`,
+`::1`, `localhost`) — the hermetic test seam — and any base carrying `user:pass@` is refused, because
+the token is sent as an `Authorization` header and never in the URL.
 
 USAGE
 ─────
   uv run python tools/gh_write_preflight.py --repo daniel-ospina/tortoise
   uv run python tools/gh_write_preflight.py --repo "$OR" --json
   GH_WRITE_PREFLIGHT_API=http://127.0.0.1:PORT uv run python tools/gh_write_preflight.py …   # test seam
+                                                                       (loopback only; anything else is refused as `usage`)
 
   exit 0 = GH-WRITE-OK(issues+pull-requests+contents writable)
   exit 1 = GH-WRITE-UNAVAILABLE(<reason>)
@@ -156,14 +167,27 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard, see
 import argparse
 import contextlib
 import http.client
+import ipaddress
 import json
 import os
 import secrets
 import urllib.error
+import urllib.parse
 import urllib.request
 
 DEFAULT_API = "https://api.github.com"
 TIMEOUT_S = 25
+
+# ⛔ THE ONE INPUT THAT CAN MAKE EVERY OTHER FAIL-CLOSED CHECK MOOT (review round 7). Every guard in
+# this module assumes the answer came from GitHub: redirects are not followed, a 2xx on a must-be-
+# invalid payload fails closed, and an unknown 4xx may not name a permission. `api_base` defeats all
+# three at once — MEASURED on the pre-fix head: `GH_WRITE_PREFLIGHT_API=http://127.0.0.1:40933` (the
+# suite's own stub) with `token=ghp_NOT_A_REAL_CREDENTIAL` printed
+# `GH-WRITE-OK(issues+pull-requests+contents writable)` and exited 0, and NOTHING in stdout, stderr or
+# the `--json` artifact named the endpoint. So the base is now (a) reported in the verdict and the OK
+# line, and (b) accepted only when it IS GitHub, or when it is a loopback stub — the only seam the
+# hermetic suite needs. `tools/activation_cohort.py` validates its base for the same reason.
+_LOOPBACK_NAMES = frozenset({"localhost"})
 
 # Probe outcomes that prove "the authorisation gate was PASSED and the request was merely invalid".
 # ⛔ 422 IS THE ONLY SUCH ANSWER, and 2xx must NOT be read as success.
@@ -177,6 +201,53 @@ TIMEOUT_S = 25
 # response did not come from GitHub's validation path, and it fails closed below.
 _WRITE_OK = (422,)
 _SURPRISING_SUCCESS = (200, 201, 204)
+
+
+def _is_loopback(host: str) -> bool:
+    """True for `localhost`, any `127.0.0.0/8` address, and `::1` — and for nothing else.
+
+    `ipaddress` rather than a string compare, so `127.0.0.2` (a real loopback the suite could bind)
+    is not silently refused while `127.0.0.1.evil.example` is not silently allowed.
+    """
+    if host.strip().lower() in _LOOPBACK_NAMES:
+        return True
+    with contextlib.suppress(ValueError):
+        return ipaddress.ip_address(host).is_loopback
+    return False
+
+
+def _validate_api_base(api_base: str) -> str:
+    """Return '' when this base is safe to send the credential to, else a NAMED refusal reason.
+
+    Refusals are reported as `usage` (the documented bad-arguments verdict) and happen BEFORE any
+    request, so a rejected base never receives so much as the READ probe.
+    """
+    if not api_base:
+        return "--api-base is empty — pass " + DEFAULT_API + " or a loopback stub"
+    # A bare `?`/`#` parses to an EMPTY query/fragment, so `parts.query` alone cannot see it — but a
+    # base carrying one still gets mangled when the probe path is joined onto it.
+    if "?" in api_base or "#" in api_base:
+        return f"--api-base must not carry a query or fragment (got {api_base!r})"
+    parts = urllib.parse.urlsplit(api_base)
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        return f"--api-base must be an absolute http(s) URL with a host (got {api_base!r})"
+    # ⛔ NEVER ECHO THESE CREDENTIALS BACK. The refused base is NOT repeated in this message on
+    # purpose: `user:pass@host` would otherwise be printed to stdout, which is the leak this branch
+    # exists to stop, arriving in the error message about stopping it.
+    if parts.username is not None or parts.password is not None:
+        return (f"--api-base host {parts.hostname!r} carries credentials ('user:pass@' in the URL) — the "
+                f"token is sent as an Authorization header, never in the URL")
+    try:
+        _ = parts.port
+    except ValueError:
+        return f"--api-base has an invalid port (got {api_base!r})"
+    if api_base.rstrip("/") == DEFAULT_API:
+        return ""
+    if not _is_loopback(parts.hostname):
+        return (f"--api-base {api_base!r} is neither {DEFAULT_API} nor a loopback stub — a verdict from an "
+                f"unrecognised endpoint is not a verdict about the credential (only 127.0.0.0/8, ::1 and "
+                f"localhost are accepted as the hermetic test seam)")
+    return ""
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -373,6 +444,9 @@ def _write_probe(url: str, token: str, body: bytes) -> dict:
 def preflight(repo: str, api_base: str, token: str, source: str) -> dict:
     result: dict = {
         "repo": repo,
+        # ⛔ WHICH ENDPOINT ANSWERED IS PART OF THE VERDICT. Without this key a consumer holding the
+        # `--json` artifact cannot tell a measurement of GitHub from a measurement of anything else.
+        "api_base": api_base,
         "credential_source": source,
         "token_shape": token_shape(token) if token else "none",
         "ok": False,
@@ -380,6 +454,13 @@ def preflight(repo: str, api_base: str, token: str, source: str) -> dict:
         "detail": "",
         "surfaces": {},
     }
+
+    # ⛔ BEFORE THE TOKEN IS EVEN RESOLVED: a base we would refuse must never be sent a credential.
+    # This is also the defence for callers that reach `preflight()` directly, not through `main()`.
+    base_refusal = _validate_api_base(api_base)
+    if base_refusal:
+        result.update(reason="usage", detail=base_refusal)
+        return result
 
     gh_host = (os.environ.get("GH_HOST") or "").strip().lower()
     if gh_host and gh_host not in ("github.com", "api.github.com"):
@@ -528,7 +609,8 @@ def main(argv: list[str]) -> int:
                     "does any work.")
     ap.add_argument("--repo", default=os.environ.get("OR", ""), help="owner/name (default: $OR)")
     ap.add_argument("--api-base", default=os.environ.get("GH_WRITE_PREFLIGHT_API", DEFAULT_API),
-                    help="API base URL (test seam; default https://api.github.com)")
+                    help="API base URL — default https://api.github.com, or a LOOPBACK stub for the "
+                         "hermetic test seam; anything else is refused as `usage`")
     ap.add_argument("--json", action="store_true", help="emit the result as JSON")
     args = ap.parse_args(argv)
 
@@ -542,7 +624,9 @@ def main(argv: list[str]) -> int:
     if args.json:
         print(json.dumps(res, indent=2, sort_keys=True))
     elif res["ok"]:
-        print(f"GH-WRITE-OK({res['reason']}) — {res['detail']}")
+        # ⛔ THE OK LINE NAMES THE ENDPOINT. A pass is only a pass if it was measured against GitHub,
+        # so the verdict carries the thing it is a verdict about — in the human line, not only in JSON.
+        print(f"GH-WRITE-OK({res['reason']} @ {res['api_base']}) — {res['detail']}")
     else:
         print(f"GH-WRITE-UNAVAILABLE({res['reason']}) — {res['detail']}")
 
