@@ -72,9 +72,13 @@ seam, and whether an extraction allowance is a **pre-spend admission** gate (lik
 **post-hoc** meter with overage. Those are pricing/enforcement questions — owner territory, post-beta calibration.
 What the design fixes: the extraction dimension is checked at the **same admission seam** the node count uses
 (`quota.enforce_org_limit`, ahead of it), reading the per-window token FLOW. The gate is **inert until an
-allowance is configured** — it refuses nothing today, because no resolver emits an allowance value. The remaining
-question — whether that admission is charged against prepaid credits *at capture time* or reconciled per window —
-is not answered by an admission check and stays with the owner.
+allowance is configured** — it refuses nothing **on the allowance ground**, because no resolver emits an allowance
+value. ⚠️ That is NOT the same as refusing nothing: every **gated** request (`points` / `documents` / `sessions`)
+fills the missing allowance keys with one control-plane read, and a **fault** in that read is a `QuotaCheckError` →
+HTTP 500 **even with no allowance configured** — see §6's "INERT IS ABOUT WHAT THE GATE REFUSES, NOT ABOUT WHAT IT
+READS" in `docs/architecture/CONSUMPTION-MODEL.md`, and `tortoise/allowance_gate.py`'s module docstring. The
+remaining question — whether that admission is charged against prepaid credits *at capture time* or reconciled per
+window — is not answered by an admission check and stays with the owner.
 
 > **OVERRIDES:** the **postpaid metered/auto-billing** default the field uses, and **`write_ops`** (the current
 > metered-usage unit) as the unit for extraction consumption — replaced by **prepaid credits** and per-token
