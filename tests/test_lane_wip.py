@@ -510,6 +510,13 @@ def test_the_remedy_for_a_cross_repo_pin_names_the_repository_that_holds_it(hub:
     advised = run_tool("list", "--all", cwd=hub)
     assert advised.returncode == 0, advised.stdout + advised.stderr
     assert "no lane has any wip pin" in advised.stdout, advised.stdout
+    # ⛔ AND IT MUST BE QUALIFIED. "no lane has any wip pin" alone is exactly what made this
+    # advice the false "the work is gone" verdict; asserting only the prefix leaves the
+    # qualifier revertible with the suite green (mutation-verified).
+    assert "in this repository" in advised.stdout, (
+        f"an empty `list --all` must name the repository it is true of: {advised.stdout}"
+    )
+    assert "refs are per-repository" in advised.stdout, advised.stdout
 
     # From the repository the remedy names, it recovers the work.
     out = restore(other_hub)
@@ -953,6 +960,16 @@ case "$sub" in
   update-index)
     [ -n "$LW_FAIL_UPDATE_INDEX" ] && {{ echo "shim: refusing update-index" >&2; exit 128; }} ;;
   rev-parse)
+    # ⛔ THE BARE `--show-toplevel` (no `-C`) IS `_repo_root`'s call, and it is the ONLY bare
+    # one — `_worktree_root`'s carries `-C`. Failing it therefore isolates "could not read the
+    # caller's repo", which must read as UNKNOWN, not as "the pin lives elsewhere".
+    if [ -n "$LW_FAIL_BARE_SHOW_TOPLEVEL" ] && [ -z "$prefix" ]; then
+      for a in "$@"; do
+        [ "$a" = "--show-toplevel" ] && {{
+          echo "shim: refusing --show-toplevel" >&2; exit 128
+        }}
+      done
+    fi
     if [ -n "$LW_FAIL_INSIDE_TREE" ]; then
       for a in "$@"; do
         [ "$a" = "--is-inside-work-tree" ] && {{
@@ -4177,6 +4194,42 @@ def test_an_unreadable_show_ref_is_UNKNOWN_not_another_repository(
     assert out.returncode == 0, out.stdout + out.stderr
     assert "DIFFERENT repository" not in out.stdout, (
         f"a failed read was stated as a fact: {out.stdout}"
+    )
+    assert "could not tell which repository" in out.stdout, out.stdout
+
+
+def test_recipe_never_calls_an_unqualified_empty_list_gone(hub: Path) -> None:
+    """RECIPE must scope "the work is genuinely gone" to a repository.
+
+    Refs are per-repository, so a cross-repo pin makes `list --all` answer "no pins" where the
+    victim is standing while the pin sits one ref away. RECIPE is the file a disaster victim
+    actually follows, so an unqualified empty answer there IS the false verdict this tool
+    forbids. Mutation-verified: restoring the old wording left all 153 tests green, i.e. this
+    half of the change was unpinned until this test.
+    """
+    out = run_tool("recipe", cwd=hub)
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert "REFS ARE PER-REPOSITORY" in out.stdout, out.stdout
+    assert "EMPTY **in this repository**" in out.stdout, out.stdout
+    assert "If the pin list is EMPTY, the work is genuinely gone" not in out.stdout, out.stdout
+
+
+def test_a_failed_caller_repo_read_is_UNKNOWN_not_another_repository(
+    hub: Path, git_shim: Path
+) -> None:
+    """`_repo_root`'s `GitFailed` is UNKNOWN, not "this pin lives in another repository".
+
+    `_repo_root` separates "not a repo" (`LaneWipError`) from "the read failed" (`GitFailed`),
+    and collapsing both into "certainly not the pin's repo" rendered a FAILED read as a fact.
+    Measured on a SAME-repo pin with only the bare `rev-parse --show-toplevel` failing: rc 0 and
+    "this pin lives in a DIFFERENT repository from this one". The `show-ref` test cannot catch
+    it — `show-ref` never runs when `caller_root` is None.
+    """
+    wt = dirty_lane(hub, "wt-shim-toplevel")
+    out = _run_tool_with_shim(git_shim, "LW_FAIL_BARE_SHOW_TOPLEVEL", "pin", cwd=wt)
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert "DIFFERENT repository" not in out.stdout, (
+        f"a failed repo read was stated as a fact: {out.stdout}"
     )
     assert "could not tell which repository" in out.stdout, out.stdout
 

@@ -1095,10 +1095,20 @@ def cmd_pin(args: argparse.Namespace) -> int:
     # advises answered "no lane has any wip pin" at rc 0 from repoA while the pin sat one ref
     # away — the false "the work is gone" verdict this module documents it must never give,
     # produced by its own primary verb.
+    # ⛔ "NOT IN A REPO" AND "THE READ FAILED" ARE DIFFERENT ANSWERS — `_repo_root` already
+    # separates them (`LaneWipError` vs `GitFailed`), and collapsing both into "certainly not
+    # the pin's repo" rendered a FAILED read as the FACT "another repository" (measured: a
+    # shim failing ONLY the bare `rev-parse --show-toplevel` over a SAME-repo pin printed the
+    # DIFFERENT-repository note at rc 0 — the same class this block closes 12 lines down, one
+    # layer up). Not-in-a-repo really does mean the pin is not here; a failed read is UNKNOWN.
+    caller_root: Path | None = None
+    repo_unknown = False
     try:
-        caller_root: Path | None = _repo_root()
-    except (LaneWipError, GitFailed):
-        caller_root = None  # outside a repo: certainly not the pin's repo
+        caller_root = _repo_root()
+    except LaneWipError:
+        caller_root = None  # genuinely not inside a repository
+    except GitFailed:
+        repo_unknown = True
     # ⛔ GATE ON WHETHER THE CALLER'S **REPOSITORY CAN SEE THE REF** — never on whether the two
     # WORKTREE paths are equal. Refs are REPOSITORY-scoped, not worktree-scoped, so a hub that
     # pins `<hub>/.worktrees/<lane>` (the fleet's most common shape) holds the ref ITSELF.
@@ -1119,12 +1129,13 @@ def cmd_pin(args: argparse.Namespace) -> int:
         else None
     )
     holds_ref = show is not None and show.returncode == 0
-    unknown_repo = show is not None and not holds_ref and not (
+    if show is not None and not holds_ref and not (
         show.returncode == 1 and not (show.stdout or show.stderr).strip()
-    )
+    ):
+        repo_unknown = True
     if holds_ref:
         print(f"recover with: tools/lane_wip.py recover {ref} --into <path>{handle}")
-    elif unknown_repo:
+    elif repo_unknown:
         print(f"recover with: tools/lane_wip.py recover {ref} --into <path>{handle}")
         print(
             f"  (could not tell which repository holds this pin — if `recover` cannot see "
