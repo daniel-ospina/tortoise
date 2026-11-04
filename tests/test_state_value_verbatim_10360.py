@@ -2088,10 +2088,10 @@ def test_the_composition_reads_a_SIGNED_or_SPACED_prefix_as_the_same_value():
     # is the exact composition the forced guard reaches (`20kk` + `miles`).
     assert v2._compose_magnitude_and_unit("20kk", "miles") == "20kkmiles"
 
-    # …and the WHOLE same-value spelling grid, which is how the 260 were found:
-    # no spelling of one number may be refused against another. 9 fused unit
-    # SPELLINGS (7 identities — `miles`/`mi` and `min`/`minutes` share one each)
-    # × 6 forms × 6 forms, 54 of them the trivial `a == b` diagonal.
+    # …and the WHOLE same-value spelling grid: no spelling of one number may
+    # be refused against another. 9 fused unit SPELLINGS (7 identities —
+    # `miles`/`mi` and `min`/`minutes` share one each) × 6 forms × 6 forms =
+    # 324 assertions, 54 of them the trivial `a == b` diagonal.
     for unit in ("miles", "mi", "km", "seconds", "min", "minutes", "ms",
                  "hours", "kg"):
         for a in ("20000", "20k", "20 k", "twenty k", "20K", "20.0k"):
