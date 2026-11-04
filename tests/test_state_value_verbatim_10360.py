@@ -1067,16 +1067,24 @@ def test_a_magnitude_prefix_beside_a_unit_word_is_COMPOSED_not_refused():
     assert v2._value_slot_divergence("the ride was 20kms", "the ride was 20000 ms") == ()
     # …while the colloquially-correct reading stays REFUSED at both heads.
     assert v2._value_slot_divergence("the ride was 20kms", "the ride was 20000 m")
-    # ⛔ THE SECOND new tolerance, and it comes from the WIDEN, not from the arm
-    # above (review P3, measured): a fused suffix outside `_UNIT_EQUIV`
-    # (`kseconds`) leaves the core UNSCALED at `5`, so it coincides with
-    # `5 minutes` and the unknown-unit tolerance fires. `the batch took 5k
-    # seconds`/`… 5 minutes` REFUSED at `origin/main` `525fde4a9` and TOLERATES
-    # here. That is a MISSED REWRITE — the fail-open direction this rule prefers
-    # to a false accusation — and the same mechanism already tolerated
-    # `3k minutes`/`3 hours` at the base. Pinned so it cannot widen unnoticed.
+    # ⛔ THE SECOND case changed SHAPE in the merge of #10804's widen with the
+    # fold's FUSION-TIME composition, and the change is a CORRECTION rather than a
+    # new tolerance: a fused suffix outside `_UNIT_EQUIV` (`kseconds`) used to
+    # leave the core UNSCALED at `5`, so it coincided with `5 minutes` and the
+    # unknown-unit tolerance fired — `the batch took 5k seconds`/`… 5 minutes`
+    # REFUSED at `origin/main` `525fde4a9` and TOLERATED with the widen alone.
+    # That was a MISSED REWRITE (5k seconds is 5000 s, not 5 min) sitting in the
+    # fail-open direction. With `_compose_magnitude_and_unit` in the fusion
+    # branch the prefix is multiplied, so the pair binds `5000s` against `5min`
+    # and is REFUSED — the truthful verdict. Pinned in BOTH directions so neither
+    # half can be narrowed silently.
     assert v2._value_slot_divergence(
-        "the batch took 5k seconds", "the batch took 5 minutes") == ()
+        "the batch took 5k seconds", "the batch took 5 minutes") == (
+            ("took", "5000s", "5min"),)
+    # …and the same value written two ways still AGREES (the composition is a
+    # reading, not a refusal): `5k seconds` is 5000 seconds.
+    assert v2._value_slot_divergence(
+        "the batch took 5k seconds", "the batch took 5000 seconds") == ()
     # …and the false accusation the SAME mechanism REPAIRS, which is why the
     # trade was taken: `3k minutes`/`3000 minutes` REFUSED at base.
     assert v2._value_slot_divergence(
