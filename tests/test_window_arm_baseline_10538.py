@@ -72,19 +72,35 @@ def test_the_receipt_disclaims_the_measurement_it_is_not():
     # the reader's `dedup_pool` cap lifts the same picks into the graded top 5 on
     # the chunk-bearing shape the corpus is actually ingested as.
     reachable = verdict["unit_reachable_without_displacement_at_window_12"]
-    assert reachable == {"chunk_free_pools": False,
-                        "chunk_bearing_pools": True}, (
-        "the reachability claim must be keyed by POOL SHAPE — a single boolean is "
-        f"a claim about one geometry dressed as a property of the arm: {reachable}")
+    assert reachable["chunk_free_pools"] is False, reachable
+    assert reachable["chunk_bearing_pools"] is True, reachable
+    # ⛔ THE AGGREGATE MUST SAY WHICH ROWS COULD SPEAK (fresh-context review,
+    # finding 3). `additive`/`evicted_ids` are entailed to be True/empty when the
+    # reader's capped pool is SHALLOWER than the window, so a shape whose only
+    # rows are that shallow supports no displacement claim either way. The deep
+    # pool is the one that fills the window after the cap, so it is the one the
+    # chunk-bearing half may be read from.
+    assert reachable["chunk_bearing_pools_displacement_expressible"] == {
+        "chunk_bearing_issue_probe": False,
+        "chunk_bearing_whole_window_cluster": False,
+        "chunk_bearing_deep_window": True,
+    }, ("a displacement claim must name the rows where displacement is "
+        f"expressible at all: {reachable}")
     assert verdict["unit_graded_by_recall_all_at_5_at_window_12"] == {
         "chunk_free_pools": 0,
         "chunk_bearing_pools": {"chunk_bearing_issue_probe": 2,
-                               "chunk_bearing_whole_window_cluster": 2},
+                               "chunk_bearing_whole_window_cluster": 2,
+                               "chunk_bearing_deep_window": 2},
     }
     assert "AT THE SHIPPED GEOMETRY ONLY" in verdict["scope"], (
         "the reachability claim must be scoped to window=12 — the receipt's own "
         "sweep reaches the graded top 5 at windows 3-6, so an unscoped "
         "\"unreachable\" would be contradicted by its own rows")
+    assert "windows 3-6 ON A CHUNK-FREE POOL" in verdict["scope"], (
+        "the sweep's 3-6 boundary is a CHUNK-FREE property — on a chunk-bearing "
+        "pool the cap grades the pick at every swept window through 13, so an "
+        "unqualified statement is the one-shape-as-a-property error this "
+        "verdict's other fields exist to prevent")
     assert "CHUNK-FREE" in verdict["scope"] and "CHUNK-BEARING" in verdict["scope"], (
         "the scope must name BOTH pool shapes: the two do not agree, and the "
         "cap is what makes them differ")
@@ -334,6 +350,130 @@ def test_head_placement_reaches_the_graded_top_five_only_by_displacement():
     assert head["graded_by_recall_all_at_5"] == 2
     assert head["net"] == 0 and head["additive"] is False, (
         "the head arm reaches the unit by eviction, not by widening")
+
+
+def test_the_sweep_boundary_is_a_shape_property_not_a_sweep_property():
+    """⛔ THE 3-6 / 7 BOUNDARY BELONGS TO THE CHUNK-FREE SHAPE ONLY
+    (fresh-context review, finding 1).
+
+    On a chunk-free pool fused rank and reader rank coincide, so a tail pick sits
+    at fused rank ``ceiling``, is in the graded top 5 at windows 3-6, and cannot
+    be from window 7 on. On a CHUNK-BEARING pool the reader's cap removes the raw
+    chunks ABOVE the pick, so the pick is graded at every swept window through
+    13. Publishing the boundary as a fact about the sweep — which the pre-fix
+    ``GEOMETRY`` comment, the receipt's ``scope`` string and this file's own
+    rationale all did — is the one-shape-as-a-property-of-the-arm error the
+    shape-keyed verdict fields exist to prevent.
+    """
+    receipt = json.loads(baseline.RECEIPT_PATH.read_text(encoding="utf-8"))
+
+    def tail_rows(chunk_bearing):
+        return {name: [r for r in rows
+                       if r["placement"] == "tail" and r["chunk_bearing"]
+                       is chunk_bearing]
+                for name, rows in receipt["by_pool"].items()
+                if any(r["placement"] == "tail" and r["chunk_bearing"]
+                       is chunk_bearing for r in rows)}
+
+    chunk_free, chunk_bearing = tail_rows(False), tail_rows(True)
+    assert chunk_free and chunk_bearing
+    # the boundary the CHUNK-FREE shape makes — on the pools it FIRES on (a
+    # clustered-but-inert pool such as `single_session_pool` grades nothing at
+    # ANY window, which is cause (c), not a boundary): graded up to 6, not from 7
+    graded_free = {name: {r["window"]: r["graded_by_recall_all_at_5"]
+                          for r in rows if r["fired"]}
+                   for name, rows in chunk_free.items()}
+    fired_free = {n: g for n, g in graded_free.items() if g}
+    assert fired_free, "no chunk-free pool fires — the boundary is unmeasurable"
+    for name, graded in fired_free.items():
+        assert all(graded[w] >= 1 for w in (3, 4, 5, 6)), name
+        # a pool that stops FIRING at 7+ reports no row at all from there, which
+        # is the same "graded nothing" answer
+        assert all(graded.get(w, 0) == 0 for w in (7, SHIPPED_WINDOW, 13, 14)), \
+            name
+    # …and the boundary it does NOT make: a chunk-bearing pool reaches the
+    # graded top 5 at 7 and at the shipped 12, which the sweep comment denied.
+    for name, rows in chunk_bearing.items():
+        graded = {r["window"]: r["graded_by_recall_all_at_5"]
+                  for r in rows if r["fired"]}
+        assert graded, name
+        assert all(graded[w] >= 1 for w in (3, 4, 5, 6, 7, SHIPPED_WINDOW, 13)), (
+            f"{name}: window 7 is where a CHUNK-FREE pool stops being graded — "
+            f"a chunk-bearing pool is still graded there: {graded}")
+    # the published scope must NAME the shape it is qualifying
+    assert "windows 3-6 ON A CHUNK-FREE POOL" in receipt["verdict"]["scope"]
+    assert "CHUNK-BEARING pool the pick is graded at EVERY swept window" in (
+        receipt["verdict"]["scope"])
+
+
+def test_displacement_fields_are_read_only_where_they_are_expressible():
+    """⛔ A SHALLOW CAPPED POOL CANNOT REPORT A DISPLACEMENT AT ALL
+    (fresh-context review, finding 3).
+
+    ``evicted_ids`` is ``[i for i in base_ids if i not in fused_set]`` over two
+    ``[:window]`` windows of the SAME pool. When the reader's capped pool is
+    shallower than the window, BOTH windows hold the whole pool, so
+    ``evicted_ids == []`` and ``additive is True`` are arithmetic — true whatever
+    the arm does. Every row now publishes ``displacement_expressible`` so a
+    reader cannot take that vacuous True as a measurement, and the verdict
+    aggregate reads only the rows where it is true.
+    """
+    receipt = json.loads(baseline.RECEIPT_PATH.read_text(encoding="utf-8"))
+    rows = [r for rows in receipt["by_pool"].values() for r in rows]
+    assert rows
+    for row in rows:
+        expressible = (row["reader_pool_depth"] > row["window"]
+                       and row["reader_pool_depth_fused"] > row["window"])
+        assert row["displacement_expressible"] is expressible, (
+            f"window={row['window']}: the flag must "
+            "be derived from the reader's own pool depth, not asserted")
+        if not expressible:
+            # the vacuity itself, pinned: nothing could have been displaced
+            assert row["evicted_ids"] == [] and row["deleted_sessions"] == [], (
+                "a non-expressible row must not be able to report a "
+                "displacement — if it does, the expressibility rule is wrong")
+    # the deep chunk-bearing pool is the one that DOES fill the window after the
+    # cap, so it is the row the chunk-bearing half of the verdict is read from
+    deep = next(r for r in rows
+                if r["pool_depth"] > 20 and r["chunk_bearing"])
+    assert deep["displacement_expressible"] is True
+    assert deep["reader_pool_depth"] > SHIPPED_WINDOW
+
+
+def test_the_head_counterfactual_is_measured_on_BOTH_shapes():
+    """⛔ THE HEAD CLAIM MUST BE A MEASUREMENT ON EACH SHAPE IT NAMES
+    (fresh-context review, finding 2).
+
+    The pre-fix receipt published ONE head row and it was chunk-free, while
+    ``verdict["why"]`` stated that head "reaches ranks 0-1 on either shape … so
+    it too is a swap". Running the same counterfactual on the chunk-bearing
+    shape refutes the second half: nothing is evicted there, because the chunk
+    cap had already brought both picks inside the reader window. The two shapes
+    now publish a head row beside their tail one.
+    """
+    receipt = json.loads(baseline.RECEIPT_PATH.read_text(encoding="utf-8"))
+    shipped = receipt["shipped_geometry_chunk_bearing"]
+    pools = {k.rsplit("_", 1)[0] for k in shipped}
+    assert pools, shipped
+    for pool in pools:
+        assert f"{pool}_tail" in shipped and f"{pool}_head" in shipped, (
+            f"{pool}: the counterfactual must be published per shape, not "
+            "extrapolated from the chunk-free pool")
+        head, tail = shipped[f"{pool}_head"], shipped[f"{pool}_tail"]
+        assert head["pick_ranks"] == [0, 1], pool
+        assert head["picks"] == tail["picks"], pool
+        assert head["graded_by_recall_all_at_5"] == 2, pool
+    # …and the one place head DOES pay by eviction is the chunk-free pool
+    head_cf = next(r for r in receipt["shipped_geometry_by_placement"]
+                   if r["placement"] == "head")
+    assert head_cf["chunk_bearing"] is False
+    assert head_cf["deleted_sessions"] == ["sB", "sC"]
+    assert head_cf["evicted_sole_representatives"] == ["sb10", "sc11"]
+    why = receipt["verdict"]["why"]
+    assert "is a different answer on each shape" in why, (
+        "the head sentence must be shape-keyed — one shape's outcome stated as "
+        "the arm's is the finding this pin exists for")
+    assert "evicts NOTHING" in why
 
 
 def test_the_arm_is_inert_when_nothing_sits_below_the_window():
