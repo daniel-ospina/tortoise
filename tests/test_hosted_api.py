@@ -98,6 +98,11 @@ TEST_TEAM = {
     "max_sessions": None,
 }
 
+# #10602: a SECOND org, used only where a test needs two reads on DIFFERENT
+# snapshot identities (``_namespace`` is the org_id, and it is the
+# fallback-snapshot key). Same shape as TEST_TEAM, different tenant.
+_SECOND_TEAM = {**TEST_TEAM, "org_id": "team-002"}
+
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -8295,7 +8300,7 @@ class TestSearchOffloadConcurrency:
                     t0 = time.monotonic()
                     await asyncio.wait_for(asyncio.gather(
                         search("falkordb traversal", limit=10, org=TEST_TEAM),
-                        search("graph performance", limit=10, org=TEST_TEAM),
+                        search("graph performance", limit=10, org=_SECOND_TEAM),
                     ), timeout=15)
                     return time.monotonic() - t0
 
