@@ -12691,8 +12691,21 @@ class TortoiseSDK:
                 # read path (#2892). Skipped when the call carries neither props
                 # nor an authored word (a bare dedup hit), so that path costs no
                 # extra query.
+                #
+                # ⛔ `props` is NEVER empty at this point, so the guard cannot be
+                # `props or …`: `content_hash` is set on it unconditionally
+                # above ("dedup flag only gates the existing-point lookup, not
+                # hash persistence", fix #80) and is not popped until the fold's
+                # own write leg, far below. A guard that reads `props` therefore
+                # admits EVERY dedup hit and spends a `LIFECYCLE_FANOUT_QUERY` on
+                # the bare one this comment promises costs nothing (#10841
+                # review, P3). The condition is the CALLER'S props — the set
+                # minus the hash this function itself added — which is what the
+                # sentence above actually describes.
+                _caller_props = set(props) - {"content_hash"}
                 _terminal = (self._lifecycle_terminal_marker(pid)
-                             if (props or cred_prior is not None) else None)
+                             if (_caller_props or cred_prior is not None)
+                             else None)
                 _temporal = _TEMPORAL_RESTAMP_PROPS & set(props)
                 if _temporal and _terminal is not None:
                     _logger.warning(
