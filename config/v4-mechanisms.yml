@@ -776,10 +776,10 @@ mechanisms:
       number, so `_value_bindings` fuses nothing and the pair fails open. That
       is the carve-out's own fifth example. ⛔ The ADJACENCY half that used to
       stand here is CLOSED: `_UNIT_WORDS` now carries the spellings the
-      carve-out names (`second(s)`, the millisecond family, `minute`, `day(s)`)
-      **plus their conventional siblings** (`hour`, `week(s)`, `mos`, `month(s)`,
-      `year(s)`, `mile(s)`, `millisec(s)` — the carve-out names none of those,
-      they are here because a duration family with a hole in it is how the
+      carve-out names (`second(s)`, the millisecond family incl. `millisec(s)`,
+      `minute`, `day(s)`) **plus their conventional siblings** (`hour`, `week(s)`,
+      `mos`, `month(s)`, `year(s)`, `mile(s)` — the carve-out names none of
+      those, they are here because a duration family with a hole in it is how the
       original gap survived review; ⛔ `percent`/`pct` are deliberately NOT among
       them: fusing `percent` REFUSED the truthful pair `20k%`/`20000 percent`,
       because an ATTACHED `k%` loses its `%` to the tokeniser (`20k%` binds as
@@ -833,10 +833,14 @@ mechanisms:
       tables (`5k millis`, `5k dys`) or NO unit word at all (`5k` alone) — the
       binding is a bare `5k`, so `_magnitude_agrees`' `_K_ABBREVIATES` gate
       (`{"km", "kg"}`) refuses it against any KNOWN unit (`5000 ms`, `5000
-      days`) and the truthful point is withheld. PRE-EXISTING in mechanism (`5k
+      days`, `5000 mos`, `5000 millisec`) and the truthful point is withheld.
+      PRE-EXISTING in mechanism (`5k
       millis` against `5000 hours` is refused at `origin/main` `525fde4a9` too);
-      this
-      widen extended which right-hand units trigger it. ⛔ NOT fixed here on
+      #10804's widen extended which right-hand units trigger it, and the fold's
+      abbreviation completion (`mos`, `millisec(s)`) extends it once more by
+      exactly those two spellings — measured: `the batch took 5k` against `… 5000
+      mos` / `… 5000 millisec` was TOLERATED at `0a1c6b909` and is REFUSED here,
+      so the fold took the same direction as the widen, never a new one. ⛔ NOT fixed here on
       purpose: that gate's narrowness is a recorded decision (#10513 review P1 —
       `20k`/`20m` is 20 km against 20 metres), so splitting it needs that ruling
       reversed deliberately, not patched here. Tracked and argued as **#10876**, and pinned here so the pair cannot
