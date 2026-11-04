@@ -13333,7 +13333,7 @@ class TestOverLimitSurfacesOfferTheHumanPath:
                "tortoise/cohort_cost.py", "tortoise/supabase_control.py",
                "tortoise/sdk.py", "tortoise/__main__.py",
                # #9567: DECLARED on purpose, not forgotten. This module holds the
-               # only real 402 allowance ceiling (`allowance_gate.py:772`, the
+               # only real 402 allowance ceiling (`allowance_gate.py:773`, the
                # over-allowance `QuotaExceededError`, correctly wrapped in
                # `with_limit_contact`) plus the fail-closed refusals around it.
                # Leaving it out made the boundary implicit: a future edit that
@@ -13377,7 +13377,7 @@ class TestOverLimitSurfacesOfferTheHumanPath:
         #     on it — `graph_storage`'s HNSW under-report, `postgres_storage`'s
         #     DB-grain attribution) was configured anyway;
         #   - a configured allowance has NO reading from its meter.
-        # The CUSTOMER ceiling is `allowance_gate.py:772`'s QuotaExceededError,
+        # The CUSTOMER ceiling is `allowance_gate.py:773`'s QuotaExceededError,
         # which carries the seam itself — and now that the module is in MODULES,
         # dropping that seam reds this gate instead of passing silently.
         "the team allowances could not be resolved for",
