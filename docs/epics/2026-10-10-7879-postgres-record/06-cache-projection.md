@@ -313,17 +313,17 @@ it — `#10852` deletes `_EPISODIC_SOURCE_PROSE_COLUMNS`, both guard doors in
 **`episodic_source_declined_properties`**, `is_episodic_source_node`, the
 `scan_cache_view` subtraction, and **`record_serve.parity_difference`'s decline**,
 and adds a leg that a lexicon `summary` + a topics-derived `_searchText` SURVIVE
-the door with the rebuilt session Source still Source-FTS-indexed. Recorded on
-#10853 as a follow-up obligation.
+the door with the rebuilt session Source still Source-FTS-indexed. Recorded as a
+follow-up obligation on #10853.
 
 **SIX touch points, not five — and two of them are callers rather than
 enumerations** (#10867 review, ISSUE 2). An obligation that named only the
 projection's own names was a trap in both directions:
 
-- `episodic_source_declined_properties` (`cache_projection.py:1554`) is a
+* `episodic_source_declined_properties` (`cache_projection.py:1554`) is a
   **caller** of `episodic_source_prose_properties`, so deleting the latter alone
   leaves `NameError` on the `props` tail for every episodic row;
-- `record_serve.parity_difference` (`record_serve.py:1137-1151`) imports **both**
+* `record_serve.parity_difference` (`record_serve.py:1137-1151`) imports **both**
   `episodic_source_declined_properties` and `is_episodic_source_node` — the
   tree's SECOND record↔cache comparison instrument. A partial deletion is an
   `ImportError` on every `Source` comparison, loud today only because three legs
