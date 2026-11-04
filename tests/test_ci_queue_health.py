@@ -1477,6 +1477,43 @@ class TestTheReportingSurfacesCoverEveryLeg:
         assert any("cut" in r for r in health.reasons)
 
 
+def test_every_documented_PR_UNWITNESSED_cause_is_reachable():
+    """⛔ The state vocabulary must not describe a cause the code cannot emit.
+
+    The module docstring lists FOUR causes of `PR-UNWITNESSED` (see `PR_UNWITNESSED`):
+    a cut `queued` feed, a cut `pending` leg, a cut `requested` leg, and an unreadable
+    stamp in the wait population. Four review rounds went into the same class — a
+    hand-written vocabulary drifting from the code — so each documented cause is
+    CONSTRUCTED here and asserted reachable. A cause that stops being reachable
+    reddens; a fifth cause added without documenting it is what the next review's
+    enumeration is for.
+
+    ⛔ The two leg-cut causes must be reachable WHILE PR CI IS EXECUTING: scoping them
+    to `pr_running == 0` was the documented claim that went stale, because a cut feed
+    loses its OLDEST runs (the feeds are newest-first) regardless of what is running.
+    """
+    serving = [run(1, "Python CI", event="pull_request", age_seconds=60)]
+
+    causes = {
+        "cut queued feed, nothing executing": classify(
+            flood_queued(12), truncated=True),
+        "cut pending leg while PR CI executes": classify(
+            flood_queued(12), in_progress=serving, pending_truncated=True),
+        "cut requested leg while PR CI executes": classify(
+            flood_queued(12), in_progress=serving, requested_truncated=True),
+        "unreadable stamp in the wait population": classify(
+            flood_queued(12),
+            in_progress=serving,
+            pending=[run(7700, "Python CI", event="pull_request",
+                         created_at="not-a-timestamp")]),
+    }
+    for label, health in causes.items():
+        assert health.verdict == Q.PR_UNWITNESSED, (
+            f"documented cause not reachable: {label} -> {health.verdict}")
+        assert health.congests_pr is None, f"{label} must refuse the gate"
+        assert health.pr_wait_measured is False, f"{label} measured nothing"
+
+
 def test_a_CUT_pending_leg_cannot_certify_the_queue_clear():
     """The other pole: an unread leg is an ABSTENTION, never a clearance.
 

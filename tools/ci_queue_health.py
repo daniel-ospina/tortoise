@@ -75,11 +75,15 @@ SIX STATES, DELIBERATELY NOT INTERCHANGEABLE
               (ISSUE 3 of the #9118 review: clause order used to return ``OK``
               here, which is a clean bill of health for a CI that is not running.)
   PR-UNWITNESSED
-              per REPO — the PR WAIT was not witnessed, for one of two reasons:
-              (a) the FEED WAS CUT AT ITS PAGE CAP, so the older runs — the end
-              the age clause needs — were never read (and no PR-event run is
-              executing); or (b) the QUEUED PR-EVENT RUNS CARRY NO READABLE
-              ``created_at``, so the wait cannot be measured at all. Neither
+              per REPO — the PR WAIT was not witnessed. FOUR causes, and the list is
+              the code's, not a summary of it: (a) the QUEUED FEED was cut at its
+              page cap (and no PR-event run is executing); (b) a `pending` leg was cut
+              at its page cap; (c) a `requested` leg was cut at its page cap — (b) and
+              (c) fire whether or not PR CI is executing, because a cut feed loses its
+              OLDEST runs (the feeds are newest-first) and those are the runs the age
+              clause needs; or (d) a WAITING PR-event run — in `queued`, `pending` or
+              `requested` — carries no readable ``created_at``, so the wait cannot be
+              measured at all. Neither
               starvation nor health is witnessed: it is not ``OK`` (the fail-open
               the truncation residual of the #9118 review names, and the same
               refusal `age_seconds` documents for an unreadable stamp), and not
@@ -131,7 +135,9 @@ Clause 3 is what lets a SINGLE read speak about a DURATION without a state
 file, and it is what keeps clauses 1-2 from firing on a quiet repo: a deep
 queue and zero PR runs is also what a fleet that is simply not pushing looks
 like. When NO leg holds a waiting PR run, starvation cannot be witnessed and the
-verdict stays ``OK`` — with ``pr_queued=0``, ``pr_pending`` and ``pr_requested``
+verdict stays ``OK`` — UNLESS A LEG WAS CUT, in which case an empty result cannot
+rule a wait out and the verdict degrades to ``PR-UNWITNESSED``. Where nothing was
+cut, it stays ``OK`` with ``pr_queued=0``, ``pr_pending`` and ``pr_requested``
 reported, so a reader sees what was measured instead of reading a clean bill of
 health. That same reading carries ``pr_wait_measured=False``: there was no wait to
 read. But where a wait DOES exist in ANY leg, it is measured, and ``congests_pr``
@@ -261,9 +267,12 @@ PR_STARVED = "PR-STARVED"
 #: PR_STARVED (which means nothing of the PR work is executing at all): the two are
 #: true of different queues, and neither may be inferred from the other.
 PR_BACKLOGGED = "PR-BACKLOGGED"
-#: A truncated feed with no PR-event run executing, or queued PR-event runs whose
+#: A truncated leg (queued, `pending`, or `requested`) with no PR-event run waiting,
+#: or waiting PR-event runs whose
 #: timestamps cannot be read: the PR WAIT is neither witnessed nor DISPROVED, so
-#: this is not ``OK``. See the truncation note in the module docstring — the runs
+#: this is not ``OK``. The `pending`/`requested` legs are distinct API statuses, so
+#: each has its own page cap and its own cut. See the truncation note in the module
+#: docstring — the runs
 #: endpoint is newest-first and cannot be asked for the oldest end, so a capped
 #: read loses exactly the runs the age clause needs — and see `age_seconds` for
 #: why an unreadable stamp cannot be treated as zero.
@@ -752,8 +761,9 @@ def classify_queue(
     """The whole decision, PURE — no API calls — so it is unit-testable.
 
     See the module docstring for the clauses and the governor's bounds. The age
-    clause is measured against the OLDEST QUEUED PR-EVENT RUN: that run is the
-    witness that PR work is BLOCKED rather than merely absent.
+    clause is measured against the OLDEST WAITING PR-EVENT RUN — the max over
+    `queued`, `pending` and `requested`: that run is the witness that PR work is
+    BLOCKED rather than merely absent.
 
     ⛔ `pending` AND `requested` ARE PART OF THE WAIT POPULATION, NOT DECORATION
     (#10641 review P2, #10831 review P2). The `queued` list comes from an API read
