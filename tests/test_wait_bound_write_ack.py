@@ -375,9 +375,11 @@ def test_any_PROPS_PAYLOAD_makes_convergence_unprovable_so_it_is_never_called_sa
 def test_a_STATE_conditional_writer_is_never_called_safe():
     """`tortoise_mitigate_operator` converges only for a CURRENT mitigation.
 
-    Its own registry description says so: "Idempotent for a CURRENT mitigation …
-    once it has been withdrawn (retracted/superseded/outdated/archived) a
-    re-assertion mints a NEW mitigation Point and returns its id." So convergence
+    Its own registry description says so: "It does NOT duplicate a CURRENT
+    mitigation — a second call updates it in place, so the node count stays 1 —
+    but it is NOT a no-op: every call re-stores the node and re-triggers EP
+    dirty-marking … once withdrawn … a re-assertion mints a NEW mitigation Point
+    and returns its id." So convergence
     depends on the mitigation's stored STATE, which no argument predicate can
     see — the same ruling this PR already applied to `tortoise_onboarding_seed`.
     Advertising it repeatable told a caller "repeating it converges" about a

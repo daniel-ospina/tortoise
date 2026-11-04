@@ -798,23 +798,26 @@ strand run-1 residue.
 
 **What is not covered — and why this is NOT a list.** The fold covers points (by
 kind + content hash), sources (by url) and connections (by endpoint set + arity).
-Everywhere else, the answer depends on the item, and a POINT can write again by
-at least two independent mechanisms:
+Everything else depends on the item, and there are at least THREE independent
+mechanisms by which an identical resubmission writes again:
 
 * `document` and `event` entities — occurrence records, append-only by contract
   (`sdk.ingest` sets `existed = []` on both legs: "never deduped");
-* a point whose node identity differs from what the fold QUERIES. The fold skips
-  operator nodes by predicate; and the props passthrough can carry `pointKind`
-  itself, which WINS over the positional kind on the node while the query still
-  scopes by the positional kind — so `{"content": "x", "pointKind": "decision"}`
-  resubmitted mints a second node with the SAME `content_hash` (measured:
-  `created.points: 1` on both runs, `deduped.points: 0`, `warnings: []`, and the
-  node is a plain point, not an operator).
+* an OPERATOR point — the fold's predicate skips operator nodes, so a points item
+  declaring itself one mints a second node;
+* a point whose identity differs from what the fold QUERIES — the props
+  passthrough can carry `pointKind` itself, which WINS over the positional kind
+  on the node while the query still scopes by the positional kind, so
+  `{"content": "x", "pointKind": "decision"}` resubmitted mints a second node
+  with the SAME `content_hash` (measured: `created.points: 1` on both runs,
+  `deduped.points: 0`, `warnings: []`, and the node is a plain point, not an
+  operator).
 
-⛔ **Two mechanisms, not two exclusions.** An earlier version of this section
-named only the operator case and was false for the `pointKind` one, so treat this
-set as OPEN and never as complete. None of them warns. (`append_only_items` in [§3.2](#32-warnings--the-thirteen-keys) is reserved
-vocabulary, not emitted today — so waiting for it learns nothing.)
+⛔ **Three mechanisms, and NOT a complete set.** Two earlier versions of this
+section presented it as closed — one named only the entity legs, the next named
+only the operator case — and each was falsified by a case missing from it. Treat
+the set as OPEN: none of these warns (`append_only_items` in [§3.2](#32-warnings--the-thirteen-keys)
+is reserved vocabulary, not emitted today, so waiting for it learns nothing).
 
 ⛔ **Do not infer convergence from this document — read the response.** The
 `created` / `deduped` counts are the verdict, per call: a resubmission that should
@@ -845,7 +848,7 @@ the verdict is not evidence that nothing was written.
 without qualification: **do NOT re-send it — reconcile by other means.** ⛔ Note
 what that verdict does and does not say. It says convergence is **not provable**
 for this tool — its bundle's key space is open-ended, so no finite predicate can
-cover it — and it does NOT say a repeat will duplicate. The mechanisms below are
+cover it — and it does NOT say a repeat will duplicate. The mechanisms above are
 WHY provability fails, not a prediction about any particular bundle: a bundle
 whose items all fold converges completely and STILL reports `retry_safe: false`,
 because the tool-level answer must hold for every bundle. Read the response's
