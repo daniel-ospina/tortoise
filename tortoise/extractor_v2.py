@@ -4202,11 +4202,32 @@ def _value_form_outside_judged(token: str) -> bool:
 #: recoverable without a second pass over the text.
 _UNIT_EQUIV = {
     "ms": "ms", "msec": "ms", "msecs": "ms", "millisecond": "ms",
-    "milliseconds": "ms",
+    "milliseconds": "ms", "millisec": "ms", "millisecs": "ms",
     "s": "s", "sec": "s", "secs": "s", "second": "s", "seconds": "s",
     "min": "min", "mins": "min", "minute": "min", "minutes": "min",
     "h": "h", "hr": "h", "hrs": "h", "hour": "h", "hours": "h",
+    # The rest of the DURATION family (#10360 residual (d)). `_UNIT_WORDS` is
+    # what makes a unit FUSABLE; this table is what makes it COMPARABLE, and a
+    # unit the engine does not FUSE binds a value with NO unit, which
+    # `_value_identity_matches` reads as the deliberate "one side omits the
+    # unit" tolerance — so `800 seconds` against `800 milliseconds` was WRITTEN
+    # as verbatim. Two of the carve-out's OWN examples are that class ("back
+    # under 800 milliseconds", "a ten minute TTL"); the rest of the family is
+    # here because a duration table with a hole in it is how the gap survived
+    # review. `d`/`y` ARE keys here (and in `_UNIT_WORDS`), so an ATTACHED
+    # `3d`/`5y` becomes a COMPARED day/year identity rather than an unmapped
+    # suffix — measured: `3d` against `3 hours` is refused. That is the same
+    # class as `800ms`/`800s`, and the false-accusation direction is pinned by
+    # the spelling controls in
+    # `test_the_carve_outs_own_ADJACENT_time_units_are_judged` (`3 days`/`3 d`).
+    "d": "d", "day": "d", "days": "d",
+    "wk": "wk", "wks": "wk", "week": "wk", "weeks": "wk",
+    "mo": "mo", "month": "mo", "months": "mo", "mos": "mo",
+    "y": "y", "yr": "y", "yrs": "y", "year": "y", "years": "y",
     "%": "%", "percent": "%", "pct": "%",
+    # `mile`/`miles` beside the `mi` symbol: `20 miles` against `20 km` is the
+    # same rewrite `20 mi` against `20 km` is refused for (residual (d)).
+    "mile": "mi", "miles": "mi",
     # every unit `_value_bindings` can FUSE (`_UNIT_WORDS`) is spelled here, so
     # no fused unit falls through to the unmapped branch and is read as "no
     # unit" — the review-2 finding: `20 km` vs `20 mi` folded because the table
@@ -4248,9 +4269,9 @@ _KNOWN_UNITS = frozenset(_UNIT_EQUIV.values())
 #: rather than widened here on a guess.
 _MAGNITUDE_PREFIXES = frozenset({"k"})
 
-#: The factor each magnitude prefix denotes. Read ONLY by `_magnitude_agrees`,
-#: which is the whole of what the ambiguity arm is allowed to tolerate: the two
-#: sides must name the SAME number once the prefix is read as x1000.
+#: The factor each magnitude prefix denotes. Read by `_magnitude_agrees` and by
+#: `_composed_identity` — together the whole of what the ambiguity arm may
+#: tolerate: both sides must name the SAME number once the prefix reads x1000.
 #: ⛔ EVERY name in `_MAGNITUDE_PREFIXES` needs a factor here, and the test file
 #: asserts the containment: a prefix with no factor makes `_magnitude_agrees`
 #: return False for everything, so the arm becomes a silent no-op and the false
@@ -4512,8 +4533,8 @@ def _value_identity_matches(a: tuple[str, str, str | None],
     # The gating is `_magnitude_agrees`: the unit mismatch alone is NOT enough
     # (review P2 — that version wrote `5k`/`6000`), so a numeric rewrite or a
     # dropped sign still reaches the core comparison below and still refuses.
-    if a[2] != b[2] and _MAGNITUDE_PREFIXES & {a[2], b[2]} \
-            and (_magnitude_agrees(a, b) or _magnitude_agrees(b, a)):
+    if a[2] != b[2] and (_magnitude_agrees(a, b) or _magnitude_agrees(b, a)
+                         or _composed_identities_agree(a, b)):
         return True
     if a[0] != b[0] or a[1] != b[1]:
         return False
@@ -6028,6 +6049,18 @@ def _canonicalise_clocks(content: str) -> str:
 _UNIT_WORDS = frozenset({
     "k", "km", "mi", "m", "kg", "lb", "min", "mins", "h", "hr", "hrs",
     "s", "sec", "secs", "minutes", "hours",
+    # ⛔ THE GAP WAS COVERAGE, NOT THE INVARIANT (#10360 residual (d), measured):
+    # `set(_UNIT_WORDS) <= set(_UNIT_EQUIV)` was already true, but the table
+    # carried `minutes`/`hours` and NOT `minute`, `second(s)`, `hour`, the
+    # millisecond family, or the day/week/month/year and mile spellings — so a
+    # space-separated unit was never FUSED, its value bound with no unit, and the
+    # pair failed OPEN. `back under 800 seconds` against
+    # `back under 800 milliseconds` was written as verbatim.
+    "ms", "msec", "msecs", "millisecond", "milliseconds", "millisec", "millisecs",
+    "second", "seconds", "minute", "hour",
+    "d", "day", "days", "wk", "wks", "week", "weeks",
+    "mo", "month", "months", "mos", "y", "yr", "yrs", "year", "years",
+    "mile", "miles",
 })
 
 
@@ -13267,3 +13300,181 @@ def _script_of(ch: str) -> str | None:
         # and the recursion is idempotent if it does.
         return _script_of(base)
     return _UNLISTED_SCRIPT
+# ── #10804 review P1: a magnitude prefix glued onto a unit WORD ───────────────
+#
+# ⛔ APPENDED AT MODULE SCOPE, NOT INSERTED, for the reason the `_run_scoped_
+# vocabulary_gap` rebinding above already records: this file's lines are cited
+# by number from the #7949 capstone bundle, `docs/00_index.md`, the runbook and
+# the hash-pinned `PRE-REGISTRATION.md`, so an insertion above them re-stales
+# every cite (that class produced a P0 on this very PR last cycle). Appending
+# after the last line shifts nothing, and the only lines that move anything
+# above it are the widen's own two hunks — +21 at `_UNIT_EQUIV` and +12 at
+# `_UNIT_WORDS` — accounted for below, never summarised as "nothing moved"
+# (what an earlier cut said, and false: `_UNIT_WORDS` is a GROWING hunk, not a
+# 1-for-1 swap).
+#
+# ⛔ AND THE OFFSET IS NOT ONE NUMBER, which is the trap in "+33" read as a
+# blanket: a cite BELOW `_UNIT_EQUIV` but ABOVE `_UNIT_WORDS` moved by +21.
+# Exactly two sites sit in that window — `_value_verbatim_span`'s definition
+# (`:4887` → `:4908`) and the `_carries_value` gate (`:4927` → `:4948`) — and
+# both are pinned at their +21 values rather than the +33 a hunk total suggests
+# (`_VALUE_FREE_GATE` in `tests/eval/write_path/test_value_span_census_2684.py`,
+# and the runbook's published `:4948-4949`). Every cite BELOW `_UNIT_WORDS`
+# moved by +33.
+#
+# ⛔ HOW TO CHECK IT, and why this note quotes NO running total. An earlier cut
+# of this paragraph pinned `git diff --numstat` at `33 0`; the very next commit
+# made that false, and a stale measurement quoted as an invariant is how the
+# cite P0 on this PR happened. So the invariant is stated STRUCTURALLY instead,
+# and it does not rot: between `_UNIT_EQUIV` and `_UNIT_WORDS` the only GROWING
+# hunks are the widen's own (+21, then +12 — see the split of offsets above) —
+# from `_UNIT_WORDS` up to the last cited line there must be NO
+# growing hunk at all, and everything this fix appends starts AFTER that line.
+# `git diff origin/main -- tortoise/extractor_v2.py | grep '^@@'` therefore has
+# to show: the two widen hunks (+21 at `_UNIT_EQUIV`, +12 at `_UNIT_WORDS`), any
+# number of NET-ZERO hunks (N lines for N lines — the magnitude arm's 2-for-2
+# swap, and comment corrections such as the one below, which is one), and a
+# final growing hunk at EOF. What must NOT appear is a GROWING hunk between
+# `_UNIT_WORDS` and the last cited line: THAT is what moves a cite. A net-zero
+# hunk cannot, which is why it is allowed and this note does not pin a count of
+# hunks — pinning one would make the next comment fix look like a moved cite,
+# and this paragraph has already been wrong once in exactly that direction.
+#
+# THE DEFECT.  `_value_bindings` glues a value to the unit word written beside
+# it with NO prefix arithmetic (``value + seq[i + 1]``), so a magnitude-prefixed
+# value followed by a SPACE-SEPARATED unit arrives as ONE token whose suffix is
+# a prefix and a unit word run together — ``20k`` + ``miles`` → ``20kmiles``.
+# That suffix is not a ``_UNIT_EQUIV`` key, so ``_value_core`` reads it as an
+# UNKNOWN unit and keeps the numeric core ``20``. Against ``20000 miles`` (core
+# ``20000``, unit ``mi``) the cores DIVERGE, and the point is REFUSED.
+#
+# ⛔ IT WAS INTRODUCED BY THIS PR'S WIDEN, and measured both ways — each row
+# returned ``()`` at `origin/main` `525fde4a9` (before the widen `miles`/`days`/
+# `milliseconds`/`weeks`/`percent` were absent from ``_UNIT_WORDS``, so the pair
+# never fused and fell open on the unknown-unit tolerance) and each REFUSED with
+# the widened tables alone:
+#
+#     `20k miles`/`20000 miles`            `3k days`/`3000 days`
+#     `5k milliseconds`/`5000 milliseconds`
+#     `2k weeks`/`2000 weeks`
+#
+# (`percent`/`pct` are NOT fused — see the `_UNIT_WORDS` note and the registry
+# row's (d). Fusing them refused `20k%`/`20000 percent`, because an ATTACHED
+# `k%` loses its `%` to the tokeniser; that family is equal by the pre-existing
+# factor arm instead, and is pinned in the test file.)
+#
+# Refusing a truthful point over how one value is written is the
+# FALSE-ACCUSATION direction the carve-out must never take — the row's residual
+# (i) says so in as many words — so the widen is only admissible WITH this arm.
+#
+# ⛔ NO NEW INTERPRETATION OF THE TOKEN (#2817 point 1's hazard). The factor is
+# ``_MAGNITUDE_FACTORS`` — the one-entry table the ``OVERRIDES:`` block on this
+# seam scopes to `k` — and `k` is already a unit IDENTITY in ``_UNIT_EQUIV``, so
+# this adds no second reading of a spelling the engine does not already read.
+def _composed_identity(identity: tuple[str, str, str | None],
+                       ) -> tuple[str, str, str | None] | None:
+    """``identity`` with a magnitude PREFIX folded into its core, or ``None``.
+
+    ``('', '20', 'kmiles')`` → ``('', '20000', 'mi')``. ``None`` whenever the
+    fold does not apply, which is the common case.
+
+    ⛔ DELIBERATELY NARROW, because "prefix + letters" is not always a prefix
+    over a unit:
+
+      * a unit ``_UNIT_EQUIV`` ALREADY knows is never composed, so ``20km``
+        stays kilometres instead of becoming 20000 metres;
+      * only ``_MAGNITUDE_FACTORS``' own prefixes compose, so the table cannot
+        grow a reading here by accident;
+      * the remainder must be a key of ``_UNIT_EQUIV``, so ``20kms``'s
+        ``ms`` composes but an arbitrary tail does not;
+      * a multi-run core (``24h/7d/4w``) carries ONE suffix for several
+        numbers and is never scaled.
+    """
+    sign, core, unit = identity
+    if not isinstance(unit, str) or len(unit) < 2 or unit in _KNOWN_UNITS:
+        return None
+    prefix = unit[:1]
+    # The declared set first, then its factor: the test file pins
+    # `set(_MAGNITUDE_PREFIXES) <= set(_MAGNITUDE_FACTORS)`, so this lookup is
+    # safe BY THAT INVARIANT rather than by a defensive `.get` that would let a
+    # prefix with no factor silently compose nothing.
+    if prefix not in _MAGNITUDE_PREFIXES:
+        return None
+    rest = _UNIT_EQUIV.get(unit[1:])
+    if rest is None or "/" in core:
+        return None
+    try:
+        scaled = Decimal(core) * _MAGNITUDE_FACTORS[prefix]
+    except (InvalidOperation, ValueError):  # pragma: no cover - belt and braces
+        return None
+    out = format(scaled, "f")
+    if "." in out:
+        whole, frac = out.split(".", 1)
+        frac = frac.rstrip("0")
+        out = whole + ("." + frac if frac else "")
+    return (sign, out, rest)
+
+
+def _composed_identities_agree(a: tuple[str, str, str | None],
+                               b: tuple[str, str, str | None]) -> bool:
+    """True when folding a glued prefix makes these two identities the SAME.
+
+    Called from the magnitude arm in ``_value_identity_matches``, where it is
+    the third of the three ways two identities can name one number (after "equal
+    cores" and "the prefix reading closes the gap").
+
+    ⛔ IT CAN ONLY EVER *ADD* TOLERANCE — it returns True only where the composed
+    form names the same number as the other side (exact equality, OR the same
+    sign+core where the other side states NO unit at all — that side's own
+    "unit is written or not" tolerance), so it cannot refuse. It
+    cannot rescue a rewritten NUMBER either: ``20k miles``/``21k miles`` composes
+    to ``20000 mi`` against ``21000 mi`` and ``20k miles``/``20000 km`` to
+    ``20000 mi`` against ``20000 km``, and both still reach the core comparison
+    and are refused (pinned in ``tests/test_state_value_verbatim_10360.py``).
+    ⛔ WHAT IT DOES *NOT* PROMISE, stated because the weaker claim is false: it
+    CANNOT stop a unit from being re-read. ``20kms`` against ``20000 ms`` is
+    TOLERATED — REFUSED at `origin/main` `525fde4a9` — and the docstring above
+    used to imply otherwise by saying the fold is "only ever used against an
+    equally composed side". It is not: ``_composed_identity`` returns ``None``
+    for ``('', '20000', 'ms')`` (``ms`` is a unit the table KNOWS) and the
+    equality is against that plainly-spelled side. That tolerance is
+    deliberate and pinned, not an oversight.
+
+    ⛔ AND THE AMBIGUOUS ``kms`` STAYS SAFE IN THE DIRECTION THAT MATTERS. A
+    colloquial "kms" for kilometres against ``20km`` does not compose to a match,
+    so the pair keeps its unknown-unit fail-open. (``20kms`` against ``20000 m``
+    IS refused — identically at `origin/main` `525fde4a9` — but NOT by
+    ``_K_ABBREVIATES``: ``_MAGNITUDE_FACTORS.get('kms')`` is ``None``, so
+    ``_magnitude_agrees`` returns at its first line and never reaches that gate.
+    It is refused by the numeric-core comparison, 20 against 20000, after the
+    compose arm fails to match ``ms`` against ``m``. **#10876 would not change
+    this pair** — it is a different root and is not covered there.)
+    """
+    for composed_side, other in ((a, b), (b, a)):
+        composed = _composed_identity(composed_side)
+        if composed is None:
+            continue
+        if composed == other:
+            return True
+        # ⛔ THE "UNIT IS WRITTEN OR NOT" TOLERANCE APPLIES TO THE COMPOSED FORM
+        # TOO, and leaving it out was a MEASURED FALSE ACCUSATION (review cycle 7,
+        # P2): exact equality against `other` can only rescue a side that STATES
+        # a unit, so `20k miles` against the same number written with NO unit at
+        # all — `('', '20000', None)` — matched nothing and fell through to the
+        # core comparison, 20 against 20000, and the truthful point was WITHHELD.
+        # Every spelling newly fused by the widen inherits that: `3k days`/
+        # `3000`, `5k seconds`/`5000`, `5k milliseconds`/`5000` were all WRITTEN at
+        # `origin/main` `525fde4a9` (the unit word was not fused there, so the
+        # value bound as a bare `k` and `_magnitude_agrees` closed the gap) and
+        # became REFUSED here. The composed identity names the SAME NUMBER on the
+        # same sign, and the other side states NO unit to contradict — which is
+        # `_value_identity_matches`' oldest tolerance (`800` / `800ms`), not a new
+        # one. It cannot rescue a rewrite: the sign and the post-fold core must be
+        # EQUAL, so `20k miles`/`21000` still refuses.
+        # ⚠️ Scoped to a side stating NO unit, deliberately: a side stating an
+        # unknown SPELLING (`millis`) keeps `_magnitude_agrees`' `_K_ABBREVIATES`
+        # refusal (#10876, recorded decision — #10513 review P1), and two STATED
+        # units still have to be equal, so `20k miles`/`20000 km` refuses.
+        if other[2] is None and composed[0] == other[0] and composed[1] == other[1]:
+            return True
+    return False
