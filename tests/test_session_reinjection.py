@@ -182,7 +182,7 @@ def _leg_mix(ret: dict) -> list[tuple[str, int]]:
 
 #: Leg reasons that mark a read DEGRADED. The engine's own ``degraded`` flag is
 #: the authority (``search_engine._trace_entry``: "``reason`` is never null
-#: when ``degraded`` is true") and is what this module reads first; the set is
+#: when ``degraded`` is true") and is what this module reads second; the set is
 #: a belt for a trace assembled outside the engine (a fixture, or a producer
 #: that predates the flag) so such a read can never masquerade as healthy.
 #: ``no_embedder``/``no_query_vector``/``empty_results``/``below_relevance_floor``
@@ -192,6 +192,21 @@ _DEGRADED_REASONS = frozenset({
     "timeout", "query_failed", "breaker_open", "index_missing",
     "no_embeddings", "tfidf_snapshot", "tfidf_fallback",
 })
+
+#: Reasons that mean a leg was DELIBERATELY not run, which this module must
+#: read BEFORE the engine's ``degraded`` flag (#10675 review, P1).
+#:
+#: ⛔ The flag alone is not enough, and that is the whole trap: the engine marks
+#: a designed absence ``degraded=True`` at the source — ``sdk.py``'s status_trace
+#: append for the vector leg is ``ran=False, degraded=True, reason=no_embedder``
+#: — so a guard that reads ``degraded`` FIRST finds every read in this module
+#: degraded (the ``_no_embedder`` fixture below is autouse), ``any(degraded)``
+#: is then always true, and ``_require_one_leg_mix``'s FAIL branch can never
+#: run. That is an inert enforcer: a real, code-caused leg divergence would
+#: SKIP — non-red to the rail — which is the exact fail-open the FAIL branch
+#: exists to close. The absence therefore has to be excluded by REASON before
+#: the flag is consulted.
+_DESIGNED_ABSENCE_REASONS = frozenset({"no_embedder", "no_query_vector"})
 
 
 def _degradations(ret: dict) -> list[tuple[str, str]]:
@@ -205,6 +220,10 @@ def _degradations(ret: dict) -> list[tuple[str, str]]:
     for leg in ret.get("legs") or []:
         name = str(leg.get("leg"))
         reason = str(leg.get("reason") or "")
+        # A leg that was never supposed to run did not degrade — read this
+        # BEFORE the flag, because the engine sets ``degraded=True`` for it.
+        if reason in _DESIGNED_ABSENCE_REASONS:
+            continue
         if (leg.get("degraded")
                 or (name == "fallback" and (leg.get("count") or 0) > 0)
                 or reason in _DEGRADED_REASONS):
@@ -580,11 +599,15 @@ def test_a_pair_served_by_different_legs_is_not_compared():
     as an id diff nobody can attribute) or starts refusing pairs that ARE
     comparable.
     """
-    healthy = {"legs": [{"leg": "vector", "ran": False,
+    # ⛔ ``degraded: True`` on the dense leg is the shape the ENGINE emits for a
+    # designed absence (``sdk.py``'s status_trace append), not a nicety: without
+    # it these fixtures describe a trace no producer creates, and the guard's
+    # real-trace behaviour goes untested (#10675 review, P1).
+    healthy = {"legs": [{"leg": "vector", "ran": False, "degraded": True,
                           "reason": "no_embedder", "count": 0},
                          {"leg": "fts", "ran": True,
                           "reason": "ok", "count": 7}]}
-    degraded = {"legs": [{"leg": "vector", "ran": False,
+    degraded = {"legs": [{"leg": "vector", "ran": False, "degraded": True,
                           "reason": "no_embedder", "count": 0},
                          {"leg": "fts", "ran": True,
                           "reason": "query_failed", "count": 0},
@@ -719,9 +742,11 @@ def test_a_degraded_leg_that_returned_rows_is_a_degradation():
     assert _degradations({"legs": [
         {"leg": "fallback", "ran": True,
          "reason": "no_fallback_applicable", "count": 0}]}) == []
-    # ...and the deliberate dense-leg omission is never a degradation
+    # ...and the deliberate dense-leg omission is never a degradation, even
+    # though the engine flags it ``degraded=True`` (the shape asserted here is
+    # the one ``sdk.py`` actually appends — see _DESIGNED_ABSENCE_REASONS).
     assert _degradations({"legs": [
-        {"leg": "vector", "ran": False, "degraded": False,
+        {"leg": "vector", "ran": False, "degraded": True,
          "reason": "no_embedder", "count": 0}]}) == []
 
 

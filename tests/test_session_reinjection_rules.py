@@ -1526,13 +1526,31 @@ _TURN_SHAPE_NARRATIVE_HOMES_PRESENT_TENSE_ONLY = (
 #:   ``event``; any other named kind is explicitly not this claim. Measured:
 #:   ``writes ``pointKind='hypothesis'`` `` was a false RED before, and is
 #:   GREEN now.
+#: ⛔ TWO MORE PROPERTIES, both measured (#10675 review, P2). Each was a
+#: fail-open on the tree's OWN spellings — the guard's job is to red on a
+#: restatement of the deleted writer, and it was not doing it:
+#: * **BACKTICKS.** ``_seed_demo_graph`` is normally written in backticks here
+#:   (``session_reinjection.py``: "(`hosted_api.py` `_seed_demo_graph`)"). A
+#:   bare ``_seed_demo_graph|`` alternative followed by ``\s+`` cannot cross the
+#:   closing backtick, so `"`_seed_demo_graph` writes a pointKind='event'"`,
+#:   the double-backticked form, and `hosted_api._seed_demo_graph` were all
+#:   GREEN — while the comment below claimed this spelling was covered.
+#: * **TURN-NODE VOCABULARY.** The tail required the literal ``pointKind``,
+#:   yet the positive half of this same guard treats ``turn node`` as the
+#:   turn-shape claim. "the demo seed writes one turn node per demo turn" was
+#:   therefore GREEN. The tail accepts either now.
+#: ⚠️ Neither of these is the negation rule: that is ``_NEGATED_CLAIM``, read on
+#: the MATCHED SPAN, so the greedy gap below stays greedy on purpose (#10675
+#: review round 16).
 _PRESENT_TENSE_DEMO_EVENT_WRITER = re.compile(
     # The SUBJECT: the qualified seed noun, the FUNCTION name, or the bare
     # ``the seeder``. `the ask-fixture seeder` does not match — the article has
     # to sit directly on ``seeder`` — and that seeder really does read `event`,
-    # so it must not be swept up.
-    r"(?:(?:demo|dashboard|hosted|sample)[^.;:,\n]{0,40}?seed(?:er)?"
-    r"|_seed_demo_graph|the\s+seeder)"
+    # so it must not be swept up. Backticks are optional on BOTH sides and a
+    # dotted prefix (``hosted_api._seed_demo_graph``) is allowed: that is how
+    # this tree writes the identifier (#10675 review, P2).
+    r"`{0,2}(?:(?:demo|dashboard|hosted|sample)[^.;:,\n]{0,40}?seed(?:er)?"
+    r"|(?:\w+\.)*_seed_demo_graph|the\s+seeder)`{0,2}"
     # The gap matters: this tree writes "the demo seed STILL writes …",
     # "… CONTINUES TO WRITE …", and backticks the identifier
     # (``_seed_demo_graph``) — all of which a bare `subject\\s+verb` misses,
@@ -1541,6 +1559,9 @@ _PRESENT_TENSE_DEMO_EVENT_WRITER = re.compile(
     # the sentence's subject.
     # …and a possessive with a noun phrase in front of the verb ("the demo
     # seed's turn writer MINTS …"), which the bare form also missed (round 14).
+    # ⛔ GREEDY on purpose: the gap must swallow a pre-verb negator ("no
+    # longer", "does not") so that ``_NEGATED_CLAIM``, which reads the matched
+    # SPAN, can see it (#10675 review round 16).
     r"(?:['’]s)?(?:\s+\w+){0,3}\s+(?:also\s+|still\s+|continues?\s+to\s+)?"
     r"(?:writes?|mints?|creates?)\b"
     # * **NEGATION** — the CORRECTED sentences say the seed "writes NO turn
@@ -1548,7 +1569,8 @@ _PRESENT_TENSE_DEMO_EVENT_WRITER = re.compile(
     #   wants written: measured, "since #10000 the demo seed writes no
     #   `pointKind='event'` node" matched before this lookahead and is GREEN
     #   after it (the `event` kind would otherwise still be a violation).
-    r"(?!\s+(?:no|nothing|none|never)\b)[^.\n]{0,160}?pointKind"
+    r"(?!\s+(?:no|nothing|none|never)\b)[^.\n]{0,160}?"
+    r"(?:pointKind|\bturn\s+node\b)"
     r"(?:\s*[=:]\s*[`'\"“]*[a-z_]+)?", re.IGNORECASE)
 
 #: The kind a ``pointKind`` mention names, if it names one — the group read by
@@ -1850,6 +1872,51 @@ def test_the_present_tense_guard_reads_a_NEGATED_writer_claim_as_the_CORRECTION(
             "a clause that NEGATES one shape and ASSERTS the turn node in the "
             "next is the half-correction this guard exists for, and the "
             f"negation escape passed it: {sentence!r}")
+
+
+def test_the_present_tense_guard_reads_the_spellings_the_tree_writes():
+    """The present-tense guard must red on the claim and NOT on the correction.
+
+    #10675 review (P2) measured six sentences the guard graded wrongly, three in
+    each direction. They live here, INSIDE the excised guard block, so the
+    population pin above does not read its own test fixtures as a claim — the
+    same self-grading hazard `_GUARD_BLOCK` exists to prevent.
+
+    FAILS IF: the guard goes back to requiring a bare (un-backticked) subject,
+    to demanding the literal ``pointKind`` where ``turn node`` says the same
+    thing, or to reading a pre-verb negator as an assertion.
+    """
+    # ── MUST RED: restatements of the deleted writer ──────────────────────
+    for claim in (
+        # Backticked identifier — how this tree actually writes it.
+        "`_seed_demo_graph` writes a pointKind='event' node per turn",
+        "``_seed_demo_graph`` writes a pointKind='event' node per turn",
+        "`hosted_api._seed_demo_graph` writes pointKind='event' per turn",
+        # The vocabulary the positive half of this guard calls the turn shape.
+        "the demo seed writes one turn node per demo turn",
+        # Baseline: the un-backticked form that already worked.
+        "the demo seed writes a pointKind='event' node per turn",
+    ):
+        assert _present_tense_writer_claim(claim) is not None, (
+            "the guard is fail-OPEN on a restatement of the deleted turn "
+            f"writer: {claim!r} was accepted (#10675 review, P2)")
+
+    # ── MUST NOT RED: the corrections, and true statements ────────────────
+    for okay in (
+        # Negation BEFORE the verb — the corrected sentence, and the one the
+        # pin is supposed to encourage.
+        "the demo seed no longer writes pointKind='event' nodes",
+        "the demo seed does not write pointKind='event' nodes",
+        "the demo seed never writes pointKind='event' nodes",
+        # Negation AFTER the verb (the form that already worked).
+        "since #10000 the demo seed writes no pointKind='event' node",
+        # TRUE: the seeder still writes these other kinds.
+        "the demo seed writes pointKind='hypothesis' points",
+        "the demo seed writes ~10 Points to the sample graph",
+    ):
+        assert _present_tense_writer_claim(okay) is None, (
+            "the guard refused a TRUE or CORRECTED sentence, which is a false "
+            f"RED on the prose it asks for: {okay!r} (#10675 review, P2)")
 
 
 # ── END of the guard's machinery — below this line the population resumes
