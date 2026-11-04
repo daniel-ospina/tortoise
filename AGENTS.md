@@ -51,22 +51,31 @@
 > the checker derives its own destination from the box — `CELL_HOME="${CELL_HOME:-$HOME}"`,
 > `DEST="$CELL_HOME/.pi/agent/scripts"` — so invoked bare it grades exactly the farm this box runs;
 > it is `pi-bootstrap/setup.sh` that passes a `$HOME`-rooted `--dest`, so on a `CELL_HOME`-rooted box
-> that run grades `$HOME/.pi/agent/scripts`, and neither its `OK` nor its `UNKNOWN — cannot verify`
+> that run grades `$HOME/.pi/agent/scripts`, and neither its `OK` nor its `UNKNOWN — <reason>`
 > says anything about the executed farm (`pi-bootstrap/setup.sh` re-labels that second one
 > `farm: COULD NOT VERIFY`). Grading a farm is not deploying one: it is materialised only by the
 > installer, so run the installer from a checkout **at the pin** — from a tree at any other commit it
 > re-farms bytes that are not the pin's, and advancing the pin alone leaves the farm stale. Third,
-> **the executed farm is ALREADY graded on a clock, so a refusal is not a blind spot**:
-> `agent-infra/scripts/harness-apply-pass.sh` PREDICATE 4 — *"the directory this box EXECUTES, which
-> no other leg looks at"*, written for tortoise#10114 — runs that same checker against
+> **the clock grades the farm only if the pass it executes carries the leg — read the record before
+> you trust it**: `agent-infra/scripts/harness-apply-pass.sh` PREDICATE 4 — *"the directory this box
+> EXECUTES, which no other leg looks at"*, written for tortoise#10114 — runs that same checker against
 > `$CELL_HOME/.pi/agent/scripts` on the `eldato-harness-apply` timer (10 min), on by default
-> (`HARNESS_APPLY_FARM_CHECK=1`), and writes a named verdict into
-> `${HARNESS_APPLY_STATE_DIR:-$HOME/.pi/agent/state}/harness-apply.log` (`action=farm-drift`,
-> `farm: DRIFT — …`). Read that line before concluding the farm is ungraded. Fourth, **the instrument
-> may refuse to run at all**: direct invocation from a pi session may be refused as
+> (`HARNESS_APPLY_FARM_CHECK=1`). ⛔ **BUT THE PASS IS ITSELF A FARMED COPY**, so on a box whose farm
+> is stale the copy the timer executes predates the leg and the clock runs GREEN over an ungraded
+> farm — measured 2026-11-04 on the `cmux` cell: the farmed `harness-apply-pass.sh` was dated
+> 2026-10-27 and held **zero** `PREDICATE 4`, and
+> `${HARNESS_APPLY_STATE_DIR:-$HOME/.pi/agent/state}/harness-apply.log` held 17 records with **no
+> `farm` field at all**. And the record is ONE-SIDED: the drift arm sets `action=farm-drift` and
+> puts `farm: DRIFT — …` in the record's `detail=`, while the CLEAN arm is a `log_line "farm: ok"` to
+> stdout/journald that leaves `action=none` — indistinguishable from a disarmed or absent leg.
+> So **absence of `action=farm-drift` falsifies nothing**: it means ungraded as readily as it means
+> clean. Use the record to establish DRIFT, never coverage; if the executing pass carries no
+> PREDICATE 4, the clock is not grading at all. Fourth, **the instrument may refuse to run at all**:
+> direct invocation from a pi session may be refused as
 > `script-indirection`, with a message that never mentions drift
-> (agent-infra#3173, the agent-infra#709 false positive) — so **a refusal is not a clean result**, it is
-> the reason to read the clock's verdict rather than to stop. Do **not** add
+> (agent-infra#3173, the agent-infra#709 false positive) — so **a refusal is not a clean result**,
+> and the paragraphs above say the clock does not automatically answer it either: confirm the pass
+> that actually runs carries the leg, or grade the farm directly. Do **not** add
 > a tortoise-side mirror — a second owner of that predicate was refused (tortoise#10722, closed
 > superseded); the farm arrays and `is_declared_local` live in agent-infra.
 
