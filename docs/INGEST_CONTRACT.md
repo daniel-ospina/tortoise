@@ -674,8 +674,7 @@ promotion alone does NOT activate a draft operator (see the §11 interim-
 route caveat; zombie-operator auto-resolution ships with the #785 promote
 tools). "Promote a second endpoint and the operator activates" is the #785-era
 post-resolution statement — pre-#785 the operator's OWN promotion
-is the second required conjunct. Promote a second endpoint and the operator activates; until then it
-cannot propagate belief. This is the derived-liveness rule (A9's selector
+is the second required conjunct. This is the derived-liveness rule (A9's selector
 predicate for operator nodes).
 
 ---
@@ -785,7 +784,13 @@ holding one `event` and one `document` entity item returns
 duplicate by comparing `created.entities` and `ids.entities` across the retry —
 the count says a second occurrence was minted and the ids name it. (Whether any
 other row in §3.2's table reaches your deployment is likewise not something this
-paragraph asserts; §3.2's emission note is not a census.)
+paragraph asserts; §3.2's emission note is not a census.) ⚠️ **The rest of this
+document is stale on the same point**: §2.2, §13 rows 6–7 and §14 still promise
+unqualified convergence, and §16 still calls `list_batch` `planned` though it
+ships. Those are pre-existing — older than the change that prompted this
+paragraph — and are filed as **#10907** rather than scoped here one sentence at a
+time. Treat THIS paragraph and §7's rule as the authoritative statement of what
+dedups; where another section disagrees, it is wrong.
 
 ⚠️ **This is also why `tortoise_ingest` is NOT declared idempotent on the MCP
 surface** (`annotations.idempotentHint: false`). A `-32009` wait-bound refusal on
