@@ -139,7 +139,22 @@ def _no_embedder(monkeypatch):
     against the documented default, so an ambient
     ``TORTOISE_LME_SESSION_REINJECTION`` / ``TORTOISE_LME_CONTEXT_ITEMS``
     (which resizes the derived seed window) would silently flip the arm
-    under test."""
+    under test.
+
+    #2513 (#10629 review P3): the same hazard applies to the THREE ambient
+    twins the resolved-arm assertions read, so they are pinned here rather
+    than one test at a time — a measurement lane that arms the A/B through
+    the documented env twins would otherwise get a FALSE RED in the very
+    test that pins the arm:
+
+    * ``TORTOISE_LME_GUARD_PER_SESSION_CAP`` — ``_resolve_guard_per_session_cap``
+      reads it, so an exported value reds the ``guard_per_session_cap ==
+      DEFAULT_POOL_SESSION_CAP`` assertion of the ``--no-floor-term`` case.
+    * ``TORTOISE_LME_COVERAGE_LOOP`` — it turns a pool-order arm on, so an
+      exported value makes the ``--floor-term``-alone run legal instead of
+      the ``ArmConflictError`` (exit 1) that case asserts.
+    * ``TORTOISE_LME_FLOOR_TERM`` — an exported value silently arms the
+      lower bound under every OFF-arm assertion."""
     import tortoise.embeddings as _emb
     monkeypatch.setattr(_emb, "compute_embedding",
                         staticmethod(lambda content: None))
@@ -147,6 +162,10 @@ def _no_embedder(monkeypatch):
                         staticmethod(lambda: None))
     monkeypatch.delenv("TORTOISE_LME_SESSION_REINJECTION", raising=False)
     monkeypatch.delenv("TORTOISE_LME_CONTEXT_ITEMS", raising=False)
+    # #2513 (#10629 review P3): hermeticity for the resolved-arm assertions.
+    monkeypatch.delenv("TORTOISE_LME_FLOOR_TERM", raising=False)
+    monkeypatch.delenv("TORTOISE_LME_GUARD_PER_SESSION_CAP", raising=False)
+    monkeypatch.delenv("TORTOISE_LME_COVERAGE_LOOP", raising=False)
 
 
 def _question(question: str = QUESTION, *,

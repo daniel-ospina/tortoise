@@ -27,24 +27,20 @@ committed in this tree and is read as a file. The SCORED run below is stamped se
 **Blast radius — the files this branch touches** (`git diff --name-only origin/main...HEAD`; the
 COUNT is deliberately not restated here — it changed twice while this was open, and a stale
 integer in the one paragraph a reviewer bounds the PR by is worse than no integer):
-the bundle itself (`docs/evidence/7949-capstone/**`, `tools/capstone_verdict_check.py`,
-`tests/test_7949_capstone_verdict_check.py`, `tests/test_7949_capstone_measure.py`) **and the
-ordering gate that judges it** (`tools/capstone_preregistration_check.py` +
-`tests/test_capstone_preregistration_9075.py`, added in the `#9089` review round: the gate
-exempts this bundle's REFUSAL log on its CONTENT, so a reviewer who bounds this PR by its own
-reading must see it); its registration (`config/ci-surfaces.yml` `core`/`tier1`/`durations`
-arms, `docs/00_index.md`); the selection edits `tools/ci_selection.py` +
-`tests/test_ci_selection.py` **remove** a `CORE_ALSO` row this branch had added and could not
-justify (the bundle prefix `docs/evidence/7949-capstone/`, landed by #9076, already selects
-`core` for a PROBE-ONLY diff — measured, not assumed), and **add** one for the gate source
-(`tools/capstone_verdict_check.py`), because a GATE-ONLY diff selected no surface at all while
-the bundle prefix covers only the probe/evidence paths (pinned by
-`tests/test_ci_selection.py::test_the_capstone_gate_change_selects_core_not_tier1`) — and add a pin
-that no `CORE_ALSO` row is shadowed by a parent prefix; the surface re-cut the new caller forces
-(`config/surface-manifest.yml`, `docs/product/mcp-sdk-surface.md`); and two test-side edits —
-`tests/test_ci_check_repair.py` (the `gh` launcher stub) and
-`tests/test_uri_env_mutations_declared.py` (this suite's `TORTOISE_DB_URI` env-control
-declaration, plus the removal of a dead duplicate row).
+the bundle itself — `docs/evidence/7949-capstone/**` (this `README.md`, `E1-E5-PROOFS.md`, the
+committed `blocker-states.json`, the scored log `capstone-measured-9152448d.log` that replaces
+`capstone-measured-e0fc940b.log`, and `probes/capstone_measure.py`) and
+`tools/capstone_verdict_check.py` with `tests/test_7949_capstone_verdict_check.py` (the V12 arm and
+its pins) plus `tests/test_7949_capstone_measure.py` (the bundle's own claim pins); its registration
+(`config/ci-surfaces.yml` `core`/`tier1`/`durations` arms, `docs/00_index.md`).
+⛔ A previous revision of this paragraph named eight files this branch does **not** touch —
+`tools/capstone_preregistration_check.py`, `tests/test_capstone_preregistration_9075.py`,
+`tools/ci_selection.py`, `tests/test_ci_selection.py`, `config/surface-manifest.yml`,
+`docs/product/mcp-sdk-surface.md`, `tests/test_ci_check_repair.py`,
+`tests/test_uri_env_mutations_declared.py` — from an earlier cut whose selection and surface edits
+were dropped. It is corrected here rather than carried, because it claimed the PR re-cut the
+**MCP/SDK surface** (`config/surface-manifest.yml`, `docs/product/mcp-sdk-surface.md`), which this
+branch does not do: no surface tool was added, removed or renamed.
 **Nothing under `tortoise/` changes behaviour and nothing instruments the extractor** — this
 bundle installs no wrapper, spy or step-composition anywhere in the measured path, so the E4
 row's "no monkeypatch" clause holds on the fact that matters. The `sdk.py`/`extractor_v2.py`
@@ -56,25 +52,16 @@ closing is a claim; this epic is where the claim is checked against the pipeline
 running end to end."*
 
 > **Verdict: 0/5 rows green. FOUR rows are RED with measured numbers, ONE is BLOCKED (E1, and its
-> refusal is itself a measurement). The epic is NOT closeable, and this bundle says so mechanically.
-> E3/E4/E5 are re-measured at `9152448d7` (2026-11-02, all eight steps witnessed); **E1 and E2 are
-> scored from the `#9889` measurement record**, not from `e1-e2.log` (#10610), because that record
-> is the only committed artifact carrying a before/after arm.**
+> refusal is itself a measurement — see §"E1 / E2 — scored from the `#9889` record"). The epic is NOT
+> closeable, and this bundle says so mechanically:**
 >
 > | row | frozen bar | measured | verdict |
 > |---|---|---|---|
 > | **E1** | `after_share <= 0.50 × before_share`, over all `:Object` nodes, floor **30** | before **0.3590** (78 Objects) and **0.5652** (69 Objects), after **0.2131** (61 Objects) — the record `docs/evidence/9889/e1-e2-scores.json`; bound **0.1795** → FAIL vs bound **0.2826** → PASS, so the pairings DISAGREE | ⛔ **BLOCKED** (n=1 per arm — not decided, not the floor) |
 > | **E2** | E2a `>= 13 of 14` value-bearing units; E2b fused share `<= 0.05` | E2a **8/14** strictly survive (the falsifier reaches **14/14** over the same population); E2b **1/114 = 0.008772** | ⛔ **RED** (8 of 14) |
-> | **E3** | `= 1.000` (zero unanchored), floor **30** derived nodes | **157 / 397 = 0.395466** as registered (this run's own graph, `capstone_measure_9152448d_…`). The `Source->Object` identity link carries no `sourceVersion` BY DESIGN (owner option A, `#5199`), so `:Object mention links` can never anchor and the frozen `= 1.000` is unreachable as registered — the metric needs re-registration (`#9736`, OPEN, owner-gated) | ⛔ **RED** |
-> | **E4** | `= 15 of 15` planted operator edges wired AND persisted | **2 / 15** on the `2026-10-19` receipt, which is on a DIFFERENT corpus (`943a99ec…`) from the frozen one, and whose retrievability rate is UNMEASURED (`#9596`) | ⛔ **RED** |
-> | **E5** | ratio `>= 0.90` **AND** raw absolute `>= 0.80` | ratio **1.0833** (passes) but raw absolute **0.4800** (fails), n = 25 | ⛔ **RED** (S3 selection recovery, `#5087`) |
->
-> ⚠️ REBASE UNION (#10601 × #10610): #10601 forked before #10610 landed and carried a
-> whole-table re-measurement that re-derived E1/E2 from this run (`e1-e2.log`), where #10610 had
-> already scored them from the `#9889` record. Taking either block wholesale would either revert
-> #10610's before arm (restoring a row whose artifact does not carry it) or discard #10601's newer
-> E3/E4/E5 measurement. So E1 and E2 keep the #9889-backed rows; E3, E4 and E5 take the
-> `9152448d7` re-measurement.
+> | **E3** | `= 1.000` (zero unanchored), floor **30** derived nodes | **148 / 433 = 0.3418** as registered (2026-10-21); **148 / 383 = 0.38642** under the amended class set (`Point`+`Event`+`Document`, `PRE-REGISTRATION.md` §10.1) — `Point` 141/338 anchored, `:Object` **0/50**, `:Event` **7/45** | ⛔ **RED** |
+> | **E4** | `= 15 of 15` planted operator edges wired AND persisted | **2 / 15** | ⛔ **RED** |
+> | **E5** | ratio `>= 0.90` **AND** raw absolute `>= 0.80` | ratio **1.0833** (passes) but raw absolute **0.4800** (fails), n = 25 | ⛔ **RED** |
 >
 > E1's and E2's proxies are printed rather than dropped (E1b 90/90 real facts; E2b 1/114) — and
 > neither proxy is allowed to become the verdict. A refused measurement is **neither a pass nor
@@ -106,20 +93,36 @@ a row moves only by RE-RUNNING the probe and deleting the file it replaces, so t
 from the tree while the numbers it produced stay citable from history. Where the two disagree, the
 log at `9152448d7` wins.
 
-⚠️ **The FROZEN pre-registration still names the deleted file, and it cannot be edited.**
+⚠️ **The pre-registration still names the deleted file, and this PR does not edit it.**
 `PRE-REGISTRATION.md` (§8's "**A scored evidence log already exists**: `capstone-measured-e0fc940b.log`"
 and its `E3 census` / `E5` cites) and `preregistration.json`'s three `post_registration_measurement`
 fields all name `capstone-measured-e0fc940b.log`, which this PR deletes. That is expected, not a
-broken reference: the record is **hash-frozen** — `document_sha256:
-sha256:e8b838724a344251d5a8ef51a641e097b97f18319d03a82f1c8de714ad6ddb45` — so editing it to follow
-the supersede would destroy the pre-registration's whole point. Read every path it names as **as-of
-its own stamp**, and use the durable route for the content: `git show
+broken reference: the record names the log **as of its own stamp**, and re-pointing it at the
+supersede would be a rewrite of the record rather than a correction of it. Read every path it names
+as **as-of its own stamp**, and use the durable route for the content: `git show
 2609039079717e445a19a0b0308e4302b02f0a8b:docs/evidence/7949-capstone/capstone-measured-e0fc940b.log`.
 ⚠️ That commit is the file's ADD commit on `origin/main` — `e0fc940b5` itself does **not** contain the
 log (it is the head the run was stamped at, written by a later commit), which is the trap a reader
 hits first if they try `git show e0fc940b5:…`. `tools/capstone_preregistration_check.py --dir
-docs/evidence/7949-capstone` exits 0 against the frozen bytes, which is why this is disclosed HERE
-instead of "fixed" there.
+docs/evidence/7949-capstone` exits 0 against the bytes in the tree, which is why this is disclosed
+HERE instead of "fixed" there.
+
+⛔ **AND THAT RECORD WAS AMENDED SIX MINUTES AFTER THIS RUN — quoting its current hash alone says
+the opposite.** The scored run at `9152448d7` (`# generated: 2026-11-02T12:16:06Z`) read the record
+whose `document_sha256` was
+`sha256:5ff05906cf383f50a873dafeee12216d5eafc80b89ae9676c78a109f16714fbe` — what
+`PRE-REGISTRATION.md` hashed to *at that commit*. The record in this tree hashes to
+`sha256:e8b838724a344251d5a8ef51a641e097b97f18319d03a82f1c8de714ad6ddb45`, because `8bc2fbed1`
+(`#10215` / PR `#10509`, merged 2026-11-02T12:22:19Z) amended it: the step set is restated as **all
+eight ACCOUNTED** — seven observed plus the one the record declares conditional. That amendment is
+the same DISCLOSED class of revision the record's §8 change-control protocol covers, but it is
+**post-run**, so the document this run was measured against is `5ff05906…` and **not** `e8b83872…`.
+**The artifact does not STATE this, and the gate CANNOT see it.** The shipped log's machine block
+names the commit it read the record from (`read_from: git show
+9152448d7:docs/evidence/7949-capstone/preregistration.json`), so the difference is one `git show`
+away — but the log asserts no hash of its own, and the gate compares the tree's bytes with the
+tree's record, so each version passes in its own tree. That is why it is stated here instead of
+being left to be inferred.
 
 ---
 
@@ -187,9 +190,14 @@ them.** That log renders, for the capture path's `proj.link_source_to_event` cal
 `tortoise/sdk.py` line 15506, and for `_TURN_WRITE_CYPHER` the number `tortoise/sdk.py` line 2408
 — written here WITHOUT the `file:line` form on purpose, because these are not live cites and must
 not be read as such. At the base it ships from (`9152448d7`) those lines are exactly those symbols;
-at THIS head they are a comment and a different statement, because the `#10215` integration on this
-branch moved `sdk.py` around them. Neither number is a defect and the log is not edited for it — a
-log is the record of what the run rendered — but do NOT follow them as pointers at this head.
+at THIS head they are a **blank line** and a line **inside a docstring**, because six commits merged
+to `main` after the run moved `sdk.py` around them (`a33af140f`, `c833c41cd`, `62e3f2f61`,
+`5028881f8`, `63981d152`, `2180f0054` — `git log 9152448d7..HEAD -- tortoise/sdk.py`). ⛔ **Not
+`#10215` and not this branch:** `8bc2fbed1` touches no `tortoise/` file at all, and neither does
+this PR, so the movers are `main`'s — which is why the symbols now sit at `_TURN_WRITE_CYPHER` and
+the `proj.link_source_to_event` call site instead of at those numbers. Neither number is a defect
+and the log is not edited for it — a log is the record of what the run rendered — but do NOT
+follow them as pointers at this head.
 
 The **SUPERSEDED** `capstone-measured-e0fc940b.log` carried the cites **as-of its own
 stamp**, and those are the numbers listed here — the ones that log rendered, exactly as it
@@ -699,9 +707,15 @@ pins the document by BYTES (`document_sha256`), asserted for **this** bundle by
 `tests/test_capstone_preregistration_9075.py::test_the_real_record_pins_the_real_document` (its
 `PREREG_DIR` is `docs/evidence/7949-capstone`, so an edited registration reds there at any checkout
 depth — the test reads no history), and enforced in the required CI step by the gate's own
-`DOCUMENT_SHA_PIN` arm in `tools/capstone_preregistration_check.py::check_machine_record`. An
-amendment is a NEW linked record — never an edit to the frozen one, which is the `#10463` ruling and the reason a
-silent edit is the failure the gate exists to catch in the first place. Leaving item 2 as the only
+`DOCUMENT_SHA_PIN` arm in `tools/capstone_preregistration_check.py::check_machine_record`.
+⛔ **Scoped, because the record's own change control is narrower than "never edit":** §8 permits a
+post-log change, but only as a RECORDED one — a `## Deviations` entry carrying the date, the original
+value, the new value and the reason, with `document_sha256` re-cut in the SAME commit. That is not
+hypothetical: this record has been amended in place three times after its first cut (`eb9fd644…` →
+`e8a74aaf…` → `5ff05906…` → `e8b83872…`, the last being `8bc2fbed1`), which is what the pin makes
+REVIEWABLE rather than what it prevents. A NEW linked record is the other permitted route (the
+`#10463` ruling this paragraph follows). Either way, the failure the gate exists to catch is the
+SILENT edit. Leaving item 2 as the only
 statement of the rule is the other failure: a lane that reads the authoritative protocol, orders its
 two commits inside one PR exactly as criterion 2 asks, and lands is refused by a requirement the
 registration never states. **This section is the changes record that closes that gap** — item 2 is
@@ -942,8 +956,8 @@ the same lesson (cite the symbol, not the line).
 | S0 READ | `_edus_from_conversation` `:10203` | `stats["edus"]`, `stats["chunks"]` | ✅ |
 | S1 NARRATE | `run_s1` `:10243` | `stats["llm"]["by_stage"]["s1"]`, `story_arc` | ✅ (`story_arc` is off-receipt; `by_stage` carries it) |
 | S2.1 EXTRACT | `run_s2` `:10267` | `by_stage["s2"]`, item counts | ✅ (`embed_list` is off-receipt; `by_stage` carries it) |
-| S2.2 VET | `_run_vet_pass` `:10296` | `result["vet"]` — built at `extractor_v2.py:10586-10590`, copied onto the receipt at the meta fold `sdk.py::_capture_stats_with_step_witness` as `stats["step_witness"]["vet"]` | ✅ reachable (#9116 seam) — and WITNESSED by the shipped post-seam run: `stats["step_witness"]["vet"]` `enabled=true`, `s2={"candidates": 40, "by_outcome": {"KEEP": 40}}` (the SUPERSEDED `e0fc940b5` log is the one that predates the seam) |
-| S2.3 CLASSIFY | `_apply_classify_kinds` `:10312` | `result["classify_later"]` — built at `extractor_v2.py:10576-10582`, copied at the same fold as `stats["step_witness"]["classify_later"]` | ✅ reachable (#9116 seam) — and WITNESSED by the shipped post-seam run: `enabled: true`, `s2 = {"adjudication_calls": 1, "assigned_llm": 7, …}` (`assigned_llm` is the evidence it did work, so this is not an idle pass) |
+| S2.2 VET | `_run_vet_pass` `:10296` | `result["vet"]` — built at `extractor_v2.py:10586-10590`, copied onto the receipt at the meta fold `sdk.py:16250` as `stats["step_witness"]["vet"]` | ✅ reachable (#9116 seam) — the shipped log predates it |
+| S2.3 CLASSIFY | `_apply_classify_kinds` `:10312` | `result["classify_later"]` — built at `extractor_v2.py:10576-10582`, copied at the same fold as `stats["step_witness"]["classify_later"]` | ✅ reachable (#9116 seam) — ⚠️ and on the measured corpus the pass is IDLE (`enabled: true`, empty `s2`/`union`), so it is honestly NOT witnessed |
 | S3 RESOLVE | `search_graph` `:10328` | `result["search"]`, copied as `stats["step_witness"]["search"]` (mode/degraded/queries_run/hits); `stats["search_queries"]`/`stats["search_degraded"]` were already on the receipt | ✅ |
 | S5 CONNECT | `execute_embed` `:10548` (+ `run_s4` `:10349` gap filler) | `stats["s4_merge"]` | ✅ (gap-filler counters) — `capstone_measure.py` uses the graph write + `stats["operator_endpoints_minted"]` |
 | S6 COMMIT | `execute_embed` payload | `result["payload"]`, copied as `stats["step_witness"]["commit"]` (payload_produced + the count the write loop RESOLVED — created or folded onto an existing canonical, so a fully-folded capture reports the folded count, never 0) | ✅ — `capstone_measure.py` additionally reads the committed `:Point` nodes and their `eventId` stamps off the live graph |
