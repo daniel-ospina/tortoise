@@ -760,6 +760,11 @@ def test_the_un_pid_d_claim_refusal_names_its_own_recovery(tmp_path):
         msg = str(exc.value)
         assert "ALREADY LIVE" in msg          # the phrase lanes and tests match on
         assert f"rm {art}" in msg             # the recovery, spelled out
+        # ⛔ And it must not OVERSTATE it: an un-pid'd claim DOES lift when the
+        # named child exits. Only a RECYCLED pid never does — an absolute "nothing
+        # will ever lift it" is the same prose-contradicting-code class as the
+        # comment this round corrected, so the qualifier is pinned too.
+        assert "no CLOCK lifts it" in msg and "RECYCLED" in msg
         # …and `collect` says the same thing where the operator will read it
         st = rd.collect(sd, "o/r", 96)
         assert st.state == rd.WAITING

@@ -990,11 +990,14 @@ def launch(pr: int, *, cwd: Path, state_dir: Path, repo: str | None = None,
             # LIFTS (`collect`'s `SPAWNING` branch has no age bound, by design —
             # an age bound there would `lost` a live rail). So the refusal must
             # name the recovery, or the PR is wedged with a refusal that reads as
-            # fact and no way forward but guessing. `ALREADY LIVE` stays the
+            # fact and no way forward but guessing. The wording is exact: this
+            # claim DOES lift when the named child exits — what no clock lifts is a
+            # RECYCLED pid, which never stops answering. `ALREADY LIVE` stays the
             # leading phrase in BOTH arms: that is what lanes match on.
             hint = ("" if prior.pid else
-                    f" — this claim names no wrapper pid, so nothing will ever lift "
-                    f"it; if that process is not this PR's rail, clear it with: "
+                    f" — this claim names no wrapper pid, so no CLOCK lifts it: "
+                    f"it lifts when that process exits, and a RECYCLED pid never "
+                    f"exits; if it is not this PR's rail, clear it with: "
                     f"rm {prior.artifact}")
             raise Refused(
                 f"a rail is ALREADY LIVE for PR #{pr} (pid {prior.pid}, since "
