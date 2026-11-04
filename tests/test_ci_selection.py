@@ -7636,6 +7636,52 @@ def test_a_detached_note_is_a_claim_no_guard_can_read(tmp_path):
         "what this test documents, and why the map's note is attached to its row")
 
 
+def test_the_9548_rows_note_is_readable_by_the_guard_whatever_its_shape():
+    """#10726 review P2: the MECHANISM is pinned above; this pins the COMMITTED map.
+
+    A synthetic pin proves the reader and the writer agree. It does not notice that
+    the REAL map's note has DETACHED, and that is not hypothetical for this row: its
+    attachment is carried ENTIRELY by the `⛔` that opens the block, because
+    `tools.ci_timing._NOTE_OPENER_RE` (`^(?:#?\\d{3,5}…|[A-Z])`) reads the block's
+    semantic first word — "The CASE COUNT …" — as a NEW note. Drop the emoji in a
+    routine cleanup and the whole note silently stops being read; measured at
+    `2ec1f36d1`, that edit takes the joined note from 2,150 chars to **0**.
+
+    ⛔ NOT `_row_continuation_lines(...) >= 1`. The writer FLATTENS a wrapped note on
+    a CUT or a wholesale replacement, so requiring a committed wrap reds a HEALTHY
+    map — the sibling `tests/test_ci_timing.py::_assert_preamble_shape` refused
+    exactly that clause for that reason (#10575 review, P2). This asserts
+    READABILITY instead, which both healthy shapes satisfy and a detached block does
+    not: the note's LAST line must be reachable in the text
+    `_durations_row_comments` joins. Measured at `2ec1f36d1` — committed: True
+    (2,150 chars); after one `render_refreshed_manifest` (flattened): True (2,150);
+    emoji dropped (detached): False (0).
+    """
+    text = cs.MANIFEST.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    key = "test_9548_record_search_keys_shape.py"
+    block_start = lines.index("durations:")
+    row = next(i for i, ln in enumerate(lines)
+               if i > block_start and ln.startswith(f"  {key}:"))
+
+    block: list[str] = []
+    for ln in lines[row + 1:]:
+        if not (ln[:1] in (" ", "\t") and ln.strip().startswith("#")):
+            break
+        block.append(ln)
+    assert block, (
+        "this row carries no note at all — the note is its rationale, restore it")
+    last_claim = block[-1].strip().lstrip("#").strip()
+    assert last_claim, "the note's last line is an empty comment marker"
+
+    joined = dict(_durations_row_comments(text))[key]
+    assert last_claim in joined, (
+        "the note below this row is DETACHED: its first line OPENS a note of its "
+        "own (`tools.ci_timing._starts_a_new_note`), so `_durations_row_comments` "
+        "never joins it and no duration guard reads what it claims. Start the block "
+        f"with a line that CONTINUES the row's sentence. (joined: {len(joined)} chars)")
+
+
 # ── a row may not state ZERO cases for a file that defines tests ──────────────
 # The instruments disagree on a CLASS-BASED file: `grep -c '^def test_'` reads **0**
 # for every test that lives as a method of a `Test*` class, while the session that
