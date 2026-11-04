@@ -610,3 +610,52 @@ def test_a_non_numeric_max_age_is_a_usage_error_not_a_fail_closed(fixture):
     assert "FAIL-CLOSED" not in r.stderr, r.stderr
     assert "max-age" in r.stderr, r.stderr
     assert fixture.cancelled() == []
+
+
+# ------------------------------------------------------- the documented --self-test verb
+# A self-test spawns a REAL pytest child, so both cases below restrict that child to ONE
+# case through pytest's own documented `PYTEST_ADDOPTS` — the pin must not pay for the
+# whole suite twice (or triple the lane's runtime).
+_ONE_CASE = "-k test_dry_run_is_the_default_and_posts_nothing"
+_ONE_FAILING_CASE = "-k test_current_head_cancel_is_refused"
+
+
+def test_self_test_passes_on_a_host_with_no_database(fixture):
+    """Round-6 finding 2: `--self-test` inherited the environment unchanged, so the
+    repo's SESSION-scoped URI gate (`tests/conftest.py`, epic #1647 P4) failed the whole
+    child session before any case ran, and the tool reported that ENVIRONMENT gate as
+    "the guard's tests failed" on exactly the boxes it runs on. This suite is hermetic,
+    so the child must get the carve-out the documented commands already carry.
+
+    Pre-fix (no `TORTOISE_TEST_CARVE_OUT` passed to the child, and a URI-less env):
+    the child session fails with `default pytest requires TORTOISE_DB_URI` -> non-zero.
+    """
+    r = guard(fixture, "--self-test",
+              env={"TORTOISE_TEST_CARVE_OUT": "",  # falsy spellings do NOT opt in
+                   "TORTOISE_DB_URI": "",
+                   "PYTEST_ADDOPTS": _ONE_CASE})
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "TORTOISE_DB_URI" not in r.stdout + r.stderr, r.stdout + r.stderr
+    assert "1 passed" in r.stdout, r.stdout
+
+
+def test_a_red_self_test_is_70_never_the_post_failure_1(fixture, tmp_path):
+    """Round-6 finding 2, second half: a red suite returned pytest's `1`, which this
+    file's exit table reserves for `1 = the cancel POST failed` — so a caller switching
+    on the exit code could not tell a red suite from a failed cancel.
+
+    The child suite is forced RED without touching the tool: `CI_CANCEL_GUARD_TOOL`
+    points the case at a foil that always exits 0, so `test_current_head_cancel_is_refused`
+    (expecting 3) fails. The carve-out is supplied HERE so this case discriminates the
+    exit-CODE mapping alone — the other case pins the carve-out propagation. Pre-fix: the
+    red child exits 1 and the tool forwards 1.
+    """
+    foil = tmp_path / "foil_guard.py"
+    foil.write_text("#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n")
+    r = guard(fixture, "--self-test",
+              env={"TORTOISE_TEST_CARVE_OUT": "1",
+                   "CI_CANCEL_GUARD_TOOL": str(foil),
+                   "PYTEST_ADDOPTS": _ONE_FAILING_CASE})
+    assert r.returncode == 70, r.stdout + r.stderr
+    assert r.returncode != 1, "a red suite must not look like a failed cancel POST"
+    assert "1 failed" in r.stdout, r.stdout

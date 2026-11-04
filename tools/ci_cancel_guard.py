@@ -65,9 +65,30 @@ Exit: 0 = permitted (and, with --apply, the cancel landed)
       3 = REFUSED (the run may not be cancelled; the reason names which clause)
       2 = FAIL-CLOSED (a surface could not be read; nothing was cancelled)
       1 = the cancel POST failed (nothing is claimed about the run's state)
+     70 = `--self-test` ran and the guard's own suite is RED
      64 = usage error
+
+⛔ Every code above is distinct ON PURPOSE. `1` means "a cancel was attempted and the
+POST failed"; pytest's own `1` ("a case failed") therefore may NOT be returned from
+`--self-test`, or a caller switching on the exit code cannot tell a red suite from a
+failed cancel. `70` is `EX_SOFTWARE` (sysexits) — this tool's own software is wrong —
+and collides with no pytest code either (pytest's `5` is "no tests collected").
 """
 from __future__ import annotations
+
+import sys
+
+# #5128 (same class as every other tools/ entry point): refuse a <3.12 interpreter
+# HERE, before the rest of the imports, so a stale local `python3` fails LOUDLY with a
+# remedy instead of with whichever 3.12-only construct happens to trip first — an
+# unattributed `AttributeError` while the docstring above tells the operator to run it.
+# Exit 70, not 1: `1` means "the cancel POST failed", and `2` is FAIL-CLOSED for an
+# unreadable SURFACE; refusing to run on this interpreter is neither.
+if sys.version_info < (3, 12):  # noqa: UP036 -- intentional RUNTIME guard
+    print(f"tools/ci_cancel_guard.py requires Python >= 3.12 (got "
+          f"{sys.version_info[0]}.{sys.version_info[1]}) -- run it as "
+          f"`uv run python tools/ci_cancel_guard.py`", file=sys.stderr)
+    raise SystemExit(70)
 
 import argparse
 import json
@@ -75,7 +96,6 @@ import math
 import os
 import re
 import subprocess
-import sys
 import time
 from typing import Any
 
@@ -391,6 +411,39 @@ def act(repo: str, run_id: int) -> tuple[int, str]:
     return 0, ""
 
 
+#: `--self-test`'s own failure code (`EX_SOFTWARE`, sysexits). NEVER pytest's `1`: this
+#: tool's `1` means "the cancel POST failed", so a red suite returning it would make a
+#: caller switching on the exit code unable to tell the two apart.
+SELF_TEST_FAILED = 70
+
+
+def _self_test() -> int:
+    """Run this tool's own suite, and report a red suite as ITS OWN exit code.
+
+    ⛔ THE CHILD GETS THE CARVE-OUT, because the suite this spawns is HERMETIC (a stub
+    `gh`, no graph, no DB) while `tests/conftest.py` installs a SESSION-scoped autouse
+    fixture that fails before any case runs when `TORTOISE_DB_URI` is unset and
+    `TORTOISE_TEST_CARVE_OUT` is not opted in (epic #1647 P4). Inheriting the ambient
+    environment unchanged made the documented `--self-test` verb report that ENVIRONMENT
+    gate as "the guard's tests fail" — 40-odd red cases that are not the guard's — on
+    exactly the boxes this tool runs on (round-6 review, P2). The author's own
+    documented commands carry the same opt-in; this makes the built-in verb agree.
+
+    `TORTOISE_DB_URI` is POPPED rather than trusted: this file must not use a database,
+    and leaving a set-but-wedged URI in place would let the #6073 tripwire fail the
+    session, reintroducing the same misattribution from the other direction.
+    """
+    env = dict(os.environ)
+    env.pop("TORTOISE_DB_URI", None)
+    env["TORTOISE_TEST_CARVE_OUT"] = "1"
+    proc = subprocess.run(
+        [sys.executable, "-m", "pytest",
+         str(os.path.join(os.path.dirname(__file__), os.pardir,
+                          "tests", "test_ci_cancel_guard.py")), "-q"],
+        check=False, env=env)
+    return 0 if proc.returncode == 0 else SELF_TEST_FAILED
+
+
 # --------------------------------------------------------------------------- render
 def render(run_id: int, verdict: str, detail: dict[str, Any], elapsed: float,
            applied: bool, post_rc: int | None, post_detail: str,
@@ -451,10 +504,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.self_test:
-        return subprocess.run([sys.executable, "-m", "pytest",
-                               str(os.path.join(os.path.dirname(__file__), os.pardir,
-                                                "tests", "test_ci_cancel_guard.py")), "-q"],
-                              check=False).returncode
+        return _self_test()
 
     if not args.run_id or not args.run_id.isascii() or not args.run_id.isdigit():
         # `isdigit()` alone accepts Unicode digits ('²'), which then blow up in `int()`
