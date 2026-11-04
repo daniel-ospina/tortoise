@@ -160,13 +160,17 @@ Measured 2026-10-31 on `main@eac49c0dd9aababd01016325a34a327481dd006c`.
 > move the numbers is an operator minted over an **already-live** claim — i.e. a
 > **resumed / partial ingest**, which this pre-registered fresh sample contains
 > none of (`ingest_v2` skips a point it already wrote but still writes the
-> operator over it). The only shape the old incident query could not reach at all
-> is an operator with NO `:Point` endpoint whatsoever — not one with no `:Point`
-> *target*: that query matched `(o)-[:IMPL|NAND]->(c:Point)`, and the source is
-> written as an outgoing edge too (`idx:0`), so a promoted draft SOURCE reached
-> it exactly as a target did. `ingest_v2` can mint neither: its operator loop
-> drops any endpoint outside the point set. Treat these cells as pre-fix values
-> until a re-cut says otherwise.
+> operator over it). Note what the old incident query could NOT reach, because it
+> is narrower than "no `:Point` target": that query matched
+> `(o)-[:IMPL|NAND]->(c:Point)`, and the source is written as an outgoing edge too
+> (`idx:0`), so a promoted draft SOURCE reached it exactly as a target did — but
+> a part/whole (`composedOf`/`decomposesInto`/…) operator has `:Point` endpoints
+> reachable through NO such edge, its edges being `hasPart` (`sdk.py:22396`),
+> so the old query could not reach it in any pass, and the new sweep promotes it
+> (as the engine does). `ingest_v2` mints none of these — its operator loop keeps
+> `op_type` to `IMPL`/`NAND` (`ingest_v2.py:401-404`) — so this sample contains
+> neither the part/whole shape nor the resumed-ingest shape. Treat these cells as
+> pre-fix values until a re-cut says otherwise.
 
 > **Line citations below are into the MEASUREMENT commit** —
 > `main@eac49c0dd9aababd01016325a34a327481dd006c`, the tree this run was taken
