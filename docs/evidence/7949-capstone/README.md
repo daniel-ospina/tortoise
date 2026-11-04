@@ -28,11 +28,19 @@ committed in this tree and is read as a file. The SCORED run below is stamped se
 COUNT is deliberately not restated here — it changed twice while this was open, and a stale
 integer in the one paragraph a reviewer bounds the PR by is worse than no integer):
 the bundle itself — `docs/evidence/7949-capstone/**` (this `README.md`, `E1-E5-PROOFS.md`, the
-committed `blocker-states.json`, the scored log `capstone-measured-9152448d.log` that replaces
-`capstone-measured-e0fc940b.log`, and `probes/capstone_measure.py`) and
+scored log `capstone-measured-9152448d.log` — `#10601`'s re-measurement, which replaced a log that
+`main` had already deleted before this branch's base, so that file is named nowhere here as a
+touched one — and `probes/capstone_measure.py`) and
 `tools/capstone_verdict_check.py` with `tests/test_7949_capstone_verdict_check.py` (the V12 arm and
 its pins) plus `tests/test_7949_capstone_measure.py` (the bundle's own claim pins); its registration
 (`config/ci-surfaces.yml` `core`/`tier1`/`durations` arms, `docs/00_index.md`).
+⛔ `blocker-states.json` is deliberately NOT listed: it landed on `origin/main` in `#10601` and this
+branch only READS it. Two commands say so and one does not — `git diff --name-only origin/main...HEAD
+-- docs/evidence/7949-capstone/blocker-states.json` and `git log --no-merges origin/main..HEAD -- …`
+are both empty, while a plain `git log origin/main..HEAD -- …` is NOT: it lists the forward merge
+commit, whose second parent carries the file, so a reader who runs the obvious form sees a hit and
+concludes the claim is false. Named with that distinction because this paragraph has now been
+re-derived twice for this class.
 ⛔ A previous revision of this paragraph named eight files this branch does **not** touch —
 `tools/capstone_preregistration_check.py`, `tests/test_capstone_preregistration_9075.py`,
 `tools/ci_selection.py`, `tests/test_ci_selection.py`, `config/surface-manifest.yml`,
@@ -60,7 +68,7 @@ running end to end."*
 > | **E1** | `after_share <= 0.50 × before_share`, over all `:Object` nodes, floor **30** | this run has no BEFORE arm (one capture cannot decide `after <= 0.5 × before` without confounding the gate with LLM non-determinism); its AFTER arm read **64 `:Object` nodes**, clearing the frozen floor of 30, with a bare-definite share of 14/64 = 0.21875. `#9889` has since produced a before arm on the same frozen corpus, **twice** — **78 Objects / 0.3590** and **69 Objects / 0.5652** against that after arm of **61 Objects / 0.2131** (`docs/evidence/9889/e1-e2-scores.json`) — so the ratio now EXISTS and the two pairings **disagree** (`0.2131 <= 0.1795` FAILS, `0.2131 <= 0.2826` PASSES; the two OFF runs of the SAME arm are 20.6 pp apart). A verdict that flips with which before run you pair against is not decided, so the row stays BLOCKED until **n >= 2 per arm** — the reason is now the pairing, not the floor | ⛔ **BLOCKED** (`#5333`) |
 > | **E2** | E2a `>= 13 of 14` value-bearing units; E2b fused share `<= 0.05` | E2a: the frozen **14-unit** denominator was carried by **no committed artifact** when this log's table was emitted, so the row is BLOCKED and not scored — `#9889` has SINCE committed the census (`docs/evidence/9889/e2a-value-units.json`, `value_units: 14, value_survived: 8`) and the current `probes/capstone_measure.py` scores E1/E2 from `docs/evidence/9889/e1-e2-scores.json` (`E1_E2_SCORES`; the superseded `e1-e2.log` parse path is removed), so a RE-RUN moves this row to **RED 8/14** — its falsifier reaches **14/14** over the same population, so the deficit is retention (`#10360`), not the denominator. That number is deliberately NOT written as this row's verdict: a row moves only by re-running the probe, and that run has not been taken at this head. E2b: **1/114 = 0.008772** | ⛔ **BLOCKED** (`#10360`) |
 > | **E3** | `= 1.000` (zero unanchored), floor **30** derived nodes | **157 / 397 = 0.395466** as registered (this run's own graph, `capstone_measure_9152448d_…`). The `Source->Object` identity link carries no `sourceVersion` BY DESIGN (owner option A, `#5199`), so `:Object mention links` can never anchor and the frozen `= 1.000` is unreachable as registered — the metric needs re-registration (`#9736`, OPEN, owner-gated) | ⛔ **RED** |
-> | **E4** | `= 15 of 15` planted operator edges wired AND persisted | **2 / 15** on the `2026-10-19` receipt, which is on a DIFFERENT corpus (`943a99ec…`) from the frozen one, and whose retrievability rate is UNMEASURED (`#9596`) | ⛔ **RED** |
+> | **E4** | `= 15 of 15` planted operator edges wired AND persisted | **5 / 15** on the **frozen** pin — `select_e4_receipt` chooses by the receipt's own `corpus_hash`, so the `2 / 15` this table shipped until 2026-11-02 (a receipt on `943a99ec…`, a NON-frozen revision) can no longer be selected; the receipt's retrievability rate is UNMEASURED (`#9596`) | ⛔ **RED** |
 > | **E5** | ratio `>= 0.90` **AND** raw absolute `>= 0.80` | ratio **1.0833** (passes) but raw absolute **0.4800** (fails), n = 25 | ⛔ **RED** (S3 selection recovery, `#5087`) |
 >
 > E1's and E2's proxies are printed rather than dropped (E1b 90/90 real facts; E2b 1/114) — and
@@ -245,9 +253,16 @@ run, this lane re-pointed those two attributions (`#8503 → #9596`, `#9738 → 
 explains the move. **No numerator, denominator or verdict was touched — the numbers are the run's.**
 The third is prose in the same class: the E4 note said the mechanism *is* `#8503`, which CLOSED
 2026-10-24 — so the note now states that the closure records E4's DISPROOF (the row's measurement
-record, not a live blocker) and names `#9596` as the residual owner. The log's own
-`POST-RUN CORRECTION` block states all three, the committed probe now EMITS both cells, the E4
-note sentence and the E5 tail so a re-run reproduces the file instead of contradicting it, and two pins in
+record, not a live blocker) and says the planted-edge residual is UNOWNED — `#9596`,
+which is the row's live blocker pointer and the receipt's unmeasured retrievability
+rate, owns a DIFFERENT gap, and a later correction to the note says so. The log's own
+`POST-RUN CORRECTION` block states all three AND the second correction to the third, and the
+committed probe now EMITS both cells, the E4
+note sentence and the E5 tail. ⛔ It does **NOT** follow that a re-run reproduces this file: since
+`#7949`'s selector the committed probe reads the receipt ON the frozen pin, so a re-run at this tree
+scores E4 at **5/15** from `w2b-operator-2026-10-24-8503-b.json` and writes a NEW
+`capstone-measured-<head>.log` — it SUPERSEDES this one, which is the bundle's documented rule. Two
+pins in
 `tests/test_7949_capstone_measure.py` (`…blocker_cells_are_the_emitters_own`,
 `…discloses_what_the_run_did_not_emit`) RED if the artifact and its emitter diverge again or if the
 disclosure disappears. This was found in review and is recorded rather than absorbed: a cell edited
@@ -504,15 +519,55 @@ corpus_hash=sha256:943a99ec619b4c67b8e31fefb90316ea023bbaddd1905d835b9d930243518
 judge_pin=w2-write-path-mechanical-v2  verdict=regression  failure_origin=gate_regression
 ```
 
-⇒ **E4 = 2/15, RED.** Two provenance facts a reader needs, both stated in the log rather than
+⇒ **E4 = 2/15 on `943a99ec…`** — the receipt above is kept as the SHIPPED LOG's record, and it
+was NOT measured on the frozen corpus.
+
+⛔ **SUPERSEDED as the row's artifact (2026-11-02).** This receipt's `corpus_hash` is not the
+frozen `fixtures_hash`, so the row above was a measurement of a different corpus revision — on
+code that predates `#8503`'s own measurement work. ⛔ Not "before `#8503`'s fix" — there is no such
+fix: `#8503` CLOSED 2026-10-24 as a **DISPROOF**, and its own body closes with *"No open issue owns
+it."* `probes/capstone_measure.py` now selects E4's receipt **by its
+own `corpus_hash`** (`select_e4_receipt`): the newest receipt on the frozen pin wins, and no match
+REFUSES instead of falling back. Three receipts on the frozen pin (`w2b-operator-2026-10-24-8503-{preleg,a,b}.json`
+— `#8503`'s OWN measurement receipts, dated `2026-10-24T05:46:51Z`/`06:03:47Z`/`06:10:47Z`, i.e.
+**14.66–15.06 h** BEFORE that issue's `closedAt` of `2026-10-24T20:50:13Z` (re-derived from the
+receipts' own `date` fields against the tracker), so they are not "after its fix" either) read
+**5/15**, with `content_ok` 11–13 and `operators_total` 29–33 across the
+three (the row reads `b`: `content_ok=11`, `operators_total=33`, commit `a999be41e`).
+So **E4 is 5/15, still RED** against the 15/15 bar. The verdict did not move; the number did, and
+it is now a measurement of the pre-registered corpus. The scored log below keeps its 2/15 because
+a superseded run is replaced by RE-RUNNING the probe, not by editing the log it wrote.
+
+Two provenance facts a reader needs, both stated in the log rather than
 smoothed over: the FILE postdates the pre-registration (added 2026-10-22) but the MEASUREMENT
 does not (`date=2026-10-19T01:39:26Z`), and its `corpus_hash` is **not** the frozen
-`fixtures_hash`. The row is therefore a non-green measurement on **its own** corpus revision,
-and the gate (V7) requires that digest to appear in the cited artifact — a declaration the
-artifact does not record is a finding. The mechanism is #8503 — **CLOSED 2026-10-24**, and that closure
-records the *disproof*, so `#8503` is this row's **measurement record, not a live blocker** —
-and the residual owner is **`#9596`**: the planted edges are not formed at all, and the
-receipt's retrievability rate is unmeasured.
+`fixtures_hash`. **The shipped log's row** is therefore a non-green measurement on **its own**
+corpus revision (`943a99ec…`), and the gate (V7) requires that digest to appear in the cited
+artifact the row declares — which is why *that* row carries `artifact_corpus_sha256`. The
+**current** row does not take that arm: it is selected BY the frozen pin, so its
+`corpus_sha256` IS the log's corpus and V7's short-circuit applies to it (§*The gate: two
+questions, two exits* states which arm each row takes). The mechanism is #8503 — the planted
+edges are largely unformed: **2 of 15** on the shipped log's `943a99ec…` receipt and **5 of 15**
+on the current row's frozen-pin one, which is why both are RED against the 15/15 bar; the
+receipt's retrievability rate is unmeasured (#9596).
+
+⚠️ **The frozen record still publishes the pre-fix figure for E4, and is deliberately NOT
+edited.** `PRE-REGISTRATION.md` §10.3 says *"E4 is not amended"*, scores it at **2 of 15**, and
+closes with *"its row are unchanged"*; `preregistration.json`'s
+`criteria[E4].post_registration_measurement` still hands a machine consumer `edge_correct=2 of 15
+… so it measures its own corpus revision`. Both sentences are scoped to the PRE-FIX artifact —
+the `w2b-operator-2026-10-19.json` receipt on corpus `943a99ec…` and the log that read it — so
+neither is a false statement about the thing it names. (The log itself is gone: `#10601`
+re-measured the table and replaced `capstone-measured-e0fc940b.log` with
+`capstone-measured-9152448d.log`, which still renders E4 as 2/15 because it was written before
+this selector existed.) What is not true of it is the conclusion a reader draws: the record is the
+one file a consumer reads without a human in the loop, and it now disagrees with the row this
+bundle publishes while carrying no pointer to the selector. It is **not** silently edited:
+`preregistration.json` pins the document by BYTES (`document_sha256`), and the `#10463` ruling
+recorded further down this bundle says an amendment is a **NEW linked record, never an edit to
+the frozen one**. This section is that changes record — read the record's E4 figure as *that
+log's*, read the row's as **5/15 via `select_e4_receipt`**, and treat the §10.3 sentence about
+"its row" as true of the log it names and not of the row the probe now builds.
 
 ## E5 — the falsifier, re-scored against this commit's gold
 
@@ -753,11 +808,15 @@ force the second answer to be read as the first — which is the exact inference
 stop.
 
 **One gate change shipped with this run, and it only ever ADDS a check.** V7 used to require every
-measured row's `corpus_sha256` to equal the log's corpus. This table cannot satisfy that honestly:
-E4 cites an operator receipt measured on *another* corpus revision, and before `#9889` so did
-E1/E2 (they now measure the FROZEN corpus and need no declaration; E4's record says so for itself).
-Refusing those rows would hide the only numbers they have;
-accepting them on the row's word would let any red row name any corpus. So a **non-green** row may
+measured row's `corpus_sha256` to equal the log's corpus. The shipped table cannot satisfy that
+honestly: E1/E2 cited `#9076`'s arm run, which measured a *different* corpus revision, and E4 cited
+an operator receipt measured on another revision too. **Both now measure the FROZEN corpus** —
+E1/E2 because `#9889` re-scored them there (their records say so), E4 because `select_e4_receipt`
+chooses its receipt BY the frozen pin, so its row carries the run's own corpus. So the table a run
+builds TODAY takes the declaration on no row — while the SHIPPED log's E1/E2/E4 rows still carry
+it, which is exactly what keeps the arm live: a red row on a genuinely other revision must still
+be able to say so. Refusing those rows would hide the only numbers they have; accepting them on
+the row's word would let any red row name any corpus. So a **non-green** row may
 declare `artifact_corpus_sha256`, and V7 then requires (a) it equals the row's own
 `corpus_sha256`, (b) that digest **appears in the cited artifact's text**, and (c) the row's note
 says so. A **GREEN** row never takes that path: it must still equal the log's corpus exactly. The
@@ -804,8 +863,10 @@ completed run, asserts a live cause — that is what V12 checks.
 
 **Two ATTRIBUTIONS were corrected, and no number was touched.** Re-measuring moves the numbers; it
 does not re-point a blocker, so the two rows whose cited issue had closed were re-attributed to the
-issue that owns the residual **now** — E4 `#8503` → **`#9596`** (the receipt's retrievability rate is
-UNMEASURED, which E4's own note already named), E5 `#9738` → **`#5087`** (raw recovery 0.4800 against
+only OPEN issue their artifact still has — a blocker POINTER, not an ownership claim on the residual
+(which is unowned: `#8503` says so itself, and E4's note now says so too). E4 `#8503` → **`#9596`**
+(the receipt's retrievability rate is UNMEASURED, which E4's own note already named), E5 `#9738` →
+**`#5087`** (raw recovery 0.4800 against
 the 0.80 floor is S3 selection recovery; `#9738` closed on its own §10 *record* correction, which is
 not a measurement of this number). `probes/capstone_measure.py` carries the same two constants so the
 next run emits them. Every NUMBER in the table below is the run's own, at `9152448d7`.
@@ -835,7 +896,8 @@ witnessed steps is printed — an honest finding for `#7949`, never a guess.
   model anchors, and the bar is **still** not reached (`148/383 = 0.38642`, §10.1) — #9736 remains
   the owner-gated attribution of the residual.
 - **No E4 edge denominator of our own.** E4's number is the committed operator receipt's
-  (`2/15`), whose corpus revision is not the frozen one; the run's own operator-shaped
+  (`5/15` on the frozen pin since the artifact is selected by its `corpus_hash`; `2/15` was the
+  pre-`#8503` receipt on another revision); the run's own operator-shaped
   relationships (`IMPL=65 INPUT=68 NAND=14` — the log's `step S5`
   line carry the same three numbers) are a *step witness*, not the 15-edge gold.
 - **Nothing about E5's population reconciliation.** The instrument's `n` is 25 bound qualifiers;
@@ -1005,7 +1067,7 @@ gated the pass off, or the stage produced nothing.
 |---|---|
 | `#9075` pre-register the corpus/split/scoring | **CLOSED COMPLETED** — landed `a6085af84` (#9507); the record is in this directory and G0 reads it |
 | `#9076` E1+E2 on one run | **CLOSED COMPLETED** — its artifact is `e1-e2.log`, and the rows above show why it is not scorable against the frozen bars |
-| `#9077` E4 on the real extraction leg | **CLOSED COMPLETED** — its receipt is cited by E4 (`2/15`) |
+| `#9077` E4 on the real extraction leg | **CLOSED COMPLETED** — it built the real-extraction leg, and the receipt E4 used to cite (`w2b-operator-2026-10-19.json`, `2/15`) is ITS artifact, on a different corpus revision. The frozen-pin receipts E4 now selects (`5/15`) are **not** `#9077`'s: they landed with `#8503`/`#9873` (`2cba48d3c`), which is the provenance §E4 above and `E1-E5-PROOFS.md` both state |
 | `#5199` the version anchor stops at Points | **CLOSED COMPLETED** — the anchor is on the derivation link by design; #9736 owns the metric contradiction that leaves behind |
 | `#7947` the raw-vs-narrative measurement | **CLOSED COMPLETED** — E5 re-scores its arms |
 | `#9116` the capture receipt's step surface | **LANDED** — this PR's seam copies each stage's own facts onto `stats["step_witness"]`, so `capture_session`'s receipt now names all eight; `S2.2` is witnessed by any post-seam re-run, and `S2.3` is WITNESSED by this one — the shipped log's `step S2.3 WITNESSED` line carries `assigned_llm: 7`, so the classify pass is NOT idle on this corpus (`#10215` restated V5/G5 as all-eight-accounted, and this run is 8/8 witnessed) |
@@ -1013,7 +1075,7 @@ gated the pass off, or the stage produced nothing.
 | `#9738` E5's disclosure and population reconciliation | **CLOSED** `2026-11-02T08:53:06Z` — it closed on its own §10 *record* correction (PR `#10525`), which is not a measurement of E5's number. The residual is S3 selection recovery, owned by **`#5087`** (OPEN): raw absolute `0.4800` against the `0.80` floor |
 | `#5333` may any pass remove/relocate an Object (owner ruling) | **OPEN** — E1's blocker (the mechanism that must move the share) |
 | `#10360` nothing enforces the state-value guarantee on the write path | **OPEN** — E2's blocker (the render half is closed: PR `#10382` on `#9775`) |
-| `#8503` the planted operator edges are not formed | **CLOSED** `2026-10-24T20:50:13Z` — it was E4's `blocked_by` and closed nine days before this bundle noticed. The residual is the receipt's retrievability, owned by **`#9596`** (OPEN) |
+| `#8503` the planted operator edges are not formed | **CLOSED** `2026-10-24T20:50:13Z` — it was E4's `blocked_by` and closed nine days before this bundle noticed. Its residual is the UNFORMED PLANTED EDGES, and **no open issue owns it** (`#8503` says so itself) — the receipt's unmeasured retrievability is a DIFFERENT gap, `#9596`, and is E4's blocker POINTER rather than this residual's owner |
 | `#9596` the operator receipt's retrievability is unmeasured | **OPEN — E4's blocker** (re-attributed from the closed `#8503`, `2026-11-02`): the receipt's retrievability rate is UNMEASURED, which E4's own note already named |
 
 A **scored** row moves to a different verdict only by RE-RUNNING the probe, never by reading an

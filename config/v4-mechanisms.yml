@@ -137,6 +137,21 @@
 # other citations are then UNMARKED prose. That is the stated limit, not an
 # omission — a discipline, not a verdict.
 #
+# ⭐ THE DECLARATION SITE CARRIES THE STATE, and that is what makes an absence
+# VISIBLE where the design is read. A marker is
+# `<!-- v4-mechanism: <id> state: <state> -->`, and
+# `declaration_state_errors()` in the gate fails closed when a marker states no
+# state, states one the registry does not support, or states a DIFFERENT one than
+# this file records — in either direction. Without that field the registry is the
+# only place the verdict lives, and #10636 is the measured case: it correctly
+# dropped `span_link` to `not-implemented` HERE while
+# `EXTRACTOR-V4-ARCHITECTURE.md` §2.4.1 rule 1 went on reading *"Every committed
+# `Point`/`Object` must carry a reachable link to its `Source` span"* with nothing
+# at the site saying the every-point half is unbuilt. A lane that read the design
+# (which is how this issue was twice believed done) met an adopted requirement.
+# The state marker is the same fix one level out: the document says, where it
+# declares the mechanism, whether the code has it.
+#
 # ⭐ MEMBERSHIP IS A GATE, NOT A HAND-PINNED TUPLE. Seven rows came from #5064's
 # own O/I/T indicator (1) — `vet`, `source_dedup`, `near_dup_merge`, `span_link`,
 # `embed_gate`, `sufficiency_router`, `fanout_cap`; `state_value_carve_out` came from the
@@ -150,7 +165,8 @@
 # ⚠️ That is the whole point of the exercise: a hand-written list cannot prove it
 # is complete, which is how a declared mechanism (this one) stayed unregistered
 # while the seven-entry gate stayed green. So every mechanism this registry knows
-# about carries a `<!-- v4-mechanism: <id> -->` marker in each scanned document
+# about carries a `<!-- v4-mechanism: <id> state: <state> -->` marker in each
+# scanned document
 # (`docs/architecture/**/*.md`, recursive) that its row names, and
 # `membership_errors()` in the gate fails closed in BOTH directions — a marker
 # with no row, and a row with no marker — AND holds each row to its OWN declared
