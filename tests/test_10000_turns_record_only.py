@@ -3293,6 +3293,17 @@ def test_a_captured_session_source_keeps_the_transcript_out_of_summary(sdk):
     The needle is the FIRST substantive utterance on purpose: that is exactly the
     slice `_session_source_metadata` picks, so a needle anywhere else would make
     this test green for the wrong reason.
+
+    ⚠️ DELIBERATE OVERLAP with
+    `tests/test_5097_capture_source_replay.py::test_the_capture_summary_is_never_on_the_node_and_never_on_the_carrier`,
+    and both are kept on purpose — they are complementary, not duplicates. That
+    pin asserts KEY ABSENCE on the shared `CONV` fixture as part of the 5097
+    whole-bag parity contract (`derived == replay(journal)`); this one asserts the
+    property by CONTENT NEEDLE on a capture it makes itself, and carries the
+    `_searchText` non-vacuity arm that makes the absence MEAN something. A key
+    pin cannot see a capture whose derivation stopped running; a needle pin
+    cannot see the key renamed. ⛔ Neither assertion was relaxed to make the other
+    pass.
     """
     needle = "the first utterance that must not become node prose"
     out = sdk.capture_session(

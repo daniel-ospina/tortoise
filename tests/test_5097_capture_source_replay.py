@@ -255,6 +255,19 @@ def test_the_capture_summary_is_never_on_the_node_and_never_on_the_carrier(captu
     still carries the text. That is what makes this an absence of the RAW TIER
     rather than a lost value: the derivation still runs, the session is still
     findable, and removing `_searchText` too would be a #3518/D10 **reopen**.
+
+    ⚠️ DELIBERATE OVERLAP with
+    `tests/test_10000_turns_record_only.py::test_a_captured_session_source_keeps_the_transcript_out_of_summary`,
+    and both are kept on purpose. This one asserts KEY ABSENCE on the shared
+    `CONV` fixture, so it belongs to THIS file's whole-bag parity contract
+    (`derived == replay(journal)`, `_bag_diff`); the #10000 pin asserts the same
+    property by CONTENT NEEDLE on a capture it makes itself, with a
+    `_searchText` non-vacuity arm and the `SourceCreated` queue read from its own
+    log. Neither subsumes the other — the needle pin cannot see a renamed key,
+    this one cannot see a capture whose derivation silently stopped running —
+    and this file's contract must not depend on a pin in an unrelated suite to
+    stay honest. ⛔ No pin was weakened to create the overlap: neither assertion
+    above was relaxed when the two landed together.
     """
     _sdk, log_path = captured
     record = _carrier(log_path)

@@ -16296,6 +16296,24 @@ class TortoiseSDK:
         caller-settable) while replay kept it, which is the same live != replay
         class in the other direction (measured in review).
 
+        ⚠️ DEPARTURE FROM A RECORDED DECISION — and where its authority lives.
+        This is NOT a cleanup, and it must not be read as one.
+        ``docs/architecture/STORAGE-ARCHITECTURE.md:527`` (§9.1) states *"summary/
+        title stay on the node — they are §4.4 metadata, not the prose"*, and
+        ``:687`` (§9.5/Q3, the DOCUMENT fields) keeps ``summary`` among the KEPT
+        properties. The §9.1 sentence's PREMISE is what fails for this writer:
+        the value derived here is the transcript's first substantive utterance —
+        PROSE, not authored §4.4 metadata — so keeping it on the node is the
+        placement §9.1/D1 forbids, while removing it departs from the sentence
+        above. That makes the removal a deliberate departure, which may only be
+        adopted once the owner's ruling is recorded as an ``OVERRIDES:`` line ON
+        #10000 (AGENTS.md: the marker goes on the issue a lane reads, not only in
+        this comment). ⛔ READ THE REMOVAL AS PENDING, NOT AS SETTLED: the ruling
+        is requested on #10000 and until it lands, `:527` still reads as if
+        nothing were decided. Nothing else in the tree moves either way — a
+        caller-authored ``summary`` (``create_source``), ``update_entity`` and a
+        DOCUMENT's authored ``summary`` keep their own writers untouched.
+
         #4911: the transcript is SCRUBBED before anything is derived from it or
         persisted. The derived metadata is the session's own turn text, so
         redacting only the turn Points would have left the SAME credential in

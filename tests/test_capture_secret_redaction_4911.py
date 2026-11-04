@@ -231,20 +231,45 @@ def _stored(sdk: TortoiseSDK, session_id: str) -> dict[str, str]:
     return {r[0]: (r[1], r[2]) for r in rows}
 
 
+def _session_source_fields(sdk: TortoiseSDK, session_id: str) -> dict[str, str]:
+    """The three turn-derived fields, un-joined, so a pin can assert each one.
+
+    Returns ``{"summary": …, "topics": …, "_searchText": …}`` with ``None``
+    normalised to ``""`` (and ``topics`` flattened to a space-joined string).
+    """
+    rows = sdk._get_proj().g.query(
+        "MATCH (s:Source {url:$u}) RETURN s.summary, s.topics, s._searchText",
+        params={"u": f"session:{session_id}"}).result_set
+    assert rows, f"no :Source materialized for session:{session_id}"
+    summary, topics, search_text = rows[0]
+    return {"summary": summary or "",
+            "topics": " ".join(topics or []),
+            "_searchText": search_text or ""}
+
+
 def _session_source_blob(sdk: TortoiseSDK, session_id: str) -> str:
     """Every turn-derived string the capture persists on the session `:Source`.
 
-    The Source's `summary`/`topics` ARE turn text — the first "substantive
-    utterance" and the six most frequent content words — so a scrubber that
-    only covered the turn `:Point`s left the same credential in the same graph
-    one property over.
+    The Source's derived metadata IS turn text — the first "substantive
+    utterance" (`summary`, until #10000 §9.1/D1 stopped this writer storing it),
+    the six most frequent content words (`topics`) and the FTS field
+    (`_searchText`, where that utterance now lives) — so a scrubber that only
+    covered the turn `:Point`s left the same credential in the same graph one
+    property over.
+
+    ⛔ ALL THREE ARE STILL READ, and `summary` is read on purpose. After §9.1/D1
+    it is *always* absent on a captured session, so it contributes nothing to the
+    blob today — but keeping it here means a writer that puts the utterance back
+    in `summary` reddens these pins instead of slipping past them. Dropping it
+    because "it is empty now" is the edit that lets the prose return unseen.
+    ⚠️ `_searchText` is the SINK THAT CARRIES THE TEXT NOW, so a blob that read
+    only `summary`/`topics` would have kept these pins green while the credential
+    landed on the node's searchable field (the coverage #10000 removed from
+    `summary` had to move here, not vanish) — and the caller asserts the field is
+    actually POPULATED, so the extra arm cannot be a vacuous empty string.
     """
-    rows = sdk._get_proj().g.query(
-        "MATCH (s:Source {url:$u}) RETURN s.summary, s.topics",
-        params={"u": f"session:{session_id}"}).result_set
-    assert rows, f"no :Source materialized for session:{session_id}"
-    summary, topics = rows[0]
-    return (summary or "") + " " + " ".join(topics or [])
+    fields = _session_source_fields(sdk, session_id)
+    return " ".join(fields.values())
 
 
 def _session_redactions(sdk: TortoiseSDK, session_id: str):
@@ -278,10 +303,24 @@ def test_every_credential_shape_is_redacted_end_to_end(sdk, monkeypatch):
             f"{case}: expected the visible marker for {kind}, got {content!r}")
         # The rest of the turn is untouched — this is a replacement, not a cut.
         assert "leaked value: " in content and "(please rotate)" in content
-        # The OTHER persistence sink on the same write: the session `:Source`
-        # derives its summary/topics from the same turn text.
+        # The OTHER persistence sinks on the same write: the session `:Source`
+        # derives `topics` and `_searchText` from the same turn text (and
+        # `summary` too, until #10000 §9.1/D1 stopped this writer storing it).
         assert value not in _session_source_blob(sdk, sid), (
             f"{case}: the {kind} VALUE survived into the session :Source")
+
+    # ── non-vacuity for the arm above: the field that now carries the text is
+    # actually POPULATED. After §9.1/D1 `summary` is always absent, so if
+    # `_searchText` were empty too the Source half of this loop would be
+    # asserting absence against `topics` alone — i.e. green for the wrong reason.
+    fields = _session_source_fields(sdk, sid)
+    assert fields["_searchText"].strip(), (
+        "the session :Source carries no `_searchText`, so the Source half of the "
+        "loop above is vacuous — `_searchText` is where #10000 §9.1/D1 left the "
+        "derived text (#3518/D10), and it must still be written")
+    assert fields["summary"] == "", (
+        "the session :Source carries a `summary` again — raw turn text on the "
+        f"graph (§9.1/D1): {fields['summary']!r}")
     assert res["capture_redactions"] == len(CASES)
 
 
@@ -290,10 +329,10 @@ def test_a_multipart_credential_is_not_left_in_the_source_as_fragments(
     """The sentence segmenter splits a JWT and rejoins it with SPACES.
 
     ``_session_llm_transcript`` runs the conversation through ``extractor._SENT``
-    and flattens newlines before the Source derives its summary/topics, so a
+    and flattens newlines before the Source derives its metadata, so a
     scrubber applied to the ASSEMBLED transcript can never see a JWT: the
     segmenter splits it on its dots and the three fragments — still a usable
-    key when concatenated — land in ``Source.summary``/``topics`` while the
+    key when concatenated — land in ``Source._searchText``/``topics`` while the
     receipt reports a redaction. Redacting per turn, before assembly, is what
     closes it; this asserts the FRAGMENTS, not just the contiguous value.
     """
