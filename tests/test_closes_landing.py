@@ -962,6 +962,83 @@ def test_no_module_level_constant_is_DEAD_because_a_dead_one_reads_as_live():
         f"name whose comment can claim it is the live mechanism (#10634 review P3)")
 
 
+def _module_scope_bound_names(tree: ast.Module) -> list[tuple[str, int]]:
+    r"""Every `(name, lineno)` the REBIND guard treats as a module-scope BINDING.
+
+    The enumeration IS the guard's scope claim: each branch below names a form this
+    function collects, so the docstring that advertises the scope cannot drift from
+    the walk (#10703 review, ISSUE 1). Only `tree.body` is visited — a `for` or
+    `with` inside a function binds in THAT scope and is not a module rebind.
+    """
+    bound: list[tuple[str, int]] = []
+
+    def _from_target(target: ast.expr) -> list[str]:
+        # `A, B = …` / `A, *rest = …` bind every Name inside the target, not a
+        # `Tuple` node — the iterable side of a `for` is a different node entirely.
+        if isinstance(target, ast.Name):
+            return [target.id]
+        if isinstance(target, ast.Starred):
+            return _from_target(target.value)
+        if isinstance(target, (ast.Tuple, ast.List)):
+            return [name for elt in target.elts for name in _from_target(elt)]
+        return []
+
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            bound.extend((name, node.lineno) for t in node.targets for name in _from_target(t))
+        elif isinstance(node, (ast.AnnAssign, ast.For, ast.AsyncFor)):
+            # An annotated target, a `for` target and an `async for` target are each a
+            # single target expression, so they share this branch.
+            bound.extend((name, node.lineno) for name in _from_target(node.target))
+        elif isinstance(node, (ast.With, ast.AsyncWith)):
+            for item in node.items:
+                if item.optional_vars is not None:
+                    bound.extend((name, node.lineno) for name in _from_target(item.optional_vars))
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                if alias.name == "*":  # a star import binds no name this walk can name
+                    continue
+                # `import a.b` binds `a`; `as c` binds `c` instead.
+                bound.append((alias.asname or alias.name.split(".")[0], node.lineno))
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bound.append((node.name, node.lineno))
+    return bound
+
+
+def _UNMODELLED_module_scope_binders(tree: ast.Module) -> list[tuple[str, int]]:
+    r"""Module-scope names bound through a form `_module_scope_bound_names` does NOT collect.
+
+    A residual that is only written down is invisible: this RETURNS the gap so the
+    guard can red on it, which is the difference between "we chose not to model
+    `match` captures" and "nothing here binds through one, and the day something
+    does we are told". Class/function/lambda bodies are skipped — they are other
+    scopes; only the module body's own statements are inspected.
+    """
+    found: list[tuple[str, int]] = []
+    other_scope = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
+
+    def _visit(node: ast.AST) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, other_scope):
+                continue
+            if isinstance(child, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)) and child.name:
+                # `except … as name` and a `match` capture both bind `name`; the walk
+                # models neither, so returning them keeps the residual measurable.
+                found.append((child.name, child.lineno))
+            elif isinstance(child, ast.MatchMapping) and child.rest:
+                found.append((child.rest, child.lineno))
+            elif isinstance(child, ast.NamedExpr) and isinstance(child.target, ast.Name):
+                found.append((child.target.id, child.lineno))
+            elif isinstance(child, ast.TypeAlias):  # PEP 695 `type X = int` (3.12+)
+                found.append((child.name.id, child.lineno))
+            _visit(child)
+
+    for statement in tree.body:
+        if not isinstance(statement, other_scope):
+            _visit(statement)
+    return found
+
+
 def test_no_module_level_name_is_REBOUND_because_the_second_copy_wins():
     r"""#10703 review, ISSUE 1. `_LIST_MARKER_RE` was defined TWICE at module scope
     (identical patterns), introduced by the integration merge that also left a
@@ -972,13 +1049,30 @@ def test_no_module_level_name_is_REBOUND_because_the_second_copy_wins():
 
     ⚠️ Neither existing guard could see it: `test_no_module_level_constant_is_DEAD`
     only flags an uppercase name that is NEVER loaded (`_LIST_MARKER_RE` is loaded
-    at both `_fence_candidate` call sites). `ruff F811` DOES own most of this class
-    and is what actually found the working-tree duplicate below — it reds a
-    redefined `def` / `class` / `import` / `with … as` target — but it is silent on
-    a REASSIGNED plain assignment target (`X = 1` … `X = 2`) and on a module-level
-    `for` / tuple-unpack target, all measured with ruff 0.16.4 on this repo's
-    `E,F,B,UP,I,SIM,RUF` set. So this guard covers the assignment-target forms and
-    the three definitions; `ruff` covers the rest of the class.
+    at both `_fence_candidate` call sites). Lint does not close the class either, and
+    the measurement is the reason this scan exists rather than a lint deferral:
+    `ruff F811` (ruff 0.16.4, this repo's `E,F,B,UP,I,SIM,RUF` set) reds a duplicated
+    `import` and a redefined `def` / `class`, and is SILENT on every other module
+    binder this pair of files can hold — a plain reassignment (`X = 1` … `X = 2`), a
+    tuple/list/starred-unpack target, a top-level `for` target, and a `with … as`
+    target all pass. That is what the rule says it does: F811 flags a redefinition of
+    an unused DEFINITION, and "plain reassignments … remain unflagged"
+    (<https://docs.astral.sh/ruff/rules/redefined-while-unused/>).
+
+    So `_module_scope_bound_names` below collects EVERY module-scope binder form this
+    pair of files can hold, instead of assigning the uncovered half to lint:
+    `Assign` / `AnnAssign` targets — bare names, the names inside a tuple/list
+    unpack, and a `*rest` element — top-level `for` / `async for` targets, top-level
+    `with` / `async with` `as` targets, `import` / `from … import` bindings, and
+    `def` / `class` names. The claimed scope and the walk are the same enumeration in
+    one place, and `test_the_REBIND_guard_DETECTS_a_duplicate_in_EVERY_form_it_collects`
+    proves each form is DETECTED rather than listed.
+
+    ⚠️ The forms the walk does NOT collect — `except … as` names, `match` captures, a
+    module-scope `:=`, and a PEP 695 `type` alias — are not merely written down here:
+    `_UNMODELLED_module_scope_binders` measures them on both scanned files and the
+    assertion below reds the moment one appears, so a gap cannot open silently while
+    the docstring keeps saying the class is watched.
 
     ⚠️ BOTH SCOPES ARE SCANNED, and the second one is not a nicety: while resolving
     the #10703 forward merge of `origin/main`, the conflicted WORKING TREE carried
@@ -996,19 +1090,15 @@ def test_no_module_level_name_is_REBOUND_because_the_second_copy_wins():
     """
     seen: dict[Path, dict[str, list[int]]] = {}
     for source in (MODULE_PATH, Path(__file__)):
+        tree = ast.parse(source.read_text())
+        unmodelled = _UNMODELLED_module_scope_binders(tree)
+        assert not unmodelled, (
+            f"{source.name} binds module-scope name(s) through a form the rebind scan "
+            f"does not collect {sorted(unmodelled)}: extend `_module_scope_bound_names` "
+            f"rather than leaving that form unwatched (#10703 review)")
         per_file: dict[str, list[int]] = {}
-        for node in ast.parse(source.read_text()).body:
-            if isinstance(node, ast.Assign):
-                targets = node.targets
-            elif isinstance(node, ast.AnnAssign):
-                targets = [node.target]
-            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                targets = [ast.Name(id=node.name)]
-            else:
-                continue
-            for target in targets:
-                if isinstance(target, ast.Name):
-                    per_file.setdefault(target.id, []).append(node.lineno)
+        for name, lineno in _module_scope_bound_names(tree):
+            per_file.setdefault(name, []).append(lineno)
         seen[source] = per_file
     # A scan that finds nothing proves nothing — this asserts the guard MEASURES.
     total_bindings = sum(len(per_file) for per_file in seen.values())
@@ -1025,6 +1115,80 @@ def test_no_module_level_name_is_REBOUND_because_the_second_copy_wins():
         f"wins at import, so the first is dead code that reads as live (#10703 review). "
         f"Each entry is `<file>:<name>` — the two files are SEPARATE namespaces, so the "
         f"same name in each is not a rebind and is never reported as one.")
+
+
+def test_the_REBIND_guard_DETECTS_a_duplicate_in_EVERY_form_it_collects():
+    r"""#10703 review, ISSUE 1 — the guard above is only worth its docstring if each
+    form it CLAIMS is a form it actually reds on.
+
+    The review's finding was a scope claim wider than the walk: the paragraph named
+    the assignment-target forms and the three definitions, then handed "the rest of
+    the class" to `ruff`, which measured SILENT on a module-level `for` target, a
+    tuple-unpack target, a plain reassignment and a `with … as` target (ruff 0.16.4,
+    this repo's rule set). A maintainer who trusted that sentence could add a second
+    `_A, _B = _parse(x)` and leave the guard green — the exact "second binding wins,
+    the copy you read is dead" class this test exists to close.
+
+    ⚠️ Non-vacuity by EXECUTION, not by reading the branches: each case appends a
+    second binding of the same name to the REAL module text and re-parses, so the
+    detection is proved against the file the guard runs on. Pre-fix — the walk that
+    collected only `Assign`/`AnnAssign` bare `Name` targets and the three
+    definitions — the `for`, `with as`, tuple-unpack and import cases report NOTHING
+    and this test reds; that is the measurement that makes it non-vacuous.
+
+    The negative control matters as much: the same duplicate INSIDE a function body
+    is a local rebind in another scope, and a walk that reds on it would fire on code
+    this tree legitimately contains. Both directions are asserted.
+    """
+    module_text = MODULE_PATH.read_text()
+    # label -> (snippet appended to the real module, names that MUST come back doubled)
+    cases: dict[str, tuple[str, tuple[str, ...]]] = {
+        "plain reassignment": ("_PROBE = 1\n_PROBE = 2\n", ("_PROBE",)),
+        "annotated reassignment": ("_PROBE: int = 1\n_PROBE: int = 2\n", ("_PROBE",)),
+        "tuple unpack": (
+            "_PROBE_A, _PROBE_B = (1, 2)\n_PROBE_A, _PROBE_B = (3, 4)\n",
+            ("_PROBE_A", "_PROBE_B")),
+        "starred unpack": (
+            "_PROBE_A, *_PROBE_REST = (1, 2)\n_PROBE_A, *_PROBE_REST = (3, 4)\n",
+            ("_PROBE_A", "_PROBE_REST")),
+        "module-level for target": (
+            "for _PROBE in (1, 2):\n    pass\nfor _PROBE in (3, 4):\n    pass\n",
+            ("_PROBE",)),
+        "module-level with-as target": (
+            "with _probe_cm() as _PROBE:\n    pass\n"
+            "with _probe_cm() as _PROBE:\n    pass\n",
+            ("_PROBE",)),
+        "import": ("import contextvars as _PROBE\nimport json as _PROBE\n", ("_PROBE",)),
+        "from-import": (
+            "from os import path as _PROBE\nfrom sys import path as _PROBE\n", ("_PROBE",)),
+        "def": ("def _probe():\n    pass\ndef _probe():\n    pass\n", ("_probe",)),
+        "class": ("class _Probe:\n    pass\nclass _Probe:\n    pass\n", ("_Probe",)),
+    }
+    undetected: dict[str, list[str]] = {}
+    for label, (snippet, expected) in cases.items():
+        per_name: dict[str, list[int]] = {}
+        for name, lineno in _module_scope_bound_names(ast.parse(module_text + snippet)):
+            per_name.setdefault(name, []).append(lineno)
+        missing = [name for name in expected if len(per_name.get(name, [])) < 2]
+        if missing:
+            undetected[label] = missing
+    assert not undetected, (
+        f"the rebind walk does not report a duplicate for {undetected}: the docstring "
+        f"names that form as collected, so a silent form is a claim the mechanism does "
+        f"not produce — the defect class of #10703 review ISSUE 1")
+
+    # NEGATIVE CONTROL — scope, not blanket suspicion. A duplicate inside a function
+    # body is a LOCAL rebind: it is a different scope, it shadows nothing at import,
+    # and this tree contains that shape legitimately. A guard that reds here would be
+    # turned off within a week.
+    local = "def _probe_outer():\n    _PROBE = 1\n    _PROBE = 2\n"
+    local_counts: dict[str, list[int]] = {}
+    for name, lineno in _module_scope_bound_names(ast.parse(module_text + local)):
+        local_counts.setdefault(name, []).append(lineno)
+    assert "_PROBE" not in local_counts, (
+        f"a module-scope host script is used to prove detection, so a FUNCTION-local "
+        f"`_PROBE` rebind must not be collected at all (got {local_counts.get('_PROBE')}): "
+        f"the walk reads `tree.body`, not `ast.walk`")
 
 
 def test_no_property_is_DEAD_because_its_docstring_can_claim_the_live_rule():
