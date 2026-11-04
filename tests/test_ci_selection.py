@@ -6290,9 +6290,21 @@ def test_the_opt_in_reaches_every_matrix_emitter_in_the_changes_job():
         f"opt-in is silently ignored on that path (#10186): {missing} of {names}")
 
 
+#: The comma-joined label expression the emitters must carry — the ONE value
+#: `_label_set` can parse out of an env var (a raw label list or a bare
+#: `…labels` reference is not it, and would make the seam silently inert).
+EXACT_PR_LABELS_EXPR = "${{ join(github.event.pull_request.labels.*.name, ',') }}"
+
+#: The declaration reference the emitters must carry. Pinned EXACTLY, not as a
+#: substring: `vars.CI_FOLD_RUNNER_LABELS_OLD` contains the name and resolves to an
+#: UNSET variable — which is silently the inert path (no warning, every row keeps
+#: its own runner), so a rename on either side would ship a lever that does nothing
+#: behind a green suite.
+EXACT_FOLD_DECLARATION_EXPR = "${{ vars.CI_FOLD_RUNNER_LABELS }}"
+
+
 def test_the_fold_lever_reaches_every_matrix_emitter_in_the_changes_job():
     """#10897: the SAME one-lever-every-emitter rule, for the fold runner class.
-
     The lever is read from the environment by
     `resolve_fold_runner(os.environ.get("CI_PR_LABELS"), …, os.environ.
     get("CI_FOLD_RUNNER_LABELS"))`, so an emitter that does not carry BOTH
@@ -6302,6 +6314,11 @@ def test_the_fold_lever_reaches_every_matrix_emitter_in_the_changes_job():
 
     Job scope stays barred (`test_the_changes_job_carries_no_job_scope_env`): the
     capstone gate lives in this job.
+
+    The EXACT expression is pinned for `CI_PR_LABELS`, not a substring: a value
+    that merely CONTAINS the word `labels` (a raw label list, a step output of
+    that name) is not the comma-joined string `_label_set` parses, so a looser
+    check would leave the seam dead in production with this pin green.
     """
     wf = _load_python_ci()
     emitters = [
@@ -6311,13 +6328,23 @@ def test_the_fold_lever_reaches_every_matrix_emitter_in_the_changes_job():
     ]
     names = [s.get("name") for s in emitters]
     assert len(emitters) >= 2, f"expected both matrix emitters; discovered {names}"
+    # ⛔ EXACT expression, not a substring. `"labels" in value` passes for any
+    # value carrying the word — `${{ github.event.pull_request.labels }}`, a step
+    # output named `labels` — i.e. a value that is NOT the comma-joined label LIST
+    # `_label_set` expects, so the seam would be dead in production behind a green
+    # suite. That is the same class the sibling pin below closes for the
+    # declaration, one key over.
     problems = []
     for step in emitters:
         env = _effective_step_env(wf, "changes", step)
-        if "labels" not in env.get("CI_PR_LABELS", ""):
-            problems.append(f"{step.get('name')}: CI_PR_LABELS absent")
-        if "vars.CI_FOLD_RUNNER_LABELS" not in env.get("CI_FOLD_RUNNER_LABELS", ""):
-            problems.append(f"{step.get('name')}: CI_FOLD_RUNNER_LABELS absent")
+        if env.get("CI_PR_LABELS", "").strip() != EXACT_PR_LABELS_EXPR:
+            problems.append(
+                f"{step.get('name')}: CI_PR_LABELS is {env.get('CI_PR_LABELS')!r}, "
+                f"expected {EXACT_PR_LABELS_EXPR!r}")
+        if env.get("CI_FOLD_RUNNER_LABELS", "").strip() != EXACT_FOLD_DECLARATION_EXPR:
+            problems.append(
+                f"{step.get('name')}: CI_FOLD_RUNNER_LABELS is "
+                f"{env.get('CI_FOLD_RUNNER_LABELS')!r}, expected {EXACT_FOLD_DECLARATION_EXPR!r}")
     assert not problems, (
         "a fold PR must be able to reach its runner class from EVERY emitter that "
         f"publishes `fast_matrix` (#10897): {problems}")
@@ -6336,18 +6363,121 @@ def test_the_fold_lever_reaches_every_matrix_emitter_in_the_changes_job():
 
 
 def test_the_fold_runner_seam_is_inert_by_default(monkeypatch):
-    """No label, or no declaration -> the row's own runner, byte-identical."""
+    """No label, or no declaration -> the row's own runner, byte-identical.
+
+    ⛔ `CI_SHARD_ROUTING` is CLEARED here as well as the fold variables, and not
+    defensively: an operator or developer with the documented `pool-split` opt-in
+    exported has rows on two classes, so asserting "every row is the hosted label"
+    would red on an untouched suite — a false red on the one lever's own pin
+    (`test_the_opt_in_*` does the same for the same reason).
+    """
     monkeypatch.delenv(cs.PR_LABELS_ENV, raising=False)
     monkeypatch.delenv(cs.FOLD_RUNNER_ENV, raising=False)
+    monkeypatch.delenv(cs.SHARD_ROUTING_ENV, raising=False)
     manifest = cs.load_manifest()
     legs = cs.push_legs(manifest)
     rows = cs.fast_matrix_include(legs["shards"])["include"]
     assert [r["runner"] for r in rows] == [json.dumps(cs.SHARD_RUNNER_HOSTED)] * len(rows)
 
     # a fold label with NO declaration declared is still inert
-    monkeypatch.setenv(cs.PR_LABELS_ENV, "batch-fold,docs")
+    monkeypatch.setenv(cs.PR_LABELS_ENV, cs.FOLD_LABEL)
     rows = cs.fast_matrix_include(legs["shards"])["include"]
     assert [r["runner"] for r in rows] == [json.dumps(cs.SHARD_RUNNER_HOSTED)] * len(rows)
+
+
+def test_a_fold_seam_with_no_label_never_moves_a_pool_split_row(monkeypatch):
+    """The seam is inert for NON-fold PRs IN BOTH ROUTING MODES, not just the default.
+
+    A seam that only honours "inert" under `hosted-only` would silently rewrite
+    main's rows for every operator who opted into the split — and lane parity (the
+    merge rail's job-name subtraction) compares against those rows.
+    """
+    manifest = cs.load_manifest()
+    legs = cs.push_legs(manifest)
+    for mode in ("hosted-only", "pool-split"):
+        monkeypatch.setenv(cs.SHARD_ROUTING_ENV, mode)
+        monkeypatch.delenv(cs.PR_LABELS_ENV, raising=False)
+        monkeypatch.delenv(cs.FOLD_RUNNER_ENV, raising=False)
+        baseline = [r["runner"] for r in cs.fast_matrix_include(legs["shards"])["include"]]
+        monkeypatch.setenv(cs.PR_LABELS_ENV, "docs,test")
+        monkeypatch.setenv(cs.FOLD_RUNNER_ENV, '["self-hosted", "fold"]')
+        rows = [r["runner"] for r in cs.fast_matrix_include(legs["shards"])["include"]]
+        assert rows == baseline, mode
+
+
+def test_a_declared_fold_class_routes_the_matrix_through_the_real_emitter(monkeypatch):
+    """The ACTIVE path is exercised through `fast_matrix_include`, not just the helper.
+
+    Calling `resolve_fold_runner` directly leaves two mutations invisible to the
+    whole suite: the caller swapping its arguments (the inert cases carry
+    `labels=None`, so identity still holds) and a typo in `CI_PR_LABELS` /
+    `CI_FOLD_RUNNER_LABELS` (the constants the environment is read by). Either one
+    leaves the seam DEAD IN PRODUCTION with a green suite — the #10186 shape this
+    change exists downstream of.
+    """
+    manifest = cs.load_manifest()
+    legs = cs.push_legs(manifest)
+    monkeypatch.setenv(cs.SHARD_ROUTING_ENV, "hosted-only")
+    monkeypatch.setenv(cs.PR_LABELS_ENV, f"docs,{cs.FOLD_LABEL}")
+    monkeypatch.setenv(cs.FOLD_RUNNER_ENV, '["self-hosted", "fold"]')
+    rows = cs.fast_matrix_include(legs["shards"])["include"]
+    fold_class = json.dumps(["self-hosted", "fold"])
+    hosted = json.dumps(cs.SHARD_RUNNER_HOSTED)
+    # every leg takes the fold class EXCEPT the canary producer, which
+    # `fast_shard_runner` rule 1 pins (see the next test)
+    assert [r["runner"] for r in rows] == [fold_class] * (len(rows) - 1) + [hosted]
+
+
+def test_a_fold_never_moves_the_canary_producer_row(monkeypatch):
+    """`fast_shard_runner` rule 1 says the producer is ALWAYS the hosted label.
+
+    The producer's artifacts feed the canary streak, which is a comparison of
+    TESTS across runs; routing it onto a different class would make it a
+    comparison of runner classes — the failure the 2026-06 measurement recorded
+    (`test (i)` taken by the ARM64 fallback, killed at 32m12s of a 30m budget).
+    A fold therefore gets priority on the legs that carry the wall, and the
+    producer stays where the streak expects it.
+    """
+    manifest = cs.load_manifest()
+    legs = cs.push_legs(manifest)
+    monkeypatch.setenv(cs.SHARD_ROUTING_ENV, "hosted-only")
+    monkeypatch.setenv(cs.PR_LABELS_ENV, cs.FOLD_LABEL)
+    monkeypatch.setenv(cs.FOLD_RUNNER_ENV, '["self-hosted", "fold"]')
+    rows = cs.fast_matrix_include(legs["shards"])["include"]
+    producers = [r for r in rows if r["canary_producer"]]
+    assert len(producers) == 1, "exactly one row is the canary producer"
+    assert producers[0]["runner"] == json.dumps(cs.SHARD_RUNNER_HOSTED)
+
+
+def test_the_fold_declaration_warns_once_not_once_per_row(monkeypatch, capsys):
+    """`::warning::` is capped at 10 per STEP — 9 identical rows would mask later ones."""
+    manifest = cs.load_manifest()
+    legs = cs.push_legs(manifest)
+    monkeypatch.setenv(cs.PR_LABELS_ENV, cs.FOLD_LABEL)
+    monkeypatch.setenv(cs.FOLD_RUNNER_ENV, "not a label array")
+    rows = cs.fast_matrix_include(legs["shards"])["include"]
+    assert len(rows) > 1
+    assert capsys.readouterr().err.count("::warning::") == 1
+
+
+def test_the_workflow_env_names_the_selection_constants():
+    """The workflow's env KEYS are the constants the selector reads — one binding.
+
+    The emitter test pins the literal EXPRESSIONS; that proves the workflow carries
+    the right strings, not that they are the strings `fast_matrix_include` reads.
+    Renaming a constant would leave every other test green and the lever dead.
+    """
+    wf = _load_python_ci()
+    emitters = [
+        step for step in wf["jobs"]["changes"]["steps"]
+        if "--emit-push-matrix" in str(step.get("run") or "")
+        or "--split" in str(step.get("run") or "")
+    ]
+    assert emitters
+    for step in emitters:
+        env = _effective_step_env(wf, "changes", step)
+        assert cs.PR_LABELS_ENV in env, (step.get("name"), cs.PR_LABELS_ENV)
+        assert cs.FOLD_RUNNER_ENV in env, (step.get("name"), cs.FOLD_RUNNER_ENV)
 
 
 def test_a_declared_fold_class_routes_every_row_of_a_fold():

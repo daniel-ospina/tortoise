@@ -1124,17 +1124,25 @@ the gate-following `ubuntu-latest` fallback (`tools/install-ci-runner-x64.sh`,
 
 So the decision lives in Python, where it is unit-tested, and the operator declares the class:
 
-```
+```text
 CI_FOLD_RUNNER_LABELS = '["self-hosted", "fold"]'   # a repo variable; unset = seam inert
 ```
 
 `tools/ci_selection.py::resolve_fold_runner` then, per matrix row:
 
-* PR has no `batch-fold` label → the row's own `runner`, **byte-identical** to main's;
-* fold + a usable declaration → every row carries that label array (a real `fromJSON`-able array —
-  `runs-on` is already per-row data, so no workflow rewrite);
-* fold + an unusable one (`[]`, a bare string, `[null]`, junk) → falls back and warns. `[]` is the entry
+- PR has no `batch-fold` label → the row's own `runner`, **byte-identical** to main's;
+- fold + a usable declaration → every row carries that label array (a real `fromJSON`-able array —
+  `runs-on` is already per-row data, so no workflow rewrite) — **except the `canary_producer` row**;
+- fold + an unusable one (`[]`, a bare string, `[null]`, junk) → falls back and warns, once per
+  matrix (not once per row: `::warning::` annotations are capped at 10 per step). `[]` is the entry
   that matters: it parses, it is a list, and it would emit a `runs-on` no runner can match.
+
+The `canary_producer` exemption is not a nicety: `fast_shard_runner` rule 1 pins the last shard to the
+hosted label precisely because the producer's artifacts feed the canary streak, and that streak is a
+comparison of TESTS across runs. Moving the producer onto another class would turn it into a
+comparison of runner classes — the failure the 2026-06 measurement recorded (`test (i)` taken by the
+ARM64 fallback, killed at 32m12s of a 30m budget). A fold gets priority on the legs that carry the
+wall; the producer stays where the streak expects it.
 
 `CI_PR_LABELS` and `CI_FOLD_RUNNER_LABELS` ride **both** matrix emitters (`Emit push matrix`,
 `Tier-2 duration split`) at STEP scope. Job scope is barred — `tests/test_capstone_preregistration_9075.py`
@@ -1155,12 +1163,16 @@ left.
 
 ### What this does not claim
 
-* The `batch-fold` label is what enables both halves of mechanism 3, and nothing applies it
-  automatically yet: a fold opened without it gets no priority. `tools/batch_open.py` (#10902) is the
-  natural place to set it.
-* A constituent **already queued** before its fold opened is not removed by mechanism 1; the label
+- **The `batch-fold` label must exist, and nothing applies it automatically yet.** Both halves of
+  mechanism 3 key on it, so on a repository where it has not been created the rule can never match and
+  the runner-class seam can never fire: an inert mechanism, not a wrong one. Create it once
+  (`batch-fold`, "A batch/fold PR — CI priority + queue precedence"), or let the fold tooling apply it
+  — `tools/batch_open.py` on #10902 is the natural home, and until it does, a fold carrying ONLY
+  `queue-accelerator` resolves at the accelerator's `high` (3000), which is priority but not this rule's
+  9000.
+- A constituent **already queued** before its fold opened is not removed by mechanism 1; the label
   refuses the *next* evaluation, and the tool closes it. De-queueing a live batch is a human action.
-* No required check was added, removed or weakened to make any of this faster — priority is not
+- No required check was added, removed or weakened to make any of this faster — priority is not
   permission. `queue_conditions ∪ merge_conditions` still equals the live required set, name for name
   (`check-required-set.py`; pinned in `tests/test_mergify_config_guard.py`), and the priority rule names
   no check at all.

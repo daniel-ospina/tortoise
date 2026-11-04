@@ -4479,7 +4479,14 @@ def resolve_shard_routing(value: str | None) -> str:
 #   * unset / not a fold            -> every row keeps its own `runner`, byte-identical to main;
 #   * a fold + a VALID declaration  -> every row carries the declared label array;
 #   * a fold + an INVALID one       -> falls back to the row's own `runner` and says so on stderr.
-# A bad setting can therefore only lose the priority, never the job.
+# ⛔ A MALFORMED setting can only lose the priority, never the job. A WELL-FORMED
+# one naming a class no runner carries is the operator's deliberate assertion and
+# IS sufficient to hang the fold — `parse_fold_runner` checks the SHAPE of the
+# declaration, not whether the fleet has such a runner, and it cannot: that is a
+# fact about the live pool, not about the string. So the rule for an operator is
+# "declare a class a runner really carries" (at this writing: `self-hosted` /
+# `self-hosted-x64`, or `ubuntu-latest`; there is no dedicated fold class yet), and
+# the fail-safe half of this seam covers typos in the JSON, not typos in a label.
 FOLD_LABEL = "batch-fold"
 FOLD_RUNNER_ENV = "CI_FOLD_RUNNER_LABELS"
 PR_LABELS_ENV = "CI_PR_LABELS"
@@ -4520,6 +4527,8 @@ def resolve_fold_runner(
     labels: str | list[str] | None,
     matrix_runner: str,
     declaration: str | None,
+    *,
+    warn: bool = True,
 ) -> str:
     """#10897: the `runs-on` JSON string for one matrix row, fold-aware.
 
@@ -4531,12 +4540,17 @@ def resolve_fold_runner(
     non-fold path must stay byte-identical to main's, so a lane diffing the
     emitted matrix sees no change at all (pinned by
     `tests/test_ci_selection.py::test_the_fold_runner_seam_is_inert_by_default`).
+
+    ⛔ `warn=False` exists because this runs PER ROW: the caller resolves the
+    same declaration for every shard, and `::warning::` annotations are capped at
+    10 per STEP on GitHub — nine rows of the same message would mask any later
+    warning in the same step. The first row warns for all of them.
     """
     if FOLD_LABEL not in _label_set(labels):
         return matrix_runner
     parsed = parse_fold_runner(declaration)
     if parsed is None:
-        if (declaration or "").strip():
+        if warn and (declaration or "").strip():
             print(
                 f"::warning::{FOLD_RUNNER_ENV} is set but is not a non-empty JSON array of "
                 f"non-empty strings — a fold keeps its normal runner class rather than routing "
@@ -4618,13 +4632,24 @@ def fast_matrix_include(shards: list[dict], routing: str | None = None) -> dict:
         row_runner = json.dumps(
             fast_shard_runner(i, len(shards))
             if mode == SHARD_ROUTING_POOL_SPLIT else SHARD_RUNNER_HOSTED)
+        # ⛔ THE CANARY PRODUCER ROW IS EXEMPT FROM THE FOLD CLASS. `fast_shard_runner`
+        # rule 1 pins the last shard to the hosted label because its artifacts feed
+        # the canary streak, and that streak is a comparison of TESTS across runs —
+        # moving the producer onto a different class would make it a comparison of
+        # runner classes, which is the failure the 2026-06 measurement recorded
+        # (`test (i)` taken by the ARM64 fallback, killed at 32m12s of a 30m budget).
+        # A fold gets priority on the eight legs that carry the wall; the producer
+        # stays where the streak expects it. `warn=(i == 0)` keeps ONE annotation for
+        # the whole matrix (`::warning::` is capped at 10 per step).
+        is_producer = i == len(shards) - 1
         include.append({
             "half": s["name"],
             "files": " ".join(s["files"]),
             "watchdog_minutes": s["watchdog_minutes"],
             "watchdog_headroom": round(float(headroom), 2),
-            "canary_producer": i == len(shards) - 1,
-            "runner": resolve_fold_runner(labels, row_runner, fold_declaration),
+            "canary_producer": is_producer,
+            "runner": row_runner if is_producer else resolve_fold_runner(
+                labels, row_runner, fold_declaration, warn=(i == 0)),
         })
     return {"include": include}
 
