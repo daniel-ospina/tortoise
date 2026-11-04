@@ -4668,6 +4668,16 @@ _README_VERDICT = re.compile(r"(?:⛔|✅)\s*\*\*(BLOCKED|RED|GREEN)\b")
 #: The premise is CHECKED below (the record names the artifact, the artifact exists, and its
 #: denominator IS the frozen 14), so these are REFUTED phrases, not merely unwelcome ones —
 #: if the artifact were ever withdrawn the pin reds on its premise instead of banning truth.
+#:
+#: ⛔ SCOPE, stated rather than implied (#10610 review at `5f636d2f`): this scans the two
+#: ROUTING surfaces — `docs/00_index.md` and `E1-E5-PROOFS.md`, the documents a reader is
+#: sent through to reach the rows. It deliberately does NOT scan
+#: `docs/evidence/7949-capstone/README.md`, which NARRATES the superseded log and is allowed
+#: to quote what that log said in a section the document itself marks as history; the
+#: bundle README's own present-tense claims are held by its artifact-table and
+#: emitter-vs-artifact pins instead. A phrase ban is also evadable by markup
+#: (`**no committed artifact**` defeats a plain substring), which is why the ROUTING docs
+#: are held to the fact — the reader exists — and not only to the spelling.
 _UNCARRIED_DENOMINATOR = (
     "carried by no committed artifact",
     "no committed artifact carries the registered denominators",
@@ -4812,11 +4822,25 @@ def test_the_three_routes_to_the_e1_e2_verdict_state_the_records_verdict():
         f"the audit's E2a + E2b rows are {len(e2_rows)}, not 2 — the audit stopped "
         "auditing one half of E2, so this leg has no subject")
     survived = f"{e2a['value_survived']} of {e2a['frozen_units']}"
-    assert table["E2"] in set(re.findall(r"\*\*(BLOCKED|RED|GREEN)\b", e2_rows[0])) \
-        or _ROW_VERDICT[record["e2"]["outcome"]] in e2_rows[0], (
-            f"the audit's E2a row states neither the record's verdict "
-            f"({_ROW_VERDICT[record['e2']['outcome']]!r}) nor the committed table's "
-            f"({table['E2']!r}): {e2_rows[0][:400]}")
+    recorded = _ROW_VERDICT[record["e2"]["outcome"]]
+    # ⛔ TOKEN-anchored, never a substring (#10610 review at `5f636d2f`). The row
+    # legitimately contains "MEASURED", which CONTAINS "RED", so a bare `recorded in
+    # e2_rows[0]` is unconditionally true and this leg pinned NOTHING — measured: an audit
+    # row rewritten to state `**GREEN**` over a measured 8 of 14 still passed the leg.
+    assert f"**{recorded}" in e2_rows[0], (
+        f"the audit's E2a row states no `**{recorded}` verdict — the record's outcome is "
+        f"{record['e2']['outcome']!r}: {e2_rows[0][:400]}")
+    assert "**GREEN" not in e2_rows[0], (
+        f"the audit's E2a row states GREEN for a criterion the record scores {recorded}: "
+        f"{e2_rows[0][:400]}")
+    if table["E2"] != recorded:
+        # The committed table is allowed to lag (it describes the frozen log); the audit is
+        # not. When the two disagree the audit row must state BOTH words, each in its own
+        # role, or a reader cannot tell the committed state from the measured one.
+        assert f"**{table['E2']}" in e2_rows[0], (
+            f"the committed table says {table['E2']} while the record scores {recorded}; "
+            "the audit row states only one of the two, so a reader cannot tell the frozen "
+            f"table's word from the measured one: {e2_rows[0][:400]}")
     assert survived in e2_rows[0] and e2a["artifact"] in e2_rows[0], (
         f"the audit's E2a row does not carry the record's own count ({survived!r}) and "
         f"artifact ({e2a['artifact']!r}): {e2_rows[0][:400]}")

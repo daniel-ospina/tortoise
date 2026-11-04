@@ -319,7 +319,12 @@ run are one realization, not two — and `decidable` is the SET of pairings, so
 two copies of one reading can only ever agree and would report a DECIDED E1 off
 the replication the design requires and never got), when a before artifact
 carries no graph at all (an absent run cannot be told apart from a duplicated
-one), when a `with_anchor` block is present but EMPTY (a record that never
+one), when the falsifier's SCORED `with_anchor` block does not DECLARE the
+injection it is credited for (`injected_anchor is not True` — an un-injected
+reading that reaches 14/14 is the inert counter under another name), when a
+share is not the fraction its OWN `bare_definite` / `objects` counts give (on
+either arm — the share is the one number E1's bar is scored on, and nothing may
+edit it while the counts printed beside it stand), when a `with_anchor` block is present but EMPTY (a record that never
 wrote its counter is not the flat shape that has no block), when its `as_written`
 block carries no graph — an absent provenance is not an inherited one — sits on another run, or reads counts other than the E2a
 record's (that block IS the E2a reading), when the value-gate positive controls
