@@ -258,8 +258,8 @@ metric's own precision.
 3. **The ON arm here is n=1.** Two OFF runs, one ON run. A second ON run was not
    taken inside this pass, so the ON arm's own spread is unmeasured — read the
    ON share as one realization, not as the arm's value.
-4. **The E1/E2 rows in the verdict table USED to parse `e1-e2.log`; they no
-   longer do.** This was written as an open limitation when the probes landed
+4. **The E1/E2 rows in the verdict table USED to parse `e1-e2.log`; no row the
+   builder emits does.** This was written as an open limitation when the probes landed
    (#10342); the re-point followed and is landed
    (`docs/evidence/7949-capstone/probes/capstone_measure.py` cites
    `E1_E2_SCORES` for both rows, and `E1E2_LOG` no longer exists there). Kept as
@@ -314,7 +314,17 @@ GRAPHS (the ON log's own `# graph:` line — its `# head:` is equal either way, 
 the head cannot catch it), when the falsifier's SCORED `with_anchor` block is
 not the run the E2a record was taken on (a graph is `capstone_on_<head>_<stamp>`,
 so a SIBLING run of the same head is a different run, and naming the head is not
-enough), when a `with_anchor` block is present but EMPTY (a record that never
+enough), when the TWO before artifacts name the SAME graph (two copies of one
+run are one realization, not two — and `decidable` is the SET of pairings, so
+two copies of one reading can only ever agree and would report a DECIDED E1 off
+the replication the design requires and never got), when a before artifact
+carries no graph at all (an absent run cannot be told apart from a duplicated
+one), when the falsifier's SCORED `with_anchor` block does not DECLARE the
+injection it is credited for (`injected_anchor is not True` — an un-injected
+reading that reaches 14/14 is the inert counter under another name), when a
+share is not the fraction its OWN `bare_definite` / `objects` counts give (on
+either arm — the share is the one number E1's bar is scored on, and nothing may
+edit it while the counts printed beside it stand), when a `with_anchor` block is present but EMPTY (a record that never
 wrote its counter is not the flat shape that has no block), when its `as_written`
 block carries no graph — an absent provenance is not an inherited one — sits on another run, or reads counts other than the E2a
 record's (that block IS the E2a reading), when the value-gate positive controls
@@ -327,7 +337,10 @@ record did not freeze, or a population from another run.
 (0.3590, 0.5652) and one ON realization (0.2131) can be paired two ways, and the
 two pairings give different verdicts. At n=1 per arm the verdict would depend on
 which before run is chosen, so the aggregate is `REFUSED` with both pairings
-printed. The next requirement is **n >= 2 per arm**.
+printed. The next requirement is **n >= 2 per arm** — and the two realizations
+have to BE two runs: the driver refuses a before pair taken on the same graph,
+because two copies of one OFF record pair identically, which would turn this
+refusal into a decided `FAIL` off a single realization.
 
 **The counts reach the rows.** The capstone's E2 row now carries E2a's count over
 the FROZEN 14 (`8 of 14` today; the bar is `>= 13 of 14`), and E1's carries the
