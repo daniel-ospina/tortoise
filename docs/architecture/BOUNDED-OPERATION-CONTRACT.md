@@ -116,7 +116,7 @@ failure mode this document exists to prevent is exactly "we audited the instance
 
 ### 2a. Why the remaining SILENT surfaces are parked, not fixed
 
-Six of the seven return a **bare list**, and each sits behind a published surface, so there is no
+All six return a **bare list**, and each sits behind a published surface, so there is no
 non-breaking place to put an incompleteness marker:
 
 - adding a key to *each row* is not a marker (a caller counting rows cannot see it);
@@ -261,8 +261,10 @@ A marker is only an instrument if a caller can act on it. Therefore:
   — asserted by
   `tests/test_8447_truncation_marker.py::TestTheCensusNamesItsEvidenceHome::test_every_test_the_contract_doc_names_exists`.
   Still **SILENT**: the list-shaped surfaces in §2a
-  (`tortoise_search`, selfhost `GET /search`, selfhost `GET /points`, `list_batches`,
-  `suggest_entry_points`) — every one of them needs a return-shape decision, not a marker.
+  (`tortoise_search`, `tortoise_query(text=…)`, selfhost `GET /search`, selfhost `GET /points`,
+  `list_batches`, `suggest_entry_points`) — all six of that section's SILENT surfaces, and every
+  one of them needs a return-shape decision, not a marker. `tortoise_query` is the one this
+  parenthetical used to drop, which re-opened the gap §2a exists to close.
   ⛔ **M2's kill set is a strict SUBSET of M1's — M2 is subsumed by M1 — so the union is 4, not 6.**
   That nesting is the arithmetic of the two mutants, not an accident: M2 publishes `truncated: False`
   over a cut page, which is the *correct* answer for the two complete-page cases, so those two pass

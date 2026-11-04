@@ -361,6 +361,18 @@ def test_refuses_when_the_rail_script_is_absent(tmp_path):
 # me" (`Refused` for the repo, `unreadable` for the head) — a missing binary is
 # that case, not a different one — so these pin both arms on a PATH that has the
 # shell tools the child needs and no `gh` at all.
+#
+# ⚠️ `main` landed the SAME fix independently at `f422799c` (`_gh` returns
+# `CompletedProcess(argv, 127, "", "gh: command not found")`, never `None`) and
+# its own CLI-level pair for the same defect — see `_path_without_gh` below and
+# `test_launch_without_the_gh_cli_starts_and_stamps_an_unreadable_head` /
+# `test_collect_without_the_gh_cli_refuses_by_name_instead_of_tracebacking`. The
+# two arms here are therefore kept as the UNIT-level pair the merge kept from
+# the other side (`_resolve_repo`'s refusal text, and `Launch.head`); the CLI
+# pair below is the end-to-end one. Four tests, one root, two layers — recorded
+# rather than deduplicated, because each layer asserts something the other does
+# not (the "installed" remedy in the refusal text; `HEAD=unreadable` stamped in
+# the artifact).
 
 def no_gh_on_path(tmp_path, monkeypatch):
     """A PATH with the child's shell tools but NOT `gh`."""

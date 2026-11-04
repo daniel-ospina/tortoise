@@ -410,7 +410,7 @@ def _resolve_repo(cwd: Path) -> str:
         ["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
         Path(cwd),
     )
-    if out is not None and out.returncode == 0 and out.stdout.strip():
+    if out.returncode == 0 and out.stdout.strip():
         repo = out.stdout.strip()
         if env_repo and env_repo != repo:
             # Mirrors the rail's own #2235 refusal: an inherited GH_REPO must
@@ -439,8 +439,7 @@ def _head_sha(cwd: Path, repo: str, pr: int) -> str:
          "-q", ".headRefOid"],
         Path(cwd),
     )
-    return (out.stdout.strip()
-            if out is not None and out.returncode == 0 else "unreadable")
+    return out.stdout.strip() if out.returncode == 0 else "unreadable"
 
 
 def _shquote(value: object) -> str:

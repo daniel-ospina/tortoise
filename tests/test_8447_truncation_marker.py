@@ -1287,7 +1287,7 @@ class TestTheMarkerSiteRegisterIsComplete:
     aliases besides `_mark_truncation` (`_seed_mark`, `_lost_mark`,
     `_lost_mark2` bound by `tortoise_fts_query`; `_lost_mark` again in
     `hosted_api.py::search`), so a filter that
-    hard-codes the two names it happens to recognise sees 3 of the 6 call sites
+    hard-codes the two names it happens to recognise sees 3 of the 7 call sites
     and would leave the pin green while a NEW site was written in the aliasing
     pattern the tree already uses three times. The name set is therefore read
     off each module's own `ImportFrom` nodes (:meth:`_marker_aliases`), which is
