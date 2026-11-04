@@ -101,7 +101,7 @@ THE FOUR PROPERTIES, AND WHERE EACH LIVES
      "legacy": at this head the capture still writes and journals the pair, so
      every session this build captures is in it. That is why the pair is marked
      CACHE-OWNED for an episodic Source
-     (:data:`EPISODIC_SOURCE_PROSE_PROPERTIES`, consumed by
+     (:func:`episodic_source_prose_properties`, consumed by
      `record_reconcile.scan_cache_view`) and counted under its own `graph_only`
      bucket — visible, and not a divergence against a record that is correct.
      The graph side is repaired by a record-sourced re-projection
@@ -152,7 +152,6 @@ from .stored_form import STORED_VECTOR_PROPS, VERBATIM_MARKER, is_verbatim
 __all__ = [
     "ADDITIONAL_PRIMARY_COLUMNS",
     "DERIVED_FROM_RECORD",
-    "EPISODIC_SOURCE_PROSE_PROPERTIES",
     "EVENT_STREAM_FOLDS",
     "FOLD_ON_CREATE_DEFAULTS",
     "KEY_PROPERTY",
@@ -177,6 +176,7 @@ __all__ = [
     "declaration_for",
     "declaration_is_sound",
     "declared_key",
+    "episodic_source_prose_properties",
     "is_episodic_source_node",
     "node_from_row",
     "node_statement",
@@ -1230,7 +1230,7 @@ def _scalar(value: Any) -> Any:
 #: `field_mismatches=2` forever. Left alone that is the class the reconciler
 #: itself grades P1 (*"a signal indistinguishable from noise is not
 #: observability"*), so the comparison is not left to carry it:
-#: :data:`EPISODIC_SOURCE_PROSE_PROPERTIES` and
+#: :func:`episodic_source_prose_properties` and
 #: `record_reconcile.scan_cache_view` mark the pair CACHE-OWNED for an episodic
 #: Source, and the reconciler counts them under `graph_only` — visible, and not
 #: a divergence against a record that is correct. The repair for the graph side
@@ -1283,11 +1283,27 @@ _EPISODIC_SOURCE_PROSE_COLUMNS: frozenset[str] = frozenset({
 #: three were caught by review before this landed and each has a NEGATIVE leg.
 _EPISODIC_SOURCE_URL_PREFIX = "session:"
 _EPISODIC_SOURCE_KIND = "agentSession"
-#: The KIND's property spelling, DERIVED for the same reason the prose set is:
-#: :func:`is_episodic_source_node` reads graph properties, and a hand-typed
-#: `sourceKind` would stop matching the row predicate the day the placement
-#: re-spells it — a permanent false `field_mismatches` no test would red.
-_EPISODIC_SOURCE_KIND_PROPERTY: str = canonical_property("source", "source_kind")
+
+
+@lru_cache(maxsize=1)
+def _episodic_source_kind_property() -> str:
+    """The KIND's property spelling, DERIVED — and resolved at CALL time.
+
+    Derived for the same reason the prose set is: `is_episodic_source_node` reads
+    graph properties, and a hand-typed `sourceKind` would stop matching the row
+    predicate the day the placement re-spells it — a permanent false
+    `field_mismatches` no test would red.
+
+    ⛔ **NOT a module-level constant** (#10853 review P1). `canonical_property`
+    reaches the placement TABLE ON DISK (`docs/epics/…/02-identity-and-placement.md`),
+    which a wheel does not ship — so evaluating it at import made
+    `import tortoise.cache_projection` fail outright on an installed
+    distribution, and with it `tortoise.record_reconcile`, `tortoise.legacy_ids`
+    and the `record-reconcile` / `record-restore` verbs THIS change names as the
+    repair. Every other placement read in this module already resolves at call
+    time (`projected_columns`, `_props_from_row`); these follow that rule.
+    """
+    return canonical_property("source", "source_kind")
 
 
 def _is_episodic_source_row(row: Mapping[str, Any]) -> bool:
@@ -1319,26 +1335,28 @@ def is_episodic_source_node(props: Mapping[str, Any]) -> bool:
     url = props.get("url")
     if isinstance(url, str) and url.startswith(_EPISODIC_SOURCE_URL_PREFIX):
         return True
-    return (props.get(_EPISODIC_SOURCE_KIND_PROPERTY) == _EPISODIC_SOURCE_KIND
+    return (props.get(_episodic_source_kind_property()) == _EPISODIC_SOURCE_KIND
             and isinstance(url, str) and "://" not in url and "/" not in url)
 
 
-def _episodic_source_prose_properties() -> frozenset[str]:
-    """The GRAPH property names the narrowing declines, derived — never typed.
+@lru_cache(maxsize=1)
+def episodic_source_prose_properties() -> frozenset[str]:
+    """The narrowing in the CACHE's vocabulary — the GRAPH property names.
 
-    `canonical_property` is the one declaration of a column's property name, so a
-    hand-written `"_searchText"` here could drift from it and the reconciler
-    would then exclude a name no writer produces (a silent no-match).
+    What :func:`tortoise.record_reconcile.scan_cache_view` must treat as
+    cache-owned for an episodic Source, so the reconciler reports it under
+    `graph_only` instead of counting it as a `field_mismatch` against a record
+    that is correct.
+
+    Derived, never typed: `canonical_property` is the one declaration of a
+    column's property name, so a hand-written `"_searchText"` here could drift
+    from it and the reconciler would then exclude a name no writer produces (a
+    silent no-match). Cached, and resolved at CALL time — see
+    :func:`_episodic_source_kind_property` for why a module-level evaluation is
+    forbidden here.
     """
     return frozenset(canonical_property("source", column)
                      for column in _EPISODIC_SOURCE_PROSE_COLUMNS)
-
-
-#: The same narrowing, in the CACHE's vocabulary — what
-#: :func:`tortoise.record_reconcile.scan_cache_view` must treat as cache-owned for
-#: an episodic Source, so the reconciler reports it under `graph_only` instead of
-#: counting it as a `field_mismatch` against a record that is CORRECT.
-EPISODIC_SOURCE_PROSE_PROPERTIES: frozenset[str] = _episodic_source_prose_properties()
 
 
 def _props_from_row(table: str, row: Mapping[str, Any], *,
@@ -1407,9 +1425,13 @@ def _props_from_row(table: str, row: Mapping[str, Any], *,
         # exactly for that reason it is filtered here rather than assumed: a
         # classification that moves is the #9710 class, and a guard that stops
         # guarding without reddening is worse than no guard.
-        declined = {canonical_property(table, c)
-                    for c in _EPISODIC_SOURCE_PROSE_COLUMNS}
-        out = {k: v for k, v in out.items() if k not in declined}
+        # ⚠️ BOTH spellings: the tail is an OPEN set keyed by whatever the payload
+        # said, so a `_search_text` tail key is the snake spelling of the same
+        # datum and would otherwise survive (`_search_text` IS a real column, so
+        # the tail can carry that spelling where it cannot carry `_searchText`).
+        declared = episodic_source_prose_properties()
+        out = {k: v for k, v in out.items()
+               if k not in declared and k not in _EPISODIC_SOURCE_PROSE_COLUMNS}
     return out
 
 
