@@ -36891,12 +36891,23 @@ class TortoiseSDK:
                 # available (kills the ~350ms full-payload re-fetch + per-call
                 # TF-IDF re-fit). Falls back to the legacy path when the
                 # snapshot is unavailable (too big / build failed).
+                #
+                # #10602: through ``get_or_build``, NOT ``build_snapshot`` — a
+                # degraded read used to fetch the whole corpus per reader, so N
+                # concurrent agents cost N corpus reads and each call's latency
+                # grew with the fleet's concurrency (measured: 8 readers, 4.6 s
+                # each vs 595 ms for one). Coalescing adds NO cache entry and NO
+                # TTL — but it is NOT "no cache-policy change" and NOT
+                # result-identical: an overtaken build is no longer cached (so a
+                # write-heavy graph loses hits the old unconditional ``put`` had),
+                # and a reader racing a write's commit→invalidate tail can be served
+                # that cohort's pre-commit rows. See the COMMIT→INVALIDATE WINDOW
+                # note on ``get_or_build``.
                 from tortoise.fallback_snapshot import (  # noqa: I001
-                    _store as _fb_store, snapshot_key, build_snapshot,
+                    _store as _fb_store, snapshot_key, get_or_build,
                     search_snapshot,
                 )
                 _key = snapshot_key(proj, getattr(self, "_namespace", None))
-                _snap = _fb_store.get(_key)
                 # #2351: the snapshot is a deliberately LEAN projection (it
                 # carries no class column), so it cannot honour a claim-class
                 # filter pre-truncation. When one is requested, DROP the (cached
@@ -36906,10 +36917,8 @@ class TortoiseSDK:
                 # class-filtered read.
                 if claim_class is not None:
                     _snap = None
-                elif _snap is None:
-                    _snap = build_snapshot(proj)
-                    if _snap is not None:
-                        _fb_store.put(_key, _snap)
+                else:
+                    _snap = get_or_build(proj, _key, store=_fb_store)
                 if _snap is not None:
                     snap_hits = search_snapshot(
                         query, _snap, limit=limit, kind=kind,
@@ -48718,3 +48727,36 @@ def _validate_extracted_from(props: dict, *, door: str) -> None:
         f"non-empty strings (got {ref!r}); a non-string scalar would mint a "
         "corrupt Source, and raising after the write would leave an "
         "un-journaled orphan (#3263/#8171)")
+
+
+# ── #10626: the run-level reader on the M2 capture lane ────────────────────
+# The v2 capture entry is wrapped where it is DEFINED (`extractor_v2`), so every
+# lane that routes through it (`sdk`, `hosted_api`, `ingest_v2`,
+# `run_v2_pipeline`) gets the #5329 census reading on its own receipt.  The
+# opt-in M2 lane (`TORTOISE_SESSION_EXTRACTOR=m2` → `_extract_session_llm`) does
+# NOT route through that entry: it folds in-capture through
+# `dedup_classify.rephrase_hit`, and a `rephrase_linked` fold there DETACH-DELETEs
+# the duplicate node — the most destructive fold in the product.  Leaving it
+# unwrapped would make the reader cover the lane that keeps both claims and skip
+# the lane that deletes one.
+#
+# Wrapped here, at module scope, rather than by inserting lines inside the method:
+# `sdk.py`'s line numbers are cited by the #7949 capstone bundle (`:15484`,
+# `:15765`, …) and a hook inside the method re-stales them.  `functools.wraps`
+# keeps the name, docstring and signature, so every `self._extract_session_llm`
+# call site and every test that inspects the method resolve to the wrapper.
+#
+# The import is FUNCTION-local and the wiring is one module-level CALL, not a
+# module-level `import`: a bare import down here is `E402` (module level import
+# not at top of file), which the repo's ruff baseline selects — and moving it to
+# the import block would shift every line of this file, re-staling the same
+# #7949 cites the wrapper exists to leave alone.
+def _wire_vocabulary_gap_run_reader_10626() -> None:
+    """Rebind the M2 entry through the #10626 run-level reader (once)."""
+    from .extractor_v2 import _run_scoped_vocabulary_gap as _scope_run
+
+    TortoiseSDK._extract_session_llm = _scope_run(
+        TortoiseSDK._extract_session_llm)
+
+
+_wire_vocabulary_gap_run_reader_10626()
