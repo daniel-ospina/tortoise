@@ -174,8 +174,11 @@ both bypassable, which is worth recording because each looked complete:
 
 The delivered rule is that **the flow belongs to a browser, not to whoever knows the `state`**:
 the attempt key is 32 random bytes, minted by the **AS on the `GET /oauth/authorize` bounce leg**
-(`consent_bounce_url`) and **ADOPTED** by `/api/consent/start` on the insert — the entry leg no longer
-invents one. The row stores **only the key's SHA-256**, and the raw key rides the `selfPath` **return
+(`consent_bounce_url`) and **ADOPTED** by `/api/consent/start` on the insert. Adoption is the normal
+path, not a guarantee: **the entry leg still mints one when it is handed none** — a request presented
+STRAIGHT to `/api/consent/start`, bypassing the AS (`start.ts:255-256`, `presentedKey ||
+newAttemptKey()`; tracked OPEN on #10884/#10865) — so the AS can only ever ADOPT a key it handed out
+on the bounce, never constrain what a direct caller invents. The row stores **only the key's SHA-256**, and the raw key rides the `selfPath` **return
 target**; the owner fill and the mint both require it. The key is INSERT-ONLY — written only when the
 row is created, never on a re-entry, so a later caller can never rotate it, because rotation *is* the
 takeover. A row that predates the column (its hash is `NULL`) is therefore **dead, never adoptable**:

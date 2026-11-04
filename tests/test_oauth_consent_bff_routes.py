@@ -2153,3 +2153,57 @@ def test_the_whitespace_attempt_key_residual_names_a_home_this_fold_does_not_clo
         "#10884 in `presented_consent_attempt_key`'s docstring AND in #10884's body; "
         "if it was fixed, DELETE the note instead of re-pointing it."
     )
+
+
+def test_the_bridge_record_does_not_claim_the_entry_leg_ever_stopped_minting() -> None:
+    """#10790 review (P2): the security record must not state an absolute the code falsifies.
+
+    `docs/engineering/auth/consent-identity-bridge.md` described the delivered rule
+    as "…ADOPTED by `/api/consent/start` on the insert — the entry leg no longer
+    invents one". The entry leg still invents one: `start.ts:255-256` is
+
+        const presentedKey = url.searchParams.get(ATTEMPT_KEY_PARAM) ?? "";
+        const attemptKey = presentedKey || newAttemptKey();
+
+    and `newAttemptKey()` mints 32 CSPRNG bytes. No earlier guard in `onRequestGet`
+    requires a presented key, so a request presented straight to `/api/consent/start`
+    (bypassing the AS) is handed a fresh key — exactly the residual the pins below
+    on `presented_consent_attempt_key` call "the direct-to-`start` residual".
+
+    A wrong absolute in the *delivered security rule* is not cosmetic: the reader
+    concludes no entry-leg-minted key can exist, so the residual tracked OPEN on
+    #10884 reads narrower than it is ("only adopts a whitespace key verbatim",
+    never "mints one when handed none") and the next lane reasons about the
+    ownerless window from a code shape that is not in the tree.
+
+    BICONDITIONAL, so it cannot rot into a tautology in either direction: while
+    `start.ts` mints on the empty path the record MUST say so; once that path is
+    removed, the sentence must be deleted rather than left standing.
+    """
+    start_ts = (CONSENT_DIR / "start.ts").read_text(encoding="utf-8")
+    mints_when_handed_none = (
+        'const presentedKey = url.searchParams.get(ATTEMPT_KEY_PARAM) ?? "";' in start_ts
+        and "const attemptKey = presentedKey || newAttemptKey();" in start_ts
+    )
+
+    doc = (
+        REPO / "docs" / "engineering" / "auth" / "consent-identity-bridge.md"
+    ).read_text(encoding="utf-8")
+
+    assert "the entry leg no longer" not in doc, (
+        "the bridge record claims the ENTRY leg stopped minting an attempt key, but "
+        "`start.ts:255-256` still does (`presentedKey || newAttemptKey()`), and no "
+        "guard before it requires a presented key. Restore the qualifier — the entry "
+        "leg mints one when it is handed none (the direct-to-`start` residual on "
+        "#10884/#10865) — instead of stating an absolute the code falsifies.")
+
+    declares_the_residual = (
+        "the entry leg still mints one when it is handed none" in doc
+    )
+    assert mints_when_handed_none == declares_the_residual, (
+        "the entry-leg mint and the record disagree: "
+        f"start_ts_mints_when_handed_none={mints_when_handed_none}, "
+        f"record_states_the_residual={declares_the_residual}. While `start.ts` has the "
+        "`||newAttemptKey()` fallback the record must name it; if the fallback is "
+        "removed, DELETE the sentence instead of leaving a stale claim."
+    )

@@ -313,13 +313,22 @@ gets instead of a misleading 401.
 
 ⛔ **#10605 is CLOSED, so it is not the live home for that residual — #10885 is.**
 A reader checking whether the capture has been retired must follow **#10885**
-(OPEN, filed with this residual's `file:line` scope and its acceptance criterion);
-#10605 records only where the residual came from. The same relay applies to the
+(OPEN, filed with this residual's `file:line` scope and its acceptance criterion); #10605
+records only where the residual came from. The same relay applies to the
 `503 consent_store_unavailable` arm and the keyless-re-entry hole, which now live
-on **#10884** rather than in #10487's closed thread. Both sentences are held in
-place by a biconditional pin
-(`tests/test_mcp_bridge.py::test_the_hosted_recipe_residual_has_a_home_this_fold_does_not_close`),
-so the pointer cannot rot into a claim about an issue that does not carry it.
+on **#10884** rather than in #10487's closed thread.
+
+The two halves are held by DIFFERENT pins, and this paragraph names them
+separately rather than claiming one covers both. The #10885 sentence is held by
+`tests/test_mcp_bridge.py::test_the_hosted_recipe_residual_has_a_home_this_fold_does_not_close`,
+whose biconditional reads this `**What this does NOT do**` paragraph itself. The
+`#10884` half is held by the two pins in `tests/test_oauth_consent_bff_routes.py` —
+`test_the_store_fault_residual_names_a_home_this_fold_does_not_close` (that
+module's docstring) and
+`test_the_whitespace_attempt_key_residual_names_a_home_this_fold_does_not_close`
+(`presented_consent_attempt_key`'s own docstring) — because #10884's two residuals
+live in the CODE, not on this page: they red when the arm or the unstripped
+adoption goes away, and they cannot read a markdown paragraph at all.
 
 Both modules are staged into the client-only wheel (`client/build_client.sh`), and
 both have guards registered on the `api` CI surface:
