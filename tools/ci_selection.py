@@ -3626,10 +3626,19 @@ def duplicate_mapping_key_issues(manifest_path: Path | None = None) -> list[str]
     ``13a53ef7e`` and 5 at ``aba51cf97``. The FIRST of those was caught only by
     the required ``manifest-integrity`` leg after a push, while ``--integrity``
     — the check that PR body cited as proof of "0 duplicates" — was green at
-    the time (``02133e21b`` does not contain this walk at all), and that is
-    exactly why the walk is now COMPOSED INTO ``--integrity`` (``dd4f66e6a``):
-    every later occurrence is named locally, before the push, by the same
-    instrument the PR body quotes.
+    the time (``02133e21b``'s ``--integrity`` does not COMPOSE this walk:
+    ``duplicate_mapping_key_issues`` does not exist in ``tools/ci_selection.py``
+    there, though ``tools/registry_integrity.py`` already had it — which is why
+    the ``manifest-integrity`` leg still saw the 62), and that is exactly why the
+    walk is now COMPOSED INTO ``--integrity`` (``dd4f66e6a``): a POST-MERGE,
+    PRE-PUSH run names it locally, by the same instrument the PR body quotes.
+
+    ⛔ POST-MERGE IS THE LIMIT, NOT A GUARANTEE. ``13a53ef7e`` is AFTER
+    ``dd4f66e6a`` and still carried 6 duplicates, because THE MERGE ITSELF
+    reintroduces them through ``merge=union`` — and that merge was pushed BEFORE
+    the check ran (``c660ffcee`` records it). So a green ``--integrity`` from
+    before a merge does not cover the merge: re-run it after every forward-merge
+    of ``main``, which is the only point at which this defect is created.
 
     The walk lives in ``tools/registry_integrity.py`` and is imported rather
     than re-spelled, so the two entry points cannot disagree about what a
