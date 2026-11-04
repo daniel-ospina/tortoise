@@ -1318,3 +1318,156 @@ class TestCredentialResolution:
         assert "tortoise_create_point" in mcp_client.list_tools()
         assert all(h is None for h in seen), seen
 
+
+class TestStatusNeverRaisesAndTheCredentialReadLeavesTheLoop:
+    """The two P2 findings of the #10802 review, each pinned by execution.
+
+    Finding 1 — `status()` hoisted `resolve_connection()` ABOVE its `try`, and its
+    failure-path `_url()` called `mcp_url()` → `resolve_connection()` a SECOND
+    time. Both raise on ORDINARY conditions (`Path.cwd()` on a removed working
+    directory, `Path.home()` with no resolvable `~`), so `if available():` — the
+    documented way for a script to skip cleanly — could traceback instead of
+    answering `False`.
+
+    Finding 2 — `_BearerProvider.auth_flow` read the filesystem on every request
+    ON THE EVENT LOOP. httpx documents the remedy on `Auth.async_auth_flow`:
+    override it when the scheme does I/O.
+    """
+
+    def test_status_never_raises_when_the_connection_cannot_be_resolved(
+        self, monkeypatch, isolated_home,
+    ):
+        """RED before the fix: the resolution sat OUTSIDE the guard."""
+        from tortoise import mcp_client
+
+        def _unresolvable_home() -> mcp_client.Connection:
+            # Exactly what `Path.home()` raises with no HOME / passwd entry —
+            # the normal shape of a container or supervisor process.
+            raise RuntimeError("Could not determine home directory.")
+
+        monkeypatch.setattr(mcp_client, "resolve_connection", _unresolvable_home)
+
+        payload = mcp_client.status()  # must NOT raise
+
+        assert payload["status"] == mcp_client._UNAVAILABLE, payload
+        assert "RuntimeError" in payload["error"], payload
+        assert mcp_client.available() is False, "available() must answer, not raise"
+
+    def test_status_survives_a_resolution_failure_on_the_FAILURE_path(
+        self, monkeypatch, isolated_home,
+    ):
+        """RED before the fix: `_url()` re-resolved INSIDE the exception handler.
+
+        The provider builds fine, so the probe is reached; the failure path then
+        re-resolves and raises the very exception it is handling.
+        """
+        from tortoise import mcp_client
+
+        real = mcp_client.resolve_connection
+        calls = {"n": 0}
+
+        def _first_ok_then_removed_cwd() -> mcp_client.Connection:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return real()
+            # Exactly what `Path.cwd()` raises once a daemon's cwd is removed.
+            raise FileNotFoundError(2, "No such file or directory")
+
+        monkeypatch.setattr(
+            mcp_client, "resolve_connection", _first_ok_then_removed_cwd)
+        monkeypatch.setenv("TORTOISE_MCP_URL", "http://127.0.0.1:1/mcp")
+        monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
+        monkeypatch.delenv("TORTOISE_MCP_API_KEY", raising=False)
+
+        payload = mcp_client.status()  # must NOT raise
+
+        assert payload["status"] == mcp_client._UNAVAILABLE, payload
+        # The URL reported is this client's own endpoint, resolved BEFORE the
+        # filesystem became unreadable — not a fresh (raising) resolution.
+        assert payload["url"] == "http://127.0.0.1:1/mcp", payload
+
+    def test_the_credential_read_does_not_run_on_the_event_loop(
+        self, monkeypatch, isolated_home,
+    ):
+        """RED before the fix: httpx's default `async_auth_flow` defers to the
+        SYNC `auth_flow`, so `resolve_connection` ran on the loop thread.
+
+        Drives a real `httpx.AsyncClient` (the shape this module's async fastmcp
+        transport uses) and compares thread identities — the property being
+        pinned is WHERE the read runs, which no correctness assertion can see.
+        """
+        import asyncio
+
+        from tortoise import mcp_client
+
+        loop_threads: list[int] = []
+        resolve_threads: list[int] = []
+        real = mcp_client.resolve_connection
+
+        def _spy() -> mcp_client.Connection:
+            resolve_threads.append(threading.get_ident())
+            return real()
+
+        monkeypatch.setattr(mcp_client, "resolve_connection", _spy)
+        monkeypatch.setenv("TORTOISE_MCP_URL", "http://127.0.0.1:9/mcp")
+        monkeypatch.setenv("TORTOISE_API_KEY", "tt_offloop")
+
+        provider = mcp_client._BearerProvider("http://127.0.0.1:9/mcp")
+        seen: list[str | None] = []
+
+        def _handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request.headers.get("authorization"))
+            return httpx.Response(200, json={})
+
+        async def _one_call() -> None:
+            loop_threads.append(threading.get_ident())
+            async with httpx.AsyncClient(
+                transport=httpx.MockTransport(_handler), auth=provider,
+            ) as client:
+                await client.post("http://127.0.0.1:9/mcp")
+
+        asyncio.run(_one_call())
+
+        assert seen == ["Bearer tt_offloop"], seen
+        assert resolve_threads, "the credential was not re-resolved per request"
+        assert loop_threads[0] not in resolve_threads, (
+            "resolve_connection() — Path.cwd()/Path.home()/stat/read_text — ran ON "
+            "the event loop: the provider must override `async_auth_flow` and "
+            "offload the read (httpx: override it when the scheme does I/O)")
+
+    def test_the_async_leg_still_re_resolves_on_EVERY_request(
+        self, monkeypatch, isolated_home,
+    ):
+        """The #10605 property survives the offload: ONE client, two requests,
+        two different keys.
+
+        This is the direction the Finding-2 fix could regress — caching the
+        resolution to avoid the read would make the loop faster and silently
+        restore the captured-credential bug #10605 exists to remove.
+        """
+        import asyncio
+
+        from tortoise import mcp_client
+
+        monkeypatch.setenv("TORTOISE_MCP_URL", "http://127.0.0.1:9/mcp")
+        monkeypatch.setenv("TORTOISE_API_KEY", "tt_first")
+
+        provider = mcp_client._BearerProvider("http://127.0.0.1:9/mcp")
+        seen: list[str | None] = []
+
+        def _handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request.headers.get("authorization"))
+            return httpx.Response(200, json={})
+
+        async def _two_calls() -> None:
+            async with httpx.AsyncClient(
+                transport=httpx.MockTransport(_handler), auth=provider,
+            ) as client:
+                await client.post("http://127.0.0.1:9/mcp")
+                monkeypatch.setenv("TORTOISE_API_KEY", "tt_rotated")
+                await client.post("http://127.0.0.1:9/mcp")
+
+        asyncio.run(_two_calls())
+
+        assert seen == ["Bearer tt_first", "Bearer tt_rotated"], seen
+

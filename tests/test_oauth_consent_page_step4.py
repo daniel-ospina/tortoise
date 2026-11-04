@@ -1298,11 +1298,19 @@ def test_the_bounce_carries_the_attempt_key_the_flow_is_bound_to(api_client) -> 
     the same flow (back button, refresh, this bounce's own return target) came back without it and
     was refused `403 flow_not_yours`.
 
-    Generating it here makes it the property of the FLOW: the bounce, the sign-in return, and every
-    re-entry carry the same value, and `start` adopts it instead of inventing one. The three
-    properties pinned below are what make that safe and useful: the key is carried at all, it is
-    UNPREDICTABLE and per-request (it is the browser's only proof of ownership, and `state` is
-    client-chosen and public), and the inner target is still the only allowlisted API path.
+    Generating it here closes the COLD START — the ONE leg on which no key exists yet. `start`
+    then ADOPTS the value the bounce carried instead of inventing one, so a sign-in return through
+    ANY `/auth` entry keeps the flow's key and the insert-only row is never poisoned by a key the
+    browser could not present.
+
+    ⛔ It does NOT make the key "the property of the flow" for a RE-BOUNCE: this mints a FRESH value
+    per call (the STATED RESIDUE on `tortoise/oauth.py::consent_bounce_url`, and #10805), so a
+    SECOND bounce of a flow whose row already exists presents a key the insert-only row cannot hold
+    and is still refused `403 flow_not_yours`. The assertion three lines below — two bounces of the
+    SAME flow never share a key — is that residue, pinned. The three properties pinned here are what
+    make the COLD-START fix safe and useful: the key is carried at all, it is UNPREDICTABLE and
+    per-request (it is the browser's only proof of ownership, and `state` is client-chosen and
+    public), and the inner target is still the only allowlisted API path.
     """
     from urllib.parse import parse_qs, urlsplit
 

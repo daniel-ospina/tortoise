@@ -535,15 +535,47 @@ class _BearerProvider(httpx.Auth):
         self.sent: Connection | None = None
         self.withheld: Connection | None = None
 
-    def auth_flow(self, request):
-        connection = resolve_connection()
+    def _record(self, connection: Connection) -> None:
+        """Record what THIS request resolved, which is what a refusal is classified from."""
         self.sent = connection
         _LAST_SENT[0] = connection
         self.withheld = None
         if connection.key and not _same_endpoint(connection.url, self.url):
             self.withheld = connection
-        elif connection.key:  # a blank resolution is absent, never `Bearer ` + nothing
+
+    def _apply(self, connection: Connection, request) -> None:
+        """Attach the credential to `request` — unless it belongs to another host."""
+        if self.withheld is not None:
+            return
+        if connection.key:  # a blank resolution is absent, never `Bearer ` + nothing
             request.headers["Authorization"] = f"Bearer {connection.key}"
+
+    def auth_flow(self, request):
+        connection = resolve_connection()
+        self._record(connection)
+        self._apply(connection, request)
+        yield request
+
+    async def async_auth_flow(self, request):
+        """The async leg — resolve OFF the event loop.
+
+        httpx 0.28's `Auth.async_auth_flow` says exactly this: *“You should
+        override this method when the authentication scheme does I/O and/or uses
+        concurrency primitives.”* Its default implementation defers to
+        `auth_flow`, which would run `resolve_connection()` — `Path.cwd()`,
+        `Path.home()`, a `stat` and (when a store supplies the key) a
+        `read_text` + `json.loads` — INLINE on the event loop, for every request.
+        This client drives an ASYNC fastmcp transport, so on a slow, hung or
+        network-mounted `$HOME` that stalled every other task in the loop for the
+        duration of the read.
+
+        The #10605 property is unchanged: the read still happens per request, so
+        a rotated store file reaches the very next call. Only the THREAD it runs
+        on changes.
+        """
+        connection = await asyncio.to_thread(resolve_connection)
+        self._record(connection)
+        self._apply(connection, request)
         yield request
 
 
@@ -720,8 +752,20 @@ class _GuardedClient:
 
 
 def _url(provider: _BearerProvider) -> str:
-    """The endpoint actually used by the last attempt (else the live one)."""
-    return provider.sent.url if provider.sent else mcp_url()
+    """The endpoint actually used by the last attempt (else this client's own).
+
+    ⛔ NEVER re-resolves. `mcp_url()` → `resolve_connection()` performs real
+    filesystem I/O and raises on ORDINARY conditions (a removed working
+    directory, an unresolvable `~`), and every caller here is a FAILURE path — so
+    re-resolving re-raised the very exception being handled and turned a graceful
+    `tortoise_unavailable` payload into a traceback out of `status()`.
+
+    The provider's construction URL IS the endpoint this client resolved, and a
+    transport's URL is fixed for the client's life anyway, so it is the honest
+    answer when no request was sent — and a more accurate one than a fresh
+    resolution, which can name a host this client never talked to.
+    """
+    return provider.sent.url if provider.sent else provider.url
 
 
 def _run(coro):
@@ -780,8 +824,32 @@ def status() -> dict[str, Any]:
     endpoint demands a credential the client does not have (the recorded
     `unconfigured` term — a set-up gap, not an outage, #3805), else
     {"status": "tortoise_unavailable", "url": ..., "error": ...}.
+
+    EVERY leg that can raise is inside a guard, including the credential
+    resolution itself: resolving a connection is filesystem I/O whose ordinary
+    failure modes (a removed cwd, an unresolvable `~`) must degrade to
+    `tortoise_unavailable`, never escape — see the `except` below.
     """
-    provider = _BearerProvider(resolve_connection().url)
+    try:
+        provider = _BearerProvider(resolve_connection().url)
+    except Exception as exc:  # noqa: BLE001, RUF100
+        # ⛔ THIS RESOLUTION IS I/O AND IT BELONGS INSIDE A GUARD. It calls
+        # `Path.cwd()`, `Path.home()`, `stat` and `read_text`, and TWO of those
+        # raise on ordinary system conditions rather than exotic ones:
+        # `Path.cwd()` raises `FileNotFoundError` when the process's working
+        # directory has been removed (a daemon whose checkout was cleaned up) and
+        # `Path.home()` raises `RuntimeError` when `~` cannot be resolved (no
+        # `HOME`, no passwd entry — the normal shape of a container/supervisor
+        # process). The module's first contract, stated at the top of this file, is
+        # that availability/status NEVER RAISE — so `if available():`, the
+        # documented way for a script to skip cleanly, must answer `False` here
+        # rather than traceback out of the caller.
+        _logger.debug("tortoise unavailable: connection resolution failed: %s", exc)
+        return {
+            "status": _UNAVAILABLE,
+            "url": _DEFAULT_URL,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
 
     async def _probe() -> dict[str, Any]:
         async with _client(provider) as client:
