@@ -6530,6 +6530,14 @@ def test_a_mid_note_span_does_not_leave_a_space_before_a_sentence_period() -> No
     assert ci_timing._without_span(control, start, end).endswith(
         "carve_out-registered x The count is re-derived at your head"), \
         ci_timing._without_span(control, start, end)
+    # CONTROL: a QUOTE is both an opening and a closing mark, so the predicate does
+    # NOT glue it — `… "quoted clause"` keeps the word separator the space carries.
+    # Gluing it emitted `word"quoted clause"` (#10704 review round 2).
+    quoted = "word — SPAN \"quoted clause\" here"
+    start = quoted.index(" — ")
+    end = quoted.index('"')
+    assert ci_timing._without_span(quoted, start, end) == 'word "quoted clause" here', \
+        ci_timing._without_span(quoted, start, end)
 
 
 def test_the_wrapped_row_prune_guard_survives_the_next_sweep() -> None:
@@ -6916,6 +6924,12 @@ def test_a_floor_that_names_no_row_or_sits_above_one_is_red() -> None:
     null_block = ci_manifest.floor_issues(
         {"durations": {"test_a.py": 355.0}, "durations_floors": None})
     assert len(null_block) == 1 and "null" in null_block[0], null_block
+    # …and the THIRD face: an EMPTY mapping. A YAML-aware editor or a `safe_dump`
+    # round-trip produces `{}` rather than `null` when a block is emptied, and it is
+    # the same silent revert (#10704 review round 2).
+    empty_block = ci_manifest.floor_issues(
+        {"durations": {"test_a.py": 355.0}, "durations_floors": {}})
+    assert len(empty_block) == 1 and "empty" in empty_block[0], empty_block
     # An ABSENT map is `check`'s UNKNOWN, not this check's red: there is no map for
     # a floor to be inconsistent with, and one red per declared floor would turn
     # that UNKNOWN into a wall of reds.
@@ -7148,6 +7162,9 @@ def test_an_unreadable_or_pinned_odd_declaration_refuses_the_write() -> None:
                 # nothing red on either side (#10575 review, P3).
                 "durations_floors:\n",
                 "durations_floors: null\n",
+                # …and the THIRD face, the one a YAML editor / `safe_dump` round-trip
+                # produces when a block is emptied (#10704 review round 2).
+                "durations_floors: {}\n",
                 "durations_floors:\n  test_capped.py: [355.0]\n",
                 'durations_floors:\n  test_capped.py: "a lot"\n',
                 "durations_floors:\n  test_capped.py: {value: 355.0, pinned: maybe}\n",

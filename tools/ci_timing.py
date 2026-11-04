@@ -1904,7 +1904,15 @@ def _prior_basis_spans(tail: str) -> list[tuple[int, int, str]]:
 # set with NO space, because the text it re-joins was adjacent before a basis was
 # injected between the two halves. `…` is in the set because the map's notes use it
 # as a sentence-final mark.
-_ATTACHING_PUNCTUATION = frozenset(",.;:!?)]}\"'…")
+#
+# ⛔ THE QUOTES ARE DELIBERATELY ABSENT. `"` and `'` are BOTH opening and closing
+# marks, so the set cannot tell `… "quoted clause"` (where the mark OPENS a word and
+# the space before it is a word separator the fix must preserve) from a fragment that
+# stopped mid-quote (where glue would be right). Gluing them destroyed the separator:
+# `word — SPAN "quoted clause"` came out `word"quoted clause"` (#10704 review round
+# 2). Of the two errors, a spurious SPACE is harmless and a destroyed separator is
+# not, so the ambiguous marks are left to the space arm.
+_ATTACHING_PUNCTUATION = frozenset(",.;:!?)]}…")
 
 
 def _without_span(tail: str, start: int, end: int) -> str:
@@ -2529,9 +2537,9 @@ def _declared_floors(manifest_text: str) -> dict[str, DeclaredFloor]:
     Absent → no declarations, so every caller and fixture that carries no such key
     keeps its output. UNREADABLE → `DurationsBridgeError`, NEVER "no declarations":
     that fail-open reading is the #10575 P1 this mechanism exists to prevent, and
-    the refused shapes are enumerated in the body below (a `null` block, a
-    non-mapping container, a per-row non-numeric value, an unknown declaration key,
-    a non-boolean `pinned`).
+    the refused shapes are enumerated in the body below (a `null` block, an EMPTY
+    block, a non-mapping container, a per-row non-numeric value, an unknown
+    declaration key, a non-boolean `pinned`).
     """
     import yaml
     try:
@@ -2539,6 +2547,18 @@ def _declared_floors(manifest_text: str) -> dict[str, DeclaredFloor]:
     except yaml.YAMLError:
         return {}
     floors = data.get("durations_floors") if isinstance(data, dict) else None
+    if isinstance(floors, dict) and not floors:
+        # The EMPTY MAPPING — the third face of this container, and the one a
+        # YAML-aware editor / `safe_dump` round-trip produces when a block is
+        # emptied. Parsed to no declarations, so it must be refused for the same
+        # reason `null` is (#10704 review round 2): reading it as "absent" reverts
+        # every declared cap on the next sweep with nothing red anywhere.
+        raise DurationsBridgeError(
+            "`durations_floors` is present but declares nothing (an empty mapping) "
+            "— a declaration block the writer cannot honour must be REFUSED rather "
+            "than silently treated as absent, or every declared cap reverts on the "
+            "next sweep (state the declaration or drop the key, #9172)"
+        )
     if floors is None:
         if isinstance(data, dict) and "durations_floors" in data:
             # PRESENT but NULL. Absent is legal (every fixture that carries no such
@@ -3227,8 +3247,12 @@ def integrity_problems(manifest_text: str) -> list[str]:
     checks through `ci_manifest.map_issues`, which ALSO carries main's two
     newer manifest checks (`fast_shard_issues` for the top-level `fast_shards`
     declaration and `duplicate_entries` for the same-surface `merge=union`
-    gate) — so when main added them beside this change they were folded into
-    the same one place instead of being re-added at this call site. The one
+    gate) AND this branch's own `floor_issues` (a weight declared as a floor or a
+    pinned cap rather than a reading — ⚠️ `origin/main` has no `floor_issues` at
+    all, so it is not one of main's) — so when main added its two beside this
+    change they were folded into the same one place instead of being re-added at
+    this call site, and the third is composed there for exactly the same reason.
+    The one
     UNKNOWN class the
     enforcing gate promotes to RED — a capture stamp that is PRESENT but
     unparseable — is likewise one shared decision,

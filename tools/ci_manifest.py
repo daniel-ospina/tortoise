@@ -422,6 +422,20 @@ def floor_issues(manifest: dict) -> list[str]:
     refuses a map whose floor it could not honour instead of shipping it.
     """
     floors = manifest.get("durations_floors")
+    if isinstance(floors, dict) and not floors:
+        # The EMPTY MAPPING is the third face of the same container, and the one a
+        # YAML-aware editor or a `safe_dump` round-trip actually produces when a
+        # block is emptied. It parsed to no declarations, so it is the same silent
+        # revert the `null` face was fixed for: "a declaration block that parses to
+        # no declarations means no row in this map is declared at all, so every cap
+        # it states silently reverts" — that sentence applies to `{}` verbatim
+        # (#10704 review round 2).
+        return [
+            "``durations_floors`` is present but declares nothing (an empty "
+            "mapping) — a declaration block that parses to no declarations means "
+            "no row in this map is declared at all, so every cap it states "
+            "silently reverts; state the declaration or drop the key (#9172)"
+        ]
     if floors is None:
         # ABSENT is legal (a fixture manifest declares no floors); PRESENT but NULL is
         # not. `durations_floors:` written with its entries deleted — a plausible
