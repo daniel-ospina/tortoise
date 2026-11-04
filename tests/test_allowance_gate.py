@@ -787,6 +787,57 @@ def test_the_points_door_carries_the_allowance_on_the_control_plane_lane(
                     ("graph", "check_org_limit.points")], seen
 
 
+def test_the_sessions_door_carries_the_allowance_on_the_control_plane_lane(
+        monkeypatch):
+    """The CAPTURE door's carry rides the control-plane pool too (main-repair).
+
+    The capture door was the one gated REST door that submitted the whole gate
+    — carry AND count — through ``asyncio.to_thread(_check_org_limit, org,
+    "sessions", sdk=sdk)``: the LOOP'S DEFAULT EXECUTOR, which carries this
+    file's graph-lane work (``_commit_sync``, ``_seed_demo_sync``). That
+    satisfies round 12's "off the event loop" half and violates its "on ITS
+    OWN substrate's lane" half, and it is the shape that produced one fault
+    with two bodies: a control-plane stall on ``/v1/sessions`` answered ``500
+    "Quota check failed"`` while the identical stall on ``/v1/points``
+    answered ``503 control_plane_unavailable``.
+
+    Mutation this REDs: put the capture door back on
+    ``asyncio.to_thread(_check_org_limit, org, "sessions", sdk=sdk)`` and the
+    capture route stops reaching ``_carry_allowances_off_loop`` at all, so
+    neither submission below is recorded.
+
+    The route-level half — that the fill does not run ON the loop — is
+    ``tests/test_capture_loop_responsiveness.py::
+    test_capture_sessions_gate_allowance_read_is_off_the_event_loop``; this pin
+    is the LANE half.
+    """
+    import asyncio
+
+    import tortoise.hosted_api as ha
+    from tortoise import quota, supabase_control
+
+    seen: list[tuple[str, str]] = []
+
+    async def _cp(fn, *, op, **_kw):
+        seen.append(("cp", op))
+        return fn()
+
+    async def _graph(fn, *, op, **_kw):
+        seen.append(("graph", op))
+        return fn()
+
+    monkeypatch.setattr(ha, "_cp_offload", _cp)
+    monkeypatch.setattr(ha, "_graph_offload", _graph)
+    monkeypatch.setattr(supabase_control, "is_supabase_enabled", lambda: True)
+    monkeypatch.setattr(quota, "resolve_org_limits", lambda oid: {"org_id": oid})
+
+    asyncio.run(ha._check_org_limit_off_loop(_rest_org(), "sessions",
+                                            op="check_org_limit.sessions"))
+
+    assert seen == [("cp", "check_org_limit.sessions.allowance_carry"),
+                    ("graph", "check_org_limit.sessions")], seen
+
+
 def test_a_control_plane_bound_miss_on_the_carry_is_the_CONTROL_PLANE_503(
         monkeypatch):
     """A slow resolver on a points door yields the control-plane body.

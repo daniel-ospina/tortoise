@@ -8989,14 +8989,19 @@ def _check_org_limit(org: dict, resource: str, *,
 
     ⚠️ For a resource in ``ALLOWANCE_GATED_RESOURCES`` that fill is ONE
     control-plane read, so an ``async def`` request path MUST run this call off
-    the event loop (``asyncio.to_thread`` / ``_graph_offload``) — a synchronous
-    read inline on this API's single uvicorn worker parks every concurrent
-    request (the #2988/#3498 class). Every call site does: the points doors ride
-    ``_check_org_limit_off_loop`` (which puts the fill on its OWN lane, see
-    below), and the capture door awaits
-    ``asyncio.to_thread(_check_org_limit, org, "sessions")`` (#9567 review
-    round 10). Both of the fill's fail-closed faults (a resolver fault, and the
-    gate's loud import-time drift) are mapped to this function's documented
+    the event loop — a synchronous read inline on this API's single uvicorn
+    worker parks every concurrent request (the #2988/#3498 class). AND it must
+    ride its OWN substrate's lane, not merely a worker thread: the fill is a
+    control-plane read and the count it feeds is a graph read, so
+    ``asyncio.to_thread`` (the loop's DEFAULT executor — the lane
+    ``_commit_sync``/``_seed_demo_sync`` already use) satisfies only half the
+    rule. EVERY call site therefore rides ``_check_org_limit_off_loop``, which
+    hoists the fill onto ``_cp_offload``/``_graph_offload`` by substrate and
+    then submits the count to the graph pool: the points doors
+    (``check_org_limit.points``) and the capture door
+    (``check_org_limit.sessions``, #9567 round 10 → main-repair 2026-11-04).
+    Both of the fill's fail-closed faults (a resolver fault, and the gate's
+    loud import-time drift) are mapped to this function's documented
     ``HTTPException(500, "Quota check failed: …")`` — never an unmapped 500.
 
     ⚠️ ONE control-plane read is the SUPABASE shape. In registry/self-host mode
@@ -17479,10 +17484,25 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # query). Run inline it would park the single uvicorn worker on every REST
     # capture — including the store-only (#3892/#4258) and replay lanes that
     # reach here having done NO other I/O — the #2988/#3498 class this file
-    # offloads everywhere else (see :15456). So it rides `asyncio.to_thread`,
-    # the same idiom the cohort cap three lines above uses; `to_thread` copies
-    # the context, so the tenant contextvars reach the gate intact. Safe on the
-    # MCP path too (it awaits this impl under its own loop in a worker thread).
+    # offloads everywhere else (see :15456).
+    #
+    # ⛔ "Off the loop" is not the whole rule (main-repair, 2026-11-04, after
+    # the #9567 round-12/13 pool split landed): `asyncio.to_thread` runs the
+    # call on the LOOP'S DEFAULT EXECUTOR, which carries this file's graph-lane
+    # work (`_commit_sync`, `_seed_demo_sync`). The gate is TWO reads on TWO
+    # substrates — the allowance CARRY is a control-plane read, the COUNT is a
+    # graph read — and round 12's rule is that a read is submitted to the pool
+    # ITS OWN substrate lives in. Submitted as one blob to the default
+    # executor, a control-plane stall occupied a slot that the commit lane
+    # needs, and it answered `500 "Quota check failed"` where the identical
+    # stall on `/v1/points` answers `503 control_plane_unavailable` — one
+    # fault, two bodies, across two gated doors of one seam. So this door uses
+    # the SAME seam as the points doors (`_check_org_limit_off_loop`): carry on
+    # `_cp_offload`/`_graph_offload` by substrate, then the count on the graph
+    # pool. `to_thread`'s context-copy is not lost — an await still runs the
+    # caller's contextvars into both halves — and it is safe on the MCP path
+    # for the same reason as before (the impl is awaited under its own loop in
+    # a worker thread).
     # #8906: `sdk=` is passed for the same reason as the points doors — this is a
     # TENANT-GRAPH resource, so an omitted sdk makes `_count_resource` mint
     # `org_{org_id}` (the org DEFAULT graph) while a graph-bound key's Sessions
@@ -17490,9 +17510,9 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # resolver emits `max_sessions: None` (#4010), so `enforce_org_limit` returns
     # before counting; the moment a finite session cap ships, an omitted sdk
     # re-arms #8906 on this door. Count on the handle the capture writes through.
-    # `to_thread` forwards kwargs, so the sdk reaches the count AND the fill
-    # rides the worker lane.
-    await asyncio.to_thread(_check_org_limit, org, "sessions", sdk=sdk)
+    # The seam forwards `sdk` verbatim to the count.
+    await _check_org_limit_off_loop(org, "sessions",
+                                    op="check_org_limit.sessions", sdk=sdk)
     # Optional frontmatter-metadata validation (#1362) — warn-only, gated by
     # TORTOISE_VALIDATE_FRONTMATTER=1 (default OFF). The SessionRequest is a
     # payload (no frontmatter block), so the shape validator runs over a
