@@ -514,7 +514,7 @@ def _gh(argv: list[str], cwd: Path) -> _GhRun:
         # identically (measured 2026-11-04, sole candidate: `shutil.which("gh")`
         # resolves it, `subprocess` does not run it — and CPython's own `PATH` walk
         # only hides the case when a WORKING `gh` sits later on the list, which is
-        # `executable_list` built from `os.get_exec_path` at `subprocess.py:1877`).
+        # `executable_list` built from `os.get_exec_path` at `subprocess.py:1880-1882`).
         # Ask the question
         # separately, so "install the GitHub CLI" is never printed at a binary the
         # operator already has.
