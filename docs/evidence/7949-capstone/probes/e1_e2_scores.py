@@ -107,7 +107,29 @@ PREREG = Path("docs/evidence/7949-capstone/preregistration.json")
 # in a scored row.
 _ARM_VARS = ("TORTOISE_VET", "TORTOISE_CLASSIFY_LATER", "TORTOISE_VALUE_GATE",
              "TORTOISE_S2_DECISION_SEAM")
-_ARM_OFF_STATES = ("none", "null", "", "0", "false", "unset", "<unset>")
+#: The repo's declared env-truthiness vocabulary, mirrored rather than imported.
+#:
+#: `tortoise/env_truthy.py` is the ONE contract ("unset/blank/falsy/garbage -> False"),
+#: and it is stdlib-only precisely so a module can carry the same rule without an
+#: import cycle — `tortoise/embedded_reaper.py` and `tortoise/hermes-plugin/__init__.py`
+#: already MIRROR it, and `tests/test_env_truthy.py` pins every mirror. This driver
+#: follows that precedent, and `test_the_arm_vocabulary_is_the_repos_truthiness_contract`
+#: pins the copy against the real `is_truthy`/`TRUTHY`/`FALSY`.
+#:
+#: ⛔ THE DENY-LIST WAS THE BUG (#10610 review at `f12471075`, P1). `_ARM_OFF_STATES`
+#: was a hand-typed list of OFF spellings, used to decide BOTH directions, while the
+#: pipeline decides with `is_truthy` — an ALLOW-LIST. So `TORTOISE_VET=off` in the ON
+#: run's readback was accepted as the ON half of E1's pair (`is_truthy("off") is
+#: False` — the treatment was OFF, and the pair was two control arms), and the same
+#: list REFUSED a genuine before arm that spelled its switches `off`/`no`. The two
+#: directions need the repo's own predicate, not a list to compare spellings against.
+_TRUTHY = ("1", "true", "yes", "on")
+_FALSY = ("0", "false", "no", "off")
+
+
+def _is_truthy(raw) -> bool:
+    """`tortoise.env_truthy.is_truthy`, mirrored: unset/blank/falsy/garbage -> False."""
+    return ("" if raw is None else str(raw).strip().lower()) in _TRUTHY
 # The measured arm is the mirror image: it must have been ON. `capstone_measure`
 # writes that readback onto the log this driver already parses (`# arm: …`), so
 # nothing about the after side needs to be assumed either.
@@ -366,6 +388,39 @@ def _census_reconcile(where: str, block: dict, *, declared=None) -> None:
             raise _refuse(f"{where} carries no value_ids/value_survived lists for "
                           f"session {session_id!r} — the census is what the "
                           "totals are summed from")
+        # ⛔ THE CENSUS IS A SET RELATION, not four lengths (#10610 review at
+        # `f12471075`, P2). `e2a_value_units.py` writes `value_lost` beside the two
+        # lists (`[v for v in value_ids if v not in survived]`), so a row that lists
+        # the same unit as both surviving and lost contradicts itself — measured: the
+        # census `kept = ids` with `value_lost` untouched wrote `E2 PASS` while six
+        # units appeared in BOTH. `len()` also counted duplicates, which inflates the
+        # totals the bar is scored on.
+        if len(set(ids)) != len(ids):
+            raise _refuse(f"{where}'s session {session_id!r} lists a value unit "
+                          "twice in value_ids — the census counts units, not rows")
+        if len(set(kept)) != len(kept):
+            raise _refuse(f"{where}'s session {session_id!r} lists a surviving unit "
+                          "twice — a duplicated id inflates the count the bar is "
+                          "scored on")
+        if not set(kept) <= set(ids):
+            raise _refuse(f"{where}'s session {session_id!r} reports surviving units "
+                          "that are not among its own value_ids — a unit cannot "
+                          "survive a population it was never in")
+        lost = row.get("value_lost")
+        if lost is not None:
+            if not isinstance(lost, list):
+                raise _refuse(f"{where}'s session {session_id!r} carries a "
+                              "value_lost that is not a list")
+            both = set(lost) & set(kept)
+            if both:
+                raise _refuse(f"{where}'s session {session_id!r} lists "
+                              f"{sorted(both)!r} as BOTH survived and lost — the row "
+                              "contradicts itself, so its totals describe no run")
+            if set(lost) | set(kept) != set(ids) or len(set(lost)) != len(lost):
+                raise _refuse(f"{where}'s session {session_id!r} does not partition "
+                              "its value_ids into survived + lost — the census is a "
+                              "partition of the population, not two independent "
+                              "lists")
         units += len(ids)
         survived += len(kept)
     stated = declared if declared is not None else (
@@ -383,6 +438,37 @@ def _grep(text: str, pattern: str, *, what: str) -> str:
     if not match:
         raise _refuse(f"{ON_ARM_LOG} carries no {what} line")
     return match.group(1)
+
+
+def _float_token(text: str, pattern: str, *, what: str) -> float:
+    """A numeric log token, REFUSED if it is not a number.
+
+    ⛔ `float(_grep(...))` was an uncaught `ValueError` (#10610 review at
+    `f12471075`, P2): `share=abc` in the log exited 1 with a traceback and wrote
+    nothing, which an operator cannot tell from a crash — the same class the
+    previous round closed on the JSON side. A token that does not parse is a
+    refusal the driver has to be able to print, not an exception it cannot catch.
+    """
+    raw = _grep(text, pattern, what=what)
+    try:
+        value = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise _refuse(f"{ON_ARM_LOG}'s {what} token {raw!r} is not a number "
+                      f"({exc}) — a log field that does not parse is not a "
+                      "measurement") from exc
+    if not math.isfinite(value):
+        raise _refuse(f"{ON_ARM_LOG}'s {what} token {raw!r} is not finite")
+    return value
+
+
+def _int_token(text: str, pattern: str, *, what: str) -> int:
+    """An integer log token, on the same refusal contract as `_float_token`."""
+    value = _float_token(text, pattern, what=what)
+    if value != int(value):
+        raise _refuse(f"{ON_ARM_LOG}'s {what} token is {value!r}, which is not a "
+                      "whole number — a count that is not integral is a ratio "
+                      "wearing a count's name")
+    return int(value)
 
 
 #: The bundle's ONE bar reader, loaded from the sibling probe by path.
@@ -534,7 +620,12 @@ def read_off_arms(repo: Path, floors: dict) -> list[dict]:
                     "the passes were OFF — a missing key is not an unset one, "
                     "and a before arm's provenance cannot be assumed")
             state = arm.get(var)
-            if str(state).strip().lower() not in _ARM_OFF_STATES:
+            # ⛔ NOT A SPELLING LIST (#10610 review at `f12471075`, P1): a before arm's
+            # switch is OFF exactly when the pipeline would read it as falsy, which is
+            # `is_truthy`'s rule. `"off"` and `"no"` are OFF (`FALSY`), and so is
+            # garbage — but the old deny-list refused BOTH realizations of the shipped
+            # pair the moment a producer spelled a switch `off`.
+            if _is_truthy(state):
                 raise _refuse(
                     f"{name} was measured with {var}={state!r}, so it is not a "
                     "before arm — scoring it as one compares a treatment against "
@@ -633,27 +724,78 @@ def read_on_arm(repo: Path) -> dict:
     if not path.is_file():
         raise _refuse(f"{EVIDENCE / ON_ARM_LOG} does not exist")
     text = path.read_text()
-    objects = int(_grep(text, r"^e1-aux objects_in_graph=(\d+)",
-                        what="e1-aux objects_in_graph"))
-    bare = int(_grep(text, r"^e1-aux objects_in_graph=\d+ bare_definite=(\d+)",
-                     what="e1-aux bare_definite"))
-    share = float(_grep(text, r"^e1-aux objects_in_graph=\d+ "
-                              r"bare_definite=\d+ share=(\S+)",
-                        what="e1-aux share"))
+    objects = _int_token(text, r"^e1-aux objects_in_graph=(\d+)",
+                        what="e1-aux objects_in_graph")
+    bare = _int_token(text, r"^e1-aux objects_in_graph=\d+ bare_definite=(\d+)",
+                      what="e1-aux bare_definite")
+    share = _float_token(text, r"^e1-aux objects_in_graph=\d+ "
+                               r"bare_definite=\d+ share=(\S+)",
+                         what="e1-aux share")
     # …and the same reconciliation on the after side. The log prints all three
     # numbers on ONE line (`objects_in_graph=61 bare_definite=13
     # share=0.21311475409836064`, and `13/61` is that float exactly), so a share
     # that disagrees with them is a record edited between the count and the
     # share — the arm a false GREEN is cheapest to forge on.
     _consistent_share(f"{EVIDENCE / ON_ARM_LOG}", share, bare, objects)
-    real_facts = int(_grep(text, r"^e1b outcome=\S+ real_facts=(\d+)",
-                           what="e1b real_facts"))
+    # …and the log's OWN third copy of the same count. `e3 label=Object nodes=N` is
+    # emitted by the census pass in the same run, so a single-field edit to the
+    # `e1-aux` line leaves an artifact contradicting itself where nobody was looking
+    # (the exact shape this bundle exists to refuse).
+    e3_objects = _int_token(text, r"^e3 label=Object nodes=(\d+)",
+                            what="e3 label=Object nodes")
+    if e3_objects != objects:
+        raise _refuse(
+            f"{EVIDENCE / ON_ARM_LOG}'s e1-aux line reports "
+            f"objects_in_graph={objects} but its own `e3 label=Object "
+            f"nodes={e3_objects}` line reports {e3_objects} — one run, one Object "
+            "census")
+    real_facts = _int_token(text, r"^e1b outcome=\S+ real_facts=(\d+)",
+                            what="e1b real_facts")
+    # ⛔ E1b's numerator is bounded by its OWN frozen denominator too (#10610 review
+    # at `f12471075`, P3): `real_facts=100000` was accepted beside `bar=90 of 90`,
+    # i.e. a numerator 1,111x its denominator — the shape `_count(ceiling=...)` was
+    # added for on E2a. The `bar` token is on the same line, so it is read rather
+    # than assumed, and the two must agree.
+    match = re.search(r"^e1b outcome=\S+ real_facts=\d+ bar=(\d+) of (\d+)", text,
+                      re.M)
+    if not match:
+        raise _refuse(f"{EVIDENCE / ON_ARM_LOG} carries no `e1b … bar=<required> of "
+                      "<population>` line, so its numerator is the only statement of "
+                      "the population it counts")
+    e1b_required, e1b_population = int(match.group(1)), int(match.group(2))
+    # The numerator must be inside the population the SAME LINE prints. The bar's
+    # agreement with the pre-registration is checked in `score()`, where the frozen
+    # record is in hand.
+    _count(f"{EVIDENCE / ON_ARM_LOG}", "e1b real_facts", real_facts,
+           ceiling=e1b_population)
     head = _grep(text, r"^# head: (\S+)", what="# head")
     graph = _grep(text, r"^# graph: (\S+)", what="# graph")
     corpus = _grep(text, r"^# corpus: \S+ fixtures_hash=sha256:(\S+)",
                    what="# corpus fixtures_hash")
-    fused, atomic = _grep(text, r"^e2b outcome=\S+ fused=(\d+/\d+)",
-                          what="e2b fused").split("/")
+    fused_text = _grep(text, r"^e2b outcome=\S+ fused=(\d+/\d+)",
+                       what="e2b fused")
+    fused, atomic = (int(part) for part in fused_text.split("/"))
+    # ⛔ THE SHARE PRINTED BESIDE THE COUNTS IS AN OPERAND, NOT DECORATION (#10610
+    # review at `f12471075`, P1). `fused`/`atomic_points` were read as unbounded
+    # integers and the `= 0.087719` on the same line was ignored, so editing ONLY the
+    # denominator (`fused=10/114` -> `10/100000`) wrote `share: 0.0001` and turned E2
+    # from FAIL into PASS while the line still printed its own contradiction. The
+    # reconciliation `_consistent_share` performs for E1's census, applied to E2b: the
+    # ratio the log states is the ratio its own counts give.
+    printed_share = _float_token(text, r"^e2b outcome=\S+ fused=\d+/\d+ = (\S+)",
+                                 what="e2b share")
+    if atomic <= 0:
+        raise _refuse(f"{EVIDENCE / ON_ARM_LOG}'s e2b line grades {fused}/{atomic} "
+                      "— a share of no population is not a measurement")
+    if not 0 <= fused <= atomic:
+        raise _refuse(f"{EVIDENCE / ON_ARM_LOG}'s e2b line reports {fused} fused "
+                      f"of {atomic} atomic Points — a numerator above its own "
+                      "denominator is not a share")
+    if abs(fused / atomic - printed_share) > 1e-6:
+        raise _refuse(f"{EVIDENCE / ON_ARM_LOG}'s e2b line reports "
+                      f"{fused}/{atomic} = {printed_share}, but those counts give "
+                      f"{fused / atomic:.6f} — the counts and the share printed "
+                      "beside them cannot disagree")
     # The after arm's OWN readback, off the `# arm:` line `capstone_measure` writes
     # from `os.environ` after forcing the passes. E1's bar compares an ON run
     # against an OFF one, so an after arm whose treatment was never enabled is not
@@ -668,7 +810,12 @@ def read_on_arm(repo: Path) -> dict:
             key, _, value = token.partition("=")
             after_arm[key] = value
     for var in _ARM_ON_VARS:
-        if str(after_arm.get(var)).strip().lower() in _ARM_OFF_STATES:
+        # ⛔ AN ALLOW-LIST, like the pipeline's (#10610 review at `f12471075`, P1).
+        # This was `not in _ARM_OFF_STATES`, which accepted `off`, `no` and any garbage
+        # token as ON — `is_truthy("off") is False`, so the measured passes were OFF
+        # and the "before/after pair" was two control arms, greened at the value the
+        # reviewer measured by changing ONE line of the log.
+        if not _is_truthy(after_arm.get(var)):
             raise _refuse(
                 f"{EVIDENCE / ON_ARM_LOG}'s arm readback has {var}="
                 f"{after_arm.get(var)!r}, so the measured passes were not ON — "
@@ -687,7 +834,7 @@ def read_on_arm(repo: Path) -> dict:
                 "does not show the switch was pinned OFF — a missing key is not "
                 "an unset one, and the measured arm is only the ON half of a "
                 "before/after pair while its OFF switches are declared")
-        if str(after_arm.get(var)).strip().lower() not in _ARM_OFF_STATES:
+        if _is_truthy(after_arm.get(var)):
             raise _refuse(
                 f"{EVIDENCE / ON_ARM_LOG}'s arm readback has {var}="
                 f"{after_arm.get(var)!r}, but the measured arm pins it OFF — "
@@ -704,8 +851,9 @@ def read_on_arm(repo: Path) -> dict:
         "bare_definite": bare,
         "share": share,
         "real_facts": real_facts,
-        "fused": int(fused),
-        "atomic_points": int(atomic),
+        "e1b_bar": (e1b_required, e1b_population),
+        "fused": fused,
+        "atomic_points": atomic,
     }
 
 
@@ -804,6 +952,22 @@ def e2_score(repo: Path, floors: dict) -> dict:
     # denominator, which is a population relation no producer can violate.
     units_n = _count(E2A_RECORD, "value_units", units)
     survived_n = _count(E2A_RECORD, "value_survived", survived, ceiling=units_n)
+    # ⛔ THE E2a RECORD IS THE RETENTION READING, so it may not be the INJECTED one
+    # (#10610 review at `f12471075`, P1). `e2a_value_units.py:165` writes
+    # `injected_anchor` into this record too, and `--inject-anchor` produces exactly
+    # the 14/14 reading the falsifier is supposed to prove is REACHABLE — so a record
+    # copied from that run states, in its own field, that it graded the injected pass,
+    # and 14/14 then passes E2a's bar. Nothing read it: the round-5 fix closed this for
+    # `with_anchor` only, on the falsifier. `is not False` (never a truthiness test)
+    # refuses `True`, `None` and an absent key alike, on the same rule as
+    # `injected_anchor is not True` one function over: a provenance that has to be
+    # PRESENT to mean "uninjected" cannot be defaulted.
+    if record.get("injected_anchor") is not False:
+        raise _refuse(f"{E2A_RECORD} does not declare an UNINJECTED reading "
+                      f"(injected_anchor={record.get('injected_anchor')!r}) — this "
+                      "record IS the retention measurement, so a reading taken with "
+                      "the anchor injected has already proven the counter reachable "
+                      "and cannot stand in for it")
     frozen_units = floors["e2a_units"]
     # The denominator must BE the frozen one. A record that grades 20 units while
     # the pre-registration froze 14 would otherwise score GREEN on a population
@@ -837,6 +1001,14 @@ def e2_score(repo: Path, floors: dict) -> dict:
                       "as-written block IS the E2a reading, so the two cannot "
                       "disagree")
     if "as_written" in falsifier:
+        # ⛔ …and the as-written half must declare it is the UNINJECTED one (#10610
+        # review at `f12471075`, P1): it says it IS the E2a reading, so an injected
+        # block claiming that identity is a falsifier pass passed off as the control.
+        if falsifier_as_written.get("injected_anchor") is not False:
+            raise _refuse(f"{E2A_FALSIFIER}'s as-written block does not declare an "                          f"uninjected reading (injected_anchor="
+                          f"{falsifier_as_written.get('injected_anchor')!r}) — the "
+                          "as-written half IS the E2a reading, which is the "
+                          "pre-injection measurement by definition")
         # The block's OWN totals must be its own census, the same rule the E2a
         # record is held to: the as-written half is the pre-injection reading the
         # README quotes, so its census is the population it must add up to.
@@ -1033,7 +1205,57 @@ def score(repo: Path = _ROOT) -> dict:
                       f"{gates_record.get('graph')!r}; one record cannot mix "
                       "them, and two runs of the SAME head are still two "
                       "graphs")
+    # ⛔ THE AFTER ARM'S CENSUS IS ALSO THE GATE-DROPS RECORD'S (#10610 review at
+    # `f12471075`, P0). The graph-identity check above already establishes that
+    # `e1-gate-drops.json` and the ON log are the SAME RUN, and that record carries its
+    # own `objects`/`bare_definite`/`object_names` census — so the after share had a
+    # witness sitting in the tree and nothing compared them. Measured: editing ONE line
+    # of `on-arm.log` to `objects_in_graph=78 bare_definite=10 share=0.1282…` (the
+    # counts self-consistent, as `_consistent_share` requires) exited 0 with
+    # `e1.outcome = PASS`, `decidable: True` — both pairings PASS — and the consumer's
+    # row came back GREEN, while `e1-gate-drops.json` still said 61 Objects / 13 bare /
+    # 0.2131 and the log's own `e3 label=Object nodes=61` line still said 61. A self-
+    # consistent multi-field edit is the one shape no per-field reconciliation can see;
+    # only a SECOND artifact about the same run can refuse it.
+    for field in ("objects", "bare_definite"):
+        stated = gates_record.get(field)
+        if stated is None:
+            raise _refuse(f"{GATE_DROPS} carries no {field}, so the one record that "
+                          "WITNESSES the ON run's census cannot confirm the share "
+                          "the run measured")
+        if stated != after[field]:
+            raise _refuse(
+                f"{EVIDENCE / ON_ARM_LOG} reports {field}={after[field]} but "
+                f"{GATE_DROPS} — the same run, same graph — reports {stated}: "
+                "two censuses of one ON run cannot disagree")
+    gate_names = gates_record.get("object_names")
+    if isinstance(gate_names, list) and gate_names:
+        if len(gate_names) != after["objects"]:
+            raise _refuse(
+                f"{GATE_DROPS} carries {len(gate_names)} `object_names` beside its "
+                f"own objects={gates_record.get('objects')} — the record's census "
+                "and its count cannot disagree either")
+        gate_bare = sum(1 for item in gate_names if _is_bare_definite(item))
+        if gate_bare != after["bare_definite"] or after["objects"] != len(gate_names):
+            raise _refuse(
+                f"{GATE_DROPS}'s own {len(gate_names)} `object_names` ({gate_bare} "
+                f"bare-definite) do not reproduce the ON arm's "
+                f"{after['bare_definite']}/{after['objects']} — the run's census is "
+                "the names it wrote, so a share computed over another one is not "
+                "this run's share")
     e1 = e1_pairings(before_arms, after, floors)
+    # ⛔ The E1b bar the log PRINTS must be the one the pre-registration froze (#10610
+    # review at `f12471075`, P3): `real_facts` is a numerator, and a log printing
+    # `bar=90 of 90` beside a frozen `90 of 90` is the only way a reader can check it.
+    # `read_on_arm` already refused a numerator outside its own printed population;
+    # this is the other half, so both statements of the bar are the frozen one.
+    if tuple(after["e1b_bar"]) != (floors["bars"]["E1b"]["required"],
+                                   floors["bars"]["E1b"]["of"]):
+        raise _refuse(f"{EVIDENCE / ON_ARM_LOG}'s e1b line prints a bar of "
+                      f"{after['e1b_bar'][0]} of {after['e1b_bar'][1]}, but the "
+                      f"pre-registration froze {floors['bars']['E1b']['required']} of "
+                      f"{floors['bars']['E1b']['of']} — a bar printed over a different "
+                      "population is a number nothing froze")
     e2 = e2_score(repo, floors)
     if after["corpus_sha256"] != normalise_pin(floors["fixtures_hash"]):
         raise _refuse(
