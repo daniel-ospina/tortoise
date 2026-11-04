@@ -221,3 +221,44 @@ def test_a_pure_dedup_hit_on_a_terminal_point_stays_silent(sdk):
     assert again["id"] == pid
     assert after["updatedAt"] == before["updatedAt"]
     assert "terminal_fold_refused" not in _advisory_codes(again), again
+
+
+def test_a_bare_dedup_hit_costs_no_lifecycle_read(sdk, monkeypatch):
+    """The skip the guard's own comment promises is MEASURED here, not asserted.
+
+    `_lifecycle_terminal_marker` is a graph round-trip (`LIFECYCLE_FANOUT_QUERY`)
+    whenever it is called without `rows`, and the shared gate above the fold names
+    one case where it must not be called at all: a bare dedup hit (no props, no
+    authored word). The predicate that decided it tested the raw `props` bag — and
+    that bag ALWAYS carries the DERIVED `content_hash` by then — so the skip was
+    dead code and every `create_point(dedup=True)` hit (the re-ingest and
+    self-host hot path included) paid a query it had never paid before (#10368
+    review).
+
+    Two-sided on purpose: a "fix" that simply REMOVED the read reds the second
+    half, because a fold carrying a caller prop must still get the terminal
+    verdict that decides the refusal.
+    """
+    calls: list[int] = []
+    real = type(sdk)._lifecycle_terminal_marker
+
+    def counting(self, *args, **kwargs):
+        calls.append(len(calls))
+        return real(self, *args, **kwargs)
+
+    content = _fresh_content("no-extra-read")
+    pid = sdk.create_point("statement", content)["id"]
+    sdk.retract_point(pid)
+    monkeypatch.setattr(type(sdk), "_lifecycle_terminal_marker", counting)
+
+    again = sdk.create_point("statement", content, dedup=True)
+    assert again["id"] == pid, "a dedup HIT is still reported"
+    assert calls == [], (
+        f"a bare dedup hit issued {len(calls)} lifecycle read(s) — this path "
+        "wrote nothing before #10368 and its own comment says it costs no extra "
+        "query (#10368 review)")
+
+    sdk.create_point("statement", content, dedup=True, custom_probe="x")
+    assert len(calls) == 1, (
+        "a fold carrying a caller prop must READ the terminal verdict — that "
+        "read is what refuses the write onto the settled claim (#10368)")

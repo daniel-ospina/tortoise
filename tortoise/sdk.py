@@ -12691,8 +12691,21 @@ class TortoiseSDK:
                 # read path (#2892). Skipped when the call carries neither props
                 # nor an authored word (a bare dedup hit), so that path costs no
                 # extra query.
+                #
+                # ⛔ The predicate is what this fold would APPLY, never the raw
+                # bag. `content_hash` is DERIVED (written near the top of this
+                # door as `props["content_hash"] = ch`, popped just below — #80
+                # review) and `extractedFrom` is the #7704 provenance fold,
+                # applied through its own journaled path — both are in `props`
+                # here, and neither can be refused. Testing `props` therefore
+                # made the skip DEAD CODE and charged every dedup hit, including
+                # a pure re-assertion, one extra `LIFECYCLE_FANOUT_QUERY`
+                # (#10368 review). Same trap shape as the `if props:` guard the
+                # #80 review fixed a few hundred lines below.
+                _fold_props = set(props) - {"content_hash", "extractedFrom"}
                 _terminal = (self._lifecycle_terminal_marker(pid)
-                             if (props or cred_prior is not None) else None)
+                             if (_fold_props or cred_prior is not None)
+                             else None)
                 _temporal = _TEMPORAL_RESTAMP_PROPS & set(props)
                 if _temporal and _terminal is not None:
                     _logger.warning(
