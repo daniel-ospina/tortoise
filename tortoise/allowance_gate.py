@@ -682,15 +682,21 @@ def _reading(dim: AllowanceDimension, org_id: str,
             return None
         # ⛔ A missing meter is NOT a blocked dimension (#9567 review round 12,
         # P2). The two states are different and a fail-closed refusal must not
-        # misdescribe its own: before this branch the message rendered
-        # "… but is BLOCKED — None" for a dimension with no ``blocked_reason``
-        # at all (reachable through the ``meters=`` seam), i.e. it named a
-        # ruling that does not exist. Branch on ``dim.blocked``.
-        if dim.blocked:
-            raise QuotaCheckError(
-                f"dimension {dim.dimension!r} has an allowance configured for "
-                f"team {org_id!r} but is {BLOCKED.upper()} — "
-                f"{dim.blocked_reason}")
+        # misdescribe its own, so THIS branch names only the state it is in —
+        # "no meter plumbed" — and never a ruling: the BLOCKED message used to
+        # be reused here with ``dim.blocked_reason`` None, inventing a ruling
+        # that does not exist.
+        #
+        # ⛔ The BLOCKED state needs no arm HERE: the guard at the top of this
+        # function already raises for every ``dim.blocked`` that carries an
+        # allowance, and reaches this point only when ``observed_only`` is set
+        # — which returns on the line above. A ``if dim.blocked:`` re-check was
+        # present and could never run (main-repair, 2026-11-04: probed with a
+        # blocked dimension whose meter is suppressed through the ``meters=``
+        # seam — the TOP guard fires, line-for-line, and the inner arm never
+        # does). Removed rather than left as dead code, because an unreachable
+        # arm with a reachability rationale invites a reader to trust a path
+        # that does not exist.
         _logger.error(
             "allowance dimension has no meter (fail-closed): team=%s "
             "dimension=%s", org_id, dim.dimension)
