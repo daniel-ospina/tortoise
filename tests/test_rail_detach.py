@@ -600,6 +600,16 @@ def test_a_missing_gh_refuses_the_default_repo_path_instead_of_crashing(
     Non-vacuity: on the pre-fix code the `_resolve_repo` line below raises
     `FileNotFoundError` and the `main()` line raises out of `start` instead of
     returning 4 — the test fails on ANY box, `gh` installed or not.
+
+    ⛔ PROVENANCE, because it changes what this pin PROVES (#10620 merge of
+    `origin/main`): `main` landed the same absent-`gh` fix independently in
+    `#10724` (`_gh(argv, cwd)` -> rc 127, plus two `PATH`-without-`gh` arms),
+    under the same measured runner evidence. This arm and its sibling above
+    therefore PASS on `origin/main`'s `tools/rail_detach.py` too (measured: 4
+    passed, both sides' arms, against main's blob). They are not the fix's
+    falsification any more — they are the extra assertions main's arms do not
+    make: `rd.Refused` at the unit contract, `collect` staying silent, and a
+    refused launch spawning nothing.
     """
     _path_without_gh_shim(tmp_path, monkeypatch)
     co = make_checkout(tmp_path)
@@ -620,3 +630,69 @@ def test_a_missing_gh_refuses_the_default_repo_path_instead_of_crashing(
     rc = rd.main(["collect", "98", "--state-dir", str(sd)])
     assert rc == 2
     assert "REFUSED" not in capsys.readouterr().err
+
+
+# ── the SAME boundary when `gh` exists and cannot be EXECUTED ────────────────
+def _exec_fails_with_permission_denied(monkeypatch) -> list[list[str]]:
+    """Make every `gh` exec fail the way a non-executable `gh` fails.
+
+    ⛔ `PermissionError`, NOT `FileNotFoundError`. A `gh` that IS on `PATH` but
+    carries no `+x` is found and still cannot be started, so `subprocess.run`
+    raises `PermissionError` at exec — the same operator-visible crash from a
+    cause the absent-binary arms cannot reach.
+
+    Simulated by patching the exec rather than `chmod`-ing a fake `gh` on a temp
+    `PATH`, deliberately: a mode-bit pin is VACUOUS for root (root ignores `+x`),
+    so it would prove the arm on a laptop and prove nothing on a root container —
+    the same suite, two different meanings (#9018's own hazard). The returned
+    list records every exec attempted, so a test cannot pass by never shelling out.
+    """
+    calls: list[list[str]] = []
+
+    def fake(argv, *a, **kw):
+        calls.append(list(argv))
+        assert argv[0] == "gh", f"this shim only stands in for `gh`, saw {argv[0]!r}"
+        raise PermissionError(13, "Permission denied", argv[0])
+
+    monkeypatch.setattr(rd.subprocess, "run", fake)
+    return calls
+
+
+def test_an_unexecutable_gh_is_a_soft_miss_on_the_head_annotation(monkeypatch, tmp_path):
+    """`_head_sha` answers `unreadable`, it does not raise out of `launch()`.
+
+    Pre-fix (`_gh` catching `FileNotFoundError` only, the shape `#10724` landed)
+    a `PermissionError` propagated out of `launch()` before the spawn — the
+    artifact is never stamped, so every `collect` reports `lost`. Measured on the
+    pre-fix blob: this arm raises `PermissionError: [Errno 13] Permission denied:
+    'gh'`.
+    """
+    calls = _exec_fails_with_permission_denied(monkeypatch)
+
+    assert rd._head_sha(tmp_path, "o/r", 99) == "unreadable"
+    assert calls and calls[0][0] == "gh", "the arm must actually attempt the exec"
+
+
+def test_an_unexecutable_gh_refuses_the_repo_path_instead_of_tracebacking(
+        monkeypatch, tmp_path, capsys):
+    """The repo path REUSES the same boundary: `Refused`, never a traceback.
+
+    A handler on `FileNotFoundError` alone does not remove the crash, it moves it
+    to the rarer trigger — and the repo half is the half that NAMES the artifact,
+    so degrading it is not an option either. Both `start` (exit 4) and `collect`
+    (exit 2) must still reach their existing `Refused` sinks.
+    """
+    calls = _exec_fails_with_permission_denied(monkeypatch)
+    co = make_checkout(tmp_path)
+    sd = tmp_path / "state"
+
+    with pytest.raises(rd.Refused) as exc:
+        rd._resolve_repo(co)
+    assert "could not resolve the repo" in str(exc.value)
+    assert "Permission denied" in str(exc.value), str(exc.value)
+    assert calls
+
+    rc = rd.main(["start", "97", "--cwd", str(co), "--state-dir", str(sd)])
+    assert rc == 4
+    assert "REFUSED" in capsys.readouterr().err
+    assert not rd.collect(sd, "o/r", 97), "a refused launch must not spawn a rail"

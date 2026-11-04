@@ -391,12 +391,26 @@ def _gh(argv: list[str], cwd: Path) -> subprocess.CompletedProcess:
     a missing command, so the callers' `returncode != 0` arms handle it — the
     same shape `tools/who_is_on.py` already uses for `git`
     (`except FileNotFoundError: return 127, "", "<bin>: command not found"`).
+
+    ⛔ ABSENCE IS ONE WAY EXEC FAILS; IT IS NOT THE ONLY ONE. The boundary is
+    *`gh` could not be started*, not *`gh` was not found*: a `gh` that IS on
+    `PATH` without the executable bit raises `PermissionError` at exec, and that
+    is the same operator-visible crash — an artefact never stamped, a repo never
+    resolved — from a different cause. Both are `OSError`, so both answer a
+    non-zero rc (`127` not found, `126` found-but-not-executable, the shell's own
+    convention) instead of raising out of `launch()`. Narrowing this to
+    `FileNotFoundError` only moves the traceback to the rarer trigger, which is
+    the failure mode this helper exists to remove.
     """
     try:
         return subprocess.run(argv, cwd=str(cwd), capture_output=True, text=True)
     except FileNotFoundError:
         return subprocess.CompletedProcess(argv, 127, "",
                                            "gh: command not found")
+    except OSError as exc:
+        return subprocess.CompletedProcess(
+            argv, 126, "", f"gh: {exc.strerror or exc}"
+        )
 
 
 def _resolve_repo(cwd: Path) -> str:
