@@ -657,7 +657,7 @@ def test_an_ingest_bundle_with_append_only_entities_is_not_repeatable():
     # the RESOLUTION rather than an oversight: three review rounds each closed ONE
     # spelling of this hole (the append-only entities leg, the JSON-string bundle,
     # and the FLAT `props` splat), which is the signal that the enumeration is the
-    # defect. `sdk.py:26781` documents the points form as `{kind, content, ref?,
+    # defect. `sdk.TortoiseSDK.ingest` documents the points form as `{kind, content, ref?,
     # status?, **props}` — so `is_operator` sits BESIDE `kind`, not in `props`, and
     # no key allow-list sees it. The bundle's key space is open-ended, so the seam
     # reports what it knows ("not provable") instead of a claim it cannot ground.
@@ -916,3 +916,47 @@ async def test_the_seam_returns_the_write_contract_and_still_abandons(slow_dispa
     assert slow_dispatch == ["tortoise_create_point"], (
         "the breached dispatch was cancelled, not abandoned — an abandoned "
         "write is exactly why the refusal cannot claim failure")
+
+
+def test_the_citations_in_this_contract_are_SYMBOLS_not_sdk_line_numbers():
+    """A `sdk.py:<line>` citation is a claim that rots on the next upstream edit.
+
+    This branch carried five of them, and they moved TWICE while it was open (the
+    `origin/main` merge shifted every one by +4, and a docstring edit in this same
+    PR shifted them again by +6). A line number is only meaningful against one
+    revision, so in a file that outlives the revision it is wrong more often than
+    right — and it stays WRONG silently, because prose cannot red a check.
+
+    The repo's own convention is the symbol (see
+    `docs/architecture/STORAGE-ARCHITECTURE-CHANGELOG.md`: "the emitters are named
+    by SYMBOL now … reds on a bare `sdk.py:<N>`"). This pins it for the files this
+    contract's claims live in, so the next lane cannot reintroduce the rot. The
+    symbol is also the stronger claim: it survives any edit that does not remove
+    the function, and a test that flips a registry entry still finds it.
+    """
+    import pathlib
+    import re
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    touched = [
+        "tortoise/mcp_server.py",
+        "tortoise/mcp_auth.py",
+        "tortoise/tool_registry.py",
+        "tests/test_wait_bound_write_ack.py",
+        "tests/test_tool_risk_tiers.py",
+        "docs/INGEST_CONTRACT.md",
+        "MEMORY.md",
+    ]
+    offenders = []
+    for rel in touched:
+        path = root / rel
+        if not path.exists():
+            continue
+        for n, line in enumerate(path.read_text().splitlines(), 1):
+            for m in re.finditer(r"sdk\.py:(\d+)", line):
+                offenders.append(f"{rel}:{n} -> sdk.py:{m.group(1)}")
+
+    assert offenders == [], (
+        "cite the SYMBOL (e.g. `sdk.TortoiseSDK.ingest`) instead of a line number "
+        "— a line citation is stale as soon as anything above it moves:\n"
+        + "\n".join(offenders))

@@ -702,7 +702,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         # operator over the same endpoints: `sdk.create_operator` has no
         # adoption/existence check — `_find_operator`, the adopt-by-endpoint-set
         # path `ingest` uses, is called from `ingest`'s connection loop only
-        # (`sdk.py:27481`, verified) — and its `_distinct_preserving_order`
+        # (`sdk.TortoiseSDK.ingest`'s connection loop is the ONLY caller, verified) — and its `_distinct_preserving_order`
         # collapse only removes repeats WITHIN one request. `ep.py` builds its
         # factor from the edge list, so the duplicate double-counts the claim's
         # EP weight. Declaring `idempotent=True` here (as this entry did until

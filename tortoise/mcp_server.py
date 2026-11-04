@@ -650,7 +650,8 @@ def _wait_bound_refused() -> bool:
 #:   * ``tortoise_search`` (``entity_type="point"``) indexes ``content`` +
 #:     ``search_keys`` only, while ``sdk.create_operator`` writes a ``:Point``
 #:     with ``{id, is_operator, op_type, direction, direction_basis, status}``,
-#:     plus ``label`` only ``if label:``, and NO ``content`` (``sdk.py:22531``) —
+#:     plus ``label`` only ``if label:``, and NO ``content`` (``sdk.create_operator``'
+#:     own ``CREATE (o:Point {…})``) —
 #:     so for EVERY created operator the recipe
 #:     returns nothing, "nothing" reads as "it did not commit", and the retry
 #:     duplicates the edge and double-counts its EP factor. That is the exact
@@ -787,13 +788,13 @@ def _arguments_disable_convergence(name: str, arguments) -> bool:
     #   * `entities` of type document/event are APPEND-ONLY (`sdk.py` "Document
     #     records are append-only — never deduped"; `docs/INGEST_CONTRACT.md` row
     #     1 `append_only_items`), and the SDK lowercases the type on BOTH legs
-    #     (`sdk.py:23851` admission, `sdk.py:27242` dispatch), so a case variant
+    #     (`sdk._check_item_shape` admission, `sdk.ingest` dispatch), so a case variant
     #     reaches the writer too;
     #   * `bundle` may arrive as a JSON STRING — the handler calls
     #     `_parse(bundle)` after this seam runs and the served schema puts no
     #     `type` on it — so `json.dumps(...)` bypassed the whole check;
-    #   * and a bundle's points SPLAT `props` FLAT (`sdk.py:26781`: `[{kind,
-    #     content, ref?, status?, **props}]`), so a caller puts `is_operator`
+    #   * and a bundle's points SPLAT `props` FLAT (the `points: [{kind,
+    #     content, ref?, status?, **props}]` loop in `sdk.ingest`), so a caller puts `is_operator`
     #     BESIDE `kind` rather than inside `props` — measured, that mints a
     #     second node while every key-allow-list reads it as props-free.
     # `batch_id` does not save any of this: it is a STAMP (`_stamp_batch_id`),
@@ -2922,10 +2923,12 @@ WRITE_TOOL_NAMES: frozenset[str] = get_write_tool_names()
 # counter for a tool whose schema REJECTS the key (a READ recorded for a call
 # that is then refused). Computed from the declarations and cached (lazy — the
 # handlers are defined below this point — because it sits on the per-call
-# path). `tests/test_dry_run_preview.py::TestPreviewToolSetIsDeclared` pins it:
-# the six DESTRUCTIVE preview tools must be in it, a write tool without
-# `dry_run` must not, and the metering behaviour is verified through the real
-# dispatch seam. "Six" is the destructive subset, not the size of the set —
+# path). Two test classes pin it, and they pin DIFFERENT halves:
+# `tests/test_dry_run_preview.py::TestPreviewToolSetIsDeclared` pins the SET (the
+# six DESTRUCTIVE preview tools must be in it, a write tool without `dry_run` must
+# not), while `::TestDryRunIsMeteredAsARead` drives the REAL dispatch seam
+# (`_dispatch_reads` → `_wrapped_call_tool`) to pin the metering itself. "Six" is
+# the destructive subset, not the size of the set —
 # the derivation yields seven registry tools today (those six plus
 # `tortoise_backfill_v25`, whose handler default is `dry_run=True`). That count is
 # the one `docs/INGEST_CONTRACT.md`'s PREVIEW row uses, and the one
