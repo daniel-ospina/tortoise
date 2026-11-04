@@ -17,7 +17,7 @@ verdict is quoted from the record, never synthesised. A record at any other head
 
 ## Census totals
 
-Outcomes across the rows below: **RE-REVIEW=5 · NOTHING-TO-RESTORE=3 · IN-FLIGHT=11 · OK=18**
+RE-REVIEW=5 · NOTHING-TO-RESTORE=3 · IN-FLIGHT=11 · OK=18
 
 | PR | head | record | record head | match | mint | verdict | evidence | gate | outcome |
 |---|---|---|---|---|---|---|---|---|---|
