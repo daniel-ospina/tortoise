@@ -2253,7 +2253,7 @@ def test_a_MEASURED_congested_refusal_does_not_escalate(monkeypatch, capsys, tmp
     summary = json.loads(captured.out)
     assert summary["queue_congestion_measured"] is True
     assert summary["repair_refused"] == 1
-    assert summary["self_witness_repaired"] == 0, (
+    assert summary["self_witness_exempted"] == 0, (
         "the exemption must NOT fire when another old wait witnesses the congestion")
     assert summary["prs"][0]["rerun"] == [], "the cancel is still suppressed"
     assert summary["prs"][0]["self_witness_rerun"] == []
@@ -2347,13 +2347,23 @@ def test_the_SOLE_witness_target_is_REPAIRED_not_stranded_forever(
     monkeypatch.setattr(R, "runs_at_head", lambda repo, head: [
         aged_run(target, jobs=0, age_s=5700.0, path="ci.yml", name="CI")])
 
-    assert R.main(["--repo", "o/r", "--no-live", "--json",
+    # ⛔ `--apply` IS PART OF THIS TEST (#10641 review P2). Without it `report()` takes
+    # the report-only branch, records `{"ok": None}` and NEVER CALLS `_rerun` — so the
+    # test passed while proving nothing about the apply path it names. Stubbed so the
+    # case stays hermetic; what is asserted is the exit code and the record the apply
+    # path actually produces.
+    rerun_calls = []
+    monkeypatch.setattr(R, "_rerun", lambda *a, **k: rerun_calls.append(a[1].id) or "rerun")
+
+    assert R.main(["--repo", "o/r", "--no-live", "--apply", "--json",
                    "--record", str(_flood_record(tmp_path))]) == 0
     captured = capsys.readouterr()
     summary = json.loads(captured.out)
     assert summary["queue_congested"] is True, "the reading is still reported as read"
     assert summary["queue_congestion_measured"] is True
-    assert summary["self_witness_repaired"] == 1
+    assert rerun_calls == [target], (
+        "the exemption must reach the ACT, not stop at the gate")
+    assert summary["self_witness_exempted"] == 1
     assert summary["repair_refused"] == 0, "nothing was stranded this window"
     assert [r["run"] for r in summary["prs"][0]["rerun"]] == [target]
     assert summary["prs"][0]["self_witness_rerun"] == [target]
@@ -2362,6 +2372,82 @@ def test_the_SOLE_witness_target_is_REPAIRED_not_stranded_forever(
     assert summary["zero_job_named"] == 1, (
         "it was named 'no verdict will arrive' and then repaired — the count describes "
         "the NAMING, not the outcome")
+
+
+def test_the_exemption_is_asked_with_the_WHOLE_head_wide_repairable_set(monkeypatch):
+    """⛔ P1 (review): a per-run exclusion DEADLOCKS whenever N>1 runs are repairable.
+
+    `wait_witness_ids` is repo-wide and `congests_pr_apart_from` excludes only the run
+    it is asked about. With three aged zero-job runs (the module's own documented
+    `CI` + `Python CI` + `drift-guard` shape) each one is "another witness" for every
+    other, so every target answers `True` and NOTHING is repaired: measured on the
+    head's pure core, `rerun=[]`, `repair_refused=[101,102,103]`, `exit 0` — permanent,
+    not the "converges over windows" the docstring claimed.
+
+    The fix is that `classify()` asks the reading with the WHOLE head-wide repairable
+    set, so the exclusion covers every run this pass can repair. Pinned here by
+    RECORDING the argument the seam is called with: dropping the set (a per-run
+    `congests_pr_apart_from(r.id)`) reddens the second assertion, and it is the
+    multi-run fixture — not the single-run one — that makes that discriminating.
+    """
+    seen: list[tuple[int, frozenset[int]]] = []
+
+    def reader(run_id, also_repairable=()):
+        seen.append((run_id, frozenset(also_repairable)))
+        # The unfixed reading's answer for the N>1 shape: every target sees a witness
+        # other than itself. Returning `False` only when the caller excluded the whole
+        # set is what makes this test pin the CALLER's half of the contract.
+        return any(t != run_id for t in (101, 102, 103)
+                   if t not in set(also_repairable))
+
+    runs = [aged_run(rid, jobs=0, age_s=5700.0) for rid in (101, 102, 103)]
+    plan = R.classify(pr(), [], runs, ["python-ci-gate"], EMITTERS, max_attempts=3,
+                      queue_congested=True, queue_congestion_measured=True,
+                      queue_congestion_apart_from=reader)
+
+    assert [r.id for r in plan.rerun] == [101, 102, 103], (
+        "with every witness repairable, all of them must be re-run — a subset here is "
+        "the deadlock: the unrepaired ones keep witnessing the repaired ones")
+    assert plan.repair_refused == [], (
+        "nothing is stranded by a congestion its own repairable set causes")
+    for run_id, repairable in seen:
+        assert {101, 102, 103} <= repairable, (
+            f"the exemption was asked about {run_id} with {sorted(repairable)} — the "
+            "caller must pass the whole head-wide repairable set")
+
+
+def test_a_NON_target_old_wait_still_refuses_the_cancel(monkeypatch):
+    """The other pole: the widened exemption must NOT become "always exempt".
+
+    A witness that is not itself a repairable zero-job run (here an ordinary aged
+    queued run in `wait_witness_ids`) is work this pass cannot remove, so
+    cancel-then-rerun would just re-queue behind it — the refusal is correct and the
+    fix must not have cleared it.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from tools import ci_queue_health as Q
+
+    def qrun(rid, age_s):
+        return Q.QueuedRun(id=rid, name="Python CI", event="pull_request",
+                           created_at=(datetime.now(UTC) - timedelta(seconds=age_s))
+                           .strftime("%Y-%m-%dT%H:%M:%SZ"))
+
+    reading = Q.classify_queue([qrun(999, 9000.0)], [], None,
+                               pending=[qrun(101, 5700.0), qrun(102, 5700.0)])
+    assert reading.congests_pr is True, reading.reasons
+    assert reading.congests_pr_apart_from(
+        101, also_repairable=frozenset({101, 102})) is True, (
+        "run 999 is not repairable by this pass, so it is a real independent witness")
+
+    plan = R.classify(pr(), [], [aged_run(101, jobs=0, age_s=5700.0),
+                                 aged_run(102, jobs=0, age_s=5700.0)],
+                      ["python-ci-gate"], EMITTERS, max_attempts=3,
+                      queue_congested=True, queue_congestion_measured=True,
+                      queue_congestion_apart_from=reading.congests_pr_apart_from)
+    assert plan.rerun == [], "an independent witness must still suppress the cancel"
+    assert sorted(d["run"] for d in plan.repair_refused) == [101, 102], (
+        "and both are recorded as refused, not silently dropped")
 
 
 def test_a_STRUCTURALLY_UNREPAIRABLE_attempt_is_never_recorded_as_REFUSED(

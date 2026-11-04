@@ -964,6 +964,30 @@ def classify(pr: dict, checks: list[dict], all_runs: list[Run], required: list[s
     plan.absent = [c for c in required if c not in seen]
     if not plan.absent:
         return plan
+    # ⛔ THE HEAD-WIDE REPAIRABLE SET (#10641 review P1). The congestion exemption
+    # asks "is anything OTHER than this run congested?", and the honest answer must
+    # exclude EVERY zero-job run this pass can repair — not just the one being
+    # considered. `wait_witness_ids` is REPO-WIDE, so with N aged zero-job runs each
+    # one is "another witness" for every other and a per-run exclusion refuses all N
+    # forever. MEASURED on the head's pure core with the module's own motivating
+    # shape (`CI` + `Python CI` + `drift-guard` held at ZERO jobs):
+    #
+    #   wait_witness_ids = (101, 102, 103)
+    #   congests_pr_apart_from(101|102|103) = True   -> rerun=[] and exit 0
+    #
+    # — a permanent deadlock at exit 0, which `docs/ci/ci-check-repair-red-surface.md`
+    # §Fact 2 declares unsound. Derived ONCE from `all_runs` (the same list every
+    # context below is scanned from), and bounded by BOTH the structural attempt
+    # bound and the spent budget, so a witness this pass could not repair — a later
+    # attempt, or a spent budget — still refuses the cancel.
+    floor = (ZERO_JOB_MIN_AGE_S if zero_job_min_age_s is None
+             else zero_job_min_age_s)
+    zero_job_targets = frozenset(
+        r.id for r in all_runs
+        if _zero_job_stalled(r, floor)
+        and r.run_attempt <= ZERO_JOB_MAX_REPAIRABLE_ATTEMPT
+        and r.run_attempt < max_attempts
+    )
     for ctx in plan.absent:
         runs = producing_runs(ctx, all_runs, emitters)
         if not runs:
@@ -981,8 +1005,9 @@ def classify(pr: dict, checks: list[dict], all_runs: list[Run], required: list[s
             # documented primitive applies — a rerun creates a fresh attempt that DOES
             # get jobs (measured on the #8254 shape) — and it spends the same attempt
             # budget every other repair path spends.
-            floor = (ZERO_JOB_MIN_AGE_S if zero_job_min_age_s is None
-                     else zero_job_min_age_s)
+            # `floor` is resolved ONCE above, before the context loop, so the
+            # head-wide `zero_job_targets` set and this loop can never disagree about
+            # which runs are in the repairable class.
             crowded = queue_starved if queue_congested is None else queue_congested
             for r in runs:
                 if not _zero_job_stalled(r, floor):
@@ -1079,7 +1104,8 @@ def classify(pr: dict, checks: list[dict], all_runs: list[Run], required: list[s
                     # no witness list to exclude from. `None` (a reading that cannot
                     # answer, a hand-built object, a cut leg) refuses like any other
                     # unmeasured input — the exemption is never a default.
-                    apart = (queue_congestion_apart_from(r.id)
+                    apart = (queue_congestion_apart_from(
+                                 r.id, also_repairable=zero_job_targets)
                              if queue_congestion_apart_from is not None else None)
                     if not (apart is False and queue_congestion_measured is True):
                         # THE REFUSAL IS RECORDED, NOT SILENT. This run was named a
@@ -2241,7 +2267,14 @@ def main(argv: list[str] | None = None) -> int:
         # run witnessing that congestion (`QueueHealth.congests_pr_apart_from`).
         # Additive, and the counterpart of `repair_refused`: without it an operator
         # reading a `congested` summary beside a landed cancel has no way to see why.
-        "self_witness_repaired": sum(len(p.self_witness) for p in plans),
+        # ⛔ AN EXEMPTION IS NOT A REPAIR (#10641 review P2). This counted plans
+        # ALLOWED PAST THE GATE, independent of whether `--apply` was passed or
+        # whether `_rerun` succeeded — measured: report-only answered 1, and
+        # `--apply` with a stubbed FAILING `_rerun` also answered 1. Naming it
+        # `..._repaired` asserted an outcome it never measured, which is the same
+        # defect `zero_job_named` was renamed out of one key above. It now counts
+        # exactly what it is: the runs this pass EXEMPTED from the congestion gate.
+        "self_witness_exempted": sum(len(p.self_witness) for p in plans),
         # Re-measures the "queued and never starts" residual every window (see
         # `PrPlan.oldest_pending_age_seconds`).
         "oldest_pending_age_seconds": (
@@ -2278,10 +2311,23 @@ def main(argv: list[str] | None = None) -> int:
                 "queue drained. No credential or manual unjam is involved."
             )
         else:
-            consequence = (
-                "This window is NOT discharged: read the queue, or run the repair "
-                "with a credential that can unjam it."
-            )
+            # ⛔ THE REPORT-ONLY POLE (#10641 review P2). The escalation above is
+            # gated on `args.apply`, so in a DRY-RUN/report-only pass the process
+            # exits 0 — and it used to print "This window is NOT discharged" in the
+            # same run, contradicting the exit status and pointing the operator at a
+            # credential for a pass that never attempted anything. Reachable: the
+            # launcher installs a report-only job and `DRY=1` passes no `--apply`.
+            if not args.apply:
+                consequence = (
+                    "Nothing was ATTEMPTED in this report-only pass (no --apply), "
+                    "so this window is not being declared clear or blocked here: "
+                    "the refusal stands and the next APPLY pass decides."
+                )
+            else:
+                consequence = (
+                    "This window is NOT discharged: read the queue, or run the repair "
+                    "with a credential that can unjam it."
+                )
         print(f"ci-check-repair: REFUSED-REPAIR — {summary['repair_refused']} "
               f"zero-job run(s) were identified and NOT cancelled/rerun because the "
               f"queue reading did not certify it clear "

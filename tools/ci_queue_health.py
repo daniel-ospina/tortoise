@@ -725,7 +725,8 @@ class QueueHealth:
             return False
         return None
 
-    def congests_pr_apart_from(self, run_id: int) -> bool | None:
+    def congests_pr_apart_from(self, run_id: int,
+                               also_repairable: Any = ()) -> bool | None:
         """Is PR work congested by something OTHER than `run_id`? THREE-VALUED.
 
         The question the ZERO-JOB repair needs and `congests_pr` cannot answer
@@ -744,9 +745,22 @@ class QueueHealth:
         0` coexisted with a required check that could never be produced, which is
         exactly what `docs/ci/ci-check-repair-red-surface.md` §Fact 2 declares unsound.
 
-        * ``False`` — the ONLY run witnessing this congestion is `run_id` itself. The
-          refusal is self-referential, and re-running that run is the act that clears
-          it.
+        ``also_repairable`` is the CALLER's set of run ids this same pass can repair
+        (the head-wide zero-job candidates). It exists because the witness set is
+        REPO-WIDE while the exemption is asked per run: with N aged zero-job runs,
+        each one is "another witness" for every other, so a per-run exclusion refuses
+        all N forever. Measured on this head's pure core: 3 aged runs (the #8254
+        `CI`/`Python CI`/`drift-guard` shape) → `wait_witness_ids = (101, 102, 103)`
+        and `congests_pr_apart_from` answered ``True`` for all three, so
+        `rerun=[]`, `repair_refused=[101, 102, 103]`, `exit 0` — a permanent
+        deadlock, not the "converges over windows" the earlier revision claimed.
+        Excluding the whole repairable set is what makes the claim true: each target
+        is repaired, and a witness that is NOT a repairable zero-job run still
+        refuses.
+
+        * ``False`` — the ONLY runs witnessing this congestion are `run_id` and the
+          caller's other repairable targets. The refusal is self-referential, and
+          re-running them is the act that clears it.
         * ``True``  — the congestion is witnessed independently of `run_id`: a `FLOOD`
           (whose offender is non-PR work by construction, and a PR run will not start
           while it holds the queue), a cut feed (the unseen oldest run may be the
@@ -757,11 +771,9 @@ class QueueHealth:
           treat `None` exactly as `congests_pr is None`, i.e. refuse.
 
         ⛔ THIS IS NOT A LICENCE TO CANCEL DURING A CONGESTION. It narrows the refusal
-        to the case that can never resolve, and `True`/`None` still refuse. A residual
-        is stated rather than hidden: with N repairable targets, the non-oldest ones
-        are still refused in this window because the oldest is another witness — they
-        become the sole witness as each earlier one is repaired, so the class converges
-        over windows rather than deadlocking.
+        to the case that can never resolve, and `True`/`None` still refuse. The
+        omission of `also_repairable` is NOT a clearance: it defaults to empty, so a
+        caller that does not name its other targets gets the old per-run answer.
         """
         if self.congests_pr is None:
             return None
@@ -778,7 +790,8 @@ class QueueHealth:
             # A reading that does not carry its witness (an object built by hand, or
             # a shape this version does not name) cannot answer. Fail closed.
             return None
-        return any(rid != run_id for rid in self.wait_witness_ids)
+        repairable = {run_id, *also_repairable} if also_repairable else {run_id}
+        return any(rid not in repairable for rid in self.wait_witness_ids)
 
     def to_dict(self) -> dict[str, Any]:
         return {
