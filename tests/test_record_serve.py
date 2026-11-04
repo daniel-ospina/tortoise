@@ -21,11 +21,14 @@ claims, each a test here rather than a sentence in a design doc:
    successfully read. A failure to read raises, and in `record` mode it is never
    downgraded to an empty answer or to a 404.
 4. **PARITY IS A RULE, NOT AN EYEBALL.** `parity_difference` compares a cache
-   answer with the record's and explains every difference: the schema's own
-   refused set is the explanation, and a difference it does NOT explain — in
-   EITHER direction — is a failure. That is what keeps "the same answer"
-   meaningful while the EP carve-out (§17.5) legitimately keeps derived fields
-   out of the record.
+   answer with the record's and explains every difference: **TWO** sanctioned
+   asymmetries, not one — the schema's own refused set (the EP carve-out,
+   §17.5), and the `§9.1/D1` prose decline for an episodic `Source`
+   (`cache_projection.episodic_source_declined_properties`). A difference it
+   does NOT explain — in EITHER direction — is a failure. That is what keeps
+   "the same answer" meaningful while the carve-out legitimately keeps derived
+   fields out of the record; the three `-k parity` legs below pin both, and the
+   `Event` leg pins that the decline does not escape its own LABEL.
 
 MUTATION PROOF — the guard each test exists to hold, and the edit that turns it
 RED (reverts and their output are recorded in the PR body):
@@ -632,6 +635,30 @@ def test_parity_explains_only_the_declined_names_on_a_session_source():
     diff = rs.parity_difference(node, _narrowed_record_source(), label="Source")
     assert not diff.clean, diff.as_dict()
     assert set(diff.unexplained_missing) == {"aFieldTheRecordMadeUp"}, diff.as_dict()
+
+
+def test_parity_does_not_explain_the_decline_OFF_the_Source_label():
+    """Scoped by LABEL too — the mirror of `scan_cache_view`'s gate leg.
+
+    `is_episodic_source_node` reads PROPERTIES and knows nothing about labels, so
+    an `Event` (or any other node) carrying a `session:` url satisfies it. The
+    decline must not follow it there: on a non-`Source` label those two names are
+    a genuine projection gap and have to redden. Deleting the `label ==
+    "Source"` conjunct in `parity_difference` left this module's other 62 legs
+    green, so this is the leg that holds that conjunct (#10867 review, P3).
+
+    `summary`/`_searchText` are not in `Event`'s refused set, so the carve-out
+    cannot explain them away and this leg stays discriminating.
+    """
+    node = {"url": "session:s-9", "summary": "the first utterance",
+            "_searchText": "the first utterance"}
+    record = {"url": "session:s-9"}
+    diff = rs.parity_difference(node, record, label="Event")
+    assert not diff.clean, (
+        "a non-Source node's own summary was explained away — the decline is "
+        f"not scoped to the Source label: {diff.as_dict()}")
+    assert set(diff.unexplained_missing) == {"summary", "_searchText"}, diff.as_dict()
+    assert not diff.explained_missing, diff.as_dict()
 
 
 # ── the mode ───────────────────────────────────────────────────────────────

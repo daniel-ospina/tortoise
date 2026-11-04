@@ -1500,8 +1500,6 @@ def _row_identity_view(row: Mapping[str, Any],
     kind_property = _episodic_source_kind_property()
     if merged.get("source_kind") is None and kind_property in tail:
         merged["source_kind"] = tail[kind_property]
-    if merged.get("url") is None and "url" in tail:
-        merged["url"] = tail["url"]
     return merged
 
 

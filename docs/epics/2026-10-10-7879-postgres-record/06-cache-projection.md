@@ -324,10 +324,10 @@ follow-up obligation on #10853.
 enumerations** (#10867 review, ISSUE 2). An obligation that named only the
 projection's own names was a trap in both directions:
 
-* `episodic_source_declined_properties` (`cache_projection.py:1567`) is a
+* `episodic_source_declined_properties` (`cache_projection.py:1583`) is a
   **caller** of `episodic_source_prose_properties`, so deleting the latter alone
   leaves `NameError` on the `props` tail for every episodic row;
-* `record_serve.parity_difference` (`record_serve.py:1137-1151`) imports **both**
+* `record_serve.parity_difference` (`record_serve.py:1145-1151`) imports **both**
   `episodic_source_declined_properties` and `is_episodic_source_node` — the
   tree's SECOND record↔cache comparison instrument. A partial deletion is an
   `ImportError` on every `Source` comparison, loud today only because three legs
@@ -340,11 +340,20 @@ projection's own names was a trap in both directions:
 
 So the check is not "were the names in this list deleted" but **"does any
 reference survive"**: after the deletion, re-run
-`grep -rn 'episodic_source_prose_properties\|episodic_source_declined_properties\|_EPISODIC_SOURCE_PROSE_COLUMNS\|is_episodic_source_node' tortoise/ tests/`
+`grep -rn 'episodic_source_prose_properties\|episodic_source_declined_properties\|_EPISODIC_SOURCE_PROSE_COLUMNS\|is_episodic_source_node\|_is_episodic_source_row\|_row_identity_view\|_decoded_tail\|_tail_payload\|_UNRESOLVED_TAIL\|_episodic_source_kind_property\|_EPISODIC_SOURCE_URL_PREFIX\|_EPISODIC_SOURCE_KIND' tortoise/ tests/`
 and expect **no** hits outside the new lexicon-SURVIVES legs (#10867 review
 ISSUE 2, from the external pass: removal guides converge on *enumerate every
 reference — including test, documentation and CI callers — then re-run the
 search to prove zero*, because a hand-kept list is what goes stale).
+
+⚠️ The pattern is deliberately WIDER than the seven touch points above (#10867
+review, P3): the rule's PREDICATE and its helpers (`_is_episodic_source_row`,
+`_row_identity_view`, `_decoded_tail`, `_tail_payload`, `_UNRESOLVED_TAIL`,
+`_episodic_source_kind_property`, `_EPISODIC_SOURCE_URL_PREFIX`,
+`_EPISODIC_SOURCE_KIND`) are what the deleted names were read THROUGH, and a
+grep that named only the deleted names would answer "zero" while leaving every
+one of those references behind. A check whose question is broader than the
+command it prescribes reports a FALSE CLEAN, which is worse than no check.
 
 ### The pin
 
