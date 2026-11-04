@@ -1944,8 +1944,15 @@ def main(argv: list[str] | None = None) -> int:
     # the scan does not restart the clock.
     pass_deadline = _arm_pass_deadline()
     queue = None if args.no_queue_health else read_queue_health(args.repo)
-    # A queue read that failed is reported as UNKNOWN and does NOT block the pass:
-    # the repair it performs is still correct, it just cannot name starvation.
+    # A queue read that FAILED is reported as UNKNOWN and it DOES block the
+    # destructive part of the pass: `queue_congestion_reading` returns `None`, and
+    # `queue_congestion_gate` maps that to `True` (refuse) — so a zero-job run is
+    # named in `no_verdict` and NOT cancelled. The pass still measures and still
+    # performs every non-destructive repair (a `rerun`, a close/reopen), because
+    # those discard no queue position; what an unread queue withholds is exactly the
+    # cancel-then-rerun and nothing else. Where the queue is readable but SILENT (a
+    # `status=queued` feed with no queued PR run to read), the refusal is escalated at
+    # the end of this function, so the window cannot be read as discharged.
     # `starves_pr` is the queue tool's own predicate, so the two instruments cannot
     # disagree: FLOOD and PR-STARVED both mean "PR CI is not running" and both reach
     # the per-head report. Keying on FLOOD alone left the late stage — PR work
@@ -1983,12 +1990,36 @@ def main(argv: list[str] | None = None) -> int:
                             deadline=pass_deadline, queue_congested=queue_congested)
         code, records = report(plans, args.apply, can_trigger_events(), args.repo,
                                args.reopen_cooldown_minutes, args.max_attempts)
+        # ⛔ A REFUSAL MADE UNDER SILENCE IS NOT A DISCHARGED WINDOW, and exit 0 is
+        # what the coverage read consumes as "discharged". `report()` exits 1 only
+        # for a repair this credential could not perform, and a suppressed cancel is
+        # deliberately NOT that — on a MEASURED congestion the suppression is the
+        # correct, self-clearing outcome and must stay exit 0. But when the queue
+        # reading was NOT MEASURED (`congestion is None`: `--no-queue-health`, a
+        # failed read, `UNKNOWN`, `PR-UNWITNESSED`, a truncated feed, or the
+        # `OK(pr_queued=0)` that the `status=queued` filter produces for a run sitting
+        # in `pending`), the refusal does not depend on anything that will change by
+        # itself: no later window measures that queue either, and the pass returns
+        # the same 0 forever while a PR whose required check can never be produced is
+        # skipped every 30 minutes. That co-existence is what
+        # `docs/ci/ci-check-repair-red-surface.md` §Fact 2 declares unsound ("exit 0
+        # must not coexist with an unhandled repair"), so it escalates: exit 1 hands
+        # the window to the local fallback, whose notification then names it.
+        # `args.apply` is in the condition for the reason `report()` states one
+        # function up: escalation is only meaningful when the pass INTENDED to act, and
+        # a report-only run measured successfully and says so in its JSON. Report-only
+        # is not a coverage signal either — the workflow passes `--apply`.
+        if (args.apply and code == 0 and congestion is None
+                and any(p.repair_refused for p in plans)):
+            code = 1
     except MeasureError as exc:
         return _could_not_measure(args, str(exc))
     except subprocess.TimeoutExpired as exc:
         return _could_not_measure(args, f"timeout: {exc}")
-    # EXIT 1 IS A SPECIFIC CLAIM — "a PR was measured and still needs a repair only a
-    # user credential can perform". Nothing else may return it, so an unexpected
+    # EXIT 1 IS A SPECIFIC CLAIM — "a PR was measured and a repair it needs was not
+    # performed": either one only a user credential can perform, or one the pass
+    # refused because the queue reading did not certify it clear (above). Nothing
+    # else may return it, so an unexpected
     # error must NOT escape as a traceback (which any caller reads as failure of
     # that kind). `report()` mutates: a failure inside it may follow repairs that
     # already landed, so the message says so rather than claiming nothing changed.
@@ -2050,6 +2081,22 @@ def main(argv: list[str] | None = None) -> int:
         "unresolved": int(code != 0),
         "prs": records,
     }
+    # ⛔ EMITTED OUTSIDE THE `--json` BRANCH, because BOTH production callers pass
+    # `--json`: `.github/workflows/ci-check-repair.yml` (`--apply --json | tee …`) and
+    # `tools/ci-check-repair-local.sh` (`--apply --json > "$OUT_FILE"`, stderr to the
+    # log). Inside the `else:` this was the one line that says "this window is NOT
+    # discharged", and no real invocation could ever print it — measured on the
+    # refused fixture: with `--json` stderr held only `NO-VERDICT-WILL-ARRIVE(...)`.
+    # Stderr unconditionally, which is the rule this module already applies to
+    # `NO-VERDICT-WILL-ARRIVE`.
+    if summary["repair_refused"]:
+        print(f"ci-check-repair: REFUSED-REPAIR — {summary['repair_refused']} "
+              f"zero-job run(s) were identified and NOT cancelled/rerun because the "
+              f"queue reading did not certify it clear "
+              f"(queue_congestion_measured={summary['queue_congestion_measured']}, "
+              f"queue_congested={summary['queue_congested']}). This window is NOT "
+              f"discharged: read the queue, or run the repair with a credential "
+              f"that can unjam it.", file=sys.stderr)
     if args.json:
         print(json.dumps(summary, indent=2))
     else:
@@ -2066,16 +2113,6 @@ def main(argv: list[str] | None = None) -> int:
                   f"rerun={[x['run'] for x in r['rerun']]} missing_run={r['missing_run']} "
                   f"reopened={r['reopened']} reopen_attempts={r['reopen_attempts']} "
                   f"needs_user_actor={r['needs_user_actor']}")
-        if summary["repair_refused"]:
-            # NAMED, because it is the one number above that can make a real problem
-            # look like a clean window. Stderr: `--json` owns stdout.
-            print(f"ci-check-repair: REFUSED-REPAIR — {summary['repair_refused']} "
-                  f"zero-job run(s) were identified and NOT cancelled/rerun because the "
-                  f"queue reading did not certify it clear "
-                  f"(queue_congestion_measured={summary['queue_congestion_measured']}, "
-                  f"queue_congested={summary['queue_congested']}). This window is NOT "
-                  f"discharged: read the queue, or run the repair with a credential "
-                  f"that can unjam it.", file=sys.stderr)
         if summary["starved"]:
             # Named state, named remedy. A starved head is not repaired by anything
             # this tool can do: the missing resource is a runner slot.

@@ -1990,9 +1990,27 @@ def test_an_unmeasured_queue_never_authorises_the_cancel(monkeypatch, capsys, tm
     monkeypatch.setattr(R, "runs_at_head", lambda repo, head: [
         aged_run(41480218593, jobs=0, age_s=5700.0, path="ci.yml", name="CI")])
 
-    assert R.main(["--repo", "o/r", "--no-live", "--json",
-                   "--record", str(_flood_record(tmp_path))]) == 0
-    summary = json.loads(capsys.readouterr().out)
+    code = R.main(["--repo", "o/r", "--no-live", "--apply", "--json",
+                   "--record", str(_flood_record(tmp_path))])
+    captured = capsys.readouterr()
+    summary = json.loads(captured.out)
+    # ⛔ THE WINDOW-LEVEL CONSEQUENCE — what the review asked to be asserted, not just
+    # the presence of the key. `report()` returns 1 only for a repair this credential
+    # could not perform, so a suppressed cancel used to leave exit 0: that is what
+    # `workflow_state()` reads as `covered`, which makes the local fallback exit idle
+    # and no notification fire. An UNMEASURED reading never clears by itself (nothing
+    # in the next window measures that queue either), so exit 0 here means the PR is
+    # skipped silently every 30 minutes — the co-existence
+    # `docs/ci/ci-check-repair-red-surface.md` §Fact 2 declares unsound.
+    assert code == 1, (
+        "a refusal under SILENCE is not a discharged window: exit 0 is the 'covered' "
+        "the local rail consumes, so the pass would report a clean window forever")
+    assert "REFUSED-REPAIR" in captured.err, (
+        "the notice must reach the --json callers (BOTH production invocations pass "
+        "--json), or the refusal reaches nobody")
+    assert "REFUSED-REPAIR" not in captured.out, (
+        "...and never into the --json stream: that would break json.load in "
+        "tools/ci-check-repair-local.sh and the workflow's step summary")
     assert [d["run"] for d in summary["prs"][0]["no_verdict"]] == [41480218593], \
         "it is still NAMED — refusing to act is not refusing to report"
     assert summary["queue_congested"] is True, (
@@ -2018,6 +2036,88 @@ def test_an_unmeasured_queue_never_authorises_the_cancel(monkeypatch, capsys, tm
         "queue_congested=True"], (
         "...and the gate that refused it; whether that `True` came from a reading "
         "or from silence is the summary pair beside it, which is asserted above")
+
+
+def test_the_local_rail_reads_the_refused_count_into_its_signature(tmp_path):
+    """P2 (review): the refusal was emitted but the ONE consumer never read it.
+
+    `tools/ci-check-repair-local.sh` decided its transition with
+    `signature="local:$rc:$needing"` and `needing_repair_count()` reading only
+    `['needing_repair']`. A refused zero-job cancel appears in NEITHER (it is
+    deliberately not a repair the pass will attempt), so `needing_repair=0,
+    repair_refused=3` produced the SAME signature as a clean, covered window: no
+    transition, no notification, and a fail-shut the operator could not see.
+
+    Executed, not grepped: the extraction is run against the artifact the tool
+    actually writes, so a shell quoting bug reddens this too.
+    """
+    launcher_path = Path(__file__).resolve().parents[1] / "tools/ci-check-repair-local.sh"
+    launcher = launcher_path.read_text()
+    assert 'signature="local:$rc:$needing:$refused"' in launcher, (
+        "the transition signature must carry the refusal, or it reads as a clean window")
+    assert "Refused zero-job repairs: ${refused}" in launcher, (
+        "and the notification must name it, or the transition says nothing useful")
+
+    out = tmp_path / "out.json"
+    out.write_text(json.dumps({"needing_repair": 0, "repair_refused": 3}))
+    fn = re.search(r"^summary_count\(\) \{.*?^\}$", launcher, re.S | re.M)
+    assert fn, "the shared extractor must still exist for both counts"
+    script = (
+        f"PYTHON_BIN={sys.executable}\nOUT_FILE={out}\n{fn.group(0)}\n"
+        "summary_count repair_refused\n"
+    )
+    ran = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    assert ran.returncode == 0, ran.stderr
+    assert ran.stdout.strip() == "3", (
+        "the rail must read the key the tool emits, not a lookalike")
+
+    # An unreadable artifact still prints `?`, never 0 — the same rule the
+    # `needing_repair` reader already had (an unreadable report is not "nothing wrong").
+    broken = tmp_path / "broken.json"
+    broken.write_text("not json")
+    script = (
+        f"PYTHON_BIN={sys.executable}\nOUT_FILE={broken}\n{fn.group(0)}\n"
+        "summary_count repair_refused\n"
+    )
+    ran = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    assert ran.stdout.strip() == "?", "an unreadable report must never print as 0"
+
+
+def test_a_MEASURED_congested_refusal_does_not_escalate(monkeypatch, capsys, tmp_path):
+    """The other pole of the escalation, so the fix is not "exit 1 on any refusal".
+
+    A refusal made on a MEASURED congestion is the correct, self-clearing outcome: the
+    queue was read, it is congested, so re-queueing the run at the back of the same
+    wait is exactly the harm the gate exists to prevent — and the next window, when
+    the queue has moved, is when the repair should fire. Escalating here would turn a
+    healthy-but-busy repo into a red repair workflow plus a notification every 30
+    minutes, which trains the reader to ignore the one signal that matters.
+    """
+    from tools import ci_queue_health as Q
+
+    congested = Q.QueueHealth(
+        verdict=Q.PR_BACKLOGGED, queued_total=4, in_progress_total=1,
+        dominant_workflow="finding-provenance", dominant_queued=3, pr_running=1,
+        pr_queued=1, oldest_pr_queued_age_seconds=9000.0, pr_wait_measured=True)
+    assert congested.congests_pr is True, "the fixture must be a MEASURED congestion"
+    assert congested.starves_pr is False, (
+        "PR CI IS executing — the fixture must not be a starvation reading as well")
+
+    monkeypatch.setattr(R, "read_queue_health", lambda repo: congested)
+    monkeypatch.setattr(R, "open_prs", lambda repo, include_drafts: [pr(1)])
+    monkeypatch.setattr(R, "check_runs_at", lambda repo, head: [])
+    monkeypatch.setattr(R, "runs_at_head", lambda repo, head: [
+        aged_run(41480218593, jobs=0, age_s=5700.0, path="ci.yml", name="CI")])
+
+    assert R.main(["--repo", "o/r", "--no-live", "--apply", "--json",
+                   "--record", str(_flood_record(tmp_path))]) == 0, (
+        "a refusal the next window can clear on its own is not an unresolved window")
+    captured = capsys.readouterr()
+    summary = json.loads(captured.out)
+    assert summary["queue_congestion_measured"] is True
+    assert summary["repair_refused"] == 1
+    assert summary["prs"][0]["rerun"] == [], "the cancel is still suppressed"
+    assert "REFUSED-REPAIR" in captured.err, "...and it is still NAMED"
 
 
 def test_a_measured_clear_queue_still_authorises_the_cancel(monkeypatch, capsys,
