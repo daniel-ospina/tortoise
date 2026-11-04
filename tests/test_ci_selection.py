@@ -10569,6 +10569,48 @@ def test_surface_audit_maps_tortoise_api_source_as_api_pin(tmp_path):
     assert "tortoise/api.py" not in [r["path"] for r in report["uncovered"]]
 
 
+def test_window_arm_receipt_edit_selects_eval():
+    """#10538 (fresh-context review, cycle 1, P1): the receipts a ruling rests on
+    must be under the gate.
+
+    `docs/scoping/receipts/2026-11-03-10538-window-arm-retention.json` is a
+    COMMITTED build artifact: the owner ruling on #10538 (`window-exit` vs
+    `ab-head-ab`) and the #9097 exit measurement are argued from its numbers. A
+    docs-only diff selects NO surface (tier 1), so before the exact-path
+    SOURCE_PATTERNS entry a hand-edited receipt — or an instrument change that
+    re-emits different numbers — ran nothing that gates. The instrument
+    (`tools/longmem_eval/window_arm_baseline.py`) was already an `eval` match;
+    the receipt was not, and registering the TEST file in
+    config/ci-surfaces.yml does not fix that half: selection is driven by
+    SOURCE_PATTERNS. Same #1349/#2938/#3616 silent-drop class as the
+    write-path entry above.
+
+    RED before the change, for TWO different reasons: the receipt edit selected
+    NO surface at all (``surfaces == []`` — a docs-only diff is tier 1), and the
+    instrument edit selected ``eval`` (``tools/longmem_eval/`` was already a
+    pattern there) but not this pin, because the surface carried no registration
+    for it. GREEN after both repairs — and both halves stay mutation-real:
+    removing the SOURCE_PATTERNS entry reds the receipt case, removing the
+    ``eval`` registration reds the instrument case.
+    """
+    cases = (
+        # the instrument that emits the numbers
+        "tools/longmem_eval/window_arm_baseline.py",
+        # ...and the committed artifact those numbers are published in
+        "docs/scoping/receipts/2026-11-03-10538-window-arm-retention.json",
+    )
+    for changed in cases:
+        r = _sel([changed])
+        assert r["full"] is False, changed
+        assert "eval" in r["surfaces"], (
+            f"{changed} must select the `eval` surface that owns its pins; "
+            f"got {r['surfaces']}")
+        selected = set(r["test_files"]) | set(r["slow_selected"])
+        assert "test_window_arm_baseline_10538.py" in selected, (
+            f"nothing pins the retention baseline on {changed}; "
+            f"selected {sorted(selected)[:5]}")
+
+
 def test_write_path_measurement_source_edit_selects_eval():
     """#7947 review P1: editing the scorer must run the tests that pin the rule.
 
