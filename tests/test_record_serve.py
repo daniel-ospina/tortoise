@@ -919,9 +919,19 @@ def test_prefer_answers_from_the_record_when_the_cache_cannot_be_opened(monkeypa
 def test_prefer_counts_an_unresolved_tenant_under_its_own_reason(monkeypatch):
     """A permanent condition gets its own fallback reason, not the outage one.
 
-    `record_tenant_for` returns `None` for every session/JWT read and every
-    non-Supabase deployment, so counting it `record-unavailable` would fire the
-    OUTAGE counter permanently on a condition the record never caused.
+    `record_tenant_for` returns `None` when the credential's org has no readable
+    active `kind='default'` row (absent, tombstoned, another org's, unreadable —
+    #10046) and on every non-Supabase deployment, so counting it
+    `record-unavailable` would fire the OUTAGE counter permanently on a
+    condition the record never caused.
+
+    ⚠️ Since #10046 that is NOT a credential class: an API key (#10025), a
+    session/JWT credential and an OAuth `oat_` token all name that row through
+    `supabase_control.default_graph_id_for_credential` when it can be read, so on
+    those lanes a `record-tenant-unresolved` is a FAULT, not the designed state
+    of the credential. This test drives an unresolvable tenant directly (the
+    `_resolve_record_tenant` seam returns `None`), which is still the refusal
+    direction and still needs its own counter.
     """
     from fastapi import HTTPException
 
@@ -958,9 +968,10 @@ def test_prefer_counts_an_unresolved_tenant_under_its_own_reason(monkeypatch):
 def test_the_unresolved_tenant_arm_counts_only_when_the_cache_answers(monkeypatch):
     """The count lands with the ANSWER, not with the intent — this arm too.
 
-    `prefer` with an unresolvable tenant takes the fallback branch, and
-    `record_tenant_for` returns `None` for EVERY session/JWT read, so this is the
-    most-travelled counting path in `prefer` mode. If the cache read itself
+    `prefer` with an unresolvable tenant takes the fallback branch, and since
+    #10046 `record_tenant_for` returns `None` only when the org's default row
+    cannot be NAMED (or on a non-Supabase deployment), so this arm is taken for
+    every request whose org has no nameable default row. If the cache read itself
     raises — the ordinary case on a self-host deployment whose graph is down —
     the client gets that error and NO fallback may be counted: the metric means
     "answered by the cache". The sibling test on this arm supplies a cache that

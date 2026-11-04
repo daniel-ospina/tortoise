@@ -9876,10 +9876,16 @@ async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)): 
     unprojectable row, a tenancy that bypasses RLS: retrying repairs none of
     them, so `prefer` does not treat them as "still incomplete".
 
-    ⚠️ **A credential with NO RECORD TENANT is a third case, and it is not a
-    misconfiguration.** Session and JWT credentials resolve no record tenant by
-    design, so in `record` mode that is a **500** (there is no cache branch to
-    fall back to) while in `prefer` mode it is a NAMED, COUNTED fallback —
+    ⚠️ **A credential with NO NAMEABLE RECORD TENANT is a third case, and it
+    is NOT a credential class.** Since #10046 an API key (#10025), a SESSION/JWT
+    credential and an OAuth `oat_` token all name the org's active
+    `kind='default'` row through
+    `supabase_control.default_graph_id_for_credential`, so `None` here means
+    that row could not be NAMED (absent, tombstoned, another org's, unreadable),
+    the tenant read was lost, or this is a non-Supabase deployment with no
+    control plane — a fault to repair, not the designed state of a credential
+    class. In `record` mode it is a **500** (there is no cache branch to fall
+    back to) while in `prefer` mode it is a NAMED, COUNTED fallback —
     `record-tenant-unresolved`, the third of the three reasons.
 
     ⚠️ A record-served answer carries the record's PRIMARY field set, and the

@@ -64,9 +64,12 @@ in the same artifact is indistinguishable from an omission:
   finished projecting. The caller-facing reads are the hosted endpoint served
   here and the MCP route that reaches the same accessor —
   ``tortoise_get_entity(id, type="point")`` (``tortoise_get_point`` is its
-  RETIRED alias, ``tool_registry.RETIRED_USE_INSTEAD``) — neither is wired,
-  because an MCP call carries no hosted org credential to resolve a record
-  tenant from. (#8877 names the same internal/caller-facing
+  RETIRED alias, ``tool_registry.RETIRED_USE_INSTEAD``) — neither is wired.
+  ⚠️ The reason is NOT that the read lacks an org credential: since #10046 the
+  MCP lane installs the credential's ``default_graph_id`` around the request
+  (``mcp_auth._record_tenant_scope``; #10025 for an org-wide key), so this is a
+  serving lane nobody has built rather than an impossibility. (#8877 names the
+  same internal/caller-facing
   separation.) ⚠️ The TYPED form ``tortoise_get_entity(id, type="point")`` is
   that route and DOES reach this accessor; the BARE ``tortoise_get_entity(id)``
   reaches ``TortoiseSDK.get_entity`` — a different read with its own coordinate,
@@ -193,9 +196,12 @@ RECORD_SERVE_ENV = "TORTOISE_RECORD_SERVE"
 #: ``record``  the record answers; there is no cache branch at all.
 #: ``prefer``  the record answers first, and a NAMED, COUNTED fallback covers a
 #:             record that ANSWERS and cannot serve (`record-miss`), cannot be
-#:             reached (`record-unavailable`), or cannot be scoped because this
-#:             CREDENTIAL resolves no record tenant (`record-tenant-unresolved`
-#:             — normal for session/JWT credentials, not a misconfiguration).
+#:             reached (`record-unavailable`), or cannot be scoped because
+#:             CREDENTIAL's org has no NAMEABLE default row
+#:             (`record-tenant-unresolved` — since #10046 that is a fault to
+#:             repair, NOT a credential class: an API key since #10025, and a
+#:             session/JWT or OAuth credential since #10046, all name that row
+#:             when it can be read).
 #:             It does NOT cover a record that was never armed or is
 #:             misconfigured: an absent/malformed DSN, a missing driver, an
 #:             unprojectable row and a bad tenancy are structural and answer
@@ -360,9 +366,11 @@ ANCHORED_READS: dict[str, AnchoredRead] = {
                "finished projecting. The caller-facing reads of the same shape "
                "are the hosted endpoint served here AND the MCP route that reaches "
                "it (`tortoise_get_entity(id, type=\"point\")` — `tortoise_get_point` "
-               "is its RETIRED alias, `tool_registry.RETIRED_USE_INSTEAD`), which is "
-               "not wired because an MCP call carries no hosted org credential from "
-               "which to resolve a record tenant.",
+               "is its RETIRED alias, `tool_registry.RETIRED_USE_INSTEAD`). ⚠️ The "
+               "reason this row is NOT_SERVED is that no serving lane was built for "
+               "it — NOT that the read lacks an org credential: since #10046 the MCP "
+               "lane installs the credential's `default_graph_id` around the request "
+               "(`mcp_auth._record_tenant_scope`; #10025 for an org-wide key).",
     ),
     "entity-accessor": AnchoredRead(
         name="entity-accessor",
@@ -478,11 +486,15 @@ def not_served_reads() -> tuple[str, ...]:
 #: backfill/completeness question.
 FALLBACK_RECORD_UNAVAILABLE = "record-unavailable"
 FALLBACK_RECORD_MISS = "record-miss"
-#: A THIRD reason, for a condition that is neither: the credential resolves no
-#: record tenant at all. `record_tenant_for` returns `None` for every session/JWT
-#: read and every non-Supabase deployment, so folding this into
-#: `record-unavailable` would fire an OUTAGE counter permanently on a condition
-#: the record never caused — and the counter's whole purpose is to be alertable.
+#: A THIRD reason, for a condition that is neither: no record tenant could be
+#: NAMED. `record_tenant_for` returns `None` when the credential's org has no
+#: readable active `kind='default'` row (absent, tombstoned, another org's,
+#: unreadable — #10046) and on every non-Supabase deployment, so folding this
+#: into `record-unavailable` would fire an OUTAGE counter permanently on a
+#: condition the record never caused — and the counter's whole purpose is to be
+#: alertable. Since #10046 this is NOT a credential class: an API key (#10025),
+#: a session/JWT credential and an OAuth `oat_` token all name that row through
+#: `supabase_control.default_graph_id_for_credential` when it can be read.
 FALLBACK_RECORD_TENANT_UNRESOLVED = "record-tenant-unresolved"
 FALLBACK_REASONS: tuple[str, ...] = (
     FALLBACK_RECORD_UNAVAILABLE, FALLBACK_RECORD_MISS,
