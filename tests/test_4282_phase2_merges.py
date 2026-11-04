@@ -495,10 +495,21 @@ def test_operator_false_on_a_relation_that_has_a_mechanism_is_refused(sdk):
     storage: `docs/product/beta-sdk-surface.md` row 19 — "An epistemic relation
     builds an operator, anything else a plain edge — the caller does not
     choose" — and ONTOLOGY §8 gives the meaning its mechanism.
+
+    #10053 review (P3, second round): the guard first tested IDENTITY
+    (`operator is False`), so `operator=0` / `operator=""` — the same "no
+    operator" in the other spellings a `bool | None` annotation lets through
+    unchecked — slipped below it and built the carrying operator, while the
+    IMPL/NAND arm reads `operator is not True` and honours those spellings as a
+    PLAIN edge. Same keyword, two meanings, same call. Every falsy non-`None`
+    spelling is now refused here, and this loop is what pins it: on the old
+    `is False` guard the `0` and `""` iterations build an operator instead of
+    raising (and leave a call in `sdk.calls`).
     """
     for relation in sorted(TortoiseSDK._EPISTEMIC_RELATION_MEANINGS):
-        with pytest.raises(ValueError, match="carries the MEANING"):
-            sdk.link_entities(relation, "p1", "p2", operator=False)
+        for declined in (False, 0, ""):
+            with pytest.raises(ValueError, match="carries the MEANING"):
+                sdk.link_entities(relation, "p1", "p2", operator=declined)
     assert sdk.calls == [], "a refusal must not fall through to a write"
 
 
@@ -515,6 +526,41 @@ def test_operator_false_still_means_a_plain_edge_where_no_meaning_decides(sdk):
         door, _args, _kwargs = sdk.calls[-1]
         assert door == "create_direct_edge", (
             f"{relation} + operator=False must stay a PLAIN edge, got {door}")
+
+
+def test_operator_true_is_refused_on_the_arms_that_record_no_operator(sdk):
+    """#10053 review (P3): `operator=True` was accepted and forwarded NOWHERE.
+
+    `operator` was not a member of `requested`, so `_dispatch`'s "a parameter
+    the arm cannot record" refusal could never fire for it. Two arms return
+    BEFORE the keyword is read at all — the provenance arm (`references` +
+    `entity_label`) and the derivation arm (`wasDerivedFrom`) — and both
+    returned success for a call whose keyword they discarded, on the verb whose
+    own rule is *"a parameter an arm cannot RECORD is refused, never dropped"*.
+    The asymmetry was exact: the SAME keyword is refused as a falsy value on a
+    meaning-bearing relation (`carries the MEANING` above) and was silently
+    dropped as `True` here. Every arm that CAN carry an operator still honours
+    it — `create_operator` lists it, and
+    `test_link_entities_builds_an_operator_when_the_caller_asks_for_one` pins
+    the IMPL case — so the refusal is scoped to the two arms that cannot.
+
+    The control half is deliberate: each arm is FIRST called without the
+    keyword and must reach its door, so this cannot pass by the arm being
+    unreachable for some unrelated reason.
+    """
+    for relation, kwargs, door in (
+            ("wasDerivedFrom", {}, "create_derivation"),
+            ("references", {"entity_label": "Event"}, "link_source_to_entity")):
+        sdk.calls.clear()
+        sdk.link_entities(relation, "src", "dst", **kwargs)
+        assert sdk.calls[-1][0] == door, (
+            f"the control call must reach {door} — otherwise the refusal below "
+            f"proves nothing; calls={sdk.calls!r}")
+
+        sdk.calls.clear()
+        with pytest.raises(ValueError, match=f"`{door}`, which records no operator"):
+            sdk.link_entities(relation, "src", "dst", operator=True, **kwargs)
+        assert sdk.calls == [], "a refusal must not fall through to a write"
 
 
 # ── 5. no arm may accept a parameter it cannot RECORD ────────────────────────

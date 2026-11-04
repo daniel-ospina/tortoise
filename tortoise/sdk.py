@@ -13788,14 +13788,20 @@ class TortoiseSDK:
         the only relation with two legitimate storages (with or without a
         carrying operator), and a caller who needs to mitigate the edge later
         must be able to say so. ``None`` (the default) means "decide from the
-        relation"; it is not a third mode.
+        relation"; it is not a third mode. Asking for ``True`` is honoured by
+        the two arms that can carry an operator (the mechanism arm, and the
+        structural relation that reaches :meth:`create_operator`), and is
+        REFUSED — not dropped — by the derivation and provenance arms, which
+        record no operator at all; a falsy non-``None`` value is honoured as a
+        plain edge on IMPL/NAND and refused on a meaning-bearing relation.
 
         On a relation that carries a MEANING (``supports``, ``refutes``,
         ``mutuallySupportive``, ``mutuallyExclusive``) the MECHANISM decides the
-        storage, so ``operator=False`` is REFUSED there rather than overruled —
-        the caller does not choose (``beta-sdk-surface.md`` row 19, ONTOLOGY §8).
-        ``True`` is accepted and changes nothing: the meaning already requires
-        the carrying operator.
+        storage, so a falsy ``operator`` — ``False``, and every other falsy
+        non-``None`` spelling (``0``, ``""``) — is REFUSED there rather than
+        overruled: the caller does not choose (``beta-sdk-surface.md`` row 19,
+        ONTOLOGY §8). ``True`` is accepted and changes nothing: the meaning
+        already requires the carrying operator.
 
         ⛔ **A parameter an arm cannot RECORD is refused, never dropped.** The
         five writers take different parameter sets, so a keyword this signature
@@ -13840,7 +13846,12 @@ class TortoiseSDK:
             "create_direct_edge": frozenset({
                 "direction", "confidence", "weight", "label", "batch_id",
                 "promote_source"}),
-            "create_operator": frozenset({"label", "direction", "promote_source"}),
+            "create_operator": frozenset({
+                "label", "direction", "promote_source",
+                # `operator=True` is the request that GOT here on a structural
+                # relation ("build the carrying operator"), so the arm that
+                # honours that request must list it or refuse itself.
+                "operator"}),
             "create_derivation": frozenset(),
             "link_source_to_entity": frozenset({"entity_label", "source_kind"}),
             "create_edge": frozenset(),
@@ -13855,6 +13866,16 @@ class TortoiseSDK:
         }
         if promote_source is False:
             requested["promote_source"] = False
+        # `operator=True` is a REQUEST for a carrying operator, and only the
+        # `create_operator` door can record one (#10053 review, P3): without
+        # this the derivation and provenance arms — which return before
+        # `operator` is read anywhere — accepted the keyword and rebuilt the
+        # link without it, while the same keyword is now REFUSED as a falsy
+        # value on a meaning-bearing relation. `False`/`0`/`""` are not added:
+        # the IMPL/NAND arm HONOURS them as a plain edge, and the meaning arm
+        # refuses them before any dispatch.
+        if operator is True:
+            requested["operator"] = True
 
         def _dispatch(door: str, call):
             """Run the arm, or REFUSE what its writer cannot record (#4282).
@@ -13917,21 +13938,23 @@ class TortoiseSDK:
         if meaning is not None:
             from tortoise.pack_registry import SEMANTICS_MECHANISMS
 
-            # #10053 review (P3): `operator` used to be read for the first time
-            # BELOW this arm, so `False` — the one spelling a caller would use
-            # to FORBID the carrying operator — was accepted here and ignored:
-            # the arm built the operator anyway, with no error and no warning,
-            # on the single family where the neighbouring IMPL/NAND arm HONOURS
-            # `False`. Same-keyword-two-meanings is the class `_dispatch` below
-            # exists to refuse, so it is refused here too rather than left to a
-            # docstring that says what the code does not do.
-            if operator is False:
+            # #10053 review (P3, second round): this guard tested IDENTITY
+            # (`operator is False`), so `operator=0` / `operator=""` — the same
+            # "no operator" in every other spelling a `bool | None` annotation
+            # lets through unchecked — fell below it and built the carrying
+            # operator the caller declined, while the IMPL/NAND arm above reads
+            # `operator is not True` and honours those spellings as a plain
+            # edge. One keyword, two meanings, on the same call. The meaning arm
+            # refuses EVERY falsy non-`None` spelling so the two arms cannot
+            # disagree about what "not an operator" means; `None` stays "decide
+            # from the relation" and `True` stays the no-op override.
+            if operator is not None and not operator:
                 raise ValueError(
                     f"link_entities: relation {rel!r} carries the MEANING "
                     f"{meaning!r}, and an epistemic relation ALWAYS needs its "
                     f"carrying operator "
                     f"(pack_registry.SEMANTICS_MECHANISMS -> "
-                    f"{SEMANTICS_MECHANISMS[meaning]!r}) — `operator=False` "
+                    f"{SEMANTICS_MECHANISMS[meaning]!r}) — `operator={operator!r}` "
                     f"asks for a plain edge, which would mint an epistemic "
                     f"edge with no mechanism to carry it. The RELATION chooses "
                     f"its storage, not the caller (beta-sdk-surface.md row 19, "

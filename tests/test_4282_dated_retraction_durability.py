@@ -279,3 +279,61 @@ def test_an_end_the_store_cannot_hold_exactly_never_becomes_a_divergence(tmp_pat
             f"divergence={result['divergence']!r} named={named!r}")
     finally:
         sdk.close()
+
+
+# ── 6. the INVALIDATE arm of the same verb carries the same bound ────────────
+
+@pytest.mark.parametrize("end", [INSTANT, "", "TBD", "a\x00b"])
+def test_the_invalidate_arm_leaves_the_gate_clean_for_every_end(tmp_path, end):
+    """#10053 review (P2, second round): the bound's gate must hold on BOTH arms.
+
+    `update_knowledge(id, invalid_at=D, corrected_by_id=…)` is a SECOND producer of a
+    caller-named window end (`sdk.py` `invalidate_point(..., valid_to=D)`), and until this
+    PR that parameter did not exist, so the arm's end was always `now` — always storable,
+    and the class below unreachable. `supersede_point`/`invalidate_point` share one
+    reference-fold branch, and that branch mirrored `valid_to` UNGATED while the retract
+    arm two lines above used `_storable_bound`. Measured at the head that introduced it:
+    `update_knowledge(p, invalid_at="a\x00b", corrected_by_id=q)` wrote LIVE `validTo=None`
+    (the #7369 degradation, the same bar the graph fold applies) while the reference
+    claimed the raw string — `divergence="content"` naming `validTo` on a graph that was
+    byte-faithful, with the verdict's own advice ("replay the journal") reproducing the
+    same absent end and so never able to clear it.
+
+    Parametrised over the four spellings that matter and NOT over one: the storable ones
+    pin that the arm really carries a caller instant (otherwise "clean" is vacuous), and
+    the unstorable one pins the agreement (live == replay == absent) that the gate buys.
+    """
+    events = tmp_path / "events"
+    events.mkdir()
+    sdk = TortoiseSDK(str(tmp_path / "invalidated.db"),
+                      event_log_path=str(events / "events.jsonl"))
+    try:
+        pid = sdk.create_point("statement", "a claim a successor corrected")["id"]
+        successor = sdk.create_point("statement", "the successor")["id"]
+        # The documented public door (row 22): the window end is a temporal FIELD.
+        sdk.update_knowledge(pid, invalid_at=end, corrected_by_id=successor)
+
+        live = _node(sdk, pid)
+        assert live["outdated"] is True, live
+        if end in (INSTANT, "", "TBD"):
+            assert live.get("validTo") == end, (
+                "the invalidate arm never carried the caller's window end — the premise "
+                f"of this test; node={live!r}")
+
+        log_path = str(events / "events.jsonl")
+        proj = sdk._get_proj()
+        check_consistency(log_path, proj)  # adopt
+        result = check_consistency(log_path, proj)
+        named = {d["id"]: d["fields"] for d in result["divergent_points"]}
+        assert result["divergence"] is None, (
+            "the reference fold states a window end the graph does not hold (or drops "
+            "one it does) on the INVALIDATE arm: "
+            f"end={end!r} divergence={result['divergence']!r} named={named!r}")
+
+        proj.rebuild_all(str(events), confirm_destructive=True)
+        rebuilt = _node(sdk, pid)
+        assert rebuilt.get("validTo") == live.get("validTo"), (
+            "the invalidate arm's window end diverged live vs replay — "
+            f"end={end!r} live={live.get('validTo')!r} rebuilt={rebuilt.get('validTo')!r}")
+    finally:
+        sdk.close()

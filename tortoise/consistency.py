@@ -1435,7 +1435,31 @@ def _fold_journal(events: list[dict]) -> dict:
                 entry["status"] = "superseded"
             if t in ("PointSuperseded", "PointInvalidated"):
                 entry["outdated"] = True
-                entry["validTo"] = ev.get("valid_to")
+                # #4282 (PR #10053): the SAME bound gate, on the OTHER two
+                # arms that carry a window end. `supersede_point` /
+                # `invalidate_point` record `valid_to` (`stamp_valid_to`), and
+                # since #4282 `update_knowledge(..., invalid_at=,
+                # corrected_by_id=)` forwards a CALLER instant into the
+                # invalidate arm — a parameter that did not exist before this
+                # change, when the arm's end was always `now` and therefore
+                # always storable. So this PR is what makes the divergence
+                # reachable: ungated, a value the store cannot hold exactly is
+                # written LIVE as null (the #7369 degradation, the same one the
+                # retract arm above guards against) while the reference claimed
+                # the raw string — `divergence="content"` naming `validTo` on a
+                # graph that is byte-faithful, with the verdict's own advice
+                # ("replay the journal") reproducing the same absent end and so
+                # never able to clear it. Measured at the head that introduced
+                # it: `update_knowledge(p, invalid_at="a\x00b",
+                # corrected_by_id=q)` -> live `validTo=None`, rebuilt `None`,
+                # `check_consistency` -> `divergence="content"`.
+                # The predicate is the retract arm's above, because it is the
+                # same question (may a replay WRITE this bound?) about the same
+                # writer value; a `None` is dropped by
+                # `_canonical_point_fields`, mirroring the graph's null-clear,
+                # and a LEGAL stored END_UNKNOWN (`""`/`"TBD"`, #9202) is kept.
+                if _storable_bound(ev.get("valid_to")):
+                    entry["validTo"] = ev["valid_to"]
                 # #2350: `validToPrecision` rides the SAME node the live writers
                 # stamp (`sdk.py` `invalidate_point`/`supersede_point` SET
                 # `n.validToPrecision`, and the graph/replay folds restore it).
