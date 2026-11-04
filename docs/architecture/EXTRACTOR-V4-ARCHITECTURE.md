@@ -234,20 +234,29 @@ The mechanism is **parent-document retrieval** / **small-to-big**: *embed the sm
 > Every other point **the extraction write path commits** is written with **no
 > span** — a point resolved by the token-overlap band carries a `source_turn_id`
 > and still no offsets, which is why the two are stated separately above and not
-> as one "address". The coverage is a **pinned census**, not an impression:
-> `tests/eval/write_path/test_value_span_census_2684.py` measures **101 of the
-> 217** committed points carrying a span (`CENSUS["spanned"]`, sealed 2026-10-25)
-> and **105 of the 217** value-free (runbook §6,
-> `2684-slice-b-t-gate.md`), i.e. the every-point requirement holds for under
-> half the committed population. The number is quoted from that artifact because
-> a reader can re-run it; a rate with no artifact behind it is the same
-> false-present class this marker exists to prevent. ⚠️ "No span" is a property
-> of the **extraction** path, not of every writer in the process: `create_point`
-> and `update_point` accept caller-supplied offsets through their generic props
-> and validate them with `validate_span`
-> (`tortoise/sdk.py:12383`, `:17271`, the rule in
-> `tortoise/commit_schema.py:445`), so an SDK caller can commit a span the four
-> gates never saw. So *"every
+> as one "address". The coverage is a **pinned census**, and the number is quoted
+> from that artifact because a reader can re-run it: on the sealed corpus
+> (`tests/eval/write_path/test_value_span_census_2684.py`, 2026-10-25) it
+> **re-derives** `CENSUS["spanned"] = 101` of the **112 value-bearing** points,
+> while the **observed** count is **0 of the 217** committed points carrying a
+> span key at all — the census's own `assert spanned == 0`, and runbook §6's
+> statement that an observed rate *"needs an end-to-end re-ingest"* (**#8486**).
+> A re-derivation of what the predicate *would* stamp is not a rate of what the
+> corpus *has*, and the two must not be quoted as one number. ⚠️ When you re-run
+> that file, its **separate** citation-resolution assertion — the one that
+> resolves the census artifacts' `retrieval.py` span citation — is red on `main`
+> at this head (a pre-existing drift in a different assertion, unrelated to
+> `CENSUS`); the `CENSUS` pins themselves pass.
+> ⚠️ "No span" is a property of the **extraction** path, not of every writer in
+> the process: three public doors pass caller-supplied offsets through their
+> generic props and validate them with `commit_schema.validate_span` —
+> `TortoiseSDK.create_point`, `TortoiseSDK.update_point`, and
+> `TortoiseSDK.update_entity` (the generic tenant / MCP surface, `_update_entity`),
+> whose own comment names the half-span hazard. So an SDK or MCP caller can
+> commit a span the four gates never saw. (Symbols, not line numbers, on purpose:
+> this document's citation pin is the default `c79ba1cf2`, at which none of those
+> offsets resolve — an unpinned HEAD number is no citation at all, per this
+> document's own header.) So *"every
 > committed `Point`/`Object` must carry a reachable link"* is unbuilt for the
 > general point, and `config/v4-mechanisms.yml` records `span_link` as
 > `not-implemented` with the widening owned by **#2684** (§2.4's own

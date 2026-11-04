@@ -81,7 +81,8 @@ prove it is COMPLETE — and that is how `state_value_carve_out` (the verbatim
 state/operational-value carve-out, #2453) stayed unregistered while this gate
 stayed green: a hand-written list of seven cannot notice an eighth mechanism the
 design declares in prose. So every mechanism the registry knows about carries a
-`<!-- v4-mechanism: <id> -->` marker in EACH `docs/architecture/**/*.md` document
+`<!-- v4-mechanism: <id> state: <state> -->` marker in EACH
+`docs/architecture/**/*.md` document
 its row names — the convention is to place it at the declaration site, and that
 placement is a DISCIPLINE, not something this gate can read (see the stated
 limits) — and `membership_errors` fails closed on FOUR shapes:
@@ -256,7 +257,14 @@ MARKER_TOKEN = "v4-mechanism:"
 #: The match is case-insensitive for the same reason, and the
 #: direction of a false match is fail-CLOSED (a prose mention inside a comment
 #: is a malformed-declaration verdict, which a reader can fix, not a silent
-#: pass). `_prose_only` still keeps ordinary prose out of this scan.
+#: pass). ⚠️ What bounds this scan is `HTML_COMMENT.findall(...)` below: only the
+#: BODY of an HTML comment reaches this matcher, and `_prose_only` is an IDENTITY
+#: function (it deliberately does not strip code or prose), so prose INSIDE a
+#: comment does reach it and does produce a malformed-declaration verdict (review
+#: P3 - an earlier revision of this note credited `_prose_only` with a bound it
+#: does not implement, and the next widening would have inherited that premise).
+#: The accepted cost is a fail-closed false red on a comment that discusses the
+#: token in prose; the alternative was a silent gap, which is the defect class.
 MARKER_TOKEN_LOOSE = re.compile(r"v4[\W_]{0,3}mechanism\s*:", re.IGNORECASE)
 #: The state recorded for a marker that NAMED its mechanism but whose wording did
 #: not parse. It exists so `membership_errors` does not re-judge the same defect
