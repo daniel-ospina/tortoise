@@ -12795,8 +12795,30 @@ class TortoiseSDK:
                 # read path (#2892). Skipped when the call carries neither props
                 # nor an authored word (a bare dedup hit), so that path costs no
                 # extra query.
+                #
+                # ⛔ THE GATE IS WHAT THE FOLD COULD **WRITE**, not the `props`
+                # dict as it happens to sit on this line. `content_hash` was put
+                # into `props` UNCONDITIONALLY at the top of this door and is not
+                # popped until after the #7704 provenance retrofit below, and
+                # `extractedFrom` is that retrofit (deliberately NOT refused) —
+                # so `if props` was ALWAYS true here, the "bare dedup hit costs
+                # no extra query" arm was unreachable, and every dedup hit spent
+                # a fan-out read on the NORMAL path ("the self-host surface
+                # dedups by DEFAULT", see the #10368 note above; pinned by
+                # `tests/test_10368_terminal_create_fold.py::
+                # test_a_bare_dedup_hit_costs_no_terminal_read`).
+                # `_fold_words` is the PRE-POP image of what
+                # `_terminal_fold_refused` reads after its own pops, so the two
+                # can never disagree: `_TEMPORAL_RESTAMP_PROPS` shares no member
+                # with the two excluded names, so `_temporal ⊆ _fold_words` and
+                # the #7819 arm keeps its verdict; `key` stays in `_fold_words`,
+                # so a KEY-resolved fold is still governed (#6110); and an
+                # empty `_fold_words` with no authored word leaves the props leg
+                # with nothing to write, so there is no refusal to decide.
+                _fold_words = set(props) - {"content_hash", "extractedFrom"}
                 _terminal = (self._lifecycle_terminal_marker(pid)
-                             if (props or cred_prior is not None) else None)
+                             if (_fold_words or cred_prior is not None)
+                             else None)
                 _temporal = _TEMPORAL_RESTAMP_PROPS & set(props)
                 if _temporal and _terminal is not None:
                     _logger.warning(
