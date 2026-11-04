@@ -263,8 +263,9 @@ already exist: no new store, no new instrumentation, no route, no metered-respon
 method. It turns the recorded residual (*"written but not readable from code"*) into a number the owner can pull per
 tenant — which is the difference between a measurement pass that runs and one that does not.
 
-**⛔ NOT in this change, deliberately:** no allowance key, **no allowance VALUE**, no change to `/v1/team`'s metered
-response, no price, no invoice. Those all still hold.
+**⛔ NOT in this change, deliberately:** no allowance **VALUE** — the three `ALLOWANCE_KEYS` fields exist and are
+carried, but no resolver emits one, so nothing is armed — and no change to `/v1/team`'s metered response, no price,
+no invoice. Those all still hold.
 
 **⚠️ §1b's "no request path calls it" is SUPERSEDED — the reader is now an enforcement hook (`#9567` D11/D12).**
 `#4051` §1b recorded that this reader was MEASUREMENT ONLY, with zero call sites, and

@@ -49,7 +49,7 @@
 # a constant here.
 manifest_version: 1
 issue: 3863
-cut_at_commit: 30c70b0472b6a78a6d7ffac9897285a95e54a4a7
+cut_at_commit: ee2a1589195d499a03352e427ee955c1ce281f5b
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform

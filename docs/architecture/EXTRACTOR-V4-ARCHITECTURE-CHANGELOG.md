@@ -1629,8 +1629,9 @@ same reader, with `absent` (a cumulative FLOW's real zero) decided by the dimens
 **OVERRIDES:** `#4051` §1b's "the reader is MEASUREMENT ONLY — no request path calls it" — the ruled
 token dimension has no other meter, so enforcement has to read this one; the measurement-only reading
 would leave the owner's 2026-09-26 token ruling unenforceable. The gate is INERT until an allowance
-value is configured (no resolver emits one), so no dimension can be refused for being **over** its
-allowance today — ⚠️ a FAULT in the read it performs is still refused (a `QuotaCheckError` → 500) even
-with nothing armed, so "nothing is refused today" is NOT the reading (see `CONSUMPTION-MODEL.md` §6).
-The same line is recorded where a lane actually reads it — on `#4051` (comment `6613755225`) and in
-`docs/architecture/CONSUMPTION-MODEL.md` §6 — and the reopen is argued there.
+value is configured (no resolver emits one) — inert about what it **REFUSES on the allowance
+ground**, never about what it **READS**: every gated request fills the missing allowance keys with one
+control-plane read, and a **fault** in that read is a `QuotaCheckError` → HTTP 500 **even with no
+allowance configured** (`tortoise/allowance_gate.py`'s "INERT IS ABOUT WHAT IT REFUSES, NOT ABOUT
+WHAT IT READS"). The same line is recorded where a lane actually reads it — on `#4051` (comment
+`6613755225`) and in `docs/architecture/CONSUMPTION-MODEL.md` §6 — and the reopen is argued there.

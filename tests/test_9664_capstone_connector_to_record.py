@@ -255,17 +255,45 @@ def _database(monkeypatch):
 # ── one tenant, one connector, one process ─────────────────────────────────
 
 
+class _NoRecordControlPlane:
+    """A control plane that ANSWERS, and holds no `organizations` row (#9567).
+
+    This fixture's control plane is not real — `resolve_api_key` is stubbed — but
+    since #9567 the gated write path makes a **second** control-plane read the
+    fixture does not stub: `allowance_gate.carry_resolved_allowances` consults
+    `quota.resolve_org_limits`, which in supabase mode reads the orgs row through
+    `get_control_plane()`. Returning `None` from that seam is a state production
+    cannot produce (`get_control_plane()` constructs its client lazily), and the
+    carry correctly treats the resulting `AttributeError` as a FAULT — fail
+    closed. So the capstone's first write was refused with *"the team allowances
+    could not be resolved"*, which is the `record-postgres` red this class fixes.
+
+    An EMPTY ROW SET is the state a real control plane returns for an org with no
+    row, and the carry's documented third arm (`quota.OrgNotFoundError` — *"no
+    record is a STATE, not a fault"*) then leaves the caller's already-
+    authoritative limits dict untouched. Nothing is armed, so the gate stays
+    inert — this tenant's actual situation — and the leg exercises that arm
+    instead of stubbing the resolver out of the picture.
+    """
+
+    def query(self, table, *, select=None, filters=None, **_kwargs):
+        assert table == "organizations", (
+            "this fixture's control plane stands in only for the ORGS read the "
+            f"allowance carry makes; {table!r} was not expected")
+        return []
+
+
 @pytest.fixture
 def connector(tmp_path, monkeypatch):
     """A real MCP app whose graph-bound credential resolves to a RECORD tenant.
 
     Every piece is the production object: the HTTP app (`create_http_app`), the
     tenancy middleware's own resolver (`record_tenant_for`), the record seam
-    (`write_live_record`). The stubs stand in only for the CONTROL PLANE, and
-    for BOTH reads a gated call makes — `resolve_api_key` (auth) and the #9567
-    allowance carry's `resolve_org_limits` — because the record's layer tables
-    FK to `public.organizations`/`public.graphs` and a registry-shaped `g_<hex>`
-    id is a different id space (#9192: "a registry graph id is never
+    (`write_live_record`). The three stubs stand in only for the CONTROL PLANE
+    (`resolve_api_key`, and the allowance carry's orgs read, which has no real
+    backend here — see `_NoRecordControlPlane`), because the record's layer
+    tables FK to `public.organizations`/`public.graphs` and a registry-shaped
+    `g_<hex>` id is a different id space (#9192: "a registry graph id is never
     installed").
     """
     from tortoise import supabase_control as sc
@@ -294,29 +322,9 @@ def connector(tmp_path, monkeypatch):
         "max_users": 10, "max_graphs": 10,
     }
     monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
-    monkeypatch.setattr(sc, "get_control_plane", lambda: None)
+    monkeypatch.setattr(sc, "get_control_plane", lambda: _NoRecordControlPlane())
     monkeypatch.setattr(sc, "resolve_api_key",
                         lambda _cp, token: org_row if token == api_key else None)
-    # #9567 D12 — the allowance carry's read, stubbed at the SAME control plane.
-    # A gated MCP write now pays a second control-plane read
-    # (`mcp_server._carry_allowances` → `allowance_gate.carry_resolved_allowances`
-    # → `quota.resolve_org_limits`). `get_control_plane` is `None` above, so an
-    # un-stubbed resolver reads THROUGH the stub, faults on `None.query`, and —
-    # correctly, by the carry's own documented rule (a read FAULT is a
-    # `QuotaCheckError`, never "unlimited") — REFUSES the write. The journey then
-    # cannot file its first Point at all: that is the `test-record-postgres`
-    # failure this stub closes (run 41810417508).
-    #
-    # The stub answers what THIS fixture's org row answers: `resolve_org_limits`'
-    # documented contract is one key per `_RESOURCE_LIMIT_KEYS` entry, the row
-    # carries no allowance column, so `carry_allowance_keys` fills NOTHING and
-    # the dict the gate enforces stays exactly `org_row` — every cap the legs
-    # below assert still binds, and no leg is satisfied by a silent "unlimited".
-    import tortoise.quota as _quota
-    monkeypatch.setattr(
-        _quota, "resolve_org_limits",
-        lambda _org: {key: org_row[key]
-                      for key in _quota._RESOURCE_LIMIT_KEYS.values()})
 
     registry = TortoiseSDK(db_path=str(tmp_path / "registry.db"),
                            namespace="registry")
