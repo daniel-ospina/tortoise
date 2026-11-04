@@ -13409,8 +13409,10 @@ def _composed_identities_agree(a: tuple[str, str, str | None],
     the third of the three ways two identities can name one number (after "equal
     cores" and "the prefix reading closes the gap").
 
-    ⛔ IT CAN ONLY EVER *ADD* TOLERANCE — it compares the composed form to the
-    other side and returns True only on exact equality, so it cannot refuse. It
+    ⛔ IT CAN ONLY EVER *ADD* TOLERANCE — it returns True only where the composed
+    form names the same number as the other side (exact equality, OR the same
+    sign+core where the other side states NO unit at all — that side's own
+    "unit is written or not" tolerance), so it cannot refuse. It
     cannot rescue a rewritten NUMBER either: ``20k miles``/``21k miles`` composes
     to ``20000 mi`` against ``21000 mi`` and ``20k miles``/``20000 km`` to
     ``20000 mi`` against ``20000 km``, and both still reach the core comparison
@@ -13434,8 +13436,31 @@ def _composed_identities_agree(a: tuple[str, str, str | None],
     compose arm fails to match ``ms`` against ``m``. **#10876 would not change
     this pair** — it is a different root and is not covered there.)
     """
-    composed = _composed_identity(a)
-    if composed is not None and composed == b:
-        return True
-    composed = _composed_identity(b)
-    return composed is not None and composed == a
+    for composed_side, other in ((a, b), (b, a)):
+        composed = _composed_identity(composed_side)
+        if composed is None:
+            continue
+        if composed == other:
+            return True
+        # ⛔ THE "UNIT IS WRITTEN OR NOT" TOLERANCE APPLIES TO THE COMPOSED FORM
+        # TOO, and leaving it out was a MEASURED FALSE ACCUSATION (review cycle 7,
+        # P2): exact equality against `other` can only rescue a side that STATES
+        # a unit, so `20k miles` against the same number written with NO unit at
+        # all — `('', '20000', None)` — matched nothing and fell through to the
+        # core comparison, 20 against 20000, and the truthful point was WITHHELD.
+        # Every spelling newly fused by the widen inherits that: `3k days`/
+        # `3000`, `5k seconds`/`5000`, `5k milliseconds`/`5000` were all WRITTEN at
+        # `origin/main` `525fde4a9` (the unit word was not fused there, so the
+        # value bound as a bare `k` and `_magnitude_agrees` closed the gap) and
+        # became REFUSED here. The composed identity names the SAME NUMBER on the
+        # same sign, and the other side states NO unit to contradict — which is
+        # `_value_identity_matches`' oldest tolerance (`800` / `800ms`), not a new
+        # one. It cannot rescue a rewrite: the sign and the post-fold core must be
+        # EQUAL, so `20k miles`/`21000` still refuses.
+        # ⚠️ Scoped to a side stating NO unit, deliberately: a side stating an
+        # unknown SPELLING (`millis`) keeps `_magnitude_agrees`' `_K_ABBREVIATES`
+        # refusal (#10876, recorded decision — #10513 review P1), and two STATED
+        # units still have to be equal, so `20k miles`/`20000 km` refuses.
+        if other[2] is None and composed[0] == other[0] and composed[1] == other[1]:
+            return True
+    return False

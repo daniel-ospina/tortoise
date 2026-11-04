@@ -1101,6 +1101,72 @@ def test_a_magnitude_prefix_beside_a_unit_word_is_COMPOSED_not_refused():
         "the batch took 5k millis", "the batch took 5000 millis") == ()
 
 
+def test_a_composed_prefix_against_a_UNITLESS_side_keeps_the_omitted_unit_tolerance():
+    """#10804 review (cycle 7) P2 — the widen newly WITHHELD a truthful point.
+
+    The composition arm's match was `composed == other`, an EXACT identity
+    equality, so it could only rescue a side that STATES a unit. A side with NO
+    unit at all is ``('', '20000', None)``, which no composed identity can equal:
+    so ``20k miles`` against ``20000`` fell through to the core comparison (20
+    against 20000) and the write REFUSED the point.
+
+    ⛔ MEASURED at `origin/main` `525fde4a9` (a scratch worktree, not a revert):
+    every row in the first loop returned ``()`` there — `miles`/`days`/`seconds`/
+    `milliseconds` were not in `_UNIT_WORDS`, so the value bound as a BARE `k`
+    and `_magnitude_agrees` closed the gap — and every one REFUSED at the head
+    before this fix. That is the false-accusation direction this carve-out must
+    never take, introduced by the widen.
+
+    MUTATION CHECK TARGET: drop the `other[2] is None` branch from
+    `_composed_identities_agree` and the first loop goes red; the second loop (a
+    rewritten number, a re-read unit, a stated spelling outside the tables) must
+    stay green either way — it is what stops the tolerance from becoming one that
+    lets a real rewrite through.
+    """
+    # The unit is written on ONE side only — the module's oldest tolerance.
+    for content, quote in (
+            ("the fleet drove 20000", "the fleet drove 20k miles"),
+            ("the lease is 3000", "the lease is 3k days"),
+            ("back under 5000", "back under 5k milliseconds"),
+            ("the batch took 5000", "the batch took 5k seconds")):
+        assert v2._value_slot_divergence(content, quote) == (), (
+            content, quote)
+    # ...and the WRITE does not withhold the point.
+    result = _write("the fleet drove 20000", "the fleet drove 20k miles")
+    assert result["payload"]["points"], (
+        "a truthful point was WITHHELD because `20k miles` and `20000` are one "
+        "value with the unit written on one side only")
+    assert not any("REWRITES its own verbatim quote" in w
+                   for w in result["warnings"]), result["warnings"]
+    # The arm itself: the fold rescues a UNITLESS side, and this is the exact
+    # equality branch still working beside it.
+    assert v2._composed_identities_agree(("", "20", "kmiles"),
+                                         ("", "20000", "mi"))
+    assert v2._composed_identities_agree(("", "20", "kmiles"),
+                                         ("", "20000", None))
+    # ⛔ NOT VACUOUS IN THE OTHER DIRECTION — a rewritten NUMBER still refuses,
+    # against a unitless side as much as against a stated one.
+    for content, quote in (
+            ("the fleet drove 20k miles", "the fleet drove 21000"),
+            ("the lease is 3k days", "the lease is 3001"),
+            ("the batch took 5k seconds", "the batch took 5001")):
+        assert v2._value_slot_divergence(content, quote), (content, quote)
+    # ...and a re-read UNIT does, including against a side that states its own.
+    for content, quote in (
+            ("the fleet drove 20k miles", "the fleet drove 20000 km"),
+            ("the lease is 3k days", "the lease is 3000 hours"),
+            ("the batch took 5k seconds", "the batch took 5000 minutes")):
+        assert v2._value_slot_divergence(content, quote), (content, quote)
+    # ⛔ THE TOLERANCE IS SCOPED TO `None`, and the scope is load-bearing: a side
+    # stating an UNKNOWN SPELLING (`millis`) is NOT rescued this way — that
+    # refusal is `_magnitude_agrees`' `_K_ABBREVIATES` gate, a recorded decision
+    # (#10513 review P1) and #10876's open root, so this fix must not reach it.
+    assert not v2._composed_identities_agree(("", "20", "kmiles"),
+                                            ("", "20000", "millis"))
+    assert v2._value_slot_divergence("the batch took 5k millis",
+                                     "the batch took 5000 ms")
+
+
 #: The patterns that assert the ADJACENCY gap is OPEN again — the thing
 #: `test_the_registry_row_names_the_residual_that_still_stands` must red on.
 #: Deliberately narrow: each one names a REOPENING, so a truthful rewording of
