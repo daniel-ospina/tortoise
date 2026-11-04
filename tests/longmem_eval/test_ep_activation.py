@@ -157,14 +157,14 @@ class _FakeGraph:
             # ``OperatorPromoted`` — ``cas_lost`` is how a test says so.
             oid = params.get("oid")
             return _Result([] if oid in self.cas_lost else [[oid]])
-        if "RETURN x.id, x.status, type(r)" in c:
+        if "RETURN x.id, x.status, type(r), labels(x)" in c:
             # #10137: the R16 endpoint read — the ENGINE's read (unlabeled, all
             # outgoing edges), returning ``(id, status, rel_type)``. The DEFAULT
             # map (``op_endpoints`` built in ``__init__``) is all-live IMPL,
             # modelling the ordinary graph; a test that needs the gate to block
             # passes ``op_endpoints=`` explicitly. There is no other hook.
             oid = params.get("oid")
-            return _Result([[eid, st, rel]
+            return _Result([[eid, st, rel, ["Point"]]
                             for eid, st, rel in self.op_endpoints.get(oid, [])])
         if "RETURN DISTINCT o.id" in c:
             # #10137: the ONE draft-operator query — the graph-wide sweep, which

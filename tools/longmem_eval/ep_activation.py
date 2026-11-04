@@ -229,13 +229,18 @@ _FACTOR_EDGE_TYPES = frozenset({"IMPL", "NAND"})
 #: returned True and flipped it. A harness that gates more loosely than the
 #: engine publishes promotions production cannot produce.
 #:
-#: ``type(r)`` is returned for ONE purpose — ``on_input`` marks only
-#: ``_FACTOR_EDGE_TYPES`` endpoints, because a ``hasPart`` / ``mitigated_by``
-#: endpoint GATES like any other but is not something EP propagates through.
+#: ``type(r)`` and ``labels(x)`` are returned for ONE purpose — ``on_input``
+#: marks only ``_FACTOR_EDGE_TYPES`` endpoints that are ``:Point``s. Everything
+#: else GATES like any other endpoint but is not something to dirty-mark: EP does
+#: not propagate through ``hasPart`` / ``mitigated_by``, and ``_mark_dirty``
+#: stamps ``MATCH (n:Point {id: pid})`` only (``sdk.py:30730``), so a
+#: ``:Subject`` / ``:Object`` / ``:Event`` id handed to it is never stamped and
+#: is instead filed in ``_dirty_roots`` as an unmatched root — MEASURED: an
+#: ``:Event`` endpoint id lands in ``_dirty_roots`` with no ``ep_dirty`` stamp.
 _SELECT_OPERATOR_ENDPOINTS = (
     "MATCH (o:Point {id:$oid})-[r]->(x) "
     "WHERE " + epistemic_disjunction("x") + " "
-    "RETURN x.id, x.status, type(r)"
+    "RETURN x.id, x.status, type(r), labels(x)"
 )
 
 # ── EP-state census (non-operator claims only) ────────────────────────────
@@ -675,7 +680,9 @@ def _promote_operator_row(sdk, g, oid, promoted_ops, on_input) -> bool:
     ``OperatorPromoted``, then ``ep.py`` strips the terminal input, the factor
     DEGENERATES, and the manifest publishes ``operators_promoted: 1,
     factors: 0`` — the "promoted but no factor" reading this change exists to
-    make impossible. Re-spelling a liveness
+    prevent on the TERMINAL-INPUT arm, which is NOT a claim that the pair is a
+    defect signal in general (see ``activate_beliefs``: a correct part/whole
+    promotion publishes it too). Re-spelling a liveness
     predicate is what ``tortoise/live.py`` forbids; reading the endpoints and
     comparing in Python mirrors the SDK's SHAPE instead (read → compare → CAS
     SET), one round trip per candidate.
@@ -704,18 +711,20 @@ def _promote_operator_row(sdk, g, oid, promoted_ops, on_input) -> bool:
                         params={"oid": oid}).result_set
     if not endpoints:
         return False  # no endpoints — nothing to gate on (the SDK skips too)
-    if not all((st or "live") == "live" for _, st, _rel in endpoints):
+    if not all((st or "live") == "live" for _, st, _rel, _labs in endpoints):
         return False  # keep draft until every endpoint is live (R16)
     flipped = g.query(_PROMOTE_OPERATOR, params={"oid": oid}).result_set
     if not flipped:
         return False  # lost a race — a concurrent writer already flipped it
     promoted_ops.add(oid)
     sdk._emit_event("OperatorPromoted", id=oid, point=sdk.get_point(oid))
-    for eid, _st, rel in endpoints:
-        # Only IMPL/NAND endpoints are factor inputs; a hasPart / mitigated_by
-        # endpoint gated the promotion but is not something EP propagates
-        # through, so marking it dirty would be a no-op churn.
-        if eid and rel in _FACTOR_EDGE_TYPES:
+    for eid, _st, rel, labs in endpoints:
+        # Only IMPL/NAND :Point endpoints are factor inputs to dirty-mark. A
+        # hasPart / mitigated_by endpoint gated the promotion but is not
+        # something EP propagates through, and a non-:Point endpoint cannot be
+        # stamped at all (``_mark_dirty`` matches ``:Point`` only) — handing its
+        # id over would file it in ``_dirty_roots`` as an unmatched root.
+        if eid and rel in _FACTOR_EDGE_TYPES and "Point" in (labs or ()):
             on_input(eid)
     return True
 
@@ -916,8 +925,9 @@ def activate_beliefs(sdk, *, namespace: str | None = None,
     # ``hasPart``
     # by design (``_FACTOR_EDGE_TYPES``). Measured: a ``composedOf`` operator
     # over two live claims publishes exactly ``operators_promoted=1, factors=0,
-    # no_op_reason='no_ep_factors'`` while being a correct, engine-identical
-    # promotion. ``operators_promoted`` counts engine-promotable operators, not
+    # no_op_reason='no_ep_factors'`` while being a correct promotion the
+    # ENGINE's gate would also admit — though the engine has no graph-wide
+    # sweep, so on already-live claims this sweep is the only route that exists. ``operators_promoted`` counts engine-promotable operators, not
     # factors; read it with ``no_op_reason`` and the factor count, never alone.
     # (Narrowing the read to make that pair unreachable was tried and is wrong —
     # it re-opens the retracted-mitigation divergence pinned by

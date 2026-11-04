@@ -298,7 +298,10 @@ def test_the_gate_refuses_a_terminal_endpoint(sdk):
     admits a RETRACTED endpoint, goes live over it, journals an
     ``OperatorPromoted``, and then ``ep.py`` strips the terminal input so the
     manifest publishes ``operators_promoted: 1, factors: 0`` — the exact
-    "promoted but no factor" reading this change exists to make impossible.
+    "promoted but no factor" reading this change exists to make impossible FOR A
+    TERMINAL INPUT. The pair alone is not a defect signal: a correct part/whole
+    promotion publishes it too (EP builds no factor from ``hasPart``), so read it
+    with ``no_op_reason`` and the factor count, never alone.
     Reachable on the population this change targets: a resumed ingest writing an
     operator over a claim a human has since retracted.
     """
@@ -437,3 +440,49 @@ def test_the_gate_reads_every_operator_edge_not_just_impl(sdk):
     )
     assert _operator_status(sdk, oid) == "draft"
     assert marked == []
+
+
+def test_on_input_marks_only_factor_point_endpoints(sdk):
+    """``on_input`` reports IMPL/NAND ``:Point`` endpoints and nothing else.
+
+    Two exclusions, both measured, both load-bearing:
+
+    * a ``hasPart`` / ``mitigated_by`` endpoint GATES the promotion but is not
+      something EP propagates through (`ep.py` has no arm for either edge), so
+      dirty-marking it is churn;
+    * a non-``:Point`` endpoint (``:Subject`` / ``:Object`` / ``:Event``) cannot
+      be stamped at all — ``_mark_dirty`` persists ``MATCH (n:Point {id: pid})``
+      only — so handing its id over files it in ``_dirty_roots`` as an unmatched
+      root with no ``ep_dirty`` stamp. The label-wide endpoint read (#7853)
+      makes such endpoints reachable, so the filter is what keeps 1c honest.
+    """
+    premise = _claim(sdk, "premise", "live")
+    conclusion = _claim(sdk, "conclusion", "live")
+    oid = sdk.create_operator(
+        "IMPL", premise, [conclusion],
+        direction="unidirectional", promote_source=False,
+    )["id"]
+    g = sdk._get_proj().g
+    # A live :Event endpoint on the same operator — admitted by the engine's
+    # label-wide read, never stampable as dirty.
+    g.query(
+        "MATCH (o:Point {id:$o}) CREATE (o)-[:IMPL {idx:2}]->"
+        "(:Event {id:'evt-10137', status:'live'})", params={"o": oid},
+    )
+    # ...and a mitigation, so a non-factor EDGE TYPE is present too.
+    result = sdk.mitigate_operator(oid, "a caveat")
+    mid = result.get("point_id") or result.get("id")
+
+    marked: list[str] = []
+    promoted = epa._promote_operator_row(sdk, g, oid, set(), marked.append)
+
+    assert promoted is True, (
+        "the gate refused an operator whose endpoints are all live — the :Event "
+        "endpoint is admitted by the engine's label-wide read (#7853)"
+    )
+    assert sorted(marked) == sorted([premise, conclusion]), (
+        f"on_input reported {marked!r}; expected exactly the two IMPL :Point "
+        f"endpoints — a mitigation id ({mid}) is not a factor input and the "
+        ":Event id cannot be stamped by `_mark_dirty` (it would land in "
+        "`_dirty_roots` as an unmatched root)"
+    )

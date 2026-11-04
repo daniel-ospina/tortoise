@@ -167,8 +167,9 @@ Measured 2026-10-31 on `main@eac49c0dd9aababd01016325a34a327481dd006c`.
 > a part/whole (`composedOf`/`decomposesInto`/…) operator has `:Point` endpoints
 > reachable through NO such edge, its edges being `hasPart` (`sdk.py:22396`),
 > so the old query could not reach it in any pass, and the new sweep promotes it
-> (as the engine does). The same goes for an operator whose endpoint is a
-> `:Subject`/`:Object`/`:Event` rather than a `:Point`: the deleted pattern
+> (the engine's GATE would admit it too, but the engine has no graph-wide sweep,
+> so here the sweep is the only route). The same goes for an operator whose
+> endpoint is a `:Subject`/`:Object`/`:Event` rather than a `:Point`: the deleted pattern
 > required `(c:Point)` and the new read is label-wide (#7853), so that shape is
 > newly reachable too — though there the sweep can be the ONLY promotion route,
 > since `promote_point` cannot promote a non-`:Point` at all. `ingest_v2` mints
