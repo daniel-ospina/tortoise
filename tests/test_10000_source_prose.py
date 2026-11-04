@@ -368,6 +368,58 @@ def test_an_acknowledgement_only_session_still_derives_and_is_findable(sdk):
     assert "session:sess-ack-only" not in framing_hits, (topics, framing_hits)
 
 
+def test_a_short_word_only_session_still_derives_and_is_findable(sdk):
+    """The emptiness test is about TOKENS PRESENT, not about word LENGTH.
+
+    ⛔ MEASURED PRE-FIX (`7ca6221b4`): the token regex carried a ``{2,}`` floor
+    (``[A-Za-z][A-Za-z0-9_-]{2,}``), so the only token ``"User: ok go"`` yielded
+    was the framing label ``user`` — the framing filter emptied the list, the
+    ``("", [])`` early return fired, and the session's ``:Source`` was written
+    with ``summary=''`` and **no ``_searchText`` at all** (``coalesce`` has
+    nothing to coalesce). `origin/main` stored ``summary = "User: ok go"`` for
+    the same input, so the branch introduced a #3518 unfindability regression
+    on every transcript whose words are all <=2 characters — the exact defect
+    the function's own docstring says it exists to prevent.
+
+    ⛔ AND THIS IS THE CLIFF THE OLD FIXTURE STEPPED OVER: the
+    acknowledgement-only arm above uses ``"user: ok\nassistant: yes"``, where
+    the 3-char ``yes`` alone produced a lexicon (and it is also a stopword, so
+    that test was exercising the FALLBACK arm only by the accident of word
+    length). This arm removes the 3-char word entirely, so it cannot pass by
+    that accident.
+    """
+    from tortoise.sdk import _session_source_metadata
+
+    summary, topics = _session_source_metadata("user: ok go")
+    assert topics, (
+        "a non-empty transcript made of words derived an EMPTY lexicon — the "
+        "token pattern's length floor is doubling as the emptiness test")
+    assert summary, summary
+    assert "go" in topics, topics
+    assert not ({"user", "assistant", "speaker"} & set(topics)), (
+        f"the fallback re-admitted the framing labels: {topics!r}")
+
+    # …and it reaches the INDEX, which is the part #3518 is about: pre-fix this
+    # session had no `_searchText`, so `coalesce` had nothing to keep.
+    sdk._materialize_session_source(
+        "sess-short-words", None, "2026-09-01T10:00:00+00:00",
+        [{"role": "user", "content": "ok go"}])
+    rows = _source_rows(sdk)
+    assert rows["session:sess-short-words"][0].startswith(DISPLAY_PREFIX), rows
+    assert rows["session:sess-short-words"][1], (
+        "the short-word-only session got no `_searchText`, so it is "
+        f"unfindable through the Source FTS leg: {rows}")
+    found = [r["id"] for r in sdk.tortoise_fts_query(
+        "go", entity_type="source")]
+    assert "session:sess-short-words" in found, (topics, found)
+
+    # NEGATIVE CONTROL: the widening must not reach the genuinely-empty class.
+    # A transcript with no word tokens at all still derives nothing, so the fix
+    # did not turn "no words" into "some descriptor".
+    for empty in ("", "   ", "...", "?!", "user:\nassistant:"):
+        assert _session_source_metadata(empty) == ("", []), empty
+
+
 def test_the_lexicon_does_not_depend_on_the_transcript_word_order():
     """The descriptor is a function of the word MULTISET, not of turn order.
 

@@ -4158,10 +4158,14 @@ def _session_source_metadata(transcript: str) -> tuple[str, list[str]]:
     and the reason this function must return SOMETHING for a non-empty
     transcript. ``("", [])`` only for a transcript with no word tokens at all
     (empty, blank, punctuation-only, or nothing but the ``Speaker:`` framing
-    labels).
+    labels) — NOT for one whose words are merely SHORT: the ``Speaker:`` filter
+    runs over a floorless token pattern, and the 3-character floor is a
+    content-word RANKING precision preference applied only to the frequency
+    arm (``words``/``counts`` below), never to the emptiness test.
 
-    ⛔ A STOPWORD-ONLY transcript ("ok" / "yes") takes the UNFILTERED content
-    list rather than returning nothing. Returning nothing blanked an
+    ⛔ A STOPWORD-ONLY transcript ("ok" / "yes") — and equally a
+    SHORT-WORD-ONLY one ("go" / "ok") — takes the UNFILTERED word list rather
+    than returning nothing. Returning nothing blanked an
     acknowledgement-only session's ``summary``, gave it no ``_searchText`` and
     left it unfindable — reintroducing the very #3518 regression the lexicon
     exists to prevent, as a side effect of a filter that is a precision
@@ -4195,15 +4199,29 @@ def _session_source_metadata(transcript: str) -> tuple[str, list[str]]:
     if not transcript.strip():
         return "", []
     from collections import Counter
-    words = [w for w in re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}",
+    # ⛔ The TOKEN pattern has NO length floor, and the "is there anything here"
+    # test is about tokens actually present. A ``{2,}`` floor here conflated
+    # "no lexicon" with "no word of >=3 letters": a non-empty transcript whose
+    # every word is short (``"User: ok go"``) matched only the framing label
+    # ``user``, fell to the ``("", [])`` early return, and wrote the session's
+    # ``:Source`` with a blank ``summary`` and NO ``_searchText`` at all — the
+    # #3518 unfindability this function exists to prevent, reintroduced as a
+    # side effect of a RANKING precision preference (``len >= 3``) that belongs
+    # on the content-word arm below, not on the emptiness test. The suite did not
+    # catch it because its own acknowledgement fixture sat one character above
+    # the cliff (``"user: ok\nassistant: yes"`` — only the 3-char ``yes``
+    # produced a lexicon, and it is also a stopword, so the fallback arm was
+    # exercised only by the accident of word length).
+    words = [w for w in re.findall(r"[A-Za-z][A-Za-z0-9_-]*",
                                    transcript.lower())
              if w not in _SESSION_SOURCE_FRAMING_TOKENS]
     if not words:  # no word tokens at all (empty/blank/punctuation-only,
         return "", []  # or nothing but the transcript's own Speaker: labels)
-    counts = Counter(w for w in words if w not in _SESSION_SOURCE_STOPWORDS)
+    counts = Counter(w for w in words
+                     if w not in _SESSION_SOURCE_STOPWORDS and len(w) >= 3)
     topics = _session_source_lexicon(counts)
-    if not topics:  # stopword-only: fall back to the transcript's own vocabulary
-        topics = _session_source_lexicon(Counter(words))
+    if not topics:  # stopword-only (or short-word-only): fall back to the
+        topics = _session_source_lexicon(Counter(words))  # transcript's own words
     return _SESSION_SOURCE_SUMMARY_PREFIX + ", ".join(topics), topics
 
 
