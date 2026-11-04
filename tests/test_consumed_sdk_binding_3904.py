@@ -322,27 +322,17 @@ _HANDLER_SERVED_NO_SDK_READ: dict[str, str] = {
         "hosted control-plane (#2302): returns the requires-hosted-mode error when "
         "there is no org, before reading the SDK."
     ),
-    "tortoise_onboarding_demo_create": (
-        "hosted-only (org context required): returns the no-team-context error on stdio."
-    ),
-    "tortoise_onboarding_state": (
-        "hosted-only (org context required): returns the no-team-context error on stdio."
-    ),
-    "tortoise_onboarding_seed": (
-        "hosted-only (org context required): returns the no-team-context error on stdio."
-    ),
     # #3540: the two per-source switches were RETIRED into the consolidated
     # operation below. The ledger follows the LIVE name — leaving the retired
     # names here is what the import-time orphan gate exists to catch.
     "tortoise_manage_sources": (
         "hosted-only (org context required): returns the no-team-context error on stdio."
     ),
-    "tortoise_onboarding_github_connect": (
-        "hosted-only (org context required): returns the no-team-context error on stdio."
-    ),
-    "tortoise_onboarding_github_status": (
-        "hosted-only (org context required): returns the no-team-context error on stdio."
-    ),
+    # #4282 Phase 3.2 removed the five remaining `run_onboarding` entries from this
+    # ledger together with the tools they described (`demo_create`, `state`,
+    # `seed`, `github_connect`, `github_status`). The import-time orphan gate below
+    # is what forced that edit — a ledger row for a tool that is no longer
+    # registered is a stale claim, not documentation.
 }
 
 # Targeted vectors for the three handlers whose declared read sits behind an

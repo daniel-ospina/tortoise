@@ -1168,20 +1168,20 @@ class TestStdioEntrypointToolRegistration:
             # and the retired name still answers, with a warning, off the list.
             assert "tortoise_overview" in names
             assert "tortoise_health" not in names
-            onboarding = {
-                "tortoise_onboarding_demo_create",
-                "tortoise_onboarding_state",
-                "tortoise_onboarding_github_connect",
-                "tortoise_onboarding_github_status",
-                "tortoise_onboarding_seed",  # #1999 (W3)
-            }
             # #3540: the two retired switches are no longer advertised; the
             # consolidated replacement is steady-state and stays listed.
             assert "tortoise_manage_sources" in names
             assert "tortoise_onboarding_session_recording" not in names
             assert "tortoise_onboarding_github_index" not in names
-            missing = onboarding - set(names)
-            assert not missing, f"missing onboarding tools: {sorted(missing)}"
+            # #4282 Phase 3.2: the five dropped `run_onboarding` members are no
+            # longer advertised either (owner ruling 2026-09-22). Their REST
+            # routes survive, so this asserts the MCP surface only.
+            for gone in ("tortoise_onboarding_demo_create",
+                         "tortoise_onboarding_state",
+                         "tortoise_onboarding_github_connect",
+                         "tortoise_onboarding_github_status",
+                         "tortoise_onboarding_seed"):
+                assert gone not in names, gone
         finally:
             proc.terminate()
             try:

@@ -960,6 +960,8 @@ def test_every_workspace_level_tool_is_excluded_by_derivation():
     import re
     from pathlib import Path
 
+    from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
+
     source = Path(mcp_server.__file__).read_text()
     callers = set()
     current = None
@@ -970,7 +972,16 @@ def test_every_workspace_level_tool_is_excluded_by_derivation():
         if "_reject_graph_bound_mcp_org_surface(" in line and current:
             callers.add(current)
     assert callers, "the derivation found no callers — it cannot fail, so it proves nothing"
-    missing = sorted(callers - mcp_auth.GRAPH_ARGUMENT_EXCLUDED)
+    # Restrict to tools that still RESOLVE (#4282 Phase 3.2): the property is "a
+    # served workspace-level tool must not advertise `graph`", and a handler that
+    # is no longer registered (the five dropped `run_onboarding` tools) advertises
+    # nothing. Their function bodies stay in `mcp_server.py` because the self-host
+    # REST suite drives them directly; keeping them in the derivation would red
+    # this arm on tools nobody can call, which is a false positive, not a trap.
+    resolvable = {t.name for t in TOOL_REGISTRY} | {
+        t.name for t in RETIRED_TOOL_REGISTRY
+    }
+    missing = sorted((callers & resolvable) - mcp_auth.GRAPH_ARGUMENT_EXCLUDED)
     assert not missing, (
         "these tools refuse a selected graph but advertise the `graph` "
         f"argument: {missing}")

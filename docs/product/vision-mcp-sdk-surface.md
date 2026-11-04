@@ -75,15 +75,26 @@ the map and the registry disagree — a mismatch is a finding, not something to 
 
 | | |
 |---|---|
-| Registry tools | **99** |
+| Registry tools | **94** |
 | Absorbed into the 27 MCP targets | **87** |
 | Absorbed into a builder-only SDK method (not on the MCP) | **1** |
 | Tenancy (SDK/REST only) | **2** |
-| Retired | **9** |
+| Retired | **4** |
 | MCP target tools | **27** |
 
-**The four bucket rows sum to 99.** (The last row is the target *surface*, not a bucket —
+**The four bucket rows sum to 94.** (The last row is the target *surface*, not a bucket —
 27 targets received those 87 absorbed tools many-to-one, so it is not part of the sum.)
+
+The **Retired** row fell **9 → 4** in #4282 **Phase 3.2** (2026-11-04): five of the nine were
+DELETED from the served registry rather than retired into nothing, because the owner's
+2026-09-22 ruling drops the whole `run_onboarding` container (`tortoise_onboarding_state`,
+`tortoise_onboarding_seed`, `tortoise_onboarding_demo_create`,
+`tortoise_onboarding_github_connect`, `tortoise_onboarding_github_status`). The registry fell
+**99 → 94** with them (81 live + 18 retired shims → **76 live + 18 retired shims**), the first
+movement of the advertised surface since #3540. Every capability those five carried survives
+on REST — each route is hand-written in `tortoise/hosted_api.py` — and the two tenant-visible
+reads are rehomed to the tenancy block. Their recorded reasons live in
+`tools/bridge_table.py::REMOVED_IN_PHASE_3_2`.
 
 The three journal names (`checkpoint`, `diary_write`, `diary_read`) moved from the *Retired*
 bucket to the *Absorbed* bucket on the owner's 2026-10-09 ruling: the two owner-approved docs

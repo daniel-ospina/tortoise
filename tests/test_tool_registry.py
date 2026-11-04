@@ -83,7 +83,7 @@ class TestRegistryEquivalence:
         census is bumped per add — and, here, per approved CONSOLIDATION.
         """
         from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
-        assert len(TOOL_REGISTRY) == 81, f"Expected 81, got {len(TOOL_REGISTRY)}"
+        assert len(TOOL_REGISTRY) == 76, f"Expected 76, got {len(TOOL_REGISTRY)}"
         names = {t.name for t in TOOL_REGISTRY}
         # The 16 #3863 retirements plus the 2 per-source switches #3540 ruling B
         # consolidated are NOT live, and each one is declared retired (#3883).
@@ -93,14 +93,22 @@ class TestRegistryEquivalence:
         assert "tortoise_validate_domain" in names, "Missing #405 validate_domain tool"
         assert "tortoise_packs_list" in names, "Missing #318 packs_list tool"
         assert "tortoise_graph_set_recording" in names, "Missing #2302 graph_set_recording tool"
-        onboarding = {"tortoise_onboarding_demo_create", "tortoise_onboarding_state",
+        onboarding = {
                       # #3540 ruling B: ONE consolidated operation carries the
                       # sources; the two per-source switches retired into it.
+                      # #4282 Phase 3.2: it is now the ONLY live onboarding-group
+                      # tool — the five dropped `run_onboarding` members moved off
+                      # the MCP (owner ruling 2026-09-22) and their REST routes
+                      # survive in `tortoise/hosted_api.py`.
                       "tortoise_manage_sources",
-                      "tortoise_onboarding_github_connect",
-                      "tortoise_onboarding_github_status",
-                      "tortoise_onboarding_seed"}
+                      }
         assert onboarding <= names, f"Missing onboarding tools: {onboarding - names}"
+        for gone in ("tortoise_onboarding_demo_create", "tortoise_onboarding_state",
+                     "tortoise_onboarding_seed", "tortoise_onboarding_github_connect",
+                     "tortoise_onboarding_github_status"):
+            assert gone not in names, (
+                f"{gone} is back on the served surface — #4282 Phase 3.2 removed it and "
+                "the owner's 2026-09-22 ruling keeps `run_onboarding` off the MCP")
         assert "tortoise_file_human_approval" in names, "Missing #531 human-approval tool"
         assert "tortoise_review_connections" in names, "Missing #913 review_connections tool"
         assert "tortoise_events_poll" in names, "Missing #432 poll_events tool"
@@ -240,22 +248,24 @@ class TestCurationGroups:
 # per-source tool reappearing here is a regression, not an improvement.
 _INTEGRATIONS: dict[str, dict] = {
     "github-issues": {
-        # `github_connect` is the OAuth handshake, deliberately NOT folded into
-        # the consolidated operation (credentials never pass through the model).
-        "enable": ("tortoise_manage_sources",
-                   "tortoise_onboarding_github_connect"),
-        "state_read": ("tortoise_onboarding_github_status",
-                       "tortoise_onboarding_state"),
+        # `github_connect` (the OAuth handshake) was NEVER folded into the
+        # consolidated operation — credentials never pass through the model — and
+        # #4282 Phase 3.2 removed it from the MCP surface entirely. Its only door
+        # is now `POST /v1/onboarding/github/connect`, so the integration is
+        # enabled and read through `tortoise_manage_sources` alone on the agent
+        # surface.
+        "enable": ("tortoise_manage_sources",),
+        "state_read": ("tortoise_manage_sources",),
         "blocked": None,
     },
     "agent-session-recording": {
         "enable": ("tortoise_manage_sources",),
-        "state_read": ("tortoise_onboarding_state",),
+        "state_read": ("tortoise_manage_sources",),
         "blocked": None,
     },
     "github-documents": {
         "enable": ("tortoise_manage_sources",),
-        "state_read": ("tortoise_manage_sources", "tortoise_onboarding_state"),
+        "state_read": ("tortoise_manage_sources",),
         "blocked": None,
     },
 }
@@ -380,9 +390,10 @@ class TestAgentAddressableIntegrations:
         for retired_switch in ("tortoise_onboarding_github_index",
                               "tortoise_onboarding_session_recording"):
             assert retired_switch not in advertised
-        # The OAuth handshake stays: it is not a switch, and folding it in would
-        # push credentials toward the model.
-        assert "tortoise_onboarding_github_connect" in advertised
+        # The OAuth handshake is NOT on the MCP: credentials never pass through
+        # the model, and #4282 Phase 3.2 removed the tool. Its only door is
+        # `POST /v1/onboarding/github/connect`.
+        assert "tortoise_onboarding_github_connect" not in advertised
 
     def test_the_new_tool_is_write_gated(self):
         """Ruling B's permission condition rests on the registry flag.
@@ -1977,9 +1988,13 @@ class TestToolIdentity:
         # LIVE writers move 45 → 44 and retired writer shims move 2 → 4; the
         # SERVED number (get_write_tool_names covers both, #3883) therefore
         # moves 47 → 48 while the ADVERTISED surface falls by one.
-        assert len(WRITE_TOOL_NAMES) == 48, f"write census moved: {len(WRITE_TOOL_NAMES)}"
+        # #4282 Phase 3.2 then removed THREE served writers (81 -> 76 live):
+        # `tortoise_onboarding_github_connect` (admin) plus
+        # `tortoise_onboarding_seed` / `tortoise_onboarding_demo_create` (write),
+        # so SERVED 48 -> 45 and LIVE 44 -> 41.
+        assert len(WRITE_TOOL_NAMES) == 45, f"write census moved: {len(WRITE_TOOL_NAMES)}"
         live = frozenset(t.name for t in TOOL_REGISTRY if t.writes)
-        assert len(live) == 44, f"live write census moved: {len(live)}"
+        assert len(live) == 41, f"live write census moved: {len(live)}"
 
     def test_gate_refuses_read_scope_for_every_writer_annotated_entry(self):
         """#4474: a `graphs:read`-only key is REFUSED for EVERY entry that writes.
@@ -2007,9 +2022,9 @@ class TestToolIdentity:
 
         served = [*TOOL_REGISTRY, *RETIRED_TOOL_REGISTRY]
         writers = sorted(e.name for e in served if e.writes)
-        # 48 = the served writer census (44 live + 4 retired shims). Pinned
+        # 45 = the served writer census (41 live + 4 retired shims). Pinned
         # here so the derived loop below can never pass by covering nothing.
-        assert len(writers) == 48, writers
+        assert len(writers) == 45, writers
         for name in ("tortoise_backfill_v25", "tortoise_dream",
                      "tortoise_index_sessions", "tortoise_ingest_corpus",
                      "tortoise_org_create"):
