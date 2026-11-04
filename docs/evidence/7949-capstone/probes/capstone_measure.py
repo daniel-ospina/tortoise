@@ -991,17 +991,25 @@ def build_rows(*, head: str, out_path: str, log_corpus_sha: str,
             corpus_sha256=e4["corpus_sha256"],
             artifact_corpus_sha256=(e4["corpus_sha256"] if e4_off_this_corpus
                                     else None),
-            # #8503 is the mechanism for a red row: it names the OPEN blocker keeping
-            # E4 from closing. A GREEN row may not carry any blocker at all — the gate
-            # refuses "GREEN carries a blocker … green and blocked are mutually
-            # exclusive" (V5) — so an unconditional `"#8503"` here made the very
-            # success state this row exists to reach emit a table the gate calls
-            # dishonest. Same invariant as the note clause above, one field over.
-            blocked_by=("#8503" if e4["verdict"] != "GREEN" else None),
+            # #9596 owns the residual for a red row — NOT #8503, which CLOSED
+            # 2026-10-24 (its closure records the DISPROOF, so it is this row's
+            # measurement record and not a live blocker), and which `#10601`'s V12
+            # now REFUSES a row for naming: a blocker recorded CLOSED in
+            # `blocker-states.json` is a finding.
+            #
+            # ⛔ The literal is unconditional HERE because the GREEN invariant is
+            # enforced one layer down, in `row()`: "GREEN carries a blocker … green and
+            # blocked are mutually exclusive" (V5) is resolved once for all five rows,
+            # before the dict is built. Emitting the conditional here as well was a
+            # narrower duplicate of that rule, and it made the cell unreadable to
+            # `test_the_shipped_logs_blocker_cells_are_the_emitters_own`, which reads
+            # the five `blocked_by="#NNNN"` literals in ROW ORDER to hold the shipped
+            # log's cells to what this probe emits.
+            blocked_by="#9596",
             note=e4["note"]),
         row("E5", verdict=e5["verdict"], evidence=E5_RESCORE, sha=head,
             numerator=e5["numerator"], denominator=e5["denominator"],
-            corpus_sha256=log_corpus_sha, blocked_by="#9738", note=e5["note"]),
+            corpus_sha256=log_corpus_sha, blocked_by="#5087", note=e5["note"]),
     ]
 
 
@@ -2487,15 +2495,24 @@ def build_e4_row(receipt: dict, *, bars: dict, corpus_sha: str) -> dict:
     # the wiring clause would be refuted there too. The `#9596` half is a fact about
     # the RECEIPT (its retrievability is unreported whatever the edge count) and
     # stays unconditional; only the `#8503` half is a claim about this number.
+    # ⛔ `#8503` is named as the MEASUREMENT RECORD, never as a live blocker: it
+    # CLOSED 2026-10-24 and that closure records E4's DISPROOF. The residual is
+    # `#9596`, and `#10601`'s V12 refuses a row whose `blocked_by` has closed — so a
+    # row that still said "#8503 is what blocks this" would be refused by the gate
+    # for naming work that is finished.
     if result["outcome"] == "PASS":
         edge_clause = ("the planted-edge bar IS met by this receipt, so #8503's fix "
                        "holds here")
     elif receipt["edge_correct"] < receipt["planted"]:
-        edge_clause = "the planted edges are still not all formed (#8503)"
+        edge_clause = ("the planted edges are still not all formed (#8503 — CLOSED "
+                       "2026-10-24; that closure records the DISPROOF, so it is this "
+                       "row's measurement record and not a live blocker, and the "
+                       "residual is owned by #9596)")
     else:
         edge_clause = (f"the planted-edge COUNT, not the wiring, is the shortfall — "
                        f"this receipt plants {receipt['planted']} where the record "
-                       f"freezes {bars['E4']['of']} (#8503)")
+                       f"freezes {bars['E4']['of']} (#8503 — CLOSED 2026-10-24, its "
+                       f"disproof; the residual is owned by #9596)")
     return {
         "verdict": verdict_word(result),
         "numerator": receipt["edge_correct"],
@@ -3138,7 +3155,13 @@ def main(argv: list[str] | None = None) -> int:
                  f"delta cannot be certified. #9738 also records that §10's prior "
                  f"measurement was visible when the record claimed it was not, and "
                  f"that the 25-bound vs 29-marker populations must be reconciled "
-                 f"before either number is called final"),
+                 f"before either number is called final. The row's blocker moved "
+                 f"on 2026-11-02 from #9738 to #5087: #9738 CLOSED that morning "
+                 f"because its own record correction landed (PR #10525), which is "
+                 f"not a measurement of this number — raw recovery "
+                 f"{e5_result['raw_recovery']:.4f} against the 0.80 floor is S3 "
+                 f"selection recovery, owned by the S0→S6 selective write path "
+                 f"(#5087)"),
     }
 
     rows = build_rows(head=head, out_path=out_path, log_corpus_sha=corpus_sha,
