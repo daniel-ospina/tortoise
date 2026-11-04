@@ -3635,17 +3635,20 @@ def duplicate_mapping_key_issues(manifest_path: Path | None = None) -> list[str]
     so the post-landing sweep rewrites a weight the shard packer never reads.
 
     It is not hypothetical: ``config/ci-surfaces.yml`` is ``merge=union``
-    (``.gitattributes``), so ANY replay of a hunk onto a ``durations:`` block
-    emits the row twice — a merge, a rebase, or a re-applied commit. This one
-    batch PR (#10726) has produced it repeatedly — 62 keys, then 13, then 1,
-    then 2 (each recorded in its fold ledger), and 6 measured on
-    ``13a53ef7e``'s own tree. ``--integrity`` — the check that PR body cited as
-    proof of "0 duplicates" — did not compose this walk at the time
-    (``02133e21b`` has no ``duplicate_mapping_key_issues`` in
-    ``tools/ci_selection.py``, though ``tools/registry_integrity.py::check_registry``
-    already walked for duplicate keys), so the required ``manifest-integrity``
-    leg was the only instrument that could see them. That is why the walk is now
-    COMPOSED INTO ``--integrity`` (``dd4f66e6a``).
+    (``.gitattributes``), so a replay in which BOTH sides changed the SAME
+    ``durations:`` row keeps both copies — a merge, a rebase, or a re-applied
+    commit; a replay only one side touched emits the row once. This one batch PR
+    (#10726) has produced it repeatedly — 62 keys, then 13, then 1, then 2 (each
+    recorded in its fold ledger), and 6 measured on ``13a53ef7e``'s own tree.
+    ``--integrity`` — the check that PR body cited as proof of "0 duplicates" —
+    did not compose this walk until ``dd4f66e6a`` (``02133e21b`` has no
+    ``duplicate_mapping_key_issues`` in ``tools/ci_selection.py``, though
+    ``tools/registry_integrity.py::check_registry`` already walked for duplicate
+    keys, and
+    ``tests/test_registry_integrity.py::test_the_real_registries_are_clean``
+    — registered in BOTH the ``api`` and ``core`` surfaces — already asserted
+    ``check() == []``). That is why the walk is now COMPOSED INTO
+    ``--integrity`` (``dd4f66e6a``).
 
     ⛔ A GREEN RUN FROM BEFORE A REPLAY DOES NOT COVER THE REPLAY.
     ``13a53ef7e`` is AFTER ``dd4f66e6a`` and still carried 6, because the replay
