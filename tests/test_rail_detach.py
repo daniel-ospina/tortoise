@@ -402,14 +402,21 @@ def _path_without_gh(tmp_path: Path, *needed: str) -> str:
     earlier one is still referenced — so the `*needed` form went unreachable and
     any `_path_without_gh(tmp_path, "date")` call became a `TypeError`.
     `test_this_module_defines_no_helper_twice` and
-    `test_the_ghless_path_helper_stages_the_tools_it_is_asked_for` pin it.
+    `test_the_ghless_path_helper_stages_the_tools_it_is_asked_for` pin it, and
+    `test_the_ghless_path_helper_is_reusable_on_one_tmp_path` pins that a SECOND
+    call is additive rather than an `FileExistsError`.
     """
     bin_dir = tmp_path / "nogh-bin"
-    bin_dir.mkdir()
+    bin_dir.mkdir(exist_ok=True)
     for name in ("bash", "sleep", "date", "sh", "env", *needed):
         src = shutil.which(name)
         assert src, f"the fixture needs {name} on the host PATH"
-        (bin_dir / name).symlink_to(src)
+        dst = bin_dir / name
+        # BOTH halves of the reuse hazard: the directory (`exist_ok=True`) AND
+        # the staged symlinks. `is_symlink` rather than `exists` so this asks
+        # about OUR staging, not about the host binary the link resolves to.
+        if not dst.is_symlink():
+            dst.symlink_to(src)
     assert not (bin_dir / "gh").exists()
     return str(bin_dir)
 
@@ -513,6 +520,36 @@ def test_the_ghless_path_helper_stages_the_tools_it_is_asked_for(tmp_path):
     path = _path_without_gh(tmp_path, "cat")
     assert (Path(path) / "cat").exists(), "the requested tool was not staged"
     assert not (Path(path) / "gh").exists(), "the helper must never stage `gh`"
+
+
+def test_the_ghless_path_helper_is_reusable_on_one_tmp_path(tmp_path):
+    """A SECOND call must ADD tools, not raise `FileExistsError`.
+
+    `main`'s copy of this helper staged its base set with `mkdir(exist_ok=True)`;
+    this branch's copy used a bare `mkdir()`, and the merge kept the stricter form
+    with no reason stated (review, #10777). Nothing reddens today only because no
+    arm calls the helper twice on one `tmp_path` — so the next arm that needs two
+    different PATHs in one test would get a bare `FileExistsError` instead of a
+    staged PATH, and the failure would name the fixture, not the arm.
+
+    ⛔ THE HAZARD HAS TWO HALVES, and fixing only the first is why the arm below
+    was written: `mkdir(exist_ok=True)` alone still reds, because the second call
+    then dies on `dst.symlink_to(src)` for every base tool already staged. BOTH
+    are idempotent here.
+
+    Non-vacuity, measured on each half SEPARATELY (this arm, `-k
+    is_reusable_on_one_tmp_path`, one mutation at a time):
+
+      bare `mkdir()`                         -> 1 failed  (FileExistsError, :1313)
+      `mkdir(exist_ok=True)`, no `is_symlink` -> 1 failed  (FileExistsError, :1388)
+      both in place                           -> 1 passed
+    """
+    first = _path_without_gh(tmp_path)
+    second = _path_without_gh(tmp_path, "cat")
+    assert first == second, "the helper must reuse one staged directory"
+    assert (Path(second) / "cat").exists(), "the second call staged nothing new"
+    assert (Path(second) / "date").exists(), "the base set was lost on reuse"
+    assert not (Path(second) / "gh").exists(), "the helper must never stage `gh`"
 
 
 def test_this_module_defines_no_helper_twice():
