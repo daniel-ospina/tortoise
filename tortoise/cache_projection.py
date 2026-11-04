@@ -1321,9 +1321,10 @@ def _is_episodic_source_row(row: Mapping[str, Any]) -> bool:
     (:func:`is_episodic_source_node`), so the two agree only while the node still
     carries the property. Where it does not, the record side declines the pair
     while the reconciler still places it, so the pair is counted as a field
-    mismatch on top of the absent property itself — a visible RED (measured: 3
-    mismatches, `graph_only` empty) instead of the healthy 0 mismatches + 2
-    `graph_only` names, never a silent loss, and not reachable through today's
+    mismatch on top of whatever else that node is missing — a visible RED
+    (`field_mismatches` non-empty, `graph_only` empty) instead of the healthy
+    empty mismatches + 2 `graph_only` names, never a silent loss, and not
+    reachable through today's
     writers
     (the legacy population is *defined* by `sourceKind` on the node —
     `session_source_migration._LEGACY_CANDIDATES` — and a record-sourced rebuild
