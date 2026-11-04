@@ -810,15 +810,8 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # URI with `monkeypatch.delenv` before every test and its teardown restores
     # the ambient value — so the red was the mutation SHAPE, not an observed
     # lane flip. Do not cite it as a measured leak (review finding, baf951165).
-    # TWO patterns because the census matches a site by its FIRST source line: the
-    # one-line form puts the variable on the `setenv(` line, while the wrapped
-    # `monkeypatch.setenv(` + name-on-the-next-line form (the log-side pin in
-    # `test_the_db_uri_log_line_does_not_print_a_query_credential`) matches only
-    # the bare open-paren. Declaring just the first reds the census on the wrapped
-    # site — measured on the PR head, 11 mutation sites in this one module.
     "test_cli_config_show.py": [
-        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"',
-        r'monkeypatch\.setenv\(\s*$'],
+        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
 }
 
 # Carve-out TEST-MODULE stems (Task 5 wires these into TEST_NO_REDIRECT_STEMS;

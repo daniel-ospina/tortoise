@@ -1881,8 +1881,11 @@ def test_the_db_uri_log_line_does_not_print_a_query_credential(
     stay green and these log assertions go red.
     """
     _global(tmp_path)
-    monkeypatch.setenv(
-        "TORTOISE_DB_URI", "/tmp/x.db?password=topsecret&api_key=tt_leak")
+    # One line on purpose: the mutation census
+    # (`tests/test_uri_env_mutations_declared.py`) scans LINE-wise, so a call
+    # split across two lines cannot be matched by a declared site pattern.
+    monkeypatch.setenv("TORTOISE_DB_URI",
+                       "/tmp/x.db?password=topsecret&api_key=tt_leak")
     with caplog.at_level("WARNING"):
         assert _run(("config", "show", "--json")) == 0
     cap = capsys.readouterr()
