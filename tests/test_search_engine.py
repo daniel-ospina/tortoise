@@ -789,6 +789,20 @@ class TestR2OrUnionAndSearchKeys:
         patched unit test pins the exact index_missing promotion; this live
         variant pins the never-silent contract on the real backend."""
         proj.g.query("CALL db.idx.fulltext.drop('Point')")
+        # ⛔ THE DROP IS AWAITED, NOT ASSUMED (#10807). FalkorDB retires a dropped
+        # index field ASYNCHRONOUSLY: until the label's one index finishes rebuilding,
+        # `CALL db.indexes()` still carries the FULLTEXT kind and an FTS query still
+        # answers from the PRE-drop definition. Asserting `hits == []` in that window
+        # reds on a LANDED drop, and the trace it then reads is a clean zero-hit run
+        # rather than the never-silent contract this test pins (measured on a loaded
+        # runner: `test (b)` in this module, run 41868531069, 3 ms to converge idle).
+        # The wait is bounded and returns its last read, so a drop that genuinely
+        # cannot happen still reds here instead of waiting forever.
+        index_rows_after_settle(
+            proj,
+            until=lambda rows: all(
+                index_kind_absent(rows, "Point", field, "FULLTEXT")
+                for field in ("content", "search_keys")))
         trace: list[dict] = []
         hits = run_fts_query(proj.g, "gym", leg_trace=trace)
         assert hits == []

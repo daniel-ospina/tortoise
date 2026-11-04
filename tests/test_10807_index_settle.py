@@ -211,6 +211,41 @@ def test_index_kind_absent_reads_the_kinds_map_and_fails_closed():
         "FULLTEXT") is False
 
 
+def _settle_call_sites(paths) -> tuple[dict[str, list[int]], dict[str, list[int]]]:
+    """Every `index_rows_after_settle(...)` call under `paths`: sites, and the
+    ones missing their `until`.
+
+    ⛔ BOTH CALL FORMS, because a module-prefixed call is invisible to a bare
+    `ast.Name` scan (review of #10807). `index_rows_after_settle(proj)` and
+    `_index_settle.index_rows_after_settle(proj)` are the SAME call — the form
+    carries no meaning, only the arguments do — so a pin that reads one form stops
+    covering the site it documents the day somebody writes the other.
+    """
+    missing: dict[str, list[int]] = {}
+    call_sites: dict[str, list[int]] = {}
+    for path in sorted(Path(p) for p in paths):
+        source = path.read_bytes()
+        # Cheap pre-filter: parsing all ~1,200 test modules to find two call
+        # sites would cost the suite seconds for nothing.
+        if b"index_rows_after_settle" not in source:
+            continue
+        for node in ast.walk(ast.parse(source)):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            named = (
+                (isinstance(func, ast.Name) and func.id == "index_rows_after_settle")
+                or (isinstance(func, ast.Attribute)
+                    and func.attr == "index_rows_after_settle")
+            )
+            if not named:
+                continue
+            call_sites.setdefault(path.name, []).append(node.lineno)
+            if not any(kw.arg == "until" for kw in node.keywords):
+                missing.setdefault(path.name, []).append(node.lineno)
+    return call_sites, missing
+
+
 def test_every_consumer_passes_the_caller_precondition():
     """The module's contract, applied at BOTH call sites — not just one (#10807).
 
@@ -226,34 +261,47 @@ def test_every_consumer_passes_the_caller_precondition():
     lane (`test (b)`'s window measures 3 ms) and only reds under CI load — the
     same reason this whole file exists. This module is exempt: it drives the raw
     wait on purpose, including quiescence-only.
+
+    ⛔ THE FLOOR NAMES THE TWO MODULES, not a count (review of #10807):
+    `len(call_sites) >= 2` could be satisfied by two NEW call sites while the two
+    documented ones were renamed or dropped, so the pin could stay green over the
+    exact regression it exists to catch.
     """
-    missing: dict[str, list[int]] = {}
-    call_sites: dict[str, list[int]] = {}
-    for path in sorted(Path(__file__).resolve().parent.glob("test_*.py")):
-        if path.name == Path(__file__).name:
-            continue
-        source = path.read_bytes()
-        # Cheap pre-filter: parsing all ~1,200 test modules to find two call
-        # sites would cost the suite seconds for nothing.
-        if b"index_rows_after_settle" not in source:
-            continue
-        for node in ast.walk(ast.parse(source)):
-            if not isinstance(node, ast.Call):
-                continue
-            func = node.func
-            if not (isinstance(func, ast.Name)
-                    and func.id == "index_rows_after_settle"):
-                continue
-            call_sites.setdefault(path.name, []).append(node.lineno)
-            if not any(kw.arg == "until" for kw in node.keywords):
-                missing.setdefault(path.name, []).append(node.lineno)
-    assert len(call_sites) >= 2, (
-        "the scan must find the two call sites this module documents — fewer "
-        f"means the pin went vacuous (a rename?): {call_sites}")
+    here = Path(__file__).resolve()
+    call_sites, missing = _settle_call_sites(
+        p for p in here.parent.glob("test_*.py") if p.name != here.name)
+    required = {"test_9079_handle_write_authority.py", "test_search_engine.py"}
+    assert required <= set(call_sites), (
+        "the scan must find the call site in each module this file documents — a "
+        f"missing one means the pin went vacuous (a rename?): {sorted(call_sites)}")
     assert not missing, (
         "these `index_rows_after_settle` calls pass no `until`, so a stale "
         "pre-drop read (idle, no `UNDER CONSTRUCTION`) is returned on the first "
         f"read and the caller's guard can refuse a GOOD fixture: {missing}")
+
+
+def test_the_scan_sees_a_module_prefixed_call_and_its_missing_until(tmp_path):
+    """Both directions of the ATTR form, on a file whose lines are known exactly.
+
+    ⛔ Pre-fix the scan matched bare `ast.Name` only, so `_index_settle.
+    index_rows_after_settle(proj)` was invisible in BOTH directions: it never
+    reached `call_sites` (so the floor could be met by unrelated sites) and it
+    never reached `missing` (so a call that can return a pre-drop read passed the
+    pin). Reverting to the bare-name test makes this case report `{}` for both.
+    """
+    mod = tmp_path / "test_synthetic_consumer.py"
+    mod.write_text(
+        "import tests._index_settle as _index_settle\n"
+        "def test_a(proj):\n"
+        "    _index_settle.index_rows_after_settle(proj)\n"
+        "def test_b(proj):\n"
+        "    _index_settle.index_rows_after_settle(proj, until=lambda rows: True)\n"
+        "def test_c(proj):\n"
+        "    index_rows_after_settle(proj, until=lambda rows: True)\n",
+        encoding="utf-8")
+    call_sites, missing = _settle_call_sites([mod])
+    assert call_sites == {"test_synthetic_consumer.py": [3, 5, 7]}, call_sites
+    assert missing == {"test_synthetic_consumer.py": [3]}, missing
 
 
 def test_index_cells_flattens_every_row():
