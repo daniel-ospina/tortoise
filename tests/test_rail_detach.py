@@ -713,6 +713,15 @@ def test_a_gh_that_exits_zero_with_no_repo_is_not_an_install_problem(tmp_path, m
     assert out.returncode == 0, (out.returncode, getattr(out, "cause", ""))
     assert out.stdout == "", repr(out.stdout)
 
+    # ⛔ THE OTHER HALF OF THE SAME SEAM (review, `#10777`): `_resolve_repo` refuses
+    # by name here, but `_head_sha`'s bare `returncode == 0` guard let the same
+    # silent `gh` through as `""` — which `launch()` stamps as `HEAD=` (blank), a
+    # value indistinguishable from a field never written. Both call sites read the
+    # same surface, so both must answer a NAMED state. This assertion fails on
+    # `return ... if out.returncode == 0 else "unreadable"`.
+    assert rd._head_sha(tmp_path, "o/r", 5) == "unreadable", (
+        "an empty head must read as `unreadable`, not as an empty string")
+
     with pytest.raises(rd.Refused) as exc:
         rd._resolve_repo(tmp_path)
     msg = str(exc.value)
