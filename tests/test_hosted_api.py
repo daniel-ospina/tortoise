@@ -13333,11 +13333,25 @@ class TestOverLimitSurfacesOfferTheHumanPath:
                "tortoise/cohort_cost.py", "tortoise/supabase_control.py",
                "tortoise/sdk.py", "tortoise/__main__.py",
                # #9567: DECLARED on purpose, not forgotten. This module holds the
-               # only real 402 allowance ceiling (`allowance_gate.py:772`, the
-               # over-allowance `QuotaExceededError`, correctly wrapped in
-               # `with_limit_contact`) plus the fail-closed refusals around it.
-               # Leaving it out made the boundary implicit: a future edit that
-               # dropped the seam on the ceiling would have reddened nothing.
+               # only real 402 allowance ceiling (`enforce_allowances`' over-allowance
+               # `QuotaExceededError`, correctly wrapped in `with_limit_contact`)
+               # plus the fail-closed refusals around it. Leaving it out made the
+               # boundary implicit for the tree-wide derivation below.
+               #
+               # ⚠️ CORRECTION (#9567 review, P2) — what that does and does NOT buy.
+               # It does NOT mean "a future edit that drops the seam reds this
+               # gate": this file is SLOW and registered on `surfaces.api` only, and
+               # a slow file owns to its FIRST matching surface
+               # (`tools/ci_selection.py`, `slow_leg_by_surface`), so a diff limited
+               # to `tortoise/allowance_gate.py` matches no `SOURCE_PATTERNS` entry,
+               # falls through to `core`, and selects NEITHER this guard NOR this
+               # file — measured: `--changed-files tortoise/allowance_gate.py` ->
+               # surfaces ['core'], `test_hosted_api.py` absent from both
+               # `test_files` and `slow_selected`. The seam-drop obligation for that
+               # diff is enforced in `tests/test_allowance_gate.py`, which is FAST and
+               # dual-registered (`api`+`core`) so a core diff runs it. Registration
+               # IN THIS FILE still buys the tree-wide derivation over the module
+               # whenever a diff does run this file.
                "tortoise/allowance_gate.py")
     LIMIT_WORDS = ("limit", "quota", "upgrade", " cap ", "cap ", "plan ",
                    "tier", "maximum", " max ", "allowance", "ceiling",
@@ -13377,9 +13391,12 @@ class TestOverLimitSurfacesOfferTheHumanPath:
         #     on it — `graph_storage`'s HNSW under-report, `postgres_storage`'s
         #     DB-grain attribution) was configured anyway;
         #   - a configured allowance has NO reading from its meter.
-        # The CUSTOMER ceiling is `allowance_gate.py:772`'s QuotaExceededError,
-        # which carries the seam itself — and now that the module is in MODULES,
-        # dropping that seam reds this gate instead of passing silently.
+        # The CUSTOMER ceiling is `enforce_allowances`' over-allowance
+        # `QuotaExceededError` (construct, not a line number — #10723 F3: a
+        # citation here was a blank line by the next head), which carries the
+        # seam itself. That obligation is enforced where an `allowance_gate.py`-only
+        # diff actually runs it: `tests/test_allowance_gate.py::
+        # test_the_customer_ceiling_carries_the_contact_seam`.
         "the team allowances could not be resolved for",
         "unreadable for dimension",
         "has an allowance configured for team",

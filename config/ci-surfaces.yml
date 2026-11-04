@@ -1409,9 +1409,12 @@ surfaces:
   # `manifest-integrity` leg), `classify_test_file` returned None, and
   # `select(['tortoise/quota.py'])` -> surfaces ['api'] / `select([
   # 'tortoise/allowance_gate.py'])` -> ['core'], both with this file ABSENT —
-  # i.e. the 28 tests that ARE the evidence for D11/D12 ran on no leg on any
-  # diff, so the suite would have stayed green if the gate were deleted. That is
-  # the #10513 / #1349 silent-drop class. Keep BOTH arms.
+  # i.e. the tests in this file that ARE the evidence for D11/D12 ran on no leg
+  # on any diff, so the suite would have stayed green if the gate were deleted.
+  # That is the #10513 / #1349 silent-drop class. Keep BOTH arms.
+  # ⛔ No COUNT here, deliberately (#10513 review P3): a hand-written total
+  # re-stales against a growing file — an earlier revision said "the 28 tests"
+  # and the file already collects 51.
   - test_allowance_gate.py
   # #4010: the session-cap removal — drives the hosted capture path + the
   # registry resolver, so it belongs with the quota/api surface.

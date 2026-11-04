@@ -1006,3 +1006,122 @@ def test_the_resolver_fallback_does_not_read_the_resolver_a_SECOND_time(
     monkeypatch.setattr(quota, "resolve_org_limits", _resolver)
     assert mcp_server._enforce_quota("points") is None
     assert calls == [ORG], calls
+
+
+# ── #5425: the CUSTOMER ceiling must carry the human-contact seam ──────────
+#
+# ⛔ WHY THE GUARD IS *HERE* AND NOT ONLY IN ``tests/test_hosted_api.py``.
+# That file's ``TestOverLimitSurfacesOfferTheHumanPath`` derives the same
+# obligation across every refusal module — but it is a SLOW file registered on
+# ``surfaces.api`` only, and a slow file owns to its FIRST matching surface
+# (``tools/ci_selection.py``, ``slow_leg_by_surface``). A diff limited to
+# ``tortoise/allowance_gate.py`` matches no ``SOURCE_PATTERNS`` entry, falls
+# through to ``core``, and therefore selects NEITHER that test NOR its file.
+# Measured at the head that added the module to ``MODULES``:
+#
+#   $ python tools/ci_selection.py --changed-files tortoise/allowance_gate.py
+#   surfaces ['core'] · 'tests/test_hosted_api.py' in slow_selected -> False
+#
+# So the one diff that can DROP the seam was exactly the diff on which nothing
+# reddened — the ``#1349``/``#10513`` silent-drop class this PR fixes two files
+# over, reproduced one file over. This file is FAST and dual-registered
+# (``api`` + ``core``), so a ``core`` diff runs it: the obligation is enforced
+# on the diff that can break it.
+#
+# ⛔ NO LINE CITATIONS (``#10723`` review F3): the construct is named, never a
+# line number — an earlier revision cited ``allowance_gate.py:772`` and it was
+# a blank line by the next head.
+_SEAM = "with_limit_contact"
+_CEILING_ERROR = "QuotaExceededError"
+
+
+def _gate_source_path():
+    import pathlib
+    return (pathlib.Path(__file__).resolve().parent.parent
+            / "tortoise" / "allowance_gate.py")
+
+
+def _ceiling_raise_sites(src: str):
+    """(lineno, message-source, carries-the-seam) per over-allowance raise.
+
+    The universe is a CONSTRUCT: a ``raise QuotaExceededError(...)`` in the
+    module. Every raise of that class IS a customer ceiling by definition (the
+    module's fail-closed arms raise ``QuotaCheckError``, a SERVER fault that
+    correctly does NOT offer an upgrade path), so no word list is needed here —
+    a pre-composed message variable still has to reach the seam.
+    """
+    import ast
+
+    out = []
+    for node in ast.walk(ast.parse(src)):
+        if not isinstance(node, ast.Raise) or not isinstance(node.exc, ast.Call):
+            continue
+        fn = node.exc.func
+        if (fn.id if isinstance(fn, ast.Name) else "") != _CEILING_ERROR:
+            continue
+        if not node.exc.args:
+            continue
+        seg = ast.get_source_segment(src, node.exc.args[0]) or ""
+        out.append((node.lineno, seg, f"{_SEAM}(" in seg))
+    return out
+
+
+def test_the_customer_ceiling_carries_the_contact_seam():
+    """The over-allowance refusal offers the #5425 human path (owner ruling).
+
+    Mutation this REDs: replace ``with_limit_contact(...)`` around the ceiling
+    message with a bare parenthesised message — the customer is told about a
+    limit with no route to talk to us. This is the obligation
+    ``test_hosted_api.py`` derives tree-wide; asserted here as well because
+    that guard does not run on an ``allowance_gate.py``-only diff.
+    """
+    src = _gate_source_path().read_text(encoding="utf-8")
+    sites = _ceiling_raise_sites(src)
+    assert sites, (
+        "the derivation found no `raise QuotaExceededError(` in "
+        "tortoise/allowance_gate.py — the guard is asserting over an empty set, "
+        "so dropping the seam would reds nothing")
+    unseamed = [f"line {n}: {seg[:90]!r}" for n, seg, ok in sites if not ok]
+    assert unseamed == [], (
+        "an over-allowance ceiling does not tell the customer they can talk to "
+        "us (#5425) — wrap the message in `with_limit_contact(...)`: "
+        + "; ".join(unseamed))
+
+
+def test_the_ceiling_guard_is_not_vacuous():
+    """The predicate catches an unseamed ceiling and clears a seamed one.
+
+    Without this the guard above could pass because it matches nothing: a
+    renamed class or a re-shaped raise would leave the universe empty and the
+    ``assert sites`` would be the only thing standing between the seam and a
+    silent drop. Measured on synthetic source, so it is independent of the real
+    file's current shape.
+    """
+    unseamed = '''
+def _bad(dimension, allowance):
+    raise QuotaExceededError(
+        f"Team {dimension} allowance reached ({allowance}) — upgrade your plan",
+        resource=dimension)
+'''
+    assert [ok for _n, _s, ok in _ceiling_raise_sites(unseamed)] == [False]
+
+    seamed = '''
+def _good(dimension, allowance):
+    raise QuotaExceededError(with_limit_contact("Team allowance reached"))
+'''
+    assert [ok for _n, _s, ok in _ceiling_raise_sites(seamed)] == [True]
+
+    # And the REAL module must red under the same mutation it guards against:
+    # strip the seam from the ceiling's own message segment and re-derive.
+    src = _gate_source_path().read_text(encoding="utf-8")
+    seamed_sites = [s for s in _ceiling_raise_sites(src) if s[2]]
+    assert seamed_sites, (
+        "the real module carries no seamed ceiling, so there is nothing for "
+        "the mutation to strip — the guard above would already be red")
+    line, seg, _ok = seamed_sites[0]
+    mutated = src.replace(seg, seg.replace(f"{_SEAM}(", "(", 1), 1)
+    assert mutated != src, "the mutation did not change the source"
+    red = [n for n, _s, carries in _ceiling_raise_sites(mutated) if not carries]
+    assert red == [line], (
+        f"stripping `{_SEAM}(` from the ceiling message did not red the "
+        f"derivation (red={red}, ceiling line={line})")
