@@ -47,21 +47,38 @@ analytics row carries — `#5045`. The **ask** lane separately records
 token counters cannot change the cap's behaviour. That separation is deliberate: this ruling is about the **unit**,
 and the cap is a separate decision.
 
-**The token counters are readable, and the spend ceiling stays blind to them.** `metering.get_capture_usage(org_id)`
-returns `capture_calls` / `capture_tokens_in` / `capture_tokens_out` / `capture_cost_usd` per org per metering
-window on BOTH substrates (`:MeteringRecord` in the registry, or `supabase.metering_records`), degrading to a zero
-view and never raising; `capture_extraction`'s declared `READER` binding in `tortoise/cost_dimensions.py` points at
-it. The reader is MEASUREMENT ONLY — no request path calls it, and the ceiling above still cannot see the **token
-counters** (`capture_tokens_in` / `capture_tokens_out` / `ask_tokens_in` / `ask_tokens_out`) by construction. It
-does of course see `capture_cost_usd` — that column is one of the two the ceiling sums, so a change in capture
-*cost* moves the cap while a change in capture *tokens* does not. The metric set itself — the per-call metrics, the
-disclosure counters, the attribution and the derived figures — is defined in
-`docs/ops/extraction-cost-metrics.md` (`#3840`); the consumption model that consumes
-the reader is `docs/architecture/CONSUMPTION-MODEL.md` (`#4051`).
+**The token counters' reader is an ENFORCEMENT reader** (`#4051` §1b is superseded — see the
+changelog). `metering.get_capture_usage(org_id)` returns `capture_calls` / `capture_tokens_in` /
+`capture_tokens_out` / `capture_tokens_total` / `capture_cost_usd` per org per metering window on BOTH
+substrates (`:MeteringRecord` in the registry, or `supabase.metering_records`), degrading to a zero view and
+never raising; `capture_extraction`'s declared `READER` binding in `tortoise/cost_dimensions.py` points at it.
+It carries the presence fact a zero VIEW cannot express — `measured` + `unmeasured_reason` (`absent` /
+`read_error` / `period_error`) — because a recorded ZERO is a reading (`#5045`) while an unreadable ledger
+is not. A reader that returns a zero view for every failure cannot tell "unknown" from "nothing spent", and
+a cap enforced on it fails OPEN for exactly the tenants whose meter is broken.
+
+The reader has exactly ONE consumer: `allowance_gate.enforce_allowances`, reached from
+`quota.enforce_org_limit` on both REST and MCP, so the `capture_extraction` allowance is enforced on the
+capture request path (`tests/test_metering_capture_usage_reader.py`'s scan names that consumer exactly, and
+reds if it is dropped). The spend ceiling above still cannot see the **token counters**
+(`capture_tokens_in` / `capture_tokens_out` / `ask_tokens_in` / `ask_tokens_out`) by construction — it sums
+`ask_cost_usd` + `capture_cost_usd`, so a change in capture *tokens* moves no cap while a change in capture
+*cost* does. The metric set itself — the per-call metrics, the disclosure counters, the attribution and the
+derived figures — is defined in `docs/ops/extraction-cost-metrics.md` (`#3840`); the consumption model that
+consumes the reader is `docs/architecture/CONSUMPTION-MODEL.md` (`#4051`).
 
 **⚠️ Open, and not decided here:** whether the token allowance and the storage allowance are enforced at the same
 seam, and whether an extraction allowance is a **pre-spend admission** gate (like the points estimate) or a
 **post-hoc** meter with overage. Those are pricing/enforcement questions — owner territory, post-beta calibration.
+What the design fixes: the extraction dimension is checked at the **same admission seam** the node count uses
+(`quota.enforce_org_limit`, ahead of it), reading the per-window token FLOW. The gate is **inert until an
+allowance is configured** — it refuses nothing **on the allowance ground**, because no resolver emits an allowance
+value. ⚠️ That is NOT the same as refusing nothing: every **gated** request (`points` / `documents` / `sessions`)
+fills the missing allowance keys with one control-plane read, and a **fault** in that read is a `QuotaCheckError` →
+HTTP 500 **even with no allowance configured** — see §6's "INERT IS ABOUT WHAT THE GATE REFUSES, NOT ABOUT WHAT IT
+READS" in `docs/architecture/CONSUMPTION-MODEL.md`, and `tortoise/allowance_gate.py`'s module docstring. The
+remaining question — whether that admission is charged against prepaid credits *at capture time* or reconciled per
+window — is not answered by an admission check and stays with the owner.
 
 > **OVERRIDES:** the **postpaid metered/auto-billing** default the field uses, and **`write_ops`** (the current
 > metered-usage unit) as the unit for extraction consumption — replaced by **prepaid credits** and per-token

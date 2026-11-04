@@ -5440,18 +5440,26 @@ def metering_get_usage(cp, org_id: str, period_start: str) -> dict:
 def metering_get_capture_usage(cp, org_id: str, period_start: str) -> dict:
     """Capture (extractor) usage for an org's window starting at
     *period_start* — the supabase-mode READ path for
-    ``metering.get_capture_usage`` (#4051).
+    ``metering.get_capture_usage`` (#4051, #5331).
 
-    Returns the ``capture_*`` columns as a dict (all ZEROS when the row is
-    absent — the MERGE only creates the record on the first write).
+    Returns the ``capture_*`` columns plus the PRESENCE fact, on ONE name:
 
-    ⛔ It exists because the columns were written and UNREADABLE: the
-    ``capture_extraction`` dimension in ``tortoise/cost_dimensions.py``
-    declared ``get_current_usage`` as its reader, and that function returns
-    write-op fields only — so "tokens per team per period" was a recorded
-    dimension with no reader, the exact shape ``#4493`` names as "a
-    measurement that does not exist". Nothing calls this from a request
-    path: it is the read half the owner's calibration pass needs.
+    ``{measured, unmeasured_reason, capture_calls, capture_tokens_in,
+    capture_tokens_out, capture_cost_usd}``
+
+    ⚠️ ``measured``/``unmeasured_reason`` are load-bearing and are why this
+    reader cannot simply return zeros for an absent row. #5045 records a capture
+    whose extraction reported no provider usage as ZERO tokens, and that zero IS
+    a reading; an absent row is not ("nobody has captured yet"). An allowance
+    gate must tell them apart — a flattened zero makes every tenant look like it
+    spent nothing, so the cap is present and vacuous (#4493's class) — while
+    ``metering_get_usage`` (the ask lane) deliberately does flatten, because it
+    has no gate reading it. ``unmeasured_reason`` is ``"absent"`` here and only
+    here: a store FAULT propagates to ``metering.get_capture_usage``'s own
+    ``read_error`` arm rather than being reported as an absence.
+
+    ``capture_cost_usd`` is #4051's column and stays in the contract: landed
+    tests assert this exact dict, and the spend ceiling reads that column.
 
     #3825: keyed on ``period_start``, not the derived month label.
     """
@@ -5463,17 +5471,20 @@ def metering_get_capture_usage(cp, org_id: str, period_start: str) -> dict:
                  ("period_start", "eq", period_start)],
     )
     if not rows:
-        return {"capture_calls": 0, "capture_tokens_in": 0,
+        # A successful read that returns NO row is an ABSENCE, not a zero
+        # reading: the MERGE only creates the record on the first write.
+        return {"measured": False, "unmeasured_reason": "absent",
+                "capture_calls": 0, "capture_tokens_in": 0,
                 "capture_tokens_out": 0, "capture_cost_usd": 0.0}
     row = rows[0]
     return {
+        "measured": True,
+        "unmeasured_reason": None,
         "capture_calls": int(row.get("capture_calls") or 0),
         "capture_tokens_in": int(row.get("capture_tokens_in") or 0),
         "capture_tokens_out": int(row.get("capture_tokens_out") or 0),
         "capture_cost_usd": float(row.get("capture_cost_usd") or 0.0),
     }
-
-
 def metering_increment_ask(cp, org_id: str, period_start: str,
                            period_end: str, *, calls: int = 1,
                            tokens_in: int = 0, tokens_out: int = 0,
