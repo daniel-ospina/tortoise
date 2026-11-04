@@ -49,7 +49,7 @@ import re
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import NoReturn
-from urllib.parse import parse_qs, urlencode, urlparse, urlsplit, urlunsplit  # noqa: F401
+from urllib.parse import parse_qs, unquote_plus, urlencode, urlparse, urlsplit, urlunsplit
 
 # #8218 — the client-identity decision (SCOPE §9 class 4(i)) is its own module so
 # the invariant has ONE enumerable home; the consent page only renders it.
@@ -2716,6 +2716,25 @@ def consent_app_origin() -> str | None:
     return None
 
 
+def _is_blank_attempt_key(segment: str) -> bool:
+    """Does this RAW query segment name the attempt key with NO usable value?
+
+    A bare ``attempt_key`` (no ``=``) and ``attempt_key=`` / ``attempt_key=%20`` all
+    read back the same way through the consumer — `url.searchParams.get()` returns
+    ``""`` for each, because the value is empty. %-encoded spellings of the NAME
+    (``%61ttempt_key=``) decode to it too, so the test is on the decoded name rather
+    than on a literal prefix.
+
+    Used only on the mint path (`consent_bounce_url`): such a segment must be
+    REMOVED before the minted key is appended, or the first-value reader keeps
+    seeing the blank and the mint is inert (review P3, #10487).
+    """
+    name, sep, value = segment.partition("=")
+    if unquote_plus(name) != CONSENT_ATTEMPT_KEY_PARAM:
+        return False
+    return not sep or not unquote_plus(value).strip()
+
+
 def consent_bounce_url(app_origin: str, raw_query: str) -> str:
     """The app-owned sign-in leg for an authorize request this server will not
     render: ``{app}/auth?next=/api/consent/start?{raw}``.
@@ -2740,8 +2759,48 @@ def consent_bounce_url(app_origin: str, raw_query: str) -> str:
       and `redirect_uri` are compared byte-for-byte by the client, and a
       `+`/`%2B`/`%20` normalisation at this hop is the silent
       CSRF-mismatch-after-consent class the bridge refuses everywhere else.
+    * ⛔ THIS SERVER MINTS THE ATTEMPT KEY, because this hop is the ONLY leg on
+      which no key exists yet (#10487). `/api/consent/start` binds the flow to a
+      browser with an insert-only `attempt_key` and hands it back inside the
+      return target — but on a cold start it had to INVENT that key, so the key
+      existed only in the one URL `start` happened to emit. A visitor who signed
+      in on a DIFFERENT `/auth` entry for the same flow (the back button, a
+      refresh, this bounce's own return target) came back without it and was
+      refused with `403 flow_not_yours`: the row was already claimed by a key
+      nobody could present. Generating the key HERE makes it the property of the
+      flow rather than of one emitted URL — the bounce, the sign-in return, and
+      every re-entry carry the same value, so `start` ADOPTS it on the insert
+      and the insert-only row is never poisoned. It is `secrets`, not a
+      counter: it is the browser's only proof of ownership, so it must not be
+      predictable from the `state` (which is client-chosen and public).
     """
     inner = CONSENT_START_PATH + (("?" + raw_query) if raw_query else "")
+    # ⛔ APPEND ONLY WHERE NONE EXISTS, AND **REPLACE** A BLANK RATHER THAN APPEND BESIDE IT.
+    # There are two callers and they are NOT alike: the bounce (`hosted_api.oauth_authorize`)
+    # carries no key, but the page's own sign-in link (`consent_page_html` → SIGNIN_URL) is
+    # rendered ONLY for a keyed flow, so ITS raw_query always carries one. Appending
+    # unconditionally emitted `…&attempt_key=K&attempt_key=<minted>`, which is benign today only
+    # because every reader takes the FIRST value — i.e. correctness would rest on a detail no
+    # consumer promises, and the day one takes the last, the page's sign-in leg presents the
+    # minted key instead of the row's and the visitor meets this very dead end again (#10487).
+    #
+    # ⛔ A PRESENT-BUT-BLANK (or bare) KEY IS DROPPED, NOT APPENDED BESIDE (review P3). The reader
+    # is `url.searchParams.get()` (`start.ts:255`), which takes the FIRST value: appending beside a
+    # blank one emitted `attempt_key=&attempt_key=<minted>`, which reads back as `""`
+    # (`getAll` -> `["", "<minted>"]`), so `start` invented a THIRD key and the mint on this leg
+    # was INERT for exactly the visitor it exists to rescue. Replacing the blank segment is the
+    # only shape where the value we mint is the value the flow adopts.
+    #
+    # ⛔ EVERY OTHER SEGMENT IS PASSED THROUGH BYTE-EXACT. `state` and `redirect_uri` are compared
+    # byte-for-byte by the client, so re-encoding the query here would be the `+`/`%2B`/`%20`
+    # CSRF-mismatch class this function's docstring refuses everywhere else. Only the segments
+    # naming THIS parameter are rebuilt, and only when a key is being minted.
+    if not any(v.strip() for v in parse_qs(raw_query, keep_blank_values=True)
+               .get(CONSENT_ATTEMPT_KEY_PARAM, [])):
+        segments = [s for s in raw_query.split("&") if s and not _is_blank_attempt_key(s)]
+        segments.append(urlencode(
+            {CONSENT_ATTEMPT_KEY_PARAM: secrets.token_urlsafe(32)}))
+        inner = CONSENT_START_PATH + "?" + "&".join(segments)
     return (app_origin.rstrip("/") + CONSENT_SIGNIN_PATH + "?"
             + urlencode({"next": inner}))
 
