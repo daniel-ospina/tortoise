@@ -762,9 +762,13 @@ mechanisms:
       stand here is CLOSED: `_UNIT_WORDS` now carries the spellings the
       carve-out names (`second(s)`, the millisecond family, `minute`, `day(s)`)
       **plus their conventional siblings** (`hour`, `week(s)`, `month(s)`,
-      `year(s)`, `mile(s)`, `percent`/`pct` — the carve-out names none of those
-      six, they are here because a duration family with a hole in it is how the
-      original gap survived review), so `back under 800 seconds` against
+      `year(s)`, `mile(s)` — the carve-out names none of those five, they are
+      here because a duration family with a hole in it is how the
+      original gap survived review; ⛔ `percent`/`pct` are deliberately NOT among
+      them: fusing `percent` REFUSED the truthful pair `20k%`/`20000 percent`,
+      because an ATTACHED `k%` loses its `%` to the tokeniser (`20k%` binds as
+      `20k`, while `20 %` and `20%` keep it) — measured, #10804 review P1), so
+      `back under 800 seconds` against
       `back under 800 milliseconds` and `a ten minute TTL` against
       `a ten hour TTL` are REFUSED — pinned by
       `tests/test_state_value_verbatim_10360.py::test_the_carve_outs_own_ADJACENT_time_units_are_judged`,
