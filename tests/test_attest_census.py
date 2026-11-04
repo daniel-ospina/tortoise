@@ -1625,3 +1625,174 @@ def test_a_uppercase_JSON_suffix_record_is_found_not_read_as_absent(monkeypatch,
     text = (tmp_path / "o.md").read_text(encoding="utf-8")
     assert "**RESTORE**" in text or "**OK**" in text, f"the upper-case record was not read: {text[-800:]}"
     assert "no record on this box" not in text
+
+
+# ── the STDERR surface, and the linter-safety of a hostile evidence cell (#10687 cycle 22) ──
+#
+# Two P2s from the cycle-22 review, both reproduced before being fixed, and both of the same
+# shape this PR keeps finding: a contract that holds on the path the author was looking at and
+# not on its sibling.
+#
+# 1. `_neutralise_stdout` closed the shutdown-flush hole on fd 1 ONLY. `flush_std_files()`
+#    flushes `sys.stdout` AND `sys.stderr`, and a failure of either makes `Py_Exit` return 120
+#    (`Python/pylifecycle.c` 3.12: `:1673-1708` set the status, `:3097-3104` map it to 120), so
+#    twelve unguarded `print(..., file=sys.stderr)` calls in `main` could publish a code the file
+#    documents as impossible — from a census that had completed. The exit code is now decided
+#    BEFORE any message is attempted, every write goes through `_say`, and `_say` neutralises fd 2
+#    on failure so the shutdown flush cannot overwrite it.
+#
+# 2. `_cell` escaped `\`, `|`, `\r`, `\n` and lone surrogates but NOT a hard tab (MD010) and not a
+#    bare URL (MD034) — and `operations/attest-census.md` is linted WHOLE by the REQUIRED `docs`
+#    job with no key of its own in `config/docs-lint-baseline.json`, so ONE such record would red a
+#    check the lane did not cause, on an artifact its own header forbids hand-editing.
+
+
+@pytest.mark.parametrize(
+    "evidence",
+    [
+        # The two shapes that reached the table unfixed. Both are ACCEPTED evidence shapes, not
+        # exotic input: a tab arrives from any hand-written or corrupt record, and the URL is one of
+        # `_EVIDENCE_REF`'s two documented forms (one of the live registry's 3,703 records uses it).
+        "comment:1\tTAB",
+        "https://github.com/daniel-ospina/tortoise/pull/8725#issuecomment-6194795895",
+    ],
+)
+def test_the_pinned_linter_accepts_a_hostile_evidence_cell(evidence, tmp_path):
+    """The `docs`-check half of both cycle-22 findings, measured by the LINTER rather than a model.
+
+    MEASURED pre-fix with the pinned `markdownlint-cli2@0.23.3`:
+      `comment:1\\tTAB`   -> `MD010/no-hard-tabs [Column: 84]`
+      the github URL      -> `MD034/no-bare-urls Bare URL used`
+    Either one is a NEW key for `operations/attest-census.md`, which the baseline does not carry, so
+    a regeneration would red the REQUIRED `docs` job. The unit assertions below pin the sanitiser;
+    this pins the OUTCOME the gate reads.
+    """
+    ac = _load()
+    script = Path(__file__).resolve().parent.parent / ".github" / "scripts" / "docs-markdownlint.sh"
+    if not script.exists():
+        pytest.skip("docs-markdownlint.sh not present")
+    target = Path(__file__).resolve().parent.parent / "operations" / "zz-attest-census-probe.md"
+    nodelist = tmp_path / "probe.nul"
+    report = tmp_path / "probe.out"
+    rec = ac.Record(path=Path("/tmp/r-1.json"), head_sha=LIVE, mint="fresh", verdict="clean",
+                    evidence=evidence)
+    row = ac.Row(pr=1, head=LIVE, branch="b", title="t", record=rec, outcome=ac.RESTORE, why="w")
+    target.write_text(ac.render([row], "o/r", "2026-11-03T00:00:00Z"), encoding="utf-8")
+    nodelist.write_bytes(b"./operations/zz-attest-census-probe.md\0")
+    try:
+        subprocess.run(
+            ["bash", str(script), "--cli2", "markdownlint-cli2@0.23.3",
+             "--files-from", str(nodelist), "--output", str(report), "--label", "probe"],
+            cwd=Path(__file__).resolve().parent.parent, capture_output=True, timeout=300,
+        )
+        out = report.read_text() if report.exists() else ""
+        if "Linting: 1 file" not in out:
+            pytest.skip(f"pinned linter unavailable here (report: {out[:200]!r})")
+        assert "Summary: 0 issues in 0 files" in out, (
+            f"the pinned linter rejects the cell rendered from evidence {evidence!r}: {out}"
+        )
+    finally:
+        target.unlink(missing_ok=True)
+
+
+def test_a_hard_tab_is_flattened_to_a_space():
+    """MD010 is a `_cell` gap, not a linter quirk: the sanitiser must emit no tab at all."""
+    ac = _load()
+    assert "\t" not in ac._cell("comment:1\tTAB"), "a hard tab reaches the table as MD010"
+    assert ac._cell("comment:1\tTAB") == "comment:1 TAB"
+
+
+def test_a_bare_url_becomes_an_autolink_and_is_not_double_wrapped():
+    """MD034, plus the idempotence a corrupt record can reach: an already-autolinked value."""
+    ac = _load()
+    url = "https://github.com/daniel-ospina/tortoise/pull/8725#issuecomment-6194795895"
+    assert ac._cell(url) == f"<{url}>"
+    # A record whose evidence already carries an autolink must not become `<<…>>`.
+    assert ac._cell(f"<{url}>") == f"<{url}>"
+    # Trailing sentence punctuation stays OUT of the link, and prose around it is untouched.
+    assert ac._cell(f"see {url}.") == f"see <{url}>."
+    # A `comment:<id>` reference carries no URL, so the column is unchanged for the common shape.
+    assert ac._cell("comment:6596200336") == "comment:6596200336"
+
+
+@pytest.mark.skipif(not Path("/dev/full").exists(), reason="/dev/full is Linux-only")
+def test_an_unwritable_stderr_does_not_turn_a_complete_census_into_rc_120(tmp_path):
+    """A census that READ EVERYTHING CORRECTLY must not report a crash because its message failed.
+
+    MEASURED pre-fix (#10687 cycle 22) on the real entry point:
+
+        attest_census.py --reviews-dir <empty> --no-gate --out /tmp/zz.md 2>/dev/full
+        -> the full report printed, /tmp/zz.md written (2,945 bytes), exit **120**
+
+    with `OSError: [Errno 28] No space left on device` raised by the courtesy
+    `print(f"attest_census: wrote {out}", file=sys.stderr)`. A caller keying on the published
+    `0`/`2` contract therefore reads "crash" from a successful run — and ENOSPC is not exotic here:
+    this PR's own body records it on the x64 pool (#10713).
+    """
+    sink = open("/dev/full", "wb")  # noqa: SIM115 — the child owns it for its whole life
+    try:
+        proc = _run_with_shim(tmp_path, [], subprocess.DEVNULL, stderr=sink)
+    finally:
+        sink.close()
+    assert proc.returncode == 0, (
+        f"an unwritable stderr must not decide the exit code (got {proc.returncode}, want 0); "
+        "the census completed and wrote its report"
+    )
+    assert (tmp_path / "o.md").exists(), "the artifact must still be written"
+
+
+@pytest.mark.skipif(not Path("/dev/full").exists(), reason="/dev/full is Linux-only")
+def test_an_unwritable_stderr_cannot_turn_the_out_failure_into_rc_120(tmp_path):
+    """The OTHER side of the same hole: `--out` unwritable is documented as 2, not 120.
+
+    Pre-fix, both writes raised (a full disk makes `--out` and stderr fail together), and the
+    courtesy message's `OSError` escaped `main` — so "could not write the report" published 120 and
+    became indistinguishable from a crash, which is the one confusion the 0/2 contract exists to
+    prevent.
+    """
+    blocked = tmp_path / "blocked"
+    blocked.mkdir()  # an `--out` that is a DIRECTORY: IsADirectoryError, an OSError
+    sink = open("/dev/full", "wb")  # noqa: SIM115
+    try:
+        proc = _run_with_shim(tmp_path, [], subprocess.DEVNULL, stderr=sink, out_name="blocked")
+    finally:
+        sink.close()
+    assert proc.returncode == 2, (
+        f"an unwritable --out with an unwritable stderr is rc 2 (got {proc.returncode})"
+    )
+
+
+def test_a_dead_stderr_pipe_does_not_turn_a_complete_census_into_rc_120(tmp_path):
+    """The `BrokenPipeError` half of the same class — a stderr PIPE whose reader is already gone.
+
+    This is a different state from `2>/dev/full` (an unwritable file) and from fd 2 CLOSED
+    (`sys.stderr is None`): here `sys.stderr` is a real object and the WRITE raises `BrokenPipeError`,
+    which is an `OSError`. stderr is line-buffered, so it raises at the `print`, not at shutdown —
+    `_say`'s handler must catch it exactly as the stdout path does. The read end is closed BEFORE the
+    child starts, so the child cannot win the race.
+    """
+    read_fd, write_fd = os.pipe()
+    os.close(read_fd)  # nobody will ever read: the first write gets EPIPE
+    with os.fdopen(write_fd, "wb") as sink:  # fdopen OWNS write_fd; closing it here is the only close
+        proc = _run_with_shim(tmp_path, [], subprocess.DEVNULL, stderr=sink)
+    assert proc.returncode == 0, (
+        f"a dead stderr pipe must not decide the exit code (got {proc.returncode}, want 0); "
+        "the census completed and the child's stderr was sent to a pipe with no reader"
+    )
+    assert (tmp_path / "o.md").exists(), "the artifact must still be written"
+
+
+def test_a_closed_fd2_still_completes_rc_0(tmp_path):
+    """The adjacent state, kept next to its siblings so the three cannot drift apart one at a time.
+
+    fd 2 CLOSED makes `sys.stderr = None`, where `print(..., file=None)` falls back to STDOUT — a
+    DIFFERENT code path from an unwritable fd 2 and from a dead pipe, and the one cycle 21 pinned
+    for the `backslashreplace` fix.
+    """
+
+    def _close_fd2():
+        os.close(2)
+
+    proc = _run_with_shim(tmp_path, [], subprocess.DEVNULL, preexec_fn=_close_fd2)
+    assert proc.returncode == 0, f"a closed fd 2 with a complete census is rc 0 (got {proc.returncode})"
+    assert (tmp_path / "o.md").exists(), "the artifact must still be written"
