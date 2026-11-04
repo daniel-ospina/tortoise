@@ -2267,6 +2267,17 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # `test_test_lane_tool.py`). Pinned by
              # tests/test_ci_selection.py::test_lane_stash_guard_runs_on_a_tools_only_change.
              "tools/lane_stash.py",
+             # #10812: `tools/lane_wip.py` pins a lane's UNCOMMITTED work into
+             # `refs/pi-lane-wip/<lane-key>/<n>` so `git worktree remove --force`
+             # cannot destroy content that was never in the object DB. It owns
+             # `tests/test_lane_wip.py`, registered `core`. Same shape as
+             # `tools/lane_stash.py` directly above: `tools/` is a flat
+             # NON_PYTHON_PREFIXES entry, so without this entry a tools-only diff
+             # comes back with `changed == []`, takes the docs-only early return,
+             # and the pin never runs on the file it guards — the
+             # #1349/#3332/#3616 silent-drop class. Pinned by
+             # tests/test_ci_selection.py::test_lane_wip_guard_runs_on_a_tools_only_change.
+             "tools/lane_wip.py",
              # #5612: the journal-growth measurement (`tools/journal_growth.py`)
              # and its probe
              # (`docs/evidence/5612-journal-growth/probes/corpus_growth_probe.py`)
@@ -2709,7 +2720,22 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # hermetic (a stub rail, temp dirs) and `core` is where its suite
              # lives. Pinned by
              # tests/test_ci_selection.py::test_rail_pin_runs_on_a_tools_only_change.
-             "tools/rail_detach.py")
+             "tools/rail_detach.py",
+             # #10920: the CI runner-label coverage gate. `tools/` is a flat
+             # NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row matches
+             # `tools/ci_runner_labels.py`, so a TOOL-ONLY change filtered to
+             # `changed == []` and took the docs-only early return — the 15 tests that
+             # pin `_pool_answers` (AND semantics), `_matrix_rows` (per-row reading, not one
+             # union) and R2 (x86_64 image claimed only by non-X64 hosts) would never run
+             # on the very file that defines them. That is the
+             # #1349/#3332/#3616 silent-drop class: a PR that deleted R2 or weakened the
+             # AND check would run `python-ci-gate` GREEN with none of its own pins.
+             # MEASURED before this entry:
+             # `select(["tools/ci_runner_labels.py"], "pull_request",
+             # load_manifest())` -> surfaces=[], 72 files, the pin ABSENT. CORE_ALSO (not
+             # TOOL_CARVEOUTS) because the gate is hermetic (a committed JSON snapshot, no
+             # graph, no URI, no network) and `core` is where its suite is registered.
+             "tools/ci_runner_labels.py")
 NON_PYTHON_PREFIXES = (
     "docs/", "website/", "product/", "legal/", "growth/", "engineering/",
     "finance-accounting/", "menu-bar/", "ux/", "data/", "operations/",
@@ -4553,6 +4579,120 @@ def resolve_shard_routing(value: str | None) -> str:
     return SHARD_ROUTING_HOSTED_ONLY
 
 
+# ── #10897: the FOLD's own runner class ──────────────────────────────────────
+#
+# THE QUESTION THE OWNER ASKED (2026-11-04): *"will we have a way to prioritise
+# for CI queues the combined ones? so their components don't land before and
+# disrupt the process?"* Three mechanisms answer it. The two STRUCTURAL ones live
+# on PR #10902 (`.mergify.yml` `queue_conditions: -label=superseded-by-fold`, a
+# superseded constituent cannot ENTER the queue; and `tools/batch_open.py`, which
+# proves containment and closes the constituents at fold-open) — they remove the
+# work instead of reordering it, and they are the larger half of the answer.
+#
+# THIS half is the third and narrowest: a fold's own matrix rows get their own
+# `runs-on` class, so the fold's suite does not queue behind the runs of the PRs
+# it replaces.
+#
+# ⛔ Mechanism 3 is OPT-IN AND FAIL-SAFE, ON PURPOSE, AND THE REASON IS THE ONE
+# FAILURE THAT IS WORSE THAN A QUEUE. GitHub does not prioritise jobs in a
+# runner queue: a run starts when a runner carrying EVERY label in `runs-on` is
+# free. A label no runner carries therefore does not deprioritise the job, it
+# makes it UNSTARTABLE, and an unstartable required check reads as "still
+# queued" — a red-less, progress-less hang, which is strictly worse than waiting.
+# Measured before writing this (2026-11-04): the pool's labels are
+# `self-hosted`, `self-hosted-x64` (x64 boxes), the arch/OS ornaments and the
+# gate-following `ubuntu-latest` fallback (`tools/install-ci-runner-x64.sh`,
+# `scripts/ci_runner_gate.sh`). THERE IS NO DEDICATED FOLD CAPACITY ON THIS FLEET,
+# so shipping `runs-on: [self-hosted, fold]` as the default would have produced
+# exactly that hang on every fold.
+#
+# So the decision lives HERE, in Python, where it is unit-tested (#10897's test
+# (d)), and the declaration `CI_FOLD_RUNNER_LABELS` is the operator switch:
+#   * unset / not a fold            -> every row keeps its own `runner`, byte-identical to main;
+#   * a fold + a VALID declaration  -> every row carries the declared label array;
+#   * a fold + an INVALID one       -> falls back to the row's own `runner` and says so on stderr.
+# ⛔ A MALFORMED setting can only lose the priority, never the job. A WELL-FORMED
+# one naming a class no runner carries is the operator's deliberate assertion and
+# IS sufficient to hang the fold — `parse_fold_runner` checks the SHAPE of the
+# declaration, not whether the fleet has such a runner, and it cannot: that is a
+# fact about the live pool, not about the string. So the rule for an operator is
+# "declare a class a runner really carries" (at this writing: `self-hosted` /
+# `self-hosted-x64`, or `ubuntu-latest`; there is no dedicated fold class yet), and
+# the fail-safe half of this seam covers typos in the JSON, not typos in a label.
+FOLD_LABEL = "batch-fold"
+FOLD_RUNNER_ENV = "CI_FOLD_RUNNER_LABELS"
+PR_LABELS_ENV = "CI_PR_LABELS"
+
+
+def _label_set(labels: str | list[str] | None) -> set[str]:
+    """Normalise the comma-joined `CI_PR_LABELS` (or an iterable) to a case-folded set."""
+    if labels is None:
+        return set()
+    items = labels.split(",") if isinstance(labels, str) else list(labels)
+    return {str(item).strip().lower() for item in items if str(item).strip()}
+
+
+def parse_fold_runner(declaration: str | None) -> list[str] | None:
+    """The declared fold label array, or None when it is absent/unusable.
+
+    Every rejection is a FALLBACK, never an exception: this is read inside the
+    `changes` job, which every python-ci job needs, so a raise here would skip
+    the whole matrix (the #2656 shape). A declaration that is not a non-empty
+    JSON array of non-empty strings is not a runner class — `[]` in particular
+    would give `fromJSON("[]")`, i.e. a job with no `runs-on` at all.
+    """
+    text = (declaration or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, list) or not parsed:
+        return None
+    if not all(isinstance(item, str) and item.strip() for item in parsed):
+        return None
+    return [item.strip() for item in parsed]
+
+
+def resolve_fold_runner(
+    labels: str | list[str] | None,
+    matrix_runner: str,
+    declaration: str | None,
+    *,
+    warn: bool = True,
+) -> str:
+    """#10897: the `runs-on` JSON string for one matrix row, fold-aware.
+
+    Identity when the PR is not a fold, or when no usable class is declared —
+    which is every run on this fleet today (the seam is OFF until an operator
+    sets `CI_FOLD_RUNNER_LABELS` to a class that really exists).
+
+    ⛔ `matrix_runner` is returned UNCHANGED rather than re-serialised: the
+    non-fold path must stay byte-identical to main's, so a lane diffing the
+    emitted matrix sees no change at all (pinned by
+    `tests/test_ci_selection.py::test_the_fold_runner_seam_is_inert_by_default`).
+
+    ⛔ `warn=False` exists because this runs PER ROW: the caller resolves the
+    same declaration for every shard, and `::warning::` annotations are capped at
+    10 per STEP on GitHub — nine rows of the same message would mask any later
+    warning in the same step. The first row warns for all of them.
+    """
+    if FOLD_LABEL not in _label_set(labels):
+        return matrix_runner
+    parsed = parse_fold_runner(declaration)
+    if parsed is None:
+        if warn and (declaration or "").strip():
+            print(
+                f"::warning::{FOLD_RUNNER_ENV} is set but is not a non-empty JSON array of "
+                f"non-empty strings — a fold keeps its normal runner class rather than routing "
+                f"to a label no runner may carry",
+                file=sys.stderr,
+            )
+        return matrix_runner
+    return json.dumps(parsed)
+
+
 def fast_shard_runner(index: int, count: int) -> list[str]:
     """#6897: which runner class carries shard `index` of `count` IN POOL-SPLIT MODE.
 
@@ -4604,6 +4744,13 @@ def fast_matrix_include(shards: list[dict], routing: str | None = None) -> dict:
     """
     mode = resolve_shard_routing(
         os.environ.get(SHARD_ROUTING_ENV) if routing is None else routing)
+    # #10897: the fold's own runner class. Read from the ENVIRONMENT here (like
+    # the shard-routing mode above) so both matrix emitters resolve the same
+    # way and `tests/test_ci_selection.py` can pin it; identity when the PR
+    # carries no `batch-fold` label or no class is declared, so the non-fold
+    # rows stay byte-identical to main's.
+    labels = os.environ.get(PR_LABELS_ENV)
+    fold_declaration = os.environ.get(FOLD_RUNNER_ENV)
     include = []
     for i, s in enumerate(shards):
         # #6145: carry the headroom alongside the budget so the margin a leg was
@@ -4614,15 +4761,29 @@ def fast_matrix_include(shards: list[dict], routing: str | None = None) -> dict:
         if headroom is None:
             headroom = watchdog_headroom(s.get("est_seconds", 0.0),
                                          s["watchdog_minutes"])
+        row_runner = json.dumps(
+            fast_shard_runner(i, len(shards))
+            if mode == SHARD_ROUTING_POOL_SPLIT else SHARD_RUNNER_HOSTED)
+        # ⛔ THE CANARY PRODUCER ROW IS EXEMPT FROM THE FOLD CLASS. `fast_shard_runner`
+        # rule 1 pins the last shard to the hosted label because its artifacts feed
+        # the canary streak, and that streak is a comparison of TESTS across runs —
+        # moving the producer onto a different class would make it a comparison of
+        # runner classes, which is the failure measured 2026-10-27..30: run
+        # `40986603502` (head `5a2ae6aa1`) had `test (i)`, the canary, taken by
+        # `pi-runner-vm-5` (ARM64) and killed at 32m12s of a 30m budget
+        # (`docs/ops/ci-runner-x64.md:847`, `:888`).
+        # A fold gets priority on the eight legs that carry the wall; the producer
+        # stays where the streak expects it. `warn=(i == 0)` keeps ONE annotation for
+        # the whole matrix (`::warning::` is capped at 10 per step).
+        is_producer = i == len(shards) - 1
         include.append({
             "half": s["name"],
             "files": " ".join(s["files"]),
             "watchdog_minutes": s["watchdog_minutes"],
             "watchdog_headroom": round(float(headroom), 2),
-            "canary_producer": i == len(shards) - 1,
-            "runner": json.dumps(
-                fast_shard_runner(i, len(shards))
-                if mode == SHARD_ROUTING_POOL_SPLIT else SHARD_RUNNER_HOSTED),
+            "canary_producer": is_producer,
+            "runner": row_runner if is_producer else resolve_fold_runner(
+                labels, row_runner, fold_declaration, warn=(i == 0)),
         })
     return {"include": include}
 

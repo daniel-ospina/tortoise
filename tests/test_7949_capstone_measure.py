@@ -4408,10 +4408,10 @@ def test_the_bare_continuation_cites_name_what_they_say():
     rows = (
         # `each VET pass is gated on the LIST` — the gate AND its call, twice.
         ("docs/00_index.md", "each VET pass is gated on the LIST", (
-            ("10328", "if vet_enabled and embed_list:"),
-            ("10329", "embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass("),
-            ("10450", "if vet_enabled and complete_list:"),
-            ("10451", "complete_list, vet_union_stats, _w, _ = _run_vet_pass("),
+            ("10462", "if vet_enabled and embed_list:"),
+            ("10463", "embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass("),
+            ("10584", "if vet_enabled and complete_list:"),
+            ("10585", "complete_list, vet_union_stats, _w, _ = _run_vet_pass("),
         )),
         # the VET block's start; its three lines of keys (10587-10589) close on
         # line 10590 — DERIVED by content, not by arithmetic: `result["vet"] = {`
@@ -4422,25 +4422,25 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # sides' bump disagreed here and why every ASSERTED number in this table
         # is verified by content instead.
         ("docs/00_index.md", "emitted unconditionally at", (
-            ("10609", 'result["classify_later"] = {'),
-            ("10619", 'result["vet"] = {'),
+            ("10743", 'result["classify_later"] = {'),
+            ("10753", 'result["vet"] = {'),
         )),
         # `_IDLE_CITES["vet"]`: the early return and the surface it emits
         ("probes/capstone_measure.py", "its vet surface", (
-            ("10237", "if not edus:"),
-            ("10253", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
+            ("10371", "if not edus:"),
+            ("10387", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
         )),
         # ...and the same claim in the rule's own docstring
         ("probes/capstone_measure.py", "with the flag ON", (
-            ("10253", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
+            ("10387", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
         )),
         ("probes/capstone_measure.py", "follows at", (
-            ("10236", "edus = _edus_from_conversation(conversation)"),
+            ("10370", "edus = _edus_from_conversation(conversation)"),
         )),
         # the S2.2/S2.3 block this probe names as the #9116 seam's subject
         ("probes/capstone_measure.py", 'result["vet"]`` at', (
-            ("10619", 'result["vet"] = {'),
-            ("10623", ("exact", "}")),
+            ("10753", 'result["vet"] = {'),
+            ("10757", ("exact", "}")),
         )),
         # The E-row audit's cites on the GATE ITSELF. `_BUNDLE_CITE` matches only
         # `sdk|edges|extractor_v2`, so a `tools/*.py` number is invisible to the
@@ -4752,12 +4752,12 @@ def test_the_per_surface_prose_cites_are_the_probe_tables_own_numbers():
     `extractor_v2.py` moves the prose with it, and nothing enforced it: the table
     was re-derived for the flag-on cause while the paragraph around it kept the
     pre-insertion numbers, so the bundle argued from `vet_enabled` at `:8683` and
-    then cited `:8684`/`:8806` for gates that had moved to `:8771`/`:8893`.
+    then cited `:8684`/`:8940` for gates that had moved to `:8771`/`:8893`.
 
     Each site is read out of the TREE by `_EXTRACTOR_SITES` (`_extractor_cite` /
     `_extractor_items_gate`), so this is a cross-artifact check between two things
     that must agree — never a third typed table. Non-vacuity, measured at
-    `7b6b2180f`: the pre-fix README carried `:8565`/`:8616`/`:8684`/`:8806` and
+    `7b6b2180f`: the pre-fix README carried `:8565`/`:8616`/`:8684`/`:8940` and
     `:8965`/`:8975`, and this leg reds on every one of them, because the derived
     numbers (`:8652`, `:8703`, `:8771`, `:8893`, `:9052`, `:9062`) appear nowhere
     in it. It also reds if a site is cited by its RANGE START only while the

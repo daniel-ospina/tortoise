@@ -47,7 +47,13 @@ THE FOUR PROPERTIES, AND WHERE EACH LIVES
    schema declares a column for it and does not refuse it. The property→column
    decision is **read from disk** — the schema (#7968) and the placement table
    (#7955) — never restated here, so a new column is a loud failure rather than
-   a silent drop.
+   a silent drop. ⛔ **One declared NARROWING (#10853):** an EPISODIC Source —
+   EITHER identity arm, `_EPISODIC_SOURCE_URL_PREFIX` or
+   `_EPISODIC_SOURCE_KIND` — never carries the COLUMNS in
+   :data:`_EPISODIC_SOURCE_PROSE_COLUMNS` (`summary`, `_search_text`; graph
+   property `_searchText`) onto its node, because §9.1/D1 places captured turn
+   text in the record and never on a graph node — see that table for the rule,
+   its bound, and its costs.
 3. **Rebuildable from the record alone.** The plan is a pure function of the
    record view: same view ⇒ same statements (idempotent), and the written field
    set equals the record view's field set exactly (never a superset). ⚠️ One
@@ -76,6 +82,36 @@ THE FOUR PROPERTIES, AND WHERE EACH LIVES
    pack folds, an `EntityMutated` state op, and the CREATION record), so the
    field is covered on every writer the record can carry — with the residues the
    table names (birth-on-ON-MATCH, ordering, ambiguous names, a null clear).
+   A **fourth** declared exception is :data:`_EPISODIC_SOURCE_PROSE_COLUMNS`
+   (#10853), and unlike the three above it narrows the field set instead of
+   widening it: an EPISODIC Source's `summary` and `_search_text` columns
+   (graph property `_searchText`) are §9.1/D1 turn prose, the record keeps them
+   and the cache declines them. Three costs, named here and at that table rather
+   than implied:
+
+   * the **journal fold** still projects the value until #10000's capture-side
+     change lands, so the two rebuild paths disagree on that one column until
+     then — in the ruling's direction, and converging with it;
+   * **graph-side FTS** over a session Source's own utterances goes with the
+     prose. The value survives in the record and is retrievable by a column read
+     (`record_serve.read_node`, `record-text`); there is no record-side text
+     INDEX;
+   * **`record-reconcile`** builds its RECORD side through this same projector,
+     so its truth side omits what the cache holds. The population is NOT
+     "legacy": at this head the capture still writes and journals the pair, so
+     every session this build captures is in it. That is why the pair is marked
+     CACHE-OWNED for an episodic Source
+     (:func:`episodic_source_prose_properties`, consumed by
+     `record_reconcile.scan_cache_view`) and counted under its own `graph_only`
+     bucket — visible, and not a divergence against a record that is correct.
+     The graph side is repaired by a record-sourced re-projection
+     (`record-restore` / `rebuild_from_record`, which re-materialise through this
+     projector) — **for a node the projection CREATES**. The write is additive
+     (`MERGE … SET n += $props`, :func:`node_statement`), so a node that ALREADY
+     carries the pair keeps it across a re-projection; this arm stops the pair
+     being re-written, it does not clear an existing one. Clearing a populated
+     cache's stale pair needs an explicit property clear, and the sweep is
+     #10000's capture change.
 4. **A cold region reads ``not-hot``, never ``empty``.** ``declaration_for``
    writes the known-hot set **after** the writes and as a function of what was
    materialized, so a record key the projection did not write is not claimed
@@ -145,6 +181,8 @@ __all__ = [
     "declaration_for",
     "declaration_is_sound",
     "declared_key",
+    "episodic_source_prose_properties",
+    "is_episodic_source_node",
     "node_from_row",
     "node_statement",
     "placement_columns",
@@ -1152,6 +1190,195 @@ def _scalar(value: Any) -> Any:
     return value
 
 
+#: ⛔ §9.1/D1 AT THE PROJECTION DOOR (#10853) — the columns an EPISODIC
+#: (`session:`) Source may **not** carry onto its node, however the row was
+#: written.
+#:
+#: WHY THIS IS HERE AND NOT ONLY IN THE CAPTURE. `sdk._session_source_metadata`
+#: derives a *summary* from the transcript's first substantive utterance, and the
+#: capture writes it on the session `:Source` (`s.summary=$sum`). #10000's ruling
+#: (§9.1/D1) is that captured turn text lives in the RECORD, not on a graph node.
+#: The capture side of that is #10000's own change. This table is the OTHER door:
+#: every record-sourced READ and rebuild goes through :func:`node_from_row` —
+#: `tortoise record-restore` and `rebuild_from_record` MATERIALISE a node with it,
+#: and `record_serve.read_node` answers the graph-engine-down read with
+#: the same map *because its contract is that the two cannot drift*. So a row
+#: written by a build that still placed the key would either re-materialise the
+#: prose **whatever build is reading it**, or make the served answer disagree
+#: with what a rebuild can carry — and nothing reds either way: a one-way
+#: divergence (`#10853`). Clearing the legacy rows would be a sweep that decays:
+#: at this head the capture still places the key, so the next capture of the same
+#: session writes the value straight back. A rule cannot decay.
+#:
+#: ⛔ THE PAIR IS ONE DATUM, which is why both COLUMNS are here (`summary`,
+#: `_search_text` — the graph property its mapping produces is `_searchText`). On
+#: the capture path there is no title, so `_source_search_text(summary=…)`
+#: resolves to the summary itself — dropping `summary` alone would leave the
+#: identical sentence on the node under `_searchText`, the "column next door" this
+#: module's own `_CONTENT_COLUMNS` note (record_projection) names as *"the SAME
+#: datum"*.
+#:
+#: ⚠️ WHAT THIS DELIBERATELY DOES NOT TOUCH. `topics` is the capture's word
+#: lexicon (its most frequent content words), not a transcript slice, and it
+#: survives; every non-episodic Source keeps both columns untouched — a
+#: document's `summary` is its own metadata and its `_searchText` is the shared
+#: title+summary+topics rule, so a guard that fired on every Source would
+#: un-index every document in the cache. The drop is a **projection** decision:
+#: the row is not mutated, so the record stays the authority for the value.
+#:
+#: ⚠️ THE THIRD COST, and it is an OBSERVATION instrument, where a permanent
+#: non-clean reads as noise: `python -m tortoise record-reconcile` builds its
+#: RECORD side through :func:`read_record_view` → `node_from_row`, so the truth
+#: side omits these two properties while the CACHE side holds them. That
+#: population is not "legacy" — at this head the capture still writes and
+#: journals them, so EVERY session this build captures would report
+#: `field_mismatches=2` forever. Left alone that is the class the reconciler
+#: itself grades P1 (*"a signal indistinguishable from noise is not
+#: observability"*), so the comparison is not left to carry it:
+#: :func:`episodic_source_prose_properties` and
+#: `record_reconcile.scan_cache_view` mark the pair CACHE-OWNED for an episodic
+#: Source, and the reconciler counts them under `graph_only` — visible, and not
+#: a divergence against a record that is correct. The repair for the graph side
+#: is a record-sourced re-projection (`record-restore` / `rebuild_from_record`,
+#: which re-materialise through this projector), then #10000's capture change.
+_EPISODIC_SOURCE_PROSE_COLUMNS: frozenset[str] = frozenset({
+    "summary", "_search_text",
+})
+
+
+#: The row-signals that make a Source EPISODIC, and they are TWO identity
+#: shapes — never a flag. This mirrors the repo's existing declaration of the
+#: same question rather than inventing a second one: `sdk.py` excludes document
+#: sources from its same-document review pool with exactly these two arms, and
+#: `session_source_migration._LEGACY_CANDIDATES` is the second arm's definition
+#: on the graph side. Both are cited there as *"the two session signals, both
+#: narrow enough to BE the identity"*.
+#:
+#: * `url LIKE 'session:%'` — the capture's own URL shape (`session:{id}`), the
+#:   prefix `_mint_source_stub` mints an episodic stub with, and the prefix
+#:   `derive_session_source_url` (file_indexer) lands on, so a migrated node
+#:   keeps it;
+#: * `source_kind = 'agentSession'` **on a separator-free bare-filename url** —
+#:   the pre-#4005 identity was `os.path.basename(ref.path)` (literally
+#:   `session.md`), and `_LEGACY_CANDIDATES` is its definition.
+#:
+#: ⛔ NEITHER FLAG IS A SIGNAL, and that is measured, not a preference — the
+#: three terms an earlier round of this change used all fire on DOCUMENTS, i.e.
+#: the mirror of the defect this table closes. `sdk.py` records the same lesson
+#: and its cost: keying on the flags *"silently disabled this exclusion on the
+#: corpus #9914 targets"*.
+#:
+#: * `source_kind = 'agentSession'` ALONE is not episodic: `file_indexer`
+#:   classifies a transcript FILE from its frontmatter (`sessionId` present →
+#:   `agent_session` → `CLASSIFIER_TO_SOURCE_KIND` → `'agentSession'`, pinned at
+#:   §6.2/I26) and writes it on a per-FILE `corpus://` permalink, so a transcript
+#:   document IS an `agentSession` Source. That is why the legacy arm ALSO
+#:   requires a separator-free url.
+#: * `is_episodic = TRUE` is not episodic either: the capture commit stamps it on
+#:   every EXTERNAL source of `payload.sources` (`hosted_api`, step 4), and
+#:   `graph-scripts/backfill_is_episodic.py` stamps it on every Source reachable
+#:   from a session point.
+#: * `session_id` is not episodic: it is a legitimate DOCUMENT coordinate
+#:   (`EventAPI.add_document` takes one; `tortoise/ingest.py` passes a
+#:   transcript's `sessionId` frontmatter into it).
+#:
+#: A guard keyed on any of the three dropped a real document's own `summary` —
+#: the exact outcome `_EPISODIC_SOURCE_PROSE_COLUMNS` forbids (*"a guard that
+#: fired on every Source would un-index every document in the cache"*). All
+#: three were caught by review before this landed and each has a NEGATIVE leg.
+_EPISODIC_SOURCE_URL_PREFIX = "session:"
+_EPISODIC_SOURCE_KIND = "agentSession"
+
+
+@lru_cache(maxsize=1)
+def _episodic_source_kind_property() -> str:
+    """The KIND's property spelling, DERIVED — and resolved at CALL time.
+
+    Derived for the same reason the prose set is: `is_episodic_source_node` reads
+    graph properties, and a hand-typed `sourceKind` would stop matching the row
+    predicate the day the placement re-spells it — a permanent false
+    `field_mismatches` no test would red.
+
+    ⛔ **NOT a module-level constant** (#10853 review P1). `canonical_property`
+    reaches the placement TABLE ON DISK (`docs/epics/…/02-identity-and-placement.md`),
+    which a wheel does not ship — so evaluating it at import made
+    `import tortoise.cache_projection` fail outright on an installed
+    distribution, and with it `tortoise.record_reconcile`, `tortoise.legacy_ids`
+    and the `record-reconcile` / `record-restore` verbs THIS change names as the
+    repair. Every other placement read in this module already resolves at call
+    time (`projected_columns`, `_props_from_row`); these follow that rule.
+    """
+    return canonical_property("source", "source_kind")
+
+
+def _is_episodic_source_row(row: Mapping[str, Any]) -> bool:
+    """Is this `public.source` row a captured session's Source?
+
+    The two identity arms are declared at :data:`_EPISODIC_SOURCE_URL_PREFIX`,
+    together with the three flag-based terms that look plausible and are NOT
+    signals. A NULL column is silence, never a negative, and a row that neither
+    arm names is a DOCUMENT — the safe answer: a missed legacy session keeps its
+    prose on a node (the pre-existing defect), while a false positive silently
+    strips a document's own metadata and un-indexes it.
+
+    ⚠️ BOUNDED RESIDUAL, stated rather than implied: arm 2 reads
+    `public.source.source_kind` HERE and `sourceKind` on a CACHE node
+    (:func:`is_episodic_source_node`), so the two agree only while the node still
+    carries the property. Where it does not, the record side declines the pair
+    while the reconciler still places it, so the pair is counted as a field
+    mismatch on top of whatever else that node is missing — a visible RED
+    (`field_mismatches` non-empty, `graph_only` empty) instead of the healthy
+    empty mismatches + 2 `graph_only` names, never a silent loss, and not
+    reachable through today's
+    writers
+    (the legacy population is *defined* by `sourceKind` on the node —
+    `session_source_migration._LEGACY_CANDIDATES` — and a record-sourced rebuild
+    writes `sourceKind` from the column). Fail-closed by direction, and left
+    named.
+    """
+    url = row.get("url")
+    if isinstance(url, str) and url.startswith(_EPISODIC_SOURCE_URL_PREFIX):
+        return True
+    return (row.get("source_kind") == _EPISODIC_SOURCE_KIND
+            and isinstance(url, str) and "://" not in url and "/" not in url)
+
+
+def is_episodic_source_node(props: Mapping[str, Any]) -> bool:
+    """The same two identity arms, read off a CACHE node (graph property names).
+
+    `_is_episodic_source_row` answers for a RECORD ROW (column names); this
+    answers for a node's property map, and it exists because the reconciler
+    compares node properties: it must classify the cache side's own key without
+    re-implementing the predicate. Two arms, never a flag — see
+    :data:`_EPISODIC_SOURCE_URL_PREFIX`.
+    """
+    url = props.get("url")
+    if isinstance(url, str) and url.startswith(_EPISODIC_SOURCE_URL_PREFIX):
+        return True
+    return (props.get(_episodic_source_kind_property()) == _EPISODIC_SOURCE_KIND
+            and isinstance(url, str) and "://" not in url and "/" not in url)
+
+
+@lru_cache(maxsize=1)
+def episodic_source_prose_properties() -> frozenset[str]:
+    """The narrowing in the CACHE's vocabulary — the GRAPH property names.
+
+    What :func:`tortoise.record_reconcile.scan_cache_view` must treat as
+    cache-owned for an episodic Source, so the reconciler reports it under
+    `graph_only` instead of counting it as a `field_mismatch` against a record
+    that is correct.
+
+    Derived, never typed: `canonical_property` is the one declaration of a
+    column's property name, so a hand-written `"_searchText"` here could drift
+    from it and the reconciler would then exclude a name no writer produces (a
+    silent no-match). Cached, and resolved at CALL time — see
+    :func:`_episodic_source_kind_property` for why a module-level evaluation is
+    forbidden here.
+    """
+    return frozenset(canonical_property("source", column)
+                     for column in _EPISODIC_SOURCE_PROSE_COLUMNS)
+
+
 def _props_from_row(table: str, row: Mapping[str, Any], *,
                     skip: frozenset[str] = frozenset()) -> dict[str, Any]:
     """Project a record row's columns + `props` tail into graph properties.
@@ -1167,13 +1394,17 @@ def _props_from_row(table: str, row: Mapping[str, Any], *,
     placed = placement_columns().get(table, {})
     refused = _refused(table)
     projected = projected_columns(table)
+    # §9.1/D1 (#10853): resolved ONCE per row, from the row itself.
+    episodic_source = table == "source" and _is_episodic_source_row(row)
     out: dict[str, Any] = {}
+    tail_keys: set[str] = set()
     for column, value in row.items():
         if column == "props":
             tail = value
             if isinstance(tail, str):
                 tail = json.loads(tail) if tail else {}
             if tail:
+                tail_keys = set(tail)
                 refused_tail = sorted(set(tail) & refused)
                 if refused_tail:
                     raise CacheProjectionError(
@@ -1185,6 +1416,11 @@ def _props_from_row(table: str, row: Mapping[str, Any], *,
                 out.update(dict(tail))
             continue
         if column in bookkeeping_columns(table) or column in skip:
+            continue
+        if episodic_source and column in _EPISODIC_SOURCE_PROSE_COLUMNS:
+            # ⛔ §9.1/D1: a session `:Source` never carries turn prose, whatever
+            # build wrote the row. See `_EPISODIC_SOURCE_PROSE_COLUMNS` for the
+            # rule, its pre-existing-capture cost, and its bound.
             continue
         if column in refused:
             # The EP carve-out and the projection-owned caches. Dropped BY NAME
@@ -1202,6 +1438,28 @@ def _props_from_row(table: str, row: Mapping[str, Any], *,
             f"refused by the schema, and not record bookkeeping — refusing to "
             f"drop it silently"
         )
+    if episodic_source and tail_keys:
+        # ⛔ THE OPEN-SET DOOR (#10853 review). `props` is written verbatim, so a
+        # row whose tail carries the pair would land it on the node and the
+        # guard's own claim — *"whatever build wrote the row"* — would be false
+        # on that door. Not reachable through today's writer (`record_projection`
+        # classifies both names as COLUMNS, so they never reach the tail), and
+        # exactly for that reason it is filtered here rather than assumed: a
+        # classification that moves is the #9710 class, and a guard that stops
+        # guarding without reddening is worse than no guard.
+        # ⚠️ BOTH spellings: the tail is an OPEN set keyed by whatever the payload
+        # said, so a `_search_text` tail key is the snake spelling of the same
+        # datum and would otherwise survive (`_search_text` IS a real column, so
+        # the tail can carry that spelling where it cannot carry `_searchText`).
+        # ⛔ AND IT UNDOES ONLY WHAT THE TAIL ADDED. Rebuilding `out` wholesale
+        # made this filter SUBSUME the column-loop guard above: deleting that
+        # guard reddened nothing at all (measured — 20 passed), so the two doors
+        # were one door and the mutation-check claim covered a branch that no
+        # longer mattered. Scoped by `tail_keys`, each door is independently
+        # exercised, which is the only way "each door is pinned" is true.
+        declared = episodic_source_prose_properties()
+        for name in tail_keys & (declared | _EPISODIC_SOURCE_PROSE_COLUMNS):
+            out.pop(name, None)
     return out
 
 
