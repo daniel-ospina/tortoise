@@ -520,14 +520,29 @@ def _resolve_repo(cwd: Path) -> str:
                 "unset GH_REPO rather than detaching a rail at an unknown target"
             )
         return repo
-    if out.returncode == 127:
-        # Names the failing COMMAND, the CAUSE and the REMEDY: a lane reading
-        # this must not have to guess whether the checkout or the tool is wrong.
+    if out.returncode == 127 and out.cause:
+        # cause is set ONLY by the arm that FABRICATED this run, so the binary
+        # really is not on `PATH`. Names the failing COMMAND, the CAUSE and the
+        # REMEDY: a lane reading this must not have to guess which is wrong.
         raise Refused(
             "could not resolve the repo from this checkout (`gh repo view` failed)"
             " — `gh` is not on PATH "
             f"({(out.stderr or 'gh: command not found').strip()}): pass --repo, or "
             "install the GitHub CLI"
+        )
+    if out.returncode == 127:
+        # ⛔ A REAL `gh` THAT RAN AND EXITED 127 IS NOT A MISSING BINARY (review,
+        # `#10777`). A fabricated run always carries a `cause`; a real one never
+        # does — so this arm is the only place a process's own 127 can land. The
+        # fleet's own `gh` shim exits 127 with a printed repair (`gh-shim: REFUSING
+        # to exec … — pass AGENT_GH_REAL`), and telling that operator "not on PATH —
+        # install the GitHub CLI" is a false diagnosis of a binary the same message
+        # proves was found and run.
+        detail = (out.stderr or "").strip().splitlines()
+        raise Refused(
+            "could not resolve the repo from this checkout (`gh repo view` exited 127"
+            + (f": {detail[-1]}" if detail else "")
+            + ") — the `gh` on PATH ran and refused; pass --repo, or repair that `gh`"
         )
     if out.returncode == 126:
         # Found but not runnable — a DIFFERENT remedy from "install the CLI", and
