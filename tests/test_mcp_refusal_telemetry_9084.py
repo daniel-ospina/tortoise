@@ -626,13 +626,15 @@ async def test_onboarding_state_without_team_context_is_recorded_as_a_failure(
     success in the sixth.
 
     #4282 Phase 3.2 removed the last SERVED witness (`tortoise_onboarding_state`
-    left the MCP surface), and every surviving caller of the helper now guards
-    `org_id is None` with its OWN literal before calling in — `tortoise_manage_sources`
-    answers at its first guard and never reaches `_sources_view`. So the helper's
+    left the MCP surface), and every surviving **tool** caller of the helper now
+    guards `org_id is None` with its OWN literal before calling in —
+    `tortoise_manage_sources` answers at its first guard and never reaches
+    `_sources_view`. The one surviving reader that DOES reach the branch is
+    `_sources_view()` itself, below. So the helper's
     branch has no dispatch-level caller left, and pinning it through a
     `tortoise_manage_sources` dispatch would assert a payload that dispatch
-    produced itself (measured: reverting `_SafeError` here leaves that shape
-    green). It is pinned where it IS reachable instead — `_sources_view()`, the
+    produced itself (measured: reverting `_SafeError` here leaves that dispatch
+    arm green). It is pinned where it IS reachable instead — `_sources_view()`, the
     one surviving reader — and the two halves are stated separately because they
     are two different producers:
 

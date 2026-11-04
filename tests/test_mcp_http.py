@@ -2789,7 +2789,7 @@ class TestToolCallAdmissionBoundary:
             # to carry here was `tortoise_onboarding_state`, which #4282 Phase 3.2
             # TOOK OFF the surface — it is now unregistered, i.e. this very case.
             # The hidden-but-callable property is pinned on a live mechanism by
-            # `test_a_hidden_tool_is_not_an_admission_error`, below.)
+            # `test_a_hidden_tool_is_not_an_admission_error`, above.)
             {"jsonrpc": "2.0", "id": 6, "method": "tools/call",
              "params": {"name": "tortoise_nonexistent_xyz", "arguments": {}}},
             # Tool-argument failures are FastMCP's, surfaced as isError results.
