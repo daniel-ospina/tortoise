@@ -220,7 +220,19 @@ def _autolink(text: str) -> str:
 
     def _repl(match: re.Match[str]) -> str:
         url = match.group("url")
-        stripped = url.rstrip(".,;:!?)]")
+        stripped = url.rstrip(".,;:!?]")
+        # ⛔ A trailing `)` is punctuation only when it CLOSES nothing. A URL whose own path carries
+        # an open paren legitimately ends in `)` (`…/wiki/Foo_(bar)`), and a blanket
+        # `rstrip(".,;:!?)]")` peels it and points the link at a DIFFERENT resource — measured
+        # (#10687 cycle 22). So the paren is peeled while, and only while, the parens are unbalanced.
+        while stripped.endswith(")") and stripped.count("(") < stripped.count(")"):
+            stripped = stripped[:-1].rstrip(".,;:!?]")
+        # ⛔ A scheme with no host (`https://`) is not a URL, and peeling it to `https://` to then
+        # wrap THAT emits `<https://>`, which is not a link at all. Keep the value verbatim and
+        # autolink it as-is: an autolink is not a bare URL (MD034), and `_cell`'s job is to preserve
+        # even a corrupt record readably, never to invent or delete part of it.
+        if not stripped.split("://", 1)[-1]:
+            return f"<{url}>"
         return f"<{stripped}>{url[len(stripped):]}"
 
     return _BARE_URL.sub(_repl, text)

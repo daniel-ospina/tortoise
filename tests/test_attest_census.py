@@ -1872,6 +1872,17 @@ def test_a_bare_url_becomes_an_autolink_and_is_not_double_wrapped():
     assert ac._cell(f"see {url}.") == f"see <{url}>."
     # A `comment:<id>` reference carries no URL, so the column is unchanged for the common shape.
     assert ac._cell("comment:6596200336") == "comment:6596200336"
+    # ⛔ A URL whose own PATH ends in a BALANCED paren keeps it. `rstrip(".,;:!?)]")` peeled the
+    # closing paren off `…/wiki/Foo_(bar)` and so pointed the link at a different page — measured
+    # (#10687 cycle 22). The peel is now conditional on the parens being unbalanced.
+    paren = "https://en.wikipedia.org/wiki/Foo_(bar)"
+    assert ac._cell(paren) == f"<{paren}>", "a balanced trailing paren belongs to the path"
+    # …and a paren that closes NOTHING is still peeled, together with any punctuation behind it.
+    assert ac._cell(f"({url})") == f"(<{url}>)"
+    assert ac._cell(f"{url}).") == f"<{url}>)."
+    # A scheme with no host is not a URL: nothing is peeled out of it, and it is still autolinked so
+    # a corrupt record cannot emit a bare URL (MD034) — the value survives verbatim instead.
+    assert ac._cell("https://.") == "<https://.>"
 
 
 @pytest.mark.skipif(not Path("/dev/full").exists(), reason="/dev/full is Linux-only")
