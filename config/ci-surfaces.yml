@@ -1648,6 +1648,19 @@ surfaces:
   core:
   - test_10017_cache_tier.py
   - test_10017_record_carrier.py  # #10017 step 3: the raw-turn carrier's declaration, its refusals, and the journal-vs-record agreement over a record-carried capture
+  # #10156: the `core` arm of the alert-register suite — DUAL-registered with `api`
+  # (below), and BOTH arms are load-bearing, so this is not a duplicate of it.
+  # The suite pins the register split, episode grouping, ack durability and the
+  # calibration table in `tortoise/abuse.py`, and `abuse.py` matches NO
+  # `SOURCE_PATTERNS` row — so an abuse.py-only diff resolves to `core` ALONE.
+  # `core` is the FALLBACK that a SOURCE_PATTERNS match REPLACES in `select()`
+  # (the #1349/#2938 silent-drop class, in its harmful direction), so an
+  # `api`-only row would leave the whole suite unrun on precisely the diff that
+  # can break it, while the required gate reported green. The `api` arm covers
+  # the other half: `tortoise/hosted_api.py` is an EXACT `api` match.
+  # `test_ci_selection.py::test_the_10156_alert_suite_is_selected_on_its_own_module`
+  # pins the two arms against drifting apart.
+  - test_10156_alert_registers.py
   - test_2351_claim_class.py
   - test_9555_narrative_cache_rebuild.py
   - test_9555_narrative_carrier.py

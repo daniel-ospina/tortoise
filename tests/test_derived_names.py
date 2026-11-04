@@ -491,8 +491,14 @@ def test_env_uri_assignment_uses_live_uri_helper(fname):
     test-prefixed path helper)."""
     import re as _re
     src = (_TESTS_ROOT / fname).read_text(encoding="utf-8")
+    # Both spellings of the raw-env read are refused: `os.environ.get(...)` AND
+    # the bracket form `os.environ[...]`. The bracket form was a measured hole
+    # (#10156 review P3): with only the `.get(` shape pinned, a
+    # `uri = os.environ["TORTOISE_DB_URI"]` followed by a declared
+    # `from_uri(uri)` left BOTH this pin and the census GREEN — a new site could
+    # DETACH the shared env-URI graph through an exemption the census grants.
     bad = [ln for ln, line in enumerate(src.split("\n"), 1)
-           if _re.search(r"(?<!_)\buri\s*=\s*os\.environ\.get\(\s*[\"']TORTOISE_DB_URI",
+           if _re.search(r"(?<!_)\buri\s*=\s*os\.environ(?:\.get\(\s*|\[)\s*[\"']TORTOISE_DB_URI",
                          line)]
     assert not bad, (
         f"{fname}: uri assignment from the raw env at L{bad} — must "

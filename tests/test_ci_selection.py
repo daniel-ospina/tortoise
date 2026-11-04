@@ -740,6 +740,46 @@ def test_the_9572_seed_surface_pins_are_selected_on_their_own_modules():
         )
 
 
+def test_the_10156_alert_suite_is_selected_on_its_own_module():
+    """#10156 review P2: the alert-register suite must run on `tortoise/abuse.py`.
+
+    The suite is DUAL-registered — `core` and `api` — and BOTH rows are
+    load-bearing. It pins the register split (an observation never renders as an
+    incident), episode grouping, ack durability and the detector calibration,
+    all of which live in `tortoise/abuse.py`. That module matches NO
+    `SOURCE_PATTERNS` row, so an `abuse.py`-only diff resolves to `core` ALONE,
+    and `core` is the FALLBACK that a SOURCE_PATTERNS match REPLACES in
+    `select()`. With the `api` row alone the suite was in NEITHER `tier1` nor
+    `surface_members(matched)` — measured before the `core` entry:
+    `_sel(['tortoise/abuse.py'])` answered `surfaces=['core']` with
+    `test_10156_alert_registers.py` ABSENT from `test_files`.
+
+    That is the #1349/#2938 silent-drop class in its harmful direction: a
+    follow-up that edits `_episode_acknowledged`, the prune gate, the register
+    map or `recent_alerts` would run `core` and never this suite, while the
+    REQUIRED `python-ci-gate` reported green — a false PASS.
+
+    Asserted on the FILE and the SELECTED SET, not on non-emptiness: a
+    `surfaces` check alone passes without the entry, which is exactly how the
+    hole survived the first fix.
+    """
+    guard = "test_10156_alert_registers.py"
+    for changed, surface in (
+            ("tortoise/abuse.py", "core"),
+            ("tortoise/hosted_api.py", "api")):
+        assert (REPO / changed).exists(), f"pinned file is gone: {changed}"
+        r = _sel([changed])
+        assert surface in r["surfaces"], (
+            f"{changed} selects {r['surfaces']}, not {surface} — the premise "
+            "of this pin changed; re-derive it"
+        )
+        assert guard in r["test_files"], (
+            f"{changed} does not select {guard} — the alert-register suite "
+            "sleeps on the one diff that can break the register split it "
+            f"exists to pin (selected: {r['test_files']})"
+        )
+
+
 def test_the_4282_durability_suite_is_selected_on_the_modules_it_guards():
     """#10053 review P2: a durability invariant must run on the modules it pins.
 
