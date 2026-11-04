@@ -222,7 +222,9 @@ def test_the_carrier_holds_the_redacted_text_not_the_raw_turn(captured):
     # property under test. ``github_token`` is the load-bearing word: the raw
     # credential is ``ghp_…``, so this word can only come from
     # ``[REDACTED:github_token]`` — and it survives the cap on this fixture (two
-    # words lead on frequency; it is the first of the count-1 ties).
+    # words lead on frequency; it is the SECOND of the count-1 ties — ``fine``
+    # sorts before it, so the margin is one word narrower than "first" would
+    # suggest).
     topics = record.get("topics") or []
     assert "github_token" in topics, (
         "the carrier's topics are not the redacted transcript's vocabulary — "

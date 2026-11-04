@@ -189,15 +189,31 @@ def test_the_guard_reds_on_the_pre_fix_derivation(sdk, monkeypatch):
     """NON-VACUITY against the real pre-fix code, not a hypothetical writer.
 
     ``816b37f1876``'s ``_session_source_metadata`` returned the transcript's
-    first substantive utterance VERBATIM — the route §9.1/D1 forbids. It is
-    monkeypatched in (the capture path resolves the module attribute at call
-    time) so this suite proves RED-before without a second checkout: the guard
-    must report the ``:Source`` that derivation produces.
+    first substantive utterance as ``summary`` — the route §9.1/D1 forbids — and
+    ``_source_search_text`` had no lexicon then (its rule was ``title or
+    summary``, and the capture passed the derived ``summary``), so **the same
+    sentence also landed in ``_searchText``**, the field the Source FTS index is
+    declared on (#3518). BOTH routes are reproduced here: patching only the
+    metadata function would leave the ``_searchText`` half — the half this
+    file's module docstring calls load-bearing — unconstructed, so the arm could
+    not show it reds.
+
+    Both are monkeypatched in (the capture path resolves the module attributes at
+    call time) so this suite proves RED-before without a second checkout: the
+    guard must report the ``:Source`` that derivation produces.
     """
     from tortoise import sdk as sdk_mod
 
+    #: The summaries the pre-fix derivation produced, in call order — the pre-fix
+    #: `_source_search_text` is handed `topics=` by the CURRENT call site, so the
+    #: pre-fix search text has to be recovered from here rather than recomputed.
+    derived_summaries: list[str] = []
+
     def pre_fix_derivation(transcript: str) -> tuple[str, list[str]]:
-        # Verbatim from `git show 816b37f1876:tortoise/sdk.py`.
+        # Verbatim from `git show 816b37f1876:tortoise/sdk.py`, the topic block
+        # INCLUDED: the pre-fix function returned COMPUTED topics, and a fake
+        # that returns `[]` would make the current capture derive
+        # `_search_text = None` — quietly deleting the route under test.
         if not transcript.strip():
             return "", []
         summary = ""
@@ -209,10 +225,31 @@ def test_the_guard_reds_on_the_pre_fix_derivation(sdk, monkeypatch):
                 break
         if not summary:
             summary = transcript.strip()[:200]
-        return summary, []
+        from collections import Counter
+        words = re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}", transcript.lower())
+        counts = Counter(w for w in words
+                        if w not in sdk_mod._SESSION_SOURCE_STOPWORDS)
+        topics = [w for w, _ in counts.most_common(6)]
+        derived_summaries.append(summary)
+        return summary, topics
+
+    def pre_fix_source_search_text(*, title: str | None = None,
+                                   summary: str | None = None,
+                                   topics: list[str] | None = None):
+        """``816b37f1876``'s rule: ``text = title or summary; return text or None``.
+
+        The pre-fix capture passed its derived ``summary`` (there was no
+        ``topics`` kwarg), so the utterance went into ``_searchText`` as well.
+        The current call site passes ``topics=``; the pre-fix prose is therefore
+        read back from the derivation above rather than recomputed.
+        """
+        text = title or (derived_summaries[-1] if derived_summaries else None)
+        return text or None
 
     monkeypatch.setattr(sdk_mod, "_session_source_metadata",
                         pre_fix_derivation)
+    monkeypatch.setattr(sdk_mod, "_source_search_text",
+                        pre_fix_source_search_text)
     session_id = "sess-source-prose-prefix-10000"
     _capture(sdk, session_id)
 
@@ -225,6 +262,27 @@ def test_the_guard_reds_on_the_pre_fix_derivation(sdk, monkeypatch):
         "the guard passed the PRE-FIX derivation — a guard that cannot red on "
         "the code it was written to police proves nothing about the fix")
     assert any("Source" in labels for labels, _ in offenders), offenders
+    # ⛔ THE `_searchText` HALF IS ASSERTED, NOT ASSUMED. The module docstring
+    # calls the indexed copy the load-bearing one (#3518), so this arm has to
+    # show the pre-fix capture actually CONSTRUCTED it — otherwise a fake that
+    # empties `topics` would red on `summary` alone and this test would still
+    # pass while the route it exists to police went unexercised.
+    #
+    # Read the node directly rather than through `_nodes_carrying`: that helper
+    # deliberately returns ONE offending property per node (it `break`s after the
+    # first hit), so a node whose `summary` matched first would never expose its
+    # `_searchText`.
+    indexed = [
+        props
+        for _labels, props in sdk._get_proj().g.query(
+            "MATCH (n:Source) RETURN labels(n), properties(n)").result_set
+        if PROSE_NEEDLE.lower()
+        in str((props or {}).get("_searchText") or "").lower()
+    ]
+    assert indexed, (
+        "the pre-fix arm did not reproduce the `_searchText` prose route — the "
+        "fake derivation or the `_source_search_text` patch is not faithful"
+    )
 
 
 def test_a_recapture_replaces_the_prose_a_pre_fix_write_left_behind(sdk):

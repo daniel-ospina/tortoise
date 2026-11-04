@@ -4118,7 +4118,9 @@ _SESSION_SOURCE_SUMMARY_PREFIX = "session capture topics: "
 #: i.e. the same measurable defect ``_SESSION_SOURCE_SUMMARY_PREFIX`` is kept out
 #: of ``_searchText`` to avoid (under the OR-union every such session would match
 #: a one-word source query for "user"). ``system``/``tool`` are reachable roles
-#: too (``_normalize_turn_role`` passes the role through, title-cased).
+#: too (``_session_llm_transcript`` title-cases the role into the line's
+#: speaker, which ``_session_source_metadata`` then folds via ``.lower()``;
+#: ``_normalize_turn_role`` only normalises None/non-strings and does no casing).
 _SESSION_SOURCE_FRAMING_TOKENS = frozenset({
     "user", "assistant", "speaker", "system", "tool",
 })
