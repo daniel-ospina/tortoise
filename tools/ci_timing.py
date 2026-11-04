@@ -2547,6 +2547,19 @@ def _declared_floors(manifest_text: str) -> dict[str, DeclaredFloor]:
         return {}
     floors = data.get("durations_floors") if isinstance(data, dict) else None
     if floors is None:
+        if isinstance(data, dict) and "durations_floors" in data:
+            # PRESENT but NULL. Absent is legal (every fixture that carries no such
+            # key keeps its output); a key that is THERE and declares nothing is a
+            # block the writer cannot read, and reading it as "absent" reverted every
+            # cap on the next sweep with no signal on either side. Same fail-closed
+            # rule the LIST shape got (#10575 review, F2), applied to the other face
+            # of the same container (#10575 review, P3).
+            raise DurationsBridgeError(
+                "`durations_floors` is present but declares nothing (null) — a "
+                "declaration block the writer cannot read must be REFUSED rather "
+                "than silently treated as absent, or every declared cap reverts on "
+                "the next sweep (state the declaration or drop the key, #9172)"
+            )
         return {}
     if not isinstance(floors, dict):
         # Fail CLOSED on the CONTAINER too: `durations_floors:` written as a LIST
