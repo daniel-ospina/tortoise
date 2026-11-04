@@ -96,6 +96,12 @@
         "client-build"
       ]
     ],
+    "closes-coherence": [
+      [
+        "closes-coherence.yml",
+        "closes-coherence"
+      ]
+    ],
     "dashboard-e2e": [
       [
         "ci.yml",
@@ -523,7 +529,7 @@
       ]
     ]
   },
-  "gate_digest": "7178da29d020f179ef84b284b73169c9ccdcf495108cf27bea907dcda2701a6c",
+  "gate_digest": "e222a0cae10746bab35981e6d177983566ac63609adb343e099282ab508fe3a7",
   "live_checked_at": "2026-09-29T02:35:26Z",
   "live_observed_contexts": [
     "ai-review-gate",
@@ -547,5 +553,5 @@
     "test-isolation"
   ],
   "settings_home_consistent": false,
-  "verified_at": "2026-10-28T02:23:15Z"
+  "verified_at": "2026-11-03T12:51:23Z"
 }
