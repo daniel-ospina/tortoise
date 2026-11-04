@@ -132,6 +132,91 @@ def test_gate_still_passes_a_bound_key_under_the_limit():
     _check_org_limit(dict(GRAPH_BOUND_ORG), "points")  # must not raise
 
 
+def test_a_FULL_default_graph_cannot_refuse_a_write_into_an_EMPTY_bound_graph():
+    """#8906 — the false-refusal direction, which no case ABOVE covers.
+
+    #8906's Test section asks for TWO directions. The cap-hole one IS covered
+    above: `test_gate_counts_the_custom_graph_a_bound_key_writes_into` seeds the
+    BOUND graph at `max_points` and requires 402, so a gate reading the other
+    graph admits and reds there. The false-refusal one is not covered **in this
+    file** — it IS covered repo-wide, at DOOR level, by
+    `tests/test_8906_points_gate_counts_write_graph.py`'s
+    `test_default_graph_full_write_graph_empty_is_ADMITTED` (#10724, landed on
+    `main` after this branch point): that file pins the doors, this arm pins the
+    omitted-`sdk=` fallback inside `_check_org_limit`. Every case above that
+    seeds a graph sets the DEFAULT graph to 0, so none of them can say what a
+    FULL counted graph does to a write into an EMPTY bound graph — and that is
+    the direction that froze the fleet (the counted graph sat at `max_points`,
+    so every REST write behind it was refused, while the bound graph kept
+    absorbing ~200 counted Points in 48 minutes; the refusal's `message` began
+    `Team points limit reached`).
+
+    DISCRIMINATION: SAME credential, SAME limit, and only the two graphs'
+    populations swapped — so only a gate that counts the graph the request
+    WRITES yields both verdicts. A gate counting the OTHER graph inverts both
+    phases: it raises 402 where admission is required (phase 1: default 5,
+    bound 0) and admits where 402 is required (phase 2: default 0, bound 5).
+
+    That is also the one mutation this arm uniquely reds: a gate counting the
+    org AGGREGATE (the sum, or the max, of both graphs) passes the cap-hole arm
+    above — sum 5 → 402 — and inverts only phase 1, so the aggregate reading of
+    the entitlement (the default **that** #8906's recorded decision OVERRIDES) is
+    red here and nowhere else in this file.
+
+    RED pre-fix, measured against the pre-#10637 `_check_org_limit` body as
+    `hosted_api.py` actually carried it, restored with a throwaway pytest
+    plugin:
+
+        enforce_org_limit(org, resource, slot_credit=slot_credit,
+                          sdk=(_org_sdk_for_credential(org)
+                               if resource in _TENANT_GRAPH_RESOURCES else None))
+
+    (`_TENANT_GRAPH_RESOURCES` is #10180's literal, which #10637 REPLACED with
+    `_GRAPH_SCOPED_QUOTA_RESOURCES = TENANT_GRAPH_RESOURCES` — the BARE name,
+    imported from `tortoise.quota` — grep `TENANT_GRAPH_RESOURCES`, not a line
+    number; same members. A restore must define the old name or use the new
+    one; the run reported here substituted the bare name.)
+
+    Note it PASSED an sdk — `_make_sdk(namespace=org_id)` for a graph-bound
+    credential — so this class is NOT found by grepping for calls that omit the
+    argument. (The module docstring above describes the ORIGINAL #4051 shape,
+    which did omit it; #10452 later passed a default-graph handle, and THAT is
+    the revision measured here. Same wrong graph, two mechanisms.)
+
+    Measured: this arm failed with `HTTPException: 402: Team points limit
+    reached (5)` — `_check_org_limit` re-raises `QuotaExceededError` as that
+    HTTPException, which is what this arm therefore observes — and the
+    cap-hole arm above reported `Failed: DID NOT RAISE HTTPException`.
+
+    GREEN after #10637, which counts through the same `_data_graph_name(org)`
+    the opener writes.
+
+    The five REST points doors are not enumerated here, and at the merge result
+    they no longer share this resolution: each passes its OWN write handle
+    (`sdk=`, #10724), so what this arm pins is the `sdk=None` fallback
+    `_check_org_limit` resolves through `sdk_factory` → `_gate_sdk_for` — the
+    arm a door that omits `sdk=` inherits. One contract
+    (`quota.enforce_org_limit`'s `sdk:`/`sdk_factory:` docs), two entry forms;
+    the doors' `sdk=` form is pinned at door level by
+    `tests/test_8906_points_gate_counts_write_graph.py`.
+    """
+    # Direction 1 (#8906's false refusal): default FULL, write graph EMPTY.
+    _seed(DEFAULT_GRAPH, 5)  # GRAPH_BOUND_ORG's max_points == 5
+    _seed(CUSTOM_GRAPH, 0)
+    assert _count(DEFAULT_GRAPH) == 5, "fixture: counted graph must be AT cap"
+    assert _count(CUSTOM_GRAPH) == 0, "fixture: the write graph must be empty"
+    _check_org_limit(dict(GRAPH_BOUND_ORG), "points")  # must NOT raise
+
+    # Direction 2 (#8906's cap hole): the same numbers, swapped.
+    _seed(DEFAULT_GRAPH, 0)
+    _seed(CUSTOM_GRAPH, 5)
+    assert _count(DEFAULT_GRAPH) == 0, "fixture: counted graph must be empty"
+    assert _count(CUSTOM_GRAPH) == 5, "fixture: the write graph must be AT cap"
+    with pytest.raises(HTTPException) as ei:
+        _check_org_limit(dict(GRAPH_BOUND_ORG), "points")
+    assert ei.value.status_code == 402, ei.value
+
+
 def test_org_wide_key_still_counts_the_default_graph():
     """Unchanged: an org-wide key (no `graph_id`) counts `org_<tid>`."""
     org_wide = {

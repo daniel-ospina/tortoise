@@ -14223,13 +14223,38 @@ def _seed_demo_graph(org_id: str, sdk=None) -> dict:
     #
     # ⚠️ NOT RETROACTIVE, the same posture as the `tags` note above: the sentinel
     # short-circuits before any write, so a demo graph seeded BEFORE this keeps
-    # its `epi_turn*` nodes. ⛔ RE-SEEDING DOES NOT REPAIR THEM — a re-seed
-    # writes nothing for those ids and deletes nothing (unlike the `tags` case,
-    # whose `MERGE` re-writes `p.tags`). Deleting those three nodes is the
-    # graph-side repair, and it is destructive, so it is out of this change's
-    # scope. Blast radius: opt-in sample content that `org.point_count`
-    # excludes — but the demo `:Session` is still returned by the session reads,
-    # so the pre-existing nodes stay reachable there and in search.
+    # its `epi_turn*` nodes AND its session's declared turn counter, which still
+    # reads 3 — the two are undone by DIFFERENT statements, and only the node
+    # delete is irreversible.
+    # ⛔ RE-SEEDING DOES NOT REPAIR THEM — a re-seed writes nothing for those
+    # ids and deletes nothing (unlike the `tags` case, whose `MERGE` re-writes
+    # `p.tags`). Deleting the sentinel and re-seeding, the idiom the note above
+    # documents, is WORSE than a no-op here: the seed then reaches the
+    # `:Session` write, sets `s.turn_count=0`, and leaves the three nodes — a
+    # Session declaring 0 beside three stored turns.
+    # ⛔ That half-state is QUIET, not loud, and that is why it is spelled out:
+    # `record_read.served_turn_count` refuses it on ONE arm only — a record that
+    # cannot be read at all (its stale-superset arm). An unarmed deployment
+    # publishes `turns: 0` BESIDE those three `turn_points` (a self-contradicting
+    # 200 — the shape the counter note above exists to eliminate), and an armed
+    # one serves the legacy 3. All three arms are pinned by
+    # `tests/test_10000_turns_record_only.py`'s predicate test, so this paragraph
+    # is falsifiable rather than prose an operator has to trust.
+    #
+    # The graph-side repair is BOTH halves in ONE step: `DETACH DELETE` the
+    # three `epi_turn*` nodes AND reset `s.turn_count=0` — or retire the demo
+    # `:Session` along with them. ⛔ That is a READ-BEFORE-WRITE rule, not two
+    # suggestions: doing the re-seed without the delete lands the quiet
+    # half-state above. The node delete ALONE is not the repair either: it
+    # leaves `declared=3, served=0`, so on an armed, journaling deployment the
+    # demo session's read refuses with `record_unavailable` (503), and on an
+    # unarmed one it serves `{"turns": 3, "turn_points": []}` — the exact split
+    # the counter note above exists to eliminate. Destructive, so it is out of
+    # this change's scope and belongs to the graph-side purge of §9.1's
+    # residual (a), `#10017`. Blast radius: opt-in sample content that
+    # `org.point_count` excludes — but the demo `:Session` is still returned by
+    # the session reads, so the pre-existing nodes stay reachable there and in
+    # search (with their counter, which is why the repair must move both).
 
     # ── Epistemic Layer — claims with evidence ───────────────────
     epistemic_points = _DEMO_EPISTEMIC_POINTS
@@ -36572,9 +36597,12 @@ async def public_demo(org: dict = Depends(get_current_org_gated)):  # noqa: B008
         # `_org_sdk` calls would split them, and the second call is a second
         # control-plane read when the auth hint is absent).
         _check_org_limit(org, "points", sdk=sdk)
-        # The shared demo seeder (extracted from /internal/demo) writes ~13
-        # Points through the handle passed in (it opens its own when called
-        # without one, e.g. from `/internal/demo`).
+        # The shared demo seeder (extracted from /internal/demo) writes ~10
+        # Points — the 9 seeded `:Point` nodes + `_demo_sentinel`, the same
+        # census the `point_count` below records — through the handle passed in
+        # (it opens its own when called without one, e.g. from
+        # `/internal/demo`). ⚠️ It said ~13 until #10675: that was true while
+        # the three `epi_turn*` nodes existed, and #10000 removed them (§9.1/D1).
         return {"existing": False,
                 "created": _seed_demo_graph(org["org_id"], sdk=sdk)}
 
