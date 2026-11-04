@@ -4288,7 +4288,17 @@ def test_a_sparse_lane_with_IN_CONE_WORK_too_still_refuses_the_partial_pin(
     (wt / "prune" / "b.txt").write_text("THE LANE'S ONLY COPY\n")
 
     out = _run_tool_with_shim(git_shim, "LW_OLD_GIT_ADD", "pin", cwd=wt, also=("LW_OLD_GIT_ADD",))
-    assert out.returncode != 0, f"a partial pin must not read as success: {out.stdout}"
+    # ⛔ TWO ACCEPTED OUTCOMES, EACH CHECKED FOR THE THING THAT MATTERS. `rc != 0` alone was not
+    # discriminating: when the shim's `--sparse` rejection does not fire, the pin is COMPLETE and
+    # exits 0 with an empty stderr, so the test went red for a reason unrelated to the tool and
+    # could not tell the two apart (measured, one run in thirteen). Assert the ARTIFACT.
+    if out.returncode == 0:
+        ref = pin_ref(out.stdout)
+        body = git("show", f"{ref}:prune/b.txt", cwd=hub).stdout
+        assert body == "THE LANE'S ONLY COPY\n", (
+            f"the pin kept HEAD's bytes for the out-of-cone path: {body!r}"
+        )
+        return
     assert "does NOT hold" in out.stderr, out.stderr
     assert "prune/b.txt" in out.stderr, out.stderr
     refs = git("for-each-ref", "--format=%(refname)", "refs/pi-lane-wip/", cwd=hub)
@@ -4355,4 +4365,67 @@ def test_recover_from_a_SUBDIRECTORY_path_still_warns_about_a_nested_repo(hub: P
     assert out.returncode == 0, out.stdout + out.stderr
     assert "nested repo" in out.stderr, (
         f"a subdirectory --path silenced the gitlink warning: {out.stderr!r}"
+    )
+
+
+def test_ONE_unreadable_path_does_not_disable_the_completeness_check(
+    hub: Path, git_shim: Path
+) -> None:
+    """A single `chmod 000` artifact must not switch the sparse cross-check off.
+
+    Measured on an old git: a sparse lane carrying one unreadable file printed
+    `pinned 3 file(s)` with a warning naming ONLY that file, while the pin held HEAD's bytes
+    for the out-of-cone path — `unreadable` disabled the one view that would have caught it,
+    and `recover` later reported success over HEAD's bytes.
+    """
+    wt = _sparse_lane(hub, "wt-sparse-unreadable")
+    # ⛔ AN IN-CONE EDIT TOO, or the pin is `worktree_clean` and the older
+    # `unreadable and worktree_clean` refusal fires first — masking the gate this test is about.
+    (wt / "keep" / "a.txt").write_text("keep v2 — the lane's work\n")
+    (wt / "prune").mkdir(exist_ok=True)
+    (wt / "prune" / "b.txt").write_text("THE LANE'S ONLY COPY\n")
+    blocked = wt / "root_owned.bin"
+    blocked.write_text("an artifact the lane does not care about\n")
+    blocked.chmod(0o000)
+    try:
+        out = _run_tool_with_shim(
+            git_shim, "LW_OLD_GIT_ADD", "pin", cwd=wt, also=("LW_OLD_GIT_ADD",)
+        )
+        if out.returncode == 0:
+            ref = pin_ref(out.stdout)
+            body = git("show", f"{ref}:prune/b.txt", cwd=hub).stdout
+            assert body == "THE LANE'S ONLY COPY\n", (
+                f"the pin kept HEAD's bytes while warning only about root_owned.bin: {body!r}"
+            )
+            return
+        assert "does NOT hold" in out.stderr, out.stderr
+        assert "prune/b.txt" in out.stderr, out.stderr
+    finally:
+        blocked.chmod(0o600)
+
+
+def test_a_dangling_symlink_does_not_refuse_a_genuine_pin(hub: Path) -> None:
+    """`hash-object <path>` on a dangling link FAILS, so the link must be hashed by its target.
+
+    With the link read through `hash-object`, the completeness cross-check saw a failed read
+    and refused a pin that held every byte (a false refusal, and one that pushes a lane into
+    `--force`). The correct comparison is the LINK TEXT, which is what git stores for mode
+    120000.
+    """
+    wt = clean_lane(hub, "wt-dangling-pin")
+    (wt / "tracked.txt").write_text("the lane's real work\n")
+    os.symlink("nowhere-at-all", wt / "dangling")
+    # ⛔ AND A LIVE LINK: `hash-object <path>` follows it and answers with the TARGET's
+    # bytes, which never equals the link-text blob — so without the symlink branch the
+    # comparison reports a false "does not hold" over a link the pin recorded perfectly.
+    os.symlink("tracked.txt", wt / "link")
+    status = git("status", "--porcelain", cwd=wt).stdout
+    assert "dangling" in status, status
+
+    out = run_tool("pin", cwd=wt)
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert "does NOT hold" not in out.stderr, out.stderr
+    ref = pin_ref(out.stdout)
+    assert (git("show", f"{ref}:dangling", cwd=hub).stdout) == "nowhere-at-all", (
+        "the pin must record the LINK TEXT for a dangling symlink"
     )

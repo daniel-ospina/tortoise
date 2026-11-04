@@ -740,7 +740,13 @@ def snapshot(root: Path, *, branch: str, note: str = "") -> tuple[str, list[str]
     # copy of an out-of-cone file pinned HEAD's bytes with an EMPTY stderr and exited 0, and
     # `recover` restored HEAD over the work. Gate on "the pin CLAIMS completeness" instead:
     # nothing proven skipped, and an index half captured (so the split claim is meaningful).
-    if not unreadable and index_tree:
+    # ⛔ ONE UNREADABLE PATH MUST NOT SWITCH THIS OFF EITHER. Measured: a sparse lane carrying
+    # one `chmod 000` artifact printed `pinned 3 file(s)` with a warning naming only THAT file,
+    # while the pin held HEAD's bytes for the out-of-cone path — `unreadable` disabled the only
+    # view that would have caught it. A path whose own bytes cannot be read is announced by name
+    # and never compared; every OTHER dirty path is checked. Only a missing index half skips
+    # this, because then the split claim it guards is not being made.
+    if index_tree:
         dirty_paths = _pin_lacks_change(root, tree, _paths_git_calls_dirty(root))
         if dirty_paths:
             shown = ", ".join(dirty_paths[:5]) + (" …" if len(dirty_paths) > 5 else "")
@@ -909,9 +915,14 @@ def _git_add(flags: list[str], *, cwd: Path, env: dict[str, str]) -> subprocess.
     return cp
 
 
-def _worktree_blob(root: Path, rel: str) -> str | None:
-    """The blob git WOULD store for the worktree path, or None when it cannot be read.
+def _worktree_blob(root: Path, rel: str) -> tuple[str | None, bool]:
+    """``(blob, read_failed)`` for a worktree path.
 
+    ⛔ TWO DIFFERENT "NO BLOB" OUTCOMES, AND THEY MUST NOT BE CONFLATED. A path the PIN SOURCE
+    cannot read at all (mode 000, other-user-owned) is a degraded state `pin` already announces
+    by name — refusing everything because of it breaks a lane over one artifact it does not
+    care about. A `git` READ that failed is an UNKNOWN about work that may be perfectly
+    readable, and that must fail closed. Only the second sets `read_failed`.
     ⛔ `hash-object <path>` FOLLOWS A SYMLINK, so it answers with the TARGET's bytes while the
     tree entry is mode 120000 holding the LINK TEXT — a symlink then reads as "the pin does
     not hold it" (a false refusal) or, for a dangling link, `fatal: could not open` and no
@@ -922,11 +933,20 @@ def _worktree_blob(root: Path, rel: str) -> str | None:
         try:
             target = os.readlink(os.fsencode(path))
         except OSError:
-            return None
+            return None, False
         cp = _git("hash-object", "--stdin", check=False, cwd=root, stdin=target)
-        return cp.stdout.strip() or None if cp.returncode == 0 else None
+        if cp.returncode != 0:
+            return None, True
+        return cp.stdout.strip() or None, False
+    try:
+        with open(path, "rb"):
+            pass
+    except OSError:
+        return None, False  # the PIN SOURCE cannot read it: announced, never compared
     got = _git("hash-object", "--", rel, check=False, cwd=root)
-    return got.stdout.strip() or None if got.returncode == 0 else None
+    if got.returncode != 0:
+        return None, True
+    return got.stdout.strip() or None, False
 
 
 def _pin_lacks_change(root: Path, tree: str, dirty: list[str]) -> list[str]:
@@ -942,13 +962,18 @@ def _pin_lacks_change(root: Path, tree: str, dirty: list[str]) -> list[str]:
         on_disk = root / rel
         if not os.path.lexists(on_disk) or on_disk.is_dir():
             continue  # a deletion is recorded by absence; nothing to compare
-        # ⛔ A FAILED READ IS NOT "THE PIN HOLDS IT". `continue` answered this function's
-        # question with False, so one unreadable `hash-object`/`ls-tree` re-opened the same
-        # false "clean — nothing to pin" at exit 0 (measured: no ref, the lane's bytes in no
-        # object). Treat the path as unproven — i.e. as work the pin may lack.
-        blob = _worktree_blob(root, rel)
+        # ⛔ A FAILED READ IS NOT "THE PIN HOLDS IT" — BUT AN UNREADABLE PATH IS NOT A
+        # COMPARISON EITHER. `continue` answered this function's question with False, so one
+        # failed `hash-object`/`ls-tree` re-opened the false "clean — nothing to pin" at exit 0
+        # (measured: no ref, the lane's bytes in no object). Counting it in `out`, though, made
+        # the CALLER refuse over one `chmod 000` artifact the pin already warned about by name
+        # — so its own bytes are announced there and this comparison simply does not
+        # contribute them. Every other dirty path is still compared.
+        blob, read_failed = _worktree_blob(root, rel)
+        if read_failed:
+            out.append(rel)  # an UNKNOWN about readable work: never a pass
+            continue
         if blob is None:
-            out.append(rel)
             continue
         want = _git("ls-tree", tree, "--", rel, check=False, cwd=root)
         if want.returncode != 0:
