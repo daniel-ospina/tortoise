@@ -495,15 +495,53 @@ def test_the_remedy_for_a_cross_repo_pin_names_the_repository_that_holds_it(hub:
             cwd=cwd,
         )
 
-    # From the CALLER's repo the ref is invisible — and it must SAY so, not answer "no pins".
+    # From the CALLER's repo the ref is invisible — and the message must SAY so, not send the
+    # operator to an advice that reads "no pins" as "the work is gone".
     wrong = restore(hub)
-    assert wrong.returncode != 0, wrong.stdout + wrong.stderr
-    assert "does not name a commit" in wrong.stdout + wrong.stderr, wrong.stdout + wrong.stderr
+    message = wrong.stdout + wrong.stderr
+    assert wrong.returncode != 0, message
+    assert "does not name a commit" in message, message
+    assert "IN THIS REPOSITORY" in message, (
+        f"the failure must qualify which repository `list --all` reads: {message}"
+    )
+    assert "--path" in message, f"and must name the flag that reaches the other repo: {message}"
+
+    # the advice the message gives, run where the reader is, must not read as "no pins exist"
+    advised = run_tool("list", "--all", cwd=hub)
+    assert advised.returncode == 0, advised.stdout + advised.stderr
+    assert "no lane has any wip pin" in advised.stdout, advised.stdout
 
     # From the repository the remedy names, it recovers the work.
     out = restore(other_hub)
     assert out.returncode == 0, out.stdout + out.stderr
     assert (lane / "big.py").read_text() == "the lane's work\n"
+
+
+def test_the_remedy_for_a_SAME_repo_pin_is_the_plain_one(hub: Path) -> None:
+    """Refs are REPOSITORY-scoped, so a hub pinning its own lane needs no `--path` and no note.
+
+    Gating the remedy on "are these two WORKTREE paths equal" misclassified the fleet's most
+    common shape — `pin --path <hub>/.worktrees/<lane>` run from the hub — as cross-repo: it
+    added an unnecessary `--path` and printed a note naming the LANE directory, i.e. the very
+    directory a disaster destroys, as the place to recover from. Measured: the hub's own
+    `show-ref` listed the ref and `recover` from the hub worked, so the note was false about
+    the repository the pin was in. The discriminator is whether the CALLER'S REPOSITORY can
+    see the ref.
+    """
+    wt = dirty_lane(hub)  # a linked worktree of the SAME repository
+    pinned = run_tool("pin", "--path", str(wt), cwd=hub)
+    assert pinned.returncode == 0, pinned.stdout + pinned.stderr
+    ref = pin_ref(pinned.stdout)
+
+    remedy = next(ln for ln in pinned.stdout.splitlines() if "recover with:" in ln)
+    assert "--path" not in remedy, f"a same-repo pin needs no --path: {remedy}"
+    assert "DIFFERENT repository" not in pinned.stdout, pinned.stdout
+
+    # …and the plain remedy is executable from where it is printed.
+    assert destroy(hub, wt).returncode == 0
+    out = run_tool("recover", ref, "--into", str(wt), "--branch", f"lane-{wt.name}", cwd=hub)
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert (wt / "big.py").read_text() == BIG
 
 
 def test_a_note_that_starts_with_the_trailer_words_survives(hub: Path) -> None:

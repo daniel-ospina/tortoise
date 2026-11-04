@@ -30,8 +30,10 @@ the working state into a REF (so `gc` cannot take it), which makes the loss
 would give, because the remover was never identified.
 
 ⛔ IT IS RECOVERABLE, NOT IMPOSSIBLE, AND NOTHING RUNS `pin` FOR YOU. There is no
-hook, no reaper integration and no dispatch wiring (measured: nothing outside
-`tools/lane_wip.py` and its test names this tool), and at least two deployed
+hook, no reaper integration and no dispatch wiring (nothing outside `tools/lane_wip.py`
+and its test **invokes** it; it IS registered in `config/ci-surfaces.yml` and in
+`tools/ci_selection.py`'s `CORE_ALSO`, and `tests/test_ci_selection.py` pins that), and
+at least two deployed
 removers DO force-remove dirty worktrees without pinning first. So a lane that
 never pinned still loses its work exactly as #10812 describes. The claim this tool
 supports is narrow and it is the true one: **a pinned lane's work survives any
@@ -1069,16 +1071,26 @@ def cmd_pin(args: argparse.Namespace) -> int:
         caller_root: Path | None = _repo_root()
     except (LaneWipError, GitFailed):
         caller_root = None  # outside a repo: certainly not the pin's repo
-    if caller_root is not None and caller_root == root:
+    # ⛔ GATE ON WHETHER THE CALLER'S **REPOSITORY CAN SEE THE REF** — never on whether the two
+    # WORKTREE paths are equal. Refs are REPOSITORY-scoped, not worktree-scoped, so a hub that
+    # pins `<hub>/.worktrees/<lane>` (the fleet's most common shape) holds the ref ITSELF.
+    # Comparing worktree paths classified that as "another repository" and printed a note
+    # naming the lane directory — i.e. the very directory the disaster destroyed — as the place
+    # to recover from (measured: hub pinned `--path .../lane`, hub's own `show-ref` listed
+    # `refs/pi-lane-wip/lane-7f4da997/1`, and `recover` from the hub worked at rc 0). Visibility
+    # is also the question the reader is actually asking.
+    holds_ref = caller_root is not None and (
+        _git("show-ref", "--verify", "--quiet", ref, check=False, cwd=caller_root).returncode == 0
+    )
+    if holds_ref:
         print(f"recover with: tools/lane_wip.py recover {ref} --into <path>{handle}")
     else:
-        # `--path <root>` makes `recover` read the ref from the repository that holds it,
-        # and the note says where to run it when `root` itself is the destroyed lane.
+        # `--path <root>` makes `recover` read the ref from the repository that holds it.
         print(f"recover with: tools/lane_wip.py recover {ref} --path {root} --into <path>{handle}")
         print(
-            f"  (this pin lives in {root} — the ref is readable from any worktree of THAT "
-            "repository, so run it there (`list --all` too); a bare `recover` from another "
-            "repository cannot see it)"
+            "  (this pin lives in a DIFFERENT repository from this one — `--path "
+            f"{root}` reads the ref from there; run it from any worktree of that repository, "
+            "and `list --all` from there too)"
         )
     return 0
 
@@ -1331,9 +1343,16 @@ def _resolve_commit(target: str, *, cwd: Path) -> str:
         )
     sha = _verify_opt(f"{target}^{{commit}}", cwd=cwd)
     if not sha:
+        # ⛔ `list --all` RUN WHERE THE READER IS answers "no lane has any wip pin" at rc 0 —
+        # the false "your work is gone" verdict this module forbids — while the pin sits in
+        # the repository that holds the PINNED WORKTREE. Unqualified, this message is a
+        # dead end for exactly the operator who mistyped the repo (measured cross-repo:
+        # rc 2 here, then the advised `list --all` -> rc 0 "no lane has any wip pin").
         raise LaneWipError(
             f"{target!r} does not name a commit in this repository — "
-            "`tools/lane_wip.py list --all` shows every pin"
+            "`tools/lane_wip.py list --all` shows every pin IN THIS REPOSITORY. A pin taken "
+            "with `--path <a worktree in another repo>` lives in THAT repository: pass "
+            "`--path <that worktree>`, or run this from there"
         )
     return sha
 
