@@ -134,6 +134,119 @@ def test_control_plane_pool_runs_calls_concurrently():
     assert len(set(names)) >= 2, f"pool serialised four calls onto {names}"
 
 
+# ── #10618 cycle-4: `drain()` — the completion barrier a harness quiesces with ──
+
+
+def test_drain_waits_for_running_work_not_for_free_workers():
+    """``drain()`` is a COMPLETION barrier: it returns only once work submitted
+    before it has actually run.
+
+    ⛔ A no-op per worker is the idiom that looks equivalent and MEASURED as
+    insufficient (the #10618 cycle-4 review's own suggested fix, falsified here):
+    with N workers a free worker consumes several no-ops while another still
+    holds a real item, so every no-op completes with real work still in flight.
+    These pools are process-lifetime (#10618/#3060), so work CAN outlive the
+    caller that submitted it — a harness that quiesces with the sentinel shape
+    leaks that work into the next test's process globals (#5049 rule 4).
+    """
+    pool = monitoring._SingleSlotWorker("test-drain-running", workers=4)
+    entered = threading.Event()
+    release = threading.Event()
+    drained = threading.Event()
+
+    def _slow():
+        entered.set()
+        release.wait(10)
+        return "done"
+
+    def _drain() -> None:
+        if pool.drain(timeout=10.0):
+            drained.set()
+
+    pool.submit(_slow)
+    assert entered.wait(5), "the pool never started the submitted callable"
+    drainer = threading.Thread(target=_drain, daemon=True)
+    drainer.start()
+    assert not drained.wait(0.3), (
+        "drain() returned while a submitted callable was still RUNNING — it is "
+        "counting only the queue, not in-flight work, which is the sentinel bug")
+    release.set()
+    assert drained.wait(10), (
+        "drain() never returned after the work completed — a completion barrier "
+        "that hangs is worse than none")
+
+
+def test_drain_cannot_be_left_waiting_by_a_fast_completing_submission():
+    """The in-flight register is populated BEFORE the enqueue.
+
+    The reverse order loses a race with a FREE worker: it can dequeue, run and
+    settle the callable before ``submit`` registers it, so ``_settle`` discards
+    nothing and the settled future is added afterwards — it then sits in the
+    register forever and every later ``drain()`` waits for work that already
+    finished (a teardown hang, not a slow test).
+
+    The race is forced deterministically here by completing the submission from
+    inside ``put_nowait`` — the exact instant a worker that won the race would —
+    without leaving it on the queue for `_loop` to trip over.
+    """
+    pool = monitoring._SingleSlotWorker("test-drain-race", workers=1)
+
+    def _racing_put(item):
+        fn, future = item
+        future.set_result(fn())
+        pool._settle(future)
+
+    pool._queue.put_nowait = _racing_put
+    pool.submit(lambda: None)
+    assert pool.drain(timeout=2.0), (
+        "a submission that settled before `submit` returned stayed in the "
+        "in-flight register — every later drain() would wait for work that had "
+        "already finished")
+
+
+def test_drain_is_not_held_open_by_a_refused_submission():
+    """A REFUSED submission never reaches a worker, so it can never run late —
+    it must not hold a drainer open (that would turn fail-fast refusal into a
+    teardown hang).
+
+    ⛔ The refusal must be ESTABLISHED, not hoped for (#10618 cycle-5 review
+    P2). `max_backlog` bounds the QUEUE, and `queue.Queue.get()` REMOVES the
+    item before the callable runs (`_SingleSlotWorker._loop`), so a
+    submit-immediately-after-submit test lets the worker free the slot first and
+    the second submission is ACCEPTED — a 5 s stall in the worker's `wait` and a
+    false RED on the premise assertion, decided by the GIL rather than by the
+    test. `started` makes it deterministic: once the worker has set it, it is
+    blocked inside the callable and cannot dequeue anything, so the backlog
+    filled below stays full.
+    """
+    tiny = monitoring._SingleSlotWorker("test-drain-refused", workers=1,
+                                        max_backlog=1)
+    release = threading.Event()
+    started = threading.Event()
+    assert tiny.drain(timeout=5.0)
+    accepted = tiny.submit(lambda: (started.set(), release.wait(5)))
+    assert started.wait(5), (
+        "the single worker never picked up the blocking submission, so the "
+        "backlog below was never proven full and the refusal was not "
+        "established")
+    # The worker is provably past its `_queue.get()` and parked, so the queue is
+    # empty: fill it to `max_backlog` while no worker can drain it.
+    queued = tiny.submit(lambda: release.wait(5))
+    assert tiny._queue.full(), (
+        "premise: the backlog must be FULL before the refusal below is "
+        "asserted, or this test measures the scheduling race it is meant to "
+        "remove")
+    refused = tiny.submit(lambda: None)
+    assert isinstance(refused.exception(), TimeoutError), (
+        "premise: the third submission must be REFUSED by the bounded backlog")
+    release.set()
+    assert tiny.drain(timeout=10.0), (
+        "a refused submission has no worker to run on, so it must not hold "
+        "drain() open")
+    assert accepted.done()
+    assert queued.done()
+
+
 def test_offload_records_op_and_duration():
     async def _run():
         return await monitoring.run_control_plane_call(lambda: "ok", op="unit")
