@@ -2748,6 +2748,58 @@ def consent_app_origin() -> str | None:
     return None
 
 
+def _is_attempt_key_segment(segment: str) -> bool:
+    """Does this RAW query segment name the attempt key — at all, blank or not?
+
+    The test is on the DECODED NAME, so a %-encoded spelling of the parameter
+    (``%61ttempt_key=``) is recognised rather than passing through as an unknown
+    segment.
+
+    ⛔ IT DELIBERATELY IGNORES THE VALUE, and that is the whole point (review P3,
+    #10487). The hops that read this parameter do NOT agree about duplicates —
+    and they do not even agree about WHICH query they are reading:
+
+    * ``start.ts`` uses ``url.searchParams.get()`` → the **FIRST** value;
+    * ``hosted_api.oauth_authorize`` uses ``request.query_params.get()``, and
+      Starlette's ``MultiDict.__getitem__`` returns ``_dict[key]``, which
+      ``setlist`` fills with ``values[-1]`` → the **LAST** value;
+    * the mint gate below used to decide from ``any(...)`` → *some* value;
+    * the rendered page's own inline script reads the **caller's original**
+      query (``ATTEMPT_KEY_PARAM`` carries only the NAME — "the server does not
+      re-embed it", `consent_page_html`) → the **FIRST** value of the query this
+      function was HANDED, not of the URL it emits.
+
+    A duplicate pair therefore makes the readers disagree about which key the
+    flow adopts, and the disagreement is not harmless: on the ONE caller that
+    can actually be handed one — the page's sign-in link (``consent_page_html``
+    → ``SIGNIN_URL``, whose ``raw_query`` is the caller's) —
+    ``attempt_key=&attempt_key=K2`` reads ``""`` for the page's first-value
+    reader and ``K2`` for the AS gate's last-value one. Dropping EVERY segment
+    that names the parameter and re-emitting exactly one makes first == last ==
+    any on the URL this function returns, so no reader of THAT URL can disagree
+    about which key the flow adopts.
+
+    ⛔ THIS DOES NOT FIX THE AS's OWN DUPLICATE GATE, and must not be read as
+    closing it. A pair is resolved by ``hosted_api.oauth_authorize``'s gate from
+    its LAST value before either branch is taken, so
+    ``attempt_key=&attempt_key=K2`` (blank FIRST) renders the PAGE — where the
+    page's own first-value read is still ``""`` and ``mint()`` aborts with no
+    sign-in link offered — while ``attempt_key=K2&attempt_key=`` (blank LAST)
+    takes the BOUNCE branch, where the collapse below adopts ``K2``. The page
+    branch ALSO calls this function (through ``consent_page_html`` →
+    ``SIGNIN_URL`` with the caller's raw query), and the collapse there is what
+    makes that sign-in link single-keyed — which is not the same thing as fixing
+    the page's own reader. The page-branch arm is a separate, PRE-EXISTING dead
+    end recorded in #10865, not closed by this hop.
+
+    The page's reader is the reason the collapse must keep a caller's real key
+    rather than always minting: it reads the input query, so the value this hop
+    emits has to be the value the flow already carries wherever one exists.
+    """
+    name, _sep, _value = segment.partition("=")
+    return unquote_plus(name) == CONSENT_ATTEMPT_KEY_PARAM
+
+
 def consent_bounce_url(app_origin: str, raw_query: str) -> str:
     """The app-owned sign-in leg for an authorize request this server will not
     render: ``{app}/auth?next=/api/consent/start?{raw}``.
