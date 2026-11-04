@@ -193,8 +193,20 @@ def test_a_breached_write_ships_a_retry_rule_not_a_fabricated_recipe():
     assert "converges" in safe["retry_rule"]
 
 
-def test_retry_safe_is_derived_from_the_registry_not_a_second_list():
-    """The retry-safety verdict is the registry's, not a second hand-kept list.
+def test_the_three_declared_tools_get_the_verdicts_10849_measured():
+    """The three resolvable declarations produce the verdicts #10849 measured.
+
+    ⛔ NAME SCOPED TO WHAT THIS ASSERTS, on purpose. It was
+    `test_retry_safe_is_derived_from_the_registry_not_a_second_list`, which the
+    body never demonstrated: three fixed values are exactly what a hard-coded
+    `{"tortoise_create_point": True, "tortoise_checkpoint": True,
+    "tortoise_create_source": True}` table returns, so the name promised
+    derivation the assertions did not test (a reviewer showed the test still
+    passing with `_write_retry_safety` replaced by such a table). That promise now
+    belongs to `test_the_verdict_FOLLOWS_a_flipped_registry_entry`, which flips a
+    registry declaration and requires the verdict to follow — and this test keeps
+    its literals, cross-checked against the real registry below so they cannot
+    silently go stale.
 
     #10849's measured asymmetry, now machine-readable at the call site:
     ``create_point`` dedups on ``(pointKind, content_hash)``, so a props-free
@@ -209,7 +221,8 @@ def test_retry_safe_is_derived_from_the_registry_not_a_second_list():
 
     (The FAIL-CLOSED half — an unresolvable name is never advertised as safe —
     is pinned separately in ``test_an_unresolvable_write_name_still_fails_closed``;
-    this test covers the three resolvable declarations.)
+    this test covers the three resolvable declarations, and DERIVATION is pinned
+    by ``test_the_verdict_FOLLOWS_a_flipped_registry_entry``.)
     """
     def safe(name):
         return _error(ms._wait_bound_refusal_result(name))["data"]["retry_safe"]
