@@ -12683,14 +12683,34 @@ class TortoiseSDK:
                 # correction, which is DESIGN ONLY and not shipped in this tree
                 # (`supersede_retroactively` has no SDK method and no registry
                 # row; #5362 waits on surface approval).
-                # ── #10368: ONE terminal read serves every leg of this fold ──
+                # ── #10368: ONE terminal read serves every REFUSAL in this fold ─
                 # `_lifecycle_terminal_marker` is the shared verdict over the
                 # id's whole fan-out (#7822 — one statement, one classifier),
                 # and the #10368 refusal needs the same verdict the #7819 one
                 # does. Read it ONCE, above both, instead of adding a second
-                # read path (#2892). Skipped when the call carries neither a prop
-                # this fold would APPLY nor an authored word (a bare dedup hit),
-                # so that path costs no extra query.
+                # REFUSAL read path (#2892). Skipped when the call carries
+                # neither a prop this fold would APPLY nor an authored word (a
+                # bare dedup hit), so that path costs no extra query.
+                #
+                # ⛔ MEASURED, and NOT "one read per fold" (#10368 review P2):
+                # the APPLIED path costs TWO. When the target is LIVE this fold
+                # writes through `update_point`, whose own #2498/#7819
+                # `_assert_lifecycle_guard` classifies the SAME fan-out again —
+                # 1 fan-out query before #10368 (that guard alone), 2 now (this
+                # read + that guard), pinned at the NUMBER by
+                # `test_an_applied_fold_costs_the_measured_lifecycle_reads`.
+                #
+                # Do NOT "restore" the single read by handing these rows to
+                # `update_point`'s guard: that guard would then classify a
+                # snapshot taken BEFORE the authored-word leg's
+                # `set_point_baseline` write and before anything else inside
+                # `update_point`, and a writer that trusts a pre-write snapshot
+                # is the defect the guard exists to catch (the same reason a
+                # database re-evaluates a predicate against the row version at
+                # UPDATE time instead of reusing the earlier search). The
+                # second read is the price of re-verifying at the write point.
+                # It is disclosed in the PR body, not hidden by a comment that
+                # overstates the saving.
                 #
                 # ⛔ The predicate is what this fold would APPLY, never the raw
                 # bag. `content_hash` is DERIVED (written near the top of this

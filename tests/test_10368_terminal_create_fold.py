@@ -262,3 +262,68 @@ def test_a_bare_dedup_hit_costs_no_lifecycle_read(sdk, monkeypatch):
     assert len(calls) == 1, (
         "a fold carrying a caller prop must READ the terminal verdict — that "
         "read is what refuses the write onto the settled claim (#10368)")
+
+
+def test_an_applied_fold_costs_the_measured_lifecycle_reads(sdk, monkeypatch):
+    """The APPLIED path's cost, measured — the comment above the fold claims ONE
+    read, and on the applied path that claim is not true.
+
+    `_lifecycle_terminal_marker` is hoisted so ONE read serves both refusals
+    (#10368), but when the target is LIVE the fold then calls `update_point`,
+    whose own #2498/#7819 `_assert_lifecycle_guard` classifies the SAME fan-out
+    again. Measured here rather than argued: the pre-#10368 tree paid that
+    guard read only (`1`), so an applied fold now costs `2` — one extra
+    `LIFECYCLE_FANOUT_QUERY` per dedup fold that actually writes, on the
+    re-ingest / self-host commit path this PR itself calls hot.
+
+    ⛔ Two-sided, and pinned at the NUMBER rather than at `>= 1`: dropping the
+    hoist reds nothing here (`2` merely becomes the guard's `1`), so a bare
+    inequality would let the refusals above lose their read and stay green.
+    The refused arm is pinned alongside it, because that is the arm the hoist
+    exists for: one read, no `update_point`, no write.
+
+    Why the double read is not collapsed into one (a fixer's option the #10368
+    review offered): handing this read's rows to `update_point`'s guard would
+    make the guard classify a snapshot taken BEFORE the authored-word leg's
+    `set_point_baseline` write and before anything else in `update_point`.
+    Re-verifying at the write point is the guard's whole value — the same
+    reason a database re-evaluates a predicate against the row version at
+    UPDATE time instead of trusting the earlier search — so the cost is the
+    price of the safety property, and it is DISCLOSED, not hidden.
+    """
+    from tortoise.live import LIFECYCLE_FANOUT_QUERY
+
+    proj = sdk._get_proj()
+    guard = type(proj.g)          # `_GuardedGraph` is __slots__-restricted
+    real_query = guard.query
+    reads: list[int] = []
+
+    def counting(inner_self, cypher, *args, **kwargs):
+        if cypher == LIFECYCLE_FANOUT_QUERY:
+            reads.append(len(reads))
+        return real_query(inner_self, cypher, *args, **kwargs)
+
+    content = _fresh_content("applied-cost")
+    pid = sdk.create_point("statement", content)["id"]
+    live = sdk.create_point("statement", content, dedup=True,
+                            custom_probe="x")
+    assert live["id"] == pid
+
+    monkeypatch.setattr(guard, "query", counting)
+
+    sdk.create_point("statement", content, dedup=True, custom_probe="x")
+    assert len(reads) == 2, (
+        "an APPLIED dedup fold must cost exactly the measured 2 fan-out reads "
+        f"(this fold's refusal read + update_point's own guard), got {len(reads)}"
+    )
+
+    sdk.retract_point(pid)
+    reads.clear()
+    refused = sdk.create_point("statement", content, dedup=True,
+                               custom_probe="x")
+    assert refused["id"] == pid
+    assert "terminal_fold_refused" in _advisory_codes(refused), refused
+    assert len(reads) == 1, (
+        "a REFUSED fold must cost exactly 1: the hoist exists so both refusals "
+        f"share one read and `update_point` is never reached, got {len(reads)}"
+    )
