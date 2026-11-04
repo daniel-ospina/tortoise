@@ -74,10 +74,25 @@ lifts it into the graded top 5. Every pool therefore carries its chunk shape
 (``raw``, reported per row as ``chunk_bearing``), and the verdict is keyed by
 shape rather than stated once. A single number here would be a claim about ONE
 shape dressed as a property of the arm — which is exactly what a fresh-context
-review caught in the first draft. ⚠️ The cap only bites where the ceiling is
-already past the metric's cut (window >= 7 at the shipped limit): at windows 3-6
-the pick is inside the top 5 on EITHER shape, for the ceiling's own reason, and
-on the chunk-bearing pools the cap merely adds the second pick.
+review caught in the first draft.
+
+⚠️ HOW FAR THE CAP REACHES, measured row by row rather than inferred from the
+ceiling (review cycle 15: the earlier "the cap only bites past the metric's cut"
+was false at windows 5 and 6). On the chunk-bearing pools, at ``limit=2``:
+
+* ``window = 3, 4`` — the cap changes NOTHING: pre-cap and post-cap ranks are
+  identical (``[2]`` and ``[3]``), exactly as on the chunk-free rows.
+* ``window = 5`` — the cap lifts the pick's READER RANK (``[4]`` -> ``[3]``);
+  both readings are already inside the top 5, so the graded count is unchanged.
+* ``window = 6`` — the cap puts the SECOND pick inside the top 5
+  (``[4, 5]`` -> ``[3, 4]``, graded 1 -> 2); the chunk-free row stays
+  ``[4, 5]`` / graded 1.
+* ``window >= 7`` — the cap is the ONLY reason any pick is graded: pre-cap
+  ``[5, 6]`` grades none, post-cap ``[3, 4]`` grades both.
+
+So the boundary the two shapes share is 3-6 (both graded, the ceiling doing the
+work for the first pick) and the boundary they do NOT share is 7+ (chunk-free:
+nothing graded; chunk-bearing: still graded) — where the cap is decisive.
 
 WHAT IT IS NOT
 --------------

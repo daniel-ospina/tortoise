@@ -427,6 +427,58 @@ def test_the_sweep_boundary_is_a_shape_property_not_a_sweep_property():
                 "here — this range belongs to the ceiling, not to the cap")
 
 
+def test_the_caps_reach_is_measured_at_each_window_not_inferred():
+    """⛔ THE CAP'S WINDOW THRESHOLDS, ROW BY ROW (review cycle 15).
+
+    An earlier draft said "the cap only bites past the metric's cut (window >= 7)",
+    which the receipt refutes at windows 5 and 6 — and it contradicted the
+    ``GEOMETRY`` comment two screens away, which said the cap decides whether the
+    SECOND pick is graded. Both were prose; this pin makes the thresholds read
+    from the rows so neither can drift back:
+
+    * w=3,4 — the cap changes nothing (pre-cap == post-cap ranks);
+    * w=5   — it lifts the READER RANK (4 -> 3), graded count unchanged;
+    * w=6   — it puts the SECOND pick inside the top 5 (4,5 -> 3,4; graded 1->2)
+              while the chunk-free row stays [4,5] / graded 1;
+    * w>=7  — it is the ONLY reason any pick is graded on a chunk-bearing pool.
+    """
+    receipt = json.loads(baseline.RECEIPT_PATH.read_text(encoding="utf-8"))
+    bearing = {name: {r["window"]: r for r in rows
+                      if r["placement"] == "tail"}
+               for name, rows in receipt["by_pool"].items()
+               if rows[0]["chunk_bearing"] and rows[0]["placement"] == "tail"}
+    free = {r["window"]: r for r in receipt["by_pool"]["issue_probe_4520"]
+            if r["placement"] == "tail"}
+    assert bearing and free
+
+    for name, rows in bearing.items():
+        for window in (3, 4):
+            assert (rows[window]["pick_ranks"]
+                    == rows[window]["pick_ranks_before_dedup"]), (
+                f"{name} w={window}: the cap moved a rank it cannot move — "
+                "there is nothing above the pick to remove yet")
+            assert (rows[window]["graded_by_recall_all_at_5"]
+                    == free[window]["graded_by_recall_all_at_5"]), (
+                f"w={window}: the two shapes must agree where the cap is inert")
+        # w=5: the rank moves, the graded count does not
+        before, after = rows[5]["pick_ranks_before_dedup"], rows[5]["pick_ranks"]
+        assert after != before and after[0] < before[0], name
+        assert rows[5]["graded_by_recall_all_at_5"] == 1, name
+        # w=6: the cap is what grades the SECOND pick
+        assert rows[6]["pick_ranks_before_dedup"] == [4, 5], name
+        assert rows[6]["pick_ranks"] == [3, 4], name
+        assert rows[6]["graded_by_recall_all_at_5"] == 2, name
+        assert free[6]["graded_by_recall_all_at_5"] == 1, (
+            "the contrast row: without the cap the second pick is NOT graded")
+        # w>=7: pre-cap grades nothing, post-cap grades both
+        for window in (7, SHIPPED_WINDOW, 13):
+            assert rows[window]["pick_ranks_before_dedup"] == [
+                window - 2, window - 1], (name, window)
+            assert rows[window]["graded_by_recall_all_at_5"] >= 1, (
+                f"{name} w={window}: the cap is the only reason this is graded")
+            assert free[window].get("graded_by_recall_all_at_5", 0) == 0, window
+
+
 def test_displacement_fields_are_read_only_where_they_are_expressible():
     """⛔ A SHALLOW CAPPED POOL CANNOT REPORT A DISPLACEMENT AT ALL
     (fresh-context review, finding 3).
