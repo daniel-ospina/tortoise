@@ -628,16 +628,51 @@ def test_self_test_passes_on_a_host_with_no_database(fixture):
     "the guard's tests failed" on exactly the boxes it runs on. This suite is hermetic,
     so the child must get the carve-out the documented commands already carry.
 
+    The docker-half's OTHER half of the declaration is supplied here too
+    (`TORTOISE_TEST_EXPECT_URI=1`, epic #1647 E2E-6): CI exports BOTH variables on the
+    shard that runs this file, and the URI gate is only satisfied when the child gets
+    the carve-out AND is not still told to expect a server.
+
     Pre-fix (no `TORTOISE_TEST_CARVE_OUT` passed to the child, and a URI-less env):
     the child session fails with `default pytest requires TORTOISE_DB_URI` -> non-zero.
     """
     r = guard(fixture, "--self-test",
               env={"TORTOISE_TEST_CARVE_OUT": "",  # falsy spellings do NOT opt in
                    "TORTOISE_DB_URI": "",
+                   "TORTOISE_TEST_EXPECT_URI": "1",
                    "PYTEST_ADDOPTS": _ONE_CASE})
     assert r.returncode == 0, r.stdout + r.stderr
     assert "TORTOISE_DB_URI" not in r.stdout + r.stderr, r.stdout + r.stderr
+    assert "TORTOISE_TEST_EXPECT_URI" not in r.stdout + r.stderr, r.stdout + r.stderr
     assert "1 passed" in r.stdout, r.stdout
+
+
+def test_the_self_test_scrubs_the_whole_backend_declaration_not_just_the_uri(fixture):
+    """CI-measured defect (2026-11-04, run 41897901625, shard `test (b)`): `_self_test`
+    popped `TORTOISE_DB_URI` and left `TORTOISE_TEST_EXPECT_URI=1` in the child's
+    environment. Two session-scoped autouse gates in `tests/conftest.py` read that pair
+    as ONE contract — P4 (`TORTOISE_DB_URI` unset -> fail unless the carve-out is opted
+    in) and E2E-6 (`EXPECT_URI=1` -> "this session MUST run against the server", which
+    fails when the URI is unset) — so removing the server while keeping the declaration
+    is a contradiction the child always loses. Result in CI: the guard's own hermetic
+    suite was reported RED on the docker-half and GREEN on every box without the pair,
+    which is how it reached a green review and a red check.
+
+    `EXPECT_URI` is the workflow's own `$GITHUB_ENV` spelling of the same gate
+    (`tools/skip-guard.py::_LANE_EXPECT_URI_ENV_ALIASES`), so both are pinned.
+
+    Pre-fix this exits 70 with the child session erroring at `tests/conftest.py:1791`
+    before a case runs; post-fix the child sees a URI-less, expectation-free env.
+    """
+    r = guard(fixture, "--self-test",
+              env={"TORTOISE_DB_URI": "",
+                   "TORTOISE_TEST_EXPECT_URI": "1",
+                   "EXPECT_URI": "1",
+                   "PYTEST_ADDOPTS": _ONE_CASE})
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "1 passed" in r.stdout, r.stdout
+    assert "TORTOISE_TEST_EXPECT_URI=1 but TORTOISE_DB_URI unset" not in (
+        r.stdout + r.stderr), r.stdout + r.stderr
 
 
 def test_a_red_self_test_is_70_never_the_post_failure_1(fixture, tmp_path):
@@ -648,13 +683,19 @@ def test_a_red_self_test_is_70_never_the_post_failure_1(fixture, tmp_path):
     The child suite is forced RED without touching the tool: `CI_CANCEL_GUARD_TOOL`
     points the case at a foil that always exits 0, so `test_current_head_cancel_is_refused`
     (expecting 3) fails. The carve-out is supplied HERE so this case discriminates the
-    exit-CODE mapping alone — the other case pins the carve-out propagation. Pre-fix: the
-    red child exits 1 and the tool forwards 1.
+    exit-CODE mapping alone — the other case pins the carve-out propagation.
+
+    `TORTOISE_TEST_EXPECT_URI=1` is supplied for the same reason: it is what CI's
+    docker-half exports, and without it this case reported `1 error` (a session gate,
+    not a red case) instead of the `1 failed` it asserts — the assertion was measuring
+    the environment, not the exit-code mapping (run 41897901625). Pre-fix: the red
+    child exits 1 and the tool forwards 1.
     """
     foil = tmp_path / "foil_guard.py"
     foil.write_text("#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n")
     r = guard(fixture, "--self-test",
               env={"TORTOISE_TEST_CARVE_OUT": "1",
+                   "TORTOISE_TEST_EXPECT_URI": "1",
                    "CI_CANCEL_GUARD_TOOL": str(foil),
                    "PYTEST_ADDOPTS": _ONE_FAILING_CASE})
     assert r.returncode == 70, r.stdout + r.stderr

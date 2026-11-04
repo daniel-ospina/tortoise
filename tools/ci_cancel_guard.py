@@ -423,6 +423,32 @@ def act(repo: str, run_id: int) -> tuple[int, str]:
 #: caller switching on the exit code unable to tell the two apart.
 SELF_TEST_FAILED = 70
 
+#: The runner's BACKEND DECLARATION, which the spawned `--self-test` child must not
+#: inherit. `tests/conftest.py` installs TWO session-scoped autouse gates over it and
+#: they are one contract, not two knobs:
+#:
+#:   * `TORTOISE_DB_URI` — epic #1647 P4: a URI-less session fails unless
+#:     `TORTOISE_TEST_CARVE_OUT` opts in (`tests/_embedded.py::_assert_p4_uri_required`);
+#:   * `TORTOISE_TEST_EXPECT_URI=1` (+ its `$GITHUB_ENV` spelling `EXPECT_URI`, the alias
+#:     declared in `tools/skip-guard.py::_LANE_EXPECT_URI_ENV_ALIASES`) — epic #1647
+#:     E2E-6: "this session MUST run against the server", which FAILS the session when
+#:     the URI is unset (`tests/conftest.py::_assert_backend_identity`).
+#:
+#: ⛔ Popping the URI and leaving EXPECT_URI in place is a CONTRADICTION, and CI's
+#: docker-half shard exports exactly that pair: it told the child "you must run against
+#: the server" while the same function removed the server. Measured 2026-11-04, run
+#: 41897901625, shard `test (b)`: the child session died at `tests/conftest.py:1791`
+#: with `TORTOISE_TEST_EXPECT_URI=1 but TORTOISE_DB_URI unset`, so the guard's own
+#: hermetic suite was reported RED — and the red-suite case below saw `1 error` where
+#: it asserts `1 failed` — while both cases passed on any box where neither variable is
+#: set. Same class, same remedy as the sibling launcher
+#: `tools/embedded_evidence.py::_child_env`, which pops the whole family.
+SELF_TEST_SCRUBBED_ENV = (
+    "TORTOISE_DB_URI",
+    "TORTOISE_TEST_EXPECT_URI",
+    "EXPECT_URI",
+)
+
 
 def _self_test() -> int:
     """Run this tool's own suite, and report a red suite as ITS OWN exit code.
@@ -436,12 +462,21 @@ def _self_test() -> int:
     exactly the boxes this tool runs on (round-6 review, P2). The author's own
     documented commands carry the same opt-in; this makes the built-in verb agree.
 
-    `TORTOISE_DB_URI` is POPPED rather than trusted: this file must not use a database,
-    and leaving a set-but-wedged URI in place would let the #6073 tripwire fail the
-    session, reintroducing the same misattribution from the other direction.
+    The backend declaration is POPPED rather than trusted: this file must not use a
+    database, and leaving a set-but-wedged URI in place would let the #6073 tripwire
+    fail the session, reintroducing the same misattribution from the other direction.
+
+    ⛔ AND THE URI'S *EXPECTATION* GOES WITH IT (`SELF_TEST_SCRUBBED_ENV`). Both halves
+    must be removed together: `TORTOISE_TEST_EXPECT_URI=1` is the docker-half's
+    "this session must run against the server" declaration, and a child that has the
+    server taken away while keeping the declaration fails the session at
+    `tests/conftest.py::_assert_backend_identity` — the same "environment gate presented
+    as the guard's own test failure" defect, arriving from the other side (CI-measured,
+    run 41897901625, shard `test (b)`).
     """
     env = dict(os.environ)
-    env.pop("TORTOISE_DB_URI", None)
+    for name in SELF_TEST_SCRUBBED_ENV:
+        env.pop(name, None)
     env["TORTOISE_TEST_CARVE_OUT"] = "1"
     proc = subprocess.run(
         [sys.executable, "-m", "pytest",
