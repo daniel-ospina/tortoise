@@ -1757,12 +1757,15 @@ def _excluded_writer_writes_the_default_graph(
     argument?" — NOT "does it touch a graph". The seam used to read the second
     answer out of the first, and that is false for
     `GRAPH_ARGUMENT_EXCLUDED_DEFAULT_TARGET`: `tortoise_pack_install`,
-    `tortoise_onboarding_demo_create`, `tortoise_onboarding_seed`,
     `tortoise_onboarding_github_index` and `tortoise_manage_sources` each write
     graph data into the org's DEFAULT graph, and each REJECTS a graph-bound key
     (`_reject_graph_bound_mcp_org_surface`), so `workspace-default` is the only
     arm they can be on. Leaving them undisclosed left the #10084 defect in place
     on every tool except the one the issue measured (review P2).
+
+    (#4282 Phase 3.2 removed `tortoise_onboarding_demo_create` and
+    `tortoise_onboarding_seed` from that frozenset along with the tools
+    themselves, so they are no longer members here.)
 
     `tortoise_manage_sources` is CONDITIONAL on its own ARGUMENTS, because only
     one branch writes graph data; see
@@ -7065,10 +7068,8 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
                 # surface), so it is tested FIRST — without the short-circuit
                 # every `tools/list` would still pay an `_org_onboarding_complete()`
                 # control-plane read to gate a population that cannot exist.
-                if (_ONBOARDING_TOOL_NAMES and onboarding_done
-                        and t.name in _ONBOARDING_TOOL_NAMES):  # noqa: SIM103
-                    return False
-                return True
+                return not (_ONBOARDING_TOOL_NAMES and onboarding_done
+                            and t.name in _ONBOARDING_TOOL_NAMES)
 
             return [t for t in tools if _visible(t)]
 

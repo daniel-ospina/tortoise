@@ -1056,7 +1056,7 @@ class TestOnboardingToolGating:
     #: `tortoise/hosted_api.py` — see `tortoise/tool_registry.py`). They are
     #: asserted ABSENT in every state: an unregistered name can never be
     #: listed, so this is a regression pin on the removal itself.
-    REMOVED_ONBOARDING_TOOLS = frozenset({  # noqa: RUF012
+    REMOVED_ONBOARDING_TOOLS = frozenset({
         "tortoise_onboarding_demo_create", "tortoise_onboarding_state",
         "tortoise_onboarding_github_connect", "tortoise_onboarding_github_status",
         "tortoise_onboarding_seed",

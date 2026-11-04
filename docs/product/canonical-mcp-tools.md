@@ -95,7 +95,9 @@ closes the tracked `github_documents` gap, which had no tool at all.
 
 `tortoise_onboarding_github_connect` is deliberately **not** folded in: it is the OAuth
 handshake, and the ruling's own *"credentials never pass through the model"* condition is
-what keeps it out of an agent-callable list/enable/disable operation.
+what keeps it out of an agent-callable list/enable/disable operation. **It has since left the
+MCP surface entirely (#4282 Phase 3.2)** — the handshake's only door is
+`POST /v1/onboarding/github/connect`, called from the dashboard.
 
 Permission is the condition the owner attached to the ruling and is enforced at the tool
 boundary: the entry declares `risk="admin"` (#4122 — `writes` is derived from it), so
@@ -218,7 +220,18 @@ do not: a warning that names nothing serves a caller who does not exist. The **9
 `tortoise_analyze`, `tortoise_backfill_v25`, `tortoise_onboarding_state`,
 `tortoise_onboarding_seed`, `tortoise_onboarding_demo_create`,
 `tortoise_onboarding_github_connect`, `tortoise_onboarding_github_status`, `tortoise_packs_list`,
-`tortoise_pack_install` (all nine live in `TOOL_REGISTRY`, measured 2026-10-27).
+`tortoise_pack_install` (all nine were live in `TOOL_REGISTRY` at the 2026-10-27 measurement).
+
+> ⚠️ **Measured again at #4282 Phase 3.2:** the five `run_onboarding` names in that list have
+> since been REMOVED — `tortoise_onboarding_state`, `tortoise_onboarding_seed`,
+> `tortoise_onboarding_demo_create`, `tortoise_onboarding_github_connect`,
+> `tortoise_onboarding_github_status` are no longer in `TOOL_REGISTRY` (76 live tools). The
+> remaining four — `tortoise_analyze`, `tortoise_backfill_v25`, `tortoise_packs_list`,
+> `tortoise_pack_install` — are still live. Their capabilities survive as hand-written REST
+> routes in `tortoise/hosted_api.py` (`POST /v1/demo`, `GET|PATCH /v1/onboarding/state`,
+> `POST /v1/onboarding/seed`, `POST /v1/onboarding/github/connect`,
+> `GET /v1/onboarding/github/status`); `tortoise/selfhost_api.py` serves only the state and
+> seed routes, so the other three are hosted-only.
 
 **What this does NOT authorise — stated because the answer was broader than the question.** The
 **18** existing `RETIRED_USE_INSTEAD` forward entries are a *different population*: every one of them

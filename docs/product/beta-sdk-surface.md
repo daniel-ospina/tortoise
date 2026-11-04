@@ -198,8 +198,9 @@ within the caller's own permission.
 Three things keep this narrower than the dropped container, and the ruling does not change any of
 them: it is **`risk="admin"`** (the `writes` permission is derived from that tier since #4122), so
 `_enforce_mcp_tool_scope` refuses a read-only key even for `action="list"`; it
-**never accepts a credential** (GitHub authorisation stays the separate
-`tortoise_onboarding_github_connect` handshake); and it **reverses no recorded default**
+**never accepts a credential** (GitHub authorisation stays the separate dashboard handshake,
+`POST /v1/onboarding/github/connect` — the `tortoise_onboarding_github_connect` MCP tool that
+used to front it left the surface in #4282 Phase 3.2); and it **reverses no recorded default**
 (`agent_sessions` stays ON — the `#1927` optional off-switch).
 
 This tool has **no SDK twin** (`sdk_method=""`), so it is declared here rather than as a row in the

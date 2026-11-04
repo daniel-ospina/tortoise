@@ -51,8 +51,11 @@ resume where the flow left off — onboarding is stateful and idempotent.
 serves the read — install first, see the self-hosted bullet below.)
 
 - **Hosted, MCP-connected agents:** call `tortoise_manage_sources(action="list")`
-  (the MCP read tool) — its `onboarding` key returns the FLOW projection verbatim,
-  the same payload `GET /v1/onboarding/state` serves. It returns the FLOW projection: `fork`
+  — its `onboarding` key returns the FLOW projection verbatim, the same payload
+  `GET /v1/onboarding/state` serves. ⏺ **A read-only (`graphs:read`) key is
+  REFUSED here:** the scope gate is per-TOOL, and this one is admin-tier
+  (`risk="admin"`, `writes=True`) even for `action="list"` — such a key must
+  use the REST read `GET /v1/onboarding/state` instead. It returns the FLOW projection: `fork`
   (`'self' | 'build' | null`), `status` (`'active' | 'complete'`), `compact`,
   `completed_steps[]` (canonical ids: `team-named`, `connection-written`,
   `harness-connected`, `first-points-filed`, `decide-completed`,

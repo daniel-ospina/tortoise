@@ -215,13 +215,13 @@ not recorded here has no approval behind it, and the carve-out does not cover it
 
 | Tool | Does | Reaches | Used by | Recomm. | Status and rationale |
 |---|---|---|---|---|---|
-| `tortoise_query` | Query points by pointKind and/or property filters — structural exact-match retrieval for known shapes (Epic #888: paginated_query + query_points_by_tag merged in). Pagination vi… | query | never called, tooling, docs | **keep** | group: `query` · never called — not called over MCP, but used by tooling — removing it would break that |
+| `tortoise_query` | Query points by pointKind and/or property filters — structural exact-match retrieval for known shapes (Epic #888: paginated_query + query_points_by_tag merged in). Pagination vi… | query | agents, tooling, docs | **keep** | group: `query` · in use — called by agents |
 | `tortoise_belief_timeline` | Dated, ordered belief chain for a topic — decision Points with validFrom, NAND/CORRECTS links, superseded priors visible. | belief_timeline | never called, tooling, docs | **keep** | never called — not called over MCP, but used by tooling — removing it would break that |
 | `tortoise_expand_relationships` | Full relationship payload for ONE Point, incl. each related point's content (the expand side of the #1353 list/expand split — search returns bounded state entries; use this to r… | expand_relationships | never called, tooling, docs | **keep** | never called — not called over MCP, but used by tooling — removing it would break that |
 | `tortoise_get_confidence` | Get EP confidence for a claim: {mean, variance, alpha, beta}. | get_confidence | never called, tooling, docs | **keep** | never called — not called over MCP, but used by tooling — removing it would break that |
 | `tortoise_get_source_reliability` | Derive a Source's reliability (0-1) — query-time, cache-consistency-checked. NOTE: refreshes the reliability cache on the Source node (write-through projection), so not read-only. | get_source_reliability | never called, tooling, docs | **keep** | never called — not called over MCP, but used by tooling — removing it would break that |
 | `tortoise_recall` | Epistemic recall — four intents via mode (preset + override). mode='state' (UC1): current high-confidence state — multiplicative confidence gate (score = relevance^a × confidenc… | recall_state | never called, eval-harness, tooling, docs | **keep** | never called — not called over MCP, but used by eval-harness, tooling — removing it would break that |
-| `tortoise_search` | Hybrid semantic search — FTS + vector + structural RRF fusion with EP confidence annotation. Use when matching by MEANING (natural-language query); for exact structural/filter q… | tortoise_fts_query | never called, eval-harness, tooling, docs | **keep** | never called — not called over MCP, but used by eval-harness, tooling — removing it would break that |
+| `tortoise_search` | Hybrid semantic search — FTS + vector + structural RRF fusion with EP confidence annotation. Use when matching by MEANING (natural-language query); for exact structural/filter q… | tortoise_fts_query | agents, eval-harness, tooling, docs | **keep** | in use — called by agents |
 | `tortoise_suggest_entry_points` | Entity resolution — NL query → matching entities from the graph. | suggest_entry_points | never called, tooling, docs | **keep** | never called — not called over MCP, but used by tooling — removing it would break that |
 | `tortoise_index_files` | Index a corpus directory of .md files as Sources + Events (D10: a document is a Source) (the unified index path — replaces tortoise_index_sessions + tortoise_ingest_corpus file… | index_directory | never called, tooling, docs | **keep** | group: `deprecated-index` · never called — not called over MCP, but used by tooling — removing it would break that |
 | `tortoise_create_point` | Create a Point node (statement, decision, vision, hypothesis, etc.). dedup=True (default): idempotent — returns existing Point if content matches. Declaring extractedFrom materi… | create_point | agents, tooling, docs | **keep** | in use — called by agents |
@@ -416,7 +416,7 @@ Grouped by **who reaches them**. This is the ranking that matters for cutting: e
 | `TortoiseSDK.diary_read` | reached by 1 registered tool(s): tortoise_diary_read | tooling, docs | **keep** | reached by 1 registered tool(s) |
 | `TortoiseSDK.diary_write` | reached by 1 registered tool(s): tortoise_diary_write | tooling, docs | **keep** | reached by 1 registered tool(s) |
 | `TortoiseSDK.dream` | reached by 1 registered tool(s): tortoise_dream | eval-harness, tooling, docs | **keep** | reached by 1 registered tool(s) |
-| `TortoiseSDK.dream_health_check` | reached by 1 registered tool(s): tortoise_dream_health | eval-harness, tooling, docs | **keep** | reached by 1 registered tool(s) |
+| `TortoiseSDK.dream_health_check` | reached by 1 registered tool(s): tortoise_dream_health | tooling, docs | **keep** | reached by 1 registered tool(s) |
 | `TortoiseSDK.poll_events` | reached by 1 registered tool(s): tortoise_events_poll | tooling, docs | **keep** | reached by 1 registered tool(s) |
 | `TortoiseSDK.expand_relationships` | reached by 1 registered tool(s): tortoise_expand_relationships | tooling, docs | **keep** | reached by 1 registered tool(s) |
 | `TortoiseSDK.file_decision` | reached by 1 registered tool(s): tortoise_file_decision | tooling, docs | **keep** | reached by 1 registered tool(s) |
@@ -448,7 +448,7 @@ Grouped by **who reaches them**. This is the ranking that matters for cutting: e
 | `TortoiseSDK.tortoise_fts_query` | reached by 1 registered tool(s): tortoise_search | eval-harness, tooling, docs | **keep** | reached by 1 registered tool(s) |
 | `TortoiseSDK.search_sessions` | reached by 1 registered tool(s): tortoise_search_sessions | tooling, docs | **keep** | reached by 1 registered tool(s) |
 | `TortoiseSDK.session_context` | reached by 1 registered tool(s): tortoise_session_context | eval-harness, tooling, docs | **keep** | reached by 1 registered tool(s) |
-| `TortoiseSDK.set_point_baseline` | reached by 1 registered tool(s): tortoise_set_point_baseline | eval-harness, tooling, docs | **keep** | reached by 1 registered tool(s) |
+| `TortoiseSDK.set_point_baseline` | reached by 1 registered tool(s): tortoise_set_point_baseline | tooling, docs | **keep** | reached by 1 registered tool(s) |
 | `TortoiseSDK.set_source_tier` | reached by 1 registered tool(s): tortoise_set_source_tier | tooling, docs | **keep** | reached by 1 registered tool(s) |
 | `TortoiseSDK.suggest_entry_points` | reached by 1 registered tool(s): tortoise_suggest_entry_points | tooling, docs | **keep** | reached by 1 registered tool(s) |
 | `TortoiseSDK.summarize_structure` | reached by 1 registered tool(s): tortoise_summarize_structure | tooling, docs | **keep** | reached by 1 registered tool(s) |
@@ -613,7 +613,7 @@ contradict.**
 So this is a live question, and the honest thing is to argue it rather than drop it. Here is the
 argument, both ways, with the weak parts named.
 
-**The case for pinning a small advertised set.** 75 of the 76 tools we advertise have no
+**The case for pinning a small advertised set.** 73 of the 76 tools we advertise have no
 call in our own tool-call log. Mainstream clients cap the tools they will show — a
 reported 40 in Cursor — so a client that caps there sees at most 40 of these 76, while we
 pay context for all of them on every turn. Every comparable we studied pins a smaller set,
