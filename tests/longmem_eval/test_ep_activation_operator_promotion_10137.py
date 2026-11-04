@@ -191,6 +191,70 @@ def test_an_all_draft_graph_still_promotes_its_operators(sdk):
     _assert_contributed(sdk, manifest, conclusion, oid)
 
 
+def test_the_gate_promotes_an_operator_once(sdk):
+    """The CAS clause IS the guard, and it is pinned HERE, on a real graph.
+
+    ``_PROMOTE_OPERATOR`` carries ``WHERE o.status = 'draft'`` so that a second
+    caller — a concurrent pass, or a re-entrant one — cannot flip an operator
+    that is already live, journal a second ``OperatorPromoted`` (which replay
+    would apply again) or double-count ``operators_promoted``. Deleting that
+    clause leaves the stub suite green, because ``tests/longmem_eval/
+    test_ep_activation.py``'s ``cas_lost`` models the CAS RESULT rather than the
+    query text. Measured without the clause on this engine: two ``True``
+    returns and two events for one operator.
+
+    Assertion is on the observable — one event, one count — not on the Cypher.
+    """
+    premise = _claim(sdk, "premise", "live")
+    conclusion = _claim(sdk, "conclusion", "live")
+    sdk.set_point_baseline(premise, 6.0, 2.0)
+    oid = sdk.create_operator(
+        "IMPL", premise, [conclusion],
+        direction="unidirectional", promote_source=False,
+    )["id"]
+
+    events: list[str] = []
+    inputs: list[str] = []
+    promoted: set[str] = set()
+    g = sdk._get_proj().g
+    real_emit = sdk._emit_event
+
+    def _counting_emit(type_, **kwargs):
+        # Count through the SDK's OWN emit surface: an event the gate never
+        # emits cannot be counted here, so this cannot pass by accident.
+        events.append(type_)
+        return real_emit(type_, **kwargs)
+
+    sdk._emit_event = _counting_emit
+    try:
+        first = epa._promote_operator_row(sdk, g, oid, promoted, inputs.append)
+        # ⛔ The second call gets a FRESH ``promoted_ops`` set, because the
+        # in-memory guard short-circuits before the query — passing the same set
+        # twice would make this test pass with the CAS clause deleted. A
+        # CONCURRENT writer is exactly the caller that has its own bookkeeping
+        # and can only be stopped by the persistent state on the node.
+        second = epa._promote_operator_row(sdk, g, oid, set(), inputs.append)
+    finally:
+        sdk._emit_event = real_emit
+
+    assert first is True, "the first promotion of a draft operator must win"
+    assert second is False, (
+        "a second promotion of an ALREADY-LIVE operator returned True — the "
+        "CAS clause (``WHERE o.status = 'draft'``) is gone, so a concurrent "
+        "pass would double-count and journal a duplicate OperatorPromoted "
+        "(#10137)"
+    )
+    assert _operator_status(sdk, oid) == "live"
+    assert len(inputs) == 2, (
+        f"the gate reported {inputs!r} endpoint id(s) across two calls; only "
+        "the WINNING call may report them"
+    )
+    assert events.count("OperatorPromoted") == 1, (
+        f"the gate journalled {events!r} — a lost CAS race must emit no second "
+        "OperatorPromoted, or JSONL replay applies the promotion again (#10137)"
+    )
+
+
 def test_the_gate_still_refuses_an_operator_with_a_draft_endpoint(sdk):
     """R16 is not widened by the sweep. ``activate_beliefs`` promotes every
     draft Point in phase 1a, so the public flow cannot reach this state — the
