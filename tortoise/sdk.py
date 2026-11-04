@@ -6875,13 +6875,33 @@ def _shape_or_refuse_caller_end(props: dict) -> dict | None:
     }
 
 
-def _with_end_receipt(reply: dict, receipt: dict | None) -> dict:
+def _with_end_receipt(reply: dict, receipt: dict | None, *,
+                      stored: bool = True,
+                      reason: str | None = None) -> dict:
     """Merge the #9202 shaping RECEIPT into a write-door reply (in-band).
 
     Returns ``reply`` unchanged when nothing was shaped, so a write that sent a
     real instant comes back byte-identical to before this door learned to shape.
+
+    ⛔ ``stored=False`` for an answer that did NOT write the shaped end — a
+    dropped dedup fold (#7819), a terminal-guard refusal, a write that matched no
+    point. Such a reply carries NO ``valid_to_shaped``: the receipt is documented
+    (manifest + ``docs/product/mcp-sdk-surface.md``) as echoing what the door
+    DID, so merging it onto a write that applied nothing would assert a stored
+    end beside the advisory that says nothing was applied (#9202 review F1-A).
+    The outcome is still counted and logged, as ``shaped_not_stored``, so the
+    measurement does not lose the caller's shape (#9202 review F1-B).
+
+    This function is the ONE place a shaping outcome is recorded, because it is
+    the only place both doors answer with their final outcome — the decision
+    (``validity.read_caller_end``) runs long before that and cannot know whether
+    the write landed.
     """
     if not receipt:
+        return reply
+    from tortoise.validity import record_shaped_end
+    record_shaped_end(receipt.get("sent"), stored=stored, reason=reason)
+    if not stored:
         return reply
     return {**reply, "valid_to_shaped": receipt}
 
@@ -9756,7 +9776,10 @@ class TortoiseSDK:
                             **_merge_advisories(
                                 self._temporal_not_applied_advisory(pid),
                                 _kind_layer_advisory(_layer_note, pid)),
-                        }, _end_receipt)
+                        }, _end_receipt,
+                            stored=False,
+                            reason="the dedup fold was dropped, so the window "
+                                   "is unchanged (#7819)")
                 if _has_key:
                     # One read serves BOTH #6110 audits below.
                     _existing = self.get_point(pid)
@@ -14008,8 +14031,23 @@ class TortoiseSDK:
         # readers, and the status then contradicts it). That predates this
         # change; the promote contract and its message are #432's.
         if _TEMPORAL_RESTAMP_PROPS & set(props):
-            self._assert_lifecycle_guard(id, method="update", missing_ok=True,
-                                         allow_operator=True)
+            try:
+                self._assert_lifecycle_guard(id, method="update",
+                                             missing_ok=True,
+                                             allow_operator=True)
+            except ValueError:
+                # #9202 review F1-B: the shaped end is NOT stored — the guard
+                # refuses before the journal append and every write. Record the
+                # outcome honestly (the caller's shape is still measured) and
+                # re-raise untouched: the refusal is the caller's answer, and it
+                # must not be re-worded by a shaping note.
+                if _end_receipt:
+                    from tortoise.validity import record_shaped_end
+                    record_shaped_end(
+                        _end_receipt.get("sent"), stored=False,
+                        reason="the point is terminal, so the update was refused "
+                               "(#7819)")
+                raise
 
         # Check if node carries :Object label (entity node with version tracking)
         has_object = proj.g.query(
@@ -14540,6 +14578,16 @@ class TortoiseSDK:
         # Dreaming (#85): property mutations can affect confidence.
         self._mark_dirty([id])
         result = self.get_point(id)
+        # #9202 review F1 (same class, third arm): the receipt echoes what the
+        # door DID, so it is only merged onto a reply that exists. An update that
+        # matched NO point (`missing_ok`) stored nothing, and a receipt on that
+        # `{}` would assert a canonical un-datable end on a row that is not
+        # there — measured on the pre-fix head as
+        # `update_point('pt_missing', validTo='TBD') == {'valid_to_shaped': …}`.
+        if not result and _end_receipt:
+            return _with_end_receipt(
+                result, _end_receipt, stored=False,
+                reason="the write matched no point, so nothing was stored")
         # The PROMOTE arm's record is NOT emitted here any more (#7951 2b): it
         # commits where the promote lands, inside the arm, so the tag sync and
         # `_mark_dirty` below it cannot strand a landed promotion. The unguarded

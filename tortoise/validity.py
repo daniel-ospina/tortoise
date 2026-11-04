@@ -101,7 +101,16 @@ _END_UNKNOWN_MARKER_SET = frozenset(END_UNKNOWN_MARKERS)
 #: is "the same refusal recurring for the same caller shape" — and only a count
 #: can show that. Process-local (the log line carries the value for anything
 #: durable); read it with ``dict(END_WRITE_OUTCOMES)``.
-END_WRITE_OUTCOMES: dict[str, int] = {"shaped": 0, "refused": 0}
+#:
+#: ``shaped`` counts ends that were SHAPED **and stored** — the receipt the reply
+#: echoes is a claim about what the record holds, so a decision the door never
+#: wrote must never land in it (a door that refuses, drops a dedup fold, or
+#: matches no point answers without storing: ``shaped_not_stored`` counts those).
+#: ``refused`` is counted where the refusal is RAISED, which is already the
+#: final outcome — a refused write stores nothing by construction.
+END_WRITE_OUTCOMES: dict[str, int] = {
+    "shaped": 0, "shaped_not_stored": 0, "refused": 0,
+}
 
 #: A date the read measure CANNOT order but whose INTENT is unambiguous: year
 #: first, 1-2 digit month/day, ONE consistent separator. ``_created_sort_key``
@@ -192,7 +201,7 @@ def effective_precision(bound: object, declared: object) -> str | None:
     and the #6140 ruling makes an unparseable START mean *no start was
     recorded*. A ``"day"`` claim about an absent datum is the defect #9201
     records; a ``"year"`` claim about it is the same defect one step further
-    (#9244 — the write boundary accepts a declaration on a PRESENT-but-orderable
+    (#9244 — the write boundary accepts a declaration on a PRESENT-but-unorderable
     bound, so a read path reporting that declaration would state a granularity
     for a start the ruling reads as never recorded, with no warning). Both the
     legacy default AND the declared token therefore sit behind the SAME
@@ -293,6 +302,53 @@ def _end_refusal(value: object, fault: str) -> ValueError:
     return ValueError(message)
 
 
+def record_shaped_end(value: object, *, stored: bool,
+                      reason: str | None = None) -> None:
+    """#9202: count and log ONE shaped caller end, saying what the door DID.
+
+    THE ONE HOME for the shaping outcome (#9202 review F1). ``read_caller_end``
+    decides; only the write door knows whether the shaped value was persisted,
+    so the count and the log are recorded HERE, from the door's own reply
+    construction — never beside the decision, where they were made before the
+    door had committed (a receipt for a store that never happened, and a count
+    that included refusals: the two instruments the ruling relies on, both
+    corrupted by one ordering mistake).
+
+    ``stored=True`` is the ordinary case: the value was shaped and written, so
+    the reply echoes the receipt and ``END_WRITE_OUTCOMES['shaped']`` moves.
+
+    ``stored=False`` is the honest third outcome — the door answered WITHOUT
+    storing (a dedup fold dropped on a terminal claim, a terminal guard refusal,
+    a write that matched no point). It is counted SEPARATELY
+    (``shaped_not_stored``) rather than added to ``shaped``, because the count
+    is the measurement of the vocabulary's reach and ``shaped`` must keep
+    meaning "the record now carries the canonical un-datable end". ``reason``
+    names why nothing landed, so the log cannot be read as a store.
+    """
+    if stored:
+        END_WRITE_OUTCOMES["shaped"] += 1
+        _logger.warning(
+            "validTo %r declares no date — stored as the canonical "
+            "UN-DATABLE end (no validTo + validToPrecision='unknown'), so "
+            "the record says 'ended, un-datable' instead of carrying text "
+            "no reader can order; the reply reports end_state='unknown' "
+            "(ONTOLOGY §4.7, #9202). Pass an ISO-8601 instant, the NUMBER "
+            "for an epoch, or None for an OPEN end, if that is what you "
+            "meant.",
+            value,
+        )
+        return
+    END_WRITE_OUTCOMES["shaped_not_stored"] += 1
+    _logger.warning(
+        "validTo %r declares no date — SHAPED, but NOT stored (%s), so the "
+        "record is unchanged and no shaping receipt is echoed: the reply "
+        "reports what actually happened (ONTOLOGY §4.7, #9202). Pass an "
+        "ISO-8601 instant, the NUMBER for an epoch, or None for an OPEN end, "
+        "if that is what you meant.",
+        value, reason or "the write did not land",
+    )
+
+
 def read_caller_end(value: object, declared_precision: object = None,
                     ) -> tuple[object, str | None]:
     """#9202: read a caller's ``validTo`` for INTENT on the way in.
@@ -337,6 +393,15 @@ def read_caller_end(value: object, declared_precision: object = None,
     caller supplies NOW, so a stored ``validTo = "TBD"`` keeps its literal end
     and keeps reading ``END_UNKNOWN`` (``end_state``). No backfill, no
     re-validation — a toaster that migrated rows would be a NEW decision.
+
+    ⛔ This function is a PURE DECISION. It neither counts nor logs: its caller
+    decides the shape and only the DOOR knows whether the shaped value was
+    actually written, so the count and the log belong where that is known
+    (``record_shaped_end``, called by the write reply; #9202 review F1). A
+    "stored as the canonical UN-DATABLE end" line emitted HERE was a claim made
+    before the door had committed — measured on the pre-fix head as a receipt
+    (and a count, and a log) on a dedup fold that was dropped (#7819), on an
+    update the terminal guard refused, and on an update that matched no point.
     """
     if value is None:
         return None, None          # absent = OPEN end, not an un-datable one
@@ -346,17 +411,6 @@ def read_caller_end(value: object, declared_precision: object = None,
         token = value.strip()
         if not token or token.lower() in _END_UNKNOWN_MARKER_SET:
             _refuse_concrete_precision_beside_marker(value, declared_precision)
-            END_WRITE_OUTCOMES["shaped"] += 1
-            _logger.warning(
-                "validTo %r declares no date — stored as the canonical "
-                "UN-DATABLE end (no validTo + validToPrecision='unknown'), so "
-                "the record says 'ended, un-datable' instead of carrying text "
-                "no reader can order; the reply reports end_state='unknown' "
-                "(ONTOLOGY §4.7, #9202). Pass an ISO-8601 instant, the NUMBER "
-                "for an epoch, or None for an OPEN end, if that is what you "
-                "meant.",
-                value,
-            )
             return None, value
         match = _DATE_VARIANT_RE.match(token)
         if match:

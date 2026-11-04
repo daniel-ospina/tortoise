@@ -1485,8 +1485,14 @@ def test_a_real_instant_and_a_readable_variant_are_accepted_silently(sdk):
     before = dict(END_WRITE_OUTCOMES)
 
     # A real instant is untouched — byte-identical, INCLUDING its spelling.
+    # (The zone-less date-time and numeric epoch 0 rows are deliberately kept
+    # from the pre-2026-10-26 write-door matrix: `0`/`False` take the
+    # `isinstance(bound, (int, float))` short-circuit in `_names_an_instant`
+    # BEFORE `_created_sort_key` is consulted, and a zone-less date-time is
+    # read locally (#3982) — an edited short-circuit that turned either into a
+    # refusal or a shaping would otherwise red no test at all. #9202 review F3.)
     for sent in ("2024-06-01", "2024-06-01T12:00:00+02:00",
-                 "2024-06-01T12:00:00Z", 1719792000):
+                 "2024-06-01T12:00:00Z", "2024-06-01T12:00:00", 1719792000):
         p = _make_point(sdk, content=f"real end {sent!r}", validFrom="2024-01-01",
                         validTo=sent)
         assert "valid_to_shaped" not in p, (
@@ -1497,6 +1503,25 @@ def test_a_real_instant_and_a_readable_variant_are_accepted_silently(sdk):
         )
         assert sdk.get_historical_knowledge(
             p["id"], "2024-05-01")["valid_point"]["end_state"] == "known"
+
+    # …and numeric epoch 0 IS 1970-01-01T00:00:00Z (#3985) — the window start
+    # is chosen so the pair itself is legal (`validTo=0` against a 2024 start
+    # would be an INVERTED window, refused by #5359 before this question
+    # arises).
+    p = _make_point(sdk, content="epoch 0 end", validFrom="1970-01-01",
+                    validTo=0)
+    assert "valid_to_shaped" not in p, (
+        "an epoch NUMBER names an instant — it is never shaped or refused: "
+        f"{p.get('valid_to_shaped')}"
+    )
+    assert _props(sdk, p["id"]).get("validTo") == 0, (
+        "epoch 0 must be stored as sent (the number, not a string)"
+    )
+    # It reads as a DATED end (1970-01-01T00:00:00Z) — never `unknown`, which is
+    # what a short-circuit regression would produce. (The date queried is inside
+    # the window: the end IS 1970-01-01, so a 2024 probe is correctly absent.)
+    assert sdk.get_historical_knowledge(
+        p["id"], "1970-01-01")["valid_point"]["end_state"] == "known"
 
     # …and representational variance is normalised WITHOUT comment.
     for sent, canonical in (("2024-3-1", "2024-03-01"),
@@ -1596,6 +1621,132 @@ def test_the_end_shaping_is_scoped_like_the_start_warning(sdk, caplog):
         legacy["id"], "2050-01-01")["valid_point"]["end_state"] == "unknown", (
         "both dialects must read identically: the shaped form and the legacy "
         "literal form are the same END_UNKNOWN evidence"
+    )
+
+
+def test_a_dropped_dedup_fold_gets_no_shaping_receipt(sdk, caplog):
+    """#9202 review F1-A — a receipt is a claim about the STORE, not the decision.
+
+    `create_point(..., validTo='TBD', dedup=True)` folding onto a TERMINAL point
+    shapes the value, and then the #7819 guard drops the WHOLE fold: the stored
+    row keeps the end it already had. On the pre-fix head the reply carried both
+    halves of a contradiction — `valid_to_shaped` ("the canonical un-datable end
+    was stored") beside the `temporal_not_applied` advisory ("NOTHING was
+    applied") — and the shaping was counted and logged as a store that never
+    happened. A caller keying on the receipt concludes the window they wrote is
+    in the record when it is not, which is trap 1 running in reverse.
+    """
+    import logging
+
+    from tortoise.validity import END_WRITE_OUTCOMES
+
+    dead = _make_point(sdk, content="terminal fold", validFrom="2024-01-01",
+                       validTo="2024-02-01")
+    sdk.retract_point(dead["id"])
+
+    before = dict(END_WRITE_OUTCOMES)
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="tortoise.validity"):
+        out = _make_point(sdk, content="terminal fold", validTo="TBD",
+                          dedup=True)
+
+    assert out["id"] == dead["id"], "fixture precondition: the dedup must hit"
+    codes = [a.get("code") for a in out.get("advisories") or []]
+    assert "temporal_not_applied" in codes, (
+        f"the fold drop must still be reported in the result: {out}"
+    )
+    assert "valid_to_shaped" not in out, (
+        "the fold was DROPPED, so nothing was stored — echoing a shaping "
+        "receipt beside 'nothing was applied' is a receipt that lies: "
+        f"{out.get('valid_to_shaped')}"
+    )
+    stored = _props(sdk, dead["id"])
+    assert stored.get("validTo") == "2024-02-01", (
+        f"the terminal claim's window must be unchanged: {stored}"
+    )
+    assert END_WRITE_OUTCOMES["shaped"] == before["shaped"], (
+        "a shaping the door did NOT store must not move the stored-shape "
+        f"count — the count is the measurement: {before} -> {END_WRITE_OUTCOMES}"
+    )
+    assert END_WRITE_OUTCOMES["shaped_not_stored"] == (
+        before["shaped_not_stored"] + 1), (
+        "…but the caller's shape is still measured as NOT stored: "
+        f"{before} -> {END_WRITE_OUTCOMES}"
+    )
+    said = [r.getMessage() for r in caplog.records
+            if "declares no date" in r.getMessage()]
+    assert len(said) == 1 and "NOT stored" in said[0], (
+        "the log must not assert a store that did not happen: "
+        f"{said}"
+    )
+
+
+def test_a_refused_terminal_update_does_not_claim_a_stored_shape(sdk, caplog):
+    """#9202 review F1-B — a refusal is not a store, and is not counted as one.
+
+    `update_point(terminal_id, validTo='TBD')` shapes the value and is then
+    refused by the #7819 terminal guard — BEFORE the journal append and every
+    write. On the pre-fix head the counter moved and the log said "stored as the
+    canonical UN-DATABLE end" for a call that stored nothing (the caller does see
+    the ValueError, so the count/log were the only lie).
+    """
+    import logging
+
+    from tortoise.validity import END_WRITE_OUTCOMES
+
+    live = _make_point(sdk, content="terminal update", validFrom="2024-01-01",
+                       validTo="2024-02-01")
+    sdk.retract_point(live["id"])
+
+    before = dict(END_WRITE_OUTCOMES)
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="tortoise.validity"):
+        with pytest.raises(ValueError, match="already terminal"):
+            sdk.update_point(live["id"], validTo="TBD")
+
+    assert END_WRITE_OUTCOMES["shaped"] == before["shaped"], (
+        "the refusal stored nothing, so it must not be counted as a shaped "
+        f"STORE: {before} -> {END_WRITE_OUTCOMES}"
+    )
+    assert END_WRITE_OUTCOMES["shaped_not_stored"] == (
+        before["shaped_not_stored"] + 1), (
+        "the refused shaping is still measured — as NOT stored: "
+        f"{before} -> {END_WRITE_OUTCOMES}"
+    )
+    said = [r.getMessage() for r in caplog.records
+            if "declares no date" in r.getMessage()]
+    assert len(said) == 1 and "NOT stored" in said[0], (
+        f"a refusal must not log a store: {said}"
+    )
+    stored = _props(sdk, live["id"])
+    assert stored.get("validTo") == "2024-02-01", (
+        f"the refused update changed nothing: {stored}"
+    )
+
+
+def test_an_update_matching_no_point_gets_no_shaping_receipt(sdk):
+    """#9202 review F1, third arm — no point, no receipt.
+
+    `update_point('missing', validTo='TBD')` is a documented no-op that answers
+    `{}` (`missing_ok`). On the pre-fix head that empty reply came back carrying
+    `valid_to_shaped`, i.e. the door asserted the canonical un-datable end on a
+    row that does not exist.
+    """
+    from tortoise.validity import END_WRITE_OUTCOMES
+
+    before = dict(END_WRITE_OUTCOMES)
+    out = sdk.update_point("pt_missing_9202", validTo="TBD")
+
+    assert out == {}, (
+        "an update that matched no point answers {} — it must not carry a "
+        f"shaping receipt for a store that never happened: {out}"
+    )
+    assert END_WRITE_OUTCOMES["shaped"] == before["shaped"], (
+        f"nothing was stored: {before} -> {END_WRITE_OUTCOMES}"
+    )
+    assert END_WRITE_OUTCOMES["shaped_not_stored"] == (
+        before["shaped_not_stored"] + 1), (
+        f"the shape is measured as NOT stored: {before} -> {END_WRITE_OUTCOMES}"
     )
 
 
