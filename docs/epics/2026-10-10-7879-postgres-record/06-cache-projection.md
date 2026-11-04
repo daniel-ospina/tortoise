@@ -201,7 +201,7 @@ projects.
 Why it lives here rather than only in the capture: every record-sourced read and
 rebuild goes through `cache_projection.node_from_row` — `tortoise record-restore`
 and `rebuild_from_record` materialise a node with it, and
-`record_serve.fetch_record_node` answers with the same map because its contract is
+`record_serve.read_node` answers with the same map because its contract is
 that a served node and a rebuilt node cannot drift. So a row written by a build
 that still placed the key either re-creates the prose **whatever build is reading
 it** or makes the served answer disagree with the rebuild — the one-way divergence
@@ -261,9 +261,10 @@ title-derived `_searchText`, silently un-indexing it in the cache.
 `tests/test_10853_session_source_prose.py`: the drop; the narrowness of the drop;
 the reconciler counting the declined pair as `graph_only` (not divergence) while a
 DOCUMENT with a differing summary is still counted field by field;
-ONE LEG PER ARM; the three NEGATIVE legs (a plain document, a transcript document
-carrying a `session_id`, a `corpus://` permalink stamped `agentSession`, a
-document stamped `is_episodic` — four rows, one per term that must not be a
-signal); and the record row that must not be mutated. Mutation-checked: each arm
-and the guard, removed one at a time, and each of the three flags, re-added one
-at a time, reds exactly the leg that names it.
+ONE LEG PER ARM; the FOUR negative legs (a plain-document baseline, then one per
+term that must not be a signal: a transcript document carrying a `session_id`, a
+`corpus://` permalink stamped `agentSession`, a document stamped `is_episodic`);
+the row/node predicate-agreement legs; the `props`-tail leg; and the record row
+that must not be mutated. Mutation-checked: each arm and the guard, removed one at
+a time, and each of the three flags, re-added one at a time, reds exactly the leg
+that names it.
