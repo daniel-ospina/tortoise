@@ -106,7 +106,15 @@ PROVISIONER_FAKE = textwrap.dedent("""\
                 printf '{"agentName":"auto-%s","gitHubUrl":"https://github.com/daniel-ospina/tortoise"}' "$i" \\
                     > "$dir/.runner"
                 if [ "${PROVISIONER_ALIVE:-1}" = "1" ]; then
-                    printf '%s\\n' "$dir" >> "$RUNNER_AUTOSCALE_ALIVE_DIRS"
+                    if [ -n "${PROVISIONER_ALIVE_DELAY_S:-}" ]; then
+                        # A listener that is STILL STARTING when the pass re-measures: the real
+                        # `Runner.Listener` is a process that comes up a moment after the install
+                        # returns, which is why the restart path bounds its own wait.
+                        ( sleep "$PROVISIONER_ALIVE_DELAY_S"
+                          printf '%s\\n' "$dir" >> "$RUNNER_AUTOSCALE_ALIVE_DIRS" ) &
+                    else
+                        printf '%s\\n' "$dir" >> "$RUNNER_AUTOSCALE_ALIVE_DIRS"
+                    fi
                 fi
                 if [ -n "${PROVISIONER_SHRINK_TO:-}" ]; then
                     # ⛔ PORTABLE, NOT `sed -i`. That form is GNU-only: BSD sed (macOS, the box the
@@ -123,6 +131,14 @@ PROVISIONER_FAKE = textwrap.dedent("""\
             fi
             i=$(( i + 1 ))
         done
+    fi
+    if [ -n "${PROVISIONER_RETIRE:-}" ]; then
+        # An UNRELATED listener exiting in the same interval (a job finishing on another repo's
+        # runner). The box total then does not move even though THIS install came up — the shape
+        # that must not be blamed on the install.
+        grep -vxF "$PROVISIONER_RETIRE" "$RUNNER_AUTOSCALE_ALIVE_DIRS" \
+            > "$RUNNER_AUTOSCALE_ALIVE_DIRS.tmp" 2>/dev/null || true
+        mv "$RUNNER_AUTOSCALE_ALIVE_DIRS.tmp" "$RUNNER_AUTOSCALE_ALIVE_DIRS"
     fi
     if [ -n "${PROVISIONER_BREAK_MEMINFO:-}" ]; then
         rm -f "$RUNNER_AUTOSCALE_MEMINFO"
@@ -225,6 +241,9 @@ class Env:
         provisioner_absent: bool = False,
         sudo_fails: bool = False,
         sudo_scoped: bool = False,
+        provisioner_alive_delay_s: str = "",
+        provisioner_retire: str = "",
+        online_wait_s: str = "0",
     ) -> None:
         self.tmp = tmp
         self.root = tmp / "opt"
@@ -265,7 +284,9 @@ class Env:
         self.svc_mark = svc_mark
         self.provisioner_absent = provisioner_absent
         self.sudo_fails = sudo_fails
-        self.sudo_scoped = sudo_scoped
+        self.provisioner_alive_delay_s = provisioner_alive_delay_s
+        self.provisioner_retire = provisioner_retire
+        self.online_wait_s = online_wait_s
         self.state_dir = tmp / "state"
         self.alive_file = tmp / "alive.txt"
         self.busy_file = tmp / "busy.txt"
@@ -328,7 +349,7 @@ class Env:
                 # argv so the case where `sudo -n` cannot run is exercised (it must never be read
                 # as "the restart failed").
                 **({} if self.sudo_fails else {"RUNNER_AUTOSCALE_NO_SUDO": "1"}),
-                "RUNNER_AUTOSCALE_ONLINE_WAIT_S": "0",  # no real sleeping in the suite
+                "RUNNER_AUTOSCALE_ONLINE_WAIT_S": self.online_wait_s,
                 "RUNNER_AUTOSCALE_POLL_S": "1",
                 "POOL_TSV": str(self.pool_tsv),
                 "RESTART_MARKER": str(self.restart_marker),
@@ -348,6 +369,8 @@ class Env:
                 "PROVISIONER_SHRINK_TO": "" if self.shrink_to is None else str(self.shrink_to),
                 "PROVISIONER_ADDS": str(self.provisioner_adds),
                 "PROVISIONER_ALIVE": str(self.provisioner_alive),
+                "PROVISIONER_ALIVE_DELAY_S": self.provisioner_alive_delay_s,
+                "PROVISIONER_RETIRE": self.provisioner_retire,
                 "PROVISIONER_BREAK_MEMINFO": "1" if self.provisioner_break_meminfo else "",
                 "PROVISIONER_RC": str(self.provisioner_rc),
             }
@@ -591,6 +614,41 @@ def test_a_provisioner_that_adds_nothing_does_not_report_convergence(env):
     # a memory-reserve stop also end `under-target` by design and must stay exit 0 (pinned below).
     assert rec["problem_kind"] == "no-listener", rec
     assert rec["_rc"] == 4, rec
+
+
+def test_an_unrelated_listener_exiting_is_not_blamed_on_the_install(env):
+    """The red is attributed to THIS SLOT, never to the box total.
+
+    `live` is a BOX total (`_live` counts every listener on the box, never narrowed to
+    `discover()` — round 9, finding 4), so an install that DID come up while another repo's runner
+    exited in the same interval reads as "the count did not move". Blaming the install there fails
+    the schedule's unit on a healthy box, every interval.
+    """
+    e = env(
+        pool=[("r1", "online", False, "self-hosted-x64")],
+        installs=[("gh-runner-x64-1", "r1")],
+    )
+    # The new slot comes up AND the pre-existing listener exits in the same interval.
+    e.provisioner_retire = str(e.root / "gh-runner-x64")
+    rec = e.record()
+    assert rec["live"] == 1, rec  # FLAT: our install +1, the retired listener -1
+    assert rec.get("problem_kind") != "no-listener", rec
+    assert rec["verdict"] == "under-target", rec
+    assert rec["_rc"] == 0, rec
+
+
+def test_a_listener_that_is_still_starting_is_not_an_inert_install(env):
+    """The red gets the restart path's bounded window: "not up yet" is not "never came up".
+
+    A real `Runner.Listener` is a process that comes up a moment AFTER the install returns, which
+    is exactly why `wait_online` exists one layer up. This pass reports the reading as a FAILED
+    unit (exit 4), so it is measured twice with a bounded wait before it may say that.
+    """
+    e = env(pool=[], installs=[], provisioner_alive_delay_s="0.2", online_wait_s="2")
+    rec = e.record()
+    assert rec.get("problem_kind") != "no-listener", rec
+    assert rec["live"] >= 1, rec
+    assert rec["_rc"] == 0, rec
 
 
 def test_a_status_read_that_ends_under_target_is_not_a_failed_schedule(env):

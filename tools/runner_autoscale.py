@@ -138,9 +138,9 @@ USAGE
 EXIT  0 converged / at-ceiling / over-ceiling / nothing to do / a REFUSAL (an answer, not a
         failure): `provisioner-refused` (its own guard), `fill-blocked` (no provisioner on this
         box — the #9639 dependency is absent, so FILL cannot run; nothing else is affected), and
-        `under-target` reached WITHOUT an attempted growth — a `--status`/`--dry-run` plan (it
-        changes nothing by design, so it cannot be a failed pass) or a stop at this box's own
-        memory reserve (the capacity counterpart of `fill-blocked`). `over-ceiling` is here too,
+        `under-target` that did not discover an INERT INSTALL — i.e. a `--status`/`--dry-run` plan
+        (nothing attempted, so nothing could fail) or a stop at this box's own memory reserve (a
+        CAPACITY stop: the box needs a bigger machine, not a repair). `over-ceiling` is here too,
         deliberately: a live count above the measured ceiling removes nothing (a runner that may
         be serving is never removed), so that pass has nothing it could have failed at.
       1 usage, or `--want N` refused (N above the measured ceiling — nothing was changed)
@@ -806,6 +806,18 @@ def enable_unit(directory: Path, name: str, repo: str) -> list[str]:
     return failures
 
 
+def _slot_dir(root: str, index: int) -> Path:
+    """The install directory of ONE slot in the provisioner's numbering (base, base-2, base-3, …).
+
+    Named once so that `_next_free_slot` (which slot is free) and the fill loop's per-step
+    ATTRIBUTION (did MY slot come up) read the numbering from the same place: a second spelling of
+    "slot #N's directory" is how the attribution below would silently stop describing the install
+    it is about.
+    """
+    base = Path(os.environ.get("RUNNER_AUTOSCALE_BASE") or (Path(root) / "gh-runner-x64"))
+    return base if index == 1 else Path(f"{base}-{index}")
+
+
 def _next_free_slot(root: str) -> int:
     """The first free slot in the provisioner's own numbering: base, base-2, base-3, ...
 
@@ -822,10 +834,9 @@ def _next_free_slot(root: str) -> int:
     ceiling allowed one, with the pass then reporting `over-ceiling` for a breach it had just
     created (round 6, finding 1).
     """
-    base = Path(os.environ.get("RUNNER_AUTOSCALE_BASE") or (Path(root) / "gh-runner-x64"))
     index = 1
     while True:
-        slot = base if index == 1 else Path(f"{base}-{index}")
+        slot = _slot_dir(root, index)
         if not (slot / ".runner").exists():
             return index
         index += 1
@@ -1194,17 +1205,44 @@ def converge(
             f"live listeners {live})"
         )
         if live <= previous_live:
-            # ⛔ THE ONE `under-target` CAUSE THAT IS A FAILURE, and it is NAMED so the exit code
-            # can key on the cause instead of on the verdict (see the EXIT block). Without this
-            # the scheduled pass reported exit 0 — "converged" to anything gating on the exit
-            # status — on the exact shape this file's own docstring refuses: installed, and inert.
-            record["problem_kind"] = "no-listener"
-            record["notes"].append(
-                f"stop: slot #{index} was installed but no listener came up (live={live}), so "
-                "another call would repeat the same result — stopping instead of reporting a "
-                "convergence that did not happen"
-            )
-            break
+            # ⛔ ATTRIBUTION BEFORE BLAME, AND A WINDOW BEFORE EITHER. `live` is a BOX total
+            # (`_live`: every listener on the box, never narrowed to `discover()`), so a flat
+            # count does NOT by itself mean THIS install produced nothing — it is also what an
+            # install that DID come up looks like when an unrelated listener (a job finishing on
+            # another repo's runner) exited in the same interval. So the red keys on this SLOT's
+            # own evidence, not on the delta.
+            #
+            # And it is measured twice, bounded, exactly like the restart path (`wait_online`,
+            # same 60 s default): "not up yet" is not "never came up". Reddening here is not a
+            # note — it exits 4 and fails the schedule's unit — so a listener that is still
+            # starting must not be read as an inert install.
+            slot = _slot_dir(root, index)
+            slot_alive = any(r.alive for r in measured if r.directory == slot)
+            deadline = time.monotonic() + max(0, wait_s)
+            while not slot_alive and time.monotonic() < deadline:
+                time.sleep(max(1, poll))
+                measured = _found()
+                live_now = _live()
+                slot_alive = any(r.alive for r in measured if r.directory == slot)
+                if slot_alive or live_now > previous_live:
+                    break
+            live = live_now
+            if live <= previous_live:
+                # ⛔ THE ONE `under-target` CAUSE THAT IS A FAILURE, and it is NAMED so the exit
+                # code can key on the cause instead of on the verdict (see the EXIT block).
+                # Without this the scheduled pass reported exit 0 — "converged" to anything
+                # gating on the exit status — on the exact shape this file's own docstring
+                # refuses: installed, and inert. Only THIS SLOT certifies that: an unrelated
+                # listener exiting while our install came up is an under-target pass, not a
+                # failed one.
+                if not slot_alive:
+                    record["problem_kind"] = "no-listener"
+                record["notes"].append(
+                    f"stop: slot #{index} was installed but no listener came up (live={live}), so "
+                    "another call would repeat the same result — stopping instead of reporting a "
+                    "convergence that did not happen"
+                )
+                break
         if after < MEM_RESERVE_MB:
             record["notes"].append(
                 f"stop: mem_available_mb={after} is below reserve_mb={MEM_RESERVE_MB} after this "
