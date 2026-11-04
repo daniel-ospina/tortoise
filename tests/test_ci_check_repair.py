@@ -2656,6 +2656,89 @@ def test_a_cancel_ACCEPTED_but_UNOBSERVED_is_named_as_itself(
         "…and must not be read as a completed repair")
 
 
+def test_a_REFUSED_cancel_is_named_a_DIRECT_rerun_not_a_cancel_then_rerun(
+        monkeypatch, capsys, tmp_path):
+    """⛔ P2 (review): the 409 pole — a re-run WAS issued, but no cancel-then-rerun was.
+
+    `rerun_not_queued` is the API's 409 for the orphan shape: the run was never
+    queued, so there is nothing to cancel first and `_rerun` issues the DIRECT
+    re-run. `report()` records `cancel_refused_409` so the entry "never reads as a
+    clean cancel-then-rerun" — its own comment in `report()` — and
+    `STARVED_OUTCOME_RERUN_WITHOUT_CANCEL` is the pole that keeps the sentence
+    honest about which of the two acts happened.
+
+    This pole was implemented but UNPINNED: deleting the `cancel_refused_409` test in
+    `_starved_repair_outcomes` left every test green, so the sentence would silently
+    fall back to claiming the cancel. Discriminating: with that test removed this
+    reddens on the outcome assertion and on "REFUSED the cancel".
+    """
+    target = 41480218593
+    reading = _starved_target_reading()
+
+    monkeypatch.setattr(R, "read_queue_health", lambda repo: reading)
+    monkeypatch.setattr(R, "open_prs", lambda repo, include_drafts: [pr(1)])
+    monkeypatch.setattr(R, "check_runs_at", lambda repo, head: [])
+    monkeypatch.setattr(R, "runs_at_head", lambda repo, head: [
+        aged_run(target, jobs=0, age_s=5700.0, path="ci.yml", name="CI")])
+    monkeypatch.setattr(R, "_rerun", lambda *a, **k: "rerun_not_queued")
+
+    assert R.main(["--repo", "o/r", "--no-live", "--apply", "--json",
+                   "--record", str(_flood_record(tmp_path))]) == 0
+    captured = capsys.readouterr()
+    summary = json.loads(captured.out)
+    assert summary["prs"][0]["rerun"][0]["ok"] is True, (
+        "the direct re-run WAS issued, so the entry is a success")
+    assert summary["prs"][0]["rerun"][0]["cancel_refused_409"] is True, (
+        "…and the record names the refused cancel as the reason there was no "
+        "cancel-then-rerun")
+    assert summary["prs"][0]["starved_repaired_outcome"] == {
+        "docs": R.STARVED_OUTCOME_RERUN_WITHOUT_CANCEL}
+    assert "ISSUED the cancel-then-rerun" not in captured.err, (
+        "the one claim this pole exists to prevent")
+    assert "REFUSED the cancel and this pass issued the DIRECT re-run instead" \
+        in captured.err, "the sentence must name the act that actually happened"
+
+
+def test_a_cancel_whose_ANSWER_WAS_LOST_is_named_as_itself(
+        monkeypatch, capsys, tmp_path):
+    """⛔ P2 (review): the `cancel_unknown` pole — the POST was sent, the answer lost.
+
+    `_rerun`'s docstring is explicit that this is neither `cancel_unobserved` (which
+    claims the cancel was ACCEPTED) nor a deferral (which claims nothing was
+    changed): the run MAY be cancelled. `STARVED_OUTCOME_CANCEL_EFFECT_UNKNOWN` keeps
+    that distinction in the operator-facing sentence.
+
+    This pole was implemented but UNPINNED: deleting its branch in
+    `_starved_repair_outcomes` silently downgrades the context to `not_issued` ("the
+    attempt was deferred or skipped"), which asserts nothing changed — the
+    understatement the pole exists to remove. Discriminating: with that branch removed
+    this reddens on the outcome assertion and on "ANSWER was lost".
+    """
+    target = 41480218593
+    reading = _starved_target_reading()
+
+    monkeypatch.setattr(R, "read_queue_health", lambda repo: reading)
+    monkeypatch.setattr(R, "open_prs", lambda repo, include_drafts: [pr(1)])
+    monkeypatch.setattr(R, "check_runs_at", lambda repo, head: [])
+    monkeypatch.setattr(R, "runs_at_head", lambda repo, head: [
+        aged_run(target, jobs=0, age_s=5700.0, path="ci.yml", name="CI")])
+    monkeypatch.setattr(R, "_rerun", lambda *a, **k: "cancel_unknown")
+
+    assert R.main(["--repo", "o/r", "--no-live", "--apply", "--json",
+                   "--record", str(_flood_record(tmp_path))]) == 0
+    captured = capsys.readouterr()
+    summary = json.loads(captured.out)
+    assert summary["prs"][0]["rerun"][0]["cancel_effect_unknown"] is True
+    assert summary["prs"][0]["starved_repaired_outcome"] == {
+        "docs": R.STARVED_OUTCOME_CANCEL_EFFECT_UNKNOWN}
+    assert "ISSUED the cancel-then-rerun" not in captured.err
+    assert "a cancel was SENT and its answer was lost" in captured.err, (
+        "the unknown pole is its own claim")
+    assert "was NOT issued" not in captured.err, (
+        "…and must not be downgraded to \"nothing changed\", which is the "
+        "understatement `_rerun`'s own docstring rejects for this state")
+
+
 def test_the_exemption_is_asked_with_the_WHOLE_head_wide_repairable_set(monkeypatch):
     """⛔ P1 (review): a per-run exclusion DEADLOCKS whenever N>1 runs are repairable.
 
