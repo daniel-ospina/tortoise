@@ -45,7 +45,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from tools.next_work import (  # noqa: E402
+from tools.next_work import (
     CONSTITUENT_LABEL,
     FOLD_LABEL,
     POSITIONS,
@@ -54,7 +54,7 @@ from tools.next_work import (  # noqa: E402
     next_command,
     render,
 )
-from tools.queue_resweep import QueueConfig, parse_config  # noqa: E402
+from tools.queue_resweep import parse_config
 
 REPO = "daniel-ospina/tortoise"
 
@@ -142,11 +142,18 @@ def pull(
     labels: list[str] | None = None,
     body: str = "",
     draft: bool = False,
+    base: str = "main",
 ) -> dict:
+    #: `base` is present because the COLLECTOR always sets it (`pr["base"]` from the
+    #: PR list) and `unmet_conditions` reads `pr["base"]["ref"]`. Omitting it made
+    #: every fixture emit `base=main (actual unknown)` — a structural refusal the
+    #: gate really would name — which is why the position tests below must isolate
+    #: the condition they are about.
     return {
         "number": n,
         "head": head,
         "draft": draft,
+        "base": {"ref": base} if base else {},
         "labels": [{"name": lb} for lb in (labels or [])],
         "closing_issues": closes or [],
         "refs_issues": refs or [],
@@ -176,8 +183,8 @@ def test_claimed_pr_is_never_picked():
         check_runs={"a" * 40: all_green()},
         attestation={"1001": {"verdict": "head"}, "1002": {"verdict": "head"}},
         merge_tree={"1001": {"clean": True}, "1002": {"clean": True}},
-        claims={"100-aaaaaaaaaaaa": {"verdict": "claim-held", "owner": "box-a:1234"},
-                "pr-1001": {"verdict": "claim-held", "owner": "box-a:1234"}},
+        claims={"refs/claims/100-aaaaaaaaaaaa": {"verdict": "claim-held", "owner": "box-a:1234"},
+                "refs/claims/pr-1001": {"verdict": "claim-held", "owner": "box-a:1234"}},
     )
     rows = units_for(s)
     held = next(u for u in rows if u.issue == 100)
@@ -214,7 +221,7 @@ def test_expired_lease_entry_still_blocks_the_pick():
         check_runs={"a" * 40: all_green()},
         attestation={"1001": {"verdict": "head"}},
         merge_tree={"1001": {"clean": True}},
-        claims={"pr-1001": {"verdict": "claim-owner-unparseable", "owner": "?"}},
+        claims={"refs/claims/pr-1001": {"verdict": "claim-owner-unparseable", "owner": "?"}},
     )
     (row,) = units_for(s)
     assert row.reason == "CLAIMED"
@@ -329,7 +336,7 @@ def _rich_snapshot() -> Snapshot:
         attestation={"1001": {"verdict": "head"}, "1011": {"verdict": "head"},
                      "2001": {"verdict": "head"}},
         merge_tree={"1001": {"clean": True}, "1011": {"clean": True}, "2001": {"clean": True}},
-        claims={"issue-100": {"verdict": "claim-held", "owner": "box-b:9"}},
+        claims={"refs/claims/issue-100": {"verdict": "claim-held", "owner": "box-b:9"}},
     )
 
 
@@ -708,10 +715,17 @@ def test_claim_verdicts_survives_the_claims_sh_exit_codes(tmp_path: Path):
                 "CLAIM_VERDICT=''; CLAIM_SNAPSHOT_OWNER=''",
                 "claim_snapshot() { :; }",
                 "claim_snapshot_verdict() {",
-                '  case "$2" in',
-                '    pr-held) CLAIM_VERDICT=claim-held; CLAIM_SNAPSHOT_OWNER="box-a:4242"; return 1 ;;',
-                '    pr-absent) CLAIM_VERDICT=claim-absent; CLAIM_SNAPSHOT_OWNER=""; return 0 ;;',
-                '    *) CLAIM_VERDICT=claim-unreadable; CLAIM_SNAPSHOT_OWNER=""; return 2 ;;',
+                # A faithful stub indexes refs/claims/<key> and matches field 1
+                # EXACTLY, because that is what claims.sh does (claim_snapshot
+                # writes ${CLAIM_NS}/${key}; the reader compares $1 == ref). An
+                # earlier stub keyed on bare words and therefore validated the
+                # shell boundary while baking in the WRONG addressing — the
+                # tool asked for `pr-10852` and got `claim-absent` for a held PR.
+                '  case "$2" in refs/claims/pr-held)', 
+                '    CLAIM_VERDICT=claim-held; CLAIM_SNAPSHOT_OWNER="box-a:4242"; return 1 ;;',
+                '  refs/claims/pr-absent)',
+                '    CLAIM_VERDICT=claim-absent; CLAIM_SNAPSHOT_OWNER=""; return 0 ;;',
+                '  *)  CLAIM_VERDICT=claim-unreadable; CLAIM_SNAPSHOT_OWNER=""; return 2 ;;',
                 "  esac",
                 "}",
             ]
@@ -723,17 +737,24 @@ def test_claim_verdicts_survives_the_claims_sh_exit_codes(tmp_path: Path):
     os.environ.update(monkeypatch_env)
     try:
         s = Snapshot()
-        next_work._claim_verdicts(tmp_path, ["pr-held", "pr-absent", "pr-mystery"], s)
+        next_work._claim_verdicts(
+            tmp_path,
+            ["refs/claims/pr-held", "refs/claims/pr-absent", "refs/claims/pr-mystery"],
+            s,
+        )
     finally:
         os.environ.clear()
         os.environ.update(old)
 
-    assert s.claims["pr-held"]["verdict"] == "claim-held", s.claims["pr-held"]
-    assert s.claims["pr-held"]["owner"] == "box-a:4242", "the owner survives the shell call"
-    assert s.claims["pr-absent"]["verdict"] == "claim-absent"
-    assert s.claims["pr-mystery"]["verdict"] == "claim-unreadable"
+    assert s.claims["refs/claims/pr-held"]["verdict"] == "claim-held", s.claims
+    assert s.claims["refs/claims/pr-held"]["owner"] == "box-a:4242", "the owner survives the shell call"
+    assert s.claims["refs/claims/pr-absent"]["verdict"] == "claim-absent"
+    assert s.claims["refs/claims/pr-mystery"]["verdict"] == "claim-unreadable"
     assert any("claim-unreadable" in u for u in s.unreadable), (
         "an abstention must make the RUN incomplete, not just decorate a row"
+    )
+    assert all(k.startswith("refs/claims/") for k in s.claims), (
+        "every key recorded must be a registry ref — a bare key addresses nothing"
     )
 
 
@@ -745,7 +766,7 @@ def test_unreadable_claim_verdict_blocks_the_unit():
         check_runs={"a" * 40: all_green()},
         attestation={"1001": {"verdict": "head"}},
         merge_tree={"1001": {"clean": True}},
-        claims={"pr-1001": {"verdict": "claim-unreadable", "owner": ""}},
+        claims={"refs/claims/pr-1001": {"verdict": "claim-unreadable", "owner": ""}},
     )
     (row,) = units_for(s)
     assert row.reason == "CLAIMED"
@@ -761,7 +782,7 @@ def test_expired_and_orphaned_claims_are_free():
             check_runs={"a" * 40: all_green()},
             attestation={"1001": {"verdict": "head"}},
             merge_tree={"1001": {"clean": True}},
-            claims={"pr-1001": {"verdict": verdict, "owner": "box-z:1"}},
+            claims={"refs/claims/pr-1001": {"verdict": verdict, "owner": "box-z:1"}},
         )
         (row,) = units_for(s)
         assert row.reason != "CLAIMED", f"{verdict} must not block a unit whose window closed"
@@ -805,3 +826,241 @@ def test_a_closes_link_is_not_reported_as_refs_only():
     )
     (row,) = units_for(s)
     assert not any("REFS only" in d for d in row.detail), row.detail
+
+
+# ── the gate's OTHER refusals are positions too (review finding 2) ─────────
+@pytest.mark.parametrize(
+    ("kwargs", "expected"),
+    [
+        ({"draft": True}, "NEEDS-FIX"),
+        ({"base": "release/1.x"}, "NEEDS-FIX"),
+    ],
+)
+def test_structural_gate_refusals_are_not_ready_to_land(kwargs, expected):
+    """A DRAFT PR, or one based on another branch, is not the closest to done.
+
+    The first version sorted only `completed/…` and `in flight` and let
+    everything else — `draft`, `base=main (actual release/1.x)`,
+    `label=X: absent` — fall through to `READY-TO-LAND`, so a PR the queue will
+    REFUSE was the tool's best position with an executable command. Measured by a
+    reviewer against the live gate.
+    """
+    s = snap(
+        issues=[issue(100)],
+        pulls=[pull(1001, closes=[100], **kwargs)],
+        check_runs={"a" * 40: all_green()},
+        attestation={"1001": {"verdict": "head"}},
+        merge_tree={"1001": {"clean": True}},
+    )
+    (row,) = units_for(s)
+    assert row.position == expected, row.detail
+    assert row.reason != "READY-TO-LAND"
+
+
+def test_a_missing_required_label_is_not_ready_to_land():
+    cfg = parse_config(
+        "queue_rules:\n  - name: q\n    queue_conditions:\n      - base=main\n      - label=ship-it\n      - check-success=docs\n"
+    )
+    s = snap(
+        issues=[issue(100)],
+        pulls=[pull(1001, closes=[100])],
+        check_runs={"a" * 40: [{"id": 1, "name": "docs", "status": "completed",
+                                "conclusion": "success", "app": {"slug": "github-actions"}}]},
+        attestation={"1001": {"verdict": "head"}},
+        merge_tree={"1001": {"clean": True}},
+    )
+    (row,) = build_units(s, cfg)
+    assert row.position == "NEEDS-FIX"
+    assert any("label=ship-it: absent" in d for d in row.detail)
+
+
+# ── an unmeasured merge is an abstention, like every other one (finding 4) ──
+def test_unmeasured_merge_tree_is_not_landable():
+    s = snap(
+        issues=[issue(100)],
+        pulls=[pull(1001, closes=[100])],
+        check_runs={"a" * 40: all_green()},
+        attestation={"1001": {"verdict": "head", "why": "head"}},
+        merge_tree={"1001": {"clean": None, "why": "fetch failed"}},
+    )
+    (row,) = units_for(s)
+    assert row.position == "NEEDS-TEST", row
+    assert any("UNMEASURED" in d for d in row.detail)
+
+
+# ── an incomplete run delivers no pick in EITHER format (finding 5) ─────────
+def test_json_refuses_the_pick_when_the_run_is_incomplete(tmp_path: Path, capsys):
+    from tools import next_work
+
+    raw = _rich_snapshot().to_json()
+    raw["unreadable"] = ["claims.sh not found — the claim registry cannot be read"]
+    path = tmp_path / "snap.json"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    rc = next_work.main(["--from", str(path), "--repo", REPO, "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 2
+    assert payload["refused"] is True
+    assert payload["pick"] is None, "an INCOMPLETE run must not hand a machine consumer a pick"
+    assert payload["next_command"] is None
+    assert all(u["next_command"] is None for u in payload["units"])
+
+
+# ── a hash or a date is not an issue number (finding 6) ────────────────────
+@pytest.mark.parametrize(
+    ("slug", "expected"),
+    [
+        ("backup/fix-10704-bc80c635d", {10704}),
+        ("batch-2026-11-03", set()),
+        ("fix/10704-live-work", {10704}),
+        (".worktrees/prd-10675", {10675}),
+        ("next-work-2", set()),
+        ("fix/10704-deadbeef1234", {10704}),
+    ],
+)
+def test_issue_number_mentions_ignore_hashes_and_dates(slug, expected):
+    """`backup/fix-10704-bc80c635d` claimed issue 635; `batch-2026-11-03` claimed 2026.
+
+    Both then read CLAIMED forever — #8175's "an abandoned claim blocks its issue
+    forever" class, re-entered through name matching.
+    """
+    from tools.next_work import _issue_numbers_in
+
+    assert _issue_numbers_in(slug) == expected
+
+
+# ── a local-holder read that FAILS is not an empty holder list (finding 3) ─
+def test_local_holder_read_failure_is_unreadable_not_free(tmp_path: Path):
+    from tools.next_work import _local_holders
+
+    not_a_repo = tmp_path / "not-a-repo"
+    not_a_repo.mkdir()
+    s = Snapshot()
+    _local_holders(not_a_repo, s)
+    assert s.unreadable, "a git that cannot answer must not report 'nobody holds it'"
+    assert any("local holders" in u for u in s.unreadable)
+
+
+# ── a failed read is CLASSIFIED, not lumped (brief: GH-RATE-LIMITED) ───────
+@pytest.mark.parametrize(
+    ("detail", "expected_prefix"),
+    [
+        ("gh api ... failed: HTTP 403: API rate limit exceeded", "GH-RATE-LIMITED("),
+        ("gh api https://api.github.com/x failed: secondary rate limit", "GH-RATE-LIMITED("),
+        ("gh api --paginate timed out after 60s", "GH-TIMEOUT("),
+        ("killed after 90s", "GH-TIMEOUT("),
+        ("something else entirely", "search:P0-blocker"),
+    ],
+)
+def test_a_failed_read_names_what_kind_of_failure_it_was(detail, expected_prefix):
+    """A rate limit clears in a minute; a bad token does not. Say which.
+
+    The brief asks for `GH-RATE-LIMITED(<endpoint>)` on a 403. Recording every
+    failure as "unreadable" makes a throttle indistinguishable from a broken
+    credential at the only moment anyone reads it — and a measured live run lost
+    every surface to timeouts, which is a different remedy again.
+    """
+    from tools.next_work import _unreadable
+
+    s = Snapshot()
+    _unreadable(s, "search:P0-blocker", detail)
+    assert s.unreadable and s.unreadable[0].startswith(expected_prefix), s.unreadable
+    assert "(" in s.unreadable[0]
+
+
+def test_a_refused_run_prints_no_command_in_the_text_footer_either():
+    """`--json` nulled every command on a refused run; the text footer did not.
+
+    The same fail-open, one format over: a text consumer grepping for a command
+    could find one on a run the tool itself calls REFUSED.
+    """
+    s = _rich_snapshot()
+    s.unreadable = ["GH-RATE-LIMITED(search:P0-blocker)"]
+    text, _ = render(build_units(s, CFG), CFG, s, repo=REPO, top=5)
+    assert "REFUSED" in text
+    for line in text.splitlines():
+        if line.strip().startswith(("1.", "2.", "3.", "4.", "5.")):
+            assert "bash " not in line and "record-review.sh" not in line, line
+
+
+def test_an_abstention_in_the_claim_map_is_incomplete_even_without_the_sentence(tmp_path: Path):
+    """One field decides refusal. The verdict map IS the fact; the prose follows it.
+
+    A replayed snapshot whose `claims` map held `claim-unreadable` but whose
+    `unreadable` list was empty rendered a row saying "claim registry UNREADABLE"
+    while `NEXT ACTION` said "every measured unit is held" and the exit code was
+    1 — the row and the verdict contradicting each other, decided by which field
+    happened to carry the fact.
+    """
+    from tools import next_work
+
+    raw = _rich_snapshot().to_json()
+    raw["claims"] = {"refs/claims/pr-1011": {"verdict": "claim-unreadable", "owner": ""}}
+    raw["unreadable"] = []
+    path = tmp_path / "snap.json"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    rc = next_work.main(["--from", str(path), "--repo", REPO])
+    assert rc == 2, "a per-key abstention is INCOMPLETE, whatever field carries it"
+    loaded = Snapshot.from_json(json.loads(path.read_text()))
+    assert any("claim-unreadable" in u for u in loaded.unreadable)
+
+
+def test_a_refused_run_carries_no_advisory_command_either():
+    """The QUEUE NOTE's remedy is spelled as a command only when the run is usable."""
+    prose = pull(901, head="9" * 40, body="batch: fold 32 open PRs into one tree")
+    prose["title"] = "batch: fold 32 open tortoise PRs into one validated tree"
+    s = snap(issues=[issue(100)], pulls=[prose])
+    ok_text, _ = render(build_units(s, CFG), CFG, s, repo=REPO, top=5)
+    assert "run `uv run python tools/batch_open.py --fold <N> --label-only`" in ok_text
+
+    s.unreadable = ["GH-RATE-LIMITED(search:P0-blocker)"]
+    refused_text, _ = render(build_units(s, CFG), CFG, s, repo=REPO, top=5)
+    assert "REFUSED" in refused_text
+    # the remedy is still STATED — it is just not spelled as something to run
+    assert "makes the relationship mechanical" in refused_text
+    assert "uv run python tools/batch_open.py" not in refused_text, (
+        "a refused run must not carry a command, not even an advisory one"
+    )
+
+
+# ── ONE rule for "cannot be read", on the row AND on the run (review F1/F2) ─
+@pytest.mark.parametrize("entry", [{"verdict": ""}, {"verdict": None}, {}, None, "claim-held"])
+def test_a_claim_entry_that_cannot_be_read_blocks_and_is_incomplete(entry):
+    """Silence is not `claim-absent`. Both readers use ONE definition.
+
+    `normalize()` folded only the literal `claim-unreadable` while `_claim_of`
+    also treated an empty verdict as an abstention, so the same snapshot produced
+    a row saying "claim registry UNREADABLE" beside a run saying "every measured
+    unit is held or superseded" — at exit 1, or exit 0 with a command when a
+    second pickable unit existed. A present key with a null value was read as
+    FREE and handed a command.
+    """
+    s = snap(
+        issues=[issue(100), issue(200)],
+        pulls=[pull(1001, closes=[100]), pull(2002, closes=[200])],
+        check_runs={"a" * 40: all_green()},
+        attestation={"1001": {"verdict": "head"}, "2002": {"verdict": "head"}},
+        merge_tree={"1001": {"clean": True}, "2002": {"clean": True}},
+        claims={"refs/claims/pr-1001": entry},
+    ).normalize()
+    rows = units_for(s)
+    held = next(u for u in rows if u.issue == 100)
+    assert held.reason == "CLAIMED", held
+    assert next_command(held, REPO) is None
+    assert any("claim-unreadable" in u for u in s.unreadable), (
+        "an unreadable entry must make the RUN incomplete, not just decorate a row"
+    )
+
+
+def test_absent_key_is_still_free():
+    """The complement: a key the registry does not hold is genuinely free."""
+    s = snap(
+        issues=[issue(100)],
+        pulls=[pull(1001, closes=[100])],
+        check_runs={"a" * 40: all_green()},
+        attestation={"1001": {"verdict": "head"}},
+        merge_tree={"1001": {"clean": True}},
+        claims={"refs/claims/pr-9999": {"verdict": "claim-held", "owner": "x:1"}},
+    ).normalize()
+    (row,) = units_for(s)
+    assert row.reason == "READY-TO-LAND"
+    assert s.unreadable == []

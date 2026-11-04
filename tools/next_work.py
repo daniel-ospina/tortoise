@@ -92,12 +92,15 @@ Exit codes
     0  the queue was fully read and a next action was decided
     1  the queue was read but NO unit is pickable (every one is held, is a fold
        constituent, or the queue is empty) — there is no action, and that is an
-       answer. A held TOP row with a pickable runner-up still exits 0, and the
-       `RUNNABLE` line names the runner-up
+       answer. Held and superseded rows are filtered out of the pick, so when the
+       RANK LEADER is held the next pickable row is simply the `TOP` — and the
+       `RUNNABLE` line appears only when the top row itself has nothing to run
+       (its head is in a runner queue), naming the first unit that does
     2  INCOMPLETE: a surface the decision depends on could not be read — the
        queue gate (``.mergify.yml``, at collection OR missing from a replayed
-       snapshot), the claim registry (``claims.sh`` absent or its snapshot
-       header failed), the attestation TOOL (``record-review.sh`` absent — not
+       snapshot), the claim registry (``claims.sh`` absent, its snapshot header
+       failed, or ANY key answering ``claim-unreadable`` — a per-key abstention
+       is INCOMPLETE, not a note beside a pick), the attestation TOOL (``record-review.sh`` absent — not
        a per-PR ``norecord``/``unreadable`` verdict, which is a real answer and
        lands the row at ``NEEDS-REVIEW``), the issue search, or the PR list.
        "Could not check" is never reported as "free" — the same posture
@@ -122,9 +125,11 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any
 
 #: The repo root, prepended to sys.path so `tools.queue_resweep` is importable when
 #: this file is run BY PATH (`python tools/next_work.py`) as a lane will run it —
@@ -139,13 +144,12 @@ if str(_ROOT) not in sys.path:
 # implementation here would be a second definition of "ready", which is the
 # defect class this fleet pays for repeatedly (two readers of one gate drifting
 # apart). So the gate is imported, not copied.
-from tools.queue_resweep import (
+from tools.queue_resweep import (  # noqa: E402 — the sys.path insert above must run first
     ConfigError,
     GhCli,
     GhError,
     QueueConfig,
     load_config_text,
-    newest_by_name,
     parse_config,
     unmet_conditions,
 )
@@ -180,6 +184,15 @@ FOLD_LABEL = "batch-fold"
 #: be parsed for it ("Deriving the close list from that prose would close a PR the
 #: fold never carried").
 FOLD_LINE_RE = re.compile(r"^\s*fold-constituents:\s*([0-9][0-9,\s]*)", re.MULTILINE | re.IGNORECASE)
+
+#: `claims.sh`'s own default (`CLAIM_NS`). A claim ref is `<CLAIM_NS>/<key>`; the
+#: key alone addresses nothing.
+CLAIM_NS = os.environ.get("CLAIM_NS") or "refs/claims"
+
+#: A date is not an issue number. `batch-2026-11-03` must not claim issue 2026.
+_DATE_SPAN_RE = re.compile(r"(?<![0-9])(?:19|20)[0-9]{2}-[0-9]{1,2}-[0-9]{1,2}(?![0-9])")
+#: A hash fragment is not an issue number: `fix-10704-bc80c635d` must not claim 80c635d.
+_HEX_SPAN_RE = re.compile(r"(?<![0-9a-zA-Z])[0-9a-f]{7,}(?![0-9a-zA-Z])")
 
 GH_TIMEOUT = 90.0
 GIT_TIMEOUT = 60.0
@@ -237,6 +250,27 @@ class Snapshot:
             "unreadable": self.unreadable,
         }
 
+    def normalize(self) -> Snapshot:
+        """Fold every abstention into `unreadable`, so ONE field decides refusal.
+
+        ⛔ A SNAPSHOT CAN CARRY THE ABSTENTION WITHOUT THE SENTENCE. `refused` was
+        derived only from `unreadable`, and `_claim_verdicts` is what appends the
+        companion line — so a replayed or hand-written snapshot whose claims map
+        held `claim-unreadable` rendered a row saying "claim registry UNREADABLE"
+        while `NEXT ACTION` said "every measured unit is held or superseded" and
+        the exit code was 1, not 2. Measured by a verifier on this change. The
+        verdict map is the fact; this makes the prose follow it, everywhere.
+        """
+        abstained = sorted(
+            ref for ref, entry in (self.claims or {}).items() if _abstention_reason(entry)
+        )
+        if abstained and not any("claim-unreadable" in u for u in self.unreadable):
+            self.unreadable.append(
+                f"claims: {len(abstained)} key(s) answered claim-unreadable — an abstention, "
+                "never freedom"
+            )
+        return self
+
     @classmethod
     def from_json(cls, raw: dict[str, Any]) -> Snapshot:
         known = {
@@ -249,7 +283,7 @@ class Snapshot:
         # anyway, but normalise so a hand-written snapshot behaves identically.
         snap.attestation = {str(k): v for k, v in (snap.attestation or {}).items()}
         snap.merge_tree = {str(k): v for k, v in (snap.merge_tree or {}).items()}
-        return snap
+        return snap.normalize()
 
 
 # ── the decision ────────────────────────────────────────────────────────────
@@ -351,6 +385,29 @@ def _fold_index(snap: Snapshot) -> dict[int, list[int]]:
     return fold_of
 
 
+def _abstention_reason(entry: object) -> str | None:
+    """Why this claim entry CANNOT BE READ as free, or ``None``. ONE definition.
+
+    ⛔ TWO READERS, ONE RULE — THAT IS THE POINT. `normalize()` decides whether the
+    RUN is incomplete and `_claim_of()` decides whether the ROW is free; when they
+    disagreed about what "unreadable" means, the same snapshot produced a row
+    saying "claim registry UNREADABLE" beside a verdict saying "every measured unit
+    is held or superseded", and could degrade to a merge command at exit 0 with a
+    second pickable unit present. Both defects were measured on this change, both
+    on the `--from` path (a hand-edited or older snapshot), and both came from the
+    two readers drifting. A present key with NO verdict is not `claim-absent`:
+    `claim-absent` is the one value that means freedom, and silence is not it.
+    """
+    if not isinstance(entry, dict):
+        return "the entry is not a verdict object"
+    verdict = str(entry.get("verdict") or "")
+    if not verdict:
+        return "the entry carries no verdict"
+    if verdict == "claim-unreadable":
+        return "claim-unreadable"
+    return None
+
+
 def _claim_of(snap: Snapshot, *, issue: int | None, pr: int | None, head: str | None) -> tuple[str | None, bool]:
     """(holder description or None, registry_readable).
 
@@ -359,13 +416,21 @@ def _claim_of(snap: Snapshot, *, issue: int | None, pr: int | None, head: str | 
     that is not explicitly `claim-absent` is an ABSTENTION — it does not prove
     freedom, so it must never be read as one.
     """
+    # ⛔ THE FULL REF, NOT THE BARE KEY. `claims.sh` indexes
+    # `refs/claims/<key>` (claim_snapshot writes `${CLAIM_NS}/${key}`) and its
+    # reader matches field 1 EXACTLY, so asking for `pr-10852` answered
+    # `claim-absent` for a key that is HELD — and `claim-absent` is the one word
+    # this module reads as freedom. Measured by a verifier on this change: PRs
+    # #10852 and #10889 were `claim-held` by a live box at that moment and both
+    # came out `READY-TO-LAND` with an executable command. The miss is silent,
+    # which is exactly why the addressing is spelled out here.
     refs: list[str] = []
     if issue is not None:
-        refs.append(f"issue-{issue}")
+        refs.append(f"{CLAIM_NS}/issue-{issue}")
     if pr is not None:
-        refs.append(f"pr-{pr}")
+        refs.append(f"{CLAIM_NS}/pr-{pr}")
         if head:
-            refs.append(f"{pr}-{head[:12]}")
+            refs.append(f"{CLAIM_NS}/{pr}-{head[:12]}")
     readable = True
     #: `claims.sh`'s OWN vocabulary (claim_snapshot_verdict), mapped once:
     #:   claim-absent    rc 0  no entry in a read snapshot          -> FREE
@@ -377,26 +442,26 @@ def _claim_of(snap: Snapshot, *, issue: int | None, pr: int | None, head: str | 
     #: not a silent note either: it blocks the row AND makes the run incomplete.
     FREE = ("claim-absent", "claim-expired", "claim-orphaned")
     for ref in refs:
-        entry = snap.claims.get(ref)
-        if entry is None:
-            # Not present in the snapshot: the registry was read and does not
-            # hold this key. That is the ONE case that is genuinely free.
+        if ref not in snap.claims:
+            # ABSENT from the snapshot: the registry was read and does not hold
+            # this key. That is the ONE case that is genuinely free. (`ref not
+            # in`, not `.get() is None` — a PRESENT key whose value is null is a
+            # registry that could not answer, not a registry that said "free".)
             continue
-        verdict = str(entry.get("verdict") or "")
+        entry = snap.claims[ref]
+        verdict = str((entry or {}).get("verdict") or "") if isinstance(entry, dict) else ""
+        why = _abstention_reason(entry)
+        if why:
+            readable = False
+            return (f"<claim-unreadable: {ref}> ({why})", readable)
         if verdict in FREE:
             continue
         owner = str(entry.get("owner") or "")
-        if verdict == "claim-unreadable" or not verdict:
-            readable = False
-            return (owner or f"<claim-unreadable: {ref}>", readable)
         # `claim-held`, or a word this reader does not know. Unknown is a HOLDER:
         # the fail-closed direction, because the other one duplicates the work.
         return (owner or verdict or ref, readable)
     for desc in snap.local_holders.get(f"issue:{issue}" if issue is not None else "", []):
         return (f"local:{desc}", readable)
-    if pr is not None:
-        for desc in snap.local_holders.get(f"pr:{pr}", []):
-            return (f"local:{desc}", readable)
     return (None, readable)
 
 
@@ -422,10 +487,18 @@ def _position_for_pr(
         detail.append(cond)
 
     blocking = [c for c in unmet if not c.startswith(f"-label={CONSTITUENT_LABEL}")]
+    # ⛔ THREE BUCKETS, NOT TWO. `unmet_conditions` also emits NON-CHECK refusals —
+    # `draft`, `base=main (actual release/1.x)`, `label=X: absent`. The first
+    # version sorted only `completed/…` and `in flight`, so everything else fell
+    # through to READY-TO-LAND: a DRAFT PR, or one based on another branch, was
+    # the tool's BEST position and was handed an executable command — a PR the
+    # queue will refuse, advertised as the closest to done. Anything structural
+    # the gate names is work on the PR, so it is NEEDS-FIX with the reason kept.
     fails = [c for c in blocking if "completed/" in c and "completed/success" not in c]
     in_flight = [c for c in blocking if "in flight" in c or "no check-run" in c]
+    structural = [c for c in blocking if c not in fails and c not in in_flight]
 
-    if fails:
+    if fails or structural:
         pos = "NEEDS-FIX"
     elif in_flight:
         pos = "NEEDS-TEST"
@@ -438,8 +511,17 @@ def _position_for_pr(
         pos = "NEEDS-FIX"
         detail.append(f"merge-tree: {mt.get('why') or 'conflict against base'}")
     elif clean is None:
-        # Abstention, not a pass: the tree was never measured.
-        detail.append(f"merge-tree: UNMEASURED ({mt.get('why') or 'head not available locally'})")
+        # ⛔ ABSTENTION, HANDLED LIKE EVERY OTHER ABSTENTION. This used to append
+        # a note and leave the position alone, so an unmeasured tree could still
+        # be READY-TO-LAND with a command — while the neighbouring unreadable
+        # attestation was correctly downgraded. Two abstentions, opposite
+        # handling: a merge that was never tested read as the safest row.
+        if pos == "READY-TO-LAND":
+            pos = "NEEDS-TEST"
+        detail.append(
+            f"merge-tree: UNMEASURED ({mt.get('why') or 'head not available locally'}) "
+            "— cannot be shown to merge, so it is not landable"
+        )
 
     if pos == "READY-TO-LAND":
         att = snap.attestation.get(str(pr["number"])) or {}
@@ -644,6 +726,36 @@ def next_command(unit: Unit, repo: str) -> str | None:
     return f"bash scripts/orchestrator-harness/fix-one.sh . {repo} {unit.pr} <branch>"
 
 
+#: Seconds between GitHub calls. The API throttles per-call and a queue sweep
+#: makes ~50 of them, so the sweep is PACED rather than fanned out.
+PACE_SECONDS = float(os.environ.get("NEXT_WORK_PACE", "0.2"))
+
+
+def _pace() -> None:
+    if PACE_SECONDS > 0:
+        time.sleep(PACE_SECONDS)
+
+
+def _unreadable(snap: Snapshot, what: str, detail: object) -> None:
+    """Record a failed read, CLASSIFIED — the brief asks for the words, not the wall.
+
+    `GH-RATE-LIMITED(<endpoint>)` on a 403, `GH-TIMEOUT(<endpoint>)` when the call
+    was cut off, the raw text otherwise. An operator reading `exit 2` needs to know
+    which of those it was: a rate limit clears itself in a minute, a wrong token
+    does not, and a timeout may be the box. Recording all three as "unreadable"
+    makes them indistinguishable at the only moment anyone looks.
+    """
+    text = str(detail or "")
+    low = text.lower()
+    spoke = what.split("?")[0]
+    if "403" in text or "rate limit" in low or "secondary rate" in low:
+        snap.unreadable.append(f"GH-RATE-LIMITED({spoke})")
+    elif "timed out" in low or "timeout" in low or "killed" in low or "128+" in low:
+        snap.unreadable.append(f"GH-TIMEOUT({spoke})")
+    else:
+        snap.unreadable.append(f"{what} ({text[:120]})")
+
+
 # ── collection (the only part that touches the network) ─────────────────────
 def _run(
     args: Sequence[str], *, timeout: float = GH_TIMEOUT, cwd: Path | None = None
@@ -685,9 +797,18 @@ def _search_issues(client: GhCli, repo: str, label: str, snap: Snapshot) -> list
         try:
             payload = client._json([arg])
         except GhError as exc:
-            snap.unreadable.append(f"search:{label} ({str(exc)[:120]})")
+            _unreadable(snap, f"search:{label}", exc)
             return []
         if total is None:
+            if "total_count" not in payload:
+                # ⛔ WITHOUT `total_count` THE RECONCILIATION BELOW CANNOT FIRE.
+                # The first version defaulted it to 0, broke after page 1, and
+                # `len(rows) < total` was then False — a page-capped read
+                # reporting "nothing left", the exact failure the docstring forbids.
+                snap.unreadable.append(
+                    f"search:{label} carried no total_count — a page cannot be reconciled "
+                    "against the population, so truncation would be invisible"
+                )
             total = int(payload.get("total_count") or 0)
         items = payload.get("items") or []
         for it in items:
@@ -711,7 +832,7 @@ def _issue_links(client: GhCli, repo: str, issue: int, snap: Snapshot) -> set[in
     try:
         events = client._get_list(f"repos/{repo}/issues/{issue}/timeline")
     except GhError as exc:
-        snap.unreadable.append(f"timeline:{issue} ({str(exc)[:120]})")
+        _unreadable(snap, f"timeline:{issue}", exc)
         return set()
     out: set[int] = set()
     for ev in events:
@@ -744,7 +865,7 @@ def _closing_refs(repo: str, snap: Snapshot) -> dict[int, list[int]]:
         timeout=GH_TIMEOUT * 2,
     )
     if proc.returncode != 0:
-        snap.unreadable.append(f"closing references ({proc.stderr.strip()[:120]})")
+        _unreadable(snap, "closing references", proc.stderr.strip())
         return {}
     try:
         rows = json.loads(proc.stdout or "[]")
@@ -766,7 +887,27 @@ def _closing_refs(repo: str, snap: Snapshot) -> dict[int, list[int]]:
     return out
 
 
-def _local_holders(repo_root: Path) -> dict[str, list[str]]:
+def _issue_numbers_in(slug: str) -> set[int]:
+    r"""The issue numbers a branch name or worktree path MENTIONS — and no others.
+
+    ⛔ A BARE DIGIT RUN IS NOT A MENTION. A boundary-exact `[0-9]{3,6}` match
+    over the whole string harvested **hex-SHA and date fragments** out of real
+    names on this hub: `backup/fix-10704-bc80c635d` claimed issue **635**, and
+    `batch-2026-11-03` claimed issue **2026**. Both then read CLAIMED forever —
+    the #8175 "an abandoned claim blocks its issue forever" class, re-entered
+    through name matching. `collision_preflight.py`'s rule is anchored
+    (`fix/#?(\d{3,7})(?![0-9])(?:-|$)`); this keeps the boundary half AND drops
+    the two things that are provably not issue numbers: hash runs and dates.
+    """
+    cleaned = _DATE_SPAN_RE.sub(" ", slug)
+    cleaned = _HEX_SPAN_RE.sub(" ", cleaned)
+    out: set[int] = set()
+    for m in re.finditer(r"(?<![0-9a-zA-Z])([0-9]{3,6})(?![0-9a-zA-Z])", cleaned):
+        out.add(int(m.group(1)))
+    return out
+
+
+def _local_holders(repo_root: Path, snap: Snapshot | None = None) -> dict[str, list[str]]:
     """Work that exists only on THIS checkout — branches and worktrees carrying commits.
 
     `who-is-on --inventory`'s lesson (#4256): a remote-only read reports live
@@ -788,6 +929,13 @@ def _local_holders(repo_root: Path) -> dict[str, list[str]]:
         timeout=GIT_TIMEOUT,
         cwd=repo_root,
     )
+    if proc.returncode != 0 and snap is not None:
+        # A git that cannot answer is NOT an empty holder list. The local half of
+        # the claim surface would otherwise report "could not check" as "free" —
+        # the posture this module forbids everywhere else.
+        why = f"local holders: git for-each-ref failed ({(proc.stderr or '').strip()[:80]})"
+        if why not in snap.unreadable:
+            snap.unreadable.append(why)
     ahead_of: dict[str, int] = {}
     if proc.returncode == 0:
         for line in proc.stdout.splitlines():
@@ -799,11 +947,15 @@ def _local_holders(repo_root: Path) -> dict[str, list[str]]:
             except (ValueError, IndexError):
                 ahead_of[parts[0]] = -1  # unreadable ahead count: assume it carries work
     proc = _run(["git", "worktree", "list", "--porcelain"], timeout=GIT_TIMEOUT, cwd=repo_root)
+    if proc.returncode != 0 and snap is not None:
+        why = f"local holders: git worktree list failed ({(proc.stderr or '').strip()[:80]})"
+        if why not in snap.unreadable:
+            snap.unreadable.append(why)
     worktrees: list[tuple[str, str]] = []
     if proc.returncode == 0:
         path = ""
         branch = ""
-        for line in proc.stdout.splitlines() + [""]:
+        for line in [*proc.stdout.splitlines(), ""]:
             if line.startswith("worktree "):
                 path, branch = line[len("worktree "):], ""
             elif line.startswith("branch "):
@@ -816,8 +968,8 @@ def _local_holders(repo_root: Path) -> dict[str, list[str]]:
     def note(slug: str, ahead: int) -> None:
         if ahead == 0:
             return  # abandoned: it produced nothing and must not block (#8175)
-        for m in re.finditer(r"(?<![0-9])([0-9]{3,6})(?![0-9])", slug):
-            holders.setdefault(f"issue:{int(m.group(1))}", []).append(slug)
+        for number in _issue_numbers_in(slug):
+            holders.setdefault(f"issue:{number}", []).append(slug)
 
     for ref, _ahead in ahead_of.items():
         note(ref, 1 if _ahead < 0 else _ahead)
@@ -882,10 +1034,7 @@ def _claim_verdicts(repo_root: Path, refs: Iterable[str], snap: Snapshot) -> Non
         cwd=str(repo_root),
         timeout=GH_TIMEOUT * 2,
     )
-    try:
-        shutil.rmtree(Path(snap_file).parent, ignore_errors=True)
-    except OSError:
-        pass
+    shutil.rmtree(Path(snap_file).parent, ignore_errors=True)
     if proc.returncode != 0:
         snap.unreadable.append(f"claims.sh verdicts ({proc.stdout.strip()[:120] or proc.returncode})")
         return
@@ -985,7 +1134,12 @@ def _merge_tree(repo_root: Path, base: str, pr: dict[str, Any], snap: Snapshot) 
 def collect(repo: str, repo_root: Path, *, base: str = "main") -> tuple[Snapshot, QueueConfig | None, str]:
     """Read every surface the decision needs, and record what could not be read."""
     snap = Snapshot(repo=repo, base=base)
-    snap.collected_at = int(subprocess.run(["date", "+%s"], capture_output=True, text=True).stdout.strip() or 0)
+    # Provenance only — the decision never reads it. Bounded like every other
+    # subprocess here: the first version ran `date` with NO timeout and no error
+    # handling, so a host without it raised FileNotFoundError and exited 1 with a
+    # traceback instead of the documented 2.
+    stamp = _run(["date", "+%s"], timeout=5)
+    snap.collected_at = int(stamp.stdout.strip() or 0) if stamp.returncode == 0 and stamp.stdout.strip().isdigit() else 0
 
     try:
         text, source = load_config_text(None)
@@ -1014,7 +1168,7 @@ def collect(repo: str, repo_root: Path, *, base: str = "main") -> tuple[Snapshot
         pulls = client.list_pulls(repo, snap.base)
     except GhError as exc:
         pulls = []
-        snap.unreadable.append(f"open pulls ({str(exc)[:120]})")
+        _unreadable(snap, "open pulls", exc)
     snap.pulls = [
         {
             "number": int(p["number"]),
@@ -1034,6 +1188,7 @@ def collect(repo: str, repo_root: Path, *, base: str = "main") -> tuple[Snapshot
     # `closingIssuesReferences` sees only closing keywords (#10534), so the
     # timeline is the surface that knows about `Refs`.
     for iss in snap.issues:
+        _pace()
         linked = _issue_links(client, repo, int(iss["number"]), snap)
         for pr in snap.pulls:
             if int(pr["number"]) in linked:
@@ -1041,25 +1196,26 @@ def collect(repo: str, repo_root: Path, *, base: str = "main") -> tuple[Snapshot
 
     heads = {str(pr["head"]) for pr in snap.pulls if pr.get("head")}
     for sha in sorted(heads):
+        _pace()
         try:
             snap.check_runs[sha] = client.list_check_runs(repo, sha)
         except GhError as exc:
-            snap.unreadable.append(f"check-runs:{sha[:8]} ({str(exc)[:120]})")
+            _unreadable(snap, f"check-runs:{sha[:8]}", exc)
 
     closes = _closing_refs(repo, snap)
     for pr in snap.pulls:
         pr["closing_issues"] = closes.get(int(pr["number"]), [])
 
-    snap.local_holders = _local_holders(repo_root)
+    snap.local_holders = _local_holders(repo_root, snap)
 
     # Claims: every key the decision could ask about, in one snapshot fetch.
     refs: list[str] = []
     for iss in snap.issues:
-        refs.append(f"issue-{iss['number']}")
+        refs.append(f"{CLAIM_NS}/issue-{iss['number']}")
     for pr in snap.pulls:
-        refs.append(f"pr-{pr['number']}")
+        refs.append(f"{CLAIM_NS}/pr-{pr['number']}")
         if pr.get("head"):
-            refs.append(f"{pr['number']}-{str(pr['head'])[:12]}")
+            refs.append(f"{CLAIM_NS}/{pr['number']}-{str(pr['head'])[:12]}")
     _claim_verdicts(repo_root, refs, snap)
 
     # Attestation + merge test only for PRs that could become a unit at all:
@@ -1072,10 +1228,11 @@ def collect(repo: str, repo_root: Path, *, base: str = "main") -> tuple[Snapshot
     for pr in snap.pulls:
         if int(pr["number"]) not in linked_prs:
             continue
+        _pace()
         _attestation(repo_root, repo, int(pr["number"]), snap)
         _merge_tree(repo_root, f"origin/{snap.base}", pr, snap)
 
-    return snap, cfg, snap.config_source
+    return snap.normalize(), cfg, snap.config_source
 
 
 # ── rendering ───────────────────────────────────────────────────────────────
@@ -1105,7 +1262,7 @@ def render(
         label = u.issue if u.kind == "issue" else f"fold {u.fold_pr}"
         pr_col = str(u.pr) if u.pr else "-"
         out.append(
-            f"{str(label):<6} {u.priority:<11} {u.reason:<19} {pr_col:<7} {u.position:<14} {u.title[:58]}"
+            f"{label!s:<6} {u.priority:<11} {u.reason:<19} {pr_col:<7} {u.position:<14} {u.title[:58]}"
         )
         for d in u.detail:
             out.append(f"{'':<6}   · {d}")
@@ -1147,19 +1304,30 @@ def render(
             f"{' …' if len(unlabelled_folds) > 8 else ''}) and carry neither `{FOLD_LABEL}` nor a "
             "`fold-constituents:` line."
         )
+        remedy = (
+            "run `uv run python tools/batch_open.py --fold <N> --label-only` to make the "
+            "relationship mechanical"
+        )
+        if snap.unreadable:
+            # A refused run must not carry a command — not even an advisory one
+            # naming another tool. The remedy is stated, not spelled as a command.
+            remedy = "`batch_open.py --fold <N> --label-only` makes the relationship mechanical"
         out.append(
             "  Consequence: #10902's entry refusal reads only the label, so nothing stops a "
-            "constituent landing ahead of its fold. This tool will NOT guess membership from a "
-            "title — run `uv run python tools/batch_open.py --fold <N> --label-only` to make the "
-            "relationship mechanical."
+            f"constituent landing ahead of its fold. This tool will NOT guess membership from a "
+            f"title — {remedy}."
         )
         out.append("")
     pickable = [u for u in units if u.pickable]
     shown = pickable[: max(top, 0)]
     out.append(f"TOP {len(shown)} PICKABLE of {len(units)} unit(s) (rank order, held/superseded excluded)")
+    # ⛔ A REFUSED RUN DELIVERS NO COMMAND IN EITHER FORMAT. The `--json` path
+    # nulled every `next_command` while this footer still printed them, so a text
+    # consumer grepping for a command could find one on a run the tool itself
+    # calls REFUSED — the same fail-open, one format over.
     for i, u in enumerate(shown, 1):
-        cmd = next_command(u, repo) or ""
-        out.append(f"  {i}. {_label(u):<12} {u.priority:<11} {u.reason:<19} {cmd[:96]}")
+        cmd = "" if snap.unreadable else (next_command(u, repo) or "")
+        out.append(f"  {i}. {_label(u):<12} {u.priority:<11} {u.reason:<19} {cmd[:96]}".rstrip())
     out.append(
         "ordering key = (priority, position, number) — total, and no clock enters the decision, "
         "so a re-run picks the same row."
@@ -1248,7 +1416,12 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     units = build_units(snap, cfg)
     text, pick = render(units, cfg, snap, repo=repo, top=args.top)
-
+    # ⛔ AN INCOMPLETE RUN DELIVERS NO PICK — in EITHER format. The text path was
+    # refused while the machine path shipped `pick` + `next_command` anyway, so a
+    # consumer keyed on `--json` was handed a command for a run the tool itself
+    # calls REFUSED. The dangerous instance: `claims.sh` missing leaves the
+    # registry empty, which `_claim_of` reads as free for every key.
+    refused = bool(snap.unreadable)
     if args.json:
         print(
             json.dumps(
@@ -1257,6 +1430,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "base": snap.base,
                     "gate": snap.config_source,
                     "unreadable": snap.unreadable,
+                    "refused": refused,
                     "units": [
                         {
                             "key": u.key,
@@ -1271,12 +1445,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                             "holder": u.holder,
                             "detail": u.detail,
                             "pickable": u.pickable,
-                            "next_command": next_command(u, repo),
+                            "next_command": None if refused else next_command(u, repo),
                         }
                         for u in units
                     ],
-                    "pick": pick.key if pick else None,
-                    "next_command": next_command(pick, repo) if pick else None,
+                    "pick": None if refused else (pick.key if pick else None),
+                    "next_command": None if refused else (next_command(pick, repo) if pick else None),
                 },
                 indent=2,
             )
