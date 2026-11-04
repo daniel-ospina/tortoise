@@ -70,50 +70,17 @@ def _isolate_atexit_budget():
 #: not a slow answer, it is the false-PASS shape: ``_server_still_alive``
 #: would say "no leak" about a server that is still running, and the
 #: assertion it guards would pass vacuously.
-#:
-#: The two arms are deliberately NOT interchangeable: on a host WITH
-#: ``/proc`` an ``OSError`` means the pid is gone, and falling through to
-#: ``ps`` would fork per poll (~120 times) to re-learn it.
-#:
-#: A module constant rather than an inline probe because a test flips it
-#: (:func:`_hide_procfs`) — the portability this probe now claims must be
-#: EXECUTED on a Linux CI host, not asserted in prose.
 _HAVE_PROC = os.path.exists("/proc/self/cmdline")
-
-
-def _cmdline_from_proc(pid: int) -> str | None:
-    """The ``/proc`` arm — Linux, one read and no fork."""
-    try:
-        with open(f"/proc/{pid}/cmdline", "rb") as fh:
-            return fh.read().replace(b"\0", b" ").decode(
-                "utf-8", "replace").strip()
-    except OSError:
-        return None  # a real /proc answered: this pid is gone
-
-
-def _cmdline_from_ps(pid: int) -> str | None:
-    """The no-procfs arm — macOS/BSD, and the ONLY source there.
-
-    ``-ww`` is not cosmetic: ``ps`` truncates its output to the terminal width,
-    and a truncated argv can put the ``redislite/bin/redis-server`` match out
-    of reach. The same flag is kept by ``tortoise/embedded_reaper.py``.
-    """
-    try:
-        out = _subprocess.run(["ps", "-ww", "-o", "command=", "-p", str(pid)],
-                              capture_output=True, text=True, timeout=5)
-    except (OSError, _subprocess.SubprocessError):
-        return None
-    return out.stdout.strip() or None  # rc 1 (no pid) leaves stdout empty
 
 
 def _server_cmdline(pid: int) -> str | None:
     """The ``pid``'s command line, or ``None`` when no argv could be read.
 
-    Two source questions are asked of a server pid — "is THIS pid still
-    there?" (liveness) and "is it still the redislite server we started?"
-    (the pid-recycling guard). Only the SECOND needs an argv, and liveness is
-    read portably by :func:`_pid_alive`, so the argv read must not carry a
-    platform dependency of its own:
+    ``/proc`` is preferred — one read, no fork, asked up to ~120 times by the
+    poll below — and ``ps`` is the fallback for a host that has no ``/proc``
+    at all. The only questions this module asks about a server are "is THIS
+    pid still there?" and "is it still the redislite server we started?"
+    (the second guards pid recycling).
 
     * ``/proc/<pid>/cmdline`` (NUL-separated argv) on Linux — one read, no
       fork, asked up to ~120 times by the poll below;
@@ -136,7 +103,25 @@ def _server_cmdline(pid: int) -> str | None:
     defect, which is a FAIL; a silent pass is not). ``ps`` is POSIX-mandated,
     so that arm is unreachable on any host this suite runs on.
     """
-    return _cmdline_from_proc(pid) if _HAVE_PROC else _cmdline_from_ps(pid)
+    if _HAVE_PROC:
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as fh:
+                return fh.read().replace(b"\0", b" ").decode(
+                    "utf-8", "replace").strip()
+        except OSError:
+            return None  # a real /proc answered: this pid is gone
+    try:
+        run = _subprocess.run(
+            ["ps", "-ww", "-o", "command=", "-p", str(pid)],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+    except (OSError, _subprocess.TimeoutExpired):
+        return None
+    # ``ps`` rc 1 ("no pid matched") and an EMPTY argv are the same answer:
+    # a COMPLETED measurement of "it is gone", not an unreadable host. ``-ww``
+    # is the widening flag — without it the argv is cut to the terminal width
+    # and the ``redislite/bin/redis-server`` token can fall off the end.
+    return run.stdout.strip() or None
 
 
 def _server_still_alive(pid: int) -> bool:
@@ -160,38 +145,45 @@ def _spawn_marked_sleeper(*argv: str):
 
 
 def _hide_procfs(monkeypatch) -> None:
-    """Make this Linux host look like a mac: no procfs, ``ps`` only."""
+    """Make this Linux host look like a mac: no procfs, ``ps`` only.
+
+    Flips the module's own :data:`_HAVE_PROC` gate — the flag
+    :func:`_server_cmdline` reads at CALL time, which is what makes the
+    fallback exercised on a host that HAS procfs instead of only on the mac
+    that lacks it.
+    """
     monkeypatch.setattr(sys.modules[__name__], "_HAVE_PROC", False)
 
 
-@pytest.mark.parametrize("what", ["ps_arm", "still_alive", "recycling_guard"])
+@pytest.mark.parametrize("what", ["cmdline", "still_alive", "recycling_guard"])
 def test_server_probe_is_portable_without_procfs(monkeypatch, what):
     """#10632 rev-e P2: the probe must not need ``/proc`` to work.
 
-    On macOS there is no procfs, and the pre-fix ``/proc``-only helper
-    returned ``None`` for a LIVE server — so the main atexit test's ``leaked``
-    was always ``False`` (a vacuous pass, the exact defect this probe was
-    rewritten to remove) while its positive control spun the full deadline and
-    then reddened.
+    On macOS there is no procfs, and the ``/proc``-only form returned ``None``
+    for a LIVE server — so the main atexit test's ``leaked`` was always
+    ``False`` (a vacuous pass, the exact defect this probe was rewritten to
+    remove) while its positive control span the full deadline and reddened.
 
     ⚠️ What each arm can and cannot prove, stated so the fail is not
     over-claimed. The PRE-CHECK below is what makes the portability claim
     executable on any host: it hides procfs AND makes the ``/proc`` arm answer
     ``None`` (what it answers on a host that has none) *before* it asserts, so
     a ``/proc``-only read cannot satisfy it — the Linux CI host included. That
-    is a correction of this test's own first form, which gated the arms on
-    ``_cmdline_from_proc`` and therefore passed on Linux only and failed
+    is a correction of this test's own first form, which gated the arms on a
+    ``/proc``-only read and therefore passed on Linux only and failed
     deterministically on the mac it was written for (3 arms x 10 s). The arms
     themselves red on the pre-fix code by NAME and by BEHAVIOUR:
 
-    * ``ps_arm`` — calls :func:`_cmdline_from_ps` directly, so the fallback is
-      exercised for real against a live process. Pre-fix that function does not
-      exist (``AttributeError``). Reds if the fallback is removed or broken.
-    * ``still_alive`` — with ``_HAVE_PROC`` False, a live pid whose argv names
-      the server must still be VISIBLE. Pre-fix ``_HAVE_PROC`` does not exist.
-      Reds if the dispatch stops honouring the flag.
-    * ``recycling_guard`` — the same pid, argv NOT naming the server, still
-      reads ``False``: the fallback did not degrade to bare liveness.
+    * ``cmdline`` — the ``ps`` fallback returns the child's argv;
+    * ``still_alive`` — a live process whose argv names the redislite server
+      is VISIBLE without procfs.
+
+    ``recycling_guard`` is the third arm and it is deliberately NOT red on the
+    pre-fix code: the pre-fix helper answered ``False`` for everything without
+    procfs, which is the defect, not this guard. It reds on the OVER-correction
+    instead — `_server_still_alive` reduced to bare liveness, which would make
+    any recycled pid read as the server — so the fallback cannot silently drop
+    the attribution it was added for.
     """
     if what == "recycling_guard":
         proc = _spawn_marked_sleeper("not-a-redis-server")
@@ -206,18 +198,16 @@ def test_server_probe_is_portable_without_procfs(monkeypatch, what):
         # child, not a pid that was never there) AND it reds a ``/proc``-only
         # pre-check on a Linux host, where such a read is invisible to review.
         _hide_procfs(monkeypatch)
-        monkeypatch.setattr(sys.modules[__name__], "_cmdline_from_proc",
-                            lambda pid: None)
         assert wait_for(lambda: _server_cmdline(proc.pid) is not None,
                         timeout_s=10), (
             "the child never became observable through the ps fallback — on a "
             "host without procfs that is the false-PASS shape this probe "
             "removes")
-        if what == "ps_arm":
-            got = _cmdline_from_ps(proc.pid)
+        if what == "cmdline":
+            got = _server_cmdline(proc.pid)
             assert got is not None, (
-                "the ps fallback returned no argv for a LIVE pid — the probe "
-                "is still Linux-only")
+                "no argv from ps when /proc is absent — the probe is still "
+                "Linux-only")
             assert "redislite/bin/redis-server" in got, got
         elif what == "still_alive":
             assert _server_still_alive(proc.pid) is True, (

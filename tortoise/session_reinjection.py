@@ -485,9 +485,9 @@ def reinjection_merge_order(
     the seed window — so the injected group lands after every base hit of
     that session and the C5 re-cap keeps base chunks first. With the guard's
     default (``floor_term=False``) an injected item can therefore never evict
-    a base item FROM THE POOL — the ``floor_term`` arm below WITHDRAWS that
-    property. With no genuinely-new id the base pool is returned unchanged
-    (the caller's ``new_ids`` gate is mirrored here for defence in depth).
+    a base item — the ``floor_term`` arm below WITHDRAWS that property. With
+    no genuinely-new id the base pool is returned unchanged (the caller's
+    ``new_ids`` gate is mirrored here for defence in depth).
 
     ⚠️ Pool-additivity is NOT reader-additivity (#10540). The reader
     consumes a PREFIX (``context_item_cap``, default 40), so an injected
@@ -498,6 +498,13 @@ def reinjection_merge_order(
     ("an injected item can never evict a base item") was true of the pool
     LIST and false of the reader, which is why the crowding was invisible
     to the census.
+
+    ⚠️ REBASE UNION (#10632 × #2513): both sides rewrote this
+    paragraph. The folded tree added the ``floor_term`` precision (the arm
+    THAT CAN evict a base item); this PR added the reader-window disclosure
+    (pool-additivity ≠ reader-additivity). They describe different
+    mechanisms and both are true, so both are kept — dropping either would
+    restore a claim the other side measured to be false.
 
     NOTE: ``guard_and_recap_pool``'s C5 re-cap counts only ``is_raw_chunk``
     hits, so injected TURN points (the default kind) are not re-capped —
@@ -601,30 +608,49 @@ def reader_window_displacement(
       ``TORTOISE_LME_EVIDENCE_BOOST`` on — the re-validation run's own
       default — the census window is the PRE-boost order and the reader's
       is the post-boost one.
-    * TWO LATER POOL MOVERS IN THE SAME LANE ARE NOT IN THIS COUNT AT ALL
-      (``tools/longmem_eval/retrieve.py``). R6 rerank re-SELECTS from the
-      whole pool (``pool = selected``, ``<= top_k``; on its degrade path
-      ``pool = pool[:top_k]``) and C6 ``prefer_latest_order`` reorders the
-      final pool. ``prefer_latest_order`` is membership-preserving, but
-      the reranker's move is a fresh SELECTION over every candidate — a
-      two-stage retrieve→rerank pipeline picks its ``top_n`` from the
-      FULL candidate list, not from a prefix of it (Cohere's Rerank API:
+    * ONE LATER POOL MOVER IN THE SAME LANE IS NOT IN THIS COUNT, and it is
+      the re-SELECTION only (``tools/longmem_eval/retrieve.py``). When R6
+      rerank APPLIES it re-SELECTS from the whole pool (``pool = selected``,
+      ``<= top_k``), and C6 ``prefer_latest_order`` reorders the final pool.
+      ``prefer_latest_order`` is membership-preserving, but the reranker's
+      move is a fresh SELECTION over every candidate — a two-stage
+      retrieve→rerank pipeline picks its ``top_n`` from the FULL candidate
+      list, not from a prefix of it (Cohere's Rerank API:
       ``rerank(documents=<all candidates>, top_n=k)`` returns indices into
       that whole list), and the lane's own ``rerank_hits`` is called on
-      the entire ``pool``. So with rerank ON the delivered surface may
+      the entire ``pool``. So on the APPLIED arm the delivered surface may
       include base hits AND injected items from BELOW this window while
       excluding ones inside it.
-      ⇒ The bound below holds for the NO-RERANK arm ONLY. With R6 active,
-      ``injected_in_window``/``base_displaced`` describe ``merged[:40]``
-      and are not a bound — upper or lower — on what the reader got.
-    * So, with rerank OFF (the fail-safe default), "inside the window" is
-      an UPPER BOUND on the delivered surface, not the surface itself;
-      with rerank ON it is not a bound at all. This module already
-      states the same residual class for ``seeded_sessions`` (*"matches the
-      reader MODULO the budget caps"*); a reuse at a different window, or
-      alongside the packaging, boost or rerank arms, needs the same
-      ``admitted=``/counterfactual treatment before the number is read as
-      delivered evidence.
+      ⇒ On the APPLIED arm ``injected_in_window``, ``base_displaced`` and
+      ``sessions_lost`` describe ``merged[:window]`` and are not a bound at
+      all — upper or lower — on what the reader got. ``sessions_lost`` is
+      derived from those SAME two windows, so the reranker can deliver a
+      session ranked below ``merged[:window]`` while this census names it
+      LOST: on that arm the key OVER-reports. (Nor are they a bound with R6
+      OFF, for the reason the bullet below gives.)
+      ⛔ The three TRUNCATING arms are NOT in that class, and an earlier
+      revision of this list wrongly put one of them there: the pool-only
+      arm and the two R6 DEGRADES (load-failure ``scorer is None``,
+      score-failure ``applied: False``) each cut a prefix of the pool, and
+      the caller declares that cut so ``window`` becomes the cut
+      (``min(item_cap, len(pool))`` after it — #10632 review ISSUE 1). No
+      candidate outside the window can reach the reader on those arms, so
+      there the window IS a ceiling. It is still not the DELIVERED set:
+      the skip filter below can only remove items from inside it.
+    * So the count is not a bound on the delivered surface in EITHER
+      direction, and the skip semantics above are why in both: a
+      claim-text-less (or cap-refused) hit INSIDE the window is counted and
+      never delivered, so the number can OVER-state what the reader got —
+      while a skipped hit FREES its slot, so ``assemble_context`` continues
+      PAST the raw prefix and admits later hits up to its item bound, and
+      injected items BELOW the window can therefore be delivered without
+      ever being counted. That under-count is the direction this key exists
+      for. It is a WINDOW CENSUS, not a ceiling and not a floor. This
+      module already states the same residual class for ``seeded_sessions``
+      (*"matches the reader MODULO the budget caps"*); a reuse at a
+      different window, or alongside the packaging, boost or rerank arms,
+      needs the same ``admitted=``/counterfactual treatment before the
+      number is read as delivered evidence.
 
     ⛔ The TOP-5 is NOT where this happens, and a probe that counts base
     hits at final rank ``>= 5`` says otherwise: it reports 35 for that shape
@@ -633,9 +659,13 @@ def reader_window_displacement(
     measurement. The guard's session-diverse reorder holds the top-5
     (measured: 0 base items lost from it in every arm tested).
 
-    ``sessions_lost`` is the load-bearing key: a session with no hit in the
-    merged window has no evidence the reader can cite, whatever its rank
-    was before.
+    ``sessions_lost`` is the load-bearing key on every arm that does not
+    re-SELECT: a session with no hit in the merged window has no evidence the
+    reader can cite, whatever its rank was before. On the APPLIED-rerank arm
+    it is an OVER-report rather than a bound, for the reason the bullet above
+    gives — the reranker selects from the whole candidate list, so a session
+    ranked below this window can be delivered while this census names it
+    lost.
 
     The synthetic ``idx:*`` namespace is dropped from BOTH sets: it names no
     graph session (the ``lme_session_index`` bucket, and since #3591 the
