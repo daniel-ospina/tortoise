@@ -392,13 +392,32 @@ def _redirect_refusal(
         # is the reason the rule is stated as a rule and not as a habit: the
         # redirect refusal was added after every sibling site was repaired.
         detail += f": {redact(body.strip(), sent.key)[:400]}"
+    # ⛔ ONE CLAUSE PER SHAPE, because `sent.source` is `None` on the keyless
+    # branch: interpolating it unconditionally printed "the credential resolved
+    # from None was never sent", which tells the operator a credential EXISTS and
+    # was sourced from a file literally named `None` (#10802 review, P2). The
+    # keyless refusal is a DIFFERENT claim — nothing was withheld, because
+    # nothing resolved — and `mcp_client._not_carried` already carries exactly
+    # this split (`test_a_refused_hop_with_no_credential_names_the_absence_not_a_
+    # value` pins it there).
+    if sent.key:
+        credential = (
+            "An Authorization header is deliberately not carried across origins: "
+            f"the credential resolved from {sent.source} was never sent to "
+            f"{final} and is not what was refused."
+        )
+    else:
+        resolved_none = ", ".join(sent.sources or ("no source recorded",))
+        credential = (
+            f"No credential resolved either ({resolved_none}), so that request "
+            "went bare — the redirect is the fault to fix first, and there was no "
+            "value to withhold."
+        )
     return (
         f"{NOT_CARRIED_CODE}: the Tortoise MCP endpoint answered this request "
         f"({detail}) with a redirect to {final}, a DIFFERENT origin, so the bridge "
         f"DID NOT follow it: the JSON-RPC payload and the session headers are never "
-        f"replayed to another host, and an Authorization header is deliberately not "
-        f"carried across origins — the credential resolved from {sent.source} was "
-        f"never sent to {final} and is not what was refused. Fix: "
+        f"replayed to another host. {credential} Fix: "
         f"{_redirect_remedy(final, sent)}"
     )
 
@@ -665,21 +684,62 @@ def forward(client: httpx.Client, state: dict, payload: Any) -> list[Any]:
     return messages
 
 
+def _resolved_or_none() -> Connection | None:
+    """`resolve_connection()`, or `None` when the resolution ITSELF fails.
+
+    ⛔ Neither call site may raise. `resolve_connection()` performs real
+    filesystem I/O — `_credential_paths` reads `Path.cwd()` and `Path.home()` —
+    and raises on ORDINARY conditions: a working directory removed mid-session
+    (how containers and supervisors recycle one), an unresolvable `~`. Both call
+    sites are places where an escape is fatal rather than diagnosable:
+
+      * at STARTUP, an escape killed the process on line 1 with a traceback and
+        no mention of the bridge, before it had read a single request;
+      * inside the per-request FAILURE handler, an escape re-raised the very
+        exception being handled, so the request the handler exists to ANSWER went
+        unanswered and the bridge exited — the silence this module's own docstring
+        says it never emits ("A request that comes back with no JSON-RPC reply is
+        answered with a named error rather than with silence").
+
+    The sibling `mcp_client.describe_failure` guards this exact call the same way
+    (`contextlib.suppress(Exception)`) for the same reason, and pins it
+    (`TestStatusNeverRaisesAndTheCredentialReadLeavesTheLoop`).
+    """
+    try:
+        return resolve_connection()
+    except Exception:
+        return None
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the bridge until stdin closes. Returns a process exit code."""
     try:
         timeout = float(os.environ.get("TORTOISE_MCP_BRIDGE_TIMEOUT", _DEFAULT_TIMEOUT))
     except ValueError:
         timeout = _DEFAULT_TIMEOUT
-    connection = resolve_connection()
+    # ⛔ A STARTUP RESOLUTION FAILURE IS NOT FATAL. `forward()` resolves per
+    # request, so the startup call only feeds these two log lines — dying here
+    # bought nothing and cost everything: the harness got a dead child and no
+    # reply for the request it was about to send, with no named refusal anywhere.
+    # A sentinel keeps the process serving, and each request gets the named
+    # failure `forward()` raises.
+    connection = _resolved_or_none()
+    start_key = connection.key if connection is not None else None
     state: dict[str, Any] = {"session_id": None, "protocol_version": None}
-    _log(f"forwarding stdio → {connection.url}")
-    _log(
-        f"credential: {connection.source}" if connection.key else
-        f"credential: NONE configured (checked {', '.join(connection.sources)}) — "
-        f"requests go out unauthenticated and a 401 becomes a named "
-        f"{REFUSAL_CODE} refusal"
-    )
+    if connection is None:
+        _log(
+            "endpoint/credential resolution FAILED at startup (a removed working "
+            "directory or an unresolvable `~` does this) — the bridge stays up "
+            "and every request is answered with the named failure it raises"
+        )
+    else:
+        _log(f"forwarding stdio → {connection.url}")
+        _log(
+            f"credential: {connection.source}" if connection.key else
+            f"credential: NONE configured (checked {', '.join(connection.sources)}) — "
+            f"requests go out unauthenticated and a 401 becomes a named "
+            f"{REFUSAL_CODE} refusal"
+        )
 
     # `follow_redirects=False` IS the security property, not a default: httpx
     # re-issues a cross-origin 307/308 with the SAME body and drops only
@@ -709,15 +769,20 @@ def main(argv: list[str] | None = None) -> int:
                 # the exit is indistinguishable from a crash loop.
                 # The START key and the LIVE one: a rotation between the
                 # send and the fault means either could be in the text.
-                detail = _redact_any(repr(exc), connection.key,
-                                     resolve_connection().key)
+                # ⛔ RESOLVED AT MOST ONCE, AND NEVER FATALLY (#10802 review, P1):
+                # this IS the failure path, so a raise here re-raised the exception
+                # being handled and the request went unanswered. `live` is None
+                # when the resolution itself fails; `redact` already answers text
+                # unchanged for a None key.
+                live = _resolved_or_none()
+                live_key = live.key if live is not None else None
+                detail = _redact_any(repr(exc), start_key, live_key)
                 # REDACT FIRST, TRUNCATE SECOND — the sibling line below already
                 # does. Slicing the raw stdin line first cut a credential that
                 # straddled char 120 in half, and neither `redact` nor
                 # `_redact_any` can match a value it can no longer see whole, so
                 # up to `len(key) - 1` characters reached stderr.
-                quoted = _redact_any(line.strip(), connection.key,
-                                     resolve_connection().key)
+                quoted = _redact_any(line.strip(), start_key, live_key)
                 _log(f"internal failure forwarding {quoted[:120]!r}: "
                      f"{detail}")
                 messages = _errors_for(

@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import os
 import select
+import shutil
 import subprocess
 import sys
 import threading
@@ -777,6 +778,145 @@ class TestFailureModes:
         assert not any(f in quoted for f in fragments), (
             f"a FRAGMENT of the value reached stderr: {quoted[:300]}")
         assert "<redacted>" in quoted, f"no redaction marker on the quoted line: {quoted[:300]}"
+
+    def test_a_resolution_failure_at_STARTUP_answers_the_request_instead_of_dying(
+        self, monkeypatch, home, capsys,
+    ):
+        """`resolve_connection()` does real filesystem I/O and raises on ORDINARY
+        conditions (a removed working directory, an unresolvable `~`).
+
+        It used to be called UNGUARDED as the first statement of `main()`, so one
+        such failure killed the process with a traceback before it had read a
+        single request — the harness got a dead child and no JSON-RPC reply, which
+        is the silence this module's own docstring says it never emits. It is not
+        needed for forwarding at all: `forward()` resolves per request, so the
+        startup call only feeds two log lines (#10802 review, P1).
+
+        RED before the fix: `main()` raised `FileNotFoundError` out of the call.
+        """
+        import io
+
+        from tortoise import mcp_bridge
+
+        def _unresolvable():
+            raise FileNotFoundError(2, "No such file or directory")
+
+        monkeypatch.setattr(mcp_bridge, "resolve_connection", _unresolvable)
+        out = io.StringIO()
+        monkeypatch.setattr(
+            sys, "stdin",
+            io.StringIO('{"jsonrpc":"2.0","id":1,"method":"initialize"}\n'))
+        monkeypatch.setattr(sys, "stdout", out)
+
+        assert mcp_bridge.main([]) == 0, "a resolution failure at startup was fatal"
+
+        lines = [json.loads(line) for line in out.getvalue().splitlines() if line.strip()]
+        assert len(lines) == 1, f"expected exactly one reply, got: {out.getvalue()!r}"
+        assert lines[0]["id"] == 1
+        assert lines[0]["error"]["code"] == -32603, lines[0]
+        assert "FileNotFoundError" in lines[0]["error"]["message"], lines[0]
+
+        err = capsys.readouterr().err
+        assert "resolution FAILED at startup" in err, (
+            f"the operator got no diagnosis of the startup failure: {err[-300:]}")
+
+    def test_a_resolution_failure_while_ANSWERING_a_fault_still_answers(
+        self, home, tmp_path,
+    ):
+        """The failure handler re-resolved the credential to redact against a
+        rotated key — and it did so UNGUARDED, on the one path whose job is to
+        answer an exception.
+
+        So a resolution failure re-raised the very exception being handled: the
+        request the handler exists to answer went unanswered and the bridge exited.
+        Reproduced here the way it actually happens — a long-lived bridge whose
+        working directory is removed mid-session (`Path.cwd()` is part of every
+        resolution), then one request (#10802 review, P1).
+
+        RED before the fix: no reply within the read window, and the child is dead.
+        """
+        cwd = tmp_path / "vanishing-cwd"
+        cwd.mkdir()
+        bridge = _Bridge("http://127.0.0.1:9/mcp", home, cwd)
+        try:
+            # Wait for the STARTUP resolution, so the failure below lands on the
+            # per-request path and not on the startup one.
+            deadline = time.monotonic() + 60
+            while time.monotonic() < deadline:
+                if any("forwarding stdio" in line or "resolution FAILED" in line
+                       for line in bridge.stderr_lines):
+                    break
+                time.sleep(0.02)
+            else:
+                raise AssertionError(
+                    f"the bridge never logged its startup resolution: "
+                    f"{bridge.stderr_lines}")
+
+            shutil.rmtree(cwd)  # how a container or supervisor recycles a cwd
+
+            for request_id in (1, 2):
+                bridge.send({**_INITIALIZE, "id": request_id})
+                reply = bridge.read()
+                assert reply["id"] == request_id, reply
+                assert reply["error"]["code"] == -32603, reply
+                assert "FileNotFoundError" in reply["error"]["message"], reply
+
+            assert bridge.proc.poll() is None, (
+                f"the bridge exited on a resolution failure while answering a "
+                f"fault: rc={bridge.proc.returncode}, stderr={bridge.stderr_lines}")
+        finally:
+            bridge.close()
+
+    def test_a_refused_hop_with_NO_credential_names_the_absence_not_a_value(self):
+        """The cross-origin refusal interpolated `sent.source` unconditionally.
+
+        `sent.source` is `None` when nothing resolved, so an uncredentialed bridge
+        meeting a cross-origin redirect told the operator "the credential resolved
+        from None was never sent" — a credential that does not exist, sourced from
+        a file named `None`. That is the "accurate about the status, useless about
+        the cause" misdirection this whole change exists to remove, on the
+        keyless branch a self-hoster can hit. The sibling builder
+        (`mcp_client._not_carried`) already has this split (#10802 review, P2).
+        """
+        import httpx as _httpx
+
+        from tortoise.mcp_bridge import NOT_CARRIED_CODE, _redirect_refusal
+        from tortoise.mcp_client import Connection
+
+        sources = ("TORTOISE_API_KEY", "TORTOISE_MCP_API_KEY")
+        sent = Connection("http://h/mcp", None, None, sources)
+        text = _redirect_refusal(
+            _httpx.Response(307), "", sent, "https://evil.example/mcp")
+
+        assert text.startswith(f"{NOT_CARRIED_CODE}:"), text
+        assert "resolved from None" not in text, (
+            f"the keyless refusal invented a credential's source: {text}")
+        assert "No credential resolved either" in text, text
+        for source in sources:
+            assert source in text, f"the refusal does not name every source read: {text}"
+        # The delivery that did NOT happen is still named, and the remedy still
+        # points at the redirect — the keyless branch must not weaken either.
+        assert "https://evil.example/mcp" in text, text
+        assert "Fix:" in text, text
+
+    def test_a_refused_hop_WITH_a_credential_still_names_the_value_it_withheld(self):
+        """The complement, so the keyless split cannot swallow the other branch.
+
+        A credential that RESOLVED and was withheld is the #10605 defect's mirror
+        image: the refusal must say the value exists and is not what was refused.
+        """
+        import httpx as _httpx
+
+        from tortoise.mcp_bridge import _redirect_refusal
+        from tortoise.mcp_client import Connection
+
+        sent = Connection("http://h/mcp", "tt_value", "TORTOISE_API_KEY",
+                          ("TORTOISE_API_KEY",))
+        text = _redirect_refusal(
+            _httpx.Response(307), "", sent, "https://evil.example/mcp")
+        assert "resolved from TORTOISE_API_KEY" in text, text
+        assert "is not what was refused" in text, text
+        assert "tt_value" not in text, f"the refusal leaked the value: {text}"
 
     def test_redaction_survives_a_TRUNCATED_body_on_the_REDIRECT_refusal(self):
         """The redirect refusal is a SECOND builder, added after the repair.
