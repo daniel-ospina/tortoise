@@ -3864,6 +3864,20 @@ surfaces:
   # pool (this fleet registers no such label; `runs-on` is the selector's alone).
   # Hermetic: no DB, no network, no `gh`; every git/gh surface is injected.
   - test_batch_gate.py
+  # #10955: the queue consumer's own guard (`tools/next_work.py`) — the pick is
+  # DECIDED from records that already exist (`.mergify.yml`, the claim registry,
+  # the attestation, the merge tree) and the row names the command a lane would
+  # run, so this file pins the fail-closed half of that: a held/superseded/
+  # duplicate unit never carries a command, an unreadable surface is INCOMPLETE
+  # (exit 2), the order never lets readiness reorder priority, and the decision is
+  # a pure function of the snapshot (no clock, no config re-read, no cwd).
+  # Registered under `core`: `tools/` is a flat NON_PYTHON_PREFIXES entry, so the
+  # registration alone does not make a `tools/next_work.py`-only change select
+  # `core` — `tools/ci_selection.py::CORE_ALSO` carries that entry, and
+  # `test_a_next_work_only_change_selects_core_so_this_guard_actually_runs` in this
+  # file pins it. Hermetic: no DB, no network, no `gh`; every surface is a fake or
+  # a replayed snapshot.
+  - test_next_work.py
   # #6884: pins the `uri_requiring` declaration (re-derived BEHAVIOURALLY — it
   # runs the failing `pytest --collect-only` with an EMPTY TORTOISE_DB_URI and
   # compares) and

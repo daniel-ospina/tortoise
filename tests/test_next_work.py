@@ -1783,3 +1783,33 @@ def test_a_labelled_fold_with_a_refused_line_says_so_on_its_row():
     assert any("refused WHOLE" in d for d in fold_row.detail), fold_row.detail
     text, _ = render(units_for(s), CFG, s, repo=REPO, top=5)
     assert "non-parsing" in text
+# ── this guard must actually RUN on an edit to the file it guards ──────────
+def test_a_next_work_only_change_selects_core_so_this_guard_actually_runs() -> None:
+    """The `CORE_ALSO` entry is LOAD-BEARING, so it is pinned here.
+
+    `tools/` is in `NON_PYTHON_PREFIXES` and no `SOURCE_PATTERNS` row matches
+    `tools/next_work.py`, so WITHOUT the entry a next_work-only diff is filtered
+    out BEFORE the "not matched -> core" fallback, `select()` returns no surface,
+    and this file never runs on the edit it exists to judge. For THIS tool that is
+    the fail-open direction specifically: it decides which unit a lane may act on,
+    so the diff most worth guarding is one that weakens the deciding code.
+
+    Measured with the entry removed: `surfaces == []` and `test_next_work.py` is
+    absent from `test_files`. `tests/test_ci_selection.py`'s generic ratchet
+    derives candidates from `tortoise/**/*.py` stems only, so it cannot see a
+    `tools/` guard — hence the pin lives here, where the entry does.
+
+    Registration in `config/ci-surfaces.yml` is the OTHER half and is pinned by
+    `ci_selection.py --integrity` (a `tests/`-unregistered file reds it); this
+    test pins the selection half, which integrity does not read.
+    """
+    from tools import ci_selection as cs
+
+    selection = cs.select(["tools/next_work.py"], "pull_request", cs.load_manifest())
+    assert selection["surfaces"] == ["core"], selection
+    assert "test_next_work.py" in selection["test_files"], (
+        "the CORE_ALSO entry is missing: a next_work-only diff would run no guard "
+        f"at all — got {len(selection['test_files'])} files"
+    )
+
+
