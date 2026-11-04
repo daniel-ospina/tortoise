@@ -13331,7 +13331,14 @@ class TestOverLimitSurfacesOfferTheHumanPath:
     REFUSAL_SUBCLASSES = ("CohortCostCapExceeded",)
     MODULES = ("tortoise/hosted_api.py", "tortoise/quota.py",
                "tortoise/cohort_cost.py", "tortoise/supabase_control.py",
-               "tortoise/sdk.py", "tortoise/__main__.py")
+               "tortoise/sdk.py", "tortoise/__main__.py",
+               # #9567: DECLARED on purpose, not forgotten. This module holds the
+               # only real 402 allowance ceiling (`allowance_gate.py:772`, the
+               # over-allowance `QuotaExceededError`, correctly wrapped in
+               # `with_limit_contact`) plus the fail-closed refusals around it.
+               # Leaving it out made the boundary implicit: a future edit that
+               # dropped the seam on the ceiling would have reddened nothing.
+               "tortoise/allowance_gate.py")
     LIMIT_WORDS = ("limit", "quota", "upgrade", " cap ", "cap ", "plan ",
                    "tier", "maximum", " max ", "allowance", "ceiling",
                    # round 5: a ceiling worded as a COUNT. "You can only have
@@ -13352,18 +13359,46 @@ class TestOverLimitSurfacesOfferTheHumanPath:
         # customer ceiling. Offering the upgrade path here would promise a
         # plan that cannot lift a data fault.
         "unreadable for resource",
-        # #4051 (this lane): the gate builds the SDK whose graph it counts, so a
-        # CONSTRUCTION fault is now a reachable fail-closed arm — the third of the
-        # same category as "quota count failed" and "unreadable for resource"
-        # above (corrupt/unavailable state on our side, never a customer ceiling).
-        # The count was never taken because the handle it reads through could not
-        # be made, and no plan lifts that. `_check_org_limit` wraps it as
-        # "Quota check failed: ...", which IS the exempted prefix — but this guard
-        # reads raise-site LITERALS, and the wrap happens at the HTTPException site
-        # in another module, so the literal here needs its own entry or the arm
-        # reads as an unregistered ceiling refusal. Registered the same way the
-        # previous arm was (#10142, f8970b536): a new fail-closed arm gets a
-        # category entry, not a rewritten message.
+        # #9567: the allowance GATE could not be IMPORTED. That is the same
+        # fail-closed SERVER-fault category as "unreadable for resource"
+        # above — a deploy/drift fault on our own side. No plan a customer
+        # could buy lifts an ImportError, so offering "need more? contact
+        # support" here would promise an upgrade path that cannot exist.
+        # (Precedent: f8970b536 added the "unreadable for resource" message
+        # and THIS exemption together, for exactly this reason.)
+        "the allowance gate could not be loaded",
+        "the allowance gate is unavailable",
+        # #9567: the allowance module's OWN fail-closed refusals. Each is a
+        # fault on OUR side that no plan can lift, so the contact path would be
+        # the false promise this list exists to prevent:
+        #   - the resolver faulted trying to carry the allowance keys;
+        #   - the configured limit value is unreadable;
+        #   - a dimension declared BLOCKED (our meter contract forbids capping
+        #     on it — `graph_storage`'s HNSW under-report, `postgres_storage`'s
+        #     DB-grain attribution) was configured anyway;
+        #   - a configured allowance has NO reading from its meter.
+        # The CUSTOMER ceiling is `allowance_gate.py:772`'s QuotaExceededError,
+        # which carries the seam itself — and now that the module is in MODULES,
+        # dropping that seam reds this gate instead of passing silently.
+        "the team allowances could not be resolved for",
+        "unreadable for dimension",
+        "has an allowance configured for team",
+        "usage has no reading for team",
+        # #4051 (this lane): the gate builds the SDK whose graph it counts
+        # (`quota._resolve_count_sdk` calls the `sdk_factory`), so a
+        # CONSTRUCTION fault is now a reachable fail-closed arm — the third of
+        # the same SERVER-fault category as "quota count failed" directly above
+        # (that is the arm `_count_resource` raises when the count itself fails;
+        # this is the arm that fires one step earlier, when the handle a
+        # graph-scoped count reads through cannot be made) and "unreadable for
+        # resource" (corrupt state on our side, never a customer ceiling — no
+        # plan lifts it).
+        # `_check_org_limit` wraps it as "Quota check failed: ...", which IS the
+        # exempted prefix — but this guard reads raise-site LITERALS, and the wrap
+        # happens at the HTTPException site in another module, so the literal here
+        # needs its own entry or the arm reads as an unregistered ceiling refusal.
+        # Registered the same way the previous arm was (#10142, f8970b536): a new
+        # fail-closed arm gets a category entry, not a rewritten message.
         "quota count sdk unavailable",
         "resolve_org_limits requires a org_id", "cohort is larger than the",
         "cannot bound anything", "cannot be evaluated",
