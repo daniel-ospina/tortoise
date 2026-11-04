@@ -26,8 +26,7 @@ THE MODEL
         false BLOCK);
       * treat the rows as alternatives where any one suffices and an unanswered row — a
         job that can never start — reports green (the false PASS).
-    Each direction has its own test below, and each is written so the other reading fails
-    it.
+    Each direction has its own fixtures below, each written so the other reading fails it.
 
 WHY A COMMITTED SNAPSHOT
     CI cannot read the Actions runners API. `config/ci-runner-labels.json` is the
@@ -59,6 +58,8 @@ from tools.ci_runner_labels import (
     violations,
 )
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
 ARM = {
     "name": "arm-1",
     "status": "online",
@@ -79,7 +80,7 @@ X64_OFFLINE = {
     "status": "offline",
     "labels": ["self-hosted", "Linux", "X64", "self-hosted-x64", "ubuntu-latest"],
 }
-POOL_POOL_SPLIT = [frozenset({"ubuntu-latest"}), frozenset({"self-hosted", "self-hosted-x64"})]
+POOL_SPLIT_ROWS = [frozenset({"ubuntu-latest"}), frozenset({"self-hosted", "self-hosted-x64"})]
 
 
 def _snapshot() -> dict:
@@ -91,9 +92,24 @@ def _snapshot() -> dict:
     return json.loads(SNAPSHOT_PATH.read_text(encoding="utf-8"))
 
 
-def _workflow(tmp: str, body: str) -> Path:
-    (Path(tmp) / "wf.yml").write_text(body, encoding="utf-8")
+def _workflow(tmp: str, name: str, body: str) -> Path:
+    (Path(tmp) / name).write_text(body, encoding="utf-8")
     return Path(tmp)
+
+
+def _shard_workflow(tmp: str, matrix: str) -> Path:
+    """The ONLY job whose computed matrix this gate may resolve: python-ci.yml:test."""
+    body = (
+        "name: t\n"
+        "on: push\n"
+        "jobs:\n"
+        "  test:\n"
+        "    runs-on: ${{ fromJSON(matrix.runner) }}\n"
+        "    strategy:\n"
+        f"      matrix: {matrix}\n"
+        "    steps: []\n"
+    )
+    return _workflow(tmp, "python-ci.yml", body)
 
 
 def _all_labels(requested: dict[str, list[frozenset[str]]]) -> set[str]:
@@ -127,6 +143,10 @@ def test_the_workflow_scan_really_finds_the_labels() -> None:
         "the scan found no `ubuntu-latest` job — this tree has ~77 of them, so the parser is "
         "missing jobs rather than the tree having changed"
     )
+    assert "self-hosted-x64" in labels, (
+        "the scan found no `self-hosted-x64` job — ci.yml's repo-harnesses AND row is the tree's "
+        "only list-form runs-on, and dropping it would silently leave the AND semantics unread"
+    )
     assert len(requested) >= 50, (
         f"only {len(requested)} job(s) parsed; the tree has ~88 — the parser is dropping jobs"
     )
@@ -154,7 +174,7 @@ def test_a_row_no_runner_answers_reds_even_when_another_row_is_served() -> None:
     instance sits `pending` forever and the required aggregate never reports — the whole
     outage — while `ubuntu-latest` (hosted) is perfectly fine.
     """
-    problems = violations({"runners": [ARM]}, {"python-ci.yml:test": POOL_POOL_SPLIT})
+    problems = violations({"runners": [ARM]}, {"python-ci.yml:test": POOL_SPLIT_ROWS})
     assert any("R1" in p and "self-hosted-x64" in p for p in problems), problems
 
 
@@ -164,24 +184,34 @@ def test_zero_runners_reds_on_the_pool_split_row() -> None:
     A gate that treated the rows as alternatives would be green here (hosted answers
     `ubuntu-latest`), certifying every odd shard as schedulable when none can start.
     """
-    assert violations({"runners": []}, {"python-ci.yml:test": POOL_POOL_SPLIT}), (
+    assert violations({"runners": []}, {"python-ci.yml:test": POOL_SPLIT_ROWS}), (
         "an empty pool cannot serve the self-hosted row — this must not be green"
     )
 
 
-def test_a_matrix_that_is_unsatisfiable_on_every_row_reds() -> None:
+def test_one_unanswerable_row_reds_while_the_other_row_is_served() -> None:
+    """The DISCRIMINATING fixture: one row answerable, one not.
+
+    Written this way on purpose. With BOTH rows unanswerable the test would pass under the
+    correct reading, the alternatives reading AND a first-row-only reading alike — so it
+    would pin nothing. Here only "every row is required" reds.
+    """
+    body = (
+        "name: t\n"
+        "on: push\n"
+        "jobs:\n"
+        "  j:\n"
+        "    runs-on: ${{ fromJSON(matrix.runner) }}\n"
+        "    strategy:\n"
+        "      matrix:\n"
+        "        include:\n"
+        '          - runner: \'["self-hosted", "self-hosted-x64"]\'\n'
+        '          - runner: \'["self-hosted", "no-such-label"]\'\n'
+        "    steps: []\n"
+    )
     with tempfile.TemporaryDirectory() as tmp:
-        _workflow(
-            tmp,
-            "name: t\non: push\njobs:\n  j:\n"
-            "    runs-on: ${{ fromJSON(matrix.runner) }}\n"
-            "    strategy:\n      matrix:\n        include:\n"
-            '          - runner: \'["self-hosted", "self-hosted-arm64"]\'\n'
-            '          - runner: \'["self-hosted", "no-such-label"]\'\n'
-            "    steps: []\n",
-        )
-        problems = violations({"runners": [X64]}, requested_labels(Path(tmp)))
-    assert any("R1" in p for p in problems), problems
+        problems = violations({"runners": [X64]}, requested_labels(_workflow(tmp, "wf.yml", body)))
+    assert any("R1" in p and "no-such-label" in p for p in problems), problems
 
 
 # ── FALSE BLOCK: a correct repo must not red ───────────────────────────────────────
@@ -191,26 +221,44 @@ def test_rows_are_checked_as_separate_sets_not_one_union() -> None:
     `ubuntu-latest` AND `self-hosted`, which no runner can be — so a correct pool would
     red. Both rows are answerable here (hosted for one, the x64 pool for the other).
     """
-    requested = {"python-ci.yml:test": POOL_POOL_SPLIT}
+    requested = {"python-ci.yml:test": POOL_SPLIT_ROWS}
     assert not violations({"runners": [X64_NO_POOL_LABEL]}, requested), (
         "the pool does not claim ubuntu-latest (the documented HEALTHY state) and must not red: "
         "hosted serves that row, the x64 runner serves the other"
     )
 
 
-def test_a_matrix_rows_are_read_per_row_not_union_into_one_set() -> None:
-    """A hand-written two-row split matrix must not become one unsatisfiable conjunction."""
+def test_the_list_form_of_runs_on_is_read_as_one_and_set() -> None:
+    """`runs-on: [a, b]` is the AND semantics R1 is built on, and this tree uses it.
+
+    Without this fixture the list branch could return [] (silently treated as group-only):
+    `ci.yml:repo-harnesses` — the tree's only AND row — would vanish from the scan and
+    every test here would stay green.
+    """
+    body = "name: t\non: push\njobs:\n  j:\n    runs-on: [self-hosted, self-hosted-x64]\n    steps: []\n"
     with tempfile.TemporaryDirectory() as tmp:
-        _workflow(
-            tmp,
-            "name: t\non: push\njobs:\n  j:\n"
-            "    runs-on: ${{ fromJSON(matrix.runner) }}\n"
-            "    strategy:\n      matrix:\n        include:\n"
-            '          - runner: \'["self-hosted", "self-hosted-arm64"]\'\n'
-            '          - runner: \'["self-hosted", "self-hosted-x64"]\'\n'
-            "    steps: []\n",
-        )
-        requested = requested_labels(Path(tmp))
+        requested = requested_labels(_workflow(tmp, "wf.yml", body))
+    assert requested == {"wf.yml:j": [frozenset({"self-hosted", "self-hosted-x64"})]}, requested
+    assert not violations({"runners": [X64_NO_POOL_LABEL]}, requested)
+    assert violations({"runners": [ARM]}, requested), "the ARM runner lacks self-hosted-x64"
+
+
+def test_a_hand_written_two_row_matrix_is_read_per_row() -> None:
+    body = (
+        "name: t\n"
+        "on: push\n"
+        "jobs:\n"
+        "  j:\n"
+        "    runs-on: ${{ fromJSON(matrix.runner) }}\n"
+        "    strategy:\n"
+        "      matrix:\n"
+        "        include:\n"
+        '          - runner: \'["self-hosted", "self-hosted-arm64"]\'\n'
+        '          - runner: \'["self-hosted", "self-hosted-x64"]\'\n'
+        "    steps: []\n"
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        requested = requested_labels(_workflow(tmp, "wf.yml", body))
     assert not violations({"runners": [ARM, X64]}, requested), (
         "both rows are answerable — a union reading would red this correct pool"
     )
@@ -218,15 +266,11 @@ def test_a_matrix_rows_are_read_per_row_not_union_into_one_set() -> None:
 
 
 def test_every_workflow_in_the_tree_parses_without_refusing() -> None:
-    """A refusal fired by a workflow nobody edited would red the suite for the whole tree.
-
-    `requested_labels()` on the real tree must complete; the read is what the committed
-    test above then verdicted.
-    """
+    """A refusal fired by a workflow nobody edited would red the suite for the whole tree."""
     assert requested_labels(), "the tree's workflows did not parse"
 
 
-# ── the provider side: ONLINE only ────────────────────────────────────────────────
+# ── the provider side ──────────────────────────────────────────────────────────────
 def test_an_offline_runner_is_not_a_provider() -> None:
     """GitHub cannot hand a job to an offline runner.
 
@@ -245,50 +289,111 @@ def test_an_offline_runner_is_not_a_provider() -> None:
     )
 
 
+def test_label_matching_is_case_insensitive() -> None:
+    """GitHub matches labels case-insensitively (this repo pins that in runner_autoscale).
+
+    Comparing exactly would red a pool that CAN schedule the job, for a spelling
+    difference, and the message would blame the label set.
+    """
+    weird = {
+        "name": "x64-odd",
+        "status": "online",
+        "labels": ["Self-Hosted", "LINUX", "x64", "Self-Hosted-X64"],
+    }
+    requested = {"wf.yml:j": [frozenset({"self-hosted", "self-hosted-x64"})]}
+    assert not violations({"runners": [weird]}, requested)
+
+
 # ── refusals: unreadable input is refused, never cleared ─────────────────────────────
 def test_an_unresolvable_runs_on_is_refused_not_cleared() -> None:
     """An expression this tool cannot read must RAISE, never count as covered."""
-    with tempfile.TemporaryDirectory() as tmp:
-        _workflow(
-            tmp,
-            "name: t\non: push\njobs:\n  j:\n"
-            "    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}\n"
-            "    steps: []\n",
-        )
-        with pytest.raises(UnreadableRunsOn):
-            requested_labels(Path(tmp))
+    body = (
+        "name: t\non: push\njobs:\n  j:\n"
+        "    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}\n    steps: []\n"
+    )
+    with tempfile.TemporaryDirectory() as tmp, pytest.raises(UnreadableRunsOn):
+        requested_labels(_workflow(tmp, "wf.yml", body))
+
+
+def test_a_partial_expression_is_refused_rather_than_stripped() -> None:
+    """A PARTIAL expression must be refused, never resolved.
+
+    Resolving only the expression discards the literal prefix, so the gate would certify a
+    label nobody asked for while the real one has no provider.
+    """
+    body = (
+        "name: t\non: push\njobs:\n  j:\n"
+        "    runs-on: 'pool-${{ matrix.os }}'\n"
+        "    strategy:\n      matrix:\n        include:\n          - os: ubuntu-latest\n"
+        "    steps: []\n"
+    )
+    with tempfile.TemporaryDirectory() as tmp, pytest.raises(UnreadableRunsOn):
+        requested_labels(_workflow(tmp, "wf.yml", body))
 
 
 def test_a_computed_matrix_under_another_key_is_refused_not_substituted() -> None:
-    """Only the shard selector's `matrix.runner` has rows this tool knows.
+    """Only the shard selector's `matrix.runner` (in its own job) has known rows.
 
     Certifying `matrix.arch` against the shard routings would report green over labels the
     rows never ask for, and leave the labels they DO ask for unchecked.
     """
-    with tempfile.TemporaryDirectory() as tmp:
-        _workflow(
-            tmp,
-            "name: t\non: push\njobs:\n  j:\n"
-            "    runs-on: ${{ fromJSON(matrix.arch) }}\n"
-            "    strategy:\n      matrix: ${{ fromJSON(needs.x.outputs.arch_matrix) }}\n"
-            "    steps: []\n",
-        )
-        with pytest.raises(UnreadableRunsOn):
-            requested_labels(Path(tmp))
+    body = (
+        "name: t\non: push\njobs:\n  j:\n"
+        "    runs-on: ${{ fromJSON(matrix.arch) }}\n"
+        "    strategy:\n      matrix: ${{ fromJSON(needs.x.outputs.arch_matrix) }}\n"
+        "    steps: []\n"
+    )
+    with tempfile.TemporaryDirectory() as tmp, pytest.raises(UnreadableRunsOn):
+        requested_labels(_workflow(tmp, "wf.yml", body))
 
 
+def test_a_computed_matrix_is_not_resolved_by_key_name_in_a_foreign_job() -> None:
+    """A key named `runner` in ANOTHER workflow must not be certified as the shard rows."""
+    body = (
+        "name: t\non: push\njobs:\n  test:\n"
+        "    runs-on: ${{ fromJSON(matrix.runner) }}\n"
+        "    strategy:\n      matrix: ${{ fromJSON(needs.plan.outputs.rows) }}\n"
+        "    steps: []\n"
+    )
+    with tempfile.TemporaryDirectory() as tmp, pytest.raises(UnreadableRunsOn):
+        requested_labels(_workflow(tmp, "other.yml", body))
+
+
+def test_a_visible_matrix_without_the_key_is_refused_not_substituted() -> None:
+    body = (
+        "name: t\non: push\njobs:\n  j:\n"
+        "    runs-on: ${{ fromJSON(matrix.runner) }}\n"
+        "    strategy:\n      matrix:\n        include:\n"
+        '          - other: \'["self-hosted", "no-such-label"]\'\n'
+        "    steps: []\n"
+    )
+    with tempfile.TemporaryDirectory() as tmp, pytest.raises(UnreadableRunsOn):
+        requested_labels(_workflow(tmp, "wf.yml", body))
+
+
+def test_axes_mixed_with_include_are_refused() -> None:
+    """An `include` entry that cannot merge into an axis combination ADDS one, so the real
+    row set cannot be recovered from the file."""
+    body = (
+        "name: t\non: push\njobs:\n  j:\n"
+        "    runs-on: ${{ fromJSON(matrix.runner) }}\n"
+        "    strategy:\n      matrix:\n"
+        "        runner: ['[\"self-hosted\"]']\n"
+        "        include:\n          - runner: '[\"ubuntu-latest\"]'\n"
+        "    steps: []\n"
+    )
+    with tempfile.TemporaryDirectory() as tmp, pytest.raises(UnreadableRunsOn):
+        requested_labels(_workflow(tmp, "wf.yml", body))
+
+
+# ── the readable forms ─────────────────────────────────────────────────────────────
 def test_the_dynamic_matrix_expression_resolves_to_both_routings() -> None:
     """This tree's `test` job: the matrix is emitted outside the workflow."""
     with tempfile.TemporaryDirectory() as tmp:
-        _workflow(
-            tmp,
-            "name: t\non: push\njobs:\n  test:\n"
-            "    runs-on: ${{ fromJSON(matrix.runner) }}\n"
-            "    strategy:\n      matrix: ${{ fromJSON(needs.changes.outputs.fast_matrix) }}\n"
-            "    steps: []\n",
+        requested = requested_labels(
+            _shard_workflow(tmp, "${{ fromJSON(needs.changes.outputs.fast_matrix) }}")
         )
-        requested = requested_labels(Path(tmp))
-    rows = requested["wf.yml:test"]
+    rows = requested["python-ci.yml:test"]
     assert frozenset({"ubuntu-latest"}) in rows, rows
     assert frozenset({"self-hosted", "self-hosted-x64"}) in rows, rows
     assert len(rows) == 2, "the routings are SEPARATE rows, never one union"
@@ -300,70 +405,40 @@ def test_the_bare_matrix_idiom_is_read_not_refused() -> None:
     Refusing it would red the required suite on a tree whose every label is answerable,
     with a message blaming the label set rather than the reader.
     """
+    body = (
+        "name: t\non: push\njobs:\n  j:\n"
+        "    runs-on: ${{ matrix.os }}\n"
+        "    strategy:\n      matrix:\n        include:\n"
+        "          - os: ubuntu-latest\n"
+        "          - os: ubuntu-24.04\n"
+        "    steps: []\n"
+    )
     with tempfile.TemporaryDirectory() as tmp:
-        _workflow(
-            tmp,
-            "name: t\non: push\njobs:\n  j:\n"
-            "    runs-on: ${{ matrix.os }}\n"
-            "    strategy:\n      matrix:\n        include:\n"
-            "          - os: ubuntu-latest\n"
-            "          - os: ubuntu-24.04\n"
-            "    steps: []\n",
-        )
-        requested = requested_labels(Path(tmp))
+        requested = requested_labels(_workflow(tmp, "wf.yml", body))
     assert not violations({"runners": []}, requested), (
         "both rows are documented hosted images — no pool runner needed"
     )
-    assert {frozenset({"ubuntu-latest"}), frozenset({"ubuntu-24.04"})} == set(requested["wf.yml:j"])
+    assert set(requested["wf.yml:j"]) == {
+        frozenset({"ubuntu-latest"}),
+        frozenset({"ubuntu-24.04"}),
+    }, requested
 
 
-def test_a_spaced_matrix_expression_is_read_not_crashed() -> None:
-    """`fromJSON( matrix.runner )` is valid YAML and must not crash the gate.
-
-    A previous revision tested a space-stripped string to DETECT the expression but then
-    split the ORIGINAL, so the spaced spelling raised `IndexError` and escaped `main()` —
-    a traceback instead of a verdict.
-    """
+def test_an_axes_only_matrix_is_read_from_its_own_axis() -> None:
+    """The axis values are literal lists IN THE FILE, so refusing them would be a false block."""
+    body = (
+        "name: t\non: push\njobs:\n  j:\n"
+        "    runs-on: ${{ matrix.os }}\n"
+        "    strategy:\n      matrix:\n        os: [ubuntu-latest, ubuntu-24.04]\n"
+        "    steps: []\n"
+    )
     with tempfile.TemporaryDirectory() as tmp:
-        _workflow(
-            tmp,
-            "name: t\non: push\njobs:\n  j:\n"
-            "    runs-on: ${{ fromJSON( matrix.runner ) }}\n"
-            "    strategy:\n      matrix: ${{ fromJSON(needs.changes.outputs.fast_matrix) }}\n"
-            "    steps: []\n",
-        )
-        requested = requested_labels(Path(tmp))
-    assert frozenset({"ubuntu-latest"}) in requested["wf.yml:j"], requested
-
-
-def test_a_visible_matrix_without_the_key_is_refused_not_substituted() -> None:
-    with tempfile.TemporaryDirectory() as tmp:
-        _workflow(
-            tmp,
-            "name: t\non: push\njobs:\n  j:\n"
-            "    runs-on: ${{ fromJSON(matrix.runner) }}\n"
-            "    strategy:\n      matrix:\n        include:\n"
-            '          - other: \'["self-hosted", "no-such-label"]\'\n'
-            "    steps: []\n",
-        )
-        with pytest.raises(UnreadableRunsOn):
-            requested_labels(Path(tmp))
-
-
-def test_an_axes_matrix_is_refused_rather_than_guessed() -> None:
-    """Axis-generated combinations are not in the file, and an `include` entry adds a
-    further combination rather than merging — so the real rows cannot be recovered."""
-    with tempfile.TemporaryDirectory() as tmp:
-        _workflow(
-            tmp,
-            "name: t\non: push\njobs:\n  j:\n"
-            "    runs-on: ${{ fromJSON(matrix.runner) }}\n"
-            "    strategy:\n      matrix:\n        runner: ['[\"self-hosted\"]']\n"
-            "        include:\n          - runner: '[\"ubuntu-latest\"]'\n"
-            "    steps: []\n",
-        )
-        with pytest.raises(UnreadableRunsOn):
-            requested_labels(Path(tmp))
+        requested = requested_labels(_workflow(tmp, "wf.yml", body))
+    assert set(requested["wf.yml:j"]) == {
+        frozenset({"ubuntu-latest"}),
+        frozenset({"ubuntu-24.04"}),
+    }, requested
+    assert not violations({"runners": []}, requested), "both are documented hosted images"
 
 
 def test_a_group_only_runs_on_is_readable_and_contributes_no_label() -> None:
@@ -372,12 +447,9 @@ def test_a_group_only_runs_on_is_readable_and_contributes_no_label() -> None:
     It must not raise: one correctly-scheduled group-only job would otherwise red the
     whole tree and block every merge.
     """
+    body = "name: t\non: push\njobs:\n  j:\n    runs-on:\n      group: my-group\n    steps: []\n"
     with tempfile.TemporaryDirectory() as tmp:
-        _workflow(
-            tmp,
-            "name: t\non: push\njobs:\n  j:\n    runs-on:\n      group: my-group\n    steps: []\n",
-        )
-        assert requested_labels(Path(tmp)) == {}
+        assert requested_labels(_workflow(tmp, "wf.yml", body)) == {}
 
 
 # ── R2: architecture ───────────────────────────────────────────────────────────────

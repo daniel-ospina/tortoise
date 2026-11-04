@@ -2608,9 +2608,9 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row matches
              # `tools/ci_runner_labels.py`, so a TOOL-ONLY change filtered to
              # `changed == []` and took the docs-only early return — the 15 tests that
-             # pin `_pool_answers` (AND semantics), `_matrix_alternatives` (per-row
-             # alternatives, not one union) and R2 (x86_64 image claimed only by non-X64
-             # hosts) would never run on the very file that defines them. That is the
+             # pin `_pool_answers` (AND semantics), `_matrix_rows` (per-row reading, not one
+             # union) and R2 (x86_64 image claimed only by non-X64 hosts) would never run
+             # on the very file that defines them. That is the
              # #1349/#3332/#3616 silent-drop class: a PR that deleted R2 or weakened the
              # AND check would run `python-ci-gate` GREEN with none of its own pins.
              # MEASURED before this entry:

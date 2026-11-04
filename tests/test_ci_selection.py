@@ -13276,6 +13276,22 @@ def test_rail_pin_runs_on_a_tools_only_change():
     assert "test_rail_detach.py" in r["test_files"], r
 
 
+def test_runner_label_gate_runs_on_a_tools_only_change():
+    # #10920: `tests/test_ci_runner_label_coverage.py` (registered `core`) pins the CI
+    # runner-label coverage gate — the AND semantics its R1 is built on, the per-row
+    # matrix reading, and R2 (an x86_64 image claimed only by non-X64 hosts). `tools/` is
+    # a flat NON_PYTHON_PREFIXES entry and `tools/ci_runner_labels.py` matches no
+    # SOURCE_PATTERNS row, so before the CORE_ALSO entry a tool-only diff was filtered
+    # out BEFORE the "not matched -> core" fallback: a PR that deleted R2 or weakened
+    # the AND check would run `python-ci-gate` GREEN with none of the gate's own pins
+    # (the #1349/#3332/#3616 silent-drop class). Mutation check: removing the CORE_ALSO
+    # entry fails the arms below (surfaces == [] and the pin absent from test_files).
+    r = _sel(["tools/ci_runner_labels.py"])
+    assert r["full"] is False, r
+    assert r["surfaces"] == ["core"], r
+    assert "test_ci_runner_label_coverage.py" in r["test_files"], r
+
+
 def test_turn_parity_census_guard_runs_on_a_tools_only_change():
     # #10017: `tests/test_10017_turn_parity_census.py` (registered `core`)
     # pins the refusal arms of `tools/turn_parity_census.py` — the purge gate

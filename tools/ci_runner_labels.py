@@ -131,12 +131,20 @@ X64_HOST_LABEL = "X64"
 _MATRIX_JSON_EXPR = re.compile(r"fromJSON\(\s*matrix\.([A-Za-z0-9_]+)\s*\)")
 #: The bare idiom `${{ matrix.<key> }}` — a label per row, not a JSON array.
 _MATRIX_BARE_EXPR = re.compile(r"matrix\.([A-Za-z0-9_]+)")
+#: The WHOLE value must be one expression. `pool-${{ matrix.os }}` is a PARTIAL expression
+#: and must be refused: resolving only the expression discards the literal text around it,
+#: so the gate would certify `ubuntu-latest` for a job that really asks
+#: `pool-ubuntu-latest` — green over a job no runner can take.
+_WHOLE_EXPR = re.compile(r"^\$\{\{.*\}\}$", re.DOTALL)
 
 #: The one matrix key whose rows are emitted by `tools/ci_selection.py` rather than
 #: written in the workflow. A computed matrix under any OTHER key cannot be read here,
 #: and substituting the shard routings for it would certify a job with labels it never
 #: asks for (the fabrication the visible-matrix branch refuses).
 _SHARD_MATRIX_KEY = "runner"
+#: The one job consuming it. Matched by `<workflow>:<job>` so a same-named key in another
+#: workflow is refused rather than certified against the wrong row set.
+_SHARD_CONSUMER = "python-ci.yml:test"
 
 
 class UnreadableRunsOn(RuntimeError):
@@ -158,8 +166,14 @@ def _row_sets_from_scalar(value: str, where: str, job: dict | None = None) -> li
     text = value.strip()
     if "${{" not in text:
         return [[text]] if text else []
-    if job is None:
-        raise UnreadableRunsOn(f"{where}: runs-on expression {text!r} has no resolvable label set")
+    if job is None or not _WHOLE_EXPR.match(text):
+        # A PARTIAL expression cannot be resolved without discarding the literal text
+        # around it, which would certify a label nobody asked for. Refused, never guessed
+        # at — `docs/ops/ci-runner-x64.md` lists this form as one the parser must refuse.
+        raise UnreadableRunsOn(
+            f"{where}: runs-on {text!r} is not ONE whole resolvable expression — a partial or "
+            f"unknown expression cannot be read as a label set"
+        )
 
     as_json = _MATRIX_JSON_EXPR.search(text)
     if as_json is not None:
@@ -207,12 +221,16 @@ def _matrix_rows(job: dict, key: str, where: str, json_array: bool) -> list[list
     REFUSED rather than certified against labels its rows never ask for.
     """
     matrix = (job.get("strategy") or {}).get("matrix")
-    if isinstance(matrix, str) and "${{" in matrix:
-        if key != _SHARD_MATRIX_KEY:
+    if isinstance(matrix, str) and "${{ " in matrix:
+        # ⛔ NOT BY KEY NAME ALONE. `matrix.runner` only has known rows in the ONE job that
+        # consumes the shard selector (`python-ci.yml:test`). Another workflow could name
+        # its own computed matrix `runner`, and certifying it against the shard routings
+        # would be green over labels its rows never ask for. Identity, not convention.
+        if key != _SHARD_MATRIX_KEY or where != _SHARD_CONSUMER:
             raise UnreadableRunsOn(
-                f"{where}: `matrix.{key}` comes from a computed matrix this tool cannot read, "
-                f"and only the shard selector's `matrix.runner` has known rows — refusing "
-                f"rather than certifying a label set the rows never ask for"
+                f"{where}: `matrix.{key}` comes from a computed matrix this tool cannot read "
+                f"(only {_SHARD_CONSUMER}'s `matrix.{_SHARD_MATRIX_KEY}` has known rows) — "
+                f"refusing rather than certifying labels the rows never ask for"
             )
         from tools.ci_selection import SHARD_RUNNER_HOSTED, SHARD_RUNNER_X64
 
@@ -222,17 +240,35 @@ def _matrix_rows(job: dict, key: str, where: str, json_array: bool) -> list[list
     if not isinstance(matrix, dict):
         raise UnreadableRunsOn(f"{where}: no readable `strategy.matrix` for `matrix.{key}`")
 
-    axes = [k for k in matrix if k != "include"]
-    if axes:
-        # Axis-generated combinations are not written in the file, and an `include` entry
-        # that overwrites the only axis value ADDS a further combination rather than
-        # merging into it — so the real row set cannot be recovered here. Refusing beats
-        # a guess that leaves a real row unchecked.
-        raise UnreadableRunsOn(
-            f"{where}: matrix uses axis key(s) {axes} — the generated combinations cannot be "
-            f"read statically, so `matrix.{key}` cannot be resolved without guessing"
-        )
     rows = matrix.get("include")
+    axes = [k for k in matrix if k != "include"]
+    if axes and rows is not None:
+        # An `include` entry that cannot merge into an axis combination ADDS a further
+        # combination (GitHub documents this), so the real row set cannot be recovered.
+        raise UnreadableRunsOn(
+            f"{where}: matrix mixes axis key(s) {axes} with `include`, so the generated row "
+            f"set cannot be read statically"
+        )
+    if rows is None:
+        # AXES ONLY: the axis named `key` is a literal list IN THE FILE, so its values are
+        # read directly. (The cross product matters only when one label is assembled from
+        # several axes at once, which the partial-expression refusal already rejects.)
+        values = matrix.get(key)
+        if not isinstance(values, list) or not values:
+            raise UnreadableRunsOn(
+                f"{where}: matrix carries neither an `include` list nor an axis named `{key}`"
+            )
+        out: list[list[str]] = []
+        for item in values:
+            if isinstance(item, list) and all(isinstance(x, str) for x in item):
+                out.append([x for x in item if x])
+            elif isinstance(item, str) and item.strip():
+                out.append([item])
+            else:
+                raise UnreadableRunsOn(
+                    f"{where}: matrix axis `{key}` has an unreadable member {item!r}"
+                )
+        return out
     if not isinstance(rows, list):
         raise UnreadableRunsOn(
             f"{where}: matrix carries no `include` rows, so `matrix.{key}` cannot be read"
@@ -242,8 +278,12 @@ def _matrix_rows(job: dict, key: str, where: str, json_array: bool) -> list[list
         if not isinstance(row, dict) or key not in row:
             continue
         raw = row[key]
+        if isinstance(raw, list) and all(isinstance(x, str) for x in raw):
+            # An `include` value may itself be a label ARRAY — a documented `runs-on` form.
+            row_sets.append([x for x in raw if x])
+            continue
         if not isinstance(raw, str):
-            raise UnreadableRunsOn(f"{where}: matrix.{key} is not a string: {raw!r}")
+            raise UnreadableRunsOn(f"{where}: matrix.{key} is not a string or label array: {raw!r}")
         if json_array:
             try:
                 parsed = json.loads(raw)
@@ -304,6 +344,18 @@ def requested_labels(workflows_dir: Path = WORKFLOWS_DIR) -> dict[str, list[froz
 
 
 # ── the provider side ────────────────────────────────────────────────────────────────
+def _norm(label: str) -> str:
+    """GitHub matches labels CASE-INSENSITIVELY.
+
+    docs.github.com "apply labels": "Labels are case-insensitive", and this repo pins the
+    same rule for its own label algebra (`tools/runner_autoscale.py::_preserve_labels`,
+    `tests/test_runner_autoscale.py` — a mixed-case `Self-Hosted-Arm64` IS the arm64
+    marker). Comparing exactly would red a pool that can schedule the job for a spelling
+    difference, and the message would blame the label set.
+    """
+    return label.strip().lower()
+
+
 def pool_providers(snapshot: dict, label: str) -> list[dict]:
     """ONLINE self-hosted runners carrying `label`.
 
@@ -312,23 +364,25 @@ def pool_providers(snapshot: dict, label: str) -> list[dict]:
     every carrier offline. (`scripts/ci_runner_gate.sh --status` excludes them for the
     same reason, and prints them as context instead.)
     """
+    wanted = _norm(label)
     return [
         r
         for r in snapshot.get("runners", [])
-        if r.get("status") == "online" and label in r.get("labels", [])
+        if r.get("status") == "online" and wanted in {_norm(x) for x in r.get("labels", [])}
     ]
 
 
 def hosted_covers(label: str) -> bool:
-    return label in HOSTED_IMAGES
+    return _norm(label) in {_norm(x) for x in HOSTED_IMAGES}
 
 
 def _pool_answers(snapshot: dict, labels: frozenset[str]) -> list[dict]:
     """ONLINE runners carrying EVERY label in the set (GitHub's AND semantics)."""
+    wanted = {_norm(x) for x in labels}
     return [
         r
         for r in snapshot.get("runners", [])
-        if r.get("status") == "online" and labels <= set(r.get("labels", []))
+        if r.get("status") == "online" and wanted <= {_norm(x) for x in r.get("labels", [])}
     ]
 
 
@@ -369,7 +423,7 @@ def violations(snapshot: dict, requested: dict[str, list[frozenset[str]]]) -> li
         providers = pool_providers(snapshot, label)
         if not providers:
             continue  # the pool does not claim it; hosted serves it. Not R2's business.
-        if any(X64_HOST_LABEL in p.get("labels", []) for p in providers):
+        if any(_norm(X64_HOST_LABEL) in {_norm(x) for x in p.get("labels", [])} for p in providers):
             continue
         names = ", ".join(sorted(p["name"] for p in providers))
         problems.append(
