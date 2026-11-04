@@ -1694,10 +1694,19 @@ def test_the_c_locale_plus_a_closed_fd2_plus_a_non_ascii_out_is_rc_0(tmp_path):
     """The triad that was rc 1: closed fd 2 + C locale + a non-ASCII `--out`.
 
     With fd 2 closed, `sys.stderr` is None and `print(..., file=None)` falls back to STDOUT — so
-    under a C-locale argv (non-ASCII `--out` decoded to lone surrogates) the courtesy message raised
-    `UnicodeEncodeError` AFTER a complete census. `errors="backslashreplace"` on stdout's
-    `reconfigure` is what closes it, and this is that guard's ONLY mutation proof: revert it and
-    this reds (measured cycle 21: HEAD 0, parent 1, origin/main 1).
+    under a C-locale argv (non-ASCII `--out` decoded as lone surrogates) the courtesy message raised
+    `UnicodeEncodeError` AFTER a complete census, and the process exited 1.
+
+    ⛔ Cycle 25 (P3) CORRECTED this docstring's claim, and the correction is the useful part. It used
+    to say `errors="backslashreplace"` on stdout's `reconfigure` was "that guard's ONLY mutation
+    proof". At this head that is **false**: reverting only `errors=` leaves the suite GREEN, because
+    cycle 22's `_say()` catches `ValueError` (of which `UnicodeEncodeError` is one) and the exit code
+    is decided before the courtesy message is attempted at all. The discriminating mutation is now
+    TWO-fold — remove `errors=` AND narrow `_say`'s handler to `(OSError, AttributeError)` — which
+    reds here with rc 1. So this test pins the CONTRACT (a C-locale box completes at rc 0); the
+    `errors=` setting is one of two independent guards behind it, and `_say` is the one carrying it
+    today. Kept as-is rather than deleted because the contract is what matters, and a claim corrected
+    in place beats a guard that reads stronger than it is.
     """
 
     def _close_fd2():
@@ -2086,6 +2095,17 @@ def test_evidence_attribution_cannot_be_redirected_by_a_path_traversal_or_a_quer
         "https://github.com/daniel-ospina/tortoise/pull/999?x=1#issuecomment-1",
         "https://github.com/daniel-ospina/tortoise/issues/999#issuecomment-1",
         "https://github.com/daniel-ospina/tortoise/settings#issuecomment-1",
+        # ⛔ Cycle 25 (P1): the guard FAILED OPEN on a URL it could not parse. `_EVIDENCE_REF`'s two
+        # path segments may contain a `/`, `_GITHUB_URL_SLUG`'s may not, and the difference was read
+        # as "attributed, nothing to check". GitHub COLLAPSES an empty segment, so the first two
+        # resolve — 200 OK — to a DIFFERENT repository while the canonical spelling of that same repo
+        # is refused. All three measured `RESTORE` before the fix.
+        "https://github.com/daniel-ospina//agent-infra#issuecomment-1",
+        "https://github.com/daniel-ospina//agent-infra/pull/999#issuecomment-1",
+        "https://github.com//evil-org/evil-repo/pull/1#issuecomment-1",
+        # ⛔ Cycle 25 (P2): `isdigit()` is true for characters `int()` REJECTS, and the conversion was
+        # outside every handler — one such record made the whole census exit 1 with a traceback.
+        "https://github.com/daniel-ospina/tortoise/pull/\u00b2#issuecomment-1",
     ):
         (tmp_path / "daniel-ospina-tortoise-7.json").write_text(tpl % crafted, encoding="utf-8")
         got = ac.load_record(tmp_path, "daniel-ospina", "tortoise", 7)
@@ -2093,9 +2113,22 @@ def test_evidence_attribution_cannot_be_redirected_by_a_path_traversal_or_a_quer
         assert got.real_evidence is False, crafted
         outcome, why = ac.classify(LIVE, got, *RED)
         assert outcome != ac.RESTORE, (crafted, outcome, why)
+        # The row must name WHICH artifact is wrong, not fall back to a generic message.
+        assert (
+            "not daniel-ospina/tortoise" in why
+            or "not #7" in why
+            or "no attributable repository" in why
+            or "not a number" in why
+            or "path-traversal segment" in why
+            or "not a pull request" in why
+        ), (crafted, why)
 
-    # The genuine shapes still restore: this is an attribution test, not a ban.
+    # The genuine shapes still restore: this is an attribution test, not a ban. `comment:<id>` is
+    # here because the attribution logic must NOT touch a pointer that carries no slug — the first
+    # cut of the cycle-25 fix refused it as "unattributable", which would have "fixed" a fail-open
+    # by breaking the registry's own dominant shape.
     for own in (
+        "comment:6593768046",
         "https://github.com/daniel-ospina/tortoise/pull/7#issuecomment-1",
         "https://github.com/daniel-ospina/tortoise/pull/7/files#discussion_r5",
         "https://github.com/daniel-ospina/tortoise/issues/7#issuecomment-1",
@@ -2227,4 +2260,40 @@ def test_a_foreign_record_cannot_report_real_evidence_on_the_json_surface(tmp_pa
     assert rows[0]["outcome"] == "UNREADABLE", rows[0]
     assert rows[0]["record"]["real_evidence"] is False, (
         "a foreign record must not report real_evidence on the machine-readable surface"
+    )
+
+
+def test_help_from_an_in_process_caller_does_not_swallow_the_hosts_stdout(tmp_path):
+    """⛔ Cycle 25, P3: `--help` through an IN-PROCESS caller permanently pointed the process's fd 1 at
+    /dev/null.
+
+    `_neutralise_stdout()` dup2s `/dev/null` onto fd 1 for the life of the PROCESS, and it was called
+    on the `SystemExit(0)` path even when the flush had SUCCEEDED — so everything written afterwards in
+    the host was discarded, including (measured) a `print()` after `ac.main(["--help"])` and, in
+    principle, pytest's own summary. The CLI half is unaffected (it has already flushed), which is why
+    only a caller that keeps running after `main` can see it — and this PR explicitly cites that
+    boundary as its own concern: the suite calls `main` in-process in dozens of places.
+
+    The fix neutralises ONLY when the flush actually failed. Mutation check: make the neutralise
+    unconditional again and the sentinel never reaches the file.
+    """
+    out = tmp_path / "host.txt"
+    code = (
+        "import sys\n"
+        f"sys.path.insert(0, {str(TOOL.parent)!r})\n"
+        "import attest_census as ac\n"
+        "try:\n"
+        "    ac.main(['--help'])\n"
+        "except SystemExit:\n"
+        "    pass\n"
+        "sys.stdout.write('HOST-SENTINEL\\n')\n"
+        "sys.stdout.flush()\n"
+    )
+    with out.open("w", encoding="utf-8") as sink:
+        subprocess.run([sys.executable, "-c", code], stdout=sink, stderr=subprocess.DEVNULL, timeout=120)
+    text = out.read_text(encoding="utf-8")
+    assert "--out" in text, f"the help text itself must still be emitted: {text[-400:]!r}"
+    assert "HOST-SENTINEL" in text, (
+        "an in-process caller's stdout must survive `main(['--help'])` — it was redirected to "
+        f"/dev/null for the rest of the process: {text[-400:]!r}"
     )
