@@ -9159,8 +9159,9 @@ durations:
   # #10137: a file ADDED BY A PR can never carry a CI junit measurement (the
   # refresher samples push-to-main runs only), so it takes the header's flat
   # `DEFAULT_FAST_WEIGHT` = 2.0 — the SAME value the sibling PR-added row
-  # (`longmem_eval/test_ep_census_10137.py`) takes. The local reading (~21 s
-  # warm for 5 cases, one throwaway embedded `TortoiseSDK` each) is recorded in
+  # (`longmem_eval/test_ep_census_10137.py`) takes. The local reading (~48 s
+  # warm for 7 cases, one throwaway embedded `TortoiseSDK` each — two of them
+  # added by review follow-up, so this count moves with the file) is recorded in
   # the PR, NOT here: a dev-box reading is a forbidden SHARD-LAYOUT input
   # (#2818/#3419). `tools/ci_timing.py --refresh-durations` re-bases it after
   # the next push-to-main sweep.

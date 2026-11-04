@@ -94,8 +94,9 @@ EP_ENGINE = "dream:full"
 #     already-live claims has no other promotion route, #10137).
 # Pinned by ``test_the_gate_promotes_an_operator_once`` (CAS, embedded),
 # ``test_the_gate_refuses_a_status_less_operator`` (explicit-draft-only arm,
-# embedded) and ``test_activate_promotes_an_operator_the_incident_query_
-# cannot_reach`` (graph-wide reach, stub).
+# embedded), and this one for graph-wide REACH (stub):
+# ``tests/longmem_eval/test_ep_activation.py``
+# ``::test_activate_promotes_an_operator_the_incident_query_cannot_reach``.
 # Candidate draft points: non-operator, draft-or-unset status (the canonical
 # read model treats unset status as live for most surfaces, but the ingest
 # shape is explicit "draft"; matching both mirrors the capture candidate read
