@@ -779,6 +779,12 @@ def _binds_locally(scope, key: str) -> bool:
     unresolvable rebind records no event and the outward walk would otherwise
     see "no local event" and resolve the enclosing name. A name that is not
     bound here at all (the genuine closure capture) still resolves outward.
+
+    ⚠️ Treating the shadow as authoritative for the WHOLE scope is Python's own
+    rule, not a simplification: a binding anywhere in a function makes the name
+    LOCAL for the whole function, so a read of it BEFORE the binding raises
+    `UnboundLocalError` at runtime — it can never be a silently-unbound third
+    path, which is why this stop cannot introduce a fail-open.
     """
     for sub in _nodes_of_one_scope(scope):
         targets: list[ast.expr] = []
