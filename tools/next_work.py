@@ -31,13 +31,16 @@ WHAT IS A WORK UNIT (mechanically, from records that already exist)
                LOCAL branches and worktrees whose slug names the issue, which
                are work that exists only on this checkout (#4256). Never
                comment prose, which is a probability only its author can read.
-    fold       a constituent of an open fold is NOT a unit; the fold is
-               (#10902). Detected from the LABEL the gate itself reads
-               (``superseded-by-fold`` on the constituent, ``batch-fold`` on
-               the fold) and, for a fold that has not been labelled yet, from
-               ``batch_open.py``'s own machine-readable ``fold-constituents:``
-               line — never from the ``batch(...): land #1 #2 #3`` title, which
-               ``tools/batch_open.py`` refuses for exactly this reason.
+    fold       a constituent of an open fold is NOT a PICKABLE unit; the fold is
+               (#10902). The constituent keeps its row — that is how a reader sees
+               why it is not offered — and carries ``SUPERSEDED-BY-FOLD`` plus no
+               command; the fold is the row that can be picked. Detected from the
+               LABEL the gate itself reads (``superseded-by-fold`` on the
+               constituent, ``batch-fold`` on the fold) and, for a fold that has
+               not been labelled yet, from ``batch_open.py``'s own
+               machine-readable ``fold-constituents:`` line — never from the
+               ``batch(...): land #1 #2 #3`` title, which ``tools/batch_open.py``
+               refuses for exactly this reason.
 
 WHAT IT EMITS, AND WHY THAT IS THE POINT
 ----------------------------------------
@@ -182,7 +185,15 @@ FOLD_LABEL = "batch-fold"
 #: (a declared list), not prose: that tool states why the fold's TITLE must never
 #: be parsed for it ("Deriving the close list from that prose would close a PR the
 #: fold never carried").
-FOLD_LINE_RE = re.compile(r"^\s*fold-constituents:\s*([0-9][0-9,\s]*)", re.MULTILINE | re.IGNORECASE)
+FOLD_LINE_RE = re.compile(
+    # `batch_open.py`'s own grammar accepts `#<n>` tokens (`#?\d+`), so a body
+    # reading `fold-constituents: #501, #502` IS a fold to that tool. Requiring a
+    # leading digit here made such a fold invisible to this reader — no fold unit,
+    # and its constituents left pickable ahead of it, the ordering #10902 exists
+    # to prevent.
+    r"^\s*fold-constituents:\s*([#0-9][#0-9,\s]*)",
+    re.MULTILINE | re.IGNORECASE,
+)
 
 #: `claims.sh`'s own default (`CLAIM_NS`). A claim ref is `<CLAIM_NS>/<key>`; the
 #: key alone addresses nothing.
@@ -237,7 +248,7 @@ class Snapshot:
     #: local branches/worktrees whose slug names an issue: "issue:<n>" -> [descriptions]
     local_holders: dict[str, list[str]] = field(default_factory=dict)
     #: surfaces that could not be read. A non-empty list makes the run INCOMPLETE
-    #: (exit 2) unless the caller explicitly accepts an advisory degradation.
+    #: (exit 2). There is no override: an unreadable surface is never a pick.
     unreadable: list[str] = field(default_factory=list)
 
     def to_json(self) -> dict[str, Any]:
@@ -315,6 +326,8 @@ class Unit:
     reason: str                  # position, CLAIMED, or SUPERSEDED-BY-FOLD
     detail: list[str] = field(default_factory=list)
     holder: str | None = None
+    #: The PR's head branch — the rails take it as their 4th argument.
+    head_ref: str | None = None
 
     @property
     def sort_key(self) -> tuple[int, int, tuple[int, int]]:
@@ -361,6 +374,7 @@ def _fold_constituents(pr: dict[str, Any]) -> set[int]:
     out: set[int] = set()
     for block in FOLD_LINE_RE.findall(str(pr.get("fold_line") or "")):
         for token in re.split(r"[,\s]+", block.strip()):
+            token = token.lstrip("#")
             if token.isdigit():
                 out.add(int(token))
     return out
@@ -662,6 +676,7 @@ def build_units(snap: Snapshot, cfg: QueueConfig | None) -> list[Unit]:
             priority=priority, title=str(iss.get("title") or ""),
             pr=pr_number, head=str(pr.get("head") or "") or None,
             position=position, reason=reason, detail=detail, holder=holder,
+            head_ref=str(pr.get("head_ref") or "") or None,
         )
         if not readable:
             u.detail.append("claim registry UNREADABLE — this row's freedom is not provable")
@@ -691,6 +706,7 @@ def build_units(snap: Snapshot, cfg: QueueConfig | None) -> list[Unit]:
             pr=pr_number, head=str(pr.get("head") or "") or None,
             position=position, reason=REASON_CLAIMED if holder else position,
             detail=detail, holder=holder,
+            head_ref=str(pr.get("head_ref") or "") or None,
         )
         if not readable:
             u.detail.append("claim registry UNREADABLE — this row's freedom is not provable")
@@ -730,10 +746,15 @@ def next_command(unit: Unit, repo: str) -> str | None:
     """The exact command a runner would execute for this row. None when there is none."""
     if not unit.pickable:
         return None
+    # The PR's head branch is what the harness rails take as their 4th argument, so
+    # a `<branch>` placeholder is NOT pasteable — in a shell `<branch>` is an input
+    # REDIRECTION, not a hole. When the snapshot lacks it, say so instead of
+    # emitting something that fails with "No such file or directory".
+    branch = unit.head_ref or f"<branch of PR #{unit.pr} unknown — read it with gh>"
     if unit.kind == "fold":
         target = f"PR #{unit.pr}"
         if unit.position == "READY-TO-LAND":
-            return f"bash scripts/orchestrator-harness/merge-one.sh . {repo} {unit.pr} <branch>"
+            return f"bash scripts/orchestrator-harness/merge-one.sh . {repo} {unit.pr} {branch}"
         if unit.position == "NEEDS-REVIEW":
             return (
                 f"# review {target} at {unit.head}, then: "
@@ -742,11 +763,11 @@ def next_command(unit: Unit, repo: str) -> str | None:
             )
         if unit.position == "NEEDS-TEST":
             return f"# {target} is awaiting checks — nothing to dispatch until its head reports"
-        return f"bash scripts/orchestrator-harness/fix-one.sh . {repo} {unit.pr} <branch>"
+        return f"bash scripts/orchestrator-harness/fix-one.sh . {repo} {unit.pr} {branch}"
     if unit.position == "NO-PR":
         return f"bash scripts/orchestrator-harness/lane.sh --repo {repo} {unit.issue} lane/{unit.issue}"
     if unit.position == "READY-TO-LAND":
-        return f"bash scripts/orchestrator-harness/merge-one.sh . {repo} {unit.pr} <branch>"
+        return f"bash scripts/orchestrator-harness/merge-one.sh . {repo} {unit.pr} {branch}"
     if unit.position == "NEEDS-REVIEW":
         return (
             f"# review PR #{unit.pr} at {unit.head}, then: "
@@ -755,7 +776,7 @@ def next_command(unit: Unit, repo: str) -> str | None:
         )
     if unit.position == "NEEDS-TEST":
         return f"# PR #{unit.pr} is awaiting checks — nothing to dispatch until its head reports"
-    return f"bash scripts/orchestrator-harness/fix-one.sh . {repo} {unit.pr} <branch>"
+    return f"bash scripts/orchestrator-harness/fix-one.sh . {repo} {unit.pr} {branch}"
 
 
 #: Seconds between GitHub calls. The API throttles per-call and a queue sweep
@@ -811,6 +832,25 @@ def _repo_slug(explicit: str | None, repo_root: Path | None = None) -> str:
         if m:
             return m.group(1)
     raise SystemExit("next_work: could not resolve owner/name — pass --repo owner/name")
+
+
+def dedupe_issues(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One row per ISSUE, highest priority winning, ordered by number.
+
+    Two searches, one per label, and an issue carrying both appeared twice with
+    the same `key`: the population was overcounted and `--json` emitted two units
+    a machine consumer keys as one. It is a function so the fix is testable — the
+    earlier test re-implemented the dedup instead of calling it.
+    """
+    by_number: dict[int, dict[str, Any]] = {}
+    for row in rows:
+        number = int(row["number"])
+        seen = by_number.get(number)
+        if seen is None or PRIORITY_RANK.get(str(row.get("priority") or ""), 99) < PRIORITY_RANK.get(
+            str(seen.get("priority") or ""), 99
+        ):
+            by_number[number] = row
+    return [by_number[n] for n in sorted(by_number)]
 
 
 def _search_issues(client: GhCli, repo: str, label: str, snap: Snapshot) -> list[dict[str, Any]]:
@@ -1226,15 +1266,10 @@ def collect(repo: str, repo_root: Path, *, base: str = "main") -> tuple[Snapshot
     # labels appeared twice with the same `key`, so the population was
     # overcounted and `--json` emitted two units a consumer keys as one. The
     # higher priority wins, because the ordering is priority-first anyway.
-    by_number: dict[int, dict[str, Any]] = {}
+    found: list[dict[str, Any]] = []
     for label in PRIORITIES:
-        for row in _search_issues(client, repo, label, snap):
-            seen = by_number.get(int(row["number"]))
-            if seen is None or PRIORITY_RANK.get(row["priority"], 99) < PRIORITY_RANK.get(
-                str(seen.get("priority") or ""), 99
-            ):
-                by_number[int(row["number"])] = row
-    snap.issues = [by_number[n] for n in sorted(by_number)]
+        found.extend(_search_issues(client, repo, label, snap))
+    snap.issues = dedupe_issues(found)
 
     try:
         pulls = client.list_pulls(repo, snap.base)
@@ -1245,6 +1280,11 @@ def collect(repo: str, repo_root: Path, *, base: str = "main") -> tuple[Snapshot
         {
             "number": int(p["number"]),
             "head": str(((p.get("head") or {}).get("sha")) or ""),
+            # ⛔ THE BRANCH IS PART OF THE RECORD. Without this the emitted rail
+            # command could only ever say "branch unknown" on a LIVE run — the
+            # field existed on `Unit`, nothing wrote it, and the only test planted
+            # it on a synthetic snapshot, so the fix was inert where it mattered.
+            "head_ref": str(((p.get("head") or {}).get("ref")) or ""),
             "draft": bool(p.get("draft")),
             "base": p.get("base") or {},
             "labels": p.get("labels") or [],
@@ -1292,10 +1332,20 @@ def collect(repo: str, repo_root: Path, *, base: str = "main") -> tuple[Snapshot
 
     # Attestation + merge test only for PRs that could become a unit at all:
     # a PR linked to a P0/P1 issue, or a fold.
+    # ⛔ A FOLD THE LINE DECLARES IS A UNIT — SO MEASURE IT. `build_units` accepts
+    # `bool(fold-constituents)` as fold evidence, but this filter only looked at
+    # issue links and the LABEL, so a line-only fold was never attested and never
+    # merge-tested: `merge_tree` stayed empty, the abstention forced NEEDS-TEST
+    # forever, and the row asserted "awaiting checks … until its head reports" over
+    # green checks and "head not available locally" when no fetch was attempted.
+    # That is the COMMON live shape — the label is not applied automatically yet
+    # (`docs/ops/batch-integration.md`), which the tool's own QUEUE NOTE reports.
     linked_prs = {
         int(pr["number"])
         for pr in snap.pulls
-        if (pr.get("closing_issues") or pr.get("refs_issues")) or FOLD_LABEL in _labels(pr)
+        if (pr.get("closing_issues") or pr.get("refs_issues"))
+        or FOLD_LABEL in _labels(pr)
+        or _fold_constituents(pr)
     }
     for pr in snap.pulls:
         if int(pr["number"]) not in linked_prs:
@@ -1446,7 +1496,27 @@ def main(argv: Sequence[str] | None = None) -> int:
     repo_root = Path(__file__).resolve().parent.parent
 
     if args.from_file:
-        raw = json.loads(Path(args.from_file).read_text(encoding="utf-8"))
+        # ⛔ A MISSING OR MALFORMED SNAPSHOT IS exit 2, NOT exit 1. Unhandled, a
+        # typo'd path or a truncated file raised FileNotFoundError/JSONDecodeError
+        # — a traceback and exit 1, which this tool documents as "the queue was
+        # read and NO unit is pickable: that is an answer". A consumer keying on
+        # the exit code read "nothing to do" from an input that was never read.
+        try:
+            raw = json.loads(Path(args.from_file).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            print(
+                f"next_work: INCOMPLETE — the snapshot {args.from_file} could not be read "
+                f"({exc}). exit 2 is 'could not check'; exit 1 would mean the queue was read "
+                "and answered.",
+                file=sys.stderr,
+            )
+            return 2
+        if not isinstance(raw, dict):
+            print(
+                f"next_work: INCOMPLETE — {args.from_file} is not a snapshot object",
+                file=sys.stderr,
+            )
+            return 2
         snap = Snapshot.from_json(raw)
         # ⛔ THE GATE COMES FROM THE SNAPSHOT. Re-reading it here (the first
         # version ran `load_config_text(None)`, which shells

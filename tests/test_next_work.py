@@ -1215,3 +1215,298 @@ def test_a_locally_held_fold_is_not_free():
     )
     row = next(u for u in units_for(s) if u.kind == "fold")
     assert row.reason == "CLAIMED", "a fold with no issue was invisible to the local surface"
+
+
+# ── a line-only fold must be MEASURED, not just detected (review 1) ────────
+def test_a_fold_declared_only_by_its_line_is_measured(monkeypatch):
+    """`build_units` accepts the declared line as fold evidence — so `collect` must measure it.
+
+    The measurement filter looked only at issue links and the `batch-fold` LABEL,
+    so a line-only fold was never attested and never merge-tested: the abstention
+    forced NEEDS-TEST forever and the row claimed "awaiting checks" over green
+    checks and "head not available locally" when no fetch was attempted. That is
+    the COMMON live shape — the label is not applied automatically yet.
+    """
+    from tools import next_work
+
+
+    # REST/`gh` shape, which is what `collect` maps: head.sha, head.ref, body…
+    rest_fold = {
+        "number": 900,
+        "head": {"sha": "9" * 40, "ref": "batch/fold-900"},
+        "base": {"ref": "main"},
+        "draft": False,
+        "labels": [],
+        "title": "batch: a fold",
+        "body": "fold-constituents: 1001",
+    }
+
+    class FakeClient:
+        def list_pulls(self, repo, base):
+            return [rest_fold]
+
+        def list_check_runs(self, repo, sha):
+            # `collect` reads the REPO's gate (6 required checks here), not the
+            # 2-check test config, so the fake must satisfy the real gate.
+            return [
+                {
+                    "id": i,
+                    "name": name,
+                    "status": "completed",
+                    "conclusion": "success",
+                    "app": {"slug": "github-actions"},
+                }
+                for i, name in enumerate(
+                    [
+                        "pricing-artifact",
+                        "docs",
+                        "test-isolation",
+                        "license-surface",
+                        "legal-e2e",
+                        "ai-review-gate",
+                    ]
+                )
+            ]
+
+    measured: dict[str, object] = {}
+
+    monkeypatch.setattr(next_work, "GhCli", lambda: FakeClient())
+    monkeypatch.setattr(next_work, "_search_issues", lambda *a, **k: [])
+    monkeypatch.setattr(next_work, "_closing_refs", lambda *a, **k: {})
+    monkeypatch.setattr(next_work, "_local_holders", lambda *a, **k: {})
+    monkeypatch.setattr(next_work, "_claim_verdicts", lambda *a, **k: None)
+    monkeypatch.setattr(
+        next_work,
+        "_attestation",
+        lambda rr, repo, pr, snap: measured.setdefault("attested", []).append(pr)
+        or snap.attestation.__setitem__(str(pr), {"verdict": "head"}),
+    )
+    monkeypatch.setattr(
+        next_work,
+        "_merge_tree",
+        lambda rr, base, pr, snap: measured.setdefault("merged", []).append(int(pr["number"]))
+        or snap.merge_tree.__setitem__(str(pr["number"]), {"clean": True}),
+    )
+    snap_, cfg, _ = next_work.collect(REPO, Path(__file__).resolve().parent.parent)
+    assert measured.get("attested") == [900], "a line-only fold was never attested"
+    assert measured.get("merged") == [900], "a line-only fold was never merge-tested"
+    row = next(u for u in build_units(snap_, cfg) if u.kind == "fold")
+    assert row.position == "READY-TO-LAND", row.detail
+    assert "awaiting checks" not in (next_command(row, REPO) or "")
+
+
+# ── an unreadable SNAPSHOT is exit 2, never "nothing to do" (review 2) ────
+def test_an_unreadable_snapshot_exits_2(tmp_path: Path):
+    assert _run_main(["--from", str(tmp_path / "nope.json"), "--repo", REPO]) == 2
+    bad = tmp_path / "truncated.json"
+    bad.write_text('{"repo": "x", "issues": [', encoding="utf-8")
+    assert _run_main(["--from", str(bad), "--repo", REPO]) == 2
+    notobj = tmp_path / "list.json"
+    notobj.write_text("[1, 2, 3]", encoding="utf-8")
+    assert _run_main(["--from", str(notobj), "--repo", REPO]) == 2
+
+
+# ── the documented 0 / 1 / 2 contract, each pinned (review 4c) ────────────
+def test_exit_codes_are_pinned(tmp_path: Path):
+    ready = tmp_path / "ready.json"
+    ready.write_text(json.dumps(_rich_snapshot().to_json()), encoding="utf-8")
+    assert _run_main(["--from", str(ready), "--repo", REPO]) == 0
+
+    held = _rich_snapshot().to_json()
+    held["claims"] = {
+        "refs/claims/issue-101": {"verdict": "claim-held", "owner": "a:1"},
+        "refs/claims/issue-200": {"verdict": "claim-held", "owner": "a:1"},
+        "refs/claims/issue-201": {"verdict": "claim-held", "owner": "a:1"},
+        "refs/claims/issue-100": {"verdict": "claim-held", "owner": "a:1"},
+    }
+    allheld = tmp_path / "held.json"
+    allheld.write_text(json.dumps(held), encoding="utf-8")
+    assert _run_main(["--from", str(allheld), "--repo", REPO]) == 1
+
+    incomplete = _rich_snapshot().to_json()
+    incomplete["unreadable"] = ["GH-TIMEOUT(search:P0-blocker)"]
+    inc = tmp_path / "inc.json"
+    inc.write_text(json.dumps(incomplete), encoding="utf-8")
+    assert _run_main(["--from", str(inc), "--repo", REPO]) == 2
+
+
+# ── the render layer never prints a held unit's command (review 4a/4b) ────
+def test_render_never_prints_a_held_units_command():
+    s = snap(
+        issues=[issue(100), issue(200)],
+        pulls=[pull(1001, closes=[100]), pull(2002, closes=[200], head="b" * 40)],
+        check_runs={"a" * 40: all_green(), "b" * 40: all_green()},
+        attestation={"1001": {"verdict": "head"}, "2002": {"verdict": "head"}},
+        merge_tree={"1001": {"clean": True}, "2002": {"clean": True}},
+        claims={"refs/claims/pr-1001": {"verdict": "claim-held", "owner": "box-a:1"}},
+    )
+    text, pick = render(build_units(s, CFG), CFG, s, repo=REPO, top=5)
+    assert pick is not None and pick.issue == 200
+    action = text.split("NEXT ACTION", 1)[1]
+    assert "1001" not in action, "the held unit's PR appeared in the NEXT ACTION block"
+    assert "2002" in action
+
+
+def test_runnable_is_never_a_held_or_superseded_unit():
+    s = snap(
+        issues=[issue(100), issue(200)],
+        pulls=[
+            pull(1001, closes=[100], labels=[CONSTITUENT_LABEL]),
+            pull(2002, closes=[200], head="b" * 40),
+        ],
+        check_runs={"a" * 40: all_green(), "b" * 40: _runs_for_position("NEEDS-FIX")},
+        attestation={"1001": {"verdict": "head"}, "2002": {"verdict": "head"}},
+        merge_tree={"1001": {"clean": True}, "2002": {"clean": True}},
+    )
+    rows = units_for(s)
+    runnable = next(u for u in rows if u.executable)
+    assert runnable.reason != "SUPERSEDED-BY-FOLD"
+    assert runnable.pickable
+
+
+# ── the search surface refuses truncation and failure (review 4d) ─────────
+def test_search_failures_are_unreadable_never_an_empty_population():
+    from tools import next_work
+
+    class Raising:
+        def _json(self, args):
+            raise next_work.GhError("gh api search/issues failed: HTTP 403")
+
+    s = Snapshot()
+    assert next_work._search_issues(Raising(), REPO, "P0-blocker", s) == []
+    assert any("GH-RATE-LIMITED" in u for u in s.unreadable), s.unreadable
+
+    class NoTotal:
+        def _json(self, args):
+            return {"items": [{"number": 1, "title": "t"}]}
+
+    s2 = Snapshot()
+    next_work._search_issues(NoTotal(), REPO, "P0-blocker", s2)
+    assert any("total_count" in u for u in s2.unreadable), s2.unreadable
+
+    class Shortfall:
+        """Page 1 returns 1 of 5 promised rows and nothing follows: a capped window."""
+
+        def _json(self, args):
+            # NB: `"page=1" in url` is ALWAYS true — `per_page=100` contains it.
+            # Split on the last `page=` to get the number actually requested.
+            if args[0].rsplit("page=", 1)[1] == "1":
+                return {"total_count": 5, "items": [{"number": 1, "title": "t"}]}
+            return {"total_count": 5, "items": []}
+
+    s3 = Snapshot()
+    next_work._search_issues(Shortfall(), REPO, "P0-blocker", s3)
+    assert any("page-capped" in u for u in s3.unreadable), s3.unreadable
+
+
+# ── the dedup is the REAL function, not re-implemented in the test (4e) ───
+def test_dedupe_issues_keeps_one_row_and_the_higher_priority():
+    from tools.next_work import dedupe_issues
+
+    rows = dedupe_issues(
+        [
+            {"number": 100, "title": "t", "priority": "P1-severe"},
+            {"number": 100, "title": "t", "priority": "P0-blocker"},
+            {"number": 99, "title": "t", "priority": "P1-severe"},
+        ]
+    )
+    assert [r["number"] for r in rows] == [99, 100]
+    assert rows[1]["priority"] == "P0-blocker"
+
+
+def test_the_newest_pr_is_the_one_offered():
+    """An older abandoned PR that names the issue is not the thing to hand a lane."""
+    from tools.next_work import _open_pulls_for_issue
+
+    s = snap(
+        issues=[issue(100)],
+        pulls=[pull(1001, closes=[100]), pull(2002, closes=[100], head="b" * 40)],
+    )
+    assert [p["number"] for p in _open_pulls_for_issue(s, 100)] == [2002, 1001]
+
+
+# ── the emitted command is pasteable: it names the branch (review, minor) ─
+def test_the_emit_command_names_the_head_branch():
+    s = snap(
+        issues=[issue(100)],
+        pulls=[{**pull(1001, closes=[100]), "head_ref": "fix/100-something"}],
+        check_runs={"a" * 40: all_green()},
+        attestation={"1001": {"verdict": "head"}},
+        merge_tree={"1001": {"clean": True}},
+    )
+    (row,) = units_for(s)
+    cmd = next_command(row, REPO) or ""
+    assert "fix/100-something" in cmd
+    assert "<branch>" not in cmd, "`<branch>` is an input redirection in a shell, not a placeholder"
+
+
+def test_collect_maps_the_head_branch_into_the_snapshot(monkeypatch):
+    """The branch must be recorded by `collect`, not planted by a test.
+
+    `Unit.head_ref` existed and `next_command` read it, but nothing WROTE it — so
+    on every live run (and every `--snapshot-out` replay) the emitted rail command
+    said "branch unknown". The only test planted the field on a synthetic
+    snapshot, which is why it could not catch this.
+    """
+    from tools import next_work
+
+    rest_pr = {
+        "number": 42,
+        "head": {"sha": "b" * 40, "ref": "fix/42-thing"},
+        "base": {"ref": "main"},
+        "draft": False,
+        "labels": [],
+        "title": "t",
+        "body": "Closes #42",
+    }
+
+    class FakeClient:
+        def list_pulls(self, repo, base):
+            return [rest_pr]
+
+        def _get_list(self, path, params="", select=".[]"):
+            return []  # no cross-referenced events for this PR
+
+        def list_check_runs(self, repo, sha):
+            return [
+                {"id": i, "name": n, "status": "completed", "conclusion": "success",
+                 "app": {"slug": "github-actions"}}
+                for i, n in enumerate(
+                    ["pricing-artifact", "docs", "test-isolation", "license-surface",
+                     "legal-e2e", "ai-review-gate"]
+                )
+            ]
+
+    monkeypatch.setattr(next_work, "GhCli", lambda: FakeClient())
+    monkeypatch.setattr(next_work, "_search_issues", lambda c, r, label, s: (
+        [{"number": 42, "title": "t", "priority": "P0-blocker"}] if label == "P0-blocker" else []
+    ))
+    monkeypatch.setattr(next_work, "_closing_refs", lambda *a, **k: {42: [42]})
+    monkeypatch.setattr(next_work, "_local_holders", lambda *a, **k: {})
+    monkeypatch.setattr(next_work, "_claim_verdicts", lambda *a, **k: None)
+    monkeypatch.setattr(next_work, "_attestation", lambda rr, repo, pr, snap: snap.attestation.__setitem__(str(pr), {"verdict": "head"}))
+    monkeypatch.setattr(next_work, "_merge_tree", lambda rr, base, pr, snap: snap.merge_tree.__setitem__(str(pr["number"]), {"clean": True}))
+
+    snap_, cfg, _ = next_work.collect(REPO, Path(__file__).resolve().parent.parent)
+    (snap_pr,) = snap_.pulls
+    assert snap_pr["head_ref"] == "fix/42-thing", snap_pr
+    (row,) = build_units(snap_, cfg)
+    cmd = next_command(row, REPO) or ""
+    assert "fix/42-thing" in cmd, "the emitted command does not name the real branch"
+
+
+def test_fold_constituents_may_carry_a_hash_prefix():
+    """`batch_open.py` accepts `#<n>` tokens; requiring a bare digit made such a
+    fold invisible here, leaving its constituents pickable ahead of it."""
+    fold = pull(900, head="9" * 40, labels=[], body="fold-constituents: #1501, #1502")
+    s = snap(
+        issues=[issue(501), issue(502)],
+        pulls=[fold, pull(1501, closes=[501]), pull(1502, closes=[502])],
+        check_runs={"9" * 40: all_green()},
+        attestation={"900": {"verdict": "head"}},
+        merge_tree={"900": {"clean": True}},
+    )
+    rows = units_for(s)
+    fold_row = [u for u in rows if u.kind == "fold"]
+    assert fold_row, "a `#`-prefixed constituent list was not read as a fold"
+    assert all(u.reason == "SUPERSEDED-BY-FOLD" for u in rows if u.kind == "issue")
