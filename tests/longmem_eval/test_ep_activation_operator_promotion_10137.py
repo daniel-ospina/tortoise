@@ -320,3 +320,64 @@ def test_the_gate_refuses_a_terminal_endpoint(sdk):
         "every non-draft status instead of requiring 'live' (#10137)"
     )
     assert marked == []
+
+
+def test_the_gate_refuses_a_status_less_operator(sdk):
+    """The sweep is explicit-``draft``-only, and a status-less operator must not flip.
+
+    The graph-wide candidate read is ``o.status = 'draft'`` on purpose. It must
+    NOT grow an ``OR o.status IS NULL`` arm: the canonical read model treats an
+    ABSENT status as LIVE (``live.py:278`` — the legacy-node rule), so a
+    status-less operator is already eligible for the factor graph and there is
+    nothing to promote. Flipping it would journal an ``OperatorPromoted`` for
+    every legacy operator on every sweep — the manifest/journal narrowing the
+    module's divergence note calls deliberate.
+
+    Pinned here because the "restore parity with capture" edit is exactly
+    re-adding that arm, and the stub suite cannot see it: its candidate answer
+    comes from a hand-fed ``graph_operators`` list regardless of the query text.
+    """
+    premise = _claim(sdk, "premise", "live")
+    conclusion = _claim(sdk, "conclusion", "live")
+    oid = sdk.create_operator(
+        "IMPL", premise, [conclusion],
+        direction="unidirectional", promote_source=False,
+    )["id"]
+    # The legacy shape: an operator node with NO status property at all.
+    sdk._get_proj().g.query(
+        "MATCH (o:Point {id:$oid}) REMOVE o.status", params={"oid": oid},
+    )
+
+    events: list[str] = []
+    real_emit = sdk._emit_event
+
+    def _counting_emit(type_, **kwargs):
+        events.append(type_)
+        return real_emit(type_, **kwargs)
+
+    sdk._emit_event = _counting_emit
+    try:
+        candidates = [
+            r[0] for r in sdk._get_proj().g.query(
+                epa._SELECT_DRAFT_OPERATOR_IDS).result_set if r
+        ]
+        promoted = epa._promote_operator_row(
+            sdk, sdk._get_proj().g, oid, set(), lambda _eid: None,
+        )
+    finally:
+        sdk._emit_event = real_emit
+
+    assert oid not in candidates, (
+        "a status-less operator was offered as a draft candidate — the sweep "
+        "grew an `OR o.status IS NULL` arm, so a legacy operator would be "
+        "re-promoted and re-journalled on every sweep (#10137)"
+    )
+    assert promoted is False, (
+        "the gate promoted a status-less operator; absent status is already "
+        "LIVE under the canonical read model, so this journals a redundant "
+        "OperatorPromoted and a JSONL replay applies it again"
+    )
+    assert events.count("OperatorPromoted") == 0
+    assert "status" not in (sdk.get_point(oid) or {}), (
+        "the sweep WROTE a status onto a legacy operator instead of leaving it"
+    )

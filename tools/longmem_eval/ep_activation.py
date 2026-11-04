@@ -92,8 +92,10 @@ EP_ENGINE = "dream:full"
 #   * ``_SELECT_DRAFT_OPERATOR_IDS`` is explicit-``draft``-only and graph-wide,
 #     not incident-scoped — see its own block for why (an operator over
 #     already-live claims has no other promotion route, #10137).
-# Both are pinned by ``test_the_gate_promotes_an_operator_once`` and
-# ``test_activate_promotes_an_operator_the_incident_query_cannot_reach``.
+# Pinned by ``test_the_gate_promotes_an_operator_once`` (CAS, embedded),
+# ``test_the_gate_refuses_a_status_less_operator`` (explicit-draft-only arm,
+# embedded) and ``test_activate_promotes_an_operator_the_incident_query_
+# cannot_reach`` (graph-wide reach, stub).
 # Candidate draft points: non-operator, draft-or-unset status (the canonical
 # read model treats unset status as live for most surfaces, but the ingest
 # shape is explicit "draft"; matching both mirrors the capture candidate read
@@ -580,15 +582,24 @@ def _promote_operator_row(sdk, g, oid, promoted_ops, on_input) -> bool:
     read model). Returns ``True`` iff the CAS-guarded ``SET`` won, so the caller
     counts and emits ``OperatorPromoted`` for exactly the flips that happened.
 
+    ⚠️ It blocks the terminal STATUS arm only, exactly as the engine's gate does
+    (``sdk.py:21339-21346`` reads ``s.id, s.status``): an endpoint carrying
+    ``status='live'`` PLUS ``outdated=true`` is admitted here because it is
+    admitted there, and ``ep.py:2128`` then strips it. That is a real engine-side
+    gap, deliberately NOT patched in the harness alone — a census that gates
+    more strictly than the engine publishes numbers production cannot produce.
+    Fixing it means fixing both, tracked in #10828.
+
     ⛔ The predicate is NOT re-spelled in Cypher, and the difference is not
     cosmetic — a draft-only Cypher predicate (``coalesce(status,'live')
     <> 'draft'``) is how this change went WRONG on its first pass: it admits
-    every TERMINAL endpoint (retracted / superseded / outdated / archived, and
-    the legacy ``deprecated``), which ``(st or "live") == "live"`` blocks. A promoted operator over a
-    terminal claim journals an ``OperatorPromoted``, then ``ep.py`` strips the
-    terminal input, the factor DEGENERATES, and the manifest publishes
-    ``operators_promoted: 1, factors: 0`` — the exact "promoted but no factor"
-    reading this change exists to make impossible. Re-spelling a liveness
+    every TERMINAL endpoint STATUS (retracted / superseded / outdated /
+    archived, and the legacy ``deprecated``), which ``(st or "live") == "live"``
+    blocks. A promoted operator over a terminal-status claim journals an
+    ``OperatorPromoted``, then ``ep.py`` strips the terminal input, the factor
+    DEGENERATES, and the manifest publishes ``operators_promoted: 1,
+    factors: 0`` — the "promoted but no factor" reading this change exists to
+    make impossible. Re-spelling a liveness
     predicate is what ``tortoise/live.py`` forbids; reading the endpoints and
     comparing in Python mirrors the SDK's SHAPE instead (read → compare → CAS
     SET), one round trip per candidate.
@@ -771,15 +782,16 @@ def activate_beliefs(sdk, *, namespace: str | None = None,
     # ⛔ The gate is NOT re-spelled in Cypher. ``tortoise/live.py`` forbids a
     # reader re-spelling the liveness predicate, and half-spelling it is a real
     # defect this change shipped on its first pass: a draft-only predicate
-    # ("<> 'draft'") admits every TERMINAL endpoint (retracted / superseded /
-    # outdated / archived, and the legacy ``deprecated``), where the SDK's
-    # ``(st or "live") == "live"`` blocks
-    # them — so a resumed ingest writing an operator over a claim a human has
-    # since retracted would have gone live over a dead endpoint, journaled an
-    # ``OperatorPromoted`` for it, and published ``operators_promoted: 1,
-    # factors: 0`` (``ep.py`` strips terminal inputs, so the factor degenerates)
-    # — the exact "promoted but no factor" reading this change exists to make
-    # impossible. Reading the endpoints and comparing in Python mirrors the
+    # ("<> 'draft'") admits every TERMINAL endpoint STATUS (retracted /
+    # superseded / outdated / archived, and the legacy ``deprecated``), where
+    # the SDK's ``(st or "live") == "live"`` blocks them — so a resumed ingest
+    # writing an operator over a claim a human has since retracted would have
+    # gone live over a dead endpoint, journaled an ``OperatorPromoted`` for it,
+    # and published ``operators_promoted: 1, factors: 0`` (``ep.py`` strips
+    # terminal inputs, so the factor degenerates) — the "promoted but no factor"
+    # reading this change exists to make impossible. The ``outdated`` FLAG arm
+    # is NOT carried, because the engine's own gate does not carry it (#10828).
+    # Reading the endpoints and comparing in Python mirrors the
     # SDK's SHAPE (read → compare → CAS SET), one round trip per candidate; the
     # endpoint READ is deliberately NARROWER (see `_promote_operator_row`), so a
     # part/whole operator is not promoted by this sweep. The candidate set is
