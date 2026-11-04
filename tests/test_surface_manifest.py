@@ -2056,6 +2056,48 @@ def test_response_fields_block_is_present_and_anchored():
         )
 
 
+def test_every_recorded_tortoise_error_row_anchors_to_a_wrap_envelope_tool():
+    """A `_meta.tortoise_error` row must name a tool whose OWN schema is a WRAP envelope.
+
+    #8482's repair is applied ONLY to a tool whose advertised output schema carries
+    `x-fastmcp-wrap-result` (`tortoise/mcp_server.py::_wrap_envelope_schema` → the
+    caller repairs nothing when it returns `None`). So a `_meta.tortoise_error` row on
+    any other tool records a key that is NEVER written — a false record in the surface
+    report the owner reads to learn a tool's error channel.
+
+    This is the #10914 review's finding 3, and it was reachable because the retirement
+    rename re-anchored `tortoise_check_structure`'s row onto `tortoise_graph_overview`
+    (`-> Any`, `output_schema is None`): the `response_fields` block is hand-authored and
+    deliberately NOT derivable (`NON_DERIVABLE_DOC_KEYS`), so `check` cannot settle
+    wrap-ness and both gates stayed green over it. Measured against the live tool list,
+    not against a hand-kept list of names.
+    """
+    import asyncio
+
+    import tortoise.mcp_server as ms
+
+    rows = [rf for rf in _manifest()["response_fields"]
+            if rf.get("field") == "_meta.tortoise_error"]
+    assert rows, "the `_meta.tortoise_error` record vanished from the manifest"
+
+    async def _schema(name: str):
+        return (await ms.mcp.get_tool(name)).output_schema
+
+    not_wrap: list[str] = []
+    for rf in rows:
+        name = str(rf["response"])
+        if name.startswith("sdk:"):
+            continue  # an endpoint row; this repair is a TOOL-envelope property
+        schema = asyncio.run(_schema(name))
+        if not (isinstance(schema, dict) and schema.get("x-fastmcp-wrap-result")):
+            not_wrap.append(f"{name} (output_schema={schema!r})")
+    assert not not_wrap, (
+        "these `_meta.tortoise_error` rows name a tool with NO wrap envelope, so the key "
+        "is never written for them — move the row to the tool that carries the envelope: "
+        + "; ".join(not_wrap)
+    )
+
+
 def test_response_fields_block_is_carried_across_a_re_cut():
     """`cut` must carry the hand-authored record forward, not drop it."""
     sys.path.insert(0, str(ROOT / "tools"))

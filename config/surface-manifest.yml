@@ -503,7 +503,7 @@ response_fields:
     one'
   unchanged_when_off: n/a — not flag-gated; the key is ABSENT on a sourced or word-bearing write, and on every write
     whose fold actually applied, so that response stays byte-identical
-- response: tortoise_graph_overview
+- response: tortoise_check_structure
   field: _meta.tortoise_error
   emitted_when: 'only for the transport wait-bound refusal — the ONE producer whose failure payload is a `{code,
     message, data}` mapping the advertised schema cannot carry; re-homed verbatim (the wait bound''s `data.retry_after`
