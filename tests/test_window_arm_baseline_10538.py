@@ -66,11 +66,28 @@ def test_the_receipt_disclaims_the_measurement_it_is_not():
     assert "NOT the #9097 Q3 exit measurement" in receipt["what_this_is_not"]
     assert "NOT a placement verdict" in receipt["what_this_is_not"]
     verdict = receipt["verdict"]
-    assert verdict["unit_reachable_without_displacement_at_window_12"] is False
+    # ⛔ SHAPE-KEYED, NOT ONE BOOLEAN (fresh-context review, finding 1). The
+    # pre-fix field read `False` as though it were a property of the arm; it was
+    # false only on the chunk-free pools the instrument happened to build, and
+    # the reader's `dedup_pool` cap lifts the same picks into the graded top 5 on
+    # the chunk-bearing shape the corpus is actually ingested as.
+    reachable = verdict["unit_reachable_without_displacement_at_window_12"]
+    assert reachable == {"chunk_free_pools": False,
+                        "chunk_bearing_pools": True}, (
+        "the reachability claim must be keyed by POOL SHAPE — a single boolean is "
+        f"a claim about one geometry dressed as a property of the arm: {reachable}")
+    assert verdict["unit_graded_by_recall_all_at_5_at_window_12"] == {
+        "chunk_free_pools": 0,
+        "chunk_bearing_pools": {"chunk_bearing_issue_probe": 2,
+                               "chunk_bearing_whole_window_cluster": 2},
+    }
     assert "AT THE SHIPPED GEOMETRY ONLY" in verdict["scope"], (
         "the reachability claim must be scoped to window=12 — the receipt's own "
         "sweep reaches the graded top 5 at windows 3-6, so an unscoped "
         "\"unreachable\" would be contradicted by its own rows")
+    assert "CHUNK-FREE" in verdict["scope"] and "CHUNK-BEARING" in verdict["scope"], (
+        "the scope must name BOTH pool shapes: the two do not agree, and the "
+        "cap is what makes them differ")
     why = verdict["why"]
     assert "never been measured on the shipped" in why, (
         "the head counterfactual has NO direct shipped-corpus measurement")
@@ -134,24 +151,143 @@ def test_the_shipped_geometry_is_net_zero_and_loses_sole_representatives():
         "the additive predicate must reject an arm that trades a session away")
 
 
-def test_every_pick_at_the_shipped_geometry_lands_below_the_graded_top_five():
-    """``recall_all@5`` grades ``hits[:5]``; a tail pick starts at
-    ``ceiling = window - budget``. So the arm's own unit cannot see its own picks
-    at the shipped window — on ANY of the pre-registered pools."""
+def test_the_graded_rank_depends_on_the_pools_chunk_shape():
+    """⛔ FRESH-CONTEXT REVIEW, FINDING 1 — the pin for it.
+
+    ``recall_all@5`` grades ``hits[:5]``, and ``hits`` is the **deduped** pool:
+    ``retrieve.py`` reassigns ``annotated`` to the fused order and THEN applies
+    ``_dedup_pool(annotated, max_chunks_per_session=3)``. ``dedup_pool`` caps RAW
+    ``session-transcript`` chunks per session in rank order and never caps
+    points/turn points, so:
+
+    * CHUNK-FREE pool — the cap is a no-op, a tail pick spliced at ceiling 10
+      stays at reader rank 10, and the metric sees NONE of them;
+    * CHUNK-BEARING pool — the cap removes the raw chunks ABOVE the pick, both
+      picks land at reader ranks 3-4, and the metric grades BOTH.
+
+    The pre-fix instrument sliced the PRE-dedup order and published ``0`` for
+    both shapes, so this pin is RED before the fix: on the chunk-bearing pools
+    it reads ``[10, 11]``/``graded 0`` instead of ``[3, 4]``/``graded 2``.
+    """
     receipt = json.loads(baseline.RECEIPT_PATH.read_text(encoding="utf-8"))
+    chunk_free, chunk_bearing = {}, {}
     for name, rows in receipt["by_pool"].items():
         row = next(r for r in rows
                    if r["window"] == SHIPPED_WINDOW and r["placement"] == "tail")
+        bucket = chunk_bearing if row["chunk_bearing"] else chunk_free
+        bucket[name] = row
+    assert chunk_free and chunk_bearing, (
+        "the receipt must carry BOTH shapes, or the two readings cannot be told "
+        "apart")
+    for name, row in chunk_free.items():
+        assert row["pick_ranks"] == row["pick_ranks_before_dedup"], name
         assert all(rank >= 5 for rank in row["pick_ranks"]), (
-            f"{name}: a pick reached the graded top 5 at window=12: "
+            f"{name}: a pick reached the graded top 5 on a CHUNK-FREE pool: "
             f"{row['pick_ranks']}")
         assert row["graded_by_recall_all_at_5"] == 0, name
+    for name, row in chunk_bearing.items():
+        assert row["fired"], f"{name}: the arm must fire on this shape"
+        assert row["pick_ranks_before_dedup"] == [10, 11], (
+            f"{name}: the splice put the picks at {row['pick_ranks_before_dedup']} "
+            "— if the SPLICE moved, the cap is no longer the cause of what "
+            "follows")
+        assert row["pick_ranks"] == [3, 4], (
+            f"{name}: the reader's chunk cap must lift the picks into the "
+            f"graded top 5; got {row['pick_ranks']}")
+        assert row["graded_by_recall_all_at_5"] == 2, name
+        assert row["reader_pool_depth"] < row["pool_depth"], (
+            f"{name}: the cap must actually bite on a chunk-bearing pool")
+
+
+def test_the_chunk_cap_is_the_CAUSE_of_the_graded_rank_and_not_the_splice():
+    """Non-vacuity for the test above: the SAME pool and the SAME fused order
+    give the old, pre-fix answer when the cap is switched off.
+
+    Without this, a change to the splice that happened to move the picks would
+    silently take the credit for the cap's work.
+    """
+    pool = baseline.pool_for("chunk_bearing_issue_probe")
+    order, picks = _fused(pool, window=SHIPPED_WINDOW)
+    reader = window_arm_retention(pool, order, picks=picks,
+                                  window=SHIPPED_WINDOW)
+    splice = window_arm_retention(pool, order, picks=picks,
+                                  window=SHIPPED_WINDOW,
+                                  max_chunks_per_session=None)
+    # the splice is IDENTICAL in both readings — only the reader's pool differs
+    assert reader["pick_ranks_before_dedup"] == splice["pick_ranks"] == [10, 11]
+    assert splice["graded_by_recall_all_at_5"] == 0, (
+        "with the cap off, the pre-fix reading must reproduce exactly")
+    assert reader["graded_by_recall_all_at_5"] == 2
+    assert splice["reader_pool_depth"] == len(pool), (
+        "cap off means the reader's pool IS the candidate pool")
+    assert reader["reader_pool_depth"] < len(pool)
+
+
+def test_a_pick_the_reader_cap_removes_is_reported_not_read_as_inert():
+    """A promotion can pay for a slot the reader NEVER RECEIVES: if the pick is
+    itself a raw chunk of a session that already holds the cap's worth of raw
+    chunks above it, ``dedup_pool`` drops it. That must read as its own fault,
+    not as ``picks_absent_from_fused`` (a caller bug) and not as an inert arm.
+
+    Reachable through the shipped caller via the bucket/date divergence the
+    module documents: ``held_buckets`` is keyed on ``(session_date,
+    session_id)``, so a session already visible under one raw date can still be
+    promoted from another — while the reader's cap is keyed on the session.
+    """
+    from tortoise.retrieval import SESSION_TRANSCRIPT_KIND
+
+    raw = SESSION_TRANSCRIPT_KIND
+    # window=6, limit=2 -> ceiling 4, so the head holds sB's first three raw
+    # chunks and the promotion reaches sB's FOURTH (a different date bucket, so
+    # `held_buckets` lets it through) — which the reader's cap then removes.
+    pool = [
+        {"id": "sa0", "session_id": "sA", "session_date": "2023-04-15",
+         "content": "alpha", "point_kind": raw},
+        {"id": "sb1", "session_id": "sB", "session_date": "2023-04-15",
+         "content": "alpha", "point_kind": raw},
+        {"id": "sb2", "session_id": "sB", "session_date": "2023-04-15",
+         "content": "alpha", "point_kind": raw},
+        {"id": "sb3", "session_id": "sB", "session_date": "2023-04-15",
+         "content": "alpha", "point_kind": raw},
+        {"id": "sc4", "session_id": "sC", "session_date": "2023-04-15",
+         "content": "alpha"},
+        {"id": "sd5", "session_id": "sD", "session_date": "2023-04-15",
+         "content": "alpha"},
+        {"id": "sb6", "session_id": "sB", "session_date": "2023-04-16",
+         "content": "alpha", "point_kind": raw},
+    ]
+    order, picks = _fused(pool, window=6)
+    assert picks == ["sb6"], (
+        f"the shipped caller must actually promote the capped pick; got {picks}")
+    got = window_arm_retention(pool, order, picks=picks, window=6)
+    assert got["picks_absent_from_fused"] == [], (
+        "the pick IS in the caller's order — reporting it as lost would blame "
+        "the caller")
+    assert got["picks_dropped_by_reader_dedup"] == ["sb6"], (
+        "a pick the reader's cap removed must be reported on its own field")
+    assert got["pick_ranks"] == [] and got["graded_by_recall_all_at_5"] == 0
+    # ...and it is NOT inert: the pick set is non-empty, which is the property
+    # an emptied `pick_ranks` alone cannot carry.
+    no_cap = window_arm_retention(pool, order, picks=picks, window=6,
+                                  max_chunks_per_session=None)
+    assert no_cap["picks_dropped_by_reader_dedup"] == [], (
+        "with the cap off nothing is dropped — the cap is the cause")
+    assert no_cap["pick_ranks"] == [4]
+    assert no_cap["graded_by_recall_all_at_5"] == 1, (
+        "the pre-fix reading graded a pick the reader never receives — which is "
+        "the whole finding in one line")
 
 
 def test_the_pick_rank_is_the_ceiling_at_every_geometry():
     """The law, not a number: a pick's fused index IS ``ceiling`` (and
     ``ceiling + i`` for the i-th) because the tail splice is
-    ``[head] + [picks]``. A change here is a change to the placement contract."""
+    ``[head] + [picks]``. A change here is a change to the placement contract.
+
+    Measured on ``pick_ranks_before_dedup`` — ``ceiling`` is the SPLICE
+    geometry, so comparing it to the reader's post-cap rank would only hold on a
+    chunk-free pool (this one is, which is why both readings agree here; the
+    chunk-bearing divergence is pinned separately).
+    """
     pool = _pool([("sA", 10), ("sB", 1), ("sC", 1), ("sD", 1), ("sE", 1),
                   ("sF", 1)])
     for window in baseline.GEOMETRY:
@@ -159,6 +295,8 @@ def test_the_pick_rank_is_the_ceiling_at_every_geometry():
         got = window_arm_retention(pool, order, picks=picks[:1] if picks else [],
                                    window=window)
         ranks = [order.index(p) for p in picks]
+        assert got["pick_ranks_before_dedup"] == ranks[:1]
+        assert got["pick_ranks"] == got["pick_ranks_before_dedup"]
         assert ranks == [got["ceiling"] + i for i in range(len(picks))], (
             f"window={window}: picks {picks} at {ranks}, ceiling "
             f"{got['ceiling']}")
@@ -295,7 +433,7 @@ def test_every_pre_registered_pool_declares_its_real_gate_state():
     from tortoise.temporal_leg import _session_clustered
 
     for name, spec in baseline.POOLS.items():
-        pool = _pool(spec["spec"])
+        pool = baseline.pool_for(name)
         for window in baseline.GEOMETRY:
             head = max(window - DEFAULT_TEMPORAL_LEG_LIMIT, 0)
             got = _session_clustered(pool, head, DEFAULT_TEMPORAL_LEG_LIMIT,
@@ -355,8 +493,9 @@ def test_the_sole_representative_count_is_per_session_not_per_bucket():
     already holds under a different raw date) and is flagged identically by both
     counts — see ``tortoise.temporal_leg.window_arm_retention``.
 
-    The pre-registered pools cannot see any of this: ``_pool()`` stamps one date
-    on every hit, so both definitions agree on all six of them.
+    The pre-registered pools in the receipt cannot see any of this: every hit in
+    them carries ONE date, so a `(date, session)` bucket and a session are the
+    same thing and both definitions agree.
     """
     pool = [
         {"id": f"sa{i}", "session_id": "sA", "session_date": "2023-04-15",
