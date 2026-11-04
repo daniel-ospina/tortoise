@@ -2753,6 +2753,9 @@ jobs:
           fi
       - name: Upload pytest log (measurement artifact, #1477)
         # #1477: non-gating upload — same contract as the fast job's upload.
+        # `${{ runner.temp }}` (not the `$PYTEST_LOG` shell variable, which
+        # `with:` does not expand) is the same per-job path the first step
+        # resolved, so the artifact is this leg's own log (#10280).
         if: always()
         continue-on-error: true
         uses: actions/upload-artifact@v4
@@ -3422,7 +3425,7 @@ jobs:
       - name: Dump tolerated tempdir-cleanup leaks (issue #7735)
         # Same capture trap as #1103 above: a PASSING test's `logger.warning` is
         # discarded by pytest capture (measured on the fast job's flags — 0
-        # occurrences in /tmp/pytest.log and 0 in the junit XML), so the
+        # occurrences in this shard's pytest log and 0 in the junit XML), so the
         # ENOTEMPTY teardown leaks tolerated by `TemporaryDirectory.cleanup`
         # are mirrored to an artifact at session end. The writer MERGES by path
         # so a future xdist admission cannot truncate a peer's record wholesale

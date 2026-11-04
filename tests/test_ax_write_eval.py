@@ -2019,3 +2019,63 @@ def test_every_committed_edge_item_declares_the_endpoints_it_is_graded_on():
             assert {str(layer).lower() for layer in wanted} <= layers, (
                 f"{exp['item']!r}: {side} names a layer that is not one of {sorted(layers)}"
             )
+
+
+def test_the_write_first_index_row_cites_symbols_that_exist():
+    """The Step-2 index row's tree cites must be resolvable, and non-rotting.
+
+    `docs/00_index.md`'s `#9675` Step 2 row asserts, present tense, that *"Every
+    mechanic it states is verified against the tree"* — and carried seven bare
+    `sdk.py:<line>` cites. Nothing pinned them (the index sweep in
+    `test_7949_capstone_measure.py` scopes to the `#7949` row), so the row stayed
+    green while the numbers named unrelated code: #10214 itself inserted the
+    #9116 seam 152 lines ABOVE them, so all seven shifted and one landed on a
+    blank line. `ONTOLOGY.md:1182` was blank from the day the row was authored.
+
+    The fix is the durable one: a SYMBOL cannot re-stale. This pin resolves each
+    one against the shipped file, so a rename reds here instead of silently
+    leaving the row citing a mechanic that moved; and it refuses a bare
+    `sdk.py:<line>` on this row, so the rot cannot come back by habit.
+
+    Non-vacuity: at the pre-fix head the row carried `sdk.py:17849/18060/…`, so
+    the numeric-cite assertion reds; the symbol assertion has nothing to resolve.
+    """
+    import ast
+
+    row = next(
+        line
+        for line in (REPO_ROOT / "docs" / "00_index.md").read_text().splitlines()
+        if "`#9675` Step 2" in line
+    )
+    assert not re.search(r"sdk\.py:\d", row), (
+        "the Step-2 index row cites `sdk.py` by LINE again — those numbers shift "
+        "with every insert above them (the #9116 seam moved all seven by +152) "
+        "and nothing pins them; cite the symbol"
+    )
+    found = re.search(r"sdk\.py::TortoiseSDK\.\{([^}]*)\}", row)
+    assert found, "the Step-2 row carries no `sdk.py::TortoiseSDK.{…}` symbol cite"
+    cited = {name.strip() for name in found.group(1).split(",") if name.strip()}
+    assert len(cited) >= 7, f"the row cites only {len(cited)} symbols: {sorted(cited)}"
+
+    sdk = (REPO_ROOT / "tortoise" / "sdk.py").read_text()
+    sdk_class = next(
+        node
+        for node in ast.parse(sdk).body
+        if isinstance(node, ast.ClassDef) and node.name == "TortoiseSDK"
+    )
+    methods = {node.name for node in sdk_class.body
+               if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    missing = sorted(cited - methods)
+    assert not missing, (
+        "the Step-2 index row cites mechanics that no longer exist on "
+        f"TortoiseSDK: {missing} — re-derive the symbol the mechanic moved to"
+    )
+
+    # ...and the spec sections it cites exist in the ontology, by NUMBER.
+    ontology = (REPO_ROOT / "docs" / "ONTOLOGY.md").read_text()
+    headings = set(re.findall(r"^## §(\d+)\.", ontology, re.MULTILINE))
+    cited_sections = set(re.findall(r"§(\d+)", row.split("ONTOLOGY.md", 1)[-1]))
+    assert {"2", "5"} <= cited_sections, (
+        f"the row's ontology anchor moved: {sorted(cited_sections)}")
+    assert {"2", "5"} <= headings, (
+        f"ONTOLOGY.md has no §2/§5 heading any more: {sorted(headings)}")

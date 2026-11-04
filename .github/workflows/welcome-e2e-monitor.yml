@@ -103,7 +103,7 @@ jobs:
         with:
           node-version: '22'   # --experimental-strip-types needs >= 22.6 (#373 harness)
       - run: pip install -e '.[test]'
-      - run: python -m playwright install --with-deps chromium
+      - uses: ./.github/actions/playwright-install
       - name: Run welcome page E2E + waitlist static tests (#373)
         run: python -m pytest tests/e2e/test_welcome_page.py tests/test_waitlist_form.py -q -rs -p no:cacheprovider
         env:

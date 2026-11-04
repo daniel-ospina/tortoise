@@ -133,7 +133,7 @@ fi
 # `${RUNNER_TEMP:-/tmp}/pytest-rc`. A foreign writer that rewrites the file and stops
 # leaves no NUL hole and no unbalanced stack, so under rc=1 it can still read as the
 # leg's verdict. For those legs the durable fix is a per-leg log path under
-# `${RUNNER_TEMP}` (#10280); both matrix jobs already pass one, so for them the
+# `${RUNNER_TEMP}` (#10280); all three matrix jobs now pass one, so for them the
 # signals below are a backstop rather than the load-bearing defence.
 #
 # ⚠️ STATUS: APPLIED TO EVERY `python-ci.yml` LEG THAT WRITES A `> ...` CAPTURE
