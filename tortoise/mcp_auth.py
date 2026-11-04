@@ -660,22 +660,42 @@ def record_tenant_for_graph(plan: dict | None) -> tuple[str, str] | None:
       :func:`plan_graph_target` answers that ref with ``None``, and refuses it
       whenever ``_current_graph_id`` is set, because its default-ref branch
       compares the bound id against the ``"default"`` SENTINEL
-      (`_DEFAULT_GRAPH_ID`, :316) while a resolved credential carries a real
-      ``public.graphs`` id. A bound credential is therefore REFUSED there
-      rather than resolved, INCLUDING one bound to the default graph's own row
-      (pinned by ``test_9340_graph_tool_argument.py``::
+      (`_DEFAULT_GRAPH_ID`, the module constant) while a resolved credential
+      carries a real ``public.graphs`` id. A bound credential is therefore
+      REFUSED there rather than resolved, INCLUDING one bound to the default
+      graph's own row (pinned by ``test_9340_graph_tool_argument.py``::
       ``test_a_bound_credential_cannot_ask_for_the_default_graph``). So the
       ``kind='default'`` row handled below reaches this function only for a
       credential bound to that very row, or for one with no binding at all —
-      and in both shapes the ambient scope already names ``(org, default)``.
+      and where the credential IS bound the ambient scope already names
+      ``(org, default)``. (Where it is NOT bound the ambient scope can name
+      NOTHING; see the ⚠️ paragraph below, which is a different answer from
+      this one and was written because this sentence used to claim both
+      shapes at once — #10723 review P3.)
 
     Installing a tenant here would therefore be a SECOND write of the same
-    scope, and the only way it could differ is by disagreeing with the answer
-    the credential already gave — a worse answer, not a better one. The lanes
-    that genuinely needed an install are the ones with NO ambient scope at all
-    (they build their own SDK from an ``org_id`` alone); they are installed at
-    their own construction site by
+    scope in the ambient-present case, and the only way it could differ is by
+    disagreeing with the answer the credential already gave — a worse answer,
+    not a better one. The lanes that genuinely needed an install are the ones
+    with NO ambient scope at all (they build their own SDK from an ``org_id``
+    alone); they are installed at their own construction site by
     ``hosted_api._bind_default_graph_record_tenant`` (#10047, five lanes).
+
+    ⚠️ There IS a reachable shape where the ambient scope names NOTHING, and
+    returning ``None`` there is still right — for a sharper reason than "it
+    would disagree" (#10046 review P2): naming the default graph by its NAME
+    (not the ``"default"`` ref) reaches the ``kind='default'`` early return
+    above even when the credential's own read was fail-soft and stamped no
+    ``default_graph_id``. In that shape the honest answer is the fail-closed
+    ``no_tenant`` refusal, NOT an install — because a default row's
+    ``plan["graph_id"]`` is the ``"default"`` SENTINEL (`_DEFAULT_GRAPH_ID`,
+    the module constant), and
+    :func:`tortoise.record_writer.record_tenant_for` accepts any non-empty
+    string in that field, so installing it would hand the record an
+    FK-invalid tenant and turn an attributable DECLINE into an unattributable
+    ``write_failed``. The only install that could be correct here would read
+    ``plan["stable_id"]``; that is a new resolution path, and #10046's own
+    review round declined it as one.
     """
     if plan is None or (plan.get("kind") or "") == "default":
         return None

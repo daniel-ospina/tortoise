@@ -3,9 +3,18 @@ must be COUNTED, never silently absorbed.
 
 The boundary refuses a fold on differences read from closed, hand-written word
 lists (``_NEGATION_MARKERS``, ``_CONDITION_MARKERS``/``_CONDITION_PHRASES``,
-``_DATE_WORDS``, ``_CLOCK_UNITS``, ``_SCRIPT_BLOCKS``).  A marker outside every
+``_DATE_WORDS``, ``_CLOCK_UNITS``).  A marker outside every
 list reaches no identity dimension, so the pair reads as a one-sided broadening
 and FOLDS — and before this census the fold left no trace anywhere.
+
+⚠️ ``_SCRIPT_BLOCKS`` is deliberately NOT in that list: a LETTER in an unlisted
+script is an UNKNOWN SCRIPT and refuses the fold (``_UNLISTED_SCRIPT`` in
+``_scripts``), so the script LETTER case is closed.  That is a statement about
+folds, not a claim that a script token is never absorbed — a one-sided token in
+a script present on BOTH sides still is, and is counted here.  ONE script-only
+population remains outside this census: a marks-or-digits-only script difference
+(Thai `๑๒๓` vs `123`) is not a content token, so nothing absorbs it and nothing
+counts it; it is declared on ``_UNLISTED_SCRIPT`` instead.
 
 What is under test here is the OBSERVABILITY, not the fold decision: the census
 records what the vocabularies did not understand, and the decision is
