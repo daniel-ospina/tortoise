@@ -307,6 +307,12 @@ still Source-FTS-indexed. Recorded on #10853 as a follow-up obligation.
 ### The pin
 
 `tests/test_10853_session_source_prose.py`: the drop; the narrowness of the drop;
+**the DROP SET itself** (every `public.source` column non-NULL, and
+`set(projected_properties("source")) - set(node.props)` is EXACTLY
+`{"summary", "_searchText"}` — the leg that reds when the set is WIDENED, which
+nothing else did until #10867 review round 9: adding `title` left every leg and
+the whole 443-test neighbourhood green while the door stripped a record-held
+property);
 the reconciler counting the declined pair as `graph_only` (not divergence) while a
 DOCUMENT with a differing summary is still counted field by field;
 ONE LEG PER ARM; the FOUR negative legs (a plain-document baseline, then one per
@@ -318,7 +324,8 @@ tail-carried kind alone does not strip a `corpus://` document); and the record r
 that must not be mutated. Mutation-checked, one at a time: each identity arm, EACH
 OF THE TWO DOORS (the column loop and the `props` tail — the tail filter undoes
 only the keys the tail added, so neither door subsumes the other), the tail read in
-the predicate (column-only reds 2 legs), the label gate,
+the predicate (column-only reds 2 legs), WIDENING THE DROP SET (`+"title"` reds the
+drop-set leg and only it), the label gate,
 the call-time resolution of the placement spellings, and each of the three flags
 re-added — every one reds at least the leg that names it, plus the row/node
 agreement shape that exists to catch exactly that drift.
