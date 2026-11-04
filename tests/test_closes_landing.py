@@ -962,6 +962,87 @@ def test_no_module_level_constant_is_DEAD_because_a_dead_one_reads_as_live():
         f"name whose comment can claim it is the live mechanism (#10634 review P3)")
 
 
+def test_no_module_level_name_is_REBOUND_because_the_second_copy_wins():
+    r"""#10703 review, ISSUE 1. `_LIST_MARKER_RE` was defined TWICE at module scope
+    (identical patterns), introduced by the integration merge that also left a
+    duplicated `classify` arm. The second binding wins at import, so the copy a
+    maintainer reads first is the one that does not run — the DEAD-constant defect
+    one screen up, only inverted: there BOTH copies were never read, here BOTH are
+    read and only one is live.
+
+    ⚠️ Neither existing guard could see it: `test_no_module_level_constant_is_DEAD`
+    only flags an uppercase name that is NEVER loaded (`_LIST_MARKER_RE` is loaded
+    at both `_fence_candidate` call sites), and `ruff`'s `E,F,B,UP,I,SIM,RUF` set
+    has no rule for a module-level rebind (`ruff check tools/closes_landing.py` is
+    green over it). So the class is closed here: any name bound twice at module
+    scope reds, whatever its case and whether or not it is loaded.
+
+    `origin/main` binds it ONCE, so the duplicate was introduced on this branch.
+    """
+    tree = ast.parse(MODULE_PATH.read_text())
+    seen: dict[str, list[int]] = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+        elif isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            targets = [ast.Name(id=node.name)]
+        else:
+            continue
+        for target in targets:
+            if isinstance(target, ast.Name):
+                seen.setdefault(target.id, []).append(node.lineno)
+    # A scan that finds nothing proves nothing — this asserts the guard MEASURES.
+    assert len(seen) > 20, f"only {len(seen)} module-level bindings found: not measuring"
+    rebound = {name: lines for name, lines in seen.items() if len(lines) > 1}
+    assert not rebound, (
+        f"name(s) rebound at module scope {sorted(rebound.items())}: the LAST binding "
+        f"wins at import, so the first is dead code that reads as live (#10703 review)")
+
+
+def test_no_property_is_DEAD_because_its_docstring_can_claim_the_live_rule():
+    r"""#10703 review, ISSUE 1. `_Fence.container_col` stopped having any reader the
+    moment the closer started being measured in `rest` space (`past = residual -
+    fence.close_base`) — but its docstring still said *"A closer's 'up to three
+    spaces' (§4.5) is measured from here"*, i.e. it named the exact computation
+    this module had just removed for buying a false `lands`.
+
+    This is the same defect class the DEAD-constant guard above pins, and that
+    guard cannot see it (`ast.AnnAssign`/`Assign` at module level only — a
+    `@property` is a `FunctionDef` inside a `ClassDef`). The cost is not tidy-up:
+    three review rounds on this file were spent on comments naming the wrong
+    coordinate space, and the one place a maintainer would look to restore the
+    measurement is the property that no code calls.
+
+    Loads are collected from BOTH the module and this test file, because a
+    property asserted only by a test (`Acceptance.all_checked`) is read, not dead.
+    """
+    tree = ast.parse(MODULE_PATH.read_text())
+    properties: dict[str, int] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ClassDef):
+            continue
+        for member in node.body:
+            if not isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if any(getattr(deco, "id", None) == "property" for deco in member.decorator_list):
+                properties[member.name] = member.lineno
+    loaded = {
+        node.attr
+        for source in (MODULE_PATH, Path(__file__))
+        for node in ast.walk(ast.parse(source.read_text()))
+        if isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Load)
+    }
+    # A scan that finds nothing proves nothing — this asserts the guard MEASURES.
+    assert properties, "no @property found on any module class: the scan is not measuring"
+    dead = {name: line for name, line in properties.items() if name not in loaded}
+    assert not dead, (
+        f"property/ies {sorted(dead.items())} (name → line) have no reader anywhere in "
+        f"the module or this suite: a dead accessor whose docstring can claim the live "
+        f"rule is exactly the fail-open shape #10634/#10703 reviews removed")
+
+
 def test_the_closed_unmerged_arm_is_stated_ONCE_because_a_dead_copy_reads_as_live():
     r"""#10703 review, ISSUE 1. The integration merge left TWO byte-identical copies of
     the "subject was CLOSED WITHOUT MERGING on the default branch" arm in
@@ -1334,7 +1415,9 @@ def test_gh_maps_a_missing_binary_to_unmeasurable(monkeypatch):
 def test_gh_is_BOUNDED_so_a_stalled_call_cannot_hang_the_guard(monkeypatch):
     """#10634 review P2: `subprocess.run` carried no `timeout=`, so a stalled
     `gh` hung the run until the JOB-level timeout killed the always-on
-    drift-guard job — `continue-on-error` covers a step's exit status, never a
+    closes-coherence job (#10703 review: this said "drift-guard", the host the
+    step was MOVED OFF because that workflow is `disabled_manually`) —
+    `continue-on-error` covers a step's exit status, never a
     step that does not finish. The bound must be PASSED to the call (not just
     handled) and an expiry must be a VERDICT, never a hang and never a pass.
     """

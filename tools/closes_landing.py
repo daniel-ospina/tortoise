@@ -597,12 +597,6 @@ class _Fence:
       the opener's column and still be inside the block;
     * `in_list` — whether a list item was open, so a dedent can end the block.
 
-    There is deliberately no raw-coordinate item column: two review rounds
-    carried one alongside this field and ended up comparing a `rest` indent with
-    a raw column (and then the reverse), each time buying a false `lands`.
-    `container_col` derives the raw column from these two fields, so there is
-    only ONE number in each space and no way to mix them.
-
     `item_col_raw` is the enclosing item's content column in RAW coordinates,
     and is set ONLY when that item sits OUTSIDE the fence's blockquote (its
     content column is at or before the quote's markers). CommonMark matches the
@@ -627,13 +621,6 @@ class _Fence:
     in_list: bool
     item_col_raw: int = 0
     item_depth: int = 0
-
-    @property
-    def container_col(self) -> int:
-        """The containing block's content column in RAW coordinates — where a
-        line's content has to start to still be inside this block. A closer's
-        "up to three spaces" (§4.5) is measured from here."""
-        return len(self.prefix) + self.close_base
 
 
 def _fence_line_column(line: str, depth: int) -> tuple[int, int, int]:
@@ -857,8 +844,8 @@ def strip_code(body: str, strict: bool = False) -> str:
             # (for a fence opened inside a list item) the item did.
             #
             # Both tests are measured in ONE coordinate space — the RAW line,
-            # with at most the fence's own blockquote depth consumed — because
-            # that is the space `container_col` lives in. Two review cycles did
+            # with at most the fence's own blockquote depth consumed, or the
+            # item's `close_base` for an item at this depth. Two review cycles did
             # this in two spaces at once (a raw indent against a `rest` column,
             # then a `rest` indent against a raw column) and each way bought a
             # false `lands` on one family of shapes while losing a real claim on
@@ -896,13 +883,14 @@ def strip_code(body: str, strict: bool = False) -> str:
                 #
                 # ⚠️ BOTH sides are in ONE space. `residual` is the indent after
                 # this line's own markers, which is the space `close_base` holds
-                # (the item's column past the prefix). Subtracting a RAW column
-                # (`column - container_col`) instead charged the MARKER'S allowance
-                # twice — the opener's `  > ` is 4 raw columns, the closer's `> `
-                # only 2, so a 4-space-indented run `>     ``` ` came out 2 columns
-                # past the container and closed a fence the renderer keeps open:
-                # `lands`, exit 0, no annotation (#10634, found by a sweep against
-                # the CommonMark reference implementation, not by a reviewer).
+                # (the item's column past the prefix). Subtracting the RAW column
+                # (a close measured from the fence's raw container column) instead
+                # charged the MARKER'S allowance twice — the opener's `  > ` is 4
+                # raw columns, the closer's `> ` only 2, so a 4-space-indented run
+                # `>     ``` ` came out 2 columns past the container and closed a
+                # fence the renderer keeps open: `lands`, exit 0, no annotation
+                # (#10634, found by a sweep against the CommonMark reference
+                # implementation, not by a reviewer).
                 past = residual - fence.close_base
                 if (past <= _MAX_FENCE_INDENT
                         and _is_closer(line[column:], fence.opener)):
@@ -949,10 +937,6 @@ def strip_code(body: str, strict: bool = False) -> str:
         out.append(raw)   # prose: keep it, keywords and all
     return "\n".join(out)
 
-# A list item's content column, so a fence opened inside one can END when the
-# item ends. Without it, `- item\n  ```\nCloses #N\n` blanked the column-0 prose
-# and the tool reported nothing at all (review c10-3).
-_LIST_MARKER_RE = re.compile(r"^(?P<indent>[ \t]*)(?:[-*+]|\d{1,9}[.)])(?P<gap>[ \t]+)")
 
 def parse_closing_refs(body: str, repo: str | None = None,
                        strict: bool = False) -> list[int]:
