@@ -332,13 +332,13 @@ enumeration** — a warning key outside this table is a divergence; report it.
 > (`mitigation_orphan_residue`, `mitigation_drift_duplicate`) describe
 > crash-orphan re-link and post-re-key drift; **no write door emits them yet** —
 > they are reserved vocabulary for those recovery flows, not observable today.
-> ⛔ **Row 1 (`append_only_items`) is ALSO declared-but-unemitted**, and that is
-> the one a caller is most likely to build a duplicate detector on. Measured on
-> this tree: re-ingesting a bundle holding one `event` and one `document` entity
-> item returns `created.entities: 2` and `warnings: []`. The append-only
-> behaviour on that row is real; only the report is missing. `§15` says so where
-> it matters, and the gap is **#10899** — until it closes, `created.entities` is
-> the only way to see the second occurrence.
+> ⚠️ This list is NOT an exhaustive census and must not be read as one: it names
+> only the rows whose emission has been checked. In particular **row 1
+> (`append_only_items`) is declared-but-unemitted** — re-ingesting a bundle
+> holding one `event` and one `document` entity item returns
+> `created.entities: 2` and `warnings: []` — and the missing emission is
+> **#10899**. Treat `warnings[]` as a bonus signal, never as your duplicate
+> detector: compare `created` and `ids` across a retry (§15).
 
 ---
 
@@ -464,7 +464,7 @@ committed. The recovery signal is a single rule:
   class as transport death: re-send the identical bundle; if it committed, you
   get an all-`deduped` response confirming presence — but an `entities` item of
   `type:"event"`/`"document"` is append-only, so that re-send mints a NEW
-  occurrence and a NEW `:Source` (§15).
+  occurrence (new id) and the operator wired to it (§15).
 
 ---
 
@@ -771,18 +771,18 @@ residue.
 (content hash + kind), `sources` (url) and the connections between them. It is
 **not** idempotent for `document`/`event` ENTITY items: those are append-only
 occurrence records, so re-sending a full bundle mints a NEW `:Event` occurrence
-(new id), a NEW `:Source`, and therefore a NEW operator over them. Re-send the
-identical bundle only when minting a second occurrence is what you want;
-otherwise re-send the point-only or connection-only half.
+(new id) and therefore a NEW operator wired to it. Re-send the identical bundle
+only when minting a second occurrence is what you want; otherwise re-send the
+point-only or connection-only half.
 
-⚠️ **This duplication is SILENT — do not wait for a warning.** §3.2 row 1
-declares an `append_only_items` key, but the entity leg does not emit it today
-(measured: re-ingesting a bundle holding one `event` and one `document` entity
-returns `created.entities: 2` and `warnings: []`). To detect a duplicate, compare
-`created.entities` across the retry — a non-zero count on the second run **is**
-the second occurrence — a non-zero count on the
-second run **is** the second occurrence. The declared-but-unemitted key is the
-contract gap in **#10899**, not a signal you can key on.
+⚠️ **Do not wait for a warning.** §3.2 row 1 declares an `append_only_items`
+key, but that key is **not emitted today** (measured: re-ingesting a bundle
+holding one `event` and one `document` entity item returns
+`created.entities: 2` and `warnings: []`; the gate is **#10899**). Detect a
+duplicate by comparing `created.entities` and `ids.entities` across the retry —
+the count says a second occurrence was minted and the ids name it. (Whether any
+other row in §3.2's table reaches your deployment is likewise not something this
+paragraph asserts; §3.2's emission note is not a census.)
 
 ⚠️ **This is also why `tortoise_ingest` is NOT declared idempotent on the MCP
 surface** (`annotations.idempotentHint: false`). A `-32009` wait-bound refusal on
