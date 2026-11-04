@@ -73,7 +73,7 @@ def _warm_daemon() -> None:
                 "dedup": True,
             })
             return
-        except Exception:  # noqa: BLE001 — the refusal is what this absorbs
+        except Exception:  # the legible refusal is what this absorbs
             if attempt + 1 < _WARM_ATTEMPTS:
                 time.sleep(_WARM_PAUSE_S)
 
