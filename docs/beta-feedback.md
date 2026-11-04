@@ -64,7 +64,7 @@ instead, use the same skeleton:
 **Expected:** what you expected to happen
 **Actual:** what happened instead
 **Graph JSON:** the point/operator payload you sent and the response you got
-  (or `tortoise_summarize_structure` output / a `tortoise backup --db <db-path>` export).
+  (or `tortoise_graph_overview(section="structure")` output / a `tortoise backup --db <db-path>` export).
   Attach long JSON as a .json file rather than pasting.
 **Steps:** minimal numbered repro, including the exact MCP tool call / CLI command
 **Version:** `pip show tortoise` version or the git SHA

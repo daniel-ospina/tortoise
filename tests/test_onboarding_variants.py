@@ -1231,15 +1231,23 @@ def test_skill_decide_protocol_tools_are_registered_mcp_tools():
     missing = tokens - registered
     assert not missing, (
         f"decide-protocol tools not registered in mcp_server.py: {missing}")
-    # the ranking read-out requires the EP computation + structure check
     # #4282: the structure check is reached through the `graph_overview` container's
     # `structure_check` SECTION. The door `tortoise_check_structure` deliberately stays
     # LIVE (it carries the #8482 wrap-envelope repair a `-> Any` container cannot), but
     # the protocol names the container because a tool-grant client must be able to follow
     # it, and the container is the name this family consolidates onto.
-    for required in ("tortoise_compute_confidence", "tortoise_graph_overview",
-                     "tortoise_create_operator", "tortoise_health"):
+    #
+    # #10914 review P3: requiring only the container NAME was weaker than the assertion it
+    # replaced — any mention of `tortoise_graph_overview` satisfies it, including the
+    # section="health" verification sentence, so nothing failed if the protocol stopped
+    # performing the structure check at all. The SECTION is what performs it, so pin the
+    # section: `section="structure_check"` is the call the protocol actually makes.
+    for required in ("tortoise_compute_confidence", "tortoise_create_operator",
+                     "tortoise_health"):
         assert required in tokens, f"decide protocol must use {required}"
+    assert 'tortoise_graph_overview(section="structure_check")' in decide_section, (
+        "the decide protocol must run the structure check through the container's "
+        "structure_check section — naming the container alone does not perform it")
 
 
 def test_skill_capture_announcement_copy_contract_present():

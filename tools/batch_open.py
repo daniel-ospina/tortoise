@@ -101,23 +101,28 @@ CI cost is.
 
 from __future__ import annotations
 
-import argparse
-import json
-import re
-import shutil
-import subprocess
 import sys
-import tempfile
-from collections.abc import Callable
-from dataclasses import dataclass, field
-from pathlib import Path
 
+# #5128: the RUNTIME guard precedes every 3.11+-only import, so an older interpreter
+# gets an attributable refusal instead of an ImportError from a line further down.
+# (Hoisted by #10914: it sat after `argparse`/`dataclasses`, which is the shape the
+# `tests/test_entry_point_python_guard.py` arm reds — same class as #10754.)
 if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     raise SystemExit(
         f"tools/batch_open.py requires Python >= 3.12 (got "
         f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
         f"`uv run python tools/batch_open.py`"
     )
+
+import argparse
+import json
+import re
+import shutil
+import subprocess
+import tempfile
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from pathlib import Path
 
 
 REPO = Path(__file__).resolve().parent.parent
