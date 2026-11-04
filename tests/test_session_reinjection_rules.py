@@ -1606,21 +1606,31 @@ _POINT_KIND = re.compile(
 #: writes turn text to the graph BUT STILL writes a `pointKind='event'` node",
 #: measured end-to-end (#10675 review cycle 3, P2: GREEN). `_NEGATED_CLAUSE_GAP`
 #: therefore refuses a connector token as well as `,`/`;`.
-#: ⚠️ The residual is stated precisely, because the previous wording overstated
+#: ⛔ AND A DASH IS A CLAUSE SEPARATOR TOO, not an odd character: `—`/`–` is
+#: this tree's dominant one (it appears throughout the comment block that states
+#: this rule), so `[^,;]` alone still crossed it — "… no longer writes turn text
+#: to the graph — it still writes a `pointKind='event'` node" was GREEN
+#: (#10675 review cycle 4, P2). Both dashes are in the excluded class.
+#: ⚠️ The residual is stated precisely, because an earlier wording overstated
 #: its cost: the escape is not the only mechanism. A sentence that negates its
 #: FIRST clause with the negator the PARENT pattern's own lookahead recognises
 #: (`writes no turn text …, and then writes a `pointKind='event'` node`) produces
 #: no anchored match at all — the parent never fires — and closing THAT needs the
 #: subject re-anchored across clauses. It is not what the gap above is for.
-#: ⛔ THE TAIL IS THE PARENT'S TAIL: the parent fires on `pointKind` OR on `turn
-#: node` (the second form is what its own positive half calls the turn shape),
-#: so an escape that only reached `pointKind` left "the demo seed no longer
-#: writes a turn node" RED — a false red on the CORRECTED sentence, which is the
-#: very defect cycle 1 filed. The alternation below is the parent's, spelled
-#: once and tested against both.
+#: ⛔ THE TAIL IS THE PARENT'S TAIL, AND THAT IS PINNED, not asserted: the literal
+#: appears in the parent (`pointKind` OR `turn node` — the second form is what
+#: its own positive half calls the turn shape) and again in
+#: `_TURN_SHAPE_TAIL` below, because the parent is defined first and cannot
+#: reference it. `test_the_present_tense_guard_reads_a_NEGATED_writer_claim_as_
+#: the_CORRECTION` asserts `_TURN_SHAPE_TAIL in
+#: _PRESENT_TENSE_DEMO_EVENT_WRITER.pattern`, so widening the parent's tail
+#: without the escape's is a RED rather than a silent return of the false red
+#: that cycle 1 filed and cycle 3 nearly reintroduced (#10675 review cycle 4,
+#: P3: the comment said "spelled once" while it was spelled twice).
 _TURN_SHAPE_TAIL = r"(?:pointKind|\bturn\s+node\b)"
 _NEGATED_CLAUSE_GAP = (
-    r"(?:(?!(?:but|yet|and|although|while|whereas|however|instead)\b)[^,;]){0,60}?")
+    r"(?:(?!(?:but|yet|and|although|while|whereas|however|instead)\b)"
+    r"[^,;\u2014\u2013]){0,60}?")
 _NEGATED_CLAIM = re.compile(
     r"\b(?:not|never|no\s+longer|no\s+more)\s+(?:also\s+|still\s+|ever\s+)?"
     r"(?:writes?|mints?|creates?)\b" + _NEGATED_CLAUSE_GAP + _TURN_SHAPE_TAIL
@@ -1853,6 +1863,16 @@ def test_the_present_tense_guard_reads_a_NEGATED_writer_claim_as_the_CORRECTION(
     stops matching the un-negated claim (which would make the arms above
     vacuous).
     """
+    # ⛔ THE ESCAPE AND THE PARENT MUST AGREE ON THE TAIL, and a comment cannot
+    # assert that: the literal is spelled in both places (the parent is defined
+    # first and cannot reference a constant defined below it), so this line is
+    # what makes the sharing true rather than claimed. Widening the parent's tail
+    # without the escape's is the cycle-3 false red returning silently (#10675
+    # review cycle 4, P3).
+    assert _TURN_SHAPE_TAIL in _PRESENT_TENSE_DEMO_EVENT_WRITER.pattern, (
+        "the parent guards a tail the negation escape does not know about, so "
+        "a CORRECTED sentence using it is a false RED: "
+        f"{_TURN_SHAPE_TAIL!r} not in the parent pattern")
     corrections = (
         "since #10000 the demo seed writes no `pointKind='event'` node",
         "since #10000 the demo seed does not write `pointKind='event'` nodes",
@@ -1903,6 +1923,11 @@ def test_the_present_tense_guard_reads_a_NEGATED_writer_claim_as_the_CORRECTION(
         # escaped is what keeps the comma-less arm a property of the rule.
         "since #10000 the demo seed no longer writes turn text to the graph but "
         "still writes a turn node per turn",
+        # ⛔ AND A DASH CROSSES A CLAUSE AS WELL — this tree's dominant separator,
+        # so a gap that excluded only `,`/`;`/connectors passed it (#10675 review
+        # cycle 4, P2).
+        "since #10000 the demo seed no longer writes turn text to the graph — "
+        "it still writes a `pointKind='event'` node per turn",
     )
     for sentence in compound:
         assert _present_tense_writer_claim(sentence) is not None, (

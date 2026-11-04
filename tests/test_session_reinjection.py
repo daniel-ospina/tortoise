@@ -224,6 +224,20 @@ def _degradations(ret: dict) -> list[tuple[str, str]]:
         # BEFORE the flag, because the engine sets ``degraded=True`` for it.
         if reason in _DESIGNED_ABSENCE_REASONS:
             continue
+        # ⛔ THE EMPTY FALLBACK IS THE SAME TRAP ONE LEG OVER (#10675 review
+        # cycle 4, P1): ``sdk.py`` appends the fallback as ``ran=True,
+        # degraded=True, reason='no_fallback_applicable', count=0``, i.e. the
+        # engine flags a leg that RAN AND FOUND NOTHING as degraded. Counting it
+        # here made ``_degradations`` non-empty on the armed half of a comparison
+        # (2 of 39 armed reads in one ordinary run), so a real, code-caused
+        # leg-mix divergence SKIPPED — non-red to the rail — which is the fail-open
+        # ``_DESIGNED_ABSENCE_REASONS`` was added to close. The engine's own
+        # contract says so: ``search_engine._results_bearing_fallback`` — “count
+        # == 0 (no_fallback_applicable) returns no rows and is not
+        # disqualifying”. Read the COUNT, not the flag, exactly as the reason set
+        # is read before it.
+        if name == "fallback" and not (leg.get("count") or 0):
+            continue
         if (leg.get("degraded")
                 or (name == "fallback" and (leg.get("count") or 0) > 0)
                 or reason in _DEGRADED_REASONS):
@@ -738,9 +752,13 @@ def test_a_degraded_leg_that_returned_rows_is_a_degradation():
     assert _degradations({"legs": [
         {"leg": "fallback", "ran": True, "reason": "tfidf_snapshot",
          "count": 11}]}) == [("fallback", "tfidf_snapshot")]
-    # ...while a fallback that produced NOTHING is not one (nothing moved)
+    # ...while a fallback that produced NOTHING is not one (nothing moved) —
+    # and the fixture carries the shape ``sdk.py`` ACTUALLY appends, ``degraded:
+    # True`` included. Omitting that key (as this arm first did) asserted a trace
+    # no producer creates, which is why the real fail-open — a diverged armed read
+    # SKIPPING because of this entry — went unnoticed (#10675 review cycle 4, P1).
     assert _degradations({"legs": [
-        {"leg": "fallback", "ran": True,
+        {"leg": "fallback", "ran": True, "degraded": True,
          "reason": "no_fallback_applicable", "count": 0}]}) == []
     # ...and the deliberate dense-leg omission is never a degradation, even
     # though the engine flags it ``degraded=True`` (the shape asserted here is
