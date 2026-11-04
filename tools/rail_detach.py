@@ -443,13 +443,22 @@ def _oserror_remedy(exc: OSError) -> str:
     wrong in a different direction: errno-only told an unreadable WORKING DIRECTORY
     to `chmod +x` a `gh` that was fine, and blaming on `filename` alone blamed the
     CWD for a `PATH` entry that is a regular file (`ENOTDIR`, `filename='gh'`).
+
+    ⛔ `ENOENT` IS DELIBERATELY ABSENT FROM THE CWD-SIDE ERRNOS (review, `#10777`).
+    Python maps `OSError(ENOENT)` onto `FileNotFoundError`, which `_gh` catches
+    BEFORE `except OSError` — so a `chdir` into a directory that is GONE never
+    reaches this helper, and an `errno.ENOENT` arm here could not fire from any
+    production path (measured: deleting it left the suite green, which is how it
+    was found). Its remedy lives on that earlier arm instead. The two errnos kept
+    below are the ones a `chdir` really delivers here, and they arrive as
+    `PermissionError`, not `FileNotFoundError`.
     """
     target = getattr(exc, "filename", None)
     cwd_side = target not in (None, "", "gh")
     if cwd_side and exc.errno == errno.ENOTDIR:
         return ("the working directory is not a directory — run from a live "
                 "checkout, or pass --repo")
-    if cwd_side and exc.errno in (errno.ENOENT, errno.EACCES, errno.EPERM):
+    if cwd_side and exc.errno in (errno.EACCES, errno.EPERM):
         return ("the working directory could not be used — run from a live "
                 "checkout, or pass --repo")
     if exc.errno in (errno.EACCES, errno.EPERM):
