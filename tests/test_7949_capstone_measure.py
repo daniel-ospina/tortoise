@@ -3460,6 +3460,22 @@ def test_the_bare_continuation_cites_name_what_they_say():
         ("E1-E5-PROOFS.md", "_step_accounting` (`:381`) refuses a GREEN row whose", (
             ("381", "def _step_accounting("),
         ), "capstone_verdict_check"),
+        # ⛔ THE SAME FACT WRITTEN TWICE, 2,000 lines apart in two different files:
+        # `docs/00_index.md:157` routes a reader to the eight-step declaration with a
+        # NAMED `tools/capstone_verdict_check.py:<line>` cite. `_BUNDLE_CITE` matches
+        # only `sdk|edges|extractor_v2`, so a `tools/*.py` number is invisible to the
+        # sweep proper — and this row had no reader at all. Measured on PR #10679: the
+        # V7 docstring edit above `STEPS` moved it `:118` → `:120`, the same commit
+        # updated `E1-E5-PROOFS.md:166` and left this row saying `:118`, which at this
+        # head is `SCHEMA = "capstone-verdict-v1"`. Two documents then gave two numbers
+        # for one symbol, and the `#10509` failure mode quoted in this leg's own
+        # docstring ("a hand-recheck did not hold across one commit") recurred on the
+        # very commit that re-checked its twin. The phrase scopes the cite to the claim
+        # ("declares the eight steps"), never to the markdown line number.
+        ("docs/00_index.md", "declares the eight steps", (
+            ("120", 'STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", '
+                    '"S5", "S6")'),
+        ), "capstone_verdict_check"),
     )
     # The SAME document states two of its claims as the RULE's own text rather than a
     # line number — a quoted rule cannot drift by an insertion above it, which is why
@@ -5048,7 +5064,17 @@ def test_the_v7_paragraph_states_the_merge_once_and_not_a_leftover_half_sentence
 
     Non-vacuity: at `3b1399ef6` the clause appears twice and this reds; it also reds if
     either half of the merge is dropped, because the paragraph is required to say BOTH
-    rows moved onto the frozen corpus and that no row takes the declaration now.
+    rows moved onto the frozen corpus and which run still takes the declaration.
+
+    ⛔ The second half of the merge repair published a claim the artifact refutes, and
+    `2b38365c9` PINNED it verbatim (`PR #10679 review, F1`): "no row in THIS table takes
+    the declaration any more", where "this table" can only be the shipped log's table —
+    and that table takes it on THREE rows (`capstone-measured-e0fc940b.log` `:310` E1,
+    `:324` E2, `:351` E4), which the README itself says 250 lines up at `:437`. The
+    reading its own antecedent forces made the sentence false, and a later reader could
+    not correct it to match the log without reding this test. So the wording is no
+    longer pinned: the fact is, from the log's own machine record, and the refuted
+    sentence is forbidden by name.
     """
     readme = README_DOC.read_text()
     paragraph = readme[readme.index("*Is the table honest?*"):]
@@ -5069,9 +5095,36 @@ def test_the_v7_paragraph_states_the_merge_once_and_not_a_leftover_half_sentence
     assert "Both now measure the FROZEN corpus" in flat, (
         "the paragraph must say BOTH rows moved onto the frozen pin — the pre-merge "
         "copies each described only their own side of the conflict")
-    assert "no row in THIS table takes the declaration" in flat, (
-        "the arm's scope is the point of the paragraph: a reader must be told that no "
-        "row in THIS table declares `artifact_corpus_sha256` any more")
+    assert "the table a run builds TODAY takes the declaration on no row" in flat, (
+        "the arm's scope is the point of the paragraph: a reader must be told that the "
+        "rows a run builds NOW declare no `artifact_corpus_sha256`")
+
+    # ⛔ …and the sentence must not over-reach to the SHIPPED table, which still takes
+    # it. Measured off the log's own machine record rather than typed: three rows do.
+    log = (README_DOC.parent / "capstone-measured-e0fc940b.log").read_text(
+        encoding="utf-8")
+    record = json.loads(log.split("=== CAPSTONE-VERDICT-BEGIN ===", 1)[1]
+                        .split("=== CAPSTONE-VERDICT-END ===", 1)[0])
+    declared = sorted(row["criterion"] for row in record["rows"]
+                      if "artifact_corpus_sha256" in row)
+    assert declared == ["E1", "E2", "E4"], (
+        "the shipped log's rows taking the `artifact_corpus_sha256` declaration are "
+        f"{declared}, not ['E1', 'E2', 'E4'] — the V7 paragraph states a fact about "
+        "that artifact, so re-derive BOTH sides before changing either")
+    assert "no row in THIS table takes the declaration" not in flat, (
+        "the paragraph claims the SHIPPED table declares nothing, and its own log "
+        f"declares it on {declared} — state which run the sentence is about (PR #10679 "
+        "review, F1: the claim this pin used to require verbatim)")
+    assert "SHIPPED log" in flat, (
+        "the paragraph must say outright that the shipped log still carries the "
+        "declaration, or the reader of the artifact cannot tell why the arm is kept")
+
+    # The merge left the SAME clause twice; the fragment half is the one a count of the
+    # sentence above cannot see (delta review, P3): re-applying only the lead-in keeps
+    # the sentence unique and restores the duplication.
+    assert flat.count("satisfy that honestly") == 1, (
+        "the V7 paragraph argues its point twice — the clause opening the argument was "
+        f"duplicated by the merge\n{flat[:400]}")
 
 
 def test_a_row_cites_the_receipt_the_selector_chose():
@@ -5158,10 +5211,21 @@ def test_a_non_string_date_is_UNREADABLE_and_refuses_instead_of_parsing():
 def test_a_green_e4_row_carries_no_blocker():
     """GREEN and blocked are mutually exclusive — the gate refuses both (V5).
 
-    `build_rows` stamped `blocked_by="#8503"` on E4 unconditionally, so the very
-    success state the row exists to reach emitted a table
-    `tools/capstone_verdict_check` calls dishonest ("GREEN carries a blocker"). The
-    blocker now follows the verdict, exactly like the note clause it sits beside.
+    This arm holds `main`'s invariant on E4's row: `row()` resolves the pair ONCE
+    (`if verdict == "GREEN": blocked_by = None`) and `build_e4_row`'s `#8503` clause
+    follows the outcome, so the very success state the row exists to reach cannot emit
+    a table `tools/capstone_verdict_check` calls dishonest ("GREEN carries a blocker").
+
+    ⛔ This docstring used to claim the arm pins a DEFECT this PR fixed — that
+    `build_rows` stamped `blocked_by="#8503"` on E4 unconditionally. That was true of
+    this branch's pre-merge head, where the row was built inline; the merge onto
+    `origin/main` moved the resolution into `row()`, so both halves of this arm are
+    satisfied by code that predates the branch and the stated defect is unreachable
+    here (`origin/main`'s `row()` keeps the invariant — PR #10679 review, F2: an arm
+    that cannot fail for the reason it gives is a vacuity/claim defect, and the
+    manifest note attributed it to this change). The arm is kept because the invariant
+    is worth guarding ON THIS ROW (E4 is the row whose blocker now follows a measured
+    outcome); it just does not claim to be the fix.
     """
     rows = _rows(e4={"verdict": "GREEN", "numerator": 15, "denominator": 15,
                      "sha": "a999be41e", "corpus_sha256": "sha256:" + "d" * 64,

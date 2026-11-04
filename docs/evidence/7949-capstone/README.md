@@ -686,14 +686,15 @@ force the second answer to be read as the first — which is the exact inference
 stop.
 
 **One gate change shipped with this run, and it only ever ADDS a check.** V7 used to require every
-measured row's `corpus_sha256` to equal the log's corpus. This table cannot satisfy that honestly:
-E1/E2 cited `#9076`'s arm run, which measured a *different* corpus revision, and E4 cited an
-operator receipt measured on another revision too. **Both now measure the FROZEN corpus** —
+measured row's `corpus_sha256` to equal the log's corpus. The shipped table cannot satisfy that
+honestly: E1/E2 cited `#9076`'s arm run, which measured a *different* corpus revision, and E4 cited
+an operator receipt measured on another revision too. **Both now measure the FROZEN corpus** —
 E1/E2 because `#9889` re-scored them there (their records say so), E4 because `select_e4_receipt`
-chooses its receipt BY the frozen pin, so its row carries the run's own corpus — and no row in
-THIS table takes the declaration any more. The arm stays, because a red row on a genuinely other
-revision must still be able to say so: refusing those rows would hide the only numbers they have;
-accepting them on the row's word would let any red row name any corpus. So a **non-green** row may
+chooses its receipt BY the frozen pin, so its row carries the run's own corpus. So the table a run
+builds TODAY takes the declaration on no row — while the SHIPPED log's E1/E2/E4 rows still carry
+it, which is exactly what keeps the arm live: a red row on a genuinely other revision must still
+be able to say so. Refusing those rows would hide the only numbers they have; accepting them on
+the row's word would let any red row name any corpus. So a **non-green** row may
 declare `artifact_corpus_sha256`, and V7 then requires (a) it equals the row's own
 `corpus_sha256`, (b) that digest **appears in the cited artifact's text**, and (c) the row's note
 says so. A **GREEN** row never takes that path: it must still equal the log's corpus exactly. The
