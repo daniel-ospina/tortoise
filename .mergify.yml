@@ -59,6 +59,12 @@
 #                              license-surface, legal-e2e, ai-review-gate
 #   merge_conditions (merge) : python-ci-gate
 #
+# ⚠️ A rule list is not only checks. `queue_conditions` also carries `base=main`
+# and `-draft`; the invariant above is over the `check-success=` names only
+# (`check-required-set.py` extracts them by that prefix), so a reader must NOT
+# "reconcile" the live set by deleting the non-check lines — that would re-open
+# #3016 (`-draft`) and the base guard at once.
+#
 # The entry list ALSO carries `-label=superseded-by-fold`, which names no check and
 # is therefore outside the union above (see the condition's own comment).
 
@@ -95,6 +101,32 @@ merge_queue:
 # own RCV trade (reliability + velocity, accepting wasted runs). Use the label
 # only for changes that unblock others, never for preference.
 priority_rules:
+  # ⛔ #10897: A FOLD OUTRANKS EVERYTHING. This rule is FIRST because Mergify uses
+  # the FIRST matching rule when several match (`priority_rules` semantics), so a
+  # fold that also carries `queue-accelerator` resolves here, at 9000 rather than
+  # at the accelerator's `high` (3000; an unmatched PR is `medium`, 2000).
+  #
+  # WHY A NUMBER AND NOT `high`: this is a PRIORITY, not a permission. A fold's
+  # validation is the one run that certifies N constituents at once, so holding
+  # it behind the constituents it supersedes spends the whole fleet's CI on work
+  # the fold replaces. 9000 keeps a headroom band (1..10_000) for a future
+  # "production incident" class to sit above it without editing this rule.
+  #
+  # `allow_checks_interruption: true` is deliberate and it does spend CI time
+  # already paid for (an in-flight batch is cancelled), which is the same RCV
+  # trade the accelerator rule records below. It is bounded by the same rule: use
+  # the label only for a real fold, never for preference.
+  #
+  # WHAT THIS DOES NOT DO: it orders the QUEUE. It does not make a fold's
+  # workflow runs jump the GitHub Actions runner queue — that lever is the
+  # `fold_runner` seam in `tools/ci_selection.py` (see docs/ops/batch-integration.md
+  # §"Priority"), and the structural lever (a superseded constituent cannot enter
+  # the queue at all) is the sibling change on PR #10902.
+  - name: fold (batch gate)
+    conditions:
+      - label = batch-fold
+    priority: 9000
+    allow_checks_interruption: true
   - name: queue accelerator
     conditions:
       - label = queue-accelerator
