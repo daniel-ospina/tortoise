@@ -724,14 +724,8 @@ NO_GIT_CHECKOUT = (
     "check from a clone, or pass --no-git when the ordering is deliberately out of scope"
 )
 NO_GIT_ANSWER = (
-    "UNPROVABLE — git could not answer this checkout's state (exit {code}: {detail}), so no base "
-    "ref can be resolved and the ordering claim — which is against the PUBLISHED base — cannot be "
-    "checked. This is a git-level refusal, not a missing repository, and the remedy is git's own"
-)
-NO_GIT_BINARY = (
-    "UNPROVABLE — git could not be EXECUTED on this host, so no history can be read and the "
-    "pre-registration ordering cannot be measured at all. Install git, or pass --no-git when the "
-    "ordering is deliberately out of scope"
+    "UNPROVABLE — git could not report this checkout's remotes (exit {code}), so no base ref can "
+    "be resolved and the ordering claim — which is against the PUBLISHED base — cannot be checked"
 )
 
 SAME_PR_REFUSAL = (
@@ -755,22 +749,6 @@ def _git_stdout(args: list[str]) -> tuple[int, str]:
     return out.returncode, out.stdout
 
 
-def _git_answer(args: list[str]) -> tuple[int, str, str] | None:
-    """``(returncode, stdout, stderr)``, or ``None`` when git could not be EXECUTED at all.
-
-    :func:`_git_stdout` collapses "git is absent" and "git answered non-zero" to ``(1, "")``, which
-    is fine where only the answer matters. It is NOT fine for a diagnostic: those are different
-    states with different remedies, and telling a user "not a git checkout" when git refused to run
-    (absent binary, dubious-ownership refusal) is the same false-reason defect this branch removes.
-    """
-    try:
-        out = subprocess.run(["git", *args], cwd=str(REPO_ROOT), capture_output=True, text=True,
-                             check=False)
-    except OSError:
-        return None
-    return out.returncode, out.stdout, out.stderr
-
-
 def resolve_base_ref(explicit: str | None = None) -> str | None:
     """The ref the ordering is measured against, or ``None`` when there is none to measure.
 
@@ -779,9 +757,7 @@ def resolve_base_ref(explicit: str | None = None) -> str | None:
     history there is and using it is not a weakening — it is the same predicate over the whole
     available history. A checkout WITH a remote but without a resolvable base is a different state:
     the answer would silently degrade to the PR-internal rule this change exists to remove, so it
-    fails closed — with whichever of :data:`NO_BASE_REF` / :data:`NO_GIT_CHECKOUT` /
-    :data:`NO_GIT_ANSWER` / :data:`NO_GIT_BINARY` :func:`no_base_ref_reason` establishes, because
-    one message for all four names a cause and a remedy that do not hold in three of them.
+    fails closed with :data:`NO_BASE_REF` instead.
     """
     for candidate in ((explicit,) if explicit else ()) + BASE_REF_CANDIDATES:
         code, out = _git_stdout(["rev-parse", "--verify", "--quiet", candidate])
@@ -793,54 +769,21 @@ def resolve_base_ref(explicit: str | None = None) -> str | None:
     return None
 
 
-def _with_refusal(head: str, fatal: "HistoryUnavailable | None",
-                  failures: list[str]) -> str:
-    """``head``, annotated with the refusal that stands behind it and the findings already proved.
-
-    A history-free half that cannot read its subject is still exit 2, but it must not ERASE what was
-    already established (#9075 r6 P2): two such halves run after the ordering check, and a bare
-    raise from either replaced the base-ref refusal and every accumulated finding (#10547 review 4
-    P2, measured).
-    """
-    text = head
-    if fatal is not None:
-        text += f"\nALSO REFUSED: {fatal}"
-    if failures:
-        text += ("\nALREADY FOUND by the checks that need no history (the base ref does not affect "
-                 "them, and they still stand):")
-        text += "".join(f"\n  - {finding}" for finding in failures)
-    return text
-
-
 def no_base_ref_reason() -> str:
-    """WHY :func:`resolve_base_ref` answered ``None`` — four states, four remedies.
+    """WHY :func:`resolve_base_ref` answered ``None`` — three states, three remedies.
 
     ``resolve_base_ref`` collapses them to one ``None``, which was fine while the reason was never
-    printed. Now that the refusal is user-visible, one message for all of them is a false statement
-    in three — and each remedy it could name is wrong in the others. The distinction is drawn from
-    what GIT REPORTED, never from a shared exit code: ``_git_answer`` returning ``None`` (git could
-    not be executed) and ``(128, "", "fatal: detected dubious ownership …")`` are both failures of
-    ``rev-parse --is-inside-work-tree``, but only an actual ``false`` answer — or git saying there is
-    no repository — establishes "not a git checkout" (#10547 review 4 P2).
+    printed. Now that the refusal is user-visible, one message for all three is a false statement in
+    two of them: "this checkout has a remote" is not established when ``git remote`` returned
+    non-zero, and it is false in a directory that is not a checkout at all — where the remedy it
+    names (``git fetch origin main``) cannot succeed either (#10547 review 3 P2).
     """
-    probe = _git_answer(["rev-parse", "--is-inside-work-tree"])
-    if probe is None:
-        return NO_GIT_BINARY
-    code, out, err = probe
-    if code == 0:
-        if out.strip() != "true":
-            return NO_GIT_CHECKOUT      # git answered, and the answer is "not a working tree"
-    elif "not a git repository" in err.lower():
-        return NO_GIT_CHECKOUT          # git answered, and the answer is "there is no repository"
-    else:
-        return NO_GIT_ANSWER.format(code=code, detail=err.strip() or "no stderr")
-
-    probe = _git_answer(["remote"])
-    if probe is None:
-        return NO_GIT_BINARY
-    code, _out, err = probe
+    code, out = _git_stdout(["rev-parse", "--is-inside-work-tree"])
+    if code != 0 or out.strip() != "true":
+        return NO_GIT_CHECKOUT
+    code, out = _git_stdout(["remote"])
     if code != 0:
-        return NO_GIT_ANSWER.format(code=code, detail=err.strip() or "no stderr")
+        return NO_GIT_ANSWER.format(code=code)
     return NO_BASE_REF
 
 
@@ -1661,22 +1604,14 @@ def run(directory: Path, use_git: bool = True, use_corpus: bool = True,
     else:
         ordering = "UNVERIFIED (--no-git)"
     report["ordering"] = ordering
-    # The machine record and the corpus pins are both history-FREE, so a REFUSAL from either must
-    # carry the base-ref refusal and everything already found — a bare raise here would replace
-    # them, which is the same forfeiture one site further along (#10547 review 4 P2, measured: a
-    # wrong-typed `corpus` block printed only its own message, and the duplication finding and the
-    # base-ref refusal both vanished).
-    try:
-        failures += check_machine_record(directory, pins)
-    except CheckError as exc:
-        raise CheckError(_with_refusal(str(exc), fatal_exc, failures)) from exc
+    failures += check_machine_record(directory, pins)
 
     if use_corpus:
         corpus_state = "verified"
         try:
             derived = derive_corpus_facts(pins)
-        except CheckError as exc:
-            raise CheckError(_with_refusal(str(exc), fatal_exc, failures)) from exc
+        except CheckError:
+            raise
         except (OSError, ImportError, ValueError, KeyError, TypeError, AttributeError,
                 IndexError) as exc:
             # A corpus change that deletes a fixture, the salience JSONL or the module itself is
@@ -1686,9 +1621,7 @@ def run(directory: Path, use_git: bool = True, use_corpus: bool = True,
             # malformed JSONL row raises TypeError/IndexError — all of them are "cannot read my
             # subject", not an internal defect.
             raise CheckError(
-                _with_refusal(
-                    f"cannot re-derive the corpus pins from the tree: {type(exc).__name__}: {exc}",
-                    fatal_exc, failures)
+                f"cannot re-derive the corpus pins from the tree: {type(exc).__name__}: {exc}"
             ) from exc
         report["derived"] = {
             "fixtures_hash": derived["fixtures_hash"],
@@ -1717,14 +1650,18 @@ def run(directory: Path, use_git: bool = True, use_corpus: bool = True,
     report["run_order_claim"] = report["ordering"]
 
     if fatal_exc is not None:
-        # Deferred to here on purpose: everything above EXCEPT the git ordering half is history-free,
-        # so `failures` holds the completeness, E4-denominator, single-measured-log, pins-exempt,
+        # Deferred to here on purpose: everything above except the git ordering half is history-free,
+        # so `failures` now holds the completeness, E4-denominator, single-measured-log, pins-exempt,
         # laundering, machine-record and corpus findings. An exit 2 that named only the base ref
-        # would clear all of them by omission (#9075 r6 P2 / #10547 review 3 P1). The two sites that
-        # can still RAISE instead of returning are wrapped above, for the same reason.
+        # would clear all of them by omission (#9075 r6 P2 / #10547 review 3 P1).
         if not failures:
             raise fatal_exc
-        raise CheckError(_with_refusal(str(fatal_exc), None, failures)) from fatal_exc
+        raise CheckError(
+            str(fatal_exc)
+            + "\nALREADY FOUND by the checks that need no history (the base ref does not affect "
+              "them, and they still stand):"
+            + "".join(f"\n  - {finding}" for finding in failures)
+        ) from fatal_exc
 
     return report
 
