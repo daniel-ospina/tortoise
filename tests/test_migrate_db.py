@@ -54,7 +54,26 @@ def _make_embedded_db(tmp, n_points=5):
     return db_path, log_dir
 
 
-def _run_migrate(tmp, *args, env_extra=None, timeout=60):
+# A `migrate-db` rebuild is not a pure DB operation: it reaches the embedder, so
+# the SUBPROCESS loads the SentenceTransformer model once per INVOCATION
+# (measured on the carve-out lane: 24-40 s per run; 15.5 s warm-cache on an idle
+# box, ~10 s of it the model load). `test_migrate_idempotent` pays it TWICE
+# (run -> marker -> run), and the pre-fix literal `60` — a bound calibrated for a
+# cheap subprocess — false-REDded the carve-out leg at PR #10610
+# (`subprocess.TimeoutExpired: ... timed out after 60 seconds`, run 41878866650,
+# job 126758921498) with no failure in the code under test.
+#
+# The bound is a HANG DETECTOR, not a latency assertion, so it must clear the
+# cold load the suite already budgets for: `tests/conftest.py` pins the
+# embedder's load budget at 270 s, because the worst cold load it has OBSERVED
+# was 204.64 s (#10010). 300 s sits above that measurement and still fails a real
+# hang far inside the shard's own watchdog. Pinned by
+# `test_the_subprocess_bound_clears_one_cold_embedder_load` below, which reds on
+# the old 60.
+_MIGRATE_TIMEOUT_S = 300
+
+
+def _run_migrate(tmp, *args, env_extra=None, timeout=_MIGRATE_TIMEOUT_S):
     """Run python -m tortoise migrate-db against a temp HOME (isolated)."""
     import site as _site
     env = dict(os.environ)
@@ -119,3 +138,30 @@ def test_migrate_backup_failure_aborts(tmp_path, monkeypatch):
         assert rc != 0 or "backup failed" in err.lower() or "aborted" in err.lower()
     finally:
         os.chmod(db_path, 0o644)
+
+
+def test_the_subprocess_bound_clears_one_cold_embedder_load():
+    """#10610: the `migrate-db` bound is a hang detector, and it is WIRED to the runs.
+
+    The subprocess loads the SentenceTransformer model on every invocation and
+    `tests/conftest.py` records the worst cold load it has OBSERVED at 204.64 s
+    (its own budget there is 270 s, #10010). The pre-fix default was a literal
+    `60` — BELOW that measurement — so `test_migrate_idempotent` (two
+    invocations) timed out on the carve-out lane with no failure in the code
+    under test. This reds on that literal two ways: the value must clear the
+    measured cold load, and the default must actually BE the constant, so a
+    decorative constant cannot satisfy it while the calls keep the old bound.
+    """
+    import inspect
+
+    assert _MIGRATE_TIMEOUT_S >= 240, (
+        f"the migrate-db subprocess bound is {_MIGRATE_TIMEOUT_S}s, below the "
+        "204.64 s worst cold embedder load tests/conftest.py records (#10010) — "
+        "a bound this tight re-introduces the #10610 carve-out flake"
+    )
+    default = inspect.signature(_run_migrate).parameters["timeout"].default
+    assert default == _MIGRATE_TIMEOUT_S, (
+        f"`_run_migrate`'s default bound is {default!r}, not the "
+        f"_MIGRATE_TIMEOUT_S constant ({_MIGRATE_TIMEOUT_S}) — the constant is "
+        "decorative and the calls still carry the tight bound"
+    )
