@@ -193,15 +193,19 @@ direction from the three widening exceptions the module names
 `public.source.summary` and `public.source._search_text` are §9.1/D1 turn prose
 when the Source is a captured session, so
 `cache_projection._EPISODIC_SOURCE_PROSE_COLUMNS` declines to project them onto
-the node. The record keeps the values (the row is not mutated, and record-side
-search reads the COLUMN), and `topics` — the capture's word lexicon — still
+the node. The record keeps the values (the row is not mutated, and they are
+retrievable by a column read — `record_serve.read_node`, `record-text`; there is
+no record-side text INDEX), and `topics` — the capture's word lexicon — still
 projects.
 
-Why it lives here rather than only in the capture: `tortoise record-restore` and
-`record_serve`'s `fetch-record` repair rebuild a node from the record row through
-`cache_projection.node_from_row`, so a row written by a build that still placed
-the key re-creates the prose **whatever build is reading it** — the one-way
-divergence #10853 measured. Sweeping the existing rows instead would decay: at
+Why it lives here rather than only in the capture: every record-sourced read and
+rebuild goes through `cache_projection.node_from_row` — `tortoise record-restore`
+and `rebuild_from_record` materialise a node with it, and
+`record_serve.fetch_record_node` answers with the same map because its contract is
+that a served node and a rebuilt node cannot drift. So a row written by a build
+that still placed the key either re-creates the prose **whatever build is reading
+it** or makes the served answer disagree with the rebuild — the one-way divergence
+#10853 measured. Sweeping the existing rows instead would decay: at
 this head the capture still writes the value, so the next capture of the same
 session writes it straight back.
 
@@ -237,17 +241,26 @@ title-derived `_searchText`, silently un-indexing it in the cache.
   lands, so the two rebuild paths disagree on that one column until then — in the
   ruling's direction, and converging with it;
 * graph-side FTS over a session Source's own utterances goes with the prose. The
-  record remains searchable (the column is untouched), and #10000 replaces the
-  capture's summary with a topic lexicon;
+  value survives in the record (retrievable by a column read; there is no
+  record-side text index), and #10000 replaces the capture's summary with a topic
+  lexicon;
 * `python -m tortoise record-reconcile` builds its RECORD side through the same
-  projector, so a Source whose cache node still holds the legacy prose reports
-  `field_mismatches` and the sweep flips from clean to DIVERGENT. That is the
-  true statement — the two sides do disagree — and it is repaired by #10017's
-  purge census, not by re-adding the projection.
+  projector, so its truth side omits what the cache holds. **The population is not
+  "legacy"**: at this head the capture still writes and journals the pair, so
+  every session this build captures would report `field_mismatches` forever — the
+  "signal indistinguishable from noise" the reconciler's own docstring grades P1.
+  So `scan_cache_view` marks the pair CACHE-OWNED for an episodic Source
+  (`cache_projection.EPISODIC_SOURCE_PROSE_PROPERTIES`) and the run counts it
+  under its own `graph_only` bucket: visible, and not a divergence against a
+  record that is correct. The graph side is repaired by a record-sourced
+  re-projection (`record-restore` / `rebuild_from_record`, which re-materialise
+  through this projector), then by #10000's capture change.
 
 ### The pin
 
 `tests/test_10853_session_source_prose.py`: the drop; the narrowness of the drop;
+the reconciler counting the declined pair as `graph_only` (not divergence) while a
+DOCUMENT with a differing summary is still counted field by field;
 ONE LEG PER ARM; the three NEGATIVE legs (a plain document, a transcript document
 carrying a `session_id`, a `corpus://` permalink stamped `agentSession`, a
 document stamped `is_episodic` — four rows, one per term that must not be a

@@ -47,11 +47,13 @@ THE FOUR PROPERTIES, AND WHERE EACH LIVES
    schema declares a column for it and does not refuse it. The property→column
    decision is **read from disk** — the schema (#7968) and the placement table
    (#7955) — never restated here, so a new column is a loud failure rather than
-   a silent drop. ⛔ **One declared NARROWING (#10853):** an EPISODIC
-   (`session:`) Source never carries the columns in
-   :data:`_EPISODIC_SOURCE_PROSE_COLUMNS` (`summary`/`_searchText`) onto its
-   node, because §9.1/D1 places captured turn text in the record and never on a
-   graph node — see that table for the rule, its bound, and its cost.
+   a silent drop. ⛔ **One declared NARROWING (#10853):** an EPISODIC Source —
+   EITHER identity arm, `_EPISODIC_SOURCE_URL_PREFIX` or
+   `_EPISODIC_SOURCE_KIND` — never carries the COLUMNS in
+   :data:`_EPISODIC_SOURCE_PROSE_COLUMNS` (`summary`, `_search_text`; graph
+   property `_searchText`) onto its node, because §9.1/D1 places captured turn
+   text in the record and never on a graph node — see that table for the rule,
+   its bound, and its costs.
 3. **Rebuildable from the record alone.** The plan is a pure function of the
    record view: same view ⇒ same statements (idempotent), and the written field
    set equals the record view's field set exactly (never a superset). ⚠️ One
@@ -82,17 +84,29 @@ THE FOUR PROPERTIES, AND WHERE EACH LIVES
    table names (birth-on-ON-MATCH, ordering, ambiguous names, a null clear).
    A **fourth** declared exception is :data:`_EPISODIC_SOURCE_PROSE_COLUMNS`
    (#10853), and unlike the three above it narrows the field set instead of
-   widening it: an EPISODIC Source's `summary`/`_searchText` are §9.1/D1 turn
-   prose, the record keeps them and the cache declines them. Three costs are
-   named at that table rather than implied: the journal fold still projects the
-   value until #10000's capture-side change lands (so the two rebuild paths
-   disagree on that one column, in the ruling's direction, until then);
-   graph-side FTS over a session Source's own utterances goes with the prose
-   (the record remains searchable, since the COLUMN is untouched); and
-   `record-reconcile` now reports the disagreement (its RECORD side is built
-   through this same projector, so its truth side omits what a legacy cache
-   node still holds — the honest `divergent`, repaired by #10017's purge
-   census).
+   widening it: an EPISODIC Source's `summary` and `_search_text` columns
+   (graph property `_searchText`) are §9.1/D1 turn prose, the record keeps them
+   and the cache declines them. Three costs, named here and at that table rather
+   than implied:
+
+   * the **journal fold** still projects the value until #10000's capture-side
+     change lands, so the two rebuild paths disagree on that one column until
+     then — in the ruling's direction, and converging with it;
+   * **graph-side FTS** over a session Source's own utterances goes with the
+     prose. The value survives in the record and is retrievable by a column read
+     (`record_serve.read_node`, `record-text`); there is no record-side text
+     INDEX;
+   * **`record-reconcile`** builds its RECORD side through this same projector,
+     so its truth side omits what the cache holds. The population is NOT
+     "legacy": at this head the capture still writes and journals the pair, so
+     every session this build captures is in it. That is why the pair is marked
+     CACHE-OWNED for an episodic Source
+     (:data:`EPISODIC_SOURCE_PROSE_PROPERTIES`, consumed by
+     `record_reconcile.scan_cache_view`) and counted under its own `graph_only`
+     bucket — visible, and not a divergence against a record that is correct.
+     The graph side is repaired by a record-sourced re-projection
+     (`record-restore` / `rebuild_from_record`, which re-materialise through this
+     projector), then by #10000's capture change.
 4. **A cold region reads ``not-hot``, never ``empty``.** ``declaration_for``
    writes the known-hot set **after** the writes and as a function of what was
    materialized, so a record key the projection did not write is not claimed
@@ -138,6 +152,7 @@ from .stored_form import STORED_VECTOR_PROPS, VERBATIM_MARKER, is_verbatim
 __all__ = [
     "ADDITIONAL_PRIMARY_COLUMNS",
     "DERIVED_FROM_RECORD",
+    "EPISODIC_SOURCE_PROSE_PROPERTIES",
     "EVENT_STREAM_FOLDS",
     "FOLD_ON_CREATE_DEFAULTS",
     "KEY_PROPERTY",
@@ -162,6 +177,7 @@ __all__ = [
     "declaration_for",
     "declaration_is_sound",
     "declared_key",
+    "is_episodic_source_node",
     "node_from_row",
     "node_statement",
     "placement_columns",
@@ -1178,19 +1194,24 @@ def _scalar(value: Any) -> Any:
 #: capture writes it on the session `:Source` (`s.summary=$sum`). #10000's ruling
 #: (§9.1/D1) is that captured turn text lives in the RECORD, not on a graph node.
 #: The capture side of that is #10000's own change. This table is the OTHER door:
-#: `tortoise record-restore` and `record_serve`'s `fetch-record` repair
-#: re-materialise a node from the RECORD ROW through :func:`node_from_row`, so a
-#: row written by a build that still placed the key re-creates the prose on the
-#: graph **whatever build is reading it**, and nothing reds — a one-way
+#: every record-sourced READ and rebuild goes through :func:`node_from_row` —
+#: `tortoise record-restore` and `rebuild_from_record` MATERIALISE a node with it,
+#: and `record_serve.fetch_record_node` answers the graph-engine-down read with
+#: the same map *because its contract is that the two cannot drift*. So a row
+#: written by a build that still placed the key would either re-materialise the
+#: prose **whatever build is reading it**, or make the served answer disagree
+#: with what a rebuild can carry — and nothing reds either way: a one-way
 #: divergence (`#10853`). Clearing the legacy rows would be a sweep that decays:
 #: at this head the capture still places the key, so the next capture of the same
 #: session writes the value straight back. A rule cannot decay.
 #:
-#: ⛔ THE PAIR IS ONE DATUM, which is why both columns are here. On the capture
-#: path there is no title, so `_source_search_text(summary=…)` resolves to the
-#: summary itself — dropping `summary` alone would leave the identical sentence
-#: on the node under `_searchText`, the "column next door" this module's own
-#: `_CONTENT_COLUMNS` note (record_projection) names as *"the SAME datum"*.
+#: ⛔ THE PAIR IS ONE DATUM, which is why both COLUMNS are here (`summary`,
+#: `_search_text` — the graph property its mapping produces is `_searchText`). On
+#: the capture path there is no title, so `_source_search_text(summary=…)`
+#: resolves to the summary itself — dropping `summary` alone would leave the
+#: identical sentence on the node under `_searchText`, the "column next door" this
+#: module's own `_CONTENT_COLUMNS` note (record_projection) names as *"the SAME
+#: datum"*.
 #:
 #: ⚠️ WHAT THIS DELIBERATELY DOES NOT TOUCH. `topics` is the capture's word
 #: lexicon (its most frequent content words), not a transcript slice, and it
@@ -1200,15 +1221,21 @@ def _scalar(value: Any) -> Any:
 #: un-index every document in the cache. The drop is a **projection** decision:
 #: the row is not mutated, so the record stays the authority for the value.
 #:
-#: ⚠️ A THIRD COST, named because it is an OBSERVATION instrument and silence
-#: there reads as "clean": `python -m tortoise record-reconcile` builds its
+#: ⚠️ THE THIRD COST, and it is an OBSERVATION instrument, where a permanent
+#: non-clean reads as noise: `python -m tortoise record-reconcile` builds its
 #: RECORD side through :func:`read_record_view` → `node_from_row`, so the truth
-#: side now omits these two properties while the CACHE side (the live graph) may
-#: still hold them from an older build. `reconciliation.reconcile_views` is
-#: presence-aware, so such a Source reports `field_mismatches=2` and the sweep
-#: flips from clean to DIVERGENT — which is the true statement (the two sides DO
-#: disagree) and is repaired by the same #10017 purge census that clears the
-#: legacy rows, not by re-adding the projection.
+#: side omits these two properties while the CACHE side holds them. That
+#: population is not "legacy" — at this head the capture still writes and
+#: journals them, so EVERY session this build captures would report
+#: `field_mismatches=2` forever. Left alone that is the class the reconciler
+#: itself grades P1 (*"a signal indistinguishable from noise is not
+#: observability"*), so the comparison is not left to carry it:
+#: :data:`EPISODIC_SOURCE_PROSE_PROPERTIES` and
+#: `record_reconcile.scan_cache_view` mark the pair CACHE-OWNED for an episodic
+#: Source, and the reconciler counts them under `graph_only` — visible, and not
+#: a divergence against a record that is correct. The repair for the graph side
+#: is a record-sourced re-projection (`record-restore` / `rebuild_from_record`,
+#: which re-materialise through this projector), then #10000's capture change.
 _EPISODIC_SOURCE_PROSE_COLUMNS: frozenset[str] = frozenset({
     "summary", "_search_text",
 })
@@ -1273,6 +1300,40 @@ def _is_episodic_source_row(row: Mapping[str, Any]) -> bool:
         return True
     return (row.get("source_kind") == _EPISODIC_SOURCE_KIND
             and isinstance(url, str) and "://" not in url and "/" not in url)
+
+
+def is_episodic_source_node(props: Mapping[str, Any]) -> bool:
+    """The same two identity arms, read off a CACHE node (graph property names).
+
+    `_is_episodic_source_row` answers for a RECORD ROW (column names); this
+    answers for a node's property map, and it exists because the reconciler
+    compares node properties: it must classify the cache side's own key without
+    re-implementing the predicate. Two arms, never a flag — see
+    :data:`_EPISODIC_SOURCE_URL_PREFIX`.
+    """
+    url = props.get("url")
+    if isinstance(url, str) and url.startswith(_EPISODIC_SOURCE_URL_PREFIX):
+        return True
+    return (props.get("sourceKind") == _EPISODIC_SOURCE_KIND
+            and isinstance(url, str) and "://" not in url and "/" not in url)
+
+
+def _episodic_source_prose_properties() -> frozenset[str]:
+    """The GRAPH property names the narrowing declines, derived — never typed.
+
+    `canonical_property` is the one declaration of a column's property name, so a
+    hand-written `"_searchText"` here could drift from it and the reconciler
+    would then exclude a name no writer produces (a silent no-match).
+    """
+    return frozenset(canonical_property("source", column)
+                     for column in _EPISODIC_SOURCE_PROSE_COLUMNS)
+
+
+#: The same narrowing, in the CACHE's vocabulary — what
+#: :func:`tortoise.record_reconcile.scan_cache_view` must treat as cache-owned for
+#: an episodic Source, so the reconciler reports it under `graph_only` instead of
+#: counting it as a `field_mismatch` against a record that is CORRECT.
+EPISODIC_SOURCE_PROSE_PROPERTIES: frozenset[str] = _episodic_source_prose_properties()
 
 
 def _props_from_row(table: str, row: Mapping[str, Any], *,

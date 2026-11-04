@@ -86,10 +86,12 @@ from dataclasses import dataclass
 from typing import Any
 
 from .cache_projection import (
+    EPISODIC_SOURCE_PROSE_PROPERTIES,
     KEY_PROPERTY,
     NODE_TABLES,
     RecordView,
     declared_key,
+    is_episodic_source_node,
     projected_properties,
 )
 from .reconciliation import (
@@ -322,7 +324,18 @@ def scan_cache_view(g: Any, *, labels: Iterable[str] | None = None,
                     f"equal and report `extra_in_cache=0` over a node the "
                     f"record does not have; divergence is UNKNOWN, not zero")
             out[declared] = props
-            placed[declared] = placeable
+            # §9.1/D1 (#10853): the projection DECLINES this pair for an
+            # episodic Source, so a cache node that still carries it holds what
+            # the projection will not write — cache-owned, the #9196 precedent,
+            # and counted as `graph_only` instead of as a divergence against a
+            # record that is correct. Without this the reconciler would report
+            # every session the current capture writes as divergent forever,
+            # which is the "signal indistinguishable from noise" the module's own
+            # docstring grades P1.
+            if label == "Source" and is_episodic_source_node(props):
+                placed[declared] = placeable - EPISODIC_SOURCE_PROSE_PROPERTIES
+            else:
+                placed[declared] = placeable
     return CacheScan(view=out, placed=placed)
 
 
