@@ -1234,6 +1234,82 @@ class TestCredentialResolution:
         payload = mcp_client.status()  # must NOT raise either
         assert payload["status"] == "tortoise_unavailable", payload
 
+    def test_the_git_work_tree_probe_fails_CLOSED_when_it_cannot_look(
+        self, tmp_path,
+    ):
+        """`exists()` re-raises EACCES, so the probe must answer "maybe".
+
+        A directory that cannot be searched might hide a `.git`; answering "no"
+        would let an unreadable checkout pass the guard. Fail closed, then let
+        `_git_tracks`' fatal arm decide.
+        """
+        import os
+
+        from tortoise import mcp_client
+
+        if os.geteuid() == 0:  # pragma: no cover - root ignores the mode
+            pytest.skip("root can search a 0000 directory, so the trigger is inert")
+
+        outer = tmp_path / "outer"
+        (outer / "inner").mkdir(parents=True)
+        outer.chmod(0o000)
+        try:
+            assert mcp_client._in_a_git_work_tree(outer / "inner" / "deeper") is True
+        finally:
+            outer.chmod(0o755)
+
+    def test_status_never_raises_when_the_store_cannot_be_STATTED(
+        self, isolated_home, monkeypatch,
+    ):
+        """An unsearchable store directory raises PermissionError from `is_file()`.
+
+        `Path.is_file()`/`exists()` only swallow ENOENT/ENOTDIR/ELOOP/EINVAL, so
+        EACCES — a container whose `HOME` the running uid cannot traverse
+        (`docker --user 1000` against `HOME=/root`), or a `chmod 000` store dir —
+        re-raises it out of `resolve_connection`. That is the ordinary container
+        shape, not a contrived one, and it lands on EVERY request.
+        """
+        import os
+
+        from tortoise import mcp_client
+
+        if os.geteuid() == 0:  # pragma: no cover - root ignores the mode
+            pytest.skip("root can read a 0000 directory, so the trigger is inert")
+
+        monkeypatch.setenv("TORTOISE_MCP_URL", "http://127.0.0.1:9/mcp")
+        store = isolated_home / ".tortoise"
+        store.mkdir(parents=True, exist_ok=True)
+        (store / "credentials.json").write_text(json.dumps({"api_key": "tt_k"}))
+        store.chmod(0o000)
+        try:
+            connection = mcp_client.resolve_connection()  # must NOT raise
+            assert connection.key is None, connection
+            payload = mcp_client.status()  # must NOT raise
+            assert payload["status"] == "tortoise_unavailable", payload
+        finally:
+            store.chmod(0o755)
+
+    def test_a_closed_stderr_never_writes_a_diagnostic_to_stdout(
+        self, isolated_home, monkeypatch, capsys,
+    ):
+        """`sys.stderr is None` makes `print(file=None)` fall back to STDOUT.
+
+        In the bridge stdout IS the JSON-RPC pipe, so a warning written there is
+        a protocol error that kills the session — the exact failure the module
+        exists to prevent. Both writers must drop the line instead.
+        """
+        from tortoise import mcp_bridge, mcp_client
+
+        monkeypatch.setattr(mcp_client.sys, "stderr", None)
+        mcp_client._WARNED_TOPICS.clear()
+        mcp_client._warn("a track-looking warning")
+        mcp_client._warn_once("unit-test-none-stderr", "a withheld credential")
+        mcp_bridge._log("forwarding stdio")
+
+        captured = capsys.readouterr()
+        assert captured.out == "", (
+            f"a diagnostic reached stdout, i.e. the JSON-RPC pipe: {captured.out!r}")
+
     def test_warn_once_cannot_raise_after_a_successful_run(
         self, monkeypatch,
     ):

@@ -250,10 +250,11 @@ def _credential_paths() -> tuple[tuple[Path, bool], ...]:
 
     Each candidate is `(path, repo_controlled)`. `repo_controlled` marks the
     candidate a REPOSITORY can commit — the project-local `./.tortoise` — which is
-    the one `_git_tracks` vets before it is read. The global store is the user's
-    own; it is read unconditionally (and not paying a `git` spawn for it keeps the
-    per-request path cheap, and keeps a `$HOME` that happens to sit in a work tree
-    from losing a credential it never had a reason to distrust).
+    ALWAYS vetted by `_git_tracks` before it is read. The global store is the
+    user's own, and is vetted only when a `.git` sits above it: that spawn-free
+    pre-check is what keeps the ordinary host free of a per-request `git` call,
+    while a `$HOME` that IS a checkout still cannot be re-aimed by one committed
+    file.
 
     PATH FUNCTIONS, never module constants: a `Path.home()` or `Path.cwd()`
     captured at import is the same capture-at-start bug this module exists to
@@ -294,11 +295,19 @@ def _in_a_git_work_tree(directory: Path) -> bool:
     """Whether a `.git` entry sits at or above `directory`.
 
     `.git` is a DIRECTORY in an ordinary checkout and a FILE in a linked
-    worktree or a submodule, so both count. Used only when git itself cannot be
-    run (`_git_tracks`): it answers "could anything here have committed the
-    file?" without needing git.
+    worktree or a submodule, so both count. Used when git itself cannot answer
+    (`_git_tracks`): it answers "could anything here have committed the file?"
+    without needing git.
+
+    `exists()` re-raises OSError for an UNSEARCHABLE directory (`chmod 000`, an
+    EACCES on a container's `HOME`); it only swallows ENOENT/ENOTDIR/ELOOP/EINVAL.
+    A directory that cannot be searched might hide a `.git`, so an unanswerable
+    question fails CLOSED — the same direction `_git_tracks` takes on a git fatal.
     """
-    return any((candidate / ".git").exists() for candidate in (directory, *directory.parents))
+    try:
+        return any((candidate / ".git").exists() for candidate in (directory, *directory.parents))
+    except OSError:
+        return True
 
 
 def _git_tracks(path: Path) -> bool:
@@ -374,7 +383,7 @@ def _git_tracks(path: Path) -> bool:
 
 
 def _warn(line: str) -> None:
-    """Write one operator warning to stderr, and NEVER raise doing it.
+    """Write one operator warning to stderr, and NEVER raise (or redirect) doing it.
 
     A diagnostic must not become a failure. `status()` documents "never raises"
     and its callers skip cleanly on that basis (`integrations/crm/twenty/bridge.py`
@@ -384,7 +393,14 @@ def _warn(line: str) -> None:
     are reached from `resolve_connection()`, which now runs on EVERY request, so
     an unguarded `print` turns a cosmetic warning into exactly the crash the
     never-raise contract exists to prevent.
+
+    `sys.stderr is None` (fd 2 closed) is checked FIRST because `print(file=None)`
+    falls back to **stdout**: in the bridge that is the JSON-RPC pipe, and a
+    diagnostic there is a protocol error, not a warning. A dropped line is always
+    cheaper than a corrupted frame.
     """
+    if sys.stderr is None:
+        return
     with contextlib.suppress(OSError, ValueError):
         print(line, file=sys.stderr)
 
@@ -480,7 +496,17 @@ def resolve_connection() -> Connection:
     for path, repo_controlled in _credential_paths():
         label = str(path)
         sources.append(label)
-        if not path.is_file():
+        try:
+            present = path.is_file()
+        except OSError:
+            # A candidate that cannot be STATTED (an unsearchable directory —
+            # EACCES on a container's HOME, a `chmod 000` store dir) is not a
+            # store that is readable here. `is_file()` only swallows
+            # ENOENT/ENOTDIR/ELOOP/EINVAL, and a raise here would break the
+            # never-raise contract on every request.
+            sources[-1] = f"{label} (unreadable: PermissionError)"
+            continue
+        if not present:
             # Absent, or a DIRECTORY at the project-local path (a repo's own
             # `./.tortoise` state dir) — "no config here", so the next candidate
             # wins (#1708 D5). Reading it would raise IsADirectoryError and be

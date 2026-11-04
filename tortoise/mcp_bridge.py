@@ -41,11 +41,11 @@ credentials — the PROJECT-LOCAL `./.tortoise` that `tortoise init --api-key`
 writes, then `~/.tortoise/credentials.json` (#1708 D5 order: the first key found
 wins) — on EVERY forwarded request, so a rotation, a refresh, or a key added
 after the session started takes effect on the next call. ONE exception, and it is
-a trust boundary rather than a precedence rule: a store that sits in a repository
-is IGNORED — tracked, or inside a work tree when git cannot say — because both
-halves of the identity come from that one file (`api_key` and `api_url`), so a
-repository that commits it would choose the key AND the host — the shape `#3660`
-fails closed on.
+a trust boundary rather than a precedence rule: a store that ARRIVES WITH a
+repository is IGNORED — git reports it tracked, or git cannot be asked and a
+`.git` sits above it — because both halves of the identity come from that one file
+(`api_key` and `api_url`), so a repository that commits it would choose the key
+AND the host — the shape `#3660` fails closed on.
 
 A blank resolution is never sent as an empty header. It sends nothing, and if
 the endpoint rejects the call the bridge answers with the named
@@ -146,7 +146,17 @@ _MAX_REDIRECT_HOPS = 3
 
 
 def _log(message: str) -> None:
-    """Diagnostics — stderr only, never a credential value."""
+    """Diagnostics — stderr only, never a credential value, never the wire.
+
+    `if sys.stderr is None: return` is not defensive noise: when fd 2 is closed
+    Python sets `sys.stderr` to None, and `print(..., file=None)` falls back to
+    **`sys.stdout`** — which in this process IS the JSON-RPC protocol pipe. A
+    harness reading stdout as MCP would then see `[mcp-bridge] credential: …` as
+    a parse error and kill the session, the one failure this module exists to
+    avoid. A dropped diagnostic is always cheaper than a corrupted frame.
+    """
+    if sys.stderr is None:
+        return
     print(f"[mcp-bridge] {message}", file=sys.stderr, flush=True)
 
 
