@@ -353,7 +353,11 @@ def _pid_alive(pid: int, marker: str = "", *, pgid: int | None = None) -> bool:
     `marker=""` with no `pgid` is a LIVENESS-ONLY probe — there is nothing to test
     identity against (the `CHILD_PID` of an artifact whose wrapper pid was never
     recorded). Its residual is that a RECYCLED pid reads `waiting`; that is the
-    documented alive-direction fail, and it cannot produce a merge.
+    documented alive-direction fail, and it cannot produce a merge. It is NOT aged
+    out on purpose: the rail's wait is unbounded, so any TTL would read a live
+    merge as `lost` and let a second rail through (#3061) — see the `SPAWNING`
+    branch in `collect`, which names the recovery (`rm` the artifact) in its
+    `reason`, and `start`, which prints the same command when it refuses on it.
     """
     if pid <= 0:
         return False
@@ -699,10 +703,35 @@ def collect(state_dir: Path, repo: str, pr: int) -> RailState | None:
         # for good. So the evidence and the named rail are read BEFORE the sentinel
         # is allowed to mean "nothing started".
         #
-        # With no wrapper pid there is no group to test membership against, so the
-        # child probe is liveness-only (no identity) — the documented fail direction
-        # (alive). It is bounded in the only way that matters: once that pid stops
-        # answering, this branch falls through to `lost`.
+        # ⛔ THIS ARM HAS NO AGE BOUND, AND THE COMMENT HERE USED TO CLAIM ONE
+        # ("bounded in the only way that matters: once that pid stops answering,
+        # this branch falls through to `lost`"). That is false for the pid this
+        # arm is about: a RECYCLED pid never stops answering, so it reads `waiting`
+        # and the PR carries an `ALREADY LIVE` refusal that no clock will lift.
+        # The residual is real and is stated where it belongs, in `_pid_alive`
+        # ("its residual is that a RECYCLED pid reads `waiting`; that is the
+        # documented alive-direction fail, and it cannot produce a merge") — this
+        # comment is corrected rather than the code aged, because an AGE BOUND HERE
+        # WOULD BE A WORSE DEFECT THAN THE WEDGE:
+        #
+        #   With no wrapper pid there is no group to test membership against, so
+        #   the child probe is liveness-only (no identity). A TTL would therefore
+        #   expire the claim of a GENUINELY LIVE RAIL — a rail's wait is set by the
+        #   runner queue and is unbounded (the module docstring's measured case is
+        #   >= 6660 s, against a `SPAWNING_TTL_S` of 60) — and `lost` is exactly the
+        #   state `start` accepts. So any age bound trades a fail-CLOSED wedge for a
+        #   SECOND RAIL on a PR that is still merging: the #3061 collision, and the
+        #   same durable-wrong-verdict shape as the fork window this arm exists to
+        #   close (`test_a_named_rail_under_spawning_is_not_no_rail` pins it with a
+        #   STARTED_AT an hour old — the arm is deliberately OLDER than any TTL).
+        #
+        # A sound bound needs IDENTITY, not elapsed time: every comparable system
+        # stores the process start time and compares it on each probe. The artifact
+        # does not record the RAIL's start time (a wrapper pid is what would give it
+        # a group to join), so identity cannot be reconstructed here after the fact
+        # — which is why this is a documented wedge with a NAMED recovery instead:
+        # `collect` says so in `reason`, and `start` prints the exact `rm` when it
+        # refuses on one of these claims. Fails CLOSED: a wedge can never merge.
         merged, sha = _merge_evidence(log)
         if merged == MERGED:
             st.state, st.merge_sha = MERGED, sha
@@ -713,7 +742,10 @@ def collect(state_dir: Path, repo: str, pr: int) -> RailState | None:
         if child > 0 and _pid_alive(child, ""):
             st.state = WAITING
             st.reason = ("a rail named itself (CHILD_PID) but its wrapper never "
-                         "recorded a pid — waiting for the rail's own record")
+                         "recorded a pid — waiting for the rail's own record"
+                         "; this claim has NO age bound, so if that pid is a "
+                         "RECYCLED one it never lifts: verify with `ps -p "
+                         f"{child}` and clear it with `rm {st.artifact}`")
             return st
         age = _age_seconds(st.since)
         if child <= 0 and age is not None and age <= SPAWNING_TTL_S:
@@ -954,10 +986,20 @@ def launch(pr: int, *, cwd: Path, state_dir: Path, repo: str | None = None,
         state_dir.mkdir(parents=True, exist_ok=True)
         prior = collect(state_dir, repo, pr)
         if prior is not None and prior.state == WAITING:
+            # ⛔ AN UN-PID'D `SPAWNING=1` CLAIM IS THE ONE WAITING STATE NO CLOCK
+            # LIFTS (`collect`'s `SPAWNING` branch has no age bound, by design —
+            # an age bound there would `lost` a live rail). So the refusal must
+            # name the recovery, or the PR is wedged with a refusal that reads as
+            # fact and no way forward but guessing. `ALREADY LIVE` stays the
+            # leading phrase in BOTH arms: that is what lanes match on.
+            hint = ("" if prior.pid else
+                    f" — this claim names no wrapper pid, so nothing will ever lift "
+                    f"it; if that process is not this PR's rail, clear it with: "
+                    f"rm {prior.artifact}")
             raise Refused(
                 f"a rail is ALREADY LIVE for PR #{pr} (pid {prior.pid}, since "
                 f"{prior.since}) — two rails on one PR is the #3061 collision; "
-                f"collect it with: collect {pr}"
+                f"collect it with: collect {pr}{hint}"
             )
 
         head = _head_sha(Path(cwd), repo, pr)

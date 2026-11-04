@@ -734,6 +734,41 @@ def test_refuses_a_second_live_rail_on_one_pr(tmp_path):
         os.environ.pop("FAKE_RAIL_SLEEP", None)
 
 
+def test_the_un_pid_d_claim_refusal_names_its_own_recovery(tmp_path):
+    """⛔ A REFUSAL THAT NAMES NO WAY OUT IS A WEDGE WITH A FRIENDLY VOICE.
+
+    The `SPAWNING=1` + `CHILD_PID=` claim is the one `waiting` state NO clock lifts
+    (`collect`'s branch has no age bound, deliberately: an age bound there would
+    read a LIVE merging rail as `lost` and let a second rail through). So when that
+    claim is a RECYCLED pid — the residual `_pid_alive` documents — `start` refuses
+    forever with `pid 0`, which names nothing an operator can act on. The refusal
+    therefore has to carry the artifact and the command that clears it.
+    """
+    co = make_checkout(tmp_path)
+    sd = tmp_path / "state"
+    sd.mkdir(parents=True)
+    art = rd.artifact_path(sd, "o/r", 96)
+    old = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 3600))
+    recycled = subprocess.Popen(["/bin/sleep", "20"], start_new_session=True,
+                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL)
+    try:
+        art.write_text(f"PR=96\nREPO=o/r\nSTARTED_AT={old}\nSPAWNING=1\n"
+                       f"CHILD_PID={recycled.pid}\n", encoding="utf-8")
+        with pytest.raises(rd.Refused) as exc:
+            rd.launch(96, cwd=co, state_dir=sd, repo="o/r")
+        msg = str(exc.value)
+        assert "ALREADY LIVE" in msg          # the phrase lanes and tests match on
+        assert f"rm {art}" in msg             # the recovery, spelled out
+        # …and `collect` says the same thing where the operator will read it
+        st = rd.collect(sd, "o/r", 96)
+        assert st.state == rd.WAITING
+        assert f"rm {st.artifact}" in st.reason
+    finally:
+        recycled.kill()
+        recycled.wait()
+
+
 def test_refuses_to_detach_a_rail_carrying_the_override_hatch(tmp_path, monkeypatch):
     """⛔ Detachment must never become the way a bypass gets lifted out of sight."""
     co = make_checkout(tmp_path)
@@ -1016,6 +1051,68 @@ def test_cli_collect_exit_codes(tmp_path, capsys):
     # --assert-merged is the next fleet beat's gate: 0 only on a real merge
     assert rd.main(["collect", "42", "--repo", "o/r", "--state-dir", str(sd),
                     "--assert-merged"]) == 0
+    capsys.readouterr()
+
+
+def test_assert_merged_is_a_gate_on_every_non_merged_state(tmp_path, capsys):
+    """⛔ `--assert-merged` IS A GATE WHOSE REFUSAL NO ARM COULD REACH.
+
+    `EXIT CODES` publishes `1` as the fleet's MACHINE GATE for "the state is not
+    `merged`", and the only arm that passed the flag read a `merged` artifact — so
+    the refusal itself was unpinned: delete it, or widen it to `st.state == LOST`,
+    and the whole suite (the arm above included, whose comment claims "0 only on a
+    real merge") stayed green. That is an inert enforcer: it appears to protect
+    the next beat and its termination condition can never fire.
+
+    One arm per non-`merged` state, each an ARTIFACT so the state is exact rather
+    than raced for. `refused` is the direction that matters most — the rail RAN
+    and declined (a `--dry-run` exits 0), which is the shape a beat would read as
+    permission if the gate were permissive.
+    """
+    sd = tmp_path / "state"
+    sd.mkdir()
+    logp = rd.log_path(sd, "o/r", 91)
+    art = rd.artifact_path(sd, "o/r", 91)
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    logp.write_text("\n===== rail attempt started x (detached) =====\n"
+                    "admin-merge: --dry-run performs no base run and merges nothing\n",
+                    encoding="utf-8")
+
+    def gate() -> int:
+        return rd.main(["collect", "91", "--repo", "o/r", "--state-dir", str(sd),
+                        "--assert-merged"])
+
+    def plain() -> int:
+        return rd.main(["collect", "91", "--repo", "o/r", "--state-dir", str(sd)])
+
+    # 1. refused — the rail exited 0 without a merge line (a --dry-run)
+    art.write_text(f"PR=91\nREPO=o/r\nSTARTED_AT={now}\nLOG={logp}\nEXIT=0\n",
+                   encoding="utf-8")
+    assert rd.collect(sd, "o/r", 91).state == rd.REFUSED
+    assert plain() == 0
+    assert gate() == 1
+
+    # 2. lost — an expired `SPAWNING=1` sentinel: no rail ever ran, no verdict exists
+    old = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 600))
+    art.write_text(f"PR=91\nREPO=o/r\nSTARTED_AT={old}\nLOG={logp}\nSPAWNING=1\n",
+                   encoding="utf-8")
+    assert rd.collect(sd, "o/r", 91).state == rd.LOST
+    assert plain() == 0
+    assert gate() == 1
+
+    # 3. waiting — a rail is still live and has decided nothing yet
+    rail = subprocess.Popen(["/bin/sleep", "20"], start_new_session=True,
+                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL)
+    try:
+        art.write_text(f"PR=91\nREPO=o/r\nSTARTED_AT={old}\nLOG={logp}\n"
+                       f"SPAWNING=1\nCHILD_PID={rail.pid}\n", encoding="utf-8")
+        assert rd.collect(sd, "o/r", 91).state == rd.WAITING
+        assert plain() == 0
+        assert gate() == 1
+    finally:
+        rail.kill()
+        rail.wait()
     capsys.readouterr()
 
 
