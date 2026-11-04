@@ -1378,19 +1378,28 @@ def _tail_payload(raw: Any) -> Any:
     verbatim is what lets the WRITER path (:func:`_props_from_row`) refuse them
     loudly — and a `not raw` test defeated exactly the shapes it says it covers:
     a DECODED `[]`/`0`/`False` is FALSY, so it would have been coerced to `{}` and
-    projected clean while the same row as TEXT (`'[]'`, `'0'`) was refused. That
-    split is decided by the driver's `jsonb` codec (asyncpg answers `str`,
-    psycopg answers a decoded list/int) and not by the row — the same corrupt
-    record aborting one `record-restore` as `RestoreUnavailable` and projecting
-    cleanly through the other. So the test is IDENTITY against the two absent
-    spellings, never truthiness.
+    projected clean while the same row as TEXT (`'[]'`, `'0'`) was refused.
+    ⛔ THAT IS ONE ROW IN TWO SPELLINGS, NOT TWO DRIVERS (#10867 review,
+    comment-compliance). This tree has ONE record driver, `psycopg2`
+    (`record_writer.py:941`, `record_serve._default_connect`, `record_restore`,
+    `record_text`), and it DECODES `json`/`jsonb` to Python objects out of the box
+    (psycopg2 docs, "JSON adaptation": *"Reading from the database, json and jsonb
+    values will be automatically converted to Python objects"*, added 2.5 / jsonb
+    2.5.4). So the DECODED forms are the production shapes; the JSON-TEXT forms are
+    the fixture / dump-carried ones, and they are accepted because a row may arrive
+    that way (the pre-existing read took a STRING tail). Both must be answered
+    IDENTICALLY, because a refusal keyed on falsiness refused `'[]'` and projected
+    `[]` — a corrupt record projecting clean in one spelling and refusing in the
+    other. So the test is IDENTITY against the two absent spellings, never
+    truthiness.
 
-    ⛔ DECLARED RESIDUAL — TWO DEGENERATE SCALARS STILL SPLIT ON THE DRIVER.
+    ⛔ DECLARED RESIDUAL — TWO DEGENERATE SCALARS STILL SPLIT ON THE SPELLING.
     PostgreSQL's `jsonb` maps JSON `null` and JSON `""` onto the SAME Python
-    values as the absent spellings above (`null` → `None`, `""` → `''`), so a
-    DECODING driver cannot distinguish `props='null'::jsonb` from an absent tail
-    — those two project as absence there while the identical row as TEXT
-    (`'null'`, `'""'`) is refused below. That asymmetry is not closable at this
+    values as the absent spellings above (`null` → `None`, `""` → `''`), so on
+    the DECODED spelling — which is the production one, `psycopg2` decodes
+    `jsonb` — `props='null'::jsonb` is indistinguishable from an absent tail and
+    projects as absence, while the identical row as JSON TEXT (`'null'`, `'""'`)
+    is refused below. That asymmetry is not closable at this
     operator: the decoded values ARE the mandated lenient spellings, and
     widening the lenient set to admit `'null'`/`'""'` as well would re-spell
     ABSENCE rather than detect it. It is declared rather than fixed because it
@@ -1416,13 +1425,17 @@ def _decoded_tail(raw: Any) -> Mapping[str, Any]:
 
     ⛔ IT MUST NOT RAISE, AND A DECODED JSON STRING IS NOT JSON TEXT (#10867
     review, closing pass). `_tail_payload` routes any `str` through `json.loads`,
-    which is right for the TEXT driver — where a `jsonb` string tail arrives as
-    its JSON SOURCE (`'"hello"'`). A DECODING driver (psycopg) hands the same
-    column back as the decoded Python `str` `'hello'`, which is not JSON text at
+    which is right for the JSON-TEXT spelling — where a `jsonb` string tail
+    arrives as its JSON SOURCE (`'"hello"'`). The DECODED spelling hands the
+    same column back as the Python `str` `'hello'`, which is not JSON text at
     all: `json.loads` raised `JSONDecodeError` out of the ROW PREDICATE, so
     `_is_episodic_source_row` — the function whose whole contract is to ANSWER
-    for every shape a row can hold — answered on one driver and raised on the
-    other. Unparseable non-objects answer `{}` here (the DOCUMENT arm, which is
+    for every shape a row can hold — answered for one spelling and raised on the
+    other. (One driver, not two: `psycopg2` is this tree's only record driver
+    and it DECODES `jsonb` out of the box, so the decoded spelling is the
+    PRODUCTION one and the TEXT spelling is the fixture / dump-carried one;
+    a row reaches this function in either.) Unparseable non-objects answer `{}`
+    here (the DOCUMENT arm, which is
     this module's declared safe asymmetry: a missed legacy session keeps its
     prose, a false positive strips a document's metadata). The WRITER path is
     untouched and stays LOUD — `_props_from_row` decodes through
