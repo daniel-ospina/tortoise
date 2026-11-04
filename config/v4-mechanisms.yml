@@ -837,12 +837,11 @@ mechanisms:
       withheld — with TWO exceptions the universal must not swallow: the gate's
       own pair (`5k` IS 5 km/5 kg, so `km`/`kg` pass to the numeric comparison)
       and a spaced `percent`/`pct`, which bind with NO unit because they are
-      deliberately absent from `_UNIT_WORDS` (next clause), so the tolerance
+      deliberately absent from `_UNIT_WORDS` (see the ADJACENCY clause above), so the tolerance
       fires instead. Measured: 44 of the 48 `_UNIT_EQUIV` spellings refuse
       `the batch took 5k` / `… 5000 <spelling>`; the 4 that do not are exactly
       `km`, `kg`, `percent`, `pct`.
-      PRE-EXISTING in mechanism (`5k
-      millis` against `5000 hours` is refused at `origin/main` `525fde4a9` too);
+      PRE-EXISTING in mechanism (`5k millis` against `5000 hours` is refused at `origin/main` `525fde4a9` too);
       #10804's widen extended which right-hand units trigger it, and the fold's
       abbreviation completion (`mos`, `millisec(s)`) extends it once more by
       exactly those two spellings — measured: `the batch took 5k` against `… 5000
