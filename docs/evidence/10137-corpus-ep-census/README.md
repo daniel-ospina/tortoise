@@ -178,6 +178,8 @@ Measured 2026-10-31 on `main@eac49c0dd9aababd01016325a34a327481dd006c`.
 > neither shape, nor the resumed-ingest shape. Treat these cells as pre-fix
 > values until a re-cut says otherwise.
 
+The cells' line citations carry a scope note of their own.
+
 > **Line citations below are into the MEASUREMENT commit** —
 > `main@eac49c0dd9aababd01016325a34a327481dd006c`, the tree this run was taken
 > on (stated at the end of the Reproduce block). `tools/longmem_eval/run.py` has
