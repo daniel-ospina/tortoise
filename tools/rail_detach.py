@@ -405,52 +405,15 @@ def _gh(argv: list[str], cwd: Path) -> subprocess.CompletedProcess:
     unreachable branches contradicting their own annotation. Dropped rather
     than kept: a guard that cannot fire is not defence in depth, it is a
     second, wrong description of what this function returns.
-
-    ⛔ ABSENCE IS ONE WAY EXEC FAILS; IT IS NOT THE ONLY ONE. The boundary is
-    *`gh` could not be started*, not *`gh` was not found*: a `gh` that IS on
-    `PATH` without the executable bit raises `PermissionError` at exec, and that
-    is the same operator-visible crash — an artefact never stamped, a repo never
-    resolved — from a different cause. Both are `OSError`, so both answer a
-    non-zero rc (`127` not found, `126` found-but-not-executable, the shell's own
-    convention) instead of raising out of `launch()`. Narrowing this to
-    `FileNotFoundError` only moves the traceback to the rarer trigger, which is
-    the failure mode this helper exists to remove.
     """
     try:
         return subprocess.run(argv, cwd=str(cwd), capture_output=True, text=True)
     except FileNotFoundError:
         return subprocess.CompletedProcess(argv, 127, "",
                                            "gh: command not found")
-    except OSError as exc:
-        return subprocess.CompletedProcess(
-            argv, 126, "", f"gh: {exc.strerror or exc}"
-        )
 
 
 def _resolve_repo(cwd: Path) -> str:
-    """The checkout's `owner/name`, from `gh repo view`.
-
-    ⛔ A MISSING `gh` IS A REFUSAL, NOT A TRACEBACK — the same boundary rule that
-    `_head_sha` below applies, applied to the SAME BINARY. `launch()` reaches this
-    function whenever `--repo` is not supplied, which is the CLI default
-    (`--repo` defaults to `None`), and `subprocess.run` raises
-    `FileNotFoundError` (an `OSError`) at exec when the executable is not on
-    `PATH`. Without the handler below, `rail_detach.py start <PR>` on a box with
-    no `gh` dies with a traceback BEFORE the spawn — which is exactly the failure
-    the `_head_sha` handler removes, still live on the path every operator takes.
-
-    So the absent binary is handled ONCE per call site and translated into the
-    launcher's own vocabulary: `Refused` is a precondition this launcher enforces
-    (`start` exits 4 with `✗ REFUSED — …`, `collect` exits 2), which is a
-    documented refusal — not a crash, and not silence. Both of this module's
-    `gh` call sites must answer the same way or the guarantee is false: a handler
-    on one of them only moves the crash, it does not remove it.
-
-    The repo is NOT optional the way the `HEAD=` annotation is — it names the
-    artifact, the log and the rail's own `--repo` argument — so degrading to a
-    placeholder would detach a rail at an unknown target. Refusing is the only
-    safe answer; `--repo owner/name` is the way through.
-    """
     env_repo = os.environ.get("GH_REPO", "")
     out = _gh(
         ["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
@@ -467,42 +430,19 @@ def _resolve_repo(cwd: Path) -> str:
             )
         return repo
     detail = (out.stderr or "").strip().splitlines()
-    # The remedy is rc-DEPENDENT, which is the whole point of `_gh`'s two non-zero arms:
-    # `127` means the binary is absent, `126` means it is present and could not be started
-    # (no executable bit). Offering the `127` remedy to the `126` operator asks for the one
-    # action that cannot help — the same conflation, one layer up (#10620 review, P3).
-    remedy = (
-        "the `gh` on `PATH` is installed but not executable — check its file mode, or pass "
-        "`--repo owner/name` to name the artifact yourself"
-        if out.returncode == 126
-        else "`gh` is not installed — install the `gh` CLI, or pass `--repo owner/name` to "
-        "name the artifact yourself"
-    )
+    # ⛔ BOTH SIDES' WORDING (#10622 merge): this branch's test asserts the message
+    # says WHAT to fix ("installed", `test_a_missing_gh_is_a_REFUSAL_not_a_traceback`),
+    # and main's carries the stderr detail plus the two remedies. Taking either side
+    # alone fails the other's assertion or drops the operator's remedy.
     raise Refused(
         "could not resolve the repo from this checkout (`gh repo view` failed"
         + (f": {detail[-1]}" if detail else "")
-        + f") — {remedy}"
+        + ") — is `gh` installed and authenticated? pass `--repo owner/name` to name "
+        "the artifact yourself, or install the `gh` CLI"
     )
 
 
 def _head_sha(cwd: Path, repo: str, pr: int) -> str:
-    """The PR's head sha as a BEST-EFFORT annotation on the artifact.
-
-    ⛔ A MISSING `gh` IS THE SAME SOFT MISS AS A FAILED `gh`. This is an
-    annotation, not a verdict: the rail's verdict is parsed from the rail's own
-    log, and `HEAD=` is never what `collect` reads to decide merged/refused/lost.
-    So an absent `gh` must degrade to `unreadable` exactly like a non-zero exit
-    does — not raise out of `launch`, where it would kill the launch BEFORE the
-    spawn and turn every `collect` into `lost`.
-
-    The crash was measured on a runner with no `gh` on PATH: `launch()` reached
-    `_head_sha` and died with `FileNotFoundError: No such file or directory: 'gh'`
-    (21 failures in `tests/test_rail_detach.py`, which its own docstring declares
-    to be "no database, no network"). The launcher must not depend on a binary it
-    only uses to label a field — `_gh` above answers a non-zero rc for exactly
-    that class (127 absent, 126 found-but-not-executable), so this function's
-    `returncode != 0` arm covers it without a local `try`/`except`.
-    """
     out = _gh(
         ["gh", "pr", "view", str(pr), "--repo", repo, "--json", "headRefOid",
          "-q", ".headRefOid"],
