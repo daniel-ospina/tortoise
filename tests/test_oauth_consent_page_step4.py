@@ -1319,6 +1319,34 @@ def test_the_bounce_does_not_append_a_SECOND_key_when_the_flow_already_has_one()
             f"a duplicate pair ({label}) must collapse to EXACTLY ONE non-blank key: the app "
             f"reads the first value and the AS gate reads the last, so {dup_keys} is a key the "
             f"two hops never agree on and the mint is inert for that link")
+    # ⛔ THE NAME TEST IS ON THE DECODED NAME, NOT THE RAW BYTES (review P3, #10757). A
+    # %-encoded spelling of the parameter is the SAME parameter to every reader —
+    # `URLSearchParams.get` and Starlette's multidict both decode before comparing — so a raw-name
+    # comparison leaves `%61ttempt_key=` in place as an "unknown" segment and appends the key AFTER
+    # it. On `%61ttempt_key=&attempt_key=` that emits a blank segment first, the first-value reader
+    # answers `""`, and the mint is inert: the two-readers-disagree defect below, reached through
+    # the encoding instead of through a duplicate. The docstring promises the decoded test, and
+    # without this arm the mutation "compare the raw segment name" passes every other arm here.
+    from urllib.parse import unquote_plus
+
+    for label, raw_enc, want in (
+        ("encoded name, blank value", f"client_id=c1&state=s1&%61ttempt_key=", None),
+        ("encoded name, real key", f"client_id=c1&state=s1&%61ttempt_key=K-enc", "K-enc"),
+        ("encoded name blank beside a plain key",
+         f"client_id=c1&state=s1&%61ttempt_key=&{CONSENT_ATTEMPT_KEY_PARAM}=K-plain", "K-plain"),
+    ):
+        enc = consent_bounce_url(APP_ORIGIN, raw_enc)
+        inner_enc = urlsplit(parse_qs(urlsplit(enc).query)["next"][0]).query
+        named = [s for s in inner_enc.split("&") if s
+                 and unquote_plus(s.split("=", 1)[0]) == CONSENT_ATTEMPT_KEY_PARAM]
+        assert len(named) == 1, (
+            f"a {label} must leave EXACTLY ONE segment naming the attempt key after DECODING: a "
+            f"raw-name comparison leaves the encoded spelling beside the emitted key, and the "
+            f"first-value reader then answers the blank one — {named}")
+        got = unquote_plus(named[0].split("=", 1)[1]) if "=" in named[0] else ""
+        assert got and (want is None or got == want), (
+            f"a {label} must leave ONE non-blank key a reader can adopt (want {want!r}): {named}")
+
     # Every OTHER segment survives byte-exact (state/redirect_uri are compared as bytes).
     blank_raw = (f"redirect_uri=https%3A%2F%2Fc.example%2Fcb%3Fa%3D1&state=s1"
                  f"&{CONSENT_ATTEMPT_KEY_PARAM}=")
