@@ -4298,6 +4298,100 @@ _MAGNITUDE_PREFIXES = frozenset({"k"})
 #: review cycles 8 and 10.
 _MAGNITUDE_FACTORS = {"k": 1000}
 
+#: A cheap pre-check for the fusion branch in `_value_bindings`: does this value
+#: token end in a LETTER? It answers only "may a magnitude prefix already be
+#: carried here", and it is deliberately LOOSE — the authoritative
+#: sign/decoration/core reading is `_value_core`'s, inside
+#: `_compose_magnitude_and_unit` (#10360 review cycle 3, P1: a strict pattern here
+#: re-invented a narrower reading than the module's and made the verdict depend on
+#: the sign GLYPH). ⚠️ It does NOT distinguish the bare unit token `k` from a
+#: `k`-suffixed value — `search("k")` matches both. That is harmless (a bare `k`
+#: never arrives as a `value`) and is stated here because an earlier revision of
+#: this comment claimed that distinction, which the regex does not make (#10360
+#: review cycle 4, P3). ⛔ The POSITIVE branch is load-bearing and pinned: forcing
+#: this check to always fire changes `20k k miles` from `20000k` to `20kkiles`,
+#: so the grid test pins that shape instead of leaving the branch untested.
+_MAGNITUDE_TAIL = re.compile(r"[A-Za-z]$")
+
+#: The decoration before a numeral (signs, currency/math symbols) — `Nd` digits in
+#: EVERY script, because `_value_core` folds them to ASCII precisely so the digit
+#: script is invisible (pinned by #10513 cycle 16). ⛔ An ASCII-only class here
+#: refused composition for `２０k`/`٢٠k`, losing the `k` reading and withholding a
+#: truthful point — the "verdict depends on the SPELLING" defect moved from the
+#: unit to the SIGNS and then to the DIGITS (#10360 review cycle 6, P2). A value
+#: token with a LETTER before that run is not a quantity at all: `_value_core`
+#: reads the LAST numeric run of any token, so the identifier-shaped `s4[k` also
+#: returns core `4` + suffix `k`, and composing it multiplied an ARRAY INDEX into
+#: 4000 (measured on this repo's own docs corpus, cycle 5 P3).
+_NUMERIC_HEAD = re.compile(r"^[^\d\w]*[.\d]")
+
+
+def _compose_magnitude_and_unit(value: str, unit: str) -> str:
+    """`20k` + `miles` is 20000 miles — NOT an unknown unit `kmiles`.
+
+    `_value_bindings` fuses a unit WORD that follows a value onto it as one
+    token, and that is right for `20` + `miles` → `20miles`. On a value that
+    ALREADY carries a magnitude prefix it produced `20kmiles`, whose suffix maps
+    to nothing: `_value_core` returned an UNKNOWN unit, the `k` reading was
+    lost, and the pair then diverged on the numeric core (20 vs 20000) —
+    reaching the write boundary and WITHHOLDING a truthful point:
+
+        the fleet drove 20000 miles / the fleet drove 20k miles
+          before: c=('20000', None)      q=('20', 'k')      -> tolerated
+          glued : c=('20000', 'mi')      q=('20', 'kmiles') -> REFUSED
+
+    ⚠️ The shape is not new — it pre-existed for every unit that was already
+    fusable (`5k min` against `5000 min` was refused on the pre-change tree) —
+    so completing the vocabulary would have WIDENED a false-accusation class
+    rather than created it. Composing here closes it for both.
+
+    ⛔ THE SIGN AND DECORATION ARE READ BY `_value_core`, NOT BY A REGEX HERE
+    (#10360 review cycles 2, 3 and 6, all measured). Earlier revisions matched
+    the value token with a private pattern, and each invented a NARROWER reading
+    of "the same number" than the module already has: `\\d+` lost the sign
+    (`-20k miles`) and the leading dot (`_LEADING_DOT`: `.5k miles`); a
+    `[-\u2212]` class then lost every OTHER sign glyph `_reads_as_sign` admits
+    (the whole `Pd` family — en/em dash, hyphen, U+2011 "what PDF and Word
+    emits") and every `Sc`/`Sm` decoration `_value_core` already skips (`~`, `+`,
+    `>`, `<`, `$`, `\u2248`, `\u00b1`); and an ASCII digit class lost every
+    decimal script but Latin (`２０k`, `٢٠k`). Each omission turned a truthful
+    pair into an unknown-unit refusal. The sign/decoration reading is therefore
+    DELEGATED to `_value_core`, the single source of truth for it, and only the
+    HEAD of the token is checked (`_NUMERIC_HEAD`) to keep identifier-shaped
+    text out of the rule.
+
+    ⛔ SCOPE, and why not inside `_value_core` itself: there the same peel would
+    apply to a SINGLE token, where `20kms` is kilometres (`km`+`s`), and peeling
+    `k` would read it as 20000 milliseconds — re-introducing the false accusation
+    this exists to remove (`test_an_unknown_unit_is_a_spelling_not_a_rewrite`
+    pins `20kms`/`20km`). Here we KNOW the unit was a separate word.
+    """
+    if _NUMERIC_HEAD.match(value) is None:
+        return value + unit
+    try:
+        identity = _value_core(value)
+    except (IndexError, ValueError):  # pragma: no cover - defensive
+        return value + unit
+    # ⛔ `_value_core` returns None for a token it deliberately does NOT read —
+    # a SEPARATOR-bearing numeral (`1,200`), which is outside the judged set by
+    # the owner's #2817 ruling ("no separator rule, at all"). Gluing the unit on
+    # unchanged keeps that exclusion intact: refusing here would smuggle the
+    # separator decision back in through the unit.
+    if identity is None:
+        return value + unit
+    sign, core_text, suffix = identity
+    factor = _MAGNITUDE_FACTORS.get(suffix) if suffix else None
+    if factor is None or not core_text or "/" in core_text:
+        return value + unit
+    try:
+        core = Decimal(core_text) * factor
+    except (InvalidOperation, ValueError):  # pragma: no cover
+        return value + unit
+    # `Decimal * int` keeps `20.5k` exact; `f` would render `205000` as
+    # `2.05E+5`, which `_value_core` cannot read as a numeral.
+    return sign + format(core, "f") + unit
+
+
 #: The longest side the #10360 rule will JUDGE, in characters. The quote a point
 #: STORES is clamped to ``_MAX_QUOTE`` (200) and its content to ``_MAX_CONTENT``
 #: (1000), so a side past ``2 * _MAX_CONTENT`` cannot be the verbatim anchor the
@@ -6056,11 +6150,28 @@ _UNIT_WORDS = frozenset({
     # space-separated unit was never FUSED, its value bound with no unit, and the
     # pair failed OPEN. `back under 800 seconds` against
     # `back under 800 milliseconds` was written as verbatim.
+    # ⚠️ Completing the set only makes the JUDGED SET uniform: a unit CONVERSION
+    # across one dimension (`90 seconds` vs `1.5 minutes`) reads a DIFFERENT
+    # identity and is judged as a divergence — the verdict the h/min family has
+    # ALWAYS produced (it was already refused before this change). What changed
+    # is the READING, not the verdict, and the committed census contains no
+    # conversion pair, so `refused == 0` is silent on it.
     "ms", "msec", "msecs", "millisecond", "milliseconds", "millisec", "millisecs",
     "second", "seconds", "minute", "hour",
     "d", "day", "days", "wk", "wks", "week", "weeks",
     "mo", "month", "months", "mos", "y", "yr", "yrs", "year", "years",
     "mile", "miles",
+    # ⛔ `percent`/`pct`/`%` are deliberately NOT here — the one place a DECLARED
+    # identity is left unfused on purpose (#10360 review cycle 3, P2, measured).
+    # `%` reaches a pair by two routes that do not agree: `20 %` is merged onto
+    # its numeral by the TOKENIZER, but `20k %` is NOT (`['20k', '%']`) and the
+    # attached `20k%` tokenises to `['20k']`, dropping the symbol. Fusing
+    # `percent` composed one side and not the other, so a truthful point was
+    # REFUSED. ⚠️ Leaving it unfused is measured to refuse NOTHING that HEAD did
+    # not already refuse across 144 same-value percent pairs, and the cost is the
+    # missed detection of a `20 percent`→`20 seconds` rewrite — the fail-OPEN
+    # direction. `test_the_unit_vocabulary_is_complete_in_the_direction_that_
+    # matters` pins both halves.
 })
 
 
@@ -6123,8 +6234,31 @@ def _value_bindings(content: str, *,
             # A unit word written apart belongs to the value: "ten km" and
             # "10km" are one quantity, and "2 hours"/"two hours" must agree
             # whichever way the unit is written.
-            value = value + seq[i + 1]
-            i += 1
+            # ⚠️ A BARE MAGNITUDE PREFIX is itself a `_UNIT_WORDS` member, so
+            # `20 k min` fused `k` and then stopped — the unit word AFTER it was
+            # never reached, leaving `('20k')` against `('20000min')` and
+            # refusing a pair that is one value in two spellings (measured: 260
+            # such pairs over a same-value spelling grid, ALL of them this one
+            # shape — #10360 review cycle 2, P1). Consume the prefix first when
+            # the value does not already carry one, then compose below.
+            if seq[i + 1] in _MAGNITUDE_FACTORS \
+                    and _MAGNITUDE_TAIL.search(value) is None:
+                value = value + seq[i + 1]
+                i += 1
+            if i + 1 < len(seq) and seq[i + 1] in _UNIT_WORDS \
+                    and any(c.isdigit() for c in value):
+                # `_compose_magnitude_and_unit` multiplies a magnitude prefix
+                # into the core first, because gluing it raw made `20k` +
+                # `miles` an UNKNOWN unit `kmiles` and withheld the truthful
+                # point (#10360 review cycle 1, P2). No second gate is needed
+                # for the ELEMENTARY case: `_UNIT_WORDS` is asserted a subset of
+                # `_UNIT_EQUIV`, so a plain `20` + `miles` is always a known
+                # unit. ⚠️ A COMPOUND suffix is still unknown and fails OPEN —
+                # `20m` + `miles` → `20mmiles` (#10360 review cycle 5, P3: the
+                # subset invariant does NOT cover the composed suffix, and
+                # fail-open is the intended outcome, not an assertion failure).
+                value = _compose_magnitude_and_unit(value, seq[i + 1])
+                i += 1
         if value is not None:
             if with_following:
                 out.append((anchor, value,
