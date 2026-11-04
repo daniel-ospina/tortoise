@@ -454,8 +454,13 @@ def test_a_note_that_starts_with_the_trailer_words_survives(hub: Path) -> None:
     COMMENT — it claimed to strip `index-tree` "before" `pinned at` while the loop
     could never reach a caller's line — so the assertion is on the last line.
     """
-    for note in ("pinned at noon, why not", "first line\nindex-tree deadbeef"):
-        wt = dirty_lane(hub, f"wt-note-{abs(hash(note)) % 10000}")
+    for i, note in enumerate(("pinned at noon, why not", "first line\nindex-tree deadbeef")):
+        # ⛔ A DETERMINISTIC name, like every other `dirty_lane` caller in this file
+        # (`wt-forge`, `wt-lane`, `wt-idxonly`). `hash()` is salted per interpreter,
+        # so deriving the name from the note made the two iterations collide with
+        # p ~ 1/10000 — and a collision reds a merge-gating test for no reason at
+        # `dirty_lane`'s `assert made.returncode == 0` (the branch already exists).
+        wt = dirty_lane(hub, f"wt-note-{i}")
         pinned = run_tool("pin", "--note", note, cwd=wt)
         assert pinned.returncode == 0, pinned.stderr
         listed = run_tool("list", cwd=wt)
