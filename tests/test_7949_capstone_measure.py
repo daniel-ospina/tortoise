@@ -861,60 +861,39 @@ def test_a_row_cites_the_artifact_it_was_written_to():
 
 
 def test_a_row_measured_on_another_corpus_declares_it(tmp_path):
-    """E4 cites an artifact on another corpus revision — and says so.
+    """REBASE UNION (#10610 × #10679) — the declaration is on the OPERANDS.
 
-    E1/E2 no longer take this path: they measure the FROZEN corpus, so their
-    artifact digest IS the run's and the V7 declaration must be ABSENT (a
-    declaration nothing needs is a claim the gate would then check). E4 does
-    still cite a receipt from another revision, and must declare it.
+    #10610 moved E1/E2 onto the frozen `#9889` record, so their `corpus_sha256` IS
+    the run's and the V7 declaration must be ABSENT (a declaration nothing needs is
+    a claim the gate would then check). #10679 then made E4 the same shape: the
+    selector REFUSES a receipt whose `corpus_hash` is not the frozen pin, so the row
+    `main` builds can never cite another revision — and the unconditional
+    `artifact_corpus_sha256` that used to sit on it asserted "a different revision"
+    about the one row whose own note says the opposite, in a field V7 never reads
+    (its same-corpus arm short-circuits first).
+
+    What the declaration is really FOR is the synthetic caller, so that is where it
+    is proven: hand `build_rows` an OFF-PIN `e4` and the field appears, carrying the
+    receipt's own digest. The condition is on the operands, not a hard `None` that
+    would also neuter the rule.
     """
     log_corpus = "sha256:" + "d" * 64
     rows = {row["criterion"]: row for row in _rows()}
-    for criterion in ("E1", "E2"):
-        row = rows[criterion]
-    # Neither row takes the declaration arm any more: #10610 moved E1/E2 onto the
-    # frozen `#9889` record and #10679 selects E4's receipt BY the frozen pin, so both
-    # rows carry the run's OWN corpus and `artifact_corpus_sha256` must be ABSENT.
     for criterion in ("E1", "E2", "E4"):
         assert "artifact_corpus_sha256" not in rows[criterion], criterion
     for criterion in ("E3", "E5"):
-        assert rows[criterion]["corpus_sha256"] == "sha256:" + "d" * 64, criterion
+        assert rows[criterion]["corpus_sha256"] == log_corpus, criterion
+        assert "artifact_corpus_sha256" not in rows[criterion], criterion
 
-    # The off-pin shape the arm exists for is still covered — by the OPERANDS, not by a
-    # hard `None`: hand `build_rows` an off-pin E4 and the declaration must appear.
     off_pin_corpus = "sha256:" + "f" * 64
-    off = _rows(e4={"verdict": "RED", "numerator": 2, "denominator": 15,
-                    "sha": "a999be41e", "corpus_sha256": off_pin_corpus,
-                    "evidence": "tests/eval/write_path/receipts/off-pin.json",
-                    "note": "off-pin"})
-    row = off["E4"]
-    assert measure.normalise_corpus(row["corpus_sha256"]) != \
-        measure.normalise_corpus("sha256:" + "d" * 64), "E4"
-    assert row.get("artifact_corpus_sha256") == row["corpus_sha256"], "E4"
-
-
-def test_the_real_e4_row_declares_no_other_corpus_revision():
-    """The row ``main`` actually builds carries NO ``artifact_corpus_sha256``.
-
-    That field told a machine consumer (``run.rows[E4].artifact_corpus_sha256``) that
-    E4's artifact measured a different corpus revision than the run froze, while the
-    note beside it said the two ARE the same — and V7 could never catch it, because
-    ``_same_corpus`` short-circuits before the declaration is read. So the arm went
-    from VERIFIED (pre-fix: an off-pin constant whose digest had to appear in the
-    artifact) to an unverified, redundant claim on the one row that cannot be scored
-    off the pin at all. This drives the real selector -> row -> table path, so a
-    reversion reds here and not only in a fixture.
-
-    Non-vacuity: at the previous head ``build_rows`` stamped the field unconditionally
-    from ``e4["corpus_sha256"]``, so the first assertion is red there; the fixture case
-    above is what reds if the condition becomes a blanket removal.
-    """
-    pin = _prereg()["corpus"]["fixtures_hash"]
-    e4 = measure.build_e4_row(measure.load_e4(_REPO, frozen_pin=pin),
-                              bars=measure.parse_bars(_prereg()), corpus_sha=pin)
-    rows = {row["criterion"]: row for row in _rows(log_corpus_sha=pin, e4=e4)}
-    assert "artifact_corpus_sha256" not in rows["E4"], rows["E4"]
-    assert measure._same_corpus(rows["E4"]["corpus_sha256"], pin), rows["E4"]
+    off = {row["criterion"]: row for row in _rows(e4={
+        "verdict": "RED", "numerator": 2, "denominator": 15,
+        "sha": "a999be41e", "corpus_sha256": off_pin_corpus,
+        "evidence": "tests/eval/write_path/receipts/off-pin.json",
+        "note": "off-pin"})}
+    assert off["E4"]["artifact_corpus_sha256"] == off_pin_corpus, off["E4"]
+    assert off["E4"]["evidence"] == \
+        "tests/eval/write_path/receipts/off-pin.json", off["E4"]
 
 
 def test_the_e1_and_e2_rows_carry_the_counts_their_criteria_are_written_over():
@@ -932,6 +911,27 @@ def test_the_e1_and_e2_rows_carry_the_counts_their_criteria_are_written_over():
     reading another population reds this test rather than the table.
     """
     parsed = measure.measure_e1_e2(_REPO)
+    rows = {row["criterion"]: row for row in _rows()}
+    assert (rows["E2"]["numerator"], rows["E2"]["denominator"]) == (
+        parsed["e2a_survived"], parsed["e2a_units"])
+    # E1's slot is the PASS-direction half of its (minimised) share: the table's
+    # numerator is a count that passed on every other row, and a bare-definite
+    # count of 0 — the BEST outcome — would be refused by V5 as a silent drop.
+    assert (rows["E1"]["numerator"], rows["E1"]["denominator"]) == (
+        parsed["after_objects"] - parsed["after_numerator"],
+        parsed["after_objects"])
+    assert measure.e1_pass_objects({"after_numerator": 0,
+                                    "after_objects": 61}) == 61, (
+        "a run with NO bare-definite Objects must still be writable green")
+    assert measure.e1_pass_objects({"after_numerator": None,
+                                    "after_objects": 61}) is None
+    # The two rows score two DIFFERENT populations (all Objects vs the frozen 14
+    # value-bearing units), so neither may name the other as a `sibling`: V8
+    # compares one population's two copies, and naming this pair siblings is what
+    # forced both counts to None in the first place.
+    assert "sibling" not in rows["E1"] and "sibling" not in rows["E2"]
+    assert parsed["e2a_units"] != parsed["after_objects"], (
+        "the two populations are the same number — re-derive this pin")
 
 
 def test_a_non_string_e4_corpus_yields_a_row_and_not_a_traceback():
@@ -972,31 +972,6 @@ def test_build_e4_row_refuses_rather_than_raising_on_a_non_string_pin():
         measure.build_e4_row(receipt, bars=measure.parse_bars(_prereg()),
                              corpus_sha=12345)
     assert "REFUSED" in str(exc.value), str(exc.value)
-
-
-def test_the_e1_and_e2_siblings_carry_the_same_denominator():
-    """V8's rule: the composite pair is carried, not restated differently."""
-    rows = {row["criterion"]: row for row in _rows()}
-    assert (rows["E2"]["numerator"], rows["E2"]["denominator"]) == (
-        parsed["e2a_survived"], parsed["e2a_units"])
-    # E1's slot is the PASS-direction half of its (minimised) share: the table's
-    # numerator is a count that passed on every other row, and a bare-definite
-    # count of 0 — the BEST outcome — would be refused by V5 as a silent drop.
-    assert (rows["E1"]["numerator"], rows["E1"]["denominator"]) == (
-        parsed["after_objects"] - parsed["after_numerator"],
-        parsed["after_objects"])
-    assert measure.e1_pass_objects({"after_numerator": 0,
-                                    "after_objects": 61}) == 61, (
-        "a run with NO bare-definite Objects must still be writable green")
-    assert measure.e1_pass_objects({"after_numerator": None,
-                                    "after_objects": 61}) is None
-    # The two rows score two DIFFERENT populations (all Objects vs the frozen 14
-    # value-bearing units), so neither may name the other as a `sibling`: V8
-    # compares one population's two copies, and naming this pair siblings is what
-    # forced both counts to None in the first place.
-    assert "sibling" not in rows["E1"] and "sibling" not in rows["E2"]
-    assert parsed["e2a_units"] != parsed["after_objects"], (
-        "the two populations are the same number — re-derive this pin")
 
 
 def test_the_e1_floor_is_applied_to_the_arm_the_row_counts():
@@ -1432,7 +1407,7 @@ def test_the_renderer_renders_a_log_from_the_committed_record(monkeypatch):
     """
     census_data = _canned_census(monkeypatch)
     e1 = measure.measure_e1_e2(_REPO)
-    e4 = measure.load_e4(_REPO)
+    e4 = measure.load_e4(_REPO, frozen_pin=_prereg()["corpus"]["fixtures_hash"])
 
     def render(record: dict) -> str:
         bars = measure.parse_bars(record)
@@ -5460,11 +5435,13 @@ def _render_a_log(monkeypatch, *, receipt: dict, corpus_sha: str) -> str:
                "stats": {}}],
         observed={}, unobserved={},
         census_data=_canned_census(monkeypatch),
-        e1={"before_share": 0.6, "after_share": 0.6, "objects_numerator": 15,
-            "objects_total": 25, "sha": "c" * 40, "corpus": "corpus",
-            "corpus_sha256": "sha256:" + "e" * 64, "declared_prereg": "no",
-            "declared_result": "UNPREREGISTERED", "real_facts": 90,
-            "state_values": 42, "fused": 7, "atomic_points": 9},
+        # REBASE UNION (#10610 × #10679): the canned `e1` here predated the fold's
+        # `e1_row_note`/`e1_pass_objects` and carried five keys the row builder now
+        # reads (`after_objects`, `after_numerator`, `corpus_sha256`,
+        # `gate_drops_total`, `gate_drops_objects`) plus the floor/decidability pair.
+        # Reading the COMMITTED record is what the fold's own render case does, and it
+        # keeps this helper from drifting out of the renderer's contract again.
+        e1=measure.measure_e1_e2(_REPO),
         e1_aux={"bare_definite": 0, "share": 0.0},
         e1_out={"outcome": "REFUSED", "value": "15/25", "bar": "x"},
         e1b_out={"outcome": "CONTROL", "value": "90", "bar": "x"},
@@ -5583,9 +5560,9 @@ def test_a_row_cites_the_receipt_the_selector_chose():
         head="a" * 40, out_path="docs/evidence/7949-capstone/e1-e2.log",
         log_corpus_sha="sha256:" + "d" * 64,
         e1={"verdict": "BLOCKED", "sha": "c" * 40, "corpus_sha256": "e" * 64,
-            "note": "E1 note"},
+            "numerator": 1, "denominator": 2, "note": "E1 note"},
         e2={"verdict": "BLOCKED", "sha": "c" * 40, "corpus_sha256": "e" * 64,
-            "note": "E2 note"},
+            "numerator": 1, "denominator": 2, "note": "E2 note"},
         e3={"verdict": "RED", "numerator": 23, "denominator": 70, "note": "E3 note"},
         e4={"verdict": "RED", "numerator": 5, "denominator": 15, "sha": "a" * 9,
             "corpus_sha256": "sha256:" + "d" * 64, "note": "E4 note",
@@ -5610,9 +5587,9 @@ def test_a_row_with_no_evidence_path_is_refused_not_defaulted_to_the_constant():
             head="a" * 40, out_path="docs/evidence/7949-capstone/e1-e2.log",
             log_corpus_sha="sha256:" + "d" * 64,
             e1={"verdict": "BLOCKED", "sha": "c" * 40, "corpus_sha256": "e" * 64,
-                "note": "E1 note"},
+                "numerator": 1, "denominator": 2, "note": "E1 note"},
             e2={"verdict": "BLOCKED", "sha": "c" * 40, "corpus_sha256": "e" * 64,
-                "note": "E2 note"},
+                "numerator": 1, "denominator": 2, "note": "E2 note"},
             e3={"verdict": "RED", "numerator": 23, "denominator": 70,
                 "note": "E3 note"},
             e4={"verdict": "RED", "numerator": 5, "denominator": 15,
