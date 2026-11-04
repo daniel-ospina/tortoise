@@ -2229,3 +2229,40 @@ def test_json_refused_run_ships_no_pickable_row(tmp_path: Path, capsys):
     assert payload["refused"] is True
     assert payload["units"], "the rows are still reported"
     assert all(u["pickable"] is False for u in payload["units"])
+
+
+# ── a wrong-typed merge verdict must not read as MEASURED CLEAN (round 12) ─
+@pytest.mark.parametrize("bad", [0, "false", "yes", 1, {}, [], "true"])
+def test_a_non_boolean_merge_verdict_is_an_abstention(bad):
+    """The polarity was `is False` / `is None`, so every OTHER value fell through.
+
+    `0` and `"false"` are the values a hand-written snapshot most plausibly carries
+    for "conflicted"; either one read as MEASURED CLEAN and got the merge rail at
+    exit 0, for a tree that was never shown to merge. Every other field in this
+    module fails closed on an unrecognised value — attestation, claims, the gate.
+    """
+    s = snap(
+        issues=[issue(100)],
+        pulls=[{**pull(1001, closes=[100]), "head_ref": "fix/100-x"}],
+        check_runs={"a" * 40: all_green()},
+        attestation={"1001": {"verdict": "head"}},
+        merge_tree={"1001": {"clean": bad}},
+    )
+    (row,) = units_for(s)
+    assert row.position == "NEEDS-TEST", row.detail
+    assert next_command(row, REPO) is None
+    assert any("UNMEASURED" in d for d in row.detail)
+
+
+def test_a_true_merge_verdict_still_lands():
+    """The complement: a real boolean True must not be swept into the abstention."""
+    s = snap(
+        issues=[issue(100)],
+        pulls=[{**pull(1001, closes=[100]), "head_ref": "fix/100-x"}],
+        check_runs={"a" * 40: all_green()},
+        attestation={"1001": {"verdict": "head"}},
+        merge_tree={"1001": {"clean": True}},
+    )
+    (row,) = units_for(s)
+    assert row.position == "READY-TO-LAND"
+    assert (next_command(row, REPO) or "").startswith("bash ")

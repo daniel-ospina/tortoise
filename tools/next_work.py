@@ -46,8 +46,8 @@ WHAT IT EMITS, AND WHY THAT IS THE POINT
 ----------------------------------------
 A ranked list is a REPORT. This tool prints, for the top row, the exact command
 a runner would execute — which rail, which PR, which issue — or, when the top row
-needs a human decision (a review) or is waiting on a runner, the ACTION and then
-the first lower-ranked unit that DOES have a command. That is the difference
+needs a human decision (a review), is waiting on a runner, or is a DRAFT, the
+ACTION and then the first lower-ranked unit that DOES have a command. That is the difference
 between a consumer and an actuator, and it is why the output has a
 ``NEXT ACTION`` block rather than a table alone.
 
@@ -64,7 +64,9 @@ read-only by its own contract.
 DETERMINISM — WHAT MAKES A SECOND LANE'S PICK CHECKABLE
 -------------------------------------------------------
 The ordering key is total: ``(priority_rank, position_rank, unit_key)`` where
-``unit_key`` is the issue number (or ``fold:<pr>``). Given the same snapshot,
+``unit_key`` is an ORDER tuple — ``(0, issue)`` for an issue, ``(1, pr)`` for a fold
+— so issues sort before folds at equal priority and position, and the comparison is
+NUMERIC (a text key would put 100 before 99). Given the same snapshot,
 two consumers pick the SAME row — that is the idempotence the brief asks for.
 ⛔ IT IS NOT MUTUAL EXCLUSION, and saying it was would be a lie: determinism means
 two concurrent lanes would take the SAME PR, and this tool writes no claim (it is
@@ -99,15 +101,15 @@ Usage
     uv run python tools/next_work.py --snapshot-out s.json --top 5
 
 Exit codes
-    0  the queue was fully read and a next action was decided
+    0  the queue was fully read and a next action was decided. When the top row has
+       nothing to run — NEEDS-TEST (a runner), NEEDS-REVIEW (a human), or a DRAFT
+       (the author's) — the block prints that row's ``ACTION`` and then the first
+       lower-ranked unit that DOES have a command; when NOTHING is runnable it says
+       so and names no unit
     1  the queue was read but NO unit is pickable — every one is held, is a fold
-       constituent, is a duplicate of a row already offered, or the queue is
-       empty. There is no action, and that is an answer. Held and superseded rows are filtered out of the pick, so when the
-       RANK LEADER is held the next pickable row is simply the `TOP` — and the
-       `RUNNABLE` line appears when the top row itself has nothing to run: NEEDS-TEST
-       (a runner), NEEDS-REVIEW (a human), or any other position without a rail. It
-       names the first unit that DOES have a command, and that unit's actual reason;
-       when NOTHING is runnable it says so and names no unit
+       constituent, is a duplicate of a row already offered (a blocked row owns its
+       action target, so a duplicate can be the rank leader), or the queue is
+       empty. The block prints ``NONE`` and that is an answer, not an error
     2  INCOMPLETE: a surface the decision depends on could not be read — the
        queue gate (``.mergify.yml``, at collection OR missing from a replayed
        snapshot), the claim registry (``claims.sh`` absent, its snapshot header
@@ -682,15 +684,26 @@ def _position_for_pr(
     # surfaced — the opposite of the documented order (gate → attestation → merge).
     mt = snap.merge_tree.get(str(pr["number"])) or {}
     clean = mt.get("clean")
-    if clean is False:
+    # ⛔ THE POLARITY IS `is True`, NOT `is False`. Written as `is False` / `is None`,
+    # every OTHER value — `0`, `"false"`, `1`, `{}`, `[]`, `"yes"` — fell through
+    # with no downgrade at all, i.e. a tree that was never shown to merge read as
+    # MEASURED CLEAN and got the merge rail at exit 0. That is the exact inversion
+    # the comment below forbids, and it was the only field in this module where
+    # "not recognised" defaulted permissive: an unknown attestation verdict, an
+    # unknown claim verdict and a missing gate all fail closed. `0` and `"false"`
+    # are the values a hand-written snapshot most plausibly carries for "conflicted".
+    if clean is True:
+        pass  # measured clean; nothing to record
+    elif clean is False:
         pos = "NEEDS-FIX"
         detail.append(f"merge-tree: {mt.get('why') or 'conflict against base'}")
-    elif clean is None:
+    else:
         if pos == "READY-TO-LAND":
             pos = "NEEDS-TEST"
         detail.append(
-            f"merge-tree: UNMEASURED ({mt.get('why') or 'head not available locally'}) "
-            "— cannot be shown to merge, so it is not landable"
+            f"merge-tree: UNMEASURED ({mt.get('why') or 'head not available locally'})"
+            + ("" if clean is None else f" — clean={clean!r} is not a boolean verdict")
+            + " — cannot be shown to merge, so it is not landable"
         )
     return (pos, detail)
 
@@ -1683,7 +1696,10 @@ def render(
             + "\n  A surface the decision depends on could not be read, so no unit's freedom is provable."
         )
     elif pick is None:
-        out.append("  NONE — every measured unit is held or superseded. That is an answer, not an error.")
+        out.append(
+            "  NONE — every measured unit is held, superseded, or a duplicate of a row "
+            "already offered. That is an answer, not an error."
+        )
     else:
         out.append(f"  TOP       {_label(pick)}  ({pick.priority}, {pick.reason}, position {pick.position})")
         cmd = next_command(pick, repo)
@@ -1767,7 +1783,10 @@ def render(
         out.append("")
     pickable = [u for u in units if u.pickable]
     shown = pickable[: max(top, 0)]
-    out.append(f"TOP {len(shown)} PICKABLE of {len(units)} unit(s) (rank order, held/superseded excluded)")
+    out.append(
+        f"TOP {len(shown)} PICKABLE of {len(units)} unit(s) "
+        "(rank order; held, superseded and duplicate rows excluded)"
+    )
     # ⛔ A REFUSED RUN DELIVERS NO COMMAND IN EITHER FORMAT. The `--json` path
     # nulled every `next_command` while this footer still printed them, so a text
     # consumer grepping for a command could find one on a run the tool itself
@@ -1776,7 +1795,7 @@ def render(
         cmd = "" if snap.unreadable else (next_command(u, repo) or "")
         out.append(f"  {i}. {_label(u):<12} {u.priority:<11} {u.reason:<19} {cmd[:96]}".rstrip())
     out.append(
-        "ordering key = (priority, position, number) — total, and no clock enters the decision, "
+        "ordering key = (priority, position, (kind, number)) — total, and no clock enters the decision, "
         "so a re-run picks the same row."
     )
     return "\n".join(out), pick
@@ -1825,7 +1844,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         # still "could not check" rather than the interpreter's 1.
         code = exc.code if isinstance(exc.code, int) else 2
         return code if code != 1 else 2
-    except (AttributeError, KeyError, TypeError, ValueError, OSError) as exc:
+    except (AttributeError, KeyError, TypeError, ValueError, OSError, RecursionError) as exc:
         print(
             f"next_work: INCOMPLETE — the snapshot could not be decided "
             f"({type(exc).__name__}: {exc}). exit 2 is 'could not check'.",
@@ -1846,9 +1865,11 @@ def _main(argv: Sequence[str] | None = None) -> int:
             "that just finished, a human. Deliberately NOT a timer: cmux authorises by ancestry, so "
             "a launchd job cannot act on a pane, and an actuator that cannot deliver is the defect "
             "this fleet keeps re-learning. The 'NEXT ACTION' block is the actuator half: the exact "
-            "command for the top row — or, when the top row needs a review or is waiting on a "
-            "runner, the ACTION for it plus the first unit below it that DOES have a command.\n\n"
-            "IDEMPOTENT BY CONSTRUCTION: the ordering key is total — (priority, position, number) — "
+            "command for the top row — or, when the top row needs a review, is waiting on a "
+            "runner, or is a DRAFT, the ACTION for it plus the first unit below it that DOES "
+            "have a command.\n\n"
+            "IDEMPOTENT BY CONSTRUCTION: the ordering key is total — (priority, position, "
+            "(kind, number)), where an issue is (0, n) and a fold is (1, pr) — "
             "so two runs on one snapshot agree on the row. That is AGREEMENT, not exclusion: two "
             "concurrent lanes would pick the same unit, and this tool writes no claim — what stops "
             "a second lane is `refs/claims`, written by the one that acts. NO clock enters the "
