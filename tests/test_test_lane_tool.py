@@ -5410,3 +5410,31 @@ def test_a_run_whose_container_DIED_is_still_reaped(lane, monkeypatch, capsys):
     assert tl.main(["run", "--", "-q", "tests/"]) == 0
     assert reaped == [1], "a container that DIED during the run was left behind"
     assert "reaping" in capsys.readouterr().err
+
+
+def test_pid_reuse_is_decided_by_WHEN_the_process_started_not_by_an_age():
+    """The three directions of `_pid_started_after`, on a REAL child process.
+
+    The direction that matters is the one that must NOT fire: declaring a genuine
+    peer's pid reused removes a LIVE run's container (#10813 review P3-8). The
+    other two are the reasons the rule exists — a marker older than the process
+    that now wears its pid is stale, and a question the platform cannot answer
+    must not be read as an answer.
+    """
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        import time as _time
+        _time.sleep(0.2)
+        now = _time.time()
+        # A marker just written by THIS live peer: it started before it.
+        assert tl._pid_started_after(child.pid, now) is False
+        # A marker two hours OLD: this process is too young to have written it.
+        assert tl._pid_started_after(child.pid, now - 7200) is True
+        # Unreadable (no such pid): unknown, which the caller must not read as
+        # stale — only a positive `True` clears a marker.
+        assert tl._pid_started_after(999_999, now) is None
+        # A clock that disagrees the other way must not manufacture "reused".
+        assert tl._pid_started_after(child.pid, now + 99999) is False
+    finally:
+        child.kill()
+        child.wait()

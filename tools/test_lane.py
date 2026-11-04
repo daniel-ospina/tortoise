@@ -3027,31 +3027,17 @@ def reap_orphans(own_name: str | None = None) -> list[str]:
                 # `container_reaper`'s `undecided` predicate matches, and this is
                 # a PERMANENT state, not a transient read failure.
                 out.append(
-                    f"reap: kept {name} — its owning worktree {owner} is gone, "
-                    f"but it is {state}, so it cannot be asked about its clients "
-                    f"(docker exec only reaches a RUNNING container) and is not "
-                    f"removed; release it with `docker rm -f {name}`")
+                    f"reap: kept {name} — its "
+                    f"{'labelled' if labelled_owner else 'owning'} worktree "
+                    f"{owner} is gone, but it is {state}, so it cannot be asked "
+                    f"about its clients (docker exec only reaches a RUNNING "
+                    f"container) and is not removed; release it with "
+                    f"`docker rm -f {name}`")
                 continue
             if labelled_owner:
-                if state in _LIVE_ISH_STATES:
-                    # ⛔ The SAME classification the name-derived arm applies, for
-                    # the same reason — this arm used to reach the probe
-                    # unconditionally and answer `None` for `created`/`paused`,
-                    # which is the `fail-closed` shape the ACTUATOR reads as an
-                    # `undecided` tick (`tools/container_reaper.py`). The labelled
-                    # population is precisely the STRANDED one (#10712's stamp
-                    # survives `git worktree remove`), so that shaped a 15-minute
-                    # timer red FOREVER over a question no retry can answer — and
-                    # a permanently FAILED unit is exactly the signal the
-                    # stale-copy pin relies on (#10813 review P2). The container is
-                    # still KEPT (docker cannot be asked, so no arm may remove it)
-                    # and the one command that releases it is named.
-                    out.append(f"reap: kept {name} — its labelled worktree "
-                               f"{owner} is gone, but it is {state}, so it "
-                               f"cannot be asked about its clients (docker exec "
-                               f"only reaches a RUNNING container) and is not "
-                               f"removed; release it with `docker rm -f {name}`")
-                    continue
+                # (The `_LIVE_ISH_STATES` classification is applied ONCE, above
+                # this branch, for both arms — a second copy here would be
+                # unreachable code that reads as a live guard.)
                 busy = (False if state in _TERMINAL_STATES
                         else _container_in_use(name))
                 if busy:
@@ -3839,7 +3825,10 @@ def cmd_run(args: argparse.Namespace) -> int:
                 print(f"test-lane: could not reap {name} on exit ({_exc}); "
                       f"the scheduled reaper (tools/container_reaper.py) will "
                       f"collect it", file=sys.stderr)
-        if kept:
+        # `started` too: a run whose `start()` raised never had a container, and
+        # re-stamping a lease for one that does not exist writes into the REAL
+        # registry for no reason.
+        if kept and started:
             # ⛔ The container SURVIVED this run, so its lease must be re-stamped
             # (the #10693 F1 rule: the epoch is the END of the last use). Putting
             # the stamp only on the `--keep-container` branch left every
