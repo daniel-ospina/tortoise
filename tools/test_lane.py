@@ -2039,7 +2039,12 @@ def _assert_removal_allowed(name: str, root: Path | str | None = None) -> None:
     tool exists for). A read that degraded between the two would then refuse to
     clean up the container the SAME call just created, leaving it holding a
     reserved port: the #8180 leak, produced by the guard meant to prevent it.
-    Omitted (`None`) only by the CLI paths, which have no earlier read to share.
+
+    No production call site omits it: `start()` reads the root ONCE
+    (`_lane_identity`) and threads it into all four removals it performs, and
+    `stop()` removes directly rather than through this guard. The default is
+    retained only so the guard stays callable without a prior read; a caller
+    that HAS read the root passing `None` is the bug this parameter prevents.
     """
     if not is_managed(name):
         raise SystemExit(f"test-lane: refusing to remove unmanaged {name!r}")
@@ -2668,6 +2673,13 @@ def reap_orphans(own_name: str | None = None) -> list[str]:
     this function ACTED on or decided to KEEP; a name refused by `is_managed()`
     is not reported (it was never a candidate), so a caller reports what
     actually happened instead of counting.
+
+    ONE container can produce TWO lines, and that is deliberate rather than a
+    miscount: a label that is not evidence is reported first (``carries an
+    ownership label that is not evidence`` — the reason the stamp was ignored)
+    and then again by whatever arm the container's own state licenses (the
+    outcome). The two lines answer different questions about one container, so
+    a reader counting containers must count DISTINCT NAMES, not lines.
     """
     slugs = _worktree_slugs()
     if slugs is None:
