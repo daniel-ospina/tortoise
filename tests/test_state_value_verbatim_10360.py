@@ -1021,6 +1021,18 @@ _ADJACENCY_CLOSED_CLAIM = (
 )
 
 
+#: The ONE exemption for the full adjacency scan in the trailing region: a
+#: sentence that discloses the still-open SPELLING class AND names no unit at all.
+#: The unit-token arm is what keeps an appended reopening from hiding behind the
+#: word `spelling` (review cycle 8, MEASURED: scanning the tail with the NARROW
+#: subset instead let 7 end-appended reopenings PASS, e.g. "except `minute`, which
+#: is open again" — the shape the block's own comment calls the likeliest edit).
+_UNIT_TOKEN = re.compile(
+    r"\b(minute|minutes|second|seconds|hour|hours|day|days|week|weeks|month|"
+    r"months|year|years|mile|miles|percent|pct|millisecond|milliseconds|"
+    r"time-unit)\b")
+
+
 #: The reopenings that may NOT appear even in the sentence that discloses the
 #: STILL-OPEN spelling class: they say a unit stopped being fused/judged, which
 #: reopens the adjacency gap whatever else the sentence is about (review cycle 7,
@@ -1117,11 +1129,15 @@ def test_the_registry_row_names_the_residual_that_still_stands():
             assert m is None, (
                 f"the row says {m.group(0)!r}, which reopens the adjacency gap "
                 f"this table closed: {sentence!r}")
-    # region B may describe the SPELLING gap as open (it IS open), but must not
-    # claim a unit stopped being fused/judged, and must still DISCLOSE that gap.
+    # ⛔ AND THE TAIL IS SCANNED WITH THE FULL LIST, exempting only a sentence that
+    # discloses the SPELLING class and names NO unit (review cycle 8, MEASURED:
+    # the narrow subset let `except \`minute\`, which is open again.` — appended at
+    # the very end — PASS, a regression against the parent commit).
     tail = sentences[last + 1:]
     for sentence in tail:
-        for pattern in _SPELLING_SENTENCE_REOPENING:
+        if "spelling" in sentence and not _UNIT_TOKEN.search(sentence):
+            continue  # the disclosed still-open SPELLING gap, its own sentence
+        for pattern in _ADJACENCY_REOPENING:
             m = re.search(pattern, sentence)
             assert m is None, (
                 f"the row says {m.group(0)!r}, which reopens the adjacency gap "
@@ -1130,7 +1146,7 @@ def test_the_registry_row_names_the_residual_that_still_stands():
         "a sentence after the adjacency claim says something other than the "
         f"disclosed SPELLING residual — inspect it: {tail!r}")
     if tail:
-        assert any("open" in s for s in tail), (
+        assert any("spelling" in s and "open" in s for s in tail), (
             "the row no longer discloses that the SPELLING class is open: "
             f"{tail!r}")
     # positive control: the RATE class IS still open, and it must stay NAMED, or
