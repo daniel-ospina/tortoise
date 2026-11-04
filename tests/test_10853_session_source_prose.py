@@ -341,12 +341,18 @@ def test_the_props_tail_cannot_smuggle_the_prose_past_the_guard():
     guard that stops guarding without reddening is worse than no guard. Review
     P2 on this PR measured the hole before it was closed.
     """
+    # ⚠️ BOTH spellings, because `props` is an OPEN set keyed by whatever the
+    # payload said: `_search_text` is a real COLUMN, so the tail can carry the
+    # snake spelling where it cannot carry the canonical one (review cycle 5, P3
+    # — the first cut of this filter missed it).
     row = _captured_session_row(
-        props='{"summary": "TAIL PROSE", "_searchText": "TAIL INDEX"}')
+        props='{"summary": "TAIL PROSE", "_searchText": "TAIL INDEX", '
+              '"_search_text": "SNAKE TAIL PROSE"}')
     node = node_from_row("Source", row)
 
     assert "summary" not in node.props
     assert "_searchText" not in node.props
+    assert "_search_text" not in node.props
 
 
 @pytest.mark.parametrize("shape", [
@@ -376,3 +382,25 @@ def test_the_row_and_node_predicates_agree_on_every_shape(shape):
         as_props[cp.canonical_property("source", column)] = value
 
     assert cp.is_episodic_source_node(as_props) == cp._is_episodic_source_row(row)
+
+
+def test_the_reconciler_exclusion_is_scoped_to_the_Source_label():
+    """The label gate is load-bearing: `Event` projects a `summary` too.
+
+    Deleting the gate leaves every other leg green (no `Event` row carries a
+    `url`), and the exclusion would then strip `summary` from any Event node that
+    happened to look episodic — the same false red one label over. This is the
+    leg that makes the gate non-vacuous. (Review cycle 5, P3.)
+    """
+    from tortoise import record_reconcile as rr
+
+    rows = [({"eventId": "e-10853", "summary": "an event summary",
+             "url": "session:s-10853"},)]
+    scan = rr.scan_cache_view(_FakeGraph(rows), labels=["Event"])
+    (key,) = scan.view
+
+    assert key.startswith("Event:")
+    assert "summary" in scan.placed[key], (
+        "the exclusion fired on a non-Source label: `Event`'s own `summary` was "
+        "treated as the declined Source pair"
+    )

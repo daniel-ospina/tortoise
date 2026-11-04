@@ -250,7 +250,7 @@ title-derived `_searchText`, silently un-indexing it in the cache.
   every session this build captures would report `field_mismatches` forever — the
   "signal indistinguishable from noise" the reconciler's own docstring grades P1.
   So `scan_cache_view` marks the pair CACHE-OWNED for an episodic Source
-  (`cache_projection.EPISODIC_SOURCE_PROSE_PROPERTIES`) and the run counts it
+  (`cache_projection.episodic_source_prose_properties()`) and the run counts it
   under its own `graph_only` bucket: visible, and not a divergence against a
   record that is correct. The graph side is repaired by a record-sourced
   re-projection (`record-restore` / `rebuild_from_record`, which re-materialise
