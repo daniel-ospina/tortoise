@@ -7508,6 +7508,54 @@ def test_the_after_arm_is_witnessed_by_the_gate_drops_record(tmp_path, capsys):
     assert "one run, one Object census" in capsys.readouterr().err
 
 
+def test_the_on_arms_witness_census_is_required_not_optional(tmp_path, capsys):
+    """#10610 review at `67a3b8e98` (P2, fail-open): the census list was optional.
+
+    `e1-gate-drops.json`'s `object_names` is the ONLY witness for the ON arm's counts
+    that is independent of the two integers it reconciles: `on-arm.log`'s `e1-aux` line
+    and the record's own `objects`/`bare_definite` are plain numbers, so a
+    self-consistent multi-field edit of them is refuted by nothing else. The guard was
+    written `if isinstance(gate_names, list) and gate_names:`, which skipped BOTH of its
+    arms — and fell through to `e1_pairings` — whenever the list was absent, empty, or
+    not a list.
+
+    Measured on the PRE-FIX probe (this test's own non-vacuity): the multi-field edit the
+    guard exists to refuse, PLUS `"object_names": []`, returned
+    `E1 PASS decidable=True` with exit 0 — a CHEAPER edit than the one the guard was
+    added for, because there is no 61-name list to forge — and the row builder turned
+    that record into a GREEN `#9080` E1 row. Post-fix each of the three shapes exits 2
+    and writes no record.
+
+    The shipped record must still score, so this is a refusal of EDITED shapes only and
+    not of the producer's own output: `probes/e1_gate_drops.py` writes `object_names`
+    unconditionally, so an absent or empty list is always an edit, never an older shape.
+    """
+    # The control first: the real bundle still scores, so the required-field guard
+    # refuses forged shapes without refusing the producer's own record.
+    shipped = scores_probe.score(_REPO)
+    assert shipped["e1"]["outcome"] == "REFUSED", shipped["e1"]
+    gates_shipped = json.loads(
+        (_REPO / "docs/evidence/9889/e1-gate-drops.json").read_text())
+    assert len(gates_shipped["object_names"]) == 61, gates_shipped.keys()
+
+    # …and every shape that would silently disable the witness is refused.
+    absent = object()
+    for label, value in (("absent", absent), ("empty", []), ("non-list", "61")):
+        repo = _bundle(tmp_path / f"gate-names-{label}")
+        path = repo / "docs/evidence/9889/e1-gate-drops.json"
+        record = json.loads(path.read_text())
+        if value is absent:
+            del record["object_names"]
+        else:
+            record["object_names"] = value
+        path.write_text(json.dumps(record))
+        with pytest.raises(SystemExit) as refused:
+            scores_probe.score(repo)
+        assert refused.value.code == 2, (label, refused.value)
+        err = capsys.readouterr().err
+        assert "carries no `object_names` census" in err, (label, err)
+
+
 def test_the_after_arm_readback_is_read_with_the_repos_truthiness(tmp_path, capsys):
     """#10610 review at `f12471075` (P1): the ON test was a DENY-list of spellings.
 

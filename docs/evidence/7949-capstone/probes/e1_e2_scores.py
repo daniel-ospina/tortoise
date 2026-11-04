@@ -1228,21 +1228,44 @@ def score(repo: Path = _ROOT) -> dict:
                 f"{EVIDENCE / ON_ARM_LOG} reports {field}={after[field]} but "
                 f"{GATE_DROPS} — the same run, same graph — reports {stated}: "
                 "two censuses of one ON run cannot disagree")
+    # ⛔ THE CENSUS LIST IS REQUIRED, NOT OPTIONAL (P2, #10610 review at `67a3b8e98`).
+    # The two checks below are the ONLY witness for the ON arm's counts that is
+    # independent of the two numbers they reconcile — `on-arm.log`'s `e1-aux` line and
+    # `e1-gate-drops.json`'s `objects`/`bare_definite` are both plain integers, so a
+    # self-consistent multi-field edit of them is refused by nothing except this list.
+    # Written as `isinstance(...) and ...`, the guard was a NO-OP in exactly the state
+    # an edit produces: absent, `[]`, or any non-list skipped BOTH arms and fell through
+    # to `e1_pairings`. Measured on the pre-fix driver: the multi-field edit that the
+    # guard was written to refuse returned `E1 PASS, decidable: true` after deleting
+    # `object_names` — a CHEAPER edit than the one the guard existed for (no name list
+    # to forge), and the row builder turned that record into a GREEN `#9080` E1 row.
+    #
+    # Absence is never a default here, which is the rule the sibling guards in this file
+    # already apply: `_census_reconcile` refuses a missing `per_session`, both call sites
+    # refuse a present-but-empty `with_anchor`, and a missing `arm` key is refused rather
+    # than read as unset. `probes/e1_gate_drops.py` writes `object_names`
+    # UNCONDITIONALLY, so an absent or empty list is always an edit, never a producer's
+    # older shape.
     gate_names = gates_record.get("object_names")
-    if isinstance(gate_names, list) and gate_names:
-        if len(gate_names) != after["objects"]:
-            raise _refuse(
-                f"{GATE_DROPS} carries {len(gate_names)} `object_names` beside its "
-                f"own objects={gates_record.get('objects')} — the record's census "
-                "and its count cannot disagree either")
-        gate_bare = sum(1 for item in gate_names if _is_bare_definite(item))
-        if gate_bare != after["bare_definite"] or after["objects"] != len(gate_names):
-            raise _refuse(
-                f"{GATE_DROPS}'s own {len(gate_names)} `object_names` ({gate_bare} "
-                f"bare-definite) do not reproduce the ON arm's "
-                f"{after['bare_definite']}/{after['objects']} — the run's census is "
-                "the names it wrote, so a share computed over another one is not "
-                "this run's share")
+    if not isinstance(gate_names, list) or not gate_names:
+        raise _refuse(
+            f"{GATE_DROPS} carries no `object_names` census — the one record that "
+            "WITNESSES the ON run's census must carry the population it counts; an "
+            "absent, empty or non-list census is the shape a cheaper edit produces, "
+            "and it cannot be confirmed by anything else in the record")
+    if len(gate_names) != after["objects"]:
+        raise _refuse(
+            f"{GATE_DROPS} carries {len(gate_names)} `object_names` beside its "
+            f"own objects={gates_record.get('objects')} — the record's census "
+            "and its count cannot disagree either")
+    gate_bare = sum(1 for item in gate_names if _is_bare_definite(item))
+    if gate_bare != after["bare_definite"] or after["objects"] != len(gate_names):
+        raise _refuse(
+            f"{GATE_DROPS}'s own {len(gate_names)} `object_names` ({gate_bare} "
+            f"bare-definite) do not reproduce the ON arm's "
+            f"{after['bare_definite']}/{after['objects']} — the run's census is "
+            "the names it wrote, so a share computed over another one is not "
+            "this run's share")
     e1 = e1_pairings(before_arms, after, floors)
     # ⛔ The E1b bar the log PRINTS must be the one the pre-registration froze (#10610
     # review at `f12471075`, P3): `real_facts` is a numerator, and a log printing
