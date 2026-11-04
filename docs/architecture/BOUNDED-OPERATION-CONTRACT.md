@@ -246,7 +246,10 @@ A marker is only an instrument if a caller can act on it. Therefore:
   `MUTATION-MATRIX(2/2)` — two mutants, **4** tests red in all — recorded on **#8447's
   2026-11-02 mutation-evidence comment**, not in a PR body: the issue is the artifact a lane
   auditing C2 reads (§2's census is written from it), and a PR body is neither durable nor the
-  pointer this census can hold. The nodes that evidence names are resolvable in the tree, and are
+  pointer this census can hold. That comment's opening *structural* claim was later corrected by a
+  fresh comment on **2026-11-04** (the arithmetic below; the original is left unedited so it stays
+  auditable), so a lane reading the 2026-11-02 tables must read the correction beneath them. The
+  nodes that evidence names are resolvable in the tree, and are
   pinned so a rename cannot leave the pointer naming something that does not exist:
   `tests/test_hosted_api.py::TestBoundedPointsListBoundaries` (M1 — marker dropped — kills all four;
   M2 — probe removed, the marker kept but LYING — kills 2 of those same four:
