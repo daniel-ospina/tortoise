@@ -1591,22 +1591,40 @@ _POINT_KIND = re.compile(
 #: Read on the MATCHED SPAN, so the negator may sit on either side of the verb.
 #: ⛔ THE NEGATOR MUST GOVERN THE MENTION, not merely share a sentence: the
 #: parent pattern's verb→`pointKind` gap is `[^.\n]{0,160}?`, which crosses `,`,
-#: `;`, `but` and `yet`, so a negated verb ANYWHERE in the span excused a match
-#: — and because the span already consumed that `pointKind`, the violating clause
-#: behind it was never examined. Measured (#10675 review cycle 2, P2): "the demo
-#: seed no longer writes turn text, but still writes a `pointKind='event'` node"
-#: was GREEN — the HALF-CORRECTION this pin exists for, in the vocabulary its own
-#: comment enumerates. The first alternative therefore walks from the negated
-#: verb to the `pointKind` it negates and stops at a clause boundary (`[^,;]`);
-#: the second covers the negator AFTER the verb, which is adjacent by
-#: construction. ⚠️ Residual: a sentence that negates its FIRST clause and
-#: asserts the shape in a later one (`writes no X but writes a `pointKind=…``)
-#: still passes, because the lookahead inside the parent pattern kills the only
-#: anchored match; catching it needs the subject re-anchored across clauses.
+#: `;`, `and`, `but` and `yet`, so a negated verb ANYWHERE in the span excused a
+#: match — and because the span already consumed that `pointKind`, the violating
+#: clause behind it was never examined. Measured (#10675 review cycle 2, P2):
+#: "the demo seed no longer writes turn text, but still writes a
+#: `pointKind='event'` node" was GREEN — the HALF-CORRECTION this pin exists
+#: for, in the vocabulary its own comment enumerates. So the first alternative
+#: walks from the negated verb to the `pointKind` it negates and stops at a
+#: CLAUSE boundary; the second covers the negator AFTER the verb, which is
+#: adjacent by construction.
+#: ⛔ A CLAUSE BOUNDARY IS NOT PUNCTUATION (`[^,;]` alone): `and`, `but` and
+#: `yet` cross a clause exactly as `,` does, and the comma before them is
+#: OPTIONAL — so a gap that stopped only at punctuation still passed "… no longer
+#: writes turn text to the graph BUT STILL writes a `pointKind='event'` node",
+#: measured end-to-end (#10675 review cycle 3, P2: GREEN). `_NEGATED_CLAUSE_GAP`
+#: therefore refuses a connector token as well as `,`/`;`.
+#: ⚠️ The residual is stated precisely, because the previous wording overstated
+#: its cost: the escape is not the only mechanism. A sentence that negates its
+#: FIRST clause with the negator the PARENT pattern's own lookahead recognises
+#: (`writes no turn text …, and then writes a `pointKind='event'` node`) produces
+#: no anchored match at all — the parent never fires — and closing THAT needs the
+#: subject re-anchored across clauses. It is not what the gap above is for.
+#: ⛔ THE TAIL IS THE PARENT'S TAIL: the parent fires on `pointKind` OR on `turn
+#: node` (the second form is what its own positive half calls the turn shape),
+#: so an escape that only reached `pointKind` left "the demo seed no longer
+#: writes a turn node" RED — a false red on the CORRECTED sentence, which is the
+#: very defect cycle 1 filed. The alternation below is the parent's, spelled
+#: once and tested against both.
+_TURN_SHAPE_TAIL = r"(?:pointKind|\bturn\s+node\b)"
+_NEGATED_CLAUSE_GAP = (
+    r"(?:(?!(?:but|yet|and|although|while|whereas|however|instead)\b)[^,;]){0,60}?")
 _NEGATED_CLAIM = re.compile(
     r"\b(?:not|never|no\s+longer|no\s+more)\s+(?:also\s+|still\s+|ever\s+)?"
-    r"(?:writes?|mints?|creates?)\b[^,;]{0,60}?pointKind"
-    r"|\b(?:writes?|mints?|creates?)\s+(?:no|nothing|none|never)\b",
+    r"(?:writes?|mints?|creates?)\b" + _NEGATED_CLAUSE_GAP + _TURN_SHAPE_TAIL
+    + r"|\b(?:writes?|mints?|creates?)\s+(?:no|nothing|none|never)\b",
     re.IGNORECASE)
 
 
@@ -1831,15 +1849,23 @@ def test_the_present_tense_guard_reads_a_NEGATED_writer_claim_as_the_CORRECTION(
     negator-BEFORE-the-verb form matched, so a TRUE correction produced a RED
     whose message quoted the negation as the violation.
 
-    FAILS IF: any of the four standard negated spellings reds again, or the
-    guard stops matching the un-negated claim (which would make the four arms
-    above vacuous).
+    FAILS IF: any of the standard negated spellings reds again, or the guard
+    stops matching the un-negated claim (which would make the arms above
+    vacuous).
     """
     corrections = (
         "since #10000 the demo seed writes no `pointKind='event'` node",
         "since #10000 the demo seed does not write `pointKind='event'` nodes",
         "since #10000 the demo seed never writes `pointKind='event'` nodes",
         "since #10000 the demo seed no longer writes `pointKind='event'` nodes",
+        # ⛔ THE OTHER TAIL: the parent fires on `turn node` as well as on
+        # `pointKind`, so an escape that only reached `pointKind` red these three
+        # — the same false red cycle 1 filed, reintroduced by the interaction of
+        # two fixes. Measured (cycle 3): all three RED before `_TURN_SHAPE_TAIL`
+        # was shared, GREEN after.
+        "since #10000 the demo seed writes no turn node at all",
+        "since #10000 the demo seed no longer writes a turn node",
+        "since #10000 the demo seed does not write a turn node per turn",
     )
     for sentence in corrections:
         found = _present_tense_writer_claim(sentence)
@@ -1866,6 +1892,17 @@ def test_the_present_tense_guard_reads_a_NEGATED_writer_claim_as_the_CORRECTION(
         "a `pointKind='event'` node per turn (#10000)",
         "since #10000 the demo seed no longer writes `[role]`-tagged text into "
         "the graph; it STILL writes a `pointKind='event'` node per turn",
+        # ⛔ NO COMMA BEFORE THE CONNECTOR — the comma is optional in English, so
+        # a gap that stopped only at `,`/`;` passed this one (#10675 review
+        # cycle 3, P2, GREEN end-to-end) while catching its comma'd twin above.
+        "since #10000 the demo seed no longer writes turn text to the graph but "
+        "still writes a `pointKind='event'` node per turn",
+        "since #10000 the demo seed no longer writes turn text to the graph and "
+        "instead writes a `pointKind='event'` node per turn",
+        # The same crossing, in the OTHER tail vocabulary — that both tails are
+        # escaped is what keeps the comma-less arm a property of the rule.
+        "since #10000 the demo seed no longer writes turn text to the graph but "
+        "still writes a turn node per turn",
     )
     for sentence in compound:
         assert _present_tense_writer_claim(sentence) is not None, (
