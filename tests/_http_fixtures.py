@@ -39,9 +39,31 @@ def _close_keepalive_anchors(module) -> None:
 def patched_tortoise_sdk(db_path: str) -> Iterator[None]:
     """Run one test's hosted-API SDK constructions against a temp embedded DB.
 
+    ⛔ THE EMBEDDED HALF OF THIS CONTRACT IS CONDITIONAL — read this before
+    relying on it. Epic #1647's docker-lane redirect
+    (``FalkorProjection.__init__``, the ``explicit_path and _uri and
+    TORTOISE_TEST_MODE`` block) discards the ``db_path`` this fixture passes
+    whenever a ``TORTOISE_DB_URI`` is in the ambient env — which every CI
+    shard and ``tools/test_lane.py`` export — and gives the construction a
+    session+path HASHED graph name instead. Measured 2026-11-01 (#10180):
+    with the URI set the same seed read back ``_is_embedded = False`` and its
+    graph was ``test_<stem>_<hash>``; with it unset the name was the one the
+    test asked for. So a file that asserts NAMED-GRAPH or embedded semantics
+    (``graph_name=f"org_{org}"``, ``_is_embedded``, a server-wide listing that
+    must contain that name) is a fiction here and must either
+    ``monkeypatch.delenv("TORTOISE_DB_URI")`` for its own body (declared in
+    ``DELIBERATE_URI_MUTATIONS``) or add its stem to
+    ``TORTOISE_TEST_NO_REDIRECT`` — ``tests/test_org_graph_open_tripwire.py``
+    shows both. Files that only need the constructions to agree WITH EACH
+    OTHER (control-plane assertions, receipts, tenancy) are unaffected: the
+    redirect is consistent within one test. The hash-renaming is what a
+    listing-based verdict cannot survive.
+
     Enter:
     - patch ``tortoise.hosted_api.TortoiseSDK.__init__`` so every no-path
       construction binds ``db_path`` (mirrors tests/test_hosted_api.py:104-120).
+      ⚠️ ``db_path`` reaches ``TortoiseSDK`` only as the REDIRECT's input
+      under an ambient URI — see the block above.
     - deterministically close + clear ``_FALLBACK_KEEPALIVE`` (#1497/#1950:
       the module-level anchor dict survives test files, so a stale anchor
       bound to a PREVIOUS test's temp DB leaks state into this test — the
