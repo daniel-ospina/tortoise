@@ -13761,14 +13761,25 @@ class TestBoundedEventCursorBoundaries:
             e["event_id"] for e in first["events"]}
 
     def test_page_two_of_two_is_short_and_that_is_the_signal(self, client):
-        """Boundary 3 — page 2 of 2: a short page means drained."""
+        """Boundary 3 — page 2 of 2: short in THIS population, and PROVED complete.
+
+        Scoped to the population these tests declare (four `PointAdded` events,
+        no duplicate ids). A short page is NOT in general a completion signal —
+        `tortoise/event_store.py::read_after` says so explicitly: a duplicate
+        `event_id` is dropped AFTER the query's `LIMIT`, so a page of `limit`
+        rows can legitimately come back with fewer distinct rows while more
+        remain beyond it. What makes completion a claim HERE is the follow-up
+        page, not the row count.
+        """
         self._seed(client, 4)
         first = client.get("/v1/events", params={"limit": 3, "types": "PointAdded"}).json()
         second = client.get(
             "/v1/events", params={"limit": 3, "types": "PointAdded", "after": first["next_cursor"]}).json()
         assert len(second["events"]) < 3
-        # A short page is a completion claim, and it must be TRUE: one more poll
-        # finds nothing rather than a row the short page silently dropped.
+        # The completion instrument is the EMPTY follow-up page, not the short
+        # count: one more poll must find nothing rather than a row the short
+        # page silently dropped. A short page alone proves nothing about a
+        # drained stream (`read_after`'s duplicate-drop window).
         third = client.get(
             "/v1/events", params={"limit": 3, "types": "PointAdded", "after": second["next_cursor"]}).json()
         assert third["events"] == []

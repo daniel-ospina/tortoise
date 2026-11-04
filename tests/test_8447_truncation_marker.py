@@ -43,6 +43,7 @@ warm the model once before collecting evidence.
 from __future__ import annotations
 
 import asyncio
+import re
 
 import pytest
 
@@ -957,42 +958,6 @@ class TestThePaginationControlBoundaries:
 # C2 reads before it derives anything, so a claim in them is asserted here
 # rather than trusted to the review that wrote it.
 
-def _unresolved_symbol_citations(citations) -> list[str]:
-    """The `<module>::<name>` citations this tree does not bind.
-
-    Resolution is an AST walk over each cited module (functions, classes and
-    module-level bindings such as `TOOL_REGISTRY`), so a rename or a move reds
-    the caller instead of silently misdirecting a reader. Shared by the two
-    artifacts that cite the census's evidence — §2 of the doc, and the
-    `docs/00_index.md` row that routes a lane into it — because the same rot has
-    to red in both places or the upstream one drifts again.
-    """
-    import ast
-    from pathlib import Path
-
-    root = Path(__file__).resolve().parent.parent
-    unresolved: list[str] = []
-    for module, name in citations:
-        path = root / module
-        if not path.is_file():
-            unresolved.append(f"{module} (module does not exist)")
-            continue
-        bound: set[str] = set()
-        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
-                                 ast.ClassDef)):
-                bound.add(node.name)
-            elif isinstance(node, ast.Assign):
-                bound.update(t.id for t in node.targets
-                             if isinstance(t, ast.Name))
-            elif isinstance(node, ast.AnnAssign) and isinstance(
-                    node.target, ast.Name):
-                bound.add(node.target.id)
-        if name not in bound:
-            unresolved.append(f"{module}::{name}")
-    return unresolved
-
-
 class TestTheCensusNamesItsEvidenceHome:
     """`docs/architecture/BOUNDED-OPERATION-CONTRACT.md` must agree with the tree
     and point its evidence at a home that HAS the evidence."""
@@ -1019,6 +984,41 @@ class TestTheCensusNamesItsEvidenceHome:
         return text.split("## 2. The census", 1)[1].split(
             "## 3. `OVERRIDES:`", 1)[0]
 
+    #: A line coordinate in a census cell, in EITHER spelling the doc has used:
+    #: contiguous (``hosted_api.py:10209``) and split across two code spans
+    #: (```config/surface-manifest.yml` (`:121-143`)```). The filename must be
+    #: followed by the coordinate, allowing only the punctuation that separates
+    #: them — a closing backtick, whitespace, and the opening paren/bracket.
+    _LINE_CITATION = re.compile(
+        r"[\w./-]+\.(?:py|ya?ml)"
+        r"[\s`'\"]*"          # a closing code span and/or whitespace
+        r"[(\[]?"             # the split form's opening paren/bracket
+        r"[\s`'\"]*"
+        r":\d[\w-]*")        # the coordinate itself
+
+    def test_the_pin_sees_the_split_form_too(self):
+        """Positive control: the split spelling is a line coordinate TOO.
+
+        The pin above is only worth its green if it can red. Its first version
+        matched the filename and the digits as one contiguous run, so the form
+        §2a actually carried —
+        ``config/surface-manifest.yml` (`:121-143`)`` — slipped past it: the
+        digits were still in the census, and the pin still said the census
+        cited none. This asserts the pattern against that exact string (and
+        against the symbol form that replaced it, which must NOT match), so
+        narrowing the pattern reds here instead of silently reopening the hole.
+        """
+        assert self._LINE_CITATION.findall(
+            "a row in\n`config/surface-manifest.yml` (`:121-143`), **not** as an"), (
+            "the census pin no longer sees the split spelling of a line "
+            "coordinate, so it can pass over exactly the drift it exists to "
+            "catch")
+        assert not self._LINE_CITATION.findall(
+            "a row in `config/surface-manifest.yml` → "
+            "`response_fields[tortoise_search].truncated`, **not** as an"), (
+            "the census pin reds on the SYMBOL form it recommends — a pin its "
+            "own suggested fix cannot satisfy is a trap")
+
     def test_the_census_cites_symbols_not_line_numbers(self):
         """A line number in the census goes stale on the next unrelated merge.
 
@@ -1032,11 +1032,16 @@ class TestTheCensusNamesItsEvidenceHome:
         The fix is the form the register in `tortoise/truncation.py` already
         uses and this PR's own scan pin already chose: cite `<module>::<name>`,
         which does not move when somebody inserts a blank line above it.
-        """
-        import re
 
-        stale = sorted(re.findall(r"[\w./-]+\.(?:py|ya?ml):\d[\w-]*",
-                                  self._census_section()))
+        ⚠️ BOTH spellings of the coordinate are caught, because the first
+        version of this pin only saw the contiguous one. A file named inside a
+        code span, with the line in its own parenthesised span —
+        ``config/surface-manifest.yml` (`:121-143`)`` — is the same stale
+        coordinate one keystroke apart, and it survived that pin while §2a
+        carried it. :meth:`test_the_pin_sees_the_split_form_too` is the
+        positive control: it reds if this pattern narrows back to contiguous.
+        """
+        stale = sorted(self._LINE_CITATION.findall(self._census_section()))
         assert not stale, (
             "the census cites absolute line numbers, which go stale on every "
             "unrelated edit to the file they point into — cite "
@@ -1052,18 +1057,75 @@ class TestTheCensusNamesItsEvidenceHome:
         module-level bindings such as `TOOL_REGISTRY`), so a rename reds here
         instead of silently misdirecting a lane.
         """
+        import ast
         import re
+        from pathlib import Path
 
+        root = Path(__file__).resolve().parent.parent
         cited = sorted(set(re.findall(r"(tortoise/[\w/]+\.py)::([A-Za-z_]\w*)",
                                      self._census_section())))
         assert cited, (
             "the census cites no `<module>::<name>` evidence at all — the "
             "pointer form regressed to something this pin cannot check")
 
-        unresolved = _unresolved_symbol_citations(cited)
+        unresolved: list[str] = []
+        for module, name in cited:
+            path = root / module
+            if not path.is_file():
+                unresolved.append(f"{module} (module does not exist)")
+                continue
+            bound: set[str] = set()
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                     ast.ClassDef)):
+                    bound.add(node.name)
+                elif isinstance(node, ast.Assign):
+                    bound.update(t.id for t in node.targets
+                                 if isinstance(t, ast.Name))
+                elif isinstance(node, ast.AnnAssign) and isinstance(
+                        node.target, ast.Name):
+                    bound.add(node.target.id)
+            if name not in bound:
+                unresolved.append(f"{module}::{name}")
         assert not unresolved, (
             "the census cites symbols the tree does not bind (renamed, moved or "
             f"invented), so its evidence cells point at nothing: {unresolved}")
+
+    @staticmethod
+    def _unresolved_symbol_citations(citations) -> list[str]:
+        """The `<module>::<name>` citations this tree does not bind.
+
+        Resolution is an AST walk over each cited module (functions, classes and
+        module-level bindings such as `TOOL_REGISTRY`), so a rename or a move reds
+        the caller instead of silently misdirecting a reader. Shared by the two
+        artifacts that cite the census's evidence — §2 of the doc, and the
+        `docs/00_index.md` row that routes a lane into it — because the same rot has
+        to red in both places or the upstream one drifts again.
+        """
+        import ast
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parent.parent
+        unresolved: list[str] = []
+        for module, name in citations:
+            path = root / module
+            if not path.is_file():
+                unresolved.append(f"{module} (module does not exist)")
+                continue
+            bound: set[str] = set()
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                     ast.ClassDef)):
+                    bound.add(node.name)
+                elif isinstance(node, ast.Assign):
+                    bound.update(t.id for t in node.targets
+                                 if isinstance(t, ast.Name))
+                elif isinstance(node, ast.AnnAssign) and isinstance(
+                        node.target, ast.Name):
+                    bound.add(node.target.id)
+            if name not in bound:
+                unresolved.append(f"{module}::{name}")
+        return unresolved
 
     def test_the_index_row_that_routes_readers_here_cites_no_line_numbers(self):
         """The front door must speak the citation form the census speaks.
@@ -1099,7 +1161,7 @@ class TestTheCensusNamesItsEvidenceHome:
         assert cited, (
             "the index row names no `<module>::<name>` evidence this pin can "
             "check — the pointer form regressed to something unresolvable")
-        unresolved = _unresolved_symbol_citations(cited)
+        unresolved = self._unresolved_symbol_citations(cited)
         assert not unresolved, (
             "the index row cites symbols the tree does not bind (renamed, moved "
             f"or invented), so a reader is sent to nothing: {unresolved}")
@@ -1311,12 +1373,15 @@ class TestTheMarkerSiteRegisterIsComplete:
     The list is derived from the tree (an AST scan), never restated here, so
     this test cannot itself go stale: adding a marker site without adding it to
     the register reds, which is exactly what the docstring's ⛔ rule promises.
+    That promise was exercised by the merge that landed `hosted_api.py::search`'s
+    outage arm on `main` — a NEW site the register did not name, caught here and
+    not by review.
 
     ⚠️ "Derived from the tree" includes the NAME the marker is called under.
-    The tree already imports `truncation.mark_truncation` under three local
+    The tree already imports `truncation.mark_truncation` under four local
     aliases besides `_mark_truncation` (`_seed_mark`, `_lost_mark`,
-    `_lost_mark2`, the first two in `tortoise_fts_query` and the third in
-    `hosted_api.py::search`'s outage arm), so a filter that
+    `_lost_mark2` bound by `tortoise_fts_query`; `_lost_mark` again in
+    `hosted_api.py::search`), so a filter that
     hard-codes the two names it happens to recognise sees 3 of the 7 call sites
     and would leave the pin green while a NEW site was written in the aliasing
     pattern the tree already uses three times. The name set is therefore read
@@ -1409,18 +1474,17 @@ class TestTheMarkerSiteRegisterIsComplete:
         """All SEVEN call sites, not the three a two-name filter can match.
 
         The tree calls the marker under `mark_truncation`, `_mark_truncation`,
-        and three further aliases introduced by
-        `from .truncation import mark_truncation as …`. Pre-fix the scan matched
-        two hard-coded names, so the three aliased calls were invisible to it —
-        the mount point for a new site that would have gone unpinned while the
-        class docstring promised it could not. Asserted by the alias NAME, not
-        by line number, because a line pin breaks on every unrelated edit to
-        `sdk.py` while an alias pin only breaks when a site is added or moved.
-
-        SEVEN since the forward merge of `origin/main` (#10602): the new site is
-        `hosted_api.py::search`'s outage arm, which imports the marker as
-        `_lost_mark` — a name this scan already had to follow, in a MODULE it
-        had not yet seen it in.
+        and four further alias bindings introduced by
+        `from .truncation import mark_truncation as …` — three inside `sdk.py`
+        and one in `hosted_api.py` (`search`'s out-of-`ImportFrom` alias
+        `_lost_mark`, which `main` added after this register was written).
+        Pre-fix the scan matched two hard-coded names, so the aliased calls were
+        invisible to it — the mount point for a new site that would have gone
+        unpinned while the class docstring promised it could not. Asserted by
+        the alias NAME, not by line number, because a line pin breaks on every
+        unrelated edit to `sdk.py` while an alias pin only breaks when a site is
+        added or moved. The same alias NAME can legitimately appear in two
+        modules, so the key is `(module, name)`.
         """
         from collections import Counter
 
@@ -1428,7 +1492,7 @@ class TestTheMarkerSiteRegisterIsComplete:
                        for module, _lineno, name, _owner in self._scan())
         assert seen == Counter({
             ("tortoise/hosted_api.py", "mark_truncation"): 1,
-            ("tortoise/hosted_api.py", "_lost_mark"): 1,  # search's outage arm
+            ("tortoise/hosted_api.py", "_lost_mark"): 1,   # search, outage arm
             ("tortoise/sdk.py", "_mark_truncation"): 2,
             ("tortoise/sdk.py", "_seed_mark"): 1,     # as _seed_mark
             ("tortoise/sdk.py", "_lost_mark"): 1,     # as _lost_mark
