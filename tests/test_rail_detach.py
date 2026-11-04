@@ -537,9 +537,19 @@ def test_the_spawn_remedy_is_keyed_by_errno(tmp_path):
     assert "loaded" in eagain, eagain
     assert "chmod" not in eagain, eagain
     assert "loaded" in rd._oserror_remedy(OSError(errno.ENOMEM, "out of memory"))
-    assert "not a directory" in rd._oserror_remedy(OSError(errno.ENOTDIR, "nope"))
+    assert "not a directory" in rd._oserror_remedy(OSError(errno.ENOTDIR, "nope", str(tmp_path)))
     generic = rd._oserror_remedy(OSError(errno.E2BIG, "too big"))
     assert "check the working directory" in generic, generic
+
+    # ⛔ THE OBJECT GATES THE CHDIR-SIDE ERRNO TOO (review, `#10777`): a PATH entry
+    # that is a regular FILE raises `ENOTDIR` with `filename='gh'`, and answering it
+    # "the working directory is not a directory" blames a cwd that is fine.
+    exec_side_enotdir = rd._oserror_remedy(
+        NotADirectoryError(errno.ENOTDIR, "not a directory", "gh"))
+    # The generic fallback mentions the cwd as ONE of two things to check; what is
+    # forbidden is CLAIMING it is the fault.
+    assert "is not a directory" not in exec_side_enotdir, exec_side_enotdir
+    assert "could not be used" not in exec_side_enotdir, exec_side_enotdir
 
     # ⛔ THE ERRNO IS NOT THE CAUSE ON ITS OWN (review, `#10777`): an `EACCES` on
     # the WORKING DIRECTORY must not be answered with `chmod +x` on a `gh` that is
@@ -547,6 +557,23 @@ def test_the_spawn_remedy_is_keyed_by_errno(tmp_path):
     cwd_denied = rd._oserror_remedy(PermissionError(errno.EACCES, "denied", str(tmp_path)))
     assert "chmod" not in cwd_denied, cwd_denied
     assert "working directory" in cwd_denied, cwd_denied
+
+
+def test_an_exec_side_failure_does_not_blame_the_working_directory(tmp_path, monkeypatch):
+    """A `PATH` entry that is a regular FILE is an EXEC failure, not a cwd failure.
+
+    Review, `#10777`: `ENOTDIR` was checked before the failing object, so this
+    shape was answered "the working directory is not a directory" about a cwd that
+    is perfectly good — `filename` is `'gh'` here, because CPython sets it to
+    `argv[0]` on the exec side. The object has to gate the errno, not the reverse.
+    """
+    a_file = tmp_path / "a-file"
+    a_file.write_text("x", encoding="utf-8")
+    monkeypatch.setenv("PATH", str(a_file))
+    out = rd._gh(["repo", "view"], tmp_path)
+    assert out.returncode == 126, (out.returncode, out.cause)
+    assert "is not a directory" not in out.remedy, out.remedy
+    assert "could not be used" not in out.remedy, out.remedy
 
 
 def test_an_unreadable_cwd_is_not_a_broken_gh_install(tmp_path):
@@ -676,8 +703,9 @@ def test_a_gh_on_path_with_a_dead_shebang_is_not_reported_as_missing(tmp_path, m
     PATH — install the GitHub CLI" for a binary the operator already had, which is
     the misdiagnosis the 126 arm exists to prevent.
 
-    ⚠️ With a WORKING `gh` later on `PATH`, glibc's `execvp` silently skips this
-    candidate and runs the later one — so this arm must own `PATH` completely or it
+    ⚠️ With a WORKING `gh` later on `PATH`, CPython's own walk silently skips this
+    candidate and runs the later one (`executable_list` is built from
+    `os.get_exec_path` at `subprocess.py:1877`; no `execvp` is called on this path) — so this arm must own `PATH` completely or it
     pins nothing.
     """
     bin_dir = tmp_path / "dead-shebang-bin"

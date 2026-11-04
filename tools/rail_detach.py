@@ -434,14 +434,18 @@ def _oserror_remedy(exc: OSError) -> str:
 
     ⛔ AND THE ERRNO ALONE IS NOT THE CAUSE EITHER (review, `#10777`): `EACCES`
     says *something* was not permitted, and WHICH OBJECT failed is carried on
-    `filename` — the CWD for a `chdir` failure, the binary for an exec failure.
-    Keying on errno alone told an unreadable WORKING DIRECTORY to `chmod +x` a
-    `gh` that was fine, which is the very defect this function's first paragraph
-    describes. The object is therefore checked before the errno.
+    `filename` — the CWD for a `chdir` failure, `argv[0]` (the bare name) for an
+    exec failure. So neither the errno nor the filename decides alone: the CWD is
+    blamed only when `filename` is not the binary AND the errno fits a chdir, and
+    everything else is an exec-side failure whose errno is the useful datum. Both
+    halves are pinned, because each one alone was wrong: errno-only told an
+    unreadable WORKING DIRECTORY to `chmod +x` a `gh` that was fine, and
+    filename-only blamed the CWD for a PATH entry that is a regular file (CPython
+    reports that as `ENOTDIR` with `filename='gh'` — measured 2026-11-04).
     """
     target = getattr(exc, "filename", None)
     cwd_side = target not in (None, "", "gh")
-    if exc.errno == errno.ENOTDIR:
+    if cwd_side and exc.errno == errno.ENOTDIR:
         return ("the working directory is not a directory — run from a live "
                 "checkout, or pass --repo")
     if cwd_side:
@@ -501,8 +505,10 @@ def _gh(argv: list[str], cwd: Path) -> _GhRun:
         # CPython passes the literal argv[0] for ANY exec failure of a bare name, so
         # a `gh` that IS on PATH but whose shebang interpreter is gone arrives here
         # identically (measured 2026-11-04, sole candidate: `shutil.which("gh")`
-        # resolves it, `subprocess` does not run it — and glibc's `execvp` only hides
-        # the case when a WORKING `gh` sits later on `PATH`). Ask the question
+        # resolves it, `subprocess` does not run it — and CPython's own `PATH` walk
+        # only hides the case when a WORKING `gh` sits later on the list, which is
+        # `executable_list` built from `os.get_exec_path` at `subprocess.py:1877`).
+        # Ask the question
         # separately, so "install the GitHub CLI" is never printed at a binary the
         # operator already has.
         found = shutil.which("gh")
