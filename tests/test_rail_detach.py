@@ -650,6 +650,77 @@ def test_previous_attempts_merge_line_is_not_inherited(tmp_path):
     assert st.merge_sha == ""
 
 
+def test_a_new_attempt_truncates_the_log(tmp_path):
+    """The log is APPEND-ONLY ACROSS ATTEMPTS and read WHOLE on every `collect`,
+    so a PR railed a dozen times pays every previous attempt's bytes on every
+    verdict read, forever. `launch` truncates it in the same flock as the artifact.
+
+    Discriminating both ways: the old attempt's mark must be gone (one mark, not
+    two) AND its `✅ merged` sha must be unreadable from the new attempt's log —
+    the second half is the forged-evidence direction the scoping guards.
+    """
+    co = make_checkout(tmp_path)
+    sd = tmp_path / "state"
+    rd.launch(64, cwd=co, state_dir=sd, repo="o/r")
+    first = wait_state(sd, 64, rd.MERGED, pred=lambda s: s.exit_code is not None)
+    assert first.state == rd.MERGED, first.as_dict()
+    logp = Path(rd.read_field(rd.artifact_path(sd, "o/r", 64).read_text(), "LOG"))
+    assert "deadbeefcafe1234" in logp.read_text(encoding="utf-8")
+
+    os.environ["FAKE_RAIL_SLEEP"] = "30"
+    try:
+        ln = rd.launch(64, cwd=co, state_dir=sd, repo="o/r")   # attempt 2
+    finally:
+        os.environ.pop("FAKE_RAIL_SLEEP", None)
+    try:
+        text = logp.read_text(encoding="utf-8")
+        assert text.count(rd.ATTEMPT_MARK) == 1, text      # pre-fix: 2
+        assert "deadbeefcafe1234" not in text, text        # pre-fix: inherited
+    finally:
+        kill_group(ln.pid)
+
+
+def test_a_merge_line_naming_another_pr_is_not_this_prs_merge(tmp_path):
+    """⛔ EVERY SUCCESS LINE CARRIES ITS PR NUMBER, AND THE NUMBER WAS IGNORED.
+
+    A log whose one success line names a DIFFERENT PR read as this PR's completed
+    merge. Reachable without a corrupted artifact: the launcher passes operator
+    args through verbatim and the rail's own argument loop takes the LAST
+    `--repo`, so `start 12 -- --repo other/repo` produced a rail for
+    `other/repo#12` under `o/r#12`'s artifact. "Merged" for a PR that did not
+    merge is the claim #2235 forbids; a mismatched number is NO evidence, which
+    fails closed.
+    """
+    sd = tmp_path / "state"
+    sd.mkdir()
+    art = rd.artifact_path(sd, "o/r", 43)
+    logp = rd.log_path(sd, "o/r", 43)
+    art.write_text(
+        f"PR=43\nREPO=o/r\nSTARTED_AT={rd._iso_now()}\nLOG={logp}\n"
+        f"ATTEMPT_ID=a43\nPID={_reaped_pid()}\n",
+        encoding="utf-8",
+    )
+    mark = f"\n{rd.ATTEMPT_MARK} x attempt=a43 (detached) =====\n"
+    logp.write_text(mark + "admin-merge: ✅ merged PR #44 at deadbeefcafe1234 "
+                    "(state=MERGED confirmed via the API)\n", encoding="utf-8")
+    st = rd.collect(sd, "o/r", 43)
+    assert st.state != rd.MERGED, st.as_dict()     # pre-fix: MERGED, for #43
+    assert st.merge_sha == ""
+
+    # …and the no-sha / already-merged forms carry the number too.
+    for line in ("admin-merge: ✅ merged PR #44 (state=MERGED) — merge commit unreadable\n",
+                 "admin-merge: PR #44 is ALREADY MERGED (state=MERGED)\n"):
+        logp.write_text(mark + line, encoding="utf-8")
+        assert rd.collect(sd, "o/r", 43).state != rd.MERGED, line
+
+    # CONTROL: the same words naming THIS PR are still the merge.
+    logp.write_text(mark + "admin-merge: ✅ merged PR #43 at deadbeefcafe1234 "
+                    "(state=MERGED confirmed via the API)\n", encoding="utf-8")
+    st = rd.collect(sd, "o/r", 43)
+    assert st.state == rd.MERGED, st.as_dict()
+    assert st.merge_sha == "deadbeefcafe1234"
+
+
 def test_already_merged_does_not_invent_a_merge_sha(tmp_path):
     """Under a squash the branch head is never on main, so reporting HEAD as
     `merge_sha` would be a fabricated sha."""
@@ -893,6 +964,87 @@ def test_an_unreaped_wrapper_group_does_not_report_waiting_forever(tmp_path):
     assert "no EXIT line" in st.reason
 
 
+def test_a_live_group_member_is_not_lost_past_the_grace(tmp_path):
+    """⛔ AGE IS NOT EVIDENCE ABOUT A PROCESS — ITS GROUP'S MEMBERS ARE.
+
+    The grace above exists because a ZOMBIE keeps `killpg(..., 0)` answering. It
+    was applied as `age > GROUP_CLAIM_GRACE_S: return False`, which is a bound on
+    the CLOCK, not on the group: a LIVE rail that has not yet executed its
+    self-naming `printf` sits in exactly that group, and the rail's wait is set by
+    the runner QUEUE (unbounded — the module's own measured case is >= 6660 s). So
+    the claim expired on a rail that was still merging, `collect` answered `lost`,
+    and `lost` is the state `start` ACCEPTS: a SECOND rail on a live PR (#3061),
+    plus the truncation that scopes its real `✅ merged` line out (#2235).
+
+    Reproduced without a race: a group whose LEADER is gone while a member of it
+    is alive — the wrapper's death with the rail still running, one process over.
+    Pre-fix `lost`, post-fix `waiting`. The control arm kills the member, so this
+    cannot be satisfied by a probe that answers `waiting` for everything.
+    """
+    sd = tmp_path / "state"
+    sd.mkdir()
+    old = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 600))
+    art = rd.artifact_path(sd, "o/r", 99)
+    logp = rd.log_path(sd, "o/r", 99)
+    # A non-interactive `sh` puts its background job in ITS OWN group, so the
+    # leader (`sh`) exits and leaves a live member (`sleep`) holding the pgid —
+    # the exact shape of a wrapper killed inside the fork window.
+    leader = subprocess.Popen(
+        ["/bin/sh", "-c", "sleep 25 & sleep 0.2"],
+        start_new_session=True, stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        leader.wait()
+        # THE PREMISE, asserted rather than assumed: the leader is GONE, and its
+        # group still answers because a LIVE member is in it.
+        assert rd._pid_alive(leader.pid, str(art)) is False
+        os.killpg(leader.pid, 0)
+        assert rd._group_has_a_live_member(leader.pid) is True
+        art.write_text(
+            f"PR=99\nREPO=o/r\nSTARTED_AT={old}\nLOG={logp}\nSPAWNING=1\n"
+            f"ATTEMPT_ID=a99\nPID={leader.pid}\n",
+            encoding="utf-8",
+        )
+        logp.write_text(f"\n{rd.ATTEMPT_MARK} x attempt=a99 (detached) =====\n"
+                        "admin-merge: … FIRST-CHECKS wait: run 41557371710 is pending\n",
+                        encoding="utf-8")
+        st = rd.collect(sd, "o/r", 99)
+        assert st.state == rd.WAITING, st.as_dict()   # pre-fix: LOST
+
+        # CONTROL: the same artifact, once the group's member is gone too.
+        os.killpg(leader.pid, signal.SIGKILL)
+        deadline = time.time() + 10
+        while time.time() < deadline and rd._group_has_a_live_member(leader.pid):
+            time.sleep(0.05)
+        st2 = rd.collect(sd, "o/r", 99)
+        assert st2.state == rd.LOST, st2.as_dict()    # the claim still lifts
+    finally:
+        with contextlib.suppress(OSError):
+            os.killpg(leader.pid, signal.SIGKILL)
+
+
+def test_the_group_probe_reads_member_state_not_membership(tmp_path):
+    """The two directions of `_group_has_a_live_member`, so neither can drift:
+    a live member answers True, a ZOMBIE-ONLY group answers False. Answering
+    True for a zombie reinstates the unrailable wedge; answering False for a live
+    member reinstates the false `lost` above."""
+    assert rd._group_has_a_live_member(os.getpgrp()) is True
+    zombie = subprocess.Popen(["/bin/sleep", "30"], start_new_session=True,
+                              stdin=subprocess.DEVNULL,
+                              stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL)
+    try:
+        os.kill(zombie.pid, signal.SIGKILL)
+        deadline = time.time() + 10
+        while time.time() < deadline and rd._proc_stat_letter(zombie.pid) != "Z":
+            time.sleep(0.02)
+        if rd._proc_stat_letter(zombie.pid) != "Z":
+            pytest.skip("no procfs on this box — a zombie cannot be pinned here")
+        assert rd._group_has_a_live_member(zombie.pid) is False
+    finally:
+        zombie.wait()
+
+
 def test_a_log_without_an_attempt_mark_is_no_evidence(tmp_path):
     """No attempt mark ⇒ not this attempt's log ⇒ no scoped evidence. Reading it
     whole would let a dead attempt inherit an earlier `✅ merged` line."""
@@ -908,6 +1060,43 @@ def test_a_log_without_an_attempt_mark_is_no_evidence(tmp_path):
     st = rd.collect(sd, "o/r", 69)
     assert st.state != rd.MERGED, st.as_dict()
     assert st.merge_sha == ""
+
+
+def test_the_attempt_mark_names_its_attempt_so_a_previous_tail_is_not_ours(tmp_path):
+    """⛔ THE EVIDENCE BOUNDARY IS THE MARK, SO THE MARK HAS TO BE ATTRIBUTABLE.
+
+    `launch` truncates the artifact and writes the new `ATTEMPT_ID=` BEFORE its
+    mark lands in the log, so a `collect` running in that instant took the
+    PREVIOUS attempt's tail as this attempt's — and a previous `✅ merged` line
+    then read as a merge this attempt never announced. Reproduced without a race:
+    an artifact for attempt `new`, a log holding only attempt `old`'s mark and a
+    merge line. Pre-fix `merged`; post-fix no scoped evidence at all.
+
+    The second half is the vacuity guard: a mark naming THIS attempt still bounds
+    its own evidence, so the fix cannot be "ignore the log".
+    """
+    sd = tmp_path / "state"
+    sd.mkdir()
+    art = rd.artifact_path(sd, "o/r", 88)
+    logp = rd.log_path(sd, "o/r", 88)
+    art.write_text(
+        f"PR=88\nREPO=o/r\nSTARTED_AT={rd._iso_now()}\nLOG={logp}\n"
+        f"ATTEMPT_ID=new-attempt\nPID={_reaped_pid()}\n",
+        encoding="utf-8",
+    )
+    logp.write_text(f"\n{rd.ATTEMPT_MARK} x attempt=old-attempt (detached) =====\n"
+                    "admin-merge: ✅ merged PR #88 at deadbeefcafe1234 (state=MERGED)\n",
+                    encoding="utf-8")
+    st = rd.collect(sd, "o/r", 88)
+    assert st.state != rd.MERGED, st.as_dict()     # pre-fix: MERGED (forged)
+    assert st.merge_sha == ""
+
+    logp.write_text(f"\n{rd.ATTEMPT_MARK} x attempt=new-attempt (detached) =====\n"
+                    "admin-merge: ✅ merged PR #88 at deadbeefcafe1234 (state=MERGED)\n",
+                    encoding="utf-8")
+    st = rd.collect(sd, "o/r", 88)
+    assert st.state == rd.MERGED, st.as_dict()
+    assert st.merge_sha == "deadbeefcafe1234"
 
 
 def test_collect_has_no_side_effects(tmp_path):

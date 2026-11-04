@@ -215,6 +215,15 @@ MERGED_AT_RE = re.compile(r"✅ merged PR #(\d+) at ([0-9a-f]{7,40})")
 # simply absent, and the artifact says so rather than substituting the head.
 MERGED_NO_SHA_RE = re.compile(r"✅ merged PR #(\d+) \(state=")
 ATTEMPT_MARK = "===== rail attempt started"
+# ⛔ THE MARK NAMES ITS ATTEMPT, because the mark is the EVIDENCE BOUNDARY.
+# Scoping the log read by "the last mark in the file" leaves one window: `launch`
+# truncates the artifact and writes the new `ATTEMPT_ID=` BEFORE its own mark
+# lands, so a `collect` running in that instant pairs the NEW attempt with the
+# PREVIOUS attempt's tail — and a previous attempt's `✅ merged` line then reads
+# as this attempt's completed merge (a merge claimed for an attempt that never
+# announced one). Carrying the id in the mark makes the boundary attributable:
+# a mark whose id is not ours bounds nothing.
+ATTEMPT_MARK_ID_RE = re.compile(r"\battempt=(\S+)")
 ALREADY_MERGED_RE = re.compile(r"PR #(\d+) is ALREADY MERGED")
 REFUSAL_RE = re.compile(r"(?:✗|BLOCK|REFUSING|REFUSED)[^\n]*")
 
@@ -482,6 +491,67 @@ def _in_group(pid: int, pgid: int) -> bool:
         return True
 
 
+def _group_has_a_live_member(pgid: int) -> bool | None:
+    """Is there a process in `pgid` that is NOT a zombie? None when the probe
+    itself cannot answer.
+
+    ⛔ WHY IT EXISTS. `killpg(pgid, 0)` answers for a group whose only remaining
+    member is a ZOMBIE — and a zombie can never write `CHILD_PID=`/`EXIT=`, so a
+    claim bounded by that answer alone is the unrailable wedge. But the bound
+    cannot be AGE (see the caller): a live rail that has not yet executed its
+    self-naming `printf` is in that same group, so an age bound reads a LIVE,
+    MERGING rail `lost` — the state `start` accepts, i.e. a second rail (#3061).
+    The group's MEMBERS settle it: zombies only ⇒ nothing can ever write again;
+    anything else ⇒ the rail's work is still running.
+
+    State is field 3 and the process group is field 5 of `/proc/<pid>/stat` where
+    procfs answers; where it does not (macOS lanes) the same two columns come from
+    a bounded `ps`. FAIL DIRECTION IS `alive`: an unlistable or unparseable probe
+    returns None, and the caller keeps the claim (`_ps_stat`'s rule).
+
+    ⛔ A STAT WE CANNOT READ IS NOT A MEMBER OF OUR GROUP. Every member of a group
+    led by our own `bash -c` child carries our uid — `fork`/`execve` preserve
+    credentials and this rail never changes them — so `/proc/<pid>/stat` is
+    readable for it even under `hidepid=1` (which raises EACCES only for OTHER
+    users' entries; `hidepid=2` does not list them at all). Counting those as
+    "unmeasurable" would make the answer permanently "unknown" on any box running
+    other users' processes — the wedge again, in the other direction.
+    """
+    if pgid <= 0:
+        return False
+    try:
+        has_procfs = Path("/proc/self/stat").exists()
+    except OSError:
+        has_procfs = False
+    if has_procfs:
+        try:
+            entries = os.listdir("/proc")
+        except OSError:
+            return None
+        for name in entries:
+            if not name.isdigit():
+                continue
+            try:
+                rest = Path(f"/proc/{name}/stat").read_text().rsplit(") ", 1)[1].split()
+            except (OSError, IndexError):
+                continue          # not ours to read ⇒ cannot be in our group
+            if len(rest) < 3 or rest[2] != str(pgid):
+                continue
+            if rest[0] != "Z":
+                return True
+        return False
+    out = _ps("-A", "-o", "pid=,pgid=,stat=")
+    if out is None:
+        return None
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) < 3 or parts[1] != str(pgid):
+            continue
+        if not parts[2].startswith("Z"):
+            return True
+    return False
+
+
 def _pid_alive(pid: int, marker: str = "", *, pgid: int | None = None) -> bool:
     """Alive AND still ours — `os.kill(pid, 0)` alone reports a RECYCLED pid as
     a live rail, which would report `waiting` forever on a dead rail.
@@ -618,13 +688,26 @@ def _rail_alive(leader: int, child: int, marker: str,
         # `✅ merged` line out). Any other OSError is unmeasurable, and the rule in
         # `_ps_stat` is unmeasurable ⇒ keep the claim.
         #
-        # ⛔ AND IT MUST EXPIRE: a ZOMBIE group member keeps `killpg(..., 0)`
-        # answering forever. Inside the fork window that is the rail itself; past
-        # `GROUP_CLAIM_GRACE_S` a rail that was going to name itself has named
-        # itself, so an unnamed group is a corpse (or a recycled pid) and keeping
-        # the claim would refuse every later `start` — the wedge, not the guard.
+        # ⛔ AND IT MUST BE BOUNDED: a ZOMBIE group member keeps `killpg(..., 0)`
+        # answering forever, so an unbounded answer here reports `waiting` for a
+        # rail that will never write again and refuses every later `start` — the
+        # wedge, not the guard.
+        #
+        # ⛔ BUT AGE IS THE WRONG BOUND. Elapsed time says nothing about whether
+        # the rail is alive: a LIVE rail that has not YET executed its self-naming
+        # `printf` sits in exactly the same group, and the rail's wait is set by
+        # the runner QUEUE (unbounded — measured >= 6660 s). Expiring on the clock
+        # read that rail `lost`, which `start` ACCEPTS: a SECOND rail on a PR that
+        # is still merging (#3061), plus the artifact truncation that scopes its
+        # real `✅ merged` line out (#2235). Measured before this probe existed: a
+        # SIGKILLed wrapper with a live group member read `lost` at age 120 s and
+        # `waiting` at age 0 — the age was the whole difference.
+        #
+        # So past the grace the group is expired on its MEMBERS' STATE, never on
+        # the clock: zombies only ⇒ gone (`lost` is true and recoverable there);
+        # anything else ⇒ the rail's work is still running ⇒ keep the claim.
         if age is not None and age > GROUP_CLAIM_GRACE_S:
-            return False
+            return _group_has_a_live_member(leader) is not False
         try:
             os.killpg(leader, 0)
         except ProcessLookupError:
@@ -677,22 +760,43 @@ def _attempt_exits(text: str) -> list[str]:
     return out
 
 
-def _merge_evidence(log: str) -> tuple[str, str]:
-    """(state, sha) from the rail's OWN words, or ('', '') when it said nothing.
+def _merge_evidence(log: str, pr: int) -> tuple[str, str]:
+    """(state, sha) from the rail's OWN words about THIS PR, or ('', '') when it
+    said nothing usable.
     ⛔ A CODE-0 EXIT IS NOT A MERGE: `admin-merge.sh --dry-run` (and --help,
     --print-bounds) exit 0 having merged nothing, and the launcher deliberately
-    passes operator args through. Merged requires the rail to SAY merged."""
+    passes operator args through. Merged requires the rail to SAY merged.
+
+    ⛔ AND THE LINE MUST NAME THE PR BEING COLLECTED. Every success line carries
+    its number, and the number was captured and then ignored — so a log whose one
+    success line belongs to a DIFFERENT PR read as this PR's completed merge. It
+    is reachable without a corrupted artifact: the launcher passes operator args
+    through verbatim, and the rail's own argument loop takes the LAST `--repo`, so
+    `start 12 -- --repo other/repo` produced a rail for `other/repo#12` under
+    `o/r#12`'s artifact. Attribution only — the rail still only prints that line
+    after the API confirmed the terminal state — but the verdict this module
+    publishes is about the PR it was asked to collect, and "merged" for a PR that
+    did not merge is the one claim #2235 forbids. A mismatched number is therefore
+    NO EVIDENCE, which fails closed (refused/lost), never open.
+    """
     m = MERGED_AT_RE.search(log)
     if m:
-        return MERGED, m.group(2)
-    if ALREADY_MERGED_RE.search(log):
+        return (MERGED, m.group(2)) if _names_this_pr(m.group(1), pr) else ("", "")
+    m = ALREADY_MERGED_RE.search(log)
+    if m:
         # Already merged before this attempt: that merge commit belongs to the
         # earlier merge and is NOT this branch head (under a squash the head is
         # never on main — admin-merge.sh:9033). Absent, never invented.
-        return MERGED, ""
-    if MERGED_NO_SHA_RE.search(log):
-        return MERGED, ""
+        return (MERGED, "") if _names_this_pr(m.group(1), pr) else ("", "")
+    m = MERGED_NO_SHA_RE.search(log)
+    if m:
+        return (MERGED, "") if _names_this_pr(m.group(1), pr) else ("", "")
     return "", ""
+
+
+def _names_this_pr(found: str, pr: int) -> bool:
+    """Does the number a success line carries name the PR being collected?"""
+    return _int_or_none(found) == pr
 
 
 # ── collect ──────────────────────────────────────────────────────────────────
@@ -755,6 +859,48 @@ class _Snapshot:
     child: int
 
 
+def _attempt_log(full: str, attempt: str) -> str:
+    """The tail of `full` that belongs to `attempt`, or "" when no mark can be
+    attributed to it.
+
+    ⛔ THE MARK IS THE EVIDENCE BOUNDARY, SO IT HAS TO NAME ITS ATTEMPT. The
+    boundary used to be "the last mark in the file", which has a window: `launch`
+    truncates the artifact and stamps the new `ATTEMPT_ID=` BEFORE its mark lands,
+    so a `collect` in that instant took the PREVIOUS attempt's tail as this
+    attempt's — and a previous `✅ merged` line then read as a merge this attempt
+    never announced. An id-carrying mark bounds only its own attempt.
+
+    COMPATIBILITY IS ONE-SIDED ON PURPOSE, mirroring `_attempt_exits`: a log whose
+    marks carry NO id at all predates the key, so it keeps its old whole-tail
+    meaning. As soon as ANY mark carries an id, a mark that is not ours bounds
+    nothing — that is the fail-CLOSED direction (empty evidence ⇒ refused/lost,
+    never a merge).
+    """
+    cut_mine: int | None = None
+    cut_legacy: int | None = None
+    cut_any: int | None = None
+    any_id_mark = False
+    pos = 0
+    for line in full.splitlines(keepends=True):
+        if line.lstrip().startswith(ATTEMPT_MARK):
+            cut_any = pos
+            m = ATTEMPT_MARK_ID_RE.search(line)
+            if m:
+                any_id_mark = True
+                if attempt and m.group(1) == attempt:
+                    cut_mine = pos
+            else:
+                cut_legacy = pos
+        pos += len(line)
+    if not attempt:
+        return full[cut_any:] if cut_any is not None else ""
+    if cut_mine is not None:
+        return full[cut_mine:]
+    if not any_id_mark and cut_legacy is not None:
+        return full[cut_legacy:]
+    return ""
+
+
 def _read_snapshot(art: Path, logp_default: Path,
                    text: str | None = None) -> _Snapshot:
     """Read the artifact (unless the caller hands back the exact text it just
@@ -768,14 +914,14 @@ def _read_snapshot(art: Path, logp_default: Path,
         # ⛔ THE LOG IS APPEND-ONLY ACROSS ATTEMPTS. Parsing the whole file lets a
         # DEAD attempt inherit a PREVIOUS attempt's `✅ merged` line and be
         # reported merged — evidence forged by concatenation. Every verdict read
-        # is scoped to the LAST attempt.
-        cut = full.rfind(ATTEMPT_MARK)
-        # ⛔ NO MARK ⇒ NO SCOPED EVIDENCE. Our launcher always writes the mark
-        # before it spawns, so a log without one is not this attempt's: reading it
-        # whole would let a dead attempt inherit ANY earlier `✅ merged` line — the
-        # forged-evidence shape the scoping exists to prevent. Fail CLOSED (empty
-        # evidence ⇒ refused/lost), never "read everything".
-        log = full[cut:] if cut >= 0 else ""
+        # is scoped to THIS attempt, by the id its own mark carries.
+        # ⛔ NO MARK FOR THIS ATTEMPT ⇒ NO SCOPED EVIDENCE. Our launcher always
+        # writes the mark before it spawns, so a log with no mark attributable to
+        # this attempt is not this attempt's: reading it whole would let a dead
+        # attempt inherit ANY earlier `✅ merged` line — the forged-evidence shape
+        # the scoping exists to prevent. Fail CLOSED (empty evidence ⇒
+        # refused/lost), never "read everything".
+        log = _attempt_log(full, read_field(text, "ATTEMPT_ID"))
     return _Snapshot(
         text=text,
         log=log,
@@ -805,7 +951,7 @@ def _exit_verdict(st: RailState, snap: _Snapshot) -> RailState:
     """The verdict for an artifact that carries this attempt's `EXIT=`."""
     code = _int_or_none(snap.exits[-1])
     st.exit_code = code
-    merged, sha = _merge_evidence(snap.log)
+    merged, sha = _merge_evidence(snap.log, st.pr)
     if merged == MERGED:
         st.state, st.merge_sha = MERGED, sha
         if not sha:
@@ -896,9 +1042,13 @@ def collect(state_dir: Path, repo: str, pr: int) -> RailState | None:
         # log tail from it) before looping, so no verdict below can be drawn from
         # the snapshot the move just invalidated.
         snap = _read_snapshot(art, logp_default, text=fresh)
-    text, log, exits = snap.text, snap.log, snap.exits
+    text, log = snap.text, snap.log
     pid, child = snap.pid, snap.child
-    if pid == 0 and read_field(text, "SPAWNING") and not exits:
+    # ⛔ `not exits` USED TO BE SPELLED HERE and could never be false — the `if
+    # snap.exits: return` at the top of the loop has already returned — so it
+    # described a condition this branch cannot reach. Dropped rather than kept:
+    # a dead clause is a second, wrong description of the guard.
+    if pid == 0 and read_field(text, "SPAWNING"):
         # Between `SPAWNING=1` and the `PID=` append the rail IS alive but
         # unnamed. Reporting `lost` there defeats the same guard that refuses a
         # second rail (#observed live 2026-11-03).
@@ -946,7 +1096,7 @@ def collect(state_dir: Path, repo: str, pr: int) -> RailState | None:
         # The test is ONE-SIDED on purpose (`_pid_is_a_stranger`): it can only ever
         # conclude "not our rail", never "ours", so it cannot produce a false `lost`
         # and it never expires a live rail however long the queue takes. Fails CLOSED.
-        merged, sha = _merge_evidence(log)
+        merged, sha = _merge_evidence(log, pr)
         if merged == MERGED:
             st.state, st.merge_sha = MERGED, sha
             st.reason = ("the rail's log records the merge"
@@ -990,7 +1140,7 @@ def collect(state_dir: Path, repo: str, pr: int) -> RailState | None:
     # `state=MERGED`. Reading it is not a gate being relaxed: the rail's gates ran
     # to completion, only the bookkeeping line was lost. Anything short of that
     # announcement stays `lost` (a vanished rail has NO verdict — #2235).
-    merged, sha = _merge_evidence(log)
+    merged, sha = _merge_evidence(log, pr)
     if merged == MERGED:
         st.state, st.merge_sha = MERGED, sha
         st.reason = ("the rail's log records the merge"
@@ -1267,8 +1417,16 @@ def launch(pr: int, *, cwd: Path, state_dir: Path, repo: str | None = None,
             f"RAIL_ARGS={' '.join([str(pr), '--repo', repo, *extra])}\n",
             encoding="utf-8",
         )
-        with logp.open("a", encoding="utf-8") as fh:
-            fh.write(f"\n===== rail attempt started {_iso_now()} (detached) =====\n")
+        # ⛔ TRUNCATED, like the artifact, and the mark NAMES ITS ATTEMPT. The log
+        # is otherwise append-only forever: every `collect` reads it whole, so a
+        # PR railed a dozen times pays a dozen attempts' worth of bytes on every
+        # verdict read, and the boundary between attempts is only inferable from
+        # a mark that named nothing. The truncation is ordered inside the flock
+        # with the artifact's own, so a `collect` that sees the new `ATTEMPT_ID=`
+        # never sees the previous attempt's tail as its own (`_attempt_log`).
+        with logp.open("w", encoding="utf-8") as fh:
+            fh.write(f"\n{ATTEMPT_MARK} {_iso_now()} attempt={attempt} "
+                     f"(detached) =====\n")
 
         argv = child_script(rail, repo, pr, logp, art, extra, attempt=attempt)
         with logp.open("a", encoding="utf-8") as logfh:
