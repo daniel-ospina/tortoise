@@ -83,7 +83,9 @@ a reader who finds the number has drifted should search the quoted fragment: tha
 ⚠️ **`get_cross_lens_candidates` MARKS one of its three bounds.** The marker is
 `truncated = len(all_candidates) > limit` (`tortoise/sdk.py::get_cross_lens_candidates`), where `limit`
 derives from `max_candidates` inside that same method. Two further bounds on that same surface do not
-reach it at all: `top_k`, clamped to `CROSS_LENS_ANN_TOP_K_MAX`
+reach it at all, and ⚠️ neither of those cuts is inside `get_cross_lens_candidates` — the per-point
+ANN pull is `_cross_lens_pairs` and the pool cut is `_cross_lens_pool`, so both are cited by symbol
+below rather than described as "same method": `top_k`, clamped to `CROSS_LENS_ANN_TOP_K_MAX`
 (`tortoise/sdk.py::CROSS_LENS_ANN_TOP_K_MAX`), bounds the per-point ANN pull (`limit=top_k + 1`,
 `tortoise/sdk.py::_cross_lens_pairs`), and `CROSS_LENS_POOL_CAP = 1000`
 (`tortoise/sdk.py::CROSS_LENS_POOL_CAP`) cuts the eligible pool (`tortoise/sdk.py::_cross_lens_pool`).
