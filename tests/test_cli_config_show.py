@@ -1595,10 +1595,34 @@ def test_a_present_but_unusable_org_field_is_not_called_absent(capsys, tmp_path)
     cred = json.loads(capsys.readouterr().out)["credential"]
     assert "org_field_warning" in cred
     assert "int" in cred["org_field_warning"]
+    assert cred["org_fields_unusable"] == ["org_id"]
     assert "org_id_hint" not in cred          # the hint would be a false explanation
+    assert "org_id" not in cred               # the value itself is unusable
     assert _run() == 0
     out = capsys.readouterr().out
     assert "not a NON-EMPTY string" in out
+    # …and the VALUE line must not contradict it. `(absent)` was printed beside a
+    # warning saying the store carries the field (#10655 review P2).
+    assert "(present but unusable)" in out
+    assert "org_id        (absent)" not in out
+
+
+def test_a_usable_org_name_beside_an_unusable_org_id_is_still_printed(
+        capsys, tmp_path):
+    """The other half of the same fix: the label is PER FIELD, not per report.
+
+    A helper that answered "present but unusable" for the whole identity block
+    would hide a perfectly good `org_name` — the value someone actually needs.
+    """
+    _write(tmp_path / ".tortoise" / "credentials.json", json.dumps({
+        "api_key": GLOBAL_KEY, "api_url": "https://api.premiselabs.co",
+        "org_id": 12345, "org_name": "agent-00e8e3",
+    }))
+    assert _run() == 0
+    out = capsys.readouterr().out
+    assert "agent-00e8e3" in out                     # still reported
+    assert "org_id        (present but unusable)" in out
+    assert "(absent)" not in out                       # nothing here is missing
 
 
 def test_the_chmod_remedy_is_display_escaped_too(monkeypatch, capsys, tmp_path):

@@ -3566,6 +3566,11 @@ def _cmd_config(args) -> int:
                 "the resolved store carries " + ", ".join(unusable_fields)
                 + " — not a NON-EMPTY string, so it cannot be used. Fix the field "
                 "in the store; nothing here can repair it")
+            # The machine-readable half of the same distinction, so `--json`
+            # cannot say "the field is there" in one key while saying nothing
+            # beside the missing one. Names only — the warning carries the types.
+            cred["org_fields_unusable"] = [entry.split(" (", 1)[0]
+                                           for entry in unusable_fields]
         # `recover` does NOT read the token from the winning store — it scans
         # `<cwd>/.tortoise` then `~/.tor…/credentials.json` regardless of which
         # store supplied the KEY (#1752's divergence case). Asking the winner
@@ -3956,8 +3961,27 @@ def _cmd_config(args) -> int:
     if api_key:
         print("Identity")
         print(f"  api_url       {_printable(cred['api_url'])}   (masked)")
-        print(f"  org_id        {_printable(cred.get('org_id') or '(absent)')}")
-        print(f"  org_name      {_printable(cred.get('org_name') or '(absent)')}")
+
+        def _coord_label(field: str) -> str:
+            """Render ONE coordinate, without claiming a present field is gone.
+
+            A field can be PRESENT and still missing from `cred` — it is only
+            copied there when it is a non-empty string (`org_field_warning`
+            covers the rest). So `cred.get(field) or '(absent)'` printed
+            "org_id (absent)" directly above a warning saying the store carries
+            it: two lines of one report disagreeing about one file (#10655
+            review P2). The hint suppression already drew this distinction; the
+            value line now draws it too.
+            """
+            value = cred.get(field)
+            if value:
+                return _printable(value)
+            if field in (cred.get("org_fields_unusable") or ()):
+                return "(present but unusable)"
+            return "(absent)"
+
+        print(f"  org_id        {_coord_label('org_id')}")
+        print(f"  org_name      {_coord_label('org_name')}")
         fp = (f"  (sha256:{cred['api_key_fingerprint']})"
               if cred.get("api_key_fingerprint")
               else "  (digest withheld — short key)")
