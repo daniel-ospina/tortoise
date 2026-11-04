@@ -443,7 +443,11 @@ def test_gh_never_returns_None_for_a_missing_binary(tmp_path, monkeypatch):
     assert out is not None, "`_gh` returned None; its annotation says it cannot"
     assert out.returncode == 127, out.returncode
     assert "command not found" in (out.stderr or ""), out.stderr
-    assert "not on PATH" in (out.cause or ""), out.cause
+    # `getattr` on the CAUSE too, not just on the message: the pre-fix module
+    # returns a bare `CompletedProcess`, so a direct `out.cause` reds with
+    # `AttributeError` while EVALUATING the assertion — a proof that reds for the
+    # wrong reason is not one (review, #10777; same guard as the chdir arm).
+    assert "not on PATH" in (getattr(out, "cause", "") or ""), getattr(out, "cause", "")
 
 
 def test_a_missing_gh_is_a_REFUSAL_that_says_what_to_fix(tmp_path, monkeypatch):
@@ -635,10 +639,14 @@ def test_a_real_gh_that_exits_127_is_not_reported_as_missing(tmp_path, monkeypat
     monkeypatch.setenv("PATH", str(bin_dir))
 
     out = rd._gh(["repo", "view"], tmp_path)
-    assert out.returncode == 127, (out.returncode, out.cause)
-    assert out.cause == "", (
+    # `getattr` in the message AND in the assertion, so the pre-fix module (whose
+    # `_gh` returns a bare `CompletedProcess` with no `cause`) reds on the
+    # BEHAVIOUR it is accused of, not on an `AttributeError` raised while
+    # formatting the proof (review, #10777).
+    assert out.returncode == 127, (out.returncode, getattr(out, "cause", ""))
+    assert getattr(out, "cause", "") == "", (
         "a real process's exit code must not be given a fabricated cause: "
-        f"{out.cause!r}")
+        f"{getattr(out, 'cause', '')!r}")
 
     with pytest.raises(rd.Refused) as exc:
         rd._resolve_repo(tmp_path)
@@ -681,8 +689,21 @@ def test_a_failed_chdir_is_not_reported_as_a_missing_binary(tmp_path):
 
     ⛔ WHY THIS ARM EXISTS (rail review, P2 on `f25cda23d`): the refusal arm above
     is a `PermissionError`, which takes the `except OSError` branch and NEVER
-    reaches the discrimination — so mutating `filename == "gh"` to `if True:`
-    left the whole suite GREEN. This arm reddens on that mutant.
+    reaches the discrimination — so before this arm existed the whole suite stayed
+    GREEN with the discrimination mutated.
+
+    ⛔ AND THE MUTANT IS NAMED EXACTLY (review, #10777 — a false measurement in a
+    docstring is the defect this file exists to refuse): this arm reddens on
+    `if False:` — the discrimination COLLAPSED to 127, so a `chdir` miss answers
+    "`gh` is not on PATH". Measured at head `32ad7fbe9`: `if False:` → 1 failed,
+    and it is THIS arm. It does NOT redden on `if True:` (that mutant forces every
+    `FileNotFoundError` down the cwd branch and this arm still gets its 126);
+    `if True:` is owned by the absence arms —
+    `test_gh_never_returns_None_for_a_missing_binary`,
+    `test_a_missing_gh_is_a_REFUSAL_that_says_what_to_fix`,
+    `test_a_gh_on_path_with_a_dead_shebang_is_not_reported_as_missing` and
+    `test_collect_without_the_gh_cli_refuses_by_name_instead_of_tracebacking`
+    (measured: 4 failed) — so the pair of mutants together pin both directions.
     """
     missing = tmp_path / "this-cwd-does-not-exist"
     out = rd._gh(["repo", "view"], missing)
@@ -734,9 +755,13 @@ def test_a_gh_on_path_with_a_dead_shebang_is_not_reported_as_missing(tmp_path, m
         "precondition: the binary IS on PATH, or this arm tests the PATH-miss case")
 
     out = rd._gh(["repo", "view"], tmp_path)
-    assert out.returncode == 126, (out.returncode, out.cause)
-    assert "is not on PATH" not in out.cause, out.cause
-    assert str(gh) in out.cause, out.cause
+    # `getattr` on the cause, so the pre-fix module reds on the BEHAVIOUR ("a live
+    # binary on PATH is not a missing one") rather than on an `AttributeError`
+    # raised while formatting the assertion (review, #10777).
+    assert out.returncode == 126, (out.returncode, getattr(out, "cause", ""))
+    cause = getattr(out, "cause", "")
+    assert "is not on PATH" not in cause, cause
+    assert str(gh) in cause, cause
 
     with pytest.raises(rd.Refused) as exc:
         rd._resolve_repo(tmp_path)

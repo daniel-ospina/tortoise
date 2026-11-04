@@ -50,7 +50,8 @@
 > moved on. Second, **the grader
 > reads the farm the installer's base names, which need not be the one this box executes**: a
 > `$HOME`-rooted run on a `CELL_HOME`-rooted box grades `$HOME/.pi/agent/scripts`, so neither its `OK`
-> nor its `COULD NOT VERIFY` says anything about the executed farm. That farm is materialised only by
+> nor its `UNKNOWN — cannot verify` says anything about the executed farm (`pi-bootstrap/setup.sh`
+> re-labels that second one `farm: COULD NOT VERIFY`). That farm is materialised only by
 > the installer, so run it from a checkout **at the pin**: from a tree at any other commit it re-farms
 > bytes that are not the pin's, and advancing the pin alone leaves the farm stale. Third, **the
 > instrument may refuse to run at all**: direct invocation from a pi session may be refused as
