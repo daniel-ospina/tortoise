@@ -23,7 +23,13 @@ NOT mean the gate is free. ``hosted_api._check_org_limit`` fills the missing key
 at the REST seam from ``quota.resolve_org_limits``, so every gated REST request
 (``points``, ``documents``, ``sessions``) performs ONE control-plane read, and a
 **fault** in that read is a ``QuotaCheckError`` → HTTP 500 **even with no allowance
-configured**. That is an over-block on our own bookkeeping fault, and the read
+configured**. ⚠️ "One read" is the SUPABASE shape: in registry/self-host mode the
+same fill is an SDK construction plus a ``MATCH (t:Team {id:…})`` query
+(``resolve_org_limits``'s registry arm → ``_make_sdk(namespace="registry")``), so
+the per-request figure is larger there — it is an SDK open, not an HTTP GET
+(#9567 review round 12, P2). Both substrates are disclosed rather than averaged:
+this gate is inert about what it REFUSES on every substrate, but never about what
+it READS, and a self-hosted deployment pays the bigger read. That is an over-block on our own bookkeeping fault, and the read
 side of the ``#3981`` tension this module states below: the ruling forbids
 refusing a paying org over a METERING fault, while a cap that serves past our
 fault is a cap that can be evaded during an outage. We chose refuse-and-name it
@@ -400,6 +406,22 @@ ALLOWANCE_KEYS: dict[str, str] = {
     "capture_extraction": "max_extraction_tokens",
 }
 
+#: Set by a caller that has ALREADY run :func:`carry_resolved_allowances` for
+#: this limits dict, so a SECOND call — the graph-lane half of
+#: ``hosted_api._check_org_limit_off_loop``, which runs the enforcement after
+#: the fill was performed on the control-plane lane — pays no second resolver
+#: read (#9567 review round 12).
+#:
+#: Why a marker and not "the keys are present": the resolver's LOOKUP MISS
+#: (``OrgNotFoundError``) is the one carried state that adds NO key, and it is a
+#: STATE, not a fault — so without this the graph lane would resolve the very
+#: same missing record again, i.e. re-run the PostgREST read on the pool the
+#: caller just moved it off. The key is deliberately private and inert: the gate
+#: iterates ``DIMENSIONS`` by their declared ``limit_key``, and
+#: ``enforce_org_limit`` validates presence per key, never the key SET — so an
+#: extra key changes nothing it can observe.
+CARRIED_MARKER_KEY = "_allowances_carried"
+
 DIMENSIONS: tuple[AllowanceDimension, ...] = (
     _dimension(
         "graph_storage", ALLOWANCE_KEYS["graph_storage"],
@@ -525,6 +547,12 @@ def carry_resolved_allowances(
     """
     if limits is None:
         return None
+    if limits.get(CARRIED_MARKER_KEY):
+        # Already carried by the caller (an off-loop fill that then hands the
+        # dict to a second lane — see CARRIED_MARKER_KEY). Returning UNCHANGED
+        # is the same answer the all-keys-present arm below gives: the caller's
+        # resolution stands and no resolver read is repeated.
+        return limits
     org_id = org_id or limits.get("org_id")
     if not org_id:
         return limits  # stdio/operator — no org context, nothing to resolve
@@ -621,9 +649,24 @@ def _reading(dim: AllowanceDimension, org_id: str,
     if meter is None:
         if observed_only:
             return None
+        # ⛔ A missing meter is NOT a blocked dimension (#9567 review round 12,
+        # P2). The two states are different and a fail-closed refusal must not
+        # misdescribe its own: before this branch the message rendered
+        # "… but is BLOCKED — None" for a dimension with no ``blocked_reason``
+        # at all (reachable through the ``meters=`` seam), i.e. it named a
+        # ruling that does not exist. Branch on ``dim.blocked``.
+        if dim.blocked:
+            raise QuotaCheckError(
+                f"dimension {dim.dimension!r} has an allowance configured for "
+                f"team {org_id!r} but is {BLOCKED.upper()} — "
+                f"{dim.blocked_reason}")
+        _logger.error(
+            "allowance dimension has no meter (fail-closed): team=%s "
+            "dimension=%s", org_id, dim.dimension)
         raise QuotaCheckError(
             f"dimension {dim.dimension!r} has an allowance configured for team "
-            f"{org_id!r} but is {BLOCKED.upper()} — {dim.blocked_reason}")
+            f"{org_id!r} but has no meter plumbed — nothing can measure "
+            f"{dim.limit_key}, so the allowance cannot be enforced")
     try:
         reading = meter(org_id)
     except Exception as e:
@@ -743,9 +786,21 @@ def enforce_allowances(
         # a NaN reading would SILENTLY PASS (a disarmed allowance), and ``inf``
         # would raise a bare OverflowError out of ``int(used)`` below — an
         # unmapped 500 this module promises never to produce (#4051). And a
-        # NON-NUMERIC reading (``None``, ``"5"``, a Decimal) would raise a bare
-        # TypeError at the comparison. So the figure is COERCED once, here, and
-        # every shape that is not a finite number is REFUSED.
+        # reading that is not number-LIKE at all (``None``, ``"five"``, an
+        # arbitrary object) would raise a bare TypeError at the comparison. So
+        # the figure is COERCED once, here, and every shape that does not coerce
+        # to a FINITE float is REFUSED.
+        #
+        # ⚠️ Coercion, not a type gate — and the honest statement matters more
+        # than a tidier one (#9567 review round 12, P2). ``float()`` accepts a
+        # NUMERIC STRING: ``MeterReading(used="5")`` is read as ``5.0``, and
+        # ``used="1e9"`` is refused as OVER the cap, not as non-numeric. That is
+        # sound for what this refusal exists to stop (never a silently-passing
+        # or uncomparable figure — the two shipped meters both hand back a
+        # float), and a stricter ``isinstance(used, (int, float))`` gate would
+        # refuse a ``Decimal`` meter for its TYPE rather than its value. What is
+        # REFUSED is exactly: a value that raises out of ``float()``, and the
+        # non-finite ones NaN / +/-inf.
         raw_used = getattr(reading, "used", None)
         try:
             used = float(raw_used)

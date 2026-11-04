@@ -722,12 +722,11 @@ def test_a_missing_allowance_gate_module_is_the_documented_500(monkeypatch,
     from tortoise.hosted_api import _check_org_limit
 
     monkeypatch.setitem(sys.modules, "tortoise.allowance_gate", None)
-    with caplog.at_level(logging.ERROR):
-        with pytest.raises(HTTPException) as exc:
-            # A NON-gated door: the import runs on every door, so the mapping
-            # must hold there too (`users` is outside
-            # ALLOWANCE_GATED_RESOURCES).
-            _check_org_limit(_rest_org(), "users")
+    with caplog.at_level(logging.ERROR), pytest.raises(HTTPException) as exc:
+        # A NON-gated door: the import runs on every door, so the mapping
+        # must hold there too (`users` is outside
+        # ALLOWANCE_GATED_RESOURCES).
+        _check_org_limit(_rest_org(), "users")
     assert exc.value.status_code == 500, exc.value
     detail = str(exc.value.detail)
     assert detail.startswith("Quota check failed:"), detail
@@ -741,3 +740,146 @@ def test_a_missing_allowance_gate_module_is_the_documented_500(monkeypatch,
               if r.levelno == logging.ERROR]
     assert any("allowance gate unavailable (fail-closed)" in m for m in errors), \
         errors
+
+
+# ── #9567 review round 12 — the CARRY's LANE, and two records that lied ───
+#
+# The carry is a CONTROL-PLANE read (`quota.resolve_org_limits`: a PostgREST
+# ladder in Supabase mode, a registry `Team` query in self-host mode) while the
+# count it feeds is a GRAPH read. `_check_org_limit` used to do both, so the
+# points doors submitted the pair through `_graph_offload` and a control-plane
+# stall surfaced as `503 graph_unavailable` — the WRONG dependency's copy — with
+# the bound miss abandoning a worker that keeps holding its graph-pool slot.
+
+
+def test_the_points_door_carries_the_allowance_on_the_control_plane_lane(
+        monkeypatch):
+    """The carry must be submitted to the CONTROL-PLANE pool, not the graph pool.
+
+    Mutation this REDs: revert the doors to
+    ``_graph_offload(lambda: _check_org_limit(org, "points"))`` (the round-11
+    shape) and the PostgREST read rides the graph pool again — the list below
+    records two `graph` submissions and no `allowance_carry` at all.
+    """
+    import asyncio
+
+    import tortoise.hosted_api as ha
+    from tortoise import quota, supabase_control
+
+    seen: list[tuple[str, str]] = []
+
+    async def _cp(fn, *, op, **_kw):
+        seen.append(("cp", op))
+        return fn()
+
+    async def _graph(fn, *, op, **_kw):
+        seen.append(("graph", op))
+        return fn()
+
+    monkeypatch.setattr(ha, "_cp_offload", _cp)
+    monkeypatch.setattr(ha, "_graph_offload", _graph)
+    monkeypatch.setattr(supabase_control, "is_supabase_enabled", lambda: True)
+    monkeypatch.setattr(quota, "resolve_org_limits", lambda oid: {"org_id": oid})
+
+    asyncio.run(ha._check_org_limit_off_loop(_rest_org(), "points"))
+
+    assert seen == [("cp", "check_org_limit.points.allowance_carry"),
+                    ("graph", "check_org_limit.points")], seen
+
+
+def test_a_control_plane_bound_miss_on_the_carry_is_the_CONTROL_PLANE_503(
+        monkeypatch):
+    """A slow resolver on a points door yields the control-plane body.
+
+    This is the review's requested pin: the fault must read as
+    ``control_plane_unavailable`` — the dependency that actually failed — and
+    never as ``graph_unavailable``.
+
+    Mutation this REDs: put the carry back inside the graph submission and the
+    patched control-plane bound is never applied, so the call SUCCEEDS after the
+    (short, unpatched) graph bound and no 503 is raised at all.
+    """
+    import asyncio
+    import time
+
+    from fastapi import HTTPException
+
+    import tortoise.hosted_api as ha
+    from tortoise import monitoring, quota, supabase_control
+
+    monkeypatch.setattr(monitoring, "CONTROL_PLANE_OFFLOAD_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(supabase_control, "is_supabase_enabled", lambda: True)
+    monkeypatch.setattr(quota, "resolve_org_limits",
+                        lambda _oid: time.sleep(0.4))
+
+    async def _run():
+        await ha._check_org_limit_off_loop(_rest_org(), "points")
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(_run())
+    assert exc.value.status_code == 503, exc.value
+    assert exc.value.detail["error_code"] == "control_plane_unavailable", \
+        exc.value.detail
+
+
+def test_a_no_record_org_is_resolved_ONCE_across_the_two_lanes(monkeypatch):
+    """The marker: the graph-lane half must not re-read a LOOKUP MISS.
+
+    ``OrgNotFoundError`` is the one carried state that adds NO key, so without
+    ``CARRIED_MARKER_KEY`` the enforcement call would consult the resolver a
+    second time — on the very pool the carry was just hoisted off.
+
+    Mutation this REDs: drop the marker check in
+    ``carry_resolved_allowances`` and ``calls`` is ``[ORG, ORG]``.
+    """
+    import asyncio
+
+    import tortoise.hosted_api as ha
+    from tortoise import quota, supabase_control
+
+    calls: list[str] = []
+
+    def _no_record(org_id: str):
+        calls.append(org_id)
+        raise quota.OrgNotFoundError(f"Team {org_id!r} not found in registry")
+
+    monkeypatch.setattr(supabase_control, "is_supabase_enabled", lambda: True)
+    monkeypatch.setattr(quota, "resolve_org_limits", _no_record)
+
+    asyncio.run(ha._check_org_limit_off_loop(_rest_org(), "points"))
+    assert calls == [ORG], calls
+
+
+def test_a_dimension_with_no_meter_is_not_described_as_BLOCKED():
+    """A missing meter is a different state from a ruled-against dimension.
+
+    Mutation this REDs: restore the single message that rendered
+    ``"… but is BLOCKED — None"`` for a dimension whose ``blocked_reason`` is
+    ``None`` (reachable through the ``meters=`` seam) and a fail-closed refusal
+    names a ruling that does not exist.
+    """
+    with pytest.raises(QuotaCheckError) as exc:
+        enforce_allowances(_limits(max_extraction_tokens=10), resource="sessions",
+                           meters={"capture_extraction": None})
+    msg = str(exc.value)
+    assert "blocked" not in msg.lower(), msg
+    assert "no meter plumbed" in msg, msg
+
+
+def test_a_numeric_string_reading_is_COERCED_and_the_record_says_so():
+    """The claim is COERCION, not a type gate — pinned so neither can drift.
+
+    The design record once said a "non-numeric" reading is refused, which reads
+    as a type gate; measured, ``MeterReading(used="5")`` is the number 5.0 and
+    ``"50"`` is refused as OVER the cap, not as non-numeric. Both real meters
+    hand back a float, so this is sound — and this test is where that stays
+    true: a stricter ``isinstance(used, (int, float))`` gate would red the first
+    assertion, and a claim of a type gate would red the second.
+    """
+    enforce_allowances(_limits(max_extraction_tokens=10), resource="sessions",
+                       meters={"capture_extraction": _meter("5")})  # 5.0 < 10
+
+    with pytest.raises(QuotaExceededError):
+        enforce_allowances(_limits(max_extraction_tokens=10),
+                           resource="sessions",
+                           meters={"capture_extraction": _meter("50")})
