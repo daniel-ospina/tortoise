@@ -27,9 +27,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import httpx
 import pytest
-from fastapi.testclient import TestClient
 
 import tortoise.hosted_api as ha_mod
+from tests._verdict import verdict_client
 from tortoise.hosted_api import app
 
 _SITEVERIFY_URL = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
@@ -39,7 +39,29 @@ _SERVICE_KEY = "test-service-role-key-123"
 
 @pytest.fixture(scope="module")
 def client():
-    with TestClient(app) as c:
+    """The #5049 client seam (#8582): a wait-bound refusal is INCONCLUSIVE, not FAIL.
+
+    `/v1/register` provisions a real registry graph, so its FIRST request in a
+    shard pays an embedded-``redislite`` start inside the handler. That start is
+    synchronous and on the event loop, so when the substrate is slow the
+    product's own 10 s `WaitBoundMiddleware` cannot even fire until it returns —
+    measured on `test (d)` of run 41747137960, where this file's first
+    `/v1/register` call took **60.41 s** and answered
+    `{"detail": mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE}` (the session fixture
+    widens redislite's start bound to 60 s, `tests/_embedded.py`), redding
+    `TestRegisterCaptcha::test_fail_open_without_secret_key` on `assert 504 ==
+    200` in a file no part of this PR touches.
+
+    A 504 refusal is the product saying "no answer yet", not a CAPTCHA verdict:
+    the property under test was never observed, so the verdict is the
+    contract's INCONCLUSIVE skip (#5049 rule 1) that NAMES the bound. Every real
+    answer — including the 400s this class pins — still reaches its own
+    assertion, so no genuine regression is masked. Plain `TestClient` here
+    re-opens #8582 for this file, which
+    `test_verdict_contract.py::test_every_converted_client_seam_builds_a_verdict_client`
+    pins.
+    """
+    with verdict_client(app) as c:
         yield c
 
 
