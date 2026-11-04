@@ -2026,6 +2026,12 @@ def test_an_unmeasured_queue_never_authorises_the_cancel(monkeypatch, capsys, tm
     assert "REFUSED-REPAIR" not in captured.out, (
         "...and never into the --json stream: that would break json.load in "
         "tools/ci-check-repair-local.sh and the workflow's step summary")
+    assert captured.err.count("REFUSED-REPAIR") == 1, (
+        "...and EXACTLY ONCE. `in` is satisfied by a second copy as well, and a second "
+        "copy is what the two independently-written fixes for this defect produced "
+        "when the branch that carried #10641's current head auto-merged them — one "
+        "notice on each side of the `--json` split. Nothing reddened: the operator "
+        "just read the same refusal twice per window in the notification.")
     assert [d["run"] for d in summary["prs"][0]["no_verdict"]] == [41480218593], \
         "it is still NAMED — refusing to act is not refusing to report"
     assert summary["queue_congested"] is True, (
