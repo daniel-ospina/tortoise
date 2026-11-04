@@ -926,12 +926,18 @@ async def test_the_seam_returns_the_write_contract_and_still_abandons(slow_dispa
 def test_the_citations_in_this_contract_are_SYMBOLS_not_sdk_line_numbers():
     """An `sdk.py:<line>` citation is a claim that rots on the next upstream edit.
 
-    This branch carried five of them and re-derived the numbers SEVEN times before
-    giving up on the device: the `origin/main` merge alone shifted every one by
-    +104, and edits inside this PR moved them again (+21, +8, +6, +3, +3, +6). A
-    line number is only meaningful against one revision, so across the life of a
-    PR it is wrong most of the time — and it stays WRONG silently, because prose
-    cannot red a check.
+    This branch carried five of them, and every attempt to keep them true failed:
+    the `origin/main` merge alone shifted all five by +104 (22427 → 22531 at
+    `b81e75385`), and this PR's own edits moved them again, repeatedly, by a
+    different delta for each citation — which is why no single sequence describes
+    them.
+    ⛔ The exact per-commit sequence is deliberately NOT restated here — two
+    attempts to write it down were themselves wrong (a different drift per
+    citation), which is the point: a device that needs a recount to stay honest is
+    not a device, it is a maintenance burden with a plausible smell. A line number
+    is only meaningful against one revision, so across the life of a PR it is wrong
+    most of the time — and it stays WRONG silently, because prose cannot red a
+    check.
 
     The repo's own convention is the symbol (see
     `docs/architecture/STORAGE-ARCHITECTURE-CHANGELOG.md`: "the emitters are named
@@ -943,8 +949,8 @@ def test_the_citations_in_this_contract_are_SYMBOLS_not_sdk_line_numbers():
     `sdk.py:<digits>`. Line citations to OTHER modules already exist in these files
     from before this PR (`mcp_auth.py:515-538`, `mcp_server.py:1304`,
     `fastmcp/tools/base.py:363-369`, `record_read.py:1029`) and are not this
-    lane's debt to convert — `sdk.py` is the one cited five times here and the one
-    that moved seven times in a week.
+    lane's debt to convert — `sdk.py` is the one cited five times here, and the one
+    that moved with every commit that touched the file.
     """
     import pathlib
     import re
