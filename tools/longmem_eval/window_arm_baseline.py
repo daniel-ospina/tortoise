@@ -71,11 +71,13 @@ chunks per session and never caps points/turn points, so the distinction is
 invisible on a chunk-free pool and decisive on the chunk-bearing shape the
 corpus is actually ingested as: the cap removes slots ABOVE a tail pick and
 lifts it into the graded top 5. Every pool therefore carries its chunk shape
-(``raw``, reported per row as ``chunk_bearing``), the two ``chunk_bearing_*``
-entries re-measure the issue's own probe and the starved-cluster shape on that
-geometry, and the verdict is keyed by shape rather than stated once. A single
-number here would be a claim about ONE shape dressed as a property of the arm —
-which is exactly what a fresh-context review caught in the first draft.
+(``raw``, reported per row as ``chunk_bearing``), and the verdict is keyed by
+shape rather than stated once. A single number here would be a claim about ONE
+shape dressed as a property of the arm — which is exactly what a fresh-context
+review caught in the first draft. ⚠️ The cap only bites where the ceiling is
+already past the metric's cut (window >= 7 at the shipped limit): at windows 3-6
+the pick is inside the top 5 on EITHER shape, for the ceiling's own reason, and
+on the chunk-bearing pools the cap merely adds the second pick.
 
 WHAT IT IS NOT
 --------------
@@ -180,12 +182,18 @@ def pool_for(name: str) -> list[dict]:
     return _pool(entry["spec"], entry.get("raw", ()))
 
 
-#: The PRE-REGISTERED pools — every one of them is a shape the #10538 record
-#: already names, so the receipt reproduces the argument rather than inventing
-#: new cases. (The two ``chunk_bearing_*`` entries are the SAME two shapes as
-#: ``issue_probe_4520`` / ``whole_window_cluster`` with the clustering session
-#: ingested as raw transcript chunks — the shape the corpus is actually written
-#: in, added by the finding-1 remedy rather than by a new argument.)
+#: The PRE-REGISTERED pools — each is a shape the #10538 record already names,
+#: so the receipt reproduces the argument rather than inventing new cases.
+#: ⛔ TWO EXCEPTIONS, both DISCLOSED at the entry itself rather than left to this
+#: header: the ``chunk_bearing_issue_probe`` / ``chunk_bearing_whole_window_cluster``
+#: entries re-measure two of the shapes above with the clustering session
+#: ingested as raw transcript chunks (the shape the corpus is actually written
+#: in, added by the finding-1 remedy), and ``chunk_bearing_deep_window`` is a
+#: PURPOSE-BUILT shape with no pre-existing counterpart, added by the finding-3
+#: remedy because both chunk-bearing pools above cap down to a pool SHALLOWER
+#: than the window and so cannot express a displacement at all. It is not an
+#: argument the record already made; it is the shape the record's question needs
+#: in order to be answerable, and its entry says so.
 #: ``clustered`` is what the arm's clustering gate must answer for
 #: that pool at the shipped geometry (``head = window - limit``), so it is
 #: EXECUTABLE metadata, not a comment: the pin asserts it against
@@ -293,12 +301,16 @@ POOLS: dict[str, dict] = {
 #:
 #: ⛔ THAT BOUNDARY IS A PROPERTY OF THE CHUNK-FREE SHAPE, NOT OF THE SWEEP
 #: (fresh-context review, finding 1). `fused rank == reader rank` only when no
-#: hit is a raw ``session-transcript`` chunk; on a CHUNK-BEARING pool the reader's
-#: cap removes the raw chunks ABOVE the pick, so the pick is graded at EVERY
-#: swept window from 3 through 13 (and at 14 on two of the three chunk-bearing
-#: pools). Stating "7 is where it cannot" as a fact about the
-#: sweep is the same one-shape-as-a-property-of-the-arm error the shape-keyed
-#: verdict fields exist to prevent — read the row's own ``chunk_bearing``.
+#: hit is a raw ``session-transcript`` chunk. At ``3,4,5,6`` a pick is graded on
+#: EITHER shape — the ceiling is inside the top 5 there, which is the CHUNK-FREE
+#: reason, and the cap only decides whether the SECOND pick is graded too. From
+#: ``7`` on the two shapes part: on a CHUNK-BEARING pool the cap removes the raw
+#: chunks ABOVE the pick, so it is still graded at EVERY swept window from 3
+#: through 13 (and at 14 on two of the three chunk-bearing pools), while on a
+#: chunk-free pool it is graded nowhere from 7 on. Stating "7 is where it cannot"
+#: as a fact about the sweep is the same one-shape-as-a-property-of-the-arm error
+#: the shape-keyed verdict fields exist to prevent — read the row's own
+#: ``chunk_bearing``.
 GEOMETRY = (3, 4, 5, 6, 7, SHIPPED_WINDOW, 13, 14)
 
 #: Pool depths swept at the shipped window — the "shallow pool" loophole: an arm
@@ -478,11 +490,14 @@ def measure() -> dict[str, Any]:
                      "corpus is ingested as). The two do NOT agree, and neither "
                      "number is universal — read the field's own shape. The "
                      "sweep below reaches the graded top 5 at windows 3-6 ON A "
-                     "CHUNK-FREE POOL; on a CHUNK-BEARING pool the pick is "
-                     "graded at EVERY swept window from 3 through 13, because "
-                     "the chunk cap removes the raw chunks above it. Both are "
-                     "different geometries from the harness's tr_top_k, so "
-                     "neither is a way to reach the unit. Where a row carries "
+                     "CHUNK-FREE POOL (the pick's ceiling is itself inside the "
+                     "top 5 there) — a different geometry, NOT the harness's "
+                     "tr_top_k, so it is not a way to reach the unit. A "
+                     "CHUNK-BEARING pool is graded at those same windows for "
+                     "that same ceiling reason, and stays graded at EVERY swept "
+                     "window from 3 through 13 because from window 7 on the "
+                     "reader's chunk cap has removed the raw chunks above the "
+                     "pick. Where a row carries "
                      "`displacement_expressible: false` the capped pool is "
                      "SHALLOWER than the window, so its `additive` / "
                      "`evicted_ids` / `deleted_sessions` are arithmetic, not "

@@ -402,8 +402,29 @@ def test_the_sweep_boundary_is_a_shape_property_not_a_sweep_property():
             f"a chunk-bearing pool is still graded there: {graded}")
     # the published scope must NAME the shape it is qualifying
     assert "windows 3-6 ON A CHUNK-FREE POOL" in receipt["verdict"]["scope"]
-    assert "CHUNK-BEARING pool the pick is graded at EVERY swept window" in (
-        receipt["verdict"]["scope"])
+    assert "stays graded at EVERY swept window from 3 through 13" in (
+        receipt["verdict"]["scope"]), (
+        "the scope must carry the chunk-bearing range as well as the "
+        "chunk-free boundary")
+    # ⛔ AND IT MUST NOT OVER-ATTRIBUTE THE CAUSE TO THE CAP AT THE LOW WINDOWS
+    # (review cycle 14, finding 2). At windows 3-6 the pick is graded on EITHER
+    # shape because the ceiling is inside the top 5; the cap only decides whether
+    # the SECOND pick is graded. The cap is what grades the pick from window 7
+    # on. Attaching "because the cap removes the raw chunks above it" to the
+    # whole 3-13 range is an over-attribution, and the receipt's own rows refute
+    # it: at w=3 and w=4 `pick_ranks` and `pick_ranks_before_dedup` are IDENTICAL
+    # on the chunk-bearing pools, exactly as on the chunk-free ones.
+    free_probe = {r["window"]: r for r in chunk_free["issue_probe_4520"]}
+    for window in (3, 4):
+        assert (free_probe[window]["pick_ranks"]
+                == free_probe[window]["pick_ranks_before_dedup"])
+    for name, rows in chunk_bearing.items():
+        low = {r["window"]: r for r in rows}
+        for window in (3, 4):
+            assert (low[window]["pick_ranks"]
+                    == low[window]["pick_ranks_before_dedup"]), (
+                f"{name} w={window}: the cap is NOT what grades the pick "
+                "here — this range belongs to the ceiling, not to the cap")
 
 
 def test_displacement_fields_are_read_only_where_they_are_expressible():
