@@ -1259,6 +1259,26 @@ def test_a_same_thread_read_outside_the_index_is_still_drift(monkeypatch) -> Non
     This is the missing direction: a read of a path outside the index made on the
     SAME thread is still recorded and still reported as drift, so the guard keeps
     its discriminating power over exactly the reads `_label_hits` itself performs.
+
+    ⛔ **Membership, NOT set equality, and the difference is measured.** An earlier
+    cut asserted `drifted == [stray]` and reddened the REQUIRED `test (d)` of run
+    41910206285 (job 126877630907) with
+    `[PosixPath('…/tests/test_substrate_map.py'), PosixPath('/proc/3045/stat')]` —
+    zero test failures, no defect in this module. `/proc/<pid>/stat` is read by
+    `tortoise/embedded_reaper._pid_alive` (`embedded_reaper.py:991`, via
+    `Path.read_text`) and the spy patches the CLASS, so any such read that lands on
+    the calling thread inside the window is recorded as drift. That is the SAME
+    false-RED class this file's docstrings already record from `test (a)` of run
+    41319892722 — there it was a foreign THREAD, which is what `scope_to_thread`
+    fixes; here the ambient reader shared the calling thread, which no scoping can
+    exclude. Set equality would therefore be asserting that the whole process read
+    nothing else during `_label_hits()` — a claim about the environment, not about
+    the recorder.
+
+    The discriminating direction is preserved exactly: a recorder that drops every
+    path outside the tracked population (the hypothesis this test exists to kill)
+    loses `stray` and still reds here, while unrelated ambient reads no longer
+    manufacture a failure.
     """
     stray = REPO / "tests" / "test_substrate_map.py"
 
@@ -1266,7 +1286,13 @@ def test_a_same_thread_read_outside_the_index_is_still_drift(monkeypatch) -> Non
         stray.read_text(encoding="utf-8")
 
     drifted = _population_drift(_label_hits_reads(monkeypatch, during=_a_stray_read))
-    assert drifted == [stray], drifted
+    assert stray in drifted, (
+        "a read of a path outside the tracked index, made on the SAME thread, was "
+        "NOT reported as drift — so a recorder that only ever records the tracked "
+        "population would pass the sibling controls vacuously and report CLEAN for "
+        "a `_label_hits` that had wandered off it; measured drift: "
+        + ", ".join(str(p) for p in drifted[:5])
+    )
 
 
 def test_an_index_git_that_cannot_answer_is_a_state_error_not_an_empty_population(
