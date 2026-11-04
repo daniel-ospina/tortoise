@@ -5796,6 +5796,21 @@ _WARN_SUPPRESS: contextvars.ContextVar[frozenset[str] | None] = contextvars.Cont
     "_WARN_SUPPRESS", default=None
 )
 
+# #10368 — while `create_point`'s dedup fold writes through `update_point`, that
+# door must REFUSE a terminal verdict at the WRITE point, not merely classify it.
+# `update_point` scopes its own terminal refusal to `_TEMPORAL_RESTAMP_PROPS`
+# (#7819), because an ADDRESSED generic revision of a dead claim is the #3305
+# capability — a caller who NAMED the point may still revise it. The dedup fold
+# is the opposite case: `create_point(dedup=True)` selects its target by CONTENT,
+# so the caller addressed nothing, and #10368 refuses every write onto a settled
+# claim. Scoping the refusal here (a ContextVar, like `_WARN_SUPPRESS`, so
+# concurrent callers cannot arm each other) keeps #3305 untouched on the public
+# door while making the fold's second read — the one that really does sit at the
+# write point — act instead of being a no-op.
+_FOLD_REFUSES_TERMINAL_WRITE: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "_FOLD_REFUSES_TERMINAL_WRITE", default=False
+)
+
 # ── #2600 server-resolved human actor ───────────────────────────────────────
 # `_current_actor_user_id` carries the server-resolved human actor for
 # session + write-event stamps. SET ONLY at auth seams (mcp_auth
@@ -12700,17 +12715,36 @@ class TortoiseSDK:
                 # read + that guard), pinned at the NUMBER by
                 # `test_an_applied_fold_costs_the_measured_lifecycle_reads`.
                 #
+                # ⛔ THAT SECOND READ RE-VERIFIES ONLY BECAUSE THIS FOLD ARMS
+                # IT (#10368 review P2, MEASURED). `update_point` scopes
+                # `refuse_terminal` to `_TEMPORAL_RESTAMP_PROPS` and this fold
+                # reaches the write leg only when `_temporal` is EMPTY, so that
+                # guard's read returned a verdict and acted on nothing: a
+                # `retract_point` landing between the read above and the write
+                # below was still applied to a settled claim, while this
+                # comment described protection that did not exist. The fold now
+                # sets `_FOLD_REFUSES_TERMINAL_WRITE` around its one write and
+                # converts the guard's refusal into this fold's own
+                # drop-with-advisory — every other `update_point` caller keeps
+                # the #3305 scope, unchanged.
+                #
                 # Do NOT "restore" the single read by handing these rows to
-                # `update_point`'s guard: that guard would then classify a
-                # snapshot taken BEFORE the authored-word leg's
-                # `set_point_baseline` write and before anything else inside
-                # `update_point`, and a writer that trusts a pre-write snapshot
-                # is the defect the guard exists to catch (the same reason a
-                # database re-evaluates a predicate against the row version at
-                # UPDATE time instead of reusing the earlier search). The
-                # second read is the price of re-verifying at the write point.
-                # It is disclosed in the PR body, not hidden by a comment that
-                # overstates the saving.
+                # that guard: it would then classify a snapshot taken BEFORE
+                # the authored-word leg's `set_point_baseline` write and before
+                # anything else inside `update_point`, and a writer that trusts
+                # a pre-write snapshot is the defect the guard exists to catch
+                # (the same reason a database re-evaluates a predicate against
+                # the row version at UPDATE time instead of reusing the earlier
+                # search).
+                #
+                # ⚠️ DISCLOSED RESIDUAL, the one this read does NOT cover: the
+                # authored-word leg writes FIRST (the `set_point_baseline`
+                # above) through its own baseline writer rather than this
+                # fold's `update_point` call, so a terminalization racing into
+                # THAT window can still land the weak body. Closing it needs a
+                # write-point predicate inside the baseline writer itself; it is
+                # not reopened here, and the window named is the one that
+                # remains — not "every leg".
                 #
                 # ⛔ The predicate is what this fold would APPLY, never the raw
                 # bag. `content_hash` is DERIVED (written near the top of this
@@ -13063,9 +13097,35 @@ class TortoiseSDK:
                     _tok = _WARN_SUPPRESS.set(
                         frozenset({repr(_vf), repr(_vt)})
                         if (_vf is not None or _vt is not None) else None)
+                    # #10368 review P2: arm the refusal for THIS write only. The
+                    # read above is a snapshot; `update_point` takes the read
+                    # that sits at the write point, and without this flag it only
+                    # classifies there — its refusal is scoped to temporal props
+                    # (#7819/#3305), which this fold never carries on this path.
+                    _ftok = _FOLD_REFUSES_TERMINAL_WRITE.set(True)
                     try:
                         self.update_point(pid, **props)
+                    except ValueError:
+                        # The write-point guard refused: the point went terminal
+                        # between the snapshot above and here. Nothing was
+                        # written — that guard raises BEFORE the journal append
+                        # and before every write — so report the same refusal
+                        # the non-raced path reports rather than letting a dedup
+                        # hit raise out of `create_point`.
+                        if self._lifecycle_terminal_marker(pid) is None:
+                            raise
+                        _terminal_fold_refused = True
+                        # No end receipt for a write that did not happen
+                        # (#9202/#10079): a raced fold must not report
+                        # `valid_to_shaped` either.
+                        _end_receipt = None
+                        _logger.warning(
+                            "create_point: dedup resolved to point %s, which "
+                            "became terminal while this fold was in flight — "
+                            "the caller's props were NOT applied (#10368).",
+                            pid)
                     finally:
+                        _FOLD_REFUSES_TERMINAL_WRITE.reset(_ftok)
                         _WARN_SUPPRESS.reset(_tok)
                 return _with_end_receipt(
                     {**self.get_point(pid),
@@ -17733,13 +17793,16 @@ class TortoiseSDK:
         # #7951 §17.1; an append for a node that is not there is a record of a
         # revision that cannot exist).
         #
-        # `refuse_terminal` is FALSE unless the call carries a temporal prop:
-        # #7819 scoped THIS door's terminal refusal deliberately — a generic
-        # revision of a dead claim remains writable through the ADDRESSED door
-        # (the caller names the point), which is the #3305 capability. The
-        # UNADDRESSED create fold is the opposite case and refuses every write
-        # onto a terminal claim (#10368), so the two doors no longer share a
-        # scope; this one is unchanged.
+        # `refuse_terminal` is FALSE unless the call carries a temporal prop, OR
+        # the caller is `create_point`'s dedup fold, which arms
+        # `_FOLD_REFUSES_TERMINAL_WRITE` around its own write: #7819 scoped THIS
+        # door's terminal refusal deliberately — a generic revision of a dead
+        # claim remains writable through the ADDRESSED door (the caller names
+        # the point), which is the #3305 capability. The UNADDRESSED create fold
+        # is the opposite case and refuses every write onto a terminal claim
+        # (#10368), so the two doors do not share a scope. The fold arms the
+        # refusal for the duration of ONE write, never for the door in general:
+        # a public `update_point` call never sees the flag.
         #
         # ⛔ THE STATUS-CARRYING CALL IS *NOT* SKIPPED. A first cut of this fix
         # read `if 'status' not in props:` around the whole guard and thereby
@@ -17763,7 +17826,8 @@ class TortoiseSDK:
         _temporal_restamp = bool(_TEMPORAL_RESTAMP_PROPS & set(props))
         _verdict = self._assert_lifecycle_guard(
             id, method="update", missing_ok=True, allow_operator=True,
-            refuse_terminal=_temporal_restamp)
+            refuse_terminal=(_temporal_restamp
+                             or _FOLD_REFUSES_TERMINAL_WRITE.get()))
         if _verdict is None and 'status' not in props:
             # ABSENT. Zero side effects, and the same `{}` the documented
             # contract already returns — no journal row, no epoch advance,

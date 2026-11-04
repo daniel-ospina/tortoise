@@ -26,6 +26,12 @@ What is pinned here:
     - the journaled provenance retrofit (#7704, OWNER RULING 2026-10-25: "a
       dedup hit KEEPS the new evidence") still folds onto a terminal point —
       it is evidence ABOUT the claim, not a rewrite of what the claim says.
+
+And the read the guard is built on is a SNAPSHOT, so the WRITE point
+re-verifies: a point that goes terminal between that read and the fold's
+`update_point` call is refused there, not written (`test_a_fold_that_races_a_
+terminalization_at_the_write_point_writes_nothing`). The authored-word leg's
+`set_point_baseline` write is the disclosed residual that window does not cover.
 """
 from __future__ import annotations
 
@@ -290,6 +296,13 @@ def test_an_applied_fold_costs_the_measured_lifecycle_reads(sdk, monkeypatch):
     reason a database re-evaluates a predicate against the row version at
     UPDATE time instead of trusting the earlier search — so the cost is the
     price of the safety property, and it is DISCLOSED, not hidden.
+
+    ⛔ AND THAT RE-VERIFICATION IS ARMED BY THE FOLD (#10368 review P2).
+    `update_point` scopes `refuse_terminal` to `_TEMPORAL_RESTAMP_PROPS`, which
+    an applied fold never carries, so its read classified and acted on nothing
+    until the fold started setting `_FOLD_REFUSES_TERMINAL_WRITE` around this
+    one write. The race that made the difference is pinned in
+    `test_a_fold_that_races_a_terminalization_at_the_write_point_writes_nothing`.
     """
     from tortoise.live import LIFECYCLE_FANOUT_QUERY
 
@@ -327,3 +340,61 @@ def test_an_applied_fold_costs_the_measured_lifecycle_reads(sdk, monkeypatch):
         "a REFUSED fold must cost exactly 1: the hoist exists so both refusals "
         f"share one read and `update_point` is never reached, got {len(reads)}"
     )
+
+
+def test_a_fold_that_races_a_terminalization_at_the_write_point_writes_nothing(sdk, monkeypatch):
+    """The guard's read is a SNAPSHOT — the WRITE point must re-verify (#10368 review P2).
+
+    The hoisted read decides both refusals, but it is taken BEFORE the fold's
+    `update_point` call (with the #7704 provenance work and the journal append in
+    between). A concurrent `retract_point`/`supersede_point` landing in that
+    window used to slip straight through: `update_point` scopes its own
+    `refuse_terminal` to `_TEMPORAL_RESTAMP_PROPS` (#7819/#3305) and an applied
+    fold carries no temporal prop, so that door's read classified the fan-out and
+    acted on NOTHING — the caller's props and `updatedAt` landed on a claim that
+    had just been settled. The fold now arms the refusal
+    (`_FOLD_REFUSES_TERMINAL_WRITE`) for its one write and turns the door's
+    refusal into its own drop-with-advisory, so the class this PR closes cannot be
+    re-opened by timing.
+
+    The race is made deterministic rather than slept on: the fold's snapshot read
+    is answered "live" while every later read — which is the one at the write
+    point — answers truthfully.
+
+    ⛔ Non-vacuous: without the arm, `update_point` is called with
+    `refuse_terminal=False`, writes `custom_probe` and moves `updatedAt`, and this
+    test reds on both assertions (measured on the pre-fix tree).
+    """
+    content = _fresh_content("raced-terminal")
+    pid = sdk.create_point("statement", content, dedup=True)["id"]
+    sdk.retract_point(pid)
+    before = sdk.get_point(pid)
+    assert before["status"] == "retracted"
+
+    real = type(sdk)._lifecycle_terminal_marker
+    calls: list[str] = []
+
+    def snapshot_then_truth(self, point_id, rows=None):
+        calls.append(point_id)
+        if len(calls) == 1:
+            return None          # the snapshot: taken before the retraction
+        return real(self, point_id, rows)
+
+    monkeypatch.setattr(type(sdk), "_lifecycle_terminal_marker",
+                        snapshot_then_truth)
+
+    again = sdk.create_point("statement", content, dedup=True,
+                             custom_probe="raced")
+    after = sdk.get_point(pid)
+
+    assert again["id"] == pid, "a dedup HIT is still reported"
+    assert len(calls) >= 2, (
+        "the write point must take its OWN lifecycle read — the snapshot above "
+        "is not a verification")
+    assert after.get("custom_probe") is None, (
+        "a fold that raced a terminalization still stored the caller's prop")
+    assert after["updatedAt"] == before["updatedAt"], (
+        "a fold that raced a terminalization still moved a settled claim's "
+        "updatedAt")
+    assert after["status"] == "retracted", "the point must stay terminal"
+    assert "terminal_fold_refused" in _advisory_codes(again), again
