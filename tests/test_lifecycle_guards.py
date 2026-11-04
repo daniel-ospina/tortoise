@@ -917,9 +917,17 @@ def test_a_dedup_hit_pays_no_lifecycle_read_unless_the_fold_can_write(
     that point: `content_hash` (this door stamps it unconditionally, #80) and
     `extractedFrom` (the #7704 evidence fold, which the capture seam
     (`TortoiseSDK.capture_session`) and the hosted commit phase attach on every
-    point). A predicate that tests the raw bag makes the skip dead code and
-    charges the re-ingest / self-host hot path a query it never paid before
-    #10368 (#10792 review, P2).
+    point). A predicate that tests the raw bag makes the skip dead code for a
+    DIRECT-SDK fold and charges it a query it never paid before #10368 (#10792
+    review, P2).
+
+    Scope, so this arm is not read as more than it measures (the #10889
+    review's P3): both SERVED seams satisfy the predicate from OTHER props —
+    the commit phase passes `is_episodic=False` / `session_id=` at both
+    `create_point` call sites, and the capture seam pre-resolves the hit and
+    only calls `create_point` on a MISS — so the commit path still pays one
+    marker read per dedup fold, an accepted cost. Only a fold carrying nothing
+    but `content_hash` + `extractedFrom`, as here, gets the skip.
 
     Two-sided on purpose: a "fix" that simply REMOVED the read reds the third
     arm, because a fold carrying a caller prop must still get the terminal
@@ -1100,6 +1108,47 @@ def test_a_KEY_named_fold_onto_a_terminal_point_is_unchanged(sdk):
         "a KEY-named fold must keep the behaviour it had before #10368")
     codes = [a.get("code") for a in (again.get("advisories") or [])]
     assert "metadata_not_applied" not in codes, again
+
+
+def test_create_or_update_point_does_not_revise_a_terminal_claim(sdk):
+    """#10889 review P3 — the DELEGATE inherits the drop, and its contract says
+    so.
+
+    `create_or_update_point` is `create_point(dedup=True, **props)`, so a
+    content hit on a terminal claim drops the generic metadata props and writes
+    no `updatedAt` — the "update" half of its one-line promise does not hold
+    for a terminal target. Nothing pinned that, and the sentence (and its
+    surface row) named neither the advisory nor the verb that DOES revise
+    (`update_point(id=…)`, #3305).
+
+    Reds pre-fix twice over: the prop was STORED on the dead node, `updatedAt`
+    MOVED, and no advisory existed to read. The live-target half is kept so the
+    delegate's ordinary "update" behaviour cannot be narrowed into the drop.
+    """
+    content = f"create_or_update terminal {uuid.uuid4().hex[:8]}"
+    pid = sdk.create_or_update_point("statement", content)["id"]
+    sdk.retract_point(pid)
+    before = sdk.get_point(pid)
+
+    again = sdk.create_or_update_point("statement", content, custom_probe="x")
+
+    assert again["id"] == pid, "the delegate still reports the dedup hit"
+    after = sdk.get_point(pid)
+    assert after["updatedAt"] == before["updatedAt"], (
+        "create_or_update_point re-stamped a TERMINAL claim (#10368)")
+    assert "custom_probe" not in after, (
+        "create_or_update_point stored a caller prop on a TERMINAL claim")
+    codes = [a.get("code") for a in (again.get("advisories") or [])]
+    assert "metadata_not_applied" in codes, again
+
+    # …and on a LIVE target the "update" half is untouched.
+    live_content = f"create_or_update live {uuid.uuid4().hex[:8]}"
+    live = sdk.create_or_update_point("statement", live_content)["id"]
+    bumped = sdk.create_or_update_point(
+        "statement", live_content, custom_probe="y")
+    assert bumped["id"] == live
+    assert sdk.get_point(live).get("custom_probe") == "y", (
+        "the terminal drop must not narrow the live-target fold")
 
 
 @pytest.mark.parametrize("kwargs", [

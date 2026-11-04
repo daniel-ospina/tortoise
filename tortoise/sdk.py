@@ -12693,16 +12693,27 @@ class TortoiseSDK:
                 # ⛔ Reading it lazily at each use is NOT equivalent: the
                 # temporal branch returns only on a NON-None marker, so a fold
                 # carrying a temporal prop onto a LIVE target asked twice.
-                # ⛔ `extractedFrom` is excluded for the same reason and one
-                # more: it is this door's own EVIDENCE fold (#7704), popped
-                # before the write leg, and the capture seam and the hosted
-                # commit phase attach it on EVERY point — so leaving it in the
-                # predicate paid the read on every idempotent capture/commit
-                # replay, a verdict that is then never consulted (an
-                # evidence-only fold writes no prop, carries no temporal prop
-                # and sets no word). Measured on this head before the
-                # exclusion (the #10792 review's P2): an evidence-only replay
-                # went 0 -> 1 marker reads.
+                # ⛔ `extractedFrom` is excluded for a NARROWER saving than an
+                # earlier version of this note claimed (corrected on the #10889
+                # review's P3): it is this door's own EVIDENCE fold (#7704),
+                # popped before the write leg, and an evidence-only fold writes
+                # no prop, carries no temporal prop and sets no word — so the
+                # verdict is never consulted. The exclusion thus avoids the read
+                # only for a DIRECT-SDK fold whose whole payload is
+                # `content_hash` + `extractedFrom` (the arm pinned at
+                # tests/test_lifecycle_guards.py:949). Measured on this head
+                # before the exclusion (the #10792 review's P2): an
+                # evidence-only replay went 0 -> 1 marker reads.
+                #
+                # ⚠️ It is NOT a saving on either SERVED seam, and this code
+                # does not claim one: the hosted commit phase passes
+                # `is_episodic=False` / `session_id=` at BOTH `create_point`
+                # call sites (`_execute_commit_writes`), and the capture seam
+                # pre-resolves the content hit and only calls `create_point` on
+                # a MISS (where no fold runs). Both therefore satisfy the
+                # predicate from OTHER props, so the commit path pays one
+                # marker read per dedup fold — a known ACCEPTED cost of the
+                # terminal verdict, not something this predicate removes.
                 #
                 # `None` therefore means "live" here only because every path
                 # that consults this value has a caller prop or a `cred_prior`.
@@ -13633,7 +13644,16 @@ class TortoiseSDK:
         return _with_end_receipt(_snapshot, _end_receipt)
 
     def create_or_update_point(self, kind: str, content: str, **props) -> dict:
-        """Idempotent create/update — matches by content hash."""
+        """Idempotent create/update — matches by content hash.
+
+        #10368: a CONTENT match settles no revision onto a TERMINAL claim. The
+        "update" half therefore does NOT hold for a terminal target — the fold's
+        generic metadata props are dropped and reported in the transient
+        ``metadata_not_applied`` advisory (its ruled ``extractedFrom`` /
+        ``credibility`` legs still apply). To revise a claim you must NAME it:
+        use ``update_point(id=…, …)`` (#3305). The reply carries the advisory, so
+        the omission is reported rather than silent.
+        """
         return self.create_point(kind, content, dedup=True, **props)
 
     # ── Resolution helper (Issue #52) ──

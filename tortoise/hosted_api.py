@@ -18852,9 +18852,13 @@ def _commit_response(
       same ones;
     * WRITE-TIME advisories (``temporal_not_applied``, #7819;
       ``metadata_not_applied``, #10368 — a dedup fold onto a terminal claim
-      drops the metadata props it carries; and
+      drops the metadata props it carries, while its ruled legs — the
+      ``extractedFrom`` source fold and the authored ``credibility`` word —
+      still write (#7704/#398); and
       ``narrative_not_recorded``, #10000 — observed while the writes ran: a
-      dedup fold dropped on an already-terminal claim wrote NOTHING, and a
+      **temporal** fold dropped on an already-terminal claim wrote NOTHING,
+      where a **metadata** fold writes only those ruled evidence/word legs
+      and never the props (#10368); and a
       commit whose `SessionNarrated` carrier did not reach the record left
       §9.1's narrative outside its home, which `_report_narrative_home` says
       rather than letting a 200 imply it landed). These are present only on the
@@ -19945,8 +19949,11 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                 # a new point property.
                 session_id=session_id, **point_props,
             )
-            # #7819: a fold dropped because the target is terminal writes
-            # NOTHING — carry the advisory out so the receipt reports it.
+            # #7819 / #10368: a fold dropped because the target is terminal
+            # writes nothing OF WHAT IT CARRIED — the WHOLE fold (temporal,
+            # #7819) or only the generic metadata props (content, #10368, whose
+            # evidence/word legs still land). Carry the advisory out so the
+            # receipt reports the drop.
             _write_advisories.extend(_written.get("advisories") or [])
             # #1370: record the id the write RESOLVED to (the map the binder
             # reads). #4970: the SUCCESSOR may itself re-key (its content
@@ -20090,7 +20097,8 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                 # the same source-session attribution surface.
                 session_id=session_id, **point_props,
             )
-            # #7819: same drop, the plain-create leg.
+            # #7819 / #10368: same drop, the plain-create leg (see above for
+            # what each advisory does and does not mean).
             _write_advisories.extend(_written.get("advisories") or [])
             # #1370: the id the write RESOLVED to. #4970: the graph id §5
             # CONTAINS and the supersede below must use — the pre-existing
