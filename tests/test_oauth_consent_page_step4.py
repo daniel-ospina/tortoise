@@ -1280,7 +1280,8 @@ def test_the_bounce_does_not_append_a_SECOND_key_when_the_flow_already_has_one()
 
     # ⛔ WHITESPACE IS **NOT** BLANK HERE (review P2, #10757). Both readers this hop reconciles
     # test TRUTHINESS, and `" "` is truthy in both: the AS gate renders the page for
-    # `attempt_key=+` (`hosted_api.py:43856`), and `start.ts:255-256`
+    # `attempt_key=+` (`hosted_api.py:44884`, `if not request.query_params.get(...)`), and
+    # `start.ts:255-256`
     # (`presentedKey || newAttemptKey()`) ADOPTS `" "`. A `.strip()` predicate minted a second
     # key for a flow that already had one and put the page and its own sign-in link on different
     # keys — so this must be left BYTE-EXACT, exactly like the real-key arm above.
