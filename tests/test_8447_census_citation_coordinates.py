@@ -1,383 +1,207 @@
-"""#8447 C1 — the census may not cite a line it has itself declared retired.
+"""#8447 C1 — the census's citations must NAME something, and must not be coordinates.
 
-THE DEFECT THIS PINS, measured on the tree before it. ``tortoise/hosted_api.py``
-moved three times under ``docs/architecture/BOUNDED-OPERATION-CONTRACT.md``
-(``+123`` at ``d72983b99``, then a *uniform* ``+649`` at ``d3f148a56``), and the
-document carries a re-derivation ledger in its header that records each move as
-``from``→``to`` ("``/v1/points`` ``10265``→``10914``", "the ``/v1/search`` marker
-pair ``10804-10813``→``11453-11462``"). The third pass applied its ``+649`` to the
-table rows and to the header, but **not** to the three ``hosted_api.py`` cites in
-§2a — so the document ended up carrying *two coordinate systems for the same two
-constructions*, at once::
+THE INVARIANT, and why it is two halves. `docs/architecture/BOUNDED-OPERATION-CONTRACT.md`
+carries an evidence column that points at the code each row describes. It used line
+numbers until #10622 replaced every one of them with a `<module>::<name>` symbol, because a
+line number is exact when written and wrong after the next unrelated merge (that document
+recorded three re-derivations before the advice was taken). A symbol does not drift with a
+merge — but it drifts with a **rename**, and nothing asserted the other half: that each
+symbol names something that still exists in the module it names.
 
-    :93   | GET /v1/points … hosted_api.py:10914 … return … at hosted_api.py:10973
-    :174  return {"points": results, "count": len(results)} (hosted_api.py:10973)
-    :175  the route declares no `response_model` (`:10265-10266`)   ← the RETIRED
-    :177  `response.update(truncation_field(…))` (`:10804`, `:10813`) ← coordinates
+WHAT THIS FILE PINS THAT `tests/test_8447_truncation_marker.py` DOES NOT, MEASURED.
+That file's `TestTheCensusNamesItsEvidenceHome::test_the_census_cites_symbols_not_line_numbers`
+asserts the ABSENCE of line numbers. It is registered on the `api` and `core` surfaces — and
+a docs-only edit of the census document selects **no surface at all**:
 
-Both sets cannot be right in one tree, and at ``origin/main`` the three stale
-numbers land on unrelated code — ``10265-10266`` is the IP-recovery rate-limit
-block, ``10804`` a comment, ``10813`` a ``_dream_ns`` assignment. A reader who
-followed the §2a cites got the wrong code; a reader who followed the table row
-got the right one, and nothing in the document said which to believe.
+    >>> ci_selection.select(['docs/architecture/BOUNDED-OPERATION-CONTRACT.md'],
+    ...                      'pull_request', manifest)['surfaces']
+    []
 
-WHY A LEDGER TEST RATHER THAN A SOURCE-RESOLVING ONE. The obvious test — "every
-``file:line`` resolves to the construction it claims" — cannot see this defect at
-the head it shipped at: this branch does not touch ``tortoise/hosted_api.py``, so
-the worktree copy is still the older ``d72983b99`` file where ``10265-10266``
-*are* the route lines. That test would be green on the broken doc before the
-merge and red/green by rebase state afterwards, i.e. it would measure the
-branch's staleness, not the document's consistency. The invariant that actually
-holds at every head is the document's own: **a coordinate the header has
-recorded as retired must not reappear as a live citation.** It is text-only
-(no interpreter, no git, no DB), it is the exact defect, and it survives every
-future re-derivation because the ledger is what a re-derivation updates.
+so the diff that re-introduces a coordinate is exactly the diff that does not run that pin.
+This file is registered on `tier1`, which `select()` seeds every selection from and returns
+wholesale for a docs-only diff — that is the arm that actually runs. It re-asserts the
+absence (cheaply, and on the path where it matters) and adds the half nothing else asserts:
+every `<module>::<name>` resolves to a definition in that module.
 
-Class-B non-vacuity: on the pre-fix document this test reports the three §2a
-sites (``:10265-10266``, ``:10804``, ``:10813``) and fails; it passes only once
-they are re-pointed at the ledger's targets. Deleting the ledger does not make
-it vacuous — ``test_the_header_ledger_is_a_ledger`` fails closed instead, so the
-retirement bookkeeping cannot be dropped to silence the coordinate check.
+⚠️ This file does NOT replace main's pin and must not be read as a second opinion on it: the
+absence rule is one rule, and the two files must agree on it. The resolution rule below is
+new; the absence rule is repeated here only because a rule enforced on a diff that never
+runs is not enforced.
+
+Cost: text-only. One document read, seven `ast.parse` calls, no DB, no graph, no network, no
+model, no fixture, no import of the package under test.
 """
 from __future__ import annotations
 
+import ast
 import re
+from functools import cache
 from pathlib import Path
 
-DOC = (
-    Path(__file__).resolve().parents[1]
-    / "docs"
-    / "architecture"
-    / "BOUNDED-OPERATION-CONTRACT.md"
+REPO = Path(__file__).resolve().parents[1]
+DOC = REPO / "docs" / "architecture" / "BOUNDED-OPERATION-CONTRACT.md"
+
+#: A symbol citation: a module path and a name, joined by `::`. The name may carry dots
+#: (`response_fields.tortoise_search.truncated`) because the manifest's own cells name keys
+#: that way; a `.py` cite is resolved against the AST, so an unknown dotted tail fails there.
+_SYMBOL_CITE = re.compile(r"([\w./\-]+\.(?:py|ya?ml))::([\w.]+)")
+
+#: A line-number citation, in either of the two shapes the document has used: an explicit
+#: `file.py:NNN` and the bare continuation `:NNN` (meaning "the file under discussion").
+#: Both are retired — #10622 — so either reappearing is the defect.
+_LINE_CITE = re.compile(
+    r"\b[\w./\-]+\.(?:py|ya?ml):\d+(?:-\d+)?|`:\d+(?:-\d+)?`"
 )
 
-#: The header ends where the document's own status block begins; everything
-#: above it is provenance, everything below it is the census.
-_STATUS_MARKER = "**Status:**"
-
-#: `10217`→`10866` / `10804-10813`→`11453-11462` — a retired coordinate pair: an
-#: optional inclusive `from` range, the arrow that retires it, and the `to` range
-#: it was retired for. **Both ends are captured**, because a "this pair retires
-#: something" assertion cannot be written against the source alone: built from
-#: the source only, the span is a non-empty set for every single-number entry, so
-#: the assertion is unreachable (#10620 review, issue 2).
-#:
-#: Whitespace around the arrow is optional. The header writes the SPACED form for
-#: SHAs one paragraph above the ledger (`` `63981d152` → `223301c4` ``), so a
-#: re-derivation that copies that style is a live future — and while the arrow
-#: was required to abut the closing backtick, such an entry was invisible, every
-#: coordinate it recorded stayed live, and the coordinate check passed on a
-#: document carrying the very defect it exists for (#10620 review, issue 3: a
-#: fail-open on a spelling the document itself uses).
-#:
-#: `\d{1,6}`, not `\d+`: a ledger-shaped span of eight or more digits is a short
-#: SHA — not a line number — and admitting one plants a retired coordinate no
-#: citation can collide with, which is noise that never catches a defect.
-_LEDGER_ENTRY = re.compile(
-    r"`(\d{1,6})(?:-(\d{1,6}))?`\s*→\s*`(\d{1,6})(?:-(\d{1,6}))?`"
-)
-
-#: A source-file mention, `dir/file.ext` or `file.ext`, optionally carrying the
-#: line numbers. Basename-normalised via group 1 so `tortoise/hosted_api.py` and
-#: a later bare `hosted_api.py` are the same file (missing that is how a scan
-#: silently drops a cite).
-_FILE_MENTION = re.compile(
-    r"`?(?:[\w.\-]+/)*([\w\-]+\.(?:py|yml|yaml))`?(?::(\d+)(?:-(\d+))?)?"
-)
-
-#: A bare continuation cite: the document's convention is that `:NNN` means
-#: "the file under discussion", i.e. the last file named.
-_BARE_CITE = re.compile(r"`:(\d+)(?:-(\d+))?`")
-
-#: The file whose coordinates the ledger retires. The ledger also carries
-#: `hosted_api.py`'s own file-size deltas; a bare cite is judged only while
-#: `hosted_api.py` is the file under discussion, so a `sdk.py:10804` (were one
-#: ever written) would not be misread as a retired hosted coordinate.
-_TRACKED_FILE = "hosted_api.py"
+#: A floor, not a count: the census carries 40 symbol citations at this head. The floor is
+#: deliberately far below that — it exists to fail a parser that matched nothing, not to be
+#: updated every time a row is added (a count pinned here is the "a past state quoted as a
+#: current one" defect this whole document is about).
+_MIN_CITATIONS = 20
 
 
-def _split_document() -> tuple[str, str]:
-    """(provenance header, census body)."""
+@cache
+def _names(module: Path) -> frozenset[str]:
+    """Every name `module` binds at any scope: defs, classes, assignments, imports.
+
+    Nested scopes are included because a cell legitimately cites a name that is not
+    module-level (a route function defined at module level is the common case; a helper is
+    not). Imports are included because a cell may cite a name the module re-exports, which is
+    a real binding in that module even though its `def` lives elsewhere.
+    """
+    tree = ast.parse(module.read_text(encoding="utf-8"))
+    found: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            found.add(node.name)
+        elif isinstance(node, ast.Assign):
+            found.update(t.id for t in node.targets if isinstance(t, ast.Name))
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            found.add(node.target.id)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                found.add(alias.asname or alias.name.split(".")[0])
+    return frozenset(found)
+
+
+def _unresolved(text: str) -> list[tuple[str, str]]:
+    """(module, name) pairs the document cites that `module` does not bind.
+
+    A missing module file is reported as `<module>` with an empty name rather than raising:
+    a cite into a file that does not exist is the loudest form of this defect, and a
+    traceback here would report it as a test error instead of as the content finding it is.
+    """
+    cited: dict[str, set[str]] = {}
+    for module, name in _SYMBOL_CITE.findall(text):
+        cited.setdefault(module, set()).add(name)
+
+    missing: list[tuple[str, str]] = []
+    for module, names in sorted(cited.items()):
+        path = REPO / module
+        if not path.exists():
+            missing.append((module, ""))
+            continue
+        if path.suffix in {".yml", ".yaml"}:
+            # A manifest cite names a key (`response_fields[...]`); the YAML is read as text
+            # rather than parsed so a cite that names a whole dotted path still resolves on
+            # its leaf, which is how the document writes them.
+            body = path.read_text(encoding="utf-8")
+            missing.extend((module, n) for n in sorted(names) if n.split(".")[0] not in body)
+            continue
+        known = _names(path)
+        missing.extend((module, n) for n in sorted(names) if n not in known)
+    return missing
+
+
+def test_the_census_cites_no_line_numbers() -> None:
+    """The retired coordinate system must not come back (#10622's rule, on the docs path).
+
+    Pre-#10622 every evidence cell was a coordinate and the document went stale three times;
+    the numbers were also the reason a re-derivation had to be a READ rather than arithmetic.
+    `tests/test_8447_truncation_marker.py` asserts this too — in a file that a docs-only edit
+    of this document does not select (see the module docstring), which is why the rule is
+    repeated here rather than merely relied on.
+    """
     text = DOC.read_text(encoding="utf-8")
-    assert _STATUS_MARKER in text, (
-        f"{DOC.name} has no {_STATUS_MARKER} marker, so its provenance header and"
-        " its census cannot be told apart — this test cannot judge the ledger"
-    )
-    head, _, body = text.partition(_STATUS_MARKER)
-    return head, body
-
-
-def _span(first: str, last: str | None) -> set[int]:
-    """An inclusive coordinate span. An inverted range yields the empty set."""
-    return set(range(int(first), int(last) + 1)) if last else {int(first)}
-
-
-def _ledger_pairs(header: str) -> list[tuple[set[int], set[int]]]:
-    """(retired span, target span) for every ``from``→``to`` pair in `header`."""
-    return [
-        (_span(match.group(1), match.group(2)), _span(match.group(3), match.group(4)))
-        for match in _LEDGER_ENTRY.finditer(header)
-    ]
-
-
-def _retired_coordinates(header: str) -> set[int]:
-    """Every line number the header records as having been superseded."""
-    retired: set[int] = set()
-    for source, _target in _ledger_pairs(header):
-        retired |= source
-    return retired
-
-
-def _live_citations(body: str) -> list[tuple[int, str, set[int]]]:
-    """(line number, raw cite, coordinates) for every `hosted_api.py` cite."""
-    found: list[tuple[int, str, set[int]]] = []
-    current: str | None = None
-    for line_no, line in enumerate(body.splitlines(), start=1):
-        events = [(m.start(), "file", m) for m in _FILE_MENTION.finditer(line)]
-        events += [(m.start(), "cite", m) for m in _BARE_CITE.finditer(line)]
-        for _position, kind, match in sorted(events, key=lambda event: event[0]):
-            if kind == "file":
-                current = match.group(1)
-                if match.group(2):
-                    coordinates = {int(match.group(2))}
-                    if match.group(3):
-                        coordinates = set(
-                            range(int(match.group(2)), int(match.group(3)) + 1)
-                        )
-                else:
-                    continue
-            else:
-                coordinates = {int(match.group(1))}
-                if match.group(2):
-                    coordinates = set(
-                        range(int(match.group(1)), int(match.group(2)) + 1)
-                    )
-            if current == _TRACKED_FILE:
-                found.append((line_no, match.group(0), coordinates))
-    return found
-
-
-def test_the_header_ledger_is_a_ledger() -> None:
-    """The retirement bookkeeping exists — otherwise the check below is vacuous.
-
-    A coordinate test that reads its expectations out of the document can be
-    silenced by deleting the part it reads. The document's method, though,
-    *requires* the ledger: §"Re-derived once more …" says in as many words that
-    a uniform delta "is exactly the shape that invites arithmetic instead of a
-    read", so the `from`→`to` pairs are what make a re-derivation auditable
-    rather than asserted. Asserting they are present keeps the coordinate test
-    from being defanged by a header rewrite.
-    """
-    header, _body = _split_document()
-    pairs = _ledger_pairs(header)
-    assert pairs, (
-        "the provenance header carries no `from`→`to` retirement pairs, so a"
-        " re-derivation can no longer be told from a re-date — and the"
-        " coordinate check in this module has nothing to check against"
-    )
-    # Each pair must actually retire something, and retire it for something else:
-    # a pair whose target equals its source is a typo, not a derivation, and an
-    # inverted range (`10813-10804`) retires nothing at all because its span is
-    # empty. Both ends are needed to say either — see `_LEDGER_ENTRY`.
-    for source, target in pairs:
-        assert source, (
-            f"a ledger pair retires an empty or inverted range: {sorted(source)}."
-            " `10813-10804` is not a span — write the range in ascending order."
-        )
-        assert target, f"a ledger pair retires TO an empty or inverted range: {sorted(target)}"
-        assert source != target, (
-            "a ledger pair whose target equals its source retires nothing —"
-            f" that is a typo, not a derivation: {sorted(source)} →"
-            f" {sorted(target)}"
-        )
-
-    retired = _retired_coordinates(header)
-    assert len(retired) >= len(pairs), (pairs, sorted(retired))
-
-
-def test_no_live_citation_points_at_a_retired_coordinate() -> None:
-    """The document must carry ONE coordinate system per construction.
-
-    This is the finding: §2a cited the `/v1/points` route and the `/v1/search`
-    marker pair at the coordinates the header had already recorded as retired,
-    while the table rows cited the same two constructions at the current ones.
-
-    ⚠️ When this fires on a citation that is CORRECT, the retired set is
-    over-broad rather than the citation being wrong: line numbers are reusable, so
-    after a file shrinks (or in a different construction) a good citation can land
-    on a number some earlier re-derivation retired. That is a false positive, and
-    the repair is neither to delete a ledger row — that un-retires the defect the
-    row exists for, and the row is the only record of the move — nor to delete
-    this test. Restate the ledger entry so it records the move this citation
-    actually made, or quote the fragment in the row so the cite stops being a bare
-    number. Silencing the instrument by removing its evidence is the failure
-    `AGENTS.md` names; if the false positive is real, record it and change the
-    mechanism deliberately.
-    """
-    header, body = _split_document()
-    retired = _retired_coordinates(header)
-    assert retired, "no retired coordinates to check against — see the ledger test"
-
-    offenders = [
-        (line_no, cite, sorted(coordinates & retired))
-        for line_no, cite, coordinates in _live_citations(body)
-        if coordinates & retired
-    ]
+    offenders = sorted(set(_LINE_CITE.findall(text)))
     assert not offenders, (
-        "the census cites line numbers its own provenance header records as"
-        f" retired: {offenders}. Re-point each at the ledger's target (or"
-        " delete the stale cite) so the document does not carry two"
-        " coordinate systems for one construction"
+        "the census carries line-number citations, which #10622 retired because a number is"
+        f" exact when written and wrong after the next merge: {offenders}. Cite the"
+        " construction as `<module>::<name>` instead."
     )
 
 
-def test_a_bare_cite_is_attributed_to_the_named_file() -> None:
-    """Guard the §2a shape itself: the hosted cites there are BARE `:NNN`.
+def test_every_cited_symbol_exists() -> None:
+    """A symbol citation is only durable if it names something: a rename must fail here.
 
-    `:10914-10915` carries no filename and no quoted fragment of its own, so the
-    document's own mitigation ("search the quoted fragment") cannot rescue it —
-    the fragment quoted in that sentence belongs to the *correct* `:10973`. A
-    bare cite in the hosted section is therefore only trustworthy when the
-    document names that same coordinate EXPLICITLY somewhere else; the table row
-    is what makes the §2a shorthand resolvable. That — bare ⊆ explicit — is what
-    this asserts.
-
-    (The first version asserted only that at least one bare cite and at least one
-    explicit cite EXISTED, which no arrangement of the document could falsify: it
-    stayed green with §2a citing `:10266-10267`, a coordinate named nowhere.
-    #10620 review, issue 4.)
+    This is the half of the invariant nothing else asserts. The document's own mitigation
+    for a drifted citation — "search the quoted fragment" — cannot substitute: a cell whose
+    symbol was renamed still READS correct, so no reader is warned.
     """
-    _header, body = _split_document()
-    citations = _live_citations(body)
-    assert citations, "no hosted_api.py citations were found — the parser drifted"
-
-    bare_coordinates = {
-        coordinate
-        for _line, cite, coordinates in citations
-        if cite.startswith("`:")
-        for coordinate in coordinates
-    }
-    assert bare_coordinates, (
-        "§2a's hosted cites are bare `:NNN` continuations; finding none means"
-        " either the parser or the document shape changed"
+    text = DOC.read_text(encoding="utf-8")
+    citations = _SYMBOL_CITE.findall(text)
+    assert len(citations) >= _MIN_CITATIONS, (
+        f"only {len(citations)} `<module>::<name>` citations were found in {DOC.name}; this"
+        " head carries 40. A parser that matches nothing would pass the resolution check"
+        " below, so the floor fails it here instead."
     )
-    explicit_coordinates = {
-        coordinate
-        for _line, cite, coordinates in citations
-        if not cite.startswith("`:")
-        for coordinate in coordinates
-    }
-    assert explicit_coordinates, "no explicit `hosted_api.py:NNN` cite to anchor the bare ones"
 
-    unattributed = bare_coordinates - explicit_coordinates
-    assert not unattributed, (
-        f"§2a cites {sorted(unattributed)} as bare `:NNN`, but the document never"
-        " names that coordinate explicitly anywhere. A bare cite carries no"
-        " filename and no fragment, so it is only resolvable through an explicit"
-        " `hosted_api.py:NNN` — cite the coordinate in the table row, or drop it"
-        " from §2a, rather than leaving a number that resolves to nothing."
+    missing = _unresolved(text)
+    assert not missing, (
+        "the census cites names its own modules do not bind: "
+        + "; ".join(f"`{m}::{n}`" if n else f"`{m}` (no such file)" for m, n in missing)
+        + ". A renamed symbol leaves the cell reading correct with no reader warned —"
+        " re-point the cite at the name that exists, or drop the cell."
     )
 
 
 # ---------------------------------------------------------------------------
-# Non-vacuity: each guard above, driven with the mutation it names.
+# Non-vacuity: both guards, driven with the mutation each names.
 #
-# A guard over a document reads its own expectations out of that document, so
-# the only honest way to show it can fail is to hand the SAME predicates the
-# mutated input. Each test below is the mutation a reviewer used to disprove the
-# first version of these checks (#10620 review, issues 2-4); they run in-process
-# against `_ledger_pairs` / `_retired_coordinates` / `_live_citations` rather
-# than against a `/tmp` copy of the document, so they cannot rot silently.
+# A guard whose expectations are read out of the document can be defanged by editing the
+# document, so each check above is handed the mutation a reviewer used to disprove its first
+# version. They run in-process against `_unresolved` / `_LINE_CITE` rather than a `/tmp` copy,
+# so they cannot rot.
 # ---------------------------------------------------------------------------
 
 
-def test_a_ledger_pair_that_retires_nothing_is_rejected() -> None:
-    """`test_the_header_ledger_is_a_ledger`'s per-pair checks, on mutations.
+def test_a_renamed_symbol_is_reported() -> None:
+    """`test_every_cited_symbol_exists`, on a mutated citation.
 
-    The disproved version built its span from the SOURCE alone, so ``assert
-    span`` was a non-empty set for every single-number entry and could not fail.
-    These are the two shapes it was meant to catch, asserted against the same
-    predicates the real test now uses.
+    The real document's symbol is read first, so this mutation follows a rename instead of
+    pinning a name that may legitimately change: it plants a `get_cross_lens_candidates`
+    cite with a suffix no module binds.
     """
-    self_retiring = "`10265`→`10265`"
-    pairs = _ledger_pairs(self_retiring)
-    assert pairs == [({10265}, {10265})], (
-        "the ledger parser must capture BOTH ends of a pair — with only the"
-        f" source captured, a self-retiring pair is indistinguishable from a"
-        f" real one: {pairs}"
+    text = DOC.read_text(encoding="utf-8")
+    assert "tortoise/sdk.py::get_cross_lens_candidates" in text, (
+        "the census no longer cites `tortoise/sdk.py::get_cross_lens_candidates` — update"
+        " this mutation to a symbol the document does cite"
     )
-    source, target = pairs[0]
-    assert source == target, "a self-retiring pair must compare equal, so the real test rejects it"
-
-    inverted = "`10813-10804`→`11453-11462`"
-    inverted_source, _inverted_target = _ledger_pairs(inverted)[0]
-    assert not inverted_source, (
-        "an inverted range must retire nothing, so the real test's `assert"
-        f" source` rejects it: {sorted(inverted_source)}"
+    mutated = text.replace(
+        "tortoise/sdk.py::get_cross_lens_candidates",
+        "tortoise/sdk.py::get_cross_lens_candidates_RENAMED",
+        1,
     )
+    assert ("tortoise/sdk.py", "get_cross_lens_candidates_RENAMED") in _unresolved(mutated), (
+        "a symbol the module does not bind was not reported — the resolution check is"
+        " vacuous, and a rename would pass silently"
+    )
+    # An import-bound name must NOT be reported: a module that re-exports a name binds it.
+    assert ("tortoise/sdk.py", "get_cross_lens_candidates") not in _unresolved(text)
 
 
-def test_a_spaced_ledger_entry_retires_the_same_coordinates() -> None:
-    """The ledger's arrow has two spellings in the wild; both must parse.
+def test_a_reintroduced_coordinate_is_reported() -> None:
+    """`test_the_census_cites_no_line_numbers`, on a planted coordinate.
 
-    The header writes the SPACED form for SHAs one paragraph above the ledger
-    (`` `63981d152` → `223301c4` ``), so a re-derivation that copies that style is
-    a live future. The disproved version required the arrow to abut the closing
-    backtick: the entry became invisible, every coordinate it recorded stayed
-    live, and the coordinate check passed on a document carrying the defect.
-    "Some entry parses" would not catch that — the two spellings must retire the
-    SAME set.
+    Both spellings are driven, because the document used each: the explicit
+    `hosted_api.py:10914` and the bare continuation `:10973` that means "the file under
+    discussion". A check written for one spelling fails OPEN on the other.
     """
-    tight = "`10804-10813`→`11453-11462`"
-    spaced = "`10804-10813` → `11453-11462`"
-    assert _LEDGER_ENTRY.search(tight), "the tight spelling must parse"
-    assert _LEDGER_ENTRY.search(spaced), (
-        "a ledger entry written with spaces around its arrow did not parse — the"
-        " coordinates it retires stay live and the coordinate check fails OPEN"
-    )
-    expected = set(range(10804, 10814))
-    assert _retired_coordinates(tight) == expected
-    assert _retired_coordinates(spaced) == expected, (
-        "the spaced spelling must retire exactly the same coordinates as the"
-        f" tight one: got {sorted(_retired_coordinates(spaced))}"
-    )
+    text = DOC.read_text(encoding="utf-8")
+    assert not _LINE_CITE.findall(text), "the real document already carries a coordinate"
 
-    # A short SHA whose hex happens to be all digits is not a line number.
-    assert not _LEDGER_ENTRY.search("`12345678` → `87654321`"), (
-        "an eight-digit SHA must not be admitted as a retired coordinate"
-    )
-
-
-def test_a_bare_cite_named_nowhere_is_unattributed() -> None:
-    """`test_a_bare_cite_is_attributed_to_the_named_file`, on a mutated body.
-
-    Narrows the table row's explicit `/v1/points` cite to the decorator alone —
-    which is what the row said before this test existed — so §2a's bare
-    `:10914-10915` has one coordinate the document names nowhere. The
-    attribution check must see it; the disproved version (existence only) did not.
-    """
-    row_cite = "`hosted_api.py:10914-10915`"
-    _header, body = _split_document()
-    assert row_cite in body, (
-        f"the table row no longer carries {row_cite} — update this mutation so it"
-        " narrows the cite the document actually writes"
-    )
-    mutated = body.replace(row_cite, "`hosted_api.py:10914`", 1)
-
-    bare = {
-        coordinate
-        for _line, cite, coordinates in _live_citations(mutated)
-        if cite.startswith("`:")
-        for coordinate in coordinates
-    }
-    explicit = {
-        coordinate
-        for _line, cite, coordinates in _live_citations(mutated)
-        if not cite.startswith("`:")
-        for coordinate in coordinates
-    }
-    assert bare - explicit == {10915}, (
-        "narrowing the row's explicit cite must leave §2a's `10915`"
-        f" unattributed; it left {sorted(bare - explicit)} — if this is empty,"
-        " the attribution check is vacuous again"
-    )
+    for planted in ("`tortoise/hosted_api.py:10914`", "(`:10973`)"):
+        assert _LINE_CITE.findall(planted), (
+            f"the coordinate scanner did not see {planted!r} — a retired number would slip"
+            " through the check above"
+        )

@@ -202,18 +202,18 @@ def test_docs_scanning_gates_stay_in_tier1():
         "registration as the sibling capstone rows above)"
     )
     assert "test_8447_census_citation_coordinates.py" in tier1, (
-        "#10620 review (issue 5): the #8447 C1 census pin's citation "
-        "coordinates live in docs/architecture/BOUNDED-OPERATION-CONTRACT.md "
-        "— `docs/` is in NON_PYTHON_PREFIXES, so a docs-only edit of the "
-        "census selects no surface and runs tier1 ONLY. Measured with this "
-        "manifest, the `core` row alone is ASLEEP on that diff AND on "
-        "`tortoise/hosted_api.py` — the module whose movement is the whole "
-        "subject of the census's third re-derivation — because hosted_api.py "
-        "selects `api`+`onboarding`, which REPLACES the core fallback (#2938). "
-        "`select()` seeds every selection from `set(tier1)`, so tier1 is the "
-        "arm that actually carries this guard; the row comment claimed `core` "
-        "was, which is how a lane reading it deletes this one (#4309/#10108 "
-        "class, same dual registration as the sibling rows above)"
+        "#10620 review (issue 5): the #8447 C1 census pin's subject is "
+        "docs/architecture/BOUNDED-OPERATION-CONTRACT.md — `docs/` is in "
+        "NON_PYTHON_PREFIXES and that document matches no SOURCE_PATTERNS "
+        "entry, so a docs-only edit of the census selects NO surface "
+        "(`select()` -> `surfaces []`, `full=False`) and runs tier1 ONLY. "
+        "Measured with this manifest, the `core` row alone is ASLEEP on that "
+        "diff AND on `tortoise/hosted_api.py`, which selects `api`+`onboarding` "
+        "and never `core` (#2938). `select()` seeds every selection from "
+        "`set(tier1)`, so tier1 is the arm that actually carries this guard; "
+        "deleting it leaves a re-introduced line citation or a renamed symbol "
+        "uncaught on exactly the diff that produces it (#4309/#10108 class, "
+        "same dual registration as the sibling rows above)"
     )
 
 
@@ -976,6 +976,72 @@ def test_the_10180_carry_pin_runs_on_the_module_that_carries_it():
     assert guard in api["test_files"], (
         f"the api registration regressed — {guard} absent from a hosted_api.py "
         "diff's selection"
+    )
+
+
+def test_the_10655_config_show_suite_is_selected_on_its_own_module():
+    """#10655 review: the `config show` suite must run on `tortoise/__main__.py`.
+
+    `tests/test_cli_config_show.py` was added by #10655 with NO manifest row at
+    all — classified by no surface, so `tools/ci_selection.py --integrity`
+    reported it as drift (the required `manifest-integrity` leg reds) and no
+    leg could ever run it. `fast_pool()` is built from the manifest's own
+    member lists, not from a `tests/**` glob, so an unregistered file is in no
+    shard, no `full` push run and no diff-selected run: the masking,
+    fingerprint and remedy-table pins that are the whole point of #10655 would
+    have been selected by nothing, on this PR or on `main` afterwards.
+
+    Measured before the `api` entry (`classify_test_file(...)` -> `None`):
+    a `tortoise/__main__.py`-only diff selects `['api']` and a few hundred files,
+    this suite ABSENT. `api` is the only surface that helps, because
+    `tortoise/__main__.py` is an EXACT `api` `SOURCE_PATTERNS` match and in
+    `select()` a named-surface match REPLACES the `core` fallback.
+
+    Same #1349/#2938 silent-drop class as the #9572/#10180 pins above; asserted
+    on the FILE as well as the classification, not on non-emptiness, because
+    `api` is selected either way. Mutation check: removing the `api` entry
+    fails both asserts; removing only the `durations` row leaves them green
+    (the surface row is the load-bearing half — the coverage floor clears
+    without the weight).
+    """
+    guard = "test_cli_config_show.py"
+    own_module = "tortoise/__main__.py"
+    manifest = load_manifest()
+    assert (REPO / own_module).exists(), f"pinned file is gone: {own_module}"
+    assert (REPO / "tests" / guard).exists(), f"pinned suite is gone: {guard}"
+    assert classify_test_file(guard, manifest) == "api", (
+        f"{guard} classifies as {classify_test_file(guard, manifest)!r}, not "
+        "'api' — an unclassified new file reds `--integrity` and is selected by "
+        "no leg at all; re-derive the surface from the module it drives"
+    )
+    r = _sel([own_module])
+    assert "api" in r["surfaces"], (
+        f"{own_module} selects {r['surfaces']}, not api — the premise of this "
+        "pin changed; re-derive it"
+    )
+    assert guard in r["test_files"], (
+        f"{own_module} does not select {guard} — the config-show pins sleep on "
+        "the one diff that can regress them (a credential printed in the clear, "
+        "a remasked DSN, a 403 remedy table that explains away a 500). "
+        f"selected {len(r['test_files'])} files"
+    )
+    # …and the `config.py` half (#10655 review F4). `tortoise/config.py` matches no
+    # `SOURCE_PATTERNS` row, so a config.py-only diff falls through to `core`; with
+    # this suite registered on `api` alone the diff selected `core` and the suite
+    # was ABSENT. That matters beyond tidiness: the ONLY pin on `config.py`'s
+    # #5109 `?password=…` log redaction lives in this suite (`caplog`-asserted),
+    # so the one diff that can revert the cut ran nothing. `core` carries the
+    # dual registration; `api` still owns the classification (first-match order),
+    # which is why the assert above stays `== "api"`.
+    cfg = _sel(["tortoise/config.py"])
+    assert "core" in cfg["surfaces"], (
+        f"tortoise/config.py selects {cfg['surfaces']}, not core — the premise of "
+        "this half of the pin changed; re-derive it"
+    )
+    assert guard in cfg["test_files"], (
+        f"a tortoise/config.py-only diff does not select {guard} — the #5109 log "
+        "redaction pin sleeps on the one diff that can revert it (a query "
+        f"credential written back into the log record). selected {len(cfg['test_files'])} files"
     )
 
 

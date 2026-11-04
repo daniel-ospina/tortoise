@@ -392,6 +392,20 @@ def _gh(argv: list[str], cwd: Path) -> subprocess.CompletedProcess:
     same shape `tools/who_is_on.py` already uses for `git`
     (`except FileNotFoundError: return 127, "", "<bin>: command not found"`).
 
+    ⛔ A SECOND, INDEPENDENT MEASUREMENT OF THE SAME DEFECT, kept from the other
+    side of this merge (#10622): `test (h)` on `pi-runner-vm-6`/Linux-ARM64, run
+    41732583553, killed all 20 cases in `tests/test_rail_detach.py` at this
+    call. Two pool boxes, one root — the missing binary, not a rail defect.
+
+    The `-> subprocess.CompletedProcess` annotation above is a CONTRACT, not a
+    hint: this function NEVER returns `None` (the `except` arm fabricates a
+    process with rc=127), so neither caller may carry an `out is not None`
+    guard. Two of them did for a while — inherited from the branch side of the
+    #10622 merge, where `_gh` was allowed to return `None` — and they were
+    unreachable branches contradicting their own annotation. Dropped rather
+    than kept: a guard that cannot fire is not defence in depth, it is a
+    second, wrong description of what this function returns.
+
     ⛔ ABSENCE IS ONE WAY EXEC FAILS; IT IS NOT THE ONLY ONE. The boundary is
     *`gh` could not be started*, not *`gh` was not found*: a `gh` that IS on
     `PATH` without the executable bit raises `PermissionError` at exec, and that
@@ -453,10 +467,21 @@ def _resolve_repo(cwd: Path) -> str:
             )
         return repo
     detail = (out.stderr or "").strip().splitlines()
+    # The remedy is rc-DEPENDENT, which is the whole point of `_gh`'s two non-zero arms:
+    # `127` means the binary is absent, `126` means it is present and could not be started
+    # (no executable bit). Offering the `127` remedy to the `126` operator asks for the one
+    # action that cannot help — the same conflation, one layer up (#10620 review, P3).
+    remedy = (
+        "the `gh` on `PATH` is installed but not executable — check its file mode, or pass "
+        "`--repo owner/name` to name the artifact yourself"
+        if out.returncode == 126
+        else "`gh` is not installed — install the `gh` CLI, or pass `--repo owner/name` to "
+        "name the artifact yourself"
+    )
     raise Refused(
         "could not resolve the repo from this checkout (`gh repo view` failed"
         + (f": {detail[-1]}" if detail else "")
-        + ") — pass `--repo owner/name`, or install the `gh` CLI"
+        + f") — {remedy}"
     )
 
 

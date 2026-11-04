@@ -71,6 +71,42 @@ def _run(argv=("config", "show")):
     return main.main(list(argv))
 
 
+def _bounded(fn, seconds=20):
+    """Run `fn` on a daemon thread and FAIL if it has not returned in `seconds`.
+
+    A credential read that BLOCKS (`read_text()` on a FIFO/socket blocks in
+    `open()` and never raises — no `except` fires) would otherwise hang the
+    whole suite: CI reports a job timeout instead of the defect, and the test
+    that names the hazard cannot say it regressed. `join(seconds)` turns the
+    hang into an assertion (#10655 review F1).
+    """
+    import threading
+
+    box: dict[str, object] = {}
+
+    def _target():
+        try:
+            box["value"] = fn()
+        except BaseException as exc:          # re-raised on the main thread
+            box["error"] = exc
+
+    t = threading.Thread(target=_target, daemon=True)
+    t.start()
+    t.join(seconds)
+    if t.is_alive():
+        raise AssertionError(
+            f"the call did not return within {seconds}s — a store read blocked "
+            "on a non-regular file (`read_text()` on a FIFO blocks in `open()` "
+            "and never raises, so no guard fires)")
+    if "error" in box:
+        raise box["error"]                   # type: ignore[misc]
+    return box["value"]
+
+
+def _run_bounded(argv, seconds=20):
+    return _bounded(lambda: main.main(list(argv)), seconds)
+
+
 def payload_of(cap):
     return json.loads(cap.out)
 
@@ -440,18 +476,50 @@ def test_an_invalid_utf8_store_is_corrupt_not_a_traceback(capsys, tmp_path):
     assert [r["state"] for r in payload["credential"]["ladder"] if r["blocks"]] == ["corrupt"]
 
 
-def test_a_fifo_at_the_candidate_does_not_hang_or_read_it(monkeypatch, capsys, tmp_path):
+def test_a_fifo_at_the_candidate_does_not_hang_or_read_it(
+        monkeypatch, capsys, tmp_path):
     """`read_text()` on a FIFO BLOCKS forever; the resolver skips it (`is_file()`
-    is False), so the report must say so instead of reading."""
+    is False), so the report must say so instead of reading.
+
+    The exported KEY is what makes this test capable of failing (#10655 review
+    F1): the recovery-token read sits inside `if api_key:`, so with NO credential
+    anywhere the pre-fix code never reached the unguarded read and this test
+    passed on the very defect its name claims. With a key resolved, the resolver
+    skips the FIFO, the global store wins, and the token read runs — which used
+    to block the verb forever (bounded, so a regression FAILS here).
+    """
     import os
     try:
         os.mkfifo(tmp_path / ".tortoise")
     except (AttributeError, OSError):
         pytest.skip("mkfifo unavailable on this platform")
-    assert _run(("config", "show", "--json")) in (0, 1)
+    monkeypatch.setenv("TORTOISE_API_KEY", GLOBAL_KEY)
+    assert _run_bounded(("config", "show", "--json")) in (0, 1)
     payload = json.loads(capsys.readouterr().out)
     cwd_row = payload["credential"]["ladder"][1]
     assert cwd_row["state"] == "not a regular file"
+    # …and the recovery-token read the key unblocked skipped it too, instead of
+    # blocking on it (the FIFO holds no token, so "absent" is the honest answer).
+    assert payload["credential"]["recovery_token"] == "absent"
+
+
+def test_no_store_reader_blocks_on_a_non_regular_candidate(tmp_path, monkeypatch):
+    """One gate, three readers: `signup`, `recover` and `config show` each read a
+    store candidate directly, and a FIFO at `<cwd>/.tortoise` hung every one of
+    them. Pinned per reader because a gate remembered at two of three call sites
+    is the same defect on the third (#10655 review F1)."""
+    import os
+    try:
+        os.mkfifo(tmp_path / ".tortoise")
+    except (AttributeError, OSError):
+        pytest.skip("mkfifo unavailable on this platform")
+    for fn in (main._read_stored_signup_token_with_source,
+               main._read_stored_config_api_url,
+               main._token_only_config_path):
+        result = _bounded(fn)
+        assert result in ((None, None), None), (
+            f"{fn.__name__} reported {result!r} for a FIFO — it must SKIP a "
+            "non-regular candidate (the resolver's own `is_file()` predicate)")
 
 
 def test_a_broken_symlink_store_is_unreadable_not_absent(capsys, tmp_path):
@@ -914,6 +982,27 @@ def test_a_whitespace_only_db_uri_is_unset_everywhere_not_half_set(
     assert "configured but unusable" in capsys.readouterr().out
 
 
+def test_a_single_space_db_uri_still_reports_the_readable_remedy(
+        monkeypatch, capsys, tmp_path):
+    """A ONE-space value is the sharp case the 3-space pin above cannot see:
+    `_scrub` used it as a replacement fragment, so every space in the refusal
+    became `<redacted>` and the remedy — the only thing the user can act on —
+    was unreadable in both text and `--json`. (The 3-space value survives by
+    luck: the message's only run of three spaces is the quoted value.)"""
+    _global(tmp_path)
+    monkeypatch.setenv("TORTOISE_DB_URI", " ")
+    assert _run(("config", "show", "--json")) == 0
+    store = json.loads(capsys.readouterr().out)["graph_store"]
+    assert store["status"] == "configured but unusable"
+    assert "Relative DB path" in store["error"], (
+        f"the refusal's prose was shredded by the scrubber: {store['error']!r}")
+    assert "<redacted>" not in store["error"]
+    assert _run() == 0
+    out = capsys.readouterr().out
+    assert "Relative DB path" in out
+    assert "allow_nonstandard_path" in out      # the actionable half, still legible
+
+
 def test_a_key_with_surrounding_whitespace_is_reported_not_called_healthy(
         monkeypatch, capsys, tmp_path):
     """The CLI sends the env key VERBATIM while the Pi hook trims it — so a key
@@ -1320,6 +1409,38 @@ def test_a_short_query_value_does_not_shred_the_diagnostic():
                                                        "https://h/?v=1")
 
 
+def test_a_whitespace_only_secret_does_not_shred_the_diagnostic():
+    """The same reasoning applies to the TOP-LEVEL secret, which the short-query
+    guard did not cover: a whitespace-only value is not learnable from, and
+    using it as a fragment rewrote every space. `TORTOISE_DB_URI=' '` left
+    `ValueError:<redacted>Relative<redacted>DB<redacted>path…` — the whole point
+    of the verb, gone."""
+    from tortoise.config import RELATIVE_PATH_ERROR
+
+    msg = "ValueError: " + RELATIVE_PATH_ERROR.format(path=" ")
+    assert main._scrub(msg, " ") == msg
+    assert main._scrub("API error 500: disk full", "\t") == "API error 500: disk full"
+    # …and skipping a whitespace fragment does not disable the REAL secrets
+    # supplied alongside it in the same call.
+    assert "hunter2" not in main._scrub("API error 401: hunter2 rejected", " ", "hunter2")
+
+
+def test_a_one_character_secret_is_redacted_as_a_token_not_a_substring():
+    """A 1-2 char secret IS a credential and must not be printed — but a bare
+    substring sweep rewrites that character everywhere it occurs, which shreds
+    the diagnostic instead of protecting it. Token-bounded keeps both."""
+    text = "API error 401: bad token; answer a is invalid"
+    scrubbed = main._scrub(text, "a")
+    assert "answer <redacted> is invalid" in scrubbed
+    assert scrubbed.count("<redacted>") == 1, scrubbed
+    # the prose that merely CONTAINS the character survives
+    assert "error 401" in scrubbed
+    assert "bad token" in scrubbed
+    # the echoed-credential shapes a refusal actually prints are still covered
+    assert main._scrub('{"api_key": "a"}', "a") == '{"api_key": "<redacted>"}'
+    assert main._scrub("key=a&x=1", "a") == "key=<redacted>&x=1"
+
+
 def test_the_harness_key_is_also_checked_for_sendability(monkeypatch, capsys, tmp_path):
     """Reporting a non-latin-1 harness key as healthy while the CLI key gets a
     ⛔ contradicts itself in one payload — and the arrow claimed "the harness's
@@ -1357,6 +1478,12 @@ def test_the_same_key_on_a_different_host_is_not_called_one_identity(
     ("https://API.premiselabs.co", "https://api.premiselabs.co", True),
     ("https://api.premiselabs.co:443", "https://api.premiselabs.co", True),
     ("https://api.premiselabs.co", "https://other.example", False),
+    # the SAME malformed value on both sides is UNKNOWN, never "different"
+    ("api.premiselabs.co", "api.premiselabs.co", None),
+    ("https://api.premiselabs.co", "api.premiselabs.co", None),
+    # plaintext vs TLS is NOT the same endpoint (it decides whether a transport
+    # failure carries across surfaces)
+    ("http://h.example:8443", "https://h.example:8443", False),
 ])
 def test_endpoint_comparison_is_normalised_like_the_hook(
         capsys, tmp_path, cli_url, hook_url, agree):
@@ -1371,7 +1498,11 @@ def test_endpoint_comparison_is_normalised_like_the_hook(
     assert _run(("config", "show", "--json")) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["identity_host_agrees"] is agree
-    assert payload["identity_relation"] == ("same" if agree else "same-key-different-host")
+    if agree is None:
+        assert payload["identity_relation"] == "same-key-host-unknown"
+    else:
+        assert payload["identity_relation"] == ("same" if agree
+                                                else "same-key-different-host")
 
 
 @pytest.mark.parametrize("bad_url", [
@@ -1434,9 +1565,10 @@ def test_the_chmod_remedy_is_quoted(capsys, tmp_path):
     evil_dir.mkdir()
     target = evil_dir / ".tortoise"        # the resolver's CWD candidate IS this file
     target.write_text(GLOBAL)
-    # mode-000 FILE: `is_file()` passes and `read_text()` fails inside the
-    # resolver's try, so it arrives as `_ConfigError` (deterministic on every
-    # platform — a mode-000 PARENT is swallowed by pathlib's `is_file()` in 3.12)
+    # mode-000 FILE, parent traversable: `is_file()` passes and `read_text()`
+    # fails inside the resolver's try, so it arrives as `_ConfigError`. (A
+    # mode-000 PARENT is NOT swallowed by `is_file()` — it re-raises EACCES;
+    # that route is `test_the_unreadable_remedy_names_which_object_blocks`.)
     target.chmod(0o000)
     try:
         import os
@@ -1452,6 +1584,510 @@ def test_the_chmod_remedy_is_quoted(capsys, tmp_path):
         del target
 
 
+def test_a_present_but_unusable_org_field_is_not_called_absent(capsys, tmp_path):
+    """Reporting "(absent)" plus the `init --api-key` hint was a false claim twice
+    over: the field IS there, and that hint does not describe such a store."""
+    _write(tmp_path / ".tortoise" / "credentials.json", json.dumps({
+        "api_key": GLOBAL_KEY, "api_url": "https://api.premiselabs.co",
+        "org_id": 12345,
+    }))
+    assert _run(("config", "show", "--json")) == 0
+    cred = json.loads(capsys.readouterr().out)["credential"]
+    assert "org_field_warning" in cred
+    assert "int" in cred["org_field_warning"]
+    assert cred["org_fields_unusable"] == ["org_id"]
+    assert "org_id_hint" not in cred          # the hint would be a false explanation
+    assert "org_id" not in cred               # the value itself is unusable
+    assert _run() == 0
+    out = capsys.readouterr().out
+    assert "not a NON-EMPTY string" in out
+    # …and the VALUE line must not contradict it. `(absent)` was printed beside a
+    # warning saying the store carries the field (#10655 review P2).
+    assert "(present but unusable)" in out
+    assert "org_id        (absent)" not in out
+
+
+def test_a_usable_org_name_beside_an_unusable_org_id_is_still_printed(
+        capsys, tmp_path):
+    """The other half of the same fix: the label is PER FIELD, not per report.
+
+    A helper that answered "present but unusable" for the whole identity block
+    would hide a perfectly good `org_name` — the value someone actually needs.
+    """
+    _write(tmp_path / ".tortoise" / "credentials.json", json.dumps({
+        "api_key": GLOBAL_KEY, "api_url": "https://api.premiselabs.co",
+        "org_id": 12345, "org_name": "agent-00e8e3",
+    }))
+    assert _run() == 0
+    out = capsys.readouterr().out
+    assert "agent-00e8e3" in out                     # still reported
+    assert "org_id        (present but unusable)" in out
+    assert "(absent)" not in out                       # nothing here is missing
+
+
+def test_the_chmod_remedy_is_display_escaped_too(monkeypatch, capsys, tmp_path):
+    """`shlex.quote` is shell-safe but passes control characters through raw, so a
+    newline in the path forged a report line."""
+    evil = tmp_path / "x\n  FAKE  ok  \u2190  USED"
+    evil.mkdir()
+    target = evil / ".tortoise"
+    target.write_text(GLOBAL)
+    target.chmod(0o000)
+    try:
+        monkeypatch.chdir(evil)
+        assert _run() == 1
+        out = capsys.readouterr().out
+        assert not any(ln.strip().startswith("FAKE") for ln in out.splitlines())
+    finally:
+        target.chmod(0o600)
+
+
+def test_the_unreadable_remedy_names_which_object_blocks(capsys, tmp_path):
+    """`unreadable` has TWO routes and only one of them is about the FILE.
+
+    A mode-000 PARENT DIRECTORY makes `Path.is_file()` re-raise EACCES — pathlib
+    swallows only ENOENT/ENOTDIR/EBADF/ELOOP — so the store is unreachable
+    THROUGH the directory: the file's own mode cannot even be read, and
+    `chmod 600 <dir>/credentials.json` exits 1 with "Permission denied". The
+    report must therefore name the object whose mode actually blocks, per
+    route, and emit the `chmod` that can work. Before the fix both routes
+    printed `chmod 600 <file>`.
+    """
+    import os
+    import shlex
+
+    # ── route 1: the FILE's mode is the problem (parent traversable) ──
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    file_store = repo / ".tortoise"          # the resolver's CWD candidate
+    file_store.write_text(GLOBAL)
+    file_store.chmod(0o000)
+    try:
+        os.chdir(repo)
+        assert _run() == 1
+        out = capsys.readouterr().out
+        line = next(ln for ln in out.splitlines() if "chmod " in ln)
+        assert "chmod 600 " in line
+        inside = line.split("chmod 600 ", 1)[1].rstrip("`).")
+        assert shlex.split(inside) == [os.path.realpath(str(file_store))]
+    finally:
+        file_store.chmod(0o600)
+
+    # ── route 2: the DIRECTORY's mode is the problem (the file is 0600) ──
+    dir_store = _global(tmp_path)            # mode 600 — the FILE is fine
+    assert dir_store.is_file()
+    dir_store.parent.chmod(0o000)
+    try:
+        with pytest.raises(PermissionError):
+            dir_store.is_file()              # EACCES re-raises, not swallowed
+        assert os.access(dir_store.parent, os.X_OK) is False
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir(exist_ok=True)
+        os.chdir(elsewhere)                  # so the CWD candidate is absent
+        assert _run() == 1
+        out = capsys.readouterr().out
+        assert "chmod 600" not in out
+        line = next(ln for ln in out.splitlines() if "chmod u+x " in ln)
+        inside = line.split("chmod u+x ", 1)[1].split("`", 1)[0]
+        # the DIRECTORY, not the child file nothing can stat
+        assert shlex.split(inside) == [
+            os.path.realpath(str(dir_store.parent))]
+    finally:
+        dir_store.parent.chmod(0o700)
+
+
+def test_the_unreadable_remedy_finds_the_shallowest_and_the_real_blocker(
+        monkeypatch, capsys, tmp_path):
+    """Two ways the naive answer names an object that cannot be `chmod`ed.
+
+    1. NESTED blockers: with `outer` AND `outer/inner` both mode-000, only the
+       SHALLOW one can be fixed — `chmod` on the deeper path cannot even be
+       reached. A nearest-parent implementation passes every other assertion in
+       this file (both fixtures block at the immediate parent) while shipping
+       this bug, so it is pinned here.
+    2. A SYMLINKED store: `Path.parents` is LEXICAL, so when `./.tortoise` is a
+       link (real practice — it is how one store is shared) whose TARGET sits
+       behind a mode-000 directory, every lexical ancestor is traversable. The
+       real blocker must still be found and named; naming the link re-prints
+       the `chmod 600` that fails.
+    """
+    import os
+    import shlex
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+
+    # ── 1. two nested non-traversable levels: name the SHALLOW one ──
+    outer = tmp_path / "outer"
+    inner = outer / "inner"
+    _write(inner / ".tortoise" / "credentials.json", GLOBAL)   # the FILE is 0600
+    monkeypatch.setenv("HOME", str(inner))     # so the store IS a candidate
+    try:
+        inner.chmod(0o000)
+        outer.chmod(0o000)
+        os.chdir(elsewhere)
+        assert _run() == 1
+        out = capsys.readouterr().out
+        line = next(ln for ln in out.splitlines() if "chmod u+x " in ln)
+        inside = line.split("chmod u+x ", 1)[1].split("`", 1)[0]
+        assert shlex.split(inside) == [
+            os.path.realpath(str(outer))]      # NOT inner
+    finally:
+        outer.chmod(0o700)
+        inner.chmod(0o700)
+
+    # ── 2. the store is a symlink; the TARGET's ancestor is the blocker ──
+    deep = tmp_path / "deep"
+    real_store = deep / "mid" / "secret"
+    _write(real_store, GLOBAL)                 # the real FILE is 0600
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".tortoise").symlink_to(real_store)   # the CWD candidate is a link
+    # block 2 must not inherit block 1's HOME: the CWD candidate is the store
+    # under test here, and a leftover HOME would add a second one.
+    monkeypatch.setenv("HOME", str(tmp_path / "no-store"))
+    try:
+        deep.chmod(0o000)
+        os.chdir(repo)
+        assert _run() == 1
+        out = capsys.readouterr().out
+        assert "chmod 600" not in out
+        line = next(ln for ln in out.splitlines() if "chmod u+x " in ln)
+        inside = line.split("chmod u+x ", 1)[1].split("`", 1)[0]
+        assert shlex.split(inside) == [
+            os.path.realpath(str(deep))]       # the REAL blocker
+    finally:
+        deep.chmod(0o700)
+
+
+def test_a_blank_org_field_is_absent_not_mistyped(capsys, tmp_path):
+    """`signup`/`recover` copy the server's value straight through, so `""` is
+    reachable — and it IS a string. Calling it "not a string" also suppressed the
+    hint that is exactly right for it."""
+    _write(tmp_path / ".tortoise" / "credentials.json", json.dumps({
+        "api_key": GLOBAL_KEY, "api_url": "https://api.premiselabs.co",
+        "org_id": "", "org_name": "  ",
+    }))
+    assert _run(("config", "show", "--json")) == 0
+    cred = json.loads(capsys.readouterr().out)["credential"]
+    assert "org_field_warning" not in cred
+    assert "org_id_hint" in cred              # the accurate explanation, restored
+
+
+def test_the_global_store_refusing_makes_the_transmitting_verbs_fail_too(
+        monkeypatch, capsys, tmp_path):
+    """Those verbs resolve `global_only=True`; asserting "unaffected" without
+    looking told the reader to rely on upload while it was broken."""
+    home = tmp_path / "home"
+    repo = tmp_path / "repo"
+    (home / ".tortoise").mkdir(parents=True)
+    repo.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.chdir(repo)
+    (repo / ".tortoise").write_text("{not json")
+    (home / ".tortoise" / "credentials.json").write_text("{not json")
+    assert _run() == 1
+    out = capsys.readouterr().out
+    assert "FAIL TOO" in out
+    assert "are unaffected" not in out
+
+
+def test_an_absent_global_store_makes_the_transmitting_verbs_identity_less(
+        monkeypatch, capsys, tmp_path):
+    """Only `ok` resolves. For absent/empty/directory the verbs have NO identity
+    and file nothing (`session drain` exits 0 with "nothing to file"), so claiming
+    "unaffected" told the reader upload was fine while it was dead."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.chdir(repo)                       # HOME has no store at all
+    (repo / ".tortoise").write_text("{not json")
+    assert _run() == 1
+    out = capsys.readouterr().out
+    assert "are unaffected" not in out
+    assert "do not resolve either" in out
+
+
+def test_the_same_malformed_api_url_on_both_sides_is_not_called_different(
+        monkeypatch, capsys, tmp_path):
+    """A missing scheme is the normal shape of a mistyped TORTOISE_API_URL, and the
+    report printed two identical values then asserted they differ."""
+    monkeypatch.setenv("TORTOISE_API_KEY", GLOBAL_KEY)
+    monkeypatch.setenv("TORTOISE_API_URL", "api.premiselabs.co")
+    assert _run(("config", "show", "--json")) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["identity_host_agrees"] is None
+    assert payload["identity_relation"] == "same-key-host-unknown"
+    assert _run() == 0
+    out = capsys.readouterr().out
+    assert "DIFFERENT endpoint" not in out
+    assert "cannot be made" in out
+
+
+def test_a_transport_drop_is_reported_as_transport_not_as_an_invalid_response(
+        monkeypatch, capsys, tmp_path):
+    """`RemoteDisconnected` is both an OSError and an HTTPException. It used to be
+    caught by the HTTPException branch and reported as "Invalid response from API",
+    i.e. blamed on the SERVER's body — the diagnosis must be a transport failure.
+    (The retry stays gated on a TIMEOUT: a reset is a different failure, reported
+    plainly instead of retried.)"""
+    import http.client
+    import io
+
+    _global(tmp_path)
+    calls: list[float] = []
+
+    class _Resp(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def _fake_urlopen(_req, timeout=None):
+        calls.append(timeout)
+        raise http.client.RemoteDisconnected("Remote end closed connection")
+
+    monkeypatch.setattr("urllib.request.urlopen", _fake_urlopen)
+    rc = main.main(["team", "info"])
+    _out, err = capsys.readouterr()
+    assert calls == [10]                            # not a timeout: no retry
+    assert rc == 1
+    assert "Cannot reach API at" in err             # a transport failure …
+    assert "Invalid response from API" not in err   # … not the server's body
+    assert "Remote end closed connection" in err
+
+
+def test_a_retry_side_transport_drop_is_reported_as_transport(
+        monkeypatch, capsys, tmp_path):
+    """The SAME order invariant as the first attempt, on the RETRY (#10655
+    review F2): `http.client.RemoteDisconnected` is BOTH a ConnectionResetError
+    (OSError) and an HTTPException, and Python takes the FIRST matching clause.
+    With the retry's arms in the pre-fix order the drop was printed as "Invalid
+    response from API" — the server's BODY blamed for a dropped connection, on
+    exactly the cold-app path this retry exists for.
+
+    No other test in this file drives a retry-side transport drop: the first
+    attempt's sibling (`..._is_reported_as_transport_not_as_an_invalid_response`)
+    asserts `calls == [10]`, i.e. no retry happens at all."""
+    import http.client
+    import urllib.error
+
+    _global(tmp_path)
+    bounds: list[float] = []
+
+    def _fake_urlopen(_req, timeout=None):
+        bounds.append(timeout)
+        if len(bounds) == 1:
+            raise urllib.error.URLError(TimeoutError("timed out"))
+        raise http.client.RemoteDisconnected("Remote end closed connection")
+
+    monkeypatch.setattr("urllib.request.urlopen", _fake_urlopen)
+    assert main.main(["team", "info"]) == 1
+    _out, err = capsys.readouterr()
+    assert bounds == [10, 30]                        # the retry DID happen
+    assert "still no answer" in err                  # a transport failure …
+    assert "Remote end closed connection" in err
+    assert "Invalid response from API" not in err    # … not the server's body
+
+
+def test_the_db_uri_log_line_does_not_print_a_query_credential(
+        monkeypatch, capsys, caplog, tmp_path):
+    """`resolve_db_path` logs the value; a `?password=…` in a path-shaped
+    TORTOISE_DB_URI reached the LOG in clear, one line above the redacted field.
+
+    Asserted on `caplog.text`, NOT only on the streams (#10655 review F3):
+    `tortoise/config.py` logs through a plain propagating
+    `logging.getLogger(__name__)`, pytest attaches its own handler to the ROOT
+    logger for the call phase, and the record therefore never reaches the
+    `logging.lastResort` stderr fallback — so a `capsys`-only assertion passes on
+    a `config.py` whose `?`/`#` cut is reverted (the payload side it does see is
+    masked by `_cmd_config` itself). Measured: reverted, the stream assertions
+    stay green and these log assertions go red.
+    """
+    _global(tmp_path)
+    # One line on purpose: the mutation census
+    # (`tests/test_uri_env_mutations_declared.py`) scans LINE-wise, so a call
+    # split across two lines cannot be matched by a declared site pattern.
+    monkeypatch.setenv("TORTOISE_DB_URI",
+                       "/tmp/x.db?password=topsecret&api_key=tt_leak")
+    with caplog.at_level("WARNING"):
+        assert _run(("config", "show", "--json")) == 0
+    cap = capsys.readouterr()
+    assert "topsecret" not in cap.out + cap.err
+    assert "tt_leak" not in cap.out + cap.err
+    # The log record is where the pre-fix leak happened. The `file path` half
+    # keeps the secret assertions from passing vacuously on an empty capture.
+    assert "file path" in caplog.text
+    assert "topsecret" not in caplog.text
+    assert "tt_leak" not in caplog.text
+
+
+@pytest.mark.parametrize("hostile", [
+    "/tmp/x.db?password=hunter2",
+    "//u:hunter2@host/x.db",          # #2987: absolute, scheme dropped, authority kept
+    "//hunter2@host/x.db",            # …and a TOKEN as the user, with no colon
+    # #10655 review P0: the COLLAPSED forms. `resolve_db_path` hands back an
+    # ABSOLUTE path and `os.path.abspath` collapses a leading `///` to `/`, so the
+    # `startswith("//")` test this predicate used to be never fired and the log
+    # line printed the password. Measured red before the fix, green after.
+    "///u:hunter2@host/x.db",
+    "////u:hunter2@host/x.db",
+])
+def test_the_db_uri_log_line_does_not_print_a_userinfo_credential(
+        monkeypatch, capsys, caplog, tmp_path, hostile):
+    """The `?`/`#` cut was only HALF the masker's rule: a scheme-dropped value keeps
+    its USERINFO, so the log line printed it in clear while stdout redacted the same
+    value. Both halves must hold."""
+    _global(tmp_path)
+    monkeypatch.setenv("TORTOISE_DB_URI", hostile)
+    with caplog.at_level("WARNING"):
+        assert _run(("config", "show", "--json")) == 0
+    cap = capsys.readouterr()
+    assert "hunter2" not in cap.out + cap.err
+    assert "hunter2" not in caplog.text
+
+
+def test_a_resolved_path_with_a_colon_is_still_a_path(monkeypatch, capsys, tmp_path):
+    """`_resolve_db_target` only returns absolute paths here, so a colon is legal —
+    calling it "userinfo-shaped" was a false statement about a working store."""
+    _global(tmp_path)
+    monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "a:b.db"))
+    assert _run(("config", "show", "--json")) == 0
+    store = json.loads(capsys.readouterr().out)["graph_store"]
+    assert store["target_kind"] == "embedded file path"
+    assert store["target"].endswith("a:b.db")
+
+
+@pytest.mark.parametrize("var, value", [
+    # The AUTHORITY form arrives as an absolute path with the `//` COLLAPSED by
+    # `os.path.abspath` (`///u:pw@host/x.db` -> `/u:pw@host/x.db`).
+    ("TORTOISE_DB_URI", "///tester:hunter2@host/x.db"),
+    ("TORTOISE_DB_URI", "////tester:hunter2@host/x.db"),
+    # A `TORTOISE_DB_PATH` is absolute already, so it never had a `//` at all.
+    ("TORTOISE_DB_PATH", "/tester:hunter2@host/x.db"),
+])
+def test_a_userinfo_dsn_collapsed_into_an_absolute_path_is_redacted(
+        monkeypatch, capsys, tmp_path, var, value):
+    """#10655 review P0 — the report printed the DB PASSWORD to stdout.
+
+    The predicate was `uri.startswith("//") and "@" in <authority>`, written to
+    keep `/tmp/me@work/db.fdb` legible. But the value the report carries came back
+    from a SUCCESSFUL `_resolve_db_target()`, which returns an ABSOLUTE path — and
+    `os.path.abspath` collapses a leading `///` to `/`. So `///u:pw@host/x.db`
+    arrived as `/u:pw@host/x.db`, the `//` test never fired, and the verb whose
+    whole job is to MASK credentials printed this as an ordinary embedded-file
+    path: `target=/u:pw@host/x.db  (TORTOISE_DB_PATH, embedded file path)`.
+
+    Measured RED on the pre-fix head (`\"target\": \"/tester:hunter2@host/x.db\"`).
+    """
+    _global(tmp_path)
+    monkeypatch.setenv(var, value)
+    assert _run(("config", "show", "--json")) == 0
+    cap = capsys.readouterr()
+    assert "hunter2" not in cap.out + cap.err
+    store = json.loads(cap.out)["graph_store"]
+    assert "hunter2" not in json.dumps(store)
+    assert store["target"].startswith("<")
+    # NOT "unrecognised": a scheme-less value is an embedded file path the resolver
+    # really opens (its own log line says "treating as embedded DB path"). The
+    # DISPLAY is redacted; the store is not inscrutable (#10655 review, F2).
+    assert store["target_kind"] == "embedded file path (redacted — userinfo-shaped)"
+
+
+@pytest.mark.parametrize("var, value", [
+    # The COLLAPSED form of a token-as-user DSN (`//token@host/x.db`): arm 1 only
+    # sees it while the `//` survives, and `os.path.abspath` eats it.
+    ("TORTOISE_DB_URI", "///token_SuperSecret12345@host/x.db"),
+    ("TORTOISE_DB_PATH", "/token_SuperSecret12345@host/x.db"),
+])
+def test_a_COLONLESS_token_collapsed_into_an_absolute_path_is_redacted(
+        monkeypatch, capsys, tmp_path, var, value):
+    """The colon-less twin of the P0 above — the shape arm 1 exists to catch.
+
+    `looks_like_uri_userinfo`'s AUTHORITY arm is documented as covering a token
+    with NO `:` (`//hunter2@host/x.db`), precisely because a colon test alone is
+    not enough. The collapsed arm was a colon test, so the moment `abspath`
+    removed the `//` the token form leaked while the password form was masked —
+    the predicate was narrower than its own stated rule.
+    """
+    _global(tmp_path)
+    monkeypatch.setenv(var, value)
+    assert _run(("config", "show", "--json")) == 0
+    cap = capsys.readouterr()
+    assert "SuperSecret12345" not in cap.out + cap.err
+    store = json.loads(cap.out)["graph_store"]
+    assert "SuperSecret12345" not in json.dumps(store)
+    assert store["target_kind"] == "embedded file path (redacted — userinfo-shaped)"
+
+
+def test_a_legal_path_that_looks_like_userinfo_is_redacted_but_not_denied(
+        monkeypatch, capsys, tmp_path):
+    """The fail-closed trade-off, pinned so nobody discovers it by surprise.
+
+    `/tmp/a:b/db@c.fdb` is a LEGAL embedded path (a colon with no credential, and
+    a real parent directory). The `:`-before-`@` tell cannot tell it from a
+    credential, so it is masked — that is the #2987/#5267 direction: a masked
+    path costs a line, an unmasked credential costs a transcript. What it must
+    NOT do is call a working store "unrecognised", which is a false statement
+    about the user's configuration.
+    """
+    _global(tmp_path)
+    monkeypatch.setenv("TORTOISE_DB_PATH", "/tmp/a:b/db@c.fdb")
+    assert _run(("config", "show", "--json")) == 0
+    store = json.loads(capsys.readouterr().out)["graph_store"]
+    assert store["target"] == "<uri-redacted-unrecognised-shape>"
+    assert store["target_kind"] == "embedded file path (redacted — userinfo-shaped)"
+
+
+def test_an_at_sign_in_a_path_directory_stays_legible(
+        monkeypatch, capsys, tmp_path):
+    """A real directory above the `@` is what separates a PATH from userinfo.
+
+    `main` pins this (`test_the_graph_store_classifies_the_target_instead_of_
+    crying_wolf`, `test_the_graph_target_keeps_the_maskers_fail_closed_rule`): a
+    report that hides a working path fails the thing it exists for. So the
+    predicate cannot be a bare-`@` test even though the display masker is —
+    that is the exemption this arm adds on top, and it is why the colon-less
+    arm is scoped to a value with NO directory above the `@`.
+    """
+    _global(tmp_path)
+    monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "me@work" / "db.fdb"))
+    assert _run(("config", "show", "--json")) == 0
+    store = json.loads(capsys.readouterr().out)["graph_store"]
+    assert store["target_kind"] == "embedded file path"
+    assert "me@work" in store["target"]
+
+
+def test_a_colon_with_no_at_sign_is_still_a_path(monkeypatch, capsys, tmp_path):
+    """The other legible shape, so the boundary cannot drift: `a:b.db` has a
+    colon and no `@`, and nothing about it is credential-shaped."""
+    _global(tmp_path)
+    monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "a:b.db"))
+    assert _run(("config", "show", "--json")) == 0
+    store = json.loads(capsys.readouterr().out)["graph_store"]
+    assert store["target_kind"] == "embedded file path"
+    assert store["target"].endswith("a:b.db")
+
+
+def test_the_blank_org_hint_does_not_say_the_store_carries_none(
+        capsys, tmp_path):
+    """A blank field is treated as ABSENT (pinned by
+    `test_a_blank_org_field_is_absent_not_mistyped`: `signup`/`recover` copy the
+    server's value through, so `""` is reachable and is not a type error). The
+    HINT, though, said "the resolved store carries no org_id" about a store that
+    carries a blank one — the same false-claim class as the `(absent)` render
+    beside a `org_field_warning` (#10655 review, F3)."""
+    _write(tmp_path / ".tortoise" / "credentials.json", json.dumps({
+        "api_key": GLOBAL_KEY, "api_url": "https://api.premiselabs.co",
+        "org_id": "   ", "org_name": "agent-x",
+    }))
+    assert _run() == 0
+    out = capsys.readouterr().out
+    assert "agent-x" in out
+    assert "no USABLE org_id" in out
+    assert "carries no org_id" not in out
+
+
 def test_the_whitespace_relation_carries_the_endpoint_verdict(
         monkeypatch, capsys, tmp_path):
     """The `same-modulo-whitespace` branch used to drop the different-endpoint
@@ -1461,17 +2097,25 @@ def test_the_whitespace_relation_carries_the_endpoint_verdict(
     monkeypatch.setenv("TORTOISE_API_URL", "")
     assert _run(("config", "show", "--json")) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["identity_host_agrees"] is False
-    assert payload["identity_relation"].endswith("different-host")
+    # `TORTOISE_API_URL=""` is not a parseable endpoint, so the verdict is UNKNOWN,
+    # not "different" — the same distinction this commit makes everywhere else.
+    assert payload["identity_host_agrees"] is None
+    assert payload["identity_relation"].endswith("host-unknown")
     assert _run() == 0
     out = capsys.readouterr().out
-    assert "DIFFERENT endpoint" in out
+    assert "cannot be made" in out
+    assert "DIFFERENT endpoint" not in out
 
 
 def test_an_unreadable_store_is_not_offered_for_deletion(capsys, tmp_path):
     """The file is INTACT and may hold the signup_token — a full credential and the
     only way back into the org. "repair or delete it" made deletion the
-    actionable-sounding option."""
+    actionable-sounding option.
+
+    The state constructed here is the mode-000 PARENT-DIRECTORY route, so the
+    remedy must name the DIRECTORY: `chmod 600 <dir>/credentials.json` fails
+    with "Permission denied" (the path is not reachable at all), and it would
+    also assert a fact about the file's mode the tool cannot check."""
     d = tmp_path / ".tortoise"
     d.mkdir()
     (d / "credentials.json").write_text(GLOBAL)
@@ -1480,8 +2124,14 @@ def test_an_unreadable_store_is_not_offered_for_deletion(capsys, tmp_path):
         assert _run() == 1
         out = capsys.readouterr().out
         assert "Do NOT delete it" in out
-        assert "chmod 600" in out
         assert "repair or delete it" not in out
+        import os
+        import shlex
+        line = next(ln for ln in out.splitlines() if "chmod u+x " in ln)
+        inside = line.split("chmod u+x ", 1)[1].split("`", 1)[0]
+        # the DIRECTORY, not the child file that cannot even be stat'ed
+        assert shlex.split(inside) == [os.path.realpath(str(d))]
+        assert "chmod 600" not in out
     finally:
         d.chmod(0o700)
 
@@ -1637,12 +2287,31 @@ def test_a_query_string_does_not_fake_an_endpoint_mismatch(capsys, tmp_path):
 
 
 def test_a_wrong_typed_harness_key_is_not_the_keyless_shape(monkeypatch, capsys, tmp_path):
+    """`resolveConfig` reads `apiUrl` from this file whatever the key's type, so the
+    file is still IN USE — "repair or delete it" would drop the endpoint and
+    silently repoint the hook at the default host."""
     _global(tmp_path)
     _harness(tmp_path, json.dumps({"apiKey": 12345, "apiUrl": "https://x.example"}))
     assert _run() == 0
     out = capsys.readouterr().out
-    assert "unusable harness store (invalid-key)" in out
+    assert "not a string, so the hook ignores it" in out
+    assert "IS still in use" in out                 # THIS file supplies the host
+    assert "unusable harness store" not in out      # that remedy invites deletion
     assert "no api-key in this file" not in out
+
+
+def test_a_wrong_typed_harness_key_under_an_env_host_does_not_claim_its_url_is_used(
+        monkeypatch, capsys, tmp_path):
+    """`resolveConfig` is `envKey ? TORTOISE_API_URL : fileUrl || DEFAULT`, so with
+    an env key the file's apiUrl is IGNORED and deleting the file drops nothing."""
+    _global(tmp_path)
+    _harness(tmp_path, json.dumps({"apiKey": 12345, "apiUrl": "https://selfhost.example"}))
+    monkeypatch.setenv("TORTOISE_API_KEY", GLOBAL_KEY)
+    monkeypatch.setenv("TORTOISE_API_URL", "https://envhost.example")
+    assert _run() == 0
+    out = capsys.readouterr().out
+    assert "IS still in use" not in out
+    assert "drops nothing" in out
 
 
 def test_the_harness_no_key_state_is_not_called_invalid(monkeypatch, capsys, tmp_path):
@@ -1681,6 +2350,55 @@ def test_a_keyless_harness_file_is_not_called_unusable(monkeypatch, capsys, tmp_
     out = capsys.readouterr().out
     assert "unusable harness store" not in out
     assert "no api-key in this file" in out
+
+
+def test_an_empty_api_url_does_not_claim_both_surfaces_fail(
+        monkeypatch, capsys, tmp_path):
+    """The harness falls back to the default host when TORTOISE_API_URL is blank,
+    so it still works — asserting a joint failure contradicted the same report."""
+    _global(tmp_path)
+    monkeypatch.setenv("TORTOISE_API_KEY", GLOBAL_KEY)
+    monkeypatch.setenv("TORTOISE_API_URL", "")
+    assert _run() == 0
+    out = capsys.readouterr().out
+    assert "BOTH fail the same way" not in out
+    assert "Only one side is affected" in out
+
+
+def test_the_same_unparseable_value_on_both_sides_says_so(
+        monkeypatch, capsys, tmp_path):
+    monkeypatch.setenv("TORTOISE_API_KEY", GLOBAL_KEY)
+    monkeypatch.setenv("TORTOISE_API_URL", "api.premiselabs.co")
+    assert _run() == 0
+    out = capsys.readouterr().out
+    assert "BOTH fail the same way" in out
+
+
+def test_two_DIFFERENT_unparseable_api_urls_are_still_a_joint_failure(
+        monkeypatch, capsys, tmp_path):
+    """#10655 review P2 — "Only one side is affected" was false here.
+
+    The branch was `if api_url == harness_url_raw`, so only two IDENTICAL raw values
+    were called a joint failure, and the comment claimed identity was the rule.
+    Identity is SUFFICIENT, never necessary: two different non-URLs are both
+    unparseable, so both surfaces fail the same way and neither side is "the"
+    affected one. This is the class commits 83ad68e6b / 0562490ae closed — "cannot
+    parse" is UNKNOWN, never "different".
+
+    Measured RED on the pre-fix head: store `api_url=host-one.example`, harness
+    `apiUrl=host-two.example` printed "Only one side is affected".
+    """
+    _global(tmp_path)
+    _harness(tmp_path, json.dumps({"apiKey": GLOBAL_KEY,
+                                   "apiUrl": "host-two.example",
+                                   "cloud": True, "autoCapture": True}))
+    _write(tmp_path / ".tortoise" / "credentials.json",
+           json.dumps({**json.loads(GLOBAL), "api_url": "host-one.example"}))
+    assert _run() == 0
+    out = capsys.readouterr().out
+    assert "cannot be made" in out
+    assert "BOTH fail the same way" in out
+    assert "Only one side is affected" not in out
 
 
 def test_an_empty_api_url_env_is_disclosed(monkeypatch, capsys, tmp_path):
