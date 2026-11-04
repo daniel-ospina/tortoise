@@ -287,9 +287,19 @@ def test_activate_promotes_an_operator_the_incident_query_cannot_reach():
     pass promoted); an operator reachable only through the sweep is the shape
     the fix exists for — a draft operator whose endpoints were already live.
 
-    Dropping the sweep's arm from ``activate_beliefs`` reds HERE and nowhere
-    else in this file, which is why the stub answers the no-param query from a
-    separate ``graph_operators`` list rather than reusing ``op_map``.
+    MEASURED falsification map — with the sweep arm dropped from
+    ``activate_beliefs`` (candidates forced to ``[]``), THREE tests in this file
+    red, not this one alone:
+    ``test_activate_promotes_points_and_operators_then_runs_ep``,
+    ``test_activate_flips_one_operator_exactly_once``, and this one
+    (``3 failed, 54 passed``). The other two red because they also assert on a
+    promoted operator's effect; this is the only one whose SUBJECT is the reach
+    itself, which is why the stub answers the no-param query from a separate
+    ``graph_operators`` list rather than reusing ``op_map``.
+
+    ⚠️ Neutralising the query TEXT does not falsify anything: the stub answers
+    the no-param query from ``graph_operators`` whatever the Cypher says
+    (``57 passed``). The arm has to be dropped at the CALL SITE to move this.
     """
     sdk, graph = _make([], total=0, graph_operators=["op_live"])
 
