@@ -1602,3 +1602,30 @@ word while deleting the residual section reds instead of shipping a blanket clai
 row, so the page cannot drift back to the pre-`#10360` story. Case COUNTS are deliberately not quoted:
 a hand-written total re-staled twice against a growing file (#10513 review P3), so the evidence is the
 named reds, which is what a mutation run can be checked against.
+
+## 2026-11-03 — the capture reader's scope: measurement-only → enforcement (#4051, #9567)
+
+**What changed in the design document, and why.** §"Where the measurement is" stated, as part of
+the design, that the passage *supersedes the scope `#4051` §1b recorded when the reader landed*
+(quoted: *"the reader is MEASUREMENT ONLY — no request path calls it"*). That is change history
+with an issue's state in it, and it belongs here: the design document now states the settled
+position and nothing about which ruling it replaced —
+`test_the_design_documents_carry_no_issue_state_or_change_narration` refuses the shape (it fired on
+the `#4051` + `landed` adjacency), and the class test is the reason the sentence was rewritten
+rather than reworded around.
+
+**The history, recorded here instead.** `#4051` §1b bounded the reader to measurement: `get_capture_usage`
+was landed for observation only, and its pin, `tests/test_metering_capture_usage_reader.py`, asserted
+that no request path called it. `#9567` (D11/D12) then put that reader behind
+`allowance_gate.enforce_allowances`, reached from `quota.enforce_org_limit` on both REST and MCP, so
+the `capture_extraction` allowance is enforced on the capture request path — a deliberate departure
+from §1b's stated scope, recorded as a reopen in `docs/architecture/CONSUMPTION-MODEL.md` §6 and on
+`#4051`, not as a silent widening. The pin was narrowed to match, not weakened: its offender list
+must now be **exactly** `["allowance_gate.py"]`, so a SECOND call site reds it and so does the gate
+*stopping* reading the meter (the fail-OPEN direction).
+
+**Why the reader had to grow a presence fact.** The landed reader degrades to a zero view on any
+store fault, which cannot distinguish "nothing spent" from "we could not read it" — a cap enforced on
+that figure fails OPEN for exactly the tenants whose meter is broken. So the reader also returns
+`measured` + `unmeasured_reason` (`absent` / `read_error` / `period_error`), and the gate refuses on
+anything that is not a measured reading.

@@ -722,12 +722,11 @@ def test_a_missing_allowance_gate_module_is_the_documented_500(monkeypatch,
     from tortoise.hosted_api import _check_org_limit
 
     monkeypatch.setitem(sys.modules, "tortoise.allowance_gate", None)
-    with caplog.at_level(logging.ERROR):
-        with pytest.raises(HTTPException) as exc:
-            # A NON-gated door: the import runs on every door, so the mapping
-            # must hold there too (`users` is outside
-            # ALLOWANCE_GATED_RESOURCES).
-            _check_org_limit(_rest_org(), "users")
+    with caplog.at_level(logging.ERROR), pytest.raises(HTTPException) as exc:
+        # A NON-gated door: the import runs on every door, so the mapping
+        # must hold there too (`users` is outside
+        # ALLOWANCE_GATED_RESOURCES).
+        _check_org_limit(_rest_org(), "users")
     assert exc.value.status_code == 500, exc.value
     detail = str(exc.value.detail)
     assert detail.startswith("Quota check failed:"), detail
@@ -741,3 +740,185 @@ def test_a_missing_allowance_gate_module_is_the_documented_500(monkeypatch,
               if r.levelno == logging.ERROR]
     assert any("allowance gate unavailable (fail-closed)" in m for m in errors), \
         errors
+
+
+# ── #10668 review round 12 — the FILL's lane, and the refusal's own wording ──
+#
+# Two independent review findings, one seam: `hosted_api._check_org_limit` fills
+# the missing allowance keys from `quota.resolve_org_limits`, and in Supabase
+# mode that read is a PostgREST call. It sat INSIDE the graph-pool submission, so
+# a control-plane timeout was reported as `graph_unavailable` (the wrong
+# dependency's copy) and a bound miss left a worker holding a graph slot — for a
+# gate that refuses nothing while nothing is armed.
+#
+# `_rest_org()` (the REST-shaped limits dict) is defined once, above.
+
+
+def test_the_points_door_carries_the_allowance_on_the_control_plane_lane(
+        monkeypatch):
+    """The PostgREST fill must NOT ride the graph-pool submission (#10668 P1).
+
+    RED on the pre-fix shape: the fill ran inside
+    ``_graph_offload(lambda: _check_org_limit(org, "points"))``, so the only
+    submission was ``("check_org_limit.points", "graph")`` — a control-plane
+    read on the graph lane, whose wait bound (30 s) is the PostgREST retry
+    ladder's own worst case and whose refusal body names the graph service.
+    """
+    import asyncio
+
+    import tortoise.hosted_api as ha_mod
+    from tortoise import supabase_control
+
+    pools: list[tuple[str, str]] = []
+    real_call = ha_mod.run_control_plane_call
+
+    async def _record(fn, *, op, timeout=None, pool="auth",
+                      cancel_on_timeout=True):
+        pools.append((op, pool))
+        return await real_call(fn, op=op, pool=pool, timeout=timeout,
+                               cancel_on_timeout=cancel_on_timeout)
+
+    monkeypatch.setattr(ha_mod, "run_control_plane_call", _record)
+    monkeypatch.setattr(supabase_control, "is_supabase_enabled", lambda: True)
+    # The fill itself is covered above; this test measures WHERE it runs.
+    monkeypatch.setattr(ha_mod, "_carry_allowance_limits",
+                        lambda org, resource: org)
+
+    asyncio.run(ha_mod._check_org_limit_offloaded(
+        _rest_org(), "points", op="check_org_limit.points"))
+
+    assert ("allowance_carry.points", "auth") in pools, (
+        f"the allowance fill did not run on the control-plane ('auth') lane — "
+        f"submissions were {pools!r}. A PostgREST read inside the graph-pool "
+        f"submission is reported as a GRAPH outage and holds a graph slot "
+        f"(#10668 review P1)")
+    assert [p for op, p in pools if op == "check_org_limit.points"] == ["graph"], (
+        f"the COUNT no longer rides the graph lane — submissions were {pools!r}")
+    assert pools.index(("allowance_carry.points", "auth")) < pools.index(
+        ("check_org_limit.points", "graph")), (
+        f"the fill must COMPLETE before the count is submitted — the count "
+        f"reads the dict it produced: {pools!r}")
+
+
+def test_a_control_plane_refusal_on_the_fill_is_not_a_graph_outage(monkeypatch):
+    """A refused control-plane offload must name the CONTROL plane (#10668 P1).
+
+    RED before the split in the direction the review measured: the fill ran
+    inside ``_graph_offload``, whose ``unavailable=_graph_unavailable`` factory
+    answers ``graph_unavailable`` — "The graph service is temporarily
+    unavailable" — for a fault in the PostgREST ladder.
+    """
+    import asyncio
+
+    from fastapi import HTTPException
+
+    import tortoise.hosted_api as ha_mod
+    from tortoise import supabase_control
+    from tortoise.monitoring import ControlPlaneOffloadError
+
+    async def _refuse(fn, *, op, timeout=None, pool="auth",
+                      cancel_on_timeout=True):
+        raise ControlPlaneOffloadError(f"{op}: pool backlog full", refused=True)
+
+    monkeypatch.setattr(ha_mod, "run_control_plane_call", _refuse)
+    monkeypatch.setattr(supabase_control, "is_supabase_enabled", lambda: True)
+    monkeypatch.setattr(ha_mod, "_carry_allowance_limits",
+                        lambda org, resource: org)
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(ha_mod._check_org_limit_offloaded(
+            _rest_org(), "points", op="check_org_limit.points"))
+    assert exc.value.status_code == 503, exc.value
+    body = exc.value.detail
+    assert isinstance(body, dict) and body.get("error_code") == (
+        "control_plane_unavailable"), (
+        f"a control-plane refusal was reported as {body!r} — the dependency "
+        f"that failed is the control plane, not the graph (#10668 review P1)")
+
+
+def test_registry_mode_keeps_the_single_graph_pool_submission(monkeypatch):
+    """Self-host mode must NOT gain a second submission (#10668 P1 regression).
+
+    In registry mode the fill is a REGISTRY read (``_make_sdk`` + a ``Team``
+    query), so both halves belong on the graph lane and the split must collapse
+    to the one submission it replaced — a mode-agnostic split would put that
+    read on the ``auth`` pool and hand it the sign-in 503 copy (#3718).
+    """
+    import asyncio
+
+    import tortoise.hosted_api as ha_mod
+    from tortoise import supabase_control
+
+    pools: list[tuple[str, str]] = []
+    real_call = ha_mod.run_control_plane_call
+
+    async def _record(fn, *, op, timeout=None, pool="auth",
+                      cancel_on_timeout=True):
+        pools.append((op, pool))
+        return await real_call(fn, op=op, pool=pool, timeout=timeout,
+                               cancel_on_timeout=cancel_on_timeout)
+
+    monkeypatch.setattr(ha_mod, "run_control_plane_call", _record)
+    monkeypatch.setattr(supabase_control, "is_supabase_enabled", lambda: False)
+    monkeypatch.setattr(ha_mod, "_carry_allowance_limits",
+                        lambda org, resource: org)
+
+    asyncio.run(ha_mod._check_org_limit_offloaded(
+        _rest_org(), "points", op="check_org_limit.points"))
+
+    assert pools == [("check_org_limit.points", "graph")], (
+        f"registry mode submitted {pools!r} — the fill is registry work and "
+        f"must stay inside the ONE graph submission it always used (#10668 "
+        f"review P1, #3718)")
+
+
+def test_a_dimension_with_no_meter_says_so_instead_of_claiming_BLOCKED():
+    """A fail-closed refusal must describe its OWN state (#10668 review P2).
+
+    ``capture_extraction`` is NOT blocked, and the blocked arm above refuses it
+    before a meter is chosen — so a missing meter (reachable through the
+    ``meters=`` seam) is this gate's own wiring gap. Borrowing the BLOCKED copy
+    rendered *"… but is BLOCKED — None"*: ``blocked_reason`` is the blocked-only
+    reason, so it printed ``None`` and told the operator the opposite of what
+    happened.
+
+    Mutation this REDs: restore the single message that interpolates
+    ``dim.blocked_reason`` for both states.
+    """
+    with pytest.raises(QuotaCheckError) as exc:
+        enforce_allowances(_limits(max_extraction_tokens=10),
+                           resource="sessions",
+                           meters={"capture_extraction": None})
+    detail = str(exc.value)
+    assert "blocked" not in detail.lower(), (
+        f"an unblocked dimension was described as BLOCKED: {detail}")
+    assert "no meter plumbed" in detail, detail
+    assert "None" not in detail, (
+        f"the refusal rendered a None reason slot: {detail}")
+
+
+def test_a_numeric_string_reading_is_COERCED_not_refused():
+    """The type gate's real boundary, pinned (#10668 review P2).
+
+    ``float()`` accepts numeric strings, so ``"5"`` is read as ``5.0`` and
+    ``"1e9"`` as a billion. The module's comment claimed every non-numeric SHAPE
+    was refused, which overstates the gate in the direction that matters — a
+    reader would trust it to reject ``"5"``. Both halves are pinned here: a
+    coercible string PASSES (against a cap it does not exceed), and the
+    uncoercible shapes still refuse (``test_a_non_numeric_reading_is_refused_
+    not_a_bare_typeerror``).
+    """
+    def _numeric_string(_org_id: str) -> MeterReading | None:
+        return MeterReading(used="5")
+
+    enforce_allowances(_limits(max_extraction_tokens=10), resource="sessions",
+                       meters={"capture_extraction": _numeric_string})
+
+    def _huge_string(_org_id: str) -> MeterReading | None:
+        return MeterReading(used="1e9")
+
+    with pytest.raises(QuotaExceededError):
+        # Refused as OVER the cap, not as non-numeric — the figure coerced.
+        enforce_allowances(_limits(max_extraction_tokens=10),
+                           resource="sessions",
+                           meters={"capture_extraction": _huge_string})

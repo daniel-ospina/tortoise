@@ -8796,8 +8796,153 @@ def _gate_sdk_for(org: dict, resource: str):
     return _org_sdk_for_credential(org)
 
 
+def _carry_allowance_limits(org: dict, resource: str) -> dict:
+    """Fill a REST lane's limits dict from the ONE allowance resolver (#9567 D12).
+
+    Every REST lane hand-assembles its limits dict from its own store read and
+    none of them reads an allowance column, while ``quota.resolve_org_limits``
+    is where an allowance value is emitted for the MCP lane — so a key a lane
+    does not carry reads as UNLIMITED in the gate and an arming edit would
+    refuse on MCP while REST served past it. This is the ONE REST convergence
+    point (``#1828``'s rule), and it fills only the keys that are MISSING, so a
+    surface that already resolved them pays no read and is never overridden.
+
+    ⛔ WHICH LANE THIS RUNS ON IS DECIDED BY MODE, NOT HERE (#10668 review P1).
+    The read's SUBSTRATE changes with the control plane, so its pool must too:
+
+    * **Supabase mode** — ``_orgs_row_fail_soft`` → PostgREST ``httpx`` with a
+      retry ladder (up to 6 attempts at a 5.0 s phase bound). That is
+      CONTROL-PLANE work: it rides ``_cp_offload``'s ``auth`` pool, whose
+      fail-closed body is the 503 ``control_plane_unavailable`` naming the
+      dependency that actually failed.
+    * **registry / self-host mode** — the resolver's non-Supabase arm builds
+      ``_make_sdk(namespace="registry")`` and runs a ``MATCH (t:Team {id: …})``.
+      That is a REGISTRY read, and ``_graph_offload``'s own docstring routes
+      those to the ``graph`` lane ("REGISTRY reads belong here too … Do NOT
+      route them to ``_cp_offload``'s default ``auth`` pool").
+
+    ``_check_org_limit_offloaded`` picks the lane by mode, the same way
+    ``_graph_list_for`` does. ⛔ What must never happen is a PostgREST read
+    inside a **graph-pool** submission: the ladder's ~30 s is exactly that
+    lane's wait bound, so a control-plane timeout was surfaced as
+    ``graph_unavailable`` — the wrong dependency's copy — and a bound miss left
+    the worker holding a graph slot (#10387), letting an INERT gate (one that
+    refuses nothing, because nothing is armed) consume graph-pool capacity per
+    gated write during a control-plane incident and take every graph route to
+    503.
+
+    Three outcomes, not two (#9567 review round 11): a LOOKUP MISS
+    (``quota.OrgNotFoundError``) returns the dict UNCHANGED — a cap cannot be
+    armed from a record that does not exist, and the absence is the gate's own
+    declared default (unconfigured = unlimited, #4051) — while any other fault
+    is a ``QuotaCheckError``, mapped to the documented 500 by the caller.
+
+    ⚠️ REGISTRY-MODE COST, STATED RATHER THAN HIDDEN (#10668 review P2). In
+    self-host mode this is an ``_make_sdk`` construction plus a ``Team`` query
+    per GATED request (points / documents / sessions) — an eager resolve, not a
+    cached dict. Nothing is armed today, so it refuses nothing and costs only
+    that read. The remedy, if an allowance is ever armed and this read matters
+    operationally, is the short-TTL memo ``tortoise/allowance_gate.py`` names in
+    its own docstring; it is deliberately NOT taken here, and not now — a memo
+    is a cache with an invalidation surface (a limit LOWERED for a tenant stays
+    uncarried until the entry expires), so shipping one before any allowance
+    exists would add an invalidation bug to fix with no measured load behind it.
+    """
+    if not org.get("org_id"):
+        return org  # internal/no-org context — nothing to resolve
+    from tortoise.quota import QuotaCheckError
+
+    try:
+        from tortoise.allowance_gate import (
+            ALLOWANCE_GATED_RESOURCES,
+            carry_resolved_allowances,
+        )
+    except Exception as e:  # mapped by the caller to the documented refusal
+        # #686: ALERT at ERROR before refusing. An import-time drift here (the
+        # gate's ``_dimension()`` is deliberately loud at import) refuses EVERY
+        # gated REST door at once, so it is the one fault on this path that MUST
+        # be alertable — and it was the only one that logged nothing, while its
+        # sibling ``quota.enforce_org_limit`` logs this same fault at ERROR. The
+        # handler used to assume "quota already logged the refusal", which is
+        # true on every other refusal path and false on this one, so a drift
+        # that takes the whole REST surface down was silent on REST and alerting
+        # on MCP — the one-state-two-answers class this PR exists to remove.
+        _logger.error(
+            "allowance gate unavailable (fail-closed): team=%s "
+            "resource=%s error=%r", org.get("org_id"), resource, e)
+        raise QuotaCheckError(
+            f"the allowance gate could not be loaded "
+            f"({type(e).__name__}: {e}) — refusing rather than checking a "
+            f"limit whose guard cannot be imported") from e
+    if resource not in ALLOWANCE_GATED_RESOURCES:
+        return org  # a key mint / user cap cannot arm a ruled dimension
+    return carry_resolved_allowances(org)
+
+
+async def _check_org_limit_offloaded(org: dict, resource: str, *,
+                                     op: str) -> None:
+    """The async gate for an off-loaded write door: carry, then count.
+
+    Use this instead of ``await _graph_offload(lambda: _check_org_limit(…))``.
+    That one-liner was correct until the allowance fill landed on the same call
+    (#9567 D12) and made a gate that refuses nothing perform a CONTROL-PLANE
+    read per gated write — on the GRAPH lane, whose 30 s bound is the
+    PostgREST ladder's own worst case (#10668 review P1, see
+    :func:`_carry_allowance_limits`).
+
+    * **registry mode** — both halves are graph work, so this is ONE graph
+      submission, exactly the shape it replaced: nothing changes for self-host.
+    * **Supabase mode** — the fill goes to ``_cp_offload`` (PostgREST lane) and
+      only the COUNT rides the graph lane, so a control-plane fault or a bound
+      miss is reported as a control-plane failure and consumes no graph slot.
+
+    A fill fault is mapped to this module's documented fail-closed refusal
+    (``HTTPException(500, "Quota check failed: …")``) here, because the mapped
+    ``try`` inside ``_check_org_limit`` no longer covers it — an unmapped
+    ``QuotaCheckError`` escaping to a route's generic handler reports OUR
+    bookkeeping fault to the tenant as their write failing (the #4051 class).
+    """
+    from tortoise.quota import QuotaCheckError
+    from tortoise.supabase_control import is_supabase_enabled
+
+    if not is_supabase_enabled():
+        await _graph_offload(lambda: _check_org_limit(org, resource), op=op)
+        return
+    try:
+        carried = await _cp_offload(
+            lambda: _carry_allowance_limits(org, resource),
+            op=f"allowance_carry.{resource}")
+    except QuotaCheckError as e:
+        raise _quota_check_failed(e, org_id=org.get("org_id"),
+                                  resource=resource) from e
+    await _graph_offload(
+        lambda: _check_org_limit(carried, resource, carry_allowances=False),
+        op=op)
+
+
+def _quota_check_failed(exc: Exception, *, org_id, resource) -> HTTPException:
+    """The documented fail-closed 500 for a quota/config read we could not finish.
+
+    ONE construction for both the count path (inside ``_check_org_limit``) and
+    the control-plane allowance fill (``_check_org_limit_offloaded``): the two
+    are the same refusal to the client, and two copies of the prose is how one
+    of them drifts into an unmapped 500.
+    """
+    # The REFUSING SITE already logged at ERROR level — `_count_resource` for a
+    # counting failure (#686), the limit validation for an UNREADABLE or MISSING
+    # limit (#4051), the allowance-gate import guard (#9567), and
+    # `tortoise.allowance_gate` for every fail-closed refusal it raises. Avoid
+    # double-logging — this site only records the HTTP context.
+    _logger.debug(
+        "quota check failed (fail-closed): team=%s resource=%s error=%s",
+        org_id, resource, str(exc),
+    )
+    return HTTPException(status_code=500, detail=f"Quota check failed: {exc}")
+
+
 def _check_org_limit(org: dict, resource: str, *,
-                     slot_credit: int = 0) -> None:
+                     slot_credit: int = 0,
+                     carry_allowances: bool = True) -> None:
     """Enforce per-org limits. Raises 402 (payment required) when at capacity.
 
     resource: 'points' | 'api_keys' | 'sessions' | 'users' | 'graphs'
@@ -8805,6 +8950,10 @@ def _check_org_limit(org: dict, resource: str, *,
     primitive passes 1 so the admission check is evaluated post-release. Only
     the rotate path may pass a non-zero credit, and only after
     ``quota.api_key_occupies_slot`` proved the displaced row is counted.
+    carry_allowances (#10668 review P1): ``False`` when the CALLER already ran
+    the fill on its own lane (``_check_org_limit_offloaded`` in Supabase mode).
+    ``True`` keeps the single-call shape for every synchronous caller, and for
+    the async doors in registry mode where the fill is graph work too.
     Fail-closed decision (#686)
     ~~~~~~~~~~~~~~~~~~~~~~~~~~~
     Counting errors raise HTTP 500 (QuotaCheckError) — never a silent pass.
@@ -8885,42 +9034,20 @@ def _check_org_limit(org: dict, resource: str, *,
         quota_refusal_payload,
     )
     try:
-        # ⚠️ The allowance gate's IMPORT and CARRY live INSIDE this ``try``
-        # (review round 10). They used to sit above it, so their two documented
-        # fail-closed faults — a resolver fault (`carry_resolved_allowances`
-        # maps it to ``QuotaCheckError``) and the gate's DELIBERATELY LOUD
-        # import-time drift (``_dimension()`` raises on a renamed/removed
-        # declared dimension) — escaped this function unmapped. On the capture
-        # route that is the tenant's own capture reported as failed with
+        # ⚠️ The allowance gate's IMPORT and CARRY are inside this ``try``
+        # (review round 10) — as of #10668 review P1 they live in
+        # ``_carry_allowance_limits``, whose two documented fail-closed faults
+        # (a resolver fault → ``QuotaCheckError``, and the gate's DELIBERATELY
+        # LOUD import-time drift — ``_dimension()`` raises on a renamed/removed
+        # declared dimension) are mapped to the documented refusal below. They
+        # used to sit ABOVE the ``try``, so both escaped unmapped: on the
+        # capture route that is the tenant's own capture reported as failed with
         # "internal capture error", i.e. OUR fault presented as THEIR write
         # failing — the #4051 class this module promises never to produce.
         # ``quota.enforce_org_limit`` wraps the same import for the same reason;
         # this is the one seam that did not.
-        try:
-            from tortoise.allowance_gate import (
-                ALLOWANCE_GATED_RESOURCES,
-                carry_resolved_allowances,
-            )
-        except Exception as e:  # mapped to the documented refusal below
-            # #686: ALERT at ERROR before refusing. An import-time drift here
-            # (the gate's `_dimension()` is deliberately loud at import) refuses
-            # EVERY gated REST door at once, so it is the one fault on this path
-            # that MUST be alertable — and it was the only one that logged
-            # nothing, while its sibling `quota.enforce_org_limit` logs this same
-            # fault at ERROR. The handler below used to assume "quota already
-            # logged the refusal", which is true on every other refusal path and
-            # false on this one, so a drift that takes the whole REST surface
-            # down was silent on REST and alerting on MCP — the
-            # one-state-two-answers class this PR exists to remove.
-            _logger.error(
-                "allowance gate unavailable (fail-closed): team=%s "
-                "resource=%s error=%r", org_id, resource, e)
-            raise QuotaCheckError(
-                f"the allowance gate could not be loaded "
-                f"({type(e).__name__}: {e}) — refusing rather than checking a "
-                f"limit whose guard cannot be imported") from e
-        if resource in ALLOWANCE_GATED_RESOURCES:
-            org = carry_resolved_allowances(org)
+        if carry_allowances:
+            org = _carry_allowance_limits(org, resource)
         # #4051 + #10180: the points/sessions/documents counts are TENANT-graph
         # counts, so the SDK they run against decides WHICH graph the cap is
         # measured on. Two orthogonal ways that went wrong, both closed by
@@ -8956,18 +9083,7 @@ def _check_org_limit(org: dict, resource: str, *,
             detail=quota_refusal_payload(e),
         )
     except QuotaCheckError as e:
-        # The REFUSING SITE already logged at ERROR level — `_count_resource`
-        # for a counting failure (#686), the limit validation for an
-        # UNREADABLE limit (#4051, on BOTH the generic path and the `documents`
-        # derived branch) or a MISSING one (#4051 review round 5), the
-        # allowance-gate IMPORT guard directly above (#9567), and
-        # `tortoise.allowance_gate` for every fail-closed refusal it raises.
-        # Avoid double-logging — this site only records the HTTP context.
-        _logger.debug(
-            "quota check failed (fail-closed): team=%s resource=%s error=%s",
-            org_id, resource, str(e),
-        )
-        raise HTTPException(status_code=500, detail=f"Quota check failed: {e}")  # noqa: B904
+        raise _quota_check_failed(e, org_id=org_id, resource=resource) from e
 
 
 def _alert_unmetered(lane: str, org_id: str | None,
@@ -11399,9 +11515,11 @@ async def create_object(body: CreateObjectRequest, request: Request,
     _require_scope(org, "graphs:write", "create_object")
     # #3773: the quota count and the SDK open are SYNC FalkorDB work too — they
     # go through the #3498 offload seam (graph pool) instead of running on the
-    # loop before the off-loaded write below.
-    await _graph_offload(lambda: _check_org_limit(org, "points"),
-                         op="check_org_limit.points")
+    # loop before the off-loaded write below. #10668 review P1: the allowance
+    # FILL is not graph work in Supabase mode, so the gate is entered through
+    # `_check_org_limit_offloaded`, which runs it on the control-plane lane.
+    await _check_org_limit_offloaded(org, "points",
+                                     op="check_org_limit.points")
     sdk = await _data_sdk_offloaded(org)
     # #5475: the kind must not widen the graph's own approval set. #9572: only a
     # NAMED kind is checked — an absent one is not a kind, and the fold supplies
@@ -11461,9 +11579,11 @@ async def create_subject(body: CreateSubjectRequest, request: Request,
     as the first graph entities.
     """
     _require_scope(org, "graphs:write", "create_subject")
-    # #3773: same off-load of the quota count + SDK open as create_object above.
-    await _graph_offload(lambda: _check_org_limit(org, "points"),
-                         op="check_org_limit.points")
+    # #3773: same off-load of the quota count + SDK open as create_object above
+    # (#10668 review P1: through the split gate, so the allowance fill takes the
+    # lane its own substrate uses).
+    await _check_org_limit_offloaded(org, "points",
+                                     op="check_org_limit.points")
     sdk = await _data_sdk_offloaded(org)
     # #5475: the same input constraint as /v1/objects, on the subject door
     # (#9572: only a NAMED kind — see CreateObjectRequest; BLANK is not a kind,
@@ -11500,9 +11620,10 @@ async def create_point(body: CreatePointRequest, request: Request, org: dict = D
     _require_scope(org, "graphs:write", "create_point")
     # #3773: the quota count and the SDK open are SYNC FalkorDB work too — they
     # go through the #3498 offload seam (graph pool) instead of running on the
-    # loop before the off-loaded write below.
-    await _graph_offload(lambda: _check_org_limit(org, "points"),
-                         op="check_org_limit.points")
+    # loop before the off-loaded write below. #10668 review P1: the allowance
+    # fill rides its own substrate's lane (see `_check_org_limit_offloaded`).
+    await _check_org_limit_offloaded(org, "points",
+                                     op="check_org_limit.points")
     sdk = await _data_sdk_offloaded(org)
     try:
         # #3718: sdk.create_point + the about edge are SYNC FalkorDB socket

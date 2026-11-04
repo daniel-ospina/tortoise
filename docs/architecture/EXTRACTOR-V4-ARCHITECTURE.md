@@ -47,7 +47,7 @@ analytics row carries — `#5045`. The **ask** lane separately records
 token counters cannot change the cap's behaviour. That separation is deliberate: this ruling is about the **unit**,
 and the cap is a separate decision.
 
-**The token counters have a reader, and it is now an ENFORCEMENT reader** (`#4051`, `#9567` D11/D12).
+**The token counters have a reader, and that reader is on the ENFORCEMENT path** (`#4051`, `#9567` D11/D12).
 `metering.get_capture_usage(org_id)` returns `capture_calls` / `capture_tokens_in` / `capture_tokens_out` /
 `capture_tokens_total` / `capture_cost_usd` per org per metering window on BOTH substrates (`:MeteringRecord` in the
 registry, or `supabase.metering_records`), degrading to a zero view and never raising; `capture_extraction`'s
@@ -55,18 +55,17 @@ declared `READER` binding in `tortoise/cost_dimensions.py` points at it. It carr
 cannot express — `measured` + `unmeasured_reason` (`absent` / `read_error` / `period_error`) — because a recorded
 ZERO is a reading (#5045) while an unreadable ledger is not.
 
-⛔ **This supersedes the scope `#4051` §1b recorded when the reader landed** (*"the reader is MEASUREMENT ONLY — no
-request path calls it"*). `allowance_gate.enforce_allowances` reads it, reached from `quota.enforce_org_limit` on both
-REST and MCP, so the `capture_extraction` allowance is enforced on the capture request path. The reopen is argued in
-`docs/architecture/CONSUMPTION-MODEL.md` §6, and
-`tests/test_metering_capture_usage_reader.py`'s scan names `allowance_gate.py` as the reader's ONE consumer. Why it
-had to move: a reader that returns a zero view for every failure cannot tell "unknown" from "nothing spent", and a
-cap enforced on it fails OPEN for exactly the tenants whose meter is broken. The spend ceiling above still cannot see
+⛔ **Who reads it, and why the presence fact is required** (`#4051`, `#9567` D11/D12).
+`allowance_gate.enforce_allowances` reads it, reached from `quota.enforce_org_limit` on both REST and MCP, so the
+`capture_extraction` allowance is enforced on the capture request path; the consumption model that consumes it is
+`docs/architecture/CONSUMPTION-MODEL.md` §6, and `tests/test_metering_capture_usage_reader.py`'s scan names
+`allowance_gate.py` as the reader's ONE consumer. The presence fact is what makes that possible: a reader that returns
+a zero view for every failure cannot tell "unknown" from "nothing spent", so a cap enforced on it fails OPEN for
+exactly the tenants whose meter is broken. The spend ceiling above still cannot see
 the **token counters** (`capture_tokens_in` / `capture_tokens_out` / `ask_tokens_in` / `ask_tokens_out`) by
 construction — it sums `ask_cost_usd` + `capture_cost_usd`, so a change in capture *tokens* moves no cap while a
 change in capture *cost* does. The metric set itself — the per-call metrics, the disclosure counters, the attribution
-and the derived figures — is defined in `docs/ops/extraction-cost-metrics.md` (`#3840`); the consumption model that
-consumes the reader is `docs/architecture/CONSUMPTION-MODEL.md` (`#4051`).
+and the derived figures — is defined in `docs/ops/extraction-cost-metrics.md` (`#3840`).
 
 **⚠️ Open, and not decided here:** whether the token allowance and the storage allowance are enforced at the same
 seam, and whether an extraction allowance is a **pre-spend admission** gate (like the points estimate) or a

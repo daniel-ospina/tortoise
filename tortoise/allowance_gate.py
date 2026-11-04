@@ -21,7 +21,7 @@ configured"*, ``docs/architecture/STORAGE-ARCHITECTURE.md``: §"The byte path").
 round 10).** Arming nothing means no dimension can be over its allowance — it does
 NOT mean the gate is free. ``hosted_api._check_org_limit`` fills the missing keys
 at the REST seam from ``quota.resolve_org_limits``, so every gated REST request
-(``points``, ``documents``, ``sessions``) performs ONE control-plane read, and a
+(``points``, ``documents``, ``sessions``) performs ONE read, and a
 **fault** in that read is a ``QuotaCheckError`` → HTTP 500 **even with no allowance
 configured**. That is an over-block on our own bookkeeping fault, and the read
 side of the ``#3981`` tension this module states below: the ruling forbids
@@ -34,6 +34,19 @@ judgement, not an oversight; the alternative (mirroring the carry into every RES
 limits builder) is the drift ``#3874`` rules out, and the fix if the read ever
 matters operationally is a short-TTL memo on the resolver — NOT a silent
 "unlimited" on a failed read.
+
+**⚠️ THAT ONE READ IS NOT ONE COST (#10668 review P2).** Its shape follows the
+control plane: in Supabase mode it is a PostgREST ``httpx`` call (``_orgs_row_fail_soft``,
+with a retry ladder under schema drift) and rides the control-plane offload lane;
+in registry/self-host mode it is ``_make_sdk(namespace="registry")`` — an SDK
+CONSTRUCTION, plus a possible cold projection open — followed by a
+``MATCH (t:Team {id: …})``, once per GATED request. Nothing is cached in either
+mode. That is deliberate today (nothing is armed, so the read refuses nothing and
+buys the fail-closed property the paragraph above argues for), and the memo named
+there is the remedy the moment an allowance IS armed: a memo is a cache with an
+invalidation surface (a limit LOWERED for a tenant stays uncarried until the
+entry expires), so it is not added before there is a measurement to justify it.
+``hosted_api._carry_allowance_limits`` states the same cost where the read lives.
 
 **⚠️ BUT A LOOKUP MISS IS NOT ONE OF THOSE FAULTS (#9567 review round 11).** The
 read has THREE outcomes, not two, and only the middle one is ours to refuse:
@@ -621,9 +634,19 @@ def _reading(dim: AllowanceDimension, org_id: str,
     if meter is None:
         if observed_only:
             return None
+        # ⛔ NOT the BLOCKED copy (#10668 review P2). A blocked dimension is
+        # refused ABOVE, before any meter is chosen, so reaching here means the
+        # dimension is NOT blocked and this gate simply has no instrument
+        # plumbed for it — reachable through the ``meters=`` seam, and a state
+        # a fail-closed refusal must describe accurately. Borrowing the BLOCKED
+        # wording rendered *"… but is BLOCKED — None"*: the reason slot is the
+        # blocked only reason, so it printed ``None`` and told the operator the
+        # opposite of what happened (a missing meter is OUR wiring gap, a
+        # BLOCKED dimension is a decision not to cap on that figure).
         raise QuotaCheckError(
             f"dimension {dim.dimension!r} has an allowance configured for team "
-            f"{org_id!r} but is {BLOCKED.upper()} — {dim.blocked_reason}")
+            f"{org_id!r} but has no meter plumbed — refusing to enforce "
+            f"{dim.limit_key} from a reading nobody takes")
     try:
         reading = meter(org_id)
     except Exception as e:
@@ -742,10 +765,21 @@ def enforce_allowances(
         # #3665's trap, in the other direction: ``nan >= allowance`` is False, so
         # a NaN reading would SILENTLY PASS (a disarmed allowance), and ``inf``
         # would raise a bare OverflowError out of ``int(used)`` below — an
-        # unmapped 500 this module promises never to produce (#4051). And a
-        # NON-NUMERIC reading (``None``, ``"5"``, a Decimal) would raise a bare
-        # TypeError at the comparison. So the figure is COERCED once, here, and
-        # every shape that is not a finite number is REFUSED.
+        # unmapped 500 this module promises never to produce (#4051). A reading
+        # with no numeric shape at all (``None``, ``"five"``, ``object()``)
+        # would raise a bare TypeError at the comparison. So the figure is
+        # COERCED once, here, and anything that does not coerce to a FINITE
+        # NUMBER is refused.
+        #
+        # ⚠️ What the coercion ACCEPTS, stated accurately (#10668 review P2):
+        # ``float()`` takes numeric STRINGS and Decimals too, so ``"5"`` is read
+        # as ``5.0`` and ``"1e9"`` as a billion — a numeric string is a NUMBER
+        # for this purpose, not a type error. Only a value that does not coerce
+        # (``None``, ``"five"``, an arbitrary object) reaches the refusal below,
+        # and a numeric value that is non-finite reaches the second one. An
+        # earlier revision of this comment claimed every non-numeric SHAPE was
+        # refused, which overstated the type gate in the direction that matters:
+        # a reader would trust it to reject ``"5"``.
         raw_used = getattr(reading, "used", None)
         try:
             used = float(raw_used)
