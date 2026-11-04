@@ -49,7 +49,11 @@ from pathlib import Path
 
 import pytest
 
-from tests._index_settle import index_cells, index_rows_after_settle
+from tests._index_settle import (
+    index_cells,
+    index_rows_after_settle,
+    point_index_drops_visible,
+)
 from tortoise.projection import (
     _HANDLE_MUTATING_VERBS,
     DirectCacheWriteRefused,
@@ -866,10 +870,19 @@ def test_schema_ddl_survives_the_armed_guard(armed_sdk, enforced):
     # runner; 0.3 s to converge idle). `index_rows_after_settle` waits for the
     # rebuild to finish; the assertions are unchanged, so a drop that really
     # cannot happen still fails here loudly rather than passing vacuously.
+    #
+    # ⛔ AND IT IS ARMED WITH THIS FIXTURE'S OWN PRECONDITION (#10807). Quiescence
+    # alone is NOT enough: `DROP INDEX` returns BEFORE the indexer thread applies
+    # it, and in that window the catalogue is internally consistent — pre-drop
+    # definition, no `UNDER CONSTRUCTION` — so a wait that only watches for the
+    # rebuild status hands that read straight back and the guards below refuse a
+    # drop that LANDED. `point_index_drops_visible` is the same question the two
+    # guards ask, so the wait and the assertions cannot disagree.
     with _graph_metadata_write_scope("test-fixture: drop the indexes"):
         proj.g._g.query("DROP INDEX ON :Point(pointKind)")
         proj.g._g.query("CALL db.idx.fulltext.drop('Point')")
-    before = index_cells(index_rows_after_settle(proj))
+    before = index_cells(
+        index_rows_after_settle(proj, until=point_index_drops_visible))
     assert not any("pointKind" in c for c in before), (
         "the fixture could not drop the Point range index, so the assertion "
         f"below would pass vacuously; catalogue={sorted(before)}")

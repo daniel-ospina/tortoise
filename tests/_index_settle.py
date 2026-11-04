@@ -104,3 +104,32 @@ def index_kind_absent(rows, label: str, field: str, kind: str) -> bool:
         if wanted in {str(k).upper() for k in kinds}:
             return False
     return True
+
+
+#: What `test (g)` drops before it reads the catalogue: the retired
+#: `:Point(pointKind)` range field, and the label's legacy two-field fulltext
+#: index (`content` + `search_keys`). The two vacuity guards at the call site
+#: assert exactly these are gone, so the wait must assert the same thing.
+POINT_RANGE_FIELD = "pointKind"
+POINT_FULLTEXT_FIELDS = ("content", "search_keys")
+
+
+def point_index_drops_visible(rows) -> bool:
+    """Are BOTH `test (g)` drops VISIBLE in ``rows`` yet?
+
+    `index_kind_absent` answers one field/kind question; this is the pair the
+    write-authority fixture needs, written once so the wait and the two guards
+    below it cannot disagree about what "dropped" means.
+
+    ⛔ Why the call site may not rely on quiescence alone: `DROP INDEX` returns
+    before the engine's indexer thread applies it, and in that window the
+    catalogue is internally consistent — pre-drop definition, no
+    ``UNDER CONSTRUCTION``, idle ``OPERATIONAL`` — so a quiescence-only wait
+    hands that read straight back and the fixture refuses a LANDED drop as if
+    the drop had failed (the false red this module exists to remove).
+    """
+    cells = index_cells(rows)
+    return (
+        not any(POINT_RANGE_FIELD in cell for cell in cells)
+        and not any(all(f in cell for f in POINT_FULLTEXT_FIELDS) for cell in cells)
+    )

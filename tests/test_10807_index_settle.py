@@ -2,7 +2,7 @@
 
 WHY THIS FILE EXISTS
 --------------------
-`tests/_live_utils.index_rows_after_settle` is the ONE definition of "wait until
+`tests/_index_settle.index_rows_after_settle` is the ONE definition of "wait until
 the FalkorDB index catalogue has SETTLED", shared by two fixtures that each lost
 the same race in a different file:
 
@@ -24,6 +24,8 @@ tolerant pass — the property both callers' unchanged assertions depend on.
 """
 from __future__ import annotations
 
+import re
+from pathlib import Path
 from types import SimpleNamespace
 
 from tests._index_settle import (
@@ -31,6 +33,7 @@ from tests._index_settle import (
     index_cells,
     index_kind_absent,
     index_rows_after_settle,
+    point_index_drops_visible,
 )
 
 #: The catalogue row shape `CALL db.indexes()` yields: [label, properties,
@@ -49,6 +52,22 @@ _POINT_REBUILDING = [
 ]
 _POINT_SETTLED = [
     ["Point", ["id", "pointKind"], {"id": ["RANGE"], "pointKind": ["RANGE"]},
+     None, "english", [], "NODE", "OPERATIONAL"],
+]
+#: `test (g)` the moment after its two `DROP` statements return and BEFORE the
+#: engine's indexer thread applies them: idle, no rebuild status, and both
+#: retired definitions still named. Quiescence alone treats this as settled.
+_POINT_BEFORE_THE_DROPS_APPLIED = [
+    ["Point", ["id", "pointKind"], {"id": ["RANGE"], "pointKind": ["RANGE"]},
+     None, "english", [], "NODE", "OPERATIONAL"],
+    ["Point", ["content", "search_keys"],
+     {"content": ["FULLTEXT"], "search_keys": ["FULLTEXT"]},
+     None, "english", [], "NODE", "OPERATIONAL"],
+]
+#: The same label once BOTH drops are applied: `pointKind` and the legacy
+#: two-field fulltext index are gone — what `test (g)`'s guards require.
+_POINT_AFTER_THE_DROPS_APPLIED = [
+    ["Point", ["id"], {"id": ["RANGE"]},
      None, "english", [], "NODE", "OPERATIONAL"],
 ]
 
@@ -129,6 +148,67 @@ def test_a_bound_that_expires_returns_the_LAST_read_never_a_tolerant_pass():
     assert INDEX_SETTLE_TIMEOUT_S > 1.0, (
         "the shipped bound is a runaway guard for a loaded runner, not the "
         "millisecond window measured idle")
+
+
+def test_point_index_drops_visible_requires_BOTH_of_test_g_drops():
+    """The `test (g)` precondition, both halves (#10807).
+
+    One predicate, not two ad-hoc lambdas: the wait and the two vacuity guards
+    below it must agree about what "the drops are visible" means, or the wait
+    can settle on a catalogue the guards reject — the false red, restored.
+    """
+    assert point_index_drops_visible(_POINT_BEFORE_THE_DROPS_APPLIED) is False
+    # Either drop still visible keeps the fixture waiting.
+    assert point_index_drops_visible([_POINT_SETTLED[0]]) is False, (
+        "the range drop alone must not certify")
+    assert point_index_drops_visible([_POINT_BEFORE_THE_DROPS_APPLIED[1]]) is False, (
+        "the fulltext drop alone must not certify")
+    assert point_index_drops_visible(_POINT_AFTER_THE_DROPS_APPLIED) is True
+    # A catalogue that names neither index cannot hide either of them.
+    assert point_index_drops_visible([]) is True
+
+
+def test_the_test_g_wait_closes_the_pre_drop_window_quiescence_misses():
+    """The finding this pins: `test (g)`'s window is the one with NO status.
+
+    When the `DROP` has returned but the indexer thread has not picked it up, the
+    catalogue is internally consistent — pre-drop definition, no
+    `UNDER CONSTRUCTION` — so a quiescence-only wait returns it on the FIRST
+    read and the fixture then refuses a drop that landed. Armed with its own
+    precondition, the same read is waited out.
+    """
+    stale = _ScriptedProj(_POINT_BEFORE_THE_DROPS_APPLIED,
+                          _POINT_AFTER_THE_DROPS_APPLIED)
+    assert index_rows_after_settle(stale) == _POINT_BEFORE_THE_DROPS_APPLIED, (
+        "this is the defect, not the fix: without `until` the pre-drop read is "
+        "returned immediately and `test (g)`'s guards red on a LANDED drop")
+    assert stale.reads == 1
+
+    armed = _ScriptedProj(_POINT_BEFORE_THE_DROPS_APPLIED,
+                          _POINT_AFTER_THE_DROPS_APPLIED)
+    rows = index_rows_after_settle(armed, until=point_index_drops_visible)
+    assert rows == _POINT_AFTER_THE_DROPS_APPLIED
+    assert armed.reads == 2
+
+
+def test_the_test_g_call_site_actually_passes_its_precondition():
+    """The contract is a fix only where it is USED (#10807).
+
+    `test (g)` is the call site that lost the race, so a wait called there
+    WITHOUT `until` re-armed the false red even though the helper supported the
+    predicate. Pinned on the source text because the defect is a timing window:
+    no fake can prove which call the fixture actually makes.
+    """
+    source = Path(__file__).with_name("test_9079_handle_write_authority.py").read_text()
+    start = source.index("def test_schema_ddl_survives_the_armed_guard(")
+    body = source[start:]
+    end = body.find("\ndef ")
+    body = body if end == -1 else body[:end]
+    assert re.search(r"index_rows_after_settle\(\s*proj\s*,\s*until=", body), (
+        "the `test (g)` call site must arm `index_rows_after_settle` with "
+        "`point_index_drops_visible`; without it a catalogue read taken before "
+        "the engine applied the drop is returned unwaited and its two vacuity "
+        "guards refuse a drop that landed")
 
 
 def test_index_kind_absent_reads_the_kinds_map_and_fails_closed():
