@@ -21959,10 +21959,26 @@ class TortoiseSDK:
         dampening a human withdrew, and ship a duplicated mitigation Point
         (§3.2 key 6's *"never duplicated"*) with no warning, because the
         change-warning compares against identical reason/strength. So when
-        every mitigation the operator carries is terminal, NOTHING is written
-        here — the withdrawn Point already records this bundle's mitigation,
-        so it is returned unchanged (no re-link, no batch stamp: this bundle
-        created nothing).
+        every mitigation the operator carries is terminal **and that withdrawn
+        Point carries THIS bundle's ``batch_id``**, NOTHING is written here —
+        the withdrawn Point already records this bundle's mitigation, so it is
+        returned unchanged (no re-link, no batch stamp: this bundle created
+        nothing).
+
+        ⛔ #9962 review — THE IDENTITY TEST IS THE ``batch_id``, NOT "any
+        terminal row". A terminal mitigation belongs to *some* bundle, and
+        ``ingest`` dedups the OPERATOR across bundles (§9: same source, target,
+        op_type and label ⇒ one operator), so a LATER, DIFFERENT bundle naming
+        the same operator also finds a terminal mitigation here. Short-circuiting
+        on "every row is terminal" alone swallowed that bundle's mitigation —
+        no Point, no edge, no batch stamp, no warning — while §9/row 8 promises
+        the mitigation Point + edge are written for a connection that declares
+        one. ``batch_id`` answers *"is this the bundle that wrote it?"*
+        mechanically: ``derive_batch_id`` is content-derived (§4.2), so an
+        identical re-submission IS the redelivery, and a submission whose
+        reason/strength/points differ is a re-assertion — which mints a NEW
+        live mitigation exactly as the direct-call route does (retraction is
+        terminal, #432/#2422).
 
         The mitigation Point is stamped with the bundle's ``batch_id`` (§16:
         "every **new** Point the bundle creates — plain points, operator
@@ -21982,29 +21998,38 @@ class TortoiseSDK:
         # #9962: the read also reports whether each attached mitigation is
         # CURRENT, using `_terminal_excluded` — the SAME predicate
         # `mitigate_operator`'s idempotency lookup applies, so "no current
-        # row" means "the writer would mint a new Point". Two behaviours hang
-        # off it:
-        #   * a redelivery must NOT mint. If every attached mitigation is
-        #     terminal, this route writes nothing and returns the withdrawn
-        #     Point: reinstating a human's retraction on a crash-retry is
-        #     silent (identical reason/strength ⇒ no
+        # row" means "the writer would mint a new Point" — and WHICH BUNDLE
+        # wrote each one. Two behaviours hang off it:
+        #   * a REDELIVERY must NOT mint. If no current row exists and the
+        #     withdrawn row carries THIS bundle's `batch_id`, this route writes
+        #     nothing and returns that Point: reinstating a human's retraction
+        #     on a crash-retry is silent (identical reason/strength ⇒ no
         #     `mitigation_strength_change`) and duplicates the Point (§3.2
-        #     key 6).
+        #     key 6). The `batch_id` test is what keeps a DIFFERENT bundle's
+        #     mitigation from being swallowed by the same arm.
         #   * the divergence comparison below reads the CURRENT row — the
-        #     node the write actually updated — never a withdrawn sibling.
+        #     node the write actually updated — never a withdrawn sibling. A
+        #     mint is not an in-place update, so it must not emit key 6's
+        #     "updated in place" warning off a dead row's numbers.
         prior = self._get_proj().g.query(
             "MATCH (op:Point {id:$oid})-[:mitigated_by]->(m:Point) "
             "RETURN m.id, m.content, m.mitigation_strength, "
-            f"{_terminal_excluded('m.status')} AS is_current",
+            f"{_terminal_excluded('m.status')} AS is_current, m.batch_id",
             params={"oid": operator_id},
         ).result_set
         _current = [row for row in prior if bool(row[3])]
-        if prior and not _current:
-            # Withdrawn by a human: terminal stays terminal on this route.
-            return min(row[0] for row in prior)
+        # Row 4 = the batch that wrote the mitigation. Only row 0 (the id) is
+        # returned, so an id-less legacy row is skipped rather than raising
+        # `TypeError` out of `min` (#9262's shape).
+        _redelivered = [row for row in prior
+                        if not bool(row[3]) and row[4] == batch_id and row[0]]
+        if _redelivered and not _current:
+            # Withdrawn by a human, and withdrawn FOR THIS BUNDLE: terminal
+            # stays terminal on this route.
+            return min(row[0] for row in _redelivered)
         mid = self.mitigate_operator(
             operator_id, reason=reason, strength=strength)["id"]
-        _prior_row = (_current or prior or [None])[0]
+        _prior_row = (_current or [None])[0]
         if _prior_row is not None:
             _old_id, _old_content, _old_strength = _prior_row[:3]
             _old_reason = (_old_content or "").removeprefix("[MITIGATION] ")

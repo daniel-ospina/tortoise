@@ -670,9 +670,19 @@ class TestMitigationIsBornCurrent:
 # door only is not the guarantee #9962 states ("retract_point and delete_point
 # differ only in what they remove").
 
-def _ingest_mitigation_bundle(strength: float = 0.50) -> dict:
+def _ingest_mitigation_bundle(strength: float = 0.50,
+                              reason: str = "p1 is unreliable") -> dict:
     """The crash-retry / redelivery shape (INGEST_CONTRACT §7): one connection
-    carrying a mitigation."""
+    carrying a mitigation.
+
+    ``reason``/``strength`` are parameters because they are what decides
+    bundle IDENTITY: ``derive_batch_id`` hashes the canonical bundle, so calling
+    this twice with the default arguments is a REDELIVERY (same points, same
+    operator, same ``batch_id``) while a different reason/strength is a NEW
+    bundle naming the SAME operator (ingest dedups the operator across
+    bundles). Both cases must be covered: they are indistinguishable by
+    operator identity and must not be collapsed.
+    """
     return {
         "points": [
             {"ref": "p1", "kind": "claim", "content": "A implies B."},
@@ -681,7 +691,7 @@ def _ingest_mitigation_bundle(strength: float = 0.50) -> dict:
         "entities": [], "sources": [],
         "connections": [
             {"from": "p1", "to": "p2", "operator": "IMPL",
-             "mitigation": {"reason": "p1 is unreliable", "strength": strength}},
+             "mitigation": {"reason": reason, "strength": strength}},
         ],
     }
 
@@ -893,3 +903,149 @@ class TestTheRetractionIsDurableOnEveryRoute:
         sdk._get_proj().g.query(
             "MATCH (m:Point {id:$m}) SET m.status = 'draft'", params={"m": staged})
         assert shown() == [], "the state view surfaced a DRAFT mitigation"
+
+
+class TestAWithdrawnMitigationIsOnlySilentForItsOwnBundle:
+    """#9962 review — the redelivery arm is scoped to the bundle that wrote it.
+
+    The v1 guard short-circuited on *"every mitigation the operator carries is
+    terminal"*. Ingest dedups the OPERATOR across bundles (`derive_batch_id`
+    hashes the bundle, not the pair), so a LATER, DIFFERENT bundle naming the
+    same operator hits the same read — and its mitigation was swallowed whole:
+    no Point, no `mitigated_by` edge, no `batch_id` stamp, no warning, while
+    INGEST_CONTRACT §13 row 8 promises the mitigation Point + edge are written
+    for any connection that declares one. That is a silent drop of a caller's
+    declared write, and it presented as `warnings: []`.
+
+    The identity test is the `batch_id` the withdrawn Point carries: the same
+    bundle redelivers to the SAME id (content-derived, §16), a genuinely new
+    bundle is a re-assertion and mints a NEW live mitigation exactly as the
+    direct-call route does — the terminal Point is never revived (#432/#2422).
+
+    MUTATIONS THAT MUST RED:
+    * drop the `batch_id` comparison (short-circuit whenever no row is current)
+      → the new bundle's mitigation vanishes (one row, weight 1.0);
+    * compare against the withdrawn sibling for the divergence warning
+      (`_current or prior`) → a MINT reports `mitigation_strength_change`,
+      claiming an in-place update that never happened.
+    """
+
+    def test_a_different_bundle_after_a_retraction_mints_a_live_mitigation(self):
+        """A new bundle is a re-assertion: mint, do not swallow.
+
+        Failing state (measured at 6c2575c79): after `retract_point`, a bundle
+        whose mitigation differs in reason/strength — a genuinely NEW bundle
+        naming the same (deduped) operator — wrote nothing at all, leaving one
+        RETRACTED row and an undamped operator, with `warnings == []`.
+        """
+        sdk = fresh_sdk()
+        first = sdk.ingest(_ingest_mitigation_bundle(strength=0.50))
+        op_id = first["ids"]["connections"][0]
+        assert isinstance(op_id, str), first["ids"]["connections"]
+        proj = sdk._get_proj()
+        rows = _ingest_mitigation_rows(sdk, op_id)
+        assert len(rows) == 1, rows
+        withdrawn = rows[0][0]
+
+        sdk.retract_point(withdrawn)
+        assert compute_operator_weight(proj, op_id) == pytest.approx(1.0)
+
+        # Same points, same operator, DIFFERENT mitigation ⇒ different bundle
+        # (derive_batch_id hashes the whole resolved bundle, mitigation
+        # included), so this is not the bundle that wrote the retracted Point.
+        second = sdk.ingest(_ingest_mitigation_bundle(
+            strength=0.30, reason="a clean re-run reproduced the lift"))
+        assert second["ids"]["connections"] == [op_id], (
+            "the operator must dedup, or this test is not exercising the "
+            f"cross-bundle collision: {second['ids']['connections']}")
+
+        rows_after = _ingest_mitigation_rows(sdk, op_id)
+        assert len(rows_after) == 2, (
+            "a NEW bundle's mitigation was silently dropped: the operator "
+            f"carries {rows_after} — expected the withdrawn Point plus the "
+            "re-assertion's new one")
+        by_id = {r[0]: r for r in rows_after}
+        assert by_id[withdrawn][1] == "retracted", (
+            f"the terminal Point must keep its state: {by_id[withdrawn]}")
+        minted = [r for r in rows_after if r[0] != withdrawn]
+        assert len(minted) == 1, rows_after
+        assert minted[0][1] in ("draft", "live"), (
+            f"the re-assertion must be a CURRENT point: {minted[0]}")
+        assert float(minted[0][2]) == pytest.approx(0.30)
+
+        damped = compute_operator_weight(proj, op_id)
+        assert damped == pytest.approx(mitigation_dampening_factor(0.30)), (
+            "a new bundle's mitigation was written but does not price the "
+            f"operator: expected {mitigation_dampening_factor(0.30)}, "
+            f"observed {damped}")
+
+        # Key 6 describes an IN-PLACE UPDATE. This was a mint against a
+        # withdrawn sibling, so reporting `mitigation_strength_change` here
+        # would be a false statement about what the write did.
+        assert second["warnings"] == [], (
+            "a mint must not report the in-place-update warning: "
+            f"{second['warnings']}")
+
+    def test_the_true_redelivery_still_returns_the_same_withdrawn_point(self):
+        """The silence arm survives — but only for the bundle that wrote it.
+
+        The sibling of the test above: identical content ⇒ identical
+        `batch_id` ⇒ the redelivery is recognised, and the withdrawn Point is
+        returned unchanged (no revive, no duplicate, no warning). Without this
+        pair a "fix" that simply deleted the guard would make the test above
+        pass while reinstating a human's retraction on every crash-retry.
+        """
+        sdk = fresh_sdk()
+        first = sdk.ingest(_ingest_mitigation_bundle())
+        op_id = first["ids"]["connections"][0]
+        proj = sdk._get_proj()
+        rows = _ingest_mitigation_rows(sdk, op_id)
+        assert len(rows) == 1, rows
+        mid = rows[0][0]
+        sdk.retract_point(mid)
+
+        second = sdk.ingest(_ingest_mitigation_bundle())
+        assert second["ids"]["connections"] == [op_id]
+        rows_after = _ingest_mitigation_rows(sdk, op_id)
+        assert [r[0] for r in rows_after] == [mid], (
+            f"the redelivery duplicated the mitigation: {rows_after}")
+        assert rows_after[0][1] == "retracted", rows_after
+        assert compute_operator_weight(proj, op_id) == pytest.approx(1.0)
+
+    def test_why_block_tradeoff_names_the_live_mitigation_not_the_withdrawn_one(self):
+        """The two halves of one why-block must agree on which mitigation exists.
+
+        `_SUPPORT_OP_CYPHER` and `_TRADEOFFS_CYPHER` are read by the same
+        assembled answer and the source comment claims they share their
+        predicate. They did not: the support leg was read `_live_only` while
+        the tradeoffs leg matched ANY `mitigated_by` neighbour, so a decision
+        point could present no mitigation in `support_chain` and the WITHDRAWN
+        one in `tradeoffs` — the mitigation text an agent reads while
+        `compute_operator_weight` prices nothing.
+
+        Failing state (measured at 6c2575c79): after `retract_point`, the
+        tradeoff entry still carried `"communicate the delay"`.
+        """
+        from tortoise.why import assemble_why_blocks
+
+        sdk = fresh_sdk()
+        decision = sdk.create_point("decision", "which rollout strategy")
+        opt_a = sdk.create_point("option", "staged rollout")
+        opt_b = sdk.create_point("option", "big bang")
+        op_a = sdk.create_operator("IMPL", decision["id"], [opt_a["id"]])
+        sdk.create_operator("IMPL", decision["id"], [opt_b["id"]])
+        mid = sdk.mitigate_operator(op_a["id"], "communicate the delay", 0.50)["id"]
+
+        def tradeoff_mitigation() -> str | None:
+            blocks = assemble_why_blocks(sdk._get_proj(), [decision["id"]])
+            by_point = {t["point_id"]: t
+                        for t in blocks[decision["id"]]["tradeoffs"]}
+            return by_point[opt_a["id"]]["mitigation"]
+
+        assert tradeoff_mitigation() == "communicate the delay", (
+            "a LIVE mitigation must still be surfaced on the alternative")
+
+        sdk.retract_point(mid)
+        assert tradeoff_mitigation() is None, (
+            "the why-block reports a RETRACTED mitigation the dampener no "
+            "longer prices")

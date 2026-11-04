@@ -126,6 +126,20 @@ Rules that hold regardless of granularity or policy:
   is terminal everywhere (the direct-call route mints a *new* mitigation for a
   re-assertion; a crash-retry is not a re-assertion, and it must not duplicate
   the Point either). Same silence as any unchanged re-submission.
+  "This bundle's mitigation" is decided by the `batch_id` the withdrawn Point
+  carries, never by "a terminal mitigation exists": `batch_id` is
+  content-derived ([§16](#16-batch_id--audit) — identical bundles share one id),
+  so an identical re-submission is the redelivery and matches. A bundle whose
+  content differs — a different `reason`/`strength`, or different points — is a
+  **re-assertion** by a caller and takes the direct-call route's rule: the
+  terminal Point is not revived, and a **new** `live` mitigation Point is minted
+  and stamped with the new `batch_id`. Operators dedup across bundles, so the
+  two cases are indistinguishable by operator identity alone and must not be
+  collapsed: a bundle that declares a mitigation gets it written
+  ([§13](#13-acceptance-surface-breaks--migration-lines) row 8), and a
+  crash-retry never duplicates it. A mint is not an in-place update, so no
+  `mitigation_strength_change` is reported for it (key 6 describes the
+  *update*); the new Point carries the bundle's `batch_id` for audit.
   On a `relation` connection `mitigation` is a **Phase-1 violation** — a
   structural edge has no operator bridge to damp ([§13](#13-acceptance-surface-breaks--migration-lines) row 4).
 - Created points default to `status: "draft"` under the gated policy (see

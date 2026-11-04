@@ -505,7 +505,8 @@ _SUPPORT_OP_CYPHER = (
     # — objective 4 requires the operator (id + kind) plus any mitigation on
     # it, and a second query per support would be a new read on the hot path.
     # The mitigation is OPTIONAL (an operator need not be mitigated) and uses
-    # the same ``mitigated_by`` predicate as _TRADEOFFS_CYPHER.
+    # the same ``mitigated_by`` predicate — AND the same LIVENESS predicate —
+    # as _TRADEOFFS_CYPHER.
     #
     # ⛔ #9962 — the optional leg reads only mitigations that PRICE the
     # operator (``live._live_only``, the predicate ``weights.py``
@@ -592,7 +593,16 @@ _TRADEOFFS_CYPHER = (
     "MATCH (n)-[ri:INPUT]->(op:Point {is_operator:true})-[r2:IMPL]->(alt:Point) "
     f"WHERE ri.idx = 0 AND r2.idx > 0 "
     f"AND (alt.is_operator = false OR alt.is_operator IS NULL) AND {_exclude_status_clause('alt')} "
+    # ⛔ #9962 — the mitigation the alternative reports is the one that
+    # PRICES the connecting operator, the same ``live._live_only`` leg
+    # _SUPPORT_OP_CYPHER reads. Without the predicate a decision point could
+    # present the WITHDRAWN mitigation here while the support leg (and
+    # ``compute_operator_weight``) priced the live one — two halves of one
+    # answer disagreeing about which mitigation exists. A retracted / draft
+    # mitigation is still a Point; it just no longer dampens, so it no longer
+    # belongs in the explanation of what the operator costs.
     "OPTIONAL MATCH (op)-[:mitigated_by]->(m:Point) "
+    f"WHERE {_live_only('m.status')} "
     "RETURN n.id, n.pointKind, alt.id, alt.content, alt.pointKind, op.id, m.content, "
     "  coalesce(alt.posterior_alpha, alt.ep_alpha, 1.0), "
     "  coalesce(alt.posterior_beta, alt.ep_beta, 1.0)"
