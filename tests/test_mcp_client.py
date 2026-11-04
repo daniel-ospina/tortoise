@@ -1528,6 +1528,53 @@ class TestCredentialResolution:
         mcp_client._raise_if_credential_was_missing(
             ToolError("upstream provider returned 401 Unauthorized"), sent)
 
+    def test_a_status_code_inside_a_URL_is_not_an_auth_rejection(self):
+        """`/401/` in an endpoint's PATH is not a 401 from the server.
+
+        httpx renders a non-auth failure as `Client error '404 Not Found' for url
+        'http://h:9/401/mcp'`, and the `\b40[13]\b` arm matched the PATH SEGMENT —
+        so a request that got a 404 from a wrong URL (or a daemon named in a
+        proxy's own message) was reported as the credential-less refusal: "add a
+        key" for a request that never reached a credential decision. That is the
+        #3805 inversion in the other direction — an outage reported as a set-up
+        gap — so it must stay an outage.
+
+        Measured: this exact text RED on the pre-fix classifier
+        (`MCPKeyEmptyError` raised) and green after the URL strip. The positive
+        control is in the same test on purpose — the strip must not silence a
+        REAL rejection, whose code sits in the status phrase, not in the URL.
+        """
+        import httpx
+
+        from tortoise import mcp_client
+
+        def status_error(code: int, path: str) -> httpx.HTTPStatusError:
+            # The message shape httpx itself produces (x._client.py):
+            #   f"{error_type} '{code} {reason}' for url '{response.url}'"
+            request = httpx.Request("POST", f"http://127.0.0.1:9{path}")
+            response = httpx.Response(code, request=request)
+            return httpx.HTTPStatusError(
+                f"Client error '{code} {response.reason_phrase}' for url '{request.url}'",
+                request=request,
+                response=response,
+            )
+
+        wrong_path = status_error(404, "/401/mcp")
+        # The trap has to be PRESENT in the text, or this test is vacuous.
+        assert "401" in str(wrong_path), str(wrong_path)
+        # An EXPLICIT keyless connection, so the assertion cannot depend on what
+        # this box happens to have in `./.tortoise` or the environment: `sent=None`
+        # would re-resolve live and take the "a key DOES resolve" branch instead.
+        keyless = mcp_client.Connection(
+            url="http://127.0.0.1:9/401/mcp", key=None, source=None, sources=(),
+        )
+        # No raise: a 404 is not a credential decision.
+        mcp_client._raise_if_credential_was_missing(wrong_path, keyless)
+
+        real_rejection = status_error(401, "/mcp")
+        with pytest.raises(mcp_client.MCPKeyEmptyError):
+            mcp_client._raise_if_credential_was_missing(real_rejection, keyless)
+
     def test_an_sdk_that_refuses_the_redirect_gets_the_same_named_refusal(
         self, monkeypatch, isolated_home,
     ):

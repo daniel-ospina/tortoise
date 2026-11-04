@@ -85,6 +85,29 @@ _ENV_KEY_NAMES: tuple[str, ...] = ("TORTOISE_API_KEY", "TORTOISE_MCP_API_KEY")
 #: exists to remove.
 _AUTH_REJECTION_RE = re.compile(r"\b40[13]\b|unauthorized|invalid or missing bearer", re.IGNORECASE)
 
+#: A URL embedded in a failure's own text. Stripped BEFORE `_AUTH_REJECTION_RE`
+#: runs, because a status code is a DELIMITED token and a path segment is not:
+#: `… for url 'http://h:9/401/mcp'` (any non-auth HTTP status, a proxy message, a
+#: transport error that names its target) matched the `40[13]` arm and turned an
+#: unreachable or mis-addressed endpoint into the credential-less refusal —
+#: "add a key" for a request that never got as far as a credential decision.
+#: That is the #3805 inversion this module exists to remove, in the other
+#: direction (an outage reported as a set-up gap). The scheme is required on
+#: purpose: an httpx status/transport error carries a fully-spelled URL, while
+#: stripping bare `host:port` would also eat the legitimate `status:401` form.
+_URL_IN_ERROR_RE = re.compile(r"\b[a-z][a-z0-9+.\-]*://\S+", re.IGNORECASE)
+
+
+def _is_auth_rejection(text: str) -> bool:
+    """Does this failure text carry a server-side auth rejection?
+
+    One owner for both classifiers (`_raise_if_credential_was_missing` and
+    `_classify_failure`), so the URL strip cannot be applied to one and forgotten
+    in the other — two owners drifting is how the same text got classified two
+    ways.
+    """
+    return bool(_AUTH_REJECTION_RE.search(_URL_IN_ERROR_RE.sub("<url>", text)))
+
 #: an SDK that REFUSES to follow a cross-origin redirect instead of following it
 #: and letting httpx strip the header: `Redirect to <url> not followed; use that
 #: URL as the endpoint if it is the intended server`. Two MCP SDK versions this
@@ -627,7 +650,7 @@ def _raise_if_credential_was_missing(exc: BaseException, sent: Connection | None
     failure must not make us claim the request had none, and a key that appeared
     during the round trip must not make us relay the server's message unchanged.
     """
-    if not _AUTH_REJECTION_RE.search(str(exc)):
+    if not _is_auth_rejection(str(exc)):
         return
     if _is_tool_error(exc):
         # A TOOL's error is not evidence about the client's credential: fastmcp
@@ -883,7 +906,7 @@ def _classify_failure(exc: BaseException, provider: _BearerProvider) -> None:
     set-up-gap bucket (#3805) exactly as the server message this module removes
     moves a set-up gap into the credential-value bucket.
     """
-    is_auth_rejection = bool(_AUTH_REJECTION_RE.search(str(exc)))
+    is_auth_rejection = _is_auth_rejection(str(exc))
     declined_hop = _redirect_refused(exc)
     if provider.withheld is not None:
         # A withheld credential explains BOTH failure shapes: an auth rejection
