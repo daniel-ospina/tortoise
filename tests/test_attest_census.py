@@ -837,10 +837,17 @@ def test_cell_sanitises_a_lone_surrogate_so_the_document_stays_encodable():
 
 def test_an_unrenderable_character_is_rc_2_not_a_traceback(monkeypatch, tmp_path):
     """The belt behind `_cell`: a value that reaches `render` WITHOUT passing a cell (argv, e.g.
-    `--repo $'\ud800'`) must still land inside the published `0`/`2` contract.
+    `--repo $'\\ud800'`) must still land inside the published `0`/`2` contract.
 
     Before the guard, `render` was called OUTSIDE every handler, so its `ValueError` escaped `main`
     as a traceback and rc 1. Pins the exit code, not the message.
+
+    ⛔ The escape is DOUBLED in this docstring, and that is load-bearing (review cycle 23): CPython
+    encodes docstrings to UTF-8 at COMPILE time (CPython #142411, 3.13+), so a docstring containing a
+    LONE SURROGATE raises out of `compile()` and the whole module fails to load — measured at rc 1 on
+    CPython 3.14, the code this file publishes as impossible. `test_every_docstring_is_utf8_encodable`
+    below is the class-wide pin; the literal in the test BODY is fine (it is runtime data, not source
+    text).
     """
 
     def _boom(*_args, **_kwargs):
@@ -1948,3 +1955,112 @@ def test_a_closed_fd2_still_completes_rc_0(tmp_path):
     proc = _run_with_shim(tmp_path, [], subprocess.DEVNULL, preexec_fn=_close_fd2)
     assert proc.returncode == 0, f"a closed fd 2 with a complete census is rc 0 (got {proc.returncode})"
     assert (tmp_path / "o.md").exists(), "the artifact must still be written"
+
+
+# ── review cycle 23: the compile-time docstring, the argparse stderr, the path normalisation ──
+
+
+def test_every_docstring_in_this_suite_and_its_tool_is_utf8_encodable():
+    r"""⛔ Cycle 23, P2: a LONE SURROGATE in a DOCSTRING is a COMPILE-TIME failure, not a runtime one.
+
+    CPython encodes a docstring to UTF-8 while compiling (CPython #142411, 3.13+), so
+    `compile()` raises `UnicodeEncodeError: surrogates not allowed` before any bytecode exists —
+    no `try`/`except`, no `raise SystemExit(2)` guard and no `main()` can observe it. Measured:
+    with a single backslash in `_cell`'s docstring, `python tools/attest_census.py --help` exited
+    **1** on CPython 3.14 while `origin/main`'s copy compiled fine — the exact code this file
+    publishes as impossible, from a run that could not even load.
+
+    `pyproject.toml` declares `requires-python >= 3.12`, so 3.13/3.14 are SUPPORTED interpreters:
+    this is a supported-configuration refusal, not an exotic one. Fix is one doubled backslash
+    (`\\ud800`, the escape as TEXT), which is why the pin is class-wide rather than per-site: the
+    defect is invisible on the pinned 3.12 that every CI leg uses, so only a walk finds the next one.
+    """
+    offenders: list[str] = []
+    for path in (TOOL, Path(__file__).resolve()):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                continue
+            doc = ast.get_docstring(node, clean=False)
+            if doc is None:
+                continue
+            try:
+                doc.encode("utf-8")
+            except UnicodeEncodeError as exc:
+                offenders.append(f"{path.name}:{node.lineno} {getattr(node, 'name', '<module>')}: {exc}")
+    assert offenders == [], (
+        "a docstring holding a lone surrogate cannot be COMPILED on CPython 3.13+ — double the "
+        "backslash so the escape is text, not a surrogate character: " + "; ".join(offenders)
+    )
+
+
+@pytest.mark.skipif(not Path("/dev/full").exists(), reason="/dev/full is Linux-only")
+def test_a_usage_error_with_an_unwritable_stderr_is_rc_2_not_120(tmp_path):
+    """⛔ Cycle 23, P3: `argparse` was the one stderr write the cycle-22 sweep could not reach.
+
+    `parse_args` prints `usage: … error: …` to STDERR and then raises `SystemExit(2)` — outside
+    every handler in the file. With an unwritable stderr that write raised `OSError(ENOSPC)`, the
+    traceback could not print either, and CPython's shutdown flush published **120**.
+
+    A usage error is a caller error and the file's contract publishes 2, so 2 is the honest code.
+    Mutation check: unwrap `parse_args` and this reds with 120.
+    """
+    sink = open("/dev/full", "wb")  # noqa: SIM115 — the child owns fd 2 for its whole life
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(TOOL), "--definitely-not-a-flag"],
+            stdout=subprocess.DEVNULL, stderr=sink, timeout=120,
+        )
+    finally:
+        sink.close()
+    assert proc.returncode == 2, (
+        f"a usage error with an unwritable stderr must be rc 2, not 120 (got {proc.returncode})"
+    )
+    # ... and a well-formed `--help` still exits 0: catching `SystemExit` would break it.
+    ok = subprocess.run(
+        [sys.executable, str(TOOL), "--help"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120
+    )
+    assert ok.returncode == 0, f"--help must still exit 0 (got {ok.returncode})"
+
+
+def test_evidence_attribution_cannot_be_redirected_by_a_path_traversal_or_a_query(tmp_path):
+    """⛔ Cycle 23, P3: the cycle-22 slug guard was bypassable two ways, both reaching `RESTORE`.
+
+    * `…/daniel-ospina/tortoise/../evil-org/evil-repo#issuecomment-1` — the FIRST TWO segments are
+      this repo, so a slug test that only looks at those passed while the URL actually normalises
+      to a DIFFERENT repository;
+    * `…/daniel-ospina/tortoise/pull/999?x=1#issuecomment-1` — `/pull/(\\d+)(?:/|$)` could not match
+      across the query string, so "no PR number found" was silently read as "no PR to disagree with".
+
+    Both classify identically to a genuine proof, which is what makes them the laundering this
+    guard exists to refuse. Mutation check: drop the traversal segment rejection / parse the path
+    without `urlsplit` and these go back to `RESTORE`.
+    """
+    tpl = (
+        '{"repo":"daniel-ospina/tortoise","pr":7,"head_sha":"' + LIVE + '","mint":"fresh",'
+        '"verdict":"clean","evidence":"%s"}'
+    )
+    for crafted in (
+        "https://github.com/daniel-ospina/tortoise/../evil-org/evil-repo#issuecomment-1",
+        "https://github.com/daniel-ospina/tortoise/%2e%2e/evil-org/evil-repo#issuecomment-1",
+        "https://github.com/daniel-ospina/tortoise/pull/999?x=1#issuecomment-1",
+        "https://github.com/daniel-ospina/tortoise/issues/999#issuecomment-1",
+        "https://github.com/daniel-ospina/tortoise/settings#issuecomment-1",
+    ):
+        (tmp_path / "daniel-ospina-tortoise-7.json").write_text(tpl % crafted, encoding="utf-8")
+        got = ac.load_record(tmp_path, "daniel-ospina", "tortoise", 7)
+        assert got is not None and got.error == "", (crafted, got and got.error)
+        assert got.real_evidence is False, crafted
+        outcome, why = ac.classify(LIVE, got, *RED)
+        assert outcome != ac.RESTORE, (crafted, outcome, why)
+
+    # The genuine shapes still restore: this is an attribution test, not a ban.
+    for own in (
+        "https://github.com/daniel-ospina/tortoise/pull/7#issuecomment-1",
+        "https://github.com/daniel-ospina/tortoise/pull/7/files#discussion_r5",
+        "https://github.com/daniel-ospina/tortoise/issues/7#issuecomment-1",
+    ):
+        (tmp_path / "daniel-ospina-tortoise-7.json").write_text(tpl % own, encoding="utf-8")
+        got = ac.load_record(tmp_path, "daniel-ospina", "tortoise", 7)
+        assert got is not None and got.real_evidence is True, own
+        assert ac.classify(LIVE, got, *RED)[0] == ac.RESTORE, own

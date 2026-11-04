@@ -95,6 +95,7 @@ import subprocess
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 GATE_CHECK = "ai-review-gate"
@@ -135,6 +136,16 @@ _EVIDENCE_REF = re.compile(
 # re-post that pointer as THIS PR's proof, so a URL naming another repo or PR is the laundering this
 # tool exists to refuse — `load_record` already refuses a record whose own `repo`/`pr` FIELDS
 # disagree (cycles 4/5); this is the same rule on the field that is actually re-posted.
+# ⛔ The ATTRIBUTION is parsed with `urlsplit`, not from this regex's path group (review cycle 23).
+# Two shapes defeated the first version, each still licensing `RESTORE` for a foreign artifact:
+#   `…/daniel-ospina/tortoise/../evil-org/evil-repo#issuecomment-1`  — the first two segments are
+#     this repo, so the slug test passed and the REST of the path was never looked at, while the URL
+#     actually normalises to a DIFFERENT repo;
+#   `…/daniel-ospina/tortoise/pull/999?x=1#issuecomment-1`           — `/pull/(\d+)(?:/|$)` did not
+#     match across a query string, so "no PR number found" was read as "no PR to disagree with".
+# So the regex is now only the "is this a github.com URL" probe; the path is split into SEGMENTS and
+# percent-DECODED first, traversal segments are refused outright, and a page that is neither
+# `/pull/<n>` nor `/issues/<n>` cannot be this PR's artifact at all.
 _GITHUB_URL_SLUG = re.compile(r"^https?://(?:www\.)?github\.com/(?P<owner>[^/#\s]+)/(?P<repo>[^/#\s]+)(?P<path>/[^#\s]*)?#")
 
 
@@ -155,22 +166,39 @@ def _evidence_defect(evidence: object, repo: str, pr: int) -> str:
     ref = evidence.strip()
     if _EVIDENCE_REF.match(ref) is None:
         return f"evidence ({evidence!r}) is not an artifact pointer — it cannot be quoted as proof"
-    m = _GITHUB_URL_SLUG.match(ref)
-    if m is None or not repo:
+    if _GITHUB_URL_SLUG.match(ref) is None or not repo:
         return ""
-    slug = f"{m.group('owner')}/{m.group('repo')}"
+    # ⛔ `unquote` BEFORE splitting: `%2e%2e` is a `..` segment a server decodes and a naive split
+    # does not, which is the same bypass one encoding layer down.
+    segs = [s for s in unquote(urlsplit(ref).path).split("/") if s]
+    if any(s in (".", "..") for s in segs):
+        return (
+            f"evidence ({evidence!r}) carries a path-traversal segment — it normalises to a "
+            "different artifact, so re-posting it would not quote this PR's proof"
+        )
+    if len(segs) < 2:
+        return ""  # nothing to attribute; `_EVIDENCE_REF` already decided it is artifact-shaped
+    slug = f"{segs[0]}/{segs[1]}"
     if slug.lower() != repo.lower():
         return (
             f"evidence ({evidence!r}) points at {slug}, not {repo} — re-posting it would quote "
             "another repository's artifact as this PR's proof"
         )
-    pm = re.search(r"/pull/(\d+)(?:/|$)", m.group("path") or "")
-    if pr and pm is not None and int(pm.group(1)) != pr:
+    rest = segs[2:]
+    if not rest:
+        return ""  # `<repo>#<anchor>`: no page to disagree with
+    if len(rest) < 2 or rest[0] not in ("pull", "issues") or not rest[1].isdigit():
         return (
-            f"evidence ({evidence!r}) points at {slug} PR #{pm.group(1)}, not #{pr} — re-posting "
+            f"evidence ({evidence!r}) points at a {slug} page that is not a pull request — "
+            "re-posting it would quote an artifact that is not this PR's review proof"
+        )
+    if pr and int(rest[1]) != pr:
+        return (
+            f"evidence ({evidence!r}) points at {slug} PR #{rest[1]}, not #{pr} — re-posting "
             "it would quote another PR's artifact as this PR's proof"
         )
     return ""
+
 # A bare URL is MD034, and `operations/attest-census.md` is linted whole by the REQUIRED `docs` job
 # with NO baseline key for that path — so one URL in one record turns a regenerated artifact into a
 # red check the lane did not cause (#10687 cycle 22, measured). `_cell` wraps every match in an
@@ -535,7 +563,17 @@ def _cell(value: object) -> str:
     not allowed' escape) BEFORE the `except (OSError, ValueError)` around the write could see it,
     so a census that had read every surface correctly died with a traceback and **rc 1**, breaking
     this file's published `0`/`2`-never-`1` contract. `print(text)` afterwards raised on the same
-    code point. `backslashreplace` keeps the evidence (`\ud800`) readable instead of dropping it.
+    code point. `backslashreplace` keeps the evidence (`\\ud800`) readable instead of dropping it.
+
+    ⛔ The escape is DOUBLED here on purpose, and it is not cosmetic (review cycle 23). CPython
+    converts a docstring to UTF-8 at COMPILE time (CPython #142411, 3.13+), and a docstring holding a
+    LONE SURROGATE raises `UnicodeEncodeError: surrogates not allowed` from `compile()` — before any
+    bytecode exists, so no `try`/`except`, no `raise SystemExit(2)` guard and no `main()` can see it.
+    Measured: a single backslash here made `tools/attest_census.py` refuse to import on CPython 3.14
+    (`python tools/attest_census.py --help` → rc **1**, the code this file publishes as impossible),
+    while `origin/main`'s copy compiled fine. `pyproject.toml` declares `requires-python >= 3.12`, so
+    3.14 is a supported interpreter. `tests/test_attest_census.py` pins this class: it walks every
+    docstring and asserts it is UTF-8 encodable.
     """
     text = (
         str(value)
@@ -904,7 +942,26 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-gate", action="store_true", help="skip the per-PR check-run read (gh pr list is still required)")
     ap.add_argument("--json", action="store_true", help="machine-readable rows on stdout instead of markdown")
     ap.add_argument("--out", default="operations/attest-census.md")
-    args = ap.parse_args(argv)
+    # ⛔ `parse_args` is the ONE stderr writer the cycle-22 `_say` sweep could not reach: argparse
+    # writes `usage: … error: …` to STDERR and then raises `SystemExit(2)`, outside every handler in
+    # this file. Measured (review cycle 23): `attest_census.py --bogus … 2>/dev/full` exited **120** —
+    # the code the stderr guard exists to eliminate, published by a census that had not even started.
+    #
+    # ⛔ The naive fix (catch `OSError` around `parse_args`) does NOT work, and that is the whole
+    # subtlety: `sys.stderr` is a `TextIOWrapper`, and a FAILED FLUSH is deferred — the ENOSPC is
+    # remembered and re-raised by the INTERPRETER'S shutdown flush, long after `parse_args` has
+    # raised its perfectly clean `SystemExit(2)`. So the stream must be neutralised on the
+    # `SystemExit` path, before that deferred flush can decide the status. `SystemExit(0)`
+    # (`--help`) is left alone: it is not a failure and must still exit 0.
+    try:
+        args = ap.parse_args(argv)
+    except (OSError, ValueError):
+        _neutralise_stderr()
+        return 2
+    except SystemExit as exc:
+        if exc.code not in (0, None):
+            _neutralise_stderr()
+        raise
 
     owner, _, name = args.repo.partition("/")
     try:
