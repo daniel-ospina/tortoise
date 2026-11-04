@@ -139,6 +139,49 @@ resources make results non-deterministic through "data corruption and configurat
 (Testcontainers, *What problems does Testcontainers solve?*). Note the container is **not
 self-cleaning**: `tools/test_lane.py down` when the batch is over.
 
+**A stranded container whose owning worktree still EXISTS is REPORTED by default, not
+deleted (#5084, #10693).** Every
+`up`/`uri`/`run` (`start()`) sweeps the box's `fdb-lane-*` containers and classifies each by
+**ownership**, never by age alone. Three ownership proofs exist; the default **removes exactly one** of
+them:
+
+| proof | default behaviour |
+|---|---|
+| the worktree that owns it is **GONE** | removed — this is the only proof #8180's ruling authorises outright |
+| the owning worktree **exists but nothing holds it** (no live process names it, no Redis client, no observed use past `OWNER_GRACE_H` = 2 h) | **reported**, with the evidence chain and the release command; removal needs `TORTOISE_TEST_LANE_REAP_LANE_GONE=1` |
+| the owner cannot be determined **from this clone** (no observed use past `ORPHAN_MAX_AGE_H` = 24 h, and the name carries a 10-hex worktree slug) | **reported**; removal needs `TORTOISE_TEST_LANE_REAP_OWNER_INDETERMINATE=1` |
+
+Both switches are strict `"1"` (any other spelling is not consent for a destructive default) and
+**nothing in this repo sets them** — #8180's owner ruling scopes deletion to "when the worktree that
+owns it is gone" and to owner-**determinate** containers, and the reopen asking for the other two arms
+is pending on that issue. So do not expect `up` to reclaim a peer's stranded container whose owning
+worktree still exists, on its own: read the `reap:` lines it prints — the evidence-chain lines name the
+owner, the container's age, the measured gap since its last observed use and why it was kept, and where
+a read FAILED the line names the fact that could not
+be read rather than stating a conclusion that read never produced. To release one container, do it
+from **its own** worktree:
+
+```bash
+cd <the owning worktree> && uv run python tools/test_lane.py down
+```
+
+The sweep itself is gated on `TORTOISE_TEST_LANE_REAP` being `"1"` (the default) — set it to
+anything else and the sweep does not run at all, so the stranded containers are neither reported nor
+reclaimed.
+
+The two **liveness** proofs — the arms behind `TORTOISE_TEST_LANE_REAP_LANE_GONE` and
+`TORTOISE_TEST_LANE_REAP_OWNER_INDETERMINATE` — never treat a container a **live** lane is using as a
+candidate: before deciding, the sweep probes a process holding the worktree (via `/proc`, so a
+cross-clone lane is visible too) and asks the container itself for an attached client. Unreadable
+evidence there (`/proc` unreadable, `docker` refusing, a non-listing reply) is **report-only** — never a
+removal. The age figures are a backstop over that evidence, never a substitute for it.
+
+⛔ **That guarantee does not extend to the worktree-gone proof above** — the one arm that removes by
+**default**. It consults ownership only (`Path(owner).is_dir()`): no `/proc` scan, no client probe. A
+worktree that was removed, moved, or is briefly on an unmounted mount therefore reads as "owner gone"
+while the lane's process — and its connected client — are still alive, and the removal takes a live
+lane's database mid-run. That gap is **#10697**; close it before widening this default.
+
 The **same lane** must serve Phase 1 and Phase 3. A batch measured on a different lane from its
 baseline is not comparable to it.
 

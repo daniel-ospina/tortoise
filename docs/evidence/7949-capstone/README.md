@@ -51,15 +51,14 @@ E1–E5 all have evidence attached to this issue — not when the children close
 closing is a claim; this epic is where the claim is checked against the pipeline
 running end to end."*
 
-> **Verdict: 0/5 rows green. FOUR rows are RED with measured numbers, ONE is BLOCKED (E1, and its
-> refusal is itself a measurement — see "What E1 took, precisely" below). The epic is NOT
-> closeable, and this bundle says so mechanically — E3/E4/E5 at `9152448d7`, re-measured 2026-11-02,
-> and E1/E2 from the `#9889` record:**
+> **Verdict: 0/5 rows green. THREE rows are RED with measured numbers, TWO are BLOCKED
+> because the frozen metric cannot be scored on the artifact that exists. The epic is NOT
+> closeable, and this bundle says so mechanically — at `9152448d7`, re-measured 2026-11-02:**
 >
 > | row | frozen bar | measured | verdict |
 > |---|---|---|---|
-> | **E1** | `after_share <= 0.50 × before_share`, over all `:Object` nodes, floor **30** | before **0.3590** (78 Objects) and **0.5652** (69 Objects), after **0.2131** (61 Objects) — the record `docs/evidence/9889/e1-e2-scores.json`; bound **0.1795** → FAIL vs bound **0.2826** → PASS, so the pairings DISAGREE | ⛔ **BLOCKED** (n=1 per arm — not decided, not the floor) |
-> | **E2** | E2a `>= 13 of 14` value-bearing units; E2b fused share `<= 0.05` | E2a **8/14** strictly survive (the falsifier reaches **14/14** over the same population); E2b **1/114 = 0.008772** | ⛔ **RED** (8 of 14) |
+> | **E1** | `after_share <= 0.50 × before_share`, over all `:Object` nodes, floor **30** | this run has no BEFORE arm (one capture cannot decide `after <= 0.5 × before` without confounding the gate with LLM non-determinism); its AFTER arm read **64 `:Object` nodes**, clearing the frozen floor of 30, with a bare-definite share of 14/64 = 0.21875. `#9889` has since produced a before arm on the same frozen corpus, **twice** — **78 Objects / 0.3590** and **69 Objects / 0.5652** against that after arm of **61 Objects / 0.2131** (`docs/evidence/9889/e1-e2-scores.json`) — so the ratio now EXISTS and the two pairings **disagree** (`0.2131 <= 0.1795` FAILS, `0.2131 <= 0.2826` PASSES; the two OFF runs of the SAME arm are 20.6 pp apart). A verdict that flips with which before run you pair against is not decided, so the row stays BLOCKED until **n >= 2 per arm** — the reason is now the pairing, not the floor | ⛔ **BLOCKED** (`#5333`) |
+> | **E2** | E2a `>= 13 of 14` value-bearing units; E2b fused share `<= 0.05` | E2a: the frozen **14-unit** denominator was carried by **no committed artifact** when this log's table was emitted, so the row is BLOCKED and not scored — `#9889` has SINCE committed the census (`docs/evidence/9889/e2a-value-units.json`, `value_units: 14, value_survived: 8`) and the current `probes/capstone_measure.py` scores E1/E2 from `docs/evidence/9889/e1-e2-scores.json` (`E1_E2_SCORES`; the superseded `e1-e2.log` parse path is removed), so a RE-RUN moves this row to **RED 8/14** — its falsifier reaches **14/14** over the same population, so the deficit is retention (`#10360`), not the denominator. That number is deliberately NOT written as this row's verdict: a row moves only by re-running the probe, and that run has not been taken at this head. E2b: **1/114 = 0.008772** | ⛔ **BLOCKED** (`#10360`) |
 > | **E3** | `= 1.000` (zero unanchored), floor **30** derived nodes | **157 / 397 = 0.395466** as registered (this run's own graph, `capstone_measure_9152448d_…`). The `Source->Object` identity link carries no `sourceVersion` BY DESIGN (owner option A, `#5199`), so `:Object mention links` can never anchor and the frozen `= 1.000` is unreachable as registered — the metric needs re-registration (`#9736`, OPEN, owner-gated) | ⛔ **RED** |
 > | **E4** | `= 15 of 15` planted operator edges wired AND persisted | **2 / 15** on the `2026-10-19` receipt, which is on a DIFFERENT corpus (`943a99ec…`) from the frozen one, and whose retrievability rate is UNMEASURED (`#9596`) | ⛔ **RED** |
 > | **E5** | ratio `>= 0.90` **AND** raw absolute `>= 0.80` | ratio **1.0833** (passes) but raw absolute **0.4800** (fails), n = 25 | ⛔ **RED** (S3 selection recovery, `#5087`) |
@@ -92,8 +91,7 @@ does NOT establish" — which state what `9152448d7` measured and are checked ag
 pass must NOT rewrite those two to the dead run's numbers: they are already the current run's. The supersede chain is the bundle's own rule:
 a row moves only by RE-RUNNING the probe and deleting the file it replaces, so the old log is gone
 from the tree while the numbers it produced stay citable from history. Where the two disagree, the
-log at `9152448d7` wins **for E3/E4/E5**; E1 and E2 are scored instead from the later `#9889` record
-(`docs/evidence/9889/e1-e2-scores.json`), which postdates that log — see "E1 / E2" below.
+log at `9152448d7` wins.
 
 ⚠️ **The pre-registration still names the deleted file, and this PR does not edit it.**
 `PRE-REGISTRATION.md` (§8's "**A scored evidence log already exists**: `capstone-measured-e0fc940b.log`"
@@ -408,7 +406,7 @@ derivation target labels are `_DERIVATION_REFERENCES_LABELS` (`edges.py:747`: `E
 got one of them backwards: `extractedFrom` points FROM the derived node
 (`(Point)-[:extractedFrom]->(GraphEvent|Event)`), while `references` points AT it
 (`(Source)-[:references]->(Event|Document)` — `link_source_to_event`, `edges.py:2832-2857`,
-reached from the capture path at `sdk.py:15765` (`proj.link_source_to_event(source_key,
+reached from the capture path at `sdk.py:16531` (`proj.link_source_to_event(source_key,
 event_id)`)). So the rule now applied — printed in the log,
 applied by one Cypher query per label — is:
 
@@ -544,9 +542,49 @@ measurement of this number): `EXTRACTOR-V4-ARCHITECTURE.md` §10's
 prior measurement was visible when the record said none was, and the 25-bound (this instrument) vs
 29-marker-sentence (the record) populations must be reconciled before either number is called final.
 
-## E1 / E2 — E1 is BLOCKED and E2 is RED
+## E1 / E2 — the `#9889` record: E1 still UNDECIDED (n=1 per arm), E2 would score 8 of 14 on a RE-RUN
 
-`e1-e2.log` is the only E1/E2 artifact, and it says what it is:
+**These two rows no longer read `e1-e2.log`.** Their `evidence` is
+`docs/evidence/9889/e1-e2-scores.json`, produced in ONE invocation by
+`probes/e1_e2_scores.py` over the three `#9889` probes' own outputs, and the old
+log's parse path is deleted from `probes/capstone_measure.py` (`#9889` item 5).
+The record's `corpus_sha256` IS the pre-registration's frozen `fixtures_hash`
+(`dd7e8520…`), because `probes/e1_paired_arm.py` refuses to run on any other
+corpus (G1) — so both rows now cite a measurement on the **frozen** corpus, which
+the superseded log never was.
+
+```text
+E1 REFUSED decidable=False (before spread 20.6 pp)
+   before 0.3590 -> bound 0.1795 vs after 0.2131 = FAIL (ratio 0.5937)
+   before 0.5652 -> bound 0.2826 vs after 0.2131 = PASS (ratio 0.3770)
+E2 FAIL — E2a 8/14 (bar >= 13), E2b fused 1/114 = 0.008772
+```
+
+- **E1 = REFUSED, and the refusal is now a MEASUREMENT.** Both before arms clear
+  E1's own floors (30 Objects; `e1_min_before_share` 0.20 — measured 78 and 69
+  Objects, 0.3590 and 0.5652), so the shares are real. What they cannot do is
+  decide the bar: one after realization paired against two independent before
+  realizations gives **both** verdicts, so at n=1 per arm the verdict would
+  depend on which before run is chosen. The two OFF runs of the same arm differ
+  by **20.6 pp** — wider than the 14.6 pp the ON arm moved away from OFF 1. The
+  next requirement is **n >= 2 per arm**, not a second arm.
+- **E2 would score RED 8/14 on a re-run, and the denominator that was missing for eleven days is now carried.**
+  E2a is **8 of 14** value-bearing planted units strictly surviving on the run's
+  own graph, against `>= 13 of 14`. The denominator is §3.3's rule read off the
+  pre-registration and computed from the gold by `probes/e2a_value_units.py`; the
+  **anchor-injection falsifier reaches 14/14**, so the counter is shown to move
+  and 8/14 is a measurement rather than an inert instrument. E2b is 1/114 =
+  0.008772 (inside `<= 0.05`); the composite needs both halves, so the short half
+  decides the row. `#10360` still records that nothing enforces retention.
+
+The mechanism half is measured too (`probes/e1_gate_drops.py`): the v4 value
+predicate drops **0 of 61** Objects and **0 of 13** `^the <X>` with its positive
+controls alive, so the selection pass is not what moves E1's share — the
+removal/relocation ruling is (`#5333`).
+
+### What the superseded log said (kept as history, cited by no row)
+
+`e1-e2.log` was the only E1/E2 artifact for eleven days, and it says what it is:
 
 ```text
 e1 before_share=0.600000 after_share=0.600000 reduction=-0.000000 threshold=n/a observed=NO_REDUCTION verdict=UNPREREGISTERED
@@ -611,7 +649,7 @@ DECIDED. The mechanism that must move the share is an owner ruling on removal/re
 | file | what it is |
 |---|---|
 | `capstone.log` | the shipped REFUSAL record (`capstone_run.py`, stamped `027c8c1ab`): G0 refused before any model call, 5 rows, no numbers |
-| `capstone-measured-9152448d.log` | the SCORED run (`capstone_measure.py`, stamped `9152448d7`, generated 2026-11-02T12:16:06Z): 3 RED + 2 BLOCKED **as the log itself tallies them** — its E1/E2 verdicts predate the `#9889` record, which scores E2 at 8/14 (RED), so the bundle's headline is FOUR RED + ONE BLOCKED; every row carrying its artifact, all 8 steps witnessed |
+| `capstone-measured-9152448d.log` | the SCORED run (`capstone_measure.py`, stamped `9152448d7`, generated 2026-11-02T12:16:06Z): 3 RED + 2 BLOCKED, every row carrying its artifact, all 8 steps witnessed |
 | `e5-rescore.json` | the E5 re-score artifact the E5 row cites (written by the probe) |
 
 ⛔ **Each earlier stamp is SUPERSEDED and its file is gone, deliberately.** `cf98e15f1` was written
@@ -780,10 +818,15 @@ witnessed steps is printed — an honest finding for `#7949`, never a guess.
 
 ## What this bundle does NOT establish
 
-- **No E1 ratio is DECIDED, and E2a IS counted.** E1's before arm now exists twice (`#9889`:
-  78 Objects / 0.3590 and 69 / 0.5652, against 61 / 0.2131), but the two pairings disagree
-  (0.1795 → FAIL, 0.2826 → PASS) with the two OFF runs 20.6 pp apart on the same corpus, so E1
-  stays `BLOCKED` at n = 1 per arm. E2a is counted — **8 of 14** — so E2 is `RED`, not `BLOCKED`.
+- **No E1 verdict** — its shares ARE carried (see the bullet's own numbers below); its DECISION is
+  not, and no green E2: `#9889` now carries BOTH E1 populations on the FROZEN corpus
+  (before `0.3590` / 78 Objects and `0.5652` / 69 Objects, after `0.2131` / 61 Objects, in
+  `docs/evidence/9889/e1-e2-scores.json`), so E1 is no longer refused for want of a population:
+  it is `BLOCKED` because the two pairings disagree, and a verdict that changes with which before
+  run you pick has not been decided (n >= 2 per arm is the next requirement). E2a's 14-unit
+  denominator IS carried and scores **8/14**, so a RE-RUN of this probe makes E2 **RED**, not blocked. (The superseded
+  `e1-e2.log` — 25 Objects, one arm, a corpus that is not the frozen one — is kept as history and
+  cited by no row.)
 - **No evidence that E3's `= 1.000` bar is reachable as registered.** It is not: `:Object`
   mention links are unanchored by design (#5199). The registered denominator of 2026-10-21 counted
   them; the amendment in `PRE-REGISTRATION.md` §10.1 re-registers it to the classes #5199 says the
@@ -882,7 +925,7 @@ way: a table whose rows carry the literal string `HEAD` is red by this repo's ow
 ## The entry point the run drives (and the receipt the #9116 seam opened)
 
 The pipeline's OWN path is `TortoiseSDK.capture_session` →
-`sdk._extract_session_v2` (`sdk.py:14656`; called at `:13693`) →
+`sdk._extract_session_v2` (`sdk.py:15422`; called at `:14459`) →
 `extractor_v2.extract_session_v2` (`extractor_v2.py:10085`), which calls, in one pass.
 
 📌 **Cite convention for this bundle's own cites.** Every `file:line` THIS bundle adds is
@@ -972,7 +1015,8 @@ gated the pass off, or the stage produced nothing.
 | `#9596` the operator receipt's retrievability is unmeasured | **OPEN — E4's blocker** (re-attributed from the closed `#8503`, `2026-11-02`): the receipt's retrievability rate is UNMEASURED, which E4's own note already named |
 
 A **scored** row moves to a different verdict only by RE-RUNNING the probe, never by reading an
-issue's state — which is why E1/E2 stay `BLOCKED` even though #9076 closed, and why E3/E4/E5 are
-`RED` rather than "blocked by a closed child". (The table above is the dependencies' own state,
-not a scoreboard — `#9116`'s landing is recorded there because the seam shipped, and the S2.2/S2.3
-rows above keep the count the frozen run measured.)
+issue's state — which is why E1 stays `BLOCKED` (its two before realizations disagree, so it is not
+decided at n=1 per arm) and E3/E4/E5 are `RED` rather than "blocked by a closed child". E2 becomes `RED`
+on a re-run, because `#9889`'s record carried the 14-unit denominator (8 of 14); the shipped table above is the
+dependencies' own state, not a scoreboard — `#9116`'s landing is recorded there because the seam
+shipped, and the S2.2/S2.3 rows above keep the count the frozen run measured.)
