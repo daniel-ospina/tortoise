@@ -88,7 +88,10 @@ USAGE
 
     exit 0 = every constituent contained (and closed, under --apply)
     exit 1 = at least one constituent NOT contained — refused, and reported
-    exit 2 = could not measure (no fold body, no constituent list, git/gh failure)
+    exit 2 = could not measure (no fold body, no constituent list, git/gh failure,
+             or a constituent whose head/base could not be read at all — an
+             UNMEASURABLE constituent is NOT a containment verdict and never
+             prints the "closing would destroy work" line)
 
 `--label-only` exists because the two mechanisms have different risk: applying a
 label is reversible in one command, closing a PR is not. An operator whose
@@ -194,7 +197,22 @@ class Report:
     closed: list[int] = field(default_factory=list)
     labelled: list[int] = field(default_factory=list)
     refused: list[int] = field(default_factory=list)
+    #: Constituents for which NO containment verdict exists (the `gh pr view` that
+    #: would give head/base failed). Reported separately from `refused` because the
+    #: two say opposite things to the operator: `refused` asserts "its work is NOT in
+    #: the fold — closing would destroy it", while these say "nothing was measured —
+    #: retry". Folding them together printed the former for the latter, which is the
+    #: sentence a human acts on by closing the PR by hand.
+    unmeasured: list[int] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+
+
+def _file_verdict(report: Report, verdict: Verdict) -> None:
+    """Record a NOT-closable verdict under the list that describes it."""
+    if verdict.state == "UNMEASURABLE":
+        report.unmeasured.append(verdict.number)
+    else:
+        report.refused.append(verdict.number)
 
 
 # ---------------------------------------------------------------------------
@@ -343,7 +361,7 @@ def execute(
     for verdict in plan.verdicts:
         report.actions.append(verdict)
         if not verdict.closable:
-            report.refused.append(verdict.number)
+            _file_verdict(report, verdict)
             continue
         if dry_run:
             continue
@@ -397,7 +415,7 @@ def label_only(
             # constituent NOT contained — refused, and reported", and this path used
             # to print `0 refused` and return 0 while a NOT-CONTAINED constituent sat
             # in the plan.
-            report.refused.append(verdict.number)
+            _file_verdict(report, verdict)
     if dry_run:
         return report
     for verdict in verdicts:
@@ -759,9 +777,17 @@ def _print_report(report: Report, dry_run: bool, label_only: bool = False) -> No
         print(f"labelled {CONSTITUENT_LABEL}: {report.labelled}")
     if report.refused:
         print(f"REFUSED (not contained in the fold — closing would destroy work): {report.refused}")
+    if report.unmeasured:
+        print(
+            "COULD NOT MEASURE (no containment verdict either way — NOT a refusal, retry): "
+            f"{report.unmeasured}"
+        )
     for err in report.errors:
         print(f"  ERROR {err}", file=sys.stderr)
-    print(f"{mode}: {len(report.actions)} constituent(s), {len(report.refused)} refused")
+    print(
+        f"{mode}: {len(report.actions)} constituent(s), {len(report.refused)} refused, "
+        f"{len(report.unmeasured)} unmeasured"
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -880,14 +906,14 @@ def main(argv: list[str] | None = None) -> int:
         # call failed", 1 is "a constituent is NOT contained". This path used to
         # return 1 for a call failure (2) and 0 when a constituent was refused —
         # both wrong against the docstring's own table.
-        if report.errors:
+        if report.errors or report.unmeasured:
             return 2
         return 1 if report.refused else 0
 
     report = execute(plan, gh=lambda argv: _gh(argv, args.repo), dry_run=not args.apply)
     _print_report(report, dry_run=not args.apply)
 
-    if report.errors:
+    if report.errors or report.unmeasured:
         return 2
     return 1 if report.refused else 0
 

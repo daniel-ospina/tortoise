@@ -132,16 +132,21 @@ def test_the_constituent_label_gate_is_at_ENTRY_not_at_MERGE() -> None:
     """(a) Entry, not merge — where the CI cycle is actually saved.
 
     A merge-time exclusion would refuse the PR only AFTER the queue had built and
-    validated a batch containing it, i.e. after the cost was paid. The contract
-    also makes this the *only* place it can work: `queue_conditions` is evaluated
-    against the PR head, which is where a label lives.
+    validated a batch containing it, i.e. after the cost was paid. It is also the
+    EVICTION lever: Mergify documents that a PR which stops matching
+    `queue_conditions` is dropped from the queue. What this test does NOT claim is
+    that a label condition in `merge_conditions` could never become true —
+    Mergify's docs scope the temporary-queue-PR substitution to the conditions for
+    CHECKS, so `label` stays the pull request's own attribute and such a condition
+    would work; it would simply be evaluated too late to save the validation run.
+    (The earlier version of this docstring asserted the opposite and was wrong.)
     """
     rule = _rule()
     wanted = f"-label={bo.CONSTITUENT_LABEL}"
     assert wanted not in rule["merge_conditions"], (
         "the constituent gate must not be a merge_conditions entry: that list is "
-        "evaluated against the queue BRANCH, which carries no author labels, so "
-        "the condition could never become true and would deadlock the merge"
+        "evaluated only AFTER the queue has built and validated a batch containing "
+        "the PR, so the CI cycle this gate exists to save would already be spent"
     )
 
 
@@ -676,6 +681,44 @@ def test_parse_constituents_refuses_a_line_it_cannot_read_unambiguously() -> Non
         "fold-constituents: https://github.com/o/r/pull/10543\n",
     ):
         assert bo.parse_constituents(line, fold=900) == [], line
+
+
+def test_an_unmeasurable_constituent_is_NOT_reported_as_a_refusal(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """(b) "could not measure" must never print the sentence "closing would destroy work".
+
+    When `constituent_refs` cannot read a PR (a failed or unparsable `gh pr view`),
+    `main` builds an `UNMEASURABLE` verdict. That verdict is not closable, so it used
+    to land in `report.refused` — printing
+
+        REFUSED (not contained in the fold — closing would destroy work): [102]
+
+    and exiting **1**. Both are wrong: the docstring reserves exit 2 for "could not
+    measure", and the printed line asserts the PR's work is missing from the fold on
+    a run where nothing was measured. That is the sentence an operator acts on by
+    closing the PR by hand — the one unrecoverable outcome this tool exists to
+    prevent. Reachable through `fold-constituents: 10543 #10820`, where `#10820` is
+    an issue and `gh pr view` fails.
+    """
+    monkeypatch.setattr(bo, "fetch_fold", lambda n, repo=None: (0, "f" * 40, "fold-br", "body"))
+    monkeypatch.setattr(bo, "_git", lambda argv, cwd: (0, ""))
+    monkeypatch.setattr(
+        bo,
+        "constituent_refs",
+        lambda n, repo=None: (("a" * 40, "b" * 40) if n == 101 else None),
+    )
+    monkeypatch.setattr(
+        bo, "verdict_for", lambda n, h, b, f, cwd: _verdict(n, "CONTAINED-CONTENT", "")
+    )
+    monkeypatch.setattr(bo, "_gh", lambda argv, repo=None: (0, ""))
+
+    rc = bo.main(["--fold", "900", "--constituent", "101", "--constituent", "102"])
+    out = capsys.readouterr().out
+
+    assert rc == 2, f"an unmeasurable constituent is 'could not measure' (exit 2), got {rc}: {out}"
+    assert "closing would destroy work" not in out, out
+    assert "COULD NOT MEASURE" in out, out
 
 
 def test_hint_constituents_still_sees_prose_but_is_never_acted_on() -> None:

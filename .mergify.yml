@@ -146,10 +146,16 @@ queue_rules:
       # closes the WINDOW before the tool runs, and the case where a constituent
       # must stay open, so the mechanism does not depend on a tool having run.
       #
-      # Why ENTRY and not merge: `queue_conditions` is evaluated against the PR
-      # HEAD, which is where a label lives; `merge_conditions` is evaluated against
-      # the queue BRANCH, which carries no author labels, so a label condition
-      # there could never become true and would DEADLOCK the queue.
+      # Why ENTRY and not merge: entry is where the CI cost is, and it is not a
+      # claim about label visibility. A `merge_conditions` failure only dequeues the
+      # PR AFTER the queue has built and validated a batch containing it (~37 min of
+      # CI already spent); an unmatched `queue_conditions` refuses it before any of
+      # that, and Mergify's documented lifecycle also DROPS an already-queued PR that
+      # stops matching `queue_conditions` — so the same line gates and drains. (It
+      # is NOT true that a label condition in `merge_conditions` could never become
+      # true: Mergify's docs say only the conditions FOR CHECKS are evaluated against
+      # the temporary queue PR; `label` remains the pull request's own attribute. The
+      # earlier version of this comment claimed otherwise and was wrong.)
       #
       # Why it is needed at all: `merge_protections_settings.auto_merge_conditions`
       # below is `true`, so ANY PR matching these conditions is queued with no

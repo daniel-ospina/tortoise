@@ -959,9 +959,13 @@ of the batch carrying it.
 Two mechanisms close that, and they are complementary — neither is sufficient alone:
 
 1. **The queue refuses a labelled constituent at ENTRY.** `queue_conditions` carries
-   `-label=superseded-by-fold`. Entry, not merge, because `merge_conditions` is evaluated against
-the queue *branch*, which carries no author labels — a label condition there could never become
-true and would **deadlock the queue for every PR**. Mergify's documented lifecycle also drops an
+   `-label=superseded-by-fold`. Entry, not merge, because entry is where the cost is: a
+`merge_conditions` failure only dequeues the PR *after* the queue has built and validated a batch
+containing it, while an unmatched `queue_conditions` refuses it before any CI is spent. It is **not**
+true that a label condition in `merge_conditions` could never become true — Mergify's documentation
+scopes the temporary-queue-PR substitution to the conditions *for checks*, and `label` stays the pull
+request's own attribute — so the older "it would deadlock the queue for every PR" reasoning was
+wrong and is recorded here as corrected. Mergify's documented lifecycle also drops an
 already-queued PR that stops satisfying `queue_conditions`, so the label should drain the queue too —
 ⚠️ that part is **documented, not measured** here; the entry gate does not rely on it, so confirm the
 drain in the Mergify UI before counting on it for a live batch.
@@ -1002,8 +1006,11 @@ costs one manual close; a false proof is unrecoverable.
 The exit status is the tool's own contract, and it is the same on both write paths: **0** every
 constituent contained, **1** at least one `NOT-CONTAINED` (reported — under `--label-only` the label
 still goes on, because it is reversible and it closes the queue rather than the PR), **2** could not
-measure (no constituent list, or a `git`/`gh` call that failed, was absent, or hung — never a
-traceback).
+measure (no constituent list, a `git`/`gh` call that failed, was absent, or hung, or a constituent
+whose head/base could not be read — never a traceback). An `UNMEASURABLE` constituent is exit **2**
+and is printed as *could not measure*, never under the `REFUSED (… closing would destroy work)` line:
+the first says nothing was measured, the second asserts the work is missing from the batch, and only
+the second is a reason to close a PR by hand.
 
 ⛔ **The constituent list is never parsed from prose.** A batch title routinely names a PR it
 deliberately did **not** fold — #10894's title names `#10641`, which was dropped. Deriving the close
