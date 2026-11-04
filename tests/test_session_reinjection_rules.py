@@ -1306,6 +1306,14 @@ def test_reader_window_displacement_docstring_never_claims_a_bound():
         "the residual list must name the C6 reorder it is scoped away from")
     assert "not a bound at all" in flat, (
         "the rerank-ON case must state that the window is no bound at all")
+    assert "``base_displaced`` and ``sessions_lost``" in flat, (
+        "``sessions_lost`` is derived from the SAME two windows as the two "
+        "counters, so the rerank-APPLIED residual must name it too — "
+        "leaving it out is the over-report this assertion exists to keep out")
+    assert "load-bearing key on every arm that does not re-SELECT" in flat, (
+        "``sessions_lost`` may not be called load-bearing unconditionally: "
+        "on the rerank-APPLIED arm the reranker can deliver a session ranked "
+        "below the window while the census names it lost")
 
 
 def test_the_pool_only_window_is_not_claimed_as_a_hard_ceiling():

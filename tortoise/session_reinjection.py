@@ -621,10 +621,13 @@ def reader_window_displacement(
       the entire ``pool``. So on the APPLIED arm the delivered surface may
       include base hits AND injected items from BELOW this window while
       excluding ones inside it.
-      ⇒ On the APPLIED arm ``injected_in_window``/``base_displaced``
-      describe ``merged[:window]`` and are not a bound at all — upper or
-      lower — on what the reader got. (Nor are they one with R6 OFF, for
-      the reason the bullet below gives.)
+      ⇒ On the APPLIED arm ``injected_in_window``, ``base_displaced`` and
+      ``sessions_lost`` describe ``merged[:window]`` and are not a bound at
+      all — upper or lower — on what the reader got. ``sessions_lost`` is
+      derived from those SAME two windows, so the reranker can deliver a
+      session ranked below ``merged[:window]`` while this census names it
+      LOST: on that arm the key OVER-reports. (Nor are they a bound with R6
+      OFF, for the reason the bullet below gives.)
       ⛔ The three TRUNCATING arms are NOT in that class, and an earlier
       revision of this list wrongly put one of them there: the pool-only
       arm and the two R6 DEGRADES (load-failure ``scorer is None``,
@@ -656,9 +659,13 @@ def reader_window_displacement(
     measurement. The guard's session-diverse reorder holds the top-5
     (measured: 0 base items lost from it in every arm tested).
 
-    ``sessions_lost`` is the load-bearing key: a session with no hit in the
-    merged window has no evidence the reader can cite, whatever its rank
-    was before.
+    ``sessions_lost`` is the load-bearing key on every arm that does not
+    re-SELECT: a session with no hit in the merged window has no evidence the
+    reader can cite, whatever its rank was before. On the APPLIED-rerank arm
+    it is an OVER-report rather than a bound, for the reason the bullet above
+    gives — the reranker selects from the whole candidate list, so a session
+    ranked below this window can be delivered while this census names it
+    lost.
 
     The synthetic ``idx:*`` namespace is dropped from BOTH sets: it names no
     graph session (the ``lme_session_index`` bucket, and since #3591 the
