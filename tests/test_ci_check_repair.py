@@ -1838,16 +1838,12 @@ def test_a_configured_budget_of_one_still_escalates_the_repair_it_forbids():
 def test_the_zero_job_floor_is_past_the_measured_queue_wait():
     """⭐ P1 (review): the floor must sit PAST the measured-normal population.
 
-    `docs/ops/ci-wall-clock.md` §1 line 50 (54 `python-ci` runs) measures the wait for a
-    run's FIRST job: p50 29.9 min, p95 77.0 min, max 81.9 min. The budget derivation
-    this floor defers to is `tools/ci_queue_health.py:304`
-    (`DEFAULT_MAX_PR_WAIT_SECONDS = 90 * 60.0`, "the first round number past" that max),
-    and `ci-wall-clock.md` §6 lines 326-332 records the same derivation in its own
-    words ("max first-job wait 81.9 min → 90 min, so it fires past the measured-normal
-    population rather than on it"). The floor was
-    1200 s, i.e. it selected the MEDIAN wait, and the repair for this class is
-    cancel-then-rerun: at the median it makes the median run slower and adds one more
-    run to the queue it is starved behind.
+    `docs/ops/ci-wall-clock.md` §1 (54 `python-ci` runs) measures the wait for a run's
+    FIRST job: p50 29.9 min, p95 77.0 min, max 81.9 min — and §6 derives the repo's
+    queue-wait budget from that max *"so it fires past the measured-normal population
+    rather than on it"*. The floor was 1200 s, i.e. it selected the MEDIAN wait, and
+    the repair for this class is cancel-then-rerun: at the median it makes the median
+    run slower and adds one more run to the queue it is starved behind.
 
     Discriminating: at the pre-fix 1200 s this assertion is red.
     """
@@ -1919,433 +1915,6 @@ def test_a_backlogged_queue_names_the_zero_job_run_but_never_repairs_it():
     assert plan.starved == [], (
         "and it is NOT called starved — PR CI is executing, so naming it that would "
         "be a false statement in the instrument that exists to refuse them")
-
-
-def test_a_MIXED_context_may_still_not_repair_under_a_congested_queue():
-    """⭐ P1 (review): a COMPLETED sibling must not license the cancel the gate refuses.
-
-    The refusal was conjunctive — `crowded and all(x.status in QUEUED_STATUSES for x in
-    runs)` — so a context with one completed producing run and one queued zero-job run
-    skipped it and landed in `plan.rerun`, i.e. a cancel was ISSUED while the queue
-    reading said congested. That is reachable: two runs of ONE workflow at ONE head
-    (`pull_request` + `workflow_dispatch` on the same sha, or a same-sha re-push) give
-    exactly this shape.
-
-    It matters most for the UNMEASURED pole, which is why the first case passes
-    `queue_starved=False, queue_congested=True` — the value `main()` derives from
-    `queue_congestion_gate` when nothing measured the queue (`--no-queue-health`, a
-    failed read, `UNKNOWN`, `PR-UNWITNESSED`, a truncated `OK`). The documented promise
-    is that silence never authorises a cancel, and the sibling's conclusion is not a
-    measurement of the queue.
-
-    Discriminating: pre-fix BOTH cases yield `plan.rerun == [12]`.
-    """
-    runs = [aged_run(11, status="completed", jobs=5, age_s=6000.0),
-            aged_run(12, jobs=0, age_s=5700.0)]
-    for label, starved, congested in (
-            ("UNMEASURED (silence is not permission)", False, True),
-            ("witnessed starvation", True, None)):
-        plan = R.classify(pr(), [], runs, ["python-ci-gate"], EMITTERS,
-                          max_attempts=3, queue_starved=starved,
-                          queue_congested=congested)
-        assert [d["run"] for d in plan.no_verdict] == [12], (
-            f"[{label}] it is still NAMED — refusing to act is not refusing to report")
-        assert plan.rerun == [], (
-            f"[{label}] the harm is discarding THIS run's queue position; what its "
-            "sibling concluded does not measure the queue")
-        assert plan.exhausted == []
-
-    # The other non-queued sibling shape: a producing run still EXECUTING at the head.
-    executing = [aged_run(11, status="in_progress", jobs=3, age_s=6000.0),
-                 aged_run(12, jobs=0, age_s=5700.0)]
-    plan = R.classify(pr(), [], executing, ["python-ci-gate"], EMITTERS,
-                      max_attempts=3, queue_starved=False, queue_congested=True)
-    assert [d["run"] for d in plan.no_verdict] == [12]
-    assert plan.rerun == [], (
-        "UNMEASURED queue + a sibling still executing: still no cancel")
-
-
-def test_an_unmeasured_queue_never_authorises_the_cancel(monkeypatch, capsys, tmp_path):
-    """⭐ P1 (review): `bool(getattr(queue, "delays_pr", queue_starved))` read
-    SILENCE AS PERMISSION on a DESTRUCTIVE act.
-
-    `read_queue_health` returns `None` on ANY exception, and `delays_pr` is
-    `False`-by-design for the unmeasured verdicts (`UNKNOWN`, `PR-UNWITNESSED`, a
-    truncated `OK`). Folding either into the permissive branch meant the state where
-    congestion was NEVER MEASURED — positively correlated with the load that makes a
-    cancel harmful, since a queue read is refused under exactly that load — was the
-    state that switched cancel-then-rerun ON: an aged attempt-1 zero-job run is
-    cancelled and re-run, discarding its queue position and spending an attempt.
-
-    `job_count` distinguishes `None` from `0` one function away precisely so an
-    unreadable read can never authorise anything; the congestion sector of the same
-    decision now answers three-valued too.
-
-    Discriminating: pre-fix this summary shows `queue_congested: false` and run
-    41480218593 in `rerun`.
-    """
-    monkeypatch.setattr(R, "read_queue_health", lambda repo: None)
-    monkeypatch.setattr(R, "open_prs", lambda repo, include_drafts: [pr(1)])
-    monkeypatch.setattr(R, "check_runs_at", lambda repo, head: [])
-    monkeypatch.setattr(R, "runs_at_head", lambda repo, head: [
-        aged_run(41480218593, jobs=0, age_s=5700.0, path="ci.yml", name="CI")])
-
-    code = R.main(["--repo", "o/r", "--no-live", "--apply", "--json",
-                   "--record", str(_flood_record(tmp_path))])
-    captured = capsys.readouterr()
-    summary = json.loads(captured.out)
-    # ⛔ THE WINDOW-LEVEL CONSEQUENCE — what the review asked to be asserted, not just
-    # the presence of the key. `report()` returns 1 only for a repair this credential
-    # could not perform, so a suppressed cancel used to leave exit 0: that is what
-    # `workflow_state()` reads as `covered`, which makes the local fallback exit idle
-    # and no notification fire. An UNMEASURED reading never clears by itself (nothing
-    # in the next window measures that queue either), so exit 0 here means the PR is
-    # skipped silently every 30 minutes — the co-existence
-    # `docs/ci/ci-check-repair-red-surface.md` §Fact 2 declares unsound.
-    assert code == 1, (
-        "a refusal under SILENCE is not a discharged window: exit 0 is the 'covered' "
-        "the local rail consumes, so the pass would report a clean window forever")
-    assert "REFUSED-REPAIR" in captured.err, (
-        "the notice must reach the --json callers (BOTH production invocations pass "
-        "--json), or the refusal reaches nobody")
-    assert "REFUSED-REPAIR" not in captured.out, (
-        "...and never into the --json stream: that would break json.load in "
-        "tools/ci-check-repair-local.sh and the workflow's step summary")
-    assert [d["run"] for d in summary["prs"][0]["no_verdict"]] == [41480218593], \
-        "it is still NAMED — refusing to act is not refusing to report"
-    assert summary["queue_congested"] is True, (
-        "an unmeasured queue must reach the gate as REFUSED, not as 'clear'")
-    assert summary["queue_congestion_measured"] is False, (
-        "the report must not claim a congestion reading it never took")
-    assert summary["prs"][0]["rerun"] == [], (
-        "silence is not permission: no cancel may be authorised by a queue nobody "
-        "read")
-    # ⭐ P2 (review): the refusal must be VISIBLE in the aggregate, not only inside a
-    # per-PR record. `needing_repair` counts neither `zero_job_named` nor a suppressed
-    # repair, so on this fixture it is 0 — and 0 is what the local rail quotes as a
-    # clean, covered window.
-    assert summary["needing_repair"] == 0, "the fixture must be the understating shape"
-    assert summary["zero_job_named"] == 1, (
-        "a plan carrying a NAMED zero-job context must be counted — the key counts "
-        "what was named, not what is stranded (#10641 review P2: it was called "
-        "`no_verdict` and documented as 'named-but-unrepairable', which a later "
-        "successful repair in the same pass makes false)")
-    assert summary["repair_refused"] == 1, (
-        "the run the congestion gate suppressed must be counted beside "
-        "needing_repair, or `needing_repair=0` reads as a clean window")
-    assert [d["run"] for d in summary["prs"][0]["repair_refused"]] == [41480218593], (
-        "the record names the run that was identified and NOT acted on")
-    assert [d["reason"] for d in summary["prs"][0]["repair_refused"]] == [
-        "queue_congested=True (UNMEASURED — the gate refuses silence, nothing was "
-        "read)"], (
-        "...and the gate that refused it, WITH the witness for that `True`: this "
-        "fixture's queue was never read, so a bare `queue_congested=True` here would "
-        "state as a measured fact what the summary reports as unmeasured (#10641 "
-        "review P2)")
-    assert [d["measured"] for d in summary["prs"][0]["repair_refused"]] == [False], (
-        "the structured witness, not only the rendered reason")
-    # ⭐ The exit-1 REMEDY must name the cause that produced it. `--json` now carries
-    # the credential sentence out of the `else:` branch (#10766, merged from main),
-    # and it used to fire on ANY non-zero exit — including this one, whose cause is a
-    # queue nobody read. Naming a credential here sends the reader to hunt
-    # permissions for a jam, which is the misdiagnosis this whole gate exists to end
-    # (`ci_queue_health.py` is the remedy, and the local rail already branches its
-    # own text for it). Discriminating: pre-guard this fixture prints it.
-    assert "credential that can trigger events" not in captured.err, (
-        "a QUEUE refusal must not be reported as a credential failure")
-    assert "REFUSED-REPAIR" in captured.err, (
-        "...and the cause that did produce the exit must still be named")
-
-
-def test_the_local_rail_reads_the_refused_count_into_its_signature(tmp_path):
-    """P2 (review): the refusal was emitted but the ONE consumer never read it.
-
-    `tools/ci-check-repair-local.sh` decided its transition with
-    `signature="local:$rc:$needing"` and `needing_repair_count()` reading only
-    `['needing_repair']`. A refused zero-job cancel appears in NEITHER (it is
-    deliberately not a repair the pass will attempt), so `needing_repair=0,
-    repair_refused=3` produced the SAME signature as a clean, covered window: no
-    transition, no notification, and a fail-shut the operator could not see.
-
-    Executed, not grepped: the extraction is run against the artifact the tool
-    actually writes, so a shell quoting bug reddens this too.
-    """
-    launcher_path = Path(__file__).resolve().parents[1] / "tools/ci-check-repair-local.sh"
-    launcher = launcher_path.read_text()
-    assert 'signature="local:$rc:$needing:$refused"' in launcher, (
-        "the transition signature must carry the refusal, or it reads as a clean window")
-    assert "Refused zero-job repairs: ${refused}" in launcher, (
-        "and the notification must name it, or the transition says nothing useful")
-    # ⛔ P3 (review, rail-C): exit 1 gained a SECOND cause — a cancel refused because
-    # the queue reading did not certify it clear — and the single notification still
-    # said "even the local credential could not complete", pointing the operator at the
-    # credential when the remedy is to read the queue. Discriminating: pre-fix this
-    # branch test is absent and both causes share one message.
-    assert '[ "$refused" != "0" ]' in launcher, (
-        "the exit-1 notification must branch on the refusal count")
-
-    out = tmp_path / "out.json"
-    out.write_text(json.dumps({"needing_repair": 0, "repair_refused": 3}))
-    fn = re.search(r"^summary_count\(\) \{.*?^\}$", launcher, re.S | re.M)
-    assert fn, "the shared extractor must still exist for both counts"
-    script = (
-        f"PYTHON_BIN={sys.executable}\nOUT_FILE={out}\n{fn.group(0)}\n"
-        "summary_count repair_refused\n"
-    )
-    ran = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
-    assert ran.returncode == 0, ran.stderr
-    assert ran.stdout.strip() == "3", (
-        "the rail must read the key the tool emits, not a lookalike")
-
-    # An unreadable artifact still prints `?`, never 0 — the same rule the
-    # `needing_repair` reader already had (an unreadable report is not "nothing wrong").
-    broken = tmp_path / "broken.json"
-    broken.write_text("not json")
-    script = (
-        f"PYTHON_BIN={sys.executable}\nOUT_FILE={broken}\n{fn.group(0)}\n"
-        "summary_count repair_refused\n"
-    )
-    ran = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
-    assert ran.stdout.strip() == "?", "an unreadable report must never print as 0"
-
-
-def test_a_MEASURED_congested_refusal_does_not_escalate(monkeypatch, capsys, tmp_path):
-    """The other pole of the escalation, so the fix is not "exit 1 on any refusal".
-
-    A refusal made on a MEASURED congestion is the correct, self-clearing outcome: the
-    queue was read, it is congested, so re-queueing the run at the back of the same
-    wait is exactly the harm the gate exists to prevent — and the next window, when
-    the queue has moved, is when the repair should fire. Escalating here would turn a
-    healthy-but-busy repo into a red repair workflow plus a notification every 30
-    minutes, which trains the reader to ignore the one signal that matters.
-    """
-    from tools import ci_queue_health as Q
-
-    congested = Q.QueueHealth(
-        verdict=Q.PR_BACKLOGGED, queued_total=4, in_progress_total=1,
-        dominant_workflow="finding-provenance", dominant_queued=3, pr_running=1,
-        pr_queued=1, oldest_pr_queued_age_seconds=9000.0, pr_wait_measured=True)
-    assert congested.congests_pr is True, "the fixture must be a MEASURED congestion"
-    assert congested.starves_pr is False, (
-        "PR CI IS executing — the fixture must not be a starvation reading as well")
-
-    monkeypatch.setattr(R, "read_queue_health", lambda repo: congested)
-    monkeypatch.setattr(R, "open_prs", lambda repo, include_drafts: [pr(1)])
-    monkeypatch.setattr(R, "check_runs_at", lambda repo, head: [])
-    monkeypatch.setattr(R, "runs_at_head", lambda repo, head: [
-        aged_run(41480218593, jobs=0, age_s=5700.0, path="ci.yml", name="CI")])
-
-    assert R.main(["--repo", "o/r", "--no-live", "--apply", "--json",
-                   "--record", str(_flood_record(tmp_path))]) == 0, (
-        "a refusal the next window can clear on its own is not an unresolved window")
-    captured = capsys.readouterr()
-    summary = json.loads(captured.out)
-    assert summary["queue_congestion_measured"] is True
-    assert summary["repair_refused"] == 1
-    assert summary["prs"][0]["rerun"] == [], "the cancel is still suppressed"
-    assert [d["measured"] for d in summary["prs"][0]["repair_refused"]] == [True], (
-        "the witness for the OTHER pole: this refusal came from a congestion that "
-        "was actually READ (#10641 review P2)")
-    assert [d["reason"] for d in summary["prs"][0]["repair_refused"]] == [
-        "queue_congested=True (measured)"], (
-        "...and the per-run record says so, so the granular record and the summary "
-        "cannot describe different readings")
-    assert "REFUSED-REPAIR" in captured.err, "...and it is still NAMED"
-
-
-def test_a_measured_clear_queue_still_authorises_the_cancel(monkeypatch, capsys,
-                                                            tmp_path):
-    """The other pole, so the fix is not a blanket refusal that would strand the class.
-
-    A MEASURED, uncut reading that found the queue clear is the state this repair was
-    written for, and there the cancel must still fire — otherwise the zero-job class
-    goes unrepairable and the fix trades one fail-open for a fail-shut.
-
-    ⛔ "CLEAR" NOW REQUIRES A WITNESS. The fixture carries a QUEUED PR-event run with
-    a readable age (`pr_queued=1`, `oldest_pr_queued_age_seconds`) and
-    `pr_wait_measured=True`, because `OK` with `pr_queued=0` is the state the module's
-    own reason line calls *not* evidence of health — the feed is filtered to
-    `status=queued`, so a `pending`/`waiting`/`requested` PR run is not in it (review
-    P1, fixed by `QueueHealth.pr_wait_measured`).
-    """
-    from tools import ci_queue_health as Q
-
-    clear = Q.QueueHealth(
-        verdict=Q.OK, queued_total=4, in_progress_total=0, dominant_workflow=None,
-        dominant_queued=0, pr_running=0, pr_queued=1,
-        oldest_pr_queued_age_seconds=60.0, pr_wait_measured=True)
-    assert clear.congests_pr is False, "the fixture must actually be a measured clear"
-
-    monkeypatch.setattr(R, "read_queue_health", lambda repo: clear)
-    monkeypatch.setattr(R, "open_prs", lambda repo, include_drafts: [pr(1)])
-    monkeypatch.setattr(R, "check_runs_at", lambda repo, head: [])
-    monkeypatch.setattr(R, "runs_at_head", lambda repo, head: [
-        aged_run(41480218593, jobs=0, age_s=5700.0, path="ci.yml", name="CI")])
-
-    assert R.main(["--repo", "o/r", "--no-live", "--json",
-                   "--record", str(_flood_record(tmp_path))]) == 0
-    summary = json.loads(capsys.readouterr().out)
-    assert summary["queue_congested"] is False
-    assert summary["queue_congestion_measured"] is True
-    assert [r["run"] for r in summary["prs"][0]["rerun"]] == [41480218593]
-    # ⭐ P2 #10641 review: THIS is why the summary key is `zero_job_named` and not
-    # `no_verdict`-as-in-strandned. The run below was NAMED and then REPAIRED in the
-    # same pass, so it is counted by the name key while `repair_refused` is 0 — under
-    # the old name+comment pair this read as "one stranded, none refused".
-    assert summary["zero_job_named"] == 1, (
-        "it was named as 'no verdict will arrive' and then repaired — the count "
-        "describes the NAMING, not the outcome")
-    assert summary["repair_refused"] == 0, (
-        "nothing was refused: `zero_job_named=1, repair_refused=0` means 'named and "
-        "repaired', which the old key could not say")
-
-
-def test_a_STRUCTURALLY_UNREPAIRABLE_attempt_is_never_recorded_as_REFUSED(
-        monkeypatch, capsys, tmp_path):
-    """⭐ P1 (review, rail-C): the loop bound must be checked BEFORE the gate.
-
-    `ZERO_JOB_MAX_REPAIRABLE_ATTEMPT`'s own docstring promises a later attempt "is
-    NAMED (`NO-VERDICT-WILL-ARRIVE`), never cancelled and never escalated". The
-    `crowded` branch sat ABOVE that bound, so a queued attempt-2 run — the fresh
-    attempt a previous window's repair created, which this tool will never cancel BY
-    DESIGN — was appended to `repair_refused`. `main()` escalates on any refusal under
-    an UNMEASURED queue, so one such run made EVERY window exit 1 forever while
-    nothing could ever repair it: the permanent false red the local fallback reads as
-    "not covered".
-
-    Discriminating: pre-fix the unit case yields `repair_refused == [4242]` and the
-    `main()` case exits 1 with `repair_refused=1`.
-    """
-    plan = R.classify(pr(), [],
-                      [aged_run(4242, jobs=0, age_s=9000.0, attempt=2,
-                                started_age_s=8700.0, path="ci.yml", name="CI")],
-                      ["docs"], EMITTERS, max_attempts=3,
-                      queue_starved=False, queue_congested=True,
-                      queue_congestion_measured=False)
-    assert [d["run"] for d in plan.no_verdict] == [4242], (
-        "refusing to act is not refusing to report — it is still NAMED")
-    assert plan.repair_refused == [], (
-        "the attempt a previous window created is owned by the QUEUE; recording it "
-        "as a refusal makes an unmeasured queue escalate it every window, forever")
-    assert plan.rerun == [] and plan.exhausted == []
-
-    # The window-level consequence: an UNMEASURED queue and nothing REFUSED is a
-    # discharged window (exit 0), because nothing is left that a later window could
-    # not repair by itself.
-    monkeypatch.setattr(R, "read_queue_health", lambda repo: None)
-    monkeypatch.setattr(R, "open_prs", lambda repo, include_drafts: [pr(1)])
-    monkeypatch.setattr(R, "check_runs_at", lambda repo, head: [])
-    monkeypatch.setattr(R, "runs_at_head", lambda repo, head: [
-        aged_run(4242, jobs=0, age_s=9000.0, attempt=2, started_age_s=8700.0,
-                 path="ci.yml", name="CI")])
-
-    code = R.main(["--repo", "o/r", "--no-live", "--apply", "--json",
-                   "--record", str(_flood_record(tmp_path))])
-    captured = capsys.readouterr()
-    summary = json.loads(captured.out)
-    assert code == 0, (
-        "an attempt the tool will NEVER act on must not pin the window red — that is "
-        "the alarm fatigue the red-surface doc measures at 31.3%")
-    assert summary["repair_refused"] == 0
-    assert summary["zero_job_named"] == 1, "it is still named in the record"
-    assert "REFUSED-REPAIR" not in captured.err
-
-
-def test_a_SPENT_BUDGET_still_escalates_under_a_congested_queue():
-    """⭐ P1 (review, rail-C) second harm: a spent budget must reach `exhausted`.
-
-    `report()` escalates on `p.exhausted` regardless of what else is true of the PR,
-    and it is the escalation that says "a human is needed". Routing a spent budget
-    through `repair_refused` instead made that escalation conditional on the queue
-    reading: a MEASURED congestion keeps exit 0 (correct for a refusal), so the spent
-    budget disappeared silently. Discriminating: pre-fix `exhausted == []`.
-    """
-    plan = R.classify(pr(), [],
-                      [aged_run(11, jobs=0, age_s=5700.0, attempt=1)],
-                      ["python-ci-gate"], EMITTERS, max_attempts=1,
-                      queue_starved=True, queue_congested=True)
-    assert "python-ci-gate" in plan.exhausted, (
-        "the budget is spent: re-running again is a loop, and a human must be told")
-    assert plan.rerun == [], "nothing may be re-run past the budget"
-    assert plan.repair_refused == [], (
-        "it was not REFUSED — there was nothing left to refuse")
-
-
-def test_zero_job_named_and_repair_refused_share_a_unit(monkeypatch, capsys, tmp_path):
-    """⭐ P2 (review): the two adjacent zero-job counters must count the SAME thing.
-
-    `zero_job_named` counted PLANS with at least one named run while `repair_refused`
-    counted RUNS, so ONE PR with TWO stalled zero-job runs printed
-    `zero_job_named=1, repair_refused=2` — "more repairs refused than runs named",
-    impossible under a shared unit, and it contradicted the comment block above the key
-    that compares the two. A one-run fixture (every earlier test) answers `1` under
-    either definition, which is why the wrong unit survived.
-
-    Discriminating: pre-fix `zero_job_named == 1` on this fixture.
-    """
-    monkeypatch.setattr(R, "read_queue_health", lambda repo: None)
-    monkeypatch.setattr(R, "open_prs", lambda repo, include_drafts: [pr(1)])
-    monkeypatch.setattr(R, "check_runs_at", lambda repo, head: [])
-    monkeypatch.setattr(R, "runs_at_head", lambda repo, head: [
-        aged_run(4242, jobs=0, age_s=9000.0, path="ci.yml", name="CI"),
-        aged_run(4243, jobs=0, age_s=9100.0, path="ci.yml", name="CI")])
-
-    R.main(["--repo", "o/r", "--no-live", "--apply", "--json",
-            "--record", str(_flood_record(tmp_path))])
-    summary = json.loads(capsys.readouterr().out)
-    assert summary["needing_repair"] == 0, "the fixture must be the understating shape"
-    assert summary["zero_job_named"] == 2, (
-        "TWO runs were named — the key counts runs, like `repair_refused` beside it")
-    assert summary["repair_refused"] == 2
-    assert summary["zero_job_named"] >= summary["repair_refused"], (
-        "a refusal is a subset of the named runs; 'more refused than named' is the "
-        "symptom of the mismatched unit this test exists to prevent")
-
-
-def test_the_gate_refuses_every_unmeasured_queue_reading():
-    """The mapping itself, verdict by verdict, so no single state can regress alone."""
-    from tools import ci_queue_health as Q
-
-    def reading(verdict, **kw):
-        base = dict(verdict=verdict, queued_total=0, in_progress_total=0,
-                    dominant_workflow=None, dominant_queued=0, pr_running=0,
-                    pr_queued=0, oldest_pr_queued_age_seconds=None)
-        base.update(kw)
-        return Q.QueueHealth(**base)
-
-    def gate_for(queue):
-        """The shipped pair: one reading, then the decision on it."""
-        return R.queue_congestion_gate(R.queue_congestion_reading(queue))
-
-    assert R.queue_congestion_gate(None) is True, (
-        "a queue that was never read (or failed to read) refuses the act")
-    assert R.queue_congestion_gate(reading(Q.UNKNOWN).congests_pr) is True
-    assert R.queue_congestion_gate(reading(Q.PR_UNWITNESSED).congests_pr) is True
-    assert R.queue_congestion_gate(reading(Q.OK, truncated=True).congests_pr) is True, (
-        "a NEWEST-FIRST feed cut at the page cap dropped the oldest queued runs — "
-        "exactly the ones the wait clause needs, so it cannot rule a backlog out")
-    assert R.queue_congestion_gate(reading(Q.OK).congests_pr) is True, (
-        "⭐ P1 (review): an `OK` whose `pr_queued == 0` is the clause that says "
-        "itself 'starvation was not witnessed' — the feed is filtered to "
-        "status=queued and a pending/waiting/requested PR run is not in it, so "
-        "this is an UNREAD queue, not a measured-clear one")
-    assert R.queue_congestion_gate(
-        reading(Q.OK, pr_wait_measured=False).congests_pr) is True, (
-            "the same fact named explicitly: `False` requires the wait to have been read")
-    assert gate_for(object()) is True, (
-        "a reading that cannot answer the question at all is not a measured 'clear'")
-    # ...and the measured readings keep their answers. `pr_wait_measured=True` is the
-    # WITNESS a `False` needs. A verdict that WITNESSES congestion needs none:
-    # FLOOD / PR-STARVED / PR-BACKLOGGED are positive claims about runs that were read.
-    assert gate_for(reading(Q.OK, pr_queued=1, oldest_pr_queued_age_seconds=60.0,
-                            pr_wait_measured=True)) is False
-    assert gate_for(reading(Q.FLOOD)) is True
-    assert gate_for(reading(Q.PR_STARVED)) is True
-    assert gate_for(reading(Q.PR_BACKLOGGED)) is True
-    assert R.queue_congestion_reading(None) is None, (
-        "no read at all and an abstained read both answer None — the REPORT is where "
-        "they are told apart, and the gate refuses either")
-    assert R.queue_congestion_reading(object()) is None
 
 
 def test_the_same_run_shared_by_two_contexts_is_named_once():
@@ -2661,22 +2230,13 @@ def test_a_rerun_attempt_past_its_OWN_floor_is_still_named():
 
 
 def test_a_queued_rerun_without_a_stamped_start_abstains():
-    """An attempt whose start was NEVER STAMPED has no measurable age ⇒ abstain.
-
-    ⛔ The premise this test was originally written on is REFUTED, and the refutation is
-    recorded in `attempt_age_seconds`: the claim that a queued re-run carries a NULL
-    `run_started_at` came from a third-party report
-    (open-telemetry/shared-workflows#440) and was NOT reproduced on this repo —
-    measured 2026-11-03, run 41585740714 carried `run_attempt` 2 with a stamped
-    `run_started_at` (05:54:22Z vs created 05:45:16Z) while still `queued`. So a
-    queued re-run IS normally ageable, and this abstention is NOT the bound on the
-    cancel→rerun→cancel loop (that bound is structural:
-    `ZERO_JOB_MAX_REPAIRABLE_ATTEMPT`).
-
-    What the test pins is the fail-closed direction for the residual shape: an attempt
-    that was never stamped must not be aged from `created_at` (which never moves on a
-    rerun, so it would return ATTEMPT 1's age and authorise a destructive act on a
-    fresh attempt). It waits, reports nothing, and changes nothing.
+    """⭐ P1 (review): a fresh re-run attempt is `queued` with a NULL `run_started_at`,
+    and `created_at` never moves on a rerun — so ageing the attempt from the run's
+    creation returns ATTEMPT 1's age, and the 1200 s floor is already spent the instant
+    the fresh attempt exists. The run is then declared "no verdict will arrive",
+    cancelled, re-run AGAIN, and escalated EXHAUSTED for a run that was only waiting
+    for a slot — the exact failure `_zero_job_stalled` documents it prevents, and
+    the state #9115 says must be repaired by nothing.
 
     Discriminating: pre-fix `attempt_age_seconds` falls back to `created_at` here, so
     this run is named, cancelled and re-run.
@@ -2779,94 +2339,15 @@ def test_a_refused_cancel_does_not_spend_the_rerun(monkeypatch):
     ⭐ P2 (review): the stub GRANTED the cancel, so the `returncode != 0` branch this
     test is named for was never entered (deleting the guard left it green), and the
     un-patched `_sleep` made the failed settle loop cost 9 real seconds per run.
-
-    ⭐ P2 #10641 review: the state MOVED. A non-zero exit here is the API ANSWERING —
-    `403 Resource not accessible by integration` from a token without `actions: write`,
-    or an org policy. Folding that into `deferred` ("nothing was changed") reported a
-    repair this credential cannot perform as a discharged window, so the scheduled run
-    exited 0, coverage said the window was covered, and the local actor — the credential
-    that COULD perform it — was never engaged. It is `denied` now, which escalates.
-
-    ⛔ `denied`, NOT `failed`: #10763 landed the SAME distinction on main while this
-    branch was open, from the other end (it anchored a `_CANCEL_DENIED_RE` on GitHub's
-    permission wording so a rate-limited 403 stays a deferral). Both fixes agree on the
-    behaviour that matters — a readable permission refusal must escalate — and this
-    rebase keeps that fix's STATE NAME and its narrower anchor rather than replacing
-    them, because the anchor is what keeps the secondary rate limiter's own 403 out of
-    the escalation path.
     """
     monkeypatch.setattr(R, "gh_json", _api())
     monkeypatch.setattr(R, "_sleep",
                         lambda s: pytest.fail("a refused cancel has no settle loop to sleep in"))
     verbs: list[str] = []
-    # ⛔ A NEUTRAL stderr, deliberately: this test is named for the plain transient
-    # refusal, and `deferred` is its state. The permission case has its own test
-    # (`test_a_PERMISSION_denied_cancel_is_TERMINAL_and_never_a_deferral`) with the
-    # GitHub 403 wording, and a rate-limited 403 has a third — with a permission
-    # string here this test asserted `denied` too and pinned nothing of its own
-    # (#10641 review P2).
-    monkeypatch.setattr(R, "_run", _verbs(verbs, cancel_rc=1,
-                                           cancel_stderr="gh: Server Error (HTTP 502)"))
-    assert R._rerun("o/r", run(1, "ci.yml", "pending"), 1,
-                    expected_head="a" * 40) == "deferred", (
-        "an unclassifiable refusal MAY be a blip: it stays a skip, not a terminal "
-        "credential failure — escalating every blip is the over-reporting `deferred` "
-        "was introduced to stop")
-    assert verbs == ["cancel"], "no rerun may be issued after a refused cancel"
-
-
-def test_a_cancel_post_whose_answer_was_lost_is_not_a_skip(monkeypatch):
-    """⭐ P2 #10641 review: a POST TIMEOUT is UNKNOWN EFFECT, not "nothing changed".
-
-    `_run` kills the child on expiry (`timeout=120`), and a killed `gh` may already have
-    had its request applied — the server's ANSWER is what was lost, not the act. The
-    post-POST states are the ones that must not read as "nothing was changed", yet this
-    path answered `refused` → `deferred`, whose record carried no effect key at all.
-
-    Discriminating: pre-fix this returns `deferred` (indistinguishable from the
-    pre-POST `no_budget` skip), and a rerun is issued off a cancel that may have landed.
-    """
-    monkeypatch.setattr(R, "gh_json", _api())
-    monkeypatch.setattr(R, "_sleep", lambda s: pytest.fail("no settle loop without a POST answer"))
-    verbs: list[str] = []
-
-    def fake(argv, **_kw):
-        verb = argv[-1].rsplit("/", 1)[-1]
-        verbs.append(verb)
-        if verb == "cancel":
-            raise subprocess.TimeoutExpired(cmd=argv, timeout=120)
-        return _Done(0)
-
-    monkeypatch.setattr(R, "_run", fake)
-    assert R._rerun("o/r", run(1, "ci.yml", "pending"), 1,
-                    expected_head="a" * 40) == "cancel_unknown", (
-        "the POST was sent and the answer was lost — the effect is UNKNOWN")
-    assert verbs == ["cancel"], (
-        "a rerun issued off a cancel that may have landed is refused 'already running'")
-
-
-def test_a_cancel_post_that_never_left_the_process_is_still_a_deferral(monkeypatch):
-    """The other half of the split: `gh` could not be STARTED, so NOTHING was changed.
-
-    `OSError` is raised before any request is made (a missing/unrunnable binary), so
-    "nothing was changed" is TRUE and the deferral is correct — this must not be folded
-    into the unknown-effect state, which would suppress a legitimate retry's record.
-    """
-    monkeypatch.setattr(R, "gh_json", _api())
-    monkeypatch.setattr(R, "_sleep", lambda s: pytest.fail("no settle loop without a POST"))
-    verbs: list[str] = []
-
-    def fake(argv, **_kw):
-        verb = argv[-1].rsplit("/", 1)[-1]
-        verbs.append(verb)
-        if verb == "cancel":
-            raise FileNotFoundError("gh")
-        return _Done(0)
-
-    monkeypatch.setattr(R, "_run", fake)
+    monkeypatch.setattr(R, "_run", _verbs(verbs, cancel_rc=1))
     assert R._rerun("o/r", run(1, "ci.yml", "pending"), 1,
                     expected_head="a" * 40) == "deferred"
-    assert verbs == ["cancel"]
+    assert verbs == ["cancel"], "no rerun may be issued after a refused cancel"
 
 
 def test_a_PERMISSION_denied_cancel_is_TERMINAL_and_never_a_deferral(monkeypatch):
@@ -2945,68 +2426,19 @@ def test_a_denied_cancel_ESCALATES_and_is_named_in_the_record(monkeypatch):
 
 
 def test_a_cancel_that_never_settles_is_not_followed_by_a_rerun(monkeypatch):
-    """The settle wait is bounded, and an UNOBSERVED settle is SKIPPED, not guessed.
+    """The settle wait is bounded, and an unsettled run is SKIPPED, not guessed.
 
-    ⭐ P2 (review): the cancel POST was ACCEPTED, so the run IS cancelled and gets no
-    replacement attempt — the state is `cancel_unobserved` ('the cancel landed, the
-    rerun did not'), NOT `deferred` ('nothing was changed'). It is still a SKIP: an
-    observation that never landed is not "a PR needs a repair this credential cannot
-    perform", and the next window re-runs the now-cancelled run as the next attempt.
+    ⭐ P2 (review): 'unsettled' used to fall through to 'failed', which `report`
+    escalates to exit 1 — "a PR needs a repair this credential cannot perform". An
+    observation that never landed is a deferral to the next window.
     """
     monkeypatch.setattr(R, "_sleep", lambda s: None)
     verbs: list[str] = []
     monkeypatch.setattr(R, "_run", _verbs(verbs))
     monkeypatch.setattr(R, "gh_json", _api(settle="in_progress"))
     assert R._rerun("o/r", run(1, "ci.yml", "pending"), 1,
-                    expected_head="a" * 40) == "cancel_unobserved"
-    assert verbs == ["cancel"], "an unobserved settle must not be re-run blindly"
-
-
-def test_a_post_cancel_budget_exhaustion_is_not_the_pre_cancel_skip(monkeypatch):
-    """⭐ P2 (review): `no_budget` was ONE state with two opposite meanings.
-
-    Checked BEFORE the POST it means nothing was cancelled; reached INSIDE the settle
-    loop (the budget can be spent by a read the loop itself awaited) it means the cancel
-    ALREADY LANDED and only the observation ran out. `_cancel` answered 'no_budget' for
-    both, so the caller could not tell a pass that changed nothing from one that had
-    just cancelled a run and left it with no replacement attempt.
-
-    Discriminating: pre-fix this returns 'no_budget', indistinguishable from the
-    pre-POST skip — and the poll count below is what makes the IN-LOOP branch itself
-    load-bearing, because both it and the loop fallthrough answer 'cancel_unobserved'.
-    """
-    monkeypatch.setattr(R, "_sleep", lambda s: None)
-    verbs: list[str] = []
-    monkeypatch.setattr(R, "_run", _verbs(verbs))
-    budget = R.CANCEL_SETTLE_PASS_BUDGET_S
-    # Spend the remainder on the FIRST settle poll, so the loop's own budget check trips
-    # on the next iteration — AFTER the cancel POST has been accepted.
-    monkeypatch.setattr(R, "_CANCEL_SETTLE_SPENT_S", budget - 0.5)
-    seen = {"runs": 0}  # the pre-act re-measurement, then one read per settle poll
-
-    def fake(a, **_kw):
-        path = a[-1] if a else ""
-        if a[:1] == ["pr"]:
-            return {"headRefOid": "a" * 40}
-        if "jobs" in path:
-            return {"total_count": 0}
-        seen["runs"] += 1
-        if seen["runs"] > 1:
-            # A read INSIDE the settle loop is slow enough to spend the pass's remaining
-            # budget — real wall clock, which is what `_cancel` compares against. It is
-            # keyed on the PRE-ACT read's count, not on the argv shape: every `gh_json`
-            # call here passes the API path as the LAST element, so a predicate on
-            # `a[-2]` (always the literal "api") can never fire.
-            R._CANCEL_SETTLE_SPENT_S = budget + 1.0
-        return {"status": "queued", "run_attempt": 1}
-
-    monkeypatch.setattr(R, "gh_json", fake)
-    assert R._cancel("o/r", run(1, "ci.yml", "pending")) == "cancel_unobserved"
-    assert verbs == ["cancel"], "the POST was issued before the budget ran out"
-    assert seen["runs"] == 2, (
-        "the in-loop budget check must STOP the poll: one pre-act read plus exactly one "
-        f"settle read, not all {R._CANCEL_SETTLE_POLLS} polls falling through to the "
-        "same state")
+                    expected_head="a" * 40) == "deferred"
+    assert verbs == ["cancel"], "an unsettled run must not be re-run blindly"
 
 
 def test_a_run_whose_jobs_appear_before_the_cancel_is_never_cancelled(monkeypatch):
@@ -3067,9 +2499,8 @@ def test_a_peer_rerun_inside_the_pass_window_is_never_cancelled(monkeypatch):
     """⭐ P2 (review): the act-time re-measurement re-read the run's STATUS and JOB
     COUNT but DISCARDED its attempt identity.
 
-    A fresh re-run attempt is `queued` with `0` jobs — identical to the stalled run on
-    the two fields the act-time gate originally compared, so it was
-    byte-indistinguishable from the stall the classification was made from. So a peer (or
+    A fresh re-run attempt is `queued`, has `0` jobs and a null `run_started_at` —
+    byte-identical to the stalled run the classification was made from. So a peer (or
     a human) re-running the same run id between `build_plans` and `report` acting was
     cancelled and re-run AGAIN: a normally-progressing attempt destroyed, a second
     attempt of the budget spent, and with `max_attempts = 3` the context escalated
@@ -3204,12 +2635,10 @@ def test_a_cancel_skipped_for_want_of_budget_defers_the_rerun(monkeypatch):
     """⭐ P2 (review): the half the suite never covered — `_cancel` → `_rerun`.
 
     `_cancel`'s own contract calls 'no_budget' a SKIP (*"Skip; the next window has a
-    fresh budget"*), but `_rerun` folded it — with the unobserved-settle state, 'refused'
-    and 'unreadable' — into 'failed'. With the shipped budgets a pass whose settles run to
+    fresh budget"*), but `_rerun` folded it — with 'unsettled', 'refused' and
+    'unreadable' — into 'failed'. With the shipped budgets a pass whose settles run to
     their bound exhausts the cancel budget on its SECOND run, so every later run was
-    reported as needing a human. The pre-POST skip is `deferred`; the post-POST one is
-    `cancel_unobserved`, which the record names as an ACCEPTED cancel whose effect was
-    never observed.
+    reported as needing a human.
     """
     monkeypatch.setattr(R, "_sleep", lambda s: pytest.fail("must not sleep"))
     verbs: list[str] = []
@@ -3235,100 +2664,7 @@ def test_a_deferred_repair_is_recorded_as_a_skip_and_does_not_escalate(monkeypat
     code, recs = R.report([plan], apply=True, trigger_ok=True, repo="o/r", cooldown_min=60)
     entry = recs[0]["rerun"][0]
     assert entry["ok"] is False and entry["deferred"] is True
-    assert "cancel_accepted" not in entry and "cancel_landed" not in entry, (
-        "a deferral cancels NOTHING — the record must not claim a cancel was even "
-        "accepted")
     assert code == 0, "a skip must stay a skip: nothing was done, so nothing escalated"
-
-
-def test_a_cancel_accepted_but_unobserved_is_recorded_as_ACCEPTED_not_LANDED(monkeypatch):
-    """⭐ P1 (review): an ACCEPTED cancel POST is not an APPLIED cancel.
-
-    `deferred` was documented as "nothing was changed", which is FALSE for a cancel whose
-    POST was accepted and whose settle was never observed; but the opposite claim is not
-    measured either. A 2xx means the request was ACCEPTED — GitHub documents that a
-    cancel can simply not take effect, which is why `/force-cancel` exists for a run "not
-    responding to POST …/cancel" — so `completed` is the only evidence of a landed
-    cancel, and this state exists precisely because that read never succeeded.
-
-    The record therefore carries `cancel_accepted` (what was measured) and NEVER
-    `cancel_landed` (what was not), and `skipped` rather than `deferred` so the entry
-    never reads as a clean no-op. Still a SKIP: bounded by the next window, which acts on
-    what is then true.
-
-    Discriminating: pre-fix there is no such state, so the entry carries `deferred` with
-    no effect key and — because the escalation predicate only excludes `deferred` by name
-    — a plain `cancel_unobserved` escalates to exit 1.
-    """
-    monkeypatch.setattr(R, "_rerun", lambda *a, **k: "cancel_unobserved")
-    plan = _plan(absent=["python-ci-gate"],
-                 rerun=[run(41523739094, "python-ci.yml", "pending")])
-    code, recs = R.report([plan], apply=True, trigger_ok=True, repo="o/r", cooldown_min=60)
-    entry = recs[0]["rerun"][0]
-    assert entry["ok"] is False
-    assert entry["cancel_accepted"] is True, (
-        "the POST was ACCEPTED — the record must say that, and only that")
-    assert "cancel_landed" not in entry, (
-        "no `completed` was ever read, so nothing measured the cancel as APPLIED")
-    assert entry["skipped"] is True, (
-        "still a SKIP: the next window owns the replacement attempt")
-    assert "deferred" not in entry, (
-        "`deferred` means the pass changed NOTHING — a destructive act was requested here")
-    assert code == 0, "an accepted cancel is bounded — this is not 'needs a human'"
-
-
-def test_a_cancel_whose_effect_is_unknown_is_recorded_as_neither(monkeypatch):
-    """⭐ P2 #10641 review: the third state — the POST was SENT and the ANSWER was lost.
-
-    Neither claim is true: the run MAY be cancelled (`cancel_accepted` would overstate it
-    too: no answer to the POST was ever read)
-    and something MAY have changed (`deferred`'s bare form would understate it). Still a
-    SKIP — a lost answer is not "a repair this credential cannot perform", and the next
-    window re-reads the run and acts on what is then true.
-
-    Discriminating: pre-fix the timeout path answered `refused` → `deferred`, so the
-    entry carries no effect key at all and reads as a clean no-op.
-    """
-    monkeypatch.setattr(R, "_rerun", lambda *a, **k: "cancel_unknown")
-    plan = _plan(absent=["python-ci-gate"],
-                 rerun=[run(41523739094, "python-ci.yml", "pending")])
-    code, recs = R.report([plan], apply=True, trigger_ok=True, repo="o/r", cooldown_min=60)
-    entry = recs[0]["rerun"][0]
-    assert entry["ok"] is False
-    assert entry["cancel_effect_unknown"] is True, (
-        "the POST was sent and the answer was lost — the record must say the effect is unknown")
-    assert "cancel_landed" not in entry and "cancel_accepted" not in entry, (
-        "the cancel MAY have landed — claiming it did is the same error in the other "
-        "direction")
-    assert entry["skipped"] is True and "deferred" not in entry, (
-        "`deferred` claims nothing was changed, which is not known here either")
-    assert code == 0, "unknown is bounded by the next window — this is not 'needs a human'"
-
-
-def test_a_cancel_the_credential_cannot_perform_escalates_the_window(monkeypatch):
-    """⭐ P2 #10641 review — the WHOLE path, not a stubbed `_rerun` return.
-
-    `_cancel` → `_rerun` → `report` for an API that ANSWERS with a refusal (a `403` from
-    a token without `actions: write`). The workflow's exit code is documented as
-    "non-zero when a PR needs a repair this credential cannot perform. That is the signal
-    the local fallback keys on" — so this must reach exit 1.
-
-    Discriminating: pre-fix the whole chain produced `deferred` and exit 0, so every
-    30-minute window reported the window as covered while the cancel was never attempted
-    by anyone — the one outcome the local fallback exists to prevent.
-    """
-    monkeypatch.setattr(R, "gh_json", _api())
-    monkeypatch.setattr(R, "_sleep", lambda s: pytest.fail("a refused cancel never settles"))
-    monkeypatch.setattr(R, "_run", _verbs([], cancel_rc=1,
-                                           cancel_stderr="Resource not accessible by integration"))
-    plan = _plan(absent=["python-ci-gate"], head="a" * 40,
-                 rerun=[run(41523739094, "python-ci.yml", "pending")])
-    code, recs = R.report([plan], apply=True, trigger_ok=True, repo="o/r", cooldown_min=60)
-    entry = recs[0]["rerun"][0]
-    assert entry["ok"] is False and "deferred" not in entry, (
-        "the API answered — this is not a deferral")
-    assert code == 1, (
-        "a repair this credential cannot perform must engage the local fallback")
 
 
 # ── 16. the two per-pass resets and the `no_verdict` record key are load-bearing ──
