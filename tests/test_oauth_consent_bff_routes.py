@@ -1696,6 +1696,96 @@ def _key_from(location: str | None) -> str:
     return keys[0]
 
 
+def test_the_AS_bounce_key_is_the_key_start_records_and_the_flow_completes() -> None:
+    """The JOINT seam: the bounce URL the AS actually emits, fed to the route that must adopt it.
+
+    The two halves are pinned separately (the bounce carries a key; `start` adopts a presented
+    key), and pinned separately they can both be green while the seam between them is broken —
+    measured: with the AS append deleted, the adoption test still PASSED, because `presentedKey ||
+    newAttemptKey()` predates it. What a cold visitor actually executes is `consent_bounce_url` →
+    `start` → sign-in → `start`, and only a test that crosses the boundary can red when the key
+    is lost or shadowed on the way in.
+    """
+    from tortoise.oauth import consent_bounce_url
+
+    emitted = consent_bounce_url("https://app.premiselabs.co", urllib.parse.urlencode(_PARAMS))
+    inner_url = urllib.parse.parse_qs(urllib.parse.urlsplit(emitted).query)["next"][0]
+    inner_q = urllib.parse.parse_qs(urllib.parse.urlsplit(inner_url).query, keep_blank_values=True)
+    as_key = inner_q["attempt_key"][0]
+    assert len(inner_q["attempt_key"]) == 1, inner_q["attempt_key"]
+
+    # Exactly the params the bounce hands the app, nothing added by this test.
+    params = {k: v[0] for k, v in inner_q.items()}
+    for name, value in _PARAMS.items():
+        assert params[name] == value, (name, params[name], value)
+
+    cold = _run("start_cold_browser", params=params)
+    assert cold["status"] == 302, cold
+    assert _key_from(cold["location"]) == as_key, (
+        "start replaced the AS-minted key, so the browser and the row now disagree — every later "
+        "leg of this flow is the #10487 dead end")
+
+    back = _run("start_signed_in", seededAttempts=cold["attempts"],
+                sessionUserId="user-1", params=params)
+    assert back["status"] == 302, f"the cold visitor's own return leg was refused: {back}"
+    assert "api.premiselabs.co/oauth/authorize" in (back["location"] or ""), back["location"]
+    advance_key = urllib.parse.parse_qs(
+        urllib.parse.urlsplit(back["location"]).query).get("attempt_key", [""])[0]
+    assert advance_key == as_key, (
+        "the advance target lost the AS-minted key, so the consent page cannot mint for this flow")
+    assert back["attempts"][0]["user_id"] == "user-1"
+
+
+def test_start_ADOPTS_a_presented_attempt_key_so_a_cold_flow_can_return() -> None:
+    """#10487: the key must belong to the FLOW, not to one URL the route happened to emit.
+
+    Measured in production: a visitor who signed in during the flow came back through the AS
+    bounce's own return target — which carried no `attempt_key`, because the key did not exist
+    until `start` invented one — and was refused `403 flow_not_yours`. The row was already
+    claimed by a key nobody could present. The AS now mints the key on the bounce leg (it is the
+    only leg where none exists yet), and this pins the half that makes that work: a PRESENTED key
+    is ADOPTED on the insert rather than replaced by a freshly generated one.
+
+    Non-vacuity: this is a PIN, not the fix's proof. `presentedKey || newAttemptKey()` predates
+    this PR — `website/` is not in its diff at all — so this test passes on the PRE-FIX tree. Its
+    sensitivity is to the browser-side code the harness executes (`start.ts`, the
+    `consent-bridge.ts` store, and the `_shared/auth` modules they import) — given as a CATEGORY
+    on purpose, because two earlier cuts of this sentence named a finite set and each was
+    falsified by the next file measured. The fix's proof is
+    `test_the_AS_bounce_key_is_the_key_start_records_and_the_flow_completes` above: it crosses the
+    AS→app seam and `KeyError`s on `attempt_key` without the AS mint (measured: reverting
+    `consent_bounce_url` to `origin/main`'s no-mint form reds that test and leaves this one green).
+
+    ⛔ NO PYTHON IN THAT LIST, deliberately: `_run` spawns ONE process (`node driver.mjs`), and the
+    TS modules call no Python, so `tortoise/consent_token.py` drift cannot red THIS test. An
+    earlier cut of this paragraph claimed "the Python verifier they call" and that was false on
+    all three of its own terms — not browser-side, not called by them, not executed here. The
+    cross-language half is pinned by the arms that actually import the verifier, not here.
+    """
+    presented = "ak-as-minted-0123456789abcdef"
+    first = _run("start_cold_browser", params=dict(_PARAMS, attempt_key=presented))
+    assert first["status"] == 302, first
+    assert _key_from(first["location"]) == presented, (
+        "the route INVENTED a key while the caller already held one — the row and the browser "
+        "now disagree, and every later leg of this flow is a 403 waiting to happen")
+    assert first["attempts"][0]["user_id"] is None
+    assert first["attempts"][0]["attempt_key_hash"], "the attempt was recorded with no key"
+
+    # The sign-in return leg, carrying the SAME key, fills the owner and advances — this is the
+    # exact sequence a cold visitor executes, and the one that used to dead-end.
+    back = _run("start_signed_in", seededAttempts=first["attempts"],
+                sessionUserId="user-1", params=dict(_PARAMS, attempt_key=presented))
+    assert back["status"] == 302, f"the cold visitor's own return leg was refused: {back}"
+    assert "api.premiselabs.co/oauth/authorize" in (back["location"] or ""), back["location"]
+    assert back["attempts"][0]["user_id"] == "user-1"
+
+    # …and the control is untouched: a DIFFERENT identity still cannot walk in on a guess.
+    foreign = _run("start_signed_in", seededAttempts=back["attempts"],
+                   sessionUserId="user-2", params=dict(_PARAMS, attempt_key="ak-guessed"))
+    assert foreign["status"] == 403, foreign
+    assert foreign["body"]["reason"] == "flow_not_yours", foreign["body"]
+
+
 def test_the_ownerless_window_is_closed_by_the_attempt_key() -> None:
     """#10208: the flow belongs to a BROWSER, not to whoever knows the `state`.
 

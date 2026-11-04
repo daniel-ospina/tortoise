@@ -182,7 +182,7 @@ def test_docs_scanning_gates_stay_in_tier1():
     )
     assert "test_v4_declared_mechanisms.py" in tier1, (
         "#9778 review (P1): the declared-mechanism MEMBERSHIP gate derives the "
-        "declared set from the `<!-- v4-mechanism: <id> -->` markers in "
+        "declared set from the `<!-- v4-mechanism: <id> state: <state> -->` markers in "
         "docs/architecture/**/*.md — `docs/` is in NON_PYTHON_PREFIXES, so a "
         "docs-only diff runs tier1 only (EXTRACTOR-V4-ARCHITECTURE.md takes "
         "the early return, STORAGE-ARCHITECTURE.md selects `onboarding`, and "
@@ -4743,6 +4743,35 @@ def test_work_claim_tool_change_fails_closed_to_full():
     # failing (measured: `tools/work_claim_extra.py` → surfaces=[], full=False, tier-1).
     # The store seam is the half whose breakage must never ship unreviewed.
     for sibling in ("tools/work_claim_store.py", "tools/work_claim_extra.py"):
+        r = _sel([sibling])
+        assert r["full"] is True, (sibling, r)
+        assert r["test_files"] == "ALL", (sibling, r)
+        assert "core" in r["surfaces"], (sibling, r)
+
+
+def test_attest_census_tool_change_fails_closed_to_full():
+    # #10687: tools/attest_census.py owns tests/test_attest_census.py — the hermetic
+    # arms that pin the fabricate-vs-repair boundary (a proof may be RE-POSTED only from
+    # a record that exists, declares this repo, binds THIS head byte-for-byte, carries a
+    # clean verdict with artifact-shaped evidence and is not `mint: carried`). Same
+    # #3261/#4256/#5052 silent-drop class as the carve-outs above: `tools/` is a flat
+    # NON_PYTHON_PREFIXES entry, so without this TOOL_CARVEOUTS entry a tool-only change
+    # came back `changed=[]`, select() took the docs-only early return (surfaces=[],
+    # tier-1 smoke only) — which BYPASSES the `if not matched: matched.add("core")`
+    # fallback — so not one arm ran on the single file that decides whether a review
+    # claim is laundered. Registering tests/test_attest_census.py under `core` in
+    # ci-surfaces.yml does NOT cover this: it applies to edits of the TEST file, not of
+    # the tool (measured: the tool-only diff came back surfaces=[], full=False).
+    # Mutation check: removing the TOOL_CARVEOUTS entry filters the path out (docs-only
+    # early return), failing every assert below.
+    r = _sel(["tools/attest_census.py"])
+    assert r["full"] is True, r
+    assert r["test_files"] == "ALL", r
+    assert "core" in r["surfaces"], r
+    # ... and the carve-out is a PREFIX, not one exact filename, so a rename or a split
+    # cannot re-open the same drop with nothing failing (the shape the work_claim prefix
+    # arm was added for).
+    for sibling in ("tools/attest_census_extra.py", "tools/attest_census_store.py"):
         r = _sel([sibling])
         assert r["full"] is True, (sibling, r)
         assert r["test_files"] == "ALL", (sibling, r)
