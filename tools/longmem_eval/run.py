@@ -3010,8 +3010,9 @@ INGEST_CACHE_CODE_FILES = (
 #: Env knobs whose values change the EXTRACTION OUTPUT while leaving code
 #: + model untouched (P1 #2607-review-style gap on the seam): the prompt
 #: mode toggle, the S2/S4 label-order shuffle + its seed, the classify-
-#: later pipeline switch, the S2.2 VET gate, and the stage token caps/
-#: truncation. ANY of them
+#: later pipeline switch, the S2.2 VET gate, the #4899 value gate, the
+#: typed-decision seam (which arms BOTH S2.2 and the S2.3 tail), and the
+#: stage token caps/truncation. ANY of them
 #: toggled between QA cycles must invalidate cached ingests — a silent
 #: reuse across modes would corrupt the very A/B this seam exists for.
 INGEST_CACHE_PROMPT_ENVS: tuple[str, ...] = (
@@ -3020,6 +3021,9 @@ INGEST_CACHE_PROMPT_ENVS: tuple[str, ...] = (
     "TORTOISE_LABEL_ORDER_SEED",       # the shuffle seed (with the above)
     "TORTOISE_CLASSIFY_LATER",         # classify-now ↔ classify-later pipeline
     "TORTOISE_VET",                    # S2.2 VET gate (#5005) — DISCARDs items
+    "TORTOISE_VALUE_GATE",            # #4899 mechanical identifier-only DISCARDs
+    "TORTOISE_S2_DECISION_SEAM",       # #5087 the typed-decision seam — arms S2.2
+                                       # (it is the arbiter) AND the S2.3 tail
     "TORTOISE_EXTRACTOR_MAX_TOKENS",   # stage output caps / truncation
     "TORTOISE_EXTRACTOR_ESCALATION_TOKENS",  # escalation cap
 )

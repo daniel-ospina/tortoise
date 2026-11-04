@@ -64,9 +64,10 @@ shape of this module emitted a ``NOOP`` for each degraded candidate; that is a
 keeping what a working predicate had dropped, and erasing the rule id that
 explains it. Omitting the verdict instead leaves every candidate exactly where
 the gate put it, and the failure is recorded once, by name, in
-``stats["seam"]`` — the gate's ``stats``, which is what reaches the artifact as
-``result["vet"][*]["stats"]["seam"]``. Nothing in this module can emit
-``DISCARD`` without a
+``stats["seam"]`` (the key :func:`vet_arbiter` reports and
+``vet_gate.vet_candidates`` folds into its own stats) — which is what reaches the
+artifact as ``result["vet"][*]["stats"]["seam"]``. Nothing in this module
+can emit ``DISCARD`` without a
 parsed, in-schema, in-band answer — *a wrong keep is noise; a wrong drop is
 memory loss* (§S2.2).
 
@@ -496,10 +497,11 @@ def vet_verdicts(
     something ``vet_gate`` applies over the mechanical ``#4899`` pass, so a
     degraded ``NOOP`` would rescind an identifier-only DISCARD. The failure is
     recorded instead in ``stats["degraded"]`` (item id → what went wrong, with
-    the failing question named), which :func:`vet_arbiter` carries out under
-    ``seam`` and :func:`vet_gate.vet_candidates` folds into the GATE's
-    ``stats`` — the artifact path is ``result["vet"][*]["stats"]["seam"]``, not
-    a ``batch`` key (the arbiter returns an empty ``batch``: no ``RENARRATE``).
+    the failing question named), which :func:`vet_arbiter` reports under its
+    ``seam`` key and :func:`vet_gate.vet_candidates` folds into the GATE's
+    ``stats["seam"]`` — the artifact path is ``result["vet"][*]["stats"]["seam"]``,
+    not a ``batch`` key (the arbiter returns an empty ``batch``: no
+    ``RENARRATE``).
     """
     stats: dict = {
         "prompt": VET_PROMPT,

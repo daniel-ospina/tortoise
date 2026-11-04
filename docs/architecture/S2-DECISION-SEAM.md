@@ -120,7 +120,9 @@ Each is a **recorded decision**, not an omission:
 
 Both rows carry a **per-item** `stats["seam"]["degraded"]` map (item id → what
 went wrong, with the failing question named), on both sides — so *which* items an
-outage left unassigned is readable, not just *how many*. Where the two records
+outage left unassigned is readable, not just *how many*. An item with **no offered
+set at all** is a third, different reading (`stats["seam"]["skipped_no_offer"]`):
+nothing was offered is not the capability being down. Where the two records
 land in the run: `result["vet"][*]["stats"]["seam"]` for S2.2 (the gate's own
 `stats`; the arbiter returns an empty `batch`, so there is no `batch["seam"]`)
 and `result["classify_later"]["s2"]["seam"]` for S2.3.

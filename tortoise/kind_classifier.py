@@ -577,13 +577,15 @@ class KindClassifier:
         ``prompt`` (which prompt version answered), ``model`` (the pin that
         answered), ``unavailable`` (how many batches the capability never
         answered, so an armed-but-keyless run is distinguishable from "no item
-        reached the tail"), ``items``, ``degraded`` (per item: which items the
-        seam could not assign from a parsed, in-schema answer, and the failing
+        reached the tail"), ``skipped_no_offer`` (items with no offered set — a
+        third, different reading: nothing was offered is NOT the capability
+        being down), ``items``, ``degraded`` (per item: which items the seam
+        could not assign from a parsed, in-schema answer, and the failing
         question — the same per-item shape S2.2 records, copied from the seam's
-        own ``degraded`` key rather than re-derived) and ``rejected`` (the
-        failing question names — the seam reports them as ``schema_rejects``,
-        re-keyed here to the name the two gates' record uses). "Endpoint down"
-        and "nothing was offered" would otherwise be the same reading.
+        own ``degraded`` key rather than re-derived, and a custom injected
+        decider's map merged in the same way) and ``rejected`` (the failing
+        question names — the seam reports them as ``schema_rejects``, re-keyed
+        here to the name the two gates' record uses).
 
         The seam re-chunks at its own :data:`s2_decision_seam.BATCH_MAX` (40,
         the validated shape), so a classifier batch of up to 50 can become two
@@ -593,7 +595,7 @@ class KindClassifier:
         seam = stats.setdefault("seam", {"assignments": 0, "calls": 0,
                                          "cost_usd": 0.0, "rejected": [],
                                          "items": 0, "unavailable": 0,
-                                         "degraded": {}})
+                                         "skipped_no_offer": 0, "degraded": {}})
         try:
             decided, seam_stats = self.tail_decider([
                 (iid, str(item.get("text", "")), [k for k, _s in top])
@@ -628,8 +630,18 @@ class KindClassifier:
             unavailable = seam_stats.get("unavailable")
             if isinstance(unavailable, int) and not isinstance(unavailable, bool):
                 seam["unavailable"] = seam.get("unavailable", 0) + unavailable
+            skipped = seam_stats.get("skipped_no_offer")
+            if isinstance(skipped, int) and not isinstance(skipped, bool):
+                # "nothing was offered" is NOT "the capability was down", and
+                # the two must not be the same reading in the artifact.
+                seam["skipped_no_offer"] = seam.get("skipped_no_offer", 0) + skipped
             degraded = seam_stats.get("degraded")
             if isinstance(degraded, dict):
+                # Per item, what went wrong: the built-in seam reports it from
+                # `classify_tail` (item id → reason, failing question named) on
+                # both of its failure modes, and a custom injected decider's map
+                # is merged the same way. `unavailable` (per batch) and
+                # `rejected` (per question) are the aggregate readings beside it.
                 seam["degraded"].update({str(k): str(v) for k, v in degraded.items()})
             rejected = seam_stats.get("schema_rejects")
             if isinstance(rejected, list):
