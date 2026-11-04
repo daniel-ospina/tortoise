@@ -74,6 +74,14 @@ Live use::
     python tools/ready_for_owner.py 10962 --json
     python tools/ready_for_owner.py 10962 --repo daniel-ospina/tortoise
 
+⛔ ONE RESIDUAL IN THE GATE READ, NAMED RATHER THAN HIDDEN: the required-context read
+keeps each `checks[].context` NAME and drops its `app_id`, and `ci_verdict`'s
+``GroupVerdict`` carries the app SLUG (not its numeric id), so a context that protection
+scopes to one app is satisfied by a same-named ``success`` from another. Inert in this repo
+— GitHub Actions is the only publisher of all seven contexts — and closing it needs an
+``app.id`` on ``GroupVerdict``, i.e. a change to the ONE check-run reading (#5042) rather
+than a second grouping here.
+
 ⛔ ONE KNOWN LIMITATION, NAMED RATHER THAN HIDDEN: condition 3 asks
 ``record-review.sh --check-carry``, and the review RECORD is per-machine
 (``$HOME/.pi/agent/reviews``). A review minted on another box is therefore invisible to
@@ -220,6 +228,24 @@ FINDINGS_DECLARED_RE = re.compile(
 #: this gate's own rule that a `[P3]` note does not block.
 ANY_SEVERITY_TOKEN_RE = re.compile(r"(?i)\bP([0-3])\b")
 ZERO_BLOCKING_RE = re.compile(r"(?i)\b0\s+blocking\b|\bno\s+blocking\b")
+#: The ISSUE block's SIBLING fields. A real finding always carries at least one of these
+#: next to its severity; bare prose that happens to say "severity: P1" does not. Used to
+#: tell a DECLARATION from a sentence ABOUT a past finding — round 8 measured 5 of 6 natural
+#: CLEAN phrasings blocking without this discriminator.
+#:
+#: ⛔ `outcome:` is NOT a sibling: it is the VERDICT header, so treating it as one made
+#: `**Outcome: CLEAN.** The one severity: P2 note from round 2 is fixed` block. The ISSUE
+#: block's own `outcome:` field is covered by the line-start arm, because the block's
+#: `severity:` is on its own line.
+SIBLING_FIELD_RE = re.compile(
+    r"(?i)(?:\b(?:check_type|origin|location|description|suggestion)\s*:"
+    r"|\bfile\s*:\s*\S)"
+)
+#: A severity declaration in FIELD position: its own line (the `ISSUE:` block's indented
+#: `severity: P1`), optionally bulleted, bolded, quoted or backticked.
+SEVERITY_LINE_START_RE = re.compile(
+    r"(?im)^\s*(?:[-*>]\s*)*\W{0,2}`?severity`?\s*\**\s*:?\s*\**\s*P[0-2]\b"
+)
 
 #: A FORMAL change request is a blocking record even when the review body is empty — the
 #: findings may live entirely in inline comments, and an unresolved `CHANGES_REQUESTED`
@@ -383,6 +409,9 @@ class Probe:
     #: ``open``/``closed`` as GitHub states it, and whether it already merged.
     pr_state: str = "open"
     merged: bool | None = None
+    #: Re-read AFTER every other read: ``True`` still the same head, ``False`` it moved
+    #: mid-read, ``None`` the re-read was unreadable.
+    head_stable: bool | None = True
     #: Set by tests/callers that need a fixed clock; default = now (UTC).
     now: datetime = field(default_factory=lambda: datetime.now(UTC))
 
@@ -639,6 +668,17 @@ def check_exclusions(probe: Probe) -> Check:
             "unreadable",
             unreadable=True,
         )
+    if probe.head_stable is None:
+        return Check(
+            "exclusions",
+            False,
+            "the closing head re-read was unreadable",
+            "unreadable",
+            unreadable=True,
+        )
+    if probe.head_stable is False:
+        reasons.append("head-moved-mid-read")
+        parts.append("the PR head moved during the read")
     if probe.merged is None:
         return Check(
             "exclusions",
@@ -769,17 +809,30 @@ def check_blocking_finding(probe: Probe) -> Check:
             severity = (declared.group(1) or "").upper()
             n = _int_or_none(declared.group(2) or declared.group(3)) or 0
             if severity:
-                blocking = severity in {"P0", "P1", "P2"}
-            else:
-                # A declared COUNT blocks only when the body also declares a blocking
-                # severity — read from the SAME sentence, not assumed from the count.
-                declined = bool(ZERO_BLOCKING_RE.search(text)) or not (
-                    BLOCKING_RE.search(text)
-                    or any(
-                        token in {"0", "1", "2"} for token in ANY_SEVERITY_TOKEN_RE.findall(text)
-                    )
+                # A `severity:` FIELD (ISSUE block, or composed beside a sibling) blocks.
+                # Bare PROSE that mentions a severity does not — `**Outcome: CLEAN.** … the
+                # severity: P1 note from round 2 is fixed` is a clean review ABOUT a past
+                # finding, and 5 of 6 natural clean phrasings blocked before this
+                # discriminator. A real finding always carries the ISSUE block's siblings.
+                blocking = bool(SIBLING_FIELD_RE.search(text)) or bool(
+                    SEVERITY_LINE_START_RE.search(text)
                 )
-                blocking = n > 0 and not declined
+            else:
+                # A declared COUNT: blocked when a blocking severity is declared ANYWHERE in
+                # the body — a P1 cannot be cancelled by a "0 blocking" phrase in the same
+                # paragraph (round 8 measured that regression) — and NOT blocked when every
+                # severity the body names is P3, or it says 0/no blocking.
+                severities = set(ANY_SEVERITY_TOKEN_RE.findall(text))
+                if severities & {"0", "1", "2"}:
+                    blocking = True
+                elif ZERO_BLOCKING_RE.search(text) or (severities and severities <= {"3"}):
+                    blocking = False
+                else:
+                    blocking = n > 0
+            # ⛔ A FORMAL unresolved change request is a blocking record whatever its body
+            # says — the module's own rule for the empty-bodied shape, applied uniformly.
+            if str(item.get("state") or "").upper() == CHANGES_REQUESTED:
+                blocking = True
         elif NON_CLEAN_RE.search(text) or (
             # The recorder's arm (2): loose `not…clean`, suppressed by an explicit
             # `Outcome: clean` — the SAME pairing `record-review.sh` applies, so this is
@@ -926,6 +979,11 @@ class Gh:
     def api(self, endpoint: str) -> Any:
         pages = self.pages(endpoint)
         return pages[0] if len(pages) == 1 else pages
+
+    def api_fresh(self, endpoint: str) -> Any:
+        """Read again, bypassing this run's cache — for the closing head witness."""
+        self._cache.pop("pages:" + endpoint, None)
+        return self.api(endpoint)
 
     def pr(self, number: int) -> Mapping[str, Any]:
         raw = self.api(f"pulls/{number}")
@@ -1484,7 +1542,27 @@ def collect_probe(
     else:
         probe.coverage_raw = probe.touched_raw
     probe.comments, probe.comments_raw = _try(gh, lambda g: _read_comments(g, pr))
+    # ⛔ THE HEAD IS RE-WITNESSED LAST. Conditions 1-2 measured `probe.head`, while condition
+    # 3's recorder evaluates the LIVE head — so a push landing in between would let
+    # `READY-FOR-OWNER(<old head>)` describe a merge target whose gates were never measured.
+    probe.head_stable = _witness_head(gh, pr, head)
     return probe
+
+
+def _witness_head(gh: Gh, pr: int, head: str) -> bool | None:
+    """Is the PR's head STILL ``head`` after everything else was read?"""
+    try:
+        fresh = gh.api_fresh(f"pulls/{pr}")
+    except RateLimited:
+        raise
+    except ReadError:
+        return None
+    if not isinstance(fresh, Mapping):
+        return None
+    live = str((fresh.get("head") or {}).get("sha") or "")
+    if len(live) != 40:
+        return None
+    return live == head
 
 
 def _try(gh: Gh, fn, surface: str = "") -> tuple[Any, str]:
@@ -1588,13 +1666,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         # still printed a traceback and NO verdict line — the very shape the handler exists to
         # make impossible.
         verdict = evaluate(probe)
+        if args.json:
+            payload = json.dumps(verdict.to_dict(), indent=2, sort_keys=True)
+        else:
+            payload = render(verdict)
     except RateLimited as exc:
         # ⛔ The contract is "exactly one of READY-FOR-OWNER / NOT-READY", and a rate limit
         # used to print an EMPTY stdout — a third shape a caller grepping the line could not
         # parse. Every condition is unread, so every condition failed.
         print(f"GH-RATE-LIMITED({exc.endpoint})", file=sys.stderr)
-        pr = args.pr if args.pr is not None else 0
-        print(f"NOT-READY({pr}, failed={','.join(CONDITIONS)})")
+        print(_failure_output(args, "gh-rate-limited"))
         return 1
     except Exception as exc:  # the OUTPUT CONTRACT outranks the exception
         # ⛔ A read that is not a verdict must never become a traceback with NO line. Every
@@ -1602,14 +1683,33 @@ def main(argv: Sequence[str] | None = None) -> int:
         # "exactly one of READY-FOR-OWNER / NOT-READY" true even for a case nobody foresaw
         # (a payload whose `head` is a string rather than an object, a vendor schema change).
         print(f"READY-GATE-ERROR({type(exc).__name__}: {exc})", file=sys.stderr)
-        pr = args.pr if args.pr is not None else 0
-        print(f"NOT-READY({pr}, failed={','.join(CONDITIONS)})")
+        print(_failure_output(args, f"error:{type(exc).__name__}"))
         return 1
-    if args.json:
-        print(json.dumps(verdict.to_dict(), indent=2, sort_keys=True))
-    else:
-        print(render(verdict))
+    print(payload)
     return 0 if verdict.ready else 1
+
+
+def _failure_output(args: argparse.Namespace, reason: str) -> str:
+    """The SAME output shape the caller asked for, on the failure path.
+
+    A `--json` caller used to receive a bare text line here, which is a parse error rather
+    than a verdict — the third-shape problem in its last hiding place.
+    """
+    pr = args.pr if args.pr is not None else 0
+    if getattr(args, "json", False):
+        return json.dumps(
+            {
+                "pr": pr,
+                "head": "",
+                "ready": False,
+                "failed": list(CONDITIONS),
+                "line": f"NOT-READY({pr}, failed={','.join(CONDITIONS)})",
+                "error": reason,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    return f"NOT-READY({pr}, failed={','.join(CONDITIONS)})"
 
 
 def probe_from_dict(data: Mapping[str, Any]) -> Probe:
@@ -1654,6 +1754,7 @@ def probe_from_dict(data: Mapping[str, Any]) -> Probe:
         labels_raw=str(data.get("labels_raw", "")),
         pr_state=str(data.get("pr_state", "open")),
         merged=None if data.get("merged") is None else bool(data["merged"]),
+        head_stable=None if data.get("head_stable") is None else bool(data["head_stable"]),
         tree=data.get("tree"),
         tree_raw=str(data.get("tree_raw", "")),
         groups=parsed_groups,

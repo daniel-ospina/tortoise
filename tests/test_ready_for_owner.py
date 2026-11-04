@@ -104,6 +104,7 @@ def _fixture(**overrides: Any) -> dict[str, Any]:
         "labels": [],
         "pr_state": "open",
         "merged": False,
+        "head_stable": True,
         # 30 minutes before NOW — comfortably past the 15-minute settling bound.
         "head_committed_at": "2026-11-04T11:30:00Z",
         "body": "Refs #10900\n\nA normal PR body.",
@@ -826,6 +827,79 @@ def test_a_count_with_a_declared_blocking_severity_still_blocks() -> None:
     _assert_fails("blocking-finding", "open-blocking-finding", comments=comments)
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        "**Outcome: 2 findings (1 × P1).** No blocking other than the P1 — it is a real open defect.",
+        "**Outcome: 2 findings (0 blocking).**\n[P1] tools/x.py:5 — a real open P1",
+        "Round 1: **Outcome: 2 issues (0 blocking).**\nRound 3: **Outcome: 1 issue (1 × P1).**",
+    ],
+    ids=["p1-with-no-blocking-phrase", "zero-count-plus-p1-line", "history-mixed-counts"],
+)
+def test_a_declared_blocking_severity_outranks_a_no_blocking_phrase(body: str) -> None:
+    """ROUND-8 P2 (false PASS, a regression on d62d856d2): `declined` was computed over the
+    whole body and short-circuited, so a body that declares an open P1 AND says "0 blocking"
+    read NEUTRAL."""
+    comments = [{"id": 150, "created_at": "2026-11-04T11:40:00Z", "kind": "comment", "body": body}]
+    _assert_fails("blocking-finding", "open-blocking-finding", comments=comments)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "**Outcome: CLEAN.** The one severity: P2 note from round 2 is fixed and verified.",
+        "NO ISSUES FOUND — verified the severity: P1 finding from round 3 is now closed.",
+        "No blocking findings. The severity: P1/P2 bar was applied to every hunk.",
+    ],
+    ids=["clean-outcome-past-severity", "no-issues-past-severity", "clean-prose-severity-bar"],
+)
+def test_prose_about_a_PAST_severity_is_not_an_open_finding(body: str) -> None:
+    """ROUND-8 P3 (false BLOCK): unanchoring `severity` made ordinary CLEAN prose a blocking
+    finding — 5 of 6 natural phrasings. A real finding carries the ISSUE block's siblings."""
+    comments = [{"id": 151, "created_at": "2026-11-04T11:40:00Z", "kind": "comment", "body": body}]
+    assert _check("blocking-finding", comments=comments).passed is True, body
+
+
+def test_a_change_request_blocks_even_when_its_body_declares_only_p3() -> None:
+    """ROUND-8 P3: the state was read only in the `else:` branch, so a formal unresolved
+    change request whose body matched the declaration arm was dropped."""
+    comments = [
+        {
+            "id": 152,
+            "created_at": "2026-11-04T11:40:00Z",
+            "kind": "review",
+            "state": "CHANGES_REQUESTED",
+            "body": "**Outcome: 2 findings (2 × P3).**",
+        }
+    ]
+    _assert_fails("blocking-finding", "open-blocking-finding", comments=comments)
+
+
+def test_a_head_that_moved_mid_read_is_not_ready() -> None:
+    """ROUND-8 P3: nothing re-witnessed the head after the reads, so a push landing between
+    the tree fetch and the recorder run could certify a head that is no longer the target."""
+    check = _assert_fails("exclusions", "head-moved-mid-read", head_stable=False)
+    assert "head moved during the read" in check.raw
+
+
+def test_an_unwitnessable_closing_head_re_read_is_unreadable() -> None:
+    check = _check("exclusions", head_stable=None)
+    assert check.passed is False
+    assert check.unreadable is True
+
+
+def test_the_probe_dataclass_defaults_a_read_dependent_flag_to_unreadable() -> None:
+    """ROUND-8 P3: `is_draft` defaulted to the PASSING side on the dataclass itself, so a
+    future edit restoring `bool = False` would silently turn an unread PR payload into
+    "open, not a draft" with nothing reddening."""
+    bare = rfo.Probe(pr=1, head=HEAD)
+    assert bare.is_draft is None
+    assert bare.merged is None
+    check = rfo.check_exclusions(bare)
+    assert check.passed is False
+    assert check.unreadable is True
+
+
 @pytest.mark.parametrize("field", ["is_draft", "merged"])
 def test_an_omitted_draft_or_merged_flag_is_unreadable(field: str) -> None:
     """ROUND-6 P3: an ABSENT boolean defaulted to the passing side."""
@@ -1139,6 +1213,9 @@ class _FakeGh:
         raise AssertionError(f"unexpected endpoint {endpoint}")
 
     def api(self, endpoint: str) -> Any:
+        return self._match(endpoint)
+
+    def api_fresh(self, endpoint: str) -> Any:
         return self._match(endpoint)
 
     def pages(self, endpoint: str) -> list[Any]:
