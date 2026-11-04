@@ -3512,6 +3512,17 @@ surfaces:
   # network/Docker/FalkorDB), so it is deliberately NOT carve_out-registered:
   # it is DB-free and runs on any lane, not embedded-only.
   - test_lane_stash.py
+  # #10812: a lane's UNCOMMITTED work is not in the object DB, so `git worktree
+  # remove --force` on a dirty worktree destroys it irrecoverably at rc=0 (the
+  # measured 4,500-line loss). This guards `tools/lane_wip.py`, which pins the
+  # working state into `refs/pi-lane-wip/<lane-key>/<n>` without touching HEAD,
+  # the real index or the working tree. Registered `core` with the paired
+  # `CORE_ALSO` entry in `tools/ci_selection.py` (the `tools/lane_stash.py`
+  # pattern): `tools/` is a flat NON_PYTHON_PREFIXES entry, so without it a
+  # tools-only diff selects NO surface and this pin never runs on the file it
+  # guards (the #1349/#3332/#3616 silent-drop class). Hermetic — real temp git
+  # repos and real worktrees, no network/Docker/FalkorDB.
+  - test_lane_wip.py
   # agent-infra#2344 (owner ruling): the runner-capacity guard. It owns
   # `tools/runner_autoscale.py` — the measured ceiling (cores 8→3, 4→2 plus the
   # additive memory arm), the five-way classification (OTHER-REPO / BUSY /
@@ -8763,6 +8774,14 @@ durations:
   # published here re-stales silently — the per-reading counts stay only because a
   # reading is meaningless without the run it came from.
   test_lane_stash.py: 355.0
+  # #10812: a file ADDED BY A PR has no CI junit measurement (the refresher samples
+  # push-to-main runs only), so 92.0 is this branch's LOCAL reading under the
+  # `# unmeasured` convention: `TORTOISE_TEST_CARVE_OUT=1 uv run python -m pytest
+  # tests/test_lane_wip.py -q` -> "86 passed in 91.92s" on a fleet-loaded cell,
+  # measured 2026-11-04. Hermetic (temp git repos, real worktrees; no DB, no
+  # network), so the spread is host load. Refresh from the first post-merge push
+  # run that includes it (#2876 coverage floor: dropping the row is what breaks it).
+  test_lane_wip.py: 92.0
   # #5612: 12.2 is the HIGHER of two local readings of this file at head 4b112ccbc
   # (5.9 s / 12.2 s; hermetic — temp-dir journals + the committed fixture, no DB;
   # the spread is fleet I/O, same as #6144 above). Erring high is correct for
