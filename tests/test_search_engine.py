@@ -7,6 +7,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest  # noqa: I001
 from tests import _live_utils
+from tests._index_settle import index_kind_absent, index_rows_after_settle
 from tortoise.bm25 import DEFAULT_LEXICAL_WEIGHT
 from tortoise.search_engine import (
     classify_query, rrf_fusion, SearchResult, SearchScores,
@@ -707,6 +708,19 @@ class TestR2OrUnionAndSearchKeys:
             # which is the only way the Event legacy branch is ever reached
             # again on a graph that already carries the two-field index.
             proj.g.query("CALL db.idx.fulltext.drop('Object')")
+            # ⛔ THE DROP IS AWAITED, NOT ASSUMED (#10807). FalkorDB retires a
+            # dropped field ASYNCHRONOUSLY: until the label's one index finishes
+            # rebuilding, `CALL db.indexes()` still reports the FULLTEXT kind, so
+            # `_schema_is_current()` correctly answers True about a graph whose
+            # drift has not been APPLIED yet — and the assertion below fails on a
+            # LANDED drop (measured: `test (b)`, run 41868531069, on a loaded
+            # runner; 3 ms to converge idle). The wait is bounded and returns the
+            # last read, so a drop that genuinely cannot happen still reds here
+            # rather than waiting forever.
+            index_rows_after_settle(
+                proj,
+                until=lambda rows: index_kind_absent(
+                    rows, "Object", "name", "FULLTEXT"))
             assert proj._schema_is_current() is False
 
             statements: list[str] = []
