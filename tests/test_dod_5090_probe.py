@@ -893,6 +893,124 @@ def test_a_collection_of_patterns_is_a_second_rule_set(tmp_path, monkeypatch):
     assert counted["verdict"] == "DRIFT", counted
 
 
+@pytest.mark.parametrize("shape", [
+    # `re.compile` here is PASSED, not called: it is an `Attribute` argument to
+    # `map`/`partial`, so a Call-only walk never sees it.
+    "import re\n_SRC = ['x', 'y']\n_A = list(map(re.compile, _SRC))\n",
+    "import re\n_A = partial(re.compile, r'x')\n",
+    # A BUILDER function: the `.compile` call lives inside a `FunctionDef`, not
+    # inside a module-level `Assign`.
+    "import re\n_SRC = ['x', 'y']\n"
+    "def _build():\n    return [re.compile(s) for s in _SRC]\n_A = _build()\n",
+])
+def test_a_compile_reference_that_is_not_an_ASSIGN_is_still_a_rule_set(
+        tmp_path, monkeypatch, shape):
+    """§12.2a's count must see a second pattern list in ANY of its shapes.
+
+    ⛔ Measured (review P2): the AST rewrite that replaced the `re.compile(`
+    substring scan required the `.compile` CALL to sit lexically inside a
+    module-level `Assign`/`AnnAssign`. Three natural shapes therefore read
+    `count: 1 / MET` on a module that DOES own a second rule set — and two of
+    them contain the literal `re.compile(` the old substring scan caught, so
+    the "fix" was LESS sensitive than the scan it replaced on exactly the shape
+    a launderer would choose. Every shape below must read `DRIFT`.
+    """
+    t = tmp_path / "tortoise"
+    t.mkdir()
+    (t / "value_gate.py").write_text(
+        "import re\n_V = re.compile(r'#\\d+')\nRULES = ('r',)\n", encoding="utf-8")
+    (t / "embed_gate.py").write_text(
+        shape + "from . import value_gate\nRULE_SET = value_gate.RULES\n",
+        encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(probe, "PREDICATE_MODULE", "tortoise/value_gate.py")
+    counted = probe.count_embed_predicates()
+    assert counted["count"] == 2, counted
+    assert counted["verdict"] == "DRIFT", counted
+
+
+def test_a_MENTION_of_embedding_is_not_a_writer(tmp_path, monkeypatch):
+    """Only a WRITE counts — not a parameter, comment, error string or docstring.
+
+    ⛔ Measured (review P1): the write test was a regex over the function's RAW
+    SOURCE, so `(?<![\\w.])embedding\\s*=` matched all four shapes below and
+    `set_embedding_clause\\(` matched the clause builder's own ``def`` line.
+    Eight of the fourteen names published into `#5090`'s body were therefore
+    not writers at all — a figure that reads as measured without being measured,
+    which is the class this whole instrument exists to end.
+    """
+    (tmp_path / "tortoise").mkdir()
+    (tmp_path / "tortoise" / "embeddings.py").write_text(
+        "def encode_for_row(t, d):\n    return None\n", encoding="utf-8")
+    (tmp_path / "tortoise" / "mentions.py").write_text(
+        'def _par(embedding=None, lane: str = "") -> bool | None:\n'
+        '    """A docstring: `n.embedding = vecf32($e)` describes the write."""\n'
+        '    # a comment: SET n.embedding = vecf32($e)\n'
+        '    return {"error": "indexed with embedding=None"} is not None\n'
+        '\n'
+        'def clause_builder(alias: str) -> str:\n'
+        '    """Returns the clause; it never issues it."""\n'
+        '    return f"{alias}.embedding = vecf32($e)"\n',
+        encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    writers = probe.embedding_writers()
+    unresolved = sorted(k for k, d in writers.items()
+                        if d["kind"] == "unresolved_write")
+    assert unresolved == [], (
+        "a function whose only `embedding` mention is a parameter, a comment, "
+        f"an error string, its own docstring or a clause it RETURNS is not a "
+        f"write path: {unresolved}"
+    )
+
+
+def test_the_unresolved_writer_set_can_be_EMPTIED_by_real_code(
+        tmp_path, monkeypatch):
+    """A set no honest change can empty pins bullets 1 and 2 forever.
+
+    ⛔ Measured (review P1): `set_embedding_clause`'s own ``def`` line matched
+    the source regex, so it was a PERMANENT `unresolved_write`. `score_rule_bullet`
+    holds bullet 1 at `PARTIAL` whenever that set is non-empty and
+    `written_labels` maps each entry to `UNKNOWN`, holding bullet 2 — so BOTH
+    rows could never reach `MET` at any head. That is the mirror of the "a row
+    that cannot come back red is machinery" defect. Pinned here on a tree where
+    the only non-gated writer is the clause builder: a real Cypher write IS
+    reported (`the removal direction still works`), and a builder alone leaves
+    the set empty (`no entry is a self-match`).
+    """
+    t = tmp_path / "tortoise"
+    t.mkdir()
+    (t / "embeddings.py").write_text(
+        "def encode_for_row(t, d):\n    return None\n", encoding="utf-8")
+    (t / "vector_write.py").write_text(
+        'EMBEDDING_PROPERTY = "embedding"\n'
+        'def set_embedding_clause(alias: str) -> str:\n'
+        '    """The canonical ``<alias>.embedding = …`` SET clause."""\n'
+        '    return f"{alias}.embedding = vecf32($e)"\n',
+        encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    assert [k for k, d in probe.embedding_writers().items()
+            if d["kind"] == "unresolved_write"] == [], (
+        "the clause BUILDER returns a template and issues nothing, so it must "
+        "not be in the unresolved set — a permanent entry pins both rows"
+    )
+    # …and the REMOVAL direction still works: a genuine, ungated Cypher write is
+    # reported, so this cannot pass by the detector having gone blind.
+    (t / "raw.py").write_text(
+        "def _store_raw(g, vec):\n"
+        "    return g.query('MATCH (n:Point {id:1}) SET n.embedding = $v', {'v': vec})\n",
+        encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    # `_embedding_writers` is `lru_cache`d by root, so the new file is invisible
+    # until the cache is dropped — without this the assertion below reads the
+    # FIRST call's map and could not fail for the right reason.
+    probe._embedding_writers.cache_clear()
+    unresolved = sorted(k for k, d in probe.embedding_writers().items()
+                        if d["kind"] == "unresolved_write")
+    assert unresolved == ["tortoise.raw::_store_raw"], (
+        f"a real Cypher embedding write must still be REPORTED: {unresolved}"
+    )
+
+
 def test_served_labels_are_the_RUNNERS_declaration():
     """`VALID_ENTITY_TYPES` + `entity_label` — pinned to the ANSWER, not its clone.
 
