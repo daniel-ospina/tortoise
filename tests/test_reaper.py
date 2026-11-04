@@ -6435,6 +6435,38 @@ def test_build_end_sweep_report_leaves_exited_alone_when_the_term_is_unmeasured(
     )
 
 
+def test_build_end_sweep_report_UNIONS_the_examined_pids_across_iterations():
+    """The per-iteration UNION is load-bearing (#10757 review P3).
+
+    `build_end_sweep_report` accumulates `discovered |= set(pids)` across
+    iterations. OVERWRITING instead forgets what iteration 1 examined, so every
+    pid that iteration already REAPED is claimed by the vanished term as a
+    natural exit — the complement form #6984 refused, and it masks a
+    discovered-then-lost server. Nothing pinned it: `discovered = set(pids)`
+    left the whole suite green (measured).
+
+    Iteration 1 examines pid 1 and acts on it; iteration 2 acts on nothing, so
+    the loop stops. 9 was alive before the sweep, is in nothing discovery
+    examined, and is gone afterwards: it is the ONE vanished server. A report
+    claiming 2 here is the union having been lost.
+    """
+    from tortoise.embedded_reaper import build_end_sweep_report
+
+    first = _scan_aware([{"pid": 1}], complete=True)
+    first.discovered_pids = {1}
+    second = _scan_aware([], complete=True)
+    second.discovered_pids = set()
+
+    report = build_end_sweep_report(
+        iter([first, second]).__next__, deadline=1030.0,
+        probe=iter([[1, 9], []]).__next__, clock=lambda: 1000.0)
+    assert report["exited"] == 1, (
+        "only pid 9 vanished: pid 1 was EXAMINED (and reaped) in iteration 1, so "
+        "an exited count of 2 means the union across iterations was overwritten "
+        "and the term is claiming a server this sweep itself examined"
+    )
+
+
 def test_reap_reports_the_candidate_pids_it_examined():
     """`reap()` carries the examined CANDIDATE pids; other classes are not
     servers (a `stale_socket` record is a dead pid's leftover directory)."""
@@ -6589,6 +6621,45 @@ def test_discover_reports_a_dropped_record_as_a_TRUNCATED_census(monkeypatch):
         "`complete=True` here is what let a hole read as 'the sweep found "
         "nothing', which the vanished term cannot tell from a real zero"
     )
+
+
+def test_discover_reports_a_PARALLEL_classification_drop_as_a_TRUNCATED_census(
+        monkeypatch):
+    """The ThreadPool arm's drop is pinned too (#10757 review P3).
+
+    With `jobs > 1` and more than one dir, classification runs through
+    `pool.submit` and a failure is caught at `fut.result()`. That is a SEPARATE
+    `dropped = True` arm from the serial one, and deleting it also left the suite
+    green (measured).
+    """
+    from tortoise.embedded_reaper import _classify_dir as real_classify
+    from tortoise.embedded_reaper import discover
+
+    base = Path(tempfile.mkdtemp(prefix="tt_"))
+    try:
+        first, _s1 = _make_dead_pid_dir(base, name="tmp")
+        _make_dead_pid_dir(base, name="tmp2")   # 2 dirs => the pool arm runs
+        target = os.path.realpath(str(first))
+
+        def refusing(d, s, **kw):
+            if os.path.realpath(str(d)) == target:
+                raise OSError("parallel classification refused")
+            return real_classify(d, s, **kw)
+
+        with monkeypatch_tempdir(base):
+            monkeypatch.setattr(
+                "tortoise.embedded_reaper._classify_dir", refusing)
+            found = discover(jobs=4)
+        assert not [r for r in found
+                    if os.path.realpath(str(r.get("dbdir", ""))) == target], (
+            "the fixture's dir must be DROPPED for this to be testing a drop"
+        )
+        assert found.complete is False, (
+            "a per-record failure inside the THREAD POOL is the same hole as the "
+            "serial one, and `dropped` of either kind must mark the census short"
+        )
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
 
 
 # ── #1005 (epic #1647 E2E-7): the ATTRIBUTED population ──────────────────

@@ -1885,6 +1885,20 @@ def _discover_from_live(live_pids, jobs, tmpdir, seen_dirs,
     # below therefore marks the census TRUNCATED; the flag is fail-closed at
     # every consumer (a partial scan proves nothing about a cleared backlog
     # either — `sweep_until_cleared`).
+    #
+    # WHICH ARMS ARE PINNED, so the claim is checkable rather than generous: the
+    # SERIAL `_classify_dir` arm by
+    # `test_discover_reports_a_dropped_record_as_a_TRUNCATED_census`, and the
+    # THREADPOOL `fut.result()` arm by
+    # `test_discover_reports_a_PARALLEL_classification_drop_as_a_TRUNCATED_census`
+    # (deliberately deleted from the flag, each one reds). The third — the
+    # `PermissionError/OSError` arm around `os.path.join`/`realpath`/`exists` —
+    # is DEFENSIVE and is not separately pinned, because it is not reachable
+    # through those calls: `os.path.exists` swallows `OSError` and returns False
+    # (so the dir simply takes the `not exists` continue), and `realpath` does
+    # not raise for these inputs. It is kept as belt-and-braces; an attempt to
+    # pin it by monkeypatching `os.path.exists` to raise did NOT reach this arm
+    # (measured), which is itself the evidence that the arm is unreachable.
     dropped = False
 
     def _classify_live(pid: int) -> dict | None:
