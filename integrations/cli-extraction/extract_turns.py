@@ -171,7 +171,7 @@ def _is_turn_of(row) -> bool:
     """
     sid = str(row[0]).split("://", 1)[-1]
     tail = str(row[5])[len(sid) + 2:]
-    return (str(row[5]).startswith(f"{sid}_t") and tail.isdecimal())
+    return tail.isdecimal()
 
 #: The capture store's own frame (`_capture_turn_frame`, ``"[role] body"``).
 #: The turn's `content` property holds the FRAMED text and `speaker` holds the
@@ -335,10 +335,9 @@ def _dump_shortfall(turns) -> str | None:
       (`_t2`/`_t3` here, `_t0`/`_t1` still in the record), where `turn_count`
       is a WINDOW length and cannot see the gap, and an interior hole left by
       one accepted turn between two the record refused;
-    * the ids stop BELOW `turn_max_index` — an ACCEPTED highest turn (or a graph
-      write that never landed for it), which is invisible to the other two (a
-      missing tail sits above `max(held)`, and the run stays contiguous with
-      `len(rows) >= turn_count`).
+    * the ids stop BELOW `turn_max_index` — an ACCEPTED highest turn, which is
+      invisible to the other two (a missing tail sits above `max(held)`, and
+      the run stays contiguous with `len(rows) >= turn_count`).
 
     ⛔ THE GAP ARM IS ANCHORED AT INDEX 0 ON PURPOSE, AND THAT IS AN ASSUMPTION.
     The writer can start a window anywhere (`_capture_turn_id(session, i,
@@ -392,7 +391,7 @@ def _dump_shortfall(turns) -> str | None:
             return (f"the session {session!r} holds {len(indexes)} turn(s) but "
                     f"not the whole run — no turn for index {shown}")
         if turn_max_index is not None and max(unique) < turn_max_index:
-            return (f"the session {session!r}'s turn rows stop at index "
+            return (f"the turn rows of session {session!r} stop at index "
                     f"{max(unique)} while its turn ids reach {turn_max_index} — "
                     "the TAIL is missing")
     return None
@@ -523,14 +522,23 @@ def dump(out: Path, allow_empty: bool = False, allow_partial: bool = False):
             # `pointKind` alone (#2517 review).
             raise SystemExit(
                 f"dump: 0 turns captured — the query MATCHED {len(rows)} "
-                f"point(s) under a :Session and all {rejected} were rejected: none "
-                "carried the `{session}_t<i>` id this lane reads (`_is_turn_of`). "
-                "Capture is therefore ON, and this has two causes: the ID "
-                "DERIVATION has moved (`sdk._capture_turn_id`), or the matched "
-                "Points are NOT turns at all — `pointKind` is an open vocabulary, "
-                "so a caller-minted `is_episodic` `event` Point under the Session "
-                "matches the predicate and is not a turn "
-                "(`session_reinjection._TURN_SHAPE_FILTER`). "
+                f"point(s) wired to a :Session with `is_episodic=true` AND "
+                f"`pointKind='event'`, and none of them carries this lane's turn "
+                f"id: all {rejected} were rejected by `_is_turn_of`, so this is "
+                "NOT an empty capture. Two causes: the ID DERIVATION has moved "
+                "(`sdk._capture_turn_id`), or the matched Points are NOT turns — "
+                "`pointKind` is an open vocabulary (`create_point` accepts any "
+                "registered kind) and `is_episodic` is a flag a backfill can "
+                "stamp, so a caller-minted `is_episodic` `event` Point under a "
+                "Session matches this predicate and is still not a turn "
+                "(`session_reinjection._TURN_SHAPE_FILTER` refuses to trust "
+                "`pointKind` alone). ⛔ THE SECOND CAUSE IS REACHABLE WITHOUT "
+                "CAPTURE EVER RUNNING: the hosted demo/dashboard seed writes "
+                "`pointKind='event'` Points into a `:Session` "
+                "(`hosted_api.py`, the opt-in episodic seed), and "
+                "`graph-scripts/backfill_is_episodic.py` — the migration the "
+                "sibling message below recommends — stamps exactly "
+                "`(s:Session)-[:CONTAINS]->(p:Point)` rows `is_episodic=true`. "
                 "(pass --allow-empty to accept an empty dump)")
         raise SystemExit(
             "dump: 0 turns captured — the query matched NO point at all, so this is "

@@ -523,8 +523,21 @@ class TestDumpReadsTheCaptureShape(unittest.TestCase):
             self.assertIn(fragment, matched,
                           "a matched-but-rejected row need not be a turn at all "
                           "— that cause needs naming too")
-        self.assertNotIn("is TORTOISE_CAPTURE on", matched,
-                         "capture is ON here — that is what MATCHED rows prove")
+        # ⛔ MATCHED ROWS DO NOT PROVE CAPTURE RAN. The previous cut asserted
+        # "Capture is therefore ON" here; the hosted demo/dashboard seed writes
+        # `pointKind='event'` Points into a `:Session` (`hosted_api.py`, the
+        # opt-in episodic seed) and `backfill_is_episodic.py` — the migration
+        # the SIBLING message recommends — stamps exactly
+        # `(s:Session)-[:CONTAINS]->(p:Point)` rows `is_episodic=true`, so this
+        # branch is reachable with capture never invoked. Naming capture as the
+        # proven cause is #9932's own defect one layer down.
+        self.assertNotIn("Capture is therefore ON", matched,
+                         "rows under a Session do not prove capture ran")
+        for fragment in ("demo", "backfill_is_episodic.py"):
+            self.assertIn(fragment, matched,
+                          "the reachable non-turn writer this repo HAS must be "
+                          "named, not only a hypothetical caller")
+        self.assertIn("NOT an empty capture", matched)
 
         # ...and NO rows is the other case: name the record-armed deployment.
         with tempfile.TemporaryDirectory() as td:
@@ -600,9 +613,12 @@ class TestDumpReadsTheCaptureShape(unittest.TestCase):
         # `dump` now refuses — so it cannot double as an ordering fixture.
         ts = "2026-11-02T00:00:00+00:00"
         order = [10, 2, 0, 7, 4, 9, 1, 8, 3, 6, 5]
+        # 8 columns, the shape the emitter produces: a complete 11-turn window
+        # declares `turn_count=11` and its id space ends at 10, so the fixture
+        # cannot silently rely on the degradation path its siblings pin.
         rows = [
             ["session://s1", "event", "assistant", _frame("assistant", f"m{i}"), ts,
-             _turn_id("s1", i)]
+             _turn_id("s1", i), 11, 10]
             for i in order
         ] + [
             # a turn-shaped point whose id is NOT a turn: it must be dropped,
@@ -785,6 +801,48 @@ class TestDumpReadsTheCaptureShape(unittest.TestCase):
             self.assertEqual(len(out.read_text().splitlines()), 4,
                              "a session that declares nothing is not refused for it")
 
+    def test_an_all_residue_dump_names_only_the_residue(self):
+        # ⛔ UNPINNED UNTIL NOW: deleting the all-residue branch left every test
+        # green, and the dump then fell into the MIXED branch printing "0 carry
+        # no `{session}_t<i>` id" — a count of a thing that was zero, telling
+        # the operator the id filter rejected rows when it rejected none. The
+        # branch exists precisely so that sentence cannot be printed here.
+        rows = [_mark("s1", i, 2, 1) for i in (2, 3)]   # both above the mark
+        payload = "\n".join(json.dumps(r) for r in rows)
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "turns.jsonl"
+            with mock.patch("extract_turns.subprocess.run") as run:
+                run.return_value = types.SimpleNamespace(stdout=payload + "\n", stderr="")
+                with self.assertRaises(SystemExit) as cm:
+                    dump(out)
+            self.assertFalse(out.exists())
+        residue_only = str(cm.exception)
+        self.assertIn("RESIDUE", residue_only)
+        self.assertNotIn("carry no", residue_only,
+                         "the id filter rejected nothing here — saying it did "
+                         "is the single-cause defect this branch exists for")
+
+    def test_coverage_is_judged_per_session_not_on_the_dump_as_a_whole(self):
+        # ⛔ PINNED BECAUSE IT IS THE P1 ITSELF, MULTIPLIED: a dump holds several
+        # sessions, and narrowing the check to the first one (measured: `[:1]`)
+        # left every test green while session `b`'s truncated transcript was
+        # written and exit 0 was reported. A CHECK THAT ONLY PASSES A DICT LOOP
+        # ONE SESSION IS THE ORIGINAL BUG WITH EXTRA STEPS.
+        rows = [_mark("a", i, 2, 1) for i in range(2)] + \
+               [_mark("b", i, 4, 3) for i in (0, 1)]
+        payload = "\n".join(json.dumps(r) for r in rows)
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "turns.jsonl"
+            with mock.patch("extract_turns.subprocess.run") as run:
+                run.return_value = types.SimpleNamespace(stdout=payload + "\n", stderr="")
+                with self.assertRaises(SystemExit) as cm:
+                    dump(out)
+            self.assertFalse(out.exists())
+        refused = str(cm.exception)
+        self.assertIn("'b'", refused,
+                      "the short session must be the one named: session `a` is "
+                      "complete, so a message naming it would misdirect")
+
     def test_a_mixed_all_dropped_dump_names_both_measured_facts(self):
         # One caller-minted non-turn Point plus two rows above the mark: NONE
         # survives, but they are not all rejected by the id filter. The message
@@ -817,7 +875,15 @@ class TestDumpReadsTheCaptureShape(unittest.TestCase):
         # `{session}_t{i}` id is a turn.
         self.assertTrue(_is_turn_of(["session://s1", "event", "r", "x", None, _turn_id("s1", 0)]))
         self.assertFalse(_is_turn_of(["session://s1", "event", "r", "x", None, "s1_note"]))
-        # the prefix hazard: `s10`'s session row must not admit `s1`'s turn id
+        # the prefix hazard: `s10`'s session row must not admit `s1`'s turn id.
+        # ⛔ THE ID IS `t70`, NOT `t0`: with sid `s10` and id `s1_t0` the tail
+        # slice is `"s1_t0"[5:]` = `""`, whose `isdecimal()` is False — so the
+        # row was rejected by the tail conjunct ALONE and the prefix conjunct
+        # was unpinned (measured: `return tail.isdecimal()` left every test
+        # green). `s1_t70` gives the tail `"0"` (decimal) against the prefix
+        # `s10_t`, so ONLY the prefix conjunct can reject it.
+        self.assertFalse(_is_turn_of(["session://s10", "event", "r", "x", None,
+                                      _turn_id("s1", 70)]))
         self.assertFalse(_is_turn_of(["session://s10", "event", "r", "x", None,
                                       _turn_id("s1", 0)]))
 
