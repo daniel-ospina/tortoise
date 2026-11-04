@@ -12189,7 +12189,11 @@ class TortoiseSDK:
         # backstop).
         """Create a new Point node. Raises ValueError if kind is invalid.
 
-        Set dedup=True for idempotent creation. The dedup identity is
+        Set dedup=True to fold onto an existing Point. ⛔ That is not a blanket
+        idempotency claim, and not every repeat is a no-op: a call also carrying
+        ``props``/``credibility``/``authoredBy`` re-stores the node it folds onto
+        (``updatedAt`` moves), and a payload naming ``is_operator`` is outside the
+        fold's predicate entirely, so it mints a second Point. The dedup identity is
         ``(pointKind, content_hash)`` and — when a ``key`` is supplied —
         ``(pointKind, key)`` as well: a re-run under the same key FOLDS onto
         the point already holding it (within that pointKind) instead of

@@ -231,8 +231,13 @@ class TortoiseCrMemory:
     cannot touch a shared/CI graph. One handle, ingest-then-recall, close at
     the end.
 
-    Write: ``create_point`` (the A4 arm's fact verb) with ``dedup=True`` so a
-    re-run is content-hash idempotent. Read: ``recall_state`` with
+    Write: ``create_point`` (the A4 arm's fact verb) with ``dedup=True``, so a
+    re-run FOLDS onto the same point — but not as a strict no-op: this call also
+    carries ``credibility`` and ``source_*`` props, and a dedup hit then
+    re-stores the node (`update_point`), so ``updatedAt`` moves. The id is
+    stable, which is what this lane relies on; it is not `retry_safe` in the
+    #10849 sense, and a `props` payload naming ``is_operator`` leaves the fold
+    entirely. Read: ``recall_state`` with
     ``object_centric=False`` so the returned pool is points only (the arm's
     own read surface, minus the object rows this lane has no text for).
     """
