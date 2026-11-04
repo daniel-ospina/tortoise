@@ -1235,14 +1235,21 @@ _SEED_MENTION = re.compile(r"demo(?:/dashboard)?[\s-]+seed", re.IGNORECASE)
 #: kind that owes a `#10000` history marker. Deliberately narrow: the
 #: `event` kind, the `turn node` the seeder stopped writing, or the
 #: `is_episodic` flag that excludes the legacy ones.
+#: ⛔ ONE paragraph per `#:` block: `#:` documents the symbol that FOLLOWS it,
+#: and a second paragraph with no blank line between them would attach to the
+#: same symbol. Measured (#10675 review, P3): this paragraph and the one below
+#: were run together, so the TURN SHAPE rule shipped as the docstring of
+#: `_OTHER_SEEDER_CONTEXT` — the symbol that answers "is this somebody ELSE's
+#: seeder?" — which is precisely the conflation these 300 lines exist to
+#: prevent. `test_each_guard_regex_documents_its_own_subject` keeps them apart.
+_TURN_SHAPE_VOCABULARY = re.compile(
+    r"pointKind\s*[=:]\s*[`'\"“]*event\b|\bturn node\b|\bis_episodic\b",
+    re.IGNORECASE)
+
 #: A subject introduced as somebody ELSE's seeder, so a `the seeder writes
 #: …` immediately after it is not the demo seed's claim.
 _OTHER_SEEDER_CONTEXT = re.compile(
     r"(?:ask[-_ ]?fixture|ask_spotcheck|onboarding)\W*$",
-    re.IGNORECASE)
-
-_TURN_SHAPE_VOCABULARY = re.compile(
-    r"pointKind\s*[=:]\s*[`'\"“]*event\b|\bturn node\b|\bis_episodic\b",
     re.IGNORECASE)
 
 
@@ -1326,6 +1333,58 @@ def test_no_home_states_the_deleted_demo_turn_writer_as_current_fact():
 
 
 # ── END of the guard's machinery — below this line the population resumes
+
+
+def _doc_block_above(source: str, symbol: str) -> list[str]:
+    """The contiguous ``#:`` lines immediately above ``symbol``'s assignment."""
+    lines = source.splitlines()
+    index = next(i for i, line in enumerate(lines)
+                 if re.match(rf"^{re.escape(symbol)}\s*=", line))
+    block: list[str] = []
+    for line in reversed(lines[:index]):
+        if not line.startswith("#:"):
+            break
+        block.append(line)
+    return list(reversed(block))
+
+
+def test_each_guard_regex_documents_its_own_subject():
+    """A ``#:`` block documents the symbol that FOLLOWS it, and only the block
+    immediately above it.
+
+    Measured (#10675 review, P3): two ``#:`` paragraphs with no blank line
+    between them both attach to the SECOND constant, so the vocabulary rule
+    (`event` / the node kind that was deleted / the exclusion flag) shipped as
+    the documentation of the OTHER guard — the regex that answers "is this
+    somebody ELSE's seeder?". The constant VALUES were right and nothing
+    behaved differently; what broke is the one job those paragraphs have,
+    telling two guards apart for the next reader.
+
+    FAILS IF: the blocks are merged, swapped, or one is attached to the wrong
+    symbol. Deliberately asserted on each block's FIRST line: a merged block
+    still CONTAINS the other constant's keywords, so a "keyword is present"
+    check passes on exactly the shape that caused this.
+    """
+    source = (_REPO / "tests/test_session_reinjection_rules.py").read_text(
+        encoding="utf-8")
+    for symbol, opening in (
+        ("_TURN_SHAPE_VOCABULARY",
+         "What makes a seed mention a statement about the TURN SHAPE"),
+        ("_OTHER_SEEDER_CONTEXT",
+         "A subject introduced as somebody ELSE's seeder"),
+    ):
+        block = _doc_block_above(source, symbol)
+        assert block, (
+            f"`{symbol}` has no `#:` doc block above it — a paragraph that "
+            "documents a guard must sit immediately above that guard, not "
+            "above its neighbour")
+        first = block[0].removeprefix("#:").strip()
+        assert first.startswith(opening), (
+            f"the `#:` block above `{symbol}` opens with {first!r}, which is "
+            f"another constant's subject — expected it to open with "
+            f"{opening!r}. Two `#:` paragraphs with no blank line between "
+            "them attach to the SAME symbol, so the two guards' rules end up "
+            "documenting each other (#10675 review, P3)")
 
 
 def test_the_population_scan_excludes_the_guards_own_body():

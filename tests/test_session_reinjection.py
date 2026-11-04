@@ -170,22 +170,77 @@ def _leg_mix(ret: dict) -> list[tuple[str, int]]:
                   for leg in ret.get("legs") or [] if leg.get("count"))
 
 
+#: Leg reasons that mark a read DEGRADED. The engine's own ``degraded`` flag is
+#: the authority (``search_engine._trace_entry``: "``reason`` is never null
+#: when ``degraded`` is true") and is what this module reads first; the set is
+#: a belt for a trace assembled outside the engine (a fixture, or a producer
+#: that predates the flag) so such a read can never masquerade as healthy.
+#: ``no_embedder``/``no_query_vector``/``empty_results``/``below_relevance_floor``
+#: are deliberately ABSENT: this module pins the dense leg out on purpose, and
+#: a leg that ran and found nothing did not degrade.
+_DEGRADED_REASONS = frozenset({
+    "timeout", "query_failed", "breaker_open", "index_missing",
+    "no_embeddings", "tfidf_snapshot", "tfidf_fallback",
+})
+
+
+def _degradations(ret: dict) -> list[tuple[str, str]]:
+    """The legs of a read that DEGRADED, as ``(leg, reason)`` pairs.
+
+    Reads the RECORD (``degraded`` / a results-bearing ``fallback``), never the
+    difference between two reads: a difference is what this module is trying to
+    measure, so it cannot also be the evidence that the measurement is void.
+    """
+    out = []
+    for leg in ret.get("legs") or []:
+        name = str(leg.get("leg"))
+        reason = str(leg.get("reason") or "")
+        if (leg.get("degraded")
+                or (name == "fallback" and (leg.get("count") or 0) > 0)
+                or reason in _DEGRADED_REASONS):
+            out.append((name, reason))
+    return sorted(out)
+
+
 def _require_one_leg_mix(*rets, test: str) -> None:
     """Refuse to compare reads the box served from DIFFERENT legs.
 
-    The arm differential is unmeasurable in that state, and comparing anyway
-    is what produced the load-dependent RED this module now pins out. Skipped
-    with BOTH mixes named (never silently): the module already skips as a
-    whole when the lane cannot serve it, and this is the same class of
-    "this environment cannot answer the question" — except it is per-read and
-    must be visible in the log rather than converted into an id diff.
+    Two outcomes, and the difference between them is the DEGRADATION, not the
+    difference (#10675 review, P3):
+
+    * **A degraded read → skip.** One read lost a leg to the environment (the
+      measured CI red: run 41741210621, ``test (i)``, an FTS ``timeout`` at
+      1220 ms > 500 ms, so that read answered from the corpus-wide
+      ``tfidf_snapshot`` pool). The arm differential is unmeasurable in that
+      state, and comparing anyway is what produced the load-dependent RED this
+      module pins out. Skipped with BOTH mixes AND both degradation lists
+      named (never silently).
+    * **NO degraded read → FAIL.** Both reads were served cleanly and their
+      leg mixes still disagree, so the divergence is the ARMS' doing — a code
+      change (e.g. one arm reaching ``hybrid_search`` with a different
+      ``entity_types`` set) — and the module's central assertion
+      (``test_reinjection_disabled_is_default_byte_identical``) would publish
+      no verdict at all if this skipped. Skipping there is the fail-open arm
+      the review named, and it is exactly the class of hole a predicate over
+      "difference" cannot see.
     """
     mixes = [_leg_mix(r) for r in rets]
-    if any(m != mixes[0] for m in mixes[1:]):
+    if not any(m != mixes[0] for m in mixes[1:]):
+        return
+    degraded = [_degradations(r) for r in rets]
+    if any(degraded):
         pytest.skip(
             f"{test}: the box served these reads from different retrieval "
-            f"legs, so a hit-for-hit comparison would compare two different "
-            f"pools — measured mixes: {mixes}")
+            f"legs, and at least one read DEGRADED, so a hit-for-hit "
+            f"comparison would compare two different pools — measured "
+            f"mixes: {mixes}; degraded legs (leg, reason): {degraded}")
+    pytest.fail(
+        f"{test}: the two reads were served from DIFFERENT retrieval legs "
+        f"with NO leg degraded on either side, so this is the ARMS behaving "
+        f"differently, not the box — measured mixes: {mixes}; degraded legs: "
+        f"{degraded}. Fix the divergence instead of skipping it: a skip here "
+        f"would publish no verdict for a code-caused confound "
+        f"(#10675 review, P3)", pytrace=False)
 
 
 @pytest.fixture(autouse=True)
@@ -553,6 +608,85 @@ def test_a_zero_count_leg_difference_is_not_a_confound():
                            {"leg": "structural", "ran": True,
                             "reason": "empty_results", "count": 0}]}
     _require_one_leg_mix(empty_timeout, empty_none, test="probe")
+
+
+def test_two_HEALTHY_reads_on_different_legs_FAIL_rather_than_skip():
+    """A difference with NO degradation is the ARMS, and must go RED.
+
+    ``_require_one_leg_mix`` used to skip on ANY difference, which is a
+    predicate over the difference rather than over the degradation: a code
+    change that made one arm reach a different retrieval leg would have been
+    "unmeasurable" forever, and the module's central arm differential would
+    publish no verdict at all (#10675 review, P3).
+
+    FAILS ON the pre-fix guard: it called ``pytest.skip`` here, so the
+    ``pytest.raises(pytest.fail.Exception)`` body never fires (DID NOT RAISE).
+    """
+    fts_only = {"legs": [{"leg": "fts", "ran": True, "degraded": False,
+                           "reason": "ok", "count": 7}]}
+    fts_and_structural = {"legs": [
+        {"leg": "fts", "ran": True, "degraded": False,
+         "reason": "ok", "count": 7},
+        {"leg": "structural", "ran": True, "degraded": False,
+         "reason": "ok", "count": 3}]}
+    with pytest.raises(pytest.fail.Exception) as exc:
+        _require_one_leg_mix(fts_only, fts_and_structural, test="probe")
+    message = str(exc.value)
+    # names the divergence AND that nothing degraded — the two facts the next
+    # reader needs to tell "fix the arms" from "wait for a quieter box".
+    assert "('structural', 3)" in message and "degraded legs: [[]" in message
+    assert "probe" in message
+
+
+def test_BOTH_reads_degraded_is_still_not_compared():
+    """Two degraded reads stay a SKIP: the environment, not the arms.
+
+    A loaded box can lose a DIFFERENT leg on each read (fts on one, structural
+    on the other). That is unmeasurable for the same reason one degraded read
+    is, and failing it would put the load-dependent RED straight back.
+
+    FAILS IF: the degradation test becomes "exactly one arm degraded" — this
+    pair then reddens a box that simply could not answer the question.
+    """
+    fts_degraded = {"legs": [
+        {"leg": "fts", "ran": True, "degraded": True,
+         "reason": "timeout", "count": 0},
+        {"leg": "fallback", "ran": True, "degraded": True,
+         "reason": "tfidf_snapshot", "count": 11}]}
+    structural_degraded = {"legs": [
+        {"leg": "fts", "ran": True, "degraded": False,
+         "reason": "ok", "count": 7},
+        {"leg": "structural", "ran": True, "degraded": True,
+         "reason": "query_failed", "count": 0}]}
+    with pytest.raises(pytest.skip.Exception) as exc:
+        _require_one_leg_mix(fts_degraded, structural_degraded, test="probe")
+    message = str(exc.value)
+    assert "different retrieval legs" in message
+    assert "'timeout'" in message and "'query_failed'" in message
+
+
+def test_a_degraded_leg_that_returned_rows_is_a_degradation():
+    """A results-bearing ``fallback`` is a degradation even flagless.
+
+    The trace contract sets ``degraded`` on a ``fallback`` entry, but a trace
+    assembled outside the engine (a fixture, or a producer predating the flag)
+    can omit it. ``fallback`` at count>0 is definitive on its own: the pool is
+    the corpus-wide TF-IDF snapshot, a DIFFERENT composition, not a leg mix.
+
+    FAILS IF: ``_degradations`` reads only the ``degraded`` key — the pair below
+    then fails as a code-caused divergence.
+    """
+    assert _degradations({"legs": [
+        {"leg": "fallback", "ran": True, "reason": "tfidf_snapshot",
+         "count": 11}]}) == [("fallback", "tfidf_snapshot")]
+    # ...while a fallback that produced NOTHING is not one (nothing moved)
+    assert _degradations({"legs": [
+        {"leg": "fallback", "ran": True,
+         "reason": "no_fallback_applicable", "count": 0}]}) == []
+    # ...and the deliberate dense-leg omission is never a degradation
+    assert _degradations({"legs": [
+        {"leg": "vector", "ran": False, "degraded": False,
+         "reason": "no_embedder", "count": 0}]}) == []
 
 
 # ── (c) fail-open: fetch failure / zero new ids / merge exception ────────
