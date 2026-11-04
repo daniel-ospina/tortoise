@@ -2603,7 +2603,22 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # hermetic (a stub rail, temp dirs) and `core` is where its suite
              # lives. Pinned by
              # tests/test_ci_selection.py::test_rail_pin_runs_on_a_tools_only_change.
-             "tools/rail_detach.py")
+             "tools/rail_detach.py",
+             # #10920: the CI runner-label coverage gate. `tools/` is a flat
+             # NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row matches
+             # `tools/ci_runner_labels.py`, so a TOOL-ONLY change filtered to
+             # `changed == []` and took the docs-only early return — the 15 tests that
+             # pin `_pool_answers` (AND semantics), `_matrix_alternatives` (per-row
+             # alternatives, not one union) and R2 (x86_64 image claimed only by non-X64
+             # hosts) would never run on the very file that defines them. That is the
+             # #1349/#3332/#3616 silent-drop class: a PR that deleted R2 or weakened the
+             # AND check would run `python-ci-gate` GREEN with none of its own pins.
+             # MEASURED before this entry:
+             # `select(["tools/ci_runner_labels.py"], "pull_request",
+             # load_manifest())` -> surfaces=[], 72 files, the pin ABSENT. CORE_ALSO (not
+             # TOOL_CARVEOUTS) because the gate is hermetic (a committed JSON snapshot, no
+             # graph, no URI, no network) and `core` is where its suite is registered.
+             "tools/ci_runner_labels.py")
 NON_PYTHON_PREFIXES = (
     "docs/", "website/", "product/", "legal/", "growth/", "engineering/",
     "finance-accounting/", "menu-bar/", "ux/", "data/", "operations/",
