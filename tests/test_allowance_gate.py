@@ -803,10 +803,18 @@ def test_the_sessions_door_carries_the_allowance_on_the_control_plane_lane(
     — the #9567 round-12 defect this seam exists to prevent — would leave every
     capture-door test green.
 
-    Mutation this REDs: route the capture door at
-    ``asyncio.to_thread(_check_org_limit, …)`` (the pre-fix shape) or submit the
-    carry through ``_graph_offload``, and the list below records two ``graph``
-    submissions with no ``sessions.allowance_carry`` at all.
+    Mutation this REDs: move the carry in ``_carry_allowances_off_loop`` from
+    ``_cp_offload`` to ``_graph_offload`` (round 12's inversion) and the first
+    entry below becomes ``('graph', 'check_org_limit.sessions.allowance_carry')``
+    — the carry still exists and still names itself, it simply rides the WRONG
+    pool, which is what this list is here to see.
+
+    The other half of the old defect is pinned one door up, in
+    ``tests/test_capture_loop_responsiveness.py``
+    (``test_capture_sessions_gate_carry_rides_its_own_substrate_lane``): the
+    pre-fix ROUTE shape (``asyncio.to_thread(_check_org_limit, …)``) reds THAT
+    test, not this one, because this test calls the seam directly and never
+    drives ``/v1/sessions``.
     """
     import asyncio
 

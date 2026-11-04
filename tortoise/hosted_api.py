@@ -9174,10 +9174,11 @@ async def _carry_allowances_off_loop(org: dict, resource: str, *,
     LOCKED region) without a second resolver read.
 
     A helper rather than two copies because TWO doors need it for the same
-    reason: ``_check_org_limit_off_loop`` (the points doors, which submit the
-    count to the graph pool) and ``/v1/sessions/commit`` (which submits its
-    whole read→plan→write region to a worker UNDER A PER-GRAPH LOCK — the carry
-    must NOT ride inside that lock, see the route's note). Both must pick the
+    reason: ``_check_org_limit_off_loop`` (the points doors AND the capture
+    door, which submit the count to the graph pool) and ``/v1/sessions/commit``
+    (which submits its whole read→plan→write region to a worker UNDER A
+    PER-GRAPH LOCK — the carry must NOT ride inside that lock, see the route's
+    note). Both must pick the
     pool by SUBSTRATE, not by whichever pool the rest of their work uses, and
     both must stamp the marker so the second half does not re-read. A second
     copy of that decision is how the two drift back apart (#9567 review round
@@ -9254,8 +9255,9 @@ async def _check_org_limit_off_loop(org: dict, resource: str, *,
     and never ``graph_unavailable``.
 
     The carry itself is ``_carry_allowances_off_loop``, shared with the commit
-    lane (#9567 review round 13) — this function is the points-doors half: hoist
-    the carry onto its own lane, then submit ONLY the count to the graph pool.
+    lane (#9567 review round 13) — this function is the gated-request half,
+    serving ``points`` and ``sessions``: hoist the carry onto its own lane, then
+    submit ONLY the count to the graph pool.
 
     ``sdk=`` is #8906's IDENTITY argument, forwarded verbatim to the count
     (``_check_org_limit(carried, resource, sdk=sdk)``): it is the handle the
