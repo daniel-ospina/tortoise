@@ -1240,7 +1240,14 @@ def test_the_bounce_does_not_append_a_SECOND_key_when_the_flow_already_has_one()
     (`consent_page_html` → SIGNIN_URL) is rendered ONLY for a keyed flow, so its raw query always
     carries one. Appending there emitted `…&attempt_key=K&attempt_key=<minted>`: benign only while
     every reader takes the FIRST value, and a re-run of this very dead end the day one takes the
-    last. A present-but-BLANK value counts as absent — it selects the bounce branch upstream.
+    last.
+
+    ⛔ AND A PRESENT-BUT-BLANK (or bare) KEY IS **REPLACED**, NOT APPENDED BESIDE (review P3).
+    Every reader is `url.searchParams.get()` (`start.ts:255`), which takes the FIRST value, so
+    `attempt_key=&attempt_key=<minted>` reads back as `""` — the mint would be INERT and `start`
+    would invent a third key, leaving the visitor keyless. This arm asserts the READER's view
+    (first value), not merely the emit shape, because the previous version of this test certified
+    exactly that inert append.
     """
     from urllib.parse import parse_qs, urlsplit
 
@@ -1254,13 +1261,28 @@ def test_the_bounce_does_not_append_a_SECOND_key_when_the_flow_already_has_one()
         "the bounce emitted a SECOND attempt key beside the flow's own: "
         f"{inner[CONSENT_ATTEMPT_KEY_PARAM]}")
 
-    # …and a blank value is treated as absent, because it selects the bounce branch upstream.
-    blank = consent_bounce_url(APP_ORIGIN, f"client_id=c1&state=s1&{CONSENT_ATTEMPT_KEY_PARAM}=")
-    inner_blank = parse_qs(urlsplit(parse_qs(urlsplit(blank).query)["next"][0]).query,
-                           keep_blank_values=True)
-    keys = inner_blank[CONSENT_ATTEMPT_KEY_PARAM]
-    assert len(keys) == 2 and keys[1].strip(), (
-        f"a blank key suppressed the minted one, leaving the visitor keyless: {keys}")
+    # …and a blank value is treated as absent, because it selects the bounce branch upstream —
+    # the minted key must then be the value a FIRST-value reader actually sees.
+    for label, raw_blank in (
+        ("blank value", f"client_id=c1&state=s1&{CONSENT_ATTEMPT_KEY_PARAM}="),
+        ("whitespace value",
+         f"client_id=c1&state=s1&{CONSENT_ATTEMPT_KEY_PARAM}=%20"),
+        ("bare key, no `=`", f"client_id=c1&state=s1&{CONSENT_ATTEMPT_KEY_PARAM}"),
+    ):
+        blank = consent_bounce_url(APP_ORIGIN, raw_blank)
+        inner_blank = parse_qs(urlsplit(parse_qs(urlsplit(blank).query)["next"][0]).query,
+                               keep_blank_values=True)
+        keys = inner_blank[CONSENT_ATTEMPT_KEY_PARAM]
+        assert len(keys) == 1 and keys[0].strip(), (
+            f"a {label} must be REPLACED by the minted key, not left beside it: every "
+            f"reader takes the first value, so {keys} leaves the visitor keyless")
+    # Every OTHER segment survives byte-exact (state/redirect_uri are compared as bytes).
+    blank_raw = (f"redirect_uri=https%3A%2F%2Fc.example%2Fcb%3Fa%3D1&state=s1"
+                 f"&{CONSENT_ATTEMPT_KEY_PARAM}=")
+    emitted_blank = consent_bounce_url(APP_ORIGIN, blank_raw)
+    inner_raw = urlsplit(parse_qs(urlsplit(emitted_blank).query)["next"][0]).query
+    assert inner_raw.startswith("redirect_uri=https%3A%2F%2Fc.example%2Fcb%3Fa%3D1&state=s1&"), (
+        f"the mint path re-encoded a pass-through segment: {inner_raw}")
 
 
 def test_the_bounce_carries_the_attempt_key_the_flow_is_bound_to(api_client) -> None:
