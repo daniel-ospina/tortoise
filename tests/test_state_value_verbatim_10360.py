@@ -1074,6 +1074,19 @@ def test_a_magnitude_prefix_beside_a_unit_word_is_COMPOSED_not_refused():
     # trade was taken: `3k minutes`/`3000 minutes` REFUSED at base.
     assert v2._value_slot_divergence(
         "the job ran 3k minutes", "the job ran 3000 minutes") == ()
+    # ⛔ THE OPPOSITE DIRECTION IS STILL REFUSED — a FALSE ACCUSATION recorded as
+    # #10876, not fixed here. When the magnitude side's spelling is UNMAPPED
+    # (`millis`, `dys`) the binding is a bare `5k`, and `_magnitude_agrees`'
+    # `_K_ABBREVIATES` gate ({"km", "kg"}) refuses it against any KNOWN unit, so
+    # a truthful point is withheld. Pre-existing (`5k millis`/`5000 hours`
+    # refuses at `origin/main` `525fde4a9`); the widen extended which right-hand
+    # units trigger it. Pinned so it cannot start agreeing silently either — the
+    # gate's narrowness is a RECORDED DECISION (#10513 review P1: `20k`/`20m` is
+    # 20 km against 20 metres), so #10876 must move before this changes.
+    assert v2._value_slot_divergence("the batch took 5k millis", "the batch took 5000 ms")
+    assert v2._value_slot_divergence("the lease is 5k dys", "the lease is 5000 days")
+    assert v2._value_slot_divergence(
+        "the batch took 5k millis", "the batch took 5000 millis") == ()
 
 
 #: The patterns that assert the ADJACENCY gap is OPEN again — the thing

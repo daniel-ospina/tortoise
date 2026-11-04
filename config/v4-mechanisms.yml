@@ -788,6 +788,17 @@ mechanisms:
       the base, and it is what makes `3k minutes`/`3000 minutes` (a FALSE
       ACCUSATION at the base) agree now. Pinned by
       `tests/test_state_value_verbatim_10360.py::test_a_magnitude_prefix_beside_a_unit_word_is_COMPOSED_not_refused`.
+      ⛔ The OPPOSITE direction is REFUSED, and it is a FALSE ACCUSATION: when the
+      magnitude side's unit is an UNMAPPED spelling (`5k millis`, `5k dys`) the
+      binding is a bare `5k`, so `_magnitude_agrees`' `_K_ABBREVIATES` gate
+      (`{"km", "kg"}`) refuses it against any KNOWN unit (`5000 ms`, `5000
+      days`) and the truthful point is withheld. PRE-EXISTING (`5k millis`
+      against `5000 hours` is refused at `origin/main` `525fde4a9` too); this
+      widen extended which right-hand units trigger it. ⛔ NOT fixed here on
+      purpose: that gate's narrowness is a recorded decision (#10513 review P1 —
+      `20k`/`20m` is 20 km against 20 metres), so splitting it needs that ruling
+      reversed deliberately, not patched here. Tracked and argued as **#10876**, and pinned here so the pair cannot
+      silently start agreeing without that issue moving.
       (e) the S5
       minted-endpoint site is not judged against its own quote — there `quote` is
       the point's OWN text, cut with the module's one truncation helper
