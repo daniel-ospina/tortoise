@@ -293,6 +293,32 @@ def test_a_recycled_pid_without_procfs_does_not_read_waiting(tmp_path, monkeypat
     assert rd._pid_alive(me, marker) is True         # the real wrapper still reads alive
 
 
+def test_the_no_procfs_argv_probe_asks_ps_for_the_full_width(tmp_path, monkeypatch):
+    """⛔ BSD/macOS `ps` TRUNCATES `command=` TO THE DISPLAY WIDTH (80 when stdout
+    is not a tty), which cuts the artifact path off BEFORE the marker.
+
+    So on the box class this module says lanes run on — macOS, no procfs, this is
+    the ONLY identity probe for the wrapper — a LIVE wrapper reads as "not ours"
+    and `collect` draws `lost` from it. `-ww` is what makes the marker readable at
+    all. Pinned on the argv (`ps` must be ASKED for the full width), never by
+    monkeypatching `_ps` away — that is why the sibling arm could not see it.
+    """
+    seen: list[tuple[str, ...]] = []
+
+    def recording_ps(*args):
+        seen.append(args)
+        return "some-unrelated-process --flag\n"   # a truncated line: no marker
+
+    monkeypatch.setattr(rd, "_proc_stat_letter", lambda pid: None)
+    monkeypatch.setattr(rd, "_proc_cmdline", lambda pid: None)
+    monkeypatch.setattr(rd, "_ps_stat", lambda pid: "S")
+    monkeypatch.setattr(rd, "_ps", recording_ps)
+    marker = str(tmp_path / "rail-o-r-92.md")
+    assert rd._pid_alive(os.getpid(), marker) is False
+    assert any("command=" in argv for argv in seen), seen
+    assert all("-ww" in argv for argv in seen if "command=" in argv), seen
+
+
 def test_an_unspawnable_launch_is_an_environment_error_not_a_gate_verdict(
     tmp_path, monkeypatch, capsys
 ):
@@ -358,8 +384,15 @@ def test_a_rail_that_exits_during_the_liveness_probe_keeps_its_exit_code(tmp_pat
     while ln.pid and rd._pid_alive(ln.pid, str(art)):
         time.sleep(0.05)
     text = art.read_text()
+    attempt = rd.read_field(text, "ATTEMPT_ID")
+    assert attempt, "launch must stamp the attempt id"
     assert "EXIT=" in text and text.count("EXIT=") == 1
-    art.write_text("\n".join(ln for ln in text.splitlines() if not ln.startswith("EXIT=")) + "\n")
+    art.write_text(
+        "\n".join(
+            ln for ln in text.splitlines()
+            if not ln.startswith(("EXIT=", "EXIT_ATTEMPT="))
+        ) + "\n"
+    )
     assert "EXIT=" not in art.read_text()                     # the stale read
 
     def exits_during_the_probe(pid, marker="", **kw):
@@ -367,7 +400,8 @@ def test_a_rail_that_exits_during_the_liveness_probe_keeps_its_exit_code(tmp_pat
         # (`pgid=`); this fake answers "gone" for BOTH processes, which is the
         # interleaving under test.
         with art.open("a", encoding="utf-8") as fh:
-            fh.write(f"EXIT=0\nFINISHED_AT={rd._iso_now()}\n")
+            # the wrapper writes the attempt tag IMMEDIATELY BEFORE its EXIT
+            fh.write(f"EXIT_ATTEMPT={attempt}\nEXIT=0\nFINISHED_AT={rd._iso_now()}\n")
         return False                                          # …and it is GONE
 
     monkeypatch.setattr(rd, "_pid_alive", exits_during_the_probe)
@@ -384,7 +418,13 @@ def test_previous_attempts_merge_line_is_not_inherited(tmp_path):
     co = make_checkout(tmp_path)
     sd = tmp_path / "state"
     rd.launch(61, cwd=co, state_dir=sd, repo="o/r")
-    assert wait_state(sd, 61, rd.MERGED).state == rd.MERGED      # attempt 1: merges
+    # ⛔ WAIT FOR THE SETTLED READ: the rail prints its success line BEFORE its
+    # wrapper appends `EXIT=`, and `collect` answers `merged` in that window
+    # (`exit_code=None`). Without the predicate this arm may snapshot the handoff
+    # and then race the previous wrapper's append against the new launch's
+    # truncation — the flake the sibling arm above was already fixed for.
+    assert wait_state(sd, 61, rd.MERGED,
+                      pred=lambda s: s.exit_code is not None).state == rd.MERGED
     os.environ["FAKE_RAIL_SLEEP"] = "30"
     try:
         ln = rd.launch(61, cwd=co, state_dir=sd, repo="o/r")    # attempt 2: hangs…
@@ -473,9 +513,67 @@ def test_torn_exit_line_does_not_crash_collect(tmp_path):
     kill_group(ln.pid)          # the whole group: nothing is left to write an EXIT
     time.sleep(0.3)
     art = rd.artifact_path(sd, "o/r", 66)
-    art.write_text(art.read_text() + "EXIT=\n")      # the torn append
+    # The wrapper writes `EXIT_ATTEMPT=<id>` then `EXIT=%s`; a kill between the
+    # format's expansions leaves the torn pair below, and the read-only verb must
+    # report a state rather than a traceback.
+    attempt = rd.read_field(art.read_text(encoding="utf-8"), "ATTEMPT_ID")
+    assert attempt, "launch must stamp the attempt id"
+    art.write_text(art.read_text() + f"EXIT_ATTEMPT={attempt}\nEXIT=\n")  # the torn append
     st = rd.collect(sd, "o/r", 66)
     assert st.state == rd.REFUSED and st.exit_code is None   # fail closed, no crash
+
+
+def test_a_named_rail_under_spawning_is_not_no_rail(tmp_path):
+    """⛔ `SPAWNING=1` WITH NO `PID=` IS NOT "NO RAIL EVER STARTED".
+
+    `launch` appends `PID=` only AFTER `Popen` returns, so a launcher killed in
+    that instant leaves `SPAWNING=1` while the rail it already spawned has written
+    `CHILD_PID=` and is merging. Concluding `lost` there is the same durable-wrong-
+    verdict shape as the fork window: the next `start` truncates the artifact and
+    scopes out a `✅ merged` line that already exists. So the named rail and the
+    log are read BEFORE the sentinel is allowed to mean "nothing started".
+
+    Both arms use a STARTED_AT well past `SPAWNING_TTL_S`, so neither can pass by
+    the sentinel simply not having expired.
+    """
+    sd = tmp_path / "state"
+    sd.mkdir()
+    art = rd.artifact_path(sd, "o/r", 98)
+    logp = rd.log_path(sd, "o/r", 98)
+    old = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 3600))
+    rail = subprocess.Popen(["/bin/sleep", "10"], start_new_session=True,
+                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL)
+    try:
+        art.write_text(
+            f"PR=98\nREPO=o/r\nSTARTED_AT={old}\nLOG={logp}\nSPAWNING=1\n"
+            f"ATTEMPT_ID=attempt-98\nCHILD_PID={rail.pid}\n",
+            encoding="utf-8",
+        )
+        # arm 1 — the named rail already ANNOUNCED its merge
+        logp.write_text(
+            "\n===== rail attempt started x (detached) =====\n"
+            "admin-merge: ✅ merged PR #98 at deadbeefcafe1234 (state=MERGED)\n",
+            encoding="utf-8",
+        )
+        st = rd.collect(sd, "o/r", 98)
+        # pre-fix: LOST, "no rail ever started" — for a PR whose rail merged
+        assert st.state == rd.MERGED, st.as_dict()
+        assert st.merge_sha == "deadbeefcafe1234"
+        assert "EXIT line was never written" in st.reason
+
+        # arm 2 — a LIVE named rail, nothing announced yet: still waiting, not lost
+        logp.write_text(
+            "\n===== rail attempt started x (detached) =====\n"
+            "admin-merge: … FIRST-CHECKS wait: run 41557371710 is pending\n",
+            encoding="utf-8",
+        )
+        st = rd.collect(sd, "o/r", 98)
+        assert st.state == rd.WAITING, st.as_dict()     # pre-fix: LOST
+        assert "CHILD_PID" in st.reason
+    finally:
+        rail.kill()
+        rail.wait()
 
 
 def test_spawning_sentinel_expires_instead_of_wedging_the_pr(tmp_path):
@@ -514,6 +612,75 @@ def test_relative_state_dir_lands_in_one_place(tmp_path, monkeypatch):
     assert st.state == rd.MERGED and st.merge_sha == "deadbeefcafe1234"
 
 
+def test_a_previous_attempts_late_exit_is_not_this_attempts(tmp_path, monkeypatch):
+    """⛔ THE ARTIFACT HANDOFF HAS NO ORDERING.
+
+    `launch` truncates the artifact while the PREVIOUS attempt's wrapper may still
+    be about to append `EXIT=`: its rail printed the merge line first, so `collect`
+    already answered `merged` and the new start was not refused. The late append
+    then lands in the NEW artifact and used to read as this attempt's exit —
+    `refused` ("exited 0 without a merge line") for an attempt that was KILLED.
+
+    Each attempt stamps its own id, so only a matching `EXIT_ATTEMPT=`/`EXIT=` pair
+    is evidence. Discriminating: without the scoping this reads `refused`.
+    """
+    co = make_checkout(tmp_path)
+    sd = tmp_path / "state"
+    rd.launch(65, cwd=co, state_dir=sd, repo="o/r")
+    first = wait_state(sd, 65, rd.MERGED, pred=lambda s: s.exit_code is not None)
+    assert first.state == rd.MERGED, first.as_dict()
+    art = rd.artifact_path(sd, "o/r", 65)
+    first_id = rd.read_field(art.read_text(encoding="utf-8"), "ATTEMPT_ID")
+    assert first_id, "launch must stamp the attempt id"
+
+    monkeypatch.setenv("FAKE_RAIL_SLEEP", "30")
+    ln = rd.launch(65, cwd=co, state_dir=sd, repo="o/r")   # truncates the artifact
+    # let attempt 2's rail NAME itself, so this arm is about the stale EXIT line
+    # and not about the (separately pinned) fork window
+    assert wait_field(art, "CHILD_PID"), art.read_text(encoding="utf-8")
+    kill_group(ln.pid)                                      # attempt 2 dies, no EXIT
+    time.sleep(0.3)
+    # …and attempt 1's wrapper appends ITS exit line after the truncation
+    with art.open("a", encoding="utf-8") as fh:
+        fh.write(f"EXIT_ATTEMPT={first_id}\nEXIT=0\nFINISHED_AT={rd._iso_now()}\n")
+    st = rd.collect(sd, "o/r", 65)
+    assert st.state == rd.LOST, st.as_dict()      # pre-fix: REFUSED, "exited 0 …"
+    assert st.exit_code is None, st.as_dict()
+
+
+def test_an_unreaped_wrapper_group_does_not_report_waiting_forever(tmp_path):
+    """⛔ `killpg(..., 0)` ANSWERS FOR A ZOMBIE GROUP MEMBER FOREVER.
+
+    A caller that stays alive after `launch()` (an importing fleet beat, not the
+    one-shot `start` CLI) leaves its killed wrapper an UNREAPED child, so the
+    group keeps answering with no rail in it and nothing left that could ever
+    write `CHILD_PID=` or `EXIT=`. Unbounded, that is `waiting` forever AND
+    `start` refused forever — the unrailable wedge this module exists to remove.
+    Past `GROUP_CLAIM_GRACE_S` an unnamed group is a corpse: `lost` is both true
+    and recoverable.
+    """
+    co = make_checkout(tmp_path)
+    sd = tmp_path / "state"
+    os.environ["FAKE_RAIL_SLEEP"] = "30"
+    try:
+        ln = rd.launch(96, cwd=co, state_dir=sd, repo="o/r")
+    finally:
+        os.environ.pop("FAKE_RAIL_SLEEP", None)
+    kill_group(ln.pid)              # the rail dies too, so no `CHILD_PID=` lands
+    time.sleep(0.3)
+    art = rd.artifact_path(sd, "o/r", 96)
+    old = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 600))
+    art.write_text("".join(
+        f"STARTED_AT={old}\n" if ln_.startswith("STARTED_AT=") else
+        "" if ln_.startswith("CHILD_PID=") else ln_ + "\n"
+        for ln_ in art.read_text(encoding="utf-8").splitlines()
+    ) + "")
+    assert rd.read_field(art.read_text(encoding="utf-8"), "CHILD_PID") == ""
+    st = rd.collect(sd, "o/r", 96)
+    assert st.state == rd.LOST, st.as_dict()     # pre-fix: WAITING, forever
+    assert "no EXIT line" in st.reason
+
+
 def test_a_log_without_an_attempt_mark_is_no_evidence(tmp_path):
     """No attempt mark ⇒ not this attempt's log ⇒ no scoped evidence. Reading it
     whole would let a dead attempt inherit an earlier `✅ merged` line."""
@@ -535,7 +702,10 @@ def test_collect_has_no_side_effects(tmp_path):
     co = make_checkout(tmp_path)
     sd = tmp_path / "state"
     launch(sd, co, pr=14)
-    wait_state(sd, 14, rd.MERGED)
+    # Same handoff as the arm above: a `merged` state can be read before the
+    # wrapper's `EXIT=` append lands, and this arm asserts BYTE + mtime equality
+    # over the artifact — so it must snapshot only the settled record.
+    wait_state(sd, 14, rd.MERGED, pred=lambda s: s.exit_code is not None)
     art = rd.artifact_path(sd, "o/r", 14)
     before = (art.read_bytes(), art.stat().st_mtime_ns, sorted(p.name for p in sd.iterdir()))
     for _ in range(3):
@@ -580,7 +750,9 @@ def test_refuses_when_the_rail_script_is_absent(tmp_path):
 
 
 def test_child_invokes_only_the_one_lander(tmp_path):
-    """#1178: no second lander. The child argv is `bash <rail> <pr> --repo <r>`."""
+    """#1178: no second lander. The child argv is
+    `bash -c <self-naming wrapper> rail <artifact> <rail-argv…>` — one lander
+    invocation, nothing else."""
     co = make_checkout(tmp_path)
     art, log = tmp_path / "a.md", tmp_path / "l.log"
     argv = rd.child_script(co / rd.RAIL_REL, "o/r", 21, log, art, ["--dry-run"])
@@ -837,43 +1009,54 @@ def test_an_unmeasurable_liveness_probe_keeps_the_rail_alive(tmp_path, monkeypat
         proc.wait()
 
 
-# ── `gh` absent: a refusal, never a traceback whose exit code is the gate ────
-def _no_gh(monkeypatch):
-    """`gh` is NOT INSTALLED: `subprocess.run([...])` raises FileNotFoundError,
-    exactly as it does on a minimal-PATH runner. Filtered by argv so the local
-    `ps` probe (the same `subprocess.run`) keeps working."""
+# ── `gh` that cannot RUN: a refusal, never a traceback whose exit code is the gate ──
+def _gh_unrunnable(monkeypatch):
+    """`gh` cannot be RUN: `subprocess.run(["gh", ...])` raises `PermissionError`.
+
+    ⛔ NOT `FileNotFoundError`. `_gh` already converts a MISSING binary into
+    rc 127 (that landed on main before this branch, and
+    `test_launch_without_the_gh_cli_*` / `test_collect_without_the_gh_cli_*` pin
+    the absent-binary class at PATH level) — so an injected `FileNotFoundError`
+    never reaches the two `except (OSError, subprocess.SubprocessError)` clauses
+    these arms are named after, which is why both arms passed on the pre-fix tree
+    and could not fail for the reason their docstrings gave. `PermissionError` is
+    an `OSError` `_gh` does NOT swallow, i.e. exactly the condition those clauses
+    exist for. Filtered by argv so the local `ps` probe keeps working."""
     real_run = subprocess.run
 
     def run(argv, *a, **kw):
         if isinstance(argv, (list, tuple)) and argv and argv[0] == "gh":
-            raise FileNotFoundError(2, "No such file or directory", "gh")
+            raise PermissionError(13, "Permission denied", "gh")
         return real_run(argv, *a, **kw)
 
     monkeypatch.setattr(rd.subprocess, "run", run)
 
 
-def test_a_missing_gh_refuses_start_instead_of_tracebacking_as_exit_1(tmp_path, monkeypatch):
+def test_an_unrunnable_gh_refuses_start_by_name_not_a_gate_code(tmp_path, monkeypatch, capsys):
     """⛔ EXIT 1 IS THIS TOOL'S MACHINE GATE (`collect --assert-merged`, "not
-    merged"). An uncaught `FileNotFoundError` from `gh repo view` escaped `main()`
-    as a traceback and the interpreter's exit **1** — i.e. a launcher that could
-    not even name the repo reported itself as "a rail ran and the PR is not
-    merged". `start`'s documented contract is `4 = refused`, and a minimal-PATH
-    runner has already produced `exit code 127` on `gh` elsewhere in this repo
-    (#9018). Refuse, do not wedge the code space."""
+    merged"), so a launcher that could not even run `gh` must never report itself
+    through it — and must not report a bare environment error either: the
+    declared contract for `start` is `4 = refused`, naming what is wrong.
+    Without the `_resolve_repo` clause the launch reports a generic environment
+    error (2) with only `[Errno 13]` as the explanation."""
     co = make_checkout(tmp_path)
     sd = tmp_path / "state"
-    _no_gh(monkeypatch)
+    _gh_unrunnable(monkeypatch)
     rc = rd.main(["start", "73", "--cwd", str(co), "--state-dir", str(sd)])
-    assert rc == 4, rc                       # pre-fix: FileNotFoundError → exit 1
+    assert rc == 4, rc                       # pre-fix: 2, an unexplained environment error
+    err = capsys.readouterr().err
+    assert "could not run `gh`" in err, err  # pre-fix: just "[Errno 13] Permission denied"
     assert not rd.artifact_path(sd, "o/r", 73).exists()
 
 
-def test_a_missing_gh_makes_the_head_unreadable_not_a_crash(tmp_path, monkeypatch):
+def test_an_unrunnable_gh_makes_the_head_unreadable_not_a_crash(tmp_path, monkeypatch):
     """`_head_sha`'s declared contract is "the sha *or* `unreadable`", and `HEAD`
-    gates nothing — so a `gh` that cannot run must not stop the rail starting."""
+    gates nothing — so a `gh` that cannot RUN must not stop the rail starting.
+    Without the `_head_sha` clause the `PermissionError` escapes `launch()` and
+    the rail is never detached at all."""
     co = make_checkout(tmp_path)
     sd = tmp_path / "state"
-    _no_gh(monkeypatch)
+    _gh_unrunnable(monkeypatch)
     ln = launch(sd, co, pr=77)               # repo given ⇒ only `_head_sha` calls `gh`
     assert ln.head == "unreadable"
     assert wait_state(sd, 77, rd.MERGED).state == rd.MERGED
