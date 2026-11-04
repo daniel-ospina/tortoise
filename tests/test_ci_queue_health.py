@@ -179,7 +179,8 @@ def test_a_deep_queue_of_pr_work_is_not_a_flood_but_it_is_not_OK_either():
     assert any("trim-safe offender present: True" in reason for reason in health.reasons)
     assert any("dominated by PR work" in reason for reason in health.reasons)
     assert health.state_line == (
-        "CI: PR-STARVED(queued=26, pr_running=0, pr_queued=20, oldest=1200s)"
+        "CI: PR-STARVED(queued=26, pr_running=0, pr_queued=20, pr_pending=0, "
+        "oldest=1200s)"
     )
 
 
@@ -618,7 +619,7 @@ def test_a_truncated_feed_cannot_certify_pr_ci_as_healthy():
     assert health.verdict != Q.OK
     assert health.trimmable == ()                     # nothing is acted on
     assert health.state_line == (
-        "CI: PR-UNWITNESSED(queued=4, pr_running=0, pr_queued=0, "
+        "CI: PR-UNWITNESSED(queued=4, pr_running=0, pr_queued=0, pr_pending=0, "
         "oldest=unmeasured, feed=truncated)"
     )
     assert any("NEWEST-FIRST" in reason for reason in health.reasons)
@@ -972,7 +973,8 @@ def test_pr_starved_is_exit_0_with_its_own_state_line(monkeypatch, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert payload["verdict"] == "PR-STARVED"
     assert payload["state_line"] == (
-        "CI: PR-STARVED(queued=26, pr_running=0, pr_queued=20, oldest=1200s)"
+        "CI: PR-STARVED(queued=26, pr_running=0, pr_queued=20, pr_pending=0, "
+        "oldest=1200s)"
     )
 
 
@@ -1031,7 +1033,8 @@ def test_a_pr_backlog_past_the_wait_budget_is_not_ok_while_pr_ci_is_serving():
     assert health.pr_running == 2
     assert health.pr_queued == 20
     assert health.state_line == (
-        "CI: PR-BACKLOGGED(queued=20, pr_running=2, pr_queued=20, oldest=31620s)"
+        "CI: PR-BACKLOGGED(queued=20, pr_running=2, pr_queued=20, pr_pending=0, "
+        "oldest=31620s)"
     )
 
 
@@ -1377,6 +1380,68 @@ def test_a_PENDING_ONLY_wait_while_PR_CI_IS_SERVING_is_a_BACKLOG():
     assert health.congests_pr is True, (
         "this wait must REFUSE a destructive cancel, not authorise one")
     assert any("PR-BACKLOGGED" in reason for reason in health.reasons)
+
+
+def test_the_PENDING_ONLY_state_line_NAMES_the_leg_that_witnessed_the_verdict():
+    """⭐⭐ P2 (review): the verdict was reachable with `pr_queued=0` and the ONE line
+    the fleet reads could not say why.
+
+    `state_line` is the module's public interface — posted as the job annotation by
+    `.github/workflows/ci-queue-health.yml` and printed as `summary["queue"]` by
+    `tools/ci_check_repair.py` — and every branch of it reported `pr_queued` and
+    NOTHING about the pending leg. This PR is what makes `PR-STARVED` /
+    `PR-BACKLOGGED` reachable with an EMPTY queued leg (the age clauses key on
+    `wait_runs`), so the line went self-contradicting on exactly the path the change
+    adds. Measured pre-fix on the fixture below:
+
+        CI: PR-STARVED(queued=0, pr_running=0, pr_queued=0, oldest=5700s)
+
+    — "PR CI is starved" and "zero PR runs are queued" in one breath, a verdict with
+    no visible witness. The existing `PR-STARVED` state-line pins both carry
+    `pr_queued=20` (the queued-driven shape), which is why this stayed green.
+
+    Discriminating: dropping `pr_pending` from the line reddens the exact-string
+    assertions below (both), and nothing else in the suite notices.
+    """
+    starved = classify([], pending=[run(4247, "Python CI", event="pull_request",
+                                       age_seconds=5700)])
+    assert starved.pr_queued == 0, "the fixture must be PENDING-ONLY"
+    assert starved.pr_pending == 1
+    assert starved.verdict == Q.PR_STARVED
+    assert starved.state_line == (
+        "CI: PR-STARVED(queued=0, pr_running=0, pr_queued=0, pr_pending=1, "
+        "oldest=5700s)"
+    ), "the line must carry the leg its own verdict was measured over"
+
+    backlogged = classify(
+        [],
+        in_progress=[run(1, "Python CI", event="pull_request", age_seconds=60)],
+        pending=[run(4248, "Python CI", event="pull_request", age_seconds=4 * 3600)],
+    )
+    assert backlogged.pr_queued == 0 and backlogged.pr_pending == 1
+    assert backlogged.verdict == Q.PR_BACKLOGGED
+    assert backlogged.state_line == (
+        "CI: PR-BACKLOGGED(queued=0, pr_running=1, pr_queued=0, pr_pending=1, "
+        "oldest=14400s)"
+    ), "the serving-state line names both wait legs too"
+
+
+def test_every_non_FLOOD_state_line_names_BOTH_wait_legs():
+    """The invariant, not just the two reachable shapes: no non-FLOOD line may omit a
+    leg of the population its ages are computed over (`wait_runs`).
+
+    FLOOD is exempt on purpose — its spelling is the one #9115 names and it carries
+    the OFFENDER, not the wait population. Read off the branches themselves so a new
+    verdict added later is caught here instead of in the fleet's annotation.
+    """
+    for verdict in (Q.OK, Q.PR_STARVED, Q.PR_BACKLOGGED, Q.PR_UNWITNESSED):
+        line = dataclasses.replace(
+            classify(starving_pr_runs(1) + flood_queued(6)),
+            verdict=verdict, pr_queued=2, pr_pending=3, pr_running=1,
+            oldest_pr_queued_age_seconds=1200.0,
+        ).state_line
+        assert "pr_queued=2" in line and "pr_pending=3" in line, (
+            f"{verdict} line omits a wait leg the ages were measured over: {line!r}")
 
 
 def test_a_PENDING_ONLY_wait_with_an_unreadable_stamp_is_UNWITNESSED():
@@ -1858,7 +1923,7 @@ def test_an_unmeasured_pr_wait_while_pr_ci_executes_is_not_ok():
     assert health.pr_wait_budget_seconds == Q.DEFAULT_MAX_PR_WAIT_SECONDS
     # the state line must not hardcode `pr_running=0` for a queue that IS serving
     assert health.state_line == (
-        "CI: PR-UNWITNESSED(queued=14, pr_running=1, pr_queued=4, "
+        "CI: PR-UNWITNESSED(queued=14, pr_running=1, pr_queued=4, pr_pending=0, "
         "oldest=unmeasured, feed=read)"
     )
     assert Q.EXIT_FOR[Q.PR_UNWITNESSED] == Q.EXIT_OK

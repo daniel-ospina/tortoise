@@ -111,9 +111,12 @@ truncated feed sound, and the verdict has to say so instead.
 
 FLOOD is spelled with its offender and its counts — ``CI: FLOOD(<workflow>,
 queued=N, pr_running=0)`` — and PR-STARVED with its own counts —
-``CI: PR-STARVED(queued=N, pr_running=0, pr_queued=K, oldest=Ms)`` — because the
+``CI: PR-STARVED(queued=N, pr_running=0, pr_queued=K, pr_pending=P, oldest=Ms)``
+— because the
 recovery differs per state, and because "the queue is deep" (a number the fleet
-already had) is exactly the reading that was mistaken for slow CI.
+already had) is exactly the reading that was mistaken for slow CI. Every
+non-FLOOD line names BOTH wait legs, so the counts on the line always witness the
+verdict beside them.
 
 WHAT MAKES IT A FLOOD — and why the third clause carries the clock
 ------------------------------------------------------------------
@@ -133,7 +136,8 @@ file, and it is what keeps clauses 1-2 from firing on a quiet repo: a deep
 queue and zero PR runs is also what a fleet that is simply not pushing looks
 like. When NOTHING IS WAITING IN EITHER READ LEG (``pr_queued`` and
 ``pr_pending`` both ``0``) starvation cannot be witnessed and the verdict stays
-``OK`` — with ``pr_queued=0`` reported, so a reader sees what was NOT measured
+``OK`` — with ``pr_queued=0`` and ``pr_pending=0`` reported, so a reader sees what
+was NOT measured
 instead of reading a clean bill of health. That
 same reading carries ``pr_wait_measured=False``, so ``congests_pr`` answers
 ``None`` there. The verdict may say "not starved"; only a measured wait may
@@ -476,6 +480,18 @@ class QueueHealth:
         FLOOD carries the offender and the exact `queued=N, pr_running=0`
         spelling the issue names; the other two states carry the same counts so
         the three are comparable at a glance.
+
+        ⛔ BOTH WAIT LEGS ARE NAMED ON EVERY NON-FLOOD BRANCH (#10641 review P2).
+        The population the age clauses compare is `queued + pending + requested`
+        (`wait_runs`), so `PR-STARVED` / `PR-BACKLOGGED` / `PR-UNWITNESSED` are all
+        reachable with `pr_queued=0` — measured, pending-only @5700 s:
+        `CI: PR-STARVED(queued=0, pr_running=0, pr_queued=0, oldest=5700s)`. That line
+        says "PR CI is starved" and "zero PR runs are queued" in the same breath,
+        which is a verdict with no visible witness in the ONE string the fleet
+        samples — the defect ("a leg named but never fetched would make every
+        downstream claim about it false") this module removes everywhere else. The
+        `to_dict()` field, the reason line and the comparability sentence above all
+        already assume `pr_pending` travels with the line; now it does.
         """
         if self.verdict == FLOOD:
             return (
@@ -495,6 +511,7 @@ class QueueHealth:
             return (
                 f"CI: PR-UNWITNESSED(queued={self.queued_total}, "
                 f"pr_running={self.pr_running}, pr_queued={self.pr_queued}, "
+                f"pr_pending={self.pr_pending}, "
                 f"oldest={waited}, feed={feed})"
             )
         if self.verdict == PR_STARVED:
@@ -502,7 +519,8 @@ class QueueHealth:
             waited = f", oldest={oldest:.0f}s" if oldest is not None else ""
             return (
                 f"CI: PR-STARVED(queued={self.queued_total}, "
-                f"pr_running={self.pr_running}, pr_queued={self.pr_queued}{waited})"
+                f"pr_running={self.pr_running}, pr_queued={self.pr_queued}, "
+                f"pr_pending={self.pr_pending}{waited})"
             )
         if self.verdict == PR_BACKLOGGED:
             # `oldest` is the WHOLE claim here — it is the measurement that says the
@@ -512,13 +530,16 @@ class QueueHealth:
             waited = f", oldest={oldest:.0f}s" if oldest is not None else ""
             return (
                 f"CI: PR-BACKLOGGED(queued={self.queued_total}, "
-                f"pr_running={self.pr_running}, pr_queued={self.pr_queued}{waited})"
+                f"pr_running={self.pr_running}, pr_queued={self.pr_queued}, "
+                f"pr_pending={self.pr_pending}{waited})"
             )
-        # `pr_queued` is on the non-FLOOD line too: an `OK` that hid a long PR
-        # backlog would be the same "slow CI" reading this tool exists to replace.
+        # `pr_queued` and `pr_pending` are on the non-FLOOD line too: an `OK` that hid
+        # a long PR backlog would be the same "slow CI" reading this tool exists to
+        # replace, and a wait leg omitted from the line is one a reader cannot audit.
         return (
             f"CI: {self.verdict}(queued={self.queued_total}, "
-            f"pr_running={self.pr_running}, pr_queued={self.pr_queued})"
+            f"pr_running={self.pr_running}, pr_queued={self.pr_queued}, "
+            f"pr_pending={self.pr_pending})"
         )
 
     @property

@@ -1840,9 +1840,9 @@ def test_the_zero_job_floor_is_past_the_measured_queue_wait():
 
     `docs/ops/ci-wall-clock.md` §1 line 50 (54 `python-ci` runs) measures the wait for a
     run's FIRST job: p50 29.9 min, p95 77.0 min, max 81.9 min. The budget derivation
-    this floor defers to is `tools/ci_queue_health.py:304`
+    this floor defers to is `tools/ci_queue_health.py:309`
     (`DEFAULT_MAX_PR_WAIT_SECONDS = 90 * 60.0`, "the first round number past" that max),
-    and `ci-wall-clock.md` §6 lines 326-332 records the same derivation in its own
+    and `ci-wall-clock.md` §6 lines 342-344 records the same derivation in its own
     words ("max first-job wait 81.9 min → 90 min, so it fires past the measured-normal
     population rather than on it"). The floor was
     1200 s, i.e. it selected the MEDIAN wait, and the repair for this class is
@@ -1854,6 +1854,51 @@ def test_the_zero_job_floor_is_past_the_measured_queue_wait():
     assert R.ZERO_JOB_MIN_AGE_S >= 81.9 * 60, (
         f"the floor is {R.ZERO_JOB_MIN_AGE_S:.0f}s, INSIDE the measured max first-job "
         "wait (81.9 min) — a run flagged there is the measured-NORMAL pre-start state")
+
+
+def test_the_floor_citations_RESOLVE_to_what_they_claim_at_this_head():
+    """P3 (review): the citation block is the change's own claim about ITSELF.
+
+    Commit `a7436214f` ("cite the floor's calibration as it is written") ships three
+    coordinates for the 5400 s floor — and two of them had already drifted by this
+    head: `tools/ci_queue_health.py:304` is the trailing COMMENT (the assignment is
+    one line below, at `:305`), and `docs/ops/ci-wall-clock.md` §6 "lines 326-332"
+    is §5's `timeout-minutes` kill table (the quoted derivation is at `342-344`). The
+    docstring names the reader who will follow these numbers and warns that whoever
+    mis-locates the derivation "discards the one section that supports this floor" —
+    so a stale coordinate sends the next lane to exactly the misreading the paragraph
+    exists to prevent.
+
+    Pinned MECHANICALLY instead of corrected by hand a third time: the numbers are
+    read back out of the docstring and resolved against the files they cite, so a
+    later insert anywhere in either file reddens this instead of silently re-arming
+    the defect. Discriminating: restore `:304` or `326-332` and it reddens.
+    """
+    root = Path(__file__).resolve().parents[1]
+    src = (root / "tools" / "ci_check_repair.py").read_text()
+
+    # 1. Every `ci_queue_health.py:<line>` cited must BE the derived-value assignment.
+    cited = sorted(set(re.findall(r"ci_queue_health\.py:(\d+)", src)))
+    assert cited, "the citation block no longer cites ci_queue_health.py by line"
+    health_lines = (root / "tools" / "ci_queue_health.py").read_text().splitlines()
+    for number in cited:
+        line = health_lines[int(number) - 1]
+        assert line.startswith("DEFAULT_MAX_PR_WAIT_SECONDS = 90 * 60.0"), (
+            f"tools/ci_queue_health.py:{number} is cited as the derived budget but reads "
+            f"{line!r}")
+
+    # 2. The `§6 (lines A-B)` span cited must contain the sentence it is quoted FOR.
+    spans = re.findall(r"§6\s*\n#: \(lines (\d+)-(\d+)\)", src)
+    assert len(spans) == 1, f"expected exactly one §6 line-span citation, got {spans}"
+    first, last = (int(n) for n in spans[0])
+    doc = (root / "docs" / "ops" / "ci-wall-clock.md").read_text().splitlines()
+    quoted = " ".join(doc[first - 1:last])
+    assert "81.9 min → 90 min" in quoted, (
+        f"ci-wall-clock.md lines {first}-{last} are cited for the budget derivation but "
+        f"do not contain it: {quoted!r}")
+    assert doc[first - 1].strip().startswith("document's own §1 measurement") or (
+        "derived from this" in quoted), (
+        "the cited span must open on the sentence the docstring quotes")
 
 
 def test_a_run_at_the_measured_median_queue_wait_is_not_cancelled():
