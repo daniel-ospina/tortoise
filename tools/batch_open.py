@@ -387,6 +387,17 @@ def label_only(
     without risking a PR that no fold carries.
     """
     report = Report(fold=fold, fold_head=fold_head, actions=list(verdicts))
+    for verdict in verdicts:
+        if not verdict.closable:
+            # REPORTED, not skipped — and note the asymmetry with `execute`, which is
+            # deliberate: the label is safe without a containment proof (reversible in
+            # one command, and it closes the QUEUE, not the PR), so it still goes on.
+            # But the run's exit status must not claim every constituent was contained
+            # when one was not: the docstring's contract is "exit 1 = at least one
+            # constituent NOT contained — refused, and reported", and this path used
+            # to print `0 refused` and return 0 while a NOT-CONTAINED constituent sat
+            # in the plan.
+            report.refused.append(verdict.number)
     if dry_run:
         return report
     for verdict in verdicts:
@@ -403,15 +414,49 @@ def label_only(
 # ---------------------------------------------------------------------------
 
 
+def _run(
+    argv: list[str],
+    *,
+    timeout: int,
+    cwd: Path | None = None,
+    stdin: str | None = None,
+) -> subprocess.CompletedProcess:
+    """`subprocess.run` that CANNOT raise: a missing binary is rc=127, a hang rc=124.
+
+    ⛔ A `FileNotFoundError` IS NOT A NON-ZERO RC. `subprocess.run(["gh", ...])`
+    raises when the CLI is not installed, and `TimeoutExpired` when it hangs; both
+    used to escape `main()` as a traceback, so the process exited **1** — the code
+    this tool's contract reserves for *"at least one constituent NOT contained"*.
+    That is a wrong claim about the wrong thing, and it is reachable on the fleet's
+    `ubuntu-latest` fallback pool, where there is no `gh` on `PATH` at all. It is
+    also the lesson `MEMORY.md` records from #9018 (`[cli-absent-is-not-failure]`).
+
+    Both failures now come back as a `CompletedProcess` with an explanatory stderr,
+    so every existing `returncode != 0` arm decides — and every one of those arms
+    refuses rather than acts, which is the safe direction.
+    """
+    try:
+        return subprocess.run(
+            argv,
+            cwd=cwd,
+            input=stdin,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+        )
+    except FileNotFoundError:
+        return subprocess.CompletedProcess(
+            argv, 127, "", f"{Path(argv[0]).name}: command not found on PATH"
+        )
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(
+            argv, 124, "", f"{Path(argv[0]).name}: did not finish within {timeout}s"
+        )
+
+
 def _git(argv: list[str], cwd: Path) -> tuple[int, str]:
-    proc = subprocess.run(
-        ["git", "-c", "core.hooksPath=/dev/null", *argv],
-        cwd=cwd,
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=GIT_TIMEOUT_S,
-    )
+    proc = _run(["git", "-c", "core.hooksPath=/dev/null", *argv], cwd=cwd, timeout=GIT_TIMEOUT_S)
     return proc.returncode, (proc.stdout if proc.returncode == 0 else proc.stderr).strip()
 
 
@@ -469,6 +514,21 @@ def content_contained(head: str, base: str, fold_head: str, cwd: Path) -> tuple[
         reintroduces a three-way apply. Exit status alone is not containment
         evidence — the same reason `_git` treats an unreadable result as a
         failure rather than as empty.
+
+    ⛔ rc=0 WITH OUTPUT IS NOT A CLEAN PROOF EITHER, and that is a SECOND message
+    git emits while exiting 0. Measured on git 2.43.0 with a MODE-ONLY constituent
+    (`old mode 100644 / new mode 100755`) reversed against a fold tree that carries
+    the file WITHOUT the chmod:
+
+        git apply --reverse --check   -> rc=0  "warning: s.sh has type 100644,
+                                               expected 100755"   and NOTHING applied
+
+    so the executable bit is not in the fold, yet the status-only reading called it
+    CONTAINED-CONTENT and `--apply` closed it. A genuinely contained diff is SILENT
+    (measured on the same git: rc=0, empty output), so "rc=0 **and** silent" is the
+    proof and non-empty output is a refusal. Whitespace noise cannot turn a true
+    positive into a refusal for this call because `--check` does not apply the patch
+    (measured: a contained trailing-whitespace diff is silent).
     """
     tmp = Path(tempfile.mkdtemp(prefix="batch-open-"))
     worktree = tmp / "fold"
@@ -478,12 +538,9 @@ def content_contained(head: str, base: str, fold_head: str, cwd: Path) -> tuple[
         if code != 0:
             return False, f"could not materialise the fold tree: {err[:200]}"
         added = True
-        diff = subprocess.run(
+        diff = _run(
             ["git", "-c", "core.hooksPath=/dev/null", "diff", f"{base}...{head}"],
             cwd=cwd,
-            capture_output=True,
-            text=True,
-            check=False,
             timeout=GIT_TIMEOUT_S,
         )
         if diff.returncode != 0:
@@ -493,18 +550,25 @@ def content_contained(head: str, base: str, fold_head: str, cwd: Path) -> tuple[
             # evidence that its work is in the fold, and treating it as contained
             # would close a PR on no evidence at all.
             return False, "the constituent's diff is empty — nothing to prove"
-        applied = subprocess.run(
+        applied = _run(
             ["git", "-c", "core.hooksPath=/dev/null", "apply", "--reverse", "--check"],
             cwd=worktree,
-            input=diff.stdout,
-            capture_output=True,
-            text=True,
-            check=False,
+            stdin=diff.stdout,
             timeout=GIT_TIMEOUT_S,
         )
-        conflicting = _reports_conflict(applied.stdout + applied.stderr)
-        if applied.returncode == 0 and not conflicting:
+        noise = (applied.stdout + applied.stderr).strip()
+        conflicting = _reports_conflict(noise)
+        if applied.returncode == 0 and not conflicting and not noise:
             return True, "reverse-apply of the constituent diff is clean"
+        if applied.returncode == 0 and noise and not conflicting:
+            # rc=0 is NOT the proof — silence is. Measured: a mode-only
+            # constituent reversed against a tree without the chmod exits 0 and
+            # prints "warning: <file> has type 100644, expected 100755" while
+            # applying nothing, so the exec bit is not in the fold.
+            return False, (
+                "reverse-apply exited 0 but was NOT silent — the fold tree does not "
+                f"carry this change: {noise[:300]}"
+            )
         if conflicting:
             # Reached only if a three-way apply is reintroduced: a conflict means
             # the fold tree does NOT carry this change, whatever the status says.
@@ -545,7 +609,7 @@ def _gh(argv: list[str], repo: str | None = None) -> tuple[int, str]:
     class of false record as a false containment proof.
     """
     full = ["gh", *argv, *(["--repo", repo] if repo else [])]
-    proc = subprocess.run(full, capture_output=True, text=True, check=False, timeout=GH_TIMEOUT_S)
+    proc = _run(full, timeout=GH_TIMEOUT_S)
     return proc.returncode, (proc.stdout if proc.returncode == 0 else proc.stderr)
 
 
@@ -582,22 +646,38 @@ def parse_constituents(body: str, fold: int | None = None) -> list[int]:
     `is_ancestor(fold_head, fold_head)` is vacuously true, so `--apply` would have
     closed the fold along with its constituents, leaving nothing that carries the
     validated tree. So:
-      * a parenthetical tail is STRIPPED and never parsed;
+      * a parenthetical tail is STRIPPED and never parsed — and it must BE the
+        tail: anything after it is prose too;
       * the remaining line must be ONLY `#<n>`/`<n>` tokens separated by commas
         and/or whitespace — otherwise the line is refused (returns `[]`), because
         a line this tool cannot read unambiguously is not evidence;
       * `fold` is excluded explicitly, and `main` excludes it again for the
         `--constituent` path.
+
+    ⛔ AND TEXT AFTER A STRIPPED PARENTHETICAL IS REFUSED, not harvested. Digits
+    after it are still TOKENS to the grammar, so
+
+        fold-constituents: 10543 (10641 dropped) #10820
+
+    read as `[10543, 10820]` — and `#10820` is an *issue*, not a PR. (Measured;
+    containment still gates the close, so the worst case is a wasted refusal, but
+    a line whose prose parses as a token is not a line this tool can read.)
     """
     for line in body.splitlines():
         match = _CONSTITUENTS_LINE.match(line)
         if not match:
             continue
         value = match.group(1)
-        # Drop a trailing parenthetical entirely: it is prose, and prose here is
-        # how a dropped PR gets closed.
-        value = re.sub(r"\([^)]*\)", " ", value)
-        value = re.sub(r"\(.*$", " ", value)  # an unterminated parenthetical
+        # A parenthetical is prose, so it is dropped — and it must be the END of the
+        # line. Whatever follows it is prose too, but `#10820` there is a valid
+        # TOKEN, so harvesting the residue turns an issue reference into a close
+        # target. A parenthetical that is not a well-formed tail refuses the line.
+        prose = re.search(r"\(.*$", value)
+        if prose:
+            after = value[prose.start() :]
+            if not re.fullmatch(r"\([^)]*\)[\s,]*", after):
+                return []
+            value = value[: prose.start()]
         if not value.strip():
             return []
         tokens = [tok for tok in re.split(r"[\s,]+", value.strip()) if tok]
@@ -661,11 +741,17 @@ def constituent_refs(number: int, repo: str | None = None) -> tuple[str, str] | 
 # ---------------------------------------------------------------------------
 
 
-def _print_report(report: Report, dry_run: bool) -> None:
+def _print_report(report: Report, dry_run: bool, label_only: bool = False) -> None:
     mode = "DRY-RUN" if dry_run else "APPLIED"
     print(f"fold #{report.fold} at {report.fold_head}")
     for verdict in report.actions:
-        mark = "close" if verdict.closable else "KEEP "
+        if label_only:
+            # This run closes nothing, so a `close` marker would describe an action
+            # the tool never takes (measured: an `--label-only --apply`-shaped run
+            # printed `close #101` while closing no PR at all).
+            mark = "label " if verdict.closable else "KEEP  "
+        else:
+            mark = "close" if verdict.closable else "KEEP "
         print(f"  {mark} #{verdict.number:<7} {verdict.state:<20} {verdict.detail}")
     if report.closed:
         print(f"closed: {report.closed}")
@@ -789,8 +875,14 @@ def main(argv: list[str] | None = None) -> int:
             gh=lambda argv: _gh(argv, args.repo),
             dry_run=False,
         )
-        _print_report(report, dry_run=False)
-        return 1 if report.errors else 0
+        _print_report(report, dry_run=False, label_only=True)
+        # Same exit contract as the close path below: 2 is "could not measure / a
+        # call failed", 1 is "a constituent is NOT contained". This path used to
+        # return 1 for a call failure (2) and 0 when a constituent was refused —
+        # both wrong against the docstring's own table.
+        if report.errors:
+            return 2
+        return 1 if report.refused else 0
 
     report = execute(plan, gh=lambda argv: _gh(argv, args.repo), dry_run=not args.apply)
     _print_report(report, dry_run=not args.apply)

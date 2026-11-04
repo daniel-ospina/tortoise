@@ -72,6 +72,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 
 import batch_open as bo  # noqa: E402
+import ci_selection as cs  # noqa: E402
 import mergify_config_guard as mcg  # noqa: E402
 
 MERGIFY = ROOT / ".mergify.yml"
@@ -418,11 +419,13 @@ def _git(repo: Path, *args: str, stdin: str | None = None) -> str:
     return proc.stdout.strip()
 
 
-def _commit(repo: Path, files: dict[str, str], parents: list[str], message: str) -> str:
+def _commit(repo: Path, files: dict[str, str], parents: list[str], message: str,
+            modes: dict[str, str] | None = None) -> str:
+    modes = modes or {}
     entries = []
     for name, content in files.items():
         blob = _git(repo, "hash-object", "-w", "--stdin", stdin=content)
-        entries.append(f"100644 blob {blob}\t{name}")
+        entries.append(f"{modes.get(name, '100644')} blob {blob}\t{name}")
     tree = _git(repo, "mktree", stdin="\n".join(entries) + "\n")
     args = ["commit-tree", tree, "-m", message]
     for parent in parents:
@@ -494,6 +497,43 @@ def test_a_genuinely_contained_change_still_proves_out(scratch_repo: Path) -> No
     verdict = bo.verdict_for(101, const, base, fold, scratch_repo)
     assert verdict.state == "CONTAINED-CONTENT", verdict
     assert verdict.closable is True
+
+
+def test_a_mode_only_constituent_the_fold_does_not_carry_is_NOT_contained(
+    scratch_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(b2) THE DEFECT: a plain reverse-apply exits 0 **with a warning** and applies nothing.
+
+    `--3way` was dropped because it exits 0 while reporting a conflict. But a plain
+    `git apply --reverse --check` has a SECOND exit-0 message: when only the FILE MODE
+    differs, git prints
+
+        warning: s.sh has type 100644, expected 100755
+
+    and applies NOTHING. Measured on git 2.43.0. So a constituent whose only change is
+    `chmod +x` was reported CONTAINED-CONTENT against a fold that never carried the
+    chmod, and `--apply` closed it — losing the executable bit that no fold carries.
+    The proof is rc=0 AND silence; a clean contained apply prints nothing.
+
+    Discrimination proof: with the `not noise` clause reverted to the old
+    status-only reading, this test reports CONTAINED-CONTENT and fails.
+    """
+    base = _commit(scratch_repo, {"s.sh": "#!/bin/sh\necho hi\n"}, [], "base")
+    const = _commit(
+        scratch_repo,
+        {"s.sh": "#!/bin/sh\necho hi\n"},
+        [base],
+        "const",
+        modes={"s.sh": "100755"},
+    )
+    fold = _commit(scratch_repo, {"s.sh": "#!/bin/sh\necho hi\n"}, [base], "fold")
+    monkeypatch.chdir(scratch_repo)
+    verdict = bo.verdict_for(101, const, base, fold, scratch_repo)
+    assert verdict.state != "CONTAINED-CONTENT", (
+        "a mode-only constituent whose chmod the fold does NOT carry was reported "
+        f"contained — the tool would close it and lose the mode: {verdict}"
+    )
+    assert verdict.closable is False, verdict
 
 
 def test_a_named_repo_is_threaded_into_every_gh_call(
@@ -644,6 +684,137 @@ def test_hint_constituents_still_sees_prose_but_is_never_acted_on() -> None:
     assert bo.hint_constituents(body, 900) == [10543, 10610, 10641]
     assert bo.parse_constituents(body, fold=900) == [], (
         "a title carrying no `fold-constituents:` line must yield NO constituents"
+    )
+
+
+def test_parse_constituents_refuses_prose_that_follows_a_stripped_parenthetical() -> None:
+    """(b2) Digits AFTER the parenthetical are prose, but they parse as TOKENS.
+
+    Measured with the pre-fix parser:
+        'fold-constituents: 10543 (10641 dropped) #10820'
+            -> [10543, 10820]
+    `#10820` is an ISSUE, and the token grammar cannot tell it from a PR, so the
+    residue is refused rather than harvested. The parenthetical must be the TAIL.
+    """
+    assert bo.parse_constituents("fold-constituents: 10543 (10641 dropped) #10820\n", fold=900) == [
+    ]
+    # ...while a well-formed tail is still stripped, and the tokens before it read.
+    assert bo.parse_constituents(
+        "fold-constituents: 10543, 10610 (10641 dropped; see #10820)\n", fold=900
+    ) == [10543, 10610]
+    # An unterminated parenthetical is not a well-formed tail either.
+    assert bo.parse_constituents("fold-constituents: 10543 (10641 dropped\n", fold=900) == []
+
+
+def test_label_only_reports_a_refused_constituent_and_exits_1(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """(a) `--label-only` must not claim `0 refused` while a constituent is unproven.
+
+    The label is deliberately still applied — it is reversible and it closes the
+    QUEUE, not the PR — but the docstring's exit contract is
+    `exit 1 = at least one constituent NOT contained — refused, and reported`, and
+    this path used to exit 0 with `0 refused` in the summary. Measured before the
+    fix: `--label-only` over [CONTAINED-CONTENT, NOT-CONTAINED] -> exit=0,
+    `APPLIED: 2 constituent(s), 0 refused`, and a `close` marker on #101 for a run
+    that closed nothing.
+    """
+    monkeypatch.setattr(bo, "fetch_fold", lambda n, repo=None: (0, "f" * 40, "fold-br", "body"))
+    monkeypatch.setattr(bo, "_git", lambda argv, cwd: (0, ""))
+    monkeypatch.setattr(bo, "constituent_refs", lambda n, repo=None: ("a" * 40, "b" * 40))
+    monkeypatch.setattr(
+        bo,
+        "verdict_for",
+        lambda n, h, b, f, cwd: _verdict(
+            n, "CONTAINED-CONTENT" if n == 101 else "NOT-CONTAINED", ""
+        ),
+    )
+    calls: list[list[str]] = []
+    monkeypatch.setattr(bo, "_gh", lambda argv, repo=None: (calls.append(list(argv)), (0, ""))[1])
+
+    rc = bo.main(["--fold", "900", "--label-only", "--constituent", "101", "--constituent", "102"])
+    out = capsys.readouterr().out
+
+    assert rc == 1, f"a NOT-CONTAINED constituent must exit 1, got {rc}: {out}"
+    assert "1 refused" in out, out
+    assert "close" not in [line.split()[0] for line in out.splitlines() if line.strip()], (
+        f"a label-only run closes nothing, so it must not print a `close` marker: {out}"
+    )
+    # The label still goes on both — refusal is about the CLOSE, not the label.
+    assert [argv[:2] for argv in calls] == [["pr", "edit"], ["pr", "edit"]], calls
+
+
+def test_label_only_exits_2_on_a_failed_call(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """(a) A failed `gh` is "could not measure" (exit 2), not "not contained" (exit 1)."""
+    monkeypatch.setattr(bo, "fetch_fold", lambda n, repo=None: (0, "f" * 40, "fold-br", "body"))
+    monkeypatch.setattr(bo, "_git", lambda argv, cwd: (0, ""))
+    monkeypatch.setattr(bo, "constituent_refs", lambda n, repo=None: ("a" * 40, "b" * 40))
+    monkeypatch.setattr(
+        bo, "verdict_for", lambda n, h, b, f, cwd: _verdict(n, "CONTAINED-CONTENT", "")
+    )
+    monkeypatch.setattr(bo, "_gh", lambda argv, repo=None: (1, "HTTP 422"))
+    rc = bo.main(["--fold", "900", "--label-only", "--constituent", "101"])
+    capsys.readouterr()
+    assert rc == 2, rc
+
+
+def test_a_missing_binary_is_a_FAILED_QUERY_not_a_traceback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """(b2) An absent `gh`/`git` must not escape as an exception, and must not look like "not contained".
+
+    `subprocess.run(["gh", ...])` raises `FileNotFoundError` — NOT a non-zero rc — so
+    `main()` used to die with a traceback and exit **1**, the code reserved for "a
+    constituent was NOT contained". On the fleet's `ubuntu-latest` fallback pool there
+    is no `gh` on PATH at all, so that was the likely reading there. Same lesson as
+    `MEMORY.md`'s `[cli-absent-is-not-failure]` (#9018).
+    """
+
+    def absent(*args, **kwargs):
+        raise FileNotFoundError(2, "No such file or directory", "gh")
+
+    monkeypatch.setattr(bo.subprocess, "run", absent)
+    code, err = bo._gh(["pr", "view", "1"])
+    assert code == 127, code
+    assert "not found" in err.lower(), err
+    code, err = bo._git(["status"], Path("."))
+    assert code == 127, code
+    assert "not found" in err.lower(), err
+
+
+def test_a_hung_call_is_124_not_an_exception(monkeypatch: pytest.MonkeyPatch) -> None:
+    """(b2) Same class: a timeout is a failed call, not an uncaught `TimeoutExpired`."""
+
+    def hung(*args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd="gh", timeout=1)
+
+    monkeypatch.setattr(bo.subprocess, "run", hung)
+    code, err = bo._gh(["pr", "view", "1"])
+    assert code == 124, code
+    assert "did not finish" in err.lower(), err
+
+
+def test_a_batch_open_only_change_selects_core_so_this_guard_actually_runs() -> None:
+    """(b2) The `CORE_ALSO` entry is LOAD-BEARING, so it is pinned here.
+
+    `tools/` is in `NON_PYTHON_PREFIXES` and no `SOURCE_PATTERNS` row matches
+    `tools/batch_open.py`, so without the entry a tool-only diff is filtered out
+    BEFORE the "not matched -> core" fallback, `select()` returns no surface, and the
+    guard that pins the fold gate never runs on the file it guards — the
+    #1349/#3332/#3616 silent-drop class the entry's comment cites. Measured: with the
+    entry removed, `surfaces == []` and `test_batch_gate.py` is not selected.
+
+    `tests/test_ci_selection.py`'s generic ratchet derives candidates from
+    `tortoise/**/*.py` stems only, so it cannot see a `tools/` guard — hence the pin
+    lives here, where the entry does.
+    """
+    selection = cs.select(["tools/batch_open.py"], "pull_request", cs.load_manifest())
+    assert selection["surfaces"] == ["core"], selection
+    assert "test_batch_gate.py" in selection["test_files"], (
+        "the CORE_ALSO entry is missing: a batch_open-only diff would run no guard "
+        f"at all — got {len(selection['test_files'])} files"
     )
 
 

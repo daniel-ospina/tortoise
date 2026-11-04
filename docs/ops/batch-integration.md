@@ -991,6 +991,20 @@ the constituent's own diff inside a scratch worktree of the batch head — the r
 squash-built batch, where ancestry is false though the work is present). Anything else is reported
 and **kept**, under `--apply` as well. Closing a PR whose work no batch carries destroys it.
 
+⛔ **`CONTAINED-CONTENT` means the reverse-apply exited 0 AND was silent.** Exit status alone is not
+the proof, because git exits **0** with two different messages that mean the change is *not* in the
+tree: `--3way` says `Applied patch to 'f.txt' with conflicts.`, and a plain `--check` says
+`warning: s.sh has type 100644, expected 100755` for a **mode-only** change the tree does not carry
+(the executable bit is lost if that PR is closed). A genuinely contained change prints nothing. So
+the tool treats a conflict phrase, and any other output at all, as `NOT-CONTAINED` — a false refusal
+costs one manual close; a false proof is unrecoverable.
+
+The exit status is the tool's own contract, and it is the same on both write paths: **0** every
+constituent contained, **1** at least one `NOT-CONTAINED` (reported — under `--label-only` the label
+still goes on, because it is reversible and it closes the queue rather than the PR), **2** could not
+measure (no constituent list, or a `git`/`gh` call that failed, was absent, or hung — never a
+traceback).
+
 ⛔ **The constituent list is never parsed from prose.** A batch title routinely names a PR it
 deliberately did **not** fold — #10894's title names `#10641`, which was dropped. Deriving the close
 list from that would close a PR the batch never carried, so the tool requires either a
