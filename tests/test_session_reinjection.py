@@ -144,7 +144,10 @@ def _fresh_uri() -> str:
 # statement about the ARM only while both reads were served from the same
 # retrieval legs — and the SDK's product default (a 500 ms collective
 # deadline, #1786 R5) is ALSO the per-query ``TIMEOUT`` handed to FalkorDB
-# (search_engine.py:1730). When BOTH sparse strategies miss it the engine
+# (`search_engine.py:1724` — the `run_fts_query` leg's
+# `graph.query(..., timeout=timeout_ms)`; `:1730` is the post-hoc warning it
+# logs six lines below, which is where an earlier version of this note pointed
+# a reader who asked for the handoff). When BOTH sparse strategies miss it the engine
 # collects 0/2, the SDK degrades to the corpus-wide ``tfidf_snapshot``
 # fallback, and that pool is a DIFFERENT COMPOSITION — measured on this
 # fixture's graph: 11 of 11 seeded Points, id-ordered, against the 7 the FTS

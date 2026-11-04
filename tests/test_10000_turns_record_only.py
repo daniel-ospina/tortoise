@@ -3239,9 +3239,22 @@ def test_the_repair_note_names_BOTH_halves_of_a_legacy_demo_graph():
         "so this pin cannot tell the instruction from the surrounding history: "
         f"{note!r}")
     repair = parts[1]
-    assert "epi_turn" in repair and "DETACH DELETE" in repair, (
-        "the repair paragraph does not say which nodes go or how: "
+    # ⛔ AND SCOPED TO THE INSTRUCTION SENTENCE, not the paragraph. The tail of
+    # the paragraph explains the half-state, and it quotes the counter reset
+    # again — so reverting the INSTRUCTION to the node-only form while leaving
+    # the counter in a later sentence (a parenthetical, or the ⛔ note) left
+    # this pin GREEN: measured (#10675 review P3), one sentence further out
+    # than the RE-SEEDING paragraph the split above was added for.
+    instruction = next(
+        (s for s in re.split(r"(?<=[.!?])\s+", repair) if "DETACH DELETE" in s),
+        None)
+    assert instruction is not None, (
+        "the repair paragraph no longer states the `DETACH DELETE` half at "
+        f"all, so this pin cannot tell an instruction from its explanation: "
         f"{repair!r}")
+    assert "epi_turn" in instruction, (
+        "the repair SENTENCE does not say which nodes go — the legacy demo "
+        f"turn nodes are `epi_turn*`: {instruction!r}")
     # ⛔ Not the bare literal: `s.turn_count=0` demands one SPELLING of the
     # instruction, so a same-meaning rewording ("reset `s.turn_count` to 0")
     # is refused although the purge lane is told exactly the right thing
@@ -3251,12 +3264,14 @@ def test_the_repair_note_names_BOTH_halves_of_a_legacy_demo_graph():
     # the counter and the value, not one punctuation choice (#10675
     # review round 12, P2: `\s*=\s*0` never accepted the `to 0` form the
     # first version of this comment itself offered as the example).
-    assert re.search(r"s\.turn_count[`\s]*(?:=|to)\s*0\b", repair), (
-        "the repair paragraph names the node delete but not the counter — "
+    assert re.search(r"s\.turn_count[`\s]*(?:=|to)\s*0\b", instruction), (
+        "the repair SENTENCE names the node delete but not the counter — an "
+        "instruction that leaves the reset to the explanation beside it is how "
+        "a destructive lane reads 'delete the nodes' and stops: "
         "deleting the `epi_turn*` nodes ALONE leaves `s.turn_count=3` beside "
         "zero rows, which the read refuses (503 on an armed deployment, "
         "`{\"turns\": 3, \"turn_points\": []}` on an unarmed one), so it "
-        f"instructs a destructive lane to re-create the defect: {repair!r}")
+        f"instructs a lane to re-create the defect: {instruction!r}")
     assert "#10017" in note, (
         "the note describes a destructive graph-side repair without naming the "
         f"lane that owns it (§9.1 residual (a), `#10017`): {note}")

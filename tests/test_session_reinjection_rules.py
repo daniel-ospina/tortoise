@@ -1558,6 +1558,21 @@ _POINT_KIND = re.compile(
     r"pointKind[`'\"\s]*(?:[=:]\s*|is\s+|of\s+)[`'\"“]*([a-z_]+)",
     re.IGNORECASE)
 
+#: A NEGATED claim about the seed's writing — i.e. the CORRECTED spelling, and
+#: the one an author reaches for first. The lookahead inside
+#: :data:`_PRESENT_TENSE_DEMO_EVENT_WRITER` only covers a negator AFTER the verb
+#: (``writes no …``); a negator BEFORE it (``does not write …``, ``never writes
+#: …``, ``no longer writes …``) still matched and red the very sentence this
+#: guard asks for — measured (#10675 review P2): all three were RED
+#: end-to-end, and the failure message quoted the NEGATION as the violation
+#: while telling the lane to "restate it as history", which it already was.
+#: Read on the MATCHED SPAN, so the negator may sit on either side of the verb.
+_NEGATED_CLAIM = re.compile(
+    r"\b(?:not|never|no\s+longer|no\s+more)\s+(?:also\s+|still\s+|ever\s+)?"
+    r"(?:writes?|mints?|creates?)\b"
+    r"|\b(?:writes?|mints?|creates?)\s+(?:no|nothing|none|never)\b",
+    re.IGNORECASE)
+
 
 def _present_tense_writer_claim(flat: str) -> str | None:
     """The forbidden present-tense claim in ``flat``, or ``None``.
@@ -1575,6 +1590,12 @@ def _present_tense_writer_claim(flat: str) -> str | None:
         # (#10675 review round 13, P3).
         before = flat[max(0, hit.start() - 40):hit.start()]
         if _OTHER_SEEDER_CONTEXT.search(before):
+            continue
+        # ⛔ A NEGATED match is the CORRECTION, not the claim (#10675 review
+        # P2): "since #10000 the demo seed does NOT write …" states exactly
+        # what this guard wants stated, and reding it tells the lane to restate
+        # a sentence that is already right.
+        if _NEGATED_CLAIM.search(hit.group()):
             continue
         # The kind may be named just PAST the verb's match ("… with a
         # ``pointKind`` of ``observation``"), so read a short context, not the
@@ -1763,6 +1784,39 @@ def test_no_home_states_the_deleted_demo_turn_writer_as_current_fact():
                 "beside it, so the reader cannot tell the seed's `event` nodes "
                 "are a LEGACY population the conjunct is retained for. Got: "
                 f"...{window}...")
+
+
+def test_the_present_tense_guard_reads_a_NEGATED_writer_claim_as_the_CORRECTION():
+    """#10675 review P2: the guard red the sentence it exists to encourage.
+
+    The corrected prose says the seed does NOT write the turn shape, and English
+    offers several ways to spell that. Only the negator-AFTER-the-verb form
+    ("writes no …") was excluded by the lookahead inside the pattern; every
+    negator-BEFORE-the-verb form matched, so a TRUE correction produced a RED
+    whose message quoted the negation as the violation.
+
+    FAILS IF: any of the four standard negated spellings reds again, or the
+    guard stops matching the un-negated claim (which would make the four arms
+    above vacuous).
+    """
+    corrections = (
+        "since #10000 the demo seed writes no `pointKind='event'` node",
+        "since #10000 the demo seed does not write `pointKind='event'` nodes",
+        "since #10000 the demo seed never writes `pointKind='event'` nodes",
+        "since #10000 the demo seed no longer writes `pointKind='event'` nodes",
+    )
+    for sentence in corrections:
+        found = _present_tense_writer_claim(sentence)
+        assert found is None, (
+            "the guard reds a CORRECTED sentence — the prose it asks for: "
+            f"{sentence!r} → {found!r}")
+    # ⛔ NON-VACUITY: the same subject, verb and kind WITHOUT a negator is the
+    # violation. Without this arm the four above would pass on a pattern that
+    # simply stopped matching anything.
+    positive = "the demo seed writes a `pointKind='event'` node per turn"
+    assert _present_tense_writer_claim(positive) is not None, (
+        "the guard stopped matching the present-tense claim altogether, so "
+        f"its negation arms prove nothing: {positive!r}")
 
 
 # ── END of the guard's machinery — below this line the population resumes
