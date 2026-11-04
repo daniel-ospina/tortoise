@@ -207,8 +207,10 @@ Key points:
   bundle items (it is server-managed — a bundle carrying it is a violation).
 - **`created` / `deduped`** each count `{points, entities, sources, connections}`.
   Re-submitting the identical bundle returns the same ids with everything in
-  `deduped` — **except** for `document`/`event` entities, which are append-only
-  occurrence records: those are counted in `created` again, with no warning
+  `deduped` — **except** for the classes the fold does not cover: `document`/
+  `event` entities (append-only occurrence records) and any point the content fold
+  excludes (it skips operator nodes). Those are counted in `created` again, with
+  no warning. Read these two counts to tell which happened
   ([§15](#15-timeout--failure)).
 - **`ids["connections"]`** — the connection descriptor contract. A connection
   routed to an **operator** appends the bare operator-id string:
@@ -333,16 +335,22 @@ enumeration** — a warning key outside this table is a divergence; report it.
 > `duplicate_target_deduped` row above); both amendments are deliberate, and are
 > recorded here and pinned in `tests/test_ingest_conformance.py`.
 >
-> **Which keys are emitted today.** Row 6 (`mitigation_strength_change`) is
-> emitted by `ingest()`'s mitigation path since #5244. Rows 3, 4 and 1
-> (`mitigation_orphan_residue`, `mitigation_drift_duplicate`,
-> `append_only_items`) are **reserved vocabulary, not observable today**: no
-> write door emits them. ⛔ Row 1 in particular is not a signal you can wait for —
-> the append-only `document`/`event` legs append **silently**
-> (`sdk.ingest`: `existed = []  # … append-only — never deduped`), so a
-> resubmission that duplicates them returns a normal response with
-> `warnings: []`. Rows 3 and 4 are reserved for their crash-orphan recovery
-> flows. Everything above is pinned in `tests/test_ingest_conformance.py`.
+> **Which keys are emitted today.** ⛔ This table is the CLOSED SET of tokens, not
+> a census of live signals — most of it is reserved vocabulary. Measured by
+> searching the package for each key, **five** are emitted: `mitigation_strength_change`
+> (row 6, `ingest()`'s mitigation path since #5244), `duplicate_target_deduped`
+> (row 13), `point_mediated_route`, `operator_absorb_completed` and
+> `partial_operator_residue`. The other **eight** — rows 1, 2, 3, 4, 5, 9, 10,
+> 11 — have **no producing call site anywhere in the codebase**; they are the
+> vocabulary those flows will use, not a signal you can watch for today.
+>
+> ⛔ That matters most for row 1 (`append_only_items`), because the condition it
+> describes is real and **silent**: the append-only `document`/`event` legs append
+> with no warning at all (`sdk.ingest`: `existed = []  # … append-only — never
+> deduped`), so a resubmission that duplicates them returns a normal response with
+> `warnings: []`. A caller waiting for that key learns nothing. Rows 9-11 are the
+> same hazard for a resubmission that drops or changes a label or direction.
+> The table is pinned as a closed set in `tests/test_ingest_conformance.py`.
 
 ---
 
@@ -772,20 +780,32 @@ Point-bearing pair.
 > **Timeout ≠ failure — resubmission is duplicate-averse, not idempotent.**
 
 If an ingest call times out, you do not know whether it committed. Re-send
-the identical bundle: committed points, sources and connections dedup
-(all-`deduped` counts confirm presence), missed items are created, and one
-`batch_id` spans the whole logical bundle. Never "fix" a timeout by editing the
+the identical bundle: what committed dedups (an all-`deduped` response confirms
+presence), what did not is created, and one `batch_id` spans the whole logical
+bundle. ⛔ "What committed dedups" is not everything — see the exception below,
+which is why the counts and not this sentence are the authority. Never "fix" a timeout by editing the
 bundle before retrying — a modified retry is a different logical bundle and can
 strand run-1 residue.
 
-**The exception, stated once.** `document` and `event` entities are append-only
-occurrence records (`sdk.ingest` never dedups them), so a resubmission that
-follows an ambiguous timeout can append a second one — **silently**, because no
-warning key reports it (`append_only_items` in [§3.2](#32-warnings--the-thirteen-keys) is reserved
-vocabulary, not emitted today, and the response comes back with `warnings: []`).
-"Resubmit the identical bundle" is therefore the right move when the bundle
-carries no `document`/`event` entities, and a bundle-with-duplicates audit when it
-does.
+**The exception, stated once.** Not every item in a bundle is duplicate-averse.
+The fold covers points (by kind + content hash), sources (by url) and
+connections (by endpoint set + arity). It does **not** cover:
+
+* `document` and `event` entities — occurrence records, append-only by contract
+  (`sdk.ingest` sets `existed = []` on both legs: "never deduped");
+* any point the fold's own predicate EXCLUDES — it skips operator nodes, so a
+  points item that declares itself an operator mints a second node on an
+  identical resubmission (measured: `created.points: 1` on both runs,
+  `deduped.points: 0`, `warnings: []`).
+
+Neither class warns. (`append_only_items` in [§3.2](#32-warnings--the-thirteen-keys) is reserved
+vocabulary, not emitted today — so waiting for it learns nothing.)
+
+⛔ **Do not infer convergence from this document — read the response.** The
+`created` / `deduped` counts are the verdict, per call: a resubmission that should
+have been all-duplicate but reports a non-zero `created` did duplicate, and its
+`ids` name what it made. That check survives an exclusion this document has not
+learned about yet, which is the only reason to prefer it to a list.
 
 **Over the MCP surface, do not infer this from the timeout alone.** A call
 refused on the transport wait bound carries the verdict explicitly, in
@@ -798,8 +818,15 @@ refused on the transport wait bound carries the verdict explicitly, in
 | `SAFE` | `"unknown"` | Dispatched and may have committed; the call is one whose SEQUENTIAL repeat converges — `retry_safe: true`. (The precondition is real: a repeat that lands while the abandoned first attempt is still running is not a repeat.) |
 | `UNSAFE` | `"unknown"` | Dispatched and may still be running, and a repeat is NOT provably convergent — `retry_safe: false`. |
 
-`tortoise_ingest` is `UNSAFE`, which is this exception stated mechanically: read
-`retry_rule`, and do not re-send while that first attempt can still be running.
+`tortoise_ingest` reports `retry_safe: false`, and its rule says what that means
+without qualification: **do NOT re-send it — reconcile by other means.** That is
+this exception stated mechanically, and it is stronger than a concurrency caution:
+ingest is `UNSAFE` because its append-only legs duplicate a repeat whenever it
+lands, not only while the first attempt is still running. So the over-MCP answer
+and this section's "re-send the identical bundle" are answering different
+questions — the section answers *"the call is dead and I want the data in"*; the
+refusal answers *"I do not know whether it is dead"*, and for ingest the safe
+move there is to read back, not to re-send.
 
 ---
 
