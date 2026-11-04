@@ -1033,13 +1033,14 @@ _UNIT_TOKEN = re.compile(
     r"time-unit)\b")
 
 
-#: The reopenings that may NOT appear even in the sentence that discloses the
-#: STILL-OPEN spelling class: they say a unit stopped being fused/judged, which
-#: reopens the adjacency gap whatever else the sentence is about (review cycle 7,
-#: MEASURED: exempting that sentence wholesale let "the SPELLING gap is not closed
-#: and `minute` no longer fuses" PASS — an over-block traded for a fail-open).
-#: `not closed` / `is open` are deliberately absent: the SPELLING gap IS open, and
-#: saying so is the row's own honest disclosure.
+#: The floor for an EXEMPT tail sentence — one that discloses the still-open
+#: SPELLING class and names no unit. It is not skipped: these reopenings say a
+#: unit stopped being fused/judged, which reopens the adjacency gap whatever else
+#: the sentence is about (review cycle 7, MEASURED: exempting that sentence
+#: wholesale let "the SPELLING gap is not closed and `minute` no longer fuses"
+#: PASS; cycle 9: skipping it entirely let "… the value class is no longer
+#: judged" PASS). `not closed` / `is open` are deliberately absent — the SPELLING
+#: gap IS open and saying so is the row's own honest disclosure.
 _SPELLING_SENTENCE_REOPENING = (
     r"\bno\s+longer\s+(closed|fuses|judged|caught|compared|enforced|retained)\b",
     r"\bunclosed\b",
@@ -1133,11 +1134,20 @@ def test_the_registry_row_names_the_residual_that_still_stands():
     # discloses the SPELLING class and names NO unit (review cycle 8, MEASURED:
     # the narrow subset let `except \`minute\`, which is open again.` — appended at
     # the very end — PASS, a regression against the parent commit).
+    # ⛔ AND AN EXEMPT SENTENCE STILL GETS A FLOOR — it is not skipped (review
+    # cycle 9, MEASURED: `continue` applied NO list at all, so "The SPELLING gap
+    # is open, and the value class is no longer judged.", "… the numeric side is
+    # no longer compared." and "… the carve-out reopens." went FAIL→PASS against
+    # the parent commit — phrases `_ADJACENCY_REOPENING` itself advertises). The
+    # exempt arm therefore applies `_SPELLING_SENTENCE_REOPENING`, whose whole
+    # job is to say a unit stopped being fused/judged whatever else the sentence
+    # is about; the non-exempt arm applies the full list.
     tail = sentences[last + 1:]
     for sentence in tail:
-        if "spelling" in sentence and not _UNIT_TOKEN.search(sentence):
-            continue  # the disclosed still-open SPELLING gap, its own sentence
-        for pattern in _ADJACENCY_REOPENING:
+        exempt = ("spelling" in sentence
+                  and not _UNIT_TOKEN.search(sentence))
+        for pattern in (_SPELLING_SENTENCE_REOPENING if exempt
+                        else _ADJACENCY_REOPENING):
             m = re.search(pattern, sentence)
             assert m is None, (
                 f"the row says {m.group(0)!r}, which reopens the adjacency gap "
