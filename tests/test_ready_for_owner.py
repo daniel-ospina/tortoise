@@ -900,6 +900,42 @@ def test_the_probe_dataclass_defaults_a_read_dependent_flag_to_unreadable() -> N
     assert check.unreadable is True
 
 
+#: The ROUND-9 corpus: every body below was measured against the previous head, and each
+#: one read the WRONG way there. `blocking` is the required answer.
+ROUND9_CORPUS: tuple[tuple[str, bool], ...] = (
+    # The declaration arm was EXCLUSIVE, so one prose severity token masked an abort marker
+    # or a real `[P1]`/`ISSUES n` verdict — a false PASS (the dangerous direction).
+    ("Auto-fix stalled after 3 cycles — see the severity: P2 note.", True),
+    ("Requires human review. The severity: P2 wording needs a human.", True),
+    ("ISSUES 2\n\nI addressed the severity: P2 comment and a P3 nit.", True),
+    ("The severity: P2 note from round 2 is fixed.\n\n[P1] tools/x.py:5 — still open", True),
+    ("Closed `severity: P2` item.\n\n* [P2] tools/x.py:9 — still open", True),
+    # quoting a finding is normal review behaviour; the `>` prefix used to read neutral.
+    ("> [P1] tools/x.py:5 — quoted finding", True),
+    ("**Outcome: 2 findings (1 × P1).** No blocking other than the P1 — a real open defect.", True),
+    # A clean round that MENTIONS the P2 it fixed must stay certifiable.
+    ("**Outcome: 2 findings (0 blocking).** One P2 was fixed, two P3 deferred.", False),
+    ("**Outcome: 3 issues (0 blocking).** Round 7's P2 is fixed; P3 notes remain.", False),
+    (
+        "**Outcome: CLEAN.** The severity: P2 note from round 2 is fixed; pushed to origin: main",
+        False,
+    ),
+    ("**Outcome: CLEAN.** The one severity: P2 note from round 2 is fixed and verified.", False),
+    ("NO ISSUES FOUND — verified the severity: P1 finding from round 3 is now closed.", False),
+    ("**Outcome: 2 findings (2 × P3).**", False),
+    ("**OUTCOME: 2 issues found (both P3), no blocking defect.**", False),
+)
+
+
+@pytest.mark.parametrize(("body", "blocks"), ROUND9_CORPUS, ids=range(len(ROUND9_CORPUS)))
+def test_the_round_9_corpus_grades_exactly_as_measured(body: str, blocks: bool) -> None:
+    """Each of these read the WRONG way at `720b628ba`. The arms are independent and OR'ed
+    now, so no single token can mask another; and a single `0 blocking` declaration is
+    trusted while a per-round history is graded on the severities it declares."""
+    got = rfo._grades_as_blocking(body, {})
+    assert got is blocks, f"{body!r} -> {got}, expected {blocks}"
+
+
 @pytest.mark.parametrize("field", ["is_draft", "merged"])
 def test_an_omitted_draft_or_merged_flag_is_unreadable(field: str) -> None:
     """ROUND-6 P3: an ABSENT boolean defaulted to the passing side."""

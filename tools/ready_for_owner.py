@@ -163,7 +163,10 @@ QUEUE_BLOCKING_LABELS = frozenset({"superseded-by-fold"})
 #: ``code-review`` converges on: a line that LEADS with ``[P0]``/``[P1]``/``[P2]``
 #: (``[P1] tortoise/sdk.py:12 — …``). The token must be the line's FIRST word, which is
 #: what makes this a finding rather than prose that happens to mention a severity.
-BLOCKING_RE = re.compile(r"^\s*(?:[-*]\s*)?\**\[?(P0|P1|P2)\]?\**\s*(?=\S|$)", re.MULTILINE)
+#: ⛔ QUOTING A FINDING (`> [P1] …`) MUST STILL BLOCK — answering a finding by quoting
+#: it is normal review behaviour, and a `>` prefix read NEUTRAL (round 9). So do nested
+#: bullets and bold brackets.
+BLOCKING_RE = re.compile(r"^\s*(?:[-*>]+\s*)*\**\[?(P0|P1|P2)\]?\**\s*(?=\S|$)", re.MULTILINE)
 ISSUES_RE = re.compile(r"^\s*ISSUES\s+(\d+)\b", re.MULTILINE)
 #: A CLEAN outcome. ⛔ THE POSITIVE VOCABULARY IS THE RECORDER'S TOO: `Outcome: clean` is
 #: the declaration `scripts/record-review.sh` reads (its own suppress arm keys on it), and
@@ -227,7 +230,9 @@ FINDINGS_DECLARED_RE = re.compile(
 #: such bodies measured across ten PRs — a permanent false NOT-READY, and a contradiction of
 #: this gate's own rule that a `[P3]` note does not block.
 ANY_SEVERITY_TOKEN_RE = re.compile(r"(?i)\bP([0-3])\b")
-ZERO_BLOCKING_RE = re.compile(r"(?i)\b0\s+blocking\b|\bno\s+blocking\b")
+#: ⛔ `no blocking` only counts as a DECLARATION when it ENDS there — "No blocking other
+#: than the P1" is the opposite claim, and matching it was the round-7→8 false PASS.
+ZERO_BLOCKING_RE = re.compile(r"(?i)\b0\s+blocking\b|\bno\s+blocking\b(?=\s*(?:[.,;:!)\]]|$))")
 #: The ISSUE block's SIBLING fields. A real finding always carries at least one of these
 #: next to its severity; bare prose that happens to say "severity: P1" does not. Used to
 #: tell a DECLARATION from a sentence ABOUT a past finding — round 8 measured 5 of 6 natural
@@ -238,8 +243,10 @@ ZERO_BLOCKING_RE = re.compile(r"(?i)\b0\s+blocking\b|\bno\s+blocking\b")
 #: block's own `outcome:` field is covered by the line-start arm, because the block's
 #: `severity:` is on its own line.
 SIBLING_FIELD_RE = re.compile(
-    r"(?i)(?:\b(?:check_type|origin|location|description|suggestion)\s*:"
-    r"|\bfile\s*:\s*\S)"
+    r"(?i)(?:\bcheck_type\s*:"
+    r"|\borigin\s*:\s*(?:diff|history|context|base|design)\b"
+    r"|\b(?:location|file)\s*:\s*\S"
+    r"|\b(?:description|suggestion)\s*:)"
 )
 #: A severity declaration in FIELD position: its own line (the `ISSUE:` block's indented
 #: `severity: P1`), optionally bulleted, bolded, quoted or backticked.
@@ -411,7 +418,7 @@ class Probe:
     merged: bool | None = None
     #: Re-read AFTER every other read: ``True`` still the same head, ``False`` it moved
     #: mid-read, ``None`` the re-read was unreadable.
-    head_stable: bool | None = True
+    head_stable: bool | None = None
     #: Set by tests/callers that need a fixed clock; default = now (UTC).
     now: datetime = field(default_factory=lambda: datetime.now(UTC))
 
@@ -461,6 +468,11 @@ def _gate_token(group: ci_verdict.GroupVerdict) -> str:
     if group.state == ci_verdict.GROUP_ABSENT:
         # cancelled / stale: measured NOTHING. Absence is not a pass.
         return f"absent:{conclusion}"
+    if group.state != ci_verdict.GROUP_GREEN:
+        # ⛔ WHITELIST, not a fall-through. A state this module has not seen used to reach
+        # the conclusion check below and PASS on `conclusion=success` — the same
+        # unrecognised-value-falls-through-the-gap defect the polarity rule forbids.
+        return f"state:{group.state}"
     if conclusion != REQUIRED_CONCLUSION:
         # green for GitHub, not for us: skipped/neutral exercised no code.
         return f"non-measuring:{conclusion}"
@@ -777,6 +789,74 @@ def _parse_instant(value: str) -> datetime | None:
 # ── condition 6 — no OPEN blocking finding ──────────────────────────────────
 
 
+def _grades_as_blocking(text: str, item: Mapping[str, Any]) -> bool:
+    """Does this review artifact record a blocker? Every arm is independent; any one blocks.
+
+    HARD arms always block. SOFT arms (a declared COUNT, and a severity named anywhere) are
+    suppressed by an explicit ``0 blocking`` / ``no blocking <thing>.`` — a P3-only round
+    that MENTIONS the P2 it fixed must stay certifiable, or a clean PR can never open the
+    owner's tab again. A blocking severity in FIELD position is hard, so a "0 blocking"
+    phrase can never cancel a real finding.
+    """
+    issues = ISSUES_RE.search(text)
+    severity = _declared_severity(text)
+    severities = set(ANY_SEVERITY_TOKEN_RE.findall(text))
+    # A declaration only counts in FIELD position (its own line, as in the `ISSUE:` block,
+    # or beside an ISSUE-block sibling field) — prose ABOUT a past finding is not a finding.
+    severity_is_field = bool(SEVERITY_LINE_START_RE.search(text)) or (
+        severity is not None and bool(SIBLING_FIELD_RE.search(text))
+    )
+    zero_blocking = bool(ZERO_BLOCKING_RE.search(text))
+
+    hard = bool(
+        BLOCKING_RE.search(text)
+        or (issues and int(issues.group(1)) > 0)
+        # The recorder's own unconditional arms (1) and (1b).
+        or NON_CLEAN_RE.search(text)
+        # Its arm (2): loose `not…clean`, suppressed by an explicit `Outcome: clean`.
+        or (LOOSE_NEGATIVE_RE.search(text) and not EXPLICIT_CLEAN_OUTCOME_RE.search(text))
+        # ⛔ A formal unresolved change request is a blocking record whatever its body says.
+        or str(item.get("state") or "").upper() == CHANGES_REQUESTED
+        or severity_is_field
+    )
+    if hard:
+        return True
+    # ⛔ `zero_blocking` is checked AFTER the multi-declaration case, not before: one round's
+    # "0 blocking" must not short-circuit a P1 declared on another round (round-9 P1).
+    counts = _declared_counts(text)
+    if not counts:
+        return False
+    if len(counts) > 1:
+        # SEVERAL declarations (a per-round history): a `0 blocking` on one round must not
+        # cancel a P1 declared on another. Only an explicit blocking severity on ANY round
+        # blocks, so an all-P3 history stays certifiable.
+        return bool(severities & {"0", "1", "2"})
+    if zero_blocking:
+        # ONE declaration that says it named nothing blocking — e.g. a P3-only round that
+        # MENTIONS the P2 it just fixed. Trust the declaration.
+        return False
+    if severities & {"0", "1", "2"}:
+        return True
+    return any(c > 0 for c in counts) and not (severities and severities <= {"3"})
+
+
+def _declared_severity(text: str) -> str | None:
+    match = FINDINGS_DECLARED_RE.search(text)
+    if not match:
+        return None
+    return (match.group(1) or "").upper() or None
+
+
+def _declared_counts(text: str) -> list[int]:
+    """Every count this body declares, in order (a per-round history declares several)."""
+    out: list[int] = []
+    for match in FINDINGS_DECLARED_RE.finditer(text):
+        value = _int_or_none(match.group(2) or match.group(3))
+        if value is not None:
+            out.append(value)
+    return out
+
+
 def check_blocking_finding(probe: Probe) -> Check:
     """No P0/P1/P2 finding may still be open — the last word must be a clean verdict.
 
@@ -800,52 +880,14 @@ def check_blocking_finding(probe: Probe) -> Check:
         probe.comments, key=lambda c: (str(c.get("created_at") or ""), int(c.get("id") or 0))
     ):
         text = str(item.get("body") or "")
-        issues = ISSUES_RE.search(text)
-        declared = FINDINGS_DECLARED_RE.search(text)
-        # ⛔ A FINDING DECLARATION OUTRANKS ANY CLEAN PHRASE IN THE SAME BODY. A "review
-        # history and dispositions" summary mentions `NO ISSUES FOUND` while listing
-        # severities, and reading that as a CLEAR would close a real finding.
-        if declared:
-            severity = (declared.group(1) or "").upper()
-            n = _int_or_none(declared.group(2) or declared.group(3)) or 0
-            if severity:
-                # A `severity:` FIELD (ISSUE block, or composed beside a sibling) blocks.
-                # Bare PROSE that mentions a severity does not — `**Outcome: CLEAN.** … the
-                # severity: P1 note from round 2 is fixed` is a clean review ABOUT a past
-                # finding, and 5 of 6 natural clean phrasings blocked before this
-                # discriminator. A real finding always carries the ISSUE block's siblings.
-                blocking = bool(SIBLING_FIELD_RE.search(text)) or bool(
-                    SEVERITY_LINE_START_RE.search(text)
-                )
-            else:
-                # A declared COUNT: blocked when a blocking severity is declared ANYWHERE in
-                # the body — a P1 cannot be cancelled by a "0 blocking" phrase in the same
-                # paragraph (round 8 measured that regression) — and NOT blocked when every
-                # severity the body names is P3, or it says 0/no blocking.
-                severities = set(ANY_SEVERITY_TOKEN_RE.findall(text))
-                if severities & {"0", "1", "2"}:
-                    blocking = True
-                elif ZERO_BLOCKING_RE.search(text) or (severities and severities <= {"3"}):
-                    blocking = False
-                else:
-                    blocking = n > 0
-            # ⛔ A FORMAL unresolved change request is a blocking record whatever its body
-            # says — the module's own rule for the empty-bodied shape, applied uniformly.
-            if str(item.get("state") or "").upper() == CHANGES_REQUESTED:
-                blocking = True
-        elif NON_CLEAN_RE.search(text) or (
-            # The recorder's arm (2): loose `not…clean`, suppressed by an explicit
-            # `Outcome: clean` — the SAME pairing `record-review.sh` applies, so this is
-            # its rule and not a second one.
-            LOOSE_NEGATIVE_RE.search(text) and not EXPLICIT_CLEAN_OUTCOME_RE.search(text)
-        ):
-            blocking = True
-        else:
-            blocking = bool(
-                BLOCKING_RE.search(text)
-                or (issues and int(issues.group(1)) > 0)
-                or str(item.get("state") or "").upper() == CHANGES_REQUESTED
-            )
+        # ⛔ EVERY ARM IS EVALUATED INDEPENDENTLY AND THEY ARE OR'ED. Making the declaration
+        # arm EXCLUSIVE (an `if/elif/else` chain) let ONE prose severity token mask the
+        # recorder's own unconditional abort markers and the reviewer's `[P1]`/`ISSUES n`
+        # verdicts — measured at the previous head: `Auto-fix stalled … see the severity: P2
+        # note.`, `ISSUES 2` + `I addressed the severity: P2 comment`, and a `[P1] … still
+        # open` line all read NEUTRAL. That is the same masking class as the round-7→8
+        # regression, so the arms no longer compete.
+        blocking = _grades_as_blocking(text, item)
         if blocking:
             blocking_seen += 1
             open_finding = item
