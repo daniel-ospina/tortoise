@@ -599,9 +599,13 @@ class _Fence:
 
     There is deliberately no raw-coordinate item column: two review rounds
     carried one alongside this field and ended up comparing a `rest` indent with
-    a raw column (and then the reverse), each time buying a false `lands`.
-    `container_col` derives the raw column from these two fields, so there is
-    only ONE number in each space and no way to mix them.
+    a raw column (and then the reverse), each time buying a false `lands`. The
+    raw column is derived here (`len(prefix) + close_base`) wherever it is
+    needed, so there is only ONE number in each space and no way to mix them —
+    and it is derived AT the use site rather than exposed as a property: the
+    property this class used to carry had no reader left once the closer test
+    moved to `residual - close_base`, and a derived column nobody reads is an
+    invitation to grow a second coordinate space beside the first (#10634).
 
     `item_col_raw` is the enclosing item's content column in RAW coordinates,
     and is set ONLY when that item sits OUTSIDE the fence's blockquote (its
@@ -627,13 +631,6 @@ class _Fence:
     in_list: bool
     item_col_raw: int = 0
     item_depth: int = 0
-
-    @property
-    def container_col(self) -> int:
-        """The containing block's content column in RAW coordinates — where a
-        line's content has to start to still be inside this block. A closer's
-        "up to three spaces" (§4.5) is measured from here."""
-        return len(self.prefix) + self.close_base
 
 
 def _fence_line_column(line: str, depth: int) -> tuple[int, int, int]:
@@ -858,7 +855,8 @@ def strip_code(body: str, strict: bool = False) -> str:
             #
             # Both tests are measured in ONE coordinate space — the RAW line,
             # with at most the fence's own blockquote depth consumed — because
-            # that is the space `container_col` lives in. Two review cycles did
+            # that is the space the enclosing item's content column
+            # (`item_col_raw`) is expressed in. Two review cycles did
             # this in two spaces at once (a raw indent against a `rest` column,
             # then a `rest` indent against a raw column) and each way bought a
             # false `lands` on one family of shapes while losing a real claim on
@@ -897,7 +895,7 @@ def strip_code(body: str, strict: bool = False) -> str:
                 # ⚠️ BOTH sides are in ONE space. `residual` is the indent after
                 # this line's own markers, which is the space `close_base` holds
                 # (the item's column past the prefix). Subtracting a RAW column
-                # (`column - container_col`) instead charged the MARKER'S allowance
+                # (`column - (len(prefix) + close_base)`) instead charged the MARKER'S allowance
                 # twice — the opener's `  > ` is 4 raw columns, the closer's `> `
                 # only 2, so a 4-space-indented run `>     ``` ` came out 2 columns
                 # past the container and closed a fence the renderer keeps open:
