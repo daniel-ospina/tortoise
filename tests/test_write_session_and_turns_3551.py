@@ -23,10 +23,14 @@ never overwrite the first machine's id.
 """
 from __future__ import annotations
 
+import ast
 import contextlib
 import hashlib
 import inspect
+import re
 import sys
+import textwrap
+from pathlib import Path
 
 import pytest
 
@@ -517,8 +521,74 @@ def test_demo_seed_is_excluded_from_the_primitive(client):
     # nothing to serve — that refusal/contradiction is the regression the value
     # was changed to remove. Asserted by VALUE, not by parameter name, so a
     # refactor that reintroduces a declared length fails this pin.
-    assert "s.turn_count=0" in src
-    assert "s.turn_count=3" not in src
+    # ⛔ Asserted over the CYPHER STRING CONSTANTS of the function, read through
+    # `ast` — not over `src`, not over "lines that are not full-line comments",
+    # and not over "quoted lines". Every line-level form is satisfied by PROSE,
+    # measured over three review rounds (#10675):
+    #   * `"s.turn_count=0" in src` — the `NOT RETROACTIVE` note quotes the
+    #     literal, so a statement declaring a length stayed GREEN;
+    #   * a whole-line `#` filter — a TRAILING comment or a DOCSTRING carries it;
+    #   * a "quote-prefixed line" filter — a docstring line is quote-prefixed
+    #     too, so a TRUE history sentence ("before #10000 the MERGE used to SET
+    #     `s.turn_count=3`") FALSE-RED the pin.
+    # Parsing is what separates a statement from prose about one: the docstring
+    # is excluded by identity, and the population is the string literals that
+    # contain Cypher. The only `turn_count=` assignment among them must be 0, so
+    # a param (`turn_count=$n`) or a literal fails it.
+    tree = ast.parse(textwrap.dedent(src))
+    fn = tree.body[0]
+    doc = ast.get_docstring(fn, clean=False)
+    literals = [
+        node.value for node in ast.walk(fn)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+        and node.value != doc]
+    # ⛔ PLUS the module-level Cypher the function references: hoisting a
+    # statement into a constant (`_HOSTED_SESSION_CYPHER` and friends) is this
+    # repo's own convention, asserted elsewhere in this very file, and a
+    # function-only scan reads the hoisted write as an ABSENT one — measured
+    # (#10675 review round 12, P2): the pin redded with `got []` while the
+    # statement still declared exactly 0.
+    used = {node.id for node in ast.walk(fn) if isinstance(node, ast.Name)}
+    module = ast.parse(Path(ha_mod.__file__).read_text(encoding="utf-8"))
+
+    def _const_str(node: ast.AST) -> str | None:
+        """A string constant, folded through `+` — `ast.literal_eval` refuses
+        a `+` of two strings, and `A = "x" "y"` / `A = "x" + "y"` / `A: str = …`
+        are all spellings this module uses."""
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            left, right = _const_str(node.left), _const_str(node.right)
+            if left is not None and right is not None:
+                return left + right
+        return None
+
+    hoisted: list[str] = []
+    for node in module.body:
+        if isinstance(node, ast.Assign):
+            names = [t.id for t in node.targets if isinstance(t, ast.Name)]
+            value = node.value
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            names, value = [node.target.id], node.value
+        else:
+            continue
+        if value is None or not (set(names) & used):
+            continue
+        text = _const_str(value)
+        if text:
+            hoisted.append(text)
+    cypher = [text for text in literals + hoisted
+              if "SET " in text or "MERGE " in text]
+    # ⚠️ NON-VACUITY: an empty population would make the assertion below pass for
+    # the wrong reason, and a future refactor could hand the Cypher to a helper.
+    assert cypher, (
+        "no Cypher string constants were found in `_seed_demo_graph` — this "
+        "pin's population is empty, so its verdict means nothing")
+    assignments = re.findall(r"turn_count\s*=\s*([^,\)\"\s]+)",
+                             "\n".join(cypher))
+    assert assignments == ["0"], (
+        "the demo seed's own Session write must declare turn_count=0 and "
+        f"nothing else — got {assignments!r} from {cypher!r}")
 
     demo_org = "demo-3551-org"
     ha_mod._seed_demo_graph(demo_org)
