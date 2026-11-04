@@ -36,10 +36,6 @@ cp "$REPO_ROOT/tortoise/exceptions.py" "$STAGE/tortoise/exceptions.py"
 # #3805: the recorded status vocabulary — the ONE declaration both client
 # surfaces import (the thin probe and the S9 skill-wiring client).
 cp "$REPO_ROOT/tortoise/status_vocabulary.py" "$STAGE/tortoise/status_vocabulary.py"
-# #4097: the ONE env-truthiness contract. `mcp_client.py` reads the
-# `TORTOISE_MCP_ALLOW_PROJECT_STORE` opt-in through `is_truthy`, so the wheel
-# needs it staged beside it (stdlib-only by design — no engine dependency).
-cp "$REPO_ROOT/tortoise/env_truthy.py" "$STAGE/tortoise/env_truthy.py"
 # #10605: the stdio↔Streamable-HTTP bridge, so a client-only install can declare
 # a local command instead of a static `Authorization` header (the harness
 # `${VAR}` expansion is a capture, not a lookup — see the module docstring).

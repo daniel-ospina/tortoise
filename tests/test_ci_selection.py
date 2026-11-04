@@ -2519,6 +2519,75 @@ def test_kind_vocabulary_guard_runs_on_a_docs_only_ontology_edit():
         ["docs/ONTOLOGY.md"], "pull_request", stripped)["test_files"]
 
 
+def test_the_split_doc_guards_run_on_the_doc_itself(monkeypatch):
+    """#10605 review (P2): both §8a guards must be selected by a §8a-only edit.
+
+    `docs/client-server-split.md` §8a is the subject of TWO guards, and one does
+    not imply the other:
+
+      * `tests/test_mcp_bridge.py::test_no_artifact_restates_the_refuted_capture_mechanism`
+        (registered `api`) pins the four refuted phrases and REQUIRES
+        "re-runs at every connect" + "process.env";
+      * `tests/test_client_status_vocabulary.py::test_the_artifacts_no_longer_call_the_driver_a_one_word_failure_reporter`
+        (registered `core`) pins the `BearerAuth` PROHIBITION.
+
+    `docs/` is a flat NON_PYTHON_PREFIXES entry and this path was no
+    SOURCE_PATTERNS row and no CORE_ALSO member, so a split-doc-only edit
+    filtered to `changed == []` and took the docs-only early return
+    (`surfaces=[]`, tier-1 smoke): re-adding "expanded once at process start",
+    deleting "re-runs at every connect", or restoring "Client + BearerAuth"
+    merged GREEN with both guards asleep — on the exact scenario the first
+    guard's own docstring names ("so the plausible-but-wrong sentence cannot
+    come back in a later tidy-up"). Same #1349/#3332/#3616 silent-drop class.
+
+    Both halves are needed because a named-surface match REPLACES the `core`
+    fallback: the `api` entry alone drops `test_client_status_vocabulary.py`.
+    """
+    doc = REPO / "docs" / "client-server-split.md"
+    assert doc.exists(), "the guarded doc is gone: docs/client-server-split.md"
+
+    r = _sel(["docs/client-server-split.md"])
+    assert r["full"] is False
+    assert sorted(r["surfaces"]) == ["api", "core"], (
+        f"a docs/client-server-split.md-only edit selects {r['surfaces']} — the "
+        "doc reached the docs-only tier-1 early return, so neither §8a guard runs "
+        "on the only change that can break it (SOURCE_PATTERNS['api'] / CORE_ALSO "
+        "entry removed?)"
+    )
+    assert "test_mcp_bridge.py" in r["test_files"], (
+        "a docs/client-server-split.md-only edit does not run "
+        "tests/test_mcp_bridge.py, so the refuted capture phrases can come back "
+        "into §8a in a later tidy-up"
+    )
+    assert "test_client_status_vocabulary.py" in r["test_files"], (
+        "a docs/client-server-split.md-only edit does not run "
+        "tests/test_client_status_vocabulary.py, so `Client + BearerAuth` can be "
+        "restored into §8a unnoticed"
+    )
+
+    # Non-vacuity, one arm per half: each entry is load-bearing on its own, so
+    # neither assertion above can be satisfied by the other entry.
+    api_paths = tuple(p for p in cs.SOURCE_PATTERNS["api"]
+                      if p != "docs/client-server-split.md")
+    monkeypatch.setattr(cs, "SOURCE_PATTERNS",
+                        {**cs.SOURCE_PATTERNS, "api": api_paths})
+    without_api = _sel(["docs/client-server-split.md"])
+    assert "test_mcp_bridge.py" not in without_api["test_files"], (
+        "with the api entry removed the bridge guard is STILL selected — the "
+        "`api` half of the pair is dead config"
+    )
+    monkeypatch.undo()
+
+    core_also = tuple(p for p in cs.CORE_ALSO if p != "docs/client-server-split.md")
+    monkeypatch.setattr(cs, "CORE_ALSO", core_also)
+    without_core = _sel(["docs/client-server-split.md"])
+    assert "core" not in without_core["surfaces"], (
+        "with the CORE_ALSO entry removed `core` is STILL selected — the "
+        "`core` half of the pair is dead config"
+    )
+    assert "test_client_status_vocabulary.py" not in without_core["test_files"]
+
+
 def test_session_import_change_selects_the_window_guard():
     """#3575 P1-A: `tortoise/session_import/` maps to no named surface, so a
     parsers.py change selects `core` via the fallback. The window guard must be
@@ -4364,6 +4433,34 @@ def test_9664_capstone_runs_on_the_middleware_diff_that_can_break_it():
             "the capstone would not run on the diff class that can break its "
             "tenant install or its refusal text",
             api_sel)
+
+
+def test_10668_allowance_gate_evidence_runs_on_both_diff_classes():
+    # #10668 review P1: `tests/test_allowance_gate.py` is the evidence for the
+    # #9567 D11/D12 allowance gate, and it was registered in NO surface —
+    # `--integrity` printed `❌ manifest drift: ['test_allowance_gate.py']`
+    # (redding the REQUIRED `manifest-integrity` leg) and no leg ever selected
+    # it, so the suite would have stayed green if the gate were deleted (#10513
+    # / #1349 silent-drop class).
+    #
+    # Two modules carry the subject and they classify DIFFERENTLY: a
+    # `tortoise/quota.py` diff (the gate's primary door, `enforce_org_limit`)
+    # selects `api`, while `tortoise/allowance_gate.py` matches no SOURCE_PATTERN
+    # and falls through to the `core` fallback — and a match REPLACES the
+    # fallback, so neither arm alone covers both diff classes (#9192/#9664
+    # idiom).
+    #
+    # Mutation check: deleting the `api` arm fails the quota pair, deleting the
+    # `core` arm fails the allowance_gate pair.
+    api_sel = _sel(["tortoise/quota.py"])
+    assert api_sel["full"] is False, api_sel
+    assert api_sel["surfaces"] == ["api"], api_sel
+    assert "test_allowance_gate.py" in api_sel["test_files"], api_sel
+
+    core_sel = _sel(["tortoise/allowance_gate.py"])
+    assert core_sel["full"] is False, core_sel
+    assert core_sel["surfaces"] == ["core"], core_sel
+    assert "test_allowance_gate.py" in core_sel["test_files"], core_sel
 
 
 def test_source_currency_tool_change_selects_core_not_tier1():

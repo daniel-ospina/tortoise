@@ -46,11 +46,16 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 
 from tortoise import status_vocabulary as vocab
-from tortoise.mcp_client import call_tool, describe_failure, list_tools, status
+from tortoise.mcp_client import (
+    call_tool,
+    describe_failure,
+    endpoint_declared,
+    list_tools,
+    status,
+)
 
 # ── Exit codes (#3832 / D5, vocabulary #3805) ───────────
 # Supersedes #526's exit-0 clause FOR THE CLI PROBE ONLY. The library below is
@@ -81,41 +86,50 @@ def _probe_payload() -> dict:
     The driver (`tortoise.mcp_client.status`) has no notion of a missing
     ENDPOINT (an unset TORTOISE_MCP_URL falls back to the self-host default), so
     `configured` below is this probe's contribution, and it decides the driver's
-    two-outcome outage word only. The one term the DRIVER owns is the
-    credential-less refusal (`unconfigured`, #10605): it already arrives here as
-    a recorded term and is passed through untouched, which is why this probe
-    never has to guess whether a missing key was the cause.
+    two-outcome outage word only. It is asked of the RESOLUTION
+    (`mcp_client.endpoint_declared`), not of the environment: since #10605 an
+    endpoint can also be DECLARED by a store's `api_url`, and deriving it from
+    `TORTOISE_MCP_URL` alone reported a store-configured, genuinely-down server
+    as `unconfigured` (exit 4, a policy gap) with `url: None` — inverting the
+    load-bearing property that `degraded` and `unconfigured` are never reported as
+    each other (#3805). The one term the DRIVER owns is the credential-less
+    refusal (`unconfigured`, #10605): it already arrives here as a recorded term
+    and is passed through untouched, which is why this probe never has to guess
+    whether a missing key was the cause.
 
-    BOUNDARY, stated rather than implied: for the UNAVAILABLE word, 'TORTOISE_MCP_URL
-    is unset' IS the definition of unconfigured on this probe. A self-hoster who runs the
-    default daemon without setting the variable and then loses that daemon
-    reads as `unconfigured`, not `degraded` — the endpoint was never declared,
-    so the probe cannot tell 'intended the default' from 'never set up' and does
-    not pretend to. Set TORTOISE_MCP_URL (even to the default) to move a down
-    daemon into the can't-reach-it state.
+    BOUNDARY, stated rather than implied: for the UNAVAILABLE word, "no endpoint
+    that this client will USE is declared" IS the definition of unconfigured on
+    this probe — `declared` describes the RESOLVED connection, so it is false when
+    neither `TORTOISE_MCP_URL` nor the store that supplies the credential records
+    an `api_url`. (A store may record an `api_url` and still yield `declared:
+    False`: with no usable `api_key` in it the store is not a credential source and
+    its endpoint is never read.) A self-hoster who runs the default daemon having
+    declared nothing, and then loses that daemon, reads as `unconfigured`, not
+    `degraded` — the probe cannot tell "intended the default" from "never set
+    up" and does not pretend to. Declare an endpoint (even the default) to move a
+    down daemon into the can't-reach-it state.
 
-    The rewritten payload drops `url` (the driver filled in the UNCONFIGURED
-    default, so keeping it would advertise an endpoint the probe just said was
-    never configured) and adds `configured: false` — ONLY for the outage word.
-    The rewrite is keyed on the DRIVER's own word being outside
-    `vocab.CLIENT_STATUS_TERMS`, because the driver's two-outcome word
-    (`tortoise_unavailable`) is the only case where `configured` has anything to
-    say. MEASURED BEFORE THAT GUARD (#10605 review, P1): with `TORTOISE_MCP_URL`
-    unset and the driver refusing for a MISSING KEY (`MCP-KEY-EMPTY`, which it
-    reports under the recorded `unconfigured` term), the payload came back
-    `{"status": "unconfigured", "url": null, "configured": false, "error":
-    "MCP-KEY-EMPTY: …"}` — an endpoint WAS resolved and contacted
-    (`http://localhost:8000/mcp/`) and the gap was the credential, so a caller
-    branching on `configured` was told to declare an endpoint it already had.
-    That is the misattribution #10605 exists to remove, and it contradicted this
-    docstring. A recorded term from the driver is now passed through verbatim,
-    `url` and all.
+    ⛔ The rewrite applies to a LEGACY word ONLY — one that cannot be translated
+    without the configuration fact (`LEGACY_WORDS_NEEDING_CONFIGURATION`, i.e.
+    `tortoise_unavailable`). A word the DRIVER already reports inside the recorded
+    term set passes through VERBATIM, url included (#10605 review, P1): the
+    credential-less refusal arrives as the recorded `unconfigured` carrying the
+    endpoint it actually resolved and contacted, and rewriting THAT to
+    `{url: None, configured: false}` told a caller to declare an endpoint it
+    already had — the misattribution #10605 exists to remove, and the opposite of
+    what the paragraph above promises.
+
+    The rewritten payload (legacy word + no declared endpoint) drops `url` (the
+    driver filled in the UNCONFIGURED default, so keeping it would advertise an
+    endpoint the probe just said was never configured) and adds
+    `configured: false`.
     """
     payload = status()
-    configured = bool(os.environ.get("TORTOISE_MCP_URL"))
-    term = vocab.resolve(payload.get("status"), configured=configured)
+    raw = payload.get("status")
+    configured = endpoint_declared()
+    term = vocab.resolve(raw, configured=configured)
     if (term == vocab.STATUS_UNCONFIGURED and not configured
-            and payload.get("status") not in vocab.CLIENT_STATUS_TERMS):
+            and raw not in vocab.CLIENT_STATUS_TERMS):
         return {**payload, "status": term, "configured": False, "url": None}
     return {**payload, "status": term}
 

@@ -1051,6 +1051,28 @@ SOURCE_PATTERNS = {
             # `_SELF_GUARD_DEBT` because of exactly this); adding the source
             # entries is the named fix, and the debt row is deleted with it.
             "tortoise/mcp_client.py", "tortoise/mcp_bridge.py",
+            # #10605 review (P2): §8a of `docs/client-server-split.md` is part of
+            # that SAME guard pair's subject, and the diff that can break it is a
+            # DOC edit. `docs/` is in NON_PYTHON_PREFIXES and is not itself a
+            # pattern, so without this CONCRETE entry (the
+            # `docs/auth-architecture.md` shape above) a
+            # `docs/client-server-split.md`-only edit filtered to `changed == []`,
+            # took the docs-only early return and selected NO surface — exactly
+            # the scenario
+            # `test_mcp_bridge.py::test_no_artifact_restates_the_refuted_capture_mechanism`
+            # and
+            # `test_client_status_vocabulary.py::test_the_artifacts_no_longer_call_the_driver_a_one_word_failure_reporter`
+            # name in their own docstrings ("so the plausible-but-wrong sentence
+            # cannot come back in a later tidy-up"). Re-adding "expanded once at
+            # process start" / "replayed for the life of the process", deleting
+            # "re-runs at every connect", or restoring "Client + BearerAuth"
+            # there merged green with both guards asleep — the
+            # #1349/#3332/#3616 silent-drop class, one level up. Paired with
+            # `CORE_ALSO` because a named-surface match REPLACES the `core`
+            # fallback and the `BearerAuth` prohibition lives in a
+            # CORE-registered guard. Named as a CONCRETE file, not a glob:
+            # `select()` matches with `startswith` and has no glob support.
+            "docs/client-server-split.md",
             # #3154: hosted_api.py imports hosted_backup.py at module level (the
             # backup/restore/import endpoints), and the boolean-index audit lives
             # there — without this entry a hosted_backup.py-only change matched
@@ -1427,6 +1449,20 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # tool's own guard) is selected. Pinned by
              # tests/test_ci_selection.py::test_queue_resweep_tool_change_selects_core_not_tier1.
              "tools/queue_resweep.py",
+             # #2148: `tools/batch_open.py` owns `tests/test_batch_gate.py`
+             # (registered `core`), and `tools/` is in NON_PYTHON_PREFIXES, so a
+             # batch_open-only change would be filtered out BEFORE the "not
+             # matched -> core" fallback and take the docs-only early return —
+             # `select(["tools/batch_open.py"])` would yield NO surface, and the
+             # guard that pins the fold gate would never run on the file it guards
+             # (the same #1349/#3332/#3616 silent-drop class as queue_resweep
+             # directly above). The entry makes `_selection_relevant()` keep the
+             # path so `core` — and this tool's own guard — is selected. Pinned by
+             # tests/test_batch_gate.py::test_a_batch_open_only_change_selects_core_so_this_guard_actually_runs,
+             # which asserts `select(["tools/batch_open.py"])` returns `core` AND this
+             # file's suite. (`integrity()` does NOT read CORE_ALSO — measured: it
+             # returns `[]` with and without this entry — so it is not a pin.)
+             "tools/batch_open.py",
              # #6388: `tools/seal_session_events.py` is the session-events seal
              # policy, guarded by tests/test_session_events_seal.py, which is
              # `core`-registered — but `tools/` is swallowed by
@@ -1967,6 +2003,21 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # above. Pinned by
              # tests/test_ci_selection.py::test_record_schema_pin_runs_on_migration_or_doc_change.
              "docs/00_index.md",
+             # #10605 review (P2): the OTHER half of the split-doc guard pair.
+             # `docs/client-server-split.md` §8a is read by TWO guards, and one
+             # does not imply the other: the `api` entry above reaches
+             # `test_mcp_bridge.py` (the four refuted phrases and the required
+             # "re-runs at every connect" mechanism sentence), while
+             # `test_client_status_vocabulary.py` — which pins the `BearerAuth`
+             # PROHIBITION — is registered only on `core`, and a named-surface
+             # match REPLACES the `core` fallback. Without this entry a
+             # split-doc-only edit selects `api` alone and half the guard pair
+             # stays asleep, which is the residue the reviewer measured. `docs/`
+             # is a flat NON_PYTHON_PREFIXES entry and this path is no
+             # SOURCE_PATTERNS row of its own, so it reached the docs-only early
+             # return. Same #1349/#3332/#3616 class; pinned by
+             # tests/test_ci_selection.py::test_the_split_doc_guards_run_on_the_doc_itself.
+             "docs/client-server-split.md",
              # RETIRED 2026-10-19: the orchestrator harness (and therefore
              # tests/test_orchestrator_harness.py) moved to
              # agent-infra/scripts/orchestrator-harness/. This repo keeps only a pointer

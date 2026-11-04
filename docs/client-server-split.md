@@ -111,7 +111,9 @@ tree exactly as before — `from tortoise.mcp_client import ...` keeps working
 | `tortoise-client` (client) | `fastmcp-slim[client]==3.4.6`, `httpx>=0.27` |
 
 - `fastmcp-slim[client]` provides the exact `fastmcp.client` import surface
-  `mcp_client.py` uses (Client + BearerAuth + StreamableHttpTransport)
+  `mcp_client.py` uses (Client + StreamableHttpTransport, with the Bearer supplied
+  by a per-request `httpx.Auth` provider — never `BearerAuth`, which CAPTURES the
+  string; §8a)
   **without** the server extra (uvicorn/websockets/cyclopts) and without
   fastapi/numpy/scipy/falkordb. The pin `==3.4.6` matches the server's
   `fastmcp==3.4.6` — protocol/API lockstep.
@@ -215,18 +217,20 @@ reported 401.
 So the server can only answer `Unauthorized: invalid or missing Bearer token`.
 That message is accurate and useless: it points at the credential's VALUE when
 the name, or the source, was never read again after the process started. The
-design consequence is a CONFIG-NAME fix, not a cache-expiry fix (#10605;#5200 is
+design consequence is a CONFIG-NAME fix, not a cache-expiry fix (#10605; #5200 is
 the same class reached by a variable-name mismatch).
 
 **The fix, in two layers.**
 
 1. `tortoise/mcp_client.py` resolves the Bearer value **per request** (an httpx
    `auth_flow` provider — the `token()`-callback shape the MCP SDKs converge on,
-   rather than a captured string — with the `async_auth_flow` twin an
-   `AsyncClient` drives), reading `TORTOISE_API_KEY`, then the fleet
+   rather than a captured string), reading `TORTOISE_API_KEY`, then the fleet
    alias `TORTOISE_MCP_API_KEY`, then the stored credentials in the recorded
    #1708 D5 order: the PROJECT-LOCAL `./.tortoise` that `tortoise init --api-key`
-   writes, then `~/.tortoise/credentials.json`. A rotation
+   writes, then `~/.tortoise/credentials.json`. A store that ARRIVES WITH a
+   repository is skipped rather than read — git reports it tracked, or git cannot
+   be asked and a `.git` sits above it (see the trust boundary below); an ordinary
+   untracked store is read. A rotation
    therefore reaches the wire on the next call with no rebuild and no restart. A
    blank value is "no credential", never an `Authorization: Bearer` header with
    nothing after the scheme; if the endpoint then rejects the call, the client raises
@@ -235,19 +239,6 @@ the same class reached by a variable-name mismatch).
    `unconfigured` term (a set-up gap, not an outage, #3805). The named refusals
    hold on the PUBLIC constructor too (`get_client()` returns a guarded client),
    not only on `status`/`available`/`list_tools`/`call_tool`.
-
-   ⛔ **The PROJECT-LOCAL `./.tortoise` is read for NON-transmitting callers
-   only.** Every entry point that puts the credential on the wire resolves
-   `resolve_connection(global_only=True)`, which reads env plus
-   `~/.tortoise/credentials.json` and SKIPS `<cwd>/.tortoise` — the same posture
-   `tortoise/__main__.py::_resolve_config_path(global_only=True)` has carried
-   since #2369 D1.2, because that file is COMMITTABLE: a cloned repo would
-   otherwise choose both the Bearer key and the host it is sent to (and shadow
-   the credential the user actually stored), and the bridge is launched with
-   cwd = the project. A skipped store is still NAMED in the refusal's source
-   list. A user who deliberately keeps a project-local credential sets
-   `TORTOISE_MCP_ALLOW_PROJECT_STORE=1`; a directory whose `./.tortoise` merely
-   exists does not, by itself, authorize transmission.
 
    A credential whose CO-SOURCED host is not this client's endpoint is
    **withheld**, never sent, and reported as `MCPCredentialHostMismatchError`
@@ -276,44 +267,59 @@ the same class reached by a variable-name mismatch).
    Server text is quoted as evidence, but a credential VALUE echoed back by the
    server is redacted before it reaches the harness's transcript or logs.
 
+   One operational knob: `TORTOISE_MCP_BRIDGE_TIMEOUT` is the seconds allowed per
+   forwarded request (default 120, declared in `.env.example`). It is generous on
+   purpose because a `tortoise_search` carries the server's own wait budget; a
+   legitimately slow call is answered by raising it, not by reading the resulting
+   timeout as an outage. A malformed value falls back to the default.
+
 **WHICH SOURCE IS ACTUALLY LIVE — stated, because "reads the live environment" is
 too generous.** The bridge is a CHILD process, so its environment is a snapshot
 of the harness's at spawn: a key exported in another shell after the session
 started is not visible to it. Re-reading the environment helps a process that
 sets its own `os.environ` mid-run (a notebook, a login flow); the source that
 genuinely rotates under a long-lived session — and the one a hosted user has on
-disk, written by `tortoise init` — is the **GLOBAL credential file**
-(`~/.tortoise/credentials.json`), re-read per request. The env leg is precedence,
-not liveness.
-
-⛔ **Which stores are read is the TRANSMITTING split stated above — not both.** A
-transmitting resolution reads env plus the global file, and reaches
-`<cwd>/.tortoise` only when `TORTOISE_MCP_ALLOW_PROJECT_STORE` is truthy; a
-NON-transmitting read (`.key` redaction) does read both, project-local first.
-So a key that sits only in the project store is not "no credential" because
-nothing resolved — that store is SKIPPED on purpose, and still NAMED in
-`MCP-KEY-EMPTY`'s source list so the operator is told it was seen and why it
-was not used. (An earlier revision of this paragraph claimed "both stores are
-read" in a section documenting the bridge, which contradicted the paragraph
-above it and the code; corrected under #10605's review.)
+disk, written by `tortoise init` — is the **credential file**, re-read per
+request. The env leg is precedence, not liveness. Both stores are read: a user
+who onboarded through the CLI has the project-local one, and a client that read
+only the global file would report "no credential" for a key sitting on disk.
+**One exception, and it is a trust boundary rather than a precedence rule: a
+store that ARRIVES WITH a repository is IGNORED.** Both halves of the identity
+come from one file (`api_key` and `api_url`), so a repository that commits
+`./.tortoise` would choose the key *and* the host its requests go to — the shape
+`#3660` fails closed on. Precisely: a store git TRACKS is skipped, and so is one
+inside a git work tree when git cannot be run at all to say whether it is tracked
+(the fail-closed arm; a store in no repository, and an ordinary untracked store
+in one, are read as before). The global store is vetted the same way whenever a
+`.git` sits above it. A store `tortoise init` writes is gitignored, so the
+ordinary project-local store is unaffected *where git can answer*; the ignored one
+is named in the refusal's source list and warned about once on stderr.
 
 **CO-SOURCE (#2369 D1.1).** When the key comes from the credential file, the
 endpoint comes from that SAME file (`api_url`), never from a `TORTOISE_MCP_URL`
 the environment supplies: a harness config can be committed to a repository, so
 letting it choose the host for a stored credential would be an exfiltration path.
 
-**What this does NOT do (residual — recorded on #10605, tracked on #10885).** The
-onboarding generator (`tortoise/__main__.py::_harness_mcp_config`) and this repo's
-committed `.mcp.json` still emit the `Authorization: Bearer ${TORTOISE_API_KEY}` capture
-for the **hosted** shape. That is deliberate and product-facing, not an oversight:
+**What this does NOT do (residual — recorded on #10605, tracked OPEN on #10885).** The
+onboarding generator (`tortoise/__main__.py::_harness_mcp_config`) and this repo's committed
+`.mcp.json` still emit the `Authorization: Bearer ${TORTOISE_API_KEY}` capture for
+the **hosted** shape. That is deliberate and product-facing, not an oversight:
 the hosted recipe must work for a user who has installed *nothing* locally, and
 the bridge needs a Python package present. Switching those recipes — and the
 fleet's own harness configs, which agent-infra owns — is the follow-up that
 retires the capture everywhere; until it lands the bridge is the recipe for
 anyone with the client installed, and the named refusal is what everyone else now
-gets instead of a misleading 401. ⛔ The follow-up is tracked OPEN on **#10885** —
-issue #10605 records only where the residual came from, and it is retired by the
-fold that lands this hop, so a reader must not follow it for live scope.
+gets instead of a misleading 401.
+
+⛔ **#10605 is CLOSED, so it is not the live home for that residual — #10885 is.**
+A reader checking whether the capture has been retired must follow **#10885**
+(OPEN, filed with this residual's `file:line` scope and its acceptance criterion);
+#10605 records only where the residual came from. The same relay applies to the
+`503 consent_store_unavailable` arm and the keyless-re-entry hole, which now live
+on **#10884** rather than in #10487's closed thread. Both sentences are held in
+place by a biconditional pin
+(`tests/test_mcp_bridge.py::test_the_hosted_recipe_residual_has_a_home_this_fold_does_not_close`),
+so the pointer cannot rot into a claim about an issue that does not carry it.
 
 Both modules are staged into the client-only wheel (`client/build_client.sh`), and
 both have guards registered on the `api` CI surface:

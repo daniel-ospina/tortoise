@@ -48865,11 +48865,9 @@ def _validate_extracted_from(props: dict, *, door: str) -> None:
 # unwrapped would make the reader cover the lane that keeps both claims and skip
 # the lane that deletes one.
 #
-# Wrapped here, at module scope, rather than by inserting lines inside the method:
+# Wired here, at module scope, rather than by inserting lines inside the method:
 # `sdk.py`'s line numbers are cited by the #7949 capstone bundle (`:15484`,
-# `:15765`, …) and a hook inside the method re-stales them.  `functools.wraps`
-# keeps the name, docstring and signature, so every `self._extract_session_llm`
-# call site and every test that inspects the method resolve to the wrapper.
+# `:15765`, …) and a hook inside the method re-stales them.
 #
 # ⛔ LAZY, not at import (review P2, measured): binding the real wrapper at
 # module scope made `import tortoise.sdk` eagerly import `tortoise.extractor_v2`
