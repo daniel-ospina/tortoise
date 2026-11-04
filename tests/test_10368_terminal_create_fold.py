@@ -299,6 +299,8 @@ def test_a_prop_bearing_dedup_hit_DOES_read_the_verdict_once(sdk, monkeypatch):
         "a caller prop must be adjudicated by the terminal verdict, exactly "
         f"once — reads: {calls}")
     assert "terminal_fold_refused" in _advisory_codes(again), again
+
+
 def test_a_bare_dedup_hit_spends_no_terminal_read(sdk, monkeypatch):
     """#10841 review (P3) — the read is skipped for the hit the comment names.
 

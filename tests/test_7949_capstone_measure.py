@@ -4122,6 +4122,24 @@ def test_the_bare_continuation_cites_name_what_they_say():
         ("probes/capstone_measure.py", "follows at", (
             ("10370", "edus = _edus_from_conversation(conversation)"),
         )),
+        # ⛔ THE README'S COPY OF THE SAME CLAIM (#10833 review round 7, P2). The
+        # two rows above pin `capstone_measure.py`'s copy of "the flag is not
+        # activity"; the README states the SAME claim in prose, and its
+        # early-return cite had gone stale TWICE — at this round's head it read
+        # `:10237` (inside `_run_vet_pass`) beside a flag at `:10367`, so the
+        # sentence asserted the flag was computed BEFORE a line ~130 lines below
+        # it. Nothing could see it: `_BUNDLE_CITE` matches only a
+        # `sdk|edges|extractor_v2` cite that NAMES ITS FILE, and both numbers
+        # here are BARE continuations of a path named once, several lines above.
+        # The claim is RELATIONAL ("computed … BEFORE the early return"), so both
+        # numbers are pinned: either one drifting re-breaks the sentence even
+        # when the other is right, which is exactly what happened.
+        ("README.md", "i.e. BEFORE the", (
+            ("10367", "vet_enabled = (vet_arbiter is not None or _vet_enabled()"),
+        )),
+        ("README.md", "`if not edus:` early return", (
+            ("10371", "if not edus:"),
+        )),
         # the S2.2/S2.3 block this probe names as the #9116 seam's subject
         ("probes/capstone_measure.py", 'result["vet"]`` at', (
             ("10753", 'result["vet"] = {'),
@@ -4155,6 +4173,21 @@ def test_the_bare_continuation_cites_name_what_they_say():
             ("136", 'STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", '
                     '"S5", "S6")'),
         ), "capstone_verdict_check"),
+        # ⛔ A CROSS-EPIC ROW, and the same defect class (#10833 review round 7,
+        # P2). The `#2684` row's cite is a bare `:NNNN-NNNN` continuation like
+        # every other row here, and this PR's cite-repair commit rewrote a
+        # CORRECT range into a wrong one on a file that did not move
+        # (`tortoise/extractor_v2.py` is byte-identical to `origin/main`), so the
+        # reader landed on `_refuse_rewritten_value` — an unrelated #10360
+        # function — instead of the value-free refusal the sentence is about.
+        # The row is NOT this bundle's, so the SWEEP's `#7949` row filter
+        # (correctly) leaves it alone; this table is scope-free by design — it
+        # binds a DOCUMENT plus a PHRASE — so one row reads it without widening
+        # the sweep to every other epic's index row.
+        ("docs/00_index.md", "refuses a value-free point at", (
+            ("5042", "if not _carries_value(content, quote):"),
+            ("5043", "return None"),
+        )),
     )
     # The SAME document states two of its claims as the RULE's own text rather than a
     # line number — a quoted rule cannot drift by an insertion above it, which is why

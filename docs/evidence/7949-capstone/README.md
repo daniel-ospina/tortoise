@@ -362,7 +362,7 @@ non-empty S2 stats) fails CLOSED.
 first tightened rule accepted `enabled: true` on its own, reading it as "the extractor's OWN
 statement that the gate was open". It is not that: `enabled` is the FLAG, computed BEFORE the pass
 is reached. `vet_enabled` is computed at `extractor_v2.py:10367`, i.e. BEFORE the
-`if not edus:` early return (`:10237`), which emits literally
+`if not edus:` early return (`:10371`), which emits literally
 `"vet": {"enabled": vet_enabled, "s2": {}, "union": {}}` (`:10387`), and
 each VET pass is gated on the LIST — `if vet_enabled and embed_list:` (`:10462`), `if vet_enabled and
 complete_list:` (`:10584`). So a session with the flag ON and an empty list emits `enabled: True`
