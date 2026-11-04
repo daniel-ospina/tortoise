@@ -8719,8 +8719,31 @@ class TortoiseSDK:
                 # NORMALISATION safety net and the text-hash attestation.
                 stamp_journal_embedding = None
             if stamp_journal_embedding is not None:
+                # ⛔ `creating` is keyed on the type NAME, so a carrier that is
+                # `PointAdded` on the RECORD side must be named here too
+                # (#10017 R2 review): `TurnRecorded` writes the same
+                # `public.point` row from THIS capture's own text, so it is the
+                # textbook CREATING record — and leaving it out made
+                # `stamp_journal_embedding` take its `else` branch and POP the
+                # identity (`embeddings.py:203-210`). The vector survived and
+                # `embedding_model`/`embedding_revision`/`embedding_text_hash`
+                # did not, so the #5004 warning ("journaled embedding was
+                # computed by X but this store's embedder is Y") could never
+                # fire for any turn written while the record is armed — and the
+                # same capture produced different record content depending on
+                # whether the DSN was set, which is the live-vs-record
+                # divergence #5004 round 3 exists to prevent.
+                #
+                # The import is LAZY and its failure degrades to the pre-#10017
+                # pair: a `_emit_event` must not depend on a record module being
+                # importable (the graph mutation has already happened by here).
+                try:
+                    from .record_projection import TURN_RECORD_TYPE
+                except Exception:  # noqa: BLE001, RUF100
+                    TURN_RECORD_TYPE = None
                 clean = stamp_journal_embedding(
-                    clean, creating=type_ in ("PointAdded", "OperatorAdded"))
+                    clean, creating=type_ in ("PointAdded", "OperatorAdded",
+                                              TURN_RECORD_TYPE))
             # #5089: NO content synthesis here. Operators store no 'content' as
             # a node property, so synthesizing the `IMPL(inputs)` label put a
             # value in the record that NO writer ever stored — and the replay

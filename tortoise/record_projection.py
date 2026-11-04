@@ -1383,10 +1383,15 @@ _RECORD_ONLY_KEYS: frozenset[str] = frozenset({
     # tier exists to keep out of the graph — the resurrection, restored by the
     # guard meant to prevent it. The tier must reach its COLUMN.
     #
-    # The intent behind that entry is served where it belongs, by the schema:
-    # the migration refuses `cache_tier` as a `props` key
-    # (`chk_point_props_no_derived`), so `cache_projection._props_from_row` drops
-    # it by name and a node can never carry it as a property.
+    # The intent behind that entry is served by the two halves that CANNOT drop
+    # it ahead of the column: the schema refuses `cache_tier` as a `props` key
+    # (`chk_point_props_no_derived`), so `_split_properties` never puts it in a
+    # tail, and the GRAPH side strips it in `projection/entities.py::_META_KEYS`
+    # (the `agent_id` precedent), so no `:Point` can carry it as a property.
+    # ⚠️ The refusal alone catches the TAIL, not the column: `_split_properties`
+    # checks `column in cols` BEFORE `refused`, so a payload tier DOES land its
+    # column — which is exactly the behaviour R2 needs from the capture writer.
+
     "point", "contains_session", "keep_id", "merge_ids", "corrects",
     # #5097 review P2: the capture path's STUB-COMPLETION discriminator. It
     # selects `_upsert_source`'s write behaviour (suppresses the ON CREATE
@@ -2314,7 +2319,13 @@ def _op_dispatch_statements(
         col_values, tail = _split_properties(
             table, dict(state),
             columns=columns, refused=refused,
-            drop=dispatch.never_store.get(table, frozenset()),
+            # #10017 R2: `cache_tier` is a placement declaration, so the
+            # `EntityMutated` path must drop it too. Without it a `state` map
+            # carrying the tier writes `object.props`/`subject.props`, and a
+            # record-sourced rebuild sets it on the node while the journal
+            # replay strips it (`_META_KEYS`) — the two rebuild routes diverging
+            # on a property, which is the class this change exists to close.
+            drop=dispatch.never_store.get(table, frozenset()) | {"cache_tier"},
         )
         return [_patch_statement(org_id, graph_id, node, key, col_values, tail,
                                  match=match)]

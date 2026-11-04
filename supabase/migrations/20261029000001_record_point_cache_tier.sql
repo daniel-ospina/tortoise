@@ -29,10 +29,13 @@
 ALTER TABLE public.point
   ADD COLUMN IF NOT EXISTS cache_tier text NOT NULL DEFAULT 'graph';
 
+-- ONE statement, as `20261014000001` does and for the same reason: a per-
+-- statement apply that stops between a DROP and its ADD leaves the table with NO
+-- tier refusal at all (an `ALTER` batch is atomic only as a whole), and here it
+-- would also mean two ACCESS EXCLUSIVE acquisitions on the record's
+-- highest-volume table instead of one.
 ALTER TABLE public.point
-  DROP CONSTRAINT IF EXISTS chk_point_cache_tier;
-
-ALTER TABLE public.point
+  DROP CONSTRAINT IF EXISTS chk_point_cache_tier,
   ADD CONSTRAINT chk_point_cache_tier
   CHECK (cache_tier IN ('graph', 'record_only'));
 
@@ -45,12 +48,31 @@ COMMENT ON COLUMN public.point.cache_tier IS
 -- 2. Refuse it as a `props` key — a forward re-declaration of the SAME
 --    constraint (append-only history: the CREATE TABLE is not edited), carrying
 --    the full set, since this REPLACES the table's refusal rather than adding to
---    it at the SQL level. The set is read from the live parser
---    (`refused_props_names()`) so it cannot drift from what the code believes.
-ALTER TABLE public.point
-  DROP CONSTRAINT IF EXISTS chk_point_props_no_derived;
+--    it at the SQL level. The list below was CUT FROM `refused_props_names()`;
+--    nothing re-derives it at apply time, and it cannot be derived: the SQL
+--    REPLACES while the parser UNIONS, so the two can drift in one direction —
+--    the parser keeps reporting a name the database stopped refusing. The pin in
+--    `tests/test_10017_cache_tier.py` (which now unions EVERY earlier
+--    re-declaration, not just the CREATE) is what keeps it honest. Do not read
+--    this list as self-maintaining.
+-- The ADD below VALIDATES existing rows. Before this migration `cache_tier` was
+-- not a column, not in `_META_KEYS` and not refused, so a caller-supplied prop
+-- of that name went into the props tail — and a single such row aborts the whole
+-- migration (`check constraint … is violated by some row`), taking the column
+-- and the index with it. The sibling `20261014000001` (the `subject` refusal)
+-- established the remedy: remove the name from the tail first. Idempotent, so
+-- re-applying it (this file is in RECORD_REAPPLY_STEPS) is a no-op.
+UPDATE public.point
+   SET props = props - 'cache_tier'
+ WHERE props ? 'cache_tier';
 
+-- ONE statement again, and here the gap is worse than redundant work: between
+-- the two halves the table accepts `content_hash`, `ep_alpha`, `c_cal` … while
+-- `refused_props_names()` goes on reporting them refused from the FILES — and a
+-- concurrent write landing in that window makes the re-ADD validate and abort
+-- with the very error this file's backfill exists to prevent.
 ALTER TABLE public.point
+  DROP CONSTRAINT IF EXISTS chk_point_props_no_derived,
   ADD CONSTRAINT chk_point_props_no_derived
   CHECK (NOT (props ?| ARRAY[
     '_graph_id', '_nid', 'baseline_set', 'c_cal', 'cache_tier', 'confidence',
@@ -59,9 +81,25 @@ ALTER TABLE public.point
     'reason', 'version'
   ]::text[]));
 
--- 3. The read this column exists for: a tenant's graph-tier points. Partial, so
---    the `record_only` rows (the highest-volume rows in the table) do not cost
---    the cache projection a scan.
+-- 3. The read this column exists for: a tenant's graph-tier points.
+--
+-- ⛔ THE READER'S PREDICATE IS SPELLED `cache_tier = 'graph'`, NOT
+-- `<> 'record_only'`, AND THIS INDEX IS WHY. PostgreSQL uses a partial index
+-- only where the query's predicate IMPLIES the index predicate, so `<>` cannot
+-- use this one. Measured on postgres:16 against a throwaway copy of the record
+-- schema (2 graph rows, 1 record_only row, one tenant):
+--
+--   `= 'graph'`         -> Index Scan using idx_point_graph_tier   (no Filter)
+--   `<> 'record_only'`  -> Index Scan using idx_point_scope
+--                          + Filter: (cache_tier <> 'record_only')
+--
+-- i.e. the `<>` spelling reads every row of `public.point` — the record's
+-- highest-volume table — and discards the record_only ones, which is exactly the
+-- population this index exists to skip. The peer-reviewed claim that the index
+-- was unjustified (`SELECT *` cannot go index-only) was right about the covering
+-- question and wrong about the scan: the index narrows the scan, which is the
+-- win. An earlier draft of this branch dropped the index; the measurement above
+-- is why it is back.
 CREATE INDEX IF NOT EXISTS idx_point_graph_tier
   ON public.point (org_id, graph_id, node_key)
   WHERE cache_tier = 'graph';

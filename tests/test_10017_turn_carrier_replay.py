@@ -40,6 +40,7 @@ import tortoise.log as log_mod
 import tortoise.projection as projection_mod
 import tortoise.record_projection as rp
 import tortoise.sdk as sdk_mod
+from tortoise.ids import content_hash
 from tortoise.log import EventLog
 from tortoise.sdk import TortoiseSDK
 
@@ -58,6 +59,15 @@ EXPECTED_TURN_IDS = [f"{SESSION_ID}_t{i}" for i in range(len(CONV))]
 TURN_SNAPSHOT_KEYS = frozenset({
     "id", "content", "pointKind", "speaker", "is_episodic", "status",
     "createdAt", "embedding", "cache_tier",
+})
+
+#: The #5004 attestation a CREATING record stamps on top of the producer's own
+#: keys (`embeddings.stamp_journal_embedding`, `creating=True`). `TurnRecorded`
+#: is a creating record on the RECORD side — it writes this capture's own text
+#: and vector — so it must carry these whenever a vector is present; the set is
+#: all-or-nothing, never one key of the three.
+EMBEDDING_ATTESTATION_KEYS = frozenset({
+    "embedding_model", "embedding_revision", "embedding_text_hash",
 })
 
 
@@ -149,12 +159,66 @@ def test_the_carrier_carries_the_tier_and_the_writers_own_keys(
     assert len(carriers) == len(CONV)
     for record in carriers:
         snapshot = record["point"]
-        assert frozenset(snapshot) == TURN_SNAPSHOT_KEYS, (
+        emitted = frozenset(snapshot)
+        missing = TURN_SNAPSHOT_KEYS - emitted
+        extra = emitted - TURN_SNAPSHOT_KEYS
+        assert not missing, (
             f"the carrier's snapshot drifted from the writer's payload: "
-            f"missing={sorted(TURN_SNAPSHOT_KEYS - set(snapshot))} "
-            f"extra={sorted(set(snapshot) - TURN_SNAPSHOT_KEYS)}")
+            f"missing={sorted(missing)}")
+        # ⛔ A `Point`-shaped key the writer never emits becomes a phantom node
+        # property on replay (the #9078 defect class), so the ONLY tolerated
+        # extras are the #5004 attestation — and those arrive all three or not
+        # at all (a partial attestation is a corrupt identity, not a subset).
+        assert extra <= EMBEDDING_ATTESTATION_KEYS, (
+            f"the carrier's snapshot drifted from the writer's payload: "
+            f"extra={sorted(extra)}")
+        assert not extra or extra == EMBEDDING_ATTESTATION_KEYS, (
+            f"a partial embedding attestation: extra={sorted(extra)}")
         assert snapshot["cache_tier"] == rp.RECORD_ONLY_TIER
         assert snapshot["is_episodic"] is True
+
+
+def test_the_carrier_ATTESTS_the_vector_it_journals(armed_sdk, monkeypatch):
+    """#5004 on the CARRIER: the identity rides with the vector, or a model
+    change becomes SILENT on the record-held lane.
+
+    ⛔ `_emit_event` gates the attestation on the record type NAME. Before the
+    #10017 fix, `TurnRecorded` was not in that gate, `stamp_journal_embedding`
+    took its `else` branch and POPPED the identity: the vector was journalled
+    and its origin thrown away, so `_record_embedding_identity` returned early
+    and the "journaled embedding was computed by X but this store's embedder is
+    Y" warning could never fire for a turn. It also made the SAME capture
+    produce different record content depending on whether the DSN was set.
+
+    The embedder identity is faked at its CALL-TIME source
+    (`embeddings.EMBEDDING_MODEL` / `_REVISION`, which `embedding_identity()`
+    reads on every call), and the vector batch is faked at the seam the capture
+    actually uses (`encode_batch_for_store`) — so this leg is offline and
+    deterministic in every lane, with or without the embeddings extra.
+    """
+    def _batch(texts, expected_dim=None):
+        return [[0.5, 0.25] for _ in texts]
+
+    monkeypatch.setattr("tortoise.embeddings.encode_batch_for_store", _batch)
+    monkeypatch.setattr("tortoise.embeddings.EMBEDDING_MODEL", "fake-model-10017")
+    monkeypatch.setattr("tortoise.embeddings.EMBEDDING_MODEL_REVISION", "rev-1")
+
+    _capture_with_record_armed(armed_sdk, monkeypatch)
+    carriers = [r for r in _records(_journal_of(armed_sdk))
+                if r["type"] == "TurnRecorded"]
+    assert len(carriers) == len(CONV)
+    for record in carriers:
+        snapshot = record["point"]
+        assert snapshot["embedding"] == [0.5, 0.25], (
+            "premise: this capture journalled no vector, so the attestation "
+            "leg would be vacuous")
+        assert snapshot["embedding_model"] == "fake-model-10017", (
+            "the carrier journalled a vector and NOT the model that made it — "
+            "a model change would be silent on this lane (#5004)")
+        assert snapshot["embedding_revision"] == "rev-1"
+        assert snapshot["embedding_text_hash"] == content_hash(
+            snapshot["content"]), (
+            "the attestation must describe THIS turn's text, not another's")
 
 
 def test_a_rebuild_from_the_carrier_journal_creates_no_turn_nodes(

@@ -1629,13 +1629,18 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # sorts outside the `2026101200000` prefix while `supabase/` is a
              # NON_PYTHON_PREFIX, so a diff touching only this file selected NO
              # surface. Measured on the pre-fix head: `_sel([<this path>])` ->
-             # `surfaces: []`, `full: false`, and BOTH readers
-             # (`test_record_projection.py`, `test_record_schema_placement.py`)
-             # absent from `test_files` — so the column set, the placement table
-             # and the props refusal this file re-declares could all drift with
-             # no guard running on the edit. The #1349/#3332/#3616 silent-drop
+             # `surfaces: []`, `full: false`, and the readers
+             # (`test_record_projection.py`, `test_record_schema_placement.py`,
+             # `test_cache_projection.py`, `test_10017_cache_tier.py`) absent
+             # from `test_files` — so the column set, the placement table and
+             # the props refusal this file re-declares could all drift with no
+             # guard running on the edit. The #1349/#3332/#3616 silent-drop
              # class. Pinned by
              # tests/test_ci_selection.py::test_record_schema_pin_runs_on_migration_or_doc_change.
+             # ⛔ The re-declaration half is the sharp edge: the SQL DROP+ADD
+             # REPLACES the constraint while the parser UNIONS, so this is the
+             # one file that can silently SHRINK `point`'s refusal set with every
+             # reader still reporting the names refused.
              "supabase/migrations/20261029000001_record_point_cache_tier.sql",
              # Re-stated at the migration pair, NOT replaced by it (#9638 review
              # P1): the DOC side is an independent member of this set. The

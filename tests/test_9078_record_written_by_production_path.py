@@ -265,10 +265,12 @@ RECORD_REAPPLY_STEPS: list[tuple[Path, str | None]] = [
     # projection emits `cache_tier` in a turn row's INSERT while a container
     # migrated by a pre-#10017 tree has no such column, and the row is lost to
     # `42703 UndefinedColumn` with the capture receipt still reporting ok (the
-    # #2782 class, one migration later). Re-apply safe by construction:
-    # `ADD COLUMN IF NOT EXISTS`, `DROP CONSTRAINT IF EXISTS` + `ADD CONSTRAINT`
-    # (the CHECK and the props refusal both), the `COMMENT ON`, and
-    # `CREATE INDEX IF NOT EXISTS`.
+    # #2782 class, one migration later). `refused_props_names()` reads the files
+    # the same way, so the cache projection's tier PREDICATE is the second
+    # consumer: on such a container every record-sourced rebuild fails too.
+    # Re-apply safe by construction: `ADD COLUMN IF NOT EXISTS`,
+    # `DROP CONSTRAINT IF EXISTS` + `ADD CONSTRAINT` (the CHECK and the props
+    # refusal both), the `COMMENT ON`, and `CREATE INDEX IF NOT EXISTS`.
     (REPO_ROOT / "supabase" / "migrations"
      / "20261029000001_record_point_cache_tier.sql", None),
 ]
