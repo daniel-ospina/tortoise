@@ -2315,8 +2315,17 @@ def test_a_red_review_gate_asks_for_a_review_not_a_fixer():
     assert "reviewer" in (next_action(row, REPO) or "")
 
 
-def test_a_red_review_gate_with_a_bound_record_is_a_real_failure():
-    """The complement: if the record IS bound, a red review gate is not a debt."""
+def test_a_red_review_gate_with_a_bound_record_asks_a_HUMAN_not_a_fixer():
+    """The complement: a bound record + red gate is not a code problem either.
+
+    `record-review.sh`'s own header (#10677): a record whose SIGNED body marker never
+    reached the PR is invisible to the required check, so the gate correctly reports
+    "No AI review evidence found" and a properly reviewed PR is blocked by a
+    BOOKKEEPING failure (remedy `--flush-pending`). The tool cannot tell that from a
+    genuinely failing check, so neither gets a fixer at approved code.
+    """
+    from tools.next_work import next_action
+
     s = snap(
         issues=[issue(100)],
         pulls=[{**pull(1001, closes=[100]), "head_ref": "fix/100-x"}],
@@ -2325,7 +2334,9 @@ def test_a_red_review_gate_with_a_bound_record_is_a_real_failure():
         merge_tree={"1001": {"clean": True}},
     )
     (row,) = build_units(s, _live_cfg())
-    assert row.position == "NEEDS-FIX", row.detail
+    assert row.position == "NEEDS-REVIEW", row.detail
+    assert next_command(row, REPO) is None, "a fixer was dispatched at approved code"
+    assert "flush-pending" in (next_action(row, REPO) or "")
 
 
 def test_a_real_check_failure_is_still_needs_fix():
@@ -2396,3 +2407,257 @@ def test_executable_documents_both_no_action_causes():
     doc = (Unit.executable.__doc__ or "").lower()
     assert "runner" in doc
     assert "measured" in doc, "the docstring omits the unmeasured-merge-tree cause"
+
+
+# ── the NO-PR rail must PROVISION, and a missing claims map must refuse (r16) ─
+def test_the_no_pr_command_uses_the_rail_that_creates_the_worktree():
+    """`lane.sh` refuses unless the caller is ALREADY in a worktree on the branch.
+
+    Measured on a throwaway clone: `lane.sh --repo … 10955 lane/10955` exits 72
+    (`reason=branch-missing`), and no fleet tool creates a `lane/<N>` branch — the
+    real dispatch provisions `feat/<N>-tm` via `wt_provision`. The NO-PR row is the
+    most numerous position, so the emitted command must be the rail that does the
+    provisioning (`dispatch-merge.sh`), not one that assumes it.
+    """
+    s = snap(issues=[issue(10955)], pulls=[])
+    (row,) = units_for(s)
+    assert row.position == "NO-PR"
+    cmd = next_command(row, REPO) or ""
+    assert "dispatch-merge.sh" in cmd, cmd
+    assert "lane.sh" not in cmd, "lane.sh assumes a worktree this command never creates"
+    assert "10955" in cmd
+
+
+@pytest.mark.parametrize("drop", ["claims", "gate"])
+def test_a_snapshot_missing_a_decision_input_is_incomplete(tmp_path: Path, drop):
+    """No claim map is not "nothing is held" — the registry was never consulted."""
+    raw = _rich_snapshot().to_json()
+    raw.pop(drop)
+    path = tmp_path / f"no-{drop}.json"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    assert _run_main(["--from", str(path), "--repo", REPO]) == 2
+
+
+def test_an_unreadable_fetched_tip_refuses_the_measurement(monkeypatch):
+    """`if got and got != head` treated an EMPTY rev-parse as a match.
+
+    The comment above it says the whole point is that the measurement must be bound
+    to the head it is filed under; an unreadable tip is a mismatch.
+    """
+    from tools import next_work
+
+    calls: list[list[str]] = []
+
+    def fake_run(args, **kwargs):
+        calls.append(list(args))
+        if args[:2] == ["git", "cat-file"]:
+            return subprocess.CompletedProcess(list(args), 1, "", "missing")
+        if args[:2] == ["git", "fetch"] and any("refs/pull" in a for a in args):
+            return subprocess.CompletedProcess(list(args), 0, "", "")
+        if args[:2] == ["git", "fetch"]:
+            return subprocess.CompletedProcess(list(args), 1, "", "no sha fetch")
+        if args[:2] == ["git", "rev-parse"]:
+            return subprocess.CompletedProcess(list(args), 0, "", "")  # EMPTY
+        if args[:2] == ["git", "merge-tree"]:
+            raise AssertionError("merge-tree must not run on an unverified ref")
+        return subprocess.CompletedProcess(list(args), 0, "", "")
+
+    monkeypatch.setattr(next_work, "_run", fake_run, raising=True)
+    s = Snapshot()
+    pr = {"number": 7, "head": "a" * 40}
+    next_work._merge_tree(Path("."), "origin/main", pr, s)
+    assert s.merge_tree["7"]["clean"] is None
+    assert "moved" in s.merge_tree["7"]["why"]
+
+
+@pytest.mark.parametrize("bad", [[], "", None, "x", 0, [1, 2]])
+def test_a_non_map_claim_surface_is_incomplete(tmp_path: Path, bad):
+    """Key presence is not enough: `[]` and `""` are falsy and read as "nothing held".
+
+    `(self.claims or {})` swallowed them, so `ref not in snap.claims` answered
+    "absent" for every key and the run emitted a merge command at exit 0 — the same
+    fail-open as a missing map, one shape over.
+    """
+    raw = _rich_snapshot().to_json()
+    raw["claims"] = bad
+    path = tmp_path / "bad-claims.json"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    assert _run_main(["--from", str(path), "--repo", REPO]) == 2, bad
+
+
+# ── ONE table for the shape of every decision input (r18) ─────────────────
+@pytest.mark.parametrize(
+    ("field", "bad"),
+    [
+        ("unreadable", ""), ("unreadable", {}), ("unreadable", 0),
+        ("issues", {}), ("issues", ""),
+        ("pulls", {}), ("pulls", ""),
+        ("claims", []), ("claims", ""), ("claims", None), ("claims", 0),
+        ("attestation", []), ("attestation", ""),
+        ("merge_tree", []), ("merge_tree", ""),
+        ("check_runs", []), ("local_holders", ""),
+        ("gate", ""), ("gate", []),
+    ],
+)
+def test_a_wrong_typed_decision_input_is_incomplete(tmp_path: Path, field, bad):
+    """Every one of these read as EMPTY before, i.e. "nothing is held / nothing unreadable".
+
+    Five were found one review round at a time, each measured as exit 0 WITH a
+    runnable command from an input on which that surface was never consulted — so
+    the shape check is a TABLE at the single door, not a guard per field.
+    """
+    raw = _rich_snapshot().to_json()
+    raw[field] = bad
+    path = tmp_path / f"bad-{field}.json"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    assert _run_main(["--from", str(path), "--repo", REPO]) == 2, (field, bad)
+
+
+def test_a_claim_map_under_another_namespace_is_incomplete(tmp_path: Path):
+    """`claim_ns` travels with the data; keys under a different prefix are not it."""
+    raw = _rich_snapshot().to_json()
+    raw["claim_ns"] = "refs/claims-other"
+    path = tmp_path / "wrong-ns.json"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    assert _run_main(["--from", str(path), "--repo", REPO]) == 2
+
+
+def test_an_empty_but_right_typed_input_is_still_valid(tmp_path: Path):
+    """The complement: `{}` / `[]` of the RIGHT type is a legitimate measurement."""
+    raw = _rich_snapshot().to_json()
+    raw["claims"] = {}
+    raw["unreadable"] = []
+    path = tmp_path / "clean.json"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    assert _run_main(["--from", str(path), "--repo", REPO]) in (0, 1)
+
+
+@pytest.mark.parametrize("bad", [[], {}, 0, False, 1])
+def test_a_non_string_claim_namespace_is_incomplete(tmp_path: Path, bad):
+    """`claim_ns` was coerced before the shape door, so a falsy wrong type vanished.
+
+    Measured: `claim_ns: []` exited 0 with a runnable merge command.
+    """
+    raw = _rich_snapshot().to_json()
+    raw["claim_ns"] = bad
+    path = tmp_path / "bad-ns.json"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    assert _run_main(["--from", str(path), "--repo", REPO]) == 2, bad
+
+
+@pytest.mark.parametrize("bad_value", ["", {}, 0, False, "x"])
+def test_a_local_holder_value_that_is_not_a_list_is_incomplete(tmp_path: Path, bad_value):
+    """A judged CONTAINER is not a judged ELEMENT.
+
+    `{"issue:101": ""}` is falsy and iterates empty, so the unit read FREE and was
+    handed a runnable command at exit 0 for work the snapshot's own key says is held.
+    """
+    raw = _rich_snapshot().to_json()
+    raw["local_holders"] = {"issue:101": bad_value}
+    path = tmp_path / "bad-holders.json"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    assert _run_main(["--from", str(path), "--repo", REPO]) == 2, bad_value
+
+
+@pytest.mark.parametrize(
+    ("field", "bad"),
+    [
+        ("labels", 0), ("labels", ""), ("labels", {}), ("labels", None),
+        ("closing_issues", 0), ("closing_issues", ""), ("closing_issues", "101"),
+        ("draft", 0), ("draft", ""), ("draft", []),
+        ("base", 0), ("base", ""), ("base", []), ("base", None),
+        ("head", 0), ("head_ref", 1), ("number", "1001"),
+    ],
+)
+def test_a_wrong_typed_pull_field_is_incomplete(tmp_path: Path, field, bad):
+    """One level down, the same erasure as the top-level fields.
+
+    Measured before the fix: `labels: 0` on a PR holding `superseded-by-fold` read as
+    no labels and handed out a merge command (#10902); `closing_issues: 0` produced a
+    NO-PR dispatch for work an existing PR carries; `draft: 0` read as not-a-draft;
+    `base: ""` produced a fixer at an unread base.
+    """
+    raw = _rich_snapshot().to_json()
+    raw["pulls"][0][field] = bad
+    path = tmp_path / f"pull-{field}.json"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    assert _run_main(["--from", str(path), "--repo", REPO]) == 2, (field, bad)
+
+
+def test_an_absent_pull_field_is_a_legitimate_omission(tmp_path: Path):
+    """The complement: a hand-written snapshot need not carry every field."""
+    raw = _rich_snapshot().to_json()
+    for key in ("labels", "closing_issues", "refs_issues", "draft", "base", "head_ref"):
+        raw["pulls"][0].pop(key, None)
+    path = tmp_path / "lean.json"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    assert _run_main(["--from", str(path), "--repo", REPO]) in (0, 1)
+
+
+@pytest.mark.parametrize("bad", [True, False, 0, -1, "1001", None, [], {}])
+def test_a_pull_number_that_is_not_a_usable_int_is_incomplete(tmp_path: Path, bad):
+    """`isinstance(True, int)` is True, so `number: true` passed the door.
+
+    The row then addressed PR #1001 while the emitted command merged **#1** — a
+    runnable command aimed at the wrong artifact. A boolean, a zero, a negative and
+    an absent number are all unaddressable.
+    """
+    raw = _rich_snapshot().to_json()
+    raw["pulls"][0]["number"] = bad
+    path = tmp_path / "bad-number.json"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    assert _run_main(["--from", str(path), "--repo", REPO]) == 2, bad
+    # …and the door's OWN message reaches the operator, rather than a KeyError/
+    # TypeError from the outer frame burying it.
+    proc = subprocess.run(
+        [sys.executable, str(Path(__file__).resolve().parent.parent / "tools" / "next_work.py"),
+         "--from", str(path), "--repo", REPO],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert "pull number" in proc.stdout, proc.stdout[-300:] + proc.stderr[-300:]
+
+
+@pytest.mark.parametrize(
+    ("field", "bad_elements"),
+    [
+        ("closing_issues", [True]),
+        ("closing_issues", ["100"]),
+        ("refs_issues", [True]),
+        ("labels", [1]),
+        ("labels", [None]),
+        ("labels", [True]),
+    ],
+)
+def test_a_wrong_typed_list_ELEMENT_is_incomplete(tmp_path: Path, field, bad_elements):
+    """A judged container is not a judged element.
+
+    `closing_issues: [true]` coerces to `int(True) == 1` and silently re-points the
+    link, reproducing the NO-PR dispatch for work an existing PR carries — the same
+    harm the container check was added for, reached through an element.
+    """
+    raw = _rich_snapshot().to_json()
+    raw["pulls"][0][field] = bad_elements
+    path = tmp_path / f"bad-{field}-el.json"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    assert _run_main(["--from", str(path), "--repo", REPO]) == 2, (field, bad_elements)
+
+
+@pytest.mark.parametrize("field", ["repo", "base", "config_source"])
+@pytest.mark.parametrize("bad", [None, [], {}, 0, True, 1.5])
+def test_a_non_string_identity_field_is_incomplete(tmp_path: Path, field, bad):
+    """`if value is not None` exempted a PRESENT `null` — the case the door exists for."""
+    raw = _rich_snapshot().to_json()
+    raw[field] = bad
+    path = tmp_path / f"bad-{field}.json"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    assert _run_main(["--from", str(path), "--repo", REPO]) == 2, (field, bad)
+
+
+@pytest.mark.parametrize("bad", ["x", None, True, [], 1.5])
+def test_a_non_int_collected_at_is_incomplete(tmp_path: Path, bad):
+    """Provenance only — but the docstring says EVERY field is judged."""
+    raw = _rich_snapshot().to_json()
+    raw["collected_at"] = bad
+    path = tmp_path / "bad-collected.json"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    assert _run_main(["--from", str(path), "--repo", REPO]) == 2, bad
