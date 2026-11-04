@@ -12693,11 +12693,22 @@ class TortoiseSDK:
                 # ⛔ Reading it lazily at each use is NOT equivalent: the
                 # temporal branch returns only on a NON-None marker, so a fold
                 # carrying a temporal prop onto a LIVE target asked twice.
+                # ⛔ `extractedFrom` is excluded for the same reason and one
+                # more: it is this door's own EVIDENCE fold (#7704), popped
+                # before the write leg, and the capture seam and the hosted
+                # commit phase attach it on EVERY point — so leaving it in the
+                # predicate paid the read on every idempotent capture/commit
+                # replay, a verdict that is then never consulted (an
+                # evidence-only fold writes no prop, carries no temporal prop
+                # and sets no word). Measured on this head before the
+                # exclusion (the #10792 review's P2): an evidence-only replay
+                # went 0 -> 1 marker reads.
+                #
                 # `None` therefore means "live" here only because every path
                 # that consults this value has a caller prop or a `cred_prior`.
                 _fold_terminal = (
                     self._lifecycle_terminal_marker(pid)
-                    if (set(props) - {"content_hash"}
+                    if (set(props) - {"content_hash", "extractedFrom"}
                         or cred_prior is not None) else None)
                 _temporal = _TEMPORAL_RESTAMP_PROPS & set(props)
                 if _temporal and _fold_terminal is not None:

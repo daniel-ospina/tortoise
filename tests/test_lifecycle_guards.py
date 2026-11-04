@@ -905,6 +905,67 @@ def test_create_point_dedup_metadata_folds_a_live_target_only(sdk):
     assert after["status"] == "retracted"
 
 
+def test_a_dedup_hit_pays_no_lifecycle_read_unless_the_fold_can_write(
+        sdk, monkeypatch):
+    """#10368 — the read the fold is supposed to SKIP is MEASURED, not asserted.
+
+    `_lifecycle_terminal_marker` is a graph round-trip (`LIFECYCLE_FANOUT_QUERY`)
+    whenever it is called without `rows`, and the fold hoists ONE read to serve
+    both refusals. The predicate that decides whether to pay it is therefore a
+    promise about the IDEMPOTENT REPLAY path — a dedup hit that can write
+    nothing must cost nothing — and TWO derived keys are always in the bag by
+    that point: `content_hash` (this door stamps it unconditionally, #80) and
+    `extractedFrom` (the #7704 evidence fold, which the capture seam
+    (`TortoiseSDK.capture_session`) and the hosted commit phase attach on every
+    point). A predicate that tests the raw bag makes the skip dead code and
+    charges the re-ingest / self-host hot path a query it never paid before
+    #10368 (#10792 review, P2).
+
+    Two-sided on purpose: a "fix" that simply REMOVED the read reds the third
+    arm, because a fold carrying a caller prop must still get the terminal
+    verdict that decides the refusal.
+    """
+    calls: list[int] = []
+    real = type(sdk)._lifecycle_terminal_marker
+
+    def counting(self, *args, **kwargs):
+        calls.append(len(calls))
+        return real(self, *args, **kwargs)
+
+    content = f"no lifecycle read {uuid.uuid4().hex[:8]}"
+    pid = sdk.create_point("statement", content)["id"]
+    sdk.retract_point(pid)
+    monkeypatch.setattr(type(sdk), "_lifecycle_terminal_marker", counting)
+
+    # (i) a BARE re-assertion: no caller prop, no word — nothing can be
+    # written, so the verdict cannot be consulted and must not be read.
+    again = sdk.create_point("statement", content, dedup=True)
+    assert again["id"] == pid, "a dedup HIT is still reported"
+    assert calls == [], (
+        f"a bare dedup hit issued {len(calls)} lifecycle read(s) — this path "
+        "wrote nothing before #10368 and its own comment says it costs no "
+        "extra query (#10792 review)")
+
+    # (ii) an EVIDENCE-only fold (the #7704 leg, which still applies): it
+    # writes no prop, carries no temporal prop and sets no word, so the
+    # terminal verdict is still never consulted.
+    sdk.create_point("statement", content, dedup=True,
+                     extractedFrom=["https://example.test/10368-evidence"])
+    assert calls == [], (
+        "an evidence-only fold issued "
+        f"{len(calls)} lifecycle read(s) — `extractedFrom` is attached on "
+        "EVERY capture/commit point, so leaving it in the predicate pays this "
+        "read on the whole idempotent-replay path (#10792 review)")
+
+    # (iii) a GENERIC caller prop: the verdict decides whether the write is
+    # refused, so it MUST be read — exactly once for the whole fold.
+    sdk.create_point("statement", content, dedup=True, custom_probe="x")
+    assert len(calls) == 1, (
+        "a fold carrying a caller prop must READ the terminal verdict — that "
+        "read is what refuses the write onto the settled claim, and the hoist "
+        "exists so both refusals share it (#10368)")
+
+
 def test_create_point_dedup_does_not_mutate_a_terminal_point(sdk):
     """#10368 — the SDK door of the #9819 class: a content-dedup fold must not
     REWRITE a TERMINAL point.

@@ -503,7 +503,10 @@ response_fields:
     word, #7704/#398), so this leg alone is dropped prop-by-prop. All of these ride the SAME key on the dedup-hit
     return, so a re-run reports them together rather than dropping one'
   unchanged_when_off: n/a — not flag-gated; the key is ABSENT on a purely word-only write and on every write whose
-    fold applied in full, so those responses stay byte-identical. It is PRESENT when either of the two legs that
+    fold applied in full, so those responses stay byte-identical — with ONE exception the (#10368) terminal leg adds.
+    On a TERMINAL target a word-only or evidence-only fold still applies its own server-owned writes (#7704/#398) but
+    no longer moves `updatedAt`, which it did before this change, so the returned snapshot differs from the pre-fix one on
+    that field ALONE and no advisory rides with it (nothing was dropped). It is PRESENT when either of the two legs that
     ADVISES a drop was refused — the temporal leg (#7819) or the terminal content-fold metadata leg (#10368) — including
     on a word-bearing fold, because the word legs and the metadata leg are decided separately. ⚠️ NOT a guarantee
     that every refusal is advised — the (#7980) first-writer-wins credibility drop and the (#6110) "key not applied"
