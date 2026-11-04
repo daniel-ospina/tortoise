@@ -4806,13 +4806,16 @@ def _narrative_statements(
         values["narrative"] = narrative
 
     # ⛔ `summary` is projected ONLY from a record that ALSO carries the
-    # narrative. The capture's own session `:Source` sets `summary` to the
-    # transcript's first substantive utterance (`sdk._session_source_metadata`),
-    # which is NOT the S1 narrative — projecting it unconditionally would let an
-    # order-independent row hold a prose snippet in the narrative's companion
-    # column, and would make `SessionText.verbatim_available` true for a session
-    # whose narrative is unknown. One carrier owns both columns, so they cannot
-    # mean different things.
+    # narrative. The gate's reason SURVIVES the capture path's change (#10000
+    # §9.1/D1): the capture no longer writes that column, but (a) a LEGACY
+    # carrier still carries it (`_session_source_metadata`'s derivation was a
+    # verbatim slice of the transcript, NOT the S1 narrative — #10853 is the row
+    # residue), and (b) an order-independent `NodeSnapshot` can carry both keys.
+    # Projecting `summary` unconditionally would let such a row hold a prose
+    # snippet in the narrative's companion column and would make
+    # `SessionText.verbatim_available` true for a session whose narrative is
+    # unknown. One carrier owns both columns, so they cannot mean different
+    # things.
     if "narrative" in values:
         summary = carrier.get("summary")
         if isinstance(summary, str) and summary.strip():

@@ -2529,7 +2529,7 @@ def _assert_the_text_is_in_exactly_one_store(proj, needle: str, *, in_graph: boo
     (`s.summary=$sum`) — a `:Source.summary` hit was a route this scan could not
     see. That write is GONE (both the live SET and the replay fold), and the
     route now has its own pin in this file
-    (`test_a_captured_session_source_keeps_the_transcript_off_the_node`), so the
+    (`test_a_captured_session_source_keeps_the_transcript_out_of_summary`), so the
     class is covered without widening these six names. The scan therefore guards
     against a changed label, id space or wiring — the shapes the sibling
     id-space assertions cannot see — and not against a renamed property. Read
@@ -3256,7 +3256,7 @@ def _source_prop_hits(proj, cypher: str, needle: str) -> list[str]:
     return [row[0] for row in proj.g.query(cypher, params={"needle": needle}).result_set]
 
 
-def test_a_captured_session_source_keeps_the_transcript_off_the_node(sdk):
+def test_a_captured_session_source_keeps_the_transcript_out_of_summary(sdk):
     """#10000 §9.1/D1 on the `:Source` — the route the six-name scan cannot see.
 
     `docs/verify/2026-10-31-record-capstone.md` §4 item 2 measured this on a
@@ -3264,6 +3264,14 @@ def test_a_captured_session_source_keeps_the_transcript_off_the_node(sdk):
     written by the capture path itself (`sdk._session_source_metadata`)"*. It is
     recorded on #10000 as the second prose passthrough onto a node, and no PR
     carried it.
+
+    ⛔ SCOPE — WHAT THIS DOES AND DOES NOT CLOSE. It closes the `summary` NODE
+    PROPERTY and its journal carrier. It does NOT close #10000's bullet 2
+    ("`:Source` = identity + metadata, **not the text**"): `_searchText` still
+    carries the same utterance, because that field is #3518/D10's recorded home
+    for a Source's searchable text and removing it is a REOPEN, not a cleanup.
+    The pin is named for what it actually asserts, so a lane grepping for
+    "is the prose off the `:Source`?" does not read a green pin as B2.
 
     ⛔ THREE HALVES, so this leg cannot pass vacuously and cannot pass by
     deleting the derivation:
