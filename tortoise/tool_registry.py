@@ -265,7 +265,9 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         name="tortoise_create_point",
         id="surface.create_point",
         description="Create a Point node (statement, decision, vision, hypothesis, etc.). "
-                    "dedup=True (default): idempotent — returns existing Point if content matches. "
+                    "dedup=True (default) folds onto an existing Point when the content "
+                    "matches — UNLESS the call carries props or authoredBy/credibility, "
+                    "which take the node out of the fold's own predicate. "
                     "Declaring extractedFrom materializes that :Source and links it (#8171); "
                     "a fresh write with no source and no provenance is advised (advisories: "
                     "[{code: no_source, node_id, message}] — advisory only, never a block). "
@@ -548,7 +550,10 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         id="surface.approve_merge",
         description="Review a dedup/temporal candidate — action=merge|reject. "
                     "Wiring deferred to promotion for live priors. WRITES "
-                    "review flags + wires edges (idempotent for repeats).",
+                    "review flags + wires edges. NOT idempotent for every branch: a "
+                    "repeat of a DEDUP review records its event again, so it is "
+                    "visible twice to poll_events (the temporal branch does guard "
+                    "one).",
         risk="write",
         # ⛔ NOT idempotent for every branch (#10849 review). The TEMPORAL branch
         # guards a re-approval ("re-approving with the SAME action is a no-op —
@@ -1234,8 +1239,10 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
     ToolDefinition(
         name="tortoise_create_document",
         id="surface.create_document",
-        description="Create a document — a :Source keyed by url (research, planDoc, "
-                    "meetingNotes, etc.).",
+        description="Create a document — a :Source (research, planDoc, "
+                    "meetingNotes, etc.). NOT keyed by url: every call mints a fresh "
+                    "id, so a repeat writes a second Source and a second "
+                    "DocumentCreated.",
         risk="write",
         # ⛔ NOT idempotent, and it must not say it is (#10849 review). The
         # description says ":Source keyed by url", but the DOOR does not key by

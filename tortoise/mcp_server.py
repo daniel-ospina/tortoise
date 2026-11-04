@@ -649,8 +649,9 @@ def _wait_bound_refused() -> bool:
 #:
 #:   * ``tortoise_search`` (``entity_type="point"``) indexes ``content`` +
 #:     ``search_keys`` only, while ``sdk.create_operator`` writes a ``:Point``
-#:     with ``{id, is_operator, op_type, direction, label, status}`` and NO
-#:     ``content`` (``sdk.py:22382``) — so for EVERY created operator the recipe
+#:     with ``{id, is_operator, op_type, direction, direction_basis, status}``,
+#:     plus ``label`` only ``if label:``, and NO ``content`` (``sdk.py:22382``) —
+#:     so for EVERY created operator the recipe
 #:     returns nothing, "nothing" reads as "it did not commit", and the retry
 #:     duplicates the edge and double-counts its EP factor. That is the exact
 #:     tool #10849 measured, so a recipe here would have instructed the
@@ -674,12 +675,16 @@ def _wait_bound_refused() -> bool:
 #: read-back can be offered for it here.
 #:
 #: ⛔ ``idempotent=True`` is a SEQUENTIAL claim, and the rule must not silently
-#: promote it to "re-send now". These dedups are CHECK-THEN-WRITE with no
-#: uniqueness constraint behind them (``create_point``: `_resolve_dedup_hit(...)`
-#: then a separate `ulid()` + CREATE; ``checkpoint``'s `_content_exists` then
-#: `create_point`; the demo sentinel then a MERGE loop). So a retry that lands
-#: while the ABANDONED first write is still running is not a repeat — both can
-#: read absent, and both create. Measured on the embedded lane: two in-process
+#: promote it to "re-send now". For the two members driven by a content fold that
+#: claim rests on a CHECK-THEN-WRITE with no uniqueness constraint behind it —
+#: ``create_point`` (`_resolve_dedup_hit(...)` then a separate `ulid()` + CREATE)
+#: and ``checkpoint`` (`_content_exists` then `create_point`). So a retry that
+#: lands while the ABANDONED first write is still running is not a repeat — both
+#: can read absent, and both create. The other two members do not share that
+#: mechanism and are not covered by this caveat: ``create_source`` converges in ONE
+#: conditional statement (`projection/entities.py`: `MERGE (s:Source {url:$id})`,
+#: "CONDITIONAL (single statement, pin b)"), and ``onboarding_demo_create`` is
+#: sentinel-gated. Measured on the embedded lane: two in-process
 #: concurrent `create_point(..., dedup=True)` calls minted two nodes with the
 #: identical `content_hash` in 14 of 20 rounds, while the sequential control
 #: converged on one id. That is the absent fourth precondition of #5064, tracked
@@ -739,8 +744,9 @@ _WAIT_BOUND_RETRY_RULE_UNSAFE = (
 )
 
 
-#: The one ARGUMENT that turns a converging write into a diverging one: with
-#: ``dedup=False`` the SAME `tortoise_create_point` call mints a second Point
+#: The ARGUMENT, of the ones this seam reads, that most plainly turns a
+#: converging write into a diverging one: with ``dedup=False`` the SAME
+#: `tortoise_create_point` call mints a second Point
 #: instead of folding onto the existing one — its own docs say so ("pass a fresh
 #: key with ``dedup=False`` to mint a second point", #6110), and ``sdk.py`` gates
 #: the whole dedup branch on ``if dedup:``. A name-only verdict is therefore
@@ -1021,10 +1027,13 @@ def _wait_bound_refusal_result(name: str | None = None,
     wait-bound refusal by ``code == ERR_TIMEOUT`` **AND an exact equality on
     ``error.message``**, and it is what converts a refusal on a busy host into
     INCONCLUSIVE instead of a false red charged to the product (#5049 / #8579).
-    Putting the write message in ``error.message`` made that detector miss every
-    refused WRITE — the reachable class, since #10849's own measured incident
-    was a ``tortoise_create_point`` refused on the wire. The message field is
-    the refusal's IDENTITY; the write consequence is its PAYLOAD.
+    Putting the write message in ``error.message`` WOULD make that detector miss
+    every refused WRITE — the reachable class, since #10849's own measured
+    incident was a ``tortoise_create_point`` refused on the wire. (It is stated
+    as a hazard, not as history: no revision of this branch ever shipped it that
+    way — every commit from `e14945d59` on sets ``message`` to the neutral
+    constant.) The message field is the refusal's IDENTITY; the write consequence
+    is its PAYLOAD.
 
     ⚠️ ``dispatched=False`` is passed by EXACTLY the two arms that never schedule
     a dispatch (the ``transport_refused`` short-circuit, and the argument-check

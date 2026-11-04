@@ -538,7 +538,8 @@ def test_an_argument_that_LOOKS_read_only_is_not_taken_at_face_value():
 
     `tortoise_manage_sources(action="list")` looks like a pure read, and an
     earlier revision of this fix had an arm that said so — `committed: "none"`,
-    `retry_safe: true`, "This call is a READ: it writes nothing". A reviewer
+    `retry_safe: true`, "This call only reads — it writes nothing, so no mutation
+    is in flight". A reviewer
     falsified it: `_sources_view()` → `_onboarding_state()` → on a hosted org
     `_get_onboarding_state`, whose registry leg runs
     `_cas_write_onboarding_state(org_id, state, 0)` — a real
