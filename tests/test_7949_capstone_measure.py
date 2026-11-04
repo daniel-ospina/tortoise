@@ -1539,16 +1539,107 @@ def test_the_shipped_measurement_log_is_structurally_clean():
     assert verdicts["E4"] == "RED", verdicts
     assert verdicts["E5"] == "RED", verdicts
     assert verdicts["E1"] == "BLOCKED" and verdicts["E2"] == "BLOCKED", verdicts
-    # the run completed; two of eight steps are unwitnessed, and the log says
-    # which and why (#9116) rather than leaving the count to be inferred
+    # the run completed and #9116's seam is in: ALL EIGHT steps are witnessed
+    # (#10537 re-measure, 2026-11-02 — the superseded `e0fc940b` run could see six
+    # because the meta fold forwarded `stats` alone)
     assert record["run"]["status"] == "COMPLETED"
     assert sorted(record["run"]["steps_observed"]) == sorted(
-        ["S0", "S1", "S2.1", "S3", "S5", "S6"])
-    assert set(record["run"]["steps_unobserved"]) == {"S2.2", "S2.3"}
+        ["S0", "S1", "S2.1", "S2.2", "S2.3", "S3", "S5", "S6"])
+    assert not record["run"].get("steps_unobserved"), record["run"]
     # and the epic stays uncloseable
     codes = [code for code, _w, _m in cvc.check(
         record, repo=_REPO, require_green=True).items]
     assert codes == ["V9"], codes
+
+
+def test_the_shipped_logs_blocker_cells_are_the_emitters_own():
+    """The scored log must carry the `blocked_by` cells its OWN probe emits.
+
+    ⛔ WHY THIS EXISTS (#10537 review P1). The shipped log's E4/E5 cells named
+    `#9596`/`#5087`, but the probe at the head the log NAMES (`9152448d7`) still
+    emitted `#8503`/`#9738` — the two cells had been edited after the run, and
+    the log's E5 note carried a sentence no committed revision of the probe ever
+    wrote (`git grep` for it at `9152448d7` finds nothing; `git log --all -S`
+    finds only this lane's own commits). The consequence is not cosmetic: a copy
+    of the shipped log with those cells set back to what the stamped probe emits
+    is REFUSED by this PR's own V12 — so the shipped table passed only because
+    of the edit, and nothing pinned artifact to emitter.
+
+    This pin closes that: the cells must be the emitter's values, in row order,
+    and the note sentence must exist in the emitter too. At the pre-fix head it
+    reds on BOTH legs.
+    """
+    source = PROBE.read_text()
+    emitted = re.findall(r'blocked_by="(#[0-9]+)"', source)
+    assert len(emitted) == 5, (
+        f"expected the probe to emit five `blocked_by=` cells (E1-E5), found "
+        f"{emitted} — this pin reads them in ROW ORDER, so a reordered literal "
+        f"list is a pin failure, not a formatting choice")
+    log = _newest_log(_scored_logs())
+    record = cvc.extract_block(log.read_text())
+    shipped = [row["blocked_by"] for row in record["rows"]]
+    assert shipped == emitted, (
+        f"{log.name} carries blocked_by {shipped} but its own probe emits "
+        f"{emitted} — the log names this emitter, so a cell that does not match "
+        f"it was edited after the run. Either re-run the probe (the supersede "
+        f"path) or disclose the edit in the log's POST-RUN CORRECTION block")
+    # the E5 attribution sentence is the emitter's words, not a hand-typed tail.
+    # The probe wraps it across adjacent f-string literals, so join those first:
+    # a pin that demanded one physical source line would be testing the FORMATTING.
+    source_joined = re.sub(r'"\s*\n\s*f?"', "", source)
+    sentence = "The row's blocker moved on 2026-11-02 from #9738 to #5087"
+    assert sentence in source_joined, (
+        "the E5 blocker-move sentence is NOT in the committed probe, so the log "
+        "carries words no run wrote — move it into the probe's E5 note template")
+    assert sentence in record["rows"][4]["note"], record["rows"][4]["note"]
+    # AND THE E4 NOTE (#10601 review round 4): the disclosure pin's stand-down
+    # rests on this pin refusing an undisclosed note edit, so the note the
+    # correction block NAMES has to be pinned too — otherwise a hand-edit of E4's
+    # note, with the block left in place, passes both pins, which is exactly the
+    # "edit that reads as emitter output" class #10537 exists to refuse.
+    e4_sentence = ("that closure records the DISPROOF, so it is this row's "
+                   "measurement record")
+    assert e4_sentence in source_joined, (
+        "the E4 note's closed-blocker sentence is NOT in the committed probe, so "
+        "a hand-typed E4 note would still pass")
+    assert e4_sentence in record["rows"][3]["note"], record["rows"][3]["note"]
+
+
+def test_the_shipped_log_discloses_what_the_run_did_not_emit():
+    """A post-run edit is allowed only when the artifact SAYS it happened.
+
+    The failure mode is not the edit — it is an edit that reads as emitter
+    output, which is the whole class of stale evidence `#10537` exists to gate.
+    Three things were updated after the run at `9152448d7` — the E4/E5 `blocked_by`
+    cells, the E5 note tail, and the E4 note's `#8503` pointer — so the log must
+    name all three, name the reason, and say that the NUMBERS were not touched.
+
+    ⛔ AND IT STANDS DOWN WHEN THERE IS NOTHING TO DISCLOSE (#10601 review round
+    3). The first version of this pin REQUIRED the block unconditionally, which
+    turned the bundle's own sanctioned remedy — re-run the probe and delete the
+    log it supersedes — red on a strictly MORE correct artifact, and the only
+    cheap way to satisfy it would be to carry a FALSE disclosure into the new
+    file. The neighbouring artifact pin stands down for exactly this reason. The
+    protection is unchanged, because the two pins together still refuse an
+    undisclosed edit: `test_the_shipped_logs_blocker_cells_are_the_emitters_own`
+    reds WHENEVER the five `blocked_by` cells, the E4 note's closed-blocker
+    sentence OR the E5 blocker-move sentence diverge from the emitter (those
+    three are the surfaces the correction block names, so the block cannot
+    confess an edit the artifact does not carry), and this pin reds whenever a
+    block claims the edit but does not describe it. What is no
+    longer required is a confession for an edit that never happened.
+    """
+    log = _newest_log(_scored_logs())
+    text = log.read_text()
+    if "POST-RUN CORRECTION" not in text:
+        # Nothing to disclose — a freshly generated log is the good case. The
+        # sibling pin is what makes this branch safe rather than a hole: it
+        # reds the moment the artifact stops being what its emitter writes.
+        return
+    for named in ("#8503 -> #9596", "#9738 -> #5087", "E5 note", "E4 note"):
+        assert named in text, f"the correction block does not name {named!r}"
+    assert "THE NUMBERS ARE THE RUN'S AND WERE NOT TOUCHED" in text, (
+        "the disclosure must state the scope of the edit: numbers untouched")
 
 
 def test_the_durations_row_quotes_the_case_count_it_weights():
@@ -1690,11 +1781,11 @@ def test_the_e3_census_counts_references_inbound_and_extractedfrom_outbound():
 # ── the census's per-label set is NOT the E3 row selector (#10525 review P1) ──
 
 #: The shipped log's own per-label block, re-used as canned Cypher rows
-#: (`capstone-measured-e0fc940b.log:32-34` + `:Point` composition).
+#: (`capstone-measured-9152448d.log:32-34` + `:Point` composition).
 _CENSUS_ROWS = {
-    "Point": (338, 141, 141, 0),
-    "Object": (50, 0, 0, 0),
-    "Event": (45, 7, 0, 7),
+    "Point": (354, 150, 150, 0),
+    "Object": (64, 0, 0, 0),
+    "Event": (43, 7, 0, 7),
     "Document": (0, 0, 0, 0),
 }
 
@@ -1704,38 +1795,38 @@ class _CannedQuery:
 
     def __init__(self, cypher: str) -> None:
         if "UNWIND labels(n)" in cypher:
-            rows = [["Point", 338], ["Object", 50], ["Event", 45]]
+            rows = [["Point", 354], ["Object", 64], ["Event", 43]]
         elif "RETURN n.name" in cypher:                                    # object_names
             rows = [["the quarry"]]
         elif "eventId IS NOT NULL" in cypher:                              # event_stamped
-            rows = [[159]]
+            rows = [[184]]
         elif "type(r) AS t" in cypher:                                     # relationships
             # The log's own `e3_census.relationship_counts` / `.relationship_anchored`
-            # (`capstone-measured-e0fc940b.log:250-260`): `extractedFrom` carries **141**
-            # links, all 141 anchored — the same 141 claims, one link each. A 150 here
-            # was the writer-class size (`extraction_claims` + `other`) written into the
-            # LINK slot, and the 9 `other` Points are defined by `deriv = 0`, i.e. by
+            # (`capstone-measured-9152448d.log`, `e3_census.relationship_counts`):
+            # `extractedFrom` carries **150** links, all 150 anchored — the same 150
+            # claims, one link each. A count equal to the writer-class size
+            # (`extraction_claims` + `other` = 161) written into the LINK slot would be
+            # wrong, and the 11 `other` Points are defined by `deriv = 0`, i.e. by
             # carrying no link at all, so 150 links is not a shape that graph can have.
             # `test_the_canned_census_transcribes_the_committed_log_it_cites` checks
             # every one of these numbers against the artifact.
-            rows = [["extractedFrom", 141, 141], ["references", 7, 7],
-                    ["aboutObject", 211, 0]]
+            rows = [["extractedFrom", 150, 150], ["references", 7, 7],
+                    ["aboutObject", 248, 0]]
         elif "AS points" in cypher:                                        # composition
             # Columns, in `census()`'s own unpack order (#10525 review):
             #   points=turn_rows=operator_points=extraction_claims=other_points=
             #   extraction_claims_anchored=turn_rows_anchored=
             #   operator_points_anchored=other_points_anchored
             # The shipped log's own composition line
-            # (`capstone-measured-e0fc940b.log:37`) is
-            # `turn_rows=159 (anchored 0) extraction_claims=141 (anchored 141)
-            #  operator_points=29 (anchored 0) other=9 (anchored 0) (total=338)`,
-            # and it PARTITIONS 338 (159 + 29 + 141 + 9). The 150 that sits one
-            # column to the left here is the `extractedFrom` LINK count
-            # (`["extractedFrom", 150, 141]` above: 141 claims + 9 `other`, one
-            # each) — not a claim count. Transcribing it into the claim slot made
-            # the fixture's own partition impossible (347 ≠ 338) and pinned a
-            # value the artifact it cites cannot produce.
-            rows = [[338, 159, 29, 141, 9, 141, 0, 0, 0]]
+            # (`capstone-measured-9152448d.log`, `point_composition`) is
+            # `turn_rows=159 (anchored 0) extraction_claims=150 (anchored 150)
+            #  operator_points=34 (anchored 0) other=11 (anchored 0) (total=354)`,
+            # and it PARTITIONS 354 (159 + 34 + 150 + 11). The `extractedFrom`
+            # LINK count is 150 — one link per extraction claim — so the link
+            # count and the claim count coincide here; they did NOT at the
+            # superseded stamp (141 claims + 9 `other`), which is why the slot is
+            # pinned from the artifact instead of from the coincidence.
+            rows = [[354, 159, 34, 150, 11, 150, 0, 0, 0]]
         else:                                                             # anchor census
             label = re.match(r"MATCH \(n:(\w+)\)", cypher).group(1)
             rows = [list(_CENSUS_ROWS[label])]
@@ -1773,13 +1864,14 @@ def test_the_census_enumerates_object_even_though_e3_no_longer_does(monkeypatch)
     """
     data = _canned_census(monkeypatch)
     assert "Object" in data["per_label"], sorted(data["per_label"])
-    assert data["per_label"]["Object"]["nodes"] == 50, data["per_label"]["Object"]
+    assert data["per_label"]["Object"]["nodes"] == 64, data["per_label"]["Object"]
     # The row SELECTOR is unchanged and still names what #9736 registered: `:Object` is not in it.
     assert "Object" not in measure.DERIVED_LABELS, measure.DERIVED_LABELS
     assert set(measure.DERIVED_LABELS) <= set(measure.CENSUS_LABELS)
-    # …and E3's totals stay on the ROW's classes: 338 + 45 + 0, never 433.
-    assert data["derived_total"] == 383, data["derived_total"]
-    assert data["anchored_total"] == 148, data["anchored_total"]
+    # …and E3's totals stay on the ROW's classes: 354 + 43 + 0, never the 461 that
+    # folding `:Object` in would report.
+    assert data["derived_total"] == 397, data["derived_total"]
+    assert data["anchored_total"] == 157, data["anchored_total"]
 
 
 def test_the_sibling_ablation_instrument_still_counts_objects(monkeypatch):
@@ -1796,14 +1888,16 @@ def test_the_sibling_ablation_instrument_still_counts_objects(monkeypatch):
     s3 = _ilu.module_from_spec(spec)
     spec.loader.exec_module(s3)
     counts = s3.created_counts(_canned_census(monkeypatch))
-    assert counts["objects"] == 50, counts
+    assert counts["objects"] == 64, counts
     # Read off the log's own composition line, never off the link count:
-    # `extraction_claims=141 (anchored 141)` (`capstone-measured-e0fc940b.log:37`).
-    assert counts["extraction_claims"] == 141, counts
-    assert counts["events"] == 45, counts
-    # 141 + 50 + 45, which is what #10463's committed log can produce; the 245
-    # this pin used to assert came from the mis-transcription above.
-    assert counts["extraction_nodes"] == 236, counts
+    # `extraction_claims=150 (anchored 150)` (`capstone-measured-9152448d.log`,
+    # `run.e3_census.point_composition`).
+    assert counts["extraction_claims"] == 150, counts
+    assert counts["events"] == 43, counts
+    # 150 + 64 + 43, which is what the shipped log's own classes produce; the 245
+    # this pin used to assert came from the mis-transcription above, and the 236
+    # from the SUPERSEDED stamp's 141 + 50 + 45.
+    assert counts["extraction_nodes"] == 257, counts
     # The partition the fixture must satisfy to be a transcription at all: the
     # composition's classes sum to the `Point` total the census reports.
     composition = _canned_census(monkeypatch)["point_composition"]
@@ -1829,8 +1923,13 @@ def test_the_canned_census_transcribes_the_committed_log_it_cites(monkeypatch):
     statements these tests exercise, not every one — so each field it DOES answer must
     be the log's.
     """
-    text = (_REPO / "docs/evidence/7949-capstone"
-            / "capstone-measured-e0fc940b.log").read_text()
+    # ⛔ DISCOVERED, NOT NAMED (#10601 review P2, same class as the OK-line pin).
+    # The bundle's own rule is that a re-run writes `capstone-measured-<new
+    # head8>.log` and DELETES the file it supersedes, so a hardcoded name here
+    # turns the next CORRECT artifact into a red on a filename. `_newest_log`
+    # orders by the log's own `# generated:` stamp, which is what the rest of
+    # this file already uses.
+    text = _newest_log(_scored_logs()).read_text()
     begin, end = "=== CAPSTONE-VERDICT-BEGIN ===", "=== CAPSTONE-VERDICT-END ==="
     assert begin in text and end in text, "the shipped log lost its verdict block"
     record = json.loads(text.split(begin, 1)[1].split(end, 1)[0])
@@ -1842,14 +1941,17 @@ def test_the_canned_census_transcribes_the_committed_log_it_cites(monkeypatch):
     assert data["point_composition"] == block["point_composition"], (
         data["point_composition"], block["point_composition"])
 
-    # 2. The per-label block — and `Document` is a real 0, not a dropped key.
+    # 2. The per-label block — and `Document` is a real 0 on both sides, not a key
+    # the fixture invents.
     for label, expected in block["per_label"].items():
         got = data["per_label"][label]
         assert (got["nodes"], got["anchored"], got["anchored_out"],
                 got["anchored_in"]) == (
                     expected["nodes"], expected["anchored"],
                     expected["anchored_out"], expected["anchored_in"]), (label, got)
-    assert "Document" not in block["per_label"], block["per_label"]
+    # `:Document` is a REAL 0 the log itself carries (it is in the amended class set,
+    # #9736 §10.1) — so the fixture must carry it too, at 0, rather than omitting it.
+    assert block["per_label"]["Document"]["nodes"] == 0, block["per_label"]
     assert data["per_label"]["Document"]["nodes"] == 0, data["per_label"]
 
     # 3. Every relationship the fake answers carries the log's count AND anchor count.
@@ -2758,11 +2860,40 @@ def test_the_not_established_section_quotes_the_s5_operator_counts_the_log_measu
         f"the README's not-established bullet says IMPL={quoted.group(1)} "
         f"INPUT={quoted.group(2)} NAND={quoted.group(3)}; the shipped log measured "
         f"IMPL={measured.group(1)} INPUT={measured.group(2)} NAND={measured.group(3)}")
-    # and the S5 table row in the same document must not disagree either
+    # and the S5 table row in the same document must describe ONE run. #10601 made the
+    # eight-step table the SUPERSEDED run's (README's own banner), while `8173e88eb` moved
+    # this row's operator triple to THIS run's — pairing the superseded census
+    # (433 derived nodes / Point 338 / Object 50 / Event 45) with the shipped run's
+    # IMPL=65 INPUT=68 NAND=14, a combination no artifact ever measured
+    # (`e0fc940b5` pairs 433/338/50/45 with IMPL=57 INPUT=58 NAND=10). The old form of
+    # this leg REQUIRED that fusion, because it was written when the eight-step table WAS
+    # the shipped run's; it now holds the row to one run — in BOTH directions. The first
+    # form of the fix gated everything on the superseded census literal, so the MIRROR
+    # fusion (shipped census `397 derived nodes` beside the superseded triple) passed
+    # every leg; measured, and the reason both branches below are asserted.
     s5_row = next(ln for ln in readme.splitlines()
                   if ln.startswith("| S5 CONNECT"))
-    assert f"IMPL={measured.group(1)} INPUT={measured.group(2)} " \
-           f"NAND={measured.group(3)}" in s5_row, s5_row
+    shipped_triple = (f"IMPL={measured.group(1)} INPUT={measured.group(2)} "
+                      f"NAND={measured.group(3)}")
+    superseded_triple = "IMPL=57 INPUT=58 NAND=10"
+    shipped_census = "397 derived nodes" in s5_row
+    superseded_census = "433 derived nodes" in s5_row
+    assert shipped_census or superseded_census, (
+        "the S5 row quotes neither run's census, so nothing here can tell which run it "
+        f"describes: {s5_row[:400]}")
+    assert not (shipped_census and superseded_census), (
+        f"the S5 row quotes BOTH runs' census counts: {s5_row[:400]}")
+    if superseded_census:
+        assert superseded_triple in s5_row and shipped_triple not in s5_row, (
+            "the S5 row quotes the SUPERSEDED run's census (433 derived nodes), so its "
+            "operator triple must be that run's too (`e0fc940b5`'s `step S5` line pairs "
+            f"433 with {superseded_triple}) — not this run's {shipped_triple}: "
+            f"{s5_row[:400]}")
+    else:
+        assert shipped_triple in s5_row and superseded_triple not in s5_row, (
+            "the S5 row quotes THIS run's census (397 derived nodes), so its operator "
+            f"triple must be this run's too ({shipped_triple}), not the superseded "
+            f"{superseded_triple}: {s5_row[:400]}")
 
 
 # ── the bundle's STATE LEDGER must describe the seam that SHIPPED ──────────
@@ -2862,8 +2993,8 @@ def test_the_bundle_does_not_state_the_pre_seam_receipt_as_the_current_one():
             "lane reads would send it to re-derive a seam that is already here")
         assert "LANDED" in row, (
             f"{doc}'s {heading.lstrip('# ')!r} row must name `#9116` as LANDED and "
-            "say what still bounds the run (S2.3's idle classify pass, and V5's "
-            f"8/8 scoping); it reads: {row}")
+            "say what still bounds the run (the rows' own blockers, and V5's "
+            f"8/8 accounting); it reads: {row}")
 
     # The prose is only allowed to claim this because the fold really does it.
     sdk = (_REPO / "tortoise" / "sdk.py").read_text()
@@ -2871,6 +3002,226 @@ def test_the_bundle_does_not_state_the_pre_seam_receipt_as_the_current_one():
         "the bundle now names `#9116` as LANDED, but `_extract_session_v2`'s meta "
         "fold does not call `_capture_stats_with_step_witness`: the seam is gone, "
         "so the documents are lying again — restore the fold or the pre-seam text")
+
+
+#: Present-tense shapes that re-state this bundle's recorded PREDICTION about a
+#: post-seam re-run — the prediction the shipped log REFUTES. Guarded on the log
+#: itself (see the test), never on a constant: the moment the scored log stops
+#: observing S2.2/S2.3 these sentences become true again and the guard stands
+#: down, so it cannot outlive the artifact it depends on. Each phrase was
+#: measured present in at least one pre-fix document (#10601 round 2, P1).
+#: ⛔ Eleven entries, and EVERY one was re-measured present at `fdb19441f` in
+#: round 3 — one of them (`"S2.3`, which the measured corpus' idle classify pass
+#: does not"`) matched no document at any revision and was replaced; a ban that
+#: cannot fire is exactly the no-op this bundle exists to refuse, so any future
+#: entry lands with the same flatten-and-grep evidence this one carries.
+_BUNDLE_STALE_STEP_PREDICTION = (
+    "so a re-run there still reports S2.3",
+    "S2.3 does not flip",
+    "S2.3 does not move on this corpus",
+    # Measured present at `fdb19441f` (and at `7caace29c`): the bundle's own
+    # dependency table said `S2.3` was "IDLE on this corpus" while the log this
+    # PR ships carries `step S2.3 WITNESSED … assigned_llm: 7`. The spellings
+    # above were blindness-by-paraphrase: these name a DIFFERENT failure (idle,
+    # not "cannot move") and so survived the guard written for the class of
+    # "the bundle states a step prediction its own artifact refutes".
+    #
+    # ⛔ The last of them was a NO-OP for one review cycle (#10601 round 3): it
+    # was registered as ``"S2.3`, which the measured corpus' idle classify pass
+    # does not"`` — a `S2.3`,`` prefix the pre-fix sentence never carries (it
+    # reads ``(S2.3 flips only once its pass does work, which the measured
+    # corpus' idle classify pass does not``), so the entry matched no document at
+    # ANY revision and a ban that cannot fire is not a ban. Measured across
+    # `origin/main`, `fdb19441f`, `7caace29c`, `d7c48ff95` and this head: the
+    # prefixed form is absent from all five; this spelling is present in
+    # README at the first three and absent at the last two.
+    "S2.3` is IDLE on this corpus",
+    "which the measured corpus' idle classify pass does not",
+    "the classify pass is IDLE on it, so S2.3",
+    "on the measured corpus the pass is IDLE",
+    "Until such a re-run is committed",
+    "What still has to land is a **committed post-seam re-run**",
+    "The two unwitnessed steps stay unwitnessed for THIS run",
+    "stays what it is — `capstone-measured-e0fc940b.log`",
+)
+
+
+def _flat(text: str) -> str:
+    """One-space-normalised prose, because these sentences WRAP.
+
+    A phrase matched against the raw text goes line-blind: "**S2.3 does not
+    flip**" is one sentence to a reader and two unrelated substrings to `in`,
+    which is how a guard like this passes over the very sentence it exists for.
+    """
+    return re.sub(r"\s+", " ", text)
+
+
+#: The superseded-run history the sibling message ASKS to keep, and the refutation — both TRUE.
+#: Kept as spellings only; the regex experiments that tried to generalise this are recorded as
+#: dead ends in `test_no_document_states_the_step_prediction_its_own_artifact_refutes`.
+
+
+
+def test_no_document_states_the_step_prediction_its_own_artifact_refutes():
+    """The bundle must not tell a lane a re-run cannot move S2.3 — one already did.
+
+    `E1-E5-PROOFS.md` is the audit a lane reads to decide whether a row can move,
+    and it asserted, in the present tense, that "a re-run there still reports S2.3"
+    unobserved, that "S2.3 does not flip", that "S2.3 does not move on this
+    corpus", that the epic's closing rule stays unsatisfiable "until such a re-run
+    is committed", and that "what still has to land is a **committed post-seam
+    re-run**" — while the log THIS PR ships IS that re-run, and it observes all
+    eight steps with S2.3's witness non-empty. The PR body already said the run
+    "falsified this bundle's recorded prediction that S2.3 stays IDLE"; the
+    sentences were simply never swept. A lane reading them concludes a re-run
+    cannot move S2.3 and does not run one — the stale-inference class `#10537`
+    exists to close.
+
+    Bound to the ARTIFACT, not to prose: the guard reads the shipped scored log's
+    own `steps_observed` / `steps_unobserved` / `status`, and only then forbids the
+    sentences. If a future re-run stops witnessing S2.3, those sentences become
+    true again and this test stands DOWN rather than lying in the other direction.
+
+    Non-vacuity (measured against the pre-fix tree at `fdb19441f`, all eleven
+    phrases, by flattening each document and grepping): README carries the "a
+    re-run there still reports S2.3", "S2.3 does not flip", "S2.3 does not move on
+    this corpus", the four IDLE paraphrases, "stay unwitnessed for THIS run" and
+    "stays what it is — `capstone-measured-e0fc940b.log`" shapes, and
+    E1-E5-PROOFS carries "Until such a re-run is committed" and "what still has to
+    land is a **committed post-seam re-run**". All eleven red there, and none is
+    present at this head.
+    """
+    shipped = _newest_log(_scored_logs())
+    run = cvc.extract_block(shipped.read_text())["run"]
+    observed = set(run.get("steps_observed") or ())
+    assert {"S2.2", "S2.3"} <= observed, (
+        f"{shipped.name} no longer observes S2.2+S2.3 (observed: "
+        f"{sorted(observed)}), so the documents' 'a re-run cannot move S2.3' "
+        "prediction is TRUE again and this guard must stand down — re-derive the "
+        "prose before replacing the log, not after")
+    assert run.get("steps_unobserved") == {}, (
+        f"{shipped.name} reports steps_unobserved={run.get('steps_unobserved')!r}: "
+        "a step is unexplained, so neither 'it moved' nor 'it cannot move' is "
+        "stateable")
+    assert run.get("status") == "COMPLETED", (
+        f"{shipped.name} status={run.get('status')!r}: a run that did not complete "
+        "cannot be the counter-example the prose is re-derived against")
+
+    for name, path in (("README.md", README_DOC),
+                       ("E1-E5-PROOFS.md", E1E5_PROOFS)):
+        text = _flat(path.read_text())
+        for phrase in _BUNDLE_STALE_STEP_PREDICTION:
+            assert _flat(phrase) not in text, (
+                f"{name} still states this bundle's recorded step PREDICTION as "
+                f"current ({phrase!r}), but {shipped.name} refutes it: the run "
+                "observes all eight steps and S2.3's witness is non-empty. A lane "
+                "reading that sentence concludes a re-run cannot move S2.3 and "
+                "never runs one — say what the SHIPPED log measured, and keep the "
+                "6-of-8 count as the SUPERSEDED run's history")
+
+        # ⛔ A STRUCTURAL ROW CHECK WAS TRIED HERE AND REMOVED — measured. Three designs,
+        #    each wrong, recorded so a future round does not re-invent them:
+        #      · a sentence-level prose regex → false-RED on `#10215`'s general rule
+        #        ("an idle classify pass is ACCOUNTED from the receipt's own facts"),
+        #        which is TRUE of any corpus;
+        #      · a row ban allowlisting the bare words `accounted|conditional` →
+        #        false-RED on a legitimate SUPERSEDED-history row AND false-GREEN on
+        #        "the pass is IDLE on this corpus, accounted";
+        #      · a scope-based row discriminator → false-RED on a TRUE row ("the classify
+        #        pass's `union` is unwitnessed (`{}`) while `s2` carries 7 assignments" —
+        #        both facts are in the log) and false-GREEN on "the pass was enabled and
+        #        did no work on this corpus (s2 counters all zero)".
+        #    A guard that reds on true content AND greens on the refuted claim is worse
+        #    than none: it is a false PASS that reports the class closed. So it is
+        #    deleted, and the residual is STATED rather than hidden: a PARAPHRASE of the
+        #    idle claim is not caught by any pin in this file. What actually protects the
+        #    load-bearing claim is the artifact-bound leg at the top of this test (it
+        #    reads the shipped log's own `steps_observed`) plus the POSITIVE pin below,
+        #    which requires the witness row to name the EVIDENCE that the pass did work
+        #    rather than a word describing it.
+        if name == "README.md":
+            witness_rows = [r for r in path.read_text().splitlines()
+                            if r.startswith("| S2.3")]
+            assert witness_rows, (
+                "README.md no longer carries a `| S2.3 …` witness row — the positive "
+                "pin below cannot check a row that is not there")
+            assert any("assigned_llm" in r for r in witness_rows), (
+                "the S2.3 witness row must name the EVIDENCE that the classify pass "
+                "did work (`assigned_llm` on the shipped log's witness), not a word "
+                f"describing it: {witness_rows[0][:300]!r}")
+
+
+#: The `e1-aux` triple of the SUPERSEDED run — `capstone-measured-e0fc940b.log`
+#: measured 50 objects / 6 bare-definite / 0.12 share. The run this bundle now ships
+#: (`capstone-measured-9152448d.log`) measures 64 / 14 / 0.21875.
+#:
+#: Measured at `7caace29c`: the bundle's E1 summary row already said "**64 Objects** …
+#: 14/64", while its own E1 narrative (`**50 `:Object` nodes** … 6/50 = 0.12`, and
+#: `6/50 in the shipped log`) and the `00_index` row (`50 Objects at a 6/50 = 0.12`)
+#: still quoted the superseded triple as THIS run's — the row's stamp had moved to
+#: `9152448d7` without the number moving with it, which is the "a row moves only by
+#: re-running the probe" rule failing in the one direction a re-measure cannot fix:
+#: the prose was never re-derived. Two documents, one class, no pin.
+_SUPERSEDED_E1_AUX = (
+    "**50 `:Object` nodes**",
+    "6/50 = 0.12",
+    "50 Objects at a 6/50",
+    "6/50 in the shipped log",
+)
+
+
+def test_no_document_quotes_the_superseded_runs_e1_aux_numbers_as_current():
+    """The bundle may not present the deleted run's E1-aux numbers as this run's.
+
+    Non-vacuity, and it is the point of the test: the SHIPPED triple must be present
+    where the superseded one was banned. A pin that only forbids would pass on a
+    document that dropped the measurement altogether — which is the "no number" form
+    of the same defect.
+    """
+    readme = (_REPO / "docs/evidence/7949-capstone/README.md").read_text(encoding="utf-8")
+    index = (_REPO / "docs/00_index.md").read_text(encoding="utf-8")
+
+    # ⛔ THE NUMBERS COME FROM THE LOG, NEVER FROM THIS TEST. A constant here turns the
+    #    REQUIRED half of this pin into a false-red trap on the very operation the
+    #    bundle exists to support: the next re-measurement would have to edit the pin
+    #    to agree with the artifact the pin is supposed to be checking, and until
+    #    somebody did, a CORRECT document would red (measured defect, review round 5).
+    #    The BAN list below is the opposite case and stays literal: it names one
+    #    specific HISTORICAL triple, and "a superseded run produced this" does not stop
+    #    being true when a third run supersedes this one.
+    shipped = _newest_log(_scored_logs())
+    aux = re.search(
+        r"^e1-aux objects_in_graph=(\d+) bare_definite=(\d+) share=([0-9.]+)",
+        shipped.read_text(encoding="utf-8"), re.M,
+    )
+    assert aux, (
+        f"{shipped.name} carries no `e1-aux` line, so neither the shipped E1 share nor "
+        "this pin's REQUIRED half can be stated — re-derive the prose from a log that "
+        "does measure it, not by editing this pin")
+    objects, bare, share = aux.group(1), aux.group(2), aux.group(3)
+
+    for name, text in (("README.md", readme), ("docs/00_index.md", index)):
+        flat = _flat(text)
+        for phrase in _SUPERSEDED_E1_AUX:
+            assert _flat(phrase) not in flat, (
+                f"{name} quotes the SUPERSEDED run's e1-aux numbers as current "
+                f"({phrase!r}) — {shipped.name} measures {objects} Objects at "
+                f"{bare}/{objects} = {share}. Say what THIS run measured. This pin "
+                "bans the superseded triple in these two documents OUTRIGHT: it does "
+                "not implement a labelled-history exemption (an earlier version of "
+                "this message promised one, which no lane could satisfy) — the "
+                "labelled form belongs in the sentence that carries its own "
+                "retrieval route, which is not these two documents' E1 headline")
+
+    assert f"{objects} `:Object` nodes" in readme and f"{bare}/{objects} = {share}" in readme, (
+        f"README.md no longer states the shipped run's E1-aux numbers ({objects} "
+        f"`:Object` nodes / {bare}/{objects} = {share}, from {shipped.name}) — the ban "
+        "above would pass vacuously on a bundle that dropped the measurement")
+    assert f"{objects} Objects at a {bare}/{objects} = {share}" in index, (
+        "docs/00_index.md's capstone row no longer states the shipped run's E1-aux "
+        f"numbers ({objects} Objects at a {bare}/{objects} = {share}, from "
+        f"{shipped.name}) — re-derive them from that log's `e1-aux` line rather than "
+        "dropping the claim")
 
 
 # ── the bundle's OWN `file:line` cites must RESOLVE (not merely be spelled) ──
@@ -3359,11 +3710,22 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # are pinned here instead. The sentence wraps over three lines and a row
         # scopes to ONE line, so the claim takes three rows.
         ("E1-E5-PROOFS.md", 'declares `STEPS = ("S0"', (
-            ("118", 'STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", '
+            ("134", 'STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", '
                     '"S5", "S6")'),
         ), "capstone_verdict_check"),
-        ("E1-E5-PROOFS.md", "_step_accounting` (`:379`) refuses a GREEN row whose", (
-            ("379", "def _step_accounting("),
+        ("E1-E5-PROOFS.md", "_step_accounting` (`:605`) refuses a GREEN row whose", (
+            ("605", "def _step_accounting("),
+        ), "capstone_verdict_check"),
+        # ⛔ A SECOND DOCUMENT PRINTS THE SAME DECLARATION (#10601 review round 2).
+        # `docs/00_index.md`'s capstone row cites this gate too, and it moved
+        # `:118` -> `:131` while the target moved to `:132` — so the index pointed
+        # at `CRITERIA = (...)` while its sibling document pointed at `STEPS`. No
+        # sweep caught it: `_BUNDLE_CITE` resolves only `sdk|edges|extractor_v2`,
+        # and the rows above covered ONE document. Every doc that prints a
+        # `tools/*.py` number needs its own row here, not just the first one.
+        ("docs/00_index.md", "declares the eight steps", (
+            ("134", 'STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", '
+                    '"S5", "S6")'),
         ), "capstone_verdict_check"),
     )
     # The SAME document states two of its claims as the RULE's own text rather than a
@@ -3433,6 +3795,99 @@ def test_the_bare_continuation_cites_name_what_they_say():
     assert not failures, (
         "a bare `:NNNN` continuation names code it does not name — re-derive the "
         "number from the tree before changing this pin:\n  " + "\n  ".join(failures))
+
+
+def test_every_readme_line_cite_carries_the_sentence_it_quotes():
+    """A `README.md:<line>` cite is invisible to every sweep — resolve it here.
+
+    ⛔ WHY (#10601 review round 2). `E1-E5-PROOFS.md` cited a line RANGE for the
+    sentence *"printed, and NOT used to green the row, because the artifact
+    counts atomic Points, not surviving planted units"*, and that range stopped
+    carrying the sentence as soon as lines were inserted above it — it went
+    stale at the base, and every edit pushed the quote further from the number
+    that named it. NO numbers are repeated here on purpose: a quoted line number
+    is the very drift this pin exists to catch, and the LIVE cite lives in the
+    document that carries it, re-derived from the file. Nothing could see it: `_BUNDLE_CITE` resolves only
+    `sdk|edges|extractor_v2` (the constraint lives in `_BUNDLE_CITE`'s own capture
+    group and in `_BUNDLE_SOURCES`), and the bundle's own docs are not sources. A document whose
+    thesis is "a claim nothing re-checks can rot silently" leaves its
+    `README.md:<line>` cites unwatched, so this pin resolves EVERY one of them —
+    either the sentence the cite QUOTES must appear inside the lines it names, or
+    (for a cite that quotes nothing, e.g. a table cell's pointer) a case token
+    such as `E2b` printed on the citing line must appear inside the named range.
+
+    ⛔ EVERY CITE IS CHECKED, NOT JUST THE QUOTED ONES (#10601 review round 3).
+    The first version skipped a cite with no quote (`continue`) and then asserted
+    `checked >= 1` — satisfied by the single quoted cite — so three of the four
+    cites in this document were resolved by nothing, in the one file whose thesis
+    is that unwatched claims rot. EVERY cite is now visited — but read the guard
+    for what it is: `checked == len(found)` increments before either branch, so it
+    cannot fail, and it guards VISITATION, not coverage. What reds is the check
+    each visited cite must pass: a cite that QUOTES a sentence must carry that
+    sentence inside the range it names. A cite that quotes nothing is anchored by
+    a case token instead — a weaker anchor, and the honest limitation of this pin:
+    a quote DELETED from a cite degrades to that anchor rather than redding, so the
+    pin proves every cite names something real, never that a cite meant to quote.
+
+    Non-vacuity: at the pre-fix head this pin reds, because the cited range no
+    longer carries the quote it names. Re-pointing a QUOTED cite at the wrong
+    range reds; an UNQUOTED cite reds only when the wrong range carries none of
+    the case tokens its citing line names (the weaker anchor, stated above). (The failing range is not re-quoted here for the same
+    reason as above — it is the drift, not the spec.)
+    """
+    import re as _re
+
+    def plain(text: str) -> str:
+        # markdown emphasis and code spans are FORMATTING, not wording
+        return " ".join(_re.sub(r"[*`]", "", text).split())
+
+    doc = (_REPO / "docs/evidence/7949-capstone/E1-E5-PROOFS.md").read_text(
+        encoding="utf-8")
+    readme_lines = (_REPO / "docs/evidence/7949-capstone/README.md").read_text(
+        encoding="utf-8").splitlines()
+    case_token = _re.compile(r"\bE[1-5][ab]?\b")
+    checked = 0
+    found = list(_re.finditer(r"README\.md:(\d+)(?:-(\d+))?", doc))
+    assert found, "E1-E5-PROOFS.md carries no README.md line cite — pin is moot"
+    for index, match in enumerate(found):
+        start = int(match.group(1))
+        end = int(match.group(2) or match.group(1))
+        # ⛔ THE WINDOW STOPS AT THE NEXT CITE. A fixed-length lookahead reached
+        # past the FOLLOWING cite in the document and attributed ITS quote to this
+        # cite, which would have made the pin pass on a cite pointing at nothing.
+        nxt = found[index + 1].start() if index + 1 < len(found) else len(doc)
+        tail = doc[match.end():min(nxt, match.end() + 600)]
+        cited = plain("\n".join(readme_lines[start - 1:end]))
+        assert cited, (
+            f"E1-E5-PROOFS.md cites README.md:{start}-{end}, which is past the end "
+            f"of the {len(readme_lines)}-line README")
+        quoted = _re.search(r'"([^"]{25,})"', tail)
+        checked += 1
+        if quoted is not None:
+            wanted = plain(quoted.group(1))
+            assert wanted in cited, (
+                f"E1-E5-PROOFS.md cites README.md:{start}-{end} for "
+                f"{quoted.group(1)[:70]!r}, but those lines carry {cited[:120]!r} — "
+                f"re-derive the range from the file, or drop the line numbers and "
+                f"keep the quote (the bundle's own convention), rather than "
+                f"pointing at text that is not there")
+            continue
+        # A cite that quotes no sentence is still a POINTER: the line carrying the
+        # cite names a criterion, so that criterion must be inside the range. It is
+        # a weaker anchor than a quote, and it is what a table cell can carry.
+        citing_line = doc.splitlines()[
+            doc.count("\n", 0, match.start())]
+        tokens = set(case_token.findall(citing_line))
+        assert tokens, (
+            f"the E1-E5-PROOFS.md line citing README.md:{start}-{end} names no "
+            f"criterion, so this cite cannot be anchored at all: {citing_line[:120]!r}")
+        assert tokens & set(case_token.findall(cited)), (
+            f"E1-E5-PROOFS.md cites README.md:{start}-{end} from a line about "
+            f"{sorted(tokens)}, but those lines carry none of them: {cited[:140]!r} — "
+            f"re-derive the range, or quote the sentence it points at")
+    assert checked == len(found), (
+        f"only {checked} of {len(found)} README.md line cites were resolved — a "
+        f"cite that skips its own check is the rot this pin exists to stop")
 
 
 def test_the_index_sweep_keeps_to_the_row_that_names_this_bundle():
@@ -3834,6 +4289,103 @@ def test_the_bare_entry_point_call_cite_resolves_to_the_call_it_names():
             "can. Re-derive the number from the tree; do not delete the cite.")
 
 
+# ── A cite into the RUN probe by NUMBER is unpinnable, so it must not be written ──
+#
+# `_BUNDLE_CITE` resolves `sdk|edges|extractor_v2` and `_BUNDLE_TOOL_SOURCES`
+# names only the GATE, so a `probes/capstone_run.py:<line>` cite is read by NO
+# sweep in this file: not resolved, and — unlike a bare `:NNNN` continuation —
+# not even reported `unmatched`, because it carries a file name the sweep never
+# looks for. The bundle's own convention for a number in that position is
+# `README.md:188-200` (*"written here WITHOUT the `file:line` form on purpose …
+# do NOT follow them as pointers at this head"*): the SYMBOL is authoritative,
+# the line is a convenience nothing re-derives.
+#
+# Measured provenance, stated exactly (the previous revision of this comment
+# misstated both halves, and this file's own docstring below contradicted it):
+# the README's sentence carried `capstone_run.py:813`, and `74d7d1f5e` re-pointed
+# it at the SYMBOL — `git log -S'capstone_run.py:19' -- docs/evidence/
+# 7949-capstone/README.md` returns NO commit, so the README never carried `:19`.
+# The `capstone_run.py:19` / `README.md:615` pair belongs to the SAME class one
+# file over: `4fbd69844` (main) recorded it in
+# `tests/test_7949_capstone_verdict_check.py`'s entry-point paragraph, and this
+# branch's `ef8d1ac08` dropped those two numbers from that paragraph — because it
+# outlived two heads and a quoted number IS the drift the paragraph describes.
+_PROBE_NUMERIC_CITE = re.compile(r"capstone_run\.py:(\d+)")
+
+#: The line this leg holds the README to, BY SYMBOL (never by a typed number).
+_PROBE_ENTRY_POINT_FALLBACK = 'required = run.get("steps_required") or list(STEPS)'
+
+
+def test_no_document_cites_the_run_probe_by_a_number_nothing_can_resolve():
+    """A `capstone_run.py:<line>` cite is invisible to every sweep — refuse it.
+
+    `_BUNDLE_CITE` matches `sdk|edges|extractor_v2` only, and
+    `_BUNDLE_TOOL_SOURCES` names just `capstone_verdict_check`, so a number
+    written into the RUN probe was checked by nothing: `grep -c '813'` across
+    both pin files returns 0/0. The README carried one
+    (`probes/capstone_run.py:813`, the `steps_required` fallback). It was
+    accurate the day it was written and had no reader, in the file that already
+    carries the precedent above.
+
+    So this leg does two things and needs both: it REFUSES the numeric form in
+    every bundle document, and it requires the sentence to keep its content by
+    naming the SYMBOL — a bare ban would pass vacuously on a bundle that deleted
+    the claim instead of re-pointing it.
+
+    Non-vacuity: at the pre-fix head the README's cite is present, so the ban
+    reds there; and the symbol leg reds on a README that drops the fallback
+    sentence. If a future lane genuinely wants the number, the route the review
+    named is to add a `_BUNDLE_TOOL_SOURCES` row plus a phrase anchor, and to
+    retarget this ban — never to type the number back in.
+    """
+    probe_lines = (_REPO / "docs/evidence/7949-capstone/probes/capstone_run.py"
+                   ).read_text(encoding="utf-8").splitlines()
+    fallbacks = [i + 1 for i, ln in enumerate(probe_lines)
+                 if _PROBE_ENTRY_POINT_FALLBACK in ln]
+    assert len(fallbacks) == 1, (
+        f"{len(fallbacks)} lines of the run probe carry the `steps_required` "
+        f"fallback ({fallbacks}) — this leg resolves the README's sentence "
+        "against ONE symbol; re-derive which line the paragraph means before "
+        "trusting a number here")
+    fallback_line = fallbacks[0]
+
+    # 1. The class ban: no bundle document may cite the run probe by number.
+    offenders = []
+    for name, path in _BUNDLE_DOCS:
+        for match in _PROBE_NUMERIC_CITE.finditer(
+                path.read_text(encoding="utf-8")):
+            offenders.append(f"{name} -> capstone_run.py:{match.group(1)}")
+    assert not offenders, (
+        "a `capstone_run.py:<line>` cite is read by NO sweep in this file — "
+        "`_BUNDLE_CITE` resolves `sdk|edges|extractor_v2` only and "
+        "`_BUNDLE_TOOL_SOURCES` names only the gate, so the number rots "
+        f"silently: {offenders}. Cite the SYMBOL instead (the bundle's own "
+        "convention, `README.md:188-200`), or add a resolver row for the probe "
+        "before writing a number into it")
+
+    # 2. The claim survives as a symbol — the ban above must not be satisfied
+    #    by deleting the sentence (that would trade a rotting cite for a
+    #    dropped measurement, and `README.md:809-815`'s paragraph is where the
+    #    README tells a consumer the frozen log predates the conditional split —
+    #    `E1-E5-PROOFS.md:219` says it too, so "only place" was never true).
+    readme_lines = (_REPO / "docs/evidence/7949-capstone/README.md").read_text(
+        encoding="utf-8").splitlines()
+    carrying = [i + 1 for i, ln in enumerate(readme_lines)
+                if _PROBE_ENTRY_POINT_FALLBACK in ln]
+    assert len(carrying) == 1, (
+        "the README must name the run probe's `steps_required` fallback on "
+        f"exactly one line (found {carrying}); that sentence is what tells a "
+        f"consumer the shipped log predates the conditional split, and the "
+        f"symbol it cites is `capstone_run.py:{fallback_line}` at this head")
+
+    # 3. …and the sentence must still say WHICH probe it is about, because the
+    #    symbol alone (`required = … or list(STEPS)`) appears in both probes.
+    assert "capstone_run.py" in "\n".join(
+        readme_lines[max(0, carrying[0] - 3):carrying[0] + 2]), (
+        "the fallback sentence must still name `capstone_run.py` — both probes "
+        "carry that fallback, and this paragraph is about the RUN probe")
+
+
 # ── E2's blocker names the LIVE half, not the closed render issue ─────────
 #
 # PR #10382 closed #9775's render half: every path that builds a prompt now
@@ -3933,6 +4485,67 @@ def test_the_bundle_names_the_live_e2_blocker_and_no_closed_render_absence():
             "an index row still routes a reader to `#9775` as E2's blocker — "
             "#9775's render half is CLOSED (PR #10382), so the live blocker is "
             f"`#10360`: {row[:400]}")
+
+
+# ── the bundle's dependency table must agree with the COMMITTED blocker record ──────
+#
+# V12 makes this a GATE for the verdict table's own `blocked_by` pointers. The bundle's
+# "Dependency state" table is the SAME claim one file over — a row reading `**OPEN**`
+# about an issue the committed `blocker-states.json` records CLOSED is stale evidence by
+# construction, which is the exact defect #10537 exists to stop.
+#
+# Measured at `7caace29c` (this repo, before the fix in the commit that added this pin):
+# the table still said `#8503` was `**OPEN** — E4's blocker` and `#9738` was
+# `**OPEN — owner-gated**`, while the record the SAME PR added records both CLOSED
+# (`2026-10-24T20:50:13Z` / `2026-11-02T08:53:06Z`). No pin covered it: the E2 test above
+# reads E2's row by name, so it cannot see a stale blocker on E4 or E5. The class is
+# mechanical, so the pin is too — it reads EVERY row of the table against the record
+# rather than the spellings this one commit happened to leave behind.
+
+#: `| `#NNNN` <title> | <state cell> |` — the dependency table's own shape.
+_BUNDLE_DEP_ROW = re.compile(r"^\|\s*`#(?P<issue>\d+)`[^|]*\|\s*(?P<state>[^|]*)\|")
+
+
+def test_the_bundle_dependency_table_never_reports_a_recorded_closed_issue_as_open():
+    """A dependency row may not call an issue OPEN when the record says CLOSED.
+
+    Non-vacuity: the test asserts it actually PARSED rows, that at least one of them
+    claims OPEN (so the comparison has something to bite on), and that the record it
+    reads carries the schema V12 reads — a pin that finds no rows, or compares against
+    an unreadable record, must fail rather than pass silently.
+
+    Measured red on the pre-fix text: rows `#8503` and `#9738` both claimed OPEN
+    against `CLOSED` states in the same tree.
+    """
+    record_path = _REPO / "docs/evidence/7949-capstone/blocker-states.json"
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    assert record.get("schema") == "capstone-blocker-states-v1", (
+        f"{record_path} carries schema {record.get('schema')!r}; this pin reads the "
+        "same record V12 does and cannot compare against another shape")
+    blockers = record.get("blockers") or {}
+    assert blockers, f"{record_path} lists no blockers — nothing to compare against"
+
+    readme = (_REPO / "docs/evidence/7949-capstone/README.md").read_text(encoding="utf-8")
+    rows = [m for m in (_BUNDLE_DEP_ROW.match(line) for line in readme.splitlines()) if m]
+    assert len(rows) >= 5, (
+        f"parsed only {len(rows)} dependency row(s) from the bundle README — this pin is "
+        "vacuous on a README whose table was renamed or removed")
+
+    claims_open = [m for m in rows if m.group("state").strip().lstrip("*").upper().startswith("OPEN")]
+    assert claims_open, (
+        "no dependency row claims OPEN — this pin cannot see the claim it exists to "
+        "check, so it would pass on a table that stopped carrying states at all")
+
+    stale = [(m.group("issue"), m.group("state").strip())
+             for m in claims_open
+             if blockers.get(f"#{m.group('issue')}", {}).get("state") == "CLOSED"]
+    assert not stale, (
+        "the bundle's dependency table calls an issue OPEN that the committed "
+        f"blocker record says is CLOSED: {stale} — a row routing a lane to finished "
+        "work is stale evidence by construction (this is what V12 refuses inside the "
+        "verdict table, one file over). Re-attribute the row to the issue that owns "
+        "the residual, as E4 `#8503`->`#9596` and E5 `#9738`->`#5087` did, or refresh "
+        f"{record_path.name} from the tracker if the tracker truly re-opened one")
 
 
 # ── the header's import claim, MEASURED (#10525 review P3) ───────────────────────────────────
