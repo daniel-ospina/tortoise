@@ -8995,11 +8995,22 @@ def _check_org_limit(org: dict, resource: str, *,
     control-plane read and the count it feeds is a graph read, so
     ``asyncio.to_thread`` (the loop's DEFAULT executor — the lane
     ``_commit_sync``/``_seed_demo_sync`` already use) satisfies only half the
-    rule. EVERY call site therefore rides ``_check_org_limit_off_loop``, which
-    hoists the fill onto ``_cp_offload``/``_graph_offload`` by substrate and
-    then submits the count to the graph pool: the points doors
-    (``check_org_limit.points``) and the capture door
-    (``check_org_limit.sessions``, #9567 round 10 → main-repair 2026-11-04).
+    rule. The INVENTORY, stated exactly (a claim of "every call site" was
+    wrong here once already — main-repair 2026-11-04, review cycle 1):
+
+    * the async REQUEST doors ride ``_check_org_limit_off_loop``, which hoists
+      the fill onto ``_cp_offload``/``_graph_offload`` by substrate and then
+      submits the count to the graph pool — the points/documents doors as
+      ``check_org_limit.points``, the capture door as
+      ``check_org_limit.sessions`` (#9567 round 10 → main-repair 2026-11-04);
+    * ``POST /v1/sessions/commit`` hoists the carry in the HANDLER, before its
+      per-graph lock is taken, and hands the stamped dict down (#9567 round 13);
+    * ``/v1/demo`` is the ONE declared exception: it runs this call inside its
+      own per-org seed lock, on a worker thread, deliberately (see BOUNDARY 4 in
+      ``tortoise/allowance_gate.py``) — so its fill rides the loop's default
+      executor rather than a substrate pool. Naming it here is deliberate: the
+      exception is real, and a reader who assumes "every door" must not.
+
     Both of the fill's fail-closed faults (a resolver fault, and the gate's
     loud import-time drift) are mapped to this function's documented
     ``HTTPException(500, "Quota check failed: …")`` — never an unmapped 500.
@@ -17511,6 +17522,20 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # before counting; the moment a finite session cap ships, an omitted sdk
     # re-arms #8906 on this door. Count on the handle the capture writes through.
     # The seam forwards `sdk` verbatim to the count.
+    #
+    # ⚠️ DECLARED RESIDUAL (main-repair review cycle 1, P2): in Supabase mode the
+    # carry's bound miss now raises `_control_plane_unavailable()`, whose
+    # `message` is the SIGN-IN copy ("Sign-in is temporarily unavailable …", the
+    # copy-string contract with website/apps/dashboard/public/signup.html) — and
+    # this route records that message as the capture's last error
+    # (`_record_capture_last_error`). So a QUOTA stall on a capture renders as a
+    # sign-in failure. That copy is a repo-wide contract owned by the mint/claim
+    # path, so this repair does not unilaterally re-word it; the honest fix is a
+    # capture-shaped `unavailable=` factory threaded through
+    # `_carry_allowances_off_loop` (which already accepts one at `_cp_offload`),
+    # and it is named here rather than left for someone to discover from a
+    # dashboard line. The `error_code` (`control_plane_unavailable`) is correct
+    # either way.
     await _check_org_limit_off_loop(org, "sessions",
                                     op="check_org_limit.sessions", sdk=sdk)
     # Optional frontmatter-metadata validation (#1362) — warn-only, gated by
