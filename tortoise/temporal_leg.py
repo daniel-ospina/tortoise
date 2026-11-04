@@ -309,8 +309,11 @@ limit`` (where its picks START), which reaches ``limit − 1`` slots INTO the
 window. That is deliberate and measured for phase 1 (the anchor path is
 measured AS-IS, #2976); the window branch does not rely on it — its own
 :data:`held_buckets` exclusion is what keeps a pick off an id the reader
-already sees. ``head=0`` is the unguarded mode — used by the unit tests to
-exercise the phases in isolation, never by the fused caller for a window ≥ 2.
+already sees. ``head=0`` is the unguarded mode: the unit tests use it to
+exercise the phases in isolation, and ``placement="head"`` reaches it through
+THIS caller (``head_excl = 0 if placement == "head" else ceiling``), which is
+the counterfactual the retention baseline measures at the shipped window. The
+default (``placement="tail"``) never passes ``head=0`` at a window >= 2.
 
 **Budget clamping.** :func:`temporal_leg_fusion_order` clamps the budget
 via :func:`effective_promotion_budget` to ``max(1, min(limit,

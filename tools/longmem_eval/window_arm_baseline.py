@@ -87,12 +87,21 @@ was false at windows 5 and 6). On the chunk-bearing pools, at ``limit=2``:
 * ``window = 6`` — the cap puts the SECOND pick inside the top 5
   (``[4, 5]`` -> ``[3, 4]``, graded 1 -> 2); the chunk-free row stays
   ``[4, 5]`` / graded 1.
-* ``window >= 7`` — the cap is the ONLY reason any pick is graded: pre-cap
-  ``[5, 6]`` grades none, post-cap ``[3, 4]`` grades both.
+* ``window >= 7`` — the pre-cap ranks are ``5, 6`` or deeper, where the metric
+  sees nothing, so the cap is the only reason a pick CAN be graded. How many it
+  actually puts inside the top 5 is not uniform across the sweep, and the
+  receipt's rows are the statement: at ``window = 7`` and at the shipped ``12``
+  BOTH picks land at ``[3, 4]``; at ``13`` one lands on
+  ``chunk_bearing_issue_probe`` (``[11, 12]`` -> ``[4, 5]``) and both on the other
+  two pools; at ``14`` it is no longer enough on the probe at all
+  (``[12]`` -> ``[5]``, graded 0) while the deep pool still grades both. That is
+  why the sweep publishes 13 and 14 instead of stopping at the shipped window.
 
 So the boundary the two shapes share is 3-6 (both graded, the ceiling doing the
-work for the first pick) and the boundary they do NOT share is 7+ (chunk-free:
-nothing graded; chunk-bearing: still graded) — where the cap is decisive.
+work for the first pick) and the one they do NOT share is 7+: a chunk-free pool
+grades nothing there at any swept depth, while a chunk-bearing pool grades at
+least one pick at every swept depth except the probe's ``window = 14`` — where
+the cap is no longer sufficient. Read the row, not the rule.
 
 WHAT IT IS NOT
 --------------

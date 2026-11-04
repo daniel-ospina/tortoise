@@ -470,13 +470,27 @@ def test_the_caps_reach_is_measured_at_each_window_not_inferred():
         assert rows[6]["graded_by_recall_all_at_5"] == 2, name
         assert free[6]["graded_by_recall_all_at_5"] == 1, (
             "the contrast row: without the cap the second pick is NOT graded")
-        # w>=7: pre-cap grades nothing, post-cap grades both
-        for window in (7, SHIPPED_WINDOW, 13):
-            assert rows[window]["pick_ranks_before_dedup"] == [
-                window - 2, window - 1], (name, window)
-            assert rows[window]["graded_by_recall_all_at_5"] >= 1, (
-                f"{name} w={window}: the cap is the only reason this is graded")
+        # w>=7: the pre-cap ranks are past the cut, so the cap is the only reason
+        # a pick can be graded — but HOW MANY land inside the top 5 is not
+        # uniform, and the rows say so: both at 7 and at 12, one-or-both at 13,
+        # and on the probe none at all at 14.
+        for window in (7, SHIPPED_WINDOW, 13, 14):
+            assert all(rank >= 5
+                       for rank in rows[window]["pick_ranks_before_dedup"]), (
+                f"{name} w={window}: a pick is graded PRE-cap here, so the cap "
+                "is not what grades it")
             assert free[window].get("graded_by_recall_all_at_5", 0) == 0, window
+        for window in (7, SHIPPED_WINDOW):
+            assert rows[window]["pick_ranks"] == [3, 4], name
+            assert rows[window]["graded_by_recall_all_at_5"] == 2, name
+        assert rows[13]["graded_by_recall_all_at_5"] >= 1, name
+        # the deep-window end, where the cap stops being sufficient on the probe
+        assert {n: r[14]["graded_by_recall_all_at_5"]
+                for n, r in bearing.items()} == {
+            "chunk_bearing_issue_probe": 0,
+            "chunk_bearing_whole_window_cluster": 1,
+            "chunk_bearing_deep_window": 2,
+        }
 
 
 def test_displacement_fields_are_read_only_where_they_are_expressible():
