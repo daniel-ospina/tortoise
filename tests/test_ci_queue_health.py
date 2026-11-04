@@ -1222,6 +1222,109 @@ def test_an_ok_with_nothing_queued_cannot_certify_the_queue_clear():
             .to_dict()["pr_wait_measured"] is True)
 
 
+def test_pending_pr_runs_are_part_of_the_WAIT_POPULATION():
+    """⭐ P2 (review, rail-C): `congests_pr is False` off a feed that cannot see `pending`.
+
+    `pr_wait_measured` was derived from the `status=queued` feed alone, so a queue
+    holding ONE readable queued PR run at 60 s beside TWELVE `pending` PR runs hours
+    old read as `OK pr_wait_measured=True congests_pr=False` — which AUTHORISES the
+    destructive cancel-then-rerun in `tools/ci_check_repair.py` while the wait that
+    makes it harmful (the oldest queued PR run, in `pending`, never read) is invisible
+    to the filtered feed. The PR body's own measurement *is* that shape: 57 queued
+    returned, 12 more in `pending`.
+
+    The fix is the one the module's contract asks for — derive the witness from the
+    population the act can hit — so `pending` runs join `queued` runs in the wait
+    population: they feed the age clauses and `pr_wait_measured` is derived over both.
+    A blocked `pending` run is then a MEASURED congestion (refuse, and the reading
+    clears itself), not an abstention (which `main()` escalates as exit 1 every
+    window): the two poles stay distinct.
+
+    Discriminating: with `wait_runs` narrowed back to `pr_queued_runs`, the first case
+    answers `OK / False` — the authorising value — and the second answers `OK`.
+    """
+    young_queued = flood_queued(4) + starving_pr_runs(1, age_seconds=60)
+    serving = [run(1, "Python CI", event="pull_request", age_seconds=60)]
+    old_pending = [run(7000 + i, "Python CI", event="pull_request",
+                       age_seconds=4 * 3600) for i in range(12)]
+
+    # The pre-fix answer, reproduced deliberately: without the pending leg this very
+    # reading IS the authorising one. It is what the gate used to consume.
+    without_leg = classify(young_queued, in_progress=serving)
+    assert without_leg.verdict == Q.OK
+    assert without_leg.pr_wait_measured is True
+    assert without_leg.congests_pr is False, (
+        "the old shape: 'the only run I could see is young' read as a measured clear")
+
+    with_leg = classify(young_queued, in_progress=serving, pending=old_pending)
+    assert with_leg.pr_pending == 12, "the leg is COUNTED, not silently dropped"
+    assert with_leg.verdict == Q.PR_BACKLOGGED, (
+        "four hours of pending PR wait is a backlog, and it is the wait the budget "
+        "applies to")
+    assert with_leg.oldest_pr_queued_age_seconds >= 4 * 3600 - 60, (
+        "the wait is the max over BOTH legs — the oldest run is the pending one")
+    assert with_leg.pr_wait_measured is True, "the wait WAS read, both legs of it"
+    assert with_leg.congests_pr is True, (
+        "a destructive cancel must not be authorised by a clearance that never read "
+        "the population it acts on")
+    assert with_leg.to_dict()["pr_pending"] == 12
+
+
+def test_a_CUT_pending_leg_cannot_certify_the_queue_clear():
+    """The other pole: an unread leg is an ABSTENTION, never a clearance.
+
+    A capped `pending` read drops its OLDEST runs — the feed is newest-first — i.e.
+    exactly the run the wait budget applies to, so it cannot certify anything. `OK`
+    degrades to `PR-UNWITNESSED` (same class as an unparseable timestamp) and the gate
+    answers `None`. Discriminating: dropping `pending_truncated` from
+    `pr_wait_measured` restores `OK / False`.
+    """
+    health = classify(flood_queued(4) + starving_pr_runs(1, age_seconds=60),
+                      in_progress=[run(1, "Python CI", event="pull_request",
+                                       age_seconds=60)],
+                      pending_truncated=True)
+    assert health.verdict == Q.PR_UNWITNESSED, (
+        "a read that did not finish is not a healthy queue")
+    assert health.pr_wait_measured is False
+    assert health.congests_pr is None, "the gate must REFUSE, not authorise"
+    assert health.to_dict()["pending_truncated"] is True
+    assert any("pending" in r and "page cap" in r for r in health.reasons), (
+        "and the reading says WHICH leg was cut")
+
+
+def test_read_health_READS_the_pending_leg(monkeypatch):
+    """The seam: `read_health` must actually fetch the leg it now relies on.
+
+    Pinning the population in `classify_queue` is worthless if the shipped read never
+    asks for it — the pure layer would be correct and the production reading would
+    still be blind to `pending`. Discriminating: with the third `read_runs` call
+    removed, `pending` never appears in the statuses read and `pr_pending` is 0.
+    """
+    seen: list[str] = []
+
+    def fake_gh_json(args):
+        status = args[-1].split("status=")[1].split("&")[0]
+        seen.append(status)
+        if status == "queued":
+            rows = [{"id": 9000, "name": "Python CI", "event": "pull_request",
+                     "created_at": (NOW - timedelta(seconds=60)).strftime(
+                         "%Y-%m-%dT%H:%M:%SZ")}]
+        elif status == "pending":
+            rows = [{"id": 9001, "name": "Python CI", "event": "pull_request",
+                     "created_at": (NOW - timedelta(seconds=4 * 3600)).strftime(
+                         "%Y-%m-%dT%H:%M:%SZ")}]
+        else:
+            rows = []
+        return {"total_count": len(rows), "workflow_runs": rows}
+
+    monkeypatch.setattr(Q, "gh_json", fake_gh_json)
+    health = Q.read_health("o/r", NOW)
+    assert "pending" in seen, "the leg must be READ, not inferred"
+    assert health.pr_pending == 1
+    assert health.congests_pr is True, (
+        "end to end: a four-hour pending PR wait reaches the gate as congestion")
+
+
 def test_a_pr_backlog_inside_the_wait_budget_is_ok():
     """The false-alarm bound: a busy queue that starts PR work promptly is healthy."""
     health = classify(starving_pr_runs(20, age_seconds=1800),

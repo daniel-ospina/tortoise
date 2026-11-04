@@ -916,8 +916,13 @@ def classify(pr: dict, checks: list[dict], all_runs: list[Run], required: list[s
     ⛔ THE DEFAULT IS FOR CALLERS THAT DID NOT ASK THE QUESTION, NOT A LICENCE TO ACT.
     `None` falls back to `queue_starved` for unit callers; the real entry point never
     leaves it unanswered — `main()` maps an UNMEASURED queue (`None`, `UNKNOWN`,
-    `PR-UNWITNESSED`, a truncated feed, `--no-queue-health`) to `True` through
+    `PR-UNWITNESSED`, a truncated `OK`, `--no-queue-health`) to `True` through
     `queue_congestion_gate`, because on a destructive act silence is not permission.
+    ⛔ "A TRUNCATED FEED" IS NOT AN UNMEASURED CONGESTION: `congests_pr` answers
+    `True` for a cut `FLOOD`/`PR-STARVED`/`PR-BACKLOGGED` (its `delays_pr` return
+    fires first), so only a truncated **`OK`** abstains (#10641 review P2 — the
+    five passages that said "a truncated feed" restated, in this file, the
+    two-valued claim about a three-valued reading that this PR exists to remove).
 
     `queue_congestion_measured` is the WITNESS for that collapse: `main()` passes
     `congestion is not None` here, so a `repair_refused` entry can say whether the
@@ -983,13 +988,52 @@ def classify(pr: dict, checks: list[dict], all_runs: list[Run], required: list[s
                 # sibling, `all(...)` is false and the cancel was ISSUED while the queue
                 # reading was congested — including the state where congestion was never
                 # measured at all (`--no-queue-health`, a failed read, `UNKNOWN`,
-                # `PR-UNWITNESSED`, a truncated feed), which is precisely the "silence is
-                # not permission" case `queue_congestion_gate` exists to close. Two runs
+                # `PR-UNWITNESSED`, a truncated `OK`), which is precisely the "silence
+                # is not permission" case `queue_congestion_gate` exists to close. Two runs
                 # of one workflow at one head are ordinary (`pull_request` plus
                 # `workflow_dispatch` on the same sha), so the hole was reachable.
                 # The HARM the refusal exists for — discarding the queue position a
                 # queued run had reached, and adding load to the wait it is stuck in —
                 # does not depend on what its SIBLINGS did, so neither may the refusal.
+                #
+                # ⛔ THE LOOP BOUND IS STRUCTURAL, NOT AN ABSTENTION (see
+                # `ZERO_JOB_MAX_REPAIRABLE_ATTEMPT`). Cancel-then-rerun turns attempt 1
+                # into attempt 2; a queued zero-job run at a LATER attempt is that
+                # fresh attempt waiting for a slot, so cancelling it would destroy the
+                # very attempt the previous window created and — at `max_attempts` —
+                # report a queue wait as EXHAUSTED ("a human is needed"). MEASURED
+                # 2026-11-03: queued re-run attempts DO carry a stamped
+                # `run_started_at`, so they are ageable and no abstention bounds this.
+                # It is NAMED above and left to the queue.
+                #
+                # ⛔ THE THREE CHECKS RUN IN THIS ORDER: STRUCTURAL BOUND → SPENT
+                # BUDGET → THE CONGESTION GATE (#10641 review P1). The bound used to
+                # sit BELOW the gate, so a queued attempt-2 run — the fresh attempt a
+                # previous window's repair created, which this tool will never cancel
+                # BY DESIGN — reached the `crowded` branch and was recorded as
+                # `repair_refused`. Two harms followed, both reachable: (a) under an
+                # UNMEASURED queue `main()` escalates on any refusal
+                # (`congestion is None and any(p.repair_refused ...)`), so that run made
+                # EVERY window exit 1 forever while nothing could ever repair it —
+                # exactly the alarm fatigue `docs/ci/ci-check-repair-red-surface.md`
+                # measures; and (b) a context whose budget was spent was short-circuited
+                # the same way, so `report()`'s `if p.exhausted and apply` escalation
+                # never fired for it. With the order above, the docstring's promise — a
+                # later attempt "is NAMED (`NO-VERDICT-WILL-ARRIVE`), never cancelled and
+                # never escalated" — is literally what the code does.
+                if r.run_attempt > ZERO_JOB_MAX_REPAIRABLE_ATTEMPT:
+                    continue
+                # A SPENT BUDGET STILL ESCALATES, INCLUDING UNDER A CONGESTED QUEUE
+                # (#10641 review P1, second harm). It is checked before the gate for
+                # the same reason the structural bound is: `report()` escalates on
+                # `p.exhausted` regardless of what else is true of the PR, and routing
+                # a spent budget through `repair_refused` instead made that escalation
+                # conditional on the queue reading — a measured congestion would then
+                # exit 0 with the budget spent and nobody told.
+                if r.run_attempt >= max_attempts:
+                    if ctx not in plan.exhausted:
+                        plan.exhausted.append(ctx)
+                    continue
                 if crowded:
                     # ⛔ THE STRUCTURAL BOUND IS EVALUATED FIRST, even though it is written
                     # below: a run past `ZERO_JOB_MAX_REPAIRABLE_ATTEMPT` is a fresh
@@ -1037,21 +1081,7 @@ def classify(pr: dict, checks: list[dict], all_runs: list[Run], required: list[s
                              "reason": reason,
                              "measured": queue_congestion_measured})
                     continue
-                # ⛔ THE LOOP BOUND IS STRUCTURAL, NOT AN ABSTENTION (see
-                # `ZERO_JOB_MAX_REPAIRABLE_ATTEMPT`). Cancel-then-rerun turns attempt 1
-                # into attempt 2; a queued zero-job run at a LATER attempt is that
-                # fresh attempt waiting for a slot, so cancelling it would destroy the
-                # very attempt the previous window created and — at `max_attempts` —
-                # report a queue wait as EXHAUSTED ("a human is needed"). MEASURED
-                # 2026-11-03: queued re-run attempts DO carry a stamped
-                # `run_started_at`, so they are ageable and no abstention bounds this.
-                # It is NAMED above and left to the queue.
-                if r.run_attempt > ZERO_JOB_MAX_REPAIRABLE_ATTEMPT:
-                    continue
-                if r.run_attempt >= max_attempts:
-                    if ctx not in plan.exhausted:
-                        plan.exhausted.append(ctx)
-                elif r not in plan.rerun:
+                if r not in plan.rerun:
                     plan.rerun.append(r)
             # STARVED (#9115): the runs EXIST and NONE of them is executing, so no
             # slot was granted. Requires the repo-level reading to have WITNESSED
@@ -2022,7 +2052,7 @@ def main(argv: list[str] | None = None) -> int:
     # suppressed by it while the report keeps naming `starved` from `starves_pr`.
     # ⛔ AND SILENCE IS NOT PERMISSION. This used to be
     # `bool(getattr(queue, "delays_pr", queue_starved))`, which reads an UNMEASURED
-    # queue (`None`, or `PR-UNWITNESSED`/`UNKNOWN`, or a truncated feed) as "clear" and
+    # queue (`None`, or `PR-UNWITNESSED`/`UNKNOWN`, or a truncated `OK`) as "clear" and
     # switches the cancel ON in exactly the state that makes a cancel most harmful:
     # a queue read is refused under the load a cancel would add to, and `delays_pr`
     # is false-by-design for the unmeasured verdicts. `queue_congestion_reading` /
@@ -2049,7 +2079,7 @@ def main(argv: list[str] | None = None) -> int:
         # deliberately NOT that — on a MEASURED congestion the suppression is the
         # correct, self-clearing outcome and must stay exit 0. But when the queue
         # reading was NOT MEASURED (`congestion is None`: `--no-queue-health`, a
-        # failed read, `UNKNOWN`, `PR-UNWITNESSED`, a truncated feed, or the
+        # failed read, `UNKNOWN`, `PR-UNWITNESSED`, a truncated `OK`, or the
         # `OK(pr_queued=0)` that the `status=queued` filter produces for a run sitting
         # in `pending`), the refusal does not depend on anything that will change by
         # itself: no later window measures that queue either, and the pass returns
@@ -2102,9 +2132,10 @@ def main(argv: list[str] | None = None) -> int:
         # the polarity is the one a reader expects: `true` here means a congestion
         # READING WAS TAKEN (clear or congested — which of the two is `queue_congested`
         # above), `false` means none was: `--no-queue-health`, a failed read, `UNKNOWN`,
-        # `PR-UNWITNESSED`, or a truncated feed. On `false` the act was REFUSED rather
-        # than authorised by silence, so a suppressed repair can be told from an
-        # abstention.
+        # `PR-UNWITNESSED`, or a truncated `OK` (NOT a truncated congestion verdict —
+        # a cut `FLOOD`/`PR-STARVED`/`PR-BACKLOGGED` is a measured `True`, #10641
+        # review P2). On `false` the act was REFUSED rather than authorised by silence,
+        # so a suppressed repair can be told from an abstention.
         "queue_congestion_measured": congestion is not None,
         # Starved contexts are NOT "needing repair" — no per-PR repair can create a
         # runner slot — so they are counted separately rather than inflating a
@@ -2123,18 +2154,29 @@ def main(argv: list[str] | None = None) -> int:
         # read next to the work it excludes.
         #
         # ⛔ `zero_job_named` IS A COUNT OF WHAT WAS NAMED, NOT OF WHAT IS STRANDED
-        # (#10641 review P2). The `no_verdict` append happens BEFORE the congestion
-        # gate, so a run counted here may then be CANCELLED AND RE-RUN in this same
-        # pass — the key used to be called `no_verdict` and described as
+        # (#10641 review P2), **AND IT COUNTS RUNS, LIKE `repair_refused` BESIDE IT**
+        # (#10641 review P2, second round). The `no_verdict` append happens BEFORE the
+        # congestion gate, so a run counted here may then be CANCELLED AND RE-RUN in
+        # this same pass — the key used to be called `no_verdict` and described as
         # "named-but-unrepairable", which read `zero_job_named=3, repair_refused=0` as
-        # "three stranded" when it means "three named, none refused". The three
-        # buckets are: repaired (this pass cancelled and re-ran it — visible in
-        # `prs[].rerun`), refused (`repair_refused`, below), and skipped by the
+        # "three stranded" when it means "three named, none refused".
+        # ⛔ THE UNIT IS RUNS ON BOTH KEYS, because they are printed as a PAIR and a
+        # reader compares them: `no_verdict` and `repair_refused` are both lists that
+        # hold one entry PER RUN, so counting plans on one side and runs on the other
+        # printed `zero_job_named=1, repair_refused=2` for one PR with two stalled
+        # runs — "more repairs refused than runs named", which is impossible under a
+        # shared unit and made the paragraph above describe a comparison the numbers
+        # could not support. The pair is pinned by
+        # `test_zero_job_named_and_repair_refused_share_a_unit`, whose fixture is a
+        # ONE-PR/TWO-RUN plan precisely because a one-run fixture answers `1` under
+        # either definition and so could not have caught this.
+        # The three buckets are: repaired (this pass cancelled and re-ran it — visible
+        # in `prs[].rerun`), refused (`repair_refused`, below), and skipped by the
         # structural loop bound at `ZERO_JOB_MAX_REPAIRABLE_ATTEMPT` (deliberately not
         # counted anywhere: it is the attempt a previous window created, and
         # cancelling it would destroy the very attempt that window made). Per-run
         # detail is in `prs[].no_verdict`.
-        "zero_job_named": sum(1 for p in plans if p.no_verdict),
+        "zero_job_named": sum(len(p.no_verdict) for p in plans),
         "repair_refused": sum(len(p.repair_refused) for p in plans),
         # Re-measures the "queued and never starts" residual every window (see
         # `PrPlan.oldest_pending_age_seconds`).

@@ -408,6 +408,20 @@ class QueueHealth:
     pr_running: int
     pr_queued: int
     oldest_pr_queued_age_seconds: float | None
+    #: PR-event runs in the `pending`/`requested` legs — the population the
+    #: `status=queued` feed CANNOT contain, read separately (#10641 review P2).
+    #: They are part of the wait population: `oldest_pr_queued_age_seconds` is the max
+    #: over both legs, and a PR run sitting here is a wait this reading could otherwise
+    #: have reported as absent. `waiting` is NOT read into it — that status is
+    #: approval-parked (`ci_check_repair._APPROVAL_PARKED_STATUSES`), so it is neither a
+    #: queue wait nor a cancel target.
+    pr_pending: int = 0
+    #: Was the `pending` leg read to completion? A capped read drops its OLDEST runs
+    #: (the feed is newest-first), i.e. exactly the ones the wait budget applies to, so
+    #: `pr_wait_measured` cannot be `True` off a cut leg and `OK` degrades to
+    #: `PR-UNWITNESSED` — a read that did not finish is never presented as a healthy
+    #: queue.
+    pending_truncated: bool = False
     #: True when the feed read hit its page cap with more runs remaining. The
     #: counts are then a LOWER BOUND and are labelled as such, never silently
     #: presented as a total.
@@ -420,20 +434,23 @@ class QueueHealth:
     #: tell a raised floor from a queue that got better, and so a JSON consumer
     #: never has to guess which threshold a reading was taken against.
     pr_wait_budget_seconds: float | None = None
-    #: Was the PR WAIT itself read? `True` only where a queued PR-event run existed
-    #: and its age was measured (the same number `pr_wait_budget_seconds` was
-    #: compared against). `False` covers the two ways the wait goes unread: no
-    #: queued PR-event run in the feed at all, and a run whose timestamp would not
-    #: parse (that one degrades to `PR-UNWITNESSED`, which is already not `OK`).
+    #: Was the PR WAIT itself read? `True` only where a queued-or-pending PR-event run
+    #: existed and every one of their ages was measured (the same number
+    #: `pr_wait_budget_seconds` was compared against). `False` covers the ways the wait
+    #: goes unread: no PR-event run in either leg at all, a run whose timestamp would
+    #: not parse (that one degrades to `PR-UNWITNESSED`, already not `OK`), and a cut
+    #: `pending` leg (same degradation).
     #:
     #: ⛔ IT IS NOT THE SAME FACT AS `verdict == OK`. `OK` is also emitted for "no
     #: PR-event run is QUEUED", which the code two clauses below says in as many
     #: words is *not* evidence of health — and that clause is reachable for the very
-    #: population a destructive gate acts on, because this module's feed is filtered
-    #: at the API to `status=queued` while a run can sit in `pending` / `waiting` /
-    #: `requested` (four non-completed labels: `ci_check_repair.QUEUED_STATUSES`).
-    #: A run the feed cannot contain is a run whose wait this reading never measured,
-    #: so `congests_pr` refuses to call that queue clear.
+    #: population a destructive gate acts on, because this module's `queued` feed is
+    #: filtered at the API to `status=queued` while a run can sit in `pending` /
+    #: `waiting` / `requested` (four non-completed labels:
+    #: `ci_check_repair.QUEUED_STATUSES`). The `pending`/`requested` legs are read
+    #: separately (`read_health`) and folded into the wait population, so the `OK` this
+    #: flag certifies is one whose wait was actually measured; `waiting` stays out
+    #: because it is approval-parked, not queued.
     pr_wait_measured: bool = False
     #: Why the verdict is what it is, in one clause per clause of the rule, so a
     #: reader can check the decision instead of trusting it.
@@ -558,6 +575,14 @@ class QueueHealth:
         * ``False`` — a MEASURED, UNCUT reading found none: `OK` off an untruncated
           feed WHERE THE WAIT ITSELF WAS READ (`pr_wait_measured`). That is the only
           `False`: a positive witness that the number the budget applies to exists.
+          ⛔ THE WITNESS MUST COVER BOTH LEGS OF THE WAIT POPULATION (#10641 review
+          P2). The `queued` feed is filtered at the API to `status=queued`, so a PR
+          run in `pending`/`requested` is invisible to it — and the number the budget
+          applies to is the OLDEST queued PR run, which in the mixed shape is the one
+          the filter hid. `pr_wait_measured` is therefore derived over
+          `queued + pending` (`read_health` reads the `pending` leg; `waiting` is
+          approval-parked and excluded): one readable young queued PR run beside
+          twelve `pending` PR runs hours old is NOT a measured-clear queue.
         * ``None``  — NOT MEASURED: `UNKNOWN`, `PR-UNWITNESSED`, **a truncated `OK`**,
           **and an `OK` whose `pr_queued == 0`**. A gate must refuse rather than
           consume that silence.
@@ -606,6 +631,11 @@ class QueueHealth:
             "global_max_queued": self.global_max_queued,
             "pr_running": self.pr_running,
             "pr_queued": self.pr_queued,
+            # The other leg of the wait population, emitted so a consumer can see that
+            # the clearance was not taken from the `status=queued` feed alone (#10641
+            # review P2), and whether that leg was read to completion.
+            "pr_pending": self.pr_pending,
+            "pending_truncated": self.pending_truncated,
             "oldest_pr_queued_age_seconds": self.oldest_pr_queued_age_seconds,
             "pr_wait_budget_seconds": self.pr_wait_budget_seconds,
             # Whether the number above was READ or merely unavailable: the fact
@@ -683,15 +713,36 @@ def classify_queue(
     max_cancel: int = 20,
     truncated: bool = False,
     max_pr_wait_seconds: float = DEFAULT_MAX_PR_WAIT_SECONDS,
+    pending: Sequence[QueuedRun] = (),
+    pending_truncated: bool = False,
 ) -> QueueHealth:
     """The whole decision, PURE — no API calls — so it is unit-testable.
 
     See the module docstring for the clauses and the governor's bounds. The age
     clause is measured against the OLDEST QUEUED PR-EVENT RUN: that run is the
     witness that PR work is BLOCKED rather than merely absent.
+
+    ⛔ `pending` IS PART OF THE WAIT POPULATION, NOT DECORATION (#10641 review P2).
+    The `queued` list comes from an API read FILTERED to `status=queued`, so a PR run
+    sitting in `pending`/`requested` (`ci_check_repair.QUEUED_STATUSES` minus the
+    approval-parked `waiting`) is structurally absent from it — and `read_health`
+    now reads that leg and passes it here, because the oldest queued PR run IS the
+    number the wait budget applies to and in the mixed shape the oldest one is the
+    one the filtered feed never showed. Including it is what lets `congests_pr`
+    answer `False` (authorise a destructive cancel) honestly: "nothing in the feed is
+    old" is only a measured clearance if the runs the feed cannot contain were read
+    too. A pending PR run that HAS waited is a congestion WITNESS like any other, so
+    it also feeds the age clauses below — refusing on it (rather than merely
+    abstaining) keeps a real backlog self-clearing instead of escalating exit 1
+    forever.
     """
     pr_running = sum(1 for run in in_progress if run.is_pr)
     pr_queued_runs = [run for run in queued if run.is_pr]
+    # The other leg of the wait population — see the docstring. `waiting` is
+    # deliberately NOT read here: `ci_check_repair._APPROVAL_PARKED_STATUSES` treats
+    # it as human-parked, so it is neither a queue wait nor a cancel target.
+    pr_pending_runs = [run for run in pending if run.is_pr]
+    wait_runs = pr_queued_runs + pr_pending_runs
 
     # The OFFENDER is decided over NON-PR queued runs only. A PR workflow with
     # many runs queued is the victim here, not the offender — naming it would aim
@@ -717,7 +768,7 @@ def classify_queue(
         else None
     )
 
-    ages = [age_seconds(run.created_at, now) for run in pr_queued_runs]
+    ages = [age_seconds(run.created_at, now) for run in wait_runs]
     # ⛔ THE UNREADABLE RUNS ARE COUNTED, NOT DROPPED. `oldest_pr_age` is a max over a
     # FILTERED list, so a single unparseable timestamp disappears into the max — and
     # in the MIXED shape (one readable queued PR run beside one unreadable) the
@@ -776,7 +827,8 @@ def classify_queue(
         + (" (truncated feed: counts are a LOWER BOUND)" if truncated else ""),
         f"offender={offender or 'none'} offender_queued={offender_queued} "
         f"global_max_queued={global_max}",
-        f"pr_running={pr_running} pr_queued={len(pr_queued_runs)}",
+        f"pr_running={pr_running} pr_queued={len(pr_queued_runs)} "
+        f"pr_pending={len(pr_pending_runs)}",
     ]
 
     def health(verdict: str, **override: Any) -> QueueHealth:
@@ -807,6 +859,11 @@ def classify_queue(
             "global_max_queued": global_max,
             "pr_running": pr_running,
             "pr_queued": len(pr_queued_runs),
+            # The OTHER leg of the wait population: queued-adjacent PR runs the
+            # `status=queued` feed cannot contain, read separately and counted so the
+            # reading states what it saw instead of what its filter allowed.
+            "pr_pending": len(pr_pending_runs),
+            "pending_truncated": pending_truncated,
             "oldest_pr_queued_age_seconds": oldest_pr_age,
             "pr_wait_budget_seconds": max_pr_wait_seconds,
             # ONE DERIVATION, at the single constructor: the wait is MEASURED when
@@ -817,7 +874,13 @@ def classify_queue(
             # ⛔ OVER THE WHOLE SET, NOT THE FILTERED MAX: every queued PR-event run
             # must have been READ. One unreadable sibling is enough to make this
             # `False` — see `unreadable_pr_runs` above.
-            "pr_wait_measured": bool(pr_queued_runs) and not unreadable_pr_runs,
+            # ⛔ AND OVER BOTH LEGS (`wait_runs`): a `status=queued` read that found a
+            # young run while the `pending` leg held an old one is exactly the shape
+            # that authorised a cancel on a wait nobody fully read (#10641 review P2).
+            # A cut `pending` read drops its OLDEST runs (the feed is newest-first), so
+            # it cannot certify the leg either.
+            "pr_wait_measured": (bool(wait_runs) and not unreadable_pr_runs
+                                 and not pending_truncated),
             "truncated": truncated,
             "reasons": tuple(reasons),
         }
@@ -868,6 +931,18 @@ def classify_queue(
                        "PR-event run(s) carry no readable timestamp, so the "
                        "wait cannot be measured and the wait budget cannot be "
                        "applied — not reported as OK")
+                )
+                return health(PR_UNWITNESSED)
+            if pending_truncated:
+                # The same refusal, for the leg the queued feed cannot contain: a
+                # capped `pending` read drops its OLDEST runs, so the wait this clause
+                # is about to call healthy may be one it never saw. This is a `READ`
+                # failure, not a healthy queue (same class as an unparseable stamp).
+                reasons.append(
+                    "PR-UNWITNESSED: the `pending` leg was cut at the page cap and "
+                    "that feed is NEWEST-FIRST, so the oldest pending PR-event run "
+                    "(the one the wait budget applies to) was never read — not "
+                    "reported as OK"
                 )
                 return health(PR_UNWITNESSED)
             return health(OK)
@@ -1106,9 +1181,22 @@ def read_health(
     max_pages: int = DEFAULT_MAX_PAGES,
     max_pr_wait_seconds: float = DEFAULT_MAX_PR_WAIT_SECONDS,
 ) -> QueueHealth:
-    """Measure the repo's queue. Raises ``MeasureError`` — never returns OK unread."""
+    """Measure the repo's queue. Raises ``MeasureError`` — never returns OK unread.
+
+    ⛔ THREE READS, NOT TWO (#10641 review P2). The `queued` leg is filtered at the API
+    to `status=queued`, so a PR run in `pending`/`requested` is absent from every
+    reading built on it alone — yet that is exactly the population a destructive
+    cancel acts on (`ci_check_repair.QUEUED_STATUSES`). The `pending` read closes the
+    leg, and its runs are part of the WAIT POPULATION in `classify_queue`: an older
+    pending PR run past the budget is a congestion WITNESS (so the gate refuses it as
+    a MEASURED state that clears itself), not merely an abstention. `waiting` is not
+    read — it is approval-parked, neither a queue wait nor a cancel target.
+    """
     queued, queued_truncated = read_runs(repo, "queued", max_pages)
     running, running_truncated = read_runs(repo, "in_progress", max_pages)
+    # The leg the `status=queued` filter cannot contain. A failure here raises, like
+    # every other read: an unmeasured queue is not a healthy one.
+    pending, pending_truncated = read_runs(repo, "pending", max_pages)
     return classify_queue(
         _project(queued),
         _project(running),
@@ -1119,6 +1207,8 @@ def read_health(
         max_cancel=max_cancel,
         truncated=queued_truncated or running_truncated,
         max_pr_wait_seconds=max_pr_wait_seconds,
+        pending=_project(pending),
+        pending_truncated=pending_truncated,
     )
 
 
