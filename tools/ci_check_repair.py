@@ -978,6 +978,16 @@ def classify(pr: dict, checks: list[dict], all_runs: list[Run], required: list[s
                 # queued run had reached, and adding load to the wait it is stuck in —
                 # does not depend on what its SIBLINGS did, so neither may the refusal.
                 if crowded:
+                    # ⛔ THE STRUCTURAL BOUND IS EVALUATED FIRST, even though it is written
+                    # below: a run past `ZERO_JOB_MAX_REPAIRABLE_ATTEMPT` is a fresh
+                    # attempt waiting for a slot, and NO queue reading — clear,
+                    # congested, or unmeasured — would authorise cancelling it. Calling
+                    # that a congestion refusal attributes it to a gate that could not
+                    # have helped, and repeats the notice's "read the queue" remedy every
+                    # cadence on windows where reading the queue cannot change the answer.
+                    # (Measured: attempt 2 + a MEASURED-CLEAR queue => rerun=[] refused=[].)
+                    if r.run_attempt > ZERO_JOB_MAX_REPAIRABLE_ATTEMPT:
+                        continue
                     # THE REFUSAL IS RECORDED, NOT SILENT. This run was named a
                     # zero-job repair candidate above and is now not repaired;
                     # without this entry the plan counts for nothing in
@@ -2067,16 +2077,6 @@ def main(argv: list[str] | None = None) -> int:
                   f"rerun={[x['run'] for x in r['rerun']]} missing_run={r['missing_run']} "
                   f"reopened={r['reopened']} reopen_attempts={r['reopen_attempts']} "
                   f"needs_user_actor={r['needs_user_actor']}")
-        if summary["repair_refused"]:
-            # NAMED, because it is the one number above that can make a real problem
-            # look like a clean window. Stderr: `--json` owns stdout.
-            print(f"ci-check-repair: REFUSED-REPAIR — {summary['repair_refused']} "
-                  f"zero-job run(s) were identified and NOT cancelled/rerun because the "
-                  f"queue reading did not certify it clear "
-                  f"(queue_congestion_measured={summary['queue_congestion_measured']}, "
-                  f"queue_congested={summary['queue_congested']}). This window is NOT "
-                  f"discharged: read the queue, or run the repair with a credential "
-                  f"that can unjam it.", file=sys.stderr)
         if summary["starved"]:
             # Named state, named remedy. A starved head is not repaired by anything
             # this tool can do: the missing resource is a runner slot.
@@ -2088,6 +2088,20 @@ def main(argv: list[str] | None = None) -> int:
             print("ci-check-repair: some repairs need a credential that can trigger events "
                   "(the local fallback covers this) — see --json for per-PR detail",
                   file=sys.stderr)
+    # ⛔ OUTSIDE the `--json` split on purpose. BOTH production callers pass `--json`
+    # (`tools/ci-check-repair-local.sh` and `.github/workflows/ci-check-repair.yml`), so
+    # a notice printed only on the non-JSON path is a notice NOBODY EVER SEES — which
+    # would leave this counter doing nothing about the very thing it was added for. It
+    # writes to stderr, so it cannot pollute the JSON document (the same shape
+    # `NO-VERDICT-WILL-ARRIVE` uses above).
+    if summary["repair_refused"]:
+        print(f"ci-check-repair: REFUSED-REPAIR — {summary['repair_refused']} "
+              f"zero-job run(s) were identified and NOT cancelled/rerun because the "
+              f"queue reading did not certify it clear "
+              f"(queue_congestion_measured={summary['queue_congestion_measured']}, "
+              f"queue_congested={summary['queue_congested']}). This window is NOT "
+              f"discharged: read the queue, or run the repair with a credential "
+              f"that can unjam it.", file=sys.stderr)
     return code
 
 

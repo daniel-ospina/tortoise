@@ -2007,7 +2007,8 @@ def test_an_unmeasured_queue_never_authorises_the_cancel(monkeypatch, capsys, tm
 
     assert R.main(["--repo", "o/r", "--no-live", "--json",
                    "--record", str(_flood_record(tmp_path))]) == 0
-    summary = json.loads(capsys.readouterr().out)
+    captured = capsys.readouterr()
+    summary = json.loads(captured.out)
     assert [d["run"] for d in summary["prs"][0]["no_verdict"]] == [41480218593], \
         "it is still NAMED — refusing to act is not refusing to report"
     assert summary["queue_congested"] is True, (
@@ -2033,6 +2034,14 @@ def test_an_unmeasured_queue_never_authorises_the_cancel(monkeypatch, capsys, tm
         "queue_congested=True"], (
         "...and the gate that refused it; whether that `True` came from a reading "
         "or from silence is the summary pair beside it, which is asserted above")
+    # ⭐ P3 (review): the count must reach the OPERATOR, not only the JSON. BOTH
+    # production callers pass `--json` (tools/ci-check-repair-local.sh and
+    # .github/workflows/ci-check-repair.yml), so a notice printed only on the non-JSON
+    # path is a notice NOBODY EVER SEES — the counter would then be doing nothing about
+    # the very thing it was added for. It goes to stderr, so stdout stays valid JSON.
+    assert "REFUSED-REPAIR" in captured.err, (
+        "the refusal notice must print on the `--json` path, which is the only path "
+        f"the local rail and the workflow use; stderr was {captured.err!r}")
 
 
 def test_a_measured_clear_queue_still_authorises_the_cancel(monkeypatch, capsys,
@@ -2428,6 +2437,19 @@ def test_a_rerun_attempt_past_its_OWN_floor_is_still_named():
         "the reported age must be the ATTEMPT's, not the run's creation")
     assert plan.rerun == [], (
         "the repair is attempt-1 only: this IS the attempt it produced")
+    # ⭐ P3 (review): a CONGESTED queue must not claim it either. The structural bound
+    # above already excludes this run, so NO queue reading — clear, congested or never
+    # measured — could have authorised cancelling it. Recording it as a congestion
+    # refusal attributes it to a gate that could not have helped, and repeats the
+    # notice's "read the queue" remedy on windows where reading the queue cannot change
+    # the answer (measured: attempt 2 + a MEASURED-CLEAR queue => rerun=[] refused=[]).
+    congested = R.classify(pr(), [], [run_], ["python-ci-gate"], EMITTERS,
+                           max_attempts=3, queue_congested=True)
+    assert congested.rerun == []
+    assert congested.repair_refused == [], (
+        "the attempt bound stopped it, not the queue — it must not be counted as a "
+        "repair the congestion gate suppressed")
+    assert congested.no_verdict, "it is still NAMED; refusal is not silence"
 
 
 def test_a_queued_rerun_without_a_stamped_start_abstains():
