@@ -37,7 +37,7 @@
 >
 > The deployed-surface grader is **agent-infra's**, not this repo's — `scripts/check-farm-drift.sh` in
 > an agent-infra checkout (it is not itself farmed, so no copy under `~/.pi/agent/scripts` exists).
-> Three things make its verdict easy to miss. First, **the installer's exit is not the verdict, and only
+> Four things make its verdict easy to miss. First, **the installer's exit is not the verdict, and only
 > one installer grades the farm at all**: `pi-bootstrap/setup.sh` runs the checker as its last leg and
 > fails the install on the checker's `1` alone — on `2` (cannot verify) or `3` (no deploy can fix it)
 > it prints `this is NOT a pass` and still ends with `Done!` — so on `2` the farm verdict is MISSING
@@ -47,16 +47,26 @@
 > leg: it does install and verify the farm (`install_farms`, then `verify_layer` `cmp`-ing each
 > declared file against `$INFRA_ROOT`), but that comparison is against whatever checkout it RESOLVED,
 > never against the PIN — so a farm that matches an OLDER checkout reads as verified while the pin has
-> moved on. Second, **the grader
-> reads the farm the installer's base names, which need not be the one this box executes**: a
-> `$HOME`-rooted run on a `CELL_HOME`-rooted box grades `$HOME/.pi/agent/scripts`, so neither its `OK`
-> nor its `UNKNOWN — cannot verify` says anything about the executed farm (`pi-bootstrap/setup.sh`
-> re-labels that second one `farm: COULD NOT VERIFY`). That farm is materialised only by
-> the installer, so run it from a checkout **at the pin**: from a tree at any other commit it re-farms
-> bytes that are not the pin's, and advancing the pin alone leaves the farm stale. Third, **the
-> instrument may refuse to run at all**: direct invocation from a pi session may be refused as
+> moved on. Second, **a `--dest` the INSTALLER passes can name a farm this box does not execute**:
+> the checker derives its own destination from the box — `CELL_HOME="${CELL_HOME:-$HOME}"`,
+> `DEST="$CELL_HOME/.pi/agent/scripts"` — so invoked bare it grades exactly the farm this box runs;
+> it is `pi-bootstrap/setup.sh` that passes a `$HOME`-rooted `--dest`, so on a `CELL_HOME`-rooted box
+> that run grades `$HOME/.pi/agent/scripts`, and neither its `OK` nor its `UNKNOWN — cannot verify`
+> says anything about the executed farm (`pi-bootstrap/setup.sh` re-labels that second one
+> `farm: COULD NOT VERIFY`). Grading a farm is not deploying one: it is materialised only by the
+> installer, so run the installer from a checkout **at the pin** — from a tree at any other commit it
+> re-farms bytes that are not the pin's, and advancing the pin alone leaves the farm stale. Third,
+> **the executed farm is ALREADY graded on a clock, so a refusal is not a blind spot**:
+> `agent-infra/scripts/harness-apply-pass.sh` PREDICATE 4 — *"the directory this box EXECUTES, which
+> no other leg looks at"*, written for tortoise#10114 — runs that same checker against
+> `$CELL_HOME/.pi/agent/scripts` on the `eldato-harness-apply` timer (10 min), on by default
+> (`HARNESS_APPLY_FARM_CHECK=1`), and writes a named verdict into
+> `${HARNESS_APPLY_STATE_DIR:-$HOME/.pi/agent/state}/harness-apply.log` (`action=farm-drift`,
+> `farm: DRIFT — …`). Read that line before concluding the farm is ungraded. Fourth, **the instrument
+> may refuse to run at all**: direct invocation from a pi session may be refused as
 > `script-indirection`, with a message that never mentions drift
-> (agent-infra#3173, the agent-infra#709 false positive) — so **a refusal is not a clean result**. Do **not** add
+> (agent-infra#3173, the agent-infra#709 false positive) — so **a refusal is not a clean result**, it is
+> the reason to read the clock's verdict rather than to stop. Do **not** add
 > a tortoise-side mirror — a second owner of that predicate was refused (tortoise#10722, closed
 > superseded); the farm arrays and `is_declared_local` live in agent-infra.
 
