@@ -5082,15 +5082,6 @@ def test_the_default_hf_home_is_the_one_the_vendor_would_resolve(tmp_path):
     assert _default_hf_home({"XDG_CACHE_HOME": xdg}) == str(Path(xdg) / "huggingface")
 
 
-# Legacy predicate name for negative-direction tests (#281). Kept as a
-# constant so no edge-syntax literal appears in source (Task 5 sweep requires
-# zero hits) — same pattern as tests/test_ranking.py.
-_LEGACY_INSTANTIATES = "INSTANTIATES"
-
-
-@pytest.fixture(autouse=True)
-
-
 def test_the_isolated_home_does_not_isolate_the_model_cache(tmp_path):
     """#10010: the HOME isolation above must not take the MODEL cache with it.
 
