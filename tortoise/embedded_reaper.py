@@ -1870,8 +1870,22 @@ def discover(jobs: int = 1, max_tempdir_entries: int = 5000,
 def _discover_from_live(live_pids, jobs, tmpdir, seen_dirs,
                         max_tempdir_entries, full_scan: bool = False):
     """Classification half of discover() (separated so the proc-info cache
-    has a deterministic lifetime). Returns ``(records, scan_complete)``."""
+    has a deterministic lifetime). Returns ``(records, scan_complete)``, where
+    `scan_complete` is BOTH the walk's flag (a bounded scan that ran out of
+    budget) and `not dropped` (a dir the walk found that classification then
+    refused) — either one makes the census TRUNCATED, and a truncated census
+    must never be read as one that found nothing."""
     results = []
+    # #8599 review P2 (#10757): a socket dir the walk ENUMERATED and this pass
+    # then DROPPED is a hole in the census, and `scan.complete` — the WALK's own
+    # flag — cannot see it. Measured: with `_classify_dir` raising for a live
+    # server's dir, `discover()` returned `records=0, complete=True`, so the
+    # vanished term read that server's pid as a natural EXIT and the gate's
+    # "the sweep's own measurement is broken" identity closed green. Every drop
+    # below therefore marks the census TRUNCATED; the flag is fail-closed at
+    # every consumer (a partial scan proves nothing about a cleared backlog
+    # either — `sweep_until_cleared`).
+    dropped = False
 
     def _classify_live(pid: int) -> dict | None:
         sock_dir = _socket_dir_from_cmdline(pid)
@@ -1937,6 +1951,7 @@ def _discover_from_live(live_pids, jobs, tmpdir, seen_dirs,
             dirs.append((d, socket_path))
         except (PermissionError, OSError):
             logger.warning("dir skipped (OSError): %s", d)
+            dropped = True
             continue
 
     if jobs > 1 and len(dirs) > 1:
@@ -1949,6 +1964,7 @@ def _discover_from_live(live_pids, jobs, tmpdir, seen_dirs,
                     rec = fut.result()
                 except Exception as exc:  # per-record isolation
                     logger.warning("classification failed: %s", exc)
+                    dropped = True
                     continue
                 if rec is not None:
                     results.append(rec)
@@ -1958,10 +1974,11 @@ def _discover_from_live(live_pids, jobs, tmpdir, seen_dirs,
                 rec = _classify_dir(d, s)
             except Exception as exc:  # per-record isolation
                 logger.warning("classification failed: %s", exc)
+                dropped = True
                 continue
             if rec is not None:
                 results.append(rec)
-    return results, scan.complete
+    return results, scan.complete and not dropped
 
 
 class _ScanResult(NamedTuple):
@@ -3686,11 +3703,22 @@ def _run_sweep(dry_run: bool, batch_size: int | None, only_safe: bool = False,
     # this set from a short scan, the gate's own "the sweep's measurement is
     # broken" case (`before=5, reaped=0, exited=0, left=2`) went RC=1 -> RC=0,
     # and `cleared=false` is a diagnostic, not a red (#4989), so nothing else
-    # catches it. `records.complete` — the CANDIDATE scan's own flag, not the
+    # catches it. `records.complete` — the CANDIDATE census's own flag, not the
     # AND below (the quarantine/pid-file passes never shorten `resolved`) — is
     # the one that decides; when it is False the reading is UNMEASURED (None,
     # never an empty or partial set) and the report leaves `exited` exactly as
     # observed, which keeps the gate as strict as before this term existed.
+    #
+    # WHAT `records.complete` OBSERVES, stated so nobody has to infer it: the
+    # bounded walk running out of budget, AND (`_discover_from_live`'s `dropped`)
+    # a socket dir the walk enumerated that classification then refused — an
+    # `OSError` on the marker, or a `_classify_dir` failure. RESIDUAL, and it is
+    # narrow on purpose: pass 1 resolving a live pid whose `unixsocket` config it
+    # cannot READ (`_socket_dir_from_cmdline` swallowing an `OSError`) is not
+    # counted, because that read fails for reasons unrelated to this sweep and
+    # folding it in would disable the #8599 term far more often than it fires —
+    # the same class 2 of the 10 (a pre-existing property of that reader, not of
+    # this term). Pass 2 still finds such a dir whenever it is ephemeral-named.
     out.discovered_pids = _candidate_pids(resolved) if records.complete else None
     return out
 

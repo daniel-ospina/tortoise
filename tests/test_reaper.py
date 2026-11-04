@@ -6546,6 +6546,51 @@ def test_run_sweep_reports_discovered_pids_unmeasured_when_the_scan_was_short(mo
     )
 
 
+def test_discover_reports_a_dropped_record_as_a_TRUNCATED_census(monkeypatch):
+    """⛔ A DIR THE WALK FOUND AND CLASSIFICATION REFUSED IS A HOLE, NOT A ZERO.
+
+    #10757 review P2. `_ScanResult.complete` is the WALK's own flag, so it
+    ``cannot`` see a PER-RECORD drop — an `OSError` on the socket marker, or a
+    `_classify_dir` failure that the per-record isolation swallows with
+    `continue`. Measured before the fix: with `_classify_dir` raising for a live
+    server's dir, `discover()` returned `records=0, complete=True`, so a sweep
+    whose census was a HOLE read as a sweep that found nothing; the vanished
+    term then claimed that server's pid as a natural EXIT and the gate's own
+    "the sweep's own measurement is broken" identity closed GREEN — the
+    fail-open two doors over from the truncated-walk one.
+
+    The flag is fail-closed at every consumer (`_run_sweep` reports
+    `discovered_pids` UNMEASURED; `sweep_until_cleared` refuses to call a
+    partial scan cleared), so reporting the truncation costs a diagnostic, never
+    a false pass.
+    """
+    from tortoise.embedded_reaper import _classify_dir as real_classify
+    from tortoise.embedded_reaper import discover
+
+    with _stale_dir_env() as (dbdir, sock):  # noqa: RUF059
+        target = os.path.realpath(str(dbdir))
+
+        def refusing(d, s, **kw):
+            # Only THIS fixture's dir is dropped — the host's own live servers
+            # (pass 1) must still classify, or the test would be measuring the
+            # box rather than the drop.
+            if os.path.realpath(str(d)) == target:
+                raise OSError("classification refused for the fixture dir")
+            return real_classify(d, s, **kw)
+
+        monkeypatch.setattr("tortoise.embedded_reaper._classify_dir", refusing)
+        found = discover()
+
+    assert not [r for r in found if os.path.realpath(str(r.get("dbdir", ""))) == target], (
+        "the fixture's dir must be DROPPED for this to be testing a drop at all"
+    )
+    assert found.complete is False, (
+        "a census that dropped a dir it enumerated is TRUNCATED, not empty: "
+        "`complete=True` here is what let a hole read as 'the sweep found "
+        "nothing', which the vanished term cannot tell from a real zero"
+    )
+
+
 # ── #1005 (epic #1647 E2E-7): the ATTRIBUTED population ──────────────────
 # The CI orphan gate used to compare its own HOST-WIDE pgrep count with the
 # sweep's HOST-WIDE `left` and red when the counter read higher. Those are two
