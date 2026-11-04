@@ -1315,6 +1315,20 @@ def _is_episodic_source_row(row: Mapping[str, Any]) -> bool:
     arm names is a DOCUMENT — the safe answer: a missed legacy session keeps its
     prose on a node (the pre-existing defect), while a false positive silently
     strips a document's own metadata and un-indexes it.
+
+    ⚠️ BOUNDED RESIDUAL, stated rather than implied: arm 2 reads
+    `public.source.source_kind` HERE and `sourceKind` on a CACHE node
+    (:func:`is_episodic_source_node`), so the two agree only while the node still
+    carries the property. Where it does not, the record side declines the pair
+    while the reconciler still places it, so the pair is counted as a field
+    mismatch on top of the absent property itself — a visible RED (measured: 3
+    mismatches, `graph_only` empty) instead of the healthy 0 mismatches + 2
+    `graph_only` names, never a silent loss, and not reachable through today's
+    writers
+    (the legacy population is *defined* by `sourceKind` on the node —
+    `session_source_migration._LEGACY_CANDIDATES` — and a record-sourced rebuild
+    writes `sourceKind` from the column). Fail-closed by direction, and left
+    named.
     """
     url = row.get("url")
     if isinstance(url, str) and url.startswith(_EPISODIC_SOURCE_URL_PREFIX):
@@ -1377,12 +1391,14 @@ def _props_from_row(table: str, row: Mapping[str, Any], *,
     # §9.1/D1 (#10853): resolved ONCE per row, from the row itself.
     episodic_source = table == "source" and _is_episodic_source_row(row)
     out: dict[str, Any] = {}
+    tail_keys: set[str] = set()
     for column, value in row.items():
         if column == "props":
             tail = value
             if isinstance(tail, str):
                 tail = json.loads(tail) if tail else {}
             if tail:
+                tail_keys = set(tail)
                 refused_tail = sorted(set(tail) & refused)
                 if refused_tail:
                     raise CacheProjectionError(
@@ -1416,7 +1432,7 @@ def _props_from_row(table: str, row: Mapping[str, Any], *,
             f"refused by the schema, and not record bookkeeping — refusing to "
             f"drop it silently"
         )
-    if episodic_source:
+    if episodic_source and tail_keys:
         # ⛔ THE OPEN-SET DOOR (#10853 review). `props` is written verbatim, so a
         # row whose tail carries the pair would land it on the node and the
         # guard's own claim — *"whatever build wrote the row"* — would be false
@@ -1429,9 +1445,15 @@ def _props_from_row(table: str, row: Mapping[str, Any], *,
         # said, so a `_search_text` tail key is the snake spelling of the same
         # datum and would otherwise survive (`_search_text` IS a real column, so
         # the tail can carry that spelling where it cannot carry `_searchText`).
+        # ⛔ AND IT UNDOES ONLY WHAT THE TAIL ADDED. Rebuilding `out` wholesale
+        # made this filter SUBSUME the column-loop guard above: deleting that
+        # guard reddened nothing at all (measured — 20 passed), so the two doors
+        # were one door and the mutation-check claim covered a branch that no
+        # longer mattered. Scoped by `tail_keys`, each door is independently
+        # exercised, which is the only way "each door is pinned" is true.
         declared = episodic_source_prose_properties()
-        out = {k: v for k, v in out.items()
-               if k not in declared and k not in _EPISODIC_SOURCE_PROSE_COLUMNS}
+        for name in tail_keys & (declared | _EPISODIC_SOURCE_PROSE_COLUMNS):
+            out.pop(name, None)
     return out
 
 

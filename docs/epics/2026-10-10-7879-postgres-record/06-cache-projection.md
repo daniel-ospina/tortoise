@@ -265,6 +265,8 @@ ONE LEG PER ARM; the FOUR negative legs (a plain-document baseline, then one per
 term that must not be a signal: a transcript document carrying a `session_id`, a
 `corpus://` permalink stamped `agentSession`, a document stamped `is_episodic`);
 the row/node predicate-agreement legs; the `props`-tail leg; and the record row
-that must not be mutated. Mutation-checked: each arm and the guard, removed one at
-a time, and each of the three flags, re-added one at a time, reds exactly the leg
-that names it.
+that must not be mutated. Mutation-checked, one at a time: each identity arm, EACH
+OF THE TWO DOORS (the column loop and the `props` tail — the tail filter undoes
+only the keys the tail added, so neither door subsumes the other), the label gate,
+the call-time resolution of the placement spellings, and each of the three flags
+re-added — every one reds exactly the leg that names it.

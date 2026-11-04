@@ -404,3 +404,37 @@ def test_the_reconciler_exclusion_is_scoped_to_the_Source_label():
         "the exclusion fired on a non-Source label: `Event`'s own `summary` was "
         "treated as the declined Source pair"
     )
+
+
+def test_the_placement_reads_stay_at_CALL_time():
+    """A module-level placement read breaks `import` on an installed tree.
+
+    `canonical_property` reaches the placement table ON DISK
+    (`docs/epics/.../02-identity-and-placement.md`), which a wheel does not ship.
+    Round 4 evaluated it at module level and `import tortoise.cache_projection`
+    failed outright on such a tree — taking `tortoise.record_reconcile`,
+    `tortoise.legacy_ids` and the `record-reconcile`/`record-restore` verbs with
+    it (review cycle 5, P1). Nothing pinned the laziness until this leg: reverting
+    either helper to a module constant left the whole suite green.
+
+    Re-executing the MODULE BODY is the import-time evaluation, so a reload is the
+    torch: after it, both caches must still be EMPTY (nothing was resolved while
+    the module body ran).
+    """
+    import importlib
+
+    import tortoise.cache_projection as cp
+
+    try:
+        importlib.reload(cp)
+        assert cp.episodic_source_prose_properties.cache_info().currsize == 0, (
+            "the declined-pair frozenset was resolved while the module body ran — "
+            "moving it back to module level breaks `import` on an installed tree")
+        assert cp._episodic_source_kind_property.cache_info().currsize == 0, (
+            "the kind's property spelling was resolved while the module body ran — "
+            "same import-time hazard")
+    finally:
+        # The reload rebuilt the module object's contents; drop the caches so a
+        # later test cannot inherit a half-initialised module.
+        cp.episodic_source_prose_properties.cache_clear()
+        cp._episodic_source_kind_property.cache_clear()
