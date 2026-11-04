@@ -2491,6 +2491,20 @@ surfaces:
   # `--changed-files tortoise/cypher_guard.py` → surfaces=['core']. `--integrity`
   # also requires every test file to be classified, which this entry satisfies.
   - test_9079_handle_write_authority.py
+  # #10807: the catalogue-SETTLE wait (`tests/_index_settle.index_rows_after_settle`
+  # / `index_kind_absent` / `index_cells` / `point_index_drops_visible`) that TWO
+  # fixtures share after they drop an index — the write-authority suite above and
+  # `tests/test_search_engine.py`.
+  # Its subject is test infrastructure, not a product module, so `core` is the
+  # arm that already owns both callers (both are registered here). `--integrity`
+  # requires every test file to be classified; this entry satisfies it. A change
+  # to `tests/_index_settle.py` (or to this new test file) falls through to the
+  # same arm — a `tests/`-prefixed path classifies to `core`.
+  # ⛔ `tests/_live_utils.py` is NOT that case and must not be named here: it is a
+  # declared `SHARED_MODULES` member (`tools/ci_selection.py`), so editing it
+  # selects the FULL CI matrix. That cost is exactly why the wait lives in
+  # `tests/_index_settle.py` instead — see that module's docstring.
+  - test_10807_index_settle.py
   # #9079 (the door ONE HOP BELOW the write handle): the client handle escapes —
   # `proj.g._g.query(...)` and `proj.db.select_graph(<g>).query(...)` — and the
   # registry that makes the client-level door judge the right (store, graph).

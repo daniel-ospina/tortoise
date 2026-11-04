@@ -49,6 +49,11 @@ from pathlib import Path
 
 import pytest
 
+from tests._index_settle import (
+    index_cells,
+    index_rows_after_settle,
+    point_index_drops_visible,
+)
 from tortoise.projection import (
     _HANDLE_MUTATING_VERBS,
     DirectCacheWriteRefused,
@@ -259,6 +264,13 @@ def _count(proj, label: str, prop: str, value: str) -> int:
         f"MATCH (n:{label} {{{prop}:$v}}) RETURN count(n)",
         params={"v": value},
     ).result_set[0][0])
+
+
+#: A DROPPED INDEX IS RETIRED ASYNCHRONOUSLY (#10807) — see
+#: `tests/_index_settle.py` for the mechanism and the two measured CI runs. The
+#: wait lives there because `tests/test_search_engine.py` loses the same race
+#: through `_schema_is_current()`; ONE definition, two callers, so it cannot
+#: drift between them.
 
 
 def _journal_lines(path: Path) -> list[dict]:
@@ -849,11 +861,32 @@ def test_schema_ddl_survives_the_armed_guard(armed_sdk, enforced):
 
     # Remove the two indexes this test is about, so their presence afterwards is
     # the armed sweep's work and nothing else.
+    #
+    # ⛔ AND THE REMOVAL IS AWAITED, NOT ASSUMED (#10807). A drop REBUILDS the
+    # label's one index on the engine's indexer thread, and the retired row keeps
+    # naming the dropped field until it finishes — so the guard below could read a
+    # catalogue that still said `pointKind` about a drop that had landed, and
+    # refuse a GOOD fixture (measured: `test (g)`, run 41817275671, on a loaded
+    # runner; 0.3 s to converge idle). `index_rows_after_settle` waits for the
+    # rebuild to finish; the assertions are unchanged, so a drop that really
+    # cannot happen still fails here loudly rather than passing vacuously.
     with _graph_metadata_write_scope("test-fixture: drop the indexes"):
         proj.g._g.query("DROP INDEX ON :Point(pointKind)")
         proj.g._g.query("CALL db.idx.fulltext.drop('Point')")
-    before = {str(cell) for row in proj.g.ro_query("CALL db.indexes()").result_set
-              for cell in row}
+    # ⛔ AND QUIESCENCE ALONE IS NOT ENOUGH (#10807, review Finding 1). A catalogue
+    # read taken BEFORE the engine picked the drops up is internally CONSISTENT — no
+    # `UNDER CONSTRUCTION`, the idle `OPERATIONAL` status, the PRE-drop definition —
+    # so a quiescence-only wait returns it on its FIRST read and the guards below
+    # refuse a good fixture: the same false red as `test (g)`, just narrower. The
+    # caller's own preconditions are what make that read WAIT, which is what the
+    # sibling at `tests/test_search_engine.py:720` already does.
+    #
+    # `point_index_drops_visible` states those preconditions ONCE, in the module
+    # that owns the wait — the same module rule that keeps the wait itself single:
+    # a local copy here could drift from the two guards below, and the drift would
+    # be invisible, since it only bites on a loaded runner.
+    before = index_cells(
+        index_rows_after_settle(proj, until=point_index_drops_visible))
     assert not any("pointKind" in c for c in before), (
         "the fixture could not drop the Point range index, so the assertion "
         f"below would pass vacuously; catalogue={sorted(before)}")
