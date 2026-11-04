@@ -700,8 +700,9 @@ def _reading(dim: AllowanceDimension, org_id: str,
         #
         # ⛔ The BLOCKED state needs no arm HERE: the guard at the top of this
         # function already raises for every ``dim.blocked`` that carries an
-        # allowance, and reaches this point only when ``observed_only`` is set
-        # — which returns on the line above. A ``if dim.blocked:`` re-check was
+        # allowance, so this point is reached only when ``observed_only`` is
+        # NOT set (that mode returns on the line above) AND ``dim.blocked`` is
+        # False. A ``if dim.blocked:`` re-check was
         # present and could never run (main-repair, 2026-11-04: probed with a
         # blocked dimension whose meter is suppressed through the ``meters=``
         # seam — the TOP guard fires, line-for-line, and the inner arm never
