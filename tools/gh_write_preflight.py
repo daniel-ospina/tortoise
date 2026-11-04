@@ -126,7 +126,8 @@ REASONS (`GH-WRITE-UNAVAILABLE(<reason>)`), each with its own fix
                                a fragment, or `user:pass@` credentials. Nothing is contacted first.
 
 ⛔ **THE ENDPOINT IS PART OF THE VERDICT, AND IT IS VALIDATED BEFORE THE TOKEN MOVES.** `api_base` is
-in the result (`--json` → `"api_base"`) and in the `GH-WRITE-OK` line, because a pass measured against
+in the result (`--json` → `"api_base"`, with any `user:pass@` userinfo REDACTED — see `_printable_base`)
+and in the `GH-WRITE-OK` line, because a pass measured against
 something that is not GitHub is not a pass: point the base at any server that answers `422` and the
 tool would otherwise print `GH-WRITE-OK(issues+pull-requests+contents writable)` for a token that
 cannot write anything. So a non-default base is accepted ONLY when it is loopback (`127.0.0.0/8`,
@@ -248,6 +249,29 @@ def _validate_api_base(api_base: str) -> str:
                 f"unrecognised endpoint is not a verdict about the credential (only 127.0.0.0/8, ::1 and "
                 f"localhost are accepted as the hermetic test seam)")
     return ""
+
+
+def _printable_base(api_base: str) -> str:
+    """`api_base` as it may be PUT IN A VERDICT — any `user:pass@` userinfo is redacted.
+
+    ⛔ THE REFUSAL IS NOT THE ONLY PATH THAT PRINTS THE BASE. `api_base` is a key in the result dict,
+    and `--json` serialises the WHOLE dict — so a credentialed base refused for carrying credentials
+    was still echoed verbatim into the machine-readable artifact. MEASURED on the round-7 fix:
+
+        --api-base http://user:hunter2@127.0.0.1:9 --json
+        → "api_base": "http://user:hunter2@127.0.0.1:9"      ← the secret, in stdout
+
+    which is credential hygiene (`R3`) failing in the artifact a lane pastes into a PR or a comment.
+    The host and path are kept so the verdict still names what was refused; only the userinfo goes.
+    """
+    try:
+        parts = urllib.parse.urlsplit(api_base)
+    except ValueError:
+        return "[unparseable --api-base, not echoed]"
+    if parts.username is None and parts.password is None:
+        return api_base
+    return urllib.parse.urlunsplit(
+        (parts.scheme, parts.netloc.rsplit("@", 1)[-1], parts.path, "", ""))
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -446,7 +470,8 @@ def preflight(repo: str, api_base: str, token: str, source: str) -> dict:
         "repo": repo,
         # ⛔ WHICH ENDPOINT ANSWERED IS PART OF THE VERDICT. Without this key a consumer holding the
         # `--json` artifact cannot tell a measurement of GitHub from a measurement of anything else.
-        "api_base": api_base,
+        # ⛔ REDACTED, because this dict IS the `--json` output: see `_printable_base`.
+        "api_base": _printable_base(api_base),
         "credential_source": source,
         "token_shape": token_shape(token) if token else "none",
         "ok": False,

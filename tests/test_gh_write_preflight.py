@@ -542,6 +542,33 @@ def test_api_base_carrying_credentials_is_refused_and_never_echoed():
     assert "hunter2" not in out and "hunter2" not in err, (out, err)
 
 
+def test_json_verdict_redacts_a_credentialed_base():
+    """`--json` must not print the `user:pass@` it just refused — the artifact IS the leak.
+
+    MEASURED on the round-7 fix (head `e42a5376e`): `--api-base http://user:hunter2@127.0.0.1:9 --json`
+    exited 1 with `reason: usage` — and serialised `"api_base": "http://user:hunter2@127.0.0.1:9"` into
+    stdout. The refusal branch deliberately does not echo the base, then the result dict carried it
+    verbatim, so the secret reached the machine-readable verdict — the one a lane pastes into a PR, an
+    issue or a `record-review` comment (Review Scope Contract `R3`: the credential is never printed,
+    logged, or placed in output).
+    """
+    with _Stub() as s:
+        p = subprocess.run([sys.executable, str(TOOL), "--repo", "daniel-ospina/tortoise", "--json",
+                            "--api-base", f"http://user:hunter2@{s.base.split('//', 1)[1]}"],
+                           capture_output=True, text=True,
+                           env=_env(s.base, "ghp_NOT_A_REAL_CREDENTIAL"), timeout=120)
+        seen = list(s.seen)
+    assert p.returncode != 0, p.stdout
+    assert "hunter2" not in p.stdout + p.stderr, (
+        f"the refused base's credential was serialised into the verdict: {p.stdout}")
+    res = json.loads(p.stdout)
+    assert res["reason"] == "usage", res
+    # …still attributable: the host survives the redaction, so a consumer can see what was refused.
+    assert res["api_base"].endswith(s.base.split("//", 1)[1]), res
+    assert "@" not in res["api_base"], res
+    assert seen == [], f"the credential was sent before the base was refused: {seen}"
+
+
 def test_api_base_validation_table():
     """The accepted/refused table, pinned at the unit level so a weakened rule reddens here first.
 
