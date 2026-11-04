@@ -1064,6 +1064,44 @@ def test_cli_collect_resolves_the_repo_from_disk_not_the_network(tmp_path, capsy
     assert capsys.readouterr().out.startswith("RAIL(#64, ")
 
 
+def test_cli_collect_answers_absent_without_asking_gh(tmp_path, monkeypatch, capsys):
+    """⛔ ZERO CANDIDATES IS AN ANSWER, NOT A REASON TO ASK GITHUB.
+
+    The artifact filename is `<repo slug>-<pr>`, so an artifact the CLI's disk glob
+    does not match cannot exist for ANY repo — the PR has never been railed here,
+    which is `absent` (3) whatever `gh` would have said. Asking `gh` first made a
+    STATUS read depend on the network: with `gh` unreachable, an empty state dir
+    exited 2 (environment error) where the exit table promises 3, and the module's
+    own comment claimed `collect` "never calls `gh`" (review finding, PR #10691).
+
+    Both directions are pinned: the answer is 3, AND the network was never asked.
+    The `--assert-merged` arm is the one that matters to a fleet beat — 3 ("no rail
+    here") is a different instruction from 1 ("a rail ran and did NOT merge"), and
+    collapsing them is how a missing artifact reads as a refusal.
+    """
+    called = tmp_path / "gh-calls"
+    bindir = fake_gh(tmp_path, f"#!/usr/bin/env bash\necho \"$@\" >> {called}\nexit 1\n",
+                     sub="bin2")
+    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}")
+    sd = tmp_path / "state"
+    sd.mkdir()
+    capsys.readouterr()
+
+    rc = rd.main(["collect", "95", "--state-dir", str(sd)])          # no --repo
+    assert rc == 3, f"no artifact is `absent` (3), not an environment error: got {rc}"
+    assert capsys.readouterr().out.startswith("RAIL(#95, absent, ")
+    assert not called.exists(), "collect asked the network a question disk settles"
+
+    # An absent rail is NOT "not merged": the machine gate must not read 1 here.
+    rc = rd.main(["collect", "95", "--state-dir", str(sd), "--assert-merged"])
+    assert rc == 3, f"absent must not wear the gate's code (1): got {rc}"
+
+    # …and a state dir that does not exist yet answers identically.
+    rc = rd.main(["collect", "95", "--state-dir", str(tmp_path / "never-created")])
+    assert rc == 3
+    assert not called.exists()
+
+
 def test_dry_run_exit_zero_is_not_a_merge(tmp_path):
     """⛔ `admin-merge.sh --dry-run` merges nothing and exits 0. Reporting that as
     `merged` would release the next beat's gate on evidence that does not exist."""
@@ -1968,13 +2006,30 @@ def test_launch_without_the_gh_cli_starts_and_stamps_an_unreadable_head(tmp_path
 
 
 def test_collect_without_the_gh_cli_refuses_by_name_instead_of_tracebacking(tmp_path):
-    """No `--repo` and no artifact ⇒ refuse (rc 2), naming what is missing.
+    """The one `collect` path that still needs `gh` refuses BY NAME, rc 2.
 
-    Pre-fix this arm exited 1 with `FileNotFoundError` — a read-only status verb
-    tracebacking, which is worse than any verdict (the fleet beat then gets no
-    state to act on). The artifact path never needs `gh` (the arm above).
+    Pre-fix this arm's trigger was "no artifact and no `--repo`", which exited 1
+    with a `FileNotFoundError` — a read-only status verb tracebacking, worse than
+    any verdict (the fleet beat then gets no state to act on). Two things changed
+    since, and this arm pins what is LEFT rather than what is gone:
+
+      * zero candidates and one candidate are answered from DISK (rc 3 / the
+        artifact's own `REPO=`), so `gh` is not asked at all — that is
+        `test_cli_collect_answers_absent_without_asking_gh` below;
+      * TWO artifacts for one PR number under different repos is a target the disk
+        genuinely cannot name, so this is the remaining `_resolve_repo` path — and
+        a missing `gh` there must still be a NAMED refusal, never a traceback.
+
+    Both halves matter: the first stops a status read depending on the network, the
+    second keeps the failure legible where it still can.
     """
-    proc = _cli(tmp_path, "collect", "778", "--state-dir", str(tmp_path / "state"))
+    sd = tmp_path / "state"
+    sd.mkdir()
+    for slug in (("o", "r"), ("o", "s")):      # same PR, two repos ⇒ ambiguous
+        rd.artifact_path(sd, "/".join(slug), 779).write_text(
+            f"PR=779\nREPO={'/'.join(slug)}\nSTARTED_AT={rd._iso_now()}\n",
+            encoding="utf-8")
+    proc = _cli(tmp_path, "collect", "779", "--state-dir", str(sd))
     assert proc.returncode == 2, (proc.returncode, proc.stdout, proc.stderr)
     assert "could not resolve the repo" in proc.stderr
     assert "command not found" in proc.stderr      # names the cause, not just the effect

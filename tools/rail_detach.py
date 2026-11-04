@@ -44,6 +44,19 @@ DERIVED at collect time from the rail's own log lines (`✅ merged PR #N at <sha
 `ALREADY MERGED`) rather than re-asking the API — the artifact must be readable
 when the network is not, and the rail's own words are the primary record.
 
+STOPPING A RAIL (the artifact is a record, not an off switch)
+-------------------------------------------------------------
+`rm <artifact>` clears the CLAIM and stops NOTHING — both refusal hints offer it
+because it is how a stale claim is released, but the rail it names keeps waiting
+and keeps merging, and the freed claim lets the next `start` put a SECOND rail on
+the same PR (#3061). To actually stop one, signal its process GROUP: `start` runs
+the wrapper under `setsid`, so `PID=` is the group leader and the rail it forked
+is in that group, which makes `kill -TERM -<PID>` (negative = group) reach both.
+The wrapper then never writes `EXIT=`, so `collect` answers `lost` — or `merged`
+if the rail had already printed its success line, since that line outranks `lost`.
+Stopping a rail does not un-merge anything; it only ends the process that would
+have reported it.
+
 STATES
 ------
 Two INDEPENDENT inputs decide the state — this attempt's `EXIT=` line and the
@@ -119,7 +132,7 @@ EXIT CODES
     1  `collect --assert-merged` and the state is not `merged` — the machine gate
     2  environment error: `collect` could not name the repo, `start` could not
        spawn the rail (EAGAIN/ENOMEM/a vanished CWD), or the interpreter is < 3.12
-    3  `collect` found no artifact for that PR
+    3  `collect` found no artifact for that PR (answered from disk — no `gh`)
     4  `start` REFUSED — a rail is already live, a forbidden bypass is set, the
        rail script is missing, or the repo could not be named. ⛔ The repo case is
        DELIBERATELY 4 here and 2 in `collect`: `collect`'s 2 is a failed
@@ -199,8 +212,18 @@ PROC_STARTTIME_FIELD = 22
 # unbounded one is not a slow read, it is a WEDGE: `_head_sha` runs while this
 # process holds the duplicate-rail flock, so a `gh` stalled on a saturating cell
 # blocks that lock and every later `start` for the PR queues behind it — the
-# guard becomes the thing that makes the PR unrailable. `collect` deliberately
-# never calls `gh` (it answers from the artifact), so a status read is unaffected.
+# guard becomes the thing that makes the PR unrailable.
+#
+# ⛔ AND THE CLI `collect` RESOLVES ITS REPO FROM DISK, NOT FROM `gh` — except in
+# ONE case, stated rather than glossed: when the state dir holds TWO OR MORE
+# artifacts for the same PR number under different repos, the PR number alone does
+# not name the target, so `main` falls back to `_resolve_repo` (a bounded `gh`).
+# ZERO candidates and ONE candidate are both answered from disk — zero is `absent`
+# (3) without naming any repo at all, because an artifact that no repo's filename
+# matches cannot exist for ANY repo. This used to be false for zero: the CLI asked
+# `gh`, and with no reachable `gh` it exited 2 (environment error) where the exit
+# table promises 3 (`collect` found no artifact) — a status read that failed
+# because the API did, which is exactly what this verb exists not to do.
 GH_PROBE_TIMEOUT_S = 10
 # The local liveness probe (`ps`), used only where there is no procfs. Local,
 # so this is a runaway guard rather than a network budget.
@@ -1709,6 +1732,17 @@ def main(argv: list[str] | None = None) -> int:
         if len(cands) == 1:
             repo = read_field(cands[0].read_text(encoding="utf-8", errors="replace"),
                               "REPO") or None
+        elif not cands:
+            # ⛔ ZERO CANDIDATES IS AN ANSWER, NOT A REASON TO ASK GITHUB. The
+            # artifact filename is `<repo slug>-<pr>`, so an artifact this glob does
+            # not match cannot exist for ANY repo — the PR has never been railed
+            # here, and that is `absent` (3) whatever `gh` would have said. Asking
+            # `gh` first made the answer depend on the network: with `gh` failing,
+            # an empty state dir exited 2 (environment error) instead of 3. The
+            # `>1` case still resolves, because two repos' artifacts for one PR
+            # number genuinely does not name a target.
+            print(f"RAIL(#{a.pr}, absent, -, -)")
+            return 3
     if not repo:
         try:
             repo = _resolve_repo(Path(os.getcwd()))
