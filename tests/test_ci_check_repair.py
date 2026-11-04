@@ -29,6 +29,25 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tools import ci_check_repair as R
 
+
+@pytest.fixture(autouse=True)
+def _pin_the_launcher_to_this_checkout(monkeypatch):
+    """A FLEET shell exports `TORTOISE_REPO`; this module's launcher tests must not.
+
+    `tools/ci-check-repair-local.sh` honours `TORTOISE_REPO` as its documented repo
+    override (`:57`, `:84`), so in a lane whose shell exports it the launcher resolved
+    `TOOL` to a DIFFERENT checkout's `tools/ci_check_repair.py` and judged THIS
+    checkout's launcher by another tree. Measured (2026-11-04, fleet lane):
+    `test_the_launcher_acts_on_a_failed_window_and_stays_idle_on_a_green_one` failed
+    with `TOOL=/home/cmux/tortoise/tools/ci_check_repair.py`, and the same file passed
+    under `env -u TORTOISE_REPO`.
+
+    A false red is not free: it trains a lane to skip the launcher test, which is the
+    one place the "covered → idle" / "ran-not-succeeded → act" handoff is executed
+    rather than grepped. Pinned out here so the test measures the launcher it names.
+    """
+    monkeypatch.delenv("TORTOISE_REPO", raising=False)
+
 REQUIRED = ["pricing-artifact", "docs", "test-isolation", "license-surface",
             "legal-e2e", "python-ci-gate", "ai-review-gate"]
 EMITTERS = {
