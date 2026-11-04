@@ -7068,6 +7068,22 @@ surfaces:
   # Not embedded-only: a URI lane redirects the by-path SDK construction to the
   # server and the assertions hold either way.
   - longmem_eval/test_ep_census_10137.py
+  # #10137: the OPERATOR-PROMOTION half of the belief-layer wiring — an operator
+  # minted over claims that are ALREADY live (a resumed/partial ingest: the v2
+  # ingest mints EVERY operator with `promote_source=False`, and
+  # `sdk.promote_point` cannot promote an operator node — it refuses one with
+  # `reason: 'is_operator'`) was promoted by NOTHING, so `ep._live_only` kept it
+  # out of the factor graph for ever and the belief layer contributed nothing on
+  # a question holding both evidence and an operator. Registered against
+  # `tools/longmem_eval/` so a change to the promotion sweep SELECTS the file
+  # that can tell a wired factor from an unpromoted one — as surface OWNERSHIP,
+  # NOT shard membership: `longmem_eval/**` is a non-gating `on_demand` member
+  # (#10194/#10206, verified: `--non-gating-report` lists all 19 under "excluded
+  # from every gating leg"), so this row does NOT put the pin on the merge gate.
+  # Nothing does — the sweep's only pre-merge cover is review. Embedded (a
+  # throwaway `TortoiseSDK` per case, no server/network); a URI lane redirects
+  # the by-path SDK construction and the assertions hold either way.
+  - longmem_eval/test_ep_activation_operator_promotion_10137.py
   - longmem_eval/test_gold_evidence_claims.py  # #3011 §9.5: gold-evidence claim artifact builder — frozen tokenizer, MIN_GOLD_TOKENS, non-emptiness (hermetic)
   - longmem_eval/test_ingest_stall_guard.py  # #2969: bounded graph socket read (socket_timeout env knobs) + ingest heartbeat/no-progress budget → retryable `ingest:retries_exhausted` (hermetic: fake hung/pong TCP servers + injected clock)
   - longmem_eval/test_server_posture_2969.py  # #2969 suggested fix 3: the eval refuses a defragging graph server (`CONFIG GET activedefrag`); opt-in `disable` applies the incident mitigation + read-back and FAILS CLOSED when it cannot read the value or open the probe (the one exception to UNKNOWN-and-proceed, which stays soft for `require-off`/`allow`); a readable value that is neither `yes` nor `no` is UNKNOWN, never `off`; wiring aborts before BOTH model loads (R6 cross-encoder pre-warm + `--model` injection), the embedder pre-flight and the dataset download (hermetic: a fake connection records commands AND a loopback RESP2 server drives the REAL `_connection_from_uri` builder — the anti-inert leg)
@@ -9193,6 +9209,17 @@ durations:
   # `tools/ci_timing.py --refresh-durations` re-bases it after the next
   # push-to-main sweep.
   longmem_eval/test_ep_census_10137.py: 2.0
+  # #10137: a file ADDED BY A PR can never carry a CI junit measurement (the
+  # refresher samples push-to-main runs only), so it takes the header's flat
+  # `DEFAULT_FAST_WEIGHT` = 2.0 — the SAME value the sibling PR-added row
+  # (`longmem_eval/test_ep_census_10137.py`) takes. Deliberately NO local timing
+  # reading and NO case count here: a dev-box reading is a forbidden
+  # SHARD-LAYOUT input (#2818/#3419), and this file's count moved three times
+  # during its own review — the map's neighbouring rows keep recording that such
+  # counts re-stale. Re-derive both from the file if you need them.
+  # `tools/ci_timing.py --refresh-durations` re-bases it after the next
+  # push-to-main sweep.
+  longmem_eval/test_ep_activation_operator_promotion_10137.py: 2.0
   longmem_eval/test_probe_v2.py: 0.1
   test_alert_store.py: 0.3  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 0.1
   test_analytics.py: 0.1
