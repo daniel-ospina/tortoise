@@ -470,8 +470,24 @@ def violations(snapshot: dict, requested: dict[str, list[frozenset[str]]]) -> li
             )
 
     # R2 is judged per LABEL: it is about which ARCHITECTURE serves an x86_64 image.
+    #
+    # ⛔ The intersection goes through `_norm`, and it is not cosmetic. `every_label` holds
+    # the SPELLING the workflow used, while `X86_IMAGE_LABELS` is lowercase, so a raw `&`
+    # silently drops `runs-on: Ubuntu-Latest`: R2 is then never evaluated for it, while R1
+    # answers the very same row case-insensitively (`_pool_answers`) — so the row counts as
+    # served and the 2026-11-04 state (an x86_64 image claimed only by ARM hosts) reports
+    # GREEN. GitHub matches labels case-insensitively everywhere else, so the spelling is
+    # not something a workflow author can be expected to get exactly right.
     every_label = {label for rows in requested.values() for row in rows for label in row}
-    for label in sorted(X86_IMAGE_LABELS & every_label):
+    x86_wanted = {_norm(x) for x in X86_IMAGE_LABELS}
+    # One entry per NORMALISED image, holding the tree's own spelling for the message; a
+    # tree that spells one image two ways must still yield one verdict, deterministically.
+    x86_requested: dict[str, str] = {}
+    for label in sorted(every_label):
+        if _norm(label) in x86_wanted:
+            x86_requested.setdefault(_norm(label), label)
+    for image in sorted(x86_requested):
+        label = x86_requested[image]
         providers = pool_providers(snapshot, label)
         if not providers:
             continue  # the pool does not claim it; hosted serves it. Not R2's business.

@@ -462,6 +462,35 @@ def test_r2_greens_once_an_x64_runner_answers_the_image() -> None:
     assert not [p for p in problems if "R2" in p], problems
 
 
+def test_r2_reds_on_a_mixed_case_x86_image_too() -> None:
+    """RED-FIRST (pre-fix: `[]`). R2's intersection must go through `_norm`.
+
+    `every_label` holds the spelling the WORKFLOW used; `X86_IMAGE_LABELS` is lowercase. A
+    raw `X86_IMAGE_LABELS & every_label` drops `runs-on: Ubuntu-Latest`, so R2 is never
+    evaluated for it — while R1 answers the SAME row case-insensitively, so the row counts
+    as served and the 2026-11-04 state (an x86_64 image claimed only by ARM hosts) reports
+    GREEN. GitHub matches labels case-insensitively, so the spelling is not something the
+    workflow author can be expected to get exactly right.
+    """
+    problems = violations({"runners": [ARM]}, {"wf.yml:d": [frozenset({"Ubuntu-Latest"})]})
+    assert any("R2" in p for p in problems), (
+        "an x86_64 image spelled in mixed case is still an x86_64 image — R1 served the row "
+        f"case-insensitively, so R2 must judge it too; got {problems}"
+    )
+    assert any("Ubuntu-Latest" in p for p in problems), (
+        f"the message must quote the tree's own spelling, not the constant's; got {problems}"
+    )
+
+
+def test_r2_reports_one_verdict_per_image_not_per_spelling() -> None:
+    """Two spellings of ONE image are one architecture question, not two violations."""
+    problems = violations(
+        {"runners": [ARM]},
+        {"wf.yml:d": [frozenset({"ubuntu-latest"}), frozenset({"Ubuntu-Latest"})]},
+    )
+    assert len([p for p in problems if "R2" in p]) == 1, problems
+
+
 # ── the snapshot's own anti-fail-open guards ───────────────────────────────────────
 def test_a_future_dated_snapshot_cannot_disable_the_staleness_control() -> None:
     """An unguarded negative age lets a clock-skewed capture certify for a year."""
