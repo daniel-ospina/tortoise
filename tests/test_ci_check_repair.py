@@ -2100,6 +2100,14 @@ def test_an_unmeasured_queue_never_authorises_the_cancel(monkeypatch, capsys, tm
         "a QUEUE refusal must not be reported as a credential failure")
     assert "REFUSED-REPAIR" in captured.err, (
         "...and the cause that did produce the exit must still be named")
+    # ⭐ The consequence sentence must agree with the exit code in the SAME run
+    # (#10641 review P2). This pole exits 1, so "NOT discharged" is true here — and
+    # asserting it is what makes the measured pole's assertion discriminating rather
+    # than a text match on either wording.
+    assert "This window is NOT discharged" in captured.err, (
+        "an UNMEASURED refusal is exactly the window that stays open")
+    assert "self-clearing" not in captured.err, (
+        "a queue nobody read is not a measured congestion that clears itself")
 
 
 def test_the_local_rail_reads_the_refused_count_into_its_signature(tmp_path):
@@ -2196,6 +2204,18 @@ def test_a_MEASURED_congested_refusal_does_not_escalate(monkeypatch, capsys, tmp
         "...and the per-run record says so, so the granular record and the summary "
         "cannot describe different readings")
     assert "REFUSED-REPAIR" in captured.err, "...and it is still NAMED"
+    # ⛔ AND IT MUST NOT CONTRADICT THE EXIT CODE IT PRINTS BESIDE (#10641 review P2).
+    # This fixture exits 0 by design (the suppression is the correct, self-clearing
+    # outcome), yet the notice said "This window is NOT discharged" and offered a
+    # credential remedy for a queue that HAD been read and needed only to drain.
+    # clig.dev's rule is the external form: exit codes are how the consumer decides
+    # succeeded/failed, so a diagnostic must not state the opposite of the code.
+    # Discriminating: pre-fix `"NOT discharged" in stderr` is True and this reddens.
+    assert "This window is NOT discharged" not in captured.err, (
+        "exit 0 IS the discharge: the notice must not say the window is still open")
+    assert "self-clearing" in captured.err, (
+        "the measured pole must say what is actually true — the refusal clears itself "
+        "when the queue drains, with no credential and no manual unjam")
 
 
 def test_a_measured_clear_queue_still_authorises_the_cancel(monkeypatch, capsys,

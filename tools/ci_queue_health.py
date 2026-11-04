@@ -492,6 +492,17 @@ class QueueHealth:
         downstream claim about it false") this module removes everywhere else. The
         `to_dict()` field, the reason line and the comparability sentence above all
         already assume `pr_pending` travels with the line; now it does.
+
+        ⛔ AND `feed=` MUST WITNESS BOTH TRUNCATION FLAGS (#10641 review P2). This
+        branch had THREE causes but `feed=` knew only one of them: `truncated` is
+        fed solely from the queued/running legs (`read_health`:
+        `truncated=queued_truncated or running_truncated`), while a cut
+        `pending`/`requested` leg rides its own `pending_truncated` flag — and it is
+        ALONE enough to reach this branch. Measured on the cut-pending fixture:
+        `CI: PR-UNWITNESSED(..., feed=read)` printed over a leg that WAS cut, which
+        is a false claim in the ONE string the fleet samples. GitHub's run listing
+        returns "up to 1,000 results" per filtered search, i.e. a capped leg is a
+        LOWER BOUND — a summary line may never render it as a completed read.
         """
         if self.verdict == FLOOD:
             return (
@@ -507,7 +518,11 @@ class QueueHealth:
             # `oldest=unmeasured` is the dimension that was not witnessed.
             oldest = self.oldest_pr_queued_age_seconds
             waited = f"{oldest:.0f}s" if oldest is not None else "unmeasured"
-            feed = "truncated" if self.truncated else "read"
+            # ONE WORD FOR EVERY CUT LEG, because the reader's question is "was this
+            # reading complete?" — not "which leg was short?" (the reason line names
+            # the leg). Either flag falsifies the completeness claim the word makes.
+            feed = ("truncated" if (self.truncated or self.pending_truncated)
+                    else "read")
             return (
                 f"CI: PR-UNWITNESSED(queued={self.queued_total}, "
                 f"pr_running={self.pr_running}, pr_queued={self.pr_queued}, "

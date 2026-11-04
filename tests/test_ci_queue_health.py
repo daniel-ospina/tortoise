@@ -1485,6 +1485,17 @@ def test_a_CUT_pending_leg_cannot_certify_the_queue_clear():
     assert health.to_dict()["pending_truncated"] is True
     assert any("pending" in r and "page cap" in r for r in health.reasons), (
         "and the reading says WHICH leg was cut")
+    # ⛔ THE SAMPLED LINE MUST CARRY THE CUT, not just the JSON and the reason line
+    # (#10641 review P2). `feed=` was keyed on `truncated` alone, which `read_health`
+    # feeds only from the queued/running legs — so a cut `pending`/`requested` leg,
+    # which is ALONE enough to reach this branch, rendered `feed=read` over a leg that
+    # was truncated. GitHub's run listing returns "up to 1,000 results" per filtered
+    # search, so a capped leg is a LOWER BOUND and never a completed read.
+    # Discriminating: with `feed` keyed back on `self.truncated` this line says
+    # `feed=read` and both assertions below redden.
+    assert "feed=truncated" in health.state_line, (
+        f"a cut leg must never be rendered as a completed read: {health.state_line!r}")
+    assert "feed=read" not in health.state_line
 
 
 def test_read_health_READS_the_pending_leg(monkeypatch):
@@ -1592,6 +1603,9 @@ def test_a_CUT_requested_leg_cannot_certify_the_queue_clear(monkeypatch):
         "withholds the clearance")
     assert health.verdict == Q.PR_UNWITNESSED
     assert health.congests_pr is None, "the gate must REFUSE, not authorise"
+    assert "feed=truncated" in health.state_line, (
+        "the line the fleet samples says which feed it read — a cut `requested` leg "
+        "is the same missing witness as a cut `pending` one (#10641 review P2)")
 
 
 def test_a_pr_backlog_inside_the_wait_budget_is_ok():

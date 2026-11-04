@@ -2174,13 +2174,34 @@ def main(argv: list[str] | None = None) -> int:
     # Stderr unconditionally, which is the rule this module already applies to
     # `NO-VERDICT-WILL-ARRIVE`.
     if summary["repair_refused"]:
+        # ⛔ THE CONSEQUENCE SENTENCE IS TWO SENTENCES, ONE PER POLE (#10641 review
+        # P2). `repair_refused` is non-zero on BOTH poles, but only the UNMEASURED
+        # one keeps the window open: on a MEASURED congestion `main()` deliberately
+        # hands back exit 0 (the suppression is the correct, self-clearing outcome —
+        # see the `congestion is None` guard above). Emitting "This window is NOT
+        # discharged" there contradicted the exit status in the same run and sent the
+        # operator to a credential remedy for a queue that had already been READ and
+        # needed only to drain. clig.dev's rule is the external form of it: exit
+        # codes are how the consumer decides succeeded/failed, so a diagnostic must
+        # not report the opposite of the code beside it.
+        if summary["queue_congestion_measured"]:
+            consequence = (
+                "This refusal does NOT hold the window open: the congestion was "
+                "MEASURED, so the suppression is the correct, self-clearing "
+                "outcome and the repair fires on the first pass that finds the "
+                "queue drained. No credential or manual unjam is involved."
+            )
+        else:
+            consequence = (
+                "This window is NOT discharged: read the queue, or run the repair "
+                "with a credential that can unjam it."
+            )
         print(f"ci-check-repair: REFUSED-REPAIR — {summary['repair_refused']} "
               f"zero-job run(s) were identified and NOT cancelled/rerun because the "
               f"queue reading did not certify it clear "
               f"(queue_congestion_measured={summary['queue_congestion_measured']}, "
-              f"queue_congested={summary['queue_congested']}). This window is NOT "
-              f"discharged: read the queue, or run the repair with a credential "
-              f"that can unjam it.", file=sys.stderr)
+              f"queue_congested={summary['queue_congested']}). {consequence}",
+              file=sys.stderr)
     if args.json:
         print(json.dumps(summary, indent=2))
     else:
