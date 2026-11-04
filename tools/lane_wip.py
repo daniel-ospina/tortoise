@@ -899,10 +899,28 @@ def _pin_lacks_change(root: Path, tree: str, dirty: list[str]) -> list[str]:
             continue  # a deletion is recorded by absence; nothing to compare
         got = _git("hash-object", "--", rel, check=False, cwd=root)
         if got.returncode != 0:
-            continue
+            # ⛔ "COULD NOT COMPARE" IS NOT "THE PIN HOLDS IT". `continue` here read a FAILED
+            # read as agreement, so the CLEAN cross-check passed and `pin` printed "clean —
+            # nothing to pin" over a worktree holding work it had not captured — the exact
+            # verdict this function exists to refuse. Every sibling read in this module
+            # (`_object_present`, `_verify_opt`, `_inside_work_tree`, `_branch_exists`) raises
+            # on the same shape; this one and `_paths_git_calls_dirty` were the two that failed
+            # open. Measured with a `status`/`hash-object` PATH shim over an out-of-cone sparse
+            # edit: rc 0, no ref, "working tree matches HEAD".
+            raise GitFailed(
+                got.returncode,
+                f"could not hash {rel} to compare it with the pin "
+                f"({(got.stderr or got.stdout).strip() or 'no diagnostic'}) — refusing to "
+                "report the pin as complete",
+            )
         want = _git("ls-tree", tree, "--", rel, check=False, cwd=root)
         if want.returncode != 0:
-            continue
+            raise GitFailed(
+                want.returncode,
+                f"could not read {rel} out of the pin to compare it "
+                f"({(want.stderr or want.stdout).strip() or 'no diagnostic'}) — refusing to "
+                "report the pin as complete",
+            )
         fields = want.stdout.split()
         if len(fields) < 3:
             out.append(rel)  # not in the pin at all
@@ -923,7 +941,17 @@ def _paths_git_calls_dirty(root: Path) -> list[str]:
         cwd=root,
     )
     if st.returncode != 0:
-        return []
+        # ⛔ AN UNKNOWN IS NOT "NO CHANGE". Returning `[]` on a failed read made the CALLER's
+        # `if dirty_paths:` false, so the cross-check silently agreed and `pin` answered
+        # "clean — nothing to pin" at rc 0 with no ref written. This is the function whose
+        # own comment says a disagreement is a REFUSAL — so a read that could not be taken must
+        # refuse too, exactly as `_branch_exists`/`_verify_opt`/`_target_is_dirty` do.
+        raise GitFailed(
+            st.returncode,
+            f"could not read `git status` in {root} "
+            f"({(st.stderr or st.stdout).strip() or 'no diagnostic'}), so a change this pin "
+            "does NOT hold cannot be ruled out — refusing to report the pin as complete",
+        )
     # ⛔ ONLY A WORKTREE-SIDE CHANGE COUNTS. `git status` also reports STAGED-ONLY entries
     # (`A  x`), which the pin captures through its index parent and `add -f`, and those are
     # not "a change this pin does not hold" — refusing on them killed the staged-only and
@@ -1079,11 +1107,29 @@ def cmd_pin(args: argparse.Namespace) -> int:
     # to recover from (measured: hub pinned `--path .../lane`, hub's own `show-ref` listed
     # `refs/pi-lane-wip/lane-7f4da997/1`, and `recover` from the hub worked at rc 0). Visibility
     # is also the question the reader is actually asking.
-    holds_ref = caller_root is not None and (
-        _git("show-ref", "--verify", "--quiet", ref, check=False, cwd=caller_root).returncode == 0
+    # ⛔ THREE-WAY READ, LIKE `_branch_exists` — rc 1 is a real "this repo does not hold it",
+    # anything else is UNKNOWN. `returncode == 0` alone rendered a FAILED read (128: a torn
+    # cell, transient I/O, a shim) as the FACT "another repository", printing a note that
+    # named a different repo at rc 0 (measured with a `show-ref` shim on a same-repo pin).
+    # A raise is NOT available here: the ref is already written, and exit 1 is reserved by this
+    # module as "never a verdict about a lane's work" — so an unknown is stated as unknown.
+    show = (
+        _git("show-ref", "--verify", "--quiet", ref, check=False, cwd=caller_root)
+        if caller_root is not None
+        else None
+    )
+    holds_ref = show is not None and show.returncode == 0
+    unknown_repo = show is not None and not holds_ref and not (
+        show.returncode == 1 and not (show.stdout or show.stderr).strip()
     )
     if holds_ref:
         print(f"recover with: tools/lane_wip.py recover {ref} --into <path>{handle}")
+    elif unknown_repo:
+        print(f"recover with: tools/lane_wip.py recover {ref} --into <path>{handle}")
+        print(
+            f"  (could not tell which repository holds this pin — if `recover` cannot see "
+            f"the ref, pass `--path {root}`)"
+        )
     else:
         # `--path <root>` makes `recover` read the ref from the repository that holds it.
         print(f"recover with: tools/lane_wip.py recover {ref} --path {root} --into <path>{handle}")
@@ -1302,8 +1348,13 @@ def cmd_list(args: argparse.Namespace) -> int:
         refs += [ln.strip() for ln in cp.stdout.splitlines() if ln.strip()]
     refs = list(dict.fromkeys(refs))
     if not refs:
+        # ⛔ "NO PINS" MUST NAME THE REPOSITORY IT IS TRUE OF. Refs are repository-scoped, so an
+        # unqualified empty answer reads as "the work is gone" to a lane whose pins a hub
+        # minted into another repo — the verdict this module forbids, printed by the verb
+        # RECIPE step 1 tells a disaster victim to run.
         scope = (
-            "no lane has any wip pin"
+            "no lane has any wip pin in this repository — refs are per-repository, so also run "
+            "`--all` from the repository that held the lane's worktree"
             if args.all
             else (
                 f"lane {lane_stash.lane_key(keyed)} has no wip pin — "
@@ -1351,8 +1402,9 @@ def _resolve_commit(target: str, *, cwd: Path) -> str:
         raise LaneWipError(
             f"{target!r} does not name a commit in this repository — "
             "`tools/lane_wip.py list --all` shows every pin IN THIS REPOSITORY. A pin taken "
-            "with `--path <a worktree in another repo>` lives in THAT repository: pass "
-            "`--path <that worktree>`, or run this from there"
+            "with `--path <a worktree in another repo>` lives in THAT repository: run this "
+            "from a worktree of it (omit `--path`), or pass `--path <a path that still "
+            "exists there>` — a destroyed worktree path falls back to THIS repository"
         )
     return sha
 
@@ -2233,6 +2285,11 @@ dirty tree returns 0 and the content is gone; nothing in git gets it back.
 
        tools/lane_wip.py list --all
 
+   ⛔ REFS ARE PER-REPOSITORY. Run this from the repository that held the lane's
+   worktree (for a linked worktree, that is the repository you added it from) —
+   `--all` in some OTHER repo answers "no lane has any wip pin" while the pin sits
+   one ref away, and that answer does NOT mean the work is gone.
+
    The lane key is `<sanitized-worktree-basename>-<sha1(path)[:8]>`, so the dead
    worktree's own name identifies its pins.
 
@@ -2245,8 +2302,10 @@ dirty tree returns 0 and the content is gone; nothing in git gets it back.
    with `read-tree --reset -u`, which restores modifications, untracked files AND
    deletions — the working state as it was, not the commit.
 
-3. If the pin list is EMPTY, the work is genuinely gone. The only remaining hope is
-   a copy that left the worktree: a reviewer's diff snapshot (e.g.
+3. If the pin list is EMPTY **in this repository**, run `list --all` from the
+   repository that held the lane's worktree before concluding anything; only when it
+   is empty THERE is the work genuinely gone. The only remaining hope then is a copy
+   that left the worktree: a reviewer's diff snapshot (e.g.
    `/tmp/<lane>-review-diff.txt`, which is what saved lane `p1-10538`), a `git
    stash` entry, or a peer lane's checkout. Re-apply it by hand.
 

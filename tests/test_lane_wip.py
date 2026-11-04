@@ -1054,6 +1054,13 @@ case "$sub" in
         echo "shim: refusing ls-tree (gitlink probe)" >&2; exit 128
       fi
     fi ;;
+  # ⛔ THE CLEAN CROSS-CHECK'S TWO READS. Both used to FAIL OPEN (`return []` /
+  # `continue`), so a failed read made the cross-check agree and `pin` printed "clean —
+  # nothing to pin" over work it had not captured. Each arm exists so that can be pinned.
+  hash-object)
+    [ -n "$LW_FAIL_HASH_OBJECT" ] && {{ echo "shim: refusing hash-object" >&2; exit 128; }} ;;
+  status)
+    [ -n "$LW_FAIL_STATUS" ] && {{ echo "shim: refusing status" >&2; exit 128; }} ;;
   for-each-ref)
     [ -n "$LW_FAIL_FOR_EACH_REF" ] && {{ echo "shim: refusing for-each-ref" >&2; exit 128; }} ;;
   diff-tree)
@@ -1096,10 +1103,18 @@ exec {real} $prefix "$@"
     return shim_dir
 
 
-def _run_tool_with_shim(shim: Path, env_key: str, *args: str, cwd: Path, value: str = "1"):
+def _run_tool_with_shim(
+    shim: Path,
+    env_key: str,
+    *args: str,
+    cwd: Path,
+    value: str = "1",
+    extra_env: dict[str, str] | None = None,
+):
     env = dict(os.environ)
     env["PATH"] = f"{shim}{os.pathsep}{env.get('PATH', '')}"
     env[env_key] = value
+    env.update(extra_env or {})
     return subprocess.run(
         [PYTHON, str(TOOL), *args],
         cwd=str(cwd),
@@ -4091,6 +4106,79 @@ def test_a_sparse_lane_pins_out_of_cone_work_BESIDE_in_cone_work(hub: Path) -> N
         f"the pin kept HEAD's content for the out-of-cone path: {body.stdout!r}"
     )
     assert git("show", f"{ref}:keep/a.txt", cwd=hub).stdout.startswith("keep v2"), "in-cone lost"
+
+
+def test_a_failed_status_read_is_a_refusal_not_nothing_to_pin(
+    hub: Path, git_shim: Path
+) -> None:
+    """`_paths_git_calls_dirty` returning `[]` on a failed read FAILED OPEN.
+
+    The caller only acts on a NON-empty result, so `return []` for a failed `git status`
+    made the cross-check silently AGREE and `pin` answered "clean — nothing to pin" at
+    rc 0 with no ref written — over the sparse lane's only copy of its work. The module's
+    own comment demands a disagreement be a REFUSAL; a read that could not be taken is not
+    agreement either. Every sibling read (`_verify_opt`, `_object_present`,
+    `_branch_exists`, `_target_is_dirty`) already raises on the same shape.
+    """
+    wt = _sparse_lane(hub, "wt-fail-status")
+    (wt / "prune").mkdir(exist_ok=True)
+    (wt / "prune" / "b.txt").write_text("THE LANE'S ONLY COPY\n")
+
+    # reach the CLEAN cross-check the way #10812 does it: an old git silently skips the
+    # out-of-cone path, so the snapshot tree equals HEAD and the cross-check decides.
+    out = _run_tool_with_shim(
+        git_shim, "LW_OLD_GIT_ADD", "pin", cwd=wt, extra_env={"LW_FAIL_STATUS": "1"}
+    )
+    assert out.returncode != 0, f"an unreadable status must not read as success: {out.stdout}"
+    assert "clean — nothing to pin" not in out.stdout, out.stdout
+    assert "could not read `git status`" in out.stderr, out.stderr
+    refs = git("for-each-ref", "--format=%(refname)", "refs/pi-lane-wip/", cwd=hub)
+    assert refs.stdout.strip() == "", f"a pin claiming completeness was minted: {refs.stdout}"
+
+
+def test_a_failed_compare_is_refused_not_read_as_the_pin_holding_it(
+    hub: Path, git_shim: Path
+) -> None:
+    """`_pin_lacks_change`'s `continue` read a FAILED `hash-object` as "the pin holds it".
+
+    Reached when the snapshot tree equals HEAD while `git status` reports a change (the
+    sparse out-of-cone shape), so `continue` emptied the refusal list and `pin` printed
+    "clean — nothing to pin" over the lane's only copy. "Could not compare" is never "the
+    pin holds it".
+    """
+    wt = _sparse_lane(hub, "wt-fail-hashobject")
+    (wt / "prune").mkdir(exist_ok=True)
+    (wt / "prune" / "b.txt").write_text("THE LANE'S ONLY COPY\n")
+
+    out = _run_tool_with_shim(
+        git_shim, "LW_OLD_GIT_ADD", "pin", cwd=wt, extra_env={"LW_FAIL_HASH_OBJECT": "1"}
+    )
+    assert out.returncode != 0, f"a failed compare must not read as success: {out.stdout}"
+    assert "clean — nothing to pin" not in out.stdout, out.stdout
+    assert "could not hash" in out.stderr, out.stderr
+    refs = git("for-each-ref", "--format=%(refname)", "refs/pi-lane-wip/", cwd=hub)
+    assert refs.stdout.strip() == "", f"a pin claiming completeness was minted: {refs.stdout}"
+
+
+def test_an_unreadable_show_ref_is_UNKNOWN_not_another_repository(
+    hub: Path, git_shim: Path
+) -> None:
+    """A failed `show-ref` is not the FACT "this pin lives in a DIFFERENT repository".
+
+    `holds_ref` was `returncode == 0`, with no third state, so rc 128 (transient I/O, a torn
+    cell, a shim) rendered as the assertion that the pin lives elsewhere — measured on a
+    SAME-repo pin, which then got an unnecessary `--path` and a false note. rc 1 is a real
+    "this repo does not hold it"; anything else must be stated as unknown. A raise is not
+    available here: the ref is already written and exit 1 is reserved as "never a verdict
+    about a lane's work".
+    """
+    wt = dirty_lane(hub, "wt-shim-showref")
+    out = _run_tool_with_shim(git_shim, "LW_FAIL_SHOW_REF", "pin", cwd=wt)
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert "DIFFERENT repository" not in out.stdout, (
+        f"a failed read was stated as a fact: {out.stdout}"
+    )
+    assert "could not tell which repository" in out.stdout, out.stdout
 
 
 def test_an_old_git_without_add_sparse_still_refuses_the_false_clean(
