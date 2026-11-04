@@ -51,10 +51,17 @@ rail's own words in the attempt-scoped log — and an exit code alone never make
 a merge (see `_merge_evidence`):
 
     waiting   no `EXIT=` yet, and something that carries the rail — the wrapper,
-              the rail itself, or the process group in the fork window — is alive
+              the rail itself, or the process group in the fork window — is alive.
+              ⛔ ALIVE OUTRANKS ANNOUNCED: a rail that has printed its success
+              line but is still running (its post-merge bookkeeping) reads `waiting`
+              here, because the announcement only becomes a verdict once nothing
+              that carries it is left. An announced merge beats `lost`; it never
+              beats `waiting`. (`collect --assert-merged` therefore stays 1 while
+              the rail lives — the gate refuses to certify an in-flight merge.)
     merged    the log carries the rail's OWN success line (`✅ merged PR #N at
               <sha>`, `✅ merged PR #N (state=` or `PR #N is ALREADY MERGED`),
-              whether or not an `EXIT=` line ever landed
+              whether or not an `EXIT=` line ever landed — and nothing that
+              carries the rail is still alive
     refused   an `EXIT=` line with NO merge line in the log: `EXIT=0` without a
               merge line is a DECLINED merge (`--dry-run`, `--help`), not a merge
     lost      nothing that carries the verdict is left and there is no `EXIT=`
@@ -827,16 +834,31 @@ def _names_this_pr(found: str, pr: int) -> bool:
     return _int_or_none(found) == pr
 
 
+def _repo_key(value: str) -> str:
+    """`owner/name`, lower-cased, with any host prefix dropped.
+
+    ⛔ BOTH SIDES OF THE REPO COMPARISON MUST BE IN THE SAME FORM. The rail
+    NORMALISES its target before printing it (`rail_normalize_slug` drops an
+    attestable host), so `github.com/o/r` is announced as `o/r` — while `launch`
+    writes `REPO=` exactly as it was given. Comparing those raw made a REAL merge
+    read `refused`, with a reason ("the rail did not merge (e.g. --dry-run)") that
+    says the opposite of what happened. Same two fields, one form.
+    """
+    parts = [p for p in value.strip().split("/") if p]
+    return "/".join(parts[-2:]).lower() if parts else ""
+
+
 def _names_this_repo(log: str, repo: str) -> bool:
     """Does the rail's own evidence line say it graded the repo this artifact
     names? ONE-SIDED: no evidence line, or no `REPO=` in the artifact, means there
     is nothing to contradict, so the answer is True; a line naming a different repo
     is False (no evidence). The LAST line wins — a rail prints one per resolution
-    and every later call uses the final answer."""
+    and every later call uses the final answer. Both sides are compared as
+    `owner/name`, so a normalised announcement matches a raw artifact value."""
     found = REPO_EVIDENCE_RE.findall(log)
     if not found or not repo:
         return True
-    return found[-1].strip().lower() == repo.strip().lower()
+    return _repo_key(found[-1]) == _repo_key(repo)
 
 
 # ── collect ──────────────────────────────────────────────────────────────────
@@ -1079,13 +1101,22 @@ def collect(state_dir: Path, repo: str, pr: int) -> RailState | None:
         # `CHILD_PID=` is the same race one process over: the wrapper can be
         # killed in the instant between the spawn and the child naming itself, so
         # a first read that missed it is not yet "no rail".
-        if (_attempt_exits(fresh) == snap.exits
-                and not (not snap.child and read_field(fresh, "CHILD_PID"))):
-            break
-        # The artifact moved under the probe ⇒ adopt THAT read (and re-derive the
-        # log tail from it) before looping, so no verdict below can be drawn from
-        # the snapshot the move just invalidated.
+        moved = (_attempt_exits(fresh) != snap.exits
+                 or (not snap.child and bool(read_field(fresh, "CHILD_PID"))))
+        # ⛔ ADOPT THE FRESH SNAPSHOT ON EVERY EXIT FROM THE LOOP — INCLUDING THE
+        # `break` — because `_read_snapshot` is what re-reads the LOG, and the log
+        # is where every word a verdict reads is written. The artifact does NOT
+        # move while a rail waits (it changes only at `CHILD_PID=`/`CHILD_STARTED=`
+        # and at `EXIT=`), so an artifact-only "did it move" test made this `break`
+        # conclude from a log read taken BEFORE the probe that had just said the
+        # writer was gone: a rail that printed `✅ merged …` and then died inside
+        # that window was reported `lost` — a few lines below the comment saying
+        # that cannot happen, and `lost` is the state `start` ACCEPTS (so the next
+        # beat truncates the log and the announcement is gone for good: #2235,
+        # #3061).
         snap = _read_snapshot(art, logp_default, text=fresh)
+        if not moved:
+            break
     text, log = snap.text, snap.log
     pid, child = snap.pid, snap.child
     # ⛔ `not exits` USED TO BE SPELLED HERE and could never be false — the `if

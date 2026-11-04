@@ -631,8 +631,10 @@ def test_previous_attempts_merge_line_is_not_inherited(tmp_path):
     sd = tmp_path / "state"
     rd.launch(61, cwd=co, state_dir=sd, repo="o/r")
     # ⛔ WAIT FOR THE SETTLED READ: the rail prints its success line BEFORE its
-    # wrapper appends `EXIT=`, and `collect` answers `merged` in that window
-    # (`exit_code=None`). Without the predicate this arm may snapshot the handoff
+    # wrapper appends `EXIT=`, and while the wrapper is still alive `collect`
+    # reports `waiting` there — a live carrier outranks an announcement (see the
+    # STATES table), so `merged` with `exit_code=None` is the POST-exit shape.
+    # Without the predicate this arm may snapshot the handoff
     # and then race the previous wrapper's append against the new launch's
     # truncation — the flake the sibling arm above was already fixed for.
     assert wait_state(sd, 61, rd.MERGED,
@@ -1136,6 +1138,63 @@ def test_a_merge_line_for_another_repo_is_not_this_prs_merge(tmp_path):
     # and every stub rail this suite uses).
     logp.write_text(mark + merged_line, encoding="utf-8")
     assert rd.collect(sd, "o/r", 12).state == rd.MERGED
+
+    # …and NORMALISED ON BOTH SIDES: the rail drops an attestable host before it
+    # prints the target, so a `github.com/o/r` artifact must still match the
+    # `o/r` it announces. Comparing the raw values made a REAL merge read
+    # `refused`, with a reason that said the operator had run a dry run.
+    art.write_text(
+        f"PR=12\nREPO=github.com/o/r\nSTARTED_AT={rd._iso_now()}\nLOG={logp}\n"
+        f"ATTEMPT_ID=a12\nPID={_reaped_pid()}\n",
+        encoding="utf-8",
+    )
+    logp.write_text(
+        mark + "admin-merge: repo o/r (resolved from --repo)\n" + merged_line,
+        encoding="utf-8")
+    st = rd.collect(sd, "o/r", 12)   # the artifact FILE name is the o/r slug
+    assert st.state == rd.MERGED, st.as_dict()
+
+
+def test_a_merge_written_to_the_log_only_is_not_lost(tmp_path, monkeypatch):
+    """⛔ THE ARTIFACT STOPS MOVING ONCE A RAIL IS WAITING; THE LOG DOES NOT.
+
+    The two-pass loop exists so a `lost` conclusion comes from a read taken AFTER
+    the liveness probe — but the "did it move?" test compared the ARTIFACT only,
+    and the artifact changes only at `CHILD_PID=`/`CHILD_STARTED=` and at `EXIT=`.
+    During the whole of a rail's wait it does not move at all, while the log is
+    where every word a verdict reads is written. So the `break` concluded from a
+    log read taken BEFORE the probe, and a rail that printed `✅ merged …` and then
+    died in that window was reported `lost` — the state `start` ACCEPTS, so the
+    next beat truncates the log and the announcement is permanently gone (#2235,
+    #3061).
+
+    Reproduced without a race: the probe appends only to the LOG and answers
+    "gone"; the artifact is never touched. Pre-fix `lost`; post-fix the rail's own
+    evidence.
+    """
+    sd = tmp_path / "state"
+    sd.mkdir()
+    art = rd.artifact_path(sd, "o/r", 74)
+    logp = rd.log_path(sd, "o/r", 74)
+    art.write_text(
+        f"PR=74\nREPO=o/r\nSTARTED_AT={rd._iso_now()}\nLOG={logp}\n"
+        f"ATTEMPT_ID=a74\nPID={_reaped_pid()}\n",
+        encoding="utf-8",
+    )
+    logp.write_text(f"\n{rd.ATTEMPT_MARK} x attempt=a74 (detached) =====\n"
+                    "admin-merge: … FIRST-CHECKS wait: run 41557371710 is pending\n",
+                    encoding="utf-8")
+
+    def probe(leader, child, marker, **_kw):
+        with logp.open("a", encoding="utf-8") as fh:
+            fh.write("admin-merge: ✅ merged PR #74 at deadbeefcafe1234 "
+                     "(state=MERGED confirmed via the API)\n")
+        return False                                    # GONE
+
+    monkeypatch.setattr(rd, "_rail_alive", probe)
+    st = rd.collect(sd, "o/r", 74)
+    assert st.state == rd.MERGED, st.as_dict()           # pre-fix: LOST
+    assert st.merge_sha == "deadbeefcafe1234"
 
 
 def test_the_attempt_mark_names_its_attempt_so_a_previous_tail_is_not_ours(tmp_path):
