@@ -332,6 +332,13 @@ enumeration** — a warning key outside this table is a divergence; report it.
 > (`mitigation_orphan_residue`, `mitigation_drift_duplicate`) describe
 > crash-orphan re-link and post-re-key drift; **no write door emits them yet** —
 > they are reserved vocabulary for those recovery flows, not observable today.
+> ⛔ **Row 1 (`append_only_items`) is ALSO declared-but-unemitted**, and that is
+> the one a caller is most likely to build a duplicate detector on. Measured on
+> this tree: re-ingesting a bundle holding one `event` and one `document` entity
+> item returns `created.entities: 2` and `warnings: []`. The append-only
+> behaviour on that row is real; only the report is missing. `§15` says so where
+> it matters, and the gap is **#10899** — until it closes, `created.entities` is
+> the only way to see the second occurrence.
 
 ---
 
@@ -773,8 +780,9 @@ declares an `append_only_items` key, but the entity leg does not emit it today
 (measured: re-ingesting a bundle holding one `event` and one `document` entity
 returns `created.entities: 2` and `warnings: []`). To detect a duplicate, compare
 `created.entities` across the retry — a non-zero count on the second run **is**
-the second occurrence. The declared-but-unemitted key is a contract gap tracked
-under #7534's burn-down, not a signal you can key on.
+the second occurrence — a non-zero count on the
+second run **is** the second occurrence. The declared-but-unemitted key is the
+contract gap in **#10899**, not a signal you can key on.
 
 ⚠️ **This is also why `tortoise_ingest` is NOT declared idempotent on the MCP
 surface** (`annotations.idempotentHint: false`). A `-32009` wait-bound refusal on
