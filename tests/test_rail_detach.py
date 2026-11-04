@@ -18,6 +18,7 @@ says, and the launcher never resolves a repo it was given.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
@@ -62,19 +63,67 @@ def make_checkout(tmp_path: Path, body: str = FAKE_RAIL) -> Path:
     return co
 
 
+def fake_gh(tmp_path: Path, script: str, sub: str = "bin") -> Path:
+    """A `gh` on PATH — the launcher's one external call, made hermetic."""
+    bindir = tmp_path / sub
+    bindir.mkdir(exist_ok=True)
+    gh = bindir / "gh"
+    gh.write_text(script, encoding="utf-8")
+    gh.chmod(0o755)
+    return bindir
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_gh(tmp_path, monkeypatch):
+    """`launch()` reads the PR head with ONE best-effort `gh` call.
+
+    ⛔ THIS SUITE USED TO MAKE A REAL `gh pr view` PER LAUNCH — ~1.9 s each on a
+    rate-limited box, one per test that launches, and a network dependency in a
+    file whose registration says it is hermetic. The call is INFORMATIONAL
+    (nothing gates on `HEAD`), so a `gh` that answers nothing is the honest stub:
+    `HEAD` records `unreadable` and every verdict assertion below is unaffected.
+    (Stated per-launch, not as a launch COUNT: a count here is stale the moment a
+    test is added — the same reason the `config/ci-surfaces.yml` row carries none.)
+    """
+    bindir = fake_gh(tmp_path, "#!/usr/bin/env bash\nexit 1\n")
+    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}")
+
+
 def launch(state_dir, co, pr=7, **kw):
     return rd.launch(pr, cwd=co, state_dir=state_dir, repo="o/r", **kw)
 
 
-def wait_state(state_dir, pr, want, timeout=15.0):
+def wait_state(state_dir, pr, want, timeout=15.0, pred=None):
     end = time.time() + timeout
     st = None
     while time.time() < end:
         st = rd.collect(state_dir, "o/r", pr)
-        if st is not None and st.state == want:
+        if st is not None and st.state == want and (pred is None or pred(st)):
             return st
         time.sleep(0.05)
     return st
+
+
+def wait_field(path: Path, key: str, timeout=10.0) -> str:
+    end = time.time() + timeout
+    while time.time() < end:
+        value = rd.read_field(path.read_text(encoding="utf-8"), key)
+        if value:
+            return value
+        time.sleep(0.02)
+    return ""
+
+
+def kill_group(pid: int, sig=signal.SIGKILL) -> None:
+    """Kill a rail's WHOLE process group — the wrapper AND the rail.
+
+    ⛔ `PID=` is the `bash -c` WRAPPER and `CHILD_PID=` is the rail, and they die
+    separately: killing only the wrapper leaves the rail RUNNING (that is the P1
+    this file now pins). "The rail is gone" therefore means the group, never the
+    one pid.
+    """
+    with contextlib.suppress(OSError):   # ProcessLookupError: already gone
+        os.killpg(os.getpgid(pid), sig)
 
 
 # ── the collect contract ─────────────────────────────────────────────────────
@@ -96,7 +145,14 @@ def test_merged_state_names_the_sha_the_rail_printed(tmp_path):
     co = make_checkout(tmp_path)
     sd = tmp_path / "state"
     launch(sd, co, pr=11)
-    st = wait_state(sd, 11, rd.MERGED)
+    # ⛔ WAIT FOR THE SETTLED READ, not merely the first `merged`. A rail prints
+    # its success line BEFORE it appends `EXIT=`, and `collect` answers `merged`
+    # in that window (`exit_code=None`) — a terminal state, a real merge, but not
+    # yet this test's evidence. Without the predicate this test is a race: it
+    # failed twice in two runs at load 27 on 2026-11-03 while passing in
+    # isolation, i.e. an intermittent red on a CI-gating file for a diff that
+    # changed nothing.
+    st = wait_state(sd, 11, rd.MERGED, pred=lambda s: s.exit_code is not None)
     assert st.state == rd.MERGED
     assert st.exit_code == 0
     assert st.merge_sha == "deadbeefcafe1234"      # from the rail's own log line
@@ -118,13 +174,8 @@ def test_refused_state_carries_the_rails_own_reason(tmp_path, monkeypatch):
 def test_a_killed_rail_is_lost_never_merged(tmp_path):
     """No EXIT line is NOT a verdict. Reporting `merged` here would be #2235.
 
-    POLLED, not a fixed sleep. A SIGKILLed launcher is a ZOMBIE until its parent
-    reaps it, and the window in which the OS has not yet published that state is
-    long enough to lose a race: measured on macOS at this head, `time.sleep(0.3)`
-    plus a single `collect` reddened this case while the same tree passed with a
-    poll. The ASSERTION is unchanged — only `lost` satisfies it, and a rail that
-    stays `waiting` (the non-Linux zombie hole `tools/rail_detach.py::
-    _process_state` closes) still fails here, at the deadline.
+    The kill is to the GROUP: `PID=` names the wrapper, and killing it alone
+    leaves the rail it started running (see the wrapper arm below).
     """
     co = make_checkout(tmp_path)
     sd = tmp_path / "state"
@@ -134,10 +185,160 @@ def test_a_killed_rail_is_lost_never_merged(tmp_path):
     finally:
         os.environ.pop("FAKE_RAIL_SLEEP", None)
     time.sleep(0.2)
-    os.kill(ln.pid, signal.SIGKILL)
-    st = wait_state(sd, 13, rd.LOST)
+    kill_group(ln.pid)
+    time.sleep(0.3)
+    st = rd.collect(sd, "o/r", 13)
     assert st.state == rd.LOST and st.exit_code is None
     assert "no EXIT line" in st.reason
+
+
+def test_a_killed_wrapper_does_not_lose_a_live_rail(tmp_path, monkeypatch):
+    """⛔ TWO PROCESSES CARRY THE VERDICT, AND THEY DIE SEPARATELY.
+
+    `start` runs `bash -c <wrapper>`, and the wrapper runs the lander as a
+    background job so it can `wait` for it and write `EXIT=`. `PID=` therefore
+    names the WRAPPER; the rail has its own pid (`CHILD_PID=`, written by the rail
+    itself). Probing only the wrapper reported `lost` for a rail that was still
+    merging — measured before the fix: the rail went on to print its `✅ merged`
+    line with nobody left to write `EXIT=`, while `collect` said `lost`, so the
+    next beat's `start` was allowed, truncated the artifact and appended a new
+    attempt mark, which scopes that real merge line out for good (#2235's durable
+    wrong verdict, in the safe direction but permanent).
+    """
+    co = make_checkout(tmp_path)
+    sd = tmp_path / "state"
+    monkeypatch.setenv("FAKE_RAIL_SLEEP", "3")
+    ln = launch(sd, co, pr=75)
+    assert wait_state(sd, 75, rd.WAITING).state == rd.WAITING
+    art = rd.artifact_path(sd, "o/r", 75)
+    child = int(wait_field(art, "CHILD_PID") or 0)
+    assert child > 0, art.read_text()          # named by the RAIL, not the wrapper
+    assert child != ln.pid                     # …and it is a different process
+    os.kill(ln.pid, signal.SIGKILL)            # the WRAPPER dies; the rail lives on
+    time.sleep(0.2)
+    st = rd.collect(sd, "o/r", 75)
+    assert st.state != rd.LOST, st.as_dict()   # pre-fix: `lost` while it was merging
+    st = wait_state(sd, 75, rd.MERGED, timeout=25)
+    assert st.state == rd.MERGED and st.merge_sha == "deadbeefcafe1234"
+    assert st.exit_code is None
+    assert "EXIT line was never written" in st.reason
+
+
+def test_the_fork_window_is_not_lost(tmp_path):
+    """⛔ `child == 0` IS NOT "NO RAIL" — it is the window BEFORE `CHILD_PID=`.
+
+    The wrapper forks the rail and the rail records ITS OWN pid a few
+    instructions later. A wrapper killed in that window leaves no pid naming the
+    rail, while the rail is alive and about to merge — the same durable-wrong-
+    verdict shape as the arm above, reached by a different clock. The GROUP
+    still answers and the rail is in it by construction, so `lost` here would
+    truncate the artifact and scope out a real `✅ merged`.
+
+    Discriminating: with the group probe removed, this reads `lost`.
+    """
+    # A SESSION LEADER that forks a child into its own group and then EXITS: the
+    # leader is gone, `child == 0` (nothing named the rail yet), the group is not.
+    leader = subprocess.Popen(
+        ["bash", "-c", "sleep 30 & exit 0"],
+        start_new_session=True,
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    try:
+        leader.wait(timeout=10)
+        assert _group_alive(leader.pid), "the forked child left the group"
+        assert rd._pid_alive(leader.pid, "") is False      # the WRAPPER is gone
+        assert rd._rail_alive(leader.pid, 0, str(tmp_path / "rail-o-r-77.md"))
+    finally:
+        with contextlib.suppress(OSError):
+            os.killpg(leader.pid, signal.SIGKILL)
+
+
+def _group_alive(pgid: int) -> bool:
+    """Does the process GROUP still have a live member? `killpg(…, 0)` answers
+    for the group, not for its leader — which is the whole point of the arm."""
+    try:
+        os.killpg(pgid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def test_a_recycled_pid_without_procfs_does_not_read_waiting(tmp_path, monkeypatch):
+    """⛔ ON A BOX WITHOUT PROCFS the argv marker was silently dropped.
+
+    `_pid_alive` consulted only the `ps` STAT letter there, so ANY live pid
+    inherited from a dead rail read `waiting` — reported alive forever AND
+    refusing every later `start` on the PR (the unrailable wedge this module
+    exists to remove; `SPAWNING_TTL_S` cannot age a pid-based `waiting` out).
+    The wrapper NEVER execs, so its argv carries the artifact path for its whole
+    life and IS a usable identity test for it (unlike for the rail, which execs
+    — that is what `pgid` is for).
+    """
+    monkeypatch.setattr(rd, "_proc_stat_letter", lambda pid: None)
+    monkeypatch.setattr(rd, "_proc_cmdline", lambda pid: None)
+    monkeypatch.setattr(rd, "_PS_USABLE", True)
+    me = os.getpid()
+    marker = str(tmp_path / "rail-o-r-91.md")
+
+    def unrelated(*args):
+        return "some-unrelated-process --flag\n" if "command=" in args else f"{me} S\n"
+
+    monkeypatch.setattr(rd, "_ps", unrelated)
+    assert rd._pid_alive(me, marker) is False        # pre-fix: True, forever
+
+    def ours(*args):
+        return f"bash -c ... {marker}\n" if "command=" in args else f"{me} S\n"
+
+    monkeypatch.setattr(rd, "_ps", ours)
+    assert rd._pid_alive(me, marker) is True         # the real wrapper still reads alive
+
+
+def test_the_no_procfs_argv_probe_asks_ps_for_the_full_width(tmp_path, monkeypatch):
+    """⛔ BSD/macOS `ps` TRUNCATES `command=` TO THE DISPLAY WIDTH (80 when stdout
+    is not a tty), which cuts the artifact path off BEFORE the marker.
+
+    So on the box class this module says lanes run on — macOS, no procfs, this is
+    the ONLY identity probe for the wrapper — a LIVE wrapper reads as "not ours"
+    and `collect` draws `lost` from it. `-ww` is what makes the marker readable at
+    all. Pinned on the argv (`ps` must be ASKED for the full width), never by
+    monkeypatching `_ps` away — that is why the sibling arm could not see it.
+    """
+    seen: list[tuple[str, ...]] = []
+
+    def recording_ps(*args):
+        seen.append(args)
+        return "some-unrelated-process --flag\n"   # a truncated line: no marker
+
+    monkeypatch.setattr(rd, "_proc_stat_letter", lambda pid: None)
+    monkeypatch.setattr(rd, "_proc_cmdline", lambda pid: None)
+    monkeypatch.setattr(rd, "_ps_stat", lambda pid: "S")
+    monkeypatch.setattr(rd, "_ps", recording_ps)
+    marker = str(tmp_path / "rail-o-r-92.md")
+    assert rd._pid_alive(os.getpid(), marker) is False
+    assert any("command=" in argv for argv in seen), seen
+    assert all("-ww" in argv for argv in seen if "command=" in argv), seen
+
+
+def test_an_unspawnable_launch_is_an_environment_error_not_a_gate_verdict(
+    tmp_path, monkeypatch, capsys
+):
+    """⛔ EXIT 1 IS THE MACHINE GATE ("not merged"). A `Popen` that raised is not.
+
+    `main()` caught only `Refused`, so an `OSError` from the spawn (EAGAIN under
+    cell load — named in this module's own `SPAWNING` comment — ENOMEM, a
+    vanished CWD) escaped as a traceback and exited 1, which `collect
+    --assert-merged` publishes as "not merged". Same mis-signal class as the
+    missing-`gh` fix, which already has a dedicated test.
+    """
+    monkeypatch.setenv("CELL_HOME", str(tmp_path))
+
+    def boom(*a, **kw):
+        raise BlockingIOError(11, "Resource temporarily unavailable")
+
+    monkeypatch.setattr(rd, "launch", boom)
+    rc = rd.main(["start", "77", "--repo", "o/r", "--cwd", str(tmp_path)])
+    assert rc == 2, f"pre-fix: exits 1 (the --assert-merged gate code), got {rc}"
+    assert "Resource temporarily unavailable" in capsys.readouterr().err
 
 
 def test_announced_merge_survives_a_missing_exit_line(tmp_path):
@@ -158,21 +359,81 @@ def test_announced_merge_survives_a_missing_exit_line(tmp_path):
     assert "EXIT line was never written" in st.reason
 
 
+def test_a_rail_that_exits_during_the_liveness_probe_keeps_its_exit_code(tmp_path, monkeypatch):
+    """The artifact is read BEFORE the liveness probe, so a rail that appends
+    `EXIT=` and exits *while* that probe runs is seen as GONE holding a read that
+    predates its EXIT — `merged` with `exit_code=None` and the false reason "the
+    EXIT line was never written", for a rail that wrote one.
+
+    The state stayed `merged` (the rail's own success line was in the log), so no
+    gate moved; what was wrong was the exit code and the explanation. It is not
+    theoretical: it made `test_merged_state_names_the_sha_the_rail_printed`
+    flake 2/2 at load 27 on 2026-11-03 while passing in isolation, i.e. an
+    intermittent red on a CI-gating file for a diff that changed nothing.
+
+    The race is reproduced WITHOUT a race — the stub writes the EXIT line and
+    answers "gone" in the same call, which is exactly the interleaving that the
+    real code hit by luck.
+    """
+    co = make_checkout(tmp_path)
+    sd = tmp_path / "state"
+    ln = launch(sd, co, pr=74)
+    assert wait_state(sd, 74, rd.MERGED).state == rd.MERGED   # the rail merged…
+    art = rd.artifact_path(sd, "o/r", 74)
+    # …so strip its bookkeeping and let the probe race it, as it did in the wild.
+    while ln.pid and rd._pid_alive(ln.pid, str(art)):
+        time.sleep(0.05)
+    text = art.read_text()
+    attempt = rd.read_field(text, "ATTEMPT_ID")
+    assert attempt, "launch must stamp the attempt id"
+    assert "EXIT=" in text and text.count("EXIT=") == 1
+    art.write_text(
+        "\n".join(
+            ln for ln in text.splitlines()
+            if not ln.startswith(("EXIT=", "EXIT_ATTEMPT="))
+        ) + "\n"
+    )
+    assert "EXIT=" not in art.read_text()                     # the stale read
+
+    def exits_during_the_probe(pid, marker="", **kw):
+        # `**kw` because the probe's ownership test grew a group-membership arm
+        # (`pgid=`); this fake answers "gone" for BOTH processes, which is the
+        # interleaving under test.
+        with art.open("a", encoding="utf-8") as fh:
+            # the wrapper writes the attempt tag IMMEDIATELY BEFORE its EXIT
+            fh.write(f"EXIT_ATTEMPT={attempt}\nEXIT=0\nFINISHED_AT={rd._iso_now()}\n")
+        return False                                          # …and it is GONE
+
+    monkeypatch.setattr(rd, "_pid_alive", exits_during_the_probe)
+    st = rd.collect(sd, "o/r", 74)
+    assert st.state == rd.MERGED
+    assert st.exit_code == 0, st.as_dict()        # pre-fix: None (the stale read)
+    assert st.merge_sha == "deadbeefcafe1234"
+    assert st.reason == "", st.reason            # not the "never written" lie
+
+
 def test_previous_attempts_merge_line_is_not_inherited(tmp_path):
     """The log is append-only across attempts: a NEW attempt that dies with no EXIT
     must not inherit the OLD attempt's `✅ merged` — that is forged evidence."""
     co = make_checkout(tmp_path)
     sd = tmp_path / "state"
     rd.launch(61, cwd=co, state_dir=sd, repo="o/r")
-    assert wait_state(sd, 61, rd.MERGED).state == rd.MERGED      # attempt 1: merges
+    # ⛔ WAIT FOR THE SETTLED READ: the rail prints its success line BEFORE its
+    # wrapper appends `EXIT=`, and `collect` answers `merged` in that window
+    # (`exit_code=None`). Without the predicate this arm may snapshot the handoff
+    # and then race the previous wrapper's append against the new launch's
+    # truncation — the flake the sibling arm above was already fixed for.
+    assert wait_state(sd, 61, rd.MERGED,
+                      pred=lambda s: s.exit_code is not None).state == rd.MERGED
     os.environ["FAKE_RAIL_SLEEP"] = "30"
     try:
         ln = rd.launch(61, cwd=co, state_dir=sd, repo="o/r")    # attempt 2: hangs…
     finally:
         os.environ.pop("FAKE_RAIL_SLEEP", None)
     time.sleep(0.2)
-    os.kill(ln.pid, signal.SIGKILL)                              # …and is killed
-    st = wait_state(sd, 61, rd.LOST)   # polled: see `…a_killed_rail_is_lost…`
+    kill_group(ln.pid)                                           # …and is killed
+    time.sleep(0.3)
+    st = rd.collect(sd, "o/r", 61)
     assert st.state == rd.LOST, st.as_dict()
     assert st.merge_sha == ""
 
@@ -249,12 +510,70 @@ def test_torn_exit_line_does_not_crash_collect(tmp_path):
         ln = rd.launch(66, cwd=co, state_dir=sd, repo="o/r")
     finally:
         os.environ.pop("FAKE_RAIL_SLEEP", None)
-    os.kill(ln.pid, signal.SIGKILL)
+    kill_group(ln.pid)          # the whole group: nothing is left to write an EXIT
     time.sleep(0.3)
     art = rd.artifact_path(sd, "o/r", 66)
-    art.write_text(art.read_text() + "EXIT=\n")      # the torn append
+    # The wrapper writes `EXIT_ATTEMPT=<id>` then `EXIT=%s`; a kill between the
+    # format's expansions leaves the torn pair below, and the read-only verb must
+    # report a state rather than a traceback.
+    attempt = rd.read_field(art.read_text(encoding="utf-8"), "ATTEMPT_ID")
+    assert attempt, "launch must stamp the attempt id"
+    art.write_text(art.read_text() + f"EXIT_ATTEMPT={attempt}\nEXIT=\n")  # the torn append
     st = rd.collect(sd, "o/r", 66)
     assert st.state == rd.REFUSED and st.exit_code is None   # fail closed, no crash
+
+
+def test_a_named_rail_under_spawning_is_not_no_rail(tmp_path):
+    """⛔ `SPAWNING=1` WITH NO `PID=` IS NOT "NO RAIL EVER STARTED".
+
+    `launch` appends `PID=` only AFTER `Popen` returns, so a launcher killed in
+    that instant leaves `SPAWNING=1` while the rail it already spawned has written
+    `CHILD_PID=` and is merging. Concluding `lost` there is the same durable-wrong-
+    verdict shape as the fork window: the next `start` truncates the artifact and
+    scopes out a `✅ merged` line that already exists. So the named rail and the
+    log are read BEFORE the sentinel is allowed to mean "nothing started".
+
+    Both arms use a STARTED_AT well past `SPAWNING_TTL_S`, so neither can pass by
+    the sentinel simply not having expired.
+    """
+    sd = tmp_path / "state"
+    sd.mkdir()
+    art = rd.artifact_path(sd, "o/r", 98)
+    logp = rd.log_path(sd, "o/r", 98)
+    old = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 3600))
+    rail = subprocess.Popen(["/bin/sleep", "10"], start_new_session=True,
+                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL)
+    try:
+        art.write_text(
+            f"PR=98\nREPO=o/r\nSTARTED_AT={old}\nLOG={logp}\nSPAWNING=1\n"
+            f"ATTEMPT_ID=attempt-98\nCHILD_PID={rail.pid}\n",
+            encoding="utf-8",
+        )
+        # arm 1 — the named rail already ANNOUNCED its merge
+        logp.write_text(
+            "\n===== rail attempt started x (detached) =====\n"
+            "admin-merge: ✅ merged PR #98 at deadbeefcafe1234 (state=MERGED)\n",
+            encoding="utf-8",
+        )
+        st = rd.collect(sd, "o/r", 98)
+        # pre-fix: LOST, "no rail ever started" — for a PR whose rail merged
+        assert st.state == rd.MERGED, st.as_dict()
+        assert st.merge_sha == "deadbeefcafe1234"
+        assert "EXIT line was never written" in st.reason
+
+        # arm 2 — a LIVE named rail, nothing announced yet: still waiting, not lost
+        logp.write_text(
+            "\n===== rail attempt started x (detached) =====\n"
+            "admin-merge: … FIRST-CHECKS wait: run 41557371710 is pending\n",
+            encoding="utf-8",
+        )
+        st = rd.collect(sd, "o/r", 98)
+        assert st.state == rd.WAITING, st.as_dict()     # pre-fix: LOST
+        assert "CHILD_PID" in st.reason
+    finally:
+        rail.kill()
+        rail.wait()
 
 
 def test_spawning_sentinel_expires_instead_of_wedging_the_pr(tmp_path):
@@ -293,6 +612,75 @@ def test_relative_state_dir_lands_in_one_place(tmp_path, monkeypatch):
     assert st.state == rd.MERGED and st.merge_sha == "deadbeefcafe1234"
 
 
+def test_a_previous_attempts_late_exit_is_not_this_attempts(tmp_path, monkeypatch):
+    """⛔ THE ARTIFACT HANDOFF HAS NO ORDERING.
+
+    `launch` truncates the artifact while the PREVIOUS attempt's wrapper may still
+    be about to append `EXIT=`: its rail printed the merge line first, so `collect`
+    already answered `merged` and the new start was not refused. The late append
+    then lands in the NEW artifact and used to read as this attempt's exit —
+    `refused` ("exited 0 without a merge line") for an attempt that was KILLED.
+
+    Each attempt stamps its own id, so only a matching `EXIT_ATTEMPT=`/`EXIT=` pair
+    is evidence. Discriminating: without the scoping this reads `refused`.
+    """
+    co = make_checkout(tmp_path)
+    sd = tmp_path / "state"
+    rd.launch(65, cwd=co, state_dir=sd, repo="o/r")
+    first = wait_state(sd, 65, rd.MERGED, pred=lambda s: s.exit_code is not None)
+    assert first.state == rd.MERGED, first.as_dict()
+    art = rd.artifact_path(sd, "o/r", 65)
+    first_id = rd.read_field(art.read_text(encoding="utf-8"), "ATTEMPT_ID")
+    assert first_id, "launch must stamp the attempt id"
+
+    monkeypatch.setenv("FAKE_RAIL_SLEEP", "30")
+    ln = rd.launch(65, cwd=co, state_dir=sd, repo="o/r")   # truncates the artifact
+    # let attempt 2's rail NAME itself, so this arm is about the stale EXIT line
+    # and not about the (separately pinned) fork window
+    assert wait_field(art, "CHILD_PID"), art.read_text(encoding="utf-8")
+    kill_group(ln.pid)                                      # attempt 2 dies, no EXIT
+    time.sleep(0.3)
+    # …and attempt 1's wrapper appends ITS exit line after the truncation
+    with art.open("a", encoding="utf-8") as fh:
+        fh.write(f"EXIT_ATTEMPT={first_id}\nEXIT=0\nFINISHED_AT={rd._iso_now()}\n")
+    st = rd.collect(sd, "o/r", 65)
+    assert st.state == rd.LOST, st.as_dict()      # pre-fix: REFUSED, "exited 0 …"
+    assert st.exit_code is None, st.as_dict()
+
+
+def test_an_unreaped_wrapper_group_does_not_report_waiting_forever(tmp_path):
+    """⛔ `killpg(..., 0)` ANSWERS FOR A ZOMBIE GROUP MEMBER FOREVER.
+
+    A caller that stays alive after `launch()` (an importing fleet beat, not the
+    one-shot `start` CLI) leaves its killed wrapper an UNREAPED child, so the
+    group keeps answering with no rail in it and nothing left that could ever
+    write `CHILD_PID=` or `EXIT=`. Unbounded, that is `waiting` forever AND
+    `start` refused forever — the unrailable wedge this module exists to remove.
+    Past `GROUP_CLAIM_GRACE_S` an unnamed group is a corpse: `lost` is both true
+    and recoverable.
+    """
+    co = make_checkout(tmp_path)
+    sd = tmp_path / "state"
+    os.environ["FAKE_RAIL_SLEEP"] = "30"
+    try:
+        ln = rd.launch(96, cwd=co, state_dir=sd, repo="o/r")
+    finally:
+        os.environ.pop("FAKE_RAIL_SLEEP", None)
+    kill_group(ln.pid)              # the rail dies too, so no `CHILD_PID=` lands
+    time.sleep(0.3)
+    art = rd.artifact_path(sd, "o/r", 96)
+    old = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 600))
+    art.write_text("".join(
+        f"STARTED_AT={old}\n" if ln_.startswith("STARTED_AT=") else
+        "" if ln_.startswith("CHILD_PID=") else ln_ + "\n"
+        for ln_ in art.read_text(encoding="utf-8").splitlines()
+    ) + "")
+    assert rd.read_field(art.read_text(encoding="utf-8"), "CHILD_PID") == ""
+    st = rd.collect(sd, "o/r", 96)
+    assert st.state == rd.LOST, st.as_dict()     # pre-fix: WAITING, forever
+    assert "no EXIT line" in st.reason
+
+
 def test_a_log_without_an_attempt_mark_is_no_evidence(tmp_path):
     """No attempt mark ⇒ not this attempt's log ⇒ no scoped evidence. Reading it
     whole would let a dead attempt inherit an earlier `✅ merged` line."""
@@ -314,7 +702,10 @@ def test_collect_has_no_side_effects(tmp_path):
     co = make_checkout(tmp_path)
     sd = tmp_path / "state"
     launch(sd, co, pr=14)
-    wait_state(sd, 14, rd.MERGED)
+    # Same handoff as the arm above: a `merged` state can be read before the
+    # wrapper's `EXIT=` append lands, and this arm asserts BYTE + mtime equality
+    # over the artifact — so it must snapshot only the settled record.
+    wait_state(sd, 14, rd.MERGED, pred=lambda s: s.exit_code is not None)
     art = rd.artifact_path(sd, "o/r", 14)
     before = (art.read_bytes(), art.stat().st_mtime_ns, sorted(p.name for p in sd.iterdir()))
     for _ in range(3):
@@ -358,8 +749,112 @@ def test_refuses_when_the_rail_script_is_absent(tmp_path):
         rd.launch(3, cwd=bare, state_dir=tmp_path / "state", repo="o/r")
 
 
+# ── a box with NO `gh` on PATH ──────────────────────────────────────────────
+#
+# `subprocess.run(["gh", …])` raises `FileNotFoundError` when the BINARY is
+# absent, and that killed every case in this module on the fleet's self-hosted
+# pool (measured 2026-11-03: `test (h)` on pi-runner-vm-6/Linux-ARM64, run
+# 41732583553 — 20 of 20 here, `FileNotFoundError: [Errno 2] … 'gh'`). The two
+# callers already have a documented degradation for "this checkout cannot tell
+# me" (`Refused` for the repo, `unreadable` for the head) — a missing binary is
+# that case, not a different one — so these pin both arms on a PATH that has the
+# shell tools the child needs and no `gh` at all.
+#
+# ⚠️ `main` landed the SAME fix independently at `f422799c` (`_gh` returns
+# `CompletedProcess(argv, 127, "", "gh: command not found")`, never `None`) and
+# its own CLI-level pair for the same defect — see `_path_without_gh` below and
+# `test_launch_without_the_gh_cli_starts_and_stamps_an_unreadable_head` /
+# `test_collect_without_the_gh_cli_refuses_by_name_instead_of_tracebacking`. The
+# two arms here are therefore kept as the UNIT-level pair the merge kept from
+# the other side (`_resolve_repo`'s refusal text, and `Launch.head`); the CLI
+# pair below is the end-to-end one. Five tests, one root, three layers — recorded
+# rather than deduplicated, because each layer asserts something the other does
+# not (the `_gh` return contract is `None`-never with rc=127; the "installed"
+# remedy in the refusal text; `HEAD=unreadable` stamped in the artifact).
+#
+# ⛔ The CONTRACT layer is not redundant with either: `test_gh_never_returns_None_for_a_missing_binary`
+# is the only arm that reds when `_gh` is changed to return `None` — the state in
+# which BOTH callers crash at `out.returncode`. It is what makes dropping the two
+# `out is not None` guards the merge kept safe (#10622 round 9), instead of tidy.
+
+def no_gh_on_path(tmp_path, monkeypatch):
+    """A PATH with the child's shell tools but NOT `gh`."""
+    d = tmp_path / "bin-nogh"
+    d.mkdir()
+    for name in ("bash", "date", "env", "sh", "sleep"):
+        real = shutil.which(name)
+        assert real, f"{name} is missing from this test box"
+        (d / name).symlink_to(real)
+    monkeypatch.setenv("PATH", str(d))
+    return d
+
+
+def test_gh_never_returns_None_for_a_missing_binary(tmp_path, monkeypatch):
+    """`_gh`'s annotation is a CONTRACT the callers may rely on, not a hint.
+
+    `-> subprocess.CompletedProcess` means the missing-binary case is ANSWERED
+    (`rc=127`), never signalled by `None` — so a caller needs no
+    `out is not None` guard, and one that carries a guard is describing a
+    return type this function does not have. Two such guards arrived on the
+    branch side of the #10622 merge (where `_gh` *could* return `None`) and sat
+    unreachable under main's `_gh` until a fresh-context review read the
+    annotation against them.
+
+    This arm is the invariant that keeps that deletion safe: a `None`-returning
+    `_gh` reds the assertion below, before a guard can rot into a second
+    description of the function. NON-VACUOUS — proved twice, because the two
+    senses differ and only one of them is a test against history:
+
+    * **Against a mutant of THIS tree** (`return None` in the `except` arm):
+      `1 failed` at the `out is not None` assertion, and both callers would
+      then crash at `out.returncode` — the guards were not protecting them.
+    * **Against the true pre-fix head** (`cbefdcbe^`, before #2148): `_gh` does
+      not exist there at all — the absent binary was an UNGUARDED
+      `subprocess.run(["gh", ...])` inside `_resolve_repo`/`_head_sha` — so
+      this arm reds with `AttributeError`, not with a behaviour claim. Said
+      plainly: the "before" side of this test is the function's absence, and
+      the invariant it pins is the one #2148 introduced.
+    """
+    co = make_checkout(tmp_path)
+    no_gh_on_path(tmp_path, monkeypatch)
+    out = rd._gh(["gh", "repo", "view"], co)
+    assert out is not None, "`_gh` returned None; its annotation says it cannot"
+    assert out.returncode == 127, out
+    assert "command not found" in (out.stderr or ""), out.stderr
+
+
+def test_a_missing_gh_is_a_REFUSAL_not_a_traceback(tmp_path, monkeypatch):
+    """`gh` absent is a precondition the launcher enforces, never a crash."""
+    co = make_checkout(tmp_path)
+    no_gh_on_path(tmp_path, monkeypatch)
+    with pytest.raises(rd.Refused) as exc:
+        rd._resolve_repo(co)
+    assert "gh repo view" in str(exc.value)
+    assert "installed" in str(exc.value), (
+        "the refusal does not say WHAT to fix — a lane reading it has to guess "
+        f"whether the checkout or the tool is wrong: {exc.value}")
+
+
+def test_with_no_gh_the_rail_still_starts_and_the_head_reads_unreadable(tmp_path, monkeypatch):
+    """The rail must outlive the lane on a box that has no `gh` too.
+
+    A caller that passes `repo=` has already settled the one thing `gh` was
+    needed for, and the head is recorded as `unreadable` — the same value
+    `_head_sha` returns when `gh` runs and fails. Neither may become a crash.
+    """
+    co = make_checkout(tmp_path)
+    sd = tmp_path / "state"
+    no_gh_on_path(tmp_path, monkeypatch)
+    ln = launch(sd, co, pr=21)
+    assert ln.pid > 0, "the rail did not start without `gh`"
+    assert ln.head == "unreadable", ln.head
+    assert wait_state(sd, 21, rd.MERGED, timeout=20).state == rd.MERGED
+
+
 def test_child_invokes_only_the_one_lander(tmp_path):
-    """#1178: no second lander. The child argv is `bash <rail> <pr> --repo <r>`."""
+    """#1178: no second lander. The child argv is
+    `bash -c <self-naming wrapper> rail <artifact> <rail-argv…>` — one lander
+    invocation, nothing else."""
     co = make_checkout(tmp_path)
     art, log = tmp_path / "a.md", tmp_path / "l.log"
     argv = rd.child_script(co / rd.RAIL_REL, "o/r", 21, log, art, ["--dry-run"])
@@ -522,3 +1017,227 @@ def test_cli_collect_exit_codes(tmp_path, capsys):
     assert rd.main(["collect", "42", "--repo", "o/r", "--state-dir", str(sd),
                     "--assert-merged"]) == 0
     capsys.readouterr()
+
+
+# ── liveness must be TRUE on every box, and `gh` must never wedge the lock ───
+def test_a_killed_rail_is_lost_on_a_box_without_procfs(tmp_path, monkeypatch):
+    """`os.kill(pid, 0)` SUCCEEDS ON A ZOMBIE.
+
+    Where procfs cannot answer, the old fallback was "kill(0) said yes, so it is
+    alive" — which on macOS (where the lanes run) made a SIGKILLed rail read
+    `waiting` FOREVER: `lost` was unreachable, and the duplicate-rail guard then
+    refused every later `start` on that PR. The state letter now comes from a
+    bounded local `ps` probe instead, so this holds without procfs.
+    """
+    monkeypatch.setattr(rd, "_proc_stat_letter", lambda pid: None)
+    monkeypatch.setattr(rd, "_proc_cmdline", lambda pid: None)
+    proc = subprocess.Popen(["sleep", "30"], start_new_session=True,
+                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL)
+    marker = "/state/rail-o-r-9.md"
+    try:
+        os.kill(proc.pid, signal.SIGKILL)
+        deadline = time.time() + 15
+        while time.time() < deadline and rd._pid_alive(proc.pid, marker):
+            time.sleep(0.05)
+        # THE PREMISE, asserted rather than assumed: this pid still answers
+        # kill(0) — so `False` below came from the state letter, not from ESRCH.
+        os.kill(proc.pid, 0)
+        assert rd._pid_alive(proc.pid, marker) is False
+    finally:
+        proc.wait()
+
+
+def test_an_unbounded_gh_cannot_wedge_the_duplicate_rail_lock(tmp_path, monkeypatch):
+    """`_head_sha` runs while the duplicate-rail flock is HELD.
+
+    So an unbounded `gh` stalled on a saturating cell does not delay one launch —
+    it holds the lock every later `start` for that PR must take, turning the
+    #3061 guard into the thing that makes the PR unrailable. The call is
+    informational (`HEAD` gates nothing), so a timeout costs nothing.
+    """
+    bindir = fake_gh(tmp_path, "#!/usr/bin/env bash\nsleep 8\n", sub="slowbin")
+    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setattr(rd, "GH_PROBE_TIMEOUT_S", 0.5)
+    co = make_checkout(tmp_path)
+    sd = tmp_path / "state"
+    t0 = time.time()
+    ln = launch(sd, co, pr=71)
+    elapsed = time.time() - t0
+    # The LOWER bound is the vacuity guard: an instant `gh` would mean the stub
+    # below never ran and this test proves nothing about the timeout.
+    assert rd.GH_PROBE_TIMEOUT_S <= elapsed < rd.GH_PROBE_TIMEOUT_S + 3, \
+        f"launch took {elapsed:.1f}s — not the {rd.GH_PROBE_TIMEOUT_S}s bound"
+    assert ln.head == "unreadable"           # informational only; nothing gates on it
+    assert wait_state(sd, 71, rd.MERGED).state == rd.MERGED   # the rail still ran
+
+
+def test_an_unanswering_gh_repo_view_refuses_instead_of_hanging(tmp_path, monkeypatch):
+    """The other `gh` call: naming the target. A timeout must REFUSE (an unnamed
+    target is exactly what the GH_REPO check exists to prevent), not hang."""
+    bindir = fake_gh(tmp_path, "#!/usr/bin/env bash\nsleep 8\n", sub="slowbin2")
+    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setattr(rd, "GH_PROBE_TIMEOUT_S", 0.5)
+    co = make_checkout(tmp_path)
+    t0 = time.time()
+    with pytest.raises(rd.Refused) as ei:
+        rd.launch(72, cwd=co, state_dir=tmp_path / "state")
+    assert "did not answer within" in str(ei.value)
+    assert rd.GH_PROBE_TIMEOUT_S <= time.time() - t0 < rd.GH_PROBE_TIMEOUT_S + 3
+
+
+def test_an_unmeasurable_liveness_probe_keeps_the_rail_alive(tmp_path, monkeypatch):
+    """No procfs AND no `ps`: unmeasurable must read ALIVE, never dead.
+
+    Reading a live rail as dead would let a SECOND rail through (#3061) — the
+    same reason `_ps_usable()` refuses to infer "no such process" from an exit
+    code it cannot tell apart from "this `ps` cannot answer". The cost is the
+    documented one: a dead rail on such a box stays `waiting`.
+    """
+    proc = subprocess.Popen(["/bin/sleep", "10"], start_new_session=True,
+                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL)
+    try:
+        monkeypatch.setattr(rd, "_proc_stat_letter", lambda pid: None)
+        monkeypatch.setattr(rd, "_proc_cmdline", lambda pid: None)
+        monkeypatch.setattr(rd, "_PS_USABLE", None)
+        monkeypatch.setenv("PATH", "/nonexistent")   # `ps` cannot be run at all
+        assert rd._pid_alive(proc.pid, "/state/rail-o-r-8.md") is True
+    finally:
+        # ⛔ NOT a bare `wait()`: the point is only that the pid is LIVE, and
+        # waiting out the 10 s sleep cost a tenth of this gating file's runtime
+        # (measured 10.03 s of ~38 s).
+        proc.kill()
+        proc.wait()
+
+
+# ── `gh` that cannot RUN: a refusal, never a traceback whose exit code is the gate ──
+def _gh_unrunnable(monkeypatch):
+    """`gh` cannot be RUN: `subprocess.run(["gh", ...])` raises `PermissionError`.
+
+    ⛔ NOT `FileNotFoundError`. `_gh` already converts a MISSING binary into
+    rc 127 (that landed on main before this branch, and
+    `test_launch_without_the_gh_cli_*` / `test_collect_without_the_gh_cli_*` pin
+    the absent-binary class at PATH level) — so an injected `FileNotFoundError`
+    never reaches the two `except (OSError, subprocess.SubprocessError)` clauses
+    these arms are named after, which is why both arms passed on the pre-fix tree
+    and could not fail for the reason their docstrings gave. `PermissionError` is
+    an `OSError` `_gh` does NOT swallow, i.e. exactly the condition those clauses
+    exist for. Filtered by argv so the local `ps` probe keeps working."""
+    real_run = subprocess.run
+
+    def run(argv, *a, **kw):
+        if isinstance(argv, (list, tuple)) and argv and argv[0] == "gh":
+            raise PermissionError(13, "Permission denied", "gh")
+        return real_run(argv, *a, **kw)
+
+    monkeypatch.setattr(rd.subprocess, "run", run)
+
+
+def test_an_unrunnable_gh_refuses_start_by_name_not_a_gate_code(tmp_path, monkeypatch, capsys):
+    """⛔ EXIT 1 IS THIS TOOL'S MACHINE GATE (`collect --assert-merged`, "not
+    merged"), so a launcher that could not even run `gh` must never report itself
+    through it — and must not report a bare environment error either: the
+    declared contract for `start` is `4 = refused`, naming what is wrong.
+    Without the `_resolve_repo` clause the launch reports a generic environment
+    error (2) with only `[Errno 13]` as the explanation."""
+    co = make_checkout(tmp_path)
+    sd = tmp_path / "state"
+    _gh_unrunnable(monkeypatch)
+    rc = rd.main(["start", "73", "--cwd", str(co), "--state-dir", str(sd)])
+    assert rc == 4, rc                       # pre-fix: 2, an unexplained environment error
+    err = capsys.readouterr().err
+    assert "could not run `gh`" in err, err  # pre-fix: just "[Errno 13] Permission denied"
+    assert not rd.artifact_path(sd, "o/r", 73).exists()
+
+
+def test_an_unrunnable_gh_makes_the_head_unreadable_not_a_crash(tmp_path, monkeypatch):
+    """`_head_sha`'s declared contract is "the sha *or* `unreadable`", and `HEAD`
+    gates nothing — so a `gh` that cannot RUN must not stop the rail starting.
+    Without the `_head_sha` clause the `PermissionError` escapes `launch()` and
+    the rail is never detached at all."""
+    co = make_checkout(tmp_path)
+    sd = tmp_path / "state"
+    _gh_unrunnable(monkeypatch)
+    ln = launch(sd, co, pr=77)               # repo given ⇒ only `_head_sha` calls `gh`
+    assert ln.head == "unreadable"
+    assert wait_state(sd, 77, rd.MERGED).state == rd.MERGED
+
+
+# ── the duplicate-rail guard is a LOCK, and only a race can tell ─────────────
+RACER = textwrap.dedent(
+    """
+    import sys
+    sys.path.insert(0, {tools!r})
+    import rail_detach as rd
+    try:
+        ln = rd.launch({pr}, cwd={co!r}, state_dir={sd!r}, repo="o/r")
+        print("STARTED", ln.pid, flush=True)
+    except rd.Refused as e:
+        print("REFUSED", str(e).replace("\\n", " "), flush=True)
+    """
+)
+
+
+def test_two_processes_racing_start_produce_exactly_one_rail(tmp_path, monkeypatch):
+    """⛔ THE SEQUENTIAL ARM ABOVE CANNOT SEE THE LOCK.
+
+    `test_refuses_a_second_live_rail_on_one_pr` goes launch → collect → launch in
+    ONE process, so a guard implemented as `collect()`-then-`Popen()` with **no
+    lock at all** passes it unchanged. The lock's whole value is atomicity under
+    concurrency, which that test never creates — this one does, with two REAL
+    processes on one PR.
+
+    The race is made deterministic in both directions instead of hoped for: the
+    first racer is held INSIDE the lock by a slow `gh` (`_head_sha` is called
+    there), and the second arrives while it is held. With the lock the second's
+    `collect` runs after the first wrote `SPAWNING=`/`PID=` → `waiting` → refuse.
+    Without it, both read "no rail", both spawn, and the artifact/log are written
+    twice (#3061 — measured: the arm fails on a lockless guard, see the PR
+    comment).
+    """
+    slow = fake_gh(tmp_path, "#!/usr/bin/env bash\nsleep 2\nexit 1\n", sub="slowbin3")
+    monkeypatch.setenv("PATH", f"{slow}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("FAKE_RAIL_SLEEP", "30")     # the winner's rail stays live
+    co = make_checkout(tmp_path)
+    sd = tmp_path / "state"
+    env = dict(os.environ, PYTHONPATH=str(REPO_ROOT / "tools"))
+
+    def racer():
+        return subprocess.Popen(
+            [sys.executable, "-c", RACER.format(
+                tools=str(REPO_ROOT / "tools"), pr=76, co=str(co), sd=str(sd))],
+            cwd=str(REPO_ROOT), env=env, stdout=subprocess.PIPE, text=True,
+        )
+
+    a = racer()
+    time.sleep(0.4)      # A is inside the lock, held there by its slow `gh`
+    b = racer()
+    try:
+        outs = [a.stdout.read(), b.stdout.read()]
+        a.wait(timeout=40)
+        b.wait(timeout=40)
+        started = [o for o in outs if o.startswith("STARTED")]
+        refused = [o for o in outs if o.startswith("REFUSED")]
+        assert len(started) == 1 and len(refused) == 1, outs
+        text = rd.artifact_path(sd, "o/r", 76).read_text(encoding="utf-8")
+        assert len(rd.read_all(text, "PID")) == 1, text
+        # ⛔ WAIT for `CHILD_PID=`: it is written by the RAIL, not by the
+        # launcher, so it lands a few ms AFTER `launch()` returns. Asserting on
+        # the immediate read raced that write — measured: `assert 0 == 1` on a
+        # full-file run (artifact holding only `PID=`/`SID=`), green 4/4 in
+        # isolation. An intermittent red on a CI-gating file for a diff that
+        # changed nothing is exactly what the sibling arms above already avoid
+        # with `wait_field`.
+        assert wait_field(rd.artifact_path(sd, "o/r", 76), "CHILD_PID"), text
+        assert Path(rd.read_field(text, "LOG")).read_text(encoding="utf-8").count(
+            rd.ATTEMPT_MARK) == 1
+        st = rd.collect(sd, "o/r", 76)
+        assert st.state == rd.WAITING, st.as_dict()
+    finally:
+        for racer_proc in (a, b):
+            if racer_proc.poll() is None:
+                racer_proc.kill()
+        st = rd.collect(sd, "o/r", 76)
+        if st is not None and st.pid:
+            kill_group(st.pid)
