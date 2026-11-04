@@ -2747,14 +2747,18 @@ def _is_attempt_key_segment(segment: str) -> bool:
     any on the URL this function returns, so no reader of THAT URL can disagree
     about which key the flow adopts.
 
-    ⛔ THIS DOES NOT REACH THE AS's OWN DUPLICATE GATE, and must not be read as
-    closing it (measured: `QueryParams('attempt_key=&attempt_key=K2').get(...)`
-    answers `K2`, the LAST value): a pair whose LAST value is non-blank
-    never arrives here at all, because ``hosted_api.oauth_authorize`` tests
-    ``request.query_params.get(...)`` — the LAST value — and renders the PAGE
-    instead. On that branch the page's own first-value read can still be ``""``
-    and dead-ends with no sign-in link offered. That is a separate, PRE-EXISTING
-    arm recorded in #10865, not closed by this hop.
+    ⛔ THIS DOES NOT FIX THE AS's OWN DUPLICATE GATE, and must not be read as
+    closing it. A pair is resolved by ``hosted_api.oauth_authorize``'s gate from
+    its LAST value before either branch is taken, so
+    ``attempt_key=&attempt_key=K2`` (blank FIRST) renders the PAGE — where the
+    page's own first-value read is still ``""`` and ``mint()`` aborts with no
+    sign-in link offered — while ``attempt_key=K2&attempt_key=`` (blank LAST)
+    takes the BOUNCE branch, where the collapse below adopts ``K2``. The page
+    branch ALSO calls this function (through ``consent_page_html`` →
+    ``SIGNIN_URL`` with the caller's raw query), and the collapse there is what
+    makes that sign-in link single-keyed — which is not the same thing as fixing
+    the page's own reader. The page-branch arm is a separate, PRE-EXISTING dead
+    end recorded in #10865, not closed by this hop.
 
     The page's reader is the reason the collapse must keep a caller's real key
     rather than always minting: it reads the input query, so the value this hop
@@ -2833,11 +2837,18 @@ def consent_bounce_url(app_origin: str, raw_query: str) -> str:
     # be the `+`/`%2B`/`%20` CSRF-mismatch class this function's docstring refuses everywhere else.
     # Only the segments naming THIS parameter are dropped, and only the chosen key is re-encoded.
     values = parse_qs(raw_query, keep_blank_values=True).get(CONSENT_ATTEMPT_KEY_PARAM, [])
-    if len(values) != 1 or not values[0].strip():
-        # Adopt a real key if the caller presented one (first non-blank wins, matching the
-        # consumer); otherwise mint. Minting beside a blank or duplicate value is what made the
+    # ⛔ "ABSENT" MEANS THE EMPTY STRING, NOT `.strip()` (review P2, #10757). Both readers this
+    # hop reconciles test the value's TRUTHINESS, and `" "` is truthy in BOTH: the AS gate
+    # (`hosted_api.py:43856`) renders the page for `attempt_key=+`, and `start.ts:255-256`
+    # (`presentedKey || newAttemptKey()`) ADOPTS `" "` as the key. Treating whitespace as absent
+    # here minted a second key for a flow that already had one, so the page minted with `" "`
+    # while its own sign-in link carried the minted one — the two-readers-disagree defect this
+    # function exists to remove, and a `403 flow_not_yours` for a caller that used to work.
+    if len(values) != 1 or values[0] == "":
+        # Adopt a real key if the caller presented one (first non-empty wins, matching the
+        # consumers); otherwise mint. Minting beside a blank or duplicate value is what made the
         # mint inert before, so only mint when there is genuinely nothing to adopt.
-        chosen = next((v for v in values if v.strip()), "") or secrets.token_urlsafe(32)
+        chosen = next((v for v in values if v), "") or secrets.token_urlsafe(32)
         segments = [s for s in raw_query.split("&")
                     if s and not _is_attempt_key_segment(s)]
         segments.append(urlencode({CONSENT_ATTEMPT_KEY_PARAM: chosen}))

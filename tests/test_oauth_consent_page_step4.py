@@ -1263,30 +1263,42 @@ def test_the_bounce_does_not_append_a_SECOND_key_when_the_flow_already_has_one()
         "the bounce emitted a SECOND attempt key beside the flow's own: "
         f"{inner[CONSENT_ATTEMPT_KEY_PARAM]}")
 
-    # …and a blank value is treated as absent, because it selects the bounce branch upstream —
-    # the minted key must then be the value a FIRST-value reader actually sees.
+    # …and a BLANK value (the empty string, or a bare key with no `=`) is treated as absent: it
+    # selects the bounce branch upstream, and the minted key must then be the value a FIRST-value
+    # reader actually sees.
     for label, raw_blank in (
         ("blank value", f"client_id=c1&state=s1&{CONSENT_ATTEMPT_KEY_PARAM}="),
-        ("whitespace value",
-         f"client_id=c1&state=s1&{CONSENT_ATTEMPT_KEY_PARAM}=%20"),
         ("bare key, no `=`", f"client_id=c1&state=s1&{CONSENT_ATTEMPT_KEY_PARAM}"),
     ):
         blank = consent_bounce_url(APP_ORIGIN, raw_blank)
         inner_blank = parse_qs(urlsplit(parse_qs(urlsplit(blank).query)["next"][0]).query,
                                keep_blank_values=True)
         keys = inner_blank[CONSENT_ATTEMPT_KEY_PARAM]
-        assert len(keys) == 1 and keys[0].strip(), (
+        assert len(keys) == 1 and keys[0], (
             f"a {label} must be REPLACED by the minted key, not left beside it: the consumers "
             f"read the FIRST value, so {keys} leaves the visitor keyless")
 
-    # ⛔ A DUPLICATE PAIR — the shape the blank arms above do not reach (review P3). On the ONE
-    # caller that can be handed a duplicate (the page's sign-in link, whose `raw_query` is the
-    # caller's), `attempt_key=&attempt_key=K2` reads `""` for the page's FIRST-value reader and
-    # `K2` for the AS gate's LAST-value one, so which key the flow adopts depended on which hop
-    # you asked. The fix collapses the pair to exactly ONE segment, so there is no ordering left
-    # for the two readers to disagree about on the URL this hop emits. (The AS's own gate never
-    # sees such a pair — it reads the LAST value, so it renders the PAGE — and that branch is a
-    # separate, PRE-EXISTING dead end recorded in #10865, not closed here.)
+    # ⛔ WHITESPACE IS **NOT** BLANK HERE (review P2, #10757). Both readers this hop reconciles
+    # test TRUTHINESS, and `" "` is truthy in both: the AS gate renders the page for
+    # `attempt_key=+` (`hosted_api.py:43856`), and `start.ts:255-256`
+    # (`presentedKey || newAttemptKey()`) ADOPTS `" "`. A `.strip()` predicate minted a second
+    # key for a flow that already had one and put the page and its own sign-in link on different
+    # keys — so this must be left BYTE-EXACT, exactly like the real-key arm above.
+    ws = consent_bounce_url(APP_ORIGIN, f"client_id=c1&state=s1&{CONSENT_ATTEMPT_KEY_PARAM}=%20")
+    ws_inner = urlsplit(parse_qs(urlsplit(ws).query)["next"][0]).query
+    assert f"{CONSENT_ATTEMPT_KEY_PARAM}=%20" in ws_inner, (
+        f"a whitespace-only key was replaced instead of adopted: {ws_inner}")
+
+    # ⛔ A DUPLICATE PAIR — the shape the blank arms above do not reach (review P3). The AS gate
+    # resolves a pair from its LAST value, so WHICH branch the pair takes is decided by which end
+    # is blank: `attempt_key=&attempt_key=K2` (blank FIRST) renders the PAGE, while
+    # `attempt_key=K2&attempt_key=` (blank LAST) takes the BOUNCE branch. Both end up here for at
+    # least one of their readers — the page branch passes its raw query into `SIGNIN_URL` — and on
+    # that caller the pair reads `""` for a FIRST-value reader and `K2` for the AS gate's
+    # LAST-value one. The fix collapses the pair to exactly ONE segment, so there is no ordering
+    # left for the two readers to disagree about on the URL this hop emits. (The PAGE's own reader
+    # still reads the caller's raw query, so the blank-FIRST arm stays a pre-existing dead end —
+    # #10865, not closed here.)
     for label, raw_dup in (
         ("blank FIRST then a real key",
          f"client_id=c1&state=s1&{CONSENT_ATTEMPT_KEY_PARAM}="
