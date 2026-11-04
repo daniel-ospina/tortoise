@@ -122,7 +122,6 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-
 REPO = Path(__file__).resolve().parent.parent
 MERGIFY_REL = ".mergify.yml"
 

@@ -10384,11 +10384,26 @@ class TortoiseSDK:
         # scan per absent write on the append-active lane #7405 describes.
         seam = self._journal_seam(log, resume)
         stat_after = self._journal_stat_key(log)
-        # ⛔ TWO DIFFERENT FACTS, TWO DIFFERENT ANSWERS (review round 17, finding
-        # 1). `stat_after is None` and "the bytes that were folded are gone / a
-        # new inode sits at the path" were one arm, and they are NOT the same
-        # evidence — collapsing them is what put this tree BELOW `main` for one
-        # interleaving:
+        # ⛔ THREE DIFFERENT FACTS, ONE ANSWER (review rounds 17/18/20; header
+        # corrected round 21). `stat_after is None`, "a new inode sits at the
+        # path", and "the same inode was truncated under the fold" are NOT the
+        # same evidence, and each arm below names its own with the citation
+        # that justifies it. But since round 20 they are the SAME ANSWER:
+        # every one of them drops the memo and hands `known` on to the needle
+        # as the WITNESS. So the three arms are, as of this writing,
+        # byte-identical — the split is documentation-of-evidence, NOT three
+        # behaviours, and the whole block is equivalent to
+        #
+        #   if (stat_after is None or stat_after[:2] != stat_key[:2]
+        #           or stat_after[2] < resume):
+        #
+        # Collapsing it would therefore be a semantic no-op today. It is left
+        # split because each arm's comment is the record of WHY that
+        # interleaving must be loud (rounds 17/18 answered differently, and
+        # THAT divergence — not the collapse — is what once put this tree BELOW
+        # `main` for one interleaving); round 20 made the answers agree, and
+        # this header is the correction that says so instead of still claiming
+        # two answers.
         #
         # * ``stat_after is None``: the path no longer names a file. `open()`
         #   binds the INODE, and unlink(2) says a file with an open descriptor
