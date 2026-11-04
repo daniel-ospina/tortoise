@@ -271,6 +271,17 @@ refused_repair_count() {
     summary_count 'repair_refused'
 }
 
+# ⛔ AND WHETHER A CREDENTIAL-ONLY REPAIR IS ALSO OUTSTANDING. The two causes of exit 1
+# CO-EXIST on a reachable path (a credential-only repair sets `code=1`, and a refusal
+# may be present in the same window), and `repair_refused` is a UNION rather than a
+# discriminator — so branching on it alone told the operator not to blame the
+# credential on the one window where the credential IS the thing only a human can
+# unblock (#10831 review P3). `tools/ci_check_repair.py` publishes the count for this
+# reader, exactly as it publishes `repair_refused`.
+needs_user_actor_count() {
+    summary_count 'needs_user_actor'
+}
+
 # ── main ───────────────────────────────────────────────────────────────────
 if [ "$STATUS_ONLY" = 1 ]; then
     echo "state file : $STATE_FILE"
@@ -337,6 +348,7 @@ rc=$?
 mode_word="apply"; [ "$DRY" = 1 ] && mode_word="report-only"
 needing="$(needing_repair_count)"
 refused="$(refused_repair_count)"
+credential="$(needs_user_actor_count)"
 last="$(cat "$STATE_FILE" 2>/dev/null || echo '')"
 # The signature carries the needing_repair COUNT as well as the exit code: a
 # repair that completes successfully (exit 0) but leaves the same PRs needing
@@ -346,20 +358,29 @@ last="$(cat "$STATE_FILE" 2>/dev/null || echo '')"
 # declined to cancel is work this pass identified and did NOT do, and it is invisible
 # in `needing_repair` — without this term a fail-shut window is indistinguishable from
 # a clean one.
-signature="local:$rc:$needing:$refused"
+# ⛔ AND IT CARRIES `credential` (#10831 review P3): the exit-1 message is chosen by
+# BOTH counts, so a window whose refused count is unchanged while a credential-only
+# repair appears (or is cleared) would otherwise be suppressed as "no transition" —
+# the operator would never be told the OTHER cause had started. The signature must
+# change whenever the MESSAGE changes.
+signature="local:$rc:$needing:$refused:$credential"
 if [ "$signature" != "$last" ]; then
     if [ "$rc" = 0 ]; then
         notify "ci-check-repair ran LOCALLY in ${mode_word} mode (${reason}). PRs needing repair: ${needing}. Refused zero-job repairs: ${refused}. The local fallback ran the same tools/ci_check_repair.py the workflow runs, exit 0."
     elif [ "$rc" = 1 ]; then
-        # ⛔ EXIT 1 HAS TWO CAUSES and this message used to name only the first.
+        # ⛔ EXIT 1 HAS TWO CAUSES, AND THEY CO-EXIST (#10831 review P3).
         # `tools/ci_check_repair.py` returns 1 for a repair only a user credential can
         # perform, AND for a zero-job cancel REFUSED because the queue reading did not
         # certify it clear (`main()`: `args.apply and code == 0 and congestion is None
-        # and any(p.repair_refused ...)`). An operator reading "even the local
-        # credential could not complete" chases the credential while the actual cause is
-        # a queue nobody read — whose remedy is to read the queue.
-        if [ "$refused" != "0" ]; then
-            notify "ci-check-repair RAN LOCALLY and is STILL UNRESOLVED in ${mode_word} mode (${reason}). PRs needing repair: ${needing}. Refused zero-job repairs: ${refused}. A zero-job cancel was REFUSED because the queue reading did not certify it clear — read the queue (uv run python tools/ci_queue_health.py) rather than blaming the credential; an unreadable refused count (?) is itself one of these causes. See $OUT_FILE."
+        # and any(p.repair_refused ...)`). Branching on the refused count ALONE named the
+        # queue for both, which on the mixed window told the operator NOT to blame the
+        # credential — steering away from the one cause only a human can unblock. The
+        # tool publishes `needs_user_actor` for exactly this reader, and its own stderr
+        # already branches on both; these two messages must agree.
+        if [ "$refused" != "0" ] && [ "$credential" != "0" ]; then
+            notify "ci-check-repair RAN LOCALLY and is STILL UNRESOLVED in ${mode_word} mode (${reason}). PRs needing repair: ${needing}. Refused zero-job repairs: ${refused}. Needs-user-actor repairs: ${credential}. TWO causes, both live: some PR needs a repair only a user credential can perform, AND a zero-job cancel was REFUSED because the queue reading did not certify it clear. Unblock the credential AND read the queue (uv run python tools/ci_queue_health.py). See $OUT_FILE."
+        elif [ "$refused" != "0" ]; then
+            notify "ci-check-repair RAN LOCALLY and is STILL UNRESOLVED in ${mode_word} mode (${reason}). PRs needing repair: ${needing}. Refused zero-job repairs: ${refused}. A zero-job cancel was REFUSED because the queue reading did not certify it clear — read the queue (uv run python tools/ci_queue_health.py); an unreadable refused count (?) is itself one of these causes. See $OUT_FILE."
         else
             notify "ci-check-repair RAN LOCALLY and is STILL UNRESOLVED in ${mode_word} mode (${reason}). PRs needing repair: ${needing}. Refused zero-job repairs: ${refused}. Some PR needs a repair even the local credential could not complete; see $OUT_FILE."
         fi

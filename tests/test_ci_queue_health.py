@@ -1930,3 +1930,109 @@ def test_the_only_ok_outside_the_seam_has_no_wait_to_measure():
     assert health.verdict == Q.OK
     assert health.pr_queued == 0
     assert health.oldest_pr_queued_age_seconds is None
+
+
+# ── the PROSE is a specification, and these make it a CHECKED one (#10831) ──
+#
+# Four review rounds on the same PR kept finding ONE class of defect: a docstring,
+# constant comment, reason line, JSON key or state-line claim asserting something the
+# code no longer did. The last round named the root — *"four rounds of the same finding
+# is the signal that the prose is a second implementation"* — and the sharpest example
+# was the one that mattered: sentences describing the CONGESTION WITNESS as "a queued
+# PR run" would, implemented literally, re-gate the witness on `pr_queued_runs` and
+# restore the fail-open that `congests_pr is False` was authorising (the #10831 P1).
+#
+# So the two properties that actually drifted are pinned as TEXT here. A fix that
+# rewrites a sentence honestly must update this block — that is the point.
+
+_TOOLS_ROOT = Path(__file__).resolve().parents[1]
+
+#: Lines where "queued PR run" is CORRECT, keyed by a substring that identifies the
+#: line, with the reason. A line that disappears fails (see the stale-allowlist test),
+#: so this cannot silently rot into a blanket exemption.
+_QUEUED_RUN_ALLOWED = {
+    "tools/ci_queue_health.py": {
+        "DOES license trims once no PR run is executing; a queued PR run is":
+            "the governor's TRIM SET: a queued PR run is never a trim candidate",
+        "candidates are a trim-safe OFFENDER's queued runs, and a queued PR run is":
+            "the governor's TRIM SET",
+        "queued runs, and a queued PR run is never one). A red run nobody can clear":
+            "the governor's TRIM SET",
+        "are a trim-safe OFFENDER's queued runs, and a queued PR run is never a":
+            "the governor's TRIM SET (reason-line f-string)",
+        "queued PR run at **527 minutes** — a clean bill of health printed":
+            "a QUOTED measurement of the 2026-10-28 incident (#10237)",
+        "one readable young queued PR run beside":
+            "the MIXED-shape example, where a queued run genuinely exists",
+        "in the MIXED shape (one readable queued PR run beside one unreadable) the":
+            "the MIXED-shape example",
+        "one queued PR run's timestamp parses and a sibling's does not — this seam":
+            "the MIXED-shape example",
+        "queued PR runs are being served: with 2 executing and 20 queued, the tool":
+            "about the QUEUED FEED's contents, not the wait witness",
+    },
+    "tools/ci_check_repair.py": {},
+}
+
+_QUEUED_RUN_PATTERN = re.compile(r"queued PR[- ](?:event[- ])?run")
+
+
+def _queued_run_offenders(relpath: str) -> list[tuple[int, str]]:
+    allowed = _QUEUED_RUN_ALLOWED[relpath]
+    out: list[tuple[int, str]] = []
+    for n, line in enumerate((_TOOLS_ROOT / relpath).read_text().splitlines(), 1):
+        if not _QUEUED_RUN_PATTERN.search(line):
+            continue
+        if any(marker in line for marker in allowed):
+            continue
+        out.append((n, line.strip()))
+    return out
+
+
+@pytest.mark.parametrize("relpath", sorted(_QUEUED_RUN_ALLOWED))
+def test_no_sentence_describes_the_witness_as_a_queued_run(relpath):
+    """⛔ THE WITNESS IS OVER THREE LEGS. Implementing "a queued PR run" re-gates it.
+
+    The pre-fix code carried `and pr_queued_runs` on BOTH congestion witnesses, and a
+    queue with `pr_queued=0 pr_pending=12 oldest=14400s` returned
+    `pr_wait_measured=True congests_pr=False` — authorising the destructive
+    cancel-then-rerun at 2.7x the wait budget (#10831 P1). A reader who takes a
+    "queued PR run" sentence literally lands exactly there.
+    """
+    offenders = _queued_run_offenders(relpath)
+    assert not offenders, (
+        f"{relpath} describes the wait witness as a queued run — the witness is the "
+        "oldest WAITING run across `queued`, `pending` AND `requested`, and "
+        "implementing this phrase re-gates it on `pr_queued_runs` (the #10831 P1 "
+        f"fail-open). Offending lines: {offenders}. Rewrite as \"a WAITING PR-event "
+        "run (queued/pending/requested)\" — or add the line to "
+        "_QUEUED_RUN_ALLOWED with the reason it is about the trim set, the queued "
+        "feed, or a quoted measurement."
+    )
+
+
+@pytest.mark.parametrize("relpath", sorted(_QUEUED_RUN_ALLOWED))
+def test_every_queued_run_allowlist_entry_still_exists(relpath):
+    """A stale exemption must fail, or the allow-list becomes a blanket one."""
+    text = (_TOOLS_ROOT / relpath).read_text()
+    stale = [m for m in _QUEUED_RUN_ALLOWED[relpath] if m not in text]
+    assert not stale, (
+        f"{relpath}: allow-listed sentence(s) no longer present — delete the "
+        f"entry(ies) rather than leaving an exemption for a line nobody can see: {stale}"
+    )
+
+
+def test_the_documented_PR_UNWITNESSED_cause_count_is_stated():
+    """The vocabulary must say how many causes it lists, so adding one is an edit here.
+
+    The REACHABILITY of all four is asserted by
+    `test_every_documented_PR_UNWITNESSED_cause_is_reachable`; this pins the WORD so a
+    fifth cause cannot arrive undocumented. Deliberately a word lookup, not a prose
+    parse: the point is to force the edit, not to grade the writing.
+    """
+    source = (_TOOLS_ROOT / "tools/ci_queue_health.py").read_text()
+    assert "FOUR causes" in source, (
+        "the `PR-UNWITNESSED` vocabulary must state its cause count, so adding one is "
+        "a deliberate edit here too")
+    assert "one of two reasons" not in source, (
+        "the pre-#10831 wording, which omitted the two leg-cut causes this PR added")

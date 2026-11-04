@@ -904,7 +904,8 @@ def classify(pr: dict, checks: list[dict], all_runs: list[Run], required: list[s
 
     `queue_congested` is the WIDER question the zero-job REPAIR keys on. It defaults
     to `queue_starved`, so no caller can forget it, and it additionally admits the
-    `PR-BACKLOGGED` reading: PR CI IS executing, but the oldest queued PR run has
+    `PR-BACKLOGGED` reading: PR CI IS executing, but the oldest WAITING PR run (any of
+    `queued`/`pending`/`requested`) has
     waited past its budget. That is deliberately a SEPARATE flag from `starved`,
     because `starved` NAMES a state — "no PR-event run is executing" — which a
     backlogged-but-moving queue falsifies (`QueueHealth.starves_pr` refuses it for
@@ -2023,7 +2024,7 @@ def main(argv: list[str] | None = None) -> int:
     # performs every non-destructive repair (a `rerun`, a close/reopen), because
     # those discard no queue position; what an unread queue withholds is exactly the
     # cancel-then-rerun and nothing else. Where the queue is readable but SILENT (a
-    # `status=queued` feed with no queued PR run to read), the refusal is escalated at
+    # `status=queued` feed with no PR-event run waiting in it), the refusal is escalated at
     # the end of this function, so the window cannot be read as discharged.
     # `starves_pr` is the queue tool's own predicate, so the two instruments cannot
     # disagree: FLOOD and PR-STARVED both mean "PR CI is not running" and both reach
@@ -2034,7 +2035,7 @@ def main(argv: list[str] | None = None) -> int:
     # THE REPAIR QUESTION IS WIDER THAN THE NAMING ONE, and they are answered by two
     # properties on purpose. `starves_pr` NAMES a state ("no PR-event run is
     # executing"); a queue that is `PR-BACKLOGGED` — PR CI is executing, but the oldest
-    # queued PR run has waited past its budget — falsifies that claim, so it must not be
+    # WAITING PR run has waited past its budget — falsifies that claim, so it must not be
     # folded into `starved`. It IS congestion all the same, and a cancel under it
     # discards the queue position the run had reached and re-queues it behind the same
     # wait (the state this tool's own body cites: `CI: OK(queued=60, pr_running=2,
@@ -2168,6 +2169,15 @@ def main(argv: list[str] | None = None) -> int:
         # detail is in `prs[].no_verdict`.
         "zero_job_named": sum(len(p.no_verdict) for p in plans),
         "repair_refused": sum(len(p.repair_refused) for p in plans),
+        # ⛔ WHETHER A CREDENTIAL-ONLY REPAIR IS ALSO OUTSTANDING (#10831 review P3).
+        # The launcher's exit-1 notification names the cause a human can act on, and the
+        # two causes CO-EXIST on one reachable path (`code` already 1 from a
+        # credential-only repair, and a refusal also present). The launcher cannot derive
+        # this from `repair_refused` — it is a UNION, not a discriminator — and it has no
+        # access to `prs[].needs_user_actor` without re-parsing every record, so the fact
+        # is published here for the same reason `repair_refused` is: so the rail's
+        # notification and this tool's own stderr cannot disagree about WHY exit was 1.
+        "needs_user_actor": sum(1 for r in records if r.get("needs_user_actor")),
         # Re-measures the "queued and never starts" residual every window (see
         # `PrPlan.oldest_pending_age_seconds`).
         "oldest_pending_age_seconds": (

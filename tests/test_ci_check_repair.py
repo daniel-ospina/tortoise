@@ -669,10 +669,23 @@ def test_the_launcher_acts_on_a_failed_window_and_stays_idle_on_a_green_one(tmp_
         '    printf "%s\\n" "${STUB_STATE}"; exit "${STUB_RC}" ;;\n'
         'esac\n'
         '# the launcher\'s inline interpreter-version guard\n'
-        'if [ "${1:-}" = "-c" ]; then exit 0; fi\n'
+        # ⛔ A REAL interpreter answers `-c`. This stub IS `PYTHON_BIN`, and the
+        # launcher uses that same binary for `summary_count` (`python -c 'import
+        # json,sys; print(json.load(sys.stdin)[key])'`). Exiting 0 here made every
+        # count read `?` — so the exit-1 notification branch was never exercised
+        # with real numbers, and a mixed window could not be driven at all.
+        'if [ "${1:-}" = "-c" ]; then exec "${STUB_REAL_PYTHON:-python3}" "$@"; fi\n'
         f'printf "%s\\n" "$*" >> {str(calls)!r}\n'
-        'printf \'{"needing_repair": 0}\\n\'\n'
-        "exit 0\n")
+        # The summary the launcher reads, PARAMETERISED so a window can be driven:
+        # `repair_refused`/`needs_user_actor` are the two exit-1 causes it now
+        # discriminates between (#10831 review P3). The defaults keep every other
+        # call in this file unchanged.
+        'printf \'{"needing_repair": %s, "repair_refused": %s, "needs_user_actor": %s}\\n\' \\\n'
+        '      "${STUB_NEEDING:-0}" "${STUB_REFUSED:-0}" "${STUB_CREDENTIAL:-0}"\n'
+        # The TOOL's exit code is driveable too: the launcher's notification branches
+        # on it (`rc`), and a stub that always exits 0 left the exit-1 branch — the one
+        # #10831 review P3 is about — completely unexercised.
+        'exit "${STUB_TOOL_RC:-0}"\n')
     pystub.chmod(0o755)
 
     ghstub = bindir / "ghstub"
@@ -683,17 +696,25 @@ def test_the_launcher_acts_on_a_failed_window_and_stays_idle_on_a_green_one(tmp_
     cmuxstub.write_text("#!/usr/bin/env bash\nexit 1\n")
     cmuxstub.chmod(0o755)
 
-    def fire(state, rc):
-        # A FRESH state dir per fire: the launcher APPENDS to its log, so a shared
-        # one would carry the previous fire's "fallback idle" line into this one.
-        fire_dir = tmp_path / f"state-{state}"
+    fired: list[int] = []
+
+    def fire(state, rc, **stub):
+        # A FRESH state dir per CALL, not per state name: the launcher APPENDS to its
+        # log AND remembers its transition signature in the state file, so a shared
+        # directory both carries a previous fire's lines into this one and suppresses
+        # the notification as "no transition". Both hid a real difference in the
+        # #10831 exit-1 windows.
+        fired.append(len(fired))
+        fire_dir = tmp_path / f"state-{state}-{len(fired)}"
         if calls.exists():
             calls.unlink()
         env = {**os.environ, "CI_REPAIR_PYTHON": str(pystub),
                "CI_REPAIR_GH": str(ghstub),
                "CI_REPAIR_STATE_DIR": str(fire_dir),
                "PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}",
-               "STUB_STATE": state, "STUB_RC": str(rc)}
+               "STUB_STATE": state, "STUB_RC": str(rc),
+               "STUB_REAL_PYTHON": sys.executable,
+               **{f"STUB_{k.upper()}": str(v) for k, v in stub.items()}}
         # ⛔ The launcher resolves its repo as `${TORTOISE_REPO:-<this script's repo>}`.
         # A host that exports TORTOISE_REPO (this cell does: it points at the MAIN
         # checkout) silently redirects the launcher at ANOTHER checkout, so this test
@@ -726,6 +747,21 @@ def test_the_launcher_acts_on_a_failed_window_and_stays_idle_on_a_green_one(tmp_
     assert str(Path(__file__).resolve().parents[1] / "tools/ci_check_repair.py") in invoked, (
         "the launcher must run the checkout under test — an inherited TORTOISE_REPO "
         f"redirects it at another checkout (#10830); invocations were {invoked!r}")
+
+    # ⛔ AND THE EXIT-1 MESSAGE NAMES THE CAUSE(S) THAT ARE ACTUALLY LIVE (#10831
+    # review P3). `repair_refused` is a UNION, not a discriminator: the two causes
+    # CO-EXIST on a reachable path, and telling the operator "do not blame the
+    # credential" on that window steers them away from the one thing only a human can
+    # unblock. The launcher reads `needs_user_actor` from the tool for exactly this.
+    r, log, _ = fire("ran-not-succeeded", 1, tool_rc=1, refused=2, credential=1)
+    assert "TWO causes" in log, (
+        "a window carrying BOTH a refusal and a credential-only repair must name both"
+        f": {log!r}")
+    assert "only a user credential can perform" in log
+    r, log, _ = fire("ran-not-succeeded", 1, tool_rc=1, refused=2, credential=0)
+    assert "TWO causes" not in log, f"no credential cause fired here: {log!r}"
+    assert "read the queue" in log, (
+        "the refusal-only window must send the operator to the queue")
 
 
 def test_reopen_is_deferred_while_the_head_still_has_runs_in_flight(monkeypatch):
@@ -2101,8 +2137,9 @@ def test_the_local_rail_reads_the_refused_count_into_its_signature(tmp_path):
     """
     launcher_path = Path(__file__).resolve().parents[1] / "tools/ci-check-repair-local.sh"
     launcher = launcher_path.read_text()
-    assert 'signature="local:$rc:$needing:$refused"' in launcher, (
-        "the transition signature must carry the refusal, or it reads as a clean window")
+    assert 'signature="local:$rc:$needing:$refused:$credential"' in launcher, (
+        "the transition signature must carry the refusal AND the credential count, or "
+        "a window whose message changed reads as a clean/unchanged one")
     assert "Refused zero-job repairs: ${refused}" in launcher, (
         "and the notification must name it, or the transition says nothing useful")
     # ⛔ P3 (review, rail-C): exit 1 gained a SECOND cause — a cancel refused because

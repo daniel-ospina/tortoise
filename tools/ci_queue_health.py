@@ -135,8 +135,15 @@ Clause 3 is what lets a SINGLE read speak about a DURATION without a state
 file, and it is what keeps clauses 1-2 from firing on a quiet repo: a deep
 queue and zero PR runs is also what a fleet that is simply not pushing looks
 like. When NO leg holds a waiting PR run, starvation cannot be witnessed and the
-verdict stays ``OK`` — UNLESS A LEG WAS CUT, in which case an empty result cannot
-rule a wait out and the verdict degrades to ``PR-UNWITNESSED``. Where nothing was
+verdict stays ``OK`` — UNLESS a ``pending`` or ``requested`` leg was cut (or the
+queued feed was cut with NO PR-event run executing), in which case an empty result
+cannot rule a wait out and the verdict degrades to ``PR-UNWITNESSED``. ⛔ THAT
+SCOPING IS THE CONTRACT, not a detail: a cut QUEUED feed is harmless while a
+PR-event run IS executing, because `health()`'s seam degrades only on
+``truncated and pr_running == 0`` — an executing run is read from the
+``in_progress`` feed regardless of the queued window. Widening this sentence to
+"any cut leg" would send a maintainer to widen that seam and degrade ``OK`` on a
+healthy executing queue. Where nothing was
 cut, it stays ``OK`` with ``pr_queued=0``, ``pr_pending`` and ``pr_requested``
 reported, so a reader sees what was measured instead of reading a clean bill of
 health. That same reading carries ``pr_wait_measured=False``: there was no wait to
@@ -267,10 +274,13 @@ PR_STARVED = "PR-STARVED"
 #: PR_STARVED (which means nothing of the PR work is executing at all): the two are
 #: true of different queues, and neither may be inferred from the other.
 PR_BACKLOGGED = "PR-BACKLOGGED"
-#: A truncated leg (queued, `pending`, or `requested`) with no PR-event run waiting,
-#: or waiting PR-event runs whose
+#: A truncated leg with no PR-event run waiting, or waiting PR-event runs whose
 #: timestamps cannot be read: the PR WAIT is neither witnessed nor DISPROVED, so
-#: this is not ``OK``. The `pending`/`requested` legs are distinct API statuses, so
+#: this is not ``OK``. ⛔ THE ARMS ARE NOT SYMMETRIC: a cut `pending`/`requested` leg
+#: degrades ALWAYS (those feeds hold nothing the `in_progress` read can substitute
+#: for), while a cut QUEUED feed degrades only when NO PR-event run is executing —
+#: see the module docstring and `health()`'s `truncated and pr_running == 0` seam.
+#: The `pending`/`requested` legs are distinct API statuses, so
 #: each has its own page cap and its own cut. See the truncation note in the module
 #: docstring — the runs
 #: endpoint is newest-first and cannot be asked for the oldest end, so a capped
@@ -289,7 +299,8 @@ EXIT_UNMEASURABLE = 2
 #: PR-UNWITNESSED joins them: it is measured-and-incomplete, not unmeasurable,
 #: and no action can clear it, so it is announced (state line + `::warning`).
 #: PR-BACKLOGGED joins them for the same reason PR-STARVED did: its whole content
-#: is "a queued PR run waited N minutes", and the state reaches no cancellation —
+#: is "a WAITING PR-event run waited N minutes" (any of `queued`/`pending`/
+#: `requested`), and the state reaches no cancellation —
 #: it requires `pr_running > 0`, and the governor's block sits BELOW that clause,
 #: so the CLAUSE ORDER is what bounds it (its candidates are a trim-safe OFFENDER's
 #: queued runs, and a queued PR run is never one). A red run nobody can clear by
@@ -304,7 +315,8 @@ EXIT_FOR = {
     UNKNOWN: EXIT_UNMEASURABLE,
 }
 
-#: How long a queued PR-event run may wait while PR CI is STILL executing before
+#: How long a WAITING PR-event run (queued/pending/requested) may wait while PR CI
+#: is STILL executing before
 #: the queue is not healthy. DERIVED, not chosen: `docs/ops/ci-wall-clock.md` §1
 #: measured the wait for a run's FIRST job to start over 54 `python-ci` runs on
 #: 2026-10-27 — p50 29.9 min, p95 77.0 min, **max 81.9 min**. A budget at or under
@@ -505,9 +517,12 @@ class QueueHealth:
         if self.verdict == PR_UNWITNESSED:
             # The one thing an UNWITNESSED wait must never print is a bare `OK`. The
             # counts stay the measured ones — including `pr_running`, which is NOT
-            # always 0 here: the second cause of this state is a queue whose PR runs
-            # ARE executing but carry no readable timestamp, and a hardcoded
-            # `pr_running=0` would be a falsehood in the line the fleet reads.
+            # always 0 here: cause (d) of this state is a wait carrying no readable
+            # timestamp, and a cut `pending`/`requested` leg reaches this state with a
+            # PR run executing too — so a hardcoded `pr_running=0` would be a falsehood
+            # in the line the fleet reads. (This said "the second cause"; under the
+            # four-cause list at the `PR_UNWITNESSED` constant the unreadable stamp is
+            # the FOURTH, and the SECOND is the cut `pending` leg.)
             # `oldest=unmeasured` is the dimension that was not witnessed.
             oldest = self.oldest_pr_queued_age_seconds
             waited = f"{oldest:.0f}s" if oldest is not None else "unmeasured"
@@ -551,7 +566,10 @@ class QueueHealth:
 
         The single seam `tools/ci_check_repair.py` keys its per-PR STARVED state on,
         so the two instruments cannot disagree about whether PR CI is running: both
-        verdicts witness a queued PR run past the age floor with nothing executing.
+        verdicts witness a WAITING PR-event run past the age floor with nothing
+        executing. The leg is whichever of `queued`/`pending`/`requested` holds the
+        oldest wait — gating either verdict on `pr_queued_runs` restores the #10831 P1
+        fail-open, so the witness is `wait_runs`, never that leg alone.
         They differ only in whether THIS READING reaches the governor's block —
         FLOOD's always does, and it trims only when its leader is trim-safe (a FLOOD
         led by an untrimmable workflow reaches it and trims NOTHING); PR-STARVED's
@@ -863,7 +881,8 @@ def classify_queue(
     # couple of PR runs while a day's worth wait behind them, and the tool printed
     # `OK` for exactly that (measured 2026-10-28T17:47Z, #10237: OK with
     # `pr_running=2`, `pr_queued=32`, oldest `527` min). The witness here is the
-    # WAIT — a queued PR run past `max_pr_wait_seconds` is beyond anything the queue
+    # WAIT — a WAITING PR-event run (any of `queued`/`pending`/`requested`) past
+    # `max_pr_wait_seconds` is beyond anything the queue
     # was measured to do (`docs/ops/ci-wall-clock.md` §1: max 81.9 min) — and it
     # needs no truncation guard, because it is a POSITIVE claim about a run that was
     # read (the same reason PR-STARVED survives a truncated feed).
@@ -1360,7 +1379,8 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=DEFAULT_MAX_PR_WAIT_SECONDS,
         help=(
-            "how long a queued PR-event run may wait while PR CI is still executing "
+            "how long a WAITING PR-event run (queued/pending/requested) may wait "
+            "while PR CI is still executing "
             "before the queue is PR-BACKLOGGED (default derived from the measured "
             "max first-job wait, docs/ops/ci-wall-clock.md §1)"
         ),
