@@ -154,8 +154,11 @@ still needs that re-run. ⚠️ It is registered in the NON-GATING `on_demand` e
 merge.
 
 - The issue's **open owner decision** ("should `activated` additionally require contribution?") gains
-  data: every question here has `questions_off_neutral == 1` and `points_moved_off_neutral > 0`, so
-  on this sample the stricter bar would not change any question's state. It would still be a re-cut
+  data: all 24 questions are themselves counted in `cells.questions_off_neutral` (24, i.e. 4 in each
+  of the six question types) and every one of the 24 rows carries `points_moved_off_neutral > 0`, so
+  on this sample the stricter bar would not change any question's state. The two are different units:
+  `questions_off_neutral` counts QUESTIONS while `points_moved_off_neutral` counts POINTS, so neither
+  can be read as a per-question value of the other. It would still be a re-cut
   of #8486's recorded disclosure bar, so it stays an owner decision — not taken here.
 
 ## Reproduce

@@ -47,8 +47,14 @@ The per-question block is published only when the input CARRIES the manifests
 ``per_question: null`` plus ``per_question_source`` saying so, never rows of
 nulls — a null ``ep_ran`` must not be readable as a measured one. A PARTIAL
 population publishes its rows AND ``per_question_unread``, the count that says
-how many questions inside them were never measured (the same disclosure
-``<key>_unread`` makes for the summed cells).
+how many questions inside them were never measured. That count is the same
+disclosure ``<key>_unread`` makes, but only for the four pre-#10493 census sums:
+it reads ``measurement_posture._UNKNOWN_PER_MANIFEST_KEYS``, while the
+belief-eligible sums use the separate ``_UNKNOWN_PER_MANIFEST_KEYS_10137`` tuple
+#10493 keeps apart on purpose (folding them in would retroactively mark a
+pre-#10137 checkpoint's measured census as unread). The two disclosures can
+therefore disagree, and a pre-#10493 artifact does: ``per_question_unread: 0``
+beside ``points_substrate_unread: 24``.
 """
 from __future__ import annotations
 

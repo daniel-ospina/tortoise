@@ -506,14 +506,19 @@ def _probe():
 def _manifest(**over) -> dict:
     """The manifest ``ep_activation.activate_beliefs`` returns per question.
 
-    This default carries the EIGHT census cells the probe's per-question
-    projection read before #10493 (``operators``, ``factor_edges``,
+    This default supplies EIGHT of the THIRTEEN census cells the probe's
+    per-question projection now reads: ``operators``, ``factor_edges``,
     ``points_with_ep``, ``points_unmeasured``, ``points_off_neutral``,
-    ``points_moved_off_neutral``, ``ep_ran``, ``no_op_reason``). The projection
-    now reads THIRTEEN: the four ``points_substrate`` / ``belief_eligible_*``
-    cells are absent here unless a caller passes them through ``**over``, and
-    that absence is load-bearing — it is exactly what makes a pre-#10493
-    manifest project four UNREAD cells rather than four measured ones."""
+    ``points_moved_off_neutral``, ``ep_ran``, ``no_op_reason``. The five it omits
+    are ``error`` and the four ``points_substrate`` / ``belief_eligible_*`` cells,
+    and each omission is load-bearing rather than an oversight: `error: null` is
+    what a fail-open manifest looks like, and the four absent belief cells are
+    exactly what makes a pre-#10493 manifest project four UNREAD cells rather
+    than four measured ones. Callers that need either pass them through
+    ``**over``.
+
+    (Before #10493 the projection read NINE — these eight plus ``error``.)
+    """
     m = {"ep_ran": True, "ep_engine": "ep", "operators": 171,
          "factor_edges": 0, "points_with_ep": 121, "points_unmeasured": 1038,
          "points_off_neutral": 8, "points_moved_off_neutral": 8,
