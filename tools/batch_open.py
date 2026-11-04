@@ -101,16 +101,7 @@ CI cost is.
 
 from __future__ import annotations
 
-import argparse
-import json
-import re
-import shutil
-import subprocess
 import sys
-import tempfile
-from collections.abc import Callable
-from dataclasses import dataclass, field
-from pathlib import Path
 
 if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     raise SystemExit(
@@ -118,6 +109,22 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
         f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
         f"`uv run python tools/batch_open.py`"
     )
+
+# ⛔ Everything below is imported AFTER the guard, on purpose: #5128 requires the
+# guard to precede every other import so a module-level 3.11+-only import cannot
+# raise ImportError on an old interpreter before the refusal can name the floor.
+# `tests/test_entry_point_python_guard.py` pins the exact preamble
+# `[docstring] [__future__] import sys <guard>`, so do not move `import sys` down
+# into this block into alphabetical order.
+import argparse  # noqa: E402
+import json  # noqa: E402
+import re  # noqa: E402
+import shutil  # noqa: E402
+import subprocess  # noqa: E402
+import tempfile  # noqa: E402
+from collections.abc import Callable  # noqa: E402
+from dataclasses import dataclass, field  # noqa: E402
+from pathlib import Path  # noqa: E402
 
 
 REPO = Path(__file__).resolve().parent.parent
