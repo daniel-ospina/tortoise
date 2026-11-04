@@ -3233,7 +3233,6 @@ def test_a_REOPENED_issue_prints_partial_and_exits_3(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert code == 3
     assert "reason=reopened" in out
-
 def test_a_stray_run_costs_the_RENDERER_its_pairing_not_a_lost_claim():
     """The LENIENT arm's line bound must still honour the run the renderer paired.
 
@@ -3257,7 +3256,6 @@ def test_a_stray_run_costs_the_RENDERER_its_pairing_not_a_lost_claim():
     # this the `pending` set would trade the under-report for an over-report that
     # outlives the paragraph it belongs to.
     assert cl.parse_closing_refs("a`\n\n`Closes #100`\n") == []
-
 
 if __name__ == "__main__":  # pragma: no cover
     # The module docstring advertises `Run standalone: python3 tests/test_closes_landing.py`.

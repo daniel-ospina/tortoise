@@ -80,7 +80,11 @@ a divergence between what this tool calls code and what a renderer calls code
 reds a test rather than a reader. That test is the mitigation, and it is the only
 thing that is: an earlier version of this paragraph claimed the cross-check while
 no test in the file imported the renderer at all, which is the re-staleable
-"checked by hand" claim this repo keeps paying for. Do not "simplify" it back to
+"checked by hand" claim this repo keeps paying for. It imports the renderer at
+MODULE scope (`tests/test_closes_landing.py`), never through
+`pytest.importorskip`, so a lost install reds the leg instead of leaving the
+oracle `skipped` and the leg green — a mitigation that can silently stop running
+is the same re-staleable claim one layer down. Do not "simplify" it back to
 `closingIssuesReferences`: for this question the source is empty precisely when it
 matters.
 

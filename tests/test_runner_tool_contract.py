@@ -48,6 +48,7 @@ import tarfile
 from pathlib import Path
 
 import pytest
+import yaml
 
 REPO = Path(__file__).resolve().parent.parent
 SCRIPT = REPO / ".github" / "scripts" / "runner-tools.sh"
@@ -203,11 +204,25 @@ def test_an_advisory_mount_is_not_on_a_disabled_workflow():
         path = WORKFLOWS / workflow
         assert path.exists(), f"advisory mount names a workflow that is not in the tree: {workflow}"
         text = path.read_text()
-        # The trigger, not just the file: `workflow_dispatch`-only would pass a
-        # file-exists check and still never fire for the PR the warning is for.
-        assert "pull_request" in text, (
-            f"{workflow} is an ADVISORY mount but does not run on `pull_request`, "
-            f"so the advisory job cannot fire for a PR"
+        # The TRIGGER, not the file. `workflow_dispatch`-only would pass a
+        # file-exists check and still never fire for the PR the warning is for —
+        # and a whole-file substring check cannot see that either, because
+        # `pull_request` also occurs in the step's `if:`, in
+        # `github.event.pull_request.number`, and in `github.event.pull_request.
+        # head.sha`. Measured (#10634 review P2): deleting the `on: pull_request:`
+        # entry while leaving the `if:` intact still matched the old substring
+        # assertion four times, so the pin passed on a workflow with no PR
+        # trigger at all. Parse the `on:` block instead.
+        doc = yaml.safe_load(text) or {}
+        # PyYAML parses the YAML 1.1 `on:` key as boolean True (same shape as
+        # `tests/test_mergify_config_guard.py::test_recut_workflow_is_never_required`).
+        triggers = doc.get("on") or doc.get(True) or {}
+        if isinstance(triggers, str):
+            triggers = {triggers}
+        assert "pull_request" in set(triggers), (
+            f"{workflow} is an ADVISORY mount but its `on:` trigger is "
+            f"{sorted(triggers) if not isinstance(triggers, str) else [triggers]!r}, not "
+            f"`pull_request`, so the advisory job cannot fire for a PR"
         )
         # …and the job must really be there, so a rename cannot leave this pin
         # asserting over a workflow with no advisory step in it at all.

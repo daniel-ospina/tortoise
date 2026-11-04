@@ -1,0 +1,75 @@
+{
+  "schema": "capstone-blocker-states-v1",
+  "checked_at": "2026-11-02T14:22:24Z",
+  "source": "gh issue view <N> --json state,closedAt  — one call per issue, RE-READ at 2026-11-02T14:22:24Z (all five states a row depends on: 5333 OPEN, 9736 OPEN, 10360 OPEN, 9596 OPEN, 5087 OPEN; the six CLOSED states re-confirmed unchanged)",
+  "why": "V12 of tools/capstone_verdict_check.py: a row's `blocked_by` is a provenance POINTER, and a pointer at CLOSED work is stale evidence by construction. Until #10537 the checker verified only the pointer's FORM (`#NNN`), so three of the five rows of the shipped table named issues that had already closed while the gate printed `structurally sound` (E2<-9775 two days late, E4<-8503 nine days, E5<-9738 that morning). The states live in this committed record rather than a network call so the check stays pure, offline and deterministic in CI; a lane refreshes it from the tracker when it re-measures and commits it WITH the measurement it verifies, so the state that decides a row is reviewed in the same diff as the row.",
+  "refresh": "For each issue a row cites: `gh issue view <N> --json state,closedAt`, then update checked_at. A record that is present but malformed is a usage error (exit 2), never a silent disarm.",
+  "blockers": {
+    "#5333": {
+      "state": "OPEN",
+      "closed_at": null,
+      "title": "design(extractor): the destructive/relocation half of G5 — whether any pass may remove or archive an existing Object (owner ruling)",
+      "cited_by": "E1 (row + the run's own arm)"
+    },
+    "#9736": {
+      "state": "OPEN",
+      "closed_at": null,
+      "title": "measure(extractor-v4): E3's pre-registered denominator counts :Object mention links, which the owner-approved model leaves unanchored BY DESIGN — the metric needs re-registration (#7949)",
+      "cited_by": "E3"
+    },
+    "#10360": {
+      "state": "OPEN",
+      "closed_at": null,
+      "title": "fix(extractor): no mechanical enforcement of the verbatim state-value guarantee — retention is prompt-only at 49.4% vs a 54.4% baseline",
+      "cited_by": "E2 (E2a's value-bearing units)"
+    },
+    "#9596": {
+      "state": "OPEN",
+      "closed_at": null,
+      "title": "operator receipt (E4): the committed artifact's retrievability rate is UNMEASURED — re-cut it on a real run (v2 surface)",
+      "cited_by": "E4"
+    },
+    "#5087": {
+      "state": "OPEN",
+      "closed_at": null,
+      "title": "epic: Extractor v4 — the selective write path (S0→S6)",
+      "cited_by": "E5 (S3 selection recovery)"
+    },
+    "#9775": {
+      "state": "CLOSED",
+      "closed_at": "2026-10-31T14:44:43Z",
+      "title": "fix(extractor): the compact render drops the state-value carve-out — a declared guarantee absent on one render path",
+      "cited_by": "E2 of the SUPERSEDED table (capstone-measured-e0fc940b.log) — the row kept citing it until #10537"
+    },
+    "#8503": {
+      "state": "CLOSED",
+      "closed_at": "2026-10-24T20:50:13Z",
+      "title": "bug(extractor): the planted operator edges are still not formed — 5/14 edge-correct, the #2552 post-close residual (4 lost to operator selection, 5 to endpoint recall)",
+      "cited_by": "E4 of the SUPERSEDED table — closed while the row still measured 2/15"
+    },
+    "#9738": {
+      "state": "CLOSED",
+      "closed_at": "2026-11-02T08:53:06Z",
+      "title": "measure(extractor-v4): the pre-registration says E5 had no prior measurement — #7947 landed it two days EARLIER, and §10's 12/25 vs 20/25 sits below the frozen 0.90 ratio (#9075, #7949)",
+      "cited_by": "E5 of the SUPERSEDED table — closed on its own record correction, not on a measurement of E5"
+    },
+    "#5199": {
+      "state": "CLOSED",
+      "closed_at": "2026-10-21T05:06:42Z",
+      "title": "ontology: the version anchor stops at Points — :Object / :Event provenance is not version-scoped (the #5038 gap)",
+      "cited_by": "E3 of the REFUSAL record (capstone.log) — a BLOCKED refusal row names the HISTORICAL cause of the refusal, which V12 exempts by construction (see the tool's docstring)"
+    },
+    "#9075": {
+      "state": "CLOSED",
+      "closed_at": "2026-10-21T21:49:13Z",
+      "title": "measure(extractor-v4): pre-register the capstone corpus, split and scoring BEFORE any E1–E5 run (#7949)",
+      "cited_by": "the REFUSAL record's rows E1/E2 (UNPREREGISTERED) and E5 (BLOCKED) — the cause of that refusal, frozen in a record whose whole content is 'the pre-registration did not exist yet'"
+    },
+    "#9077": {
+      "state": "CLOSED",
+      "closed_at": "2026-10-22T05:34:35Z",
+      "title": "measure(extractor-v4): E4 on the real extraction leg — the planted-operator corpus wired AND persisted, no monkeypatch (#7949)",
+      "cited_by": "the REFUSAL record's E4 row — historical cause, same exemption"
+    }
+  }
+}
