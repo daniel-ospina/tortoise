@@ -433,26 +433,33 @@ def _oserror_remedy(exc: OSError) -> str:
     exists, "reinstall `gh`" for a box that is simply out of process slots.
 
     ⛔ AND THE ERRNO ALONE IS NOT THE CAUSE EITHER (review, `#10777`): `EACCES`
-    says *something* was not permitted, and WHICH OBJECT failed is carried on
-    `filename` — the CWD for a `chdir` failure, `argv[0]` (the bare name) for an
-    exec failure. So neither the errno nor the filename decides alone: the CWD is
-    blamed only when `filename` is not the binary AND the errno fits a chdir, and
-    everything else is an exec-side failure whose errno is the useful datum. Both
-    halves are pinned, because each one alone was wrong: errno-only told an
-    unreadable WORKING DIRECTORY to `chmod +x` a `gh` that was fine, and
-    filename-only blamed the CWD for a PATH entry that is a regular file (CPython
-    reports that as `ENOTDIR` with `filename='gh'` — measured 2026-11-04).
+    says *something* was not permitted, and the object is only PARTLY recoverable —
+    `filename` is the CWD for a `chdir` failure and `argv[0]` (the bare name) for
+    an exec failure, so the CWD can be blamed when `filename` is not the binary AND
+    the errno is one a `chdir` can raise. On the exec side the object is NOT
+    recoverable at all (an untraversable `PATH` directory and a non-executable
+    file both give `PermissionError(errno=13, filename='gh')`), so that remedy has
+    to name both possibilities. Each half is pinned, because each one alone was
+    wrong in a different direction: errno-only told an unreadable WORKING DIRECTORY
+    to `chmod +x` a `gh` that was fine, and blaming on `filename` alone blamed the
+    CWD for a `PATH` entry that is a regular file (`ENOTDIR`, `filename='gh'`).
     """
     target = getattr(exc, "filename", None)
     cwd_side = target not in (None, "", "gh")
     if cwd_side and exc.errno == errno.ENOTDIR:
         return ("the working directory is not a directory — run from a live "
                 "checkout, or pass --repo")
-    if cwd_side:
+    if cwd_side and exc.errno in (errno.ENOENT, errno.EACCES, errno.EPERM):
         return ("the working directory could not be used — run from a live "
                 "checkout, or pass --repo")
     if exc.errno in (errno.EACCES, errno.EPERM):
-        return "make `gh` executable (`chmod +x`), or pass --repo"
+        # ⚠️ `filename` is `argv[0]` here, so it does NOT say which object was
+        # denied: an untraversable `PATH` directory and a non-executable file give
+        # the same `PermissionError(errno=13, filename='gh')` (measured 2026-11-04).
+        # Both remedies are therefore named — `chmod +x` alone is wrong advice for
+        # an untraversable directory, and the tool cannot tell the two apart.
+        return ("make `gh` executable, and each `PATH` directory it sits in "
+                "traversable (`chmod +x`), or pass --repo")
     if exc.errno in (errno.EAGAIN, errno.ENOMEM):
         return ("the box could not spawn a process — retry when it is not loaded, "
                 "or pass --repo")

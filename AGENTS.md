@@ -40,9 +40,10 @@
 > Three things make its verdict easy to miss. First, **the installer's exit is not the verdict, and only
 > one installer grades the farm at all**: `pi-bootstrap/setup.sh` runs the checker as its last leg and
 > fails the install on the checker's `1` alone — on `2` (cannot verify) or `3` (no deploy can fix it)
-> it prints `this is NOT a pass` and still ends with `Done!`, and with the checker **absent** it prints
-> `farm drift NOT verified` and still ends with `Done!`, so the farm verdict is MISSING rather than
-> negative and the install reports success either way — while `cell-install.sh` has no farm-**drift**
+> it prints `this is NOT a pass` and still ends with `Done!` — so on `2` the farm verdict is MISSING
+> rather than negative, on `3` the named rows ARE the verdict and the install still reports success,
+> and with the checker **absent** the only trace is one `farm drift NOT verified` warning, after which
+> the install still ends with `Done!` — while `cell-install.sh` has no farm-**drift**
 > leg: it does install and verify the farm (`install_farms`, then `verify_layer` `cmp`-ing each
 > declared file against `$INFRA_ROOT`), but that comparison is against whatever checkout it RESOLVED,
 > never against the PIN — so a farm that matches an OLDER checkout reads as verified while the pin has
