@@ -13307,10 +13307,11 @@ def _script_of(ch: str) -> str | None:
 # by number from the #7949 capstone bundle, `docs/00_index.md`, the runbook and
 # the hash-pinned `PRE-REGISTRATION.md`, so an insertion above them re-stales
 # every cite (that class produced a P0 on this very PR last cycle). Appending
-# after the last line shifts nothing. The two edits that touch the cited region
-# are both NET-ZERO line swaps (the magnitude arm, 2 lines for 2; one
-# `_UNIT_WORDS` spelling line, 1 for 1), so **the file's line numbering above
-# this append is unchanged by this fix** and no cite needs re-deriving.
+# after the last line shifts nothing, and the only lines that move anything
+# above it are the widen's own +21 and +12 — accounted for below, never
+# summarised as "nothing moved", which is what an earlier cut said and was
+# false (`_UNIT_WORDS` is a GROWING hunk, not a 1-for-1 swap; 17 cites were
+# re-derived by exactly +33).
 #
 # ⛔ HOW TO CHECK IT, and why this note quotes NO running total. An earlier cut
 # of this paragraph pinned `git diff --numstat` at `33 0`; the very next commit
