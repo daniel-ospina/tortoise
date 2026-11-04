@@ -780,6 +780,13 @@ def _binds_locally(scope, key: str) -> bool:
     see "no local event" and resolve the enclosing name. A name that is not
     bound here at all (the genuine closure capture) still resolves outward.
 
+    ⚠️ The stop reads the bindings of THIS BLOCK only — `_nodes_of_one_scope`
+    stops at a nested `def` AND at a nested `class`, because a class body is a
+    block of its own (a `class C: sdk = …` binds `C.sdk`, never the writing
+    function's `sdk`). Descending into it made this answer True and silenced a
+    write through the enclosing UNBOUND handle that `origin/main` flags — a
+    false PASS, the direction this file must never fail in.
+
     ⚠️ Treating the shadow as authoritative for the WHOLE scope is Python's own
     rule, not a simplification: a binding anywhere in a function makes the name
     LOCAL for the whole function, so a read of it BEFORE the binding raises
@@ -804,18 +811,37 @@ def _binds_locally(scope, key: str) -> bool:
 
 
 def _nodes_of_one_scope(scope) -> list:
-    """Every node of `scope` WITHOUT descending into a nested function body.
+    """Every node of `scope` WITHOUT descending into a nested code BLOCK.
 
     A nested `def`'s bindings are its OWN locals: descending into them would read
     a sibling function's `sdk` as this function's, which is the fail-open the
     bounded walk exists to avoid.
+
+    A nested `class` body is a block of its own for exactly the same reason, and
+    it is the #10723 review F1 regression: the CPython execution model defines a
+    block as "a module, a function body, and a class definition", and "if a name
+    is bound in a block, it is a local variable of that block" — so `class C:
+    sdk = …` binds `C.sdk` and says NOTHING about the enclosing function, which
+    keeps resolving its own `sdk`. Reading it as a binding of the writing
+    function made `_binds_locally` answer True, took the `shadowed` branch, and
+    answered `inherited` (`None` = silent) for a write through the lane's UNBOUND
+    handle that `origin/main` flags. A false PASS, which this file's contract
+    forbids even where a false positive is tolerated.
+
+    A nested class is skipped even when `scope` IS a class: a class body's own
+    bindings are read when the scan judges that class's block (the write's
+    `_enclosing_scope` is the class itself then), never through a class nested
+    inside it.
     """
+    inner_blocks: tuple = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
+    if not isinstance(scope, ast.ClassDef):
+        inner_blocks += (ast.ClassDef,)
     found: list = []
     stack = list(ast.iter_child_nodes(scope))
     while stack:
         node = stack.pop()
         found.append(node)
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+        if isinstance(node, inner_blocks):
             continue
         stack.extend(ast.iter_child_nodes(node))
     return found
@@ -2108,6 +2134,58 @@ def _lane(org_id):
         "the shadowing stop reads THIS scope's bindings only — a nested `def`'s "
         "local must not silence the write one scope out, which is the "
         "fail-open a plain `ast.walk(scope)` would introduce")
+
+
+def test_a_nested_CLASS_BODY_binding_is_not_a_binding_of_the_writing_function():
+    """A class body is its own BLOCK — `C.sdk` is not the writing function's `sdk`.
+
+    #10723 review F1 (P2, false PASS, regression against `origin/main`).
+    `_nodes_of_one_scope` stopped at a nested `def` but not at a nested `class`,
+    so `_binds_locally` read a class-body assignment as a binding of the writing
+    function. `state_at` then took the `shadowed` branch and answered
+    `inherited` (`None` = silent) for a write through the lane's UNBOUND handle —
+    a lane that `origin/main` flags. CPython's execution model is explicit: a
+    block is "a module, a function body, and a class definition", and "if a name
+    is bound in a block, it is a local variable of that block".
+
+    Both directions are asserted so the pin is non-vacuous: renaming the class
+    attribute to a different name must not change the answer (it never did), and
+    the class-body spelling must agree with it.
+
+    Mutation this reddens on: dropping the `ast.ClassDef` stop from
+    `_nodes_of_one_scope` (the `class C: sdk = …` case goes silent again).
+    """
+    class_body_binds_the_handle = '''
+def _lane(org_id):
+    sdk = _make_sdk(namespace=org_id)
+    def _write():
+        class C:
+            sdk = _safe_handle()
+        sdk.create_point("Subject", {})
+    _write()
+'''
+    class_body_binds_another_name = class_body_binds_the_handle.replace(
+        "sdk = _safe_handle()", "other = _safe_handle()")
+
+    assert _flagged(class_body_binds_another_name), (
+        "the write goes through the ENCLOSING lane's unbound handle — the "
+        "control case, which must stay RED")
+    assert _flagged(class_body_binds_the_handle) == _flagged(
+        class_body_binds_another_name), (
+        "a class-body assignment binds `C.<name>`, not the writing function's "
+        "name, so it must not silence the enclosing unbound handle (#10723 "
+        "review F1 — a false PASS where `origin/main` was RED)")
+
+    class_body_write_through_its_own_handle = '''
+def _lane(org_id):
+    class C:
+        sdk = _make_sdk(namespace=org_id)
+        sdk.create_point("Subject", {})
+'''
+    assert _flagged(class_body_write_through_its_own_handle), (
+        "a class body's OWN bindings are still read when the write's scope IS "
+        "that class — the stop only removes the ENCLOSING function's claim on "
+        "them, so this unbound write must stay RED")
 
 
 def test_a_literal_namespace_is_not_an_org_scoped_site():
