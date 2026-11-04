@@ -21,6 +21,7 @@ degradation), not about FalkorDB.
 """
 from __future__ import annotations
 
+import ast
 from types import SimpleNamespace
 
 import pytest
@@ -89,6 +90,73 @@ _ALLOWED = {"metering.py", "supabase_control.py", "cost_dimensions.py"}
 _ENFORCEMENT_CONSUMERS = {"allowance_gate.py"}
 
 
+def _names_the_reader(path):
+    """True iff ``path`` REFERENCES ``get_capture_usage`` in CODE.
+
+    ⛔ PARSED, never grepped. A substring match also counts the COMMENT that
+    documents the reader: ``hosted_api.py`` names
+    ``metering.get_capture_usage`` in the comment explaining its own capture
+    door, and a text scan reads that prose as a second consumer — so the pin
+    reds on the very file that explains the relationship it enforces (the
+    ``#10675`` class: a pin that reads a file as TEXT also matches the prose
+    about it). An AST drops comments and docstrings by construction.
+
+    The detection surface is every **direct syntactic** reference in the scanned
+    package — an attribute, a bare name, an import alias (including a re-export
+    with no use site at all), or a ``getattr``/``setattr`` naming the reader as a
+    literal IN A CALL. Those last two are here because a first version of this
+    helper matched only ``ast.Attribute``/``ast.Name`` and therefore read
+    ``from … import get_capture_usage as gcu`` + ``gcu(o)`` as clean — a
+    false-negative the old substring scan did not have, and house style in this
+    repo (``allowance_gate.py:196`` aliases its own import). A bare string
+    OUTSIDE a call is deliberately not matched, so docstrings and comments —
+    which are what this helper exists to exclude — stay invisible. (A name built
+    at RUNTIME, e.g. ``getattr(m, some_variable)`` or ``eval``, is out of scope:
+    no static pin can resolve it, and demanding it is demanding an interpreter.)
+
+    It cannot see TRANSITIVE wiring: a door that runs the gate inherits the
+    reader without naming it (the declared residual on ``#10949``). "No offender"
+    therefore means "no direct reference in this package", never "no consumer".
+    """
+    try:
+        # ⛔ ``read_bytes``, not ``read_text``: decoding first makes two kinds of
+        # VALID module unparsable — a UTF-8 BOM (``read_text`` leaves a ``\ufeff``
+        # the tokenizer rejects) and a non-UTF-8 file with a coding cookie. Both
+        # compile and import fine, so raising on them would be a false red that
+        # MISREPORTS itself as "could not be parsed". ``ast.parse`` on bytes
+        # honours the BOM and the cookie itself, and still raises ``SyntaxError``
+        # for a genuinely broken file.
+        tree = ast.parse(path.read_bytes())
+    except SyntaxError as exc:
+        # ⛔ NOT a silent clean: the file is in ``scanned``, so returning False
+        # would satisfy the >100 floor while this module was never examined —
+        # a guard that checked nothing reading exactly like one that found
+        # nothing (the failure the floor's own docstring exists to prevent).
+        raise AssertionError(
+            f"{path} could not be parsed, so the scope scan never examined it — "
+            "an UNREADABLE module must not read as a CLEAN one"
+        ) from exc
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and node.attr == "get_capture_usage":
+            return True
+        if isinstance(node, ast.Name) and node.id == "get_capture_usage":
+            return True
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                if "get_capture_usage" in (alias.name, alias.asname):
+                    return True
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id in ("getattr", "setattr")
+            and len(node.args) >= 2
+            and isinstance(node.args[1], ast.Constant)
+            and node.args[1].value == "get_capture_usage"
+        ):
+            return True
+    return False
+
+
 def _scan_capture_call_sites(root):
     """Return ``(offending relative paths, every relative path actually read)``.
 
@@ -102,7 +170,7 @@ def _scan_capture_call_sites(root):
             continue
         rel = str(path.relative_to(root))
         scanned.append(rel)
-        if "get_capture_usage" in path.read_text(encoding="utf-8", errors="replace"):
+        if _names_the_reader(path):
             offenders.append(rel)
     return offenders, scanned
 
@@ -166,6 +234,92 @@ def test_the_scope_scan_flags_a_wired_call_site(tmp_path):
     offenders, scanned = _scan_capture_call_sites(tmp_path)
     assert offenders == ["hosted_api.py"]
     assert scanned == ["clean.py", "hosted_api.py"]
+
+
+def test_a_comment_naming_the_reader_is_not_a_consumer(tmp_path):
+    """The false-POSITIVE direction: prose about the reader is not a consumer.
+
+    ``hosted_api.py`` documents its capture door as *"its meter is
+    `metering.get_capture_usage`"*. A substring scan reads that comment as a
+    second consumer and reds the tree on the file that explains the
+    relationship (the ``#10675`` class). Pinned so the scanner cannot regress
+    to text matching: a module mentioning the reader ONLY in a comment and a
+    docstring must stay OFF the offender list, while a bare name reference in
+    code must still be caught.
+    """
+    (tmp_path / "documents_it.py").write_text(
+        '"""Why the door is metered: see get_capture_usage."""\n'
+        "# and its meter is `metering.get_capture_usage`,\n"
+        "X = 1  # get_capture_usage\n",
+        encoding="utf-8")
+    (tmp_path / "calls_it.py").write_text(
+        "from tortoise.metering import get_capture_usage\n"
+        "Y = get_capture_usage\n",
+        encoding="utf-8")
+    offenders, scanned = _scan_capture_call_sites(tmp_path)
+    assert scanned == ["calls_it.py", "documents_it.py"]
+    assert offenders == ["calls_it.py"], (
+        "prose naming the reader must not read as a consumer; a bare name "
+        "reference in code must still be one"
+    )
+
+
+def test_the_scan_catches_a_renamed_or_dynamically_named_consumer(tmp_path):
+    """The false-NEGATIVE direction: renaming the reader must not hide a consumer.
+
+    A first version of ``_names_the_reader`` matched only ``ast.Attribute`` /
+    ``ast.Name``, and so read all of these as CLEAN — a narrowing the substring
+    scan it replaced did not have (found in review). Aliasing an import is house
+    style here (``allowance_gate.py:196``), so a second consumer written that way
+    would have cleared the pin silently. ``setattr`` is paired with ``getattr``
+    because both take the name as a literal argument, and the cost of missing
+    one is the same fail-open — each gets its own fixture, because an arm that
+    is never exercised can be deleted without reddening anything. The
+    star-import case is here for the ``ast.Name`` arm specifically: every other
+    fixture reaches the reader through an ``Import``/``Attribute`` node, so
+    without it that arm could be replaced by ``if False:`` and the file would
+    stay green (found in review).
+    """
+    (tmp_path / "aliased.py").write_text(
+        "from tortoise.metering import get_capture_usage as gcu\nX = gcu(1)\n",
+        encoding="utf-8")
+    (tmp_path / "reexported.py").write_text(
+        "from tortoise.metering import get_capture_usage  # noqa: F401\n",
+        encoding="utf-8")
+    (tmp_path / "dynamically.py").write_text(
+        'X = getattr(metering, "get_capture_usage")(1)\n', encoding="utf-8")
+    (tmp_path / "dynamically_set.py").write_text(
+        'setattr(metering, "get_capture_usage", None)\n', encoding="utf-8")
+    (tmp_path / "starimported.py").write_text(
+        "from tortoise.metering import *\nX = get_capture_usage\n", encoding="utf-8")
+    offenders, scanned = _scan_capture_call_sites(tmp_path)
+    assert scanned == [
+        "aliased.py", "dynamically.py", "dynamically_set.py", "reexported.py",
+        "starimported.py",
+    ], f"every module must have been examined; read: {scanned}"
+    assert sorted(offenders) == [
+        "aliased.py", "dynamically.py", "dynamically_set.py", "reexported.py",
+        "starimported.py",
+    ], (
+        "an aliased import, a bare re-export, getattr/setattr by literal name, and a "
+        f"star-imported bare name are all consumers; only these were found: {offenders}"
+    )
+
+
+def test_an_unparsable_module_reds_instead_of_reading_as_clean(tmp_path):
+    """Unreadable must never equal clean — the floor cannot catch this.
+
+    An unparsable file is still appended to ``scanned``, so it satisfies the
+    ``>100`` floor while never being examined. Returning False there would make
+    a guard that checked nothing indistinguishable from one that found nothing.
+    """
+    (tmp_path / "broken.py").write_text("def f(:\n", encoding="utf-8")
+    try:
+        _scan_capture_call_sites(tmp_path)
+    except AssertionError as exc:
+        assert "UNREADABLE" in str(exc)
+    else:  # pragma: no cover - the assertion below is the failure
+        raise AssertionError("an unparsable module was read as CLEAN")
 
 
 def test_the_scope_scan_exempts_only_the_defining_modules(tmp_path):
