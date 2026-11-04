@@ -1243,11 +1243,13 @@ def test_the_bounce_does_not_append_a_SECOND_key_when_the_flow_already_has_one()
     last.
 
     ⛔ AND A PRESENT-BUT-BLANK (or bare) KEY IS **REPLACED**, NOT APPENDED BESIDE (review P3).
-    Every reader is `url.searchParams.get()` (`start.ts:255`), which takes the FIRST value, so
+    The consumer, `url.searchParams.get()` (`start.ts:255`), takes the FIRST value, so
     `attempt_key=&attempt_key=<minted>` reads back as `""` — the mint would be INERT and `start`
     would invent a third key, leaving the visitor keyless. This arm asserts the READER's view
     (first value), not merely the emit shape, because the previous version of this test certified
-    exactly that inert append.
+    exactly that inert append. The AS's own gate is the OPPOSITE reader (Starlette's multidict
+    `__getitem__` answers the LAST value), which is why the duplicate arms below are the real
+    pin: the two hops must never be handed a query they can disagree about.
     """
     from urllib.parse import parse_qs, urlsplit
 
@@ -1274,8 +1276,33 @@ def test_the_bounce_does_not_append_a_SECOND_key_when_the_flow_already_has_one()
                                keep_blank_values=True)
         keys = inner_blank[CONSENT_ATTEMPT_KEY_PARAM]
         assert len(keys) == 1 and keys[0].strip(), (
-            f"a {label} must be REPLACED by the minted key, not left beside it: every "
-            f"reader takes the first value, so {keys} leaves the visitor keyless")
+            f"a {label} must be REPLACED by the minted key, not left beside it: the consumers "
+            f"read the FIRST value, so {keys} leaves the visitor keyless")
+
+    # ⛔ A DUPLICATE PAIR — the shape that DEFEATED the `any(...)` gate the blank arms above do
+    # not reach (review P3). `attempt_key=&attempt_key=K2` cleared `any(v.strip())`, so nothing
+    # was minted; the AS gate (LAST value) saw `K2`, `start` (FIRST value) saw `""` and invented a
+    # third key — the pre-fix dead end, restored for that link. The fix collapses the pair to
+    # exactly ONE segment, so there is no ordering left for the two readers to disagree about.
+    for label, raw_dup in (
+        ("blank FIRST then a real key",
+         f"client_id=c1&state=s1&{CONSENT_ATTEMPT_KEY_PARAM}="
+         f"&{CONSENT_ATTEMPT_KEY_PARAM}=K2"),
+        ("real key FIRST then blank",
+         f"client_id=c1&state=s1&{CONSENT_ATTEMPT_KEY_PARAM}=K2"
+         f"&{CONSENT_ATTEMPT_KEY_PARAM}="),
+        ("two different real keys",
+         f"client_id=c1&state=s1&{CONSENT_ATTEMPT_KEY_PARAM}=K1"
+         f"&{CONSENT_ATTEMPT_KEY_PARAM}=K2"),
+    ):
+        dup = consent_bounce_url(APP_ORIGIN, raw_dup)
+        inner_dup = parse_qs(urlsplit(parse_qs(urlsplit(dup).query)["next"][0]).query,
+                             keep_blank_values=True)
+        dup_keys = inner_dup[CONSENT_ATTEMPT_KEY_PARAM]
+        assert len(dup_keys) == 1 and dup_keys[0].strip(), (
+            f"a duplicate pair ({label}) must collapse to EXACTLY ONE non-blank key: the app "
+            f"reads the first value and the AS gate reads the last, so {dup_keys} is a key the "
+            f"two hops never agree on and the mint is inert for that link")
     # Every OTHER segment survives byte-exact (state/redirect_uri are compared as bytes).
     blank_raw = (f"redirect_uri=https%3A%2F%2Fc.example%2Fcb%3Fa%3D1&state=s1"
                  f"&{CONSENT_ATTEMPT_KEY_PARAM}=")

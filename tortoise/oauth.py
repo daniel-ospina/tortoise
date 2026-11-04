@@ -2716,23 +2716,33 @@ def consent_app_origin() -> str | None:
     return None
 
 
-def _is_blank_attempt_key(segment: str) -> bool:
-    """Does this RAW query segment name the attempt key with NO usable value?
+def _is_attempt_key_segment(segment: str) -> bool:
+    """Does this RAW query segment name the attempt key — at all, blank or not?
 
-    A bare ``attempt_key`` (no ``=``) and ``attempt_key=`` / ``attempt_key=%20`` all
-    read back the same way through the consumer — `url.searchParams.get()` returns
-    ``""`` for each, because the value is empty. %-encoded spellings of the NAME
-    (``%61ttempt_key=``) decode to it too, so the test is on the decoded name rather
-    than on a literal prefix.
+    The test is on the DECODED NAME, so a %-encoded spelling of the parameter
+    (``%61ttempt_key=``) is recognised rather than passing through as an unknown
+    segment.
 
-    Used only on the mint path (`consent_bounce_url`): such a segment must be
-    REMOVED before the minted key is appended, or the first-value reader keeps
-    seeing the blank and the mint is inert (review P3, #10487).
+    ⛔ IT DELIBERATELY IGNORES THE VALUE, and that is the whole point (review P3,
+    #10487). The three hops that read this parameter do NOT agree about
+    duplicates:
+
+    * ``start.ts`` uses ``url.searchParams.get()`` → the **FIRST** value;
+    * ``hosted_api.oauth_authorize`` uses ``request.query_params.get()``, and
+      Starlette's ``MultiDict.__getitem__`` returns ``_dict[key]``, which
+      ``setlist`` fills with ``values[-1]`` → the **LAST** value;
+    * the mint gate below used to decide from ``any(...)`` → *some* value.
+
+    So a value-blind ``any()`` gate could satisfy one reader while another read
+    ``""``: ``attempt_key=&attempt_key=K2`` made the AS take the bounce branch,
+    skip the mint, and hand ``start`` a first value of ``""`` — which invented a
+    third key and restored the very dead end this hop exists to close. Dropping
+    EVERY segment that names the parameter and re-emitting exactly one makes
+    first == last == any, so no reader can disagree about which key the flow
+    adopts.
     """
-    name, sep, value = segment.partition("=")
-    if unquote_plus(name) != CONSENT_ATTEMPT_KEY_PARAM:
-        return False
-    return not sep or not unquote_plus(value).strip()
+    name, _sep, _value = segment.partition("=")
+    return unquote_plus(name) == CONSENT_ATTEMPT_KEY_PARAM
 
 
 def consent_bounce_url(app_origin: str, raw_query: str) -> str:
@@ -2775,31 +2785,36 @@ def consent_bounce_url(app_origin: str, raw_query: str) -> str:
       predictable from the `state` (which is client-chosen and public).
     """
     inner = CONSENT_START_PATH + (("?" + raw_query) if raw_query else "")
-    # ⛔ APPEND ONLY WHERE NONE EXISTS, AND **REPLACE** A BLANK RATHER THAN APPEND BESIDE IT.
-    # There are two callers and they are NOT alike: the bounce (`hosted_api.oauth_authorize`)
-    # carries no key, but the page's own sign-in link (`consent_page_html` → SIGNIN_URL) is
-    # rendered ONLY for a keyed flow, so ITS raw_query always carries one. Appending
-    # unconditionally emitted `…&attempt_key=K&attempt_key=<minted>`, which is benign today only
-    # because every reader takes the FIRST value — i.e. correctness would rest on a detail no
-    # consumer promises, and the day one takes the last, the page's sign-in leg presents the
-    # minted key instead of the row's and the visitor meets this very dead end again (#10487).
+    # ⛔ EMIT EXACTLY ONE ATTEMPT-KEY SEGMENT — NEVER ZERO, NEVER TWO (review P3, #10487).
+    # The two callers are not alike: the bounce (`hosted_api.oauth_authorize`) carries no key,
+    # but the page's own sign-in link (`consent_page_html` → SIGNIN_URL) is rendered ONLY for a
+    # keyed flow, so ITS raw_query always carries one. Both must leave here with a single key
+    # the flow will actually adopt, because the hops that read it DISAGREE about duplicates:
+    # `start.ts` (`url.searchParams.get`) takes the FIRST value, and this server's own gate
+    # (`request.query_params.get`, Starlette `MultiDict.__getitem__` → `_dict[key] = values[-1]`)
+    # takes the LAST. A value-blind `any(...)` gate satisfied neither: `attempt_key=&attempt_key=K2`
+    # cleared it, so nothing was minted, `start` saw a first value of `""`, invented a third key
+    # and the visitor met the very dead end this hop exists to close. Collapsing every segment
+    # that names the parameter to ONE makes first == last == any, so there is nothing to disagree
+    # about; `attempt_key=K1&attempt_key=K2` likewise collapses to the first (`K1`), which is the
+    # value the app was already adopting.
     #
-    # ⛔ A PRESENT-BUT-BLANK (or bare) KEY IS DROPPED, NOT APPENDED BESIDE (review P3). The reader
-    # is `url.searchParams.get()` (`start.ts:255`), which takes the FIRST value: appending beside a
-    # blank one emitted `attempt_key=&attempt_key=<minted>`, which reads back as `""`
-    # (`getAll` -> `["", "<minted>"]`), so `start` invented a THIRD key and the mint on this leg
-    # was INERT for exactly the visitor it exists to rescue. Replacing the blank segment is the
-    # only shape where the value we mint is the value the flow adopts.
+    # ⛔ THE "ALREADY EXACTLY ONE, AND NON-BLANK" CASE IS LEFT BYTE-EXACT AND UNTOUCHED. That is
+    # the page's sign-in leg, i.e. the common path — it re-emits nothing.
     #
-    # ⛔ EVERY OTHER SEGMENT IS PASSED THROUGH BYTE-EXACT. `state` and `redirect_uri` are compared
-    # byte-for-byte by the client, so re-encoding the query here would be the `+`/`%2B`/`%20`
-    # CSRF-mismatch class this function's docstring refuses everywhere else. Only the segments
-    # naming THIS parameter are rebuilt, and only when a key is being minted.
-    if not any(v.strip() for v in parse_qs(raw_query, keep_blank_values=True)
-               .get(CONSENT_ATTEMPT_KEY_PARAM, [])):
-        segments = [s for s in raw_query.split("&") if s and not _is_blank_attempt_key(s)]
-        segments.append(urlencode(
-            {CONSENT_ATTEMPT_KEY_PARAM: secrets.token_urlsafe(32)}))
+    # ⛔ EVERY OTHER SEGMENT IS PASSED THROUGH BYTE-EXACT when a rebuild IS needed. `state` and
+    # `redirect_uri` are compared byte-for-byte by the client, so re-encoding the query here would
+    # be the `+`/`%2B`/`%20` CSRF-mismatch class this function's docstring refuses everywhere else.
+    # Only the segments naming THIS parameter are dropped, and only the chosen key is re-encoded.
+    values = parse_qs(raw_query, keep_blank_values=True).get(CONSENT_ATTEMPT_KEY_PARAM, [])
+    if len(values) != 1 or not values[0].strip():
+        # Adopt a real key if the caller presented one (first non-blank wins, matching the
+        # consumer); otherwise mint. Minting beside a blank or duplicate value is what made the
+        # mint inert before, so only mint when there is genuinely nothing to adopt.
+        chosen = next((v for v in values if v.strip()), "") or secrets.token_urlsafe(32)
+        segments = [s for s in raw_query.split("&")
+                    if s and not _is_attempt_key_segment(s)]
+        segments.append(urlencode({CONSENT_ATTEMPT_KEY_PARAM: chosen}))
         inner = CONSENT_START_PATH + "?" + "&".join(segments)
     return (app_origin.rstrip("/") + CONSENT_SIGNIN_PATH + "?"
             + urlencode({"next": inner}))
