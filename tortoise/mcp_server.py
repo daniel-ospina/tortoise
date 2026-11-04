@@ -2482,6 +2482,10 @@ def _carry_allowances(limits: dict | None, resource: str) -> dict | None:
     read and is never overridden), and the state-vs-fault split is
     ``carry_resolved_allowances``'s own: a resolver LOOKUP MISS leaves the dict
     unchanged, a read FAULT is the documented ``QuotaCheckError``.
+    ⚠️ The ``limits is None`` fallback in ``_enforce_quota`` is ALREADY the
+    resolver's own answer, so it skips this fill — otherwise the same read runs
+    twice for one gate (pinned by
+    ``test_the_resolver_fallback_does_not_read_the_resolver_a_SECOND_time``).
 
     ⚠️ The import is GUARDED, for the reason ``quota.enforce_org_limit`` states
     in-line about the SAME import: the gate's drift check is deliberately LOUD at
@@ -2534,9 +2538,11 @@ def _enforce_quota(resource: str = "points") -> None:
         # quota is N/A (selfhost has no billing). Batch caps still apply.
         return
     limits = _current_org_limits.get()
-    if limits is None:
-        limits = resolve_org_limits(org_id)
-    limits = _carry_allowances(limits, resource)
+    # ⛔ `limits is None` means the fallback IS the resolver read, so its answer
+    # is already authoritative — carrying it afterwards would repeat the very
+    # same control-plane read for one gate (#9567 review round 15).
+    limits = (resolve_org_limits(org_id) if limits is None
+              else _carry_allowances(limits, resource))
     # Count on the SAME org SDK the tool writes to (identical connection),
     # so the count and the write can never target different databases.
     enforce_org_limit(limits, resource, sdk=_get_org_sdk())
