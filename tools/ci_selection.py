@@ -4647,8 +4647,10 @@ def fast_matrix_include(shards: list[dict], routing: str | None = None) -> dict:
         # rule 1 pins the last shard to the hosted label because its artifacts feed
         # the canary streak, and that streak is a comparison of TESTS across runs —
         # moving the producer onto a different class would make it a comparison of
-        # runner classes, which is the failure the 2026-06 measurement recorded
-        # (`test (i)` taken by the ARM64 fallback, killed at 32m12s of a 30m budget).
+        # runner classes, which is the failure measured 2026-10-27..30: run
+        # `40986603502` (head `5a2ae6aa1`) had `test (i)`, the canary, taken by
+        # `pi-runner-vm-5` (ARM64) and killed at 32m12s of a 30m budget
+        # (`docs/ops/ci-runner-x64.md:847`, `:888`).
         # A fold gets priority on the eight legs that carry the wall; the producer
         # stays where the streak expects it. `warn=(i == 0)` keeps ONE annotation for
         # the whole matrix (`::warning::` is capped at 10 per step).
