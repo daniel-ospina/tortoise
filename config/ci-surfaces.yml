@@ -141,6 +141,18 @@ surfaces:
   # #10703 batch, NOT by CI — the gate could not see it because the file was unregistered.
   - test_cli_config_show.py
   - test_9583_openapi_read_only_claim.py
+  # #4282: the `api` arm of the #4860 key-limit failover guard. The file drives the
+  # hosted write door (`POST /v1/sessions` -> `hosted_api._capture_session_impl` ->
+  # `sdk._extract_session_v2` -> `RotatingModel`) and reads the response's
+  # `extraction_provider` / `extraction_mode`, so the file it actually guards IS
+  # `tortoise/hosted_api.py`. That module is an EXACT `api` SOURCE_PATTERN match, so a
+  # `hosted_api.py`-only diff selects `api` and REPLACES the `core` fallback in
+  # `select()` — without this row such a PR ships with every leg green and the only
+  # end-to-end #4860 proof never runs, invisibly (`--integrity` is green either way).
+  # The `core` row below is the OTHER half of the // #7968 / #3561 dual-registration
+  # idiom: it covers a `tortoise/model_adapters.py`-only diff (the rotation subject,
+  # which matches no SOURCE_PATTERN). BOTH are required.
+  - test_4860_capture_key_limit_failover.py
   # #9583: a served GET docstring IS the OpenAPI operation `description` a customer
   # reads, and `/v1/packs` advertised "read-only pack introspection" while its handler
   # calls `pack_state.get_tenant_packs`, whose self-heal `ensure_tenant_packs` MERGEs a
@@ -1870,6 +1882,7 @@ surfaces:
   - test_10194_eval_suite_non_gating.py
   - test_10017_backfill_copy.py
   - test_2351_claim_class.py
+  - test_4860_capture_key_limit_failover.py
   - test_9555_narrative_cache_rebuild.py
   - test_9555_narrative_carrier.py
   - test_9567_record_capstone.py
