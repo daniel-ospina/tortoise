@@ -303,26 +303,24 @@ _SDK_OPENERS = frozenset({
     # learn these names would silently stop counting those lanes — exactly the
     # drift this inventory exists to catch.
     "_org_sdk", "_org_sdk_for_credential", "_org_sdk_from_name",
-    # #4051: the ORG-LIMIT GATE's count SDK — `_make_sdk(graph_name=<binding>)`
-    # for a graph-bound key, `_org_sdk_for_credential(org)` for an org-wide one,
-    # and `None` for a registry-scoped resource or an unresolved binding. It is
-    # COUNTED here as well as judged in `_UNBOUND_OPENERS`, because every other
-    # untented opener this file knows is both: a member of the judging set and
-    # not of the census one would be a silent asymmetry ("how many sites can
-    # this scan judge?" would answer one fewer than it does).
+    # #4051: the org-limit gate's SDK (`graph_name=_data_graph_name(org)` or
+    # `_org_sdk_for_credential(org)`). Listed here SO THAT its call sites count
+    # as sites — the site walker's `unconditional` set is `_SDK_OPENERS +
+    # _INSTALLING_OPENERS`, so an opener declared only in `_UNBOUND_OPENERS`
+    # would be judged as a handle with its own construction uncounted.
     "_gate_sdk_for",
 })
 #: The openers that install a record tenant on the SDK they return.
-_INSTALLING_OPENERS = frozenset({
-    "_data_sdk", "_data_sdk_offloaded",
-    # #10602: `_data_sdk` PLUS the projection attach, in ONE worker call. It
-    # DELEGATES — `sdk = _data_sdk(org)` is its first statement, so the bind
-    # happens there, before the attach — which makes it the same
-    # clean-by-construction family as the pair above, and a lane opening through
-    # it BOUND rather than exempt. Reading it as "not a handle" (the `None`
-    # answer) would look past a write that is genuinely covered.
-    "_data_sdk_with_projection",
-})
+#:
+#: `_data_sdk_with_projection` (#10602) is `_data_sdk` PLUS the projection
+#: attach: it opens through `_data_sdk` (`sdk = _data_sdk(org)`), and `_data_sdk`
+#: binds this request's record tenant before returning
+#: (`_bind_record_tenant(sdk, org)`), so it installs before returning exactly
+#: like its two neighbours. It arrived on `origin/main` AFTER this branch's base
+#: and the classification leg below went RED on the MERGE tree while staying
+#: green on the branch — the leg doing precisely its job (#10723 review F1).
+_INSTALLING_OPENERS = frozenset({"_data_sdk", "_data_sdk_offloaded",
+                                 "_data_sdk_with_projection"})
 #: The openers that return an SDK with NO record tenant installed on it. Every
 #: one of these is a real SDK handle, so a write through it without a later
 #: `_TENANT_INSTALLERS` call is exactly the unbound write this file exists to
@@ -341,14 +339,17 @@ _UNBOUND_OPENERS = frozenset({
     "_org_sdk",                   # #10180: the one default-graph resolver
     "_org_sdk_from_name",         #   …its already-resolved-name twin (no I/O)
     "_org_sdk_for_credential",    #   …and its credential-shaped twin
-    # #4051: the ORG-LIMIT GATE's count SDK. Both arms it can return install
-    # NOTHING — `_make_sdk(graph_name=_data_graph_name(org))` for a graph-bound
-    # key, `_org_sdk_for_credential(org)` for an org-wide one — so a write
-    # through one is exactly the unbound write this file exists to catch, and
-    # reading the name as "not a handle" would look straight past it. Its `None`
-    # arms (registry-scoped resource, unresolved binding) answer `False` here
-    # too, which is the fail-closed direction: the caller that then writes is
-    # flagged rather than exempted.
+    # #4051: the org-limit gate's own SDK — `_make_sdk(graph_name=…)` for a
+    # graph-bound key, `_org_sdk_for_credential(org)` for an org-wide one, and
+    # `None` for a registry-scoped or unresolved binding. It installs nothing,
+    # so it is the UNBOUND class: today it is only ever COUNTED through (so
+    # this scan reports 0 writes through it), and a future write through it
+    # must not be looked past. Also landed on `origin/main` after this branch's
+    # base (#10723 review F1).
+    # ⚠️ This member is ALSO in `_SDK_OPENERS`, and that is not redundant:
+    # `_org_scoped_sdk_sites` builds its site set from `_SDK_OPENERS` +
+    # `_INSTALLING_OPENERS`, so a member here alone would be judged as a HANDLE
+    # while its own call site was never counted as a construction site.
     "_gate_sdk_for",
 })
 #: The carriers that install a record tenant on an SDK that already exists.
@@ -397,10 +398,11 @@ _NOT_A_LANE_OPENER = frozenset({
     "mine_corpus_with_sdk", "_retire_probe_sdk_locked", "_sdk_matches_env",
     "_sdk_usable", "_sdk_backend_is_embedded", "sdk_reflex",
     "_probe_sdk_key", "_probe_sdk_reset",
-    # #4051: `quota._resolve_count_sdk(sdk, sdk_factory, …)` returns the handle it
-    # was HANDED, or the one the given factory builds — it opens nothing itself,
-    # so it is a pass-through and not a construction site. Classified rather than
-    # left to answer `None` by accident, which is what this vocabulary is for.
+    # #4051: a PASS-THROUGH, not an opener — it returns the `sdk` it was GIVEN,
+    # or `sdk_factory()`'s return, and constructs nothing itself. Same class as
+    # `mine_corpus_with_sdk`: the handle it hands back was classified at its own
+    # construction site (`_gate_sdk_for`, above). Also on `origin/main` only
+    # (#10723 review F1).
     "_resolve_count_sdk",
 })
 
@@ -557,13 +559,26 @@ def _namespace_is_org_scoped(call) -> bool:
     predicate, so answering "not an org graph" here would ALSO answer `None`
     ("not an SDK handle at all") THERE and make a write through such a handle
     invisible, which is the one direction this scan must never take. The census
-    therefore counts 88 sites (86 org-graph + those 2 probes) — re-measured at
-    #10723's head with this file's own `_org_scoped_sdk_sites` over all 264
-    modules, after #10602/#4051 added `_data_sdk_with_projection` and
-    `_gate_sdk_for` to the vocabularies — and both halves are pinned by
-    `test_a_literal_namespace_is_not_an_org_scoped_site`.
+    therefore counts the two probe constructions among the package's org-scoped
+    sites (the measured breakdown lives in `_org_scoped_sdk_sites`, dated to the
+    tree it was measured on), and both halves
+    are pinned by `test_a_literal_namespace_is_not_an_org_scoped_site`.
+
+    An ABSENT keyword is the same construction (#10723 review F2):
+    `hosted_api._make_sdk` is `def _make_sdk(*, namespace: str | None = None,
+    graph_name: str | None = None)`, so `_make_sdk()` IS `namespace=None` at
+    runtime — the org's DEFAULT graph with no tenant. It was the one spelling
+    that reached the OPPOSITE answer on BOTH halves (not a site, and
+    `_handle_state` → `None` → the write looked past), because
+    `kwargs.get("namespace")` is Python `None` for an omitted keyword just as it
+    is for an explicit `None`. `_make_sdk(**opts)` folds in here too (`**`
+    has no `arg`), which is the same fail-closed direction. No site count moves:
+    the shipped package has no bare or `**`-spread `_make_sdk` call.
     """
     kwargs = {k.arg: k.value for k in call.keywords}
+    if "namespace" not in kwargs and "graph_name" not in kwargs:
+        # `_make_sdk()` / `_make_sdk(**opts)`: namespace=None at runtime.
+        return True
     namespace = kwargs.get("namespace")
     if "graph_name" in kwargs:
         return True
@@ -572,7 +587,20 @@ def _namespace_is_org_scoped(call) -> bool:
 
 
 def _operand_calls(value) -> list:
-    """The call expressions a value is made of, flattening `or`/`if else`."""
+    """The call expressions a value is made of, flattening `or`/`if else`/`await`.
+
+    `await` is unwrapped for the same reason `or` and `if else` are (#10723
+    review F1): it is a TRANSPARENT wrapper around the call, so leaving it on
+    made `_handle_state` answer `None` — "not an SDK handle at all" — for
+    `sdk = await _data_sdk_offloaded(org)`. That is a fail-OPEN on an awaited
+    `_UNBOUND_OPENERS` member (the write looks past the handle and the scan is
+    GREEN, the false PASS this file exists to prevent) and a FALSE POSITIVE on
+    the documented fix when the rebind is spelled with the async twin. `await`
+    is not a hypothetical spelling here: `hosted_api.py` assigns
+    `sdk = await _data_sdk_offloaded(org)` at 23 sites.
+    """
+    if isinstance(value, ast.Await):
+        return _operand_calls(value.value)
     if isinstance(value, ast.BoolOp):
         return [expr for operand in value.values
                 for expr in _operand_calls(operand)]
@@ -734,6 +762,110 @@ def _binds_as_parameter(scope, key: str) -> bool:
     return False
 
 
+def _binds_locally(scope, key: str) -> bool:
+    """Does `scope` BIND `key` itself — by any statement, resolvable or not?
+
+    PEP 227's escape clause, which the outward walk must respect (#10723 review
+    round 3 P2, shape ii): *"names bound in B are visible in A unless A contains
+    a name binding that hides the binding in B"*. A nested `def` that assigns
+    `sdk = _safe_handle()` holds a DIFFERENT variable from the enclosing lane's
+    `sdk`, so folding the enclosing definition onto its write is a false
+    positive — it tells the reader to install a tenant on a handle the write
+    never touches.
+
+    `_binds_as_parameter` covers the handed-in half; this covers the
+    re-bound half. Only the BINDINGS that make the name local are tested, not
+    resolvability: `_handle_state` answers `None` for `_safe_handle()`, so an
+    unresolvable rebind records no event and the outward walk would otherwise
+    see "no local event" and resolve the enclosing name. A name that is not
+    bound here at all (the genuine closure capture) still resolves outward.
+
+    ⚠️ A target that is NOT an identifier is a USE of the name, never a binding
+    of it (#10723 review at `bb2dde007`, P2 fail-open). CPython's execution
+    model lists what binds a name as *"targets that are **identifiers** if
+    occurring in an assignment … after `as` in a `with` statement"*, so
+    `sdk.timeout = 5`, `seen[sdk] = 1` and `sdk.calls += 1` all only *read*
+    `sdk` — they cannot make it local. Walking the target and accepting any
+    `ast.Name` it contains read those as bindings, so a nested writer that
+    merely set an attribute on the enclosing UNBOUND handle was answered
+    `shadowed` → `inherited` (`None` = silent), while deleting the attribute
+    line flagged it. Measured at `bb2dde007`: `_flagged` returned `[]` for the
+    attribute and subscript spellings and `['_lane:5 writes through the unbound
+    SDK `sdk`']` for the control. The `Store` requirement below is the fix; the
+    genuine shadows (`sdk = …`, `with … as sdk:`) are `Store` and stay silent.
+
+    ⚠️ The stop reads the bindings of THIS BLOCK only — `_nodes_of_one_scope`
+    stops at a nested `def` AND at a nested `class`, because a class body is a
+    block of its own (a `class C: sdk = …` binds `C.sdk`, never the writing
+    function's `sdk`). Descending into it made this answer True and silenced a
+    write through the enclosing UNBOUND handle that `origin/main` flags — a
+    false PASS, the direction this file must never fail in.
+
+    ⚠️ Treating the shadow as authoritative for the WHOLE scope is Python's own
+    rule, not a simplification: a binding anywhere in a function makes the name
+    LOCAL for the whole function, so a read of it BEFORE the binding raises
+    `UnboundLocalError` at runtime — it can never be a silently-unbound third
+    path, which is why this stop cannot introduce a fail-open.
+    """
+    for sub in _nodes_of_one_scope(scope):
+        targets: list[ast.expr] = []
+        if isinstance(sub, ast.Assign):
+            targets = list(sub.targets)
+        elif isinstance(sub, (ast.AnnAssign, ast.AugAssign, ast.For,
+                             ast.AsyncFor)):
+            targets = [sub.target]
+        elif isinstance(sub, (ast.With, ast.AsyncWith)):
+            targets = [item.optional_vars for item in sub.items
+                       if item.optional_vars is not None]
+        for target in targets:
+            for node in ast.walk(target):
+                # `Store` only: `ast.walk` also reaches the `Load` names inside
+                # an attribute or subscript target, which are uses (see the
+                # docstring). A tuple/list target carries `Store` on each of its
+                # `Name`s, so unpacking still binds.
+                if (isinstance(node, ast.Name) and node.id == key
+                        and isinstance(node.ctx, ast.Store)):
+                    return True
+    return False
+
+
+def _nodes_of_one_scope(scope) -> list:
+    """Every node of `scope` WITHOUT descending into a nested code BLOCK.
+
+    A nested `def`'s bindings are its OWN locals: descending into them would read
+    a sibling function's `sdk` as this function's, which is the fail-open the
+    bounded walk exists to avoid.
+
+    A nested `class` body is a block of its own for exactly the same reason, and
+    it is the #10723 review F1 regression: the CPython execution model defines a
+    block as "a module, a function body, and a class definition", and "if a name
+    is bound in a block, it is a local variable of that block" — so `class C:
+    sdk = …` binds `C.sdk` and says NOTHING about the enclosing function, which
+    keeps resolving its own `sdk`. Reading it as a binding of the writing
+    function made `_binds_locally` answer True, took the `shadowed` branch, and
+    answered `inherited` (`None` = silent) for a write through the lane's UNBOUND
+    handle that `origin/main` flags. A false PASS, which this file's contract
+    forbids even where a false positive is tolerated.
+
+    A nested class is skipped even when `scope` IS a class: a class body's own
+    bindings are read when the scan judges that class's block (the write's
+    `_enclosing_scope` is the class itself then), never through a class nested
+    inside it.
+    """
+    inner_blocks: tuple = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
+    if not isinstance(scope, ast.ClassDef):
+        inner_blocks += (ast.ClassDef,)
+    found: list = []
+    stack = list(ast.iter_child_nodes(scope))
+    while stack:
+        node = stack.pop()
+        found.append(node)
+        if isinstance(node, inner_blocks):
+            continue
+        stack.extend(ast.iter_child_nodes(node))
+    return found
+
+
 def _position_of(node) -> tuple[int, int]:
     """A node's `(lineno, col_offset)` — its ORDER inside its own scope.
 
@@ -804,8 +936,7 @@ def _is_conditional(node, parents, scope) -> bool:
     parent = parents.get(id(child))
     while parent is not None and parent is not scope:
         if isinstance(parent, (ast.If, ast.For, ast.AsyncFor, ast.While,
-                               ast.ExceptHandler, ast.Match,
-                               ast.match_case)):
+                               ast.ExceptHandler, ast.Match, ast.match_case)):
             return True
         if isinstance(parent, ast.Try) and any(
                 child is statement for statement in parent.orelse):
@@ -963,19 +1094,20 @@ def _org_scoped_sdk_sites(tree) -> dict[str, int]:
     pass a string-literal namespace. Measured at #10046 review round 3: 94 of
     175 counted "sites" were literal-namespace constructions, i.e. 54% of the
     count was not org-scoped at all, which let the non-vacuity floor stand on
-    registry lanes alone. Corrected, and re-measured at #10723's head (the census
-    is a live count, so every PR that adds a construction site moves it), the
-    package has 88 org-scoped sites across THREE modules — `hosted_api.py` 85
-    (two of which are the `namespace=None` probe constructions the predicate
-    COUNTS deliberately), `quota.py` 1 and `supabase_control.py` 2 (the
-    module-qualified spelling). The count rose from 83 when #10602 and #4051
-    added `_data_sdk_with_projection` / `_gate_sdk_for` to the vocabularies: the
-    two CALL sites of those helpers (`_data_sdk_offloaded`'s attach branch and
-    `_check_org_limit`'s gate) are construction sites this scan judges, so
-    learning the names without counting them would have made the census answer
-    one fewer than it can see. An earlier revision of this line said "81 across
-    two modules", which described a predicate that excluded `namespace=None` and
-    missed `supabase_control.py` (#10046 review F3).
+    registry lanes alone. Corrected, the package has 88 org-scoped sites across
+    THREE modules, measured on the tree #10723 merges into (`origin/main`
+    `e4ee966f4`, 264 modules): `hosted_api.py` 85 (two of which are the
+    `namespace=None` probe constructions the predicate COUNTS deliberately),
+    `quota.py` 1 and `supabase_control.py` 2 (the module-qualified spelling).
+    ⚠️ The number is DATED on purpose. Two earlier revisions of this line said
+    "81 across two modules" and then "83 across three": each was true of the
+    predicate on the day it was written and false at the next merge, because
+    `origin/main` keeps adding openers (#10602's `_data_sdk_with_projection`,
+    #4051's `_gate_sdk_for` — both counted here by DECLARATION, which is why the
+    vocabulary is what moves this number). A bare number that outlives its tree
+    is the claim-vs-code defect this file has been sent back for four times
+    (#10046 review F3, #10723 review F3), so quote the snapshot or quote the
+    breakdown, never a bare figure.
     """
     sites: dict[str, int] = {}
     unconditional = (_SDK_OPENERS - {"_make_sdk"}) | _INSTALLING_OPENERS
@@ -1080,8 +1212,17 @@ def _unbound_record_writes(tree) -> list[str]:
             #     because a too-late event in a middle scope would otherwise
             #     reset the answer instead of inheriting the outer binding.
             initial = inherited.get(key)
+            # A nested scope that BINDS the name itself holds a DIFFERENT
+            # variable, so no enclosing definition reaches its write (PEP 227's
+            # "unless A contains a name binding that hides the binding in B").
+            # `_handle_state` answers `None` for an unresolvable value, so such a
+            # rebind records no event and the walk below would otherwise resolve
+            # the enclosing name — reporting a lane that shadows its handle with
+            # a SAFE one as unbound (#10723 review round 3 P2, shape ii).
+            # Answering `inherited` (unknown) is the honest state, not "bound".
+            shadowed = scope is not lane and _binds_locally(scope, key)
             anchor = scope
-            while anchor is not lane:
+            while not shadowed and anchor is not lane:
                 if _binds_as_parameter(anchor, key):
                     initial = inherited.get(key)
                     break
@@ -1182,9 +1323,15 @@ def test_no_hosted_lane_writes_records_through_an_unbound_sdk():
     """
     tree = ast.parse(Path(ha.__file__).read_text())
     sites = _org_scoped_sdk_sites(tree)
-    assert len(sites) >= 30, (
+    # `sites` maps LANE → its count, so the floor is asserted on the SITES, the
+    # same quantity the package-wide leg uses. `len(sites)` is the number of
+    # lanes holding at least one site (65 at `bb2dde007` against 85 sites), so
+    # the old message reported a lane count as a site count and the floor would
+    # not move while lanes kept one site each (#10723 review P3).
+    assert sum(sites.values()) >= 30, (
         "the scan found only "
-        f"{len(sites)} org-scoped SDK construction sites — the AST criteria no "
+        f"{sum(sites.values())} org-scoped SDK construction sites across "
+        f"{len(sites)} lanes — the AST criteria no "
         "longer match how lanes open their SDK")
     unbound = _unbound_record_writes(tree)
     assert unbound == [], (
@@ -1240,19 +1387,21 @@ def test_no_lane_ANYWHERE_in_the_package_writes_records_through_an_unbound_sdk()
     nothing, which is exactly the silent-invisible class #10046 was filed for
     ("the gap is invisible until such a tenant tries to write").
 
-    Re-measured at #10723's head — the counts are a live measurement, not a
-    one-off, so each is re-derived with the file's own functions rather than
-    carried forward: 264 modules, 88 org-scoped construction sites across THREE
-    modules, and 0 unbound record writes, so widening the scan cannot red on the
-    code as it stands. Its whole job is the module that does not exist yet. (Two
-    earlier revisions reported different counts, each fixed
+    Measured on the tree this leg was last verified against (`origin/main`
+    `e4ee966f4`, 264 modules): 88 org-scoped construction sites across THREE
+    modules, and 0 unbound record writes, so widening the scan
+    cannot red on the code as it stands. Its whole job is the module that does
+    not exist yet. (Two earlier revisions reported different counts, each fixed
     at review: "149 entries / 175 sites" was inflated by a doubled predicate —
     `_make_sdk` is a member of `_SDK_OPENERS`, so the membership test matched
     EVERY `_make_sdk(...)` call and 94 of the 175 were registry/base literals;
     then "81 sites / two modules" still missed `supabase_control.py`, whose two
     lanes open through the MODULE-QUALIFIED spelling `_ha._make_sdk(...)` that a
     bare-name reader cannot see. Both are fixed in `_org_scoped_sdk_sites` /
-    `_handle_state`.)
+    `_handle_state`. A third revision said "83" until `origin/main` added #10602's
+    `_data_sdk_with_projection` and #4051's `_gate_sdk_for`; the count follows the
+    declared vocabulary, so it moves when main adds an opener — see the dated
+    note in `_org_scoped_sdk_sites`.)
 
     WHAT THIS SCAN CANNOT SEE, stated rather than implied: it judges a write by
     the handle's OPENER, and only openers in the declared vocabularies are
@@ -1268,31 +1417,22 @@ def test_no_lane_ANYWHERE_in_the_package_writes_records_through_an_unbound_sdk()
     reached through a lambda or local factory. ORDER is modelled, but only
     WITHIN one function (`_handle_events_by_scope`): a definition reaches a
     write positionally, so an install arms only the writes after it and an
-    unconditional rebind kills the earlier definition — while a write in a
-    DIFFERENT function is judged by that function's own definitions. The shipped
-    shape that costs is a callback FACTORY, `_run_dream_on_pool(_drain,
+    unconditional rebind kills the earlier definition. A write in a DIFFERENT
+    function is judged by that function's own definitions when the handle is
+    handed in as a PARAMETER, and by the ENCLOSING function's definitions when
+    it is a CLOSURE CAPTURE — resolved at the nested `def`'s position, and again
+    at the enclosing scope's end, because a closure runs at CALL time (PEP 227:
+    names bound in the enclosing function are visible in the nested one *unless
+    the nested one binds the name itself*, which `_binds_locally` honours). The
+    trade that buys is one CONSERVATIVE false positive: an install positioned
+    between the nested `def` and its CALL is not seen (the fold anchors at the
+    def's position), so such a lane is flagged although the install does run
+    first — kept because the alternative re-opens the `finally`-install
+    fail-open, and it is pinned as the asserted answer rather than left silent.
+    The shipped shape that costs is a callback FACTORY, `_run_dream_on_pool(_drain,
     _open_sdk)` in `hosted_api.py`: `_open_sdk` opens and arms the handle,
     `_drain` writes it, and the write's handle is therefore unknown rather than
     assumed bound (the local-factory indirection above, one spelling over).
-    ⚠️ TWO HANDLE SPELLINGS, which used to be omitted from this list and are
-    exactly the kind of gap the list exists for (#10723 review P2):
-
-      * a CHAINED assignment, `sdk = s2 = _make_sdk(namespace=org_id)`.
-        `_assigned_handles` takes a single-target `ast.Assign`
-        (`len(node.targets) == 1`), so a multi-target one records NO event at
-        all — measured: the chained lane followed by `sdk.create_point(…)`
-        answers `[]`, not a flag. Ordinary, and not modelled;
-      * a CLASS-BODY opener assigned to a plain name (as opposed to the
-        attribute the class map merges) — listed below, and named here because
-        it is the same "no statement to hang an event on" shape.
-
-    `match`/`case` arms WERE a third: a rebind inside a `case` body read as
-    unconditional, which `_handle_state_at` treats as a KILL, so a bound install
-    in one arm silenced an unbound handle on the path where the pattern does not
-    match — the fail-OPEN direction, measured GREEN where the `if` twin was RED.
-    That is modelled now (`_is_conditional`), so it is no longer a blind spot;
-    the package has 0 `match` statements, so nothing pinned it until
-    `test_a_match_ARM_is_a_branch_like_an_if_body` did.
     Also OUT, and listed so `0 unbound`
     is not read as covering them: an SDK handed to a writing helper as an INLINE
     call in either position (`_write(_org_sdk(org))` / `_write(sdk=_org_sdk(org))`
@@ -1312,36 +1452,20 @@ def test_no_lane_ANYWHERE_in_the_package_writes_records_through_an_unbound_sdk()
     in another, and armed by a positional, keyword or method-form install), the
     ORDER of a handle's definitions within a function (an install arms only the
     writes after it; an unconditional rebind kills the earlier one; a conditional
-    one is worst-wins — under `if`/`for`/`while`, an `except` handler, a
-    `try`'s `orelse`, or a `match` arm), `with … as sdk` (EVERY item of a
-    multi-item `with`), and module-qualified dispatch (`_ha._make_sdk(...)`).
+    one is worst-wins), `with … as sdk` (EVERY item of a multi-item `with`), a
+    CLOSURE CAPTURE of an enclosing function's handle (with a nested local that
+    SHADOWS the name answered as its own, per PEP 227), an `await`ed opener in
+    either direction (`sdk = await _data_sdk_offloaded(org)` is the package's
+    ordinary async spelling — 23 sites in `hosted_api.py` — and leaving the
+    `ast.Await` wrapper on made it a non-handle, i.e. a fail-open on the unbound
+    direction and a false positive on the bound one), and module-qualified
+    dispatch (`_ha._make_sdk(...)`).
     """
     modules = sorted(_PACKAGE_ROOT.rglob("*.py"))
     assert len(modules) >= 200, (
         f"the package walk found only {len(modules)} modules under "
         f"{_PACKAGE_ROOT} — the walk no longer sees the shipped package, so a "
         "clean result would prove nothing")
-
-    # Non-vacuity of the DETECTOR, not only of the census (#10723 review P2).
-    # The three floors below — the module count, `sum(sites.values()) >= 60` and
-    # the `_ORG_SCOPED_MODULES` presence check — all measure
-    # `_org_scoped_sdk_sites`, the CENSUS, while the assertion they read as
-    # protecting is `unbound == []` from `_unbound_record_writes`. Measured:
-    # replacing that detector's body with `return []` left every floor green AND
-    # this leg passing, so the non-vacuity sat on the wrong measurement and a
-    # neutered detector certified nothing. One known-positive lane — the
-    # shipped #10087 shape, an unbound org SDK written through — is run through
-    # the detector FIRST, so neutering it reds here.
-    known_positive = '''
-def _known_unbound_lane(org_id: str) -> None:
-    sdk = _make_sdk(namespace=org_id)
-    sdk.create_point("Subject", {})
-'''
-    assert _unbound_record_writes(ast.parse(known_positive)), (
-        "the write detector flagged NOTHING on a lane that opens an unbound org "
-        "SDK and writes records through it, so `unbound == []` below certifies "
-        "nothing. The census floors cannot catch this: they measure "
-        "`_org_scoped_sdk_sites`, which is a different function")
 
     sites: dict[str, int] = {}
     unbound: list[str] = []
@@ -1369,12 +1493,13 @@ def _known_unbound_lane(org_id: str) -> None:
         "whether they install a record tenant:" + _joined(unparsed))
 
     # The MODULE axis, which a global site floor cannot see: THREE modules
-    # contribute sites and `hosted_api.py` holds 85 of the 88 (measured at
-    # #10723's head), so criteria drift that stopped matching anywhere else
-    # would still clear the floor below with the one module it already covered.
-    # A SUPERSET assertion (not equality) is the honest form — a legitimate new
-    # org-scoped lane may ADD a module freely, while a module that stops
-    # matching reds.
+    # contribute sites and `hosted_api.py` holds 85 of the 88 (measured on
+    # `origin/main` `e4ee966f4`; the ratio, not the figure, is what matters
+    # here), so criteria drift
+    # that stopped matching anywhere else would still clear the floor below with
+    # the one module it already covered. A SUPERSET assertion (not equality) is
+    # the honest form — a legitimate new org-scoped lane may ADD a module freely,
+    # while a module that stops matching reds.
     missing = sorted(_ORG_SCOPED_MODULES - contributing)
     assert missing == [], (
         "these modules used to contribute an ORG-SCOPED SDK construction site and "
@@ -1410,17 +1535,12 @@ def test_every_sdk_shaped_name_in_the_package_is_classified():
     recurrence the package-wide leg above exists to catch, arriving through the
     one axis that leg cannot see.
 
-    Re-measured at #10723's head: 30 SDK-SHAPED module-level definitions in the
-    package (the `_sdk` token anywhere, not just a `_sdk` suffix — the suffix
+    Measured when this leg was added: 27 SDK-SHAPED module-level definitions in
+    the package (the `_sdk` token anywhere, not just a `_sdk` suffix — the suffix
     test alone excluded the real openers `_org_sdk_from_name` and
-    `_data_sdk_offloaded`), all 30 declared and 0 undeclared. When this leg was
-    ADDED there were 27, of them 7 declared and 20 undeclared — including
+    `_data_sdk_offloaded`), 7 of them already declared, 20 undeclared — including
     `_get_org_sdk`, which carries `tortoise/mcp_server.py`'s entire record-write
-    surface (109 call sites) and whose tenant is the request's AMBIENT scope —
-    and the three that arrived with #10602/#4051 (`_data_sdk_with_projection`,
-    `_gate_sdk_for`, `_resolve_count_sdk`) are classified above. Re-derive
-    rather than trust this paragraph: the shapes are counted by the leg itself,
-    and the assertion below is what fails when a new one is unclassified.
+    surface (109 call sites) and whose tenant is the request's AMBIENT scope.
 
     Mutation this reddens on: deleting `_get_org_sdk` from `_AMBIENT_OPENERS`
     (it returns to being silently exempt), or adding an SDK-shaped helper to any
@@ -1743,6 +1863,50 @@ def _early_bind(org_id: str) -> None:
         "so the flag above is ordering rather than a broken harness")
 
 
+def test_a_match_ARM_is_a_branch_like_an_if_body():
+    """#10723 review P2: a `case` body may not run, so its rebind is not a kill.
+
+    `_is_conditional` listed `if`/`for`/`while`/`except` and `try`'s `orelse` but
+    not `ast.Match`, so a rebind inside a `case` arm read as UNCONDITIONAL — the
+    shape `_handle_state_at` treats as "the earlier definition is dead". The
+    direction is worth naming because it is the DANGEROUS one: this test's first
+    snippet measured `[]` (GREEN) before the fix, while its `if` twin was RED.
+    A conditional rebind to a BOUND opener leaves an unbound handle live on the
+    path where the pattern does not match, and only treating the arm as a branch
+    says so.
+
+    Mutation this reddens on: dropping `ast.Match`/`ast.match_case` from
+    `_is_conditional`'s isinstance tuple.
+    """
+    match_unbound_live = '''
+def _match_rebind(org, mode):
+    sdk = _make_sdk(namespace=org["org_id"])
+    match mode:
+        case "bound":
+            sdk = _data_sdk(org)
+        case _:
+            pass
+    sdk.create_point("Subject", {})
+'''
+    assert _flagged(match_unbound_live), (
+        "the arm may not run, so the unbound handle still reaches the write — "
+        "reading the `case` body as unconditional killed it and went GREEN")
+
+    match_all_bound = '''
+def _match_bound(org, mode):
+    sdk = _data_sdk(org)
+    match mode:
+        case "again":
+            sdk = _data_sdk(org)
+        case _:
+            pass
+    sdk.create_point("Subject", {})
+'''
+    assert _flagged(match_all_bound) == [], (
+        "the control: an all-bound lane is clean whichever arm runs — making "
+        "`case` a branch must not manufacture a false positive")
+
+
 def test_a_rebind_to_a_BOUND_opener_before_the_write_clears_the_handle():
     """#10046 review F2 (false positive): the binding in force AT the write wins.
 
@@ -1791,50 +1955,6 @@ def _conditional_rebind(org):
     assert _flagged(conditional_rebind), (
         "the control the round-6 worst-wins rule protects: a CONDITIONAL rebind "
         "may not run, so the unbound definition still reaches the write")
-
-
-def test_a_match_ARM_is_a_branch_like_an_if_body():
-    """#10723 review P2: a `case` body may not run, so its rebind is not a kill.
-
-    `_is_conditional` listed `if`/`for`/`while`/`except` and `try`'s `orelse` but
-    not `ast.Match`, so a rebind inside a `case` arm read as UNCONDITIONAL — the
-    shape `_handle_state_at` treats as "the earlier definition is dead". The
-    direction is worth naming because it is the DANGEROUS one: this test's first
-    snippet measured `[]` (GREEN) before the fix, while its `if` twin was RED.
-    A conditional rebind to a BOUND opener leaves an unbound handle live on the
-    path where the pattern does not match, and only treating the arm as a branch
-    says so.
-
-    Mutation this reddens on: dropping `ast.Match`/`ast.match_case` from
-    `_is_conditional`'s isinstance tuple.
-    """
-    match_unbound_live = '''
-def _match_rebind(org, mode):
-    sdk = _make_sdk(namespace=org["org_id"])
-    match mode:
-        case "bound":
-            sdk = _data_sdk(org)
-        case _:
-            pass
-    sdk.create_point("Subject", {})
-'''
-    assert _flagged(match_unbound_live), (
-        "the arm may not run, so the unbound handle still reaches the write — "
-        "reading the `case` body as unconditional killed it and went GREEN")
-
-    match_all_bound = '''
-def _match_bound(org, mode):
-    sdk = _data_sdk(org)
-    match mode:
-        case "again":
-            sdk = _data_sdk(org)
-        case _:
-            pass
-    sdk.create_point("Subject", {})
-'''
-    assert _flagged(match_all_bound) == [], (
-        "the control: an all-bound lane is clean whichever arm runs — making "
-        "`case` a branch must not manufacture a false positive")
 
 
 def test_a_nested_def_writing_through_the_ENCLOSING_lane_handle_is_caught():
@@ -1972,6 +2092,28 @@ def _lane(org_id):
         "an install after the inner write, in the MIDDLE scope, must not clear "
         "the outer unbound definition")
 
+    # The CONSERVATIVE trade the fold buys, stated as a contract rather than
+    # left to be discovered (#10723 review round 3, P2 shape i). The fold anchors
+    # the nested scope at the `def`'s position, so an install positioned BETWEEN
+    # the def and its CALL is not seen — the lane is flagged although the install
+    # does run first. Kept, because seeing it would mean folding the enclosing
+    # scope to its END, which re-opens the `finally`-install fail-open on the
+    # line above. A false POSITIVE is the direction this file may err in; a
+    # false PASS is not.
+    install_between_def_and_call = '''
+def _lane(org_id):
+    sdk = _make_sdk(namespace=org_id)
+    def _write():
+        sdk.create_point("Subject", {})
+    _bind_default_graph_record_tenant(sdk, org_id)
+    _write()
+'''
+    assert _flagged(install_between_def_and_call), (
+        "the asserted CONSERVATIVE answer: an install between the nested def and "
+        "its call is not modelled, so the lane reads unbound. If this ever goes "
+        "silent, the fold has started reading the enclosing scope to its END — "
+        "which is the fail-open `late_install_one_scope_out` pins against")
+
 
 def test_a_nested_def_writing_through_a_PARAMETER_is_still_silent():
     """The declared indirection the scoped fold exists for, preserved.
@@ -2016,6 +2158,203 @@ def _lane(org_id):
         "out, not only on the writing scope's own")
 
 
+def test_a_nested_def_that_SHADOWS_the_enclosing_handle_is_silent():
+    """PEP 227's escape clause: a local binding HIDES the enclosing one.
+
+    #10723 review round 3 (P2, shape ii). The outward walk resolves a closure
+    capture against the enclosing function, which is right only while the nested
+    scope does NOT bind the name itself: *"names bound in B are visible in A
+    unless A contains a name binding that hides the binding in B"*. A nested
+    `sdk = _safe_handle()` holds a DIFFERENT variable — but `_handle_state`
+    answers `None` for an unresolvable opener, so the rebind records NO event and
+    the walk saw "no local event" and resolved the enclosing unbound name,
+    reporting a lane that had already replaced its handle with a safe one. That
+    is the round-6/7 false-positive family (“the guard rejected its own
+    documented fix”) one scope out.
+
+    Mutation this reddens on: deleting the `_binds_locally` stop in `state_at`
+    (the enclosing `_make_sdk` then answers for the shadowed write), or widening
+    `_binds_locally` to descend into a nested `def`'s body (the `deeper` case
+    below then stops the walk on a SIBLING's binding — a fail-open).
+    """
+    shadowed = '''
+def _lane(org_id):
+    sdk = _make_sdk(namespace=org_id)
+    def _write():
+        sdk = _safe_handle()
+        sdk.create_point("Subject", {})
+    _write()
+'''
+    assert _flagged(shadowed) == [], (
+        "a nested local that REPLACES the handle is a different variable — the "
+        "enclosing unbound definition does not reach its write")
+
+    shadowed_by_a_with_binding = '''
+def _lane(org_id):
+    sdk = _make_sdk(namespace=org_id)
+    def _write():
+        with _safe_handle() as sdk:
+            sdk.create_point("Subject", {})
+    _write()
+'''
+    assert _flagged(shadowed_by_a_with_binding) == [], (
+        "a `with … as sdk` binds the name too, so it hides the outer one")
+
+    deeper = '''
+def _lane(org_id):
+    sdk = _make_sdk(namespace=org_id)
+    def _write():
+        def _unrelated():
+            sdk = _safe_handle()
+            return sdk
+        sdk.create_point("Subject", {})
+    _write()
+'''
+    assert _flagged(deeper), (
+        "the shadowing stop reads THIS scope's bindings only — a nested `def`'s "
+        "local must not silence the write one scope out, which is the "
+        "fail-open a plain `ast.walk(scope)` would introduce")
+
+
+def test_a_USE_of_the_handle_inside_the_writer_is_not_a_shadow():
+    """Setting an ATTRIBUTE on the handle reads it — it does not bind the name.
+
+    #10723 review at `bb2dde007`, P2 (fail-open, the direction this file must
+    never fail in). `_binds_locally` walked the assignment TARGET and accepted
+    any `ast.Name` it met, so the `Load` names inside an attribute or subscript
+    target counted as bindings. CPython's execution model (§4.2.1, the primary
+    source for this) says only *"targets that are identifiers"* bind a name, so
+    `sdk.timeout = 5` is a USE of `sdk`. Reading it as a binding made
+    `state_at` take the `shadowed` branch and answer `inherited` (`None` =
+    silent) for a write through the enclosing lane's UNBOUND handle.
+
+    Measured at `bb2dde007` with this file's own `_flagged`: the attribute case
+    and the subscript case returned `[]`, the augmented form returned `[]`, and
+    deleting the attribute line from the same snippet returned
+    `['_lane:5 writes through the unbound SDK `sdk` …']` — the flag existed and
+    the use-only line erased it. Post-fix all three red, so the pin fails on the
+    pre-fix code.
+
+    Mutation this reddens on: dropping `isinstance(node.ctx, ast.Store)` from
+    `_binds_locally` (back to a plain `ast.walk` over the target).
+    """
+    control = '''
+def _lane(org_id):
+    sdk = _make_sdk(namespace=org_id)
+    def _write():
+        sdk.create_point("Subject", {})
+    _write()
+'''
+    attribute_use = '''
+def _lane(org_id):
+    sdk = _make_sdk(namespace=org_id)
+    def _write():
+        sdk.timeout = 5
+        sdk.create_point("Subject", {})
+    _write()
+'''
+    subscript_use = '''
+def _lane(org_id):
+    sdk = _make_sdk(namespace=org_id)
+    def _write():
+        seen[sdk] = 1
+        sdk.create_point("Subject", {})
+    _write()
+'''
+    augmented_attribute = '''
+def _lane(org_id):
+    sdk = _make_sdk(namespace=org_id)
+    def _write():
+        sdk.calls += 1
+        sdk.create_point("Subject", {})
+    _write()
+'''
+    control_flag = _flagged(control)
+    assert control_flag, (
+        "the write goes through the enclosing lane's UNBOUND handle — the "
+        "control case, which must stay RED")
+
+    def _shape(flags: list[str]) -> list[str]:
+        """The flag with its line number dropped — the variants shift lines."""
+        return [re.sub(r":\d+ ", ":<line> ", f) for f in flags]
+
+    for label, source in (("attribute", attribute_use),
+                          ("subscript", subscript_use),
+                          ("augmented attribute", augmented_attribute)):
+        assert _shape(_flagged(source)) == _shape(control_flag), (
+            f"a {label} assignment on the handle is a USE — it does not bind "
+            "the name, so it must not hide the enclosing unbound definition "
+            "(#10723 review: a false PASS where the same snippet without that "
+            "line is RED)")
+
+    # The `Store` requirement must not cost a genuine binding: an unpacking
+    # target carries `Store` on each of its names, so this one still shadows.
+    unpacked_shadow = '''
+def _lane(org_id):
+    sdk = _make_sdk(namespace=org_id)
+    def _write():
+        sdk, other = _safe_handle(), 1
+        sdk.create_point("Subject", {})
+    _write()
+'''
+    assert _flagged(unpacked_shadow) == [], (
+        "an unpacking target BINDS each name it names, so the nested scope "
+        "holds a different variable and the outer definition does not reach "
+        "its write")
+
+
+def test_a_nested_CLASS_BODY_binding_is_not_a_binding_of_the_writing_function():
+    """A class body is its own BLOCK — `C.sdk` is not the writing function's `sdk`.
+
+    #10723 review F1 (P2, false PASS, regression against `origin/main`).
+    `_nodes_of_one_scope` stopped at a nested `def` but not at a nested `class`,
+    so `_binds_locally` read a class-body assignment as a binding of the writing
+    function. `state_at` then took the `shadowed` branch and answered
+    `inherited` (`None` = silent) for a write through the lane's UNBOUND handle —
+    a lane that `origin/main` flags. CPython's execution model is explicit: a
+    block is "a module, a function body, and a class definition", and "if a name
+    is bound in a block, it is a local variable of that block".
+
+    Both directions are asserted so the pin is non-vacuous: renaming the class
+    attribute to a different name must not change the answer (it never did), and
+    the class-body spelling must agree with it.
+
+    Mutation this reddens on: dropping the `ast.ClassDef` stop from
+    `_nodes_of_one_scope` (the `class C: sdk = …` case goes silent again).
+    """
+    class_body_binds_the_handle = '''
+def _lane(org_id):
+    sdk = _make_sdk(namespace=org_id)
+    def _write():
+        class C:
+            sdk = _safe_handle()
+        sdk.create_point("Subject", {})
+    _write()
+'''
+    class_body_binds_another_name = class_body_binds_the_handle.replace(
+        "sdk = _safe_handle()", "other = _safe_handle()")
+
+    assert _flagged(class_body_binds_another_name), (
+        "the write goes through the ENCLOSING lane's unbound handle — the "
+        "control case, which must stay RED")
+    assert _flagged(class_body_binds_the_handle) == _flagged(
+        class_body_binds_another_name), (
+        "a class-body assignment binds `C.<name>`, not the writing function's "
+        "name, so it must not silence the enclosing unbound handle (#10723 "
+        "review F1 — a false PASS where `origin/main` was RED)")
+
+    class_body_write_through_its_own_handle = '''
+def _lane(org_id):
+    class C:
+        sdk = _make_sdk(namespace=org_id)
+        sdk.create_point("Subject", {})
+'''
+    assert _flagged(class_body_write_through_its_own_handle), (
+        "a class body's OWN bindings are still read when the write's scope IS "
+        "that class — the stop only removes the ENCLOSING function's claim on "
+        "them, so this unbound write must stay RED")
+
+
 def test_a_literal_namespace_is_not_an_org_scoped_site():
     """Pins the round-3 predicate: `_make_sdk(namespace="registry")` is not ours.
 
@@ -2033,6 +2372,13 @@ def test_a_literal_namespace_is_not_an_org_scoped_site():
     `_handle_state` reaches this same predicate, so excluding it would make a
     write through such a handle invisible — so the docstring was corrected and
     the behaviour pinned here instead of left to drift either way.
+
+    The THIRD half pins the ABSENT keyword (#10723 review F2). `_make_sdk()` is
+    `namespace=None` at runtime — `hosted_api._make_sdk`'s defaults — and it was
+    the one spelling that answered the OPPOSITE way on BOTH halves: not a site,
+    and `_handle_state` → `None` ("not an SDK handle at all"), so a write
+    through it was looked straight past. The write half is asserted through
+    `_flagged` because that is the leg the silence actually cost.
     """
     registry = 'def f():\n    return _make_sdk(namespace="registry")\n'
     assert _org_scoped_sdk_sites(ast.parse(registry)) == {}, (
@@ -2043,6 +2389,22 @@ def test_a_literal_namespace_is_not_an_org_scoped_site():
         "surface, but a handle opened that way writes to the DEFAULT graph with "
         "no tenant, and `_handle_state` must not answer `None` (not-a-handle) "
         "for it")
+    absent_kwarg = 'def f():\n    return _make_sdk()\n'
+    assert _org_scoped_sdk_sites(ast.parse(absent_kwarg)) == {"f": 1}, (
+        "`_make_sdk()` with NO keyword is `namespace=None` at runtime "
+        "(`hosted_api._make_sdk`'s defaults), so it must count exactly like the "
+        "explicit `namespace=None` — otherwise the omission is the one spelling "
+        "that answers `not an org graph` on both halves")
+    absent_kwarg_write = (
+        "def f(org_id):\n"
+        "    sdk = _make_sdk()\n"
+        "    sdk.create_point('Subject', {})\n")
+    flagged = _flagged(absent_kwarg_write)
+    assert flagged and "`sdk`" in flagged[0], (
+        "a write through `_make_sdk()` is an UNBOUND write: the handle carries "
+        "no tenant and `_handle_state` answering `None` for it made the write "
+        "invisible — the false-PASS shape this file exists to remove; "
+        f"got {flagged!r}")
     org = 'def f(org_id):\n    return _make_sdk(namespace=org_id)\n'
     assert _org_scoped_sdk_sites(ast.parse(org)), (
         "the control: a non-literal namespace IS an org-scoped site")
@@ -2098,6 +2460,60 @@ def _run_new_lane(org_id: str) -> None:
         f"a lane writing records through an unbound `{opener}()` handle must be "
         "flagged — the scan cannot treat the default-graph resolver as a "
         "non-handle")
+
+
+def test_an_AWAITED_unbound_opener_is_flagged_and_an_awaited_rebind_is_clean():
+    """#10723 review F1: `await` is a TRANSPARENT wrapper, not a non-handle.
+
+    `_operand_calls` flattened `or`/`if else` but left `ast.Await` on, so
+    `sdk = await _data_sdk_offloaded(org)` recorded NO event for `sdk`:
+    `_handle_state` never ran a branch and answered `None` — "not an SDK handle
+    at all" — and the write-detector then looked straight past it. Both
+    directions of the round-6/7 defect came back at once, and only for the async
+    spelling:
+
+    - a fail-OPEN on an awaited `_UNBOUND_OPENERS` member (the write is GREEN
+      while the handle carries no tenant — the false PASS this file exists to
+      stop), and
+    - a FALSE POSITIVE on the documented fix when the rebind is spelled with the
+      async twin (`_data_sdk_offloaded` IS an `_INSTALLING_OPENERS` member).
+
+    Not a hypothetical spelling: `hosted_api.py` assigns
+    `sdk = await _data_sdk_offloaded(org)` at 23 sites, so the census's "0
+    unbound" says nothing about those handles unless this is covered.
+
+    Mutation this reddens on: dropping the `ast.Await` unwrap in
+    `_operand_calls` — the unbound case goes silent and the rebind case reds.
+    """
+    awaited_unbound = '''
+async def _lane(org_id):
+    sdk = await _org_sdk(org_id)
+    sdk.create_point("Subject", {})
+'''
+    assert _flagged(awaited_unbound), (
+        "an AWAITED unbound opener returns the same tenantless SDK — answering "
+        "'not a handle' for it is the fail-open the review found")
+
+    awaited_rebind = '''
+async def _lane(org):
+    sdk = _make_sdk(namespace=org["org_id"])
+    sdk = await _data_sdk_offloaded(org)
+    sdk.create_point("Subject", {})
+'''
+    assert _flagged(awaited_rebind) == [], (
+        "`_data_sdk_offloaded` binds before returning, awaited or not — the "
+        "SYNC twin of this rebind is silent, and the spelling must not decide")
+
+    awaited_conditional = '''
+async def _lane(org):
+    sdk = _make_sdk(namespace=org["org_id"])
+    if not sdk:
+        sdk = await _data_sdk_offloaded(org)
+    sdk.create_point("Subject", {})
+'''
+    assert _flagged(awaited_conditional), (
+        "the conditional case must keep its worst-wins answer through the "
+        "unwrap too: the branch may not run")
 
 
 def test_an_org_sdk_lane_that_binds_is_clean():

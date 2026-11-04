@@ -51,6 +51,10 @@ _TESTS_ROOT = Path(__file__).resolve().parent
 #   "assertion"        — the test ASSERTS the SDK's namespace→graph mapping
 #                        (test_namespace_uri_mode, test_sdk_legacy_coverage);
 #                        the literal must stay byte-for-byte.
+#   "synthetic-source" — the literal rides a SOURCE STRING handed to
+#                        `ast.parse` (or the explanation around it), never a
+#                        construction; there is nothing to rename and nothing
+#                        for the redirect to resolve.
 # The swept (renamed) sites are the test_-prefixed literals/constants the
 # guard passes on their own — the table documents the residual declarations.
 ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
@@ -147,14 +151,14 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     # mis-counted — so they are declared here rather than renamed to a `test_*`
     # namespace, which would make the pin exercise a spelling no prod lane uses
     # (and the docstring `grep` a literal it no longer explains). The guard greps
-    # file TEXT, so it cannot tell this from a real construction; MEASURED with
-    # the guard's own `_sdk_call_namespace_literals()` at #10723's head — it
-    # reports lines 2020 (the docstring's own `_make_sdk(namespace="registry")`
-    # sample) and 2037 (the `registry = 'def f(): … namespace="registry" …'`
-    # snippet) — and without this row it reds on exactly those two →
-    # `test-slow (e)` → python-ci-gate, which is how it was found. Re-derive by
-    # running the generator; the numbers move whenever the test file above them
-    # is edited, so they are a measurement, not a constant.
+    # file TEXT, so it cannot tell this from a real construction; MEASURED:
+    # without this row it reds on BOTH of those matches — the docstring sample
+    # and the `registry = 'def f():\n    return _make_sdk(namespace="registry")'`
+    # string — → `test-slow (e)` → python-ci-gate, which is how it was found.
+    # ⛔ NO LINE NUMBERS, deliberately (#10723 review F3): an earlier revision
+    # cited them and they were stale by the very next head, because both matches
+    # ride the END of a file that keeps growing. Name the construct, not the
+    # line — the same rule `tortoise/mcp_auth.py`'s anchors now follow.
     "test_10047_record_every_lane.py": {"registry": "synthetic-source"},
     # #7677: the retry-idempotency tests drive REAL org creation through the
     # registry control plane — `_make_sdk(namespace="registry")._get_registry()`
