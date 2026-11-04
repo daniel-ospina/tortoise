@@ -16461,7 +16461,13 @@ class TortoiseSDK:
             # fresh text-less node has always had.
             "s.summary=CASE WHEN $sum <> '' THEN $sum "
             "ELSE coalesce(s.summary, '') END",
-            "s.topics=$topics",
+            # #10000: `topics` moves under the SAME guard as `summary`. It used to
+            # be unconditional (`s.topics=$topics`), so a text-less re-capture
+            # left `topics=[]` while `summary`/`_searchText` kept the lexicon
+            # those topics name — the third column disagreeing with the two it
+            # is a view of.
+            "s.topics=CASE WHEN size($topics) > 0 THEN $topics "
+            "ELSE coalesce(s.topics, []) END",
             # `coalesce` keeps the stored text ONLY when this capture derives
             # none. It is not what makes an old node heal — the DERIVATION is:
             # a pre-#10000 Source holds utterance prose, and the next capture's
@@ -16556,7 +16562,17 @@ class TortoiseSDK:
             # other two: #9451 — the record must state the instant this write
             # STORED, which is the earlier writer's when the stub pre-existed
             # (`s.ingestedAt=coalesce(s.ingestedAt, $now)` keeps it), not `now`.
-            + " RETURN s.validFrom, s.is_episodic, s.ingestedAt",
+            # #10000: the three DERIVED columns are read back for exactly the
+            # same reason as the three above — `summary`/`topics`/`_searchText`
+            # now all have a keep-arm, so the record must state what this write
+            # STORED, not what the call derived. Journalling the call's empty
+            # derivation made `derived != replay(journal)`: a text-less
+            # re-capture kept the display column live and the replay wrote `''`
+            # over it (measured — `rebuild()` and `rebuild_all()` both blanked
+            # `summary` while `_searchText` survived, the #5024/#5097 class this
+            # carrier exists to close).
+            + f" RETURN s.validFrom, s.is_episodic, s.ingestedAt,"
+              f" s.summary, s.topics, s.{SOURCE_SEARCH_TEXT_FIELD}",
             params=params,
         ).result_set
         prior_valid_from = _rows[0][0] if _rows else None
@@ -16572,6 +16588,12 @@ class TortoiseSDK:
         # the very divergence this issue closes, on that one state.
         _stored = _rows[0][2] if _rows else None
         stored_ingested_at = now if _stored is None else _stored
+        # #10000: the stored derived columns (see the RETURN note above). The
+        # call's values are the fallback only for a MERGE that returned no row —
+        # nothing was written, so there is no stored value to state.
+        stored_summary = _rows[0][3] if _rows else summary
+        stored_topics = _rows[0][4] if _rows else topics
+        stored_search_text = _rows[0][5] if _rows else search_text
         # ⛔ §17.1 ORDER (#9206 review P1): THE RECORD IS APPENDED HERE, BEFORE
         # the `link_source_to_event` write below — not after it (where it used to
         # sit), and BEFORE the record's own explanatory block explains why it is
@@ -16621,11 +16643,11 @@ class TortoiseSDK:
             # in `record_projection._RECORD_ONLY_KEYS` so it never enters a
             # record's props tail.
             _ingestedAtStored=True,
-            **{SOURCE_SEARCH_TEXT_FIELD: search_text},
+            **{SOURCE_SEARCH_TEXT_FIELD: stored_search_text},
             sessionId=session_id,
             capturedAt=now,
-            summary=summary,
-            topics=topics,
+            summary=stored_summary,
+            topics=stored_topics,
             **(({"eventId": event_id}) if event_id else {}),
         )
         if event_id:

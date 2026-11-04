@@ -6367,9 +6367,18 @@ _FULLTEXT_INDEX_LABEL_FIELDS: tuple[tuple[str, list[str]], ...] = (
     # `sdk._source_search_text` — the indexer
     # (`_upsert_source`, title) and the capture
     # path (`_materialize_session_source`,
-    # title-else-summary). `summary`/`topics` are
+    # title-else-topics). `summary`/`topics` are
     # deliberately NOT indexed: a second
     # vocabulary the FTS surface does not read.
+    # ⛔ #10000: the capture path resolves its
+    # `_searchText` from `topics`, NOT from
+    # `summary` — `summary` carries the DISPLAY
+    # prefix ("session capture topics: "), and
+    # this leg OR-unions query terms, so indexing
+    # it would make every captured session match
+    # "session"/"capture"/"topics". Do not
+    # "simplify" the capture arm back to
+    # `summary`.
 )
 
 # #2981 — a FalkorDB/Redis server that has reached `maxmemory` with

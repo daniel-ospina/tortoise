@@ -257,7 +257,7 @@ def test_an_acknowledgement_only_session_still_derives_and_is_findable(sdk):
     assert "session:sess-ack-only" in found, (topics, found)
 
 
-def test_a_text_less_recapture_keeps_the_two_derived_columns_tied(sdk):
+def test_a_text_less_recapture_keeps_the_two_derived_columns_tied(sdk, tmp_path):
     """``summary`` and ``_searchText`` are two views of ONE derivation.
 
     ``summary`` was written unconditionally while ``_searchText`` kept its
@@ -282,6 +282,34 @@ def test_a_text_less_recapture_keeps_the_two_derived_columns_tied(sdk):
         f"value: {summary!r} vs the indexed {search!r}")
     assert search == before_search, (search, before_search)
     assert summary == DISPLAY_PREFIX + search, (summary, search)
+
+    # ⛔ AND THE RECORD MUST STATE WHAT THE WRITE *STORED* (review round 4).
+    # The keep-arm above is live-side only unless `SourceCreated` carries the
+    # STORED columns instead of the call's derivation: journalling the call's
+    # empty derivation made `derived != replay(journal)` — a rebuild wrote `''`
+    # over the display column while `_searchText` survived, splitting this pair
+    # on the exact recovery path the carrier exists for (#5024/#5097).
+    from tortoise.log import EventLog
+
+    topics = sdk._get_proj().g.query(
+        "MATCH (s:Source {url:$u}) RETURN s.topics",
+        params={"u": url}).result_set[0][0]
+    assert topics, f"the lexicon column blanked: {topics!r}"
+
+    sdk._get_proj().rebuild(
+        EventLog(str(tmp_path / "events.jsonl")), confirm_destructive=True)
+
+    replayed_summary, replayed_search = _source_rows(sdk)[url]
+    replayed_topics = sdk._get_proj().g.query(
+        "MATCH (s:Source {url:$u}) RETURN s.topics",
+        params={"u": url}).result_set[0][0]
+    assert (replayed_summary, replayed_search) == (summary, search), (
+        "replay(journal) diverged from the live node — the record carried the "
+        f"call's derivation, not the stored columns: live {(summary, search)!r} "
+        f"vs replayed {(replayed_summary, replayed_search)!r}")
+    assert replayed_topics == topics, (replayed_topics, topics)
+
+
 def test_a_point_that_is_not_a_turn_is_reported_not_exempted(sdk):
     """The exemption is the TURN-STORE id space, never the `Point` label.
 
