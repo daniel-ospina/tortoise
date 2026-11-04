@@ -9012,11 +9012,21 @@ def _check_org_limit(org: dict, resource: str, *,
       capture-door repair;
     * ``POST /v1/sessions/commit`` hoists the carry in the HANDLER, before its
       per-graph lock is taken, and hands the stamped dict down (#9567 round 13);
-    * ``/v1/demo`` is the ONE declared exception: it runs this call inside its
+    * ``/v1/demo`` is one declared exception: it runs this call inside its
       own per-org seed lock, on a worker thread, deliberately (see BOUNDARY 4 in
       ``tortoise/allowance_gate.py``) — so its fill rides the loop's default
       executor rather than a substrate pool. Naming it here is deliberate: the
-      exception is real, and a reader who assumes "every door" must not.
+      exception is real, and a reader who assumes "every door" must not;
+    * TWO async doors run this function INLINE, with no offload at all, and they
+      are the worst cases rather than exceptions: ``create_api_key``
+      (``_check_org_limit(org, "api_keys")``) and ``rotate_api_key``
+      (``_check_org_limit(org, "api_keys", slot_credit=1)``). ``api_keys`` is
+      NOT in ``ALLOWANCE_GATED_RESOURCES``, so no CARRY runs — but the COUNT
+      does (``_session_user_org`` always emits an int ``max_api_keys``), which
+      is a PostgREST ``active_api_keys`` read or a registry
+      ``MATCH (k:APIKey …)`` on the single uvicorn worker. PRE-EXISTING, one
+      root, filed once with both sites as **#10954** — not absorbed into a
+      capture-door repair.
 
     Both of the fill's fail-closed faults (a resolver fault, and the gate's
     loud import-time drift) are mapped to this function's documented
@@ -17503,8 +17513,9 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # capture — including the store-only (#3892/#4258) and replay lanes that
     # reach here having done NO other I/O — the #2988/#3498 class this file
     # offloads at its other request doors. (No line pointer here on purpose:
-    # ``create_api_key`` still runs its ``api_keys`` count INLINE on the loop —
-    # #10954 — so a bare ``see :NNNN`` would point a reader at a counter-example
+    # ``create_api_key`` AND ``rotate_api_key`` still run their ``api_keys``
+    # count INLINE on the loop — one root, #10954 — so a bare ``see :NNNN``
+    # would point a reader at a counter-example
     # to this sentence, and a line number drifts on the next PR anyway.)
     #
     # ⛔ "Off the loop" is not the whole rule (main-repair, 2026-11-04, after
