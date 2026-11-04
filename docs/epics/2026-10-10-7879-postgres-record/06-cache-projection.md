@@ -269,4 +269,5 @@ that must not be mutated. Mutation-checked, one at a time: each identity arm, EA
 OF THE TWO DOORS (the column loop and the `props` tail — the tail filter undoes
 only the keys the tail added, so neither door subsumes the other), the label gate,
 the call-time resolution of the placement spellings, and each of the three flags
-re-added — every one reds exactly the leg that names it.
+re-added — every one reds at least the leg that names it, plus the row/node
+agreement shape that exists to catch exactly that drift.
