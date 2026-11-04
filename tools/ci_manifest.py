@@ -41,7 +41,7 @@ is the ONE composition, and it carries every manifest-level check the two
 entry points used to call loose — the three duration checks plus
 ``fast_shard_issues`` (#6135) and ``duplicate_entries`` (#2913/#5373), which
 landed on main beside this change and must therefore run here rather than at a
-call site.
+call site, plus this module's own ``floor_issues``.
 
 CLI::
 
@@ -541,8 +541,9 @@ def map_issues(manifest: dict) -> list[str]:
     This is the ONE composition both enforcing entry points reach
     (``ci_selection --integrity`` and ``ci_timing.integrity_problems``, via
     :func:`check`), so a check added here cannot be half-wired. ``#6135``'s
-    ``fast_shard_issues`` and ``#2913/#5373``'s ``duplicate_entries`` are
-    carried here for exactly that reason: both landed on main beside the
+    ``fast_shard_issues``, ``#2913/#5373``'s ``duplicate_entries`` and this
+    module's own ``floor_issues`` are
+    carried here for exactly that reason: the first two landed on main beside the
     #5050 validator, and leaving them at a call site would have made them
     reachable from one entry point only — the half-wired state this
     composition exists to prevent. Order follows main's own composition
