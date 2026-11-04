@@ -2544,8 +2544,23 @@ def _declared_floors(manifest_text: str) -> dict[str, DeclaredFloor]:
     import yaml
     try:
         data = yaml.safe_load(manifest_text) or {}
-    except yaml.YAMLError:
-        return {}
+    except yaml.YAMLError as exc:
+        # The UNPARSEABLE document — the outermost face of this container, and the
+        # one that made the paragraph above a lie. It used to `return {}`, i.e. read
+        # an unreadable document as "no declarations", the same fail-open the
+        # `null`, the empty mapping and the list container are refused for (#10704
+        # review round 4, P3). It is not reachable from `render_refreshed_manifest`
+        # today — `_classified_test_keys` parses the whole document first, inside
+        # the try that converts `YAMLError` (`:2713-2718`) — so this was a latent
+        # trap AND a false contract rather than an active revert. It is refused now
+        # so the contract holds on every path, including any future caller that
+        # hands this function text it has not already validated.
+        raise DurationsBridgeError(
+            "the manifest text is not parseable as YAML, so `durations_floors` "
+            f"cannot be read at all ({exc}) — an unreadable declaration block must "
+            "be REFUSED rather than silently treated as absent, or every declared "
+            "cap reverts on the next sweep (repair the YAML, #9172)"
+        ) from None
     floors = data.get("durations_floors") if isinstance(data, dict) else None
     if isinstance(floors, dict) and not floors:
         # The EMPTY MAPPING — the third face of this container, and the one a

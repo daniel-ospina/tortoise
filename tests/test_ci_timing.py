@@ -7171,6 +7171,16 @@ def test_an_unreadable_or_pinned_odd_declaration_refuses_the_write() -> None:
                 "durations_floors:\n  test_capped.py: {value: 355.0, cap: true}\n"):
         with pytest.raises(ci_timing.DurationsBridgeError):
             ci_timing._declared_floors(f"{bad}{header}")
+    # …and the OUTERMOST face: a document that is not parseable at all. This one
+    # returned `{}` ("no declarations") while the docstring above promised
+    # `UNREADABLE -> DurationsBridgeError, NEVER "no declarations"`, so the contract
+    # was false on the one shape a whole-document parse cannot distinguish from an
+    # absent key — the same fail-open the `null`, empty-mapping and list containers
+    # are refused for (#10704 review round 4, P3).
+    with pytest.raises(ci_timing.DurationsBridgeError):
+        ci_timing._declared_floors(
+            "durations_floors:\n  test_capped.py: 355.0\n  twin.py: [oops\n"
+            f"{header}")
     # …and the shapes that ARE readable parse to what they say
     parsed = ci_timing._declared_floors(
         "durations_floors:\n  a.py: 355.0\n  b.py: {value: 12.5, pinned: true}\n"
