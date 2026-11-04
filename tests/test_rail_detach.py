@@ -524,7 +524,11 @@ def test_a_failed_chdir_is_not_reported_as_a_missing_binary(tmp_path):
     """
     missing = tmp_path / "this-cwd-does-not-exist"
     out = rd._gh(["repo", "view"], missing)
-    assert out.returncode == 126, (out.returncode, out.cause)
+    # `getattr` on the MESSAGE, so the pre-fix module (whose `_gh` returns a bare
+    # `CompletedProcess` with no `cause`) fails on the BEHAVIOUR — rc 127 for a
+    # chdir miss — instead of on an `AttributeError` raised while formatting this
+    # assertion. Review, #10777: a proof that reds for the wrong reason is not one.
+    assert out.returncode == 126, (out.returncode, getattr(out, "cause", ""))
     assert "is not on PATH" not in out.cause, out.cause
     assert str(missing) in out.cause, (
         f"the cause must name the CWD that could not be entered: {out.cause}")
