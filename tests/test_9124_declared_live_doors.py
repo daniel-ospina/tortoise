@@ -66,7 +66,8 @@ and is named rather than claimed away. Measured on this tree: sdk.py has 4 verb 
 receiver — 3 resolved read-only `MATCH … RETURN` probes
 (`_holds_role_available`, `_refuse_inverted_point_window`,
 `_refuse_inconsistent_validity_precision`) and 1 unresolved read
-(`_source_reachable_by`) — and none is a write. `self.query(...)` calls are NOT
+(`_label_reachable_by`, the shared key-discipline resolver behind the `:Source`
+and `:Event` guards) — and none is a write. `self.query(...)` calls are NOT
 in that population, because `self`/`cls` are never treated as handle parameters.
 A NESTED function writing through an alias captured from its parent is also not
 resolved (aliases are tracked per function; measured 0 live instances). A new write through one of the unresolved shapes would be invisible here,
@@ -469,7 +470,14 @@ _UNRESOLVED = {
     "_review_prune",
     "_reverse_bfs_neighbors",
     "_semantic_dedup",
-    "_source_reachable_by",
+    # #10389: the SHARED key-discipline resolver — `_source_reachable_by`
+    # delegates to it, and the `:Event` guard added beside it calls it directly
+    # (the #5196 rule: a guard whose predicate differs from the write's is
+    # decoration, so there is ONE implementation rather than two). The LABEL is a
+    # parameter, so its f-string reports '<unresolved>'; checked by hand:
+    # `MATCH (n:<label> {<the label's own key>:$id}) RETURN count(n)` — a read with
+    # no SET/CREATE/MERGE/DELETE/REMOVE, appending no record.
+    "_label_reachable_by",
     # #9962: the state view's mitigation read interpolates
     # `live._live_only('m.status')` — the DAMPENER's own predicate
     # (`weights.py`'s `compute_operator_weight`), which is the point of the row:
