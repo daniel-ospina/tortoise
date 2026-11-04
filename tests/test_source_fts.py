@@ -42,21 +42,33 @@ QUERY_TERM = "QUOKKA"
 # nor the constant.
 SEARCH_TEXT_FIELD = "_searchText"
 
+#: The session descriptor's DISPLAY prefix (#10000), a literal for the same
+#: reason as `SEARCH_TEXT_FIELD`: the assertions below must fail on their own
+#: terms, not on an import, against code that predates the change.
+DISPLAY_PREFIX = "session capture topics: "
+
 
 # ── the shared rule (hermetic — no DB) ─────────────────────────────────────
 
 
 def test_source_search_text_rule() -> None:
     """#3518: ONE rule for a Source's searchable text — title when present,
-    else summary, else absent (never an empty string that pretends to be
-    text)."""
+    else the session's topic lexicon, else summary, else absent (never an empty
+    string that pretends to be text)."""
     from tortoise.sdk import _source_search_text
 
     assert _source_search_text(title="Auth refactor", summary="ignored") == \
         "Auth refactor"
     assert _source_search_text(summary="we adopted QUOKKA") == "we adopted QUOKKA"
+    # #10000: the capture path passes its lexicon, and the DISPLAY prefix its
+    # `summary` carries must not reach the index (this leg OR-unions).
+    assert _source_search_text(
+        summary="session capture topics: adopted, quokka",
+        topics=["adopted", "quokka"]) == "adopted, quokka"
+    assert _source_search_text(summary="ignored", topics=[]) == "ignored"
     assert _source_search_text() is None
     assert _source_search_text(title="", summary="") is None
+    assert _source_search_text(summary="", topics=[]) is None
 
 
 def test_source_search_text_field_is_searchtext() -> None:
@@ -151,6 +163,8 @@ def test_capture_and_indexer_source_field_parity(sdk) -> None:
         "MATCH (s:Source) RETURN s.url, s._searchText").result_set)
     summaries = dict(g.query(
         "MATCH (s:Source) RETURN s.url, s.summary").result_set)
+    topics = dict(g.query(
+        "MATCH (s:Source) RETURN s.url, s.topics").result_set)
     # #10000 (§9.1/D1): the capture's node carries a topic descriptor, NOT the
     # session's own turn text — and because `_searchText` is that same
     # derivation, the prose cannot survive in the FTS index after leaving the
@@ -162,12 +176,19 @@ def test_capture_and_indexer_source_field_parity(sdk) -> None:
         rows
 
     # Both resolved through the shared rule (the parity pin) — the capture arm is
-    # read off the node's OWN stored summary, so this stays a statement about the
-    # RULE and not about which prose the derivation happened to emit.
+    # resolved from the node's OWN stored `topics`, so this stays a statement
+    # about the RULE and not about which prose the derivation happened to emit.
     assert rows["session:sess-parity"] == _source_search_text(
-        summary=summaries["session:sess-parity"])
+        topics=topics["session:sess-parity"])
     assert rows["corpus://parity/s1.md"] == _source_search_text(
         title="PARITYPHRASE auth refactor session")
+
+    # #10000: `summary` is the DISPLAY form of the SAME lexicon the index holds,
+    # so the two derived columns stay a function of one another — and the prefix
+    # that makes the display readable is exactly what the index must not carry.
+    assert summaries["session:sess-parity"] == (
+        DISPLAY_PREFIX + rows["session:sess-parity"])
+    assert DISPLAY_PREFIX.strip() not in rows["session:sess-parity"]
 
     # …and both are actually findable through the read path.
     for term, url in (("QUOKKA", "session:sess-parity"),

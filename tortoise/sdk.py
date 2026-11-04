@@ -4097,6 +4097,18 @@ _SESSION_SOURCE_STOPWORDS = frozenset({
 })
 
 
+#: #10000: the DISPLAY prefix on a session Source's ``summary``. It is a LABEL,
+#: not vocabulary, so ``_source_search_text`` keeps it OUT of ``_searchText``.
+#: The Source retrieval leg OR-unions query terms (``search_engine`` →
+#: ``sparse.build_or_query``), so a constant prefix in the index makes EVERY
+#: captured session match any source query containing "session", "capture" or
+#: "topics" — and none of the three is a RediSearch stopword (its default list
+#: is function words) or a member of ``_SESSION_SOURCE_STOPWORDS``. Measured on a
+#: two-session graph (one about a migration plan, one about a fencing budget):
+#: the query "session capture topics" returned BOTH, on the prefix alone.
+_SESSION_SOURCE_SUMMARY_PREFIX = "session capture topics: "
+
+
 def _session_source_metadata(transcript: str) -> tuple[str, list[str]]:
     """Derive the session Source's searchable TOPIC LEXICON (#1352, #10000).
 
@@ -4115,7 +4127,17 @@ def _session_source_metadata(transcript: str) -> tuple[str, list[str]]:
     capture already derives, and they keep a captured session findable through
     ``tortoise_fts_query(entity_type='source')`` — the regression #3518 closed,
     and the reason this function must return SOMETHING for a non-empty
-    transcript. ``("", [])`` for an empty or wordless transcript.
+    transcript. ``("", [])`` only for a transcript with no word tokens at all
+    (empty, blank, punctuation-only).
+
+    ⛔ A STOPWORD-ONLY transcript ("ok" / "yes") takes the UNFILTERED frequency
+    list rather than returning nothing. Returning nothing blanked an
+    acknowledgement-only session's ``summary``, gave it no ``_searchText`` and
+    left it unfindable — reintroducing the very #3518 regression the lexicon
+    exists to prevent, as a side effect of a filter that is a precision
+    preference and not part of the §9.1/D1 rule. It is still a LEXICON
+    (frequency order, never word order, never a quotation), so it puts no
+    sentence on the node.
 
     ⛔ The descriptor is a FUNCTION OF THE TOPICS, never of the transcript's own
     wording or word order, and it never quotes: a summary that echoed the
@@ -4130,9 +4152,11 @@ def _session_source_metadata(transcript: str) -> tuple[str, list[str]]:
     words = re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}", transcript.lower())
     counts = Counter(w for w in words if w not in _SESSION_SOURCE_STOPWORDS)
     topics = [w for w, _ in counts.most_common(6)]
-    if not topics:  # a transcript of pure stopwords/punctuation
+    if not topics:  # stopword-only: fall back to the transcript's own vocabulary
+        topics = [w for w, _ in Counter(words).most_common(6)]
+    if not topics:  # no word tokens at all (empty/blank/punctuation-only)
         return "", []
-    return "session capture topics: " + ", ".join(topics), topics
+    return _SESSION_SOURCE_SUMMARY_PREFIX + ", ".join(topics), topics
 
 
 #: #3518: the ONE searchable-text field on a :Source — the field the Source
@@ -4142,21 +4166,34 @@ SOURCE_SEARCH_TEXT_FIELD = "_searchText"
 
 
 def _source_search_text(*, title: str | None = None,
-                        summary: str | None = None) -> str | None:
-    """#3518: the ONE rule for a Source's searchable text — the title when
-    present, else the summary (``None`` when neither carries text).
+                        summary: str | None = None,
+                        topics: list[str] | None = None) -> str | None:
+    """#3518: the ONE rule for a Source's searchable text — the ``title`` when
+    the writer has one, else the session's TOPIC LEXICON, else the ``summary``
+    (``None`` when none of them carries text).
 
     Both Source writers resolve their ``_searchText`` through here so the two
     cannot drift into different vocabularies: the indexer
     (``_index_source_merge`` → ``create_source(..., _searchText=...)``) passes
     its frontmatter ``title``; the capture path
     (``_materialize_session_source``) has no title and passes its derived
-    ``summary``. Before this, the indexer set the field but the capture path
+    ``topics``. Before this, the indexer set the field but the capture path
     never did, and no ``Source`` FTS index existed at all — a captured session
     was unfindable through ``tortoise_fts_query(entity_type='source')``.
+
+    ⛔ #10000: the capture path passes ``topics``, NOT its ``summary``. The two
+    differ by the DISPLAY prefix ``summary`` carries
+    (``_SESSION_SOURCE_SUMMARY_PREFIX``), and that prefix must never reach the
+    index: this leg OR-unions its query terms (``sparse.build_or_query``), so a
+    constant "session capture topics" in every capture's search text makes every
+    captured session match any source query containing one of those three words.
+    The lexicon alone is what discriminates; the prefix only reads well.
     """
-    text = title or summary
-    return text or None
+    if title:
+        return title
+    if topics:
+        return ", ".join(topics)
+    return summary or None
 
 
 def _session_extraction_estimate(conversation: list[dict], *,
@@ -16296,9 +16333,10 @@ class TortoiseSDK:
         references edge (test_backfill_sources.py).
 
         #4911: the transcript is SCRUBBED before anything is derived from it or
-        persisted. ``topics`` are the six most frequent content words and
-        ``summary`` is a descriptor built FROM them (#10000: it used to be the
-        first substantive utterance, i.e. raw turn prose on a node — see
+        persisted. ``topics`` are the six most frequent content words (the
+        transcript's whole vocabulary when it is stopword-only) and ``summary``
+        is a DISPLAY descriptor built FROM them (#10000: it used to be the first
+        substantive utterance, i.e. raw turn prose on a node — see
         ``_session_source_metadata``) — so redacting only the turn Points left
         the SAME credential in ``Source.summary`` / ``Source.topics`` on the
         same write (reproduced in review). ``contentHash`` is taken over the
@@ -16306,15 +16344,19 @@ class TortoiseSDK:
 
         #3518: it also populates ``_searchText`` — the field the Source FTS
         index is declared on — via the shared ``_source_search_text`` rule
-        (title-else-summary; the capture path has no title). Without it the
+        (title-else-lexicon; the capture path has no title). Without it the
         captured session was created but NOT findable through
-        ``tortoise_fts_query(entity_type='source')``. The SET is
+        ``tortoise_fts_query(entity_type='source')``. It indexes the BARE
+        lexicon, never ``summary``: the display prefix is a constant, and this
+        leg OR-unions, so indexing it would make every capture match a query for
+        "session"/"capture"/"topics" (#10000). The SET is
         ``CASE WHEN $st IS NOT NULL THEN $st ELSE <stored> END`` (#10000): a
         non-NULL derivation REPLACES the stored text, so a node captured before
         the prose route was removed heals instead of keeping it forever, and an
         empty/wordless transcript still cannot erase what a previous capture (or
         the indexer path) established — the property the old ``coalesce`` was
-        added for.
+        added for. ``summary`` moves under the SAME guard, so the display column
+        and the indexed column can never disagree.
         Additive and idempotent: never touches ``_link_source`` or
         ``_session_event_write``; re-capturing a session re-MERGEs the same
         url. The references edge is skipped when ``event_id`` is None (Event
@@ -16351,11 +16393,13 @@ class TortoiseSDK:
         # capture path MUST populate it or the captured session stays
         # unfindable. The capture path has no title (the indexer path is the
         # one that carries frontmatter), so the shared rule resolves to the
-        # derived summary. The SET is CASE-based, NOT a `coalesce` (#10000): a
-        # non-NULL derivation replaces the stored text, and only an empty /
-        # wordless transcript falls back to what a previous writer established
-        # (`_upsert_source`'s merge semantics on the indexer side).
-        search_text = _source_search_text(summary=summary)
+        # derived TOPIC LEXICON — not to `summary`, which is the same lexicon
+        # behind a display prefix that must not be indexed (#10000). The SET is
+        # CASE-based, NOT a `coalesce` (#10000): a non-NULL derivation replaces
+        # the stored text, and only an empty / wordless transcript falls back to
+        # what a previous writer established (`_upsert_source`'s merge semantics
+        # on the indexer side).
+        search_text = _source_search_text(topics=topics)
         params = {
             "url": url,
             "sk": "agentSession",
@@ -16388,7 +16432,17 @@ class TortoiseSDK:
             "OR s.contentHash <> $ch THEN $now "
             "ELSE coalesce(s.updatedAt, $now) END",
             "s.contentHash=$ch",
-            "s.summary=$sum",
+            # #10000: `summary` and `_searchText` move under the SAME guard —
+            # both keep their previous value exactly when the derivation is
+            # empty, so the display column and the indexed column cannot
+            # disagree. It used to be `s.summary=$sum` unconditionally while the
+            # `_searchText` SET had a keep-arm, so a text-less re-capture BLANKED
+            # `summary` and left the indexed text (measured) — two columns that
+            # `_source_search_text` deliberately ties together, diverging on
+            # caller-controlled input. `coalesce(..., '')` keeps the value a
+            # fresh text-less node has always had.
+            "s.summary=CASE WHEN $sum <> '' THEN $sum "
+            "ELSE coalesce(s.summary, '') END",
             "s.topics=$topics",
             # #3518's coalesce kept the FIRST search text this node ever got, so
             # a Source captured before #10000 kept the transcript prose in the

@@ -141,3 +141,122 @@ def test_a_recapture_replaces_the_prose_a_pre_fix_write_left_behind(sdk):
         "a re-capture left the pre-fix prose on the node — the SET must replace "
         "a non-empty derivation instead of coalescing into the old value:\n"
         + "\n".join(f"  {labels} {props}" for labels, props in offenders))
+
+
+# ── the derived metadata is still FINDABLE, and the display prefix is not ──
+# `_searchText` is the field the Source FTS index is declared on, and the
+# Source retrieval leg OR-unions its query terms
+# (`search_engine` → `sparse.build_or_query`). So the constant display prefix
+# `summary` carries would make EVERY captured session match any source query
+# containing "session", "capture" or "topics" — words no transcript said, and
+# none of them an FTS stopword. The two tests below pin both halves: the index
+# carries the bare lexicon, and a capture whose transcript has no content word
+# still derives one (a blank derivation is unfindable — the #3518 regression).
+
+
+def _source_rows(sdk) -> dict[str, tuple[str, str]]:
+    rows = sdk._get_proj().g.query(
+        "MATCH (s:Source) RETURN s.url, s.summary, s._searchText").result_set
+    return {r[0]: (r[1] or "", r[2] or "") for r in rows}
+
+
+#: The descriptor's DISPLAY prefix, repeated as a literal — pinned to the module
+#: constant by `test_the_display_prefix_constant_is_pinned` — so the behaviour
+#: tests below fail on their ASSERTIONS, not on an import, against code that
+#: predates #10000 (the `SEARCH_TEXT_FIELD` precedent in `test_source_fts.py`).
+DISPLAY_PREFIX = "session capture topics: "
+
+
+def test_the_display_prefix_constant_is_pinned() -> None:
+    from tortoise.sdk import _SESSION_SOURCE_SUMMARY_PREFIX
+
+    assert _SESSION_SOURCE_SUMMARY_PREFIX == DISPLAY_PREFIX
+
+
+def test_the_display_prefix_is_not_indexed(sdk):
+    """The lexicon is indexed; the descriptor's constant prefix is not.
+
+    Measured pre-fix: two sessions with disjoint vocabularies (a migration plan
+    and a fencing budget) were BOTH returned for the query "session capture
+    topics" — the prefix alone answered a query neither transcript had anything
+    to do with.
+    """
+    sdk._materialize_session_source(
+        "sess-prefix-migration", None, "2026-09-01T10:00:00+00:00",
+        [{"role": "user",
+          "content": "we adopted the QUOKKA migration plan for the ledger"}])
+    sdk._materialize_session_source(
+        "sess-prefix-fencing", None, "2026-09-02T10:00:00+00:00",
+        [{"role": "user", "content": "badger fencing budget spreadsheet"}])
+    rows = _source_rows(sdk)
+
+    # NON-VACUITY: the field is populated, so the "no match" below cannot be
+    # the empty-index pass.
+    assert rows["session:sess-prefix-migration"][1], rows
+    assert DISPLAY_PREFIX.strip() not in \
+        rows["session:sess-prefix-migration"][1], rows
+
+    hits = [r["id"] for r in sdk.tortoise_fts_query(
+        "session capture topics", entity_type="source")]
+    assert hits == [], (
+        "a source query made only of the display prefix matched a captured "
+        f"session — the prefix is in the index: {hits}")
+
+    # …and the session is still findable by a word it actually used.
+    found = [r["id"] for r in sdk.tortoise_fts_query(
+        "QUOKKA", entity_type="source")]
+    assert "session:sess-prefix-migration" in found, found
+
+
+def test_an_acknowledgement_only_session_still_derives_and_is_findable(sdk):
+    """A non-empty transcript with no content word must still derive SOMETHING.
+
+    ``_session_source_metadata`` promised that in its own docstring, and #3518
+    needs it: an empty derivation blanked ``summary``, wrote no ``_searchText``
+    and left the session unfindable through
+    ``tortoise_fts_query(entity_type='source')``.
+    """
+    from tortoise.sdk import _session_source_metadata
+
+    summary, topics = _session_source_metadata("user: ok\nassistant: yes")
+    assert topics, "a transcript made of words must not derive an empty lexicon"
+    assert summary, summary
+
+    sdk._materialize_session_source(
+        "sess-ack-only", None, "2026-09-01T10:00:00+00:00",
+        [{"role": "user", "content": "ok"},
+         {"role": "assistant", "content": "yes"}])
+    rows = _source_rows(sdk)
+    assert rows["session:sess-ack-only"][1], rows
+
+    assert "yes" in topics, topics
+    found = [r["id"] for r in sdk.tortoise_fts_query(
+        "yes", entity_type="source")]
+    assert "session:sess-ack-only" in found, (topics, found)
+
+
+def test_a_text_less_recapture_keeps_the_two_derived_columns_tied(sdk):
+    """``summary`` and ``_searchText`` are two views of ONE derivation.
+
+    ``summary`` was written unconditionally while ``_searchText`` kept its
+    previous value when the derivation was empty, so a text-less re-capture
+    BLANKED the display column and left the indexed one — the pair the shared
+    rule ties together, diverging. They must keep together or replace together.
+    """
+    session_id = "sess-columns-tied-10000"
+    url = f"session:{session_id}"
+    _capture(sdk, session_id)
+    before_summary, before_search = _source_rows(sdk)[url]
+    assert before_summary and before_search, "the capture derived nothing"
+    assert before_search in before_summary, (before_summary, before_search)
+
+    # A text-less re-capture (no turns to derive from) must not split the pair.
+    sdk._materialize_session_source(
+        session_id, None, "2026-09-02T10:00:00+00:00", [])
+
+    summary, search = _source_rows(sdk)[url]
+    assert summary == before_summary, (
+        "a text-less re-capture blanked `summary` while `_searchText` kept its "
+        f"value: {summary!r} vs the indexed {search!r}")
+    assert search == before_search, (search, before_search)
+    assert summary == DISPLAY_PREFIX + search, (summary, search)
