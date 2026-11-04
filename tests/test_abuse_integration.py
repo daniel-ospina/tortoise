@@ -44,7 +44,7 @@ from tortoise import abuse
 from tortoise.abuse import ALERT_TYPES, SupabaseAbuseStore, _alert_dict
 from tortoise.auth import lookup_hash
 from tests._http_fixtures import patched_tortoise_sdk
-from tests._verdict import verdict_client
+from tests._verdict import verdict_client, verdict_async_client
 from tests.fake_control_plane import FakeControlPlane
 
 TEAM = "team-abuse-1"
@@ -179,8 +179,8 @@ def _await_records(predicate, *, timeout: float = 5.0,
     return predicate()
 
 
-def _await_no_record(predicate, *, after=None, window: float = 1.0,
-                     interval: float = 0.02) -> bool:
+def _await_no_record(predicate, *, after=None, barrier=None,
+                     window: float = 1.0, interval: float = 0.02) -> bool:
     """Bounded NEGATIVE wait for an offloaded abuse/activation record (#10618).
 
     The mirror of `_await_records`, and the fix for the class the cycle-3
@@ -190,18 +190,35 @@ def _await_no_record(predicate, *, after=None, window: float = 1.0,
     PASSES. Returns True only when `predicate` — the record that must NOT
     appear — stayed false for the whole `window`.
 
-    `after` is the COMPLETION BARRIER: a predicate giving positive evidence
-    that the offloaded work for this request has already run (its own durable
-    row, its own in-memory read count). Without one the window can elapse while
-    the hook is still queued behind a busy ``abuse`` pool — which is the same
-    vacuity one step later — so a missing barrier is an assertion failure, not
-    a silently weaker pass.
+    COMPLETION MUST BE ESTABLISHED before that window is measured, by exactly
+    one of two barriers:
+
+    * `after` — a predicate giving positive evidence that the offloaded work for
+      this request has already run (its own durable row, its own in-memory read
+      count);
+    * `barrier` — a callable that BLOCKS until the lane is quiesced
+      (``_drain_abuse_pool``), for the requests whose hook has no observable row
+      to poll for at all.
+
+    Supplying NEITHER is an ``AssertionError``, not a weaker pass: without a
+    barrier the window can elapse while the hook is still queued behind a busy
+    ``abuse`` pool — the same vacuity one step later (#10618 cycle-5 review P3).
     """
+    if after is None and barrier is None:
+        raise AssertionError(
+            "a negative assertion needs a COMPLETION BARRIER — either `after=` "
+            "(a predicate the offloaded hook makes true) or `barrier=` (a "
+            "callable that quiesces the lane) — otherwise the bounded window "
+            "below measures nothing (#10618)")
     if after is not None and not _await_records(after):
         raise AssertionError(
             "the offloaded abuse hook never landed the record this negative "
             "assertion needs as its completion barrier, so the negative below "
             "would measure nothing (#10618)")
+    if barrier is not None and not barrier():
+        raise AssertionError(
+            "the abuse lane did not quiesce, so the negative below would "
+            "measure a hook that is still queued (#10618)")
     return not _await_records(predicate, timeout=window, interval=interval)
 
 
@@ -426,12 +443,15 @@ class TestPointBurst:
                 assert r.status_code in (200, 404), r.text
         # #10618: the post-auth hook for those requests is offloaded, so a
         # regression that recorded a point_create asynchronously could land
-        # AFTER this read. No completion barrier is available here — a DELETE's
-        # hook is a no-op (R3 counts GETs only, and there is no geo header) —, so
-        # the negative is measured over a bounded window instead of an instant.
+        # AFTER this read. These requests' hooks write no row of their own to
+        # poll for (R3 counts GETs only, and there is no geo header), so the
+        # barrier is the lane itself: `_drain_abuse_pool()` returns only once
+        # every submission made before it has COMPLETED, after which a late
+        # point_create can no longer appear.
         assert _await_no_record(
             lambda: bool([e for e in fake.tables.get("abuse_events", [])
                           if e["event_type"] == "point_create"]),
+            barrier=_drain_abuse_pool,
             window=1.0), (
             f"a non-create write recorded a point_create; "
             f"events={fake.tables.get('abuse_events')!r}")
@@ -2251,8 +2271,6 @@ class TestPerRequestHooksLeaveTheSharedPool:
         overrides ``get_current_org``, which is exactly why it cannot see this
         hop — this test deliberately goes through a real API key.
         """
-        import httpx
-
         app = env["app"]
         width = _default_executor_width()
         answer: dict = {}
@@ -2269,9 +2287,8 @@ class TestPerRequestHooksLeaveTheSharedPool:
                             f"running blockers — the pool was never full, so this "
                             f"run proves nothing about the request path (#10618)")
                     await asyncio.sleep(0.01)
-                transport = httpx.ASGITransport(app=app)
-                async with httpx.AsyncClient(
-                        transport=transport, base_url="http://test") as ac:
+                async with verdict_async_client(
+                        app, base_url="http://test") as ac:
                     started = time.monotonic()
                     try:
                         response = await asyncio.wait_for(
@@ -2450,18 +2467,21 @@ _LATE_HOOK_SLEEP_S = 0.25
 class TestTheAbusePoolIsQuiescedBetweenTests:
     def test_a_hook_left_in_flight_lands_in_the_next_tests_tracker_and_the_drain_stops_it(
             self, env):
-        """The `env` teardown drain is LOAD-BEARING, proven in three legs.
+        """The `env` teardown drain is LOAD-BEARING, proven in two legs.
 
-        (1) the hazard is real — a hook running when its test ends is counted by
-            whoever's tracker is installed when it lands (this is why the
-            exact-count barriers were reachable only by luck);
-        (2) WITHOUT the drain that leak still happens (the pre-fix shape), so a
-            regression here is not theoretical;
-        (3) WITH `_drain_abuse_pool()` nothing survives it.
+        (1) the hazard is real, and it is the NO-DRAIN shape: a hook running when
+            its test ends is counted by whoever's tracker is installed when it
+            lands (this is why the exact-count barriers were reachable only by
+            luck). Nothing quiesces the pool before the leak is observed —
+            that is precisely the pre-fix teardown;
+        (2) WITH `_drain_abuse_pool()` nothing survives it.
 
-        The middle leg is what makes this discriminating rather than vacuous: a
-        drain that returned without waiting would pass (3) as long as nothing was
-        in flight, so (1)+(2) establish that something was.
+        The pair is what makes this discriminating rather than vacuous: a drain
+        that returned without waiting would pass (2) as long as nothing was in
+        flight, and (1) establishes that something was. An earlier draft ran (1)
+        twice under different names; that repetition measured nothing new
+        (#10618 cycle-5 review P3) and is replaced by this single honest
+        no-drain leg.
         """
         import threading
 
@@ -2491,8 +2511,10 @@ class TestTheAbusePoolIsQuiescedBetweenTests:
         def _count(tracker) -> int:
             return len(tracker._by_org.get(TEAM) or [])
 
-        # (1) the hazard, reproduced: the hook outlives its request and lands in
-        # the freshly installed tracker.
+        # (1) the hazard in its NO-DRAIN shape, reproduced: the hook outlives
+        # its request, nothing quiesces the pool, and it lands in the freshly
+        # installed tracker — a stray read is exactly what makes an `== N`
+        # barrier unsatisfiable.
         _submit_a_late_read()
         leaked = _install_a_fresh_tracker()
         assert _await_records(lambda: _count(leaked) == 1), (
@@ -2500,17 +2522,7 @@ class TestTheAbusePoolIsQuiescedBetweenTests:
             "the leak this test is about did not reproduce — the assertions "
             f"below would measure nothing; tracker={leaked._by_org!r}")
 
-        # (2) the pre-fix shape: a teardown that does NOT quiesce leaves that
-        # leak in place, and a stray read is exactly what makes an `== N`
-        # barrier unsatisfiable.
-        _submit_a_late_read()
-        stale = _install_a_fresh_tracker()
-        assert _await_records(lambda: _count(stale) == 1), (
-            "an un-quiesced teardown no longer leaks — then the drain below is "
-            "not what fixes the barrier, and this pin needs rewriting rather "
-            f"than silently passing; tracker={stale._by_org!r}")
-
-        # (3) the fix: a hook submitted BEFORE the drain cannot land after it.
+        # (2) the fix: a hook submitted BEFORE the drain cannot land after it.
         _submit_a_late_read()
         assert _drain_abuse_pool(), (
             f"the abuse pool did not quiesce within {_ABUSE_POOL_DRAIN_TIMEOUT_S}s")
@@ -2521,3 +2533,31 @@ class TestTheAbusePoolIsQuiescedBetweenTests:
             "(`== 100` / `== 2` / `== 1`) would then be off by one and its poll "
             f"would expire into a FAIL (#10618 cycle-4 review P3); "
             f"tracker={clean._by_org!r}")
+
+
+# ── #10618 cycle-5: a negative WITHOUT a completion barrier must not pass ────
+
+
+class TestANegativeNeedsACompletionBarrier:
+    def test_a_negative_with_no_barrier_is_a_harness_failure(self):
+        """`_await_no_record` REFUSES to measure a negative with no barrier.
+
+        The cycle-5 review's P3: the docstring promised "a missing barrier is an
+        assertion failure, not a silently weaker pass" while the code accepted
+        `after=None`. A caller that omitted it would then measure a bounded
+        window that can elapse while the hook is still queued — the vacuus pass
+        this helper exists to remove. This pin is the promise, executable: on the
+        pre-fix helper (which accepted the omission) it FAILS, because the call
+        returns `True` instead of raising.
+        """
+        import pytest
+
+        with pytest.raises(AssertionError, match="COMPLETION BARRIER"):
+            _await_no_record(lambda: False)
+
+    def test_a_supplied_barrier_is_enforced(self):
+        """A barrier that does not establish completion fails the measurement."""
+        import pytest
+
+        with pytest.raises(AssertionError, match="never landed the record"):
+            _await_no_record(lambda: False, after=lambda: False)
