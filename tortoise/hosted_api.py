@@ -11717,7 +11717,18 @@ async def list_points(
     # GET /v1/points/{id}, not by list. No include param on REST v1 (surface
     # minimal).
     conditions.append("(n.status IS NULL OR n.status <> 'retracted')")
-    params: dict = {"limit": limit}
+    # #8447 (C2): this route capped at ``limit`` and answered
+    # ``{"points": …, "count": len(results)}`` — a FULL page was byte-identical
+    # to a COMPLETE one, and there is no offset and no cursor on this surface, so
+    # a row past the cap was unreachable by any follow-up call. That is the
+    # defect #8447 exists for, on the highest-traffic list route.
+    #
+    # The probe is how the marker is PROVED without a second round trip: ask the
+    # store for one row MORE than the caller asked for and drop it. ``limit+1``
+    # is an INTERNAL probe, never a caller-visible cap — the caller's bound still
+    # governs what is delivered, so the route's ``le=1000`` stays the caller's
+    # ceiling and no cap VALUE changes here (only its marking).
+    params: dict = {"limit": limit + 1}
     if kind:
         conditions.append("n.pointKind = $kind")
         params["kind"] = kind
@@ -11744,13 +11755,36 @@ async def list_points(
     rows = await _read_offload(
         lambda: sdk._get_proj().g.query(query, params=params).result_set,
         op="list_points")
+    # The candidate set AS THE PROBE CAN SEE IT — capped at ``limit+1``, so the
+    # population is BOUNDED, while the VERDICT (``candidates > returned``) is
+    # decided rather than estimated: it is true iff the store held more rows
+    # than the caller asked for.
+    # That boundedness is why ``exact=False`` below and why ``total_available``
+    # is withheld — publishing ``limit+1`` as a total is a lower bound wearing a
+    # total's clothes (``truncation.py``). Do NOT pass ``exact=True`` here.
+    candidates = len(rows)
     results = []
-    for r in rows:
+    for r in rows[:limit]:
         d = r[0]
         if "pointKind" in d:
             d["kind"] = d.pop("pointKind")
         results.append(d)
-    return {"points": results, "count": len(results)}
+    from tortoise.truncation import mark_truncation, truncation_field
+
+    # ``exact=False``: the probe proves THERE ARE MORE, not HOW MANY. An exact
+    # total would need a second COUNT over the whole graph, and publishing the
+    # probe's own ``limit+1`` as ``total_available`` would be a lower bound
+    # wearing a total's clothes (`truncation.py`). So a truncated page here takes
+    # the contract's THIRD state — incomplete, total unknown — and a complete one
+    # is positively marked complete rather than left un-marked.
+    trunc_out: dict = {}
+    mark_truncation(trunc_out, returned=len(results),
+                    candidates=candidates, exact=False)
+    body: dict = {"points": results, "count": len(results)}
+    # ⚠️ ``count`` keeps its exact prior meaning — rows DELIVERED — so a caller
+    # that ignores the new field is unaffected; ``truncated`` is the instrument.
+    body.update(truncation_field(trunc_out))
+    return body
 
 
 @app.get("/v1/points/{point_id}")
