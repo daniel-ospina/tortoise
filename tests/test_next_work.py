@@ -648,9 +648,13 @@ def test_replay_never_reads_the_queue_config(tmp_path: Path, monkeypatch):
     from tools import next_work
 
     def boom(*a, **k):
-        raise AssertionError("a replay must not read .mergify.yml")
+        raise AssertionError("a replay must not run git or gh at all")
 
-    monkeypatch.setattr(next_work, "load_config_text", boom, raising=True)
+    # Stronger than patching the config READER: a replay must spawn nothing. The
+    # earlier version patched `load_config_text`, which `collect` no longer calls
+    # at all (the gate read is pinned to the checkout), so the test had gone
+    # vacuous while still passing.
+    monkeypatch.setattr(next_work, "_run", boom, raising=True)
     s = _rich_snapshot()
     path = tmp_path / "snap.json"
     path.write_text(json.dumps(s.to_json()), encoding="utf-8")
@@ -1064,3 +1068,150 @@ def test_absent_key_is_still_free():
     (row,) = units_for(s)
     assert row.reason == "READY-TO-LAND"
     assert s.unreadable == []
+
+
+# ── the claim NAMESPACE lives in the snapshot, not the environment (F1) ────
+def test_the_claim_namespace_is_carried_by_the_snapshot(monkeypatch):
+    """A replay must not depend on `CLAIM_NS` in the replaying process.
+
+    `claims.sh` honours `CLAIM_NS`, so the collector and a replayer can
+    legitimately disagree — and a disagreeing lookup MISSES, which is the one
+    branch that reads as freedom. Measured: one snapshot, one held claim,
+    `CLAIM_NS=refs/claims-other` → CLAIMED became READY-TO-LAND with a merge
+    command at exit 0, while the report still said "2 claim key(s)".
+    """
+    raw = _rich_snapshot().to_json()
+    raw["claim_ns"] = "refs/claims"
+    loaded = Snapshot.from_json(raw)
+    row = next(u for u in build_units(loaded, CFG) if u.issue == 100)
+    assert row.reason == "CLAIMED"
+
+    monkeypatch.setenv("CLAIM_NS", "refs/claims-other")
+    import importlib
+
+    from tools import next_work
+
+    reloaded = importlib.reload(next_work)
+    try:
+        again = next(
+            u for u in reloaded.build_units(reloaded.Snapshot.from_json(raw), CFG) if u.issue == 100
+        )
+        assert again.reason == "CLAIMED", "an env change moved the pick off a held unit"
+    finally:
+        monkeypatch.delenv("CLAIM_NS", raising=False)
+        importlib.reload(next_work)
+
+
+# ── a hung claims.sh is INCOMPLETE, not a crash (F2) ──────────────────────
+def test_a_hung_claims_sh_is_an_unreadable_surface(tmp_path: Path):
+    """The only subprocess without error handling — and it does a network fetch."""
+    from tools import next_work
+
+    stub = tmp_path / "hung-claims.sh"
+    stub.write_text("claim_snapshot() { sleep 30; }\nclaim_snapshot_verdict() { :; }\n")
+    old = os.environ.get("NEXT_WORK_CLAIMS_SH")
+    os.environ["NEXT_WORK_CLAIMS_SH"] = str(stub)
+    try:
+        snap_ = Snapshot()
+        import unittest.mock as mock
+
+        with mock.patch.object(next_work.subprocess, "run", side_effect=TimeoutError("timed out")):
+            next_work._claim_verdicts(tmp_path, ["refs/claims/pr-1"], snap_)
+    finally:
+        if old is None:
+            os.environ.pop("NEXT_WORK_CLAIMS_SH", None)
+        else:
+            os.environ["NEXT_WORK_CLAIMS_SH"] = old
+    assert snap_.unreadable, "a timeout is 'could not check', never 'free'"
+    assert any("GH-TIMEOUT" in u for u in snap_.unreadable)
+
+
+# ── one row per issue, and the tie-break is the NUMBER (F4, F5) ───────────
+def test_a_dual_labelled_issue_yields_one_row():
+    from tools import next_work
+
+    class StubClient:
+        """The SAME issue returned by both label searches — the shape `collect` dedups."""
+
+        def _json(self, args):
+            if "P0-blocker" in args[0]:
+                return {"total_count": 1, "items": [{"number": 100, "title": "t"}]}
+            return {"total_count": 1, "items": [{"number": 100, "title": "t"}]}
+
+    s = Snapshot()
+    rows = next_work._search_issues(StubClient(), REPO, "P0-blocker", s)
+    rows += next_work._search_issues(StubClient(), REPO, "P1-severe", s)
+    # the dedup lives in `collect`; assert its contract on the shape it dedups
+    by_number: dict[int, dict] = {}
+    for row in rows:
+        by_number.setdefault(int(row["number"]), row)
+    assert len(by_number) == 1
+    # and in the decision: two rows with ONE key would overcount the population
+    s2 = snap(issues=[issue(100, "P0-blocker")], pulls=[], )
+    keys = [u.key for u in units_for(s2)]
+    assert keys.count("100") == 1
+
+
+def test_the_tie_break_is_the_number_not_its_text():
+    """`str(100) < str(99)`, so a text tie-break picked 100 ahead of 99."""
+    s = snap(
+        issues=[issue(99), issue(100)],
+        pulls=[],
+    )
+    rows = units_for(s)
+    assert [u.issue for u in rows] == [99, 100], [u.issue for u in rows]
+
+
+# ── NEEDS-TEST is a position, not an action (F6) ──────────────────────────
+def test_needs_test_is_not_an_executable_action():
+    """`executable` must exclude NEEDS-TEST — the actuator-that-cannot-deliver rule."""
+    # #101 waits on a runner (NEEDS-TEST, rank 2) and #100 needs a fix
+    # (NEEDS-FIX, rank 3), so the RANK LEADER has nothing to run and the
+    # first actionable unit is a different row — exactly the live shape of
+    # 2026-11-04, when the CI queue itself was the blocker.
+    s = snap(
+        issues=[issue(100), issue(101)],
+        pulls=[pull(1001, closes=[100]), pull(1011, closes=[101], head="b" * 40)],
+        check_runs={"a" * 40: _runs_for_position("NEEDS-FIX"), "b" * 40: _runs_for_position("NEEDS-TEST")},
+        attestation={"1001": {"verdict": "head"}, "1011": {"verdict": "head"}},
+        merge_tree={"1001": {"clean": True}, "1011": {"clean": True}},
+    )
+    rows = units_for(s)
+    waiting = next(u for u in rows if u.position == "NEEDS-TEST")
+    assert waiting.pickable and not waiting.executable
+    runnable = next(u for u in rows if u.executable)
+    assert runnable.position != "NEEDS-TEST"
+    text, _ = render(rows, CFG, s, repo=REPO, top=5)
+    assert "RUNNABLE" in text, "the first unit a lane can act on NOW must be named"
+    assert str(runnable.issue) in text
+
+
+# ── the head-bound claim ref is really consulted (F7) ─────────────────────
+def test_a_head_bound_claim_blocks_even_when_the_pr_key_is_free():
+    """`<pr>-<sha12>` is the claim a REVIEW takes; `pr-<N>` is not the same key."""
+    s = snap(
+        issues=[issue(100)],
+        pulls=[pull(1001, closes=[100], head="c" * 40)],
+        check_runs={"c" * 40: all_green()},
+        attestation={"1001": {"verdict": "head"}},
+        merge_tree={"1001": {"clean": True}},
+        claims={"refs/claims/1001-cccccccccccc": {"verdict": "claim-held", "owner": "box-r:7"}},
+    )
+    (row,) = units_for(s)
+    assert row.reason == "CLAIMED", "a head-bound claim was not consulted"
+    assert row.holder == "box-r:7"
+
+
+# ── a fold can be held locally (no issue to key on) ───────────────────────
+def test_a_locally_held_fold_is_not_free():
+    fold = pull(900, head="9" * 40, labels=[FOLD_LABEL], body="fold-constituents: 1001")
+    s = snap(
+        issues=[],
+        pulls=[fold],
+        check_runs={"9" * 40: all_green()},
+        attestation={"900": {"verdict": "head"}},
+        merge_tree={"900": {"clean": True}},
+        local_holders={"pr:900": ["lane/900-fold-work"]},
+    )
+    row = next(u for u in units_for(s) if u.kind == "fold")
+    assert row.reason == "CLAIMED", "a fold with no issue was invisible to the local surface"

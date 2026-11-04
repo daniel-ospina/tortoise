@@ -149,7 +149,6 @@ from tools.queue_resweep import (  # noqa: E402 — the sys.path insert above mu
     GhCli,
     GhError,
     QueueConfig,
-    load_config_text,
     parse_config,
     unmet_conditions,
 )
@@ -214,6 +213,14 @@ class Snapshot:
     #: tool exists to prevent. `None` means the gate could not be read at
     #: collection; a replay of such a snapshot must EXIT 2, never fall open.
     gate: dict[str, Any] | None = None
+    #: The claim namespace the KEYS were built with. `claims.sh` honours
+    #: `CLAIM_NS`, so a process with a different value constructed DIFFERENT refs
+    #: than the snapshot holds — every lookup missed, and a miss is the one branch
+    #: that reads as freedom. Measured by a reviewer on this change: one snapshot,
+    #: one held claim, `CLAIM_NS=refs/claims-other` → CLAIMED became
+    #: READY-TO-LAND with an executable command at exit 0. The namespace travels
+    #: with the data; the environment cannot move a replay.
+    claim_ns: str = ""
     collected_at: int = 0
     #: open P0/P1 issues: {number, title, priority}
     issues: list[dict[str, Any]] = field(default_factory=list)
@@ -239,6 +246,7 @@ class Snapshot:
             "base": self.base,
             "config_source": self.config_source,
             "gate": self.gate,
+            "claim_ns": self.claim_ns,
             "collected_at": self.collected_at,
             "issues": self.issues,
             "pulls": self.pulls,
@@ -274,7 +282,7 @@ class Snapshot:
     @classmethod
     def from_json(cls, raw: dict[str, Any]) -> Snapshot:
         known = {
-            "repo", "base", "config_source", "gate", "collected_at", "issues", "pulls",
+            "repo", "base", "config_source", "gate", "claim_ns", "collected_at", "issues", "pulls",
             "check_runs", "attestation", "claims", "merge_tree", "local_holders",
             "unreadable",
         }
@@ -283,6 +291,10 @@ class Snapshot:
         # anyway, but normalise so a hand-written snapshot behaves identically.
         snap.attestation = {str(k): v for k, v in (snap.attestation or {}).items()}
         snap.merge_tree = {str(k): v for k, v in (snap.merge_tree or {}).items()}
+        # A snapshot from before this field existed carries its keys under the
+        # registry's own default; reading `CLAIM_NS` from the environment here
+        # would re-open the seam that made a held unit look free on replay.
+        snap.claim_ns = str(raw.get("claim_ns") or "refs/claims")
         return snap.normalize()
 
 
@@ -305,7 +317,7 @@ class Unit:
     holder: str | None = None
 
     @property
-    def sort_key(self) -> tuple[int, int, str]:
+    def sort_key(self) -> tuple[int, int, tuple[int, int]]:
         """TOTAL and deterministic: priority, then position, then a stable key.
 
         The third element exists so two rows can never compare equal — a partial
@@ -314,7 +326,15 @@ class Unit:
         """
         p = PRIORITY_RANK.get(self.priority, len(PRIORITY_RANK))
         pos = POSITION_RANK.get(self.position, len(POSITIONS))
-        return (p, pos, self.key)
+        # ⛔ `key` IS TEXT. `str(100) < str(99)`, so a text tie-break picked issue
+        # 100 ahead of 99 while the docstring, the epilog and the footer all said
+        # the tie-break is the NUMBER. Numeric here; folds sort after issues on
+        # the same (priority, position) because their id is a PR, not an issue.
+        order = (0, int(self.issue)) if self.kind == "issue" and self.issue else (
+            1,
+            int(self.fold_pr or 0),
+        )
+        return (p, pos, order)
 
     @property
     def pickable(self) -> bool:
@@ -424,13 +444,15 @@ def _claim_of(snap: Snapshot, *, issue: int | None, pr: int | None, head: str | 
     # #10852 and #10889 were `claim-held` by a live box at that moment and both
     # came out `READY-TO-LAND` with an executable command. The miss is silent,
     # which is exactly why the addressing is spelled out here.
+    # NO ENV FALLBACK: the namespace is data. `refs/claims` is claims.sh's own default.
+    ns = snap.claim_ns or "refs/claims"
     refs: list[str] = []
     if issue is not None:
-        refs.append(f"{CLAIM_NS}/issue-{issue}")
+        refs.append(f"{ns}/issue-{issue}")
     if pr is not None:
-        refs.append(f"{CLAIM_NS}/pr-{pr}")
+        refs.append(f"{ns}/pr-{pr}")
         if head:
-            refs.append(f"{CLAIM_NS}/{pr}-{head[:12]}")
+            refs.append(f"{ns}/{pr}-{head[:12]}")
     readable = True
     #: `claims.sh`'s OWN vocabulary (claim_snapshot_verdict), mapped once:
     #:   claim-absent    rc 0  no entry in a read snapshot          -> FREE
@@ -460,8 +482,18 @@ def _claim_of(snap: Snapshot, *, issue: int | None, pr: int | None, head: str | 
         # `claim-held`, or a word this reader does not know. Unknown is a HOLDER:
         # the fail-closed direction, because the other one duplicates the work.
         return (owner or verdict or ref, readable)
-    for desc in snap.local_holders.get(f"issue:{issue}" if issue is not None else "", []):
-        return (f"local:{desc}", readable)
+    local_keys = []
+    if issue is not None:
+        local_keys.append(f"issue:{issue}")
+    if pr is not None:
+        # A fold has NO issue, so `issue:` keys cannot cover it — measured by a
+        # reviewer: a fold held only by a local branch read free. `_local_holders`
+        # now records both keyings for every number a slug names, so the PR half
+        # is live rather than the dead lookup it was before.
+        local_keys.append(f"pr:{pr}")
+    for key in local_keys:
+        for desc in snap.local_holders.get(key, []):
+            return (f"local:{desc}", readable)
     return (None, readable)
 
 
@@ -770,10 +802,10 @@ def _run(
         return subprocess.CompletedProcess(list(args), 127, "", str(exc))
 
 
-def _repo_slug(explicit: str | None) -> str:
+def _repo_slug(explicit: str | None, repo_root: Path | None = None) -> str:
     if explicit:
         return explicit
-    proc = _run(["git", "remote", "get-url", "origin"], timeout=GIT_TIMEOUT)
+    proc = _run(["git", "remote", "get-url", "origin"], timeout=GIT_TIMEOUT, cwd=repo_root)
     if proc.returncode == 0:
         m = re.search(r"[:/]([^/:]+/[^/]+?)(?:\.git)?\s*$", proc.stdout.strip())
         if m:
@@ -969,7 +1001,10 @@ def _local_holders(repo_root: Path, snap: Snapshot | None = None) -> dict[str, l
         if ahead == 0:
             return  # abandoned: it produced nothing and must not block (#8175)
         for number in _issue_numbers_in(slug):
+            # Both keyings: a slug's number may be an ISSUE or a PR (a fold has no
+            # issue at all), and recording only one leaves half the surface blind.
             holders.setdefault(f"issue:{number}", []).append(slug)
+            holders.setdefault(f"pr:{number}", []).append(slug)
 
     for ref, _ahead in ahead_of.items():
         note(ref, 1 if _ahead < 0 else _ahead)
@@ -1026,15 +1061,26 @@ def _claim_verdicts(repo_root: Path, refs: Iterable[str], snap: Snapshot) -> Non
         '  printf "%s\\t%s\\t%s\\n" "$ref" "$v" "${CLAIM_SNAPSHOT_OWNER:-}"; '
         'done'
     )
-    proc = subprocess.run(
-        ["bash", "-c", script_body],
-        input="\n".join(ref_list) + "\n",
-        capture_output=True,
-        text=True,
-        cwd=str(repo_root),
-        timeout=GH_TIMEOUT * 2,
-    )
-    shutil.rmtree(Path(snap_file).parent, ignore_errors=True)
+    try:
+        proc = subprocess.run(
+            ["bash", "-c", script_body],
+            input="\n".join(ref_list) + "\n",
+            capture_output=True,
+            text=True,
+            cwd=str(repo_root),
+            timeout=GH_TIMEOUT * 2,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        # ⛔ A HUNG `git fetch` INSIDE claims.sh MUST EXIT 2, NOT CRASH. This was
+        # the only subprocess in the module without error handling, and
+        # `claim_snapshot` does a network fetch — so a slow one escaped as
+        # TimeoutExpired, produced a traceback and exit 1 with `unreadable`
+        # EMPTY, which is the one shape that reads as "the queue was read and
+        # answered". A timeout is "could not check".
+        snap.unreadable.append(f"GH-TIMEOUT(claims.sh): {str(exc)[:120]}")
+        return
+    finally:
+        shutil.rmtree(Path(snap_file).parent, ignore_errors=True)
     if proc.returncode != 0:
         snap.unreadable.append(f"claims.sh verdicts ({proc.stdout.strip()[:120] or proc.returncode})")
         return
@@ -1133,7 +1179,7 @@ def _merge_tree(repo_root: Path, base: str, pr: dict[str, Any], snap: Snapshot) 
 
 def collect(repo: str, repo_root: Path, *, base: str = "main") -> tuple[Snapshot, QueueConfig | None, str]:
     """Read every surface the decision needs, and record what could not be read."""
-    snap = Snapshot(repo=repo, base=base)
+    snap = Snapshot(repo=repo, base=base, claim_ns=CLAIM_NS)
     # Provenance only — the decision never reads it. Bounded like every other
     # subprocess here: the first version ran `date` with NO timeout and no error
     # handling, so a host without it raised FileNotFoundError and exited 1 with a
@@ -1142,7 +1188,24 @@ def collect(repo: str, repo_root: Path, *, base: str = "main") -> tuple[Snapshot
     snap.collected_at = int(stamp.stdout.strip() or 0) if stamp.returncode == 0 and stamp.stdout.strip().isdigit() else 0
 
     try:
-        text, source = load_config_text(None)
+        # ⛔ PINNED TO THE CHECKOUT, NOT THE PROCESS CWD. `load_config_text(None)`
+        # shells `git show origin/main:.mergify.yml` with no cwd, so the gate came
+        # from whatever repository the process was standing in — and was labelled
+        # `origin/main:.mergify.yml` either way, indistinguishable from the right
+        # one. Measured by a reviewer: from another Mergify repo it returned THAT
+        # repo's conditions silently, so positions were computed against a foreign
+        # gate. The read is pinned; `parse_config` (the shared parser) is unchanged.
+        shown = _run(
+            ["git", "show", f"origin/{base}:.mergify.yml"],
+            timeout=GIT_TIMEOUT,
+            cwd=repo_root,
+        )
+        if shown.returncode == 0 and shown.stdout.strip():
+            text, source = shown.stdout, f"origin/{base}:.mergify.yml ({repo})"
+        else:
+            on_disk = repo_root / ".mergify.yml"
+            text = on_disk.read_text(encoding="utf-8")
+            source = f"{on_disk} (FALLBACK — origin/{base} unreadable)"
         cfg = parse_config(text)
         snap.config_source = source
         snap.base = cfg.base
@@ -1159,10 +1222,19 @@ def collect(repo: str, repo_root: Path, *, base: str = "main") -> tuple[Snapshot
 
     client = GhCli()
 
-    issues: list[dict[str, Any]] = []
+    # ⛔ ONE ROW PER ISSUE. Two searches, one per label — an issue carrying BOTH
+    # labels appeared twice with the same `key`, so the population was
+    # overcounted and `--json` emitted two units a consumer keys as one. The
+    # higher priority wins, because the ordering is priority-first anyway.
+    by_number: dict[int, dict[str, Any]] = {}
     for label in PRIORITIES:
-        issues.extend(_search_issues(client, repo, label, snap))
-    snap.issues = sorted(issues, key=lambda i: i["number"])
+        for row in _search_issues(client, repo, label, snap):
+            seen = by_number.get(int(row["number"]))
+            if seen is None or PRIORITY_RANK.get(row["priority"], 99) < PRIORITY_RANK.get(
+                str(seen.get("priority") or ""), 99
+            ):
+                by_number[int(row["number"])] = row
+    snap.issues = [by_number[n] for n in sorted(by_number)]
 
     try:
         pulls = client.list_pulls(repo, snap.base)
@@ -1402,7 +1474,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             snap.config_source = f"{snap.config_source} (from snapshot)"
         repo = args.repo or snap.repo
     else:
-        repo = _repo_slug(args.repo)
+        repo = _repo_slug(args.repo, repo_root)
         snap, cfg, _ = collect(repo, repo_root, base="main")
         if args.snapshot_out:
             Path(args.snapshot_out).write_text(json.dumps(snap.to_json(), indent=2), encoding="utf-8")
