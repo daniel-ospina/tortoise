@@ -693,6 +693,36 @@ def test_a_real_gh_that_exits_126_is_not_reported_as_unexecutable(tmp_path, monk
     assert "126 from a binary that ran" in msg, msg
 
 
+def test_a_gh_that_exits_zero_with_no_repo_is_not_an_install_problem(tmp_path, monkeypatch):
+    """rc=0 with EMPTY stdout reaches the refusal too, and it is not an install fault.
+
+    Review, `#10777`: the success guard requires `returncode == 0 AND stdout.strip()`,
+    so a `gh` that exited 0 and printed nothing fell through the 127/126 pairs into
+    the generic arm — which told the operator "`gh repo view` failed … is `gh`
+    installed and authenticated? … install the `gh` CLI" about a binary that exited
+    0, i.e. demonstrably ran. Same dishonesty as the 126 collapse, one branch down.
+    """
+    bin_dir = tmp_path / "gh-silent-bin"
+    bin_dir.mkdir()
+    stub = bin_dir / "gh"
+    stub.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    stub.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bin_dir))
+
+    out = rd._gh(["repo", "view"], tmp_path)
+    assert out.returncode == 0, (out.returncode, getattr(out, "cause", ""))
+    assert out.stdout == "", repr(out.stdout)
+
+    with pytest.raises(rd.Refused) as exc:
+        rd._resolve_repo(tmp_path)
+    msg = str(exc.value)
+    # The claim that must NOT survive: a 0-exit binary is not a broken install.
+    assert "install the `gh` CLI" not in msg, msg
+    assert "is `gh` installed and authenticated" not in msg, msg
+    assert "exited 0" in msg, msg
+    assert "pass `--repo" in msg, msg
+
+
 def test_a_cwd_that_is_not_a_directory_is_not_a_broken_gh_install(tmp_path):
     """An `ENOTDIR` cwd is ALSO an `OSError`, and "repair the install" is wrong for it.
 
