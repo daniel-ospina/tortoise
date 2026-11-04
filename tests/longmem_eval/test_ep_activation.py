@@ -108,11 +108,15 @@ class _FakeGraph:
             if graph_operators is None else list(graph_operators))
         # #10137: the CAS-lost arm — a concurrent writer already flipped these.
         self.cas_lost = set(cas_lost)
-        # #10137: operator -> its endpoint ids, all LIVE (the R16 endpoint read
-        # supplies only ids+statuses, so the stub needs no point nodes). An
-        # operator reachable ONLY through the graph-wide sweep gets a synthetic
-        # live endpoint, which is exactly the shape it models: endpoints that
-        # were live before the operator existed.
+        # #10137: operator -> ``(endpoint id, status, edge type)``, all LIVE.
+        # The fourth column the real read returns (``labels(x)``) is HARD-CODED
+        # to ``["Point"]`` by the stub, so the stub CANNOT model a non-:Point
+        # endpoint and no label-filter coverage can be written here — that
+        # behaviour is pinned against a real graph by
+        # ``test_on_input_marks_only_factor_point_endpoints``. An operator
+        # reachable ONLY through the graph-wide sweep gets a synthetic live
+        # endpoint, which is exactly the shape it models: endpoints that were
+        # live before the operator existed.
         self.op_endpoints: dict[str, list[tuple[str, str | None, str]]] = {}
         for cid, oids in self.op_map.items():
             for oid in oids:
@@ -159,7 +163,8 @@ class _FakeGraph:
             return _Result([] if oid in self.cas_lost else [[oid]])
         if "RETURN x.id, x.status, type(r), labels(x)" in c:
             # #10137: the R16 endpoint read — the ENGINE's read (unlabeled, all
-            # outgoing edges), returning ``(id, status, rel_type)``. The DEFAULT
+            # outgoing edges), returning ``(id, status, rel_type, labels)`` with
+            # the label column stubbed to ``["Point"]`` (see ``op_endpoints``). The DEFAULT
             # map (``op_endpoints`` built in ``__init__``) is all-live IMPL,
             # modelling the ordinary graph; a test that needs the gate to block
             # passes ``op_endpoints=`` explicitly. There is no other hook.

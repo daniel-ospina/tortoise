@@ -859,7 +859,7 @@ def activate_beliefs(sdk, *, namespace: str | None = None,
     #     (``live.py``: "an ABSENT status is LIVE — the legacy-node rule"), so
     #     ``ep._live_only('o.status')`` already admitted such an operator as a
     #     factor; not re-promoting it removes no factor. ⛔ But that is NOT a
-    #     claim that the factor graph cannot move — see the FOURTH bullet.
+    #     claim that the factor graph cannot move — see the NEXT bullet.
     #   * the factor graph CAN LOSE a factor, on a shape ``main`` promoted and
     #     this gate refuses. The deleted query matched on ``-[:IMPL|NAND]->``
     #     alone, so it promoted a draft operator incident to a promoted draft
@@ -919,16 +919,17 @@ def activate_beliefs(sdk, *, namespace: str | None = None,
     # ⚠️ ``operators_promoted: 1, factors: 0`` is NOT by itself a defect signal,
     # and must not be read as one. The endpoint read is the ENGINE's, so a
     # part/whole (``hasPart``) operator over live claims IS promoted by this
-    # sweep, and the ENGINE's gate would admit it too (its read has no edge-type
-    # filter) — though the engine has no graph-wide sweep, so for already-live
+    # sweep, and the ENGINE's GATE would admit it too (its read has no edge-type
+    # filter) — though the engine has no graph-wide sweep, and ``promote_point``
+    # returns ``already_live`` before its incident sweep, so on already-live
     # claims this sweep is the only route that exists. EP builds no factor from
-    # ``hasPart``
-    # by design (``_FACTOR_EDGE_TYPES``). Measured: a ``composedOf`` operator
-    # over two live claims publishes exactly ``operators_promoted=1, factors=0,
-    # no_op_reason='no_ep_factors'`` while being a correct promotion the
-    # ENGINE's gate would also admit — though the engine has no graph-wide
-    # sweep, so on already-live claims this sweep is the only route that exists. ``operators_promoted`` counts engine-promotable operators, not
-    # factors; read it with ``no_op_reason`` and the factor count, never alone.
+    # ``hasPart`` by design (``_FACTOR_EDGE_TYPES``).
+    #
+    # Measured: a ``composedOf`` operator over two live claims publishes exactly
+    # ``operators_promoted=1, factors=0, no_op_reason='no_ep_factors'`` while
+    # being a correct promotion. So ``operators_promoted`` counts
+    # engine-promotable operators, NOT factors — read it with ``no_op_reason``
+    # and the factor count, never alone.
     # (Narrowing the read to make that pair unreachable was tried and is wrong —
     # it re-opens the retracted-mitigation divergence pinned by
     # ``test_the_gate_reads_every_operator_edge_not_just_impl``.)
