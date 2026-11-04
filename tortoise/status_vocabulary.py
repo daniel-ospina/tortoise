@@ -141,9 +141,11 @@ CONDITIONS: dict[str, str] = {
 #: translated rather than treated as an unknown state.
 #:
 #: ⛔ ``tortoise_unavailable`` is deliberately NOT in this table, and must not be
-#: added. ``tortoise/mcp_client.py`` reports it for *any* failure to answer and
-#: has no notion of a missing endpoint (it falls back to its default URL), so it
-#: covers both "configured, but down" and "never pointed at a memory". A single
+#: added. ``tortoise/mcp_client.py`` emits it for the failures it cannot
+#: classify — it has no notion of a missing endpoint (it falls back to its default
+#: URL) — so it covers both "configured, but down" and "never pointed at a
+#: memory". (A credential-less auth refusal is NOT one of them: the driver
+#: classifies that one by name, as ``unconfigured``, #10605.) A single
 #: value here would make the documented migration path collapse the exact
 #: never-configured-vs-down split this contract exists to keep — an unset
 #: endpoint would read as ``degraded`` (exit 3) instead of ``unconfigured``
@@ -192,9 +194,11 @@ def resolve(word: str | None, *, configured: bool) -> str:
     on its own (``ok`` / ``not_configured``) is translated from
     ``LEGACY_WORDS``. The one word **cannot** be translated without the
     configuration fact: ``tortoise_unavailable`` — ``tortoise/mcp_client.py``
-    reports it for *any* failure to answer (it has no notion of a missing
+    emits it for the failures it cannot classify (it has no notion of a missing
     endpoint and falls back to its default URL), so it covers both "configured,
-    but down" and "never pointed at a memory". That collapse is exactly what the
+    but down" and "never pointed at a memory". (The credential-less auth refusal
+    is not one of them: it arrives as ``unconfigured``, #10605.) That collapse is
+    exactly what the
     client boundary removes here, which is why ``configured`` is a parameter —
     and why the word is kept OUT of ``LEGACY_WORDS``, so a caller cannot even
     be tempted to resolve it from the flat table.
