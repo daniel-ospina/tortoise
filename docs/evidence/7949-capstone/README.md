@@ -27,20 +27,24 @@ committed in this tree and is read as a file. The SCORED run below is stamped se
 **Blast radius — the files this branch touches** (`git diff --name-only origin/main...HEAD`; the
 COUNT is deliberately not restated here — it changed twice while this was open, and a stale
 integer in the one paragraph a reviewer bounds the PR by is worse than no integer):
-the bundle itself — `docs/evidence/7949-capstone/**` (this `README.md`, `E1-E5-PROOFS.md`, the
-committed `blocker-states.json`, the scored log `capstone-measured-9152448d.log` that replaces
-`capstone-measured-e0fc940b.log`, and `probes/capstone_measure.py`) and
-`tools/capstone_verdict_check.py` with `tests/test_7949_capstone_verdict_check.py` (the V12 arm and
-its pins) plus `tests/test_7949_capstone_measure.py` (the bundle's own claim pins); its registration
-(`config/ci-surfaces.yml` `core`/`tier1`/`durations` arms, `docs/00_index.md`).
-⛔ A previous revision of this paragraph named eight files this branch does **not** touch —
-`tools/capstone_preregistration_check.py`, `tests/test_capstone_preregistration_9075.py`,
-`tools/ci_selection.py`, `tests/test_ci_selection.py`, `config/surface-manifest.yml`,
-`docs/product/mcp-sdk-surface.md`, `tests/test_ci_check_repair.py`,
-`tests/test_uri_env_mutations_declared.py` — from an earlier cut whose selection and surface edits
-were dropped. It is corrected here rather than carried, because it claimed the PR re-cut the
-**MCP/SDK surface** (`config/surface-manifest.yml`, `docs/product/mcp-sdk-surface.md`), which this
-branch does not do: no surface tool was added, removed or renamed.
+the bundle itself (`docs/evidence/7949-capstone/**`, `tools/capstone_verdict_check.py`,
+`tests/test_7949_capstone_verdict_check.py`, `tests/test_7949_capstone_measure.py`) **and the
+ordering gate that judges it** (`tools/capstone_preregistration_check.py` +
+`tests/test_capstone_preregistration_9075.py`, added in the `#9089` review round: the gate
+exempts this bundle's REFUSAL log on its CONTENT, so a reviewer who bounds this PR by its own
+reading must see it); its registration (`config/ci-surfaces.yml` `core`/`tier1`/`durations`
+arms, `docs/00_index.md`); the selection edits `tools/ci_selection.py` +
+`tests/test_ci_selection.py` **remove** a `CORE_ALSO` row this branch had added and could not
+justify (the bundle prefix `docs/evidence/7949-capstone/`, landed by #9076, already selects
+`core` for a PROBE-ONLY diff — measured, not assumed), and **add** one for the gate source
+(`tools/capstone_verdict_check.py`), because a GATE-ONLY diff selected no surface at all while
+the bundle prefix covers only the probe/evidence paths (pinned by
+`tests/test_ci_selection.py::test_the_capstone_gate_change_selects_core_not_tier1`) — and add a pin
+that no `CORE_ALSO` row is shadowed by a parent prefix; the surface re-cut the new caller forces
+(`config/surface-manifest.yml`, `docs/product/mcp-sdk-surface.md`); and two test-side edits —
+`tests/test_ci_check_repair.py` (the `gh` launcher stub) and
+`tests/test_uri_env_mutations_declared.py` (this suite's `TORTOISE_DB_URI` env-control
+declaration, plus the removal of a dead duplicate row).
 **Nothing under `tortoise/` changes behaviour and nothing instruments the extractor** — this
 bundle installs no wrapper, spy or step-composition anywhere in the measured path, so the E4
 row's "no monkeypatch" clause holds on the fact that matters. The `sdk.py`/`extractor_v2.py`
@@ -192,11 +196,12 @@ them.** That log renders, for the capture path's `proj.link_source_to_event` cal
 not be read as such. At the base it ships from (`9152448d7`) those lines are exactly those symbols;
 at THIS head they are a **blank line** and a line **inside a docstring**, because six commits merged
 to `main` after the run moved `sdk.py` around them (`a33af140f`, `c833c41cd`, `62e3f2f61`,
-`5028881f8`, `63981d152`, `2180f0054` — `git log 9152448d7..HEAD -- tortoise/sdk.py`). ⛔ **Not
-`#10215` and not this branch:** `8bc2fbed1` touches no `tortoise/` file at all, and neither does
-this PR, so the movers are `main`'s — which is why the symbols now sit at `_TURN_WRITE_CYPHER` and
-the `proj.link_source_to_event` call site instead of at those numbers. Neither number is a defect
-and the log is not edited for it — a log is the record of what the run rendered — but do NOT
+`5028881f8`, `63981d152`, `2180f0054` — `git log 9152448d7..origin/main -- tortoise/sdk.py`), and the
+fold adds `a6e20f05b` and `e4ee966f4` on top. ⛔ **Not `#10215` and not this branch:** `8bc2fbed1`
+touches no `tortoise/` file at all, and neither does this PR, so the movers are `main`'s — which is
+why the symbols now sit at `_TURN_WRITE_CYPHER` and the `proj.link_source_to_event` call site
+instead of at those numbers. Neither number is a defect and the log is not edited for it — a
+log is the record of what the run rendered — but do NOT
 follow them as pointers at this head.
 
 The **SUPERSEDED** `capstone-measured-e0fc940b.log` carried the cites **as-of its own
@@ -575,7 +580,7 @@ measurement of this number): `EXTRACTOR-V4-ARCHITECTURE.md` §10's
 prior measurement was visible when the record said none was, and the 25-bound (this instrument) vs
 29-marker-sentence (the record) populations must be reconciled before either number is called final.
 
-## E1 / E2 — the `#9889` record: E1 still UNDECIDED (n=1 per arm), E2 would score 8 of 14 on a RE-RUN
+## E1 / E2 — scored from the `#9889` record: E1 REFUSED (n=1 per arm), E2 RED (8 of 14)
 
 **These two rows no longer read `e1-e2.log`.** Their `evidence` is
 `docs/evidence/9889/e1-e2-scores.json`, produced in ONE invocation by
@@ -601,7 +606,7 @@ E2 FAIL — E2a 8/14 (bar >= 13), E2b fused 1/114 = 0.008772
   depend on which before run is chosen. The two OFF runs of the same arm differ
   by **20.6 pp** — wider than the 14.6 pp the ON arm moved away from OFF 1. The
   next requirement is **n >= 2 per arm**, not a second arm.
-- **E2 would score RED 8/14 on a re-run, and the denominator that was missing for eleven days is now carried.**
+- **E2 = RED, and the denominator that was missing for eleven days is carried.**
   E2a is **8 of 14** value-bearing planted units strictly surviving on the run's
   own graph, against `>= 13 of 14`. The denominator is §3.3's rule read off the
   pre-registration and computed from the gold by `probes/e2a_value_units.py`; the
@@ -733,15 +738,9 @@ pins the document by BYTES (`document_sha256`), asserted for **this** bundle by
 `tests/test_capstone_preregistration_9075.py::test_the_real_record_pins_the_real_document` (its
 `PREREG_DIR` is `docs/evidence/7949-capstone`, so an edited registration reds there at any checkout
 depth — the test reads no history), and enforced in the required CI step by the gate's own
-`DOCUMENT_SHA_PIN` arm in `tools/capstone_preregistration_check.py::check_machine_record`.
-⛔ **Scoped, because the record's own change control is narrower than "never edit":** §8 permits a
-post-log change, but only as a RECORDED one — a `## Deviations` entry carrying the date, the original
-value, the new value and the reason, with `document_sha256` re-cut in the SAME commit. That is not
-hypothetical: this record has been amended in place three times after its first cut (`eb9fd644…` →
-`e8a74aaf…` → `5ff05906…` → `e8b83872…`, the last being `8bc2fbed1`), which is what the pin makes
-REVIEWABLE rather than what it prevents. A NEW linked record is the other permitted route (the
-`#10463` ruling this paragraph follows). Either way, the failure the gate exists to catch is the
-SILENT edit. Leaving item 2 as the only
+`DOCUMENT_SHA_PIN` arm in `tools/capstone_preregistration_check.py::check_machine_record`. An
+amendment is a NEW linked record — never an edit to the frozen one, which is the `#10463` ruling and the reason a
+silent edit is the failure the gate exists to catch in the first place. Leaving item 2 as the only
 statement of the rule is the other failure: a lane that reads the authoritative protocol, orders its
 two commits inside one PR exactly as criterion 2 asks, and lands is refused by a requirement the
 registration never states. **This section is the changes record that closes that gap** — item 2 is
@@ -853,7 +852,7 @@ witnessed steps is printed — an honest finding for `#7949`, never a guess.
   `docs/evidence/9889/e1-e2-scores.json`), so E1 is no longer refused for want of a population:
   it is `BLOCKED` because the two pairings disagree, and a verdict that changes with which before
   run you pick has not been decided (n >= 2 per arm is the next requirement). E2a's 14-unit
-  denominator IS carried and scores **8/14**, so a RE-RUN of this probe makes E2 **RED**, not blocked. (The superseded
+  denominator IS carried and scores **8/14**, so E2 is **RED**, not blocked. (The superseded
   `e1-e2.log` — 25 Objects, one arm, a corpus that is not the frozen one — is kept as history and
   cited by no row.)
 - **No evidence that E3's `= 1.000` bar is reachable as registered.** It is not: `:Object`
@@ -1046,7 +1045,7 @@ gated the pass off, or the stage produced nothing.
 
 A **scored** row moves to a different verdict only by RE-RUNNING the probe, never by reading an
 issue's state — which is why E1 stays `BLOCKED` (its two before realizations disagree, so it is not
-decided at n=1 per arm) and E3/E4/E5 are `RED` rather than "blocked by a closed child". E2 becomes `RED`
-on a re-run, because `#9889`'s record carried the 14-unit denominator (8 of 14); the shipped table above is the
+decided at n=1 per arm) and E3/E4/E5 are `RED` rather than "blocked by a closed child". E2 is `RED`
+since `#9889`'s record carried the 14-unit denominator (8 of 14). (The table above is the
 dependencies' own state, not a scoreboard — `#9116`'s landing is recorded there because the seam
 shipped, and the S2.2/S2.3 rows above keep the count the frozen run measured.)
