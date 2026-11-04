@@ -977,22 +977,31 @@ def test_no_module_level_name_is_REBOUND_because_the_second_copy_wins():
     green over it). So the class is closed here: any name bound twice at module
     scope reds, whatever its case and whether or not it is loaded.
 
+    ⚠️ BOTH SCOPES ARE SCANNED, and the second one is not a nicety: the #10703
+    forward merge of `origin/main` produced two byte-identical copies of
+    `test_a_stray_run_costs_the_RENDERER_its_pairing_not_a_lost_claim` in THIS
+    file (both sides had added the same test, git kept both). pytest collects the
+    LAST binding, so the first copy never ran — a guard that silently weakens
+    itself, which is the fail-open direction this file exists to refuse. Only
+    `ruff F811` caught it, and this suite is the one a maintainer extends by
+    copy-paste.
+
     `origin/main` binds it ONCE, so the duplicate was introduced on this branch.
     """
-    tree = ast.parse(MODULE_PATH.read_text())
     seen: dict[str, list[int]] = {}
-    for node in tree.body:
-        if isinstance(node, ast.Assign):
-            targets = node.targets
-        elif isinstance(node, ast.AnnAssign):
-            targets = [node.target]
-        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            targets = [ast.Name(id=node.name)]
-        else:
-            continue
-        for target in targets:
-            if isinstance(target, ast.Name):
-                seen.setdefault(target.id, []).append(node.lineno)
+    for source in (MODULE_PATH, Path(__file__)):
+        for node in ast.parse(source.read_text()).body:
+            if isinstance(node, ast.Assign):
+                targets = node.targets
+            elif isinstance(node, ast.AnnAssign):
+                targets = [node.target]
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                targets = [ast.Name(id=node.name)]
+            else:
+                continue
+            for target in targets:
+                if isinstance(target, ast.Name):
+                    seen.setdefault(target.id, []).append(node.lineno)
     # A scan that finds nothing proves nothing — this asserts the guard MEASURES.
     assert len(seen) > 20, f"only {len(seen)} module-level bindings found: not measuring"
     rebound = {name: lines for name, lines in seen.items() if len(lines) > 1}
@@ -3233,6 +3242,8 @@ def test_a_REOPENED_issue_prints_partial_and_exits_3(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert code == 3
     assert "reason=reopened" in out
+
+
 def test_a_stray_run_costs_the_RENDERER_its_pairing_not_a_lost_claim():
     """The LENIENT arm's line bound must still honour the run the renderer paired.
 
@@ -3256,6 +3267,7 @@ def test_a_stray_run_costs_the_RENDERER_its_pairing_not_a_lost_claim():
     # this the `pending` set would trade the under-report for an over-report that
     # outlives the paragraph it belongs to.
     assert cl.parse_closing_refs("a`\n\n`Closes #100`\n") == []
+
 
 if __name__ == "__main__":  # pragma: no cover
     # The module docstring advertises `Run standalone: python3 tests/test_closes_landing.py`.
