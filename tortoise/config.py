@@ -394,6 +394,40 @@ def is_db_uri(uri: str | None) -> bool:
     return scheme in SUPPORTED_URI_SCHEMES
 
 
+def looks_like_uri_userinfo(value: str) -> bool:
+    """Does a SCHEME-LESS DB target carry URI USERINFO? (#10655 review P0)
+
+    ONE predicate, shared by the two redaction sites that must agree: this
+    module's `resolve_db_path` log line and `__main__`'s `config show` report.
+    They were two hand-written copies and BOTH leaked the same shape, because
+    both tested the `//` AUTHORITY prefix and neither tested the COLLAPSED form.
+
+    Two arms, and both are required or one shape leaks:
+
+    * **AUTHORITY FORM** — ``//user:pw@host/x.db`` or ``//token@host/x.db``.
+      The second carries a token as the user with NO ``:`` at all, which is why
+      a colon test alone is not enough. The authority is everything after the
+      leading ``//`` up to the next ``/``.
+    * **USERINFO COLLAPSED INTO A PATH** — `resolve_db_path` hands its caller an
+      ABSOLUTE path, and ``os.path.abspath`` collapses a leading ``///`` to
+      ``/``, so ``///user:pw@host/x.db`` reaches the reporter as
+      ``/user:pw@host/x.db`` where the ``//`` arm cannot see it. The same holds
+      for a `TORTOISE_DB_PATH` that is already absolute. The tell is a ``:``
+      BEFORE the last ``@`` — the ``user:password@`` boundary.
+
+    Deliberately NOT "any ``@``": the tree's display masker fails closed on any
+    ``@``, but applying that here would redact two legal paths the suite pins as
+    legible — ``/tmp/me@work/db.fdb`` (an ``@`` with no credential) and
+    ``/tmp/a:b.db`` (a colon with no ``@``). Requiring the ``:``-before-``@``
+    boundary keeps both readable while covering every ``user:password@`` shape.
+    """
+    if "@" not in value:
+        return False
+    if value.startswith("//") and "@" in value.split("/", 2)[-1].split("/", 1)[0]:
+        return True
+    return ":" in value.rsplit("@", 1)[0]
+
+
 def raw_uri_userinfo(uri: str) -> tuple[str | None, str | None]:
     """Return a URI's ``(username, password)`` in the percent-ENCODED form.
 
@@ -497,11 +531,14 @@ def resolve_db_path(explicit: str | None = None) -> str:
         # is written out rather than imported: `__main__` imports THIS module, so a
         # masker import here would cycle.
         _shown = uri.split("?", 1)[0].split("#", 1)[0]
-        # AUTHORITY FORM, not "does it contain a colon": `//token@host/x.db` carries
-        # a token as the user with no `:` at all, and the tree's own masker fails
-        # closed on ANY `@` in a scheme-less value. Requiring a colon was narrower
-        # than that rule and leaked this shape on all three streams.
-        if _shown.startswith("//") and "@" in _shown.split("/", 2)[-1].split("/", 1)[0]:
+        # AUTHORITY FORM **or** USERINFO COLLAPSED INTO A PATH — one shared
+        # predicate (`looks_like_uri_userinfo`), because this site and
+        # `__main__`'s report used to be two hand-written copies of a
+        # `startswith("//")` test and BOTH leaked `/user:pw@host/x.db`: the
+        # value arrives ABSOLUTE here, and `os.path.abspath` collapses a leading
+        # `///` to `/`, so the `//` test never fires. Never a bare `@` test — two
+        # legal paths are pinned as legible (see the helper).
+        if looks_like_uri_userinfo(_shown):
             _shown = "<redacted: userinfo-shaped>"
         logger.warning(
             "TORTOISE_DB_URI=%r is a file path (no supported scheme: %s) — "
