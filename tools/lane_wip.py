@@ -276,7 +276,7 @@ def _repo_root() -> Path:
         # as a fact exited 2 with "not inside a git work tree — nothing to pin" over a lane
         # whose `git status` worked (measured). Same contract as `_worktree_root`.
         if any(m in err for m in _NOT_A_WORKTREE):
-            raise LaneWipError("not inside a git work tree — nothing to pin")
+            raise LaneWipError("not inside a git work tree")
         raise GitFailed(
             cp.returncode,
             f"could not read the repository root: {(err or cp.stdout).strip() or 'no diagnostic'}",
@@ -332,6 +332,26 @@ _SKIP_MARKERS = (
     "unable to index",
     "could not read",
 )
+
+
+def _repo_root_with_remedy(reason: str) -> Path:
+    """`_repo_root()` for a READ verb that has already lost its `--path`, with a real remedy.
+
+    ⛔ "NOT INSIDE A GIT WORK TREE — NOTHING TO PIN" IS A PIN MESSAGE, ON A READ VERB, IN THE
+    #10812 SHAPE. Reached from `recover`/`list` when `--path` names a DESTROYED worktree and
+    the caller is in no repository, it named a "this repository" that does not exist and
+    offered no remedy at all (measured end to end: pin a lane from outside any repository,
+    `git worktree remove --force` that lane, then run the exact command `pin` printed -> the
+    note, then `not inside a git work tree — nothing to pin`, rc 2).
+    """
+    try:
+        return _repo_root()
+    except LaneWipError as exc:
+        raise LaneWipError(
+            f"{reason}, and you are NOT inside a repository here, so the pins cannot be read. "
+            "Run this from a worktree of the repository that held it (the one you added it "
+            "from), or pass `--path <a surviving path in that repo>`"
+        ) from exc
 
 
 def _resolve_path(path: Path, *, what: str) -> Path:
@@ -1329,7 +1349,7 @@ def cmd_list(args: argparse.Namespace) -> int:
                 "`tools/lane_wip.py list --all` reads the pins from this repo instead, "
                 "and `tools/lane_wip.py recipe` says what is still recoverable"
             )
-        root = _repo_root()
+        root = _repo_root_with_remedy(f"{root} does not exist")
     keyed = _lane_root(root)
     # ⛔ THE KEY COMES FROM THE PATH; THE REFS COME FROM A REPOSITORY. A lane that recreated
     # its own (gitignored) path with `mkdir -p` is a KEY, not a repo — and `for-each-ref`
@@ -1338,7 +1358,7 @@ def cmd_list(args: argparse.Namespace) -> int:
     if _inside_work_tree(keyed, what="repository"):
         root = keyed
     else:
-        root = _repo_root()
+        root = _repo_root_with_remedy(f"{keyed} is not a repository")
         print(
             f"lane_wip: note — {keyed} is not a repository, so the pins are read from "
             f"{root}; the LANE KEY still comes from {keyed}",
@@ -1667,9 +1687,25 @@ def _pin_index_tree(sha: str, *, cwd: Path) -> tuple[str, str]:
     # printed a salvage command that then proved the pin was never damaged (measured).
     tree = _verify_opt(f"{second_sha}^{{tree}}", cwd=cwd)
     if not tree:
+        # ⛔ TWO SHAPES REACH HERE AND THEY HAVE DIFFERENT ROUTES. A missing COMMIT makes
+        # `^{tree}` unresolvable while the TREE and its blobs very often SURVIVE in this
+        # object DB — measured: prune only the second parent's commit on an `AD` pin and
+        # `git cat-file -t <tree>` still answers `tree` with the staged file intact, while
+        # `git ls-tree <tree>` reads it. Describing that as "the second parent resolves but
+        # its TREE object is unreadable" told the lane its content was gone when it was one
+        # enumeration away — the "stop looking" verdict this module documents as its worst
+        # outcome, on the damaged-pin recovery path.
+        if not _object_present(f"{second_sha}^{{commit}}", cwd=cwd):
+            return "", (
+                "the pin's second parent COMMIT object is missing — its TREE and blobs very "
+                "often still survive in this object DB: `git cat-file "
+                "--batch-all-objects --batch-check` lists them, `git ls-tree -r <tree>` "
+                "gives the paths, and `git cat-file blob <blob>` reads each file"
+            )
         return "", (
             "the pin's second parent resolves but its TREE object is unreadable — the "
-            "staged half of this pin cannot be restored"
+            "staged half cannot be restored through this pin; if it matters, look for "
+            "another copy of this object DB (a clone, a peer checkout)"
         )
     return tree, ""
 
@@ -1743,12 +1779,14 @@ def cmd_recover(args: argparse.Namespace) -> int:
     here = _resolve_path(Path(args.path), what="--path") if args.path else _repo_root()
     asked = here
     if args.path and not here.is_dir():
+        # ⛔ ONLY PRINT THE "read from here instead" NOTE ONCE WE KNOW THERE IS A HERE.
+        fallback = _repo_root_with_remedy(f"{here} does not exist")
         print(
-            f"lane_wip: note — {here} does not exist, so the pins are read from this "
-            "repository instead; `--into` still decides where the work is restored",
+            f"lane_wip: note — {here} does not exist, so the pins are read from {fallback} "
+            "instead; `--into` still decides where the work is restored",
             file=sys.stderr,
         )
-        here = _repo_root()
+        here = fallback
     if getattr(args, "branch", None) == "HEAD":
         # `--branch HEAD` is what an older pin printed for a detached pin; treat it as
         # "no branch" rather than comparing the CALLER's HEAD to the pin's parent.
@@ -2261,23 +2299,18 @@ def cmd_recover(args: argparse.Namespace) -> int:
             )
         staged_note = " (with the staged/unstaged split it was pinned with)"
     if index_problem:
-        # ⛔ NO SALVAGE COMMAND IN THIS BRANCH — `index_problem` IS the condition that makes one
-        # impossible. `_pin_index_tree` sets it only when
-        # `rev-parse --verify --quiet <pin>^2^{tree}` answers NOTHING (`_verify_opt` RAISES on a
-        # failed read, so `""` is a real "no such tree"), and BOTH `read-tree <pin>^2` and
-        # `show <pin>^2:<path>` need exactly that object. Measured on both shapes that reach
-        # here (the second parent's COMMIT pruned; only its TREE pruned): each printed command
-        # exited 128 `fatal: failed to unpack tree object`. Naming a remedy that cannot run, on
-        # the recovery path, is worse than naming none — the sibling branch above verifies its
-        # `salvage` before printing it, and this one did not.
+        # ⛔ NO SALVAGE COMMAND IN THIS BRANCH — `index_problem` IS the condition that makes
+        # `read-tree <pin>^2` / `show <pin>^2:<path>` fail. `_pin_index_tree` sets it only
+        # when `<pin>^2^{tree}` resolves to NOTHING (`_verify_opt` RAISES on a failed read, so
+        # `""` is a real "no such tree"), and BOTH commands need exactly that object.
+        # Measured on both shapes that reach here (the second parent's COMMIT pruned; only
+        # its TREE pruned): each printed command exited 128 `fatal: failed to unpack tree
+        # object`. The shape-specific route lives in `index_problem` itself; the sibling
+        # branch above verifies its `salvage` before printing, and this one did not.
         raise GitFailed(
             3,
             f"restored the WORKTREE of {sha[:12]} into {target}, but {index_problem}. "
-            "The files are back; the staged/unstaged split is NOT, and it cannot be "
-            "recovered FROM THIS PIN — the tree that holds it is the object that is gone. "
-            "If that split matters, look for another copy of the object DB (a clone, a peer "
-            "checkout), or `git cat-file --batch-all-objects --batch-check` in a repository "
-            "that still has the objects",
+            "The files are back; the staged/unstaged split is NOT",
         )
     # ⛔ COUNTED FROM THE PIN, IN `here`, BEFORE THE RESTORE IS REPORTED. Reading it from
     # the target AFTERWARDS made a display-only failure exit 3 over a completed restore,

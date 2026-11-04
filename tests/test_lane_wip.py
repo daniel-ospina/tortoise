@@ -2229,6 +2229,71 @@ def test_a_pin_taken_OUTSIDE_any_repository_does_not_claim_another_repository(hu
     assert f"--path {wt}" in out.stdout, out.stdout
 
 
+def test_a_pin_whose_second_parent_COMMIT_is_gone_names_the_ROUTE_that_survives(hub: Path) -> None:
+    """A missing second-parent COMMIT is NOT "the tree is unreadable" — the tree survives.
+
+    `_pin_index_tree` answered `index_problem` for both shapes but described only the
+    tree-gone one, so an `AD` pin whose second parent's commit had been pruned was told its
+    staged content was gone while the TREE and its blobs were still in this object DB, one
+    enumeration away — the "stop looking" verdict this module documents as its worst outcome.
+    """
+    wt = dirty_lane(hub, "wt-commitgone")
+    (wt / "only_in_index.py").write_text("staged work only in the index\n")
+    assert git("add", "only_in_index.py", cwd=wt).returncode == 0
+    (wt / "only_in_index.py").unlink()
+    pinned = run_tool("pin", cwd=wt)
+    assert pinned.returncode == 0, pinned.stderr
+    ref = pin_ref(pinned.stdout)
+
+    second = git("rev-parse", f"{ref}^2", cwd=hub).stdout.strip()
+    tree = git("rev-parse", f"{second}^{{tree}}", cwd=hub).stdout.strip()
+    assert second and tree, "the pin must carry a staged half"
+    objects = git(
+        "rev-parse", "--path-format=absolute", "--git-path", "objects", cwd=hub
+    ).stdout.strip()
+    loose = Path(objects) / second[:2] / second[2:]
+    if not loose.exists():
+        pytest.skip("the second parent's commit is packed in this fixture")
+    loose.unlink()  # the COMMIT only — its tree and blobs stay
+
+    target = hub.parent / "wt-commitgone-x"
+    out = run_tool("recover", ref, "--into", str(target), cwd=hub)
+    assert out.returncode == 3, f"{out.returncode}: {out.stdout}{out.stderr}"
+    assert "second parent COMMIT object is missing" in out.stderr, out.stderr
+    assert "batch-all-objects" in out.stderr, out.stderr
+    assert "cannot be recovered FROM THIS PIN" not in out.stderr, (
+        f"the content is one enumeration away, not gone: {out.stderr}"
+    )
+    # …and the route the message names really works HERE.
+    assert git("cat-file", "-t", tree, cwd=hub).stdout.strip() == "tree"
+    listing = git("ls-tree", "-r", "--name-only", tree, cwd=hub)
+    assert "only_in_index.py" in listing.stdout, listing.stdout
+
+
+def test_a_dead_path_from_outside_any_repository_offers_a_remedy(hub: Path) -> None:
+    """The `pin`-flavoured "nothing to pin" on a READ verb, in the #10812 shape.
+
+    `pin --path <lane>` from outside any repository prints a `recover` line whose `--path`
+    exists only while the lane does. Remove the lane (the disaster) and the same command fell
+    back to "this repository" — which does not exist — and died on `not inside a git work
+    tree — nothing to pin`, a PIN message with no remedy on a READ verb.
+    """
+    wt = dirty_lane(hub, "wt-deadpath")
+    outside = hub.parent / "no-repo-here"
+    outside.mkdir()
+    pinned = run_tool("pin", "--path", str(wt), cwd=outside)
+    assert pinned.returncode == 0, pinned.stdout + pinned.stderr
+    ref = pin_ref(pinned.stdout)
+
+    assert destroy(hub, wt).returncode == 0
+    out = run_tool("recover", ref, "--path", str(wt), "--into", str(wt), cwd=outside)
+    assert out.returncode != 0, out.stdout + out.stderr
+    message = out.stdout + out.stderr
+    assert "nothing to pin" not in message, f"a PIN message on a READ verb: {message}"
+    assert "you are NOT inside a repository here" in message, message
+    assert "surviving path in that repo" in message, message
+
+
 def test_pin_works_without_a_configured_git_identity(hub: Path) -> None:
     """A fresh CI/cell clone has no `user.email`; the pin writes commits, so it must not fail."""
     wt = dirty_lane(hub, "wt-noid")
