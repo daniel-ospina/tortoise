@@ -184,6 +184,13 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     "test_acl_graph_users.py": {"registry": "prod-coupled"},   # C4 #2113 — team seeding via _make_sdk(namespace="registry")
     "test_delivery_tenancy.py": {"registry": "prod-coupled"},  # C6 #2115 — registry seeding in _spine_env
     "test_tenancy_spine.py": {"registry": "prod-coupled"},   # C5 #2114 — registry seeding in _spine_env
+    # #8906: the new door-level suite mirrors `test_tenancy_spine`'s seeding — the
+    # literal IS the namespace prod's control plane resolves
+    # (`hosted_api._make_sdk(namespace="registry")`), so a `test_*` rename would
+    # seed a graph the auth resolver never reads and every arm would pass over an
+    # empty registry. `db_path` is `tmp_path`-bound, so the shared-graph hazard is
+    # closed by the redirect's per-path derivation, not by a rename.
+    "test_8906_points_gate_counts_write_graph.py": {"registry": "prod-coupled"},
     "test_hosted_volunteer_context.py": {"registry": "prod-coupled"},   # #2103 (W4C) — registry control-plane mint/revoke mirrors test_hosted_auth
     "test_capture_phase_d_dedup.py": {"team-001": "team-identity"},  # #2104 (W5-D) — hosted _make_sdk(namespace="team-001") mirror arm
     "test_capture_loop_responsiveness.py": {"registry": "prod-coupled"},  # #3086 — the capture-writer loop-affinity proof reaches the graph class via _make_sdk(namespace="registry") to record writer-thread affinity
