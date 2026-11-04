@@ -7292,6 +7292,31 @@ def test_an_unreadable_or_pinned_odd_declaration_refuses_the_write() -> None:
     assert parsed["b.py"] == ci_timing.DeclaredFloor(12.5, True), parsed
 
 
+def test_an_unparseable_manifest_refuses_the_declarations_it_cannot_read() -> None:
+    """A manifest PyYAML cannot parse is REFUSED, never read as "no declarations".
+
+    `_declared_floors`'s docstring stated the contract every repair round had
+    already deleted — *"absent or unreadable → no declarations"* — and code matched
+    it on this one face: `except yaml.YAMLError: return {}` dropped every cap
+    silently, which is the revert the mechanism exists to prevent (#10575 review,
+    F1). `_held_equal_pins` carried the identical arm beside it.
+
+    Non-vacuity: both calls RETURNED `{}` before the fix, so the `pytest.raises`
+    below fails on the pre-fix module. A TAB in the indentation is the smallest
+    text PyYAML rejects while the line parser would still see a `durations:` block.
+    """
+    unparseable = "durations:\n  test_capped.py: 355.0\n\tdurations_floors:\n"
+    with pytest.raises(ci_timing.DurationsBridgeError, match="not readable as YAML"):
+        ci_timing._declared_floors(unparseable)
+    with pytest.raises(ci_timing.DurationsBridgeError, match="not readable as YAML"):
+        ci_timing._held_equal_pins(unparseable)
+    # …and ABSENT stays legal on both, so a fixture with no such key keeps its
+    # output: only a manifest that cannot be read at all is refused.
+    header = "durations:\n  test_capped.py: 355.0\n"
+    assert ci_timing._declared_floors(header) == {}
+    assert ci_timing._held_equal_pins(header) == {}
+
+
 # ── the RATIONALE counts are DERIVED, never frozen in prose ──────────────────
 #
 # Three docstrings justify a DESTRUCTIVE rule (the CUT arm deletes a row's

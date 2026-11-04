@@ -2537,14 +2537,31 @@ def _declared_floors(manifest_text: str) -> dict[str, DeclaredFloor]:
       the very reading its note says must not become the weight — the hand-edit a
       human had already made once, done silently by the sweep instead.
 
-    Absent or unreadable → no declarations, so every caller and fixture that
-    carries no such key keeps its output.
+    ABSENT → no declarations, so every caller and fixture that carries no such
+    key keeps its output. PRESENT but unreadable → :class:`DurationsBridgeError`,
+    NEVER `{}`: a declaration this reader cannot fully honour must be REFUSED, or
+    every declared cap reverts with no signal on either side — which is the state
+    this mechanism exists to end. That rule reaches every shape below, including
+    the two that used to read as "absent" and whose docstring said so as if it
+    were the general contract: a manifest PyYAML cannot parse at all, and a
+    per-row/key container this reader does not know (#10575 review, F1).
     """
     import yaml
     try:
         data = yaml.safe_load(manifest_text) or {}
-    except yaml.YAMLError:
-        return {}
+    except yaml.YAMLError as exc:
+        # An UNPARSEABLE manifest is not a manifest with no declarations: a cap
+        # that cannot be read must be refused, or the next sweep discounts every
+        # capped row and the map says nothing about why (#10575 review, F1).
+        # Unreachable through `render_refreshed_manifest`, whose own parse raises
+        # the translated error first — this arm is the seam a DIRECT caller can
+        # still reach, and it is the seam the old docstring advertised as silent.
+        raise DurationsBridgeError(
+            "manifest is not readable as YAML, so `durations_floors` cannot be "
+            "read either — a declaration the writer cannot parse must be REFUSED "
+            "rather than read as 'no declarations', which silently reverts every "
+            f"declared cap ({exc.__class__.__name__}: {exc})"
+        ) from exc
     floors = data.get("durations_floors") if isinstance(data, dict) else None
     if floors is None:
         if isinstance(data, dict) and "durations_floors" in data:
@@ -2620,14 +2637,22 @@ def _held_equal_pins(manifest_text: str) -> dict[str, str]:
     A machine-readable declaration, because it is a fact about this artifact and
     the writer is its only automatic re-writer: each row is otherwise re-based from
     its own reading, and two rows the suite requires to agree drift apart the first
-    time a sweep measures them separately. Absent or unreadable → no pins, so every
-    caller and fixture that carries no such key keeps its output.
+    time a sweep measures them separately. ABSENT → no pins, so every caller and
+    fixture that carries no such key keeps its output; an UNPARSEABLE manifest is
+    refused rather than read as "no pins", for the reason `_declared_floors` states
+    at length — a pin silently dropped is the drift this key exists to stop
+    (#10575 review, F1).
     """
     import yaml
     try:
         data = yaml.safe_load(manifest_text) or {}
-    except yaml.YAMLError:
-        return {}
+    except yaml.YAMLError as exc:
+        raise DurationsBridgeError(
+            "manifest is not readable as YAML, so `durations_held_equal` cannot be "
+            "read either — a pin the writer cannot parse must be REFUSED rather "
+            "than read as 'no pins', which lets the pinned pair drift apart on the "
+            f"next sweep with no signal ({exc.__class__.__name__}: {exc})"
+        ) from exc
     pins = data.get("durations_held_equal") if isinstance(data, dict) else None
     if not isinstance(pins, dict):
         return {}
