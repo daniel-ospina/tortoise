@@ -126,6 +126,12 @@ CONSENT_TOKEN_TYP = "JWT"
 
 _SECRET_ENV = "CONSENT_TOKEN_SECRET"
 _ISSUER_ENV = "CONSENT_TOKEN_ISSUER"
+#: ASCII whitespace, spelled out because JS `trim()` and Python `str.strip()` do NOT share a set:
+#: `trim()` strips U+FEFF (a BOM) and `strip()` does not, while `strip()` strips U+001C–U+001F and
+#: U+0085 and `trim()` does not. `consentTokenIssuer()` in `functions/api/consent/token.ts` strips
+#: this EXACT set, so a BOM-prefixed `CONSENT_TOKEN_ISSUER` resolves to the SAME `iss` on both halves
+#: instead of the mint stamping one value and the AS refusing it with a silent `401`.
+_ISSUER_PAD = " \t\n\r\f\v"
 
 #: A consent token is ~1 KB. The cap is defence-in-depth against a hostile header/body value, and
 #: it is checked before any parse so a huge token cannot cost a base64 decode.
@@ -228,7 +234,7 @@ def consent_token_secret() -> str | None:
 
 def consent_token_issuer() -> str:
     """The configured session origin (§2.1 `iss`)."""
-    configured = os.environ.get(_ISSUER_ENV, "").strip()
+    configured = os.environ.get(_ISSUER_ENV, "").strip(_ISSUER_PAD)
     return configured or DEFAULT_CONSENT_TOKEN_ISSUER
 
 

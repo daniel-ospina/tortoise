@@ -513,6 +513,36 @@ def test_an_EMPTY_issuer_falls_through_to_the_default_on_BOTH_halves(monkeypatch
     verify_consent_token(token, presented=_presented())
 
 
+def test_a_BOM_prefixed_issuer_resolves_IDENTICALLY_on_both_halves(monkeypatch) -> None:
+    """The trim SETS must match, not just the trim direction.
+
+    JS `trim()` strips U+FEFF and Python `str.strip()` does not; `str.strip()` strips U+001C–U+001F
+    and U+0085 and `trim()` does not. So a `.trim()` here and a `.strip()` there disagree on exactly
+    those characters: with a BOM-prefixed `CONSENT_TOKEN_ISSUER` the mint resolved the DEFAULT and
+    the AS resolved the BOM'd string, i.e. `200` on the mint and `401 invalid_token` on every
+    redemption — the failure mode this whole family of pins exists to prevent. A BOM is the normal
+    artefact of "a value round-tripped through a file", which the secret's own provenance comment
+    names as the operator's path.
+    """
+    bom = "\ufeffhttps://app.premiselabs.co"
+    monkeypatch.setenv("CONSENT_TOKEN_SECRET", _TEST_SECRET)
+    monkeypatch.setenv("CONSENT_TOKEN_ISSUER", bom)
+
+    out = _run("mint_ok", issuer=bom)
+    assert out["status"] == 200, out
+    token = out["body"]["token"]
+    assert _issuer_claim(token) == bom, (
+        f"the minter stamped {_issuer_claim(token)!r} for a BOM-prefixed issuer ({bom!r}); it must "
+        "resolve it exactly as the AS does — a JS `.trim()` here and a Python `.strip()` there "
+        "disagree on U+FEFF, which is a silent 401 on every redemption")
+
+    from tortoise.consent_token import verify_consent_token
+
+    # Both halves now share the ASCII-only set, so they agree on the BOM'd value and the token
+    # verifies. Before the sets were aligned this raised `iss is not the configured session origin`.
+    verify_consent_token(token, presented=_presented())
+
+
 def test_the_minted_token_carries_a_fresh_single_use_nonce() -> None:
     """Two mints must never share a `jti`; reusing one would make the second redemption a replay.
 

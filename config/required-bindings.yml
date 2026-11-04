@@ -404,8 +404,11 @@ projects:
         type: env_vars
         envs: [production]
         note: >-
-          The `iss` the mint stamps (§2.1). Defaults to APP_ORIGIN /
-          https://app.premiselabs.co. A preview deployment must set it to its
-          OWN origin so the AS it talks to accepts the mint; the value must
-          match CONSENT_TOKEN_ISSUER on that API or every redemption is
-          `401 invalid_token`.
+          The `iss` the mint stamps (§2.1). Defaults to
+          https://app.premiselabs.co — and NOT to APP_ORIGIN: both halves resolve
+          this knob independently (`consentTokenIssuer()` on the Pages side,
+          `consent_token_issuer()` on the AS) and neither derives it from
+          APP_ORIGIN, so setting APP_ORIGIN alone changes nothing. A preview
+          deployment must set CONSENT_TOKEN_ISSUER to its OWN origin, and set it
+          on BOTH the Pages project and the API, or every redemption is
+          `401 invalid_token` while the mint still answers 200.

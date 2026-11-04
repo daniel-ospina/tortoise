@@ -61,10 +61,17 @@ export function consentAsOrigin(env: Env): string {
  * explicitly (it is a declared, `recommended` binding of this project) would point the two halves
  * at different issuers with no symptom but every redemption failing.
  */
+
+/** ASCII whitespace, `[ \t\n\r\f\v]` — spelled out for the reason given at the call site. */
+const ISSUER_PAD = /^[ \t\n\r\f\v]+|[ \t\n\r\f\v]+$/g;
 export function consentTokenIssuer(env: Env): string {
-  // `trim()` + `||` mirror `consent_token_issuer()`'s `.strip()` / `or`: a padded or empty value
-  // must resolve the same way on both sides, which is the `CONSENT_TOKEN_SECRET` rule one field over.
-  const configured = (env.CONSENT_TOKEN_ISSUER ?? "").trim();
+  // ⛔ NOT `.trim()`: JS `trim()` and Python `str.strip()` do NOT share a character set — `trim()`
+  // strips U+FEFF (a BOM, the artefact of "a value round-tripped through a file") and `strip()` does
+  // not, while `strip()` strips U+001C–U+001F and U+0085 and `trim()` does not. Either way the two
+  // halves resolve the SAME configured value to different `iss` strings: the mint stamps one and
+  // the AS refuses it with a `401 invalid_token` while the mint answers `200`.
+  // So strip an explicit ASCII set, exactly as ``_ISSUER_PAD`` in `tortoise/consent_token.py` does.
+  const configured = (env.CONSENT_TOKEN_ISSUER ?? "").replace(ISSUER_PAD, "");
   return configured || "https://app.premiselabs.co";
 }
 
