@@ -81,6 +81,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import math
 import re
 import sys
 from pathlib import Path
@@ -170,10 +171,22 @@ def _consistent_share(where: str, share, bare, objects) -> None:
                       "a fraction of any population")
     try:
         implied = float(bare) / float(objects)
+        declared = float(share)
     except (TypeError, ValueError) as exc:
         raise _refuse(f"{where} carries bare_definite={bare!r} / "
                       f"objects={objects!r}, which is not a share: {exc}") from exc
-    if abs(float(share) - implied) > 1e-9:
+    # ⛔ NON-FINITE IS A REFUSAL, not a value (#10610 review at `e079c8dd`). `share=nan`
+    # parses fine, and `abs(nan - implied) > 1e-9` is False — every comparison against NaN
+    # is False — so the reconciliation below PASSED and a log with `share=nan` wrote a
+    # DECIDED E1 record (`outcome: FAIL`, `decidable: true`) instead of refusing. Measured
+    # on `on-arm.log` with the share set to `nan`: exit 0, record written, both pairings
+    # FAIL, ratio `nan`. `inf` has the same shape (abs(inf - implied) > 1e-9 is True, so it
+    # refused by luck, not by rule).
+    if not (math.isfinite(declared) and math.isfinite(implied)):
+        raise _refuse(f"{where} reports share={share!r} over counts "
+                      f"({bare} of {objects}), which is not a finite number — a share "
+                      "must be a fraction of a real population, not nan or inf")
+    if not math.isclose(declared, implied, rel_tol=0.0, abs_tol=1e-9):
         raise _refuse(f"{where} reports share={share!r} but its own counts "
                       f"({bare} of {objects}) give {implied!r} — the share is "
                       "the operand E1's bar is scored on, so a record whose "

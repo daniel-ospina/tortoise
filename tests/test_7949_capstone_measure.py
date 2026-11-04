@@ -4820,6 +4820,30 @@ def test_the_three_routes_to_the_e1_e2_verdict_state_the_records_verdict():
             "that prints the superseded run's numbers describes a population the record "
             f"does not: {route[:400]}")
 
+    # 3b. THE BARS, derived from the frozen pre-registration — #10610 review at `e079c8dd`.
+    #     Every count and verdict on these rows was pinned and the BARS were not, so the
+    #     audit could print "8 of 14 ... against `>= 6 of 14`" under a RED that MEETS its own
+    #     printed bar, with every gate green (measured: `>= 13 of 14` -> `>= 6 of 14` in both
+    #     docs, `<= 0.05` -> `<= 0.5`, all passed). A bar typed into a document is a bar nobody
+    #     froze, so read it from the record through the bundle's ONE reader.
+    bars = measure.parse_bars(
+        json.loads((_REPO / "docs/evidence/7949-capstone/preregistration.json")
+                   .read_text(encoding="utf-8")))
+    e2a_bar = f">= {bars['E2a']['required']} of {bars['E2a']['of']}"
+    e2b_bar = f"<= {bars['E2b']['max_fused_share']}"
+    assert (bars["E2a"]["required"], bars["E2a"]["of"]) == \
+        (e2a["required"], e2a["frozen_units"]), (
+            "the scoring record's E2a bar and the pre-registration's disagree — reconcile "
+            f"them before a document can be held to either: {(e2a['required'], e2a['frozen_units'])} "
+            f"vs {(bars['E2a']['required'], bars['E2a']['of'])}")
+    e2_table_row = next(ln for ln in listed if ln.startswith("> | **E2**"))
+    for surface, text_row in (("the README's E2 verdict cell", e2_table_row),
+                              ("the `#9080` index row", route)):
+        assert e2a_bar in text_row, (
+            f"{surface} does not print the frozen E2a bar {e2a_bar!r}: {text_row[:400]}")
+        assert e2b_bar in text_row, (
+            f"{surface} does not print the frozen E2b bar {e2b_bar!r}: {text_row[:400]}")
+
     # 4. The AUDIT is not the run's mirror — it audits the criteria against CURRENT evidence,
     #    so it is held to the RECORD, not to the frozen log's table. That difference is
     #    deliberate and is exactly what legs 2 and 4 together pin: the table may lag (a row
@@ -4830,6 +4854,10 @@ def test_the_three_routes_to_the_e1_e2_verdict_state_the_records_verdict():
     assert len(e2_rows) == 2, (
         f"the audit's E2a + E2b rows are {len(e2_rows)}, not 2 — the audit stopped "
         "auditing one half of E2, so this leg has no subject")
+    for audit_row, bar in ((e2_rows[0], e2a_bar), (e2_rows[1], e2b_bar)):
+        assert bar in audit_row, (
+            f"an audit row does not print its frozen bar {bar!r} — a bar a document types "
+            f"is a bar nobody froze: {audit_row[:400]}")
     survived = f"{e2a['value_survived']} of {e2a['frozen_units']}"
     recorded = _ROW_VERDICT[record["e2"]["outcome"]]
     # ⛔ THE VERDICT WORDS AS A SET, not substrings (#10610 review at `5f636d2f`, then at
@@ -4854,8 +4882,10 @@ def test_the_three_routes_to_the_e1_e2_verdict_state_the_records_verdict():
     # the first is mutated. Measured: rewriting the measured clause to `**7 of 14**` (or
     # `**8 of 12**`) left this pin GREEN, with the row asserting two contradicting counts and
     # the record refuting one. The bold-ratio SET makes a second, disagreeing figure
-    # impossible to carry.
-    bold_ratios = set(re.findall(r"\*\*(\d+) of (\d+)\*\*", e2_rows[0]))
+    # impossible to carry — and the pattern deliberately also reads the PARENTHESISED form
+    # `**RED (8 of 14)**`, because a set that skips it is evaded by mutating the restated
+    # count alone (measured at `e079c8dd`: `**RED (7 of 14)**` passed the narrower pattern).
+    bold_ratios = set(re.findall(r"\*\*(?:[A-Z]{3,} \()?(\d+) of (\d+)\)?\*\*", e2_rows[0]))
     expected_ratio = {(str(e2a["value_survived"]), str(e2a["frozen_units"]))}
     assert bold_ratios == expected_ratio, (
         f"the audit's E2a row states the bold counts {sorted(bold_ratios)}, but the record "
@@ -5830,9 +5860,41 @@ def test_the_after_arm_share_must_be_the_fraction_its_counts_give(tmp_path,
     assert scores_probe.score(repo)["e1"]["outcome"] == "REFUSED"
 
 
+@pytest.mark.parametrize("token", ["share=nan", "share=inf", "share=-inf"])
+def test_a_non_finite_share_is_refused_rather_than_scored(token, tmp_path, capsys):
+    """A share that is not a NUMBER must refuse — `abs(nan - implied) > 1e-9` is False.
+
+    #10610 review at `e079c8dd` (P3, and a FAIL-OPEN). `share=nan` parses fine from the
+    log, and EVERY comparison against NaN is False — so the reconciliation one test
+    above passed it and the probe wrote a DECIDED record (`outcome: FAIL`,
+    `decidable: true`) off a share that is not a number. Measured on `on-arm.log` with
+    the share set to `nan`: exit 0, a record written, both pairings FAIL, ratio `nan`.
+    `inf` refused only by luck (its comparison happens to be True), which is not a rule.
+
+    The refusal is now a finiteness check BEFORE the comparison, so all three forms go
+    the same way — and the shipped log still scores, so this leg discriminates a
+    non-finite share from the finite one that ships.
+
+    Non-vacuity: at the pre-fix head every case here scores instead of refusing.
+    """
+    repo = _bundle(tmp_path)
+    log = repo / "docs/evidence/9889/on-arm.log"
+    text = log.read_text()
+    assert text.count(_ON_ARM_SHARE_TOKEN) == 1, text.count(_ON_ARM_SHARE_TOKEN)
+    log.write_text(text.replace(_ON_ARM_SHARE_TOKEN, token))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert "is not a finite number" in err, err
+
+    log.write_text(text)
+    assert scores_probe.score(repo)["e1"]["outcome"] == "REFUSED"
+
+
 # ── the falsifier must DECLARE the injection it certifies (#10610 review P2) ─────────────────
 
-@pytest.mark.parametrize("declared", [False, None, "absent"])
+@pytest.mark.parametrize("declared", [False, None, "absent", "False"])
 def test_the_falsifier_must_declare_the_injection_it_is_credited_for(declared,
                                                                     tmp_path,
                                                                     capsys):
@@ -5847,9 +5909,15 @@ def test_the_falsifier_must_declare_the_injection_it_is_credited_for(declared,
     that it ran no injection. That is the inert-counter class the refusal above
     it is written for, read one field short.
 
-    `False`, `None` and an ABSENT key are each mutated alone, because the guard is
-    `is not True` and a truthiness test would accept the first two; a permissive
-    default is not an assertion.
+    `False`, `None`, an ABSENT key and the STRING `"False"` are each mutated alone.
+    The first three are refused by `is not True` and by a truthiness test alike — so
+    they prove the guard REFUSES a non-declaration, not that it is `is not True` —
+    and the fourth is the case that actually tells the two forms apart: a truthiness
+    test accepts `"False"` (a non-empty string is truthy), `is not True` refuses it.
+    Measured at `e079c8dd`: with the guard rewritten as
+    `if not with_anchor.get("injected_anchor")`, the three original cases still passed
+    and only the string case reds. A permissive default is not an assertion, and
+    neither is a parametrization whose members all agree.
 
     Non-vacuity: at the pre-fix head this bundle scores, reporting the 14/14 from a
     block that declares no injection as the falsifier reading.
