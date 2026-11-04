@@ -740,7 +740,12 @@ def _test_node_names(path: Path) -> set[str] | None:
     directions:
 
       * a class defining ``__new__`` and an ABSTRACT class — pytest collects no
-        test under them, this gate accepts them (the fail-open direction);
+        test under them, this gate accepts them (the fail-open direction); a node
+        marked ``skip``/``xfail`` — pytest COLLECTS it and never RUNS it, so the
+        pin would red nowhere while reading as watched — is NO LONGER in this
+        list: the UNCONDITIONAL forms are now detected by `_never_reds` /
+        `_pytestmark_never_reds` below (review cycles 10-11), which is why this
+        is FIVE shapes and not the earlier SIX;
       * a base imported from ANOTHER file that defines ``__init__`` — pytest
         REFUSES the subclass, this gate accepts it;
       * an imported base carrying ``__test__ = False`` — pytest collects
