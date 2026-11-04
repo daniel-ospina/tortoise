@@ -830,7 +830,8 @@ def test_the_live_retirement_reasons_account_for_exactly_the_retired_rows() -> N
         f"({sorted(set(REMOVALS) - retired)})"
     )
     # FOUR remain: the two canonical "Removed entirely" entries and the two pack
-    # tools the owner settled as SDK/REST-post-beta. The other five — the dropped
+    # tools the owner settled as SDK/REST-post-beta. The set fell 9 -> 4: the other
+    # five — the dropped
     # `run_onboarding` members — were DELETED from the served registry in #4282
     # Phase 3.2, so no `REMOVED` row survives for them and no live reason may
     # either; their reasons moved to the HISTORY map below, which is asserted too.
@@ -852,14 +853,15 @@ def test_the_live_retirement_reasons_account_for_exactly_the_retired_rows() -> N
 
 
 def _synthetic_retirement(monkeypatch, bt):
-    """A live tool mapped to `REMOVED`, so the reason proof has a subject again.
+    """A live tool mapped to `REMOVED`, so the reason proof has a fresh subject.
 
-    #4282 Phase 3.2 emptied the real retirement set (every `REMOVED` tool was
-    deleted
-    from the registry), which would make every mutation test below VACUOUS — a guard
-    that nothing exercises can be deleted silently, and `_validate` returning `[]` on
-    an empty set cannot tell "the proof passed" from "the proof is gone". So the
-    mutation tests SYNTHESISE one retirement on a tool that is still registered.
+    The real retirement set fell 9 -> 4 in #4282 Phase 3.2 (the five dropped
+    `run_onboarding` members were DELETED from the registry, so no `REMOVED` row
+    survives for them), and four is still enough for a per-name loop — so the
+    mutation tests below ALSO iterate the real set. This helper adds a subject
+    the real set cannot give: a name the code was never tuned against, which is
+    what catches a guard that happens to fire for `tortoise_analyze` but not for
+    a differently-shaped row.
     """
     rows = bt._registry_rows()
     victim = sorted({n for n, d in bt.DESTINATION.items() if d != "REMOVED"})[0]
@@ -870,14 +872,28 @@ def _synthetic_retirement(monkeypatch, bt):
 
 
 def test_a_retirement_without_a_reason_fails_the_build(monkeypatch) -> None:
-    """Drop the reason from a retired name -> the build must refuse that name.
+    """Drop the reason from a retired name -> the build must refuse EVERY name.
 
-    The subject is synthesised (`_synthetic_retirement`) because the real retirement
-    set is empty since #4282 Phase 3.2 — see that helper for why an empty set makes
-    this test vacuous rather than clean.
+    The loop covers the FOUR real `REMOVED` rows one at a time: a guard that fires
+    for `tortoise_analyze` but not for `tortoise_packs_list` would leave the pack
+    rows silently unreasoned and the surface publishes an unreasoned retirement.
+    `_synthetic_retirement` adds one more name the code was never tuned against,
+    so the proof is not limited to the rows that already exist.
     """
     sys.path.insert(0, str(ROOT))
     from tools import bridge_table as bt
+
+    # EVERY real retirement, one at a time — the per-name coverage the loop exists
+    # for, restored after the set fell 9 -> 4 rather than replaced by one victim.
+    for name in sorted(bt.REMOVALS):
+        monkeypatch.setattr(bt, "REMOVALS",
+                            {k: v for k, v in bt.REMOVALS.items() if k != name})
+        errs = bt._validate(bt._registry_rows())
+        assert any("UNREASONED retirement" in e and name in e for e in errs), (
+            f"the real retirement {name} with no reason did not red the build; "
+            f"got {errs}"
+        )
+    monkeypatch.undo()
 
     rows, victim = _synthetic_retirement(monkeypatch, bt)
 

@@ -49,7 +49,7 @@
 # a constant here.
 manifest_version: 1
 issue: 3863
-cut_at_commit: 6a84ca924
+cut_at_commit: 7595f7c92
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -703,6 +703,8 @@ high_water_counts:
   # deliberate, reviewable act the pin requires: leaving it at 82 would give a re-cut over the
   # reduced surface six slots of slack, so re-adding any of the five (the regression
   # `tests/test_tool_registry.py` pins) would pass `tools/surface-guard.py` green.
+  # ⚠️ A re-cut DROPS this comment (it emits the block, not the prose) — re-add it with the
+  # value if you cut again, or the reason for the pin is lost while the pin survives.
   tools: 76
   sdk_public_methods: 150
 retired:

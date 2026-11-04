@@ -225,6 +225,16 @@ class TestCurationGroups:
 # so the dashboard only PRESENTS what exists and the wiring never grows a
 # bespoke per-integration UI flow.
 #
+# ⛔ ONE RECORDED EXCEPTION, and it is deliberate (owner ruling 2026-09-22,
+# #4282 Phase 3.2): the GitHub CONNECT leg is human/dashboard-side
+# (`POST /v1/onboarding/github/connect`) and is NOT agent-callable — credentials
+# never pass through the model. For `github-issues` the invariant therefore
+# holds on the ENABLE and STATE-READ legs only, and only AFTER a human has
+# connected: `tortoise_manage_sources(action="enable")` refuses with a pointer
+# to that route while the team has no connection (see
+# `tests/test_manage_sources_3540.py::test_enabling_a_github_source_without_a_connection_is_refused`).
+# Never describe GitHub as connectable from an agent.
+#
 # This table is the HAND-MAINTAINED registry of the integrations this file
 # tracks. It is parametrized, so a row IN it cannot go stale silently: a row
 # whose tool path is missing fails `test_existing_integrations_agent_settable`,
@@ -288,7 +298,12 @@ class TestAgentAddressableIntegrations:
     Parametrized over the three integrations the epic ships. A live row
     asserts registry presence, onboarding-group membership (an ungrouped tool
     falls to the 'memory' default and is filtered off group-scoped surfaces)
-    and HTTP exposure."""
+    and HTTP exposure.
+
+    Scope of the claim, stated so it is not read wider than it holds: the
+    CONNECT leg of `github-issues` is dashboard-side by ruling (see the table's
+    recorded exception above), so what these rows prove is that the ENABLE and
+    STATE-READ legs are agent-settable."""
 
     @staticmethod
     def _registry():

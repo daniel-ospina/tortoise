@@ -227,7 +227,8 @@ do not: a warning that names nothing serves a caller who does not exist. The **9
 > `tortoise_onboarding_demo_create`, `tortoise_onboarding_github_connect`,
 > `tortoise_onboarding_github_status` are no longer in `TOOL_REGISTRY` (76 live tools). The
 > remaining four — `tortoise_analyze`, `tortoise_backfill_v25`, `tortoise_packs_list`,
-> `tortoise_pack_install` — are still live. Their capabilities survive as hand-written REST
+> `tortoise_pack_install` — are still live and keep their own entries here. **The five REMOVED
+tools'** capabilities survive as hand-written REST
 > routes in `tortoise/hosted_api.py` (`POST /v1/demo`, `GET|PATCH /v1/onboarding/state`,
 > `POST /v1/onboarding/seed`, `POST /v1/onboarding/github/connect`,
 > `GET /v1/onboarding/github/status`); `tortoise/selfhost_api.py` serves only the state and
@@ -243,7 +244,7 @@ carry two recorded decisions **in this document**: the 2026-10-17 amendment (ret
 replacement"*) and the 2026-10-25 one (*"the absorbed names stay retired-forward entries"*).
 **Removing them is a separate decision** and would need its own argument naming #3540 and #9660; it
 is not done here. The end state of the epic is still **27 advertised tools**, but that is reached by
-the full 81 → 27 consolidation, **not** by this amendment — these two answers remove 0 tools and 0
+the full **76 → 27** consolidation (was 81 before #4282 Phase 3.2), **not** by this amendment — these two answers remove 0 tools and 0
 methods on their own.
 
 > **OVERRIDES:** the plan item `1.4` (`#3883`) requirement that *nothing is removed from the MCP

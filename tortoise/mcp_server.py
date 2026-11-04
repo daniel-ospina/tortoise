@@ -5315,13 +5315,18 @@ def tortoise_belief_timeline(topic: str, limit: int = 50) -> dict:
 # directly (same pattern as all tools) — the REST endpoints in hosted_api.py
 # expose the same operations to the welcome page.
 
-# Epic #888 no-regret: once an org's onboarding completes, the seven
-# tortoise_onboarding_* tools retire from that org's steady-state MCP
-# surface (tools/list) — the REST /v1/onboarding/* endpoints remain for the
-# web onboarding flow. Function bodies are untouched; only the listing hides
-# them. #2210: no @mcp.tool decorators here — the module-bottom register_all
-# registers each from its registry entry (annotations are registry-canonical).
+# Epic #888 no-regret (HISTORICAL — read the frozenset below before trusting
+# this paragraph): once an org's onboarding completed, the onboarding tools
+# retired from that org's steady-state MCP surface (tools/list) while the REST
+# /v1/onboarding/* endpoints stayed for the web onboarding flow. Function bodies
+# were untouched; only the listing hid them. #2210: no @mcp.tool decorators
+# here — the module-bottom register_all registers each from its registry entry
+# (annotations are registry-canonical).
 # See _HTTPToolFilter.list_tools.
+# ⛔ SINCE #4282 Phase 3.2 THIS GATE HAS NO POPULATION: the set below is EMPTY,
+# and five of the seven tools are UNREGISTERED, so they can never be listed in
+# ANY team state — the hiding is not what keeps them off the surface. Do not read
+# a served-name regression as "already covered by hiding".
 # #3540: `tortoise_onboarding_session_recording` and
 # `tortoise_onboarding_github_index` were RETIRED into
 # `tortoise_manage_sources` (#3883), so they are no longer advertised and must
