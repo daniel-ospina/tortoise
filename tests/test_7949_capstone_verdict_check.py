@@ -1354,8 +1354,11 @@ def test_a_degraded_search_is_not_s3():
     degraded=True) is exactly the shape of a search that failed. Scoring that
     attempt as resolved let V5, the epic's ONLY closing gate, pass on a step
     that never resolved, and every E-row measured on the run was then published
-    as valid. `README.md:298` records the rule ("a degraded search is not S3")
-    and the sibling probe already implements it
+    as valid. The README's `S3 RESOLVE` step row records the rule ("a degraded
+    search is not S3") — cited by its SENTENCE, not a line number, because this
+    branch's own README insertions moved it twice: `298` -> `305` -> `309`, each time
+    correct when written, each time stale after the next insertion — and the sibling
+    probe already implements it
     (`capstone_measure.py::observe_steps`, the arm that writes that sentence into
     the step's own note).
 
@@ -2945,9 +2948,20 @@ def _multi_artifact_record(row: dict | None = None) -> dict:
 def test_a_non_green_row_on_another_corpus_must_declare_that_revision():
     """A row whose number comes from a DIFFERENT artifact must say so.
 
-    The capstone's rows do not all come from one run: E1/E2 cite #9076's arm run
-    and E4 an operator receipt, and neither measured the corpus the capstone run
-    froze. Refusing those rows outright would hide the only numbers they have;
+    The capstone's rows have not all come from one run. E1/E2 cited #9076's arm run,
+    which did not measure the corpus the capstone run froze, until `#9889` re-scored
+    them on the FROZEN corpus (their records now carry that digest); and E4 cited an
+    operator receipt on another revision until `#7949`'s selector made it choose the
+    receipt BY the frozen pin, so the CURRENT E4 row's corpus is the log's. The arm
+    still matters for every log written BEFORE those two changes — the shipped
+    `capstone-measured-9152448d.log` carries exactly those shapes, because `#10601`
+    re-measured the table at a head that still read the pre-selector constant, so its
+    E4 row declares `943a99ec…` while the log's own corpus was `dd7e8520…` — so a rule
+    deleted once the current probes stop taking it would leave those recorded rows
+    unverifiable. (`#10601` DELETED `capstone-measured-e0fc940b.log`, which this
+    docstring used to name as "the shipped" log: a docstring that points a reader at
+    a file the tree no longer holds is the same claim-vs-tree defect the arm exists
+    to catch.) Refusing such rows outright would hide the only numbers they have;
     accepting them on the row's word would let any red row name any corpus. So the
     row DECLARES the revision, and the declaration is checked against the artifact.
     """
