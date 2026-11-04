@@ -131,6 +131,17 @@ column nor an invented field can hide behind the carve-out. A field the cache
 has and the record does not, and that is **not** in the refused set, is an
 UNEXPLAINED absence and reddens the test.
 
+⛔ TWO sanctioned asymmetries, not one, and BOTH are enumerated in
+:func:`parity_difference` rather than absorbed by a tolerant comparison: the
+SCHEMA's refusal set (the EP carve-out above) and, since #10853, the
+PROJECTION's own §9.1/D1 decline of an episodic Source's turn prose
+(``cache_projection.episodic_source_declined_properties``). The second one
+exists because this module's parity rule is one of the TWO record↔cache field
+comparison instruments in the tree; teaching only `record_reconcile` about the
+decline (#10867 review ISSUE 1) left this one reporting a legacy session node's
+own prose as a projection gap, i.e. a declared asymmetry reddening the same as a
+real defect.
+
 ⚠️ ``content_hash`` is in the refused set and is still recomputable (a pure
 function of ``content``, #2795 D2) — a caller that wants it re-derives it with
 the writer's own function rather than reading a stored copy. This module does not
@@ -1034,8 +1045,12 @@ class ParityDiff:
                              field the record path made up. Non-empty = RED.
     ``changed``              fields both stores answer, with different values.
                              Non-empty = RED.
-    ``explained_missing``    the carve-out at work: `confidence`, `content_hash`,
-                             `ep_*`, … — enumerated, never silently tolerated.
+    ``explained_missing``    the declared asymmetries at work: the schema's
+                             carve-out (`confidence`, `content_hash`, `ep_*`, …)
+                             and, for an episodic Source, §9.1/D1's declined
+                             turn prose (`summary`, `_searchText`) — enumerated
+                             in :func:`parity_difference`, never silently
+                             tolerated.
     """
 
     label: str
@@ -1069,8 +1084,14 @@ def parity_difference(cache_props: Mapping[str, Any],
     function so the rule has ONE home: the tests call it, and an audit of a
     production pair can call it without re-deciding what "the same" means.
 
-    Three explanations, and every one of them comes from a declaration the other
-    halves of the epic already made — none is re-listed here:
+    Four explanations, and every one of them comes from a declaration the other
+    halves of the epic already made — none is re-listed here. ⛔ It was THREE
+    before #10853, and the fourth arrived with the narrowing that made it
+    necessary (#10867 review ISSUE 1): an asymmetry absent from this list is not
+    explained by omission, it is a RED, so a declared asymmetry that this rule
+    did not know about turned a sanctioned decline into the same signal as a
+    projection gap — *"a signal indistinguishable from noise is not
+    observability"*, the class this same change treats as P1 elsewhere.
 
     * **the EP carve-out** — a field absent from the record whose name the SCHEMA
       refuses (``cache_projection._refused(table)``: ``confidence``,
@@ -1080,24 +1101,54 @@ def parity_difference(cache_props: Mapping[str, Any],
     * **a fold ``ON CREATE`` default** — a field absent from the record whose
       value is the constant the cache projection fills when the record is SILENT
       (``FOLD_ON_CREATE_DEFAULTS``, #9634).
+    * **the §9.1/D1 decline (#10853)** — for a ``Source`` whose CACHE node is an
+      EPISODIC source (``cache_projection.is_episodic_source_node``: either
+      identity arm), the names in
+      ``cache_projection.episodic_source_declined_properties()`` (``summary``,
+      ``_searchText`` / ``_search_text``). The record KEEPS them and this
+      projector deliberately does not materialise them, so a cache node that
+      still carries them — the legacy population, and every session the current
+      capture wrote — is CACHE-OWNED, not a gap. Scoped by the node's own
+      identity, never by the label alone: a transcript DOCUMENT Source keeps its
+      own ``summary``, and there the same absence IS a projection gap (leg
+      ``test_parity_reddens_on_the_same_names_for_a_document_source``).
     * **nothing else.** A field the cache answers and the record does not, with no
       explanation, is a projection gap — and it reddens. A field the record
       answers and the cache does not is an invention — and it reddens too. The
-      carve-out is the ONLY sanctioned asymmetry, and because it is enumerated
-      it cannot be used to hide a gap.
+      carve-out is the ONLY sanctioned asymmetry the SCHEMA declares, the decline
+      above is the only one the PROJECTION declares, and because both are
+      enumerated they cannot be used to hide a gap.
+
+    ⚠️ The decline explains an ABSENCE FROM THE RECORD'S ANSWER, never a VALUE:
+    the record's answer here is the projection's own map
+    (``cache_projection.node_from_row``, the same map ``read_node`` returns), so
+    the declined pair is absent by construction — exactly the shape the
+    comparison must not redden on.
 
     ⚠️ A field BOTH sides carry is always compared, refused name or not. That is
     what keeps a caller's own re-derivation honest: the served endpoint puts a
     recomputed ``content_hash`` back into its response, and a wrong recomputation
     must redden here rather than hide behind the carve-out.
     """
-    from .cache_projection import FOLD_ON_CREATE_DEFAULTS, NODE_TABLES, _refused
+    from .cache_projection import (
+        FOLD_ON_CREATE_DEFAULTS,
+        NODE_TABLES,
+        _refused,
+        episodic_source_declined_properties,
+        is_episodic_source_node,
+    )
 
     table = NODE_TABLES.get(label)
     if table is None:
         raise RecordServeError(f"{label!r} has no record table")
     refused = _refused(table)
     defaults = FOLD_ON_CREATE_DEFAULTS.get(label, {})
+    # #10853's declared decline, resolved ONCE per comparison and only for a
+    # Source: the set is graph-property names AND the raw column spellings, read
+    # from the projection's ONE declaration rather than re-listed here.
+    declined = (episodic_source_declined_properties()
+                if label == "Source" and is_episodic_source_node(cache_props)
+                else frozenset())
 
     def _is_fold_default(field_name: str, value: Any) -> bool:
         return field_name in defaults and value == defaults[field_name]
@@ -1108,6 +1159,12 @@ def parity_difference(cache_props: Mapping[str, Any],
         if field_name in record_props:
             continue
         if field_name in refused or _is_fold_default(field_name, value):
+            explained[field_name] = value
+            continue
+        if field_name in declined:
+            # §9.1/D1 decline (#10853): the record keeps the prose, the
+            # projection does not materialise it, and a cache node that still
+            # carries it is CACHE-OWNED — never a projection gap.
             explained[field_name] = value
             continue
         unexplained[field_name] = value

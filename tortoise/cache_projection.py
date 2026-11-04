@@ -91,11 +91,15 @@ THE FOUR PROPERTIES, AND WHERE EACH LIVES
 
    * the **journal fold** still projects the value until #10000's capture-side
      change lands, so the two rebuild paths disagree on that one column until
-     then — in the ruling's direction, and converging with it;
+     then — in the ruling's direction. ⛔ It does NOT converge by itself: see the
+     OBLIGATION below, which `#10852` owes;
    * **graph-side FTS** over a session Source's own utterances goes with the
-     prose. The value survives in the record and is retrievable by a column read
-     (`record_serve.read_node`, `record-text`); there is no record-side text
-     INDEX;
+     prose. The value survives in the RECORD (the row is not mutated), but no
+     in-tree verb serves it back: `record_serve.read_node` returns this very
+     projector's narrowed map, and `record-text` reads
+     `public.session_narrative` — a different table and a different datum — so
+     the only read is a direct `SELECT summary, _search_text FROM public.source
+     …`, and there is no record-side text INDEX;
    * **`record-reconcile`** builds its RECORD side through this same projector,
      so its truth side omits what the cache holds. The population is NOT
      "legacy": at this head the capture still writes and journals the pair, so
@@ -106,12 +110,34 @@ THE FOUR PROPERTIES, AND WHERE EACH LIVES
      bucket — visible, and not a divergence against a record that is correct.
      The graph side is repaired by a record-sourced re-projection
      (`record-restore` / `rebuild_from_record`, which re-materialise through this
-     projector) — **for a node the projection CREATES**. The write is additive
-     (`MERGE … SET n += $props`, :func:`node_statement`), so a node that ALREADY
-     carries the pair keeps it across a re-projection; this arm stops the pair
-     being re-written, it does not clear an existing one. Clearing a populated
-     cache's stale pair needs an explicit property clear, and the sweep is
-     #10000's capture change.
+     projector), then by #10000's capture change.
+
+   ⛔ **OBLIGATION `#10852` OWES — named, not assumed (#10867 review, P1).**
+   `#10852` replaces the capture's `summary` with a TOPIC LEXICON descriptor and
+   derives `_searchText` from `topics` — a §4.4 METADATA value
+   (`STORAGE-ARCHITECTURE.md:527`: *"`summary`/`title` stay on the node — they
+   are §4.4 metadata, not the prose"*), not §9.1/D1 prose. This narrowing is
+   keyed on the ROW IDENTITY, never on the value's provenance, so it would
+   strip that descriptor too — on the record→cache door only, while the live
+   journal fold keeps it — and the reconciler is told not to judge the pair, so
+   nothing reds. It is correct for a pre-fix row and WRONG for a post-`#10852`
+   one, and it must not outlive it: `#10852` DELEGATES to this table, it does
+   not merely "converge" with it. `#10852` therefore deletes
+   :data:`_EPISODIC_SOURCE_PROSE_COLUMNS`, both guard doors in
+   :func:`_props_from_row`, :func:`episodic_source_prose_properties`,
+   :func:`episodic_source_declined_properties` (a CALLER of that last one —
+   read by the `props` tail door here and by `record_serve`),
+   :func:`is_episodic_source_node`, the `record_reconcile.scan_cache_view`
+   subtraction and `record_serve.parity_difference`'s fourth explanation (that
+   module imports both of the two names above, so deleting either alone is an
+   `ImportError` on every `Source` comparison, and leaving it in place keeps
+   explaining a real post-`#10852` gap away), and adds a leg that a lexicon
+   `summary` + a topics-derived `_searchText` SURVIVE the door and the rebuilt
+   session Source is still Source-FTS-indexed. Recorded on #10853 as the
+   follow-up obligation.
+
+   That is **seven** touch points and the count is not the contract — the check
+   is whether any REFERENCE survives; see the epic doc's grep-to-zero step.
 4. **A cold region reads ``not-hot``, never ``empty``.** ``declaration_for``
    writes the known-hot set **after** the writes and as a function of what was
    materialized, so a record key the projection did not write is not claimed
@@ -181,6 +207,7 @@ __all__ = [
     "declaration_for",
     "declaration_is_sound",
     "declared_key",
+    "episodic_source_declined_properties",
     "episodic_source_prose_properties",
     "is_episodic_source_node",
     "node_from_row",
@@ -1238,9 +1265,26 @@ def _scalar(value: Any) -> Any:
 #: :func:`episodic_source_prose_properties` and
 #: `record_reconcile.scan_cache_view` mark the pair CACHE-OWNED for an episodic
 #: Source, and the reconciler counts them under `graph_only` — visible, and not
-#: a divergence against a record that is correct. The repair for the graph side
-#: is a record-sourced re-projection (`record-restore` / `rebuild_from_record`,
-#: which re-materialise through this projector), then #10000's capture change.
+#: a divergence against a record that is correct. The graph side is repaired by a
+#: record-sourced re-projection (`record-restore` / `rebuild_from_record`, which
+#: re-materialise through this projector), then #10000's capture change.
+#:
+#: ⛔ **THIS TABLE MUST BE DELETED BY `#10852`, and that is a contract term, not a
+#: hope (#10867 review, P1).** `#10852` makes the capture's `summary` a TOPIC
+#: LEXICON descriptor (§4.4 metadata, per `STORAGE-ARCHITECTURE.md:527`) and
+#: derives `_searchText` from `topics`. The predicate here is the ROW's IDENTITY,
+#: so it cannot tell that provenance from the prose — it would decline both, on
+#: the record→cache door only (the live fold keeps them), and the
+#: `record_reconcile` subtraction would keep that out of the mismatch count.
+#: So the rule is correct for a pre-fix row and wrong for a post-`#10852` one:
+#: `#10852` deletes this table, both guard doors in :func:`_props_from_row`,
+#: :func:`episodic_source_prose_properties`,
+#: :func:`episodic_source_declined_properties` (a CALLER of it),
+#: :func:`is_episodic_source_node`, the `scan_cache_view` subtraction and
+#: `record_serve.parity_difference`'s fourth explanation (the other caller), and
+#: adds a leg that a lexicon `summary` + a topics-derived `_searchText` SURVIVE
+#: the door. Seven names, and the list is not the contract — the epic doc's
+#: check is a grep for surviving REFERENCES. Recorded on #10853.
 _EPISODIC_SOURCE_PROSE_COLUMNS: frozenset[str] = frozenset({
     "summary", "_search_text",
 })
@@ -1311,7 +1355,140 @@ def _episodic_source_kind_property() -> str:
     return canonical_property("source", "source_kind")
 
 
-def _is_episodic_source_row(row: Mapping[str, Any]) -> bool:
+#: Distinguishes "the caller did not decode the tail" from an EMPTY tail.
+_UNRESOLVED_TAIL: Any = object()
+
+
+def _tail_payload(raw: Any) -> Any:
+    """The row's `props` tail DECODED, in whatever shape the row holds it.
+
+    ONLY `None` and the EMPTY STRING answer `{}` — the two spellings of ABSENT.
+    ⛔ `''` is handled explicitly: `props` is `jsonb NOT NULL DEFAULT '{}'`, so the
+    common shapes are a mapping or `None`, but the pre-existing read accepted a
+    STRING tail and wrote `json.loads(tail) if tail else {}` — i.e. it treated the
+    empty string as an ABSENT tail on purpose. `json.loads('')` RAISES, so keeping
+    that case is what stops the projection from turning an empty tail into a
+    `JSONDecodeError` (pinned by
+    :func:`test_the_DROP_SET_itself_is_exactly_the_declared_pair`, whose row
+    populates every column).
+
+    ⛔ IT DOES NOT COERCE, AND THE ABSENCE TEST IS NOT FALSINESS (#10867 review,
+    second pass). `props` is `jsonb NOT NULL DEFAULT '{}'` with no CHECK that it is
+    an OBJECT, so a corrupt row can carry a scalar or an array. Answering those
+    verbatim is what lets the WRITER path (:func:`_props_from_row`) refuse them
+    loudly — and a `not raw` test defeated exactly the shapes it says it covers:
+    a DECODED `[]`/`0`/`False` is FALSY, so it would have been coerced to `{}` and
+    projected clean while the same row as TEXT (`'[]'`, `'0'`) was refused. That
+    split is decided by the driver's `jsonb` codec (asyncpg answers `str`,
+    psycopg answers a decoded list/int) and not by the row — the same corrupt
+    record aborting one `record-restore` as `RestoreUnavailable` and projecting
+    cleanly through the other. So the test is IDENTITY against the two absent
+    spellings, never truthiness.
+
+    ⛔ DECLARED RESIDUAL — TWO DEGENERATE SCALARS STILL SPLIT ON THE DRIVER.
+    PostgreSQL's `jsonb` maps JSON `null` and JSON `""` onto the SAME Python
+    values as the absent spellings above (`null` → `None`, `""` → `''`), so a
+    DECODING driver cannot distinguish `props='null'::jsonb` from an absent tail
+    — those two project as absence there while the identical row as TEXT
+    (`'null'`, `'""'`) is refused below. That asymmetry is not closable at this
+    operator: the decoded values ARE the mandated lenient spellings, and
+    widening the lenient set to admit `'null'`/`'""'` as well would re-spell
+    ABSENCE rather than detect it. It is declared rather than fixed because it
+    carries NO content: neither a JSON `null` nor a JSON empty string has keys,
+    so no tail property is lost either way (`test_a_MALFORMED_props_tail_is_
+    REFUSED_not_dropped_in_silence` pins the split so it cannot be read as
+    parity).
+    """
+    if raw is None or raw == "":
+        return {}
+    return json.loads(raw) if isinstance(raw, str) else raw
+
+
+def _decoded_tail(raw: Any) -> Mapping[str, Any]:
+    """The row's `props` tail as a MAPPING — the IDENTITY read's view.
+
+    A `None`/empty tail and anything that is not an object answer `{}`, because
+    this feeds the row predicate, which must answer for every shape a row can
+    hold. That leniency is deliberately NOT shared with :func:`_props_from_row`:
+    the writer path decodes through :func:`_tail_payload` and RAISES on a
+    non-object, so a malformed tail is refused where it would otherwise be
+    projected (and silently dropped).
+
+    ⛔ IT MUST NOT RAISE, AND A DECODED JSON STRING IS NOT JSON TEXT (#10867
+    review, closing pass). `_tail_payload` routes any `str` through `json.loads`,
+    which is right for the TEXT driver — where a `jsonb` string tail arrives as
+    its JSON SOURCE (`'"hello"'`). A DECODING driver (psycopg) hands the same
+    column back as the decoded Python `str` `'hello'`, which is not JSON text at
+    all: `json.loads` raised `JSONDecodeError` out of the ROW PREDICATE, so
+    `_is_episodic_source_row` — the function whose whole contract is to ANSWER
+    for every shape a row can hold — answered on one driver and raised on the
+    other. Unparseable non-objects answer `{}` here (the DOCUMENT arm, which is
+    this module's declared safe asymmetry: a missed legacy session keeps its
+    prose, a false positive strips a document's metadata). The WRITER path is
+    untouched and stays LOUD — `_props_from_row` decodes through
+    :func:`_tail_payload` directly, so `props='{not json'` still raises."""
+    try:
+        tail = _tail_payload(raw)
+    except (ValueError, TypeError):
+        # Unparseable, i.e. not JSON text — a decoded string tail as the driver
+        # spells it. NOT `CacheProjectionError` (a RuntimeError) and NOT the
+        # writer path, which must keep raising.
+        return {}
+    return tail if isinstance(tail, Mapping) else {}
+
+
+def _row_identity_view(row: Mapping[str, Any],
+                       tail: Mapping[str, Any]) -> Mapping[str, Any]:
+    """The row's identity AS THE NODE WILL CARRY IT: the columns + `props` tail.
+
+    ⛔ THE TAIL CARRIES IDENTITY, NOT ONLY PROSE (#10867 review). `props` is
+    written to the node VERBATIM, so a row whose `source_kind` column is NULL
+    while the tail carries `sourceKind='agentSession'` produces an EPISODIC
+    node — `is_episodic_source_node` says so, because it reads the MERGED map.
+    A predicate that read the COLUMNS alone therefore answered "document" for a
+    node the reconciler then classified as a captured session: the prose reached
+    the node through the column door (which never fired), and the reconciler
+    counted the pair as CACHE-OWNED (`graph_only`) instead of as the divergence
+    it is — R1 ("from any row shape") failing OPEN, and the same hazard the
+    `tail_keys` filter exists for, defeated from the other side.
+
+    A COLUMN VALUE WINS over the tail's spelling of the same coordinate, which
+    preserves the asymmetry :func:`_is_episodic_source_row` declares: an
+    AMBIGUOUS row is read as a DOCUMENT, so it keeps its prose (the pre-existing
+    defect) rather than stripping a document's own metadata.
+
+    ⛔ AND THAT RULE IS THE *NODE MAP's* RULE TOO — `_props_from_row` seeds `out`
+    from the tail and lets the column loop overwrite it, for this reason (#10867
+    review ISSUE 1). The rule is stated here once and applied in both places on
+    purpose: it is the same collision, and resolving it twice is how the two
+    functions came to disagree.
+
+    `None` is SILENCE, and nothing else is: a column that carries a value (an
+    empty string included) wins the coordinate, because `_props_from_row` writes
+    it. An empty key is refused downstream anyway (`node_from_row`'s
+    `UnprojectableRecord`, and the schema's own CHECK), so the two agree on every
+    shape that can become a node.
+
+    The row itself is NEVER mutated — a FRESH mapping is returned, on every
+    branch. ⛔ The empty-tail branch used to `return row`, so `is` identity held
+    and a caller mutating the "view" mutated the RECORD ROW — a false guarantee
+    on the one object R3 leans on to prove the record is untouched (#10867 review
+    P3). One shallow copy on a branch the live path does not take is the whole
+    cost.
+    """
+    if not tail:
+        return dict(row)
+    merged: dict[str, Any] = {k: v for k, v in row.items() if k != "props"}
+    kind_property = _episodic_source_kind_property()
+    if merged.get("source_kind") is None and kind_property in tail:
+        merged["source_kind"] = tail[kind_property]
+    if merged.get("url") is None and "url" in tail:
+        merged["url"] = tail["url"]
+    return merged
+
+
+def _is_episodic_source_row(row: Mapping[str, Any],
+                            tail: Any = _UNRESOLVED_TAIL) -> bool:
     """Is this `public.source` row a captured session's Source?
 
     The two identity arms are declared at :data:`_EPISODIC_SOURCE_URL_PREFIX`,
@@ -1335,11 +1512,19 @@ def _is_episodic_source_row(row: Mapping[str, Any]) -> bool:
     `session_source_migration._LEGACY_CANDIDATES` — and a record-sourced rebuild
     writes `sourceKind` from the column). Fail-closed by direction, and left
     named.
+
+    The identity is read through :func:`_row_identity_view`, so the `props` tail
+    participates: a tail-carried `sourceKind`/`url` is an identity the NODE will
+    carry, and a predicate that ignored it disagreed with the reconciler on that
+    row shape (see the view's docstring).
     """
-    url = row.get("url")
+    if tail is _UNRESOLVED_TAIL:
+        tail = _decoded_tail(row.get("props"))
+    view = _row_identity_view(row, tail) if tail else row
+    url = view.get("url")
     if isinstance(url, str) and url.startswith(_EPISODIC_SOURCE_URL_PREFIX):
         return True
-    return (row.get("source_kind") == _EPISODIC_SOURCE_KIND
+    return (view.get("source_kind") == _EPISODIC_SOURCE_KIND
             and isinstance(url, str) and "://" not in url and "/" not in url)
 
 
@@ -1379,41 +1564,128 @@ def episodic_source_prose_properties() -> frozenset[str]:
                      for column in _EPISODIC_SOURCE_PROSE_COLUMNS)
 
 
+def episodic_source_declined_properties() -> frozenset[str]:
+    """EVERY spelling the declared decline covers — the one home for the set.
+
+    Two spellings of the same datum reach a cache node: the graph property name
+    (:func:`episodic_source_prose_properties`, ``summary`` / ``_searchText``)
+    and the raw COLUMN spelling (``_EPISODIC_SOURCE_PROSE_COLUMNS``:
+    ``_search_text``), which the ``props`` tail is an open set over — see
+    :func:`_props_from_row`'s open-set door, where the tail can carry the snake
+    spelling because ``_search_text`` IS a real column.
+
+    ⛔ ONE declaration, because the decline is read by THREE consumers and a
+    second list is how they drift. Two need BOTH spellings and take this
+    function: :func:`_props_from_row`'s open-set door (what it pops — the tail
+    is an open set, so the snake spelling really can appear there) and
+    `record_serve.parity_difference` (what it EXPLAINS instead of reddening —
+    #10867 review ISSUE 1). The third, `record_reconcile.scan_cache_view`,
+    compares two GRAPH-vocabulary name sets, so it takes
+    :func:`episodic_source_prose_properties` — the subset — deliberately: a
+    snake name is not in either side's vocabulary there, and subtracting it from
+    a graph-name set would suggest a comparison this module does not make.
+
+    What must NOT happen is the drift #10867 caught: before this function
+    existed, `_props_from_row` spelled the union inline and the parity
+    instrument spelled nothing at all, so it reported a legacy session node's
+    own prose as an unexplained projection gap — a sanctioned decline and a real
+    defect as the same red.
+
+    Derived, cached, resolved at CALL time for the same reasons as
+    :func:`episodic_source_prose_properties`.
+    """
+    return episodic_source_prose_properties() | _EPISODIC_SOURCE_PROSE_COLUMNS
+
+
 def _props_from_row(table: str, row: Mapping[str, Any], *,
                     skip: frozenset[str] = frozenset()) -> dict[str, Any]:
     """Project a record row's columns + `props` tail into graph properties.
 
-    Three destinations, and no fourth:
+    FOUR destinations, and no fifth. The first three were the contract before
+    §9.1/D1; the fourth is #10853's declared NARROWING, and it is a destination
+    rather than an absence ON PURPOSE — a name it refuses must be nameable here,
+    or the next reader takes "no fourth destination" as proof that a property
+    cannot be lost on this door:
 
-    * a column the placement table spells → that property, under its name;
+    * a column the placement table spells → that property, under its name —
+      **unless** the row is an EPISODIC Source and the column is in
+      :data:`_EPISODIC_SOURCE_PROSE_COLUMNS`, which is the fourth destination
+      below (`episodic_source_declined_properties()` is its declared set);
     * a column the schema REFUSES (the EP carve-out, the projection caches) →
       dropped, by name — never stored as authority (S3's contract clause);
-    * the `props` tail → verbatim, unmapped (the open-set surface);
+    * the `props` tail → the open-set surface, unmapped. ⚠️ It is not written
+      "verbatim" any more, and the order matters: the tail is seeded **first**
+      and a column value **overwrites** it (the row-ordering collision resolved
+      once — see the seed comment below), and for an EPISODIC Source the
+      declined names are **popped** from the seeded tail afterwards, in both
+      spellings;
+    * an EPISODIC Source's §9.1/D1 turn prose (`summary`, `_search_text` /
+      `_searchText`) → **declined**, whatever build wrote the row, from the
+      column door AND from the tail door;
     * anything else → :class:`UnknownRecordColumn`, loudly.
     """
     placed = placement_columns().get(table, {})
     refused = _refused(table)
     projected = projected_columns(table)
-    # §9.1/D1 (#10853): resolved ONCE per row, from the row itself.
-    episodic_source = table == "source" and _is_episodic_source_row(row)
+    # The tail is decoded ONCE: it feeds the identity read below AND the verbatim
+    # seed of `out`, and decoding is what decides whether the identity participates.
+    # ⛔ A NON-OBJECT TAIL IS REFUSED HERE, NOT SWALLOWED (#10867 review P3).
+    # `props` is `jsonb NOT NULL DEFAULT '{}'` with NO CHECK that it is an object,
+    # so a corrupt row can carry a scalar or an array; `_decoded_tail` answers
+    # `{}` for those by design (it also feeds the predicate, which must answer for
+    # every shape), and seeding `out` from that would drop the tail's whole
+    # content with no signal — the silent loss this module refuses by name
+    # everywhere else. Before the tail was SEEDED, the same row raised `TypeError`
+    # out of `dict(tail)`; the loudness is kept, in this module's own error type.
+    tail = _tail_payload(row.get("props"))
+    if not isinstance(tail, Mapping):
+        raise CacheProjectionError(
+            f"{table}.props is a {type(tail).__name__}, not a JSON object — the "
+            f"column is `jsonb NOT NULL DEFAULT '{{}}'` with no CHECK, so a row "
+            f"can carry a scalar or an array; refusing to drop its content "
+            f"silently"
+        )
+    # §9.1/D1 (#10853): resolved ONCE per row, from the row's identity AS THE
+    # NODE WILL CARRY IT — the columns AND the `props` tail.
+    episodic_source = (table == "source"
+                       and _is_episodic_source_row(row, tail))
+    # ⛔ THE TAIL IS SEEDED FIRST, AND A COLUMN VALUE WINS (#10867 review ISSUE
+    # 1). Ordering here is not cosmetic: `props` is declared LAST in every
+    # record table (`CREATE TABLE public.source` … `props jsonb NOT NULL DEFAULT
+    # '{}' :189), and Postgres yields `SELECT *` columns in DDL order
+    # (`pg_attribute.attnum` — "ordinary columns are numbered from 1 up"), so on
+    # a REAL row the tail used to be iterated last and `out.update(dict(tail))`
+    # made it the WINNER — of every coordinate it carried, not just the identity.
+    # The winner was therefore the row's MAPPING ORDER (`sorted()` in a test
+    # fixture puts `props` early, `SELECT *` puts it last), while
+    # `_row_identity_view` declares the opposite rule — *"a COLUMN VALUE WINS
+    # over the tail's spelling of the same coordinate"*. On a row whose
+    # `source_kind` COLUMN and `sourceKind` tail disagreed, the row predicate
+    # read the column (document) and the node carried the tail (agentSession):
+    # R1 failed OPEN on a node `is_episodic_source_node` itself calls a session,
+    # with the turn prose on it, and `scan_cache_view` then subtracted the pair
+    # from `placed` — hiding a real divergence as `graph_only` instead of
+    # reporting it. Seeding `out` from the tail and letting the column loop
+    # overwrite it resolves the collision ONCE, in the direction both functions
+    # already declare: the record's COLUMN is the authority for a column-backed
+    # property (the writer routes it there — `record_projection._split_properties`
+    # — so the tail never legitimately carries one), and the tail stays the
+    # open-set surface for the names no column spells.
     out: dict[str, Any] = {}
     tail_keys: set[str] = set()
+    if tail:
+        tail_keys = set(tail)
+        refused_tail = sorted(set(tail) & refused)
+        if refused_tail:
+            raise CacheProjectionError(
+                f"{table}.props carries DERIVED/VOLATILE name(s) "
+                f"{refused_tail} — the record must not hold them as "
+                f"authority, so the cache must not either (the "
+                f"schema's own CHECK refuses this row)"
+            )
+        out.update(dict(tail))
     for column, value in row.items():
         if column == "props":
-            tail = value
-            if isinstance(tail, str):
-                tail = json.loads(tail) if tail else {}
-            if tail:
-                tail_keys = set(tail)
-                refused_tail = sorted(set(tail) & refused)
-                if refused_tail:
-                    raise CacheProjectionError(
-                        f"{table}.props carries DERIVED/VOLATILE name(s) "
-                        f"{refused_tail} — the record must not hold them as "
-                        f"authority, so the cache must not either (the "
-                        f"schema's own CHECK refuses this row)"
-                    )
-                out.update(dict(tail))
             continue
         if column in bookkeeping_columns(table) or column in skip:
             continue
@@ -1457,8 +1729,8 @@ def _props_from_row(table: str, row: Mapping[str, Any], *,
         # were one door and the mutation-check claim covered a branch that no
         # longer mattered. Scoped by `tail_keys`, each door is independently
         # exercised, which is the only way "each door is pinned" is true.
-        declared = episodic_source_prose_properties()
-        for name in tail_keys & (declared | _EPISODIC_SOURCE_PROSE_COLUMNS):
+        declared = episodic_source_declined_properties()
+        for name in tail_keys & declared:
             out.pop(name, None)
     return out
 
@@ -1485,7 +1757,10 @@ def node_from_row(label: str, row: Mapping[str, Any]) -> RecordNode:
     # The fold's `ON CREATE` constants, applied where the record is SILENT
     # (#9634). `None` counts as silence, not as a value: it is a FALLBACK, so a
     # value the record states — a named kind, from the column or from the
-    # `props` tail, which `_props_from_row` keeps verbatim — is never replaced.
+    # `props` tail, which `_props_from_row` seeds FIRST and then lets a column
+    # value overwrite (and, for an EPISODIC Source, pops the declined names out
+    # of — :func:`_props_from_row`'s own docstring states the rule in full) — is
+    # never replaced.
     #
     # On the OBJECT side null-as-silence IS the fold's own rule: both clauses
     # COALESCE (`coalesce($ok, 'other')`, `coalesce($title, '')`), so an
