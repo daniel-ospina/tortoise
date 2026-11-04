@@ -680,8 +680,8 @@ def _wait_bound_refused() -> bool:
 #: ``create_point`` (`_resolve_dedup_hit(...)` then a separate `ulid()` + CREATE)
 #: and ``checkpoint`` (`_content_exists` then `create_point`). So a retry that
 #: lands while the ABANDONED first write is still running is not a repeat — both
-#: can read absent, and both create. The other two members do not share that
-#: mechanism and are not covered by this caveat: ``create_source`` converges in ONE
+#: can read absent, and both create. The remaining member does not share that
+#: mechanism and is not covered by this caveat: ``create_source`` converges in ONE
 #: conditional statement, `_upsert_source`'s `MERGE (s:Source {url: $url})`
 #: (`projection/entities.py:6503`; that function's own note there is "pin d").
 #: ⛔ ``onboarding_demo_create`` is NOT one of them, though its seed is
@@ -5208,8 +5208,11 @@ def tortoise_search_sessions(query: str, agent: str | None = None, topics: Any =
                  after=after, before=before, limit=limit, offset=offset)
 
 def tortoise_create_document(title: str, documentKind: str, props: Any = None) -> dict:
-    """Create a document — a :Source keyed by url (research, planDoc,
-    meetingNotes, etc.)."""
+    """Create a document — a :Source (research, planDoc, meetingNotes, etc.).
+
+    ⛔ NOT keyed by url: `sdk.create_document` mints a FRESH id per call and the
+    :Source is MERGEd on that id, so a repeat writes a second Source.
+    """
     props = _parse(props)
     _reject = _reject_server_managed_props(props)
     if _reject:
@@ -5988,9 +5991,14 @@ def _onboarding_state() -> dict:
 
 
 def tortoise_onboarding_demo_create() -> dict:
-    """Create the demo epistemic graph (4 layers) for this org. Idempotent.
+    """Create the demo epistemic graph (4 layers) for this org.
 
     Q4 — 'Create a demo graph?' — shows what Tortoise memory looks like.
+
+    ⛔ The SEED is sentinel-gated, so a repeat files no new nodes — but the call
+    is NOT idempotent: the onboarding receipt written after it takes a CAS leg
+    with no value-unchanged short-circuit, so every repeat re-stores the state
+    and advances `state_version`.
     """
     from tortoise.hosted_api import _seed_demo_graph
     org_id = _current_org_id.get()
