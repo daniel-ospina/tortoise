@@ -3604,6 +3604,11 @@ surfaces:
   # measurement that only ran on one lane would stop being checkable.
   - test_journal_growth.py
   - test_test_lane_tool.py
+  # #10806: the test-lane container REAPER's actuator. DB-free and docker-free
+  # (every docker call in it is monkeypatched), so it belongs on the same lane as
+  # the tool it drives — and a destructive tool whose safety suite never runs in
+  # CI has no safety suite.
+  - test_container_reaper.py
   - test_transport_wait_bound.py  # #3834: transport wait bound + cold-half gate wiring (dual: api)
   # #2877: DB-free guards that a dead backup watcher degrades /health (the file
   # it guards, tortoise/hosted_api.py, selects the `api` surface, so it is
