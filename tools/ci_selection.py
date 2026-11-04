@@ -3652,8 +3652,9 @@ def duplicate_mapping_key_issues(manifest_path: Path | None = None) -> list[str]
     ``dd4f66e6a`` and still carried 6 duplicates, because THE MERGE ITSELF
     reintroduces them through ``merge=union`` — and that merge was pushed BEFORE
     the check ran (``c660ffcee`` records it). So a green ``--integrity`` from
-    before a merge does not cover the merge: re-run it after every forward-merge
-    of ``main``, which is the only point at which this defect is created.
+    before a merge does not cover the merge: re-run it after EVERY merge into
+    this branch — of ``main``, of a sibling lane, or of a fold constituent —
+    because the merge is where this defect is created.
 
     The walk lives in ``tools/registry_integrity.py`` and is imported rather
     than re-spelled, so the two entry points cannot disagree about what a
