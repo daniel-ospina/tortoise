@@ -990,6 +990,38 @@ def _credential(**over) -> dict:
     return org
 
 
+def _stub_allowance_resolver(monkeypatch) -> None:
+    """Pin `quota.resolve_org_limits` to production's CURRENT output shape.
+
+    `hosted_api._check_org_limit` carries any MISSING allowance key from that
+    resolver at the REST seam (`allowance_gate.carry_resolved_allowances`,
+    #9567 D12), and `_hosted` points the control plane at an unroutable test
+    URL (`https://test.supabase.co`) with no HTTP stub — so without this stub
+    the carry is a real PostgREST round-trip, the suite's hermetic egress
+    guard (#4387) refuses it, and the seam (by design, #4051) refuses the
+    write over a config read it could not complete. The caller then sees
+    HTTP 500 "the team allowances could not be resolved", which is what these
+    two tests reported after the #10180 merge brought them onto this branch.
+
+    The stub is not a weakening: NO production resolver emits an
+    `ALLOWANCE_KEYS` value today (that is the `TBD-BY-MEASUREMENT` state #4051
+    rules), so the carry adds nothing and the dict handed to
+    `enforce_org_limit` is the one these tests already asserted. Keeping the
+    credential itself production-shaped — no allowance keys on it — is
+    deliberate; the keys arrive from the RESOLVER, never from a credential.
+    The file's `_org_default_namespace` `pytest.fail` pin ("the quota gate
+    must not read the control plane") still binds: the #10180 no-read property
+    is about the COUNT, and it is untouched.
+    """
+    import tortoise.quota as quota
+
+    monkeypatch.setattr(
+        quota, "resolve_org_limits",
+        lambda org_id: {"org_id": org_id, "tier": "pro", "max_users": 5,
+                        "max_graphs": 3, "max_points": 1000,
+                        "max_api_keys": 2, "max_sessions": None})
+
+
 def test_the_quota_gate_counts_the_promoted_graph(monkeypatch):
     """The money gate. `_check_org_limit` must hand the counter the DEFAULT
     graph's SDK: counting the demoted graph admits an org past its real cap
@@ -1005,6 +1037,7 @@ def test_the_quota_gate_counts_the_promoted_graph(monkeypatch):
     import tortoise.quota as quota
 
     _hosted(monkeypatch)
+    _stub_allowance_resolver(monkeypatch)
     seen: dict = {}
     monkeypatch.setattr(
         quota, "enforce_org_limit",
@@ -1058,6 +1091,7 @@ def test_a_graph_bound_credential_counts_the_graph_it_writes_to(monkeypatch):
     import tortoise.quota as quota
 
     _hosted(monkeypatch)
+    _stub_allowance_resolver(monkeypatch)
     seen: dict = {}
     monkeypatch.setattr(
         quota, "enforce_org_limit",
