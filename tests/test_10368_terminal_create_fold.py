@@ -285,11 +285,18 @@ def test_an_applied_fold_costs_the_measured_lifecycle_reads(sdk, monkeypatch):
     Why the double read is not collapsed into one (a fixer's option the #10368
     review offered): handing this read's rows to `update_point`'s guard would
     make the guard classify a snapshot taken BEFORE the authored-word leg's
-    `set_point_baseline` write and before anything else in `update_point`.
-    Re-verifying at the write point is the guard's whole value — the same
-    reason a database re-evaluates a predicate against the row version at
-    UPDATE time instead of trusting the earlier search — so the cost is the
-    price of the safety property, and it is DISCLOSED, not hidden.
+    `set_point_baseline` write and before anything else in `update_point` — a
+    writer that trusts a pre-write snapshot is the defect that guard exists to
+    catch — so the cost is DISCLOSED, not hidden.
+
+    ⛔ What the second read is NOT (#10368 review P2): it is not a
+    re-verification of THIS refusal. `update_point` passes
+    `refuse_terminal=_temporal_restamp` (keyed on `_TEMPORAL_RESTAMP_PROPS`,
+    which is empty on every fold that reaches here), so that guard reads the
+    same fan-out, computes the terminal verdict and does not act on it. The
+    hoisted read is the only refusal on this path, and a
+    `retract`/`supersede` landing between it and the write is a disclosed
+    residual, not a covered case (see the block above the fold in `sdk.py`).
     """
     from tortoise.live import LIFECYCLE_FANOUT_QUERY
 

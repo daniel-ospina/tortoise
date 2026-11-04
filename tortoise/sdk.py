@@ -12707,8 +12707,34 @@ class TortoiseSDK:
                 # `update_point`, and a writer that trusts a pre-write snapshot
                 # is the defect the guard exists to catch (the same reason a
                 # database re-evaluates a predicate against the row version at
-                # UPDATE time instead of reusing the earlier search). The
-                # second read is the price of re-verifying at the write point.
+                # UPDATE time instead of reusing the earlier search).
+                #
+                # ⛔ AND DO NOT READ THAT SECOND READ AS A RE-VERIFICATION OF
+                # *THIS* REFUSAL (#10368 review P2 — the earlier claim here was
+                # FALSE, measured against the source): `update_point` calls
+                # `_assert_lifecycle_guard(..., refuse_terminal=_temporal_restamp)`,
+                # i.e. the raise is keyed on `_TEMPORAL_RESTAMP_PROPS & props`,
+                # NOT on terminality. This path is reached only when `_temporal`
+                # is EMPTY (a temporal fold returned in the #7819 arm above), so
+                # that guard reads the SAME fan-out, computes the terminal
+                # verdict and does NOT act on it. The read hoisted above is
+                # therefore the ONLY refusal on this path: deleting it as
+                # "redundant with the guard's own read" deletes the refusal.
+                #
+                # ⚠️ KNOWN RESIDUAL, stated rather than papered over: a
+                # `retract_point` / `supersede_point` from ANOTHER connection
+                # landing between that read and the write leg is refused by
+                # nothing below — the write-point guard's verdict is not acted
+                # on — so the caller's props can still land on a point that
+                # became terminal inside that window. Closing it means ARMING
+                # the write point for this call (a separate change: the fold's
+                # write would have to refuse on that verdict), and arming only
+                # `update_point` would not close the window either, because the
+                # authored-word leg's `set_point_baseline` write happens BEFORE
+                # it — a partial arming would leave that leg uncovered while
+                # reading as full coverage, which is the defect this comment is
+                # replacing. The cost disclosure below is the measured truth;
+                # this sentence is the coverage truth.
                 # It is disclosed in the PR body, not hidden by a comment that
                 # overstates the saving.
                 #
