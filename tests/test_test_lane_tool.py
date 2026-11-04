@@ -159,10 +159,6 @@ def test_reaper_reaps_an_unowned_container_and_keeps_a_live_owner(
     # (the measured conflation: 68 containers outlived their lanes by days).
     monkeypatch.setattr(tl, "_live_lane_paths", lambda: {str(alive)})
     monkeypatch.setattr(tl, "_started_epoch", lambda _n: 0.0)
-    # A real container ANSWERS the client probe; the flag's fake `docker` returns
-    # an empty `exec` body, which is an UNREADABLE probe and now keeps (Proof 1
-    # asks before removing — #10833 finding 3).
-    monkeypatch.setattr(tl, "_container_in_use", lambda _n: False)
     out = tl.reap_orphans()
     joined = "\n".join(out)
     assert "removed fdb-lane-dead" in joined, out
@@ -251,8 +247,10 @@ def test_the_reaper_never_removes_a_container_no_worktree_here_claims(monkeypatc
     # "ownership is NOT determined" and `continue`s, and the "active client"
     # arm this test exists to pin is never reached (measured: red on macOS,
     # green on the Linux runner — the #5049 "verdicts from conditions, not
-    # ambient machine state" defect). Pin the scan to a readable-and-empty
-    # answer so each arm asserts the rule it names on every host.
+    # ambient machine state" defect, and the same fail-closed branch that made
+    # this test red on every macOS checkout with `assert 'active client' in …`).
+    # Pin the scan to a readable-and-empty answer so each arm asserts the rule
+    # it names on every host.
     monkeypatch.setattr(tl, "_live_lane_paths", lambda: set())
     # YOUNG: the backstop is a bound, not a hair trigger. An unowned container
     # inside ORPHAN_MAX_AGE_H is REPORTED and removed by nothing.
@@ -414,9 +412,6 @@ def test_reaper_reads_the_TERMINATION_FACTS_before_an_OWNER_GONE_removal(
     monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
     monkeypatch.setattr(tl, "_worktree_slugs",
                         lambda: {"gone": str(tmp_path / "removed-worktree")})
-    # Proof 1 asks the container whether a client is attached before it removes
-    # (#10833 finding 3); an unanswered probe is not "unused".
-    monkeypatch.setattr(tl, "_container_in_use", lambda _n: False)
     out = tl.reap_orphans()
     assert removed == [("-f", "fdb-lane-gone")], (removed, out)
     assert order == ["facts", "rm"], (order, out)   # read BEFORE the removal
@@ -603,7 +598,6 @@ def test_reaper_reports_NO_termination_facts_for_a_RUNNING_owner_gone_removal(
     monkeypatch.setattr(tl, "_docker", fake)
     monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
     monkeypatch.setattr(tl, "_worktree_slugs", lambda: {"lively": "/gone/worktree"})
-    monkeypatch.setattr(tl, "_container_in_use", lambda _n: False)  # no client
     monkeypatch.setattr(tl, "_termination_report",
                         lambda _n, live: "KILLED FOR MEMORY (OOMKilled=true)")
     out = tl.reap_orphans()
@@ -674,7 +668,18 @@ def test_reaper_reads_the_STATE_from_docker_ps_not_from_its_own_head(
     """The state arm is meaningless unless the state is actually READ. Pinned
     at the argv: with `--format "{{.Names}}"` the parse yields no state, every
     container reads `unknown`, the arm never fires, and the port exhaustion
-    returns with a fully green suite — the exact measured bug, silently."""
+    returns with a fully green suite — the exact measured bug, silently.
+
+    The two OWNERSHIP columns are pinned for the same reason and against the
+    same failure mode. `reap_orphans` reads them by INDEX (`parts[2]` owner,
+    `parts[3]` slug) and hands them to `_trusted_label_owner`, where an empty
+    string means "no label at all: absence is not a contradiction" — and docker
+    renders a key it cannot find as `""` rather than erroring
+    (`formatter.ContainerContext.Label` returns `""` for a nil/absent key). So
+    dropping or reordering either placeholder is a one-character edit that
+    turns every labelled container into the INDETERMINATE population — #8180's
+    leak, back again, with a green suite. The exact column SEQUENCE is asserted
+    because the order is what makes `parts[2]`/`parts[3]` the right fields."""
     seen: list = []
 
     def fake(*a, **k):
@@ -689,6 +694,11 @@ def test_reaper_reads_the_STATE_from_docker_ps_not_from_its_own_head(
     argv = list(ps[0])
     fmt = argv[argv.index("--format") + 1]
     assert "{{.Names}}" in fmt and "{{.State}}" in fmt, fmt
+    cols = fmt.split("\t")
+    assert len(cols) == 4, fmt
+    assert cols[0] == "{{.Names}}" and cols[1] == "{{.State}}", fmt
+    assert cols[2] == f'{{{{.Label "{tl.LABEL_OWNER}"}}}}', fmt
+    assert cols[3] == f'{{{{.Label "{tl.LABEL_SLUG}"}}}}', fmt
 
 
 def test_reaper_reads_no_state_as_UNKNOWN_not_as_terminal(tmp_path, monkeypatch):
@@ -1950,9 +1960,6 @@ def test_start_sweeps_orphans_and_reports_them_on_stderr(
     monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
     monkeypatch.setattr(tl, "container_state", lambda _n: "absent")
     monkeypatch.setattr(tl, "_worktree_slugs", lambda: {"dead": str(dead)})
-    # The container must be ASKED before it is removed (#10833 finding 3); the
-    # `exec` arm above answers `PONG` for real, so answer the client probe too.
-    monkeypatch.setattr(tl, "_container_in_use", lambda _n: False)
     removed: list = []
 
     def fake(*a, **k):
@@ -3170,7 +3177,8 @@ def test_a_DEGRADED_later_root_read_cannot_strand_a_half_started_container(
 
 
 def test_the_orphan_sweep_uses_the_NAME_the_caller_already_derived(monkeypatch):
-    """`start()` passes the name it derived (`own_name=`) into the sweep.
+    """`reap_orphans` must take the caller's name (`own_name=`) instead of
+    deriving its own.
 
     The sweep's "this is THIS worktree's container" test is what stops a lane
     deleting its own database. Deciding it from a SECOND `repo_root()` read meant
@@ -3178,8 +3186,12 @@ def test_the_orphan_sweep_uses_the_NAME_the_caller_already_derived(monkeypatch):
     container `start()` was about to create — the same divergence the label pair
     exists to prevent, one record over.
 
-    Mutation: drop `own_name=` at the call site (or use `lane_name()` regardless)
-    and the sweep re-derives the name, reaching the boom below.
+    This test pins the SWEEP's half: `lane_name` and `repo_root` both raise, so a
+    sweep that re-derives reaches the boom. #10712 review P2: that is not the
+    same claim as "`start()` passes it", which an earlier docstring also made — a
+    mutation dropping `own_name=name` at the call site leaves this test green,
+    because this test never enters `start()`. The forwarding half is pinned
+    separately, by `test_start_threads_its_ONE_read_into_the_orphan_sweep`.
     """
     name = "fdb-lane-0123456789"
 
@@ -3193,6 +3205,37 @@ def test_the_orphan_sweep_uses_the_NAME_the_caller_already_derived(monkeypatch):
                         lambda *a, **k: _R(0, f"{name}\trunning\t\t\n", ""))
     out = tl.reap_orphans(own_name=name)
     assert f"kept {name} — this is THIS worktree's container" in "\n".join(out), out
+
+
+def test_start_threads_its_ONE_read_into_the_orphan_sweep(lane, monkeypatch):
+    """`start()` must PASS the name it derived (`own_name=`) into the sweep.
+
+    #10712 review P2: the sweep-side test above pins that `reap_orphans` USES the
+    name it is given, but not that `start()` gives it one — dropping
+    `own_name=name` at the call site left the whole file green, so the exact
+    regression the change claims to close ("the sweep takes the caller's name so
+    `mine` cannot diverge") was unprotected. This drives the real `start()` and
+    captures what the sweep actually received.
+
+    MUTATION: change the call site to `reap_orphans()` and this goes red with
+    `{}` captured.
+    """
+    captured: dict = {}
+
+    class _Stop(Exception):
+        """Sentinel: stop `start()` the moment the sweep has been observed."""
+
+    def _stop(_n):
+        raise _Stop
+
+    monkeypatch.setenv("TORTOISE_TEST_LANE_REAP", "1")
+    monkeypatch.setattr(tl, "reap_orphans", lambda **kw: captured.update(kw) or [])
+    monkeypatch.setattr(tl, "container_state", _stop)
+    with pytest.raises(_Stop):
+        tl.start()
+    assert captured.get("own_name") == lane, (
+        "start() did not thread its ONE `_lane_identity()` read into the sweep, "
+        f"so the sweep would re-derive it: {captured}")
 
 
 def test_stop_surfaces_a_failed_removal(lane, monkeypatch):
@@ -4654,9 +4697,18 @@ def _labelled_row(name, state, owner):
 
 def test_the_label_writer_cannot_read_the_root_itself():
     """The single-read invariant is only true if `_label_args` cannot read the
-    root itself: a required `root` parameter is what makes "ONE `repo_root()`
-    read" a property of the code instead of a comment."""
-    assert list(inspect.signature(tl._label_args).parameters) == ["root"]
+    root itself: a REQUIRED `root` parameter is what makes "ONE `repo_root()`
+    read" a property of the code instead of a comment.
+
+    #10712 review P2: asserting only `list(parameters) == ["root"]` does not
+    test requiredness — `def _label_args(root=None)` (which re-reads when it is
+    None) passes that assertion and restores the defect. The DEFAULT is the
+    thing that has to be absent, so the default is what is asserted."""
+    sig = inspect.signature(tl._label_args)
+    assert list(sig.parameters) == ["root"]
+    assert sig.parameters["root"].default is inspect.Parameter.empty, (
+        "a default (even None) lets `_label_args` re-read `repo_root()` itself, "
+        "which is what let the label name a different worktree than the name")
 
 
 def test_the_NAME_and_the_ownership_LABEL_come_from_ONE_root_read(monkeypatch,
@@ -4737,8 +4789,10 @@ def test_an_ownership_LABEL_makes_a_DEREGISTERED_worktree_still_reapable(
     # git answered: nothing claims this container any more (the teardown).
     monkeypatch.setattr(tl, "_worktree_slugs", lambda: {})
     monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
-    # The label moves this container onto Proof 1; Proof 1 now asks whether a
-    # client is still attached (#10833 finding 3), so the container answers.
+    # The container itself says NO client is attached. This is stubbed rather
+    # than left to `fake` (whose `exec` answers "" ⇒ `_container_in_use` returns
+    # None ⇒ fail-closed KEEP), because "nothing is using it" is a POSITIVE
+    # premise of the removal asserted below, not an ambient default.
     monkeypatch.setattr(tl, "_container_in_use", lambda _n: False)
     out = tl.reap_orphans()
     joined = "\n".join(out)
@@ -4746,73 +4800,52 @@ def test_an_ownership_LABEL_makes_a_DEREGISTERED_worktree_still_reapable(
     assert "owning worktree" in joined and "is gone" in joined, out
 
 
-def _labelled_gone_fixture(monkeypatch, tmp_path, busy):
-    """The `#10788`/label shape: a container whose owning worktree was REMOVED
-    (`git worktree remove`) and which the label still attributes, so it reaches
-    Proof 1 — with `busy` as what the container's own `CLIENT LIST` answers.
+def test_a_LABEL_cannot_kill_a_LIVE_lane_whose_worktree_was_torn_down(
+        monkeypatch, tmp_path):
+    """#10712 review P1: the label must not outrank a live CLIENT.
 
-    Returns ``(name, removed, out)``. `_live_lane_paths` is stubbed empty
-    because a removed worktree cannot be held by a live process; the client
-    probe is the ONLY liveness datum left, which is exactly why Proof 1 must ask
-    it.
+    The label reaches a population `origin/main` never put on arm 1: a worktree
+    torn down (`git worktree remove --force` / `prune`) while the lane's process
+    is STILL RUNNING. That process's cwd is a deleted directory, so
+    `_live_lane_paths` cannot name it — the container's own `CLIENT LIST` is the
+    only remaining evidence that a test run is in progress.
+
+    On `origin/main` this container is INDETERMINATE, which ASKS and keeps an
+    in-use container (#10693 review F1). Without the client probe in arm 1 the
+    label flips that to `rm -f`: a live lane's database killed mid-run. The
+    probe is scoped to label-derived owners, so name-derived arm 1 is unchanged.
+
+    MUTATION: delete the `if labelled_owner:` probe block and this goes red with
+    `removed == [('rm', '-f', name)]`. A `None` answer (could not ask) must keep
+    it too — unreadable is not "unused".
     """
-    gone = tmp_path / "deleted-worktree-with-a-live-client"
-    removed: list = []
-    name = tl.container_name(tl.slug_for(gone))
+    gone = tmp_path / "deleted-worktree"
     assert not gone.exists()
 
-    def fake(*a, **k):
-        if a[0] == "ps":
-            return _R(0, _labelled_row(name, "running", gone), "")
-        if a[0] == "rm":
-            removed.append(a)
-        return _R(0, "", "")
+    def _sweep_with_client(answer):
+        """(removed argv list, joined report) for one `_container_in_use` answer."""
+        removed: list = []
+        name = tl.container_name(tl.slug_for(gone))
 
-    monkeypatch.setattr(tl, "_docker", fake)
-    monkeypatch.setattr(tl, "_worktree_slugs", lambda: {})
-    monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
-    monkeypatch.setattr(tl, "_live_lane_paths", lambda: set())
-    monkeypatch.setattr(tl, "_container_in_use", lambda _n: busy)
-    return name, removed, tl.reap_orphans()
+        def fake(*a, **k):
+            if a[0] == "ps":
+                return _R(0, _labelled_row(name, "running", gone), "")
+            if a[0] == "rm":
+                removed.append(a)
+            return _R(0, "", "")
 
+        monkeypatch.setattr(tl, "_docker", fake)
+        monkeypatch.setattr(tl, "_worktree_slugs", lambda: {})
+        monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
+        monkeypatch.setattr(tl, "_container_in_use", lambda _n: answer)
+        return removed, "\n".join(tl.reap_orphans())
 
-def test_Proof_1_KEEPS_a_container_that_still_HAS_a_client(monkeypatch,
-                                                           tmp_path):
-    """#10833 review finding 3, the defect itself.
-
-    "The owning worktree is gone" is silent about whether the container still
-    has a CLIENT — and a lane container outlives its worktree BY DESIGN, so a
-    pytest run still serving from it after `git worktree remove` is precisely the
-    state Proof 1 reaches. `main` never had to ask because `owner` came from
-    `git worktree list` and a removed worktree could not be named there, so that
-    population fell to INDETERMINATE, which probes and KEEPS. The ownership
-    label moves exactly that population onto Proof 1, so Proof 1 must carry the
-    probe — otherwise the label silently WEAKENS the delete on the default path.
-
-    Non-vacuity: on the pre-fix code `removed` is ``[("rm", "-f", name)]`` and
-    this fails; nothing else is stubbed, so only the probe can keep it.
-    """
-    name, removed, out = _labelled_gone_fixture(monkeypatch, tmp_path, True)
-    joined = "\n".join(out)
-    assert removed == [], f"a container with an attached client was REMOVED: {out}"
-    assert f"kept {name}" in joined, out
-    assert "HAS an active client" in joined, out
-
-
-def test_Proof_1_KEEPS_when_the_client_probe_cannot_ANSWER(monkeypatch,
-                                                           tmp_path):
-    """The fail-closed half (#10833 finding 3), and the one a later lane is most
-    likely to delete as noise: `None` is an UNREADABLE probe (no `redis-cli`, a
-    wedged server, a failed `exec`) and must never fall through to the removal.
-
-    Non-vacuity: `busy is None` removed the container on the pre-fix code; the
-    polarity `is not False` is the only thing keeping it here.
-    """
-    name, removed, out = _labelled_gone_fixture(monkeypatch, tmp_path, None)
-    joined = "\n".join(out)
-    assert removed == [], f"an UNANSWERABLE probe authorised a removal: {out}"
-    assert f"kept {name}" in joined, out
-    assert "could not be asked" in joined, out
+    for answer, expected in ((True, "active client"), (None, "could not be asked")):
+        removed, joined = _sweep_with_client(answer)
+        assert removed == [], (
+            "the label reaped a container a live lane is using", answer, joined)
+        assert expected in joined, (answer, joined)
+        assert "is gone" in joined, joined
 
 
 def test_a_LABEL_whose_SLUG_disagrees_with_the_container_is_not_evidence(
@@ -4893,6 +4926,13 @@ def test_a_corroborated_label_whose_owner_EXISTS_beats_the_age_backstop(
     monkeypatch.setattr(tl, "_live_lane_paths", lambda: set())
     monkeypatch.setattr(tl, "_container_in_use", lambda _n: False)
     monkeypatch.setattr(tl, "_unused_gap", lambda _n: 40.0)
+    # The container's state at the MOMENT OF ACTION, which arm 3 re-reads. Left
+    # unstubbed, `fake` answers "" ⇒ `container_state` reports `unknown` ⇒ the
+    # re-read keeps it fail-closed, and then "not removed" would be explained by
+    # an unreadable state instead of by the label — the docstring's claim that
+    # "the same fixture without the label reaches `rm -f`" would be false
+    # (#10712 review P2). Answer with the state the sweep already saw.
+    monkeypatch.setattr(tl, "container_state", lambda _n: "running")
     monkeypatch.setenv(tl.OWNER_INDETERMINATE_REAP_ENV, "1")   # age arm ARMED
     out = tl.reap_orphans()
     joined = "\n".join(out)

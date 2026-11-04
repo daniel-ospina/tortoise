@@ -2033,13 +2033,26 @@ def _assert_removal_allowed(name: str, root: Path | str | None = None) -> None:
 
     ``root`` is the root the CALLER derived ``name`` from — `start()` takes
     exactly ONE `repo_root()` read (`_lane_identity`) and threads it into every
-    removal it performs. It is not cosmetic: without it the guard compares
+    removal that reaches this guard. It is not cosmetic: without it the guard
+    compares
     against a FRESH `repo_root()`, and `repo_root()` has a documented PER-CALL
     degraded mode (`Path.cwd()` on a git timeout — the overloaded hosts this
     tool exists for). A read that degraded between the two would then refuse to
     clean up the container the SAME call just created, leaving it holding a
     reserved port: the #8180 leak, produced by the guard meant to prevent it.
-    Omitted (`None`) only by the CLI paths, which have no earlier read to share.
+
+    No production call site omits it. `start()` reads the root ONCE
+    (`_lane_identity`) and threads it into the THREE removals that reach this
+    guard: the stale-container replacement, the never-answered-PING cleanup and
+    the publishes-no-port cleanup. `start()`'s fourth removal — the
+    `docker run`-failed cleanup — never consults a root at all, and must not:
+    it targets the container ID docker itself printed for the container THAT
+    call just created (falling back to the name only when no ID was reported,
+    under `is_managed`), while this guard compares NAMES, so an ID could never
+    match. `stop()` removes directly rather than through this guard. The
+    default is retained only so the guard stays callable without a prior read;
+    a caller that HAS read the root passing `None` is the bug this parameter
+    prevents.
     """
     if not is_managed(name):
         raise SystemExit(f"test-lane: refusing to remove unmanaged {name!r}")
@@ -2668,6 +2681,13 @@ def reap_orphans(own_name: str | None = None) -> list[str]:
     this function ACTED on or decided to KEEP; a name refused by `is_managed()`
     is not reported (it was never a candidate), so a caller reports what
     actually happened instead of counting.
+
+    ONE container can produce TWO lines, and that is deliberate rather than a
+    miscount: a label that is not evidence is reported first (``carries an
+    ownership label that is not evidence`` — the reason the stamp was ignored)
+    and then again by whatever arm the container's own state licenses (the
+    outcome). The two lines answer different questions about one container, so
+    a reader counting containers must count DISTINCT NAMES, not lines.
     """
     slugs = _worktree_slugs()
     if slugs is None:
@@ -2719,6 +2739,10 @@ def reap_orphans(own_name: str | None = None) -> list[str]:
             out.append(f"reap: kept {name} — this is THIS worktree's container")
             continue
         owner = slugs.get(name[len(NAME_PREFIX):])
+        # Whether `owner` came from the LABEL rather than the name record. Arm 1
+        # below cannot tell the difference from `owner` alone, and the two
+        # populations must NOT be treated alike there (see the client probe).
+        labelled_owner = False
         # The slug the container's OWN name encodes. `_live_lane_paths` gives the
         # slugs of every worktree a live process holds, in ANY clone on this host,
         # so this is how a cross-clone owner is still recognised as alive.
@@ -2739,6 +2763,7 @@ def reap_orphans(own_name: str | None = None) -> list[str]:
                 name, stamped.get("owner", ""), stamped.get("slug", ""))
             if trusted:
                 owner = trusted
+                labelled_owner = True
             elif why_not:
                 # Reported, not believed. A label that does not describe the
                 # container it sits on is not an ownership record (see
@@ -2764,43 +2789,39 @@ def reap_orphans(own_name: str | None = None) -> list[str]:
                        f"could not be examined (fail-closed, report only)")
             continue
         if owner is not None and present is False:
+            # ⛔ A LABEL-DERIVED owner must not skip the client probe. The name
+            # record can only produce arm 1 for a worktree `git worktree list`
+            # still lists, but the label reaches a NEW population: a worktree
+            # torn down (`git worktree remove --force` / `prune`) while the
+            # lane's process is STILL RUNNING. That process's cwd is a deleted
+            # directory, so `_live_lane_paths` cannot name it either — the
+            # container's own `CLIENT LIST` is the only thing left that knows a
+            # test run is in progress. On `origin/main` this population lands in
+            # the INDETERMINATE bucket, which ASKS (`_container_in_use`) and
+            # keeps an in-use container (#10693 review F1); without this probe
+            # the label would flip that from `kept` to `rm -f` and kill a live
+            # lane's database. Name-derived arm 1 is left exactly as main had
+            # it: this probe is scoped to the label.
+            if labelled_owner:
+                busy = (False if state in _TERMINAL_STATES
+                        else _container_in_use(name))
+                if busy:
+                    _touch_lease(name)   # observed use: the epoch follows the proof
+                    out.append(f"reap: kept {name} — its labelled worktree "
+                               f"{owner} is gone but it HAS an active client, "
+                               f"so a lane is still using it")
+                    continue
+                if busy is None:
+                    out.append(f"reap: kept {name} — its labelled worktree "
+                               f"{owner} is gone but the container could not "
+                               f"be asked whether it is in use; report only, "
+                               f"fail-closed")
+                    continue
             # Proof 1, the ONLY armed proof: the worktree that owns this
             # container is gone, so this is what #8180 authorises. #7357: the
             # facts are read BEFORE the removal — `rm -f` destroys the only
             # evidence of WHY it stopped, and nobody else will report it now
             # that its owner is gone.
-            #
-            # ⛔ THE CLIENT PROBE IS PART OF THIS PROOF, not a refinement of it
-            # (#10833 review finding 3). "The owning worktree is gone" says
-            # nothing about whether the container still has a CLIENT: a lane
-            # container outlives its worktree by design, and this arm's own
-            # comment below says so — so a pytest run still serving from it
-            # after `git worktree remove` is precisely the state this arm
-            # reaches. `main` never had to ask, because `owner` there could
-            # only come from `_worktree_slugs()`, which cannot resolve a
-            # removed worktree: that population fell to INDETERMINATE, whose
-            # default probes `_container_in_use` and KEEPS. The ownership label
-            # moves exactly that population HERE, so this arm must carry the
-            # probe the arm it moved containers out of already had — otherwise
-            # adding the label silently weakens the delete on the DEFAULT path,
-            # which is the opposite of what a label may do.
-            #
-            # Polarity, same as every other destructive path here: `is not
-            # False` authorises nothing. `True` is an attached client (keep and
-            # count the use as the lease's positive observation); `None` is an
-            # unreadable probe, which is never "unused".
-            busy = _container_in_use(name)
-            if busy is True:
-                _touch_lease(name)
-            if busy is not False:
-                out.append(
-                    f"reap: kept {name} — its owning worktree {owner} is gone, "
-                    f"but "
-                    + ("it HAS an active client, so something is still using "
-                       "it" if busy else
-                       "the container could not be asked whether it is in "
-                       "use (fail-closed, report only)"))
-                continue
             #
             # The facts are a claim about WHY it stopped, so they may only be
             # read for a container docker actually reports as STOPPED: this
@@ -3395,7 +3416,13 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 
 def cmd_down(args: argparse.Namespace) -> int:
-    print(f"test-lane: {lane_name()} -> {stop()}", file=sys.stderr)
+    # ONE `repo_root()` read, inside `stop()`. Printing `lane_name()` here as
+    # well was a second read, and `repo_root()` degrades PER CALL to `Path.cwd()`
+    # on a git timeout — so the name printed could disagree with the container
+    # actually removed. `stop()` takes no argument by design (naming a target is
+    # how one lane would delete a peer's DB), so the fix is to print what it
+    # ACTED ON, not a separately-derived name.
+    print(f"test-lane: down -> {stop()}", file=sys.stderr)
     return 0
 
 
