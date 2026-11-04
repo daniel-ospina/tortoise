@@ -459,14 +459,18 @@ class PrPlan:
     no_verdict: list[dict] = field(default_factory=list)
     # Runs whose zero-job repair was SUPPRESSED by the congestion gate (`crowded`
     # below), i.e. a repair this pass identified and deliberately did not perform.
-    # Each entry is ``{run, workflow, reason}``. It exists because such a run lands
-    # in `no_verdict` FIRST and then takes the `continue`, so it contributes nothing
-    # to `needing_repair` — and a pass that exits 0 reporting `needing_repair=0` is
-    # read by the local rail's notification and transition signature as a CLEAN,
-    # COVERED window. A refused repair is not a clean window: it is work waiting for
-    # a queue that is readable (or for the credential that can unjam it), so it is
-    # counted and printed beside `needing_repair` (module-level summary keys
-    # `no_verdict` / `repair_refused`).
+    # Each entry is ``{run, workflow, reason, measured}``. It exists because such a
+    # run lands in `no_verdict` FIRST and then takes the `continue`, so it contributes
+    # nothing to `needing_repair` — and a pass that exits 0 reporting
+    # `needing_repair=0` is read by the local rail's notification and transition
+    # signature as a CLEAN, COVERED window. A refused repair is not a clean window: it
+    # is work waiting for a queue that is readable (or for the credential that can
+    # unjam it), so it is counted and printed beside `needing_repair` (module-level
+    # summary keys `zero_job_named` / `repair_refused`).
+    # `measured` is the WITNESS for the gate value that refused it — `True` (a
+    # congestion reading was taken), `False` (silence: the gate refuses it), or `None`
+    # (the caller did not say). Without it `reason` would render
+    # `queue_congested=True` for a queue nobody read (#10641 review P2).
     repair_refused: list[dict] = field(default_factory=list)
 
     @property
@@ -873,7 +877,8 @@ def classify(pr: dict, checks: list[dict], all_runs: list[Run], required: list[s
              emitters: dict[str, list[str]], max_attempts: int,
              queue_starved: bool = False,
              zero_job_min_age_s: float | None = None,
-             queue_congested: bool | None = None) -> PrPlan:
+             queue_congested: bool | None = None,
+             queue_congestion_measured: bool | None = None) -> PrPlan:
     """The whole decision, PURE — no API calls — so it is unit-testable.
 
     For each required context absent from the head's check runs, the producing
@@ -913,6 +918,14 @@ def classify(pr: dict, checks: list[dict], all_runs: list[Run], required: list[s
     leaves it unanswered — `main()` maps an UNMEASURED queue (`None`, `UNKNOWN`,
     `PR-UNWITNESSED`, a truncated feed, `--no-queue-health`) to `True` through
     `queue_congestion_gate`, because on a destructive act silence is not permission.
+
+    `queue_congestion_measured` is the WITNESS for that collapse: `main()` passes
+    `congestion is not None` here, so a `repair_refused` entry can say whether the
+    `True` that refused it came from a congestion READING or from SILENCE. Without it
+    the per-run record renders `queue_congested=True` for both, which states as a
+    measured fact something the summary can only report as unmeasured — the two-valued
+    claim this PR exists to remove, reappearing one layer down (#10641 review P2).
+    `None` means the caller did not say (unit callers); it is never "measured".
     """
     plan = PrPlan(number=int(pr["number"]), head=pr["headRefOid"],
                   in_flight=sorted({r.name or r.path for r in all_runs
@@ -989,22 +1002,40 @@ def classify(pr: dict, checks: list[dict], all_runs: list[Run], required: list[s
                     if r.run_attempt > ZERO_JOB_MAX_REPAIRABLE_ATTEMPT:
                         continue
                     # THE REFUSAL IS RECORDED, NOT SILENT. This run was named a
-                    # zero-job repair candidate above and is now not repaired;
-                    # without this entry the plan counts for nothing in
-                    # `needing_repair` and the pass reads as a clean window.
-                    # The reason names the refuser it can SEE here: measured
-                    # starvation, or the congestion gate. Whether that gate value
-                    # came from a real reading or from silence is NOT knowable at
-                    # this layer (`main()` collapses an unmeasured queue to `True`
-                    # through `queue_congestion_gate`) — the summary pair
-                    # `queue_congested` + `queue_congestion_measured` says it, and
-                    # the REFUSED-REPAIR notice prints both.
-                    reason = "queue_starved=True" if queue_starved else (
-                        "queue_congested=True")
+                    # zero-job repair candidate above and is now not repaired; without
+                    # this entry `repair_refused` would be 0 and the REFUSED-REPAIR
+                    # notice would never print, so the operator would be told nothing.
+                    # ⛔ `repair_refused` IS NOT AN INPUT TO `needing_repair` (that is
+                    # `missing_run or rerun or exhausted`) — this entry does not stop
+                    # the window reading clean by itself. What stops it is the NAMING
+                    # above (`no_verdict`, counted as `zero_job_named`) plus the
+                    # escalation in `main()` when the queue was never measured; the
+                    # earlier wording here claimed this line was what kept the window
+                    # from reading clean, and it is not.
+                    # The reason names the refuser it can SEE here — measured
+                    # starvation, or the congestion gate — AND carries the WITNESS
+                    # for the gate's `True`. The gate value alone cannot say which:
+                    # `main()` collapses an unmeasured queue to `True` through
+                    # `queue_congestion_gate`, so a bare `queue_congested=True` in
+                    # this record renders silence as a measured congestion — the
+                    # exact two-valued claim `congests_pr` exists to remove (#10641
+                    # review P2). The summary pair says it for the PASS; this entry
+                    # now says it for the RUN, which is what the per-PR record is
+                    # read for.
+                    if queue_starved:
+                        reason = "queue_starved=True"
+                    elif queue_congestion_measured is True:
+                        reason = "queue_congested=True (measured)"
+                    elif queue_congestion_measured is False:
+                        reason = ("queue_congested=True (UNMEASURED — the gate "
+                                  "refuses silence, nothing was read)")
+                    else:
+                        reason = "queue_congested=True (measurement not reported here)"
                     if not any(d["run"] == r.id for d in plan.repair_refused):
                         plan.repair_refused.append(
                             {"run": r.id, "workflow": r.name or r.path,
-                             "reason": reason})
+                             "reason": reason,
+                             "measured": queue_congestion_measured})
                     continue
                 # ⛔ THE LOOP BOUND IS STRUCTURAL, NOT AN ABSTENTION (see
                 # `ZERO_JOB_MAX_REPAIRABLE_ATTEMPT`). Cancel-then-rerun turns attempt 1
@@ -1397,10 +1428,16 @@ def _rerun(repo: str, run: Run, number: int, expected_head: str = "") -> str:
             # escalates instead of promising a window that cannot ever succeed.
             return "denied"
         else:
-            # 'no_budget' (checked BEFORE the POST) / 'refused' (`gh` never started, so
-            # the POST was never sent) / 'unreadable' — the cancel did NOT happen, so no
-            # rerun may be attempted and NOTHING was changed. That is a deferral to the
-            # next window, not a repair this credential cannot perform.
+            # 'no_budget' (checked BEFORE the POST) / 'refused' / 'unreadable' — the
+            # cancel did NOT happen, so no rerun may be attempted and NOTHING was
+            # changed. That is a deferral to the next window, not a repair this
+            # credential cannot perform.
+            # ⛔ `refused` IS *NOT* ONLY "`gh` never started". `_cancel` also answers
+            # `refused` when the API ANSWERED with a non-zero it cannot classify as
+            # permanent — there the POST WAS SENT and its effect is unknown-but-not-
+            # denied, which is why it stays a deferral (#10641 review P3). The claim
+            # this comment may make is the one every `refused` path shares: no cancel
+            # is OBSERVED to have landed, so a rerun would race the run it targets.
             return "deferred"
     try:
         ok = _run([GH_BIN, "api", "-X", "POST",
@@ -1484,7 +1521,8 @@ def build_plans(repo: str, required: list[str], emitters: dict[str, list[str]],
                 include_drafts: bool, max_attempts: int,
                 queue_starved: bool = False,
                 deadline: float | None = None,
-                queue_congested: bool | None = None) -> list[PrPlan]:
+                queue_congested: bool | None = None,
+                queue_congestion_measured: bool | None = None) -> list[PrPlan]:
     plans: list[PrPlan] = []
     # A PASS IS THE CACHE SCOPE. Two passes in one process (a launcher that polls)
     # must not reuse a verdict measured against a head that has since moved.
@@ -1509,7 +1547,8 @@ def build_plans(repo: str, required: list[str], emitters: dict[str, list[str]],
         runs = runs_at_head(repo, head)
         plans.append(classify(pr, checks, runs, required, emitters, max_attempts,
                               queue_starved=queue_starved,
-                              queue_congested=queue_congested))
+                              queue_congested=queue_congested,
+                              queue_congestion_measured=queue_congestion_measured))
     return plans
 
 
@@ -1553,9 +1592,12 @@ def queue_congestion_reading(queue) -> bool | None:
 
     `None` covers BOTH ways the question goes unanswered — no reading at all
     (`--no-queue-health`, a failed `read_queue_health`) and a reading that abstained
-    (`UNKNOWN`, `PR-UNWITNESSED`, a truncated newest-first feed, or any object that
-    cannot answer). The gate refuses on either, which is why the distinction is not
-    needed until the REPORT, where `queue_congestion_measured` states it.
+    (`UNKNOWN`, `PR-UNWITNESSED`, a truncated `OK`, or any object that cannot
+    answer). ⛔ A truncated FEED is not itself an abstention: `congests_pr` returns
+    ``True`` for a witnessed congestion before it looks at `truncated`, so a cut
+    `FLOOD`/`PR-STARVED`/`PR-BACKLOGGED` arrives here as ``True``, not ``None``
+    (#10641 review P2). The gate refuses on either, which is why the distinction is
+    not needed until the REPORT, where `queue_congestion_measured` states it.
     """
     if queue is None:
         return None
@@ -1580,9 +1622,8 @@ def queue_congestion_gate(congestion: bool | None) -> bool:
 
       * ``None`` from the reading — NOT MEASURED, whether because the read never ran
         (`--no-queue-health`; `read_queue_health` returns ``None`` on any exception)
-        or because it abstained (`UNKNOWN`, `PR-UNWITNESSED`, any verdict off a
-        truncated newest-first feed, an object that cannot answer at all) → ``True``,
-        the act is refused;
+        or because it abstained (`UNKNOWN`, `PR-UNWITNESSED`, a truncated `OK`, an
+        object that cannot answer at all) → ``True``, the act is refused;
       * anything not provably ``False`` → ``True``. Only a MEASURED, uncut clear
         reading lets the cancel run.
 
@@ -1955,8 +1996,15 @@ def main(argv: list[str] | None = None) -> int:
     # the scan does not restart the clock.
     pass_deadline = _arm_pass_deadline()
     queue = None if args.no_queue_health else read_queue_health(args.repo)
-    # A queue read that failed is reported as UNKNOWN and does NOT block the pass:
-    # the repair it performs is still correct, it just cannot name starvation.
+    # A queue read that FAILED is reported as UNKNOWN and it DOES block the
+    # destructive part of the pass: `queue_congestion_reading` returns `None`, and
+    # `queue_congestion_gate` maps that to `True` (refuse) — so a zero-job run is
+    # named in `no_verdict` and NOT cancelled. The pass still measures and still
+    # performs every non-destructive repair (a `rerun`, a close/reopen), because
+    # those discard no queue position; what an unread queue withholds is exactly the
+    # cancel-then-rerun and nothing else. Where the queue is readable but SILENT (a
+    # `status=queued` feed with no queued PR run to read), the refusal is escalated at
+    # the end of this function, so the window cannot be read as discharged.
     # `starves_pr` is the queue tool's own predicate, so the two instruments cannot
     # disagree: FLOOD and PR-STARVED both mean "PR CI is not running" and both reach
     # the per-head report. Keying on FLOOD alone left the late stage — PR work
@@ -1991,15 +2039,40 @@ def main(argv: list[str] | None = None) -> int:
         require_emitters(required, emitters, record_path)
         plans = build_plans(args.repo, required, emitters, args.include_drafts,
                             args.max_attempts, queue_starved=queue_starved,
-                            deadline=pass_deadline, queue_congested=queue_congested)
+                            deadline=pass_deadline, queue_congested=queue_congested,
+                            queue_congestion_measured=congestion is not None)
         code, records = report(plans, args.apply, can_trigger_events(), args.repo,
                                args.reopen_cooldown_minutes, args.max_attempts)
+        # ⛔ A REFUSAL MADE UNDER SILENCE IS NOT A DISCHARGED WINDOW, and exit 0 is
+        # what the coverage read consumes as "discharged". `report()` exits 1 only
+        # for a repair this credential could not perform, and a suppressed cancel is
+        # deliberately NOT that — on a MEASURED congestion the suppression is the
+        # correct, self-clearing outcome and must stay exit 0. But when the queue
+        # reading was NOT MEASURED (`congestion is None`: `--no-queue-health`, a
+        # failed read, `UNKNOWN`, `PR-UNWITNESSED`, a truncated feed, or the
+        # `OK(pr_queued=0)` that the `status=queued` filter produces for a run sitting
+        # in `pending`), the refusal does not depend on anything that will change by
+        # itself: no later window measures that queue either, and the pass returns
+        # the same 0 forever while a PR whose required check can never be produced is
+        # skipped every 30 minutes. That co-existence is what
+        # `docs/ci/ci-check-repair-red-surface.md` §Fact 2 declares unsound ("exit 0
+        # must not coexist with an unhandled repair"), so it escalates: exit 1 hands
+        # the window to the local fallback, whose notification then names it.
+        # `args.apply` is in the condition for the reason `report()` states one
+        # function up: escalation is only meaningful when the pass INTENDED to act, and
+        # a report-only run measured successfully and says so in its JSON. Report-only
+        # is not a coverage signal either — the workflow passes `--apply`.
+        if (args.apply and code == 0 and congestion is None
+                and any(p.repair_refused for p in plans)):
+            code = 1
     except MeasureError as exc:
         return _could_not_measure(args, str(exc))
     except subprocess.TimeoutExpired as exc:
         return _could_not_measure(args, f"timeout: {exc}")
-    # EXIT 1 IS A SPECIFIC CLAIM — "a PR was measured and still needs a repair only a
-    # user credential can perform". Nothing else may return it, so an unexpected
+    # EXIT 1 IS A SPECIFIC CLAIM — "a PR was measured and a repair it needs was not
+    # performed": either one only a user credential can perform, or one the pass
+    # refused because the queue reading did not certify it clear (above). Nothing
+    # else may return it, so an unexpected
     # error must NOT escape as a traceback (which any caller reads as failure of
     # that kind). `report()` mutates: a failure inside it may follow repairs that
     # already landed, so the message says so rather than claiming nothing changed.
@@ -2047,10 +2120,21 @@ def main(argv: list[str] | None = None) -> int:
         # local rail's notification/transition signature quotes `needing_repair` as a
         # clean, covered window while a PR whose required check can never be produced
         # is silently skipped every 30 minutes. Both are reported so the zero can be
-        # read next to the work it excludes: `no_verdict` counts PLANS carrying a
-        # named-but-unrepairable zero-job context, `repair_refused` counts the RUNS
-        # this pass identified and deliberately did not cancel.
-        "no_verdict": sum(1 for p in plans if p.no_verdict),
+        # read next to the work it excludes.
+        #
+        # ⛔ `zero_job_named` IS A COUNT OF WHAT WAS NAMED, NOT OF WHAT IS STRANDED
+        # (#10641 review P2). The `no_verdict` append happens BEFORE the congestion
+        # gate, so a run counted here may then be CANCELLED AND RE-RUN in this same
+        # pass — the key used to be called `no_verdict` and described as
+        # "named-but-unrepairable", which read `zero_job_named=3, repair_refused=0` as
+        # "three stranded" when it means "three named, none refused". The three
+        # buckets are: repaired (this pass cancelled and re-ran it — visible in
+        # `prs[].rerun`), refused (`repair_refused`, below), and skipped by the
+        # structural loop bound at `ZERO_JOB_MAX_REPAIRABLE_ATTEMPT` (deliberately not
+        # counted anywhere: it is the attempt a previous window created, and
+        # cancelling it would destroy the very attempt that window made). Per-run
+        # detail is in `prs[].no_verdict`.
+        "zero_job_named": sum(1 for p in plans if p.no_verdict),
         "repair_refused": sum(len(p.repair_refused) for p in plans),
         # Re-measures the "queued and never starts" residual every window (see
         # `PrPlan.oldest_pending_age_seconds`).
@@ -2061,6 +2145,22 @@ def main(argv: list[str] | None = None) -> int:
         "unresolved": int(code != 0),
         "prs": records,
     }
+    # ⛔ EMITTED OUTSIDE THE `--json` BRANCH, because BOTH production callers pass
+    # `--json`: `.github/workflows/ci-check-repair.yml` (`--apply --json | tee …`) and
+    # `tools/ci-check-repair-local.sh` (`--apply --json > "$OUT_FILE"`, stderr to the
+    # log). Inside the `else:` this was the one line that says "this window is NOT
+    # discharged", and no real invocation could ever print it — measured on the
+    # refused fixture: with `--json` stderr held only `NO-VERDICT-WILL-ARRIVE(...)`.
+    # Stderr unconditionally, which is the rule this module already applies to
+    # `NO-VERDICT-WILL-ARRIVE`.
+    if summary["repair_refused"]:
+        print(f"ci-check-repair: REFUSED-REPAIR — {summary['repair_refused']} "
+              f"zero-job run(s) were identified and NOT cancelled/rerun because the "
+              f"queue reading did not certify it clear "
+              f"(queue_congestion_measured={summary['queue_congestion_measured']}, "
+              f"queue_congested={summary['queue_congested']}). This window is NOT "
+              f"discharged: read the queue, or run the repair with a credential "
+              f"that can unjam it.", file=sys.stderr)
     if args.json:
         print(json.dumps(summary, indent=2))
     else:
@@ -2068,7 +2168,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{summary['queue']}")
         print(f"ci-check-repair [{mode}] repo={args.repo} open_prs={summary['open_prs']} "
               f"needing_repair={summary['needing_repair']} starved={summary['starved']} "
-              f"no_verdict={summary['no_verdict']} "
+              f"zero_job_named={summary['zero_job_named']} "
               f"repair_refused={summary['repair_refused']} "
               f"trigger={summary['trigger_ok']}")
         for r in records:
@@ -2088,20 +2188,11 @@ def main(argv: list[str] | None = None) -> int:
             print("ci-check-repair: some repairs need a credential that can trigger events "
                   "(the local fallback covers this) — see --json for per-PR detail",
                   file=sys.stderr)
-    # ⛔ OUTSIDE the `--json` split on purpose. BOTH production callers pass `--json`
-    # (`tools/ci-check-repair-local.sh` and `.github/workflows/ci-check-repair.yml`), so
-    # a notice printed only on the non-JSON path is a notice NOBODY EVER SEES — which
-    # would leave this counter doing nothing about the very thing it was added for. It
-    # writes to stderr, so it cannot pollute the JSON document (the same shape
-    # `NO-VERDICT-WILL-ARRIVE` uses above).
-    if summary["repair_refused"]:
-        print(f"ci-check-repair: REFUSED-REPAIR — {summary['repair_refused']} "
-              f"zero-job run(s) were identified and NOT cancelled/rerun because the "
-              f"queue reading did not certify it clear "
-              f"(queue_congestion_measured={summary['queue_congestion_measured']}, "
-              f"queue_congested={summary['queue_congested']}). This window is NOT "
-              f"discharged: read the queue, or run the repair with a credential "
-              f"that can unjam it.", file=sys.stderr)
+    # ⛔ AND EMITTED EXACTLY ONCE. It used to sit here as well (one copy on each side of
+    # the `--json` split, from two independently-written fixes for the same defect); the
+    # notice is idempotent by content, so a duplicate is invisible in behaviour but
+    # makes the operator read the same refusal twice per window. The single emission
+    # point is above, before the split.
     return code
 
 

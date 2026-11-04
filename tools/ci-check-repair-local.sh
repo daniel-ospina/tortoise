@@ -246,14 +246,29 @@ run_tool() {
     return $rc
 }
 
-needing_repair_count() {
-    local n
+summary_count() {
+    local key="$1" n
     # The count is read from the artifact the tool just wrote; `?` (not 0) when
     # it cannot be read, so an unreadable report never prints as "nothing wrong".
-    n="$("$PYTHON_BIN" -c "import json,sys; print(json.load(sys.stdin)['needing_repair'])" \
+    n="$("$PYTHON_BIN" -c "import json,sys; print(json.load(sys.stdin)['$key'])" \
         < "$OUT_FILE" 2>/dev/null)"
     [ -n "$n" ] || n="?"
     printf '%s' "$n"
+}
+
+needing_repair_count() {
+    summary_count 'needing_repair'
+}
+
+# ⛔ THE ZERO-JOB REFUSAL, READ WHERE THE COVERAGE SIGNAL IS DECIDED. A pass that
+# refuses the congested destruct act reports `needing_repair=0` (neither
+# `zero_job_named` nor `repair_refused` is a repair this pass will attempt), and this
+# rail used to read only that key — so `needing_repair=0, repair_refused=3` produced
+# the SAME signature as a clean window, no transition fired, and nobody was notified.
+# The count is emitted by the tool for exactly this reader (tools/ci_check_repair.py
+# summary keys).
+refused_repair_count() {
+    summary_count 'repair_refused'
 }
 
 # ── main ───────────────────────────────────────────────────────────────────
@@ -321,17 +336,22 @@ run_tool
 rc=$?
 mode_word="apply"; [ "$DRY" = 1 ] && mode_word="report-only"
 needing="$(needing_repair_count)"
+refused="$(refused_repair_count)"
 last="$(cat "$STATE_FILE" 2>/dev/null || echo '')"
 # The signature carries the needing_repair COUNT as well as the exit code: a
 # repair that completes successfully (exit 0) but leaves the same PRs needing
 # attention must still read as a new state, or the one notice that matters would
-# be suppressed by an earlier exit-0 notification.
-signature="local:$rc:$needing"
+# be suppressed by an earlier exit-0 notification. ⛔ It carries the REFUSED count
+# too, for the same reason one step further out: a zero-job run the congestion gate
+# declined to cancel is work this pass identified and did NOT do, and it is invisible
+# in `needing_repair` — without this term a fail-shut window is indistinguishable from
+# a clean one.
+signature="local:$rc:$needing:$refused"
 if [ "$signature" != "$last" ]; then
     if [ "$rc" = 0 ]; then
-        notify "ci-check-repair ran LOCALLY in ${mode_word} mode (${reason}). PRs needing repair: ${needing}. The local fallback ran the same tools/ci_check_repair.py the workflow runs, exit 0."
+        notify "ci-check-repair ran LOCALLY in ${mode_word} mode (${reason}). PRs needing repair: ${needing}. Refused zero-job repairs: ${refused}. The local fallback ran the same tools/ci_check_repair.py the workflow runs, exit 0."
     elif [ "$rc" = 1 ]; then
-        notify "ci-check-repair RAN LOCALLY and is STILL UNRESOLVED in ${mode_word} mode (${reason}). PRs needing repair: ${needing}. Some PR needs a repair even the local credential could not complete; see $OUT_FILE."
+        notify "ci-check-repair RAN LOCALLY and is STILL UNRESOLVED in ${mode_word} mode (${reason}). PRs needing repair: ${needing}. Refused zero-job repairs: ${refused}. Some PR needs a repair even the local credential could not complete; see $OUT_FILE."
     else
         notify "ci-check-repair COULD NOT MEASURE locally (${reason}), exit=$rc. No further action was taken; any repair already issued is not undone. See $LOG_FILE."
     fi
@@ -339,6 +359,7 @@ if [ "$signature" != "$last" ]; then
 else
     log "no transition (signature unchanged: $signature)"
 fi
-printf 'exit=%s mode=%s reason=%s needing_repair=%s\n' "$rc" "$mode_word" "$reason" "$needing" \
+printf 'exit=%s mode=%s reason=%s needing_repair=%s refused_repair=%s\n' \
+    "$rc" "$mode_word" "$reason" "$needing" "$refused" \
     >> "$LOG_FILE"
 exit "$rc"

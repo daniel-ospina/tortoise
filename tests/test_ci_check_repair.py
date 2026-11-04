@@ -2005,10 +2005,27 @@ def test_an_unmeasured_queue_never_authorises_the_cancel(monkeypatch, capsys, tm
     monkeypatch.setattr(R, "runs_at_head", lambda repo, head: [
         aged_run(41480218593, jobs=0, age_s=5700.0, path="ci.yml", name="CI")])
 
-    assert R.main(["--repo", "o/r", "--no-live", "--json",
-                   "--record", str(_flood_record(tmp_path))]) == 0
+    code = R.main(["--repo", "o/r", "--no-live", "--apply", "--json",
+                   "--record", str(_flood_record(tmp_path))])
     captured = capsys.readouterr()
     summary = json.loads(captured.out)
+    # ⛔ THE WINDOW-LEVEL CONSEQUENCE — what the review asked to be asserted, not just
+    # the presence of the key. `report()` returns 1 only for a repair this credential
+    # could not perform, so a suppressed cancel used to leave exit 0: that is what
+    # `workflow_state()` reads as `covered`, which makes the local fallback exit idle
+    # and no notification fire. An UNMEASURED reading never clears by itself (nothing
+    # in the next window measures that queue either), so exit 0 here means the PR is
+    # skipped silently every 30 minutes — the co-existence
+    # `docs/ci/ci-check-repair-red-surface.md` §Fact 2 declares unsound.
+    assert code == 1, (
+        "a refusal under SILENCE is not a discharged window: exit 0 is the 'covered' "
+        "the local rail consumes, so the pass would report a clean window forever")
+    assert "REFUSED-REPAIR" in captured.err, (
+        "the notice must reach the --json callers (BOTH production invocations pass "
+        "--json), or the refusal reaches nobody")
+    assert "REFUSED-REPAIR" not in captured.out, (
+        "...and never into the --json stream: that would break json.load in "
+        "tools/ci-check-repair-local.sh and the workflow's step summary")
     assert [d["run"] for d in summary["prs"][0]["no_verdict"]] == [41480218593], \
         "it is still NAMED — refusing to act is not refusing to report"
     assert summary["queue_congested"] is True, (
@@ -2019,29 +2036,118 @@ def test_an_unmeasured_queue_never_authorises_the_cancel(monkeypatch, capsys, tm
         "silence is not permission: no cancel may be authorised by a queue nobody "
         "read")
     # ⭐ P2 (review): the refusal must be VISIBLE in the aggregate, not only inside a
-    # per-PR record. `needing_repair` counts neither `no_verdict` nor a suppressed
+    # per-PR record. `needing_repair` counts neither `zero_job_named` nor a suppressed
     # repair, so on this fixture it is 0 — and 0 is what the local rail quotes as a
     # clean, covered window.
     assert summary["needing_repair"] == 0, "the fixture must be the understating shape"
-    assert summary["no_verdict"] == 1, (
-        "a plan carrying a named-but-unrepairable zero-job context must be counted")
+    assert summary["zero_job_named"] == 1, (
+        "a plan carrying a NAMED zero-job context must be counted — the key counts "
+        "what was named, not what is stranded (#10641 review P2: it was called "
+        "`no_verdict` and documented as 'named-but-unrepairable', which a later "
+        "successful repair in the same pass makes false)")
     assert summary["repair_refused"] == 1, (
         "the run the congestion gate suppressed must be counted beside "
         "needing_repair, or `needing_repair=0` reads as a clean window")
     assert [d["run"] for d in summary["prs"][0]["repair_refused"]] == [41480218593], (
         "the record names the run that was identified and NOT acted on")
     assert [d["reason"] for d in summary["prs"][0]["repair_refused"]] == [
-        "queue_congested=True"], (
-        "...and the gate that refused it; whether that `True` came from a reading "
-        "or from silence is the summary pair beside it, which is asserted above")
-    # ⭐ P3 (review): the count must reach the OPERATOR, not only the JSON. BOTH
-    # production callers pass `--json` (tools/ci-check-repair-local.sh and
-    # .github/workflows/ci-check-repair.yml), so a notice printed only on the non-JSON
-    # path is a notice NOBODY EVER SEES — the counter would then be doing nothing about
-    # the very thing it was added for. It goes to stderr, so stdout stays valid JSON.
-    assert "REFUSED-REPAIR" in captured.err, (
-        "the refusal notice must print on the `--json` path, which is the only path "
-        f"the local rail and the workflow use; stderr was {captured.err!r}")
+        "queue_congested=True (UNMEASURED — the gate refuses silence, nothing was "
+        "read)"], (
+        "...and the gate that refused it, WITH the witness for that `True`: this "
+        "fixture's queue was never read, so a bare `queue_congested=True` here would "
+        "state as a measured fact what the summary reports as unmeasured (#10641 "
+        "review P2)")
+    assert [d["measured"] for d in summary["prs"][0]["repair_refused"]] == [False], (
+        "the structured witness, not only the rendered reason")
+
+
+def test_the_local_rail_reads_the_refused_count_into_its_signature(tmp_path):
+    """P2 (review): the refusal was emitted but the ONE consumer never read it.
+
+    `tools/ci-check-repair-local.sh` decided its transition with
+    `signature="local:$rc:$needing"` and `needing_repair_count()` reading only
+    `['needing_repair']`. A refused zero-job cancel appears in NEITHER (it is
+    deliberately not a repair the pass will attempt), so `needing_repair=0,
+    repair_refused=3` produced the SAME signature as a clean, covered window: no
+    transition, no notification, and a fail-shut the operator could not see.
+
+    Executed, not grepped: the extraction is run against the artifact the tool
+    actually writes, so a shell quoting bug reddens this too.
+    """
+    launcher_path = Path(__file__).resolve().parents[1] / "tools/ci-check-repair-local.sh"
+    launcher = launcher_path.read_text()
+    assert 'signature="local:$rc:$needing:$refused"' in launcher, (
+        "the transition signature must carry the refusal, or it reads as a clean window")
+    assert "Refused zero-job repairs: ${refused}" in launcher, (
+        "and the notification must name it, or the transition says nothing useful")
+
+    out = tmp_path / "out.json"
+    out.write_text(json.dumps({"needing_repair": 0, "repair_refused": 3}))
+    fn = re.search(r"^summary_count\(\) \{.*?^\}$", launcher, re.S | re.M)
+    assert fn, "the shared extractor must still exist for both counts"
+    script = (
+        f"PYTHON_BIN={sys.executable}\nOUT_FILE={out}\n{fn.group(0)}\n"
+        "summary_count repair_refused\n"
+    )
+    ran = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    assert ran.returncode == 0, ran.stderr
+    assert ran.stdout.strip() == "3", (
+        "the rail must read the key the tool emits, not a lookalike")
+
+    # An unreadable artifact still prints `?`, never 0 — the same rule the
+    # `needing_repair` reader already had (an unreadable report is not "nothing wrong").
+    broken = tmp_path / "broken.json"
+    broken.write_text("not json")
+    script = (
+        f"PYTHON_BIN={sys.executable}\nOUT_FILE={broken}\n{fn.group(0)}\n"
+        "summary_count repair_refused\n"
+    )
+    ran = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    assert ran.stdout.strip() == "?", "an unreadable report must never print as 0"
+
+
+def test_a_MEASURED_congested_refusal_does_not_escalate(monkeypatch, capsys, tmp_path):
+    """The other pole of the escalation, so the fix is not "exit 1 on any refusal".
+
+    A refusal made on a MEASURED congestion is the correct, self-clearing outcome: the
+    queue was read, it is congested, so re-queueing the run at the back of the same
+    wait is exactly the harm the gate exists to prevent — and the next window, when
+    the queue has moved, is when the repair should fire. Escalating here would turn a
+    healthy-but-busy repo into a red repair workflow plus a notification every 30
+    minutes, which trains the reader to ignore the one signal that matters.
+    """
+    from tools import ci_queue_health as Q
+
+    congested = Q.QueueHealth(
+        verdict=Q.PR_BACKLOGGED, queued_total=4, in_progress_total=1,
+        dominant_workflow="finding-provenance", dominant_queued=3, pr_running=1,
+        pr_queued=1, oldest_pr_queued_age_seconds=9000.0, pr_wait_measured=True)
+    assert congested.congests_pr is True, "the fixture must be a MEASURED congestion"
+    assert congested.starves_pr is False, (
+        "PR CI IS executing — the fixture must not be a starvation reading as well")
+
+    monkeypatch.setattr(R, "read_queue_health", lambda repo: congested)
+    monkeypatch.setattr(R, "open_prs", lambda repo, include_drafts: [pr(1)])
+    monkeypatch.setattr(R, "check_runs_at", lambda repo, head: [])
+    monkeypatch.setattr(R, "runs_at_head", lambda repo, head: [
+        aged_run(41480218593, jobs=0, age_s=5700.0, path="ci.yml", name="CI")])
+
+    assert R.main(["--repo", "o/r", "--no-live", "--apply", "--json",
+                   "--record", str(_flood_record(tmp_path))]) == 0, (
+        "a refusal the next window can clear on its own is not an unresolved window")
+    captured = capsys.readouterr()
+    summary = json.loads(captured.out)
+    assert summary["queue_congestion_measured"] is True
+    assert summary["repair_refused"] == 1
+    assert summary["prs"][0]["rerun"] == [], "the cancel is still suppressed"
+    assert [d["measured"] for d in summary["prs"][0]["repair_refused"]] == [True], (
+        "the witness for the OTHER pole: this refusal came from a congestion that "
+        "was actually READ (#10641 review P2)")
+    assert [d["reason"] for d in summary["prs"][0]["repair_refused"]] == [
+        "queue_congested=True (measured)"], (
+        "...and the per-run record says so, so the granular record and the summary "
+        "cannot describe different readings")
+    assert "REFUSED-REPAIR" in captured.err, "...and it is still NAMED"
 
 
 def test_a_measured_clear_queue_still_authorises_the_cancel(monkeypatch, capsys,
@@ -2079,6 +2185,16 @@ def test_a_measured_clear_queue_still_authorises_the_cancel(monkeypatch, capsys,
     assert summary["queue_congested"] is False
     assert summary["queue_congestion_measured"] is True
     assert [r["run"] for r in summary["prs"][0]["rerun"]] == [41480218593]
+    # ⭐ P2 #10641 review: THIS is why the summary key is `zero_job_named` and not
+    # `no_verdict`-as-in-strandned. The run below was NAMED and then REPAIRED in the
+    # same pass, so it is counted by the name key while `repair_refused` is 0 — under
+    # the old name+comment pair this read as "one stranded, none refused".
+    assert summary["zero_job_named"] == 1, (
+        "it was named as 'no verdict will arrive' and then repaired — the count "
+        "describes the NAMING, not the outcome")
+    assert summary["repair_refused"] == 0, (
+        "nothing was refused: `zero_job_named=1, repair_refused=0` means 'named and "
+        "repaired', which the old key could not say")
 
 
 def test_the_gate_refuses_every_unmeasured_queue_reading():
@@ -2591,12 +2707,19 @@ def test_a_refused_cancel_does_not_spend_the_rerun(monkeypatch):
     monkeypatch.setattr(R, "_sleep",
                         lambda s: pytest.fail("a refused cancel has no settle loop to sleep in"))
     verbs: list[str] = []
+    # ⛔ A NEUTRAL stderr, deliberately: this test is named for the plain transient
+    # refusal, and `deferred` is its state. The permission case has its own test
+    # (`test_a_PERMISSION_denied_cancel_is_TERMINAL_and_never_a_deferral`) with the
+    # GitHub 403 wording, and a rate-limited 403 has a third — with a permission
+    # string here this test asserted `denied` too and pinned nothing of its own
+    # (#10641 review P2).
     monkeypatch.setattr(R, "_run", _verbs(verbs, cancel_rc=1,
-                                           cancel_stderr="Resource not accessible by integration"))
+                                           cancel_stderr="gh: Server Error (HTTP 502)"))
     assert R._rerun("o/r", run(1, "ci.yml", "pending"), 1,
-                    expected_head="a" * 40) == "denied", (
-        "a readable permission refusal is a repair this credential cannot perform — "
-        "not a skip")
+                    expected_head="a" * 40) == "deferred", (
+        "an unclassifiable refusal MAY be a blip: it stays a skip, not a terminal "
+        "credential failure — escalating every blip is the over-reporting `deferred` "
+        "was introduced to stop")
     assert verbs == ["cancel"], "no rerun may be issued after a refused cancel"
 
 

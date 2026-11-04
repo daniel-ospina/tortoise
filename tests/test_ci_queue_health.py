@@ -268,6 +268,43 @@ def test_an_unreadable_timestamp_does_not_satisfy_the_age_clause():
     assert health.verdict != Q.OK
     assert health.oldest_pr_queued_age_seconds is None
     assert any("no readable timestamp" in reason for reason in health.reasons)
+    assert "1 of the 1" in " ".join(health.reasons), (
+        "the reason names how many of the queued PR runs were unreadable, so a mixed "
+        "reading is not described as an all-unreadable one")
+
+
+def test_a_MIXED_unreadable_pr_wait_cannot_certify_the_queue_clear():
+    """⭐ P1 (review): the witness was derived from the FILTERED max, not the SET.
+
+    `oldest_pr_age` is `max()` over the ages that PARSED, so one unparseable queued PR
+    run was dropped rather than degrading the reading: as soon as a readable sibling
+    existed, `pr_wait_measured` was `True` and `congests_pr` answered `False` — which
+    is the only value that authorises `ci_check_repair.py`'s destructive
+    cancel-then-rerun. Measured on the pre-fix code (12 `issues` runs, one readable
+    `pull_request` run at 60 s, one `pull_request` run with
+    `created_at="not-a-timestamp"`):
+
+        verdict=OK pr_queued=2 oldest=60.0 pr_wait_measured=True congests_pr=False
+
+    The unreadable run may be the OLDEST one — i.e. exactly the wait the budget
+    applies to — so the reading must degrade (`PR-UNWITNESSED`) and the gate must
+    abstain (`None`). Tested because the all-unreadable shape was already covered and
+    this one, the one that actually fails open, was not.
+    """
+    broken = Q.QueuedRun(id=6, name="Python CI", event="pull_request",
+                         created_at="not-a-timestamp")
+    health = classify([*flood_queued(12), *starving_pr_runs(1, age_seconds=60), broken])
+    assert health.pr_queued == 2, "the fixture must carry BOTH queued PR runs"
+    assert health.oldest_pr_queued_age_seconds == pytest.approx(60, abs=2), (
+        "the readable sibling is what made the pre-fix witness lie")
+    assert health.verdict == Q.PR_UNWITNESSED, (
+        "a wait that exists and was only partly read is not a measured-healthy queue")
+    assert health.pr_wait_measured is False
+    assert health.congests_pr is None, (
+        "the destructive gate must abstain: one queued PR run was never read")
+    assert health.delays_pr is False, (
+        "the REPORTING polarity is untouched — it claims no congestion it did not read")
+    assert any("1 of the 2" in reason for reason in health.reasons)
 
 
 def test_the_age_witness_is_the_oldest_queued_pr_run():
@@ -1127,6 +1164,16 @@ def test_congests_pr_is_three_valued_so_a_cancel_cannot_consume_silence():
         "the wait WAS read — truncation is what must answer `None` below")
     assert cut.congests_pr is None, (
         "a capped feed is not a measured-clear queue, even when its verdict is OK")
+
+    # ⭐ P2 #10641 review — the OTHER half, which the prose used to contradict. A
+    # truncated feed does not abstain on a CONGESTION verdict: `delays_pr` returns
+    # `True` before `truncated` is consulted, because a witnessed flood is a positive
+    # claim about runs that WERE read. The docstring said "ANY verdict carried by a
+    # truncated feed" was `None`; only a truncated `OK` is.
+    cut_flood = classify(flood_queued(12) + starving_pr_runs(9), truncated=True)
+    assert cut_flood.verdict == Q.FLOOD and cut_flood.congests_pr is True, (
+        "truncation cannot downgrade a WITNESSED congestion to 'not measured' — the "
+        "gate must still refuse it, and as a measured refusal")
 
 
 def test_an_ok_with_nothing_queued_cannot_certify_the_queue_clear():

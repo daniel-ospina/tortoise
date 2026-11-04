@@ -270,14 +270,29 @@ def test_redirect_seam_decodes_userinfo(monkeypatch):
     the argument). ``_capture_init`` stubs ``__init__``, so the ``from_uri``
     round-trip tests cannot reach it — this constructs for real and captures
     the redirect's ``FalkorDB(...)`` kwargs.
+
+    ⛔ THE PROCESS IS NOT THIS TEST'S. ``falkordb.FalkorDB`` is a MODULE-GLOBAL
+    and is patched here for every thread, so any client a live background
+    worker constructs while this test runs is recorded too. Measured on shard
+    (c) of run 41757554840 / job 126367334698: a leaked worker appended
+    ``{'username': None, 'password': 'falkordb'}`` BEFORE the redirect's own
+    construction (and logged its own ``registry_tortoise`` vector-search
+    warning inside this test's captured log), so ``calls[0]`` was not this
+    seam's call and the test reddened at a head whose seam was correct. The
+    call this test is about is the one made ON THIS THREAD; a foreign thread's
+    construction is somebody else's seam and is not evidence about this one.
     """
+    import threading
+
     import falkordb
 
     calls: list[dict] = []
+    here = threading.current_thread()
 
     class _FakeFalkorDB:
         def __init__(self, *args, **kwargs):
-            calls.append({k: kwargs.get(k) for k in ("username", "password")})
+            calls.append({"thread": threading.current_thread(),
+                          **{k: kwargs.get(k) for k in ("username", "password")}})
 
         def select_graph(self, name):
             raise RuntimeError("unit test: no graph")
@@ -292,8 +307,14 @@ def test_redirect_seam_decodes_userinfo(monkeypatch):
     with contextlib.suppress(Exception):
         FalkorProjection("/tmp/seam-3039-userinfo.db")
 
-    assert calls, "the redirect seam constructed no FalkorDB client"
-    assert calls[0]["password"] == "p@ss", calls
+    seam_calls = [c for c in calls if c["thread"] is here]
+    assert seam_calls, (
+        "the redirect seam constructed no FalkorDB client on this thread "
+        f"(all constructions: {calls!r})")
+    assert seam_calls[0]["password"] == "p@ss", seam_calls
+    assert all(c["password"] != "p%40ss" for c in seam_calls), (
+        "no construction on this thread may carry the RAW userinfo — urlparse does "
+        f"not percent-decode it: {seam_calls!r}")
 
 
 @pytest.mark.parametrize(
