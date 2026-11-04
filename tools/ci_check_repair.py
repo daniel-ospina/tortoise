@@ -2235,20 +2235,30 @@ def main(argv: list[str] | None = None) -> int:
               "running. No per-PR repair can clear this: unjam the queue with "
               "`uv run python tools/ci_queue_health.py --apply`.", file=sys.stderr)
     if code != 0:
-        # ⛔ EXIT 1 HAS TWO CAUSES (#10831 review P3) and this line used to name only the
-        # first. `main()` returns 1 for a repair only a user credential can perform, AND
-        # for a zero-job cancel REFUSED because the queue reading did not certify it clear
-        # (`args.apply and code == 0 and congestion is None and any(p.repair_refused ...)`).
-        # An operator reading "a credential" on the second cause chases a credential that
-        # would not change the outcome — the remedy there is to READ THE QUEUE, and the
-        # refusal notice above already says so. `tools/ci-check-repair-local.sh` branches
-        # its notification on the same ground; these two must not disagree.
-        if summary.get("repair_refused"):
+        # ⛔ EXIT 1 HAS TWO CAUSES (#10831 review P3) and naming only the credential
+        # sends the operator after a credential that would not change the outcome.
+        # `main()` returns 1 for a repair only a user credential can perform, AND for a
+        # zero-job cancel REFUSED because the queue reading did not certify it clear
+        # (`args.apply and code == 0 and congestion is None and any(p.repair_refused)`).
+        # ⛔ `repair_refused` ALONE IS NOT A DISCRIMINATOR: that escalation arm requires
+        # `code == 0`, so when it is what fired there was no credential-needing repair —
+        # asserting one is false, and the same line then argues against itself. Both can
+        # be true only on the path where `code` was ALREADY 1 and a refusal also exists;
+        # `needs_user_actor` is what separates the two, and it is read from the same
+        # records the arm above reads.
+        refused = bool(summary.get("repair_refused"))
+        credential = any(r.get("needs_user_actor") for r in records)
+        if refused and credential:
             print("ci-check-repair: some repairs need a credential that can trigger events, "
-                  "and a zero-job cancel was REFUSED because the queue reading did not "
-                  "certify it clear — read the queue rather than blaming the credential "
-                  "for the refusal; the per-PR detail is in the report",
+                  "AND a zero-job cancel was REFUSED because the queue reading did not "
+                  "certify it clear — see --json for per-PR detail; read the queue for "
+                  "the refusal rather than blaming the credential for it",
                   file=sys.stderr)
+        elif refused:
+            print("ci-check-repair: a zero-job cancel was REFUSED because the queue "
+                  "reading did not certify it clear — read the queue "
+                  "(`uv run python tools/ci_queue_health.py`); the per-PR detail is in "
+                  "the report", file=sys.stderr)
         else:
             print("ci-check-repair: some repairs need a credential that can trigger events "
                   "(the local fallback covers this) — the per-PR detail is in the report",

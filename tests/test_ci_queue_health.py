@@ -1336,6 +1336,82 @@ def test_the_PENDING_LEG_ALONE_is_a_witness_that_refuses_the_cancel():
     assert young.verdict == Q.OK
     assert young.congests_pr is False
 
+    # (d) ⛔ THE WIDENING AT THE `no PR run waiting` CLAUSE IS PINNED IN ITS OWN RIGHT
+    # (#10831 review P3). Cases (c) above never reach that clause — one returns at
+    # `pr_running != 0`, and a below-the-floor offender returns at `no_flood()` — so
+    # `if not wait_runs` could be reverted to `if not pr_queued_runs` with every test
+    # still green, silently turning a young pending-only reading from
+    # `pr_wait_measured=True / congests_pr=False` into `False / None`. This arm reaches
+    # the clause: offender at the dominance floor, no PR event in the denominator's
+    # queued leg, no PR run executing.
+    young_idle = classify(flood_queued(12),
+                          pending=[run(7200, "Python CI", event="pull_request",
+                                       age_seconds=60)])
+    assert young_idle.pr_queued == 0 and young_idle.pr_pending == 1
+    assert young_idle.verdict == Q.OK
+    assert young_idle.pr_wait_measured is True, (
+        "the clause must read the legs it now knows about — reverting it to "
+        "`pr_queued_runs` makes this `False` on a wait it demonstrably read")
+    assert young_idle.congests_pr is False, (
+        "a young wait that WAS read is a measured clearance — the clause must not "
+        "treat 'no queued run' as 'no run' and abstain where it can measure")
+
+
+def test_a_PENDING_ONLY_UNREADABLE_stamp_is_UNWITNESSED():
+    """⭐ The unreadable-stamp guard must count the legs it now reads.
+
+    `if pr_queued_runs and unreadable_pr_runs` left the guard blind on a shape this
+    PR made routine: with every PR run in `pending` and one of their timestamps
+    unparseable, the guard was falsy and the reading came back `OK` — while
+    `pr_wait_measured` said the wait was measured. Widened to `wait_runs`, the same
+    reading is `PR-UNWITNESSED` and the gate abstains.
+
+    Discriminating: restoring the `pr_queued_runs` conjunct returns `OK` here.
+    """
+    pending = [run(7300 + i, "Python CI", event="pull_request", age_seconds=60)
+               for i in range(2)]
+    broken = run(7400, "Python CI", event="pull_request", created_at="not-a-timestamp")
+    health = classify(flood_queued(4),
+                      in_progress=[run(1, "Python CI", event="pull_request",
+                                       age_seconds=60)],
+                      pending=[*pending, broken])
+    assert health.pr_queued == 0 and health.pr_pending == 3
+    assert health.verdict == Q.PR_UNWITNESSED, (
+        "one unreadable stamp in the leg that was read is an unread wait, not health")
+    assert health.pr_wait_measured is False
+    assert health.congests_pr is None, "the gate must REFUSE, not authorise"
+
+
+def test_the_REQUESTED_leg_is_read_and_is_a_witness():
+    """⛔ `requested` is its own API status, so `status=pending` cannot return it.
+
+    `ci_check_repair.QUEUED_STATUSES` includes `requested`, i.e. a run with no slot is
+    a CANCEL TARGET — so leaving that leg unread is the same fail-open as the P1, one
+    status narrower. The docstrings claimed this module covered
+    `pending`/`requested` while the read asked for `status=pending` only; this pins
+    the leg, its truncation, and its witness.
+    """
+    old_requested = [run(7500 + i, "Python CI", event="pull_request",
+                         age_seconds=4 * 3600) for i in range(2)]
+    health = classify(flood_queued(12),
+                      in_progress=[run(1, "Python CI", event="pull_request",
+                                       age_seconds=60)],
+                      requested=old_requested)
+    assert health.pr_queued == 0 and health.pr_pending == 0
+    assert health.pr_requested == 2, "the leg is COUNTED, not silently dropped"
+    assert health.verdict == Q.PR_BACKLOGGED, (
+        "four hours of `requested` PR wait is a backlog — the budget applies to it")
+    assert health.congests_pr is True, (
+        "a run with no slot that has waited past the budget must REFUSE the cancel")
+
+    # A cut `requested` leg cannot certify anything either.
+    cut = classify(flood_queued(4),
+                   in_progress=[run(1, "Python CI", event="pull_request",
+                                    age_seconds=60)],
+                   requested_truncated=True)
+    assert cut.verdict == Q.PR_UNWITNESSED
+    assert cut.congests_pr is None
+
 
 def test_a_CUT_pending_leg_cannot_certify_the_queue_clear():
     """The other pole: an unread leg is an ABSTENTION, never a clearance.
@@ -1360,12 +1436,17 @@ def test_a_CUT_pending_leg_cannot_certify_the_queue_clear():
 
 
 def test_read_health_READS_the_pending_leg(monkeypatch):
-    """The seam: `read_health` must actually fetch the leg it now relies on.
+    """The seam: `read_health` must actually fetch the legs it relies on.
 
     Pinning the population in `classify_queue` is worthless if the shipped read never
     asks for it — the pure layer would be correct and the production reading would
     still be blind to `pending`. Discriminating: with the third `read_runs` call
     removed, `pending` never appears in the statuses read and `pr_pending` is 0.
+
+    ⛔ `requested` IS A FOURTH READ, NOT PART OF THE `pending` ONE (#10831 review P2):
+    GitHub's run `status` enum makes `requested` its own value, so `status=pending`
+    cannot return it — and `ci_check_repair.QUEUED_STATUSES` makes a `requested` run a
+    CANCEL TARGET. Discriminating: drop the `requested` read and `pr_requested` is 0.
     """
     seen: list[str] = []
 
@@ -1380,6 +1461,10 @@ def test_read_health_READS_the_pending_leg(monkeypatch):
             rows = [{"id": 9001, "name": "Python CI", "event": "pull_request",
                      "created_at": (NOW - timedelta(seconds=4 * 3600)).strftime(
                          "%Y-%m-%dT%H:%M:%SZ")}]
+        elif status == "requested":
+            rows = [{"id": 9002, "name": "Python CI", "event": "pull_request",
+                     "created_at": (NOW - timedelta(seconds=4 * 3600)).strftime(
+                         "%Y-%m-%dT%H:%M:%SZ")}]
         else:
             rows = []
         return {"total_count": len(rows), "workflow_runs": rows}
@@ -1387,7 +1472,10 @@ def test_read_health_READS_the_pending_leg(monkeypatch):
     monkeypatch.setattr(Q, "gh_json", fake_gh_json)
     health = Q.read_health("o/r", NOW)
     assert "pending" in seen, "the leg must be READ, not inferred"
+    assert "requested" in seen, (
+        "`requested` is a distinct status — a `status=pending` read cannot contain it")
     assert health.pr_pending == 1
+    assert health.pr_requested == 1, "the requested leg is counted, not dropped"
     assert health.congests_pr is True, (
         "end to end: a four-hour pending PR wait reaches the gate as congestion")
 

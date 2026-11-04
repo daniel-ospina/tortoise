@@ -2036,6 +2036,15 @@ def test_an_unmeasured_queue_never_authorises_the_cancel(monkeypatch, capsys, tm
     assert "REFUSED-REPAIR" not in captured.out, (
         "...and never into the --json stream: that would break json.load in "
         "tools/ci-check-repair-local.sh and the workflow's step summary")
+    # ⛔ AND THE CLOSING LINE NAMES THE CAUSE THAT ACTUALLY FIRED (#10831 review P3).
+    # This window's exit 1 came from the REFUSAL, not from a credential-only repair
+    # (`needs_user_actor` is False in this fixture), so a message claiming a credential
+    # is needed sends the operator after a credential that would not change the answer.
+    assert "some repairs need a credential" not in captured.err, (
+        "the credential cause did NOT fire in this window — naming it is a false claim "
+        "and it argues against the refusal notice printed above it")
+    assert "read the queue" in captured.err, (
+        "the refusal's own remedy must be the one the operator is given")
     assert captured.err.count("REFUSED-REPAIR") == 1, (
         "...and EXACTLY ONCE. `in` is satisfied by a second copy as well, and a second "
         "copy is what the two independently-written fixes for this defect produced "
