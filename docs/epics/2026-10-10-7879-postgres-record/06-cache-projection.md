@@ -193,10 +193,12 @@ direction from the three widening exceptions the module names
 `public.source.summary` and `public.source._search_text` are §9.1/D1 turn prose
 when the Source is a captured session, so
 `cache_projection._EPISODIC_SOURCE_PROSE_COLUMNS` declines to project them onto
-the node. The record keeps the values (the row is not mutated, and they are
-retrievable by a column read — `record_serve.read_node`, `record-text`; there is
-no record-side text INDEX), and `topics` — the capture's word lexicon — still
-projects.
+the node. The record keeps the values — the row is not mutated — but **no shipped
+verb reads them back**: `record_serve.read_node` projects through the same
+`node_from_row`, so it declines the pair exactly as the cache does, and
+`record-text` serves `public.session_narrative`, not `public.source.summary`.
+The raw columns are the only route, and there is no record-side text INDEX.
+`topics` — the capture's word lexicon — still projects.
 
 Why it lives here rather than only in the capture: every record-sourced read and
 rebuild goes through `cache_projection.node_from_row` — `tortoise record-restore`
@@ -241,9 +243,9 @@ title-derived `_searchText`, silently un-indexing it in the cache.
   lands, so the two rebuild paths disagree on that one column until then — in the
   ruling's direction, and converging with it;
 * graph-side FTS over a session Source's own utterances goes with the prose. The
-  value survives in the record (retrievable by a column read; there is no
-  record-side text index), and #10000 replaces the capture's summary with a topic
-  lexicon;
+  value survives in the record (the raw columns are the only route — no verb
+  reads the pair back, and there is no record-side text index), and #10000
+  replaces the capture's summary with a topic lexicon;
 * `python -m tortoise record-reconcile` builds its RECORD side through the same
   projector, so its truth side omits what the cache holds. **The population is not
   "legacy"**: at this head the capture still writes and journals the pair, so

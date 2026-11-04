@@ -93,9 +93,12 @@ THE FOUR PROPERTIES, AND WHERE EACH LIVES
      change lands, so the two rebuild paths disagree on that one column until
      then — in the ruling's direction, and converging with it;
    * **graph-side FTS** over a session Source's own utterances goes with the
-     prose. The value survives in the record and is retrievable by a column read
-     (`record_serve.read_node`, `record-text`); there is no record-side text
-     INDEX;
+     prose. The value survives in the record's raw columns
+     (`public.source.summary` / `_search_text`) and **no shipped verb serves
+     it**: `record_serve.read_node` projects through this module's own
+     `node_from_row`, so it declines the pair exactly as the cache does, and
+     `record-text` reads `public.session_narrative`, not this table. The raw
+     columns are the only route, and there is no record-side text INDEX;
    * **`record-reconcile`** builds its RECORD side through this same projector,
      so its truth side omits what the cache holds. The population is NOT
      "legacy": at this head the capture still writes and journals the pair, so

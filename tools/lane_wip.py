@@ -30,9 +30,12 @@ the working state into a REF (so `gc` cannot take it), which makes the loss
 would give, because the remover was never identified.
 
 ⛔ IT IS RECOVERABLE, NOT IMPOSSIBLE, AND NOTHING RUNS `pin` FOR YOU. There is no
-hook, no reaper integration and no dispatch wiring (measured: nothing outside
-`tools/lane_wip.py` and its test names this tool), and at least two deployed
-removers DO force-remove dirty worktrees without pinning first. So a lane that
+hook, no reaper integration and no dispatch wiring: measured, nothing outside
+`tools/lane_wip.py` and `tests/test_lane_wip.py` INVOKES this tool. The
+`AGENTS.md` rule, the `MEMORY.md` gotcha and the `tools/ci_selection.py` surface
+entry NAME it, so a lane is told to run `pin`; none of them runs it FOR the lane.
+And at least two deployed removers DO force-remove dirty worktrees without
+pinning first. So a lane that
 never pinned still loses its work exactly as #10812 describes. The claim this tool
 supports is narrow and it is the true one: **a pinned lane's work survives any
 removal**. Wiring `pin` into the lane-dispatch path is a separate change.
