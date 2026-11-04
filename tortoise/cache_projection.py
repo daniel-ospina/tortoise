@@ -1336,6 +1336,8 @@ def _is_episodic_source_row(row: Mapping[str, Any]) -> bool:
     writes `sourceKind` from the column). Fail-closed by direction, and left
     named.
     """
+    if row.get("source_kind") == _EPISODIC_SOURCE_KIND:
+        return True
     url = row.get("url")
     if isinstance(url, str) and url.startswith(_EPISODIC_SOURCE_URL_PREFIX):
         return True
