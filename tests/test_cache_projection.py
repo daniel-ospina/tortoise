@@ -685,13 +685,21 @@ def test_relation_props_ride_the_edge_and_the_predicate_is_the_rel_type():
 def test_rebuild_equals_record_no_extra_node_and_no_extra_field():
     """The rebuild's field set is EXACTLY the record's — never a superset.
 
-    ⚠️ ONE DECLARED EXCEPTION (#9634): the properties in
+    ⚠️ TWO DECLARED EXCEPTIONS. (1) #9634: the properties in
     `cp.FOLD_ON_CREATE_DEFAULTS` are the FOLD's `ON CREATE` constants, applied
     where the record row is silent, so the view carries them before this test
     runs. That is why the comparison below cannot see this class — the bound on
     the exception is
     `test_the_declared_fold_defaults_are_the_folds_own_constants`, not this
-    assertion. Everything NOT in that table is still pinned exactly here.
+    assertion. (2) #10853: `cp._EPISODIC_SOURCE_PROSE_COLUMNS` (`summary`,
+    `_searchText`) is DELIBERATELY not written for an episodic Source, and this
+    comparison cannot see that class either — it compares the plan's props to
+    `node.props`, and the narrowing happens when the node is BUILT, so both
+    sides are already narrowed. ⛔ A narrowing is a SILENT-LOSS surface, so it is
+    pinned by a leg that measures the drop set rather than by this assertion:
+    `tests/test_10853_session_source_prose.py::test_the_DROP_SET_itself_is_exactly_the_declared_pair`
+    (and its widening mutation). Everything NOT in those two tables is still
+    pinned exactly here.
 
     This is S3's contract clause at the STATEMENT level: a superset would be the
     cache carrying state the record does not hold, i.e. the cache becoming a

@@ -89,6 +89,39 @@ def _document_row(**overrides: object) -> dict[str, object]:
     return row
 
 
+def _every_column_populated_session_row(**overrides: object) -> dict[str, object]:
+    """A `public.source` row with **every** column Non-NULL, as the schema allows.
+
+    The drop set is a *set* declaration (`_EPISODIC_SOURCE_PROSE_COLUMNS`), so
+    pinning it needs a row in which every projected column is present — a row
+    that leaves a column NULL cannot tell "absent because dropped" from "absent
+    because NULL" (`projected_columns` are written only when non-None). Values
+    are placeholders; only their NON-NULL-ness is load-bearing.
+    """
+    row: dict[str, object] = {c: f"v-{c}" for c in sorted(rp.table_columns()["source"])}
+    for column in ("topics", "url_aliases", "about_entities"):
+        row[column] = [f"v-{column}"]
+    row.update(
+        embedding=[0.125, 0.25],
+        is_episodic=True,
+        needs_extraction=True,
+        credibility_tier=2,
+        version=3,
+        graph_id="g-10853",
+        id="s-10853",
+        node_key="s-10853",
+        node_label="Source",
+        name="s-10853",
+        url="session:s-10853",
+        source_kind="agentSession",
+        # An EMPTY tail: the drop set is what this leg pins, and a non-empty tail
+        # would add a property that is not in `projected_properties` at all.
+        props="",
+    )
+    row.update(overrides)
+    return row
+
+
 def _assert_kept(node, why: str) -> None:
     assert node.props.get("summary") == "A memo about the Q3 pricing change.", (
         f"{why} — the projection dropped a DOCUMENT's own summary, which is the "
@@ -128,6 +161,62 @@ def test_the_drop_is_narrow_the_session_metadata_still_projects():
         "`topics` is the capture's word LEXICON (its most frequent content "
         "words), not a transcript slice — it is the metadata #10000 keeps"
     )
+
+
+def test_the_DROP_SET_itself_is_exactly_the_declared_pair():
+    """The narrowing is a SET, and a set nobody pins grows silently (#10867).
+
+    ⛔ THE UNGUARDED EXTENSION POINT THIS LEG CLOSES. `_EPISODIC_SOURCE_PROSE_COLUMNS`
+    is a frozenset, and `test_the_drop_is_narrow_…` above pins only four
+    SURVIVORS (`url`/`sourceKind`/`sessionId`/`topics`) — so WIDENING the set was
+    invisible: measured by review at this head, adding `title` (a placed,
+    record-held `public.source` column) left all 21 legs green *and* the whole
+    record/projection neighbourhood green (443 passed), while the recovery door
+    silently stripped a record-held property — the exact silent-loss class this
+    change exists to close, on a table the very next lane (#10852) edits.
+
+    So this leg pins the DIFFERENCE between the record's projected property set
+    and the node's property map, over a row in which every projected column is
+    non-NULL: it must be EXACTLY the declared pair. Both directions are covered:
+    widening the set adds a missing name (red), and emptying it makes the pair
+    project again (red).
+    """
+    from tortoise import cache_projection as cp
+
+    node = node_from_row("Source", _every_column_populated_session_row())
+
+    dropped = set(cp.projected_properties("source")) - set(node.props)
+    assert dropped == {"summary", "_searchText"}, (
+        f"the drop set is {sorted(dropped)} — `_EPISODIC_SOURCE_PROSE_COLUMNS` "
+        "must strip the turn-prose PAIR and nothing else; a wider set "
+        "silently strips a record-held property off a session Source"
+    )
+
+
+def test_the_drop_set_leg_would_catch_a_widened_set(monkeypatch):
+    """Non-vacuity: WIDENING the declared set must red the leg above.
+
+    The mutation is applied the way a future lane would apply it — a wider
+    frozenset — rather than asserted, because "the leg pins the set" is exactly
+    the claim that is false when the leg compares against the set itself.
+    """
+    from tortoise import cache_projection as cp
+
+    monkeypatch.setattr(
+        cp, "_EPISODIC_SOURCE_PROSE_COLUMNS",
+        cp._EPISODIC_SOURCE_PROSE_COLUMNS | {"title"})
+    monkeypatch.setattr(
+        cp, "episodic_source_prose_properties",
+        lambda: frozenset(cp.canonical_property("source", c)
+                          for c in cp._EPISODIC_SOURCE_PROSE_COLUMNS))
+
+    node = node_from_row("Source", _every_column_populated_session_row())
+    dropped = set(cp.projected_properties("source")) - set(node.props)
+    assert dropped != {"summary", "_searchText"}, (
+        "a widened `_EPISODIC_SOURCE_PROSE_COLUMNS` did not change the drop set "
+        "— the pin above would stay green while the guard strips `title`"
+    )
+    assert "title" in dropped
 
 
 def test_the_legacy_bare_filename_agent_session_is_episodic():

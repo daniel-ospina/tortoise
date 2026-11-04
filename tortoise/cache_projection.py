@@ -1348,11 +1348,19 @@ _UNRESOLVED_TAIL: Any = object()
 def _decoded_tail(raw: Any) -> Mapping[str, Any]:
     """The row's `props` tail as a mapping, decoded once.
 
-    `None`/empty — and anything that is not a mapping — answers `{}`. The
-    WRITER's refusal for a malformed tail stays in :func:`_props_from_row`;
-    this helper only feeds the identity read, so it must not pre-empt it.
+    `None`/empty — and anything that is not a mapping — answers `{}`. ⛔ `''` is
+    handled explicitly: `props` is `jsonb NOT NULL DEFAULT '{}'`, so the common
+    shapes are a mapping or `None`, but the pre-existing read accepted a STRING
+    tail and wrote `json.loads(tail) if tail else {}` — i.e. it treated the empty
+    string as an ABSENT tail on purpose. `json.loads('')` RAISES, so keeping that
+    case is what stops the identity read from turning an empty tail into a
+    `JSONDecodeError` on the projection path (caught here by
+    :func:`test_the_DROP_SET_itself_is_exactly_the_declared_pair`, whose row
+    populates every column). The WRITER's refusal for a malformed tail stays in
+    :func:`_props_from_row`; this helper only feeds the identity read, so it must
+    not pre-empt it.
     """
-    if raw is None:
+    if not raw:
         return {}
     tail = json.loads(raw) if isinstance(raw, str) else raw
     return tail if isinstance(tail, Mapping) else {}
