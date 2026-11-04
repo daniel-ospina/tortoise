@@ -8786,20 +8786,19 @@ def _gate_sdk_for(org: dict, resource: str):
       `None`, and NOT because the gate's reading is harmless: what holds is that
       **no write can occur either way** — `_data_sdk` refuses the request 403
       GRAPH_NOT_FOUND — so returning `None` cannot widen access. Substituting a
-      graph here WOULD be a fail-open widening. ⚠️ At the three
-      `/v1/{points,objects,subjects}` sites the gate runs before that 403, so the
-      default-graph count is still taken first and a 402 can pre-empt the 403 —
-      the same ordering the residual below records for the RESOLVED arm; this
-      arm is not exempt from it.
+      graph here WOULD be a fail-open widening. At the three
+      `/v1/{points,objects,subjects}` sites that 403 now precedes the gate (#8906
+      moved `_data_sdk_offloaded` ahead of `_check_org_limit`), and those sites
+      pass `sdk=` anyway, so this arm is not reachable from them at all.
 
-    ⛔ KNOWN RESIDUAL (recorded, not fixed): on the three `/v1/{points,objects,
-    subjects}` sites the gate runs BEFORE `_data_sdk`'s `_assert_graph_owned`, so
-    for a binding whose namespace RESOLVES but is not owned (a DB-inconsistency
-    window, never client input — `graph_namespace` is auth-stamped) the gate now
-    counts that graph and a 402 can pre-empt the 403. Closing it means either
-    moving the gate after the SDK open at those three sites or gating the graph
-    SDK on a completed ownership check; both are their own change. The commit
-    lane is NOT in this class: it opens `_data_sdk` before its gate.
+    ✅ The RESIDUAL this docstring used to record is CLOSED for all three
+    `/v1/{points,objects,subjects}` sites by #8906's reorder: they await
+    `_data_sdk_offloaded(org)` BEFORE the gate, so `_data_sdk`'s GRAPH_NOT_FOUND
+    and `_assert_graph_owned` 403s are both raised first and no 402 can pre-empt
+    them. The commit lane was never in the class (it opens `_data_sdk` before its
+    gate). What remains true generally: a caller that OMITS `sdk=` at a
+    tenant-graph door is gated before any ownership check, so a future door that
+    forgets the keyword re-opens this ordering window.
     """
     if resource not in _GRAPH_SCOPED_QUOTA_RESOURCES:
         return None
@@ -8815,14 +8814,50 @@ def _gate_sdk_for(org: dict, resource: str):
 
 
 def _check_org_limit(org: dict, resource: str, *,
-                     slot_credit: int = 0) -> None:
+                     slot_credit: int = 0, sdk=None) -> None:
     """Enforce per-org limits. Raises 402 (payment required) when at capacity.
 
     resource: 'points' | 'api_keys' | 'sessions' | 'users' | 'graphs'
+        | 'documents'  (the declared universe is ``quota.GATEABLE_RESOURCES``)
     slot_credit (#4355): slots this same operation RELEASES — the rotate
     primitive passes 1 so the admission check is evaluated post-release. Only
     the rotate path may pass a non-zero credit, and only after
     ``quota.api_key_occupies_slot`` proved the displaced row is counted.
+    sdk (#8906): the SDK this request WRITES through — pass it for every
+    resource. It WINS over the omitted-sdk fallback, and the point of passing it
+    is IDENTITY, not the graph: the count then runs on the very handle the write
+    uses, so the two cannot disagree even if the default resolution moves
+    between two constructions of it. The contract for what an OMITTED sdk
+    counts lives at the seam that owns the trap
+    (``quota.enforce_org_limit``'s ``sdk:``/``sdk_factory:`` docs) — at this
+    seam the fallback is ``_gate_sdk_for(org, resource)``, which mirrors the
+    OPENER's own call forms: a graph-BOUND credential's ``graph_namespace``
+    (so the count follows the BINDING), an org-wide credential's promotion-aware
+    default (#10180 — so the count follows a PROMOTION), and ``None`` for the
+    registry-scoped resources. ⚠️ It ALSO answers ``None`` for the second of its
+    two deliberate non-uses — an UNRESOLVED binding (``_data_graph_name`` →
+    ``None``) — and that arm is not a wrong-graph count: no write can occur
+    either way (``_data_sdk`` refuses 403), so substituting a graph would be a
+    fail-open widening. At the REST doors that arm is unreachable and costs
+    nothing in ordering — those three sites pass `sdk=` and have already awaited
+    `_data_sdk` (which raises the 403) BEFORE the gate, which is exactly why
+    #8906 reordered them. Both non-uses are recorded in ``_gate_sdk_for``'s own
+    docstring. That fallback is
+    what #10637 landed and what
+    makes this keyword an optimisation rather than the whole fix; before it, an
+    omitted sdk made ``_count_resource`` mint ``_make_sdk(namespace=org_id)`` —
+    the org's DEFAULT graph ``org_{org_id}`` — while a custom-graph-bound key
+    wrote its own ``org_{org_id}_{gid}``, so the cap was compared against a
+    graph the request never touched, in BOTH directions (a full default graph
+    refused every write to an EMPTY one — the permanent REST freeze — and a full
+    custom graph was admitted because the default was small). That history is
+    why #8906's doors pass this keyword; the rule it restores is the MCP house
+    rule (`mcp_server._enforce_quota`: "Count on the SAME org SDK the tool
+    writes to … so the count and the write can never target different
+    databases").
+    Registry-scoped resources (api_keys/users/graphs) are unaffected by ``sdk``
+    for the count, so callers may pass it for every resource.
+
     Fail-closed decision (#686)
     ~~~~~~~~~~~~~~~~~~~~~~~~~~~
     Counting errors raise HTTP 500 (QuotaCheckError) — never a silent pass.
@@ -8854,23 +8889,28 @@ def _check_org_limit(org: dict, resource: str, *,
         quota_refusal_payload,
     )
     try:
-        # TWO fixes meet at this call, and the fold keeps BOTH:
+        # Merged intent, and BOTH fixes are kept:
         #
-        # * #4051 — count the graph the request would actually OPEN. `sdk_factory`
-        #   is LAZY on purpose: a resource whose limit is unlimited/uncounted
-        #   must not pay for an SDK it never uses (measured: 0 -> 1 `_make_sdk`
-        #   per capture, 764 us embedded, on the event loop).
-        # * #10180 — a promoted DEFAULT is counted where its writes land. That
-        #   fact now lives inside `_gate_sdk_for`'s org-wide arm, which delegates
-        #   to `_org_sdk_for_credential` (the credential carries
-        #   `graph_namespace`, resolved at auth, so it is no I/O and cannot fail
-        #   open). Resolving it inside the factory rather than here keeps the
-        #   laziness #4051 requires AND the promoted-default count #10180
-        #   requires; spelling `_make_sdk(namespace=…)` here instead would also
-        #   be a new unaccounted org-wide opener for #10180's AST inventory.
-        enforce_org_limit(org, resource,
-                          sdk_factory=lambda: _gate_sdk_for(org, resource),
-                          slot_credit=slot_credit)
+        # * #8906 — the request OWN sdk WINS: the count and the write then target
+        #   one graph and one HANDLE, so a door that already opened the SDK it
+        #   writes through must not build a second construction of the same graph.
+        # * #4051 — the fallback is LAZY: a gate that RETURNS before counting must
+        #   not build a graph handle to prove it (sessions is unlimited by #4010
+        #   and documents returns for an unlimited max_points; an eager resolve was
+        #   measured as 0 -> 1 _make_sdk per capture, 764 us embedded, on the
+        #   event loop, for a count that never ran).
+        # * #10180 — a PROMOTED default is counted where its writes land. That fact
+        #   lives inside _gate_sdk_for org-wide arm, which delegates to
+        #   _org_sdk_for_credential (the credential carries graph_namespace,
+        #   resolved at auth, so it is no I/O and cannot fail open). Spelling
+        #   _make_sdk(namespace=...) HERE instead would also be a new unaccounted
+        #   org-wide opener for the #10180 AST inventory.
+        # _gate_sdk_for returns None for the registry-scoped resources, so
+        # api_keys/users/graphs never pay for an SDK they do not touch.
+        enforce_org_limit(
+            org, resource, slot_credit=slot_credit, sdk=sdk,
+            sdk_factory=(None if sdk is not None
+                         else (lambda: _gate_sdk_for(org, resource))))
     except QuotaExceededError as e:
         # #4614: the refusal is a STRUCTURED, distinguishable state — a `code`
         # plus the resource/used/limit the gate actually compared — not the
@@ -11325,12 +11365,14 @@ async def create_object(body: CreateObjectRequest, request: Request,
     returns the canonical node). objectKind/status/… ride the props.
     """
     _require_scope(org, "graphs:write", "create_object")
-    # #3773: the quota count and the SDK open are SYNC FalkorDB work too — they
+    # #3773: the SDK open and the quota count are SYNC FalkorDB work too — both
     # go through the #3498 offload seam (graph pool) instead of running on the
     # loop before the off-loaded write below.
-    await _graph_offload(lambda: _check_org_limit(org, "points"),
-                         op="check_org_limit.points")
+    # #8906: sdk FIRST, then the gate, so the count runs on the graph this
+    # request writes (see `_check_org_limit`'s `sdk:` doc).
     sdk = await _data_sdk_offloaded(org)
+    await _graph_offload(lambda: _check_org_limit(org, "points", sdk=sdk),
+                         op="check_org_limit.points")
     # #5475: the kind must not widen the graph's own approval set. #9572: only a
     # NAMED kind is checked — an absent one is not a kind, and the fold supplies
     # the ``'other'`` default ON CREATE. #9572 review P2: BLANK is not a kind
@@ -11389,10 +11431,12 @@ async def create_subject(body: CreateSubjectRequest, request: Request,
     as the first graph entities.
     """
     _require_scope(org, "graphs:write", "create_subject")
-    # #3773: same off-load of the quota count + SDK open as create_object above.
-    await _graph_offload(lambda: _check_org_limit(org, "points"),
-                         op="check_org_limit.points")
+    # #3773: same off-load of the SDK open + quota count as create_object above.
+    # #8906: same ORDER too — the count must run on the graph this request
+    # writes (`_check_org_limit`'s `sdk:` doc).
     sdk = await _data_sdk_offloaded(org)
+    await _graph_offload(lambda: _check_org_limit(org, "points", sdk=sdk),
+                         op="check_org_limit.points")
     # #5475: the same input constraint as /v1/objects, on the subject door
     # (#9572: only a NAMED kind — see CreateObjectRequest; BLANK is not a kind,
     # per ``kind_fallbacks.named_kind``).
@@ -11426,12 +11470,15 @@ async def create_subject(body: CreateSubjectRequest, request: Request,
 async def create_point(body: CreatePointRequest, request: Request, org: dict = Depends(get_current_org_session_ungated)):  # noqa: B008
     """Create a Point in the org's graph."""
     _require_scope(org, "graphs:write", "create_point")
-    # #3773: the quota count and the SDK open are SYNC FalkorDB work too — they
+    # #3773: the SDK open and the quota count are SYNC FalkorDB work too — they
     # go through the #3498 offload seam (graph pool) instead of running on the
     # loop before the off-loaded write below.
-    await _graph_offload(lambda: _check_org_limit(org, "points"),
-                         op="check_org_limit.points")
+    # #8906: sdk BEFORE the gate — this is the door the P0 was measured on (the
+    # write graph held 200 Points in 48 minutes while the gate reported a frozen
+    # `used=25000` read from the org's default graph).
     sdk = await _data_sdk_offloaded(org)
+    await _graph_offload(lambda: _check_org_limit(org, "points", sdk=sdk),
+                         op="check_org_limit.points")
     try:
         # #3718: sdk.create_point + the about edge are SYNC FalkorDB socket
         # I/O — both run in ONE worker thread (a single hand-off keeps the
@@ -14032,7 +14079,7 @@ _DEMO_POINT_IDS: frozenset[str] = frozenset(
 ) | {_DEMO_SENTINEL_ID}
 
 
-def _seed_demo_graph(org_id: str) -> dict:
+def _seed_demo_graph(org_id: str, sdk=None) -> dict:
     """Seed the 4-layer OPT-IN demo/sample graph for an org. Idempotent
     (sentinel). #2360: NEVER called on the fresh-org provisioning path —
     fresh orgs get the REAL starter seed (/internal/starter-seed) instead.
@@ -14058,7 +14105,12 @@ def _seed_demo_graph(org_id: str) -> dict:
     filings; deleting the sentinel and re-seeding, or a one-shot backfill of
     `tags` from the existing `TAGGED` edges, closes it per graph.
     """
-    sdk = _org_sdk(org_id)
+    # #8906: a caller that ALREADY opened this graph (and gated its count on that
+    # handle, `public_demo`) passes it in, so the count and the write are one
+    # handle rather than two `_org_sdk(org_id)` constructions that agree only
+    # while the default resolution does not move between them. `sdk=None` keeps
+    # every other caller unchanged (they open it here, as before).
+    sdk = sdk if sdk is not None else _org_sdk(org_id)
     proj = sdk._get_proj()
     now = datetime.now(UTC).isoformat()
 
@@ -17084,7 +17136,15 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # Removing it needs that contract re-pointed at `max_points` AND a decision
     # for the store-only lanes, so it is tracked separately rather than copied
     # half-way here.
-    _check_org_limit(org, "sessions")
+    #
+    # #8906: `sdk=` is passed for the same reason as the points doors — this is a
+    # TENANT-GRAPH resource, so an omitted sdk makes `_count_resource` mint
+    # `org_{org_id}` (the org DEFAULT graph) while a graph-bound key's Sessions
+    # land in its own `graph_namespace`. Vacuous TODAY only because every
+    # resolver emits `max_sessions: None` (#4010), so `enforce_org_limit` returns
+    # before counting; the moment a finite session cap ships, an omitted sdk
+    # re-arms #8906 on this door. Count on the handle the capture writes through.
+    _check_org_limit(org, "sessions", sdk=sdk)
     # Optional frontmatter-metadata validation (#1362) — warn-only, gated by
     # TORTOISE_VALIDATE_FRONTMATTER=1 (default OFF). The SessionRequest is a
     # payload (no frontmatter block), so the shape validator runs over a
@@ -20568,7 +20628,11 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
         # per-graph-locked region. The site (after every replay return, before the
         # budget adjudication) is unchanged, so an idempotent re-POST is still
         # never gated.
-        _check_org_limit(org, "points")
+        #
+        # #8906: count on the SAME SDK this commit writes through — `sdk` is the
+        # handle the handler opened off-loop above, so the count and the writes
+        # below target one graph (`_check_org_limit`'s `sdk:` doc).
+        _check_org_limit(org, "points", sdk=sdk)
 
         # [4c] #4051 §3.1 — the per-ORG ingest budget. The gates above bound the
         # REQUEST (payload shape, #9425) and the org's ALREADY-COUNTED nodes
@@ -36442,10 +36506,21 @@ async def public_demo(org: dict = Depends(get_current_org_gated)):  # noqa: B008
         # like any other Point-creating write — the REST surface was the
         # 0-quota bypass (bug-hunt 2026-08-28 server P2-13). Idempotent
         # re-calls short-circuit above and skip the gate (no write).
-        _check_org_limit(org, "points")
-        # The shared demo seeder (extracted from /internal/demo) opens its own
-        # SDK and writes ~10 Points.
-        return {"existing": False, "created": _seed_demo_graph(org["org_id"])}
+        # #8906: this door is DEFAULT-GRAPH ONLY by construction —
+        # `_reject_graph_bound_org_surface` refuses a graph-bound key above, and
+        # `_org_sdk(org_id)` is #10180's promotion-aware default resolver (NOT a
+        # bare ``namespace=org_id``). The count runs on the handle this closure
+        # probed, and that SAME handle is handed to the seeder below, so the
+        # count and the write are one handle rather than two constructions of
+        # the same graph (#8906 review, P2: a promotion landing between the two
+        # `_org_sdk` calls would split them, and the second call is a second
+        # control-plane read when the auth hint is absent).
+        _check_org_limit(org, "points", sdk=sdk)
+        # The shared demo seeder (extracted from /internal/demo) writes ~13
+        # Points through the handle passed in (it opens its own when called
+        # without one, e.g. from `/internal/demo`).
+        return {"existing": False,
+                "created": _seed_demo_graph(org["org_id"], sdk=sdk)}
 
     async with await _demo_seed_lock(org["org_id"]):
         out = await asyncio.to_thread(_seed_demo_sync)
