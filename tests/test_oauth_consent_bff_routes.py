@@ -1749,12 +1749,18 @@ def test_start_ADOPTS_a_presented_attempt_key_so_a_cold_flow_can_return() -> Non
     Non-vacuity: this is a PIN, not the fix's proof. `presentedKey || newAttemptKey()` predates
     this PR — `website/` is not in its diff at all — so this test passes on the PRE-FIX tree. Its
     sensitivity is to the browser-side code the harness executes (`start.ts`, the
-    `consent-bridge.ts` store, the `_shared/auth` modules they import, and the Python verifier
-    they call) — a list given as a CATEGORY on purpose, because two earlier cuts of this sentence
-    named a finite set and each was falsified by the next file measured. The fix's proof is
+    `consent-bridge.ts` store, and the `_shared/auth` modules they import) — given as a CATEGORY
+    on purpose, because two earlier cuts of this sentence named a finite set and each was
+    falsified by the next file measured. The fix's proof is
     `test_the_AS_bounce_key_is_the_key_start_records_and_the_flow_completes` above: it crosses the
     AS→app seam and `KeyError`s on `attempt_key` without the AS mint (measured: reverting
     `consent_bounce_url` to `origin/main`'s no-mint form reds that test and leaves this one green).
+
+    ⛔ NO PYTHON IN THAT LIST, deliberately: `_run` spawns ONE process (`node driver.mjs`), and the
+    TS modules call no Python, so `tortoise/consent_token.py` drift cannot red THIS test. An
+    earlier cut of this paragraph claimed "the Python verifier they call" and that was false on
+    all three of its own terms — not browser-side, not called by them, not executed here. The
+    cross-language half is pinned by the arms that actually import the verifier, not here.
     """
     presented = "ak-as-minted-0123456789abcdef"
     first = _run("start_cold_browser", params=dict(_PARAMS, attempt_key=presented))
