@@ -779,11 +779,29 @@ def test_a_MALFORMED_props_tail_is_REFUSED_not_dropped_in_silence():
     leg pins the loudness, in the module's own error type.
 
     Both shapes are exercised because both are reachable: an ARRAY
-    (`jsonb`'s other collection form) and a bare SCALAR.
+    (`jsonb`'s other collection form) and a bare SCALAR. ⛔ AND IN BOTH
+    SPELLINGS, because the two record drivers do not agree on one: asyncpg
+    hands `props` back as TEXT, psycopg as an already-decoded value — so a
+    refusal keyed on falsiness refused `'[]'` and projected `[]`, i.e. the same
+    corrupt row aborted one `record-restore` and not the other (#10867 review,
+    second pass). The ABSENT test is identity against `None`/`''`, never
+    truthiness.
     """
     from tortoise.cache_projection import CacheProjectionError
 
-    for payload, what in (("[1, 2]", "an array"), ('"just a string"', "a scalar")):
+    malformed = (
+        ("[1, 2]", "an array (text)"),
+        ([1, 2], "an array (decoded)"),
+        ('"just a string"', "a scalar (text)"),
+        (7, "a scalar (decoded)"),
+        # FALSY non-objects: `not raw` would have coerced every one of these.
+        ("[]", "an EMPTY array (text)"),
+        ([], "an EMPTY array (decoded)"),
+        ("0", "zero (text)"),
+        (0, "zero (decoded)"),
+        (False, "False (decoded)"),
+    )
+    for payload, what in malformed:
         row = _captured_session_row()
         row["props"] = payload
         with pytest.raises(CacheProjectionError) as caught:
@@ -795,9 +813,10 @@ def test_a_MALFORMED_props_tail_is_REFUSED_not_dropped_in_silence():
             f"dropped in silence instead: {caught.value}"
         )
 
-    # The LENIENT shape must stay lenient: an empty tail is the schema's DEFAULT
-    # and the ordinary row, so it projects (and the guard still fires).
-    for empty in ("", "{}", None):
+    # The LENIENT shapes must stay lenient, and the set of them is EXACTLY the
+    # two spellings of ABSENT: `None` (the column's own silence) and the empty
+    # string (`''`, plus the schema default `'{}'` and its decoded form).
+    for empty in (None, "", "{}", {}):
         row = _captured_session_row()
         row["props"] = empty
         node = node_from_row("Source", row)

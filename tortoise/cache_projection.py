@@ -1348,23 +1348,30 @@ _UNRESOLVED_TAIL: Any = object()
 def _tail_payload(raw: Any) -> Any:
     """The row's `props` tail DECODED, in whatever shape the row holds it.
 
-    `None`/empty answers `{}` — the ABSENT tail, spelled the way both readers
-    expect. ⛔ `''` is handled explicitly: `props` is `jsonb NOT NULL DEFAULT
-    '{}'`, so the common shapes are a mapping or `None`, but the pre-existing read
-    accepted a STRING tail and wrote `json.loads(tail) if tail else {}` — i.e. it
-    treated the empty string as an ABSENT tail on purpose. `json.loads('')`
-    RAISES, so keeping that case is what stops the projection from turning an
-    empty tail into a `JSONDecodeError` (pinned by
+    ONLY `None` and the EMPTY STRING answer `{}` — the two spellings of ABSENT.
+    ⛔ `''` is handled explicitly: `props` is `jsonb NOT NULL DEFAULT '{}'`, so the
+    common shapes are a mapping or `None`, but the pre-existing read accepted a
+    STRING tail and wrote `json.loads(tail) if tail else {}` — i.e. it treated the
+    empty string as an ABSENT tail on purpose. `json.loads('')` RAISES, so keeping
+    that case is what stops the projection from turning an empty tail into a
+    `JSONDecodeError` (pinned by
     :func:`test_the_DROP_SET_itself_is_exactly_the_declared_pair`, whose row
     populates every column).
 
-    ⛔ IT DOES NOT COERCE. `props` is `jsonb NOT NULL DEFAULT '{}'` with no CHECK
-    that it is an OBJECT, so a corrupt row can carry a scalar or an array. This
-    answers it verbatim so the WRITER path (:func:`_props_from_row`) can refuse
-    it loudly, instead of a lenient coercion here swallowing the whole tail (#10867
-    review P3).
+    ⛔ IT DOES NOT COERCE, AND THE ABSENCE TEST IS NOT FALSINESS (#10867 review,
+    second pass). `props` is `jsonb NOT NULL DEFAULT '{}'` with no CHECK that it is
+    an OBJECT, so a corrupt row can carry a scalar or an array. Answering those
+    verbatim is what lets the WRITER path (:func:`_props_from_row`) refuse them
+    loudly — and a `not raw` test defeated exactly the shapes it says it covers:
+    a DECODED `[]`/`0`/`False` is FALSY, so it would have been coerced to `{}` and
+    projected clean while the same row as TEXT (`'[]'`, `'0'`) was refused. That
+    split is decided by the driver's `jsonb` codec (asyncpg answers `str`,
+    psycopg answers a decoded list/int) and not by the row — the same corrupt
+    record aborting one `record-restore` as `RestoreUnavailable` and projecting
+    cleanly through the other. So the test is IDENTITY against the two absent
+    spellings, never truthiness.
     """
-    if not raw:
+    if raw is None or raw == "":
         return {}
     return json.loads(raw) if isinstance(raw, str) else raw
 
