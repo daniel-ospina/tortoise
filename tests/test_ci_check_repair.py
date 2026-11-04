@@ -1790,7 +1790,8 @@ def test_the_held_run_shape_this_tool_exists_to_repair_is_completed():
 # is ordinary progressive-job-creation lag; an UNREADABLE count is an abstention.
 
 def aged_run(rid, status="pending", jobs=0, age_s=1800.0, attempt=1,
-             path="python-ci.yml", name="Python CI", started_age_s=None):
+             path="python-ci.yml", name="Python CI", started_age_s=None,
+             event="pull_request"):
     from datetime import UTC, datetime
     created = datetime.fromtimestamp(R.time.time() - age_s, UTC).strftime(
         "%Y-%m-%dT%H:%M:%SZ")
@@ -1798,7 +1799,7 @@ def aged_run(rid, status="pending", jobs=0, age_s=1800.0, attempt=1,
         R.time.time() - started_age_s, UTC).strftime("%Y-%m-%dT%H:%M:%SZ"))
     return R.Run(id=rid, name=name or Path(path).stem, path=f".github/workflows/{path}",
                  status=status, conclusion=None, run_attempt=attempt,
-                 event="pull_request", created_at=created, job_count=jobs,
+                 event=event, created_at=created, job_count=jobs,
                  started_at=started)
 
 
@@ -2372,6 +2373,88 @@ def test_the_SOLE_witness_target_is_REPAIRED_not_stranded_forever(
     assert summary["zero_job_named"] == 1, (
         "it was named 'no verdict will arrive' and then repaired — the count describes "
         "the NAMING, not the outcome")
+
+    # ⛔ ⛔ THE TWO SURFACES THAT DESCRIBE A STARVED WINDOW MUST NOT DISAGREE WITH THE
+    # REPAIR (#10641 review P2). The exemption makes this context `starved` AND
+    # `rerun` on the same pass — the run whose presence witnessed the starvation is
+    # the one it cancelled — and neither surface said so: the record read
+    # `starved: ["docs"]` beside `rerun: [41480218593]`, and the STARVED remedy line
+    # told the operator "No per-PR repair can clear this", which is false for exactly
+    # this context. Discriminating: `starved_repaired` does not exist pre-fix
+    # (KeyError on the record) and the bare denial is what the pre-fix line printed.
+    # The MEASUREMENT is kept, because issuing a rerun does not un-take it — the
+    # replacement attempt is queued too — so the record now says which measure was
+    # taken and which act was performed, one key each.
+    assert summary["prs"][0]["starved"] == ["docs"], (
+        "the starvation was MEASURED and stays reported: the fresh attempt is queued "
+        "too, so the queue reading is still starved at this window")
+    assert summary["prs"][0]["starved_repaired"] == ["docs"], (
+        "and the record names the context the exemption actually repaired")
+    assert "ISSUED the cancel-then-rerun" in captured.err, (
+        "the remedy line must name the repair this pass performed for the starved "
+        "context, instead of denying that any per-PR repair exists")
+    assert "No per-PR repair can clear this" not in captured.err, (
+        "pre-fix this was the whole remedy on this window — the denial of the act "
+        "that had just landed")
+    assert "ci_queue_health.py" in captured.err, (
+        "the unjam is NOT withheld in the repaired pole: the queue itself is still "
+        "starved and the fresh attempt is queued behind it")
+
+
+def test_a_starved_context_the_exemption_repaired_keeps_the_remnant_remedy(
+        monkeypatch, capsys, tmp_path):
+    """⛔ P2 (review): the MIXED window — one starved context repaired, one not.
+
+    The remedy line now has three shapes, and the two-context window is the one that
+    can silently be wrong: `docs`' only witness is a repairable zero-job run (so the
+    exemption cancels and re-runs it), while `python-ci-gate` is queued behind a run
+    that holds jobs and no per-PR act can start it. Saying only "the repair was
+    issued" would hide the context that still needs the queue unjammed; saying only
+    "no per-PR repair can clear this" is the pre-fix denial of the repair that WAS
+    issued. The line must carry both halves, and the per-PR record must name which
+    context is which.
+
+    `python-ci-gate`'s run is a `workflow_dispatch` run on purpose: it is QUEUED at
+    the head (so the context really is starved by `classify`'s own predicate) without
+    being a PR-event run, so the repo-level PR reading is still witnessed by the
+    `docs` target alone and the exemption is genuinely reachable beside it.
+    """
+    target = 41480218593
+    reading = _queue_reading(pending=[_queue_run(target, age_s=5700.0)])
+    assert reading.wait_witness_ids == (target,)
+    assert reading.congests_pr_apart_from(target) is False
+
+    monkeypatch.setattr(R, "read_queue_health", lambda repo: reading)
+    monkeypatch.setattr(R, "open_prs", lambda repo, include_drafts: [pr(1)])
+    monkeypatch.setattr(R, "check_runs_at", lambda repo, head: [])
+    monkeypatch.setattr(R, "runs_at_head", lambda repo, head: [
+        aged_run(target, jobs=0, age_s=5700.0, path="ci.yml", name="CI"),
+        aged_run(778899, jobs=2, age_s=600.0, path="python-ci.yml",
+                 name="Python CI", event="workflow_dispatch")])
+    monkeypatch.setattr(R, "_rerun", lambda *a, **k: "rerun")
+
+    rec = tmp_path / "required-contexts.json"
+    rec.write_text(json.dumps({
+        "required_contexts": ["docs", "python-ci-gate"],
+        "emitters": {"docs": [["ci.yml", "docs"]],
+                     "python-ci-gate": [["python-ci.yml", "python-ci-gate"]]},
+    }))
+
+    assert R.main(["--repo", "o/r", "--no-live", "--apply", "--json",
+                   "--record", str(rec)]) == 0
+    captured = capsys.readouterr()
+    summary = json.loads(captured.out)
+    assert summary["prs"][0]["starved"] == ["docs", "python-ci-gate"], (
+        "both contexts are starved by the module's own predicate")
+    assert summary["prs"][0]["starved_repaired"] == ["docs"], (
+        "only the context whose every queued run crossed the gate was repaired")
+    assert [d["run"] for d in summary["prs"][0]["rerun"]] == [target], (
+        "the repaired context's run is the one that was actually cancelled and re-run")
+    assert "WAS issued for 1 starved context(s)" in captured.err, (
+        "the mixed pole must name the repair it issued")
+    assert "for the remaining 1" in captured.err, (
+        "…and must not let it mask the context no per-PR repair can clear")
+    assert "ci_queue_health.py" in captured.err, "…and still names the unjam remedy"
 
 
 def test_the_exemption_is_asked_with_the_WHOLE_head_wide_repairable_set(monkeypatch):

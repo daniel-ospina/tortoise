@@ -468,6 +468,26 @@ class PrPlan:
     #: `docs/ci/ci-check-repair-red-surface.md` §Fact 2). Reported so an operator can
     #: see WHY a cancel happened while the reading said `congested`.
     self_witness: list[Run] = field(default_factory=list)
+    # Starved contexts the exemption above REPAIRED this pass — i.e. `starved`
+    # contexts whose every QUEUED producing run crossed the gate as its own only
+    # witness, so the cancel-then-rerun was issued for exactly the run(s) whose
+    # presence witnessed the starvation (#10641 review P2).
+    #
+    # ⛔ THIS IS NOT A CONTRADICTION OF `starved`, IT IS THE SENTENCE THAT MAKES IT
+    # READABLE. `starved` is a MEASUREMENT — "the required checks exist as QUEUED
+    # runs that no runner slot has started" — and issuing a rerun does not un-take
+    # that measurement: the replacement attempt is queued too. What the exemption
+    # DOES change is the remedy: "no per-PR repair can clear this" is false for
+    # exactly these contexts, because the per-PR repair is what this pass just
+    # performed. Without this field a record read `starved: ["docs"]` beside
+    # `rerun: [<run>]` and could not tell whether the repair happened, while the
+    # STARVED line told the operator the one act that had just landed was
+    # impossible. Both surfaces now branch on this list (see `report()`).
+    # Deliberately NOT merged into `starved`: dropping the context from `starved`
+    # would leave `queue_starved: true` in the summary with nothing accounting for
+    # it, and would withhold the unjam remedy from a queue that is still starved at
+    # this window. The two keys are different questions, and each answers one.
+    starved_repaired: list[str] = field(default_factory=list)
     # Runs whose zero-job repair was SUPPRESSED by the congestion gate (`crowded`
     # below), i.e. a repair this pass identified and deliberately did not perform.
     # Each entry is ``{run, workflow, reason, measured}``. It exists because such a
@@ -1211,6 +1231,16 @@ def classify(pr: dict, checks: list[dict], all_runs: list[Run], required: list[s
             # the noise that gets this report muted.
             if queue_starved and all(r.status in QUEUED_STATUSES for r in runs):
                 plan.starved.append(ctx)
+                # ⛔ AND IF THE EXEMPTION COVERED THIS CONTEXT, SAY SO — it is the
+                # per-PR repair the STARVED remedy line used to deny exists
+                # (#10641 review P2). `all(...)` is over this CONTEXT's queued
+                # runs, never the plan's or the pass's: a context with a sibling
+                # run that stayed refused (a later attempt, a job-holding wait) is
+                # still unrepaired and must keep the plain remedy. `plan.self_witness`
+                # holds the exempted runs, so this test is the exemption's own
+                # record, not a re-derivation of it.
+                if all(r in plan.self_witness for r in runs):
+                    plan.starved_repaired.append(ctx)
             continue
         # Completed runs, check never landed. Prefer the newest attempts.
         dead = sorted(runs, key=lambda r: r.run_attempt, reverse=True)
@@ -1883,6 +1913,7 @@ def report(plans: list[PrPlan], apply: bool, trigger_ok: bool, repo: str,
                      "pending": p.pending, "rerun": [], "reopened": False,
                      "missing_run": p.missing_run, "exhausted": list(p.exhausted),
                      "starved": list(p.starved),
+                     "starved_repaired": list(p.starved_repaired),
                      "no_verdict": list(p.no_verdict),
                      "repair_refused": list(p.repair_refused),
                      "self_witness_rerun": [r.id for r in p.self_witness],
@@ -2427,6 +2458,7 @@ def main(argv: list[str] | None = None) -> int:
         for r in records:
             print(f"  #{r['pr']} absent={r['absent']} pending={r['pending']} "
                   f"starved={r.get('starved', [])} "
+                  f"starved_repaired={r.get('starved_repaired', [])} "
                   f"rerun={[x['run'] for x in r['rerun']]} missing_run={r['missing_run']} "
                   f"reopened={r['reopened']} reopen_attempts={r['reopen_attempts']} "
                   f"needs_user_actor={r['needs_user_actor']}")
@@ -2444,12 +2476,41 @@ def main(argv: list[str] | None = None) -> int:
     # ahead of the document makes `json.load` raise (the local fallback swallows it
     # with `2>/dev/null` and reports "PRs needing repair: ?").
     if summary["starved"]:
-        # Named state, named remedy. A starved head is not repaired by anything
-        # this tool can do: the missing resource is a runner slot.
+        # Named state, named remedy. A starved head is not repaired by a runner
+        # slot this tool can create.
+        #
+        # ⛔ BUT THE EXEMPTION DOES REPAIR SOME OF THEM, AND THE SENTENCE MUST AGREE
+        # (#10641 review P2). With the self-witness exemption, one context can be
+        # `starved` AND `rerun` on the same pass: the run whose presence witnessed
+        # the starvation was cancelled and re-run. Printing "No per-PR repair can
+        # clear this" on that window told the operator the one act that had just
+        # landed was impossible, and the per-PR record (`starved: [...]` beside
+        # `rerun: [...]`) could not say which had happened. So the remedy is
+        # composed from the RECORD's own two lists — the same data a reader of
+        # `--json` sees — and it names the repair where one was issued. The unjam
+        # is never withheld in the repaired pole: the queue reading is still
+        # starved at this window and the fresh attempt is queued behind it.
+        repaired = [c for r in records for c in r.get("starved_repaired", [])]
+        unrepaired = [c for r in records for c in r.get("starved", [])
+                      if c not in r.get("starved_repaired", [])]
+        if not repaired:
+            remedy = ("No per-PR repair can clear this: unjam the queue with "
+                      "`uv run python tools/ci_queue_health.py --apply`.")
+        elif not unrepaired:
+            remedy = (f"For the {len(repaired)} starved context(s) whose only "
+                      "witness was a repairable zero-job run, this pass ISSUED the "
+                      "cancel-then-rerun above; the unjam is still needed for the "
+                      "QUEUE itself if that fresh attempt does not start: "
+                      "`uv run python tools/ci_queue_health.py --apply`.")
+        else:
+            remedy = (f"The cancel-then-rerun above WAS issued for "
+                      f"{len(repaired)} starved context(s) whose only witness was a "
+                      f"repairable zero-job run; for the remaining {len(unrepaired)} "
+                      "no per-PR repair can clear this: unjam the queue with "
+                      "`uv run python tools/ci_queue_health.py --apply`.")
         print("ci-check-repair: STARVED — the required checks exist as QUEUED runs "
               "that no runner slot has started; PR CI is not slow, it is not "
-              "running. No per-PR repair can clear this: unjam the queue with "
-              "`uv run python tools/ci_queue_health.py --apply`.", file=sys.stderr)
+              f"running. {remedy}", file=sys.stderr)
     # ⛔ EXIT 1 IS PRODUCED BY TWO DIFFERENT CAUSES, and the credential sentence is
     # only true of one of them. `report()` returns 1 for a repair only a user
     # credential can perform (`needs_user_actor`), and this function ALSO raises 1
