@@ -602,15 +602,16 @@ class _Fence:
     * `in_list` — whether a list item was open, so a dedent can end the block.
 
     `item_col_raw` is the enclosing item's content column in RAW coordinates,
-    and is set ONLY when that item sits OUTSIDE the fence's blockquote (its
+    and is USED only when that item sits OUTSIDE the fence's blockquote (its
     content column is at or before the quote's markers). CommonMark matches the
     OUTER container first, so such an item ends on a RAW dedent — consuming a
     `>` marker before measuring it read a column-0 `>` as the container's own,
     missed the dedent, and kept the fence open over top-level prose (#10634
-    review). A marker-line fence has its item INSIDE the quote, so this value is
-    POPULATED but UNUSED there (`_fence_candidate("> ", "- ```", [])` returns 4)
-    and the line is measured after the prefix via `close_base` instead. "Unused at
-    this depth" — not "never set"; the depth branch below is what makes it moot.
+    review). A marker-line fence has its item INSIDE the quote, so although the
+    field is POPULATED there (`_fence_candidate("> ", "- ```", [])` returns 4) it
+    is UNUSED, and the line is measured after the prefix via `close_base`
+    instead. "Unused at this depth" — not "never set"; the depth branch below is
+    what makes it moot.
 
     `item_depth` is the depth the enclosing ITEM was opened at, and it is what
     selects WHICH of the two numbers above applies — not whether `item_col_raw`
@@ -815,12 +816,12 @@ def strip_code(body: str, strict: bool = False) -> str:
       content line may sit BELOW the opener's column and still be inside the
       block) — and a fence may open ON the marker line itself, at the item's
       content column (#10634 review P1). That comparison is made in exactly ONE
-      space PER BRANCH: the raw line with at most the fence's OWN blockquote
-      depth consumed for an item OUTSIDE the blockquote (`item_col_raw`), or the
-      `rest` residual against `close_base` for an item at this depth — selected
-      by the item's DEPTH, never by which field happens to be set. A `>` inside
-      the block therefore stays literal and a marker cannot move the item's edge
-      (see `_fence_line_column`);
+      space PER BRANCH: the RAW column (`indent`, from the unconsumed line) against
+      `item_col_raw` when the item sits OUTSIDE the blockquote, or the `rest`
+      residual against `close_base` when it sits at this depth — selected by the
+      item's DEPTH, never by which field happens to be set. A `>` inside the block
+      therefore stays literal and a marker cannot move the item's edge (see
+      `_fence_line_column`);
     * containers are compared by DEPTH, never by the raw prefix string: `>`, `> `,
       `  > ` are one container to CommonMark, and comparing strings meant a legal
       closer was never recognised (review c10-1);
@@ -1131,11 +1132,14 @@ def classify(pr: PullRequest, by_head: dict[str, PullRequest],
         #
         # ⚠️ STATED ONCE, and `continue`-guarded: #10703's integration merge added a
         # byte-identical SECOND copy directly below this one, which the `continue`
-        # above made unreachable. That is the same class as the `import contextvars`
-        # the same merge dropped — silent — and it is worse than dead code in THIS
-        # module: the next maintainer edits the copy that never runs. No linter here
-        # catches it (ruff 0.16.4 over E/F/B/UP/I/SIM/RUF is green over a duplicate
-        # arm), so `test_the_closed_unmerged_arm_is_stated_ONCE...` pins the count.
+        # above made unreachable. Silent, and worse than dead code in THIS module:
+        # the next maintainer edits the copy that never runs. No linter catches a
+        # duplicated ARM (ruff 0.16.4 over E/F/B/UP/I/SIM/RUF is green over one), so
+        # `test_the_closed_unmerged_arm_is_stated_ONCE...` pins the count.
+        #
+        # The same PR lost a `import contextvars` to a merge resolution, one module
+        # over in `tortoise/hosted_api.py` — the class this comment is about — but
+        # cite it as that: it was NOT this file's merge and NOT this file's import.
         if pr.closed_unmerged and pr.base == default_branch:
             findings.append(Finding(
                 issue=issue, pr=pr.number, base=pr.base, verdict="unresolved",

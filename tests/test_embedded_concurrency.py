@@ -534,9 +534,19 @@ def test_a_spawn_failure_names_the_childs_own_stderr():
             "sys.exit(4)\n"))
     elapsed = time.monotonic() - started
     assert held in str(exc2.value), str(exc2.value)
-    assert elapsed < 15.0, (
+    # ⚠️ THE BOUND IS 4.0s, NOT A GENEROUS 15.0s, and the difference is the whole
+    # discriminating power of this leg. The grandchild holds the pipe for 5s, so an
+    # UNBOUNDED drain (a plain `p.stderr.read()`) returns at ~5s. A 15.0s allowance
+    # passed over that mutation — measured: the bounded loop swapped for
+    # `p.stderr.read()` still produced `1 passed` — i.e. the guard reported PASS on
+    # exactly the defect it names. 4.0s keeps ~2s of margin over the 2.0s cap (which
+    # is a `select` deadline on `time.monotonic()`, so it does not stretch with
+    # load) while staying 1s under the 5s hold, so bounded passes and unbounded
+    # reds. Re-check BOTH directions before moving either number (#10703 review).
+    assert elapsed < 4.0, (
         f"the stderr drain must be bounded — a pipe a grandchild still holds "
-        f"open took {elapsed:.1f}s")
+        f"open took {elapsed:.1f}s, which is closer to the 5s the grandchild holds "
+        f"it than to the 2s cap: the drain is not bounded")
 
 
 @pytest.fixture(autouse=True)

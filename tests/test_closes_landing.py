@@ -972,18 +972,13 @@ def test_no_module_level_name_is_REBOUND_because_the_second_copy_wins():
 
     ⚠️ Neither existing guard could see it: `test_no_module_level_constant_is_DEAD`
     only flags an uppercase name that is NEVER loaded (`_LIST_MARKER_RE` is loaded
-    at both `_fence_candidate` call sites), and `ruff`'s `E,F,B,UP,I,SIM,RUF` set
-    has no rule for a module-level rebind (`ruff check tools/closes_landing.py` is
-    green over it). So the class is closed here for the forms that can collide:
-    an assignment target, `def` or `class` bound twice at module scope reds,
-    whatever its case and whether or not it is loaded.
-
-    ⚠️ What this scan does NOT cover, stated because an unqualified "anything
-    bound twice" would be a claim the mechanism does not produce: `import` /
-    `from … import` (ruff's `F811` owns a duplicate import), and `for` / `with …
-    as` / tuple-unpack TARGETS at module scope (they bind names this walk does not
-    collect). Those are narrower than the three forms above and lint-covered where
-    it matters; the sentence above therefore names the forms it measures.
+    at both `_fence_candidate` call sites). `ruff F811` DOES own most of this class
+    and is what actually found the working-tree duplicate below — it reds a
+    redefined `def` / `class` / `import` / `with … as` target — but it is silent on
+    a REASSIGNED plain assignment target (`X = 1` … `X = 2`) and on a module-level
+    `for` / tuple-unpack target, all measured with ruff 0.16.4 on this repo's
+    `E,F,B,UP,I,SIM,RUF` set. So this guard covers the assignment-target forms and
+    the three definitions; `ruff` covers the rest of the class.
 
     ⚠️ BOTH SCOPES ARE SCANNED, and the second one is not a nicety: while resolving
     the #10703 forward merge of `origin/main`, the conflicted WORKING TREE carried
@@ -1097,8 +1092,11 @@ def test_the_closed_unmerged_arm_is_stated_ONCE_because_a_dead_copy_reads_as_liv
     r"""#10703 review, ISSUE 1. The integration merge left TWO byte-identical copies of
     the "subject was CLOSED WITHOUT MERGING on the default branch" arm in
     `classify()`, one directly below the other. The first ends in `continue`, so the
-    second could never execute — the same class as the `import contextvars` the same
-    merge silently DROPPED, only inverted (duplication instead of omission).
+    second could never execute — silent, and worse than dead code in this module: the
+    next maintainer repairs the copy that never runs, and it looks verified. (The
+    sibling artifact in the same PR was a dropped `import contextvars`, but that was
+    `tortoise/hosted_api.py` and a different merge — cited here as the same CLASS of
+    silent-loss failure, not as this file's history.)
 
     ⚠️ This is not tidy-up in this module, for the reason its own P3 doctrine gives
     for the DEAD-constant guard above: a dead arm whose surroundings claim it is live
@@ -1529,19 +1527,22 @@ def test_gh_clamps_each_call_to_the_runs_REMAINING_budget(monkeypatch):
 
 # ── …and the justification for that budget is a fact about its HOST ──────────
 
-#: The number of sequential `gh` calls at which the per-call bound ALONE has spent
-#: the job cap of the only workflow that hosts this tool — DERIVED in the test as
-#: `cap_seconds // cl._GH_TIMEOUT_SECONDS`, never quoted as a literal.
-#:
-#: It is a THRESHOLD, not the measurement it used to claim to be. The earlier
-#: `_DOCUMENTED_CALLS = 13` documented itself as "the walk the pinned #10568/#10519
-#: shape actually makes (`2 + L`: … one per base up a five-deep stack, measured)" —
-#: and `2 + 5` is 7, not 13, which is the eleven-deep depth the number implied. Both
-#: halves could not be true, the assertion below passed either way, and nothing in
-#: the tree settles which one was ever measured: `collect_stack`'s walk is
-#: `while pending:` with NO depth bound, so `2 + L` has no maximum to measure. What
-#: the tree DOES produce is the depth at which the job cap is reached, and that is
-#: the claim the budget needs (#10703 review).
+# The call count is DERIVED in the test below as
+# `cap_seconds // cl._GH_TIMEOUT_SECONDS`, never quoted as a literal.
+#
+# It is a THRESHOLD, not the measurement it used to claim to be. The earlier
+# `_DOCUMENTED_CALLS = 13` (deleted by #10703) documented itself as "the walk the
+# pinned #10568/#10519 shape actually makes (`2 + L`: … one per base up a
+# five-deep stack, measured)" — and `2 + 5` is 7, not 13, which is the eleven-deep
+# depth the number implied. Both halves could not be true, the assertion below
+# passed either way, and nothing in the tree settles which one was ever measured:
+# `collect_stack`'s walk is `while pending:` with NO depth bound, so `2 + L` has no
+# maximum to measure. What the tree DOES produce is the depth at which the job cap
+# is reached, and that is the claim the budget needs (#10703 review).
+#
+# Plain `#`, deliberately NOT `#:`: this block documents no attribute (the symbol
+# it discussed is gone), and a `#:` here would attach itself to `_timeout_minutes`
+# below, which is not what it describes.
 
 
 def _timeout_minutes(path: Path) -> int:
