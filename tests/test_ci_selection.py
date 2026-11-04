@@ -6290,6 +6290,120 @@ def test_the_opt_in_reaches_every_matrix_emitter_in_the_changes_job():
         f"opt-in is silently ignored on that path (#10186): {missing} of {names}")
 
 
+def test_the_fold_lever_reaches_every_matrix_emitter_in_the_changes_job():
+    """#10897: the SAME one-lever-every-emitter rule, for the fold runner class.
+
+    The lever is read from the environment by
+    `resolve_fold_runner(os.environ.get("CI_PR_LABELS"), …, os.environ.
+    get("CI_FOLD_RUNNER_LABELS"))`, so an emitter that does not carry BOTH
+    variables keeps the normal runner class for every fold — silently, and on
+    exactly the event type a fold uses. `split` OVERRIDES `push-matrix`'s output
+    on tier-2 PRs, so wiring one and not the other is the #10186 defect exactly.
+
+    Job scope stays barred (`test_the_changes_job_carries_no_job_scope_env`): the
+    capstone gate lives in this job.
+    """
+    wf = _load_python_ci()
+    emitters = [
+        step for step in wf["jobs"]["changes"]["steps"]
+        if "--emit-push-matrix" in str(step.get("run") or "")
+        or "--split" in str(step.get("run") or "")
+    ]
+    names = [s.get("name") for s in emitters]
+    assert len(emitters) >= 2, f"expected both matrix emitters; discovered {names}"
+    problems = []
+    for step in emitters:
+        env = _effective_step_env(wf, "changes", step)
+        if "labels" not in env.get("CI_PR_LABELS", ""):
+            problems.append(f"{step.get('name')}: CI_PR_LABELS absent")
+        if "vars.CI_FOLD_RUNNER_LABELS" not in env.get("CI_FOLD_RUNNER_LABELS", ""):
+            problems.append(f"{step.get('name')}: CI_FOLD_RUNNER_LABELS absent")
+    assert not problems, (
+        "a fold PR must be able to reach its runner class from EVERY emitter that "
+        f"publishes `fast_matrix` (#10897): {problems}")
+
+
+# ── #10897: the fold's runner class resolves to a label ARRAY, or not at all ──
+#
+# `runs-on` is `fromJSON(matrix.runner)`, so the value that matters is the JSON
+# string the selector emits per row. These tests aim at the two ways it can go
+# wrong and neither is visible by reading the code:
+#   * a declaration that parses into something that is NOT a label array (an
+#     empty list, a bare string, a number, `[null]`) — `fromJSON` of that yields
+#     a `runs-on` no runner can match, i.e. a job that never starts;
+#   * the seam leaking onto NON-fold PRs, which would move main's rows and break
+#     every lane-parity comparison the merge rail does.
+
+
+def test_the_fold_runner_seam_is_inert_by_default(monkeypatch):
+    """No label, or no declaration -> the row's own runner, byte-identical."""
+    monkeypatch.delenv(cs.PR_LABELS_ENV, raising=False)
+    monkeypatch.delenv(cs.FOLD_RUNNER_ENV, raising=False)
+    manifest = cs.load_manifest()
+    legs = cs.push_legs(manifest)
+    rows = cs.fast_matrix_include(legs["shards"])["include"]
+    assert [r["runner"] for r in rows] == [json.dumps(cs.SHARD_RUNNER_HOSTED)] * len(rows)
+
+    # a fold label with NO declaration declared is still inert
+    monkeypatch.setenv(cs.PR_LABELS_ENV, "batch-fold,docs")
+    rows = cs.fast_matrix_include(legs["shards"])["include"]
+    assert [r["runner"] for r in rows] == [json.dumps(cs.SHARD_RUNNER_HOSTED)] * len(rows)
+
+
+def test_a_declared_fold_class_routes_every_row_of_a_fold():
+    """A fold + a valid declaration -> EVERY row carries the declared array."""
+    labels = "docs, batch-fold"
+    assert cs.resolve_fold_runner(
+        labels, '["ubuntu-latest"]', '["self-hosted", "fold"]'
+    ) == '["self-hosted", "fold"]'
+    # it IS a label array once parsed — not just a string that looks like one
+    assert json.loads(cs.resolve_fold_runner(
+        labels, '["ubuntu-latest"]', '["self-hosted","fold"]')) == ["self-hosted", "fold"]
+    # a list argument resolves the same way as the workflow's comma-joined form
+    assert cs.resolve_fold_runner(
+        ["batch-fold"], '["ubuntu-latest"]', '["x"]') == '["x"]'
+    # label matching is case-folded: GitHub labels are case-insensitive
+    assert cs.resolve_fold_runner(
+        "BATCH-FOLD", '["ubuntu-latest"]', '["x"]') == '["x"]'
+
+
+@pytest.mark.parametrize("declaration", [
+    "",                                   # absent
+    "   ",                                # blank
+    "not json",                           # unparsable
+    '"self-hosted"',                     # a bare string is not a label array
+    "[]",                                 # EMPTY array -> fromJSON('[]') = no runs-on
+    "[null]",                             # null entry
+    '[""]',                               # empty label
+    '[1, 2]',                             # non-strings
+    '{"self-hosted": true}',             # an object
+])
+def test_an_unusable_fold_declaration_falls_back_never_routes_a_dead_label(declaration):
+    """Fail-SAFE: a bad setting costs the priority, never the job.
+
+    `[]` is the entry that matters most: it parses, it is a list, and it would
+    emit `runs-on: fromJSON("[]")` — a job no runner can ever pick up.
+    """
+    assert cs.resolve_fold_runner("batch-fold", '["ubuntu-latest"]', declaration) \
+        == '["ubuntu-latest"]'
+
+
+def test_a_non_fold_pr_keeps_its_own_runner_even_with_a_declaration():
+    assert cs.resolve_fold_runner("docs", '["self-hosted","self-hosted-x64"]',
+                                  '["self-hosted","fold"]') \
+        == '["self-hosted","self-hosted-x64"]'
+
+
+def test_a_warning_names_an_unusable_declaration(capsys):
+    """Silence would make a mis-set variable indistinguishable from 'nobody set it'."""
+    cs.resolve_fold_runner("batch-fold", '["ubuntu-latest"]', "oops")
+    err = capsys.readouterr().err
+    assert "::warning::" in err and cs.FOLD_RUNNER_ENV in err
+    # …and a merely ABSENT declaration is not a warning (that is every run today)
+    cs.resolve_fold_runner("batch-fold", '["ubuntu-latest"]', "")
+    assert capsys.readouterr().err == ""
+
+
 def test_the_changes_job_carries_no_job_scope_env():
     """#10186 review ISSUE 1 (blocking): the lever may NOT live at JOB scope.
 
