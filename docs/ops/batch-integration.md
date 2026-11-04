@@ -5,9 +5,9 @@ domain: platform
 doc_status: live
 subjects.team: epistemic-team
 aboutSubjects: batch-integration, ci-wall-clock, ci-headroom-guards
-aboutObjects: tortoise, "#10399", .mergify.yml, .github/workflows/python-ci.yml, .github/workflows/post-merge-validation.yml, config/ci-surfaces.yml
+aboutObjects: tortoise, "#10399", "#2148", .mergify.yml, .github/workflows/python-ci.yml, .github/workflows/post-merge-validation.yml, config/ci-surfaces.yml, tools/batch_open.py, superseded-by-fold
 created: 2026-10-31
-updated: 2026-10-31
+updated: 2026-11-04
 ---
 
 # Batch integration — the gate is the batch, not the PR
@@ -165,9 +165,14 @@ from **its own** worktree:
 cd <the owning worktree> && uv run python tools/test_lane.py down
 ```
 
-The sweep itself is gated on `TORTOISE_TEST_LANE_REAP` being `"1"` (the default) — set it to
-anything else and the sweep does not run at all, so the stranded containers are neither reported nor
-reclaimed.
+The sweep itself is gated on `TORTOISE_TEST_LANE_REAP` — on by default, and off for any of
+`0` / `false` / `no` / `off` / empty / unset-to-nothing (`export X=${SOMETHING_UNSET}`), which is
+the same predicate the `run` exit hook reads. Set it to one of those and the LANE's sweep does not
+run, nor does `run` reap on exit, so the stranded containers are neither reported nor reclaimed by
+either. Any other value — including `1`, `true`, `yes` — leaves both ON, so do not spell "off" with
+a value this list does not name. ⛔ It gates the LANE's two paths only: the installed
+`tortoise-container-reaper.timer` clears this variable (`UnsetEnvironment=`) and is armed by
+INSTALLATION, so disarming it is an installer act — `docs/ops/container-lifetime.md` §2.
 
 The two **liveness** proofs — the arms behind `TORTOISE_TEST_LANE_REAP_LANE_GONE` and
 `TORTOISE_TEST_LANE_REAP_OWNER_INDETERMINATE` — never treat a container a **live** lane is using as a
@@ -177,10 +182,15 @@ evidence there (`/proc` unreadable, `docker` refusing, a non-listing reply) is *
 removal. The age figures are a backstop over that evidence, never a substitute for it.
 
 ⛔ **That guarantee does not extend to the worktree-gone proof above** — the one arm that removes by
-**default**. It consults ownership only (`Path(owner).is_dir()`): no `/proc` scan, no client probe. A
-worktree that was removed, moved, or is briefly on an unmounted mount therefore reads as "owner gone"
-while the lane's process — and its connected client — are still alive, and the removal takes a live
-lane's database mid-run. That gap is **#10697**; close it before widening this default.
+**default**. Its ownership test is a directory (`Path(owner).is_dir()`), with no `/proc` scan: a
+worktree that was removed, moved, or is briefly on an unmounted mount therefore reads as "owner gone".
+(#10712's ownership LABEL narrows this — such a container is attributed rather than left
+indeterminate — but it does not turn a directory read into a liveness proof.) The container IS asked
+for an attached client before every proof-1 removal **of a container docker reports as RUNNING**, and
+is spared on `True` or on an unreadable answer (a TERMINAL container cannot have a client, so the probe
+is skipped there rather than failing on a dead server). So a live client is not the gap; the gap is
+that the client probe can only see a client that answers it. That residual is **#10697**; close it
+before widening this default.
 
 The **same lane** must serve Phase 1 and Phase 3. A batch measured on a different lane from its
 baseline is not comparable to it.
@@ -931,6 +941,98 @@ Plain `uv sync` silently drops the dense-retrieval extras; retrieval then degrad
 the run reports green for a product that no longer has embeddings. `uv sync --extra embeddings` alone
 drops `parity` (pyarrow). The extras are part of the lane definition, not setup trivia.
 
+### Before Phase 1 — close the constituents, so none of them lands ahead of the batch
+
+The batch is only *one* path to `main`. `.mergify.yml` sets
+`merge_protections_settings.auto_merge_conditions: true`, so **every PR that matches
+`queue_conditions` is queued with no human click** — including a constituent whose work the batch
+already carries. A constituent that wins that race is validated (~37 min) and squash-merged alone,
+and the batch then applies the same diff to a `main` that has moved, so its `tested-tree` is no
+longer the tree that lands (see [Landing](#landing--main-must-still-be-the-tree-you-tested)).
+
+That is not hypothetical. Measured 2026-11-04 with 32 open PRs and 10 open batch PRs: **7 of 7**
+open PRs named as some batch's constituent were ADMITTED by the entry gate. They were #10543
+(in #10894 and #10702), #10575 (#10894, #10704), #10610, #10641, #10850 and #10867 (the latter
+two both in #10880), and #10856 (#10895) — every one of them separately eligible to land ahead
+of the batch carrying it.
+
+Two mechanisms close that, and they are complementary — neither is sufficient alone:
+
+1. **The queue refuses a labelled constituent at ENTRY.** `queue_conditions` carries
+   `-label=superseded-by-fold`. Entry, not merge, because entry is where the cost is: a
+`merge_conditions` failure only dequeues the PR *after* the queue has built and validated a batch
+containing it, while an unmatched `queue_conditions` refuses it before any CI is spent. It is **not**
+true that a label condition in `merge_conditions` could never become true — Mergify's documentation
+scopes the temporary-queue-PR substitution to the conditions *for checks*, and `label` stays the pull
+request's own attribute — so the older "it would deadlock the queue for every PR" reasoning was
+wrong and is recorded here as corrected. Mergify's documented lifecycle also drops an
+already-queued PR that stops satisfying `queue_conditions`, so the label should drain the queue too —
+⚠️ that part is **documented, not measured** here; the entry gate does not rely on it, so confirm the
+drain in the Mergify UI before counting on it for a live batch.
+   ⚠️ **Measured limit: this gate refuses nothing until the label is applied.** With no label, all
+   7 were still admitted. So mechanism 2 is load-bearing; mechanism 1 is the belt.
+2. **`tools/batch_open.py` labels and closes the constituents when the batch opens.** A closed PR
+   cannot be queued, merged, or spend a runner slot.
+
+```bash
+# Dry run first — it mutates nothing and reports every constituent, contained or not.
+uv run python tools/batch_open.py --fold <batch PR> --constituent <n> --constituent <n>
+
+# Gate the queue without closing anything (reversible in one command):
+uv run python tools/batch_open.py --fold <batch PR> --label-only
+
+# Label + comment + close, once the dry run is clean:
+uv run python tools/batch_open.py --fold <batch PR> --apply
+```
+
+Pass `--repo <owner>/<name>` whenever the checkout you are standing in is not the repository you
+mean: every `gh` call is pinned to it, so a wrong `--repo` fails loudly instead of mutating
+same-numbered PRs in the repository you happen to be in.
+
+The tool closes a constituent **only** when its work is provably in the batch tree, by one of two
+routes: `CONTAINED-ANCESTOR` (`git merge-base --is-ancestor`) or `CONTAINED-CONTENT` (reverse-apply
+the constituent's own diff inside a scratch worktree of the batch head — the route that survives a
+squash-built batch, where ancestry is false though the work is present). Anything else is reported
+and **kept**, under `--apply` as well. Closing a PR whose work no batch carries destroys it.
+
+⛔ **`CONTAINED-CONTENT` means the reverse-apply exited 0 AND was silent.** Exit status alone is not
+the proof, because git exits **0** with two different messages that mean the change is *not* in the
+tree: `--3way` says `Applied patch to 'f.txt' with conflicts.`, and a plain `--check` says
+`warning: s.sh has type 100644, expected 100755` for a **mode-only** change the tree does not carry
+(the executable bit is lost if that PR is closed). A genuinely contained change prints nothing. So
+the tool treats a conflict phrase, and any other output at all, as `NOT-CONTAINED` — a false refusal
+costs one manual close; a false proof is unrecoverable.
+
+The exit status is the tool's own contract, and it is the same on both write paths: **0** every
+constituent contained, **1** at least one `NOT-CONTAINED` (reported — under `--label-only` the label
+still goes on, because it is reversible and it closes the queue rather than the PR), **2** could not
+measure (no constituent list, a `git`/`gh` call that failed, was absent, or hung, or a constituent
+whose head/base could not be read — never a traceback). An `UNMEASURABLE` constituent is exit **2**
+and is printed as *could not measure*, never under the `REFUSED (… closing would destroy work)` line:
+the first says nothing was measured, the second asserts the work is missing from the batch, and only
+the second is a reason to close a PR by hand.
+
+⛔ **The constituent list is never parsed from prose.** A batch title routinely names a PR it
+deliberately did **not** fold — #10894's title names `#10641`, which was dropped. Deriving the close
+list from that would close a PR the batch never carried, so the tool requires either a
+`fold-constituents: <n>, <n>` line in the batch PR body or explicit `--constituent` arguments, and
+exits 2 (listing the prose references only as a hint) when neither is present.
+
+The label is also what unblocks a PR: if the batch is abandoned, re-open the constituent and remove
+`superseded-by-fold`.
+
+**Priority for the batch itself.** A batch adds `queue-accelerator`, which the existing
+`priority_rules` resolves to `priority: high` with `allow_checks_interruption: true` — so the batch
+is not held behind dozens of constituents. That interruption spends CI time already paid for; it is
+the queue's own reliability/velocity trade, which is why the label goes on a batch and never on a
+preference. It is deliberately **not** a separate runner pool: this fleet registers no such label
+(`install-ci-runner-x64.sh --print-labels` → `self-hosted-x64`), and a `runs-on` naming an
+unregistered label selects zero runners — a job that never starts and never reports, which is worse
+than waiting in a queue.
+
+A batch PR is **still opened as a draft** and still owes every required context: closing the
+constituents removes the race, it does not exempt the batch from the landing rail.
+
 ## Aftermath
 
 - The batch PR body is the **evidence**: constituent PRs, conflicts dropped and why, the
@@ -1008,7 +1110,10 @@ likely to over-credit.
 ⛔ **The draft gates ENTRY, not the MERGE — the residual window is real, and it is one queue cycle
 wide.** `.mergify.yml`'s own configuration contract states the split in a single line:
 `queue_conditions` gates **ENTRY** (evaluated against the PR head) and `merge_conditions` gates the
-**MERGE** (evaluated against the queue branch). `-draft` is a `queue_conditions` entry, so
+**MERGE**. Its **check** conditions are the ones evaluated against the queue branch / temporary queue
+PR; non-check conditions such as `label` and `draft` stay the pull request's own attributes (Mergify's
+`merge_conditions` doc scopes the temporary-PR substitution to "the merge conditions **for checks**").
+`-draft` is a `queue_conditions` entry, so
 un-drafting makes the PR *eligible*; it does not pin the base. From there:
 
 - `merge_method: squash` applies the batch's diff to `main` **as it is at merge time**, not to
