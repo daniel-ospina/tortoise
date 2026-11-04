@@ -12852,14 +12852,20 @@ class TortoiseSDK:
                 #
                 # ⛔ THAT SECOND READ RE-VERIFIES ONLY BECAUSE THIS FOLD ARMS
                 # IT (#10368 review P2, MEASURED). `update_point` scopes
-                # `refuse_terminal` to `_TEMPORAL_RESTAMP_PROPS` and this fold
-                # reaches the write leg only when `_temporal` is EMPTY, so that
-                # guard's read returned a verdict and acted on nothing: a
-                # `retract_point` landing between the read above and the write
-                # below was still applied to a settled claim, while this
-                # comment described protection that did not exist. The fold now
-                # sets `_FOLD_REFUSES_TERMINAL_WRITE` around its one write and
-                # converts the guard's refusal into this fold's own
+                # `refuse_terminal` to `_TEMPORAL_RESTAMP_PROPS`, so on the fold
+                # this paragraph is about — one whose SNAPSHOT said LIVE and
+                # generated a GENERIC prop — that guard's read returned a verdict
+                # and acted on nothing: a `retract_point` landing between the
+                # read above and the write below was still applied to a settled
+                # claim, while this comment described protection that did not
+                # exist. (`_temporal` is NOT empty on every path that reaches
+                # this write leg: a fold carrying a temporal prop reaches it
+                # whenever the snapshot said live, and the #7819 branch above
+                # covers only the snapshot-terminal case — the raced remainder
+                # is refused by that same guard and reported as
+                # `temporal_not_applied`, never `terminal_fold_refused`.) The
+                # fold now sets `_FOLD_REFUSES_TERMINAL_WRITE` around its one
+                # write and converts the guard's refusal into this fold's own
                 # drop-with-advisory — every other `update_point` caller keeps
                 # the #3305 scope, unchanged.
                 #
