@@ -49,7 +49,7 @@
 # a constant here.
 manifest_version: 1
 issue: 3863
-cut_at_commit: f60036084435b11925a5e51e940b71249937e253
+cut_at_commit: 2ae8b8f0afd8b4ce7af08e49a22c93898d184d01
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -1902,14 +1902,14 @@ rows:
   canonical: null
   job: 'What is in this memory graph and how it is shaped — ONE orientation call (#4282 row 6). section: taxonomy|structure|structure_check|pointkinds|tags|sources|namespaces|graphs|topics|health|status|stale
     (the consolidated list_*/status/health zoo); validate_domain (requires domain); audit (optional point_kinds);
-    issue_insight (requires title); dream_health. Omit section → a compact combined summary in the same envelope
-    this family has always returned. topics requires entity_id.'
+    dream_health. Omit section → a compact combined summary in the same envelope this family has always returned.
+    topics requires entity_id.'
   dependency: 'handler-served: no declared SDK link'
   lifecycle: active
-  used_by: never called, tooling, docs
+  used_by: agents, tooling, docs
   recommendation: keep
   basis: observed
-  reason: not called over MCP, but used by tooling — removing it would break that
+  reason: called by agents
   recommended_family: null
   proposed: false
   exemption: false

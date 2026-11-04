@@ -271,12 +271,19 @@ Two consequences for readers of the paragraph below, which is left as written be
    none of them dead-ends. **A future container batch must do the same for every pointer that names
    the container it retires** — a two-hop pointer resolves nowhere while the warning shim still serves
    both names, which is why it fails silently.
-3. Row 6's absorb list is executed as five retirements, not six: `tortoise_check_structure` keeps its
-   own door live until the container has a **declared output envelope**. That read is the one member
-   with a wrap envelope (`-> list[dict]`) and it carries the #8482 failure repair for a payload the
-   array schema cannot otherwise express; a `-> Any` container cannot carry it, so retiring the door
-   first would move the repair off the advertised path. The `structure_check` section and the door
+3. **Row 6 lists seven names; the batch accounts for all seven.** Five retire into the container
+   (`overview`, `summarize_structure`, `validate_domain`, `audit`, `dream_health`).
+   `tortoise_check_structure` is absorbed as the `structure_check` **section** while its own door
+   stays **live**, until the container has a **declared output envelope**: that read is the one
+   member with a wrap envelope (`-> list[dict]`) and it carries the #8482 failure repair for a
+   payload the array schema cannot otherwise express, while a `-> Any` container cannot carry it —
+   retiring the door first would move the repair off the advertised path. The section and the door
    answer the same rows today.
+   `tortoise_issue_insight` is **not** part of this batch at all: its Phase-0.1 destination
+   (`tools/bridge_table.py` `DESTINATION`) is **`search_knowledge`**, so it retires with that
+   container. Folding it in here as a section would also have given one SDK method two different
+   `limit` defaults — the door's own `2` against a container-wide `50` — and it remains **live and
+   advertised** until `search_knowledge` lands.
 
 No SDK method is added, removed or renamed by that batch (150 public methods before and after); the
 SDK leg of this list is a separate change.

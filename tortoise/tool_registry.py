@@ -1362,10 +1362,9 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "call (#4282 row 6). section: taxonomy|structure|structure_check|"
                     "pointkinds|tags|sources|namespaces|graphs|topics|health|status|"
                     "stale (the consolidated list_*/status/health zoo); validate_domain "
-                    "(requires domain); audit (optional point_kinds); issue_insight "
-                    "(requires title); dream_health. Omit section → a compact combined "
-                    "summary in the same envelope this family has always returned. "
-                    "topics requires entity_id.",
+                    "(requires domain); audit (optional point_kinds); dream_health. "
+                    "Omit section → a compact combined summary in the same envelope "
+                    "this family has always returned. topics requires entity_id.",
         risk="read",
         http_policy=True,
         sdk_method="",  # custom handler in mcp_server.py (dispatches per section)
