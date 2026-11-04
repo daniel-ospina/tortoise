@@ -878,9 +878,15 @@ def test_the_ghless_path_helper_is_reusable_on_one_tmp_path(tmp_path):
     Non-vacuity, measured on each half SEPARATELY (this arm, `-k
     is_reusable_on_one_tmp_path`, one mutation at a time):
 
-      bare `mkdir()`                         -> 1 failed  (FileExistsError, :1313)
-      `mkdir(exist_ok=True)`, no `is_symlink` -> 1 failed  (FileExistsError, :1388)
+      bare `mkdir()`                         -> 1 failed  (FileExistsError at `bin_dir.mkdir()`)
+      `mkdir(exist_ok=True)`, no `is_symlink` -> 1 failed  (FileExistsError at `dst.symlink_to(src)`)
       both in place                           -> 1 passed
+
+    ⛔ THE CALL SITES, NOT `pathlib.py` LINE NUMBERS (review, `#10777`). These cited
+    `:1313` / `:1388`, which resolve in NO commit of this file (1051 lines at its
+    longest) and are `pathlib`'s own positions besides — version-dependent, so they
+    would rot at the next CPython. Naming the raising call makes the measurement
+    re-runnable against any interpreter.
     """
     first = _path_without_gh(tmp_path)
     second = _path_without_gh(tmp_path, "cat")
