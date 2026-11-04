@@ -1750,17 +1750,13 @@ def _pgrep_redis_servers() -> list[int]:
     O(servers) instead of scanning the whole tempdir (which holds tens of
     thousands of stale dirs on a leaky machine). Returns [] when pgrep is
     unavailable.
+
+    ⛔ THE LOSSY FORM, and it delegates to `_pgrep_redis_servers_or_none`
+    deliberately so the two cannot drift: `[]` here means "measured none OR the
+    probe failed". A caller that must distinguish those (#4740's residue bound,
+    and #8599's census — see `discover`) must use `_or_none` DIRECTLY.
     """
-    text = _run_text(
-        ["pgrep", "-f", "redislite/bin/redis-server"], timeout=5)
-    if text is None:
-        return []
-    pids: list[int] = []
-    for line in text.splitlines():
-        line = line.strip()
-        if line.isdigit():
-            pids.append(int(line))
-    return pids
+    return _pgrep_redis_servers_or_none() or []
 
 
 def _pgrep_redis_servers_or_none() -> list[int] | None:
@@ -1771,8 +1767,9 @@ def _pgrep_redis_servers_or_none() -> list[int] | None:
     A caller that must report an unaccounted residue (#4740: the conftest
     session-end sweep's `left`, which the CI orphan gate binds its bound to)
     needs the difference: `[]` means measured-none, `None` means
-    not-measured. Kept alongside (not inside) `_pgrep_redis_servers` so the
-    many existing callers keep their exact `[]`-on-failure contract.
+    not-measured. `_pgrep_redis_servers` DELEGATES here and collapses with
+    `or []`, so the many existing callers keep their exact `[]`-on-failure
+    contract while the two readers cannot drift apart (#10757 P3).
 
     pgrep exits 0 on matches and 1 on no matches — both are successful
     probes. Any other status, a timeout, or an OSError is a failed probe.
@@ -1850,7 +1847,20 @@ def discover(jobs: int = 1, max_tempdir_entries: int = 5000,
     tmpdir = _real_gettempdir()
 
     # Pass 1: live servers (authoritative pid comes from pgrep).
-    live_pids = _pgrep_redis_servers()
+    #
+    # ⛔ READ THE `_or_none` FORM (#8599 review P3, #10757): the `[]`-collapsing
+    # reader cannot tell "measured zero" from "the 5 s pgrep probe timed out or
+    # pgrep is missing", and this function's `complete` flag is what decides
+    # whether the census may be PUBLISHED as measured. A failed pass 1 publishes
+    # a SUBSET as measured, which is the same fail-open the `dropped` flag closes
+    # for pass 2 — the vanished term then claims every live server pass 1 would
+    # have named as a natural exit. Reachability needs a pass-1 failure AND a
+    # server pass 2 does not cover (pass 2 walks the ephemeral namespace, where
+    # essentially every redislite dir lives), which is why it is `and`, not the
+    # main path — but it is exactly the load that produced #8599 in the first
+    # place, so it is closed rather than declared.
+    pass1_pids = _pgrep_redis_servers_or_none()
+    live_pids = pass1_pids or []
     seen_dirs: set[str] = set()
 
     # One batched ps for all live pids (issue #1005 perf).
@@ -1863,7 +1873,9 @@ def discover(jobs: int = 1, max_tempdir_entries: int = 5000,
     finally:
         _PROC_INFO_CACHE = {}
     out = _ScanAwareList(records)
-    out.complete = complete
+    # Fail-closed: a pass-1 probe that FAILED makes the census truncated
+    # whatever pass 2 saw.
+    out.complete = complete and pass1_pids is not None
     return out
 
 
@@ -1893,12 +1905,17 @@ def _discover_from_live(live_pids, jobs, tmpdir, seen_dirs,
     # `test_discover_reports_a_PARALLEL_classification_drop_as_a_TRUNCATED_census`
     # (deliberately deleted from the flag, each one reds). The third — the
     # `PermissionError/OSError` arm around `os.path.join`/`realpath`/`exists` —
-    # is DEFENSIVE and is not separately pinned, because it is not reachable
-    # through those calls: `os.path.exists` swallows `OSError` and returns False
-    # (so the dir simply takes the `not exists` continue), and `realpath` does
-    # not raise for these inputs. It is kept as belt-and-braces; an attempt to
-    # pin it by monkeypatching `os.path.exists` to raise did NOT reach this arm
-    # (measured), which is itself the evidence that the arm is unreachable.
+    # is DEFENSIVE and is not reachable through those calls: `os.path.exists`
+    # swallows `OSError` and returns False (so the dir takes the `not exists`
+    # continue), `realpath` does not raise for these inputs, and `join` cannot
+    # raise `OSError`. It is kept as belt-and-braces for a future guard added
+    # inside this `try` — and that is the ONLY reason to keep it: it is not
+    # pinned, because pinning it means forcing a raise the production calls
+    # cannot make. (An earlier revision of this comment claimed a measurement
+    # showed the arm unreachable; the measurement only showed that one
+    # monkeypatch of `os.path.exists` was consumed by `_scan_socket_dirs`'s own
+    # call — a fact about the patch, not about the arm. The reasoning above is
+    # the claim; no measurement is offered as evidence for it.)
     dropped = False
 
     def _classify_live(pid: int) -> dict | None:
@@ -3724,15 +3741,20 @@ def _run_sweep(dry_run: bool, batch_size: int | None, only_safe: bool = False,
     # observed, which keeps the gate as strict as before this term existed.
     #
     # WHAT `records.complete` OBSERVES, stated so nobody has to infer it: the
-    # bounded walk running out of budget, AND (`_discover_from_live`'s `dropped`)
-    # a socket dir the walk enumerated that classification then refused — an
-    # `OSError` on the marker, or a `_classify_dir` failure. RESIDUAL, and it is
-    # narrow on purpose: pass 1 resolving a live pid whose `unixsocket` config it
-    # cannot READ (`_socket_dir_from_cmdline` swallowing an `OSError`) is not
-    # counted, because that read fails for reasons unrelated to this sweep and
-    # folding it in would disable the #8599 term far more often than it fires —
-    # the same class 2 of the 10 (a pre-existing property of that reader, not of
-    # this term). Pass 2 still finds such a dir whenever it is ephemeral-named.
+    # bounded walk running out of budget; a socket dir the walk enumerated that
+    # classification then refused (`_discover_from_live`'s `dropped`); and —
+    # since the #10757 P3 — a FAILED pass-1 `pgrep` probe, which `discover` now
+    # reads in its `_or_none` form instead of collapsing to `[]` (a subset census
+    # that reads as measured is this fail-open one door over, and pass 1 runs
+    # under exactly the load that produced #8599).
+    #
+    # RESIDUAL, narrow on purpose: pass 1 resolving a live pid whose `unixsocket`
+    # config it cannot READ (`_socket_dir_from_cmdline` swallowing an `OSError`)
+    # is not counted, because that read fails for reasons unrelated to this sweep
+    # and folding it in would disable the #8599 term far more often than it fires
+    # — a pre-existing property of that reader, not of this term. Pass 2 still
+    # finds such a dir whenever it is ephemeral-named, which is nearly all of
+    # them (`EPHEMERAL_PREFIXES`).
     out.discovered_pids = _candidate_pids(resolved) if records.complete else None
     return out
 
@@ -3874,6 +3896,15 @@ def live_embedded_server_count() -> int | None:
     servers of every other concurrent job, and under `pytest -n` those of every
     other worker. It is a measurement of the PROCESS TABLE, not of this run's
     residue — use :func:`own_live_server_count` for the attributable number.
+
+    ⛔ NEVER FEED THIS TO `build_end_sweep_report` OR ANY PID-SET CONSUMER
+    (#10757 review P3). A count cannot say WHICH process left a population, so a
+    scalar where the builder `len()`s an observed pid set silently LOSES the
+    #8599 vanished term instead of failing — which is why `tests/conftest.py`
+    switched to :func:`live_embedded_server_pids` and why the AST pin in
+    `tests/test_reaper.py` rejects a count probe at that call site. The function
+    is kept because a count is a legitimate reading for a COUNT consumer; it is
+    a trap only where identities are required.
     """
     probe = _pgrep_redis_servers_or_none()
     return None if probe is None else len(probe)

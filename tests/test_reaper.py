@@ -472,8 +472,12 @@ def test_live_candidate_is_found_by_pass1_regardless_of_dir_name(
         d = tmp_path / name
         d.mkdir()
         (d / "redis.socket").write_text("")
-    # pass 1 resolves the dir from the live pid's cmdline (name-independent)
-    monkeypatch.setattr(_R, "_pgrep_redis_servers", lambda: [424242])
+    # pass 1 resolves the dir from the live pid's cmdline (name-independent).
+    # ⛔ THE `_or_none` SEAM (#10757 P3): `discover` reads it directly so a
+    # FAILED probe is distinguishable from a measured zero. Patching the
+    # collapsing `_pgrep_redis_servers` here silently stops reaching pass 1 at
+    # all — measured: this test then saw the host's 27 real servers and redded.
+    monkeypatch.setattr(_R, "_pgrep_redis_servers_or_none", lambda: [424242])
     monkeypatch.setattr(_R, "_socket_dir_from_cmdline",
                         lambda pid: str(tmp_path / "my-custom-name"))
     monkeypatch.setattr(_R, "_classify_dir",
@@ -2743,8 +2747,13 @@ def test_stale_marker_write_never_follows_symlink(monkeypatch):
             "fixture must be inside the ephemeral namespace — else the " \
             "refusal would be containment's, not the marker guard's"
         # No pgrep in the fixture: pass 2 is what must discover the decoy.
-        monkeypatch.setattr("tortoise.embedded_reaper._pgrep_redis_servers",
-                            lambda: [])
+        # ⛔ MEASURED-zero, not a failed probe (#10757 P3): discover reads the
+        # `_or_none` seam, so this is a COMPLETE census (a `None` here would
+        # make it truncated and the assertion below would be about that
+        # instead of about pass 2).
+        monkeypatch.setattr(
+            "tortoise.embedded_reaper._pgrep_redis_servers_or_none",
+            lambda: [])
         with monkeypatch_tempdir(base):
             acted = _run_sweep(dry_run=False, batch_size=None,
                                sweep_pid_files=False)
@@ -3737,8 +3746,10 @@ def test_run_sweep_pass1_live_server_in_quarantine_not_killed(monkeypatch):
                             # the record classified 'protected' instead of
                             # the 'candidate' shape this test pins.
                             lambda pid: os.path.realpath(str(dbdir)))
+        # ⛔ The `_or_none` seam `discover` actually reads (#10757 P3).
         monkeypatch.setattr(
-            "tortoise.embedded_reaper._pgrep_redis_servers", lambda: [live_pid])
+            "tortoise.embedded_reaper._pgrep_redis_servers_or_none",
+            lambda: [live_pid])
         try:
             rec = _classify_dir(str(dbdir), sock, known_pid=live_pid)
             assert rec["classification"] == "candidate"  # the dangerous shape
@@ -5263,6 +5274,45 @@ def test_pgrep_redis_servers_or_none_distinguishes_failure_from_zero(
 
     monkeypatch.setattr(_R.subprocess, "run", lambda *a, **k: _Bad())
     assert _R._pgrep_redis_servers_or_none() is None
+
+
+def test_discover_reports_a_FAILED_pass1_probe_as_a_TRUNCATED_census(
+        tmp_path, monkeypatch):
+    """#8599 review P3 (#10757): `discover()` reads the `_or_none` form, so a
+    pass-1 probe that FAILED makes the census TRUNCATED (`complete is False`).
+
+    Why the flag is load-bearing rather than tidy: `_run_sweep` publishes
+    `discovered_pids` only when `records.complete` (pinned by
+    `test_run_sweep_reports_discovered_pids_unmeasured_when_the_scan_was_short`),
+    and the #8599 vanished term is read off that set. A pass-1 failure used to
+    collapse to `[]`, so the census read as MEASURED and the vanished term
+    claimed every live server pass 1 would have named as a natural exit — the
+    fail-open the `dropped` flag closes for pass 2, one door over, reachable
+    under exactly the load that produced #8599.
+
+    All three readings are pinned in one test on purpose: `complete is False`
+    unconditionally would satisfy the failure arm alone, and the measured-zero
+    arm (pgrep exit 1 — a SUCCESSFUL probe reporting none) is the one that must
+    NOT be truncated, since a `None`-on-empty reader would disable the term on
+    every quiet host.
+    """
+    import tortoise.embedded_reaper as _R
+
+    # Only the pass-1 reading varies; pass 2 walks an empty scoped tempdir, so
+    # a `False` here cannot come from the walk or from `dropped`.
+    monkeypatch.setattr(_R, "_socket_dir_from_cmdline", lambda pid: None)
+    for probe, expected, why in (
+        (lambda: None, False, "a FAILED probe (timeout / missing / status 2)"),
+        (lambda: [], True, "a measured zero (pgrep exit 1)"),
+        (lambda: [424242], True, "measured pids"),
+    ):
+        monkeypatch.setattr(_R, "_pgrep_redis_servers_or_none", probe)
+        with monkeypatch_tempdir(tmp_path):
+            out = _R.discover()
+        assert out.complete is expected, (
+            f"{why} must give complete={expected}: got {out.complete!r}. A "
+            f"census that is truncated but reads as measured lets the #8599 "
+            f"vanished term count every unlisted live server as a natural exit")
 
 
 def test_reap_refuses_when_an_owner_attached_after_confirmation(
