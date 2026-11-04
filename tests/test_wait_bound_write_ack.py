@@ -950,7 +950,11 @@ def test_the_citations_in_this_contract_are_SYMBOLS_not_sdk_line_numbers():
     from before this PR (`mcp_auth.py:515-538`, `mcp_server.py:1304`,
     `fastmcp/tools/base.py:363-369`, `record_read.py:1029`) and are not this
     lane's debt to convert — `sdk.py` is the one cited five times here, and the one
-    that moved with every commit that touched the file.
+    that moved by BOTH `origin/main` merges (+21 at `de53c5ee2`, +104 at
+    `b81e75385`) and by most of this PR's own edits. ⛔ Not "every commit that
+    touched the file": three of them (9f04159f0, 8274613f8, e0c7e49b1) changed
+    `sdk.py` without moving the cited constructs, which is the precise reason a
+    line citation looks fine right up until it is not.
     """
     import pathlib
     import re
