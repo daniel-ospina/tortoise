@@ -136,10 +136,49 @@ _ARM_OFF_VARS = ("TORTOISE_VALUE_GATE", "TORTOISE_S2_DECISION_SEAM")
 #: naming a different head; the two spellings below are pinned.
 _HEAD_PREFIX = 8
 
+#: The repo's own bare-definite SHAPE rule, copied here as a literal rather than
+#: imported, so this driver stays stdlib-only (it runs before any DB is up).
+#:
+#: `capstone_measure._is_bare_definite` defers to
+#: `tortoise.definite_description_backfill.is_bare_definite_description`, which is
+#: `_ARTICLE.match(name.strip()) is not None` for `_ARTICLE =
+#: re.compile(r"^the[ \t]+(?P<body>\S(?:.*\S)?)$", re.IGNORECASE)`. The two are
+#: held EQUAL by `test_the_bare_definite_shape_is_the_repos_own_predicate`, over
+#: the shipped names and a synthetic corpus, so this copy cannot drift into
+#: agreeing with a record it should refuse.
+_BARE_ARTICLE = re.compile(r"^the[ \t]+\S(?:.*\S)?$", re.IGNORECASE)
+
+
+def _is_bare_definite(name: str) -> bool:
+    """Whether ``name`` has the ``the <body>`` shape (repo predicate, copied)."""
+    raw = str(name or "").strip()
+    return bool(raw) and _BARE_ARTICLE.match(raw) is not None
+
 
 def _names_head(graph: str, head: str) -> bool:
-    """Does ``graph`` name ``head`` under the prefix the producers write?"""
-    return head[:_HEAD_PREFIX] in graph
+    """Does ``graph`` name ``head`` under the prefix the producers write?
+
+    ⛔ A SUBSTRING TEST IS NOT A NAME TEST (#10610 review at `75bfd9c6`). The
+    previous form was `head[:8] in graph`, which the comment above claimed "still
+    rejects a graph naming a different head" — it does not. Measured: setting an
+    OFF arm's graph to `capstone_off_9152448d_54922a80` — a graph naming head
+    `9152448d` with our own eight characters merely APPENDED — scored, and that
+    arm's share was then used as a before realization of head `54922a80`.
+
+    So the producers' documented shape (`<name>_<head>_<epoch>`) is parsed and the
+    HEAD TOKEN is compared, not searched for: the token must be a prefix of the
+    head the record claims (producers write eight, the committed records carry
+    nine, so any prefix length is accepted), and it must be the token in the
+    head's OWN position — the segment before the numeric epoch. A name that does
+    not parse into that shape names no head this driver can check, so it refuses
+    rather than being searched for a lucky substring.
+    """
+    parts = str(graph or "").split("_")
+    if len(parts) < 3 or not parts[-1].isdigit() or not parts[-2]:
+        return False
+    token = parts[-2]
+    wanted = str(head or "").strip()
+    return bool(wanted) and len(token) >= 6 and wanted.startswith(token)
 
 
 def _consistent_share(where: str, share, bare, objects) -> None:
@@ -247,6 +286,96 @@ def _refuse(message: str) -> SystemExit:
     """
     print(f"e1-e2-scores: REFUSED — {message}", file=sys.stderr)
     return SystemExit(2)
+
+
+def _count(where: str, field: str, value, ceiling: int | None = None) -> int:
+    """A count field, bounded by the population it counts — or refused.
+
+    ⛔ Every count in this file was a TRUSTED TOKEN until the review at
+    `75bfd9c6` (#10610): `_consistent_share` bounded the SHARE's numerator by its
+    denominator, and the E2a counter beside it was still compared straight against
+    its bar. Three mutations went GREEN:
+
+    * `value_survived: 20` against the frozen 14 wrote `E2 PASS — E2a 20/14`
+      (a numerator above its own denominator is not a population);
+    * `value_survived: Infinity` wrote `E2 PASS — E2a inf/14` — JSON carries the
+      `Infinity` literal and `int.__ge__` accepts it;
+    * `value_survived: "8"` escaped as `TypeError: '>=' not supported between
+      instances of 'str' and 'int'` — exit 1 with a traceback, which an operator
+      cannot tell from a crash, not the refusal the module docstring promises.
+
+    So: numeric (never `bool`, which is an `int` in Python), finite, integral,
+    non-negative, and no larger than the population it counts. `ceiling=None`
+    means the caller bounds it itself (the E2a denominator is held to the frozen
+    corpus count further down, and an unbounded read here must not pre-empt that
+    refusal's more specific message).
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise _refuse(f"{where} carries {field}={value!r}, which is not a number "
+                      f"— a count is numeric, so this is an edited record or "
+                      f"another producer's shape")
+    if not math.isfinite(value):
+        raise _refuse(f"{where} carries {field}={value!r}, which is not a finite "
+                      f"number — a count of a real population cannot be nan or "
+                      f"inf")
+    if value != int(value):
+        raise _refuse(f"{where} carries {field}={value!r}, which is not a whole "
+                      f"number — a count that is not integral is a ratio wearing "
+                      f"a count's name")
+    if ceiling is not None and not 0 <= value <= ceiling:
+        raise _refuse(f"{where} carries {field}={value} of a population of "
+                      f"{ceiling} — a count outside [0, population] is a number "
+                      f"edited away from the census it counts")
+    if value < 0:
+        raise _refuse(f"{where} carries {field}={value}, which is negative — no "
+                      f"population counts back below zero")
+    return int(value)
+
+
+def _census_reconcile(where: str, block: dict, *, declared=None) -> None:
+    """The totals a record STATES must be the sum of its own per-session census.
+
+    ⛔ The E2a record carries the census the totals are summed from
+    (`e2a_value_units.py` builds `units_total += len(value_ids)` and
+    `survived_total += len(survived)` per session), and the driver read the totals
+    and ignored the census (#10610 review at `75bfd9c6`). One field edit to the
+    file a lane would reach for to unblock the row — `value_survived: 14` with the
+    census untouched, which still sums to 8 — then wrote `E2 PASS — E2a 14/14`
+    while the record's own detail said 8 units survived. That is the shiftiest
+    possible forged green: a single number, no other file touched, and the
+    artifact contradicts itself where nobody was looking.
+
+    A record with no census is refused rather than trusted: every producer writes
+    it, so its absence means the totals are the only surviving statement of the
+    population, which is the state this check exists to exclude.
+    """
+    sessions = block.get("per_session")
+    if not isinstance(sessions, dict) or not sessions:
+        raise _refuse(f"{where} carries no `per_session` census, so its totals "
+                      "are the only statement of the population it grades — "
+                      "every producer writes the census those totals are summed "
+                      "from, so an absent one is an edited record")
+    units = survived = 0
+    for session_id, row in sessions.items():
+        if not isinstance(row, dict):
+            raise _refuse(f"{where} carries a `per_session` row for "
+                          f"{session_id!r} that is not an object")
+        ids = row.get("value_ids")
+        kept = row.get("value_survived")
+        if not isinstance(ids, list) or not isinstance(kept, list):
+            raise _refuse(f"{where} carries no value_ids/value_survived lists for "
+                          f"session {session_id!r} — the census is what the "
+                          "totals are summed from")
+        units += len(ids)
+        survived += len(kept)
+    stated = declared if declared is not None else (
+        block.get("value_units"), block.get("value_survived"))
+    if (units, survived) != tuple(stated):
+        raise _refuse(f"{where} states {stated[1]} of {stated[0]} value-bearing "
+                      f"units survived, but its own `per_session` census sums to "
+                      f"{survived} of {units} — the totals are the census, so a "
+                      "record that disagrees with its own detail grades a "
+                      "population it does not carry")
 
 
 def _grep(text: str, pattern: str, *, what: str) -> str:
@@ -430,9 +559,62 @@ def read_off_arms(repo: Path, floors: dict) -> list[dict]:
                 f"{graph!r} — the same run is not a second realization, and "
                 "`decidable` is the SET of pairings, so two copies of one "
                 "reading can only ever agree; the before arm still has n=1")
+        # ⛔ THE GRAPH NAME IS NOT THE RECORD'S IDENTITY (#10610 review at
+        # `75bfd9c6`). Comparing the string alone left the guard one character
+        # wide: copying arm 2 over arm 1 with its epoch bumped by one second
+        # (`…_1793379347` -> `…_1793379348`, record otherwise byte-identical) made
+        # two names for ONE realization, and E1 went from REFUSED to a DECIDED
+        # `PASS` off a single reading — the pseudoreplication this guard exists to
+        # stop, and the cheapest way to satisfy the "n >= 2 per arm" the design
+        # asks for. `e1_paired_arm.py` writes `object_names` from the run, so two
+        # realizations of the same arm differ there; identical names are the same
+        # measurement wearing a new stamp.
+        names = record.get("object_names")
+        if not isinstance(names, list) or not names:
+            raise _refuse(
+                f"{name} carries no `object_names`, so nothing in it establishes "
+                "a population of its own — a realization that names no population "
+                "cannot be told apart from a re-stamped copy of another")
+        same = next((prior for prior in arms
+                     if prior.get("object_names") == names), None)
+        if same is not None:
+            raise _refuse(
+                f"{name} and {same['artifact']} carry the SAME `object_names` — "
+                f"a fresh graph stamp ({graph!r} vs {same['graph']!r}) is not a "
+                "fresh realization, so the before arm still has n=1 and "
+                "`decidable` would be asserted from one reading")
+        # ⛔ …and the counts must BE that population (#10610 review at
+        # `75bfd9c6`). `_consistent_share` reconciled the share against
+        # `bare_definite`/`objects`, and nothing reconciled THOSE with the
+        # `object_names` they are counted from: editing arm 1 to `bare_definite:
+        # 70, share: 70/78` (names untouched: 78, of which 28 bare) scored a
+        # DECIDED `PASS` at a 33.2 pp spread. A count that disagrees with the list
+        # it counts is an edit, and the census is the list.
+        if objects != len(names):
+            raise _refuse(
+                f"{name} states objects={objects} but carries {len(names)} "
+                "`object_names` — the count is the census, so a record that "
+                "disagrees with its own population grades a run it does not "
+                "carry")
+        bare_in_names = sum(1 for item in names if _is_bare_definite(item))
+        if record.get("bare_definite") != bare_in_names:
+            raise _refuse(
+                f"{name} states bare_definite={record.get('bare_definite')} but "
+                f"{bare_in_names} of its {len(names)} `object_names` have the "
+                "bare-definite shape — a share computed over a count the record's "
+                "own names refute")
+        counts = record.get("label_counts")
+        if isinstance(counts, dict):
+            labelled = counts.get("Object")
+            if labelled is not None and labelled != objects:
+                raise _refuse(
+                    f"{name} states objects={objects} but its own label_counts "
+                    f"reports {labelled} `:Object` — two censuses of one run "
+                    "cannot disagree")
         arms.append({
             "artifact": f"{EVIDENCE / name}",
             "graph": graph,
+            "object_names": names,
             "objects": objects,
             "bare_definite": record.get("bare_definite"),
             "share": share,
@@ -614,6 +796,14 @@ def e2_score(repo: Path, floors: dict) -> dict:
     survived = record.get("value_survived")
     if not units or survived is None:
         raise _refuse(f"{E2A_RECORD} carries no value_units/value_survived")
+    # ⛔ A COUNT, not a token (#10610 review at `75bfd9c6`). `20/14` and `inf/14`
+    # both wrote `E2 PASS` before this, and `"8"` escaped as a TypeError — see
+    # `_count`. The denominator is bounded by the frozen count below (whose refusal
+    # names the pre-registered number, the more specific finding), so only its
+    # type/finiteness is asserted here; the numerator is bounded by its own
+    # denominator, which is a population relation no producer can violate.
+    units_n = _count(E2A_RECORD, "value_units", units)
+    survived_n = _count(E2A_RECORD, "value_survived", survived, ceiling=units_n)
     frozen_units = floors["e2a_units"]
     # The denominator must BE the frozen one. A record that grades 20 units while
     # the pre-registration froze 14 would otherwise score GREEN on a population
@@ -624,6 +814,12 @@ def e2_score(repo: Path, floors: dict) -> dict:
                       f"'>= {floors['bars']['E2a']['required']} of "
                       f"{floors['bars']['E2a']['of']}') — a bar printed over a "
                       "different denominator is a number nothing froze")
+    # ⛔ …and the totals must BE the census they are summed from (#10610 review at
+    # `75bfd9c6`): `value_survived: 14` with `per_session` untouched (still 8)
+    # scored GREEN off ONE field edit to the file a lane would reach for to unblock
+    # the row. AFTER the frozen-denominator refusal, so a drifted denominator still
+    # gets the message that names the pre-registered number.
+    _census_reconcile(E2A_RECORD, record, declared=(units, survived))
 
     # …and the as-written block IS this record's reading (the bundle's README
     # reads it as `as_written 8/14 -> injected 14/14`), so its COUNTS must equal
@@ -640,6 +836,12 @@ def e2_score(repo: Path, floors: dict) -> dict:
                       f"{E2A_RECORD} reads {survived} of {units} — the "
                       "as-written block IS the E2a reading, so the two cannot "
                       "disagree")
+    if "as_written" in falsifier:
+        # The block's OWN totals must be its own census, the same rule the E2a
+        # record is held to: the as-written half is the pre-injection reading the
+        # README quotes, so its census is the population it must add up to.
+        _census_reconcile(f"{E2A_FALSIFIER}'s as-written block",
+                          falsifier_as_written)
 
     # "Absent" and "present but empty" are different records: the fallback below
     # is for a flat record that declares no block at all. An EMPTY block is a
@@ -669,6 +871,14 @@ def e2_score(repo: Path, floors: dict) -> dict:
                       "moved because an anchor was injected")
     injected_survived = with_anchor.get("value_survived")
     injected_units = with_anchor.get("value_units")
+    # The same bound as the E2a counter it is compared to (#10610 review at
+    # `75bfd9c6`): the falsifier's reading is `units/units` or it is inert, and a
+    # non-number here used to reach the comparison below as a TypeError.
+    injected_units_n = _count(f"{E2A_FALSIFIER}'s scored block", "value_units",
+                              injected_units)
+    _count(f"{E2A_FALSIFIER}'s scored block", "value_survived",
+           injected_survived, ceiling=max(injected_units_n, 0))
+    _census_reconcile(f"{E2A_FALSIFIER}'s scored block", with_anchor)
     # The falsifier must move the SAME population the score is taken over. A
     # falsifier that reaches its own denominator proves that SOME counter moves;
     # crediting it to the frozen 14 would print a number nothing measured.
@@ -691,7 +901,7 @@ def e2_score(repo: Path, floors: dict) -> dict:
                       "mechanism count measures nothing")
 
     required = floors["bars"]["E2a"]["required"]
-    passed = survived >= required
+    passed = survived_n >= required
     return {
         "criterion": "E2",
         "bar": (f"E2a >= {required} of {frozen_units}, E2b fused share <= "

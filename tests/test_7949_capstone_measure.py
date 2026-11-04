@@ -1291,6 +1291,105 @@ def test_the_scores_probe_refuses_an_e2a_and_gate_drops_pair_from_two_graphs(
     assert sibling in err and on_graph in err, err
 
 
+def _falsifier_inflated(repo: Path) -> None:
+    """Make the falsifier's blocks agree with an E2a record that reaches its bar."""
+    falsifier_path = repo / "docs/evidence/9889" / scores_probe.E2A_FALSIFIER
+    falsifier = json.loads(falsifier_path.read_text())
+    for key in ("with_anchor", "as_written"):
+        block = falsifier[key]
+        for row in block["per_session"].values():
+            row["value_survived"] = list(row["value_ids"])
+        block["value_survived"] = block["value_units"]
+    falsifier_path.write_text(json.dumps(falsifier))
+
+
+@pytest.mark.parametrize("mutation", [
+    {"value_survived": 20},        # a numerator above its own denominator
+    {"value_survived": float("inf")},
+    {"value_survived": "8"},       # not a number at all
+    {"value_survived": 8.5},       # a ratio wearing a count's name
+    {"value_survived": -1},
+])
+def test_the_e2a_counter_is_a_count_not_a_token(mutation, tmp_path, capsys):
+    """#10610 review at `75bfd9c6` (P1): E2a's counter was compared straight to its bar.
+
+    Three mutations went GREEN before `_count` existed: `value_survived: 20` against the
+    frozen 14 wrote `E2 PASS — E2a 20/14`; `Infinity` (JSON carries the literal, and
+    `int.__ge__` accepts it) wrote `E2 PASS — E2a inf/14`; and `"8"` escaped as
+    `TypeError: '>=' not supported between instances of 'str' and 'int'` — exit 1 with a
+    traceback, which an operator cannot tell from a crash, not the exit-2 refusal the
+    module docstring promises. This is the same pair of checks `_consistent_share` got in
+    the two previous rounds, on the counter nobody looked at.
+
+    Non-vacuity: at the pre-fix head the first two write `PASS` (exit 0) and the string arm
+    escapes with exit 1.
+    """
+    repo = _bundle(tmp_path)
+    path = repo / "docs/evidence/9889/e2a-value-units.json"
+    record = json.loads(path.read_text())
+    record.update(mutation)
+    path.write_text(json.dumps(record))
+    _falsifier_inflated(repo)
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert "value_survived" in err, err
+
+
+def test_the_e2a_totals_are_the_census_they_re_summed_from(tmp_path, capsys):
+    """#10610 review at `75bfd9c6` (P1): the totals were never reconciled with the census.
+
+    The record carries the per-session census `e2a_value_units.py` sums the totals from,
+    and the driver read the totals and ignored it. So ONE field edit to the file a lane
+    would reach for to unblock the row — `value_survived: 14`, `per_session` untouched —
+    wrote `E2 PASS — E2a 14/14` while the record's own detail still said 8 units survived.
+    The shifty version of a forged green: no other file touched, and the artifact
+    contradicts itself where nobody was looking.
+
+    Non-vacuity: at the pre-fix head this bundle scores `PASS`, exit 0.
+    """
+    repo = _bundle(tmp_path)
+    record = json.loads((repo / "docs/evidence/9889/e2a-value-units.json").read_text())
+    census = sum(len(row["value_survived"]) for row in record["per_session"].values())
+    assert census == 8 and record["value_units"] == 14, record["value_survived"]
+    record["value_survived"] = 14
+    (repo / "docs/evidence/9889/e2a-value-units.json").write_text(json.dumps(record))
+    _falsifier_inflated(repo)
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert "per_session" in err and "census sums to 8 of 14" in err, err
+
+
+def test_a_graph_names_the_head_in_the_heads_own_position(tmp_path, capsys):
+    """#10610 review at `75bfd9c6` (P3): `head[:8] in graph` is not a name test.
+
+    The comment claimed the substring form "still rejects a graph naming a different head".
+    Measured: an OFF arm whose graph was set to `capstone_off_9152448d_54922a80` — a graph
+    naming head `9152448d` with our own eight characters merely APPENDED — scored, and that
+    arm's share became a before realization of head `54922a80`. The producers' documented
+    shape is parsed instead (`<name>_<head>_<epoch>`, the head token immediately before the
+    numeric epoch) and the token is compared, so a name that does not parse refuses.
+
+    Non-vacuity: at the pre-fix head this bundle scores, exit 0.
+    """
+    repo = _bundle(tmp_path)
+    path = repo / "docs/evidence/9889/e1-paired-off-arm-1.json"
+    record = json.loads(path.read_text())
+    # The arm records carry no `head` field; the head is the graph's own middle token.
+    head = record["graph"].split("_")[-2]
+    assert head.startswith("54922a800"), head
+    record["graph"] = "capstone_off_9152448d_" + head[:8]
+    path.write_text(json.dumps(record))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert "does not name head" in err, err
+
+
 def test_the_value_gate_liveness_refusal_is_not_a_truthiness_test(tmp_path, capsys):
     """A record that says its positive controls are DEAD must refuse — including `"false"`.
 
@@ -1311,14 +1410,23 @@ def test_the_value_gate_liveness_refusal_is_not_a_truthiness_test(tmp_path, caps
         e2a_path = repo / "docs/evidence/9889" / scores_probe.E2A_RECORD
         e2a = json.loads(e2a_path.read_text())
         assert e2a["value_units"] == 14, e2a          # the bar is ">= 13 of 14"
-        e2a["value_survived"] = e2a["value_units"]     # the E2a bar is MET
+        # The bar is MET — and the record's own `per_session` census has to agree
+        # with it, because the driver reconciles the totals against the census
+        # (an edit to the total ALONE is refused there, so a fixture that only
+        # bumped the total would be testing the wrong guard).
+        for row in e2a["per_session"].values():
+            row["value_survived"] = list(row["value_ids"])
+        e2a["value_survived"] = e2a["value_units"]
         e2a_path.write_text(json.dumps(e2a))
         # ...and the FALSIFIER's own blocks must agree, or its cross-check refuses first and
         # this test would be proving the wrong arm had fired.
         falsifier_path = repo / "docs/evidence/9889" / scores_probe.E2A_FALSIFIER
         falsifier = json.loads(falsifier_path.read_text())
-        for block in ("with_anchor", "as_written"):
-            falsifier[block]["value_survived"] = falsifier[block]["value_units"]
+        for key in ("with_anchor", "as_written"):
+            block = falsifier[key]
+            for row in block["per_session"].values():
+                row["value_survived"] = list(row["value_ids"])
+            block["value_survived"] = block["value_units"]
         falsifier_path.write_text(json.dumps(falsifier))
         path = repo / "docs/evidence/9889" / scores_probe.GATE_DROPS
         record = json.loads(path.read_text())
@@ -5001,16 +5109,76 @@ def test_the_three_routes_to_the_e1_e2_verdict_state_the_records_verdict():
     assert f"{e2b['share']:.6f}" in e2_rows[1], (
         f"the audit's E2b row does not carry the record's fused share ({e2b['share']:.6f}): "
         f"{e2_rows[1][:400]}")
-    assert e2b["below_floor"] is False and "MET" in e2_rows[1], (
+    # ⛔ THE TOKEN, not the substring (#10610 review at `75bfd9c6`). `"MET" in row` is
+    # satisfied by `"NOT MET"` — measured: `**E2b's own bar is MET**` → `**… is NOT MET**`
+    # left the whole suite green while the row claimed the RED belonged to E2b, which is the
+    # exact misreading this assertion's message forbids. Same class as `bold_ratios` and the
+    # verdict-word SET above, so it is pinned the same way.
+    assert e2b["below_floor"] is False and "bar is MET" in e2_rows[1], (
         "the record says E2b is NOT below its floor, so the audit's E2b row must state that "
         f"its own bar is MET — otherwise the RED reads as E2b's verdict: {e2_rows[1][:400]}")
+    assert "NOT MET" not in e2_rows[1], (
+        "the audit's E2b row states its own bar is NOT MET while the record says the floor is "
+        f"NOT breached — the RED then reads as E2b's verdict: {e2_rows[1][:400]}")
     assert record["e2"].get("decided_by") == "E2a" and "E2a" in e2_rows[1], (
         "the record attributes E2's FAIL to E2a, so the audit's E2b row must name the half "
         f"that decides it: {e2_rows[1][:400]}")
-    assert "SUPERSEDED" in e2_rows[0], (
-        "the audit's E2a row does not mark the reading it replaced as SUPERSEDED — a "
-        "superseded count left standing beside the live one is two present-tense "
+    # ⛔ …and SUPERSEDED as a BOLD TOKEN, for the same reason: `"is NOT SUPERSEDED"` contains
+    # `"SUPERSEDED"`, and that mutation (two live 1/14 and 8/14 readings) also stayed green.
+    assert ("is SUPERSEDED" in e2_rows[0] or "**SUPERSEDED**" in e2_rows[0]) and (
+        "NOT SUPERSEDED" not in e2_rows[0]), (
+        "the audit's E2a row must mark the reading it replaced as SUPERSEDED and only that "
+        "— a superseded count left standing beside the live one is two present-tense "
         f"measurements of one criterion: {e2_rows[0][:400]}")
+
+    # 4b. THE TWO E1 SURFACES, held to the record's own pairings — #10610 review at
+    #     `75bfd9c6` (P3). Leg 2 pinned only the README TABLE's verdict WORD, and legs 3/4
+    #     read the index row and the audit's E2 rows; the README's E1 verdict cell and the
+    #     audit's `| **E1** |` row were read by nothing. Measured: rewriting the README's
+    #     `0.3590` to `0.8123` in both of its sites, and the audit's "REFUSED at n=1 per arm"
+    #     to "a DECIDED PASS at n=1 per arm", left all 147 cases green — two documents
+    #     contradicting the committed record on the row `#9889` is waiting for.
+    e1_readme_row = next(ln for ln in listed if ln.startswith("> | **E1**"))
+    for pairing in pairings:
+        before_text = f"**{pairing['before_objects']} Objects / {pairing['before_share']:.4f}**"
+        assert before_text in e1_readme_row, (
+            f"the README's E1 verdict cell does not carry the record's before arm "
+            f"{before_text!r} — a cell that prints another run's numbers describes a "
+            f"population the record does not: {e1_readme_row[:600]}")
+        assert f"{pairing['after_share']:.4f}" in e1_readme_row, (
+            f"the README's E1 verdict cell does not carry the record's after share "
+            f"{pairing['after_share']:.4f}: {e1_readme_row[:600]}")
+    assert f"**{pairings[0]['after_objects']} Objects / " \
+           f"{pairings[0]['after_share']:.4f}**" in e1_readme_row, (
+        "the README's E1 verdict cell does not carry the record's after arm as "
+        f"`**{pairings[0]['after_objects']} Objects / {pairings[0]['after_share']:.4f}**`: "
+        f"{e1_readme_row[:600]}")
+    spread = f"{record['e1']['before_spread_pp']}"
+    assert spread in e1_readme_row, (
+        f"the README's E1 verdict cell does not carry the record's before spread "
+        f"({spread} pp) — the spread is WHY the pairings disagree: {e1_readme_row[:600]}")
+    # The audit's own E1 row: the row verdict THIS record gives, and no decided claim
+    # while `decidable` is false. The `decidable` flag is the record's, so the ban is
+    # conditional: once a re-run decides E1 at n >= 2, the row is free to say so.
+    e1_audit_rows = [ln for ln in proofs.splitlines() if re.match(r"^\| \*\*E1\*\*", ln)]
+    assert len(e1_audit_rows) == 1, (
+        f"the audit carries {len(e1_audit_rows)} E1 rows, not 1 — this leg has no subject")
+    # The audit quotes the RECORD's own word (`REFUSED`), where the README table maps it to
+    # the row verdict (`BLOCKED`, `_ROW_VERDICT`) — two surfaces, two vocabularies, and the
+    # audit's is the record's. Either is acceptable; whatever it says must be one of them.
+    assert (record["e1"]["outcome"] in e1_audit_rows[0]
+            or _ROW_VERDICT[record["e1"]["outcome"]] in e1_audit_rows[0]), (
+        f"the audit's E1 row states neither the record's own word "
+        f"({record['e1']['outcome']!r}) nor the row verdict for it "
+        f"({_ROW_VERDICT[record['e1']['outcome']]}): {e1_audit_rows[0][:600]}")
+    if record["e1"]["decidable"] is not True:
+        assert "DECIDED" not in e1_audit_rows[0], (
+            "the record's E1 is not decidable, so the audit's E1 row may not claim a "
+            f"DECIDED verdict: {e1_audit_rows[0][:600]}")
+        assert "n=1" in e1_audit_rows[0], (
+            "the audit's E1 row does not state the replication that is missing (n=1 per "
+            f"arm) — the reason the row is refused rather than undecided: "
+            f"{e1_audit_rows[0][:600]}")
 
     # 5. The refuted absence claim, in every routing surface.
     #
@@ -5578,6 +5746,97 @@ def test_a_before_arm_missing_one_arm_key_is_refused(key, tmp_path, capsys):
     record["arm"][key] = None
     path.write_text(json.dumps(record))
     assert scores_probe.score(repo)["e1"]["outcome"] in ("REFUSED", "PASS", "FAIL")
+
+
+def test_a_re_stamped_copy_of_one_before_arm_is_still_one_realization(tmp_path, capsys):
+    """#10610 review at `75bfd9c6` (P1): the graph NAME is not the record's identity.
+
+    The duplicate guard compared the graph string, which left it one character wide.
+    Copying arm 2 over arm 1 and bumping its epoch by one second
+    (`…_1793379347` -> `…_1793379348`, the record otherwise byte-identical) made two
+    names for ONE realization: measured, E1 went from REFUSED to a DECIDED `PASS` off a
+    single reading — the pseudoreplication the guard exists to stop, and the cheapest way
+    to fake #9889's own next requirement (n >= 2 per arm). `e1_paired_arm.py` writes
+    `object_names` from the run, so identity is the POPULATION, not the stamp.
+
+    Non-vacuity: at the pre-fix head this bundle scores `PASS`, exit 0.
+    """
+    repo = _bundle(tmp_path)
+    first = repo / "docs/evidence/9889/e1-paired-off-arm-1.json"
+    second = repo / "docs/evidence/9889/e1-paired-off-arm-2.json"
+    # Arm 1 COPIED over arm 2, with only the stamp changed: the population is arm 1's,
+    # the name claims to be arm 2's.
+    copy = json.loads(first.read_text())
+    second_record = json.loads(second.read_text())
+    assert copy["object_names"] != second_record["object_names"], (
+        "the SHIPPED before arms already carry one population — re-derive this pin")
+    copy["graph"] = second_record["graph"]
+    assert copy["graph"] != json.loads(first.read_text())["graph"]
+    second.write_text(json.dumps(copy))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert "SAME `object_names`" in err, err
+    assert "n=1" in err, err
+
+
+def test_the_before_arms_counts_are_the_population_they_count(tmp_path, capsys):
+    """#10610 review at `75bfd9c6` (P2): a count that disagrees with the census.
+
+    `_consistent_share` reconciled the share against `bare_definite`/`objects`, and
+    nothing reconciled THOSE with the `object_names` they are counted from. Measured: arm
+    1 edited to `bare_definite: 70, share: 70/78` with its 78 names untouched (28 bare of
+    78) scored a DECIDED `PASS` at a 33.2 pp spread. Three arms, one per census field.
+    """
+    cases = (
+        ("bare", lambda rec: (rec.__setitem__("bare_definite", 70),
+                              rec.__setitem__("share", 70 / 78)),
+         "states bare_definite=70"),
+        ("objects", lambda rec: (rec.__setitem__("objects", 77),
+                                 rec.__setitem__("share", 28 / 77)),
+         "states objects=77"),
+        ("labelled", lambda rec: rec["label_counts"].__setitem__("Object", 70),
+         "reports 70 `:Object`"),
+    )
+    for marker, mutate, expected in cases:
+        repo = _bundle(tmp_path / marker)
+        path = repo / "docs/evidence/9889/e1-paired-off-arm-1.json"
+        record = json.loads(path.read_text())
+        assert record["objects"] == 78 and len(record["object_names"]) == 78, record.keys()
+        mutate(record)
+        path.write_text(json.dumps(record))
+        with pytest.raises(SystemExit) as refused:
+            scores_probe.score(repo)
+        assert refused.value.code == 2, (marker, refused.value)
+        err = capsys.readouterr().err
+        assert expected in err, (marker, err)
+
+
+def test_the_bare_definite_shape_is_the_repos_own_predicate():
+    """The driver's local copy of the repo's predicate must BE the repo's predicate.
+
+    `capstone_measure._is_bare_definite` defers to
+    `tortoise.definite_description_backfill.is_bare_definite_description`; the scoring
+    driver cannot import it (it runs before any DB is up and is stdlib-only by design), so
+    it carries the shape as a literal. That is the copy that drifts, so it is held to the
+    repo's own function over the shipped populations AND the edge cases a regex rewrite
+    would get wrong (`"the"` alone, a trailing space, a newline in the body, `"The"`-case,
+    a tab separator, an empty name).
+    """
+    from tortoise.definite_description_backfill import (
+        is_bare_definite_description as repo_predicate,
+    )
+    shipped: list[str] = []
+    for name in ("e1-paired-off-arm-1.json", "e1-paired-off-arm-2.json"):
+        shipped.extend(json.loads(
+            (_REPO / "docs/evidence/9889" / name).read_text())["object_names"])
+    edge = ["the x", "the", "the ", "The Owner", "the\ttabbed", "", "the x\n",
+            " the padded body ", "a the x", "the \n span", "THE END"]
+    for sample in [*shipped, *edge]:
+        assert scores_probe._is_bare_definite(sample) == bool(repo_predicate(sample)), (
+            f"the driver's bare-definite shape disagrees with the repo predicate on "
+            f"{sample!r} — a share computed over a different rule than the producer's")
 
 
 def test_the_two_before_arms_must_be_two_RUNS_not_two_copies(tmp_path, capsys):
