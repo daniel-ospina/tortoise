@@ -1145,7 +1145,8 @@ mechanisms:
       unit word after it is never reached. REFUSED identically at `origin/main`
       `2745cfbc9`, so this is pre-existing and is NOT attributed to the
       completion. ⛔ Not repaired here on purpose: reaching a second token needs
-      its own decision about what `20 k` means beside a unit.
+      its own decision about what `20 k` means beside a unit. Tracked as
+      **#10942**.
       (q2) an IDENTIFIER-SHAPED value beside a unit word — `the see was x4k ms`
       against `… 4000 ms` — TOLERATES, and `x4k ms` against `x5k ms` REFUSES:
       `x4k`/`s4[k` are array indexes, not quantities. ⛔ The VERDICT is
@@ -1154,6 +1155,7 @@ mechanisms:
       completion changed is the ROUTE — `_composed_identity` now multiplies the
       glued `x4kms` to 4000 ms. So this is a fail-open the widen neither created
       nor closed, and it is named here rather than left to be discovered.
+      Tracked as **#10943**.
       Both halves of (q), and (p), are pinned by
       `test_the_registry_rows_measured_disclosures_are_pinned`.
       THE RENDER HALF is unchanged and stays pinned where #9775 left it.
