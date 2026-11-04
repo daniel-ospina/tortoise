@@ -2605,7 +2605,25 @@ def _declared_floors(manifest_text: str) -> dict[str, DeclaredFloor]:
     out: dict[str, DeclaredFloor] = {}
     for row, declaration in floors.items():
         if not isinstance(row, str):
-            continue
+            # The ROW-NAME face of the same defect the unknown-key branch below
+            # refuses (#10704 review round 5, P3). `_declared_floors` used to
+            # `continue` here while `ci_manifest.floor_issues` iterated the same
+            # keys unfiltered and red them — so `durations_floors: {355.0: 400.0}`
+            # (a row name typed as a number, or `on:`/`yes:`, which YAML keys as
+            # `True`) was a declaration the writer silently dropped and the reader
+            # reported, on the same document, from the same repo. Bounded today —
+            # `refresh_durations`'s pre-write `integrity_problems` gate turns it into
+            # a `refusing to write` rather than a silent cap revert — but it is the
+            # same "a declaration this reader cannot honour is one it must refuse"
+            # rule, and the writer must not be the lenient half of a two-sided
+            # contract.
+            raise DurationsBridgeError(
+                f"`durations_floors` declares the row name {row!r}, which is not a "
+                f"string (a {type(row).__name__}) — a declaration this reader cannot "
+                "key onto a `durations` row is one it must refuse rather than "
+                "silently drop, or the cap reverts on the next sweep with the "
+                "reader redding a document the writer accepted (#9172)"
+            ) from None
         if isinstance(declaration, dict):
             unknown = sorted(set(declaration) - {"value", "pinned"})
             if unknown:

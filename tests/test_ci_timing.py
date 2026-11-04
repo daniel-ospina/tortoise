@@ -7181,6 +7181,15 @@ def test_an_unreadable_or_pinned_odd_declaration_refuses_the_write() -> None:
         ci_timing._declared_floors(
             "durations_floors:\n  test_capped.py: 355.0\n  twin.py: [oops\n"
             f"{header}")
+    # …and the ROW-NAME face: a declaration keyed on something that is not a string.
+    # `355.0` (a row name typed as a number) or `yes:` (which YAML keys as `True`)
+    # used to be `continue`d — dropped by the WRITER while `ci_manifest.floor_issues`
+    # red the same document from the READ side, so the two halves of one contract
+    # disagreed about the same bytes (#10704 review round 5, P3).
+    for bad_row_name in ("355.0", "yes"):
+        with pytest.raises(ci_timing.DurationsBridgeError):
+            ci_timing._declared_floors(
+                f"durations_floors:\n  {bad_row_name}: 355.0\n{header}")
     # …and the shapes that ARE readable parse to what they say
     parsed = ci_timing._declared_floors(
         "durations_floors:\n  a.py: 355.0\n  b.py: {value: 12.5, pinned: true}\n"
