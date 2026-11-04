@@ -1888,7 +1888,9 @@ def test_the_shipped_logs_blocker_cells_are_the_emitters_own():
     # TWICE in the joined source: in the reachable `elif` arm AND in `build_e4_row`'s
     # `else` arm, which no committed receipt can reach (`edge_correct >= planted` with
     # an outcome that is not PASS). Rewriting the REACHABLE arm's clause to
-    # "… and IS a live blocker again …" left the whole file green at 163 passed, while
+    # "… and IS a live blocker again …" left the whole file green (163 passed at
+    # `b132e1a28`, the head that review ran on — the file collects more at this head,
+    # so the count is dated rather than restated), while
     # `build_e4_row` emitted exactly that sentence into every future scored log. The
     # BEHAVIOURAL binding is asserted on `built["note"]` further down, beside the
     # sibling `unowned` clause round 3 fixed the same way; this line only catches a
@@ -1937,7 +1939,8 @@ def test_the_shipped_logs_blocker_cells_are_the_emitters_own():
     # ⛔ AND THE CLOSED-BLOCKER SENTENCE ITSELF, BOUND BEHAVIOURALLY (`#10679` review
     # round 6). The file-wide pre-check above cannot see a rewrite of the REACHABLE
     # arm, because the same phrase survives in the unreachable one — measured: the
-    # refuted "… and IS a live blocker again …" stayed green at 163 passed while the
+    # refuted "… and IS a live blocker again …" stayed green (163 passed at
+    # `b132e1a28`) while the
     # emitter printed it. Binding `built["note"]` closes that, and the negative arm
     # below (`"not a live blocker"`) is what makes the binding mean something rather
     # than just "the phrase is still somewhere in the sentence".
@@ -3200,7 +3203,8 @@ def test_the_shipped_log_states_EVERY_row_note_the_same_way_in_both_copies():
     a CONTRADICTORY `row E4 note:` line inserted ABOVE the real one was neither counted
     nor compared. Measured in a throwaway copy: inserting one such line, reverting
     "no open issue owns the residual" to "the residual is owned by #9596", left the
-    whole suite green at 163 passed while the log carried a human sentence its own
+    whole suite green (163 passed at `b132e1a28`) while the log carried a human
+    sentence its own
     machine copy refutes — the very attribution round 4 was closing, still readable as
     emitter output. Occurrence COUNTS are compared now, so a duplicate is the finding.
 
@@ -4706,9 +4710,10 @@ def test_the_bare_entry_point_call_cite_resolves_to_the_call_it_names():
 # looks for. The bundle's own convention for a number in that position is
 # the README's *"written here WITHOUT the `file:line` form on purpose … do NOT
 # follow them as pointers at this head"* paragraph: the SYMBOL is authoritative, the
-# line is a convenience nothing re-derives. Cited by SENTENCE — that range was
-# `188-200` at `origin/main` and is `196-205` at this head, moved by THIS branch's own
-# README insertions, which is the third time a number here has walked.
+# line is a convenience nothing re-derives. Cited by SENTENCE, and with NO typed
+# range at all: that paragraph's bounds move with every insertion above it, and a
+# number in this position had already walked three times — so the SYMBOL carries
+# the identity and the range is deliberately not restated here.
 #
 # Measured provenance, stated exactly (the previous revision of this comment
 # misstated both halves, and this file's own docstring below contradicted it):
