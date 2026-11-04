@@ -672,16 +672,99 @@ def e2a_outcome(e1: dict, bars: dict) -> dict:
                    value=f"value_units {survived}/{units} survived")
 
 
-def e3_outcome(*, anchored: int, derived: int, bars: dict) -> dict:
-    """E3: derived nodes carrying a version anchor, floor 30 derived nodes."""
+def e3_unmeasured_legs(per_label: dict[str, dict[str, int]] | None, *,
+                       labels: tuple[str, ...] = DERIVED_LABELS) -> tuple[str, ...]:
+    """The registered denominator classes the measured graph carries **zero** nodes of (#9736).
+
+    E3's row is scored by SUMMING its classes (``census()`` → ``derived_total``), so a registered
+    class with no nodes contributes ``0/0`` and disappears from BOTH halves of the ratio. The row
+    then reports ``share = 1.000`` — a PASS — over a population NARROWER than the one it registered,
+    which is a false green in the favourable direction: the exact failure ``= 1.000 (zero
+    unanchored)`` cannot distinguish from a real one.
+
+    That is the production shape, not a corner: ``:Document`` is a RETIRED label (the writer remaps
+    it onto ``:Source`` under D10 — the ``entity_label = "Source"`` remap in
+    ``tortoise/projection/edges.py``, cited by SYMBOL because a line number here would re-stale on
+    the next insertion above it), and §10.1 of the
+    pre-registration records that the run IT re-derives wrote none at all (the scored log agrees:
+    ``e3 label=Document nodes=0``). So the leg E3 names is
+    structurally empty on every post-D10 graph, and only #9736's owner-gated ruling can change
+    WHICH spelling the row names.
+
+    ⛔ Which classes are "registered" is ``DERIVED_LABELS`` (re-derived from the writer's
+    ``_DERIVATION_REFERENCES_LABELS``) and NOT the wider instrument census: ``:Object`` is left
+    unanchored BY DESIGN (#5199 option A) and #10525 dropped it from the row, so counting it as a
+    missing leg would re-red E3 for a recorded decision.
+
+    An ABSENT block is empty too — a census that never enumerated a registered class did not
+    measure it, and "absent" must not read as "fine".
+    """
+    blocks = per_label or {}
+    empty: list[str] = []
+    for label in labels:
+        block = blocks.get(label)
+        nodes = block.get("nodes") if isinstance(block, dict) else None
+        if not nodes:
+            empty.append(label)
+    return tuple(empty)
+
+
+def e3_legs_line(per_label: dict[str, dict[str, int]] | None) -> str:
+    """The log's ``e3 unmeasured_legs=`` line, DERIVED from the census it is printed beside.
+
+    ⛔ Derived from ``per_label``, never from a caller's ``e3``/``e3_out`` dict. The first cut read
+    the row's ``unmeasured_legs`` key, so a caller that built the row by hand (this bundle's own
+    render fixture did exactly that, over a canned census whose ``Document`` leg is 0) rendered
+    ``e3 unmeasured_legs=none — every registered class carried nodes`` two lines below
+    ``e3 label=Document nodes=0``. A positive measurement claim asserted from an ABSENT KEY is the
+    same defect this line exists to disclose, one layer up.
+    """
+    legs = e3_unmeasured_legs(per_label)
+    if legs:
+        return ("e3 unmeasured_legs=" + ",".join(legs)
+                + " — a registered class the run wrote ZERO of; its `0/0` cannot "
+                  "satisfy '= 1.000', so the measured denominator is narrower than "
+                  "the registered one and E3 cannot PASS on it (#9736)")
+    return ("e3 unmeasured_legs=none — every registered class the census "
+            "enumerates carried nodes, so the measured denominator IS the "
+            "registered one")
+
+
+def e3_outcome(*, anchored: int, derived: int, bars: dict,
+               unmeasured_legs: tuple[str, ...] = ()) -> dict:
+    """E3: derived nodes carrying a version anchor, floor 30 derived nodes.
+
+    ``unmeasured_legs`` is the ruling-free half of #9736 (``NOT-A-DECISION(9736-gate-empty-leg)``):
+    a registered class the run measured **zero** nodes of cannot SATISFY the ``= 1.000`` bar by
+    arithmetic. The bar is a claim about the REGISTERED class set, so a row whose population is a
+    strict subset of it has not been measured, however clean the subset looks.
+
+    The rule is deliberately narrow and moves NO recorded number:
+
+    * a row that already fails **stays** FAIL and the empty leg is disclosed in the bar — no
+      softening, and no new red on a reading that was already red;
+    * a row whose every registered class carried nodes is scored exactly as before;
+    * the node floor still wins where it applies (``derived < floor`` is REFUSED, not a verdict);
+    * the class set, the threshold and ``:Object``'s exclusion are all UNTOUCHED — choosing
+      ``Document`` vs ``Source``-as-document is #9736's owner-gated ruling, and this function
+      refuses to certify EITHER spelling when the run wrote none of it.
+    """
     floor = bars["floors"]["e3_derived_nodes"]
     share = (anchored / derived) if derived else 0.0
-    return outcome(measured=True, below_floor=derived < floor,
-                   passed=share >= bars["E3"]["required_share"],
-                   bar=f"share = {bars['E3']['required_share']} (zero "
-                       f"unanchored), floor {floor} derived nodes",
-                   value=f"anchored={anchored} derived={derived} "
-                         f"share={share:.6f}")
+    legs = tuple(unmeasured_legs)
+    share_ok = share >= bars["E3"]["required_share"]
+    bar = (f"share = {bars['E3']['required_share']} (zero unanchored), floor "
+           f"{floor} derived nodes")
+    if legs:
+        bar += (f"; ⛔ empty registered class leg(s) {', '.join(legs)} — the "
+                f"measured denominator is NARROWER than the registered one, so "
+                f"this row cannot pass by arithmetic (#9736)")
+    result = outcome(measured=True, below_floor=derived < floor,
+                     passed=share_ok and not legs, bar=bar,
+                     value=f"anchored={anchored} derived={derived} "
+                           f"share={share:.6f}")
+    result["unmeasured_legs"] = legs
+    return result
 
 
 def e4_outcome(*, edge_correct: int, planted: int, bars: dict) -> dict:
@@ -946,11 +1029,11 @@ def build_rows(*, head: str, out_path: str, log_corpus_sha: str,
         row("E4", verdict=e4["verdict"], evidence=E4_RECEIPT, sha=e4["sha"],
             numerator=e4["numerator"], denominator=e4["denominator"],
             corpus_sha256=e4["corpus_sha256"],
-            artifact_corpus_sha256=e4["corpus_sha256"], blocked_by="#8503",
+            artifact_corpus_sha256=e4["corpus_sha256"], blocked_by="#9596",
             note=e4["note"]),
         row("E5", verdict=e5["verdict"], evidence=E5_RESCORE, sha=head,
             numerator=e5["numerator"], denominator=e5["denominator"],
-            corpus_sha256=log_corpus_sha, blocked_by="#9738", note=e5["note"]),
+            corpus_sha256=log_corpus_sha, blocked_by="#5087", note=e5["note"]),
     ]
 
 
@@ -1559,7 +1642,29 @@ def e3_row_note(*, composition: dict | None, e3_result: dict, graph: str,
         f"the reopening of the model, and §10.1 reports BOTH readings — the "
         f"amended denominator and the pre-amendment one — while this row states the "
         f"amended one's composition, so neither is read "
-        f"off a denominator whose composition was hidden")
+        f"off a denominator whose composition was hidden"
+        + _e3_empty_leg_clause(e3_result))
+
+
+def _e3_empty_leg_clause(e3_result: dict) -> str:
+    """The #9736 empty-leg disclosure, when the run measured a registered class of ZERO nodes.
+
+    Empty when every registered class carried nodes, so a fully-measured run's note is byte-for-byte
+    what it was before this rule. When a leg IS empty the note says so on the row itself — the one
+    place a reader quotes — rather than leaving it in the log's per-label lines, because a
+    ``0/0`` leg is invisible in the totals the row prints.
+    """
+    legs = tuple(e3_result.get("unmeasured_legs") or ())
+    if not legs:
+        return ""
+    return (
+        f" ⛔ AND THE POPULATION IS NARROWER THAN THE REGISTRATION: this run "
+        f"wrote ZERO nodes of the registered class(es) {', '.join(legs)}, so the "
+        f"denominator above is a strict SUBSET of the one §3.1 registers, and "
+        f"`= 1.000` over a subset is not the criterion. The empty leg contributes "
+        f"0/0: it can neither pass nor fail, so the row may not PASS on it "
+        f"(#9736 NOT-A-DECISION(9736-gate-empty-leg); WHICH spelling the document "
+        f"class should name stays #9736's owner-gated ruling)")
 
 
 def _stage_calls(stats: dict, stage: str) -> int:
@@ -2333,6 +2438,7 @@ def render_log(*, head: str, prereg_sha: str, bars: dict, corpus_sha: str,
     add(f"e3 numerator={e3['numerator']} denominator={e3['denominator']} "
         f"below_floor={'REFUSED' if e3['below_floor'] else 'no'} "
         f"outcome={e3['outcome']} bar={e3['bar']}")
+    add(e3_legs_line(census_data.get("per_label")))
     add("e3 relationship anchors: " + ", ".join(
         f"{name}={census_data['relationship_anchored'].get(name, 0)}/{count}"
         for name, count in sorted(census_data["relationship_counts"].items())))
@@ -2707,8 +2813,13 @@ def main(argv: list[str] | None = None) -> int:
     }
 
     # ── E3 ────────────────────────────────────────────────────────────────
+    # The empty-leg set is passed to the row because the row's arithmetic cannot see it: the
+    # totals are SUMS, so a registered class with no nodes is already gone from both halves by the
+    # time `e3_outcome` is called (#9736).
     e3_result = e3_outcome(anchored=census_data["anchored_total"],
-                           derived=census_data["derived_total"], bars=bars)
+                           derived=census_data["derived_total"], bars=bars,
+                           unmeasured_legs=e3_unmeasured_legs(
+                               census_data.get("per_label")))
     composition = census_data.get("point_composition") or {}
     e3 = {
         "verdict": verdict_word(e3_result),
@@ -2738,8 +2849,10 @@ def main(argv: list[str] | None = None) -> int:
                  f"corpus_hash={receipt['corpus_hash']} differ from the frozen "
                  f"corpus ({corpus_sha}), and its verdict={receipt['verdict']} "
                  f"failure_origin={receipt['failure_origin']}: the planted edges "
-                 f"are not formed at all (#8503), and the receipt's "
-                 f"retrievability rate is UNMEASURED (#9596)"),
+                 f"are not formed at all (#8503 \u2014 CLOSED 2026-10-24: that closure "
+                 f"records the DISPROOF, so it is this row's measurement record and "
+                 f"not a live blocker; the residual is owned by #9596), and the "
+                 f"receipt's retrievability rate is UNMEASURED (#9596)"),
     }
 
     # ── E5 ────────────────────────────────────────────────────────────────
@@ -2763,7 +2876,13 @@ def main(argv: list[str] | None = None) -> int:
                  f"delta cannot be certified. #9738 also records that §10's prior "
                  f"measurement was visible when the record claimed it was not, and "
                  f"that the 25-bound vs 29-marker populations must be reconciled "
-                 f"before either number is called final"),
+                 f"before either number is called final. The row's blocker moved "
+                 f"on 2026-11-02 from #9738 to #5087: #9738 CLOSED that morning "
+                 f"because its own record correction landed (PR #10525), which is "
+                 f"not a measurement of this number — raw recovery "
+                 f"{e5_result['raw_recovery']:.4f} against the 0.80 floor is S3 "
+                 f"selection recovery, owned by the S0→S6 selective write path "
+                 f"(#5087)"),
     }
 
     rows = build_rows(head=head, out_path=out_path, log_corpus_sha=corpus_sha,

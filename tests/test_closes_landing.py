@@ -32,14 +32,26 @@ Run under pytest:    python3 -m pytest tests/test_closes_landing.py -q
 """
 from __future__ import annotations
 
+import ast
 import importlib.util
 import re
 import subprocess
 import sys
 import time
+import tomllib
 from pathlib import Path
 
 import pytest
+
+# A MODULE-SCOPE hard import, deliberately — never `pytest.importorskip` (#10634
+# review P2). The renderer cross-check below is the ONLY mitigation for this
+# file's hand-rolled copy of GitHub's grammar (`tools/closes_landing.py:76-84`:
+# "That test is the mitigation, and it is the only thing that is"), so a missing
+# dependency must be a collection ERROR, not a `1 skipped` that leaves the leg
+# green — which is exactly the re-staleable "checked by hand" claim #8379 removed
+# by declaring markdown-it-py on both install paths. Same import, same reason, as
+# the repo precedent `tests/test_blog_authoring_doc.py:21`.
+from markdown_it import MarkdownIt
 
 ROOT = Path(__file__).resolve().parents[1]
 MODULE_PATH = ROOT / "tools" / "closes_landing.py"
@@ -173,6 +185,12 @@ def test_a_base_branch_with_no_pr_is_unresolved_not_a_pass():
     (finding,) = cl.classify(pr, _by_head(pr), DEFAULT)
     assert finding.verdict == "unresolved"
     assert finding.carrier is None
+    # …and the ONE cause where a PR really is missing says so. `carrier_path`
+    # returns None for three causes, so the sentence has to be about THIS one
+    # (#10634 review P3).
+    assert "no PR with that head branch exists" in finding.detail
+    assert "CYCLE" not in finding.detail
+    assert "MAX_STACK_DEPTH" not in finding.detail
 
 
 def test_a_cycle_is_unresolved_not_a_pass():
@@ -180,6 +198,22 @@ def test_a_cycle_is_unresolved_not_a_pass():
     a = _pr(50, "b-branch", "Closes #100", head="a-branch")
     (finding,) = cl.classify(a, _by_head(a, b), DEFAULT)
     assert finding.verdict == "unresolved"
+    # The WORDING is pinned, not just the verdict: the cycle arm used to reuse the
+    # "no PR with that head branch exists" sentence, which is FALSE here — the PR
+    # with that head branch is the other half of the cycle — and the remedy it
+    # implies (open a PR on that base) cannot repair a cycle. Only the verdict was
+    # asserted, so the false sentence survived a file that pins wording for its
+    # four sibling arms (#10634 review P3).
+    assert "no PR with that head branch exists" not in finding.detail
+    assert "CYCLE" in finding.detail
+    # …naming BOTH halves, which is the whole diagnosis: the reader cannot see the
+    # cycle from either PR alone.
+    assert "PR #50" in finding.detail and "PR #51" in finding.detail
+    assert "targets `b-branch`" in finding.detail
+    assert "targets `a-branch`" in finding.detail
+    # …and the remedy that exists, rather than "open a PR" (which would re-form
+    # the cycle): re-target a link at the default branch.
+    assert "Re-target" in finding.detail and DEFAULT in finding.detail
 
 
 def test_the_worst_verdict_wins():
@@ -883,6 +917,50 @@ def test_a_code_span_that_crosses_a_LINE_BREAK_cannot_buy_a_pass():
     assert cl.parse_closing_refs("    a `b\nprose `c Closes #100\n") == [100]
 
 
+def test_no_module_level_constant_is_DEAD_because_a_dead_one_reads_as_live():
+    r"""#10634 review P3 at `241bd0007`: `_BLANK_LINE_RE = re.compile(r"\n[ \t]*\n")`
+    was defined, NEVER read, and its own comment claimed it is "where the STRICT
+    inline scan stops looking for a closing backtick run" — with a second comment
+    ("needed this as well as `_BLANK_LINE_RE`") pointing a maintainer at it as the
+    live half of the paragraph bound.
+
+    ⚠️ That is not tidy-up. `_span_limit` takes the strict bound from
+    `_paragraph_end`, which ends the paragraph on its OWN blank-line test
+    (`if not line.strip()`). A maintainer who believes the comment has a
+    documented reason to "restore" the constant as the span bound — and a
+    blank-line-ONLY bound is exactly the fail-open shape this PR removed: an
+    unmatched backtick run then pairs with the OPENER of a real span in a later
+    block and exposes the keyword that span held (`lands`, exit 0, no annotation).
+
+    So the constant is DELETED and this guard keeps the CLASS from returning: a
+    name defined at module level and never loaded is a false claim of liveness,
+    because a prose mention is not a reference. That is why the check is AST-based
+    and not a `grep`: a `grep` finds the dead comment (and this docstring) and
+    calls the constant alive, while the AST sees only `LOAD`s — what the module
+    actually reads.
+    """
+    tree = ast.parse(MODULE_PATH.read_text())
+    defined, loaded = set(), set()
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+        elif isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+        else:
+            continue
+        for target in targets:
+            if isinstance(target, ast.Name) and target.id.upper() == target.id:
+                defined.add(target.id)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+            loaded.add(node.id)
+    # A scan that finds nothing proves nothing — this asserts the guard MEASURES.
+    assert defined, "no module-level constants found: the scan is not measuring"
+    assert not defined - loaded, (
+        f"module-level constant(s) {sorted(defined - loaded)} are never loaded: a dead "
+        f"name whose comment can claim it is the live mechanism (#10634 review P3)")
+
+
 def test_a_closed_unmerged_subject_on_a_sibling_base_is_not_promised_a_carrier():
     """#10634 cycle 2 (P2): the sibling-base arm said "#100's work only lands when
     PR #carrier merges" for a subject that was CLOSED WITHOUT MERGING — its
@@ -1224,8 +1302,9 @@ def test_gh_refuses_to_spend_the_run_budget_rather_than_the_whole_job(monkeypatc
     """#10634 review P2. The per-call bound leaves the RUN unbounded: one `--pr`
     run issues `2 + L` sequential calls (identity, the PR, one per base branch up
     the stack) and `collect_stack` follows the stack as far as it goes, so a
-    stalled API can consume the drift-guard job's whole `timeout-minutes: 15` —
-    and a JOB-level timeout is a red that `continue-on-error: true` cannot cover.
+    stalled API can consume the whole job cap (`.github/workflows/
+    closes-coherence.yml`, `timeout-minutes: 10`) — and a JOB-level timeout is a
+    red that `continue-on-error: true` cannot cover.
 
     Once the run's aggregate budget is spent, NO further call is made: the answer
     is UNMEASURED (exit 2), which is the same verdict the per-call bound gives.
@@ -1255,6 +1334,79 @@ def test_gh_clamps_each_call_to_the_runs_REMAINING_budget(monkeypatch):
     assert cl._gh(["x"]) == "{}"
     assert 0 < seen["timeout"] <= 6, seen
     assert seen["timeout"] < cl._GH_TIMEOUT_SECONDS, seen
+
+
+# ── …and the justification for that budget is a fact about its HOST ──────────
+
+#: The number of sequential `gh` calls the comment on `_GH_RUN_BUDGET_SECONDS`
+#: names as enough to reach the job cap: "thirteen calls at the per-call cap".
+#: It is the walk the pinned #10568/#10519 shape actually makes (`2 + L`: the
+#: identity call, the PR, and one per base up a five-deep stack, measured), not a
+#: ceiling — `collect_stack` walks as far as the stack goes.
+_DOCUMENTED_CALLS = 13
+
+
+def _timeout_minutes(path: Path) -> int:
+    found = re.findall(r"^\s*timeout-minutes:\s*(\d+)\s*$", path.read_text(), re.M)
+    assert len(found) == 1, (
+        f"{path.name} carries {len(found)} `timeout-minutes` values ({found}); this "
+        f"pin reads the ONE cap the tool's run budget must fit inside — re-measure it")
+    return int(found[0])
+
+
+def _workflows_running_the_tool() -> list[Path]:
+    return sorted(
+        path for path in (ROOT / ".github" / "workflows").glob("*.yml")
+        if "tools/closes_landing.py" in path.read_text()
+    )
+
+
+def test_the_run_budget_is_justified_by_the_cap_of_the_workflow_that_HOSTS_it():
+    r"""#10634 review P3 at `15763ba97`. The comment justifying
+    `_GH_RUN_BUDGET_SECONDS` said thirteen calls at the per-call cap "already
+    reach the job's `timeout-minutes: 15`" — `drift-guard.yml`'s cap, left behind
+    when the step moved to `closes-coherence.yml`, whose job caps at 10. That
+    arithmetic is the whole argument for the aggregate budget, so a reader
+    checking it against the tree found a workflow that does not host the tool.
+
+    Correcting the prose alone would drift again on the next move, so the claim is
+    MEASURED here against whichever workflow actually runs the tool: the budget
+    must fit inside that job's cap (otherwise the job timeout, not the budget,
+    ends the run — and a job-level kill is a red `continue-on-error` cannot cover),
+    and the documented call count at the per-call cap must genuinely reach it.
+
+    On the pre-fix tree this REDS on the prose leg: the comment region said
+    `timeout-minutes: 15` while the only workflow that runs the tool caps at 10.
+    """
+    hosts = _workflows_running_the_tool()
+    assert [path.name for path in hosts] == ["closes-coherence.yml"], (
+        f"the tool's hosting workflow(s) are {[p.name for p in hosts]}: the run "
+        f"budget's justification must be re-measured against the new cap")
+    cap_minutes = _timeout_minutes(hosts[0])
+    cap_seconds = cap_minutes * 60
+
+    # The prose leg — the exact claim that drifted. It is read from the comment
+    # block above `_GH_RUN_BUDGET_SECONDS`, because a `grep` of the whole file
+    # would also find the OTHER workflow's cap (`drift-guard.yml:53`) quoted in a
+    # sibling docstring and call the claim matched.
+    source = MODULE_PATH.read_text()
+    budget_at = source.index("_GH_RUN_BUDGET_SECONDS = ")
+    comment_block = source[source.index("#: …and the bound is PER CALL", 0, budget_at):budget_at]
+    named = re.findall(r"timeout-minutes:\s*(\d+)", comment_block)
+    assert named == [str(cap_minutes)], (
+        f"the comment justifying the run budget names `timeout-minutes: {named}` but "
+        f"{hosts[0].name} caps its job at {cap_minutes}: that sentence IS the "
+        f"argument for the budget, so it must name the workflow that hosts it")
+
+    assert cap_seconds > cl._GH_RUN_BUDGET_SECONDS, (
+        f"the {cl._GH_RUN_BUDGET_SECONDS}s run budget must end the run BEFORE the "
+        f"{cap_seconds}s job cap does, or the job timeout wins and a stalled API "
+        f"reds a job that `continue-on-error: true` cannot cover")
+    assert cap_seconds < _DOCUMENTED_CALLS * cl._GH_TIMEOUT_SECONDS, (
+        f"{_DOCUMENTED_CALLS} calls at the {cl._GH_TIMEOUT_SECONDS}s per-call cap "
+        f"are {_DOCUMENTED_CALLS * cl._GH_TIMEOUT_SECONDS}s and must reach the "
+        f"{cap_seconds}s job cap — that arithmetic IS the justification for an "
+        f"aggregate budget; if it no longer holds, re-measure the comment")
 
 
 def test_main_starts_a_FRESH_run_budget(monkeypatch, tmp_path):
@@ -1324,6 +1476,22 @@ def test_the_stack_depth_cap_is_off_by_at_most_nothing(depth, verdict):
     subject, by_head = _stack(depth)
     (finding,) = cl.classify(subject, by_head, DEFAULT)
     assert finding.verdict == verdict
+
+
+def test_the_depth_cap_message_says_measurement_stopped_not_that_a_pr_is_missing():
+    """The cap is the THIRD cause of `carrier is None`, and every PR in it exists.
+
+    Reusing the "no PR with that head branch exists" sentence here told the reader
+    evidence was missing when the walk had simply stopped, and pointed at a PR
+    that is not missing (#10634 review P3). The sibling test above pins the
+    verdict; this pins the sentence.
+    """
+    subject, by_head = _stack(cl.MAX_STACK_DEPTH - 1)
+    (finding,) = cl.classify(subject, by_head, DEFAULT)
+    assert finding.verdict == "unresolved"
+    assert "no PR with that head branch exists" not in finding.detail
+    assert str(cl.MAX_STACK_DEPTH) in finding.detail
+    assert "not a missing PR" in finding.detail
 
 
 # ── collect_stack: the LIVE walk (two hops, and a base with no PR) ───────────
@@ -1606,6 +1774,16 @@ def test_a_fence_is_measured_from_its_items_content_column(body, expected, why):
     (">     Closes #100\n", [], "indented code block, quoted, single line"),
     # The flat form, restated: it already refused, and must keep refusing.
     ("old version:\n\n    Closes #100\n", [], "flat indented code block (unchanged)"),
+    # …and the TAB-indented form, which is where the removed `rest.startswith("\\t")`
+    # clause claimed to act. It never could: `strip_code` runs `expandtabs(4)` on
+    # every line first, so a tab arrives here as FOUR SPACES and this arm already
+    # fired on `rest_indent`. Pinned because the dead clause read as a live guard
+    # (#10634 review P3, flagged twice); a renderer agrees it is `<pre><code>`.
+    ("old version:\n\n\tCloses #100\n", [], "tab-indented code block"),
+    # …and the mirror, which the same removal had to keep: a TAB after a quote
+    # marker is ONE space of the blockquote's own indentation (§5.1), not four,
+    # so the renderer emits `<blockquote><p>Closes #100` and GitHub fires it.
+    ("> a\n>\tCloses #100\n", [100], "a tab after the quote marker is quoted prose"),
     # …and quoted PROSE stays a claim. Only CODE is ignored by GitHub.
     ("> Closes #5\n", [5], "a quoted paragraph is prose"),
     (">   Closes #5\n", [5], "a quote-indented PARAGRAPH is prose, not code"),
@@ -1815,6 +1993,31 @@ _COMMONMARK_SHAPES = [
     ("- ```\n   > Closes #100\n", "a literal `>` inside a depth-0 item fence"),
     ("- ```\n>   Closes #100\n", "a blockquote line ends a depth-0 item fence"),
     ("> - ```\n   > Closes #100\n", "indented quote marker ends a quoted item"),
+    # …and a LIST MARKER inside a quote is a real item, so the fence opened under
+    # it has an ITEM edge: when the item ends, the renderer ends the containing
+    # block there AND reads the dedented fence line as a FRESH fence opener — so
+    # the claim after it is CODE. Tracking only markers on the raw line never saw
+    # `> - item`, the fence kept its block open, and the keyword read as prose:
+    # `lands` on a body the renderer shows as `<pre><code>` (#10634 review P1).
+    ("> - item\n>   ```\n> ```\n> Closes #100\n",
+     "a quoted list item's fence ends with the item; the dedented fence re-opens"),
+    ("> 1. item\n>    ```\n> ```\n> Closes #100\n",
+     "…same shape with an ORDERED marker"),
+    ("> - item\n>   ```\n  > ```\n>   Closes #100\n",
+     "…and with a closer carrying a 2-column pre-marker indent"),
+    # …and a CLOSER'S "up to three spaces" is measured after this line's own
+    # markers, in the same space the containing block's column lives in. Measured
+    # from a RAW column instead, the opener's `  > ` allowance (4 columns) was
+    # charged against the closer's `> ` (2), so a 4-space-indented run came out 2
+    # columns past the container, closed a fence the renderer keeps OPEN, and the
+    # keyword after it read as prose: `lands`, exit 0, no annotation. Found by a
+    # sweep against the CommonMark REFERENCE implementation (the Python `cmark`
+    # port), not by a review cycle — every generated item/quote/fence shape now
+    # agrees with it in both directions (#10634).
+    ("  > item\n  > ```\n>     ```\n  > Closes #100\n",
+     "a closer's marker allowance cannot shift its three-space budget"),
+    ("  > item\n  >    ```\n>     ```\n  > Closes #100\n",
+     "…same shape with the fence opened one column deeper"),
     # …and inside a QUOTE that sits inside an ITEM: the item's content column is
     # expressed in `rest` space, so a 4-column run there is NOT a fence (the
     # renderer shows <pre><code>) and the claim after it is PROSE. Passing the
@@ -1857,6 +2060,21 @@ _COMMONMARK_SHAPES = [
     # soft line break INSIDE one container, so stopping at "any line starting
     # with >" would lose these real claims (the under-report direction).
     ("> a `Closes\n> #100` b\n", "a span across two lines of ONE paragraph"),
+    # …and §5.1's LAZY CONTINUATION is still that one paragraph: a line carrying
+    # NO `>` marker continues the quote's paragraph, so opener and closer are ONE
+    # span and the renderer puts the keyword in <code>. Requiring an EQUAL depth
+    # ended the span early, left both runs unmatched, and the keyword survived as
+    # "prose" in BOTH arms — `lands`, exit 0, no annotation (#10634 review P1).
+    ("> The old body said `Closes\n#100` and nothing fired.\n",
+     "a span across a LAZY continuation line of a quote"),
+    ("> > a `Closes\n> b #100` c\n",
+     "…and across a lazy line one quote shallower"),
+    # …and a run the LINE bound leaves literal is still closed by the next run of
+    # its length in the paragraph, which is what the renderer does: this keyword is
+    # PROSE, and a per-line scan that paired line 2's own runs blanked it away —
+    # a lost claim in the FINDING arm (#10634 review P3).
+    ("a`\n`Closes #100`\n",
+     "a stray run pairs with the NEXT run of its length"),
     ("> - item `Closes\n>   #100` here\n",
      "a span across two lines of ONE quoted list item"),
     # …and the claims that ARE prose
@@ -1868,9 +2086,7 @@ _COMMONMARK_SHAPES = [
 
 @pytest.mark.parametrize("body,why", _COMMONMARK_SHAPES)
 def test_the_parser_agrees_with_a_real_commonmark_renderer(body, why):
-    markdown_it = pytest.importorskip(
-        "markdown_it", reason="markdown-it-py is a declared test dependency (#8379)")
-    html = markdown_it.MarkdownIt("commonmark").render(body)
+    html = MarkdownIt("commonmark").render(body)
     prose = _CODE_BLOCK_RE.sub("", html)
     match = _FIRST_REF_RE.search(body)
     assert match, (why, body)
@@ -1887,6 +2103,36 @@ def test_the_parser_agrees_with_a_real_commonmark_renderer(body, why):
             f"{why}: the renderer puts #{n} in <pre><code> ({html!r}) and the "
             f"strict parse — the PASS arm — reported it. A keyword GitHub ignores "
             f"cannot buy a `lands`.")
+
+
+def test_the_commonmark_oracle_cannot_be_skipped_out_of_the_install():
+    """The oracle above is only as real as the dependency being installed.
+
+    It used to reach `markdown_it` through `pytest.importorskip`, so an install
+    that lost the package reported `1 skipped` and left the file GREEN — while the
+    mitigation `tools/closes_landing.py:76-84` leans on ("a divergence … reds a
+    test rather than a reader") silently stopped existing. The import is now
+    module-scope, so that state is a collection error; this pin closes the other
+    half, the declarations a well-meaning tidy-up could drop.
+
+    Both paths are pinned because both are installed in practice (#2985): CI's
+    `pip install -e '.[test]'` and the canonical dev install `uv sync --extra
+    embeddings --extra parity`, which does NOT include the `test` extra. That is
+    the #8379 finding-3 rule this dependency was declared by in the first place.
+    """
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    test_extra = pyproject["project"]["optional-dependencies"]["test"]
+    dev_group = pyproject["dependency-groups"]["dev"]
+    for where, declarations in (
+        ("`project.optional-dependencies.test` (CI: pip install -e '.[test]')", test_extra),
+        ("`dependency-groups.dev` (uv sync --extra embeddings --extra parity)", dev_group),
+    ):
+        assert any(d.startswith("markdown-it-py") for d in declarations), (
+            f"markdown-it-py is missing from {where} — the renderer oracle in this "
+            f"file is the ONLY check on the hand-rolled CommonMark copy in "
+            f"tools/closes_landing.py, and with a module-scope import a dropped "
+            f"declaration makes that install path lose the oracle. Declarations: "
+            f"{declarations}")
 
 
 def test_the_ITEM_EDGE_is_measured_in_the_space_the_item_lives_in():
@@ -2793,6 +3039,29 @@ def test_a_REOPENED_issue_prints_partial_and_exits_3(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert code == 3
     assert "reason=reopened" in out
+def test_a_stray_run_costs_the_RENDERER_its_pairing_not_a_lost_claim():
+    """The LENIENT arm's line bound must still honour the run the renderer paired.
+
+    The renderer pairs a stray run left open on one line with the FIRST run of the
+    same length after it — which can be the opener of a balanced pair on the next
+    line — so the keyword here is PROSE and a per-line scan that blanked line 2
+    reported nothing:
+
+        a`
+        `Closes #100`      ->  <p>a<code> </code>Closes #100`</p>
+
+    That was a lost claim (no warning for a real closure) in the FINDING arm, the
+    direction `_span_limit`'s docstring exists to protect, and it is what
+    `_strip_inline_code`'s `pending` set closes (#10634 review P3).
+    """
+    body = "a`\n`Closes #100`\n"
+    assert cl.parse_closing_refs(body) == [100]          # the FINDING arm sees it
+    assert cl.parse_closing_refs(body, None, strict=True) == [100]   # …and it is prose
+    # The pairing is per PARAGRAPH, not global: a blank line ends it, so the
+    # keyword in the next paragraph's real code span stays a quotation. Without
+    # this the `pending` set would trade the under-report for an over-report that
+    # outlives the paragraph it belongs to.
+    assert cl.parse_closing_refs("a`\n\n`Closes #100`\n") == []
 
 
 if __name__ == "__main__":  # pragma: no cover
