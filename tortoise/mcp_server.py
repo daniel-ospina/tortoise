@@ -5539,9 +5539,11 @@ def _onboarding_state() -> dict:
     from tortoise.mcp_auth import SELFHOST_ORG_ID
     org_id = _current_org_id.get()
     if org_id is None:
-        # #9084: `_SafeError`, so `tortoise_onboarding_state`,
-        # `tortoise_manage_sources` and `_sources_view` — which all return this
-        # payload verbatim — record the dispatch as a refusal instead of `ok`.
+        # #9084: `_SafeError`, so a caller that returns this payload verbatim
+        # records the dispatch as a refusal instead of `ok`. `_sources_view`
+        # does exactly that; `tortoise_manage_sources` does NOT reach this
+        # branch — it answers its own `_SafeError` when `org_id` is None
+        # (its first guard) and never calls in here.
         return _SafeError({"error": "No team context (HTTP mode required)"})
     if org_id == SELFHOST_ORG_ID:
         from tortoise.mcp_auth import _get_org_sdk

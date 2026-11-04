@@ -618,19 +618,30 @@ async def test_overview_topics_without_entity_id_is_recorded_as_a_failure(
 @pytest.mark.asyncio
 async def test_onboarding_state_without_team_context_is_recorded_as_a_failure(
         events, hosted):
-    """`_onboarding_state` builds the refusal; a served tool returns it verbatim.
+    """`_onboarding_state` builds the refusal; `_sources_view` returns it verbatim.
 
     The IDENTICAL "No team context" message was converted in six sibling tool
     bodies by the first sweep and left plain in the helper that produces it —
     so the same refusal from the same family was a failure in five tools and a
     success in the sixth.
 
-    #4282 Phase 3.2: the original witness (`tortoise_onboarding_state`) left the
-    MCP surface, but the HELPER did not — `tortoise_manage_sources(action="list")`
-    still calls `_onboarding_state()` and returns its refusal verbatim, so the
-    property is re-pinned on the surviving caller instead of lapsing with the
-    removed name.
+    #4282 Phase 3.2 removed the last SERVED witness (`tortoise_onboarding_state`
+    left the MCP surface), and every surviving caller of the helper now guards
+    `org_id is None` with its OWN literal before calling in — `tortoise_manage_sources`
+    answers at its first guard and never reaches `_sources_view`. So the helper's
+    branch has no dispatch-level caller left, and pinning it through a
+    `tortoise_manage_sources` dispatch would assert a payload that dispatch
+    produced itself (measured: reverting `_SafeError` here leaves that shape
+    green). It is pinned where it IS reachable instead — `_sources_view()`, the
+    one surviving reader — and the two halves are stated separately because they
+    are two different producers:
+
+    1. the SERVED tool's own no-team-context refusal is classified
+       `exec_error` / `safe_error` (dispatch-level, below), and
+    2. the HELPER's refusal is an `_SafeError` and `_sources_view` hands it back
+       UNCHANGED (helper-level, below).
     """
+    # (1) dispatch-level: a served tool answering its own no-org refusal.
     token = ms._current_org_id.set(None)
     try:
         result = await ms.mcp.call_tool("tortoise_manage_sources",
@@ -643,6 +654,27 @@ async def test_onboarding_state_without_team_context_is_recorded_as_a_failure(
     row = events[-1]
     assert row["status"] == "exec_error", row
     assert row["error_kind"] == "safe_error", row
+
+    # (2) helper-level: `_onboarding_state`'s conversion, reached the only way
+    # it CAN be reached after the removal — directly, through `_sources_view`.
+    token = ms._current_org_id.set(None)
+    try:
+        state = ms._onboarding_state()
+        view = ms._sources_view()
+    finally:
+        ms._current_org_id.reset(token)
+
+    assert isinstance(state, ms._SafeError), (
+        "the #9084 conversion regressed: `_onboarding_state` answers its "
+        f"no-team-context refusal with a plain {type(state).__name__}, which the "
+        "seam can only classify when `_safe` produced the same text — "
+        "`_sources_view` would then record its refusal as `ok`"
+    )
+    assert "No team context" in state["error"], state
+    assert view == state, (
+        "`_sources_view` must hand the failure back UNCHANGED — a `sources` "
+        f"envelope around a refusal is unclassifiable at the seam: {view}"
+    )
 
 
 @pytest.mark.asyncio

@@ -17,7 +17,7 @@ aboutObjects: [tortoise-mcp, tortoise-sdk]
 
 **A developer should be able to read our entire surface in a sitting and know what to call.**
 Today they cannot: the MCP server exposes **94 tools** (76 of them advertised — the five
-`run_onboarding` tools were deleted in #4282 Phase 3.2, 81 → 76) and the SDK **149 methods**, with five
+`run_onboarding` tools were deleted in #4282 Phase 3.2, 81 → 76) and the SDK **150 methods**, with five
 overlapping ways to search, four ways to revise, seven ways to create a node, and a
 lifecycle nobody owns. The target is a surface small enough to hold in your head, where every
 name says what it does, every operation says what it will do to your data, and
@@ -43,8 +43,8 @@ account — the builder pays; an end-customer never has an organisation account 
 | Document | What it is |
 |---|---|
 | **`docs/product/canonical-mcp-tools.md`** | **The approved MCP list — 23 tools**, 9 READ / 14 WRITE. Merged as `8375c7921`. This is the **naming authority** for the SDK. |
-| **`docs/product/beta-sdk-surface.md`** | **The recommended SDK surface — 40 methods** over 149, from the builder's and the agent's actual work. Includes the discarded-name ledger and the rationale for each. |
-| `docs/product/canonical-sdk-methods.md` | The full inventory of all 149 with descriptions, grouped into 32 groups. **It is an inventory and an earlier target sketch, not the target.** Where it disagrees with `beta-sdk-surface.md`, `beta-sdk-surface.md` governs. |
+| **`docs/product/beta-sdk-surface.md`** | **The recommended SDK surface — 40 methods** over 150, from the builder's and the agent's actual work. Includes the discarded-name ledger and the rationale for each. |
+| `docs/product/canonical-sdk-methods.md` | The full inventory of all 150 with descriptions, plus an earlier 32-group sketch over 149 names. **It is an inventory and an earlier target sketch, not the target.** Where it disagrees with `beta-sdk-surface.md`, `beta-sdk-surface.md` governs. |
 
 **These documents are the vision.** This file is the bridge from them to implementation.
 

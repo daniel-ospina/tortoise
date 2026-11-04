@@ -1482,9 +1482,15 @@ def get_write_tool_names() -> frozenset[str]:
     a read. FOUR retired shims ARE writers (`tortoise_ingest_corpus`,
     `tortoise_index_sessions`, and the two #3540 onboarding retirements
     `tortoise_onboarding_github_index` / `tortoise_onboarding_session_recording`),
-    so the served census (48) exceeds the live census (44) — the derivation over
+    so the served census (45) exceeds the live census (41) — the derivation over
     the served set is what keeps them counted, and it stops the census from
-    silently shrinking when a live writer is retired."""
+    silently shrinking when a live writer is retired.
+
+    Both censuses moved 48/44 -> 45/41 in #4282 Phase 3.2, which deleted the
+    three SERVED writers `tortoise_onboarding_github_connect` (admin),
+    `tortoise_onboarding_seed` and `tortoise_onboarding_demo_create` (write).
+    The four-shim / live gap is unchanged by that: the two #3540 retirements
+    are still members of the four shims, so 45 - 41 = 4 still holds."""
     return frozenset(
         t.name for t in (*TOOL_REGISTRY, *RETIRED_TOOL_REGISTRY) if t.writes
     )
