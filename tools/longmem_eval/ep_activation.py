@@ -12,11 +12,13 @@ draft is EP-inert and must never display a fabricated ``0.5``.
 This module closes that gap with two steps for a given eval graph:
 
 1. **Promote** draft points → ``live`` and draft operators → ``live``
-   (batch path, mirroring the capture auto-promotion block
+   (batch path, shaped after the capture auto-promotion block
    ``sdk._apply_capture_ingest_ep`` at ``tortoise/sdk.py:8278+`` — the claim
-   candidate read is ``sdk.py:8357-8363`` and its operator sweep
-   ``sdk.py:8394-8401``; the ``PointPromoted`` / ``OperatorPromoted`` events are
-   emitted so a JSONL replay rebuilds the same live state).
+   candidate read is ``sdk.py:8357-8363``; the ``PointPromoted`` /
+   ``OperatorPromoted`` events are emitted so a JSONL replay rebuilds the same
+   live state). Its operator sweep (``sdk.py:8394-8401``) is NOT copied: see
+   ``_SELECT_DRAFT_OPERATOR_IDS`` and the Cypher header below for the two
+   divergences and why they are deliberate.
 2. **Run EP** so real posteriors (``posterior_alpha``/``posterior_beta``,
    falling back to ``ep_alpha``/``ep_beta``) are persisted.
 
@@ -80,7 +82,18 @@ logger = logging.getLogger(__name__)
 #: EP engine label for the manifest — names the entry point actually used.
 EP_ENGINE = "dream:full"
 
-# ── Cypher (byte-mirrored from the capture auto-promotion block) ──────────
+# ── Cypher ────────────────────────────────────────────────────────────────
+# Shaped after the capture auto-promotion block (``sdk._apply_capture_ingest_ep``,
+# ``sdk.py:8278+``), NOT byte-mirrored from it. Two divergences are DELIBERATE
+# and must not be "restored to parity":
+#   * ``_PROMOTE_OPERATOR`` adds ``WHERE o.status = 'draft'`` and ``RETURN o.id``
+#     — capture's ``SET`` is unconditional, which double-counts and journals a
+#     duplicate ``OperatorPromoted`` under concurrency;
+#   * ``_SELECT_DRAFT_OPERATOR_IDS`` is explicit-``draft``-only and graph-wide,
+#     not incident-scoped — see its own block for why (an operator over
+#     already-live claims has no other promotion route, #10137).
+# Both are pinned by ``test_the_gate_promotes_an_operator_once`` and
+# ``test_activate_promotes_an_operator_the_incident_query_cannot_reach``.
 # Candidate draft points: non-operator, draft-or-unset status (the canonical
 # read model treats unset status as live for most surfaces, but the ingest
 # shape is explicit "draft"; matching both mirrors the capture candidate read
