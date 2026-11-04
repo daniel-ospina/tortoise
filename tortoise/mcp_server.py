@@ -2925,8 +2925,12 @@ WRITE_TOOL_NAMES: frozenset[str] = get_write_tool_names()
 # that is then refused). Computed from the declarations and cached (lazy — the
 # handlers are defined below this point — because it sits on the per-call
 # path). `tests/test_dry_run_preview.py::TestPreviewToolSetIsDeclared` pins it:
-# the six preview tools must be in it, a write tool without `dry_run` must not,
-# and the metering behaviour is verified through the real dispatch seam.
+# the six DESTRUCTIVE preview tools must be in it, a write tool without
+# `dry_run` must not, and the metering behaviour is verified through the real
+# dispatch seam. "Six" is the destructive subset, not the size of the set —
+# the derivation yields seven registry tools today (those six plus
+# `tortoise_backfill_v25`, whose handler default is `dry_run=True`), which is
+# the count `docs/INGEST_CONTRACT.md` and `_arguments_say_preview` both use.
 _DRY_RUN_TOOLS: frozenset[str] | None = None
 
 
