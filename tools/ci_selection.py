@@ -6581,7 +6581,8 @@ def main() -> int:
         # (`fast_shard_issues` for the top-level `fast_shards` declaration and
         # `duplicate_entries` for the same-surface `merge=union` gate — both
         # landed beside this one while it was open, so BOTH were folded into the
-        # same one place rather than being re-added here), plus the
+        # same one place rather than being re-added here), `floor_issues` (the
+        # declared per-row floor/cap check this PR adds), plus the
         # plausibility/freshness checks the validator adds (any weight the writer
         # could not have rendered — sub-floor, finer precision, or negative — a
         # non-empty map whose every weight is the `0.0` sentinel, and a stale
@@ -6590,7 +6591,7 @@ def main() -> int:
         #
         # `watchdog_headroom_issues` is the EXCEPTION, and deliberately composed
         # here instead: `ci_manifest` does not own it (main added it after this
-        # validator was cut, and `ci_manifest.map_issues` composes only the five
+        # validator was cut, and `ci_manifest.map_issues` composes only the six
         # above). It is re-added at this call site so the union of the two
         # pipelines drops neither — the same rule the two folded-in checks
         # followed. Both entry points compose it, so it stays single-sourced.

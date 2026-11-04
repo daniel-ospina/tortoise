@@ -41,7 +41,7 @@ is the ONE composition, and it carries every manifest-level check the two
 entry points used to call loose — the three duration checks plus
 ``fast_shard_issues`` (#6135) and ``duplicate_entries`` (#2913/#5373), which
 landed on main beside this change and must therefore run here rather than at a
-call site.
+call site, plus this module's own ``floor_issues``.
 
 CLI::
 
@@ -68,6 +68,7 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
 import argparse
 import datetime as dt
 import math
+from collections.abc import Mapping
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -384,6 +385,165 @@ def plausibility_issues(manifest: dict) -> list[str]:
 # ── the composed contract ────────────────────────────────────────────────
 
 
+def floor_issues(manifest: dict) -> list[str]:
+    """``durations_floors`` must name a row that EXISTS and that is INSIDE its declaration.
+
+    Some weights in this map are not what the file cost, they are what the pack
+    SHALL assume — deliberately high, because understating a weight "can red
+    ``python-ci-gate`` with zero test failures" (#3395). ``test_lane_stash.py``
+    states that in prose directly above its own row ("⛔ 355.0 IS A DELIBERATE CAP,
+    NOT A READING … a CI-budget decision recorded on #9172");
+    ``test_calibration.py`` and ``eval/write_path/test_write_path_operator_lane.py``
+    hold the same cap. ``ci_timing._declared_floors`` makes such a declaration
+    binding on the writer, and this is the read side that keeps it HONEST.
+
+    Two ways a floor can be declared and mean nothing, both silent without this:
+
+    * a key with no ``durations`` row — the floor guards a weight the map does not
+      carry, so the file packs at the flat default and the floor never applies.
+      That is the #3400/#4348 trap ("a row must EXIST, not merely default") applied
+      to the mechanism meant to make a declared cap binding;
+    * a row that contradicts its own declaration — BELOW a floor, or ABOVE a CAP.
+      The map then says "this weight is a declared minimum" (or maximum) and
+      writes a number on the wrong side of it, which is the state that makes a
+      reader distrust both halves. The writer keeps a row inside its declaration
+      in both cases, so reaching it means someone hand-edited one of the two and
+      left the other behind.
+
+    A DECLARATION IS EITHER A FLOOR OR A CAP (``{value: 355.0, pinned: true}``).
+    A bare number is a minimum only, so a row above it is legitimate; a ``pinned``
+    one is the weight in BOTH directions, because the rows that carry it record a
+    weighing choice rather than a reading (#6133/#9172) and their own notes say a
+    sweep must not turn the measurement they cite into the weight.
+
+    Composed in :func:`map_issues` rather than at a call site: both enforcing
+    entry points (``ci_selection --integrity`` and ``ci_timing.integrity_problems``)
+    reach it there, so it cannot be half-wired — and the writer's pre-write gate
+    refuses a map whose floor it could not honour instead of shipping it.
+    """
+    floors = manifest.get("durations_floors")
+    if floors is None:
+        # ABSENT is legal (a fixture manifest declares no floors); PRESENT but NULL is
+        # not. `durations_floors:` written with its entries deleted — a plausible
+        # merge-resolution "tidy", and exactly how duplicate twins get dropped in this
+        # repo — used to read as "no declarations" on BOTH sides at once, so every
+        # declared cap reverted on the next sweep with nothing red anywhere. That is
+        # the same silent revert the LIST shape was fixed for (#10575 review, F2); the
+        # container shape must fail closed on either face (#10575 review, P3).
+        if "durations_floors" in manifest:
+            return [
+                "``durations_floors`` is present but declares nothing (`null`) — a "
+                "declaration block that parses to no declarations means no row in "
+                "this map is declared at all, so every cap it states silently "
+                "reverts; state the declaration or drop the key (#9172)"
+            ]
+        return []
+    if not isinstance(floors, dict):
+        return [
+            f"``durations_floors`` is a {type(floors).__name__}, not a mapping — a "
+            f"declaration block no reader can parse means no row in this map is "
+            f"declared at all, so every cap it states silently reverts (#10575 "
+            f"review, F2)"
+        ]
+    durations = _durations(manifest)
+    if not durations:
+        # An ABSENT (or empty) map is `check()`'s UNKNOWN, not this check's red:
+        # there is no map here for a floor to be inconsistent WITH, and reporting
+        # one red per declared floor would turn that UNKNOWN into a wall of reds
+        # (the module's own "red outranks unknown" rule is about a red this check
+        # can actually observe). A malformed `durations` value is a red already,
+        # named by `duration_issues`.
+        return []
+    issues: list[str] = []
+    for name, declaration in sorted(floors.items(), key=lambda kv: str(kv[0])):
+        # The CONTAINER shape fails closed on both sides: `{name: [355.0]}` (or any
+        # mapping this reader cannot fully honour) must not silently mean "no
+        # declaration", which would revert every cap on the next sweep with no
+        # signal anywhere.
+        nested = isinstance(declaration, Mapping)
+        if nested:
+            unknown = sorted(set(declaration) - {"value", "pinned"})
+            if unknown:
+                issues.append(
+                    f"``durations_floors`` declares {name} with the unknown key(s) "
+                    f"{', '.join(map(repr, unknown))} — the accepted keys are "
+                    f"``value`` and ``pinned``, and a declaration no reader can "
+                    f"fully honour is not a declaration"
+                )
+                continue
+            pinned = declaration.get("pinned", False)
+            if not isinstance(pinned, bool):
+                issues.append(
+                    f"``durations_floors`` declares {name} with ``pinned: "
+                    f"{pinned!r}`` — not a boolean, so no reader can tell whether "
+                    f"the row is capped or merely floored"
+                )
+                continue
+            floor = declaration.get("value")
+        else:
+            pinned = False
+            floor = declaration
+        if isinstance(floor, bool) or not isinstance(floor, (int, float)) \
+                or not math.isfinite(float(floor)):
+            issues.append(
+                f"``durations_floors`` declares {floor!r} for {name} — not a "
+                f"number. A floor the writer cannot compare against is a floor "
+                f"the writer would silently ignore, which is the state this "
+                f"declaration exists to end"
+            )
+            continue
+        if name not in durations:
+            issues.append(
+                f"``durations_floors`` declares a floor of {float(floor):.1f} for "
+                f"{name}, which has no ``durations`` row — a floor can only guard "
+                f"a weight the map actually carries (#3400/#4348: a row must "
+                f"EXIST, not merely default)"
+            )
+            continue
+        value = durations[name]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue  # the wrong TYPE is `duration_issues`' diagnostic, not this one
+        if float(value) < float(floor):
+            # The DECLARATION decides the sentence, not the direction of the
+            # disagreement (the writer-side mirror of `kept_at_declared_cap` vs
+            # `kept_as_lower_bound`, `tools/ci_timing.py`). A `pinned` row is a CAP:
+            # the writer holds it AT the declared value in BOTH directions, and the
+            # key's own header forbids "lower the declared floor" as a repair —
+            # raising or lowering a cap is a CI-budget decision recorded on #9172,
+            # never a sweep's side effect (`config/ci-surfaces.yml`,
+            # `durations_floors`). Naming the wrong mechanism here sent a reader to
+            # the one action the declaration forbids (#10575 review, P3).
+            if pinned:
+                issues.append(
+                    f"{name} is declared with a ``durations_floors`` CAP of "
+                    f"{float(floor):.1f} but its row carries {value!r} — the writer "
+                    f"holds a capped row AT its declared value in both directions, "
+                    f"so this map states both that the weight is a declared weighing "
+                    f"choice and that it is a measurement below it; correcting the "
+                    f"row (or the declaration itself) is a CI-budget decision "
+                    f"(#9172), never a side effect of a sweep"
+                )
+            else:
+                issues.append(
+                    f"{name} is declared with a ``durations_floors`` FLOOR of "
+                    f"{float(floor):.1f} but its row carries {value!r} — the writer "
+                    f"keeps a row at or above its floor, so this map states both that "
+                    f"the value is a declared minimum and that it is below it; raise "
+                    f"the row, or lower the declared floor"
+                )
+        elif pinned and float(value) > float(floor):
+            issues.append(
+                f"{name} is declared with a ``durations_floors`` CAP of "
+                f"{float(floor):.1f} but its row carries {value!r} — the writer "
+                f"keeps a capped row AT its declared value in both directions, so "
+                f"this map states both that the weight is a declared weighing "
+                f"choice and that it is a measurement above it; a raise of the "
+                f"declaration is a CI-budget decision (#9172), never a side effect "
+                f"of a sweep"
+            )
+    return issues
+
+
 def map_issues(manifest: dict) -> list[str]:
     """The manifest checks that already exist, composed in the #3407 order.
 
@@ -395,8 +555,9 @@ def map_issues(manifest: dict) -> list[str]:
     This is the ONE composition both enforcing entry points reach
     (``ci_selection --integrity`` and ``ci_timing.integrity_problems``, via
     :func:`check`), so a check added here cannot be half-wired. ``#6135``'s
-    ``fast_shard_issues`` and ``#2913/#5373``'s ``duplicate_entries`` are
-    carried here for exactly that reason: both landed on main beside the
+    ``fast_shard_issues``, ``#2913/#5373``'s ``duplicate_entries`` and this
+    module's own ``floor_issues`` are
+    carried here for exactly that reason: the first two landed on main beside the
     #5050 validator, and leaving them at a call site would have made them
     reachable from one entry point only — the half-wired state this
     composition exists to prevent. Order follows main's own composition
@@ -408,6 +569,7 @@ def map_issues(manifest: dict) -> list[str]:
             + cs.duration_issues(manifest)
             + cs.leg_coverage_issues(manifest)
             + cs.duration_coverage_issues(manifest)
+            + floor_issues(manifest)
             + cs.duplicate_entries(manifest))
 
 
