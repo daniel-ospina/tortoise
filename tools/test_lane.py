@@ -2949,6 +2949,25 @@ def reap_orphans(own_name: str | None = None) -> list[str]:
             # lane's database. Name-derived arm 1 is left exactly as main had
             # it: this probe is scoped to the label.
             if labelled_owner:
+                if state in _LIVE_ISH_STATES:
+                    # ⛔ The SAME classification the name-derived arm applies, for
+                    # the same reason — this arm used to reach the probe
+                    # unconditionally and answer `None` for `created`/`paused`,
+                    # which is the `fail-closed` shape the ACTUATOR reads as an
+                    # `undecided` tick (`tools/container_reaper.py`). The labelled
+                    # population is precisely the STRANDED one (#10712's stamp
+                    # survives `git worktree remove`), so that shaped a 15-minute
+                    # timer red FOREVER over a question no retry can answer — and
+                    # a permanently FAILED unit is exactly the signal the
+                    # stale-copy pin relies on (#10813 review P2). The container is
+                    # still KEPT (docker cannot be asked, so no arm may remove it)
+                    # and the one command that releases it is named.
+                    out.append(f"reap: kept {name} — its labelled worktree "
+                               f"{owner} is gone, but it is {state}, so it "
+                               f"cannot be asked about its clients (docker exec "
+                               f"only reaches a RUNNING container) and is not "
+                               f"removed; release it with `docker rm -f {name}`")
+                    continue
                 busy = (False if state in _TERMINAL_STATES
                         else _container_in_use(name))
                 if busy:

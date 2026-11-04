@@ -431,6 +431,32 @@ def test_an_INCOMPLETE_tick_that_ALSO_removed_one_never_says_NOTHING_was(
     assert "NOTHING was removed" in out.err, out.err
 
 
+def test_a_DRY_RUN_INCOMPLETE_tick_never_claims_a_removal_COMPLETED(
+        monkeypatch, capsys):
+    """#10813 review P2: the summary lied on the tool's DEFAULT path.
+
+    `acted` is derived from `would remove` verdicts under a dry run, so the
+    did-clause printed "1 removal(s) DID complete in this sweep" beside a body
+    that said `would remove` — on a host where no `rm` was issued at all, in the
+    mode `container_reaper.py` runs when invoked without `--apply` (the
+    documented default, i.e. the first thing an operator sees). Exit 2 was right;
+    the sentence was the summary-contradicts-its-body class this module exists to
+    refuse, inverted into the safe mode.
+
+    MUTATION: drop the `apply` argument from `_exit_for` and this reds with
+    "DID complete" present in a dry run.
+    """
+    docker = _Two()
+    _two_orphan_box(monkeypatch, docker)
+    rc = cr.main(["reap"])                      # DRY RUN — no --apply
+    out = capsys.readouterr()
+    assert rc == 2, (rc, out.out, out.err)
+    assert docker.removals == [], docker.removals
+    assert "1 removal(s) WOULD complete" in out.err, out.err
+    assert "DID complete" not in out.err, out.err
+    assert "DRY RUN" in out.err, out.err
+
+
 def test_a_PAUSED_orphan_is_REPORTED_never_probed_and_never_reds_the_timer(
         monkeypatch, capsys):
     """`docker exec` cannot reach a container docker is not RUNNING.
@@ -470,6 +496,83 @@ def test_a_PAUSED_orphan_is_REPORTED_never_probed_and_never_reds_the_timer(
     # ⛔ and it must not wear the shape the actuator reads as INCOMPLETE.
     assert "unreadable" not in lines, lines
     assert "fail-closed" not in lines, lines
+
+
+def test_a_LABELLED_orphan_in_a_state_docker_cannot_exec_is_NEVER_a_red_tick(
+        monkeypatch, capsys, tmp_path):
+    """#10813 review P2: the stalled-timer case, in the population #10712 exists for.
+
+    The name-derived arm classifies `_LIVE_ISH_STATES` as a DECISION to keep —
+    `docker exec` reaches a container only while docker is RUNNING it (MEASURED
+    docker 27: `created` → "is not running", `paused` → "is paused, unpause the
+    container before exec", both exit 1). The LABEL-derived arm did not: it asked
+    anyway, got `None`, and emitted the `fail-closed` line the ACTUATOR reads as
+    an `undecided` tick — so the deployed unit returned exit 2 on EVERY tick,
+    forever, over a question no retry can answer. A `paused` container cannot be
+    removed by any arm, so that is not a transient INCOMPLETE: it is a permanent
+    false alarm beside a container that stays put, and it destroys the one
+    signal the stale-copy pin depends on (a FAILED unit).
+
+    The label arm is the one that matters here: `labelled_owner` is set exactly
+    when `_worktree_slugs()` no longer names the worktree, i.e. the STRANDED
+    population — `git worktree remove` keeps the label and destroys the name's
+    meaning (#10712).
+
+    MUTATION: drop the `_LIVE_ISH_STATES` branch from the labelled arm (return to
+    probing unconditionally) and this reds with rc == 2 and `fail-closed` in the
+    text.
+    """
+    gone = tmp_path / "torn-down-worktree"
+    assert not gone.exists()
+    name = tl.container_name(tl.slug_for(gone))
+    stamp = _stamp(3 * 3600)
+
+    def fake(*args, **kwargs):
+        if args[:2] == ("ps", "-a"):
+            if "-s" in args:
+                return _R(0, f"{name}\t1MB (virtual 2MB)\n", "")
+            if args[-1] == _PS_HEADER:
+                # The actuator's own census projection (5 columns).
+                return _R(0, f"{name}\tpaused\t{stamp}\t\t{gone}\n", "")
+            # `reap_orphans()`'s projection: name, state, LABEL_OWNER, LABEL_SLUG.
+            # A corroborated pair (`slug_for(owner) == slug`) — that is the only
+            # shape `_label_args()` writes, so it is the only one that can reach
+            # the labelled arm.
+            return _R(0, f"{name}\tpaused\t{gone}\t{tl.slug_for(gone)}\n", "")
+        return _R(0, "", "")
+
+    monkeypatch.setattr(tl, "_docker", fake)
+    # The teardown: git no longer names this worktree, so the NAME record is
+    # silent and only the stamped label can carry ownership.
+    monkeypatch.setattr(tl, "_worktree_slugs", lambda: {})
+    monkeypatch.setattr(tl, "_live_lane_paths", lambda: set())
+    monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-0123456789")
+    monkeypatch.setattr(tl, "_started_epoch", lambda _n: None)
+    monkeypatch.setattr(tl, "_unused_gap", lambda _n: None)
+    monkeypatch.setattr(tl, "_touch_lease", lambda _n: None)
+    monkeypatch.setenv("TORTOISE_TEST_LANE_REAP", "0")
+    monkeypatch.setenv("TORTOISE_CONTAINER_REAPER_SHA256", "")
+    monkeypatch.setenv("TORTOISE_TEST_LANE_POLICY_SHA256", "")
+
+    probed: list[str] = []
+    monkeypatch.setattr(tl, "_container_in_use",
+                        lambda n: probed.append(n) or None)
+
+    rc = cr.main(["reap", "--apply"])
+    out = capsys.readouterr()
+    lines = "\n".join([out.out, out.err])
+    # The timer must be GREEN about a state it can never change.
+    assert rc == 0, (rc, out.out, out.err)
+    # …while the container is KEPT (kept is the decision, not a deletion) and the
+    # operator is given the one command that releases it.
+    assert name in lines, lines
+    assert "cannot be asked about its clients" in lines, lines
+    assert "docker rm -f" in lines, lines
+    # ⛔ and it must not wear the shape the actuator reads as INCOMPLETE, nor
+    # spend a 60 s `exec` on a container docker has told us is paused.
+    assert "fail-closed" not in lines, lines
+    assert "unreadable" not in lines, lines
+    assert probed == [], f"a container docker is not RUNNING was probed: {probed}"
 
 
 def test_a_PER_CONTAINER_undecided_tick_does_not_claim_the_sweep_NEVER_RAN(

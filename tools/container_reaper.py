@@ -385,8 +385,14 @@ def _owner_report(row: dict, slug_map: dict[str, str] | None,
                   live_paths: set[str] | None) -> str:
     """``<path> (live|gone|idle|unresolvable)`` for one container.
 
-    Reported from the SAME two reads the reaper decides with, so the line an
-    operator reads and the verdict beneath it cannot tell different stories.
+    Reported from the SAME two PREDICATES the reaper decides with
+    (``_worktree_slugs`` / ``_live_lane_paths``), so the line an operator reads
+    and the verdict beneath it cannot tell different stories **about the same
+    readings**. It is not the same two READINGS: ``reap()`` takes its own census
+    reads for this column and then calls ``reap_orphans()``, which reads both
+    surfaces again — a worktree removed or a process exiting in between can make
+    the two disagree for one sweep. Stated rather than papered over, because this
+    is the evidence line of a destructive tool (#10813 review P3).
     """
     owner = row.get("label_owner") or None
     if not owner and slug_map is not None:
@@ -548,7 +554,7 @@ def reap(*, apply: bool, as_json: bool = False) -> int:
             "lines": rendered,
             "notes": notes,
         }, indent=2))
-        return _exit_for(skipped, failed, acted)
+        return _exit_for(skipped, failed, acted, apply=apply)
 
     for line in rendered:
         print(line)
@@ -562,11 +568,11 @@ def reap(*, apply: bool, as_json: bool = False) -> int:
           f"{len(acted)}; {_human_bytes(total_bytes)} of writable layer "
           f"{'reclaimed' if apply else 'reclaimable'}"
           + ("" if apply else " — DRY RUN, pass --apply to act"))
-    return _exit_for(skipped, failed, acted)
+    return _exit_for(skipped, failed, acted, apply=apply)
 
 
 def _exit_for(skipped: list[str], failed: list[str],
-              acted: list[str] = ()) -> int:
+              acted: list[str] = (), *, apply: bool = True) -> int:
     """The verdict: a failed removal beats an undecided sweep, which beats OK.
 
     Both were measured reporting `ok: true` / exit 0 before this existed — the
@@ -579,14 +585,29 @@ def _exit_for(skipped: list[str], failed: list[str],
     a summary contradicting its own body is the exact defect class this module
     exists to refuse (see the `acted` comment above). Exit 2 stands either way:
     the tick is still INCOMPLETE.
+
+    ⛔ …and it must not say the removal COMPLETED when this is the DEFAULT mode
+    (`--apply` absent), where nothing is removed by construction. `acted` is
+    derived from "would remove" verdicts under a dry run, so an un-mode-aware
+    sentence printed "1 removal(s) DID complete in this sweep" beside a body that
+    said `would remove` and a host where no `rm` was issued — a false
+    operator-facing claim from the tool's documented default path, i.e. the very
+    summary-contradicts-its-body class this returns exit 2 to refuse (#10813
+    review P2). `apply` defaults to True only so a caller that can only ever
+    reach this with a real sweep (nothing does today) keeps its meaning.
     """
     if failed:
         print("container_reaper: PARTIAL — at least one removal was attempted "
               "and FAILED; the container is still on the host", file=sys.stderr)
         return EXIT_PARTIAL
     if skipped:
-        did = (f"{len(acted)} removal(s) DID complete in this sweep"
-               if acted else "NOTHING was removed")
+        if not acted:
+            did = "NOTHING was removed"
+        elif apply:
+            did = f"{len(acted)} removal(s) DID complete in this sweep"
+        else:
+            did = (f"{len(acted)} removal(s) WOULD complete in this sweep "
+                   f"(DRY RUN — nothing was removed)")
         print("container_reaper: INCOMPLETE — at least one container could not "
               "be decided (see its reason above); " + did +
               ". This is exit 2, never a clean sweep.", file=sys.stderr)

@@ -104,7 +104,11 @@ exec"*; *"container … is not running"*), so proof 1 keeps such a container and
 prints the `docker rm -f` that releases it. It is deliberately **not** classified
 as `undecided`: that verdict reds the 15-minute timer, and a state no retry can
 change would be a permanent false alarm — the shape that destroys the signal a
-`FAILED` tick is supposed to be.
+`FAILED` tick is supposed to be. This holds for **both** ownership arms: the
+name-derived one and the label-derived one (#10712's stamp, which is how a
+container whose worktree was torn down is still attributed at all). The labelled
+arm reached the probe unconditionally at first and answered `None`, i.e. exit 2
+on every tick forever, beside a container no arm can remove.
 
 The cost of rule 1, stated: a lane that opens its DB with `uri` and then calls
 `run` **reuses** the container, so the hook never reaps it and — while the
