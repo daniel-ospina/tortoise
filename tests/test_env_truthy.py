@@ -500,6 +500,16 @@ _LEDGER_LITERAL_OWNERS: dict[str, tuple[int, str]] = {
            "by the HOST interpreter from its PATH, so `tortoise` need not be importable "
            "there at all; it imports only the stdlib — the same standalone-consumer "
            "reason as the embedded reaper"),
+    "tortoise/mcp_server.py": (
+        1, "OVERRIDES: the ONE env-truthiness vocabulary (`TRUTHY`/`FALSY` from "
+           "`tortoise.env_truthy`) — `_COERCES_TO_TRUE` is not an env read at all: it is "
+           "pydantic's BOOL-COERCION table applied to an MCP tool ARGUMENT (`dry_run`), "
+           "and the reader must match that coercion EXACTLY — including its `t`/`y` "
+           "members and its absence of `.strip()` — or the refusal's `committed` claim "
+           "would disagree with the arm the handler actually takes (`TRUTHY` reads "
+           "`\"t\"` as a non-preview and over-blocks a real preview). The two "
+           "vocabularies are deliberately distinct, and neither may be derived from the "
+           "other"),
 }
 
 #: Narrow `== "1"` reads that REMAIN after #4097, with their site COUNT as an UPPER
