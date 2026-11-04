@@ -8998,11 +8998,18 @@ def _check_org_limit(org: dict, resource: str, *,
     rule. The INVENTORY, stated exactly (a claim of "every call site" was
     wrong here once already — main-repair 2026-11-04, review cycle 1):
 
-    * the async REQUEST doors ride ``_check_org_limit_off_loop``, which hoists
+    * the async POINTS doors ride ``_check_org_limit_off_loop``, which hoists
       the fill onto ``_cp_offload``/``_graph_offload`` by substrate and then
-      submits the count to the graph pool — the points/documents doors as
-      ``check_org_limit.points``, the capture door as
+      submits the count to the graph pool, as ``check_org_limit.points``;
+      the capture door rides the same twin as
       ``check_org_limit.sessions`` (#9567 round 10 → main-repair 2026-11-04);
+    * the DOCUMENTS door does NOT use this function or that seam: it calls
+      ``enforce_org_limit(limits, "documents", …)`` directly, on a limits dict
+      its caller resolved inline (``resolve_org_limits`` on the event loop, in
+      the detached ``_run_docs_indexing`` task). That is a PRE-EXISTING
+      on-loop control-plane read of the #2988/#3498 class, named here so this
+      inventory is true and filed on its own rather than absorbed into a
+      capture-door repair;
     * ``POST /v1/sessions/commit`` hoists the carry in the HANDLER, before its
       per-graph lock is taken, and hands the stamped dict down (#9567 round 13);
     * ``/v1/demo`` is the ONE declared exception: it runs this call inside its
@@ -17510,10 +17517,14 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # fault, two bodies, across two gated doors of one seam. So this door uses
     # the SAME seam as the points doors (`_check_org_limit_off_loop`): carry on
     # `_cp_offload`/`_graph_offload` by substrate, then the count on the graph
-    # pool. `to_thread`'s context-copy is not lost — an await still runs the
-    # caller's contextvars into both halves — and it is safe on the MCP path
-    # for the same reason as before (the impl is awaited under its own loop in
-    # a worker thread).
+    # pool. The CONTEXT story, stated exactly (review cycle 2 corrected an
+    # earlier over-claim): the COUNT and the registry-mode CARRY ride
+    # `_graph_offload`, which applies `confine_context` — the caller's
+    # contextvars reach them. The SUPABASE carry rides `_cp_offload`, whose
+    # control-plane pool does NOT copy the context, and needs none: the org id
+    # travels in the dict argument, and `supabase_control` declares no
+    # ContextVar. Safe on the MCP path for the same reason as before (the impl
+    # is awaited under its own loop in a worker thread).
     # #8906: `sdk=` is passed for the same reason as the points doors — this is a
     # TENANT-GRAPH resource, so an omitted sdk makes `_count_resource` mint
     # `org_{org_id}` (the org DEFAULT graph) while a graph-bound key's Sessions
