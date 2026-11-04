@@ -171,8 +171,10 @@ class CommitRecordStore:
         refusal that discards leaves the graph as it found it, so a retry after
         the documented backoff — or after a cap is raised (#9826) — is a first
         adjudication, never a second one. The `>50` budget refusal is the one
-        pre-write refusal that deliberately KEEPS its record (a re-submission
-        must 402 deterministically), so the rule is per-outcome, not blanket.
+        pre-write refusal that deliberately KEEPS its record (#9826's recorded
+        instruction, for DE2E-7 Session B/C evidence) — though that record is
+        not what makes the refusal deterministic: the ceiling test is
+        band-independent (`commit_schema.py:1855`). Per-outcome, not blanket.
 
         Deleting restores the pre-attempt state exactly, which is what the
         refusal promised: nothing was written, so the client's documented

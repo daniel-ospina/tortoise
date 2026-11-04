@@ -515,15 +515,20 @@ the `{error}`-only shape whose retry action is different.
   within 60 s, and the correct action is **backoff-and-retry** — the opposite
   of the cumulative `ERR_QUOTA` advice above. A request refused by THIS throttle
   leaves no record of its own: the `:CommitRecord` it opened is removed when
-  that request created it, so the retry cannot be judged against it. If that
+  that request created it, so the retry cannot be judged against it. (If that
+  cleanup itself fails — a store fault — the failure is logged at ERROR and the
+  refusal still returns unchanged, but the record then survives and the retry is
+  re-adjudicated; it is the one case the guarantee does not cover.) If that
   attempt was the first for this `client_commit_id`, the retry is therefore a
   **first** attempt — the same `held[]` adjudication a clean request would have
   received, not a second one. When an EARLIER attempt of the same id left a
   record — a `held` deferral, a crash mid-write, or the `>50` ceiling refusal
-  (which deliberately KEEPS its record so a re-submission refuses
-  deterministically) — that record is preserved and the
+  (which deliberately KEEPS its record, per the recorded instruction behind
+  #9826) — that record is preserved and the
   retry is a re-submission: it is not re-adjudicated against the 25-item
-  first-adjudication band, only against the 50-item ceiling. A `fully_written`
+  first-adjudication band, only against the 50-item ceiling. (The `>50` refusal
+  is deterministic either way: its ceiling test is band-independent, so that
+  record is evidence rather than what forces the 402.) A `fully_written`
   record is not re-run at all: the replay check returns `duplicate: true` with
   zero writes before the org-cap and ingest gates are consulted (the per-key
   rate limiter and Layer-1 validation still run first, so a re-POST of a
@@ -556,8 +561,10 @@ the `{error}`-only shape whose retry action is different.
   pre-write check — an in-flight bundle is unaffected. The refused request is
   **not** an attempt you have to reason about later: a pre-write quota refusal
   (and the ingest throttle above) writes nothing and leaves no commit record of
-  its own. So **when no earlier attempt of the same `client_commit_id` left
-  one** — the `>50` ceiling refusal above is the case that does — the retry is
+  its own — the cleanup described on the throttle bullet, including its
+  store-fault caveat. So **when no earlier attempt of the same
+  `client_commit_id` left one** — the `>50` ceiling refusal above is the case
+  that does — the retry is
   a **first** attempt: it receives the same `held[]` adjudication a clean
   request would have, rather than a re-adjudication that writes what the
   first-adjudication band deferred (#9826).

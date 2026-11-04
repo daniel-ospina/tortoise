@@ -20212,8 +20212,10 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
 def _discard_refused_attempt(store, client_commit_id: str, created: bool) -> None:
     """Undo this attempt's idempotency record when a PRE-WRITE gate refuses.
 
-    `store.acquire(...)` merges the `:CommitRecord` before EVERY gate in the
-    commit handler, and `commit_schema.is_first_adjudication` is
+    `store.acquire(...)` merges the `:CommitRecord` before every gate BELOW
+    `[3c]` in the commit handler (`[3c]`'s ambiguity refusal deliberately runs
+    above `acquire`, so it leaves no record to clean), and
+    `commit_schema.is_first_adjudication` is
     `record is None` — so a refusal that keeps its record silently converts the
     client's documented retry into a RE-adjudication, without the
     first-adjudication hard-25 band, and writes what the band had held. The 429
@@ -20231,9 +20233,16 @@ def _discard_refused_attempt(store, client_commit_id: str, created: bool) -> Non
     work (`value_nodes_declared IS NULL`), so a genuine mid-write record is
     never touched.
 
-    ⛔ NOT for the budget `fail` (>50) branch: that record is deliberately KEPT
-    so re-submission 402s deterministically (DE2E-7 Session B/C). The rule is
-    per-outcome, not blanket.
+    ⛔ NOT for the budget `fail` (>50) branch, which (per #9826's own recorded
+    instruction) deliberately KEEPS its record. Note what does NOT follow: the
+    record is not what makes that refusal deterministic — `adjudicate_budget`
+    tests `cumulative > BUDGET_CEILING` unconditionally, before it consults the
+    first-adjudication band (`commit_schema.py:1855`), so a retry recomputes the
+    same `prior_created + delta` and 402s with or without the record. The record
+    is KEPT as the attempt's evidence (DE2E-7 Session B/C), not to force the
+    402 — and the pins (`test_session_b_ceiling_402`,
+    `test_session_c_held_resubmission_ceiling_402`) pin the 402s, not the
+    retention. The rule is per-outcome, not blanket.
 
     ⛔ INERT ON FAULT: a cleanup that fails must not REPLACE the refusal. The
     refusal is the answer the client needs (a structured 402/500 with its
