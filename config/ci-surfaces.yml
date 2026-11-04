@@ -3610,16 +3610,22 @@ surfaces:
   # CI has no safety suite.
   - test_container_reaper.py
   - test_transport_wait_bound.py  # #3834: transport wait bound + cold-half gate wiring (dual: api)
-  # #10849: the write-refusal contract. The `core` row is load-bearing too, for a
-  # path neither `api` nor the full matrix covers: `config/surface-manifest.yml`
-  # selects `core` ALONE (measured: `select(['config/surface-manifest.yml'])` ->
-  # ['core'], full=False), and that manifest is where the served
-  # `idempotentHint` values are re-cut — the exact input this file's
-  # `_write_retry_safety` derives `retry_safe` from. So a re-cut that flips a
-  # hint back to `true` would otherwise land with no leg running this pin
-  # (the #1349/#2938 silent-drop class). DB-free and pure-unit, so it needs no
-  # slow/carve_out row and no `durations` weight — `duration_coverage_issues()`
-  # is a coverage FLOOR, measured [] for this manifest revision.
+  # #10849: the write-refusal contract. The `core` row is a BACKSTOP, not the
+  # guard that catches a hint flip: the primary one is `tortoise/tool_registry.py`
+  # — where `ToolDefinition.idempotent` (the field `_write_retry_safety` derives
+  # `retry_safe` from) actually lives — and that file is a SHARED_MODULE, so any
+  # hint change already arrives with the full matrix (measured:
+  # `select(['tortoise/tool_registry.py'])` -> full=True). The row is here for the
+  # one path the matrix does NOT reach: `config/surface-manifest.yml` selects
+  # `core` ALONE (measured: `select(['config/surface-manifest.yml'])` -> ['core'],
+  # full=False). Do NOT read that manifest as a hint store — it carries no
+  # per-tool hint field (its only `idempotentHint` occurrence is prose inside a
+  # `job:` string); it is the committed SNAPSHOT of the served surface, drift-
+  # gated by `tools/surface_manifest.py check`, so a re-cut-only diff lands with
+  # no leg running this pin otherwise (the #1349/#2938 silent-drop class).
+  # DB-free and pure-unit, so it needs no slow/carve_out row and no `durations`
+  # weight — `duration_coverage_issues()` is a coverage FLOOR, measured [] for
+  # this manifest revision.
   - test_wait_bound_write_ack.py
   # #2877: DB-free guards that a dead backup watcher degrades /health (the file
   # it guards, tortoise/hosted_api.py, selects the `api` surface, so it is
