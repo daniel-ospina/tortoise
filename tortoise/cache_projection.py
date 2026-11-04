@@ -1345,24 +1345,40 @@ def _episodic_source_kind_property() -> str:
 _UNRESOLVED_TAIL: Any = object()
 
 
-def _decoded_tail(raw: Any) -> Mapping[str, Any]:
-    """The row's `props` tail as a mapping, decoded once.
+def _tail_payload(raw: Any) -> Any:
+    """The row's `props` tail DECODED, in whatever shape the row holds it.
 
-    `None`/empty — and anything that is not a mapping — answers `{}`. ⛔ `''` is
-    handled explicitly: `props` is `jsonb NOT NULL DEFAULT '{}'`, so the common
-    shapes are a mapping or `None`, but the pre-existing read accepted a STRING
-    tail and wrote `json.loads(tail) if tail else {}` — i.e. it treated the empty
-    string as an ABSENT tail on purpose. `json.loads('')` RAISES, so keeping that
-    case is what stops the identity read from turning an empty tail into a
-    `JSONDecodeError` on the projection path (caught here by
+    `None`/empty answers `{}` — the ABSENT tail, spelled the way both readers
+    expect. ⛔ `''` is handled explicitly: `props` is `jsonb NOT NULL DEFAULT
+    '{}'`, so the common shapes are a mapping or `None`, but the pre-existing read
+    accepted a STRING tail and wrote `json.loads(tail) if tail else {}` — i.e. it
+    treated the empty string as an ABSENT tail on purpose. `json.loads('')`
+    RAISES, so keeping that case is what stops the projection from turning an
+    empty tail into a `JSONDecodeError` (pinned by
     :func:`test_the_DROP_SET_itself_is_exactly_the_declared_pair`, whose row
-    populates every column). The WRITER's refusal for a malformed tail stays in
-    :func:`_props_from_row`; this helper only feeds the identity read, so it must
-    not pre-empt it.
+    populates every column).
+
+    ⛔ IT DOES NOT COERCE. `props` is `jsonb NOT NULL DEFAULT '{}'` with no CHECK
+    that it is an OBJECT, so a corrupt row can carry a scalar or an array. This
+    answers it verbatim so the WRITER path (:func:`_props_from_row`) can refuse
+    it loudly, instead of a lenient coercion here swallowing the whole tail (#10867
+    review P3).
     """
     if not raw:
         return {}
-    tail = json.loads(raw) if isinstance(raw, str) else raw
+    return json.loads(raw) if isinstance(raw, str) else raw
+
+
+def _decoded_tail(raw: Any) -> Mapping[str, Any]:
+    """The row's `props` tail as a MAPPING — the IDENTITY read's view.
+
+    A `None`/empty tail and anything that is not an object answer `{}`, because
+    this feeds the row predicate, which must answer for every shape a row can
+    hold. That leniency is deliberately NOT shared with :func:`_props_from_row`:
+    the writer path decodes through :func:`_tail_payload` and RAISES on a
+    non-object, so a malformed tail is refused where it would otherwise be
+    projected (and silently dropped)."""
+    tail = _tail_payload(raw)
     return tail if isinstance(tail, Mapping) else {}
 
 
@@ -1398,10 +1414,15 @@ def _row_identity_view(row: Mapping[str, Any],
     `UnprojectableRecord`, and the schema's own CHECK), so the two agree on every
     shape that can become a node.
 
-    The row itself is NEVER mutated — a fresh mapping is returned.
+    The row itself is NEVER mutated — a FRESH mapping is returned, on every
+    branch. ⛔ The empty-tail branch used to `return row`, so `is` identity held
+    and a caller mutating the "view" mutated the RECORD ROW — a false guarantee
+    on the one object R3 leans on to prove the record is untouched (#10867 review
+    P3). One shallow copy on a branch the live path does not take is the whole
+    cost.
     """
     if not tail:
-        return row
+        return dict(row)
     merged: dict[str, Any] = {k: v for k, v in row.items() if k != "props"}
     kind_property = _episodic_source_kind_property()
     if merged.get("source_kind") is None and kind_property in tail:
@@ -1505,7 +1526,22 @@ def _props_from_row(table: str, row: Mapping[str, Any], *,
     projected = projected_columns(table)
     # The tail is decoded ONCE: it feeds the identity read below AND the verbatim
     # seed of `out`, and decoding is what decides whether the identity participates.
-    tail = _decoded_tail(row.get("props"))
+    # ⛔ A NON-OBJECT TAIL IS REFUSED HERE, NOT SWALLOWED (#10867 review P3).
+    # `props` is `jsonb NOT NULL DEFAULT '{}'` with NO CHECK that it is an object,
+    # so a corrupt row can carry a scalar or an array; `_decoded_tail` answers
+    # `{}` for those by design (it also feeds the predicate, which must answer for
+    # every shape), and seeding `out` from that would drop the tail's whole
+    # content with no signal — the silent loss this module refuses by name
+    # everywhere else. Before the tail was SEEDED, the same row raised `TypeError`
+    # out of `dict(tail)`; the loudness is kept, in this module's own error type.
+    tail = _tail_payload(row.get("props"))
+    if not isinstance(tail, Mapping):
+        raise CacheProjectionError(
+            f"{table}.props is a {type(tail).__name__}, not a JSON object — the "
+            f"column is `jsonb NOT NULL DEFAULT '{{}}'` with no CHECK, so a row "
+            f"can carry a scalar or an array; refusing to drop its content "
+            f"silently"
+        )
     # §9.1/D1 (#10853): resolved ONCE per row, from the row's identity AS THE
     # NODE WILL CARRY IT — the columns AND the `props` tail.
     episodic_source = (table == "source"

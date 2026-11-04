@@ -738,3 +738,84 @@ def test_the_placement_reads_stay_at_CALL_time():
         # later test cannot inherit a half-initialised module.
         cp.episodic_source_prose_properties.cache_clear()
         cp._episodic_source_kind_property.cache_clear()
+
+
+def test_a_MALFORMED_props_tail_is_REFUSED_not_dropped_in_silence():
+    """A non-object `props` tail must not vanish from the projection (#10867 P3).
+
+    `public.source.props` is `jsonb NOT NULL DEFAULT '{}'` with **no CHECK that it
+    is an object**, so a corrupt row can carry a scalar or an array. The identity
+    read must tolerate that (it answers for EVERY shape a row can hold), but the
+    WRITER path must not: `_decoded_tail` answers `{}` for a non-mapping, and
+    seeding `out` from that dropped the tail's whole content with no signal —
+    the silent loss this module refuses by name everywhere else. Before the tail
+    was seeded, the identical row raised `TypeError` out of `dict(tail)`; this
+    leg pins the loudness, in the module's own error type.
+
+    Both shapes are exercised because both are reachable: an ARRAY
+    (`jsonb`'s other collection form) and a bare SCALAR.
+    """
+    from tortoise.cache_projection import CacheProjectionError
+
+    for payload, what in (("[1, 2]", "an array"), ('"just a string"', "a scalar")):
+        row = _captured_session_row()
+        row["props"] = payload
+        with pytest.raises(CacheProjectionError) as caught:
+            node_from_row("Source", row)
+        assert ".props is a" in str(caught.value) and "not a JSON object" in str(
+            caught.value
+        ), (
+            f"a `props` tail holding {what} must be REFUSED by name — it was "
+            f"dropped in silence instead: {caught.value}"
+        )
+
+    # The LENIENT shape must stay lenient: an empty tail is the schema's DEFAULT
+    # and the ordinary row, so it projects (and the guard still fires).
+    for empty in ("", "{}", None):
+        row = _captured_session_row()
+        row["props"] = empty
+        node = node_from_row("Source", row)
+        assert "summary" not in node.props and "_searchText" not in node.props, (
+            f"an empty `props` tail ({empty!r}) is not a malformed one — it must "
+            "project normally, with the prose still declined")
+
+    # A STRING tail is decoded, so a syntactically broken one raises
+    # `JSONDecodeError` (a `ValueError`) rather than projecting as `{}`.
+    row = _captured_session_row()
+    row["props"] = "{not json"
+    with pytest.raises(ValueError):
+        node_from_row("Source", row)
+
+
+def test_the_identity_view_NEVER_aliases_the_record_row():
+    """`_row_identity_view` promises a FRESH mapping on EVERY branch (#10867 P3).
+
+    Its docstring is what R3 leans on to say "the record row is not mutated", and
+    the empty-tail branch broke it: `return row` made the "view" the SAME object,
+    so a caller writing identity into the view wrote into the record. Latent today
+    (`_is_episodic_source_row` short-circuits before calling it with no tail), and
+    exactly therefore unpinned — the guarantee has to hold for the caller that
+    arrives next, not only for today's.
+    """
+    from tortoise import cache_projection as cp
+
+    row = _captured_session_row()
+    before = dict(row)
+
+    view = cp._row_identity_view(row, {})
+    assert view is not row, (
+        "`_row_identity_view(row, {})` returned the RECORD ROW itself, so its "
+        "own \"the row itself is NEVER mutated\" guarantee is false")
+    view["url"] = "session:MUTATED"
+    view["source_kind"] = "MUTATED"
+    assert dict(row) == before, (
+        "mutating the returned identity view mutated the RECORD ROW — the "
+        "record is the authority for these values and must not be rewritten by "
+        "a projection read")
+
+    # The tail path was already fresh; pin it so a later refactor cannot make the
+    # two branches disagree.
+    view = cp._row_identity_view(row, {"sourceKind": "agentSession"})
+    assert view is not row
+    view["source_kind"] = "MUTATED"
+    assert dict(row) == before, "the tail branch aliased the record row"
