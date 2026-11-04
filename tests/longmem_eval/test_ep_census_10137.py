@@ -258,7 +258,7 @@ def _ingest_claim(sdk: TortoiseSDK, content: str) -> str:
     """A claim written EXACTLY as ``ingest_v2._write_payload`` writes one:
     kind ``statement``, ``status="draft"``, and — the trap — ``is_episodic=True``
     (``ingest_v2.py:275-290``). The flag is the QUOTA discriminator
-    (``quota.py:1024-1030``), not a belief/evidence one; a denominator filtered
+    (``quota.py:1046-1050``), not a belief/evidence one; a denominator filtered
     on it would exclude every claim EP stamps (review P0)."""
     return sdk.create_point("statement", content, dedup=False,
                             is_episodic=True, status="draft")["id"]
