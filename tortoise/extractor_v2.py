@@ -13419,8 +13419,9 @@ def _composed_identities_agree(a: tuple[str, str, str | None],
     ⛔ AND IT IS WHY THE AMBIGUOUS ``kms`` STAYS SAFE. ``20kms`` folds to
     milliseconds here, but the fold is only ever *used* against an equally
     composed side; a colloquial "kms" for kilometres against ``20km`` does not
-    match, so the pair keeps its unknown-unit fail-open and a reader's "kms" is
-    never the reason a truthful point is refused.
+    match, so the pair keeps its unknown-unit fail-open. (``20kms`` against
+    ``20000 m`` IS refused — but identically at `origin/main` `525fde4a9`, by the
+    pre-existing ``_K_ABBREVIATES`` gate this arm does not touch, #10876.)
     """
     composed = _composed_identity(a)
     if composed is not None and composed == b:
