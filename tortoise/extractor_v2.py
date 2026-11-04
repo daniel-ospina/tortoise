@@ -13410,18 +13410,29 @@ def _composed_identities_agree(a: tuple[str, str, str | None],
     cores" and "the prefix reading closes the gap").
 
     ⛔ IT CAN ONLY EVER *ADD* TOLERANCE — it compares the composed form to the
-    other side and returns True only on exact equality, so it cannot refuse and
-    cannot let a rewrite through: ``20k miles``/``21k miles`` composes to
-    ``20000 mi`` against ``21000 mi`` and still reaches the core comparison, and
-    ``20k miles``/``20000 km`` to ``20000 mi`` against ``20000 km``. Both are
-    pinned in ``tests/test_state_value_verbatim_10360.py``.
+    other side and returns True only on exact equality, so it cannot refuse. It
+    cannot rescue a rewritten NUMBER either: ``20k miles``/``21k miles`` composes
+    to ``20000 mi`` against ``21000 mi`` and ``20k miles``/``20000 km`` to
+    ``20000 mi`` against ``20000 km``, and both still reach the core comparison
+    and are refused (pinned in ``tests/test_state_value_verbatim_10360.py``).
+    ⛔ WHAT IT DOES *NOT* PROMISE, stated because the weaker claim is false: it
+    CANNOT stop a unit from being re-read. ``20kms`` against ``20000 ms`` is
+    TOLERATED — REFUSED at `origin/main` `525fde4a9` — and the docstring above
+    used to imply otherwise by saying the fold is "only ever used against an
+    equally composed side". It is not: ``_composed_identity`` returns ``None``
+    for ``('', '20000', 'ms')`` (``ms`` is a unit the table KNOWS) and the
+    equality is against that plainly-spelled side. That tolerance is
+    deliberate and pinned, not an oversight.
 
-    ⛔ AND IT IS WHY THE AMBIGUOUS ``kms`` STAYS SAFE. ``20kms`` folds to
-    milliseconds here, but the fold is only ever *used* against an equally
-    composed side; a colloquial "kms" for kilometres against ``20km`` does not
-    match, so the pair keeps its unknown-unit fail-open. (``20kms`` against
-    ``20000 m`` IS refused — but identically at `origin/main` `525fde4a9`, by the
-    pre-existing ``_K_ABBREVIATES`` gate this arm does not touch, #10876.)
+    ⛔ AND THE AMBIGUOUS ``kms`` STAYS SAFE IN THE DIRECTION THAT MATTERS. A
+    colloquial "kms" for kilometres against ``20km`` does not compose to a match,
+    so the pair keeps its unknown-unit fail-open. (``20kms`` against ``20000 m``
+    IS refused — identically at `origin/main` `525fde4a9` — but NOT by
+    ``_K_ABBREVIATES``: ``_MAGNITUDE_FACTORS.get('kms')`` is ``None``, so
+    ``_magnitude_agrees`` returns at its first line and never reaches that gate.
+    It is refused by the numeric-core comparison, 20 against 20000, after the
+    compose arm fails to match ``ms`` against ``m``. **#10876 would not change
+    this pair** — it is a different root and is not covered there.)
     """
     composed = _composed_identity(a)
     if composed is not None and composed == b:

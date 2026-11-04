@@ -1085,6 +1085,18 @@ def test_a_magnitude_prefix_beside_a_unit_word_is_COMPOSED_not_refused():
     # 20 km against 20 metres), so #10876 must move before this changes.
     assert v2._value_slot_divergence("the batch took 5k millis", "the batch took 5000 ms")
     assert v2._value_slot_divergence("the lease is 5k dys", "the lease is 5000 days")
+    # ⛔ AND THE MOST GENERAL INSTANCE: a BARE `5k`, with NO unit word at all on
+    # that side. #10876's first scope clause used to require an unmapped
+    # spelling, which excludes this shape entirely — yet it is the same refusal
+    # and the widest one (every newly fused unit triggers it). TOLERATED at
+    # `origin/main` `525fde4a9`, REFUSED here; pinned so #10876 cannot be closed
+    # against the narrow shape alone.
+    assert v2._value_slot_divergence("the took 5k", "the took 5000 ms")
+    assert v2._value_slot_divergence("the took 5k", "the took 5000 days")
+    assert v2._value_slot_divergence("the took 5k", "the took 5000 second")
+    # …while the units `k` may abbreviate, and a bare number, still agree.
+    assert v2._value_slot_divergence("the took 5k", "the took 5000 km") == ()
+    assert v2._value_slot_divergence("the took 5k", "the took 5000") == ()
     assert v2._value_slot_divergence(
         "the batch took 5k millis", "the batch took 5000 millis") == ()
 
