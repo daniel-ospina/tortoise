@@ -7655,17 +7655,25 @@ def test_the_9548_rows_note_is_readable_by_the_guard_whatever_its_shape():
     `tests/test_ci_timing.py::_assert_preamble_shape` refused the same clause for
     that reason (#10575 review, P2). Measured at this head, read-only:
 
-        committed                                        span = 31, reader joins 2,150
-        CUT-arm shape, built as `tools/ci_timing.py:2939-2945` writes it
-                                                         span =  0, reader joins 2,154
-        `⛔` dropped so the block opens a note           span =  0, reader joins      0
+        committed                                     span = 31, reader joins 2,150
+        CUT arm, `_joined_note_tail` -> `{rendered_row}{tail}`
+                                                      span =  0, reader joins 2,122
+        `⛔` dropped so the block opens a note         span =  0, reader joins      0
 
     So the shapes are told apart by READABILITY alone, and the pin below is the one
     property every healthy shape satisfies and a detached block does not: whatever
     the row carries must be REACHABLE in the text `_durations_row_comments` joins.
     The expected text is derived from the map ITSELF (never a phrase baked in here),
     so a legitimate rewrite of the note stays green.
+
+    ⛔ THE SPAN IS THE GUARDS' OWN (`tools.ci_timing._row_continuation_lines`), never
+    a span hand-rolled in this test. That predicate refuses a block whose first line
+    OPENS a note — this map's dominant convention is a block that documents the row
+    BELOW — so a private collector that accepts one applies this row's assertion to a
+    NEIGHBOUR's prose and reds a map the reader and the writer both accept.
     """
+    from tools.ci_timing import _row_continuation_lines
+
     text = cs.MANIFEST.read_text(encoding="utf-8")
     lines = text.splitlines()
     key = "test_9548_record_search_keys_shape.py"
@@ -7673,33 +7681,38 @@ def test_the_9548_rows_note_is_readable_by_the_guard_whatever_its_shape():
     row = next(i for i, ln in enumerate(lines)
                if i > block_start and ln.startswith(f"  {key}:"))
 
-    # Collect the block below the row with the READER's span semantics, not a
-    # stricter one of our own: a blank line does NOT end a note and any other
-    # non-comment line does (`tools/ci_timing.py:2208`, mirrored by
-    # `_durations_row_comments`). A loop that stopped at a blank line red a map both
-    # production predicates still accept (measured: writer span 31, reader 2,150).
-    block: list[str] = []
+    # Raw extent of the block below the row, with the reader's blank-line rule
+    # (`tools/ci_timing.py:2208`: a blank line does NOT end a note; any other
+    # non-comment line does). Used only to pick the DIAGNOSIS when the span is empty.
+    raw_block: list[str] = []
     for ln in lines[row + 1:]:
         if not ln.strip():
             continue
         if not (ln[:1] in (" ", "\t") and ln.strip().startswith("#")):
             break
-        block.append(ln)
+        raw_block.append(ln)
 
     joined = dict(_durations_row_comments(text))[key]
-    if block:
-        last_claim = block[-1].strip().lstrip("#").strip()
+    span = _row_continuation_lines(lines, row)
+    if span:
+        last_claim = lines[span[-1]].strip().lstrip("#").strip()
         assert last_claim, "the note's last line is an empty comment marker"
         assert last_claim in joined, (
+            "the note below this row is DETACHED from it: no duration guard reads "
+            "what it claims. Make the block CONTINUE the row's sentence rather "
+            f"than open a new one. (joined: {len(joined)} chars)")
+    elif raw_block:
+        # A block sits below the row but is NOT this row's note — either the row was
+        # flattened and the block documents the NEXT row (healthy), or the block was
+        # detached from this row (the defect). The row's own tail tells them apart.
+        assert joined.strip(), (
             "the note below this row is DETACHED: its first line OPENS a note of its "
             "own (`tools.ci_timing._starts_a_new_note`), so `_durations_row_comments` "
             "never joins it and no duration guard reads what it claims. Start the "
-            f"block with a line that CONTINUES the row's sentence. (joined: "
-            f"{len(joined)} chars)")
+            "block with a line that CONTINUES the row's sentence.")
     else:
-        # The FLATTENED shape. There is no block to detach here — the writer moved
-        # the whole note onto the row line — so the only way this shape loses the
-        # guard is by the row carrying no note at all.
+        # FLATTENED with nothing below: the writer moved the whole note onto the row
+        # line, so the only way this shape loses the guard is by carrying no note.
         assert joined.strip(), (
             "this row carries NO note in either shape: no continuation block below "
             "it and no tail on its row line, so no duration guard reads what it "
