@@ -4202,7 +4202,7 @@ def _value_form_outside_judged(token: str) -> bool:
 #: recoverable without a second pass over the text.
 _UNIT_EQUIV = {
     "ms": "ms", "msec": "ms", "msecs": "ms", "millisecond": "ms",
-    "milliseconds": "ms",
+    "milliseconds": "ms", "millisec": "ms", "millisecs": "ms",
     "s": "s", "sec": "s", "secs": "s", "second": "s", "seconds": "s",
     "min": "min", "mins": "min", "minute": "min", "minutes": "min",
     "h": "h", "hr": "h", "hrs": "h", "hour": "h", "hours": "h",
@@ -4222,7 +4222,7 @@ _UNIT_EQUIV = {
     # `test_the_carve_outs_own_ADJACENT_time_units_are_judged` (`3 days`/`3 d`).
     "d": "d", "day": "d", "days": "d",
     "wk": "wk", "wks": "wk", "week": "wk", "weeks": "wk",
-    "mo": "mo", "month": "mo", "months": "mo",
+    "mo": "mo", "month": "mo", "months": "mo", "mos": "mo",
     "y": "y", "yr": "y", "yrs": "y", "year": "y", "years": "y",
     "%": "%", "percent": "%", "pct": "%",
     # `mile`/`miles` beside the `mi` symbol: `20 miles` against `20 km` is the
@@ -6056,10 +6056,10 @@ _UNIT_WORDS = frozenset({
     # space-separated unit was never FUSED, its value bound with no unit, and the
     # pair failed OPEN. `back under 800 seconds` against
     # `back under 800 milliseconds` was written as verbatim.
-    "ms", "msec", "msecs", "millisecond", "milliseconds",
+    "ms", "msec", "msecs", "millisecond", "milliseconds", "millisec", "millisecs",
     "second", "seconds", "minute", "hour",
     "d", "day", "days", "wk", "wks", "week", "weeks",
-    "mo", "month", "months", "y", "yr", "yrs", "year", "years",
+    "mo", "month", "months", "mos", "y", "yr", "yrs", "year", "years",
     "mile", "miles",
 })
 

@@ -945,7 +945,12 @@ def test_the_carve_outs_own_ADJACENT_time_units_are_judged():
             ("back under 800 seconds", "back under 800 milliseconds"),
             ("a ten minute TTL", "a ten hour TTL"),
             ("the lease is 3 hours", "the lease is 3 days"),
-            ("the drive is 20 miles", "the drive is 20 km")):
+            ("the drive is 20 miles", "the drive is 20 km"),
+            # The two abbreviations the abbreviation set itself omitted: a
+            # table with a hole in it is how this gap survived review, so the
+            # siblings the widen introduced are pinned, not just the words.
+            ("the lease is 3 mos", "the lease is 3 years"),
+            ("back under 800 millisec", "back under 800 seconds")):
         assert v2._value_slot_divergence(content, quote), (
             content, quote)
     # …and the WRITE refuses the point, not just the pure function
@@ -967,6 +972,8 @@ def test_the_carve_outs_own_ADJACENT_time_units_are_judged():
             ("the lease is 3 months", "the lease is 3 mo"),
             ("the SLA is 5 years", "the SLA is 5 yr"),
             ("the cache TTL is 900 milliseconds", "the cache TTL is 900 ms"),
+            ("the cache TTL is 900 milliseconds", "the cache TTL is 900 millisec"),
+            ("the lease is 3 months", "the lease is 3 mos"),
             ("the TTL is 20 minutes", "the TTL is 20 mins"),
             ("the share is 20 percent", "the share is 20%"),
             ("back under 800 milliseconds", "back under 800ms")):

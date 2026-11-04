@@ -777,9 +777,9 @@ mechanisms:
       is the carve-out's own fifth example. ⛔ The ADJACENCY half that used to
       stand here is CLOSED: `_UNIT_WORDS` now carries the spellings the
       carve-out names (`second(s)`, the millisecond family, `minute`, `day(s)`)
-      **plus their conventional siblings** (`hour`, `week(s)`, `month(s)`,
-      `year(s)`, `mile(s)` — the carve-out names none of those five, they are
-      here because a duration family with a hole in it is how the
+      **plus their conventional siblings** (`hour`, `week(s)`, `mos`, `month(s)`,
+      `year(s)`, `mile(s)`, `millisec(s)` — the carve-out names none of those,
+      they are here because a duration family with a hole in it is how the
       original gap survived review; ⛔ `percent`/`pct` are deliberately NOT among
       them: fusing `percent` REFUSED the truthful pair `20k%`/`20000 percent`,
       because an ATTACHED `k%` loses its `%` to the tokeniser (`20k%` binds as
