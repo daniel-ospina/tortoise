@@ -101,47 +101,114 @@ READER_MODEL = "openrouter:deepseek/deepseek-v4-flash"
 # session-extraction order (sdk._SESSION_LLM_PROVIDER_PRIORITY).
 _PROVIDER_PRIORITY = _SESSION_LLM_PROVIDER_PRIORITY
 
-#: Providers whose models reason by DEFAULT, keyed by the env var that names the
-#: provider (the eval's transports already hold it). Shared with the judge
-#: (``judge.py`` imports it from here — the judge must disable thinking for the
-#: same reason, and the fact belongs in ONE place).
+#: Model FAMILIES that reason by DEFAULT, matched on the model ID's last path
+#: segment and INDEPENDENT of which endpoint serves it. The NEED to disable
+#: reasoning is a property of the MODEL; the FIELD that does it is a property of
+#: the ENDPOINT (``REASONING_CONTROL_BY_KEY_ENV``). Keying the whole guard on one
+#: or the other alone is how it goes silently inert — a single-literal gate dies
+#: on the next id rename (#4129), and an endpoint-keyed gate covers nothing on a
+#: route that serves the same family over a different host (the pinned
+#: ``READER_MODEL`` below is exactly that route). ``tortoise/analyze.py``'s #1790
+#: gate is the in-repo precedent: it matches the FAMILY, on the last segment,
+#: "so an OpenRouter route (deepseek/deepseek-v4-flash) is recognised".
+REASONING_BY_DEFAULT_FAMILIES = frozenset({"deepseek"})
+
+#: The control that turns that default reasoning OFF — keyed by the env var of
+#: the endpoint that serves the call, because the request FIELD is the endpoint's:
 #:
-#: WHY — measured 2026-10-25 on api.deepseek.com, the only provider this box has
-#: a key for (OPENAI_API_KEY / OPENROUTER_API_KEY absent):
+#: * ``api.deepseek.com`` documents ``thinking:{"type":"enabled"|"disabled"}``,
+#:   and it is MEASURED (2026-10-25, on the one provider this box has a key for):
+#:     judge  (official shape, max_tokens=10):  content='' finish=length,
+#:             reasoning_tokens=10  -> label rule ``'yes' in ''`` grades EVERY
+#:             question WRONG.
+#:     reader (official shape, max_tokens=500): one 11,352-prompt-token
+#:             multi-session question burned completion_tokens=500 with an EMPTY
+#:             answer, was recorded ``valid: True`` with no error class, and
+#:             scored 0 — a starved answer counted as a wrong one.
+#:       both with ``thinking:{"type":"disabled"}`` -> 'yes' / a real answer,
+#:       finish=stop, 1 completion token for the judge.
+#: * OpenRouter has NO ``thinking`` field; its control is the ``reasoning``
+#:   parameter, and this repo already sends ``reasoning:{"effort":"none"}`` on
+#:   that route (``tortoise/model_adapters.py`` — the #1790 extractor lane's
+#:   ``disable_reasoning``). Documented, but NOT measured from this box (no
+#:   OpenRouter key here): if the route rejects it the call FAILS LOUDLY rather
+#:   than scoring a starved answer as a wrong one, which is the fail-closed
+#:   direction this guard exists for.
 #:
-#:   judge  (official shape, max_tokens=10):  content='' finish=length,
-#:           reasoning_tokens=10  -> label rule ``'yes' in ''`` grades EVERY
-#:           question WRONG.
-#:   reader (official shape, max_tokens=500): one 11,352-prompt-token
-#:           multi-session question burned completion_tokens=500 with an EMPTY
-#:           answer, was recorded ``valid: True`` with no error class, and
-#:           scored 0 — a starved answer counted as a wrong one.
-#:
-#:     both with ``thinking:{"type":"disabled"}`` -> 'yes' / a real answer,
-#:     finish=stop, 1 completion token for the judge.
-#:
-#: So a reasoning-by-default model must have thinking disabled to make the
-#: benchmark's fixed completion budgets mean what they mean on a non-reasoning
-#: model. Same mechanism as ``tortoise/analyze.py``'s #1790 deepseek gate; the
-#: OFFICIAL judge (``openai:gpt-4o-2024-08-06``) and every other provider are
-#: untouched — their request stays byte-identical to the official shape.
-THINKING_BY_DEFAULT_KEY_ENVS = frozenset({"DEEPSEEK_API_KEY"})
+#: A family in ``REASONING_BY_DEFAULT_FAMILIES`` served by an endpoint absent
+#: from this map is the UNGUARDED case: ``build_reader``/``build_judge`` warn on
+#: stderr and the report records that no control was sent (never silent).
+REASONING_CONTROL_BY_KEY_ENV = {
+    "DEEPSEEK_API_KEY": {"thinking": {"type": "disabled"}},
+    "OPENROUTER_API_KEY": {"reasoning": {"effort": "none"}},
+}
 
 
-class _ThinkingDisabledTransport(OpenAICompatModel):
-    """``OpenAICompatModel`` + ``thinking:{type:disabled}``.
+def _is_reasoning_by_default(model_id: str) -> bool:
+    """True when ``model_id`` names a model of a reasoning-by-default FAMILY.
+
+    Matched on the LAST path segment (``deepseek/deepseek-v4-flash`` is the same
+    model as ``deepseek-v4-flash``) and on the family PREFIX, not on one literal
+    id — #4129: a single-literal gate goes silently inert the moment the id is
+    renamed, with no failing test and no log line.
+    """
+    tail = model_id.rsplit("/", 1)[-1]
+    return any(tail == family or tail.startswith(family + "-")
+               or tail.startswith(family + ".")
+               for family in REASONING_BY_DEFAULT_FAMILIES)
+
+
+def reasoning_control(model_id: str, key_env: str | None) -> dict:
+    """The EXACT request addition that disables default reasoning, or ``{}``.
+
+    Empty in two different cases, and the caller must not conflate them: the
+    model does not reason by default (nothing to disable — the request stays
+    byte-identical to the official shape), or it DOES and the endpoint serving
+    it documents no control this repo knows (the guard cannot reach it — warn,
+    and record it in the report, rather than claiming coverage).
+    """
+    if not _is_reasoning_by_default(model_id):
+        return {}
+    return dict(REASONING_CONTROL_BY_KEY_ENV.get(key_env or "", {}))
+
+
+def reasoning_control_of(reader_or_judge: object | None) -> dict | None:
+    """The reasoning-disable control the object's TRANSPORT actually sends.
+
+    Read off the transport (``_model.reasoning_control`` — set by
+    ``build_reader`` and by ``OfficialJudgeModel``) rather than restated by the
+    caller, so a report's call-shape string cannot drift from the request that
+    was made. ``None`` for an object with no transport (retrieval-only, the mock
+    reader/judge). ONE home for both transports (#8486).
+    """
+    model = getattr(reader_or_judge, "_model", None)
+    control = getattr(model, "reasoning_control", None)
+    return dict(control) if isinstance(control, dict) else None
+
+
+class _ReasoningControlTransport(OpenAICompatModel):
+    """``OpenAICompatModel`` + the endpoint's reasoning-disable control.
 
     The ONLY difference from the official gen.py reader call shape: without it a
-    reasoning-by-default provider spends the whole completion budget on hidden
+    reasoning-by-default model spends the whole completion budget on hidden
     reasoning and returns empty ``content``, and an empty reader answer is
     graded as a wrong answer — so the accuracy would measure the transport, not
     the retrieval or the reader (measured 2026-10-25; see
-    ``THINKING_BY_DEFAULT_KEY_ENVS``).
+    ``REASONING_CONTROL_BY_KEY_ENV``). WHICH field carries the control is the
+    endpoint's (``thinking`` on api.deepseek.com, ``reasoning`` on OpenRouter);
+    the dict is passed in rather than hard-coded so the judge transport and this
+    one cannot disagree about the route they are on.
     """
+
+    def __init__(self, *args, control: dict | None = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        # The exact addition that WILL be sent — read back by the report so the
+        # methodology cannot claim a shape this transport did not send.
+        self.reasoning_control = dict(control or {})
 
     def build_request(self, system: str, user: str) -> dict:
         req = super().build_request(system, user)
-        req["thinking"] = {"type": "disabled"}
+        req.update(self.reasoning_control)
         return req
 
 
@@ -249,25 +316,48 @@ def build_reader(spec: str | None = None, *, mock: bool = False) -> Reader:
               f"pinned READER_MODEL {READER_MODEL!r} — run is NOT pinned "
               f"(M5 #1525); report records reader_pinned=false",
               file=sys.stderr)
-    from tortoise.models import OpenAICompatModel
 
     # Official reader call shape: temperature 0, bounded max_tokens, NO
     # response_format (JSON mode) — the answer is free text, and forcing
     # json_object mangles free-form answers on several providers.
-    transport = (_ThinkingDisabledTransport
-                 if key_env in THINKING_BY_DEFAULT_KEY_ENVS
-                 else OpenAICompatModel)
-    model = transport(
-        id=model_id, base_url=base_url, api_key_env=key_env,
-        response_format=None, max_tokens=DEFAULT_READER_MAX_TOKENS,
-    )
-    if transport is _ThinkingDisabledTransport:
-        print("[longmem_eval] reader transport sends thinking:{\"type\":"
-              "\"disabled\"}: this provider reasons by DEFAULT and would "
-              "otherwise spend the whole 500-token answer budget on hidden "
-              "reasoning (measured 2026-10-25 — an 11,352-token prompt came "
-              "back with completion_tokens=500 and an EMPTY answer, recorded "
-              "valid with no error class and scored 0)", file=sys.stderr)
+    # #8486: the reasoning-disable control follows the FAMILY (a property of the
+    # model) and is addressed in the FIELD the serving endpoint documents.
+    control = reasoning_control(model_id, key_env)
+    if control:
+        model = _ReasoningControlTransport(
+            id=model_id, base_url=base_url, api_key_env=key_env,
+            response_format=None, max_tokens=DEFAULT_READER_MAX_TOKENS,
+            control=control,
+        )
+    else:
+        model = OpenAICompatModel(
+            id=model_id, base_url=base_url, api_key_env=key_env,
+            response_format=None, max_tokens=DEFAULT_READER_MAX_TOKENS,
+        )
+    # The report reads this back (``methodology.reader_call_shape``) so the shape
+    # it states is the one that was sent — ``{}`` included, for a route this
+    # guard cannot reach.
+    model.reasoning_control = control
+    if control:
+        print(f"[longmem_eval] reader transport sends "
+              f"{control}: this model FAMILY reasons by DEFAULT and would "
+              f"otherwise spend the whole {DEFAULT_READER_MAX_TOKENS}-token "
+              f"answer budget on hidden reasoning (measured 2026-10-25 — an "
+              f"11,352-token prompt came back with completion_tokens=500 and "
+              f"an EMPTY answer, recorded valid with no error class and "
+              f"scored 0)", file=sys.stderr)
+    elif _is_reasoning_by_default(model_id):
+        # The family reasons by default, but this endpoint documents no control
+        # this repo knows: the guard is ABSENT on this route. Say it — an empty
+        # answer is scored as a wrong one and nothing downstream can tell them
+        # apart (§8.1), so silence is the fail-open half of the defect.
+        print(f"[longmem_eval] WARNING: reader model {model_id!r} is from a "
+              f"REASONING-BY-DEFAULT family, but it is served by "
+              f"{provider_name!r} ({key_env}), which documents no reasoning "
+              f"control in REASONING_CONTROL_BY_KEY_ENV — this route has NO "
+              f"starvation guard, so an empty answer here is scored as a "
+              f"wrong one (§8.1). The report records the absence "
+              f"(methodology.reader_call_shape).", file=sys.stderr)
     return LLMReader(model, model_id=model_id, model_spec=raw_spec,
                      provider=provider_name,
                      pinned=(raw_spec == READER_MODEL))

@@ -259,6 +259,11 @@ def test_outcomes_to_report_golden_shape():
         # #8486: the judge endpoint is a methodology field (additive) — pinned
         # here so the forward from run.py cannot be dropped silently.
         judge_provider="deepseek",
+        # …and so is the reasoning-disable control each transport actually sent:
+        # the call-shape strings are rendered from THESE, so a report cannot
+        # state a shape its transport did not send (#8486 disclosure gap).
+        reader_reasoning_control={"thinking": {"type": "disabled"}},
+        judge_reasoning_control=None,
         ks=(5, 10, 20),
         top_k=20,
         split="s",
@@ -365,6 +370,13 @@ def test_outcomes_to_report_golden_shape():
     assert m["reader_model"] == "golden-reader"
     assert m["judge_model"] == "golden-judge"
     assert m["judge_provider"] == "deepseek"
+    # #8486: both transports' call shapes are recorded, and each one names the
+    # control that transport SENT (the reader's) or states that none was sent
+    # (the judge's) — the same fact, disclosed symmetrically.
+    assert "thinking" in m["reader_call_shape"]
+    assert "max_tokens=500" in m["reader_call_shape"]
+    assert "NO reasoning control" in m["judge_call_shape"]
+    assert "max_tokens=10" in m["judge_call_shape"]
     assert m["k_values"] == [5, 10, 20]
     assert m["top_k_context"] == 20
     # R1 (#1540) D7: knob provenance in the methodology
@@ -1778,9 +1790,10 @@ def test_official_judge_call_shape():
     assert req["max_tokens"] == 10
     assert "response_format" not in req  # no JSON mode
     # #8486 (2026-10-25): the OFFICIAL judge's request carries no provider
-    # extras — a thinking-disable here would be a shape deviation on the one
-    # provider whose shape must be verbatim.
+    # extras — a thinking-disable or a reasoning-disable here would be a shape
+    # deviation on the one provider whose shape must be verbatim.
     assert "thinking" not in req
+    assert "reasoning" not in req
 
 
 def test_judge_disables_thinking_on_a_reasoning_by_default_provider():
@@ -1837,11 +1850,36 @@ def test_build_judge_endpoint_follows_the_named_provider(monkeypatch):
         "type": "disabled"}
 
 
+def test_judge_control_follows_the_model_family_not_the_route(monkeypatch):
+    """The same DeepSeek model reached over OpenRouter is guarded TOO — in that
+    endpoint's own field — while a non-reasoning model is never touched.
+
+    Before this pin the guard was keyed on the transport's API-key env, so the
+    identical model on the ``openrouter`` route sent nothing at all and the
+    10-token budget could vanish into hidden reasoning (a fake 0.0000 that the
+    receipt could not distinguish from a real one).
+    """
+    for k in ("OPENAI_API_KEY", "GEMINI_API_KEY"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-test-key")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ds-test-key")
+    judge = build_judge("openrouter:deepseek/deepseek-v4-pro")
+    assert judge.provider == "openrouter"
+    req = judge._model.build_request("Is the response correct?")
+    # OpenRouter's control is the ``reasoning`` parameter — ``thinking`` is not
+    # a field that endpoint accepts (unlike api.deepseek.com).
+    assert req["reasoning"] == {"effort": "none"}
+    assert "thinking" not in req
+    # The official shape is otherwise untouched.
+    assert (req["n"], req["temperature"], req["max_tokens"]) == (1, 0, 10)
+    assert "response_format" not in req
+
+
 def test_build_judge_endpoint_reports_openrouter_when_the_spec_names_it(
         monkeypatch):
-    """The converse pin: an ``openrouter:`` spec keeps its own endpoint (a
-    thinking-disable there would be a shape deviation on a provider that does
-    not reason by default) — so the fix cannot be 'always use DeepSeek'."""
+    """The converse pin: an ``openrouter:`` spec keeps its own endpoint, and an
+    OFFICIAL (non-reasoning) model there carries no control in any field — so
+    the fix cannot be 'always use DeepSeek' or 'always send something'."""
     monkeypatch.setenv("OPENROUTER_API_KEY", "or-test-key")
     monkeypatch.setenv("DEEPSEEK_API_KEY", "ds-test-key")
     judge = build_judge("openrouter:openai/gpt-4o-2024-08-06")
@@ -1850,7 +1888,8 @@ def test_build_judge_endpoint_reports_openrouter_when_the_spec_names_it(
     assert m.base_url == "https://openrouter.ai/api/v1"
     assert m.api_key_env == "OPENROUTER_API_KEY"
     assert m.disables_thinking is False
-    assert "thinking" not in m.build_request("Is the response correct?")
+    req = m.build_request("Is the response correct?")
+    assert "thinking" not in req and "reasoning" not in req
 
 
 def test_build_judge_fails_closed_on_missing_keys(monkeypatch):

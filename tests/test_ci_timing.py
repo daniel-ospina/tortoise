@@ -5849,3 +5849,120 @@ def test_a_partial_census_cannot_discount_a_weight_but_a_whole_one_can(
         sample_label="CI junit census 2026-10-22 (run 39782493641)")
     assert stats["kept_as_lower_bound"] == 0
     assert yaml.safe_load(text)["durations"]["test_alpha.py"] == 5.0
+
+
+# ── the map's own two rules, enforced by the writer (#10048 / #10051) ──────
+#
+# #10026 red `main` for every PR by writing two weights ABOVE the map's declared
+# arithmetic ceiling and by splitting a pinned pair. Correcting those rows by hand
+# is not a fix — the next weekly sweep feeds the same readings through
+# `render_refreshed_manifest` and re-writes them. These pins fail on the writer as
+# it was, so the class cannot come back.
+
+
+def test_the_weight_ceiling_is_the_one_the_map_derives():
+    """The cap is DERIVED from the shard watchdog, not a number this tool likes.
+
+    `config/ci-surfaces.yml` states it on the `test_lane_stash.py` row and
+    `tests/test_ci_selection.py::test_watchdog_is_per_shard_and_scales_with_the_shard`
+    asserts it: `WATCHDOG_FLOOR_MIN` must clear the largest fast file by 2.5x, so
+    no declarable weight may reach `floor * 60 / 2.5`. A ceiling that drifted from
+    the selection module's constants would either cap weights the map legitimately
+    allows or bless ones that red that assertion.
+    """
+    from tools.ci_selection import WATCHDOG_HEADROOM, WATCHDOG_FLOOR_MIN
+
+    derived = WATCHDOG_FLOOR_MIN * 60 / 2.5
+    assert ci_timing.DURATIONS_WEIGHT_CEILING_S == derived, (
+        "the writer's ceiling drifted from the map's own derivation "
+        f"({derived}s)")
+    # The CAP must sit strictly below the ceiling (900/360 = 2.500 exactly, which
+    # "clears" the pin by zero margin) and still clear it.
+    assert ci_timing.DURATIONS_WEIGHT_CAP_S < ci_timing.DURATIONS_WEIGHT_CEILING_S
+    assert WATCHDOG_FLOOR_MIN * 60 / ci_timing.DURATIONS_WEIGHT_CAP_S > 2.5, (
+        "the cap does not clear the #6133 headroom the ceiling exists for")
+    assert WATCHDOG_HEADROOM == 2.0, (
+        "WATCHDOG_HEADROOM moved; re-derive the cap against it rather than "
+        "assuming the 2.5x pin is unchanged")
+
+
+def _render_ceiling_probe(tmp_path, weights, label="sweep 2026-11-02 (run 999)"):
+    text, _ = ci_timing.render_refreshed_manifest(
+        (REPO_ROOT / "config" / "ci-surfaces.yml").read_text(encoding="utf-8"),
+        weights, "2026-11-02", sample_label=label)
+    return text
+
+
+def _row(text: str, key: str) -> str:
+    return next(ln for ln in text.splitlines() if ln.startswith(f"  {key}: "))
+
+
+def test_an_over_ceiling_reading_is_capped_and_never_adopted(tmp_path):
+    """The exact reading #10026 adopted (390.0) must not survive a render again."""
+    over = ci_timing.DURATIONS_WEIGHT_CEILING_S + 30.0
+    text = _render_ceiling_probe(tmp_path, {"test_calibration.py": over})
+    row = _row(text, "test_calibration.py")
+    assert f"test_calibration.py: {ci_timing.DURATIONS_WEIGHT_CAP_S:.1f}" in row, (
+        f"an over-ceiling reading was adopted verbatim: {row[:200]}")
+    # The real reading survives as the cap's PROVENANCE — 355.0 is not a
+    # measurement of the file, and #9172 needs the real number to act on.
+    assert f"{over:.1f}s" in row, (
+        "the capped row lost the reading that hit the ceiling")
+
+
+def test_the_cap_is_stable_across_sweeps(tmp_path):
+    """A capped row states ONE basis however many sweeps hit the ceiling."""
+    weights = {"test_calibration.py": ci_timing.DURATIONS_WEIGHT_CEILING_S + 30.0}
+    label = "sweep 2026-11-02 (run 999)"
+    first, _ = ci_timing.render_refreshed_manifest(
+        (REPO_ROOT / "config" / "ci-surfaces.yml").read_text(encoding="utf-8"),
+        weights, "2026-11-02", sample_label=label)
+    second, _ = ci_timing.render_refreshed_manifest(
+        first, weights, "2026-11-02", sample_label=label)
+    assert first == second, "the render is not idempotent on a capped row"
+
+
+def test_an_at_or_below_ceiling_reading_is_adopted_unchanged(tmp_path):
+    """Non-vacuity: the cap must not touch a reading the map may declare."""
+    under = ci_timing.DURATIONS_WEIGHT_CEILING_S - 20.0
+    text = _render_ceiling_probe(tmp_path, {"test_calibration.py": under})
+    row = _row(text, "test_calibration.py")
+    assert f"test_calibration.py: {under:.1f}" in row, (
+        "a declarable reading was capped, which would discount real measurements")
+    # The ROW's own surviving note may legitimately mention the ceiling (the
+    # capped predecessor's rationale does); the WRITER's cap clause is the marker.
+    assert "not measured at it" not in row, (
+        "a declarable reading got the writer's cap clause")
+
+
+def test_the_overrides_pair_is_held_equal_whatever_the_sweep_reads(tmp_path):
+    """The map's `# OVERRIDES:` pair carries ONE weight (the LARGER reading).
+
+    `tests/test_mcp_rename_table.py::test_duration_weight_matches_the_sibling_generator_suite`
+    reds if the two diverge, and #10026 diverged them 21.2 vs 2.2 by adopting both
+    readings verbatim — so the hold belongs in the writer, not in a hand edit.
+    """
+    text = _render_ceiling_probe(
+        tmp_path, {"test_bridge_table.py": 21.2, "test_mcp_rename_table.py": 2.2})
+    values = yaml.safe_load(text)["durations"]
+    assert values["test_mcp_rename_table.py"] == values["test_bridge_table.py"] == 21.2, (
+        "the pinned pair was split by the sweep: "
+        f"{values['test_mcp_rename_table.py']} vs {values['test_bridge_table.py']}")
+    pin = _row(text, "test_mcp_rename_table.py")
+    assert "HELD EQUAL" in pin and "NOT measured itself" in pin, (
+        "the pinned row must not claim a measurement of its own weight")
+
+
+def test_the_pair_hold_uses_the_sibling_final_capped_value(tmp_path):
+    """Ordering matters: the cap runs first, so the pin inherits the CAPPED value.
+
+    A pin that copied the sibling's pre-cap reading would put the pair above the
+    ceiling together — two violations instead of one.
+    """
+    over = ci_timing.DURATIONS_WEIGHT_CEILING_S + 40.0
+    text = _render_ceiling_probe(
+        tmp_path, {"test_bridge_table.py": over, "test_mcp_rename_table.py": 2.2})
+    values = yaml.safe_load(text)["durations"]
+    assert values["test_bridge_table.py"] == ci_timing.DURATIONS_WEIGHT_CAP_S
+    assert values["test_mcp_rename_table.py"] == ci_timing.DURATIONS_WEIGHT_CAP_S, (
+        "the pin copied an over-ceiling sibling reading")

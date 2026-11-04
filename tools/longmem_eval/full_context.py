@@ -50,7 +50,7 @@ from typing import Any
 from . import dataset as ds
 from .dataset_audit import audit_dataset
 from .judge import build_judge, is_abstention
-from .reader import build_reader
+from .reader import build_reader, reasoning_control_of
 from .report import build_report, save_report
 from .retrieve import _estimate_tokens, render_context
 
@@ -228,6 +228,18 @@ def run_cell(
         split=split,
         reader_model=reader.model_id,
         judge_model=judge.model_id,
+        # #8486: the cell report carries the SAME endpoint + call-shape
+        # disclosure the main runner does. Without this the new
+        # ``judge_provider`` field was emitted as ``null`` beside a real
+        # ``judge_model`` — and the field exists so a provider substitution is
+        # VISIBLE, so a null there reads as "no provider", which is worse than
+        # the key's absence.
+        judge_provider=getattr(judge, "provider", None),
+        reader_provider=getattr(reader, "provider", None),
+        reader_pinned=getattr(reader, "pinned", None),
+        reader_model_spec=getattr(reader, "model_spec", ""),
+        reader_reasoning_control=reasoning_control_of(reader),
+        judge_reasoning_control=reasoning_control_of(judge),
         extraction_approach=CELL_EXTRACTION_APPROACH,
         ingest_mode="full-context-cell",
         ks=(5, 10, 20),

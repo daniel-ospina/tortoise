@@ -881,6 +881,28 @@ def _usage_report_block(completed: list[dict[str, Any]],
     return block
 
 
+def _reasoning_control_suffix(control: dict[str, Any] | None, *,
+                             measured: str, official: str) -> str:
+    """Render the reasoning-disable half of a call-shape sentence.
+
+    ONE renderer for both transports, so the reader and the judge cannot state
+    different truths about the same fact (#8486). ``control`` is the dict the
+    transport actually merged into its request — empty means it sent none, and
+    the report then says so instead of asserting a shape it did not send.
+    """
+    if control:
+        return ("; this transport additionally sends "
+                f"{json.dumps(control, sort_keys=True)} because the model "
+                "FAMILY reasons by DEFAULT — without it the fixed completion "
+                "budget is spent on hidden reasoning and the answer comes "
+                f"back empty (measured {measured})"
+                + (f"; {official}" if official else ""))
+    return ("; NO reasoning control was sent — the model does not reason by "
+            "default, or its endpoint documents none (an unguarded route is "
+            "warned on stderr, never assumed covered)"
+            + (f"; {official}" if official else ""))
+
+
 def build_report(
     outcomes: list[dict[str, Any]],
     *,
@@ -895,6 +917,15 @@ def build_report(
     # would otherwise carry invisibly (the factory now resolves the endpoint
     # from the spec's own provider, one resolution feeding both).
     judge_provider: str | None = None,
+    # #8486 (2026-10-25): the reasoning-disable control each transport ACTUALLY
+    # sent ({} = none sent). The call-shape strings below are rendered from
+    # these, so a report cannot state a shape its transport did not send — the
+    # reader's identical deviation was disclosed only on stderr while the
+    # judge's was recorded here, and two reports from the same reader spec were
+    # then byte-identical in the methodology even though one ran with the
+    # reader's reasoning disabled and the other did not.
+    reader_reasoning_control: dict[str, Any] | None = None,
+    judge_reasoning_control: dict[str, Any] | None = None,
     extraction_approach: str,
     ingest_mode: str = "deterministic",
     # #8486: the run's MEASUREMENT POSTURE — the ingest mode + whether the
@@ -2533,18 +2564,25 @@ def build_report(
                 else measurement_posture.build(ingest_mode=ingest_mode)),
             "judge_rule": "official LongMemEval get_anscheck_prompt; "
                           "label = 'yes' in response.lower()",
-            "judge_call_shape": "official evaluate_qa.py: messages=[user], "
-                                "n=1, temperature=0, max_tokens=10 — no "
-                                "response_format (JSON mode), no system "
-                                "message; on a provider whose models reason "
-                                "by DEFAULT (api.deepseek.com) the transport "
-                                "additionally sends thinking:{type:disabled} "
-                                "— without it the 10-token budget is spent "
-                                "on hidden reasoning and the empty answer "
-                                "grades 'no' for every question (measured "
-                                "2026-10-25; the official OpenAI judge is "
-                                "unaffected, its request is byte-identical "
-                                "to evaluate_qa.py)",
+            "judge_call_shape": (
+                "official evaluate_qa.py: messages=[user], n=1, temperature=0, "
+                "max_tokens=10 — no response_format (JSON mode), no system "
+                "message"
+                + _reasoning_control_suffix(judge_reasoning_control,
+                                            measured="2026-10-25",
+                                            official="the official OpenAI judge "
+                                                     "is byte-identical to "
+                                                     "evaluate_qa.py")),
+            # #8486: the reader's call shape, recorded for the SAME reason the
+            # judge's is — the reasoning-disable control is a deviation from the
+            # official gen.py shape, and a deviation that lives only on stderr is
+            # invisible to the receipt §4.2 rests on.
+            "reader_call_shape": (
+                "official gen.py: messages=[system,user], temperature=0, "
+                "max_tokens=500, no response_format (free-text answer)"
+                + _reasoning_control_suffix(reader_reasoning_control,
+                                            measured="2026-10-25",
+                                            official="")),
             "reader_context_format": "official gen.py shape: 'Current Date: "
                                      "{question_date}' header + per-session "
                                      "date annotation on every retrieved chunk "

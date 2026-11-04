@@ -64,9 +64,10 @@ from tortoise.models import _emit_usage_sink
 
 from .reader import (
     _PROVIDER_PRIORITY,
-    THINKING_BY_DEFAULT_KEY_ENVS,
+    _is_reasoning_by_default,
     _parse_model_spec,
     _resolve_provider,
+    reasoning_control,
 )
 
 logger = logging.getLogger(__name__)
@@ -405,15 +406,20 @@ class OfficialJudgeModel:
         # Whether this endpoint's models reason by default and would starve the
         # official 10-token completion budget — the judge starves it exactly as
         # the reader starves its 500-token budget, so both transports read ONE
-        # declaration (``reader.THINKING_BY_DEFAULT_KEY_ENVS``, where the
-        # measurements behind it live). Always False for the OFFICIAL judge
-        # (``openai:gpt-4o-2024-08-06``): its request stays byte-identical to
-        # evaluate_qa.py.
-        self.disables_thinking = api_key_env in THINKING_BY_DEFAULT_KEY_ENVS
+        # declaration (``reader.reasoning_control``, where the measurements
+        # behind it live) and agree about the route they are on. Empty for the
+        # OFFICIAL judge (``openai:gpt-4o-2024-08-06``, on any endpoint that
+        # serves it): its request stays byte-identical to evaluate_qa.py.
+        self.reasoning_control = reasoning_control(id, api_key_env)
         # #2185: additive usage-capture seam (no-op unless the harness binds
         # it). NO last_* mirrors — the transport stays byte-verbatim so
         # published LongMemEval numbers stay comparable.
         self.usage_sink = None
+
+    @property
+    def disables_thinking(self) -> bool:
+        """Whether this transport adds a reasoning-disable control (any field)."""
+        return bool(self.reasoning_control)
 
     def build_request(self, user: str) -> dict:
         """The official kwargs — a single user message, nothing else."""
@@ -424,14 +430,16 @@ class OfficialJudgeModel:
             "temperature": 0,
             "max_tokens": 10,
         }
-        if self.disables_thinking:
-            # The one addition, and only where the provider reasons by default:
-            # without it the 10-token budget is consumed by hidden reasoning and
-            # ``content`` returns empty, which the benchmark's label rule
+        if self.reasoning_control:
+            # The one addition, and only for a model FAMILY whose reasoning is on
+            # by DEFAULT — in the field ITS endpoint documents (``thinking`` on
+            # api.deepseek.com, ``reasoning`` on OpenRouter). Without it the
+            # 10-token budget is consumed by hidden reasoning and ``content``
+            # returns empty, which the benchmark's label rule
             # (``'yes' in response.lower()``) grades as "no" — every question
             # wrong, for a reason that is not the model's answer. Measured
-            # 2026-10-25; see ``_THINKING_BY_DEFAULT_KEY_ENVS``.
-            req["thinking"] = {"type": "disabled"}
+            # 2026-10-25; see ``reader.REASONING_CONTROL_BY_KEY_ENV``.
+            req.update(self.reasoning_control)
         return req
 
     @staticmethod
@@ -689,5 +697,17 @@ def build_judge(spec: str | None = None, *, mock: bool = False) -> Judge:
     # no system message, max_tokens=10) — see OfficialJudgeModel.
     model = OfficialJudgeModel(
         id=model_id, base_url=base_url, api_key_env=key_env)
+    if not model.reasoning_control and _is_reasoning_by_default(model_id):
+        # The family reasons by default but this endpoint documents no control
+        # this repo knows: an empty 10-token answer grades EVERY question "no",
+        # so the run would publish a fake 0.0000. Say it — and the report records
+        # the absence (``methodology.judge_call_shape``) rather than a shape the
+        # transport did not send.
+        print(f"[longmem_eval] WARNING: judge model {model_id!r} is from a "
+              f"REASONING-BY-DEFAULT family, but it is served by "
+              f"{provider_name!r} ({key_env}), which documents no reasoning "
+              f"control in REASONING_CONTROL_BY_KEY_ENV — this route has NO "
+              f"starvation guard, so an empty answer grades EVERY question "
+              f"'no'. See the evidence README §8.1.", file=sys.stderr)
     return LLMJudge(model, model_id=model_id, model_spec=raw_spec,
                     provider=provider_name)

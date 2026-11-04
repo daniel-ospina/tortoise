@@ -828,6 +828,41 @@ def parse_log(path: Path) -> dict:
 DURATIONS_CAPTURED_AT = "durations_captured_at"
 DURATIONS_VALUE_FLOOR_S = 0.1
 
+# ⛔ THE CEILING IS THE MAP'S, DERIVED, NOT THIS TOOL'S PREFERENCE. `config/
+# ci-surfaces.yml` states (on the `test_lane_stash.py` row, ~7638-7645) that
+# `tools/ci_selection.WATCHDOG_FLOOR_MIN` (15 min) must clear the largest fast
+# file by 2.5x — asserted by
+# `tests/test_ci_selection.py::test_watchdog_is_per_shard_and_scales_with_the_shard`
+# — so EVERY declarable weight is < 360 s (900/360 = 2.5 exactly). The map's own
+# note draws the conclusion this renderer now enforces: overtaking that ceiling
+# "needs the WATCHDOG FLOOR raised with it, which is a CI-budget decision
+# recorded on #9172 rather than smuggled in with a weight".
+#
+# #10026 nevertheless wrote two weights above it (`test_calibration.py: 390.0`,
+# `eval/write_path/test_write_path_operator_lane.py: 386.2`) and red `main` for
+# every PR. Correcting those two rows by hand is not a fix: the next weekly
+# sweep feeds the same readings through this function and re-writes 390.0/386.2
+# verbatim (measured — the sole difference between that refresh and a red main
+# is whether anybody re-typed the numbers). So an over-ceiling READING is CAPPED
+# here, and the reading is recorded as the cap's provenance. Pinned to the
+# selection module's own constants by
+# `tests/test_ci_timing.py::test_the_weight_ceiling_is_the_one_the_map_derives`.
+DURATIONS_WEIGHT_CEILING_S = 360.0
+# The rounded cap BELOW the ceiling — the same value the map already uses for
+# this purpose (`test_lane_stash.py` 355.0 for a 366.4 s reading): 900/355 =
+# 2.535, which leaves the #6133 assertion real margin instead of sitting on
+# 2.500 the way a 359.9 cap would.
+DURATIONS_WEIGHT_CAP_S = 355.0
+
+# ⛔ THE OVERRIDES PAIR. `config/ci-surfaces.yml` carries a recorded decision for
+# two suites that pay the SAME shared-conftest + generator import cost: they
+# carry ONE weight, "held equal at the larger of the two measured values"
+# (`# OVERRIDES:` block ~7114-7118; the pin ~7761-7765; asserted by
+# `tests/test_mcp_rename_table.py::test_duration_weight_matches_the_sibling_generator_suite`).
+# Adopting both readings verbatim splits the pair — #10026 wrote 21.2 vs 2.2 and
+# red that pin. Keyed PINNED -> its MEASURED sibling.
+DURATIONS_PINNED_PAIRS = {"test_mcp_rename_table.py": "test_bridge_table.py"}
+
 # `  <tests-relative key>: <seconds>[  # comment]` — the map's one line shape.
 # Keys may carry a subdirectory (e.g. `bench/test_smoke_embedded.py`). The key
 # class `[^\s:]+` is why a key with whitespace or a colon is REFUSED on the ADD
@@ -1856,6 +1891,15 @@ _PRIOR_BASIS_RE = re.compile(
 # later hold (see `_strip_prior_held_basis`, #9134 review, P2).
 _PRIOR_ADOPTED_BASIS_RE = re.compile(r";[ \t]*was [0-9]+(?:\.[0-9]+)?[ \t]*$")
 
+# A PRIOR CEILING-CAP basis (see `DURATIONS_WEIGHT_CEILING_S`). Its own strip,
+# deliberately NOT routed through `_PRIOR_BASIS_RE`: that regex is anchored on
+# `_SAMPLE_LABEL_RE`, so a caller supplying a label of another shape (a test, or a
+# future caller) would leave the previous render's cap clause in place and the row
+# would grow one clause per sweep. This marker is the cap clause itself, whatever
+# the label looks like.
+_PRIOR_CAP_BASIS_RE = re.compile(
+    r"[ \t]+—[ \t]+[^—]*?CAPPED at [0-9]+(?:\.[0-9]+)?[^—]*$")
+
 
 def _strip_prior_held_basis(tail: str) -> str:
     """Drop a PRIOR HELD basis, keep a prior ADOPTED one.
@@ -2182,6 +2226,16 @@ def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
         provable = coverage is not None and declared > 1 and observed >= declared
         kept = coverage is not None and not provable and measured < previous
         new_value = previous if kept else measured
+        # CEILING (see DURATIONS_WEIGHT_CEILING_S): a reading above the largest
+        # weight the map may declare is not adoptable, so the row keeps a capped
+        # value and the reading becomes the cap's provenance. This is NOT `kept`
+        # — the row's value may still move (e.g. 2.0 -> 355.0) — but the surviving
+        # number does not come from this reading, so it gets the HELD treatment
+        # for its note and must say so.
+        capped_from = None
+        if not kept and new_value > DURATIONS_WEIGHT_CEILING_S:
+            capped_from = new_value
+            new_value = DURATIONS_WEIGHT_CAP_S
         if kept:
             kept_as_lower_bound += 1
         # An ADOPTED row's `# unmeasured` marker is FALSIFIED by the adoption, so
@@ -2192,7 +2246,22 @@ def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
         # already got via `_restate_unmeasured_marker`.
         if not kept:
             tail = _strip_unmeasured_marker(tail)
-        if kept and sample_label:
+        if capped_from is not None and sample_label:
+            # A CAPPED row states the cap and the reading that hit it, and prunes
+            # a PRIOR basis — including a prior cap basis, by its own marker
+            # (`_PRIOR_CAP_BASIS_RE`) rather than by the label-anchored
+            # `_PRIOR_BASIS_RE` — so the row states exactly ONE basis however many
+            # sweeps hit the ceiling. ⛔ The reading is kept in the note on purpose:
+            # the capped value is not a measurement of this file, and a reader — or
+            # the #9172 decision on raising the floor — needs the real number.
+            tail = _strip_prior_held_basis(_PRIOR_CAP_BASIS_RE.sub("", tail))
+            basis = (f"{sample_label}: the reading ({capped_from:.1f}s) EXCEEDS the "
+                     f"{DURATIONS_WEIGHT_CEILING_S:.0f}s ceiling this map may declare "
+                     f"(WATCHDOG_FLOOR_MIN must clear the largest fast file by 2.5x), "
+                     f"so it is CAPPED at {new_value:.1f}, not measured at it; raising "
+                     f"the ceiling is the CI-budget decision on #9172")
+            tail = f"{tail} — {basis}" if tail.strip() else f"  # {basis}"
+        elif kept and sample_label:
             # A HELD row keeps its note. Its value did not move, so the reading
             # its note cites IS still the basis of the surviving value — the
             # map's rule ("a note whose cited run is not in the basis is dropped")
@@ -2275,6 +2344,39 @@ def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
             f"{match.group('indent')}{match.group('key')}: "
             f"{new_value:.1f}{tail}"
         )
+    # THE OVERRIDES PAIR, applied AFTER the per-row adoptions so it sees the
+    # sibling's FINAL (possibly ceiling-capped) value: the pinned row takes that
+    # value, so the pair carries one number. Rendered as a canonical HELD note
+    # rather than appended to whatever the pinned row already had — that is what
+    # keeps it idempotent: a sweep that re-splits the pair REWRITES this note in
+    # place instead of growing it, and a sweep that agrees (`pinned == sibling`)
+    # leaves the row exactly as it was.
+    for pinned, sibling in DURATIONS_PINNED_PAIRS.items():
+        if pinned not in entries or sibling not in entries:
+            continue
+        pin_match = _DURATION_LINE_RE.match(lines[entries[pinned]])
+        sib_match = _DURATION_LINE_RE.match(lines[entries[sibling]])
+        assert pin_match is not None  # located by the same regex
+        assert sib_match is not None  # located by the same regex
+        pinned_value = round(float(pin_match.group("value")), 1)
+        sibling_value = round(float(sib_match.group("value")), 1)
+        if pinned_value == sibling_value:
+            continue
+        # The reading that was NOT adopted is worth keeping when the caller named
+        # the sample: it is the only record of how far the two legs diverged.
+        reading = (
+            f" This sweep read the pin at {pinned_value:.1f}s and the sibling at "
+            f"{sibling_value:.1f}s." if sample_label else "")
+        note = (
+            f"  # HELD EQUAL to its measured sibling, NOT measured itself: this row "
+            f"carries {sibling}'s weight so the pair shares ONE number, which is "
+            f"the map's OVERRIDES rule (held equal at the LARGER of the two "
+            f"measured values) — a split merely records which of the two a "
+            f"load-varied leg happened to slow down, not a difference in their "
+            f"cost.{reading}")
+        lines[entries[pinned]] = (
+            f"{pin_match.group('indent')}{pin_match.group('key')}: "
+            f"{sibling_value:.1f}{note}")
     # A resolved key with no `durations:` line is a REGISTRATION, not a rewrite —
     # append it to the block in the same `  key: value` shape the existing rows
     # use (indent 2, one decimal, no trailing comment). APPENDED, not inserted

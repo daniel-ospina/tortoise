@@ -106,9 +106,55 @@ def test_reader_disables_thinking_on_a_reasoning_by_default_provider(monkeypatch
     assert "response_format" not in req
     assert req["messages"] == [{"role": "system", "content": "SYS"},
                                 {"role": "user", "content": "USER"}]
-    # A provider that does NOT reason by default keeps the official shape.
+    # A reasoning-by-default FAMILY on an endpoint whose API takes no
+    # ``thinking`` param is still guarded — in that endpoint's OWN field.
+    # OpenRouter documents ``reasoning:{"effort":"none"}`` (the same field
+    # ``tortoise/model_adapters.py`` already sends on that route), so the guard
+    # is keyed on the MODEL (which reasons) and addressed per ENDPOINT (where
+    # the field lives) — never on the route alone, which is what left the
+    # PINNED ``READER_MODEL`` (``openrouter:deepseek/deepseek-v4-flash``) inert.
     r2 = build_reader("openrouter:deepseek/deepseek-v4-flash")
-    assert "thinking" not in r2._model.build_request("SYS", "USER")
+    req2 = r2._model.build_request("SYS", "USER")
+    assert req2["reasoning"] == {"effort": "none"}
+    assert "thinking" not in req2          # not a field that endpoint accepts
+    # …and the official reader shape stays untouched on both routes.
+    assert (req2["max_tokens"], req2["temperature"]) == (500, 0)
+    assert "response_format" not in req2
+
+
+def test_reader_control_is_keyed_on_the_family_not_the_route(monkeypatch):
+    """A renamed DeepSeek id is still guarded, and a NON-reasoning model on
+    the same endpoint is not touched — the two halves of keying on the family.
+
+    #4129: a single-literal gate goes silently inert when the id is renamed.
+    """
+    monkeypatch.setenv("OPENROUTER_API_KEY", "o")
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    renamed = build_reader("openrouter:deepseek/deepseek-v4-flash-2026-01-01")
+    assert renamed._model.build_request("S", "U")["reasoning"] == {
+        "effort": "none"}
+    # The official judge/reader id on that same endpoint stays verbatim.
+    official = build_reader("openrouter:openai/gpt-4o-2024-08-06")
+    req = official._model.build_request("S", "U")
+    assert "reasoning" not in req and "thinking" not in req
+
+
+def test_an_unguarded_route_warns_instead_of_staying_silent(monkeypatch,
+                                                            capsys):
+    """A reasoning-by-default family on an endpoint with no known control is
+    the UNGUARDED case: the run log has to say so (§8.1), because an empty
+    answer is scored as a wrong one and nothing downstream can tell them apart.
+    """
+    monkeypatch.setenv("OPENAI_API_KEY", "oa")
+    for k in ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "GEMINI_API_KEY"):
+        monkeypatch.delenv(k, raising=False)
+    r = build_reader("openai:deepseek-v4-flash")
+    err = capsys.readouterr().err
+    assert "REASONING-BY-DEFAULT family" in err
+    assert "NO starvation guard" in err
+    # nothing invented for an endpoint we have no documented control for
+    req = r._model.build_request("S", "U")
+    assert "thinking" not in req and "reasoning" not in req
 
 
 def test_named_provider_missing_key_still_raises(monkeypatch):

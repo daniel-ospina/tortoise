@@ -121,7 +121,11 @@ from .errors import (
 from .ingest import DEFAULT_CHUNK_TURNS, ingest_haystack
 from .judge import build_judge, is_abstention
 from .preflight import FatalProviderError, PreflightError, run_preflight
-from .reader import build_reader, reader_prompt_constants
+from .reader import (
+    build_reader,
+    reader_prompt_constants,
+    reasoning_control_of,
+)
 from .report import (
     _outcome_grade,
     build_report,
@@ -5516,6 +5520,10 @@ def run_evaluation(
         reader_model_spec=getattr(reader, "model_spec", "") if reader else "",
         reader_provider=getattr(reader, "provider", None) if reader else None,
         reader_pinned=getattr(reader, "pinned", None) if reader else None,
+        # #8486: the reasoning-disable control the reader transport ACTUALLY
+        # sent (read off the transport, not restated) — the report's
+        # ``reader_call_shape`` is rendered from it.
+        reader_reasoning_control=reasoning_control_of(reader),
         reader_system_prompt=system_prompt,
         reader_type_fragments=type_fragments,
         judge_model=(judge.model_id if judge is not None
@@ -5524,6 +5532,7 @@ def run_evaluation(
         # same disclosure the reader carries, so a provider substitution cannot
         # ride the report invisibly.
         judge_provider=getattr(judge, "provider", None) if judge else None,
+        judge_reasoning_control=reasoning_control_of(judge),
         ks=ks,
         top_k=top_k,
         split=split,
@@ -5720,6 +5729,11 @@ def outcomes_to_report(
     reader_model_spec: str = "",
     reader_provider: str | None = None,
     reader_pinned: bool | None = None,
+    # #8486: the control each transport actually sent — forwarded to
+    # ``build_report`` so ``methodology.{reader,judge}_call_shape`` describe the
+    # request that was made, never a constant.
+    reader_reasoning_control: dict[str, Any] | None = None,
+    judge_reasoning_control: dict[str, Any] | None = None,
     reader_system_prompt: str = "",
     reader_type_fragments: dict[str, str] | None = None,
     # #8486 (2026-10-25): the judge's resolved endpoint, threaded like
@@ -5961,6 +5975,8 @@ def outcomes_to_report(
         reader_model_spec=reader_model_spec,
         reader_provider=reader_provider,
         reader_pinned=reader_pinned,
+        reader_reasoning_control=reader_reasoning_control,
+        judge_reasoning_control=judge_reasoning_control,
         reader_system_prompt=reader_system_prompt,
         reader_type_fragments=reader_type_fragments,
         extraction_approach=(EXTRACTION_APPROACH_V2 if ingest_mode == "v2"
