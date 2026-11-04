@@ -190,37 +190,26 @@ _tortoise_dir_python() {
 }
 
 # 0 when this seam can actually RUN the checkout at "$1". Holding `tortoise/`
-# is not that (#4848): the tree must offer an entry point this guard accepts. A
-# WHEEL install resolves a module dir INSIDE a venv's site-packages, where there
-# is no `.venv` beneath it — the venv that OWNS the tree is the one marked by
-# `pyvenv.cfg`, found by walking up (bounded), the same way the seams' own wheel
-# probe does (#2385). The console-script legs stay here because a seam that
-# resolves `TORTOISE_BIN` runs the SCRIPT, not an interpreter; every interpreter
-# leg lives in `_tortoise_dir_python` alone, so acceptance and execution share
-# one answer instead of two that can drift (#4848 review).
+# is not that (#4848), and neither is holding an entry point only SOME seams can
+# run. This block is byte-identical across seven seams; a console script is
+# usable only where the seam RESOLVES it into `TORTOISE_BIN`, and cursor's
+# `session-start` executes an interpreter and never a script — so a console leg
+# here would bless, in the seams that cannot run it, exactly the state #4848
+# refuses: the loop would `break` on a candidate the seam then declines, and the
+# later runnable checkout would never be tried (#4848 review 3, measured on
+# codex `session-end`: the accepted wrapper never ran, the good candidate never
+# was reached, and the breadcrumb blamed the ambient interpreter).
+# A console script therefore stays an EXECUTION preference — each seam resolves
+# one where it has that machinery — and never an acceptance test. The capability
+# ALL seven seams share is the interpreter ladder (`_tortoise_dir_python`, which
+# also carries the bounded `pyvenv.cfg` walk-up for a wheel layout, the way the
+# seams' own wheel probe does — #2385), so THAT is the one answer acceptance and
+# execution share. A tree nothing can run is skipped, not claimed.
 _tortoise_dir_runnable() {
-  local dir="${1:-}" probe depth
+  local dir="${1:-}"
   if [ -z "$dir" ]; then
     return 1
   fi
-  if _tortoise_bin_qualifies "$dir/.venv/bin/tortoise"; then
-    return 0
-  fi
-  probe="$dir"
-  depth=0
-  while [ "$depth" -lt 5 ]; do
-    if [ -z "$probe" ] || [ "$probe" = "/" ]; then
-      break
-    fi
-    if [ -f "$probe/pyvenv.cfg" ]; then
-      if _tortoise_bin_qualifies "$probe/bin/tortoise"; then
-        return 0
-      fi
-      break
-    fi
-    probe="${probe%/*}"
-    depth=$((depth + 1))
-  done
   _tortoise_dir_python "$dir" >/dev/null 2>&1
 }
 
@@ -668,6 +657,10 @@ if [ -z "$TORTOISE_BIN" ] && [ -z "$PYTHON_BIN" ]; then
   # is reported as a wrong interpreter (with its version and path) instead of
   # as an absent one — the phrase "found no python3 interpreter" is what the
   # no-interpreter case yields.
+  # FAIL-SAFE, unreachable while the acceptance invariant holds: acceptance IS
+  # `_tortoise_dir_python`, so a resolved module dir always has an interpreter
+  # by this line. It stays because the alternative — rendering with an empty
+  # `$PYTHON_BIN` — is a silent no-capture with no evidence (#4314 inverted).
   INERT_DETAIL="the installed Claude session-start hook resolved a tortoise module dir but $(_tortoise_unusable_reason "${TORTOISE_MODULE:-}") and injected nothing"
   INERT_STAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
   _record_breadcrumb claude "$INERT_DETAIL" "$INERT_STAMP"

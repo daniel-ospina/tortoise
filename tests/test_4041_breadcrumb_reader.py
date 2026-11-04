@@ -678,40 +678,39 @@ def test_install_inert_is_rendered_with_no_python_on_path(tmp_path):
         "the inert writer touched the capture-failure slot")
 
 
-def test_the_second_inert_branch_also_renders_the_breadcrumb(tmp_path):
-    """There are TWO inert branches and each renders its OWN record.  This is
-    the SECOND: a tortoise module dir RESOLVED (so the first branch does not
-    apply) but no python3 exists to render the capture half with.  Branch 1's
-    call is exercised by ``test_install_inert_is_rendered_with_no_python_on_
-    path``; branch 2's call is a SEPARATE statement and needs its own proof.
+def test_a_console_script_nothing_can_run_is_refused_not_accepted(tmp_path):
+    """#4848 review 3, the regression guard for the last acceptance/execution
+    disagreement. A candidate whose ONLY entry point is a console script the
+    shared predicate would bless but this seam cannot execute — here a
+    `pyvenv.cfg`-owned `bin/tortoise` with a `#!/bin/sh` shebang and no
+    `bin/python` beside it — must NOT win the resolution loop.
 
-    Mutation: drop the ``_render_breadcrumb_inert`` call from the resolved-
-    module-dir branch — nothing is printed and this REDs."""
+    The shared predicate is byte-identical across seven seams and cursor's
+    `session-start` never runs a console script at all, so acceptance may only
+    use the capability every seam has: the interpreter ladder. When it accepted
+    a console script anyway, the loop `break`ed on this tree, the later runnable
+    checkout was never tried, and the breadcrumb blamed the ambient interpreter
+    for a tree the guard itself had just blessed (#4848 review 3).
+
+    The record that IS written for it is the UNUSABLE-DIR branch, which names
+    the directory and the real cause — not branch 1's "could not resolve a
+    module dir", and not a refusal that points at the wrong interpreter.
+
+    Mutation: restore either console leg to `_tortoise_dir_runnable` — this
+    candidate is accepted, the branch below records the "resolved a tortoise
+    module dir" text, and this REDs."""
     home = tmp_path / "home"
     home.mkdir()
     bindir = tmp_path / "bin"
     _shell_tools_only(bindir)  # no python3, no tortoise
 
-    # A resolved module dir: `TORTOISE_SRC_DIR` holds a real `tortoise/`
-    # package, so the hook does NOT take the unresolvable branch.
+    # A `tortoise/` tree whose only entry point is a console script with a
+    # non-python `#!` and NO interpreter beside it. `_tortoise_dir_runnable`
+    # accepts on the interpreter ladder alone, so this candidate is UNUSABLE:
+    # skipped, and remembered so the refusal can name it.
     src = tmp_path / "src"
     (src / "tortoise").mkdir(parents=True)
     (src / "tortoise" / "__init__.py").write_text("", encoding="utf-8")
-    # #4848: the seam now REFUSES a source dir it cannot run, and a later
-    # `../..` candidate can win over it — so the dir is given the one entry
-    # point that survives with no interpreter: a console script whose `#!` is
-    # not python (unknown is not refused). The RESOLVED module dir is therefore
-    # this dir, and the branch under test is still "resolved, but no
-    # interpreter", which is the state its payload must describe.
-    #
-    # #4848 REVIEW ROUND 2: the entry point is now the `pyvenv.cfg` OWNING-venv
-    # one (`bin/tortoise`), not `.venv/bin/tortoise`. A `.venv` console script is
-    # resolved into `TORTOISE_BIN` and EXECUTED by this seam — acceptance and
-    # execution must agree — so that fixture would no longer describe "no
-    # interpreter". The owning-venv script is accepted by the walk-up but is not
-    # reachable from `$TORTOISE_MODULE/.venv`, and with no `bin/python` beside it
-    # there is still nothing to run the module with: the exact state this branch's
-    # payload describes.
     console = src / "bin" / "tortoise"
     console.parent.mkdir(parents=True)
     console.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
@@ -724,30 +723,33 @@ def test_the_second_inert_branch_also_renders_the_breadcrumb(tmp_path):
     assert shutil.which("python3", path=str(bindir)) is None
     fields = _fields(proc.stdout)
     assert fields.get("code") == "install-inert", proc.stdout
-    assert "resolved a tortoise module dir but found no python3" in \
-        fields.get("why", ""), proc.stdout
-    # ⛔ THE RECOVERY MUST MATCH THIS BRANCH'S CAUSE (#4041 review round 3, P2). The
-    # renderer used to hard-code branch 1's sentence, so this branch's payload
-    # contradicted ITSELF (`why:` said the module dir WAS resolved; `next:` said it was
-    # not) and prescribed `hooks upgrade` for a missing interpreter. Asserting only
-    # ``startswith("Recovery:")`` could not see that.
+    # Branch 3 (unusable dir), NOT branch 2 ("resolved a tortoise module dir"):
+    # the tree was refused, so it never became the module dir.
+    why = fields.get("why", "")
+    assert "resolved a tortoise source dir" in why, proc.stdout
+    assert str(src) in why, proc.stdout
+    assert "found no python3 interpreter" in why, proc.stdout
+    assert "resolved a tortoise module dir" not in why, (
+        f"the console-script-only tree was ACCEPTED — acceptance and execution "
+        f"disagree again: {why!r}")
+    # ⛔ THE RECOVERY MUST MATCH THE CAUSE (#4041 review round 3, P2). Branch 1's
+    # remedy is `hooks upgrade`, which cannot install an interpreter; this
+    # branch must send the user to the CHECKOUT's venv instead.
     recovery = fields.get("next", "")
     assert recovery.startswith("Recovery:"), proc.stdout
-    assert "no python3" not in recovery or "python3" in recovery, recovery
-    assert "python3" in recovery, recovery
-    assert "resolved no tortoise module dir" not in recovery, (
-        "this branch's next: must not repeat branch 1's cause — its why: says the "
-        f"module dir DID resolve: {recovery!r}")
+    assert "create its venv" in recovery, recovery
+    assert "hooks upgrade" not in recovery, (
+        f"this cause is a missing interpreter, which `hooks upgrade` cannot "
+        f"fix — that is branch 1's remedy leaking in: {recovery!r}")
 
     # The INERT RECORD this branch writes is what `session verify` reads, so it
     # must be pinned too — the stdout alone does not prove the write happened.
-    # Mutation: drop this branch's `_record_breadcrumb` call — stdout stays
-    # correct and this REDs.
     body = json.loads(_install_crumb_path(home).read_text(encoding="utf-8"))
     assert body["kind"] == "install-inert", body
     assert body["harness"] == "claude", body
-    assert "resolved a tortoise module dir but found no python3" in \
-        body["detail"], body
+    assert "resolved a tortoise source dir" in body["detail"], body
+    assert str(src) in body["detail"], body
+    assert "resolved a tortoise module dir" not in body["detail"], body
     assert body["recorded_at"], body
 
 
