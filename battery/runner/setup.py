@@ -636,8 +636,12 @@ def seed_scenario_via_ingest(sdk, scenario: Scenario, *,
     author-set on ANY kind/status ⇒ ``baseline_set: true`` even on drafts;
     this lane ingests under ``promotion_policy='gated'``, so every no-status
     point is stated ``draft`` and then promoted explicitly below (a bare
-    ``create_point`` is live since #1088); ingest is content-hash idempotent
-    (re-run ⇒ deduped, same batch_id); connections reify to operator points only with the reification anchor; labels on
+    ``create_point`` is live since #1088); ingest is content-hash idempotent on
+    THIS lane's bundle — its items are plain points and named entities, so a
+    re-run dedups with the same ``batch_id`` (the fold skips operator nodes and
+    appends ``document``/``event`` entities, so this is a property of the bundle,
+    not of ingest); connections reify to operator points only with the
+    reification anchor; labels on
     connections must be declared relations (omit them — decorative).
 
     Returns ``{batch_id, promoted: [ids], created_points: [ids]}``.

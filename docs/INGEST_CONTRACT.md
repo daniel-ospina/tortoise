@@ -812,10 +812,18 @@ have been all-duplicate but reports a non-zero `created` did duplicate, and its
 learned about yet, which is the only reason to prefer it to a list.
 
 **Over the MCP surface, do not infer this from the timeout alone.** A call
-refused on the transport wait bound carries the verdict explicitly, in
-`error.data.committed`, `error.data.retry_safe` and `error.data.retry_rule`:
+refused by the MCP tools seam on the transport wait bound carries the verdict
+explicitly, in `error.data.committed`, `error.data.retry_safe` and
+`error.data.retry_rule`:
 
-| `retry_rule` | `committed` | What it means |
+⛔ **One arm does not: the pre-SSE transport middleware.** When that layer answers
+(HTTP 504 on the JSON-RPC surface) the payload carries `retry_after` and nothing
+else — no `committed`, no `retry_safe`, no `retry_rule`. Treat that answer as the
+worst case, `committed: "unknown"` and `retry_safe: false`: the request may have
+reached the server, and for `ingest` a repeat is not convergent. The absence of
+the verdict is not evidence that nothing was written.
+
+| `retry_rule` | `committed` | What it means (seam refusals only — see above) |
 |---|---|---|
 | `NOT_SENT` | `"none"` | Nothing was dispatched — `retry_safe: true`, re-send freely. |
 | `PREVIEW` | `"none"` | The call declared itself a preview — a `dry_run` argument on one of the seven tools that has a `dry_run` parameter (its declared default counts), or `tortoise_delete` with no `confirmation` token — so it wrote nothing: `retry_safe: true`. |

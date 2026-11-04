@@ -26734,14 +26734,19 @@ class TortoiseSDK:
           existing operator does not retro-promote a previously-gated
           source). ORTHOGONAL to granularity: both modes honor the same
           policy.
-        - Idempotent-ish: points dedup by (content_hash, pointKind) via
-          create_point(dedup=True); sources merge by url; Subject/Object
+        - Idempotent-ish where the fold applies: points dedup by
+          (content_hash, pointKind) via create_point(dedup=True) — EXCEPT
+          operator nodes, which the fold's predicate skips, so a point item
+          carrying ``is_operator`` appends a second node on an identical
+          re-ingest; sources merge by url; Subject/Object
           resolve-or-mint on the name (#3590: the MERGE key is `id`, so the
           second item naming a live name RESOLVES to it rather than minting
           a second carrier); operator connections dedup by (op_type, input
           set);
           structural edges MERGE. Document/Event entities are append-only
           occurrence records — re-ingest duplicates them by design.
+          ⛔ NOT idempotent end to end, and neither exclusion emits a warning:
+          read ``created``/``deduped`` to tell which happened.
         - EP-safe: under promotion_policy='gated' every no-status point is
           born draft and stays draft (the operator wiring passes
           promote_source=False). Under promotion_policy='auto' a no-status
