@@ -115,14 +115,20 @@ def _is_turn_store(labels: list[str]) -> bool:
 
 
 def test_a_recapture_replaces_the_prose_a_pre_fix_write_left_behind(sdk):
-    """The fix must HEAL, not only stop new leaks.
+    """A pre-fix node HEALS on re-capture — and the healing is the DERIVATION.
 
     A Source captured before this change carries the utterance in ``summary``
-    and (because #3518's ``_searchText`` SET was a ``coalesce``) in the field
-    the FTS index is declared on — so a re-capture that merely stopped
-    PRODUCING prose would leave the old prose on the node and in the index
-    forever. This seeds that exact pre-fix state and asserts the next capture
-    replaces it.
+    and (because #3518 puts the summary in the searchable field) in
+    ``_searchText``. This seeds that exact pre-fix state and asserts the next
+    capture replaces it, so the fix does not merely stop new leaks.
+
+    ⛔ WHAT THIS TEST DOES NOT PROVE, stated so nobody infers it: the ``_searchText``
+    SET is still ``coalesce($st, s._searchText)``, and THAT is not the healing
+    mechanism — ``coalesce`` already yields the new derivation whenever one
+    exists. An earlier cut of this PR rewrote the clause as an equivalent
+    ``CASE WHEN $st IS NOT NULL …`` and cited this test as its proof; it passes
+    under BOTH forms, so it is evidence for the metadata change and for nothing
+    about the clause (measured: 2 passed with the clause reverted).
     """
     session_id = "sess-source-prose-heal-10000"
     url = f"session:{session_id}"
@@ -138,6 +144,7 @@ def test_a_recapture_replaces_the_prose_a_pre_fix_write_left_behind(sdk):
     offenders = [(labels, props) for labels, props in _nodes_carrying(sdk, MARKER)
                  if not _is_turn_store(labels)]
     assert not offenders, (
-        "a re-capture left the pre-fix prose on the node — the SET must replace "
-        "a non-empty derivation instead of coalescing into the old value:\n"
+        "a re-capture left the pre-fix prose on the node — the capture's own "
+        "derivation (a topic lexicon, non-NULL for any transcript with content) "
+        "must replace it:\n"
         + "\n".join(f"  {labels} {props}" for labels, props in offenders))
