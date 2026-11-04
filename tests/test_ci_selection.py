@@ -9883,8 +9883,12 @@ def test_drift_gate_cannot_skip_the_test_matrix():
     # `admin-merge.sh` NON_RED_CONC, i.e. a false PASS on the merge path. The "not
     # skippable on a cancelled run" half is pinned in tests/test_ci_new_failure_gate.py
     # ::test_the_required_aggregate_must_not_be_skippable_on_a_cancelled_run; the
-    # "skipped counts non-red" half is NOT pinned in this repo — `NON_RED_CONC` lives
-    # out-of-repo at agent-infra/scripts/admin-merge.sh:5867.
+    # "skipped counts non-red" half is pinned against the rail's own set at
+    # tests/fixtures/rail_surface_tokens.json by
+    # tests/test_merge_throughput.py::test_surface_token_sets_match_the_committed_rail_record
+    # (always runs), and re-verified against the LIVE rail by
+    # ::test_rail_surface_token_sets_match. Cite the constant, not a rail line number —
+    # the record's own `_read_at_rail_lines` already shows those drift between checkouts.
     assert gate.get("if") in _always, (
         "python-ci-gate must run even when the drift job fails (#2656), and must not be "
         "skippable on a cancelled run (#10911) — `skipped` is a green required check")

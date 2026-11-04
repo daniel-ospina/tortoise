@@ -4306,10 +4306,11 @@ jobs:
     # `always()`: this must run when the legs FAILED — that is the only case it exists
     # for. Without it the default `success()` would skip it on exactly the red runs.
     #
-    # OVERRIDES: GitHub's documented `${{ !cancelled() }}` remedy for runs that stay
-    # queued after cancellation — it clears the wedge but SKIPS this job, and a skipped
-    # verdict lands in the aggregate's `skipped` arm (this job's row carries the `-`
-    # selector) which REDs the required check; refused deliberately (#10911).
+    # OVERRIDES: GitHub documents `${{ !cancelled() }}` as the alternative where
+    # `always()` keeps a job alive through cancellation — it would make this job conclude
+    # `skipped` instead of re-arming. Refused deliberately (#10911): a skipped verdict
+    # lands in the aggregate's `skipped` arm (this job's row carries the `-` selector),
+    # which REDs the required check.
     #
     # ⛔ DO NOT "fix" this to `${{ !cancelled() }}`. MEASURED 2026-11-04T12:1xZ:
     # `cancel-in-progress` above cancels a superseded PR run, GitHub RE-EVALUATES job
@@ -4437,17 +4438,18 @@ jobs:
           fi
 
   python-ci-gate:
-    # OVERRIDES: GitHub's documented `${{ !cancelled() }}` remedy for runs that stay
-    # queued after cancellation — a SKIPPED required check reports Success to branch
-    # protection and is counted non-red by the rail (`admin-merge.sh` NON_RED_CONC =
-    # {success, neutral, skipped, cancelled, stale}), so it converts a throughput wedge
-    # into a bypass; refused deliberately (#10911).
+    # OVERRIDES: GitHub documents `${{ !cancelled() }}` as the alternative where
+    # `always()` keeps a job alive through cancellation. Refused deliberately (#10911):
+    # a SKIPPED required check reports Success to branch protection and the rail counts
+    # `skipped` non-red (its NON_RED_CONC, recorded in
+    # tests/fixtures/rail_surface_tokens.json), so it converts a throughput wedge into
+    # a bypass.
     #
     # ⛔ `always()` MUST stay non-skippable. This IS the required context
     # (`merge_conditions`), and the measured wedge (#10911) — a cancelled run re-arming
     # this job into a permanent `queued` state so it never posts at all — fails SAFE:
     # the rail REFUSES BY NAME (`check-unresolved:<name>:<status>/<conclusion>`) at
-    # `ADMIN_MERGE_CHECK_UNRESOLVED_BOUND` (default 3600 s, `admin-merge.sh:1006`),
+    # `ADMIN_MERGE_CHECK_UNRESOLVED_BOUND` (default 3600 s, `ADMIN_MERGE_CHECK_UNRESOLVED_BOUND` in `admin-merge.sh`),
     # which exists for precisely this shape — its own doc block says a run "queued
     # because the whole pool is saturated never stops moving, so no progress-based
     # clock can ever reach it". Making the gate skippable would replace that refusal
