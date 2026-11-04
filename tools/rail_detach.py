@@ -377,12 +377,42 @@ class Refused(Exception):
     """A precondition the launcher itself enforces (never a rail verdict)."""
 
 
+class _GhRun:
+    """The two fields the `gh` call sites read, from one ALWAYS-RETURNING read.
+
+    ⛔ A MISSING `gh` BINARY IS AN UNREADABLE ANSWER, NOT A CRASH (measured
+    2026-11-03, CI shard `test (d)`): `subprocess.run(["gh", …])` raises
+    `FileNotFoundError` when the executable is not on `PATH`, and neither call
+    site caught it — 21 tests in `tests/test_rail_detach.py` died with a bare
+    traceback on a runner that has no `gh`, and an operator on a box without it
+    got the same traceback instead of the tool's documented degradation. The
+    intent is already written into `_head_sha` (`else "unreadable"`) and into
+    `_resolve_repo`'s `Refused`; only the spawn itself was unguarded.
+
+    `returncode=127` is the shell's own "command not found", so every existing
+    `returncode != 0` branch keeps its meaning and the missing binary cannot be
+    mistaken for a successful read.
+    """
+
+    def __init__(self, returncode: int, stdout: str = "") -> None:
+        self.returncode = returncode
+        self.stdout = stdout
+
+
+def _gh(argv: list[str], cwd: Path) -> _GhRun:
+    """Run `gh` and NEVER raise for a missing binary or an unspawnable argv."""
+    try:
+        out = subprocess.run(
+            ["gh", *argv], cwd=str(cwd), capture_output=True, text=True,
+        )
+    except (FileNotFoundError, NotADirectoryError, PermissionError, OSError):
+        return _GhRun(127)
+    return _GhRun(out.returncode, out.stdout or "")
+
+
 def _resolve_repo(cwd: Path) -> str:
     env_repo = os.environ.get("GH_REPO", "")
-    out = subprocess.run(
-        ["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
-        cwd=str(cwd), capture_output=True, text=True,
-    )
+    out = _gh(["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"], cwd)
     if out.returncode == 0 and out.stdout.strip():
         repo = out.stdout.strip()
         if env_repo and env_repo != repo:
@@ -393,15 +423,17 @@ def _resolve_repo(cwd: Path) -> str:
                 "unset GH_REPO rather than detaching a rail at an unknown target"
             )
         return repo
+    if out.returncode == 127:
+        raise Refused(
+            "could not resolve the repo from this checkout — `gh` is not on PATH "
+            "(pass --repo, or install the GitHub CLI)"
+        )
     raise Refused("could not resolve the repo from this checkout (`gh repo view` failed)")
 
 
 def _head_sha(cwd: Path, repo: str, pr: int) -> str:
-    out = subprocess.run(
-        ["gh", "pr", "view", str(pr), "--repo", repo, "--json", "headRefOid",
-         "-q", ".headRefOid"],
-        cwd=str(cwd), capture_output=True, text=True,
-    )
+    out = _gh(["pr", "view", str(pr), "--repo", repo, "--json", "headRefOid",
+               "-q", ".headRefOid"], cwd)
     return out.stdout.strip() if out.returncode == 0 else "unreadable"
 
 
