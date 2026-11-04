@@ -580,8 +580,9 @@ Exit 0 only when **all** of these hold:
    is scored by SUMMING its classes, so a class with no nodes contributes `0/0` to BOTH halves and
    vanishes: the row then reports `share = 1.000` over a population NARROWER than the one registered.
    That is reachable on every post-D10 graph, because `:Document` is a retired label (the writer
-   remaps it onto `:Source`) and §10.1 records that the scored run wrote none at all — a leg that
-   `0/0` makes permanently unable to fail. So the probe derives the empty legs from the census
+   remaps it onto `:Source`) and §10.1 records that the run IT re-derives wrote none at all (the
+   scored log agrees: `capstone-measured-9152448d.log` carries `e3 label=Document nodes=0`) — a leg
+   that `0/0` makes permanently unable to fail. So the probe derives the empty legs from the census
    (`e3_unmeasured_legs`, over `DERIVED_LABELS` and never `:Object`) and a row naming one **cannot
    PASS** — it is `FAIL`, or `REFUSED` where the node floor applies (a too-small population is not a
    verdict either way) — with the leg disclosed in its bar, note and log line. **This decides no

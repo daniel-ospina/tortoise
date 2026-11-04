@@ -427,8 +427,9 @@ def test_e3_cannot_pass_on_a_registered_class_leg_that_is_empty():
     from both halves of the ratio.
 
     That is not hypothetical: `:Document` is a RETIRED label — the writer remaps `Document` onto
-    `:Source` (`tortoise/projection/edges.py:2765-2769`, D10) — and §10.1 of the pre-registration
-    records that the scored run wrote no `Document` at all. So the vacuous leg is the PRODUCTION
+    `:Source` (`tortoise/projection/edges.py:2765-2769`, D10) — and §10.1 of the pre-registration,
+    computed on the superseded run's census, records no `Document` written at all (the scored log
+    agrees: `e3 label=Document nodes=0`). So the vacuous leg is the PRODUCTION
     shape, and only the owner's §9736 ruling can change which spelling E3 names.
 
     The rule this pins is the ruling-free one the issue's own decision card declares
@@ -487,8 +488,11 @@ def test_main_feeds_the_census_legs_into_e3_and_renders_them():
     `main` would keep summing the totals and a class the run never wrote would keep disappearing.
     This reads `main`'s own AST and requires (a) `e3_outcome` to be called with an
     `unmeasured_legs=` argument built from `e3_unmeasured_legs(census_data[...])`, and (b)
-    `render_log` to read that key back for the log's own `e3 unmeasured_legs=` line — because the
-    defect this closes was `0/0` being invisible in both places at once.
+    `render_log` to DERIVE the log's own `e3 unmeasured_legs=` line from that same CENSUS
+    (`e3_legs_line(census_data[...])`) rather than reading it back off the row — because the
+    defect this closes was `0/0` being invisible in both places at once, and a caller-built row
+    that happens to lack the key would otherwise render "every registered class carried nodes"
+    two lines beneath `e3 label=Document nodes=0`.
     """
     tree = ast.parse(PROBE.read_text())
     main = next(node for node in tree.body

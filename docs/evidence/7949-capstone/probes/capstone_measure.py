@@ -686,7 +686,8 @@ def e3_unmeasured_legs(per_label: dict[str, dict[str, int]] | None, *,
     it onto ``:Source`` under D10 — the ``entity_label = "Source"`` remap in
     ``tortoise/projection/edges.py``, cited by SYMBOL because a line number here would re-stale on
     the next insertion above it), and §10.1 of the
-    pre-registration records that the scored run wrote none at all. So the leg E3 names is
+    pre-registration records that the run IT re-derives wrote none at all (the scored log agrees:
+    ``e3 label=Document nodes=0``). So the leg E3 names is
     structurally empty on every post-D10 graph, and only #9736's owner-gated ruling can change
     WHICH spelling the row names.
 
