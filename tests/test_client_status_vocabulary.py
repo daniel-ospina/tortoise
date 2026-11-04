@@ -245,11 +245,35 @@ class TestProbeExecutesTheContract:
 
     def test_never_configured_probe_reports_unconfigured_exit_four(self, monkeypatch, capsys):
         monkeypatch.delenv("TORTOISE_MCP_URL", raising=False)
+        # `configured` is asked of the RESOLUTION, so pin it rather than depend on
+        # whatever store this machine happens to have (#3805, #10605).
+        monkeypatch.setattr(cli, "endpoint_declared", lambda: False)
         monkeypatch.setattr(cli, "status", _fake_status("tortoise_unavailable", error="boom"))
         assert cli.main(["status"]) == 4
         out = json.loads(capsys.readouterr().out)
         assert out["status"] == UNCONFIGURED
         assert out["configured"] is False
+
+    def test_a_store_declared_endpoint_that_is_DOWN_is_degraded_not_unconfigured(
+        self, monkeypatch, capsys,
+    ):
+        """An endpoint a STORE declares is configured — `degraded`, exit 3.
+
+        `configured` used to be `bool(TORTOISE_MCP_URL)`, which was adequate while
+        the environment was the only way to name an endpoint. Since #10605 a
+        store's `api_url` is a first-class endpoint source, so a down server that
+        a store points at was reported `unconfigured` (exit 4 — a policy gap) with
+        `url: None`, nulling the very endpoint the driver had resolved. That
+        inverts this module's load-bearing property: `degraded` and `unconfigured`
+        are never reported as each other.
+        """
+        monkeypatch.delenv("TORTOISE_MCP_URL", raising=False)
+        monkeypatch.setattr(cli, "endpoint_declared", lambda: True)
+        monkeypatch.setattr(cli, "status", _fake_status("tortoise_unavailable", error="boom"))
+        assert cli.main(["status"]) == 3
+        out = json.loads(capsys.readouterr().out)
+        assert out["status"] == DEGRADED
+        assert out["url"] == "http://localhost:8000/mcp", out
 
     def test_a_reachable_probe_is_never_a_failure_at_the_boundary(self, monkeypatch, capsys):
         """Negative: the reachable path can never emit the failure terms (the
@@ -267,3 +291,53 @@ class TestProbeExecutesTheContract:
         assert cli._exit_code(DEGRADED) == 3
         assert cli._exit_code(UNCONFIGURED) == 4
         assert cli._exit_code("wat") == 3  # fail loud, never silently success
+
+
+def test_the_artifacts_no_longer_call_the_driver_a_one_word_failure_reporter():
+    """#10727 review (F3): three artifacts still described the PRE-#10605 driver.
+
+    `tortoise/mcp_client.status()` now classifies a credential-less auth rejection
+    as `unconfigured` (#10605), so "the driver emits `tortoise_unavailable` for
+    ANY failure to answer" became false — the sentence points the next reader at a
+    driver that no longer exists. The dependency line went the same way: it named
+    `BearerAuth`, which CAPTURES the string, while the client now supplies a
+    per-request `httpx.Auth` provider (the whole of #10605).
+
+    The conclusion those sentences support — `tortoise_unavailable` stays OUT of
+    `LEGACY_WORDS`, because its term needs the configuration fact — is still
+    right, which is why the stale CLAUSE is re-cut instead of the paragraph being
+    deleted. Pinned so the tidy-but-wrong version cannot come back, and so a later
+    edit cannot leave the three artifacts disagreeing with each other.
+    """
+    stale_clause = "for *any* failure to answer"
+    for name in ("client/README.md", "tortoise/status_vocabulary.py"):
+        text = (REPO_ROOT / name).read_text(encoding="utf-8")
+        assert stale_clause not in text, (
+            f"{name} still claims the driver reports `tortoise_unavailable` for "
+            "ANY failure to answer — a credential-less auth rejection is "
+            "`unconfigured` (#10605)")
+        assert "#10605" in text, (
+            f"{name} must name the failure the driver DOES classify "
+            "(the credential-less refusal, #10605) so the exclusion reads as "
+            "deliberate rather than as an oversight")
+    split = (REPO_ROOT / "docs" / "client-server-split.md").read_text(encoding="utf-8")
+    assert "Client + BearerAuth" not in split, (
+        "docs/client-server-split.md still says the MCP client uses `BearerAuth`, "
+        "which CAPTURES the credential at construction — the #10605 defect. It "
+        "supplies a per-request `httpx.Auth` provider (§8a)")
+
+    # `.env.example` is the ENV CONTRACT (`tests/test_9078_record_written_by_
+    # production_path.py` says so in as many words), and it was the fourth home of
+    # a claim this PR re-cut in three others: it named `_api_key` (deleted by this
+    # PR) and asserted that the alias "is then read by NOTHING", which the client's
+    # own `_ENV_KEY_NAMES` chain and the onboarding pin both refute.
+    env_example = (REPO_ROOT / ".env.example").read_text(encoding="utf-8")
+    assert "_api_key" not in env_example, (
+        ".env.example names `mcp_client.py::_api_key`, which #10605 deleted — the "
+        "reader is now the per-request provider over `_ENV_KEY_NAMES`")
+    assert "read by NOTHING" not in env_example, (
+        ".env.example still says TORTOISE_MCP_API_KEY is read by nothing; the MCP "
+        "HTTP client reads it (`_ENV_KEY_NAMES`, #10605)")
+    assert "TORTOISE_MCP_API_KEY" in env_example, (
+        ".env.example must DISCLOSE the alias it describes, or the contract and the "
+        "code disagree (#5153)")

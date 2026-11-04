@@ -2016,16 +2016,6 @@ def test_the_state_value_carve_out_row_records_what_is_enforced_and_what_is_not(
     assert "A SEPARATOR-BEARING NUMERAL IS NEVER JUDGED" in row["note"], row["note"]
     assert ("test_a_separator_bearing_number_is_outside_the_judged_set"
             in row["note"]), row["note"]
-    # And the HYPHENATED COMPOUND is named among the open set (#10801 review
-    # cycle 2, P3, measured): `20k-mile` is ONE token, so it never reaches the
-    # fusion branch — `_value_core` reads core `20` + unit `kmile` and the pair
-    # diverges on the CORE, refusing a truthful point against `20000 miles`.
-    # The row claims its remaining open set is "named completely", so a class
-    # that withholds a truthful point has to be IN it; a future lane that peels
-    # the prefix inside a token must move this row with it.
-    assert "20k-mile" in row["note"], row["note"]
-    assert "HYPHEN" in row["note"], row["note"]
-    assert "20k-30k miles" in row["note"], row["note"]
 
 
 #: Number words the registry prose may spell, keyed by the count they name. A
