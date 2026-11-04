@@ -889,9 +889,7 @@ def _call_folds_siblings_into_props(arguments) -> bool:
     # PROVABLE — not because this particular value diverges.
     if arguments.get("authoredBy"):                 # handler: `if authoredBy:`
         return True
-    if arguments.get("credibility") is not None:     # handler: `is not None`
-        return True
-    return False
+    return arguments.get("credibility") is not None  # handler: `is not None`
 
 
 def _declared_dry_run_default(name: str):
