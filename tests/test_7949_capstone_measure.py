@@ -1260,6 +1260,81 @@ def test_the_scores_probe_refuses_a_record_that_does_not_name_the_on_head(
     assert foreign in err, err
 
 
+def test_the_scores_probe_refuses_an_e2a_and_gate_drops_pair_from_two_graphs(
+        tmp_path, capsys):
+    """The E2a <-> gate-drops graph IDENTITY, with the head loop out of the way.
+
+    #10610 review at `21b2af22` (P3). The neighbour above moves all three cited records to
+    ONE foreign graph, so the head loop refuses first and the equality check
+    (`e2a_record.get("graph") != gates_record.get("graph")`) is never the reason — deleting
+    that check left every test green. The two records carry a head and a bare `<head8>`; the
+    graph name is `capstone_on_<head8>_<stamp>`, so a SIBLING run of the SAME head is a
+    DIFFERENT graph with an equal head. That is the only shape that isolates this guard.
+
+    Non-vacuity: at the pre-fix head this bundle scores, because both records still name the
+    ON head and nothing compares their graphs to each other.
+    """
+    repo = _copied_bundle(tmp_path)
+    path = repo / "docs/evidence/9889" / scores_probe.GATE_DROPS
+    record = json.loads(path.read_text())
+    on_graph = record["graph"]
+    assert on_graph.startswith("capstone_on_"), on_graph
+    sibling = on_graph.rsplit("_", 1)[0] + "_1799999999"
+    assert sibling != on_graph and sibling.startswith("capstone_on_"), sibling
+    record["graph"] = sibling
+    path.write_text(json.dumps(record))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert "come from different graphs" in err, err
+    assert sibling in err and on_graph in err, err
+
+
+def test_the_value_gate_liveness_refusal_is_not_a_truthiness_test(tmp_path, capsys):
+    """A record that says its positive controls are DEAD must refuse — including `"false"`.
+
+    #10610 review at `21b2af22` (P2, a FAIL-OPEN). The guard read
+    `if not gates.get("predicate_alive")`, which refuses `false`/`null`/absent but ACCEPTS
+    the STRING `"false"` — and the E2a bar is separately satisfied at 13/14 here, so the
+    measured outcome was `e2 = PASS`: a GREEN row whose own artifact states that the positive
+    controls no longer drop. That is the exact shape the falsifier's `injected_anchor` guard
+    one function over already refuses with `is not True`.
+
+    `False`, `None`, an ABSENT key and the STRING `"false"` are each armed alone: the first
+    three are refused by both forms, and the string is the case that tells them apart — a
+    truthiness test accepts it (a non-empty string is truthy), `is not True` refuses it.
+    """
+    for declared, marker in ((False, "bool"), (None, "null"), ("absent", "absent"),
+                             ("false", "string")):
+        repo = _copied_bundle(tmp_path / marker)
+        e2a_path = repo / "docs/evidence/9889" / scores_probe.E2A_RECORD
+        e2a = json.loads(e2a_path.read_text())
+        assert e2a["value_units"] == 14, e2a          # the bar is ">= 13 of 14"
+        e2a["value_survived"] = e2a["value_units"]     # the E2a bar is MET
+        e2a_path.write_text(json.dumps(e2a))
+        # ...and the FALSIFIER's own blocks must agree, or its cross-check refuses first and
+        # this test would be proving the wrong arm had fired.
+        falsifier_path = repo / "docs/evidence/9889" / scores_probe.E2A_FALSIFIER
+        falsifier = json.loads(falsifier_path.read_text())
+        for block in ("with_anchor", "as_written"):
+            falsifier[block]["value_survived"] = falsifier[block]["value_units"]
+        falsifier_path.write_text(json.dumps(falsifier))
+        path = repo / "docs/evidence/9889" / scores_probe.GATE_DROPS
+        record = json.loads(path.read_text())
+        assert record["predicate_alive"] is True, record["predicate_alive"]
+        if declared == "absent":
+            record.pop("predicate_alive")
+        else:
+            record["predicate_alive"] = declared
+        path.write_text(json.dumps(record))
+        with pytest.raises(SystemExit) as refused:
+            scores_probe.score(repo)
+        assert refused.value.code == 2, (marker, refused.value)
+        err = capsys.readouterr().err
+        assert "positive controls no longer drop" in err, (marker, err)
+
+
 def _literal_path(node: ast.AST) -> tuple[str, ...] | None:
     """A chained LITERAL subscript's key path — `bars['floors']['x']` → 3 keys.
 
@@ -4895,6 +4970,23 @@ def test_the_three_routes_to_the_e1_e2_verdict_state_the_records_verdict():
         f"the audit's E2a row does not carry the record's artifact ({e2a['artifact']!r}): "
         f"{e2_rows[0][:400]}")
 
+    # ⛔ THE DEPENDENCY ROW'S LOSS COUNT IS DERIVED TOO (#10610 review at `21b2af22`, P3).
+    # The `| E2 |` row states the surviving-value loss to argue that the row needs the
+    # EXTRACTION loss fixed rather than the write-path filter (`#10360`) — and it stated
+    # `(1 of 14)`, the SUPERSEDED `#9775` reading, while the record scores 8 of 14 surviving
+    # (so 6 lost). Nothing read that row, so the audit a lane opens to decide whether E2 can
+    # move told that lane the loss was 13 of 14. Derive it from the record: a count typed
+    # into prose is a count nobody froze.
+    dep_rows = [ln for ln in proofs.splitlines() if re.match(r"^\| E2 \|", ln)]
+    assert len(dep_rows) == 1, (
+        f"the audit carries {len(dep_rows)} dependency rows for E2, not 1 — this leg has no "
+        "subject")
+    lost = e2a["frozen_units"] - e2a["value_survived"]
+    assert f"`{lost} of {e2a['frozen_units']}` lost" in dep_rows[0], (
+        f"the E2 dependency row does not state the record's loss (`{lost} of "
+        f"{e2a['frozen_units']}` lost, i.e. {e2a['value_survived']} surviving) — a loss count "
+        f"that disagrees with the record tells a lane the wrong dependency: {dep_rows[0][:400]}")
+
     # The E2b row is COUNTED above but was never INSPECTED — so this diff's own new claim on
     # it (E2b's bar is MET at 1/114, and the RED belongs to the composite via E2a) could be
     # mutated to `3/114` with every pin green (measured at `42143b80`). Hold it to the record
@@ -5032,6 +5124,53 @@ def test_the_e1_e2_record_refuses_a_record_from_another_run(tmp_path):
         with pytest.raises(SystemExit) as refused:
             scores_probe.score(repo)
         assert refused.value.code == 2, (name, refused.value)
+
+
+@pytest.mark.parametrize("mutation", [
+    {"bare_definite": 100, "share": 100 / 78},   # numerator above its population
+    {"bare_definite": -1, "share": -1 / 78},     # negative numerator
+    {"objects": "78"},                            # not a number at all
+    {"share": "0.36"},                            # the operand as a string
+])
+def test_a_before_arm_share_must_be_a_fraction_of_a_real_population(mutation,
+                                                                    tmp_path,
+                                                                    capsys):
+    """The numerator is bounded too, and a non-number is a REFUSAL, not a crash.
+
+    #10610 review at `21b2af22` (P2, a FAIL-OPEN). `_consistent_share` checked only that
+    `objects > 0`, so `bare_definite` ABOVE its own population — which no producer can write
+    (`len(bare) / len(names)`) and which is therefore an edit — reconciled happily against
+    `share = 100/78` and wrote a DECIDED `PASS`: measured, a bound of `0.641` against an
+    after share of `0.2131` PASSES both pairings, flipping E1 from REFUSED to a decided PASS
+    off the numerator alone.
+
+    The same function ALSO ran its `objects <= 0` test BEFORE the float conversion, so a
+    non-numeric field escaped as `TypeError: '<=' not supported between instances of 'str'
+    and 'int'` (exit 1) instead of the refusal the neighbouring `except` advertises — a run
+    an operator cannot tell from a crash is not a refusal, the class this bundle fixed in
+    `e1_paired_arm.py`. Coercing instead of refusing would leave the raw string travelling on
+    to the comparisons below, which is how the traceback got out in the first place.
+
+    ⚠️ `bare_definite == objects` with `share: 1.0` is NOT mutated here: a population in
+    which EVERY Object name is bare-definite is a legitimate reading (the share is a
+    fraction of a population, and 1 is that fraction's maximum), so refusing it would red a
+    true measurement. The bound is `0 <= bare <= objects`, inclusive by design.
+
+    Non-vacuity: at the pre-fix head the two range arms score a decided PASS and the two
+    non-number arms escape as a traceback.
+    """
+    repo = _bundle(tmp_path)
+    path = repo / "docs/evidence/9889/e1-paired-off-arm-1.json"
+    record = json.loads(path.read_text())
+    assert record["bare_definite"] == 28 and record["objects"] == 78, record
+    record.update(mutation)
+    path.write_text(json.dumps(record))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert ("not a subset of the population" in err or "which is not a number" in err
+            or "not a fraction of any population" in err), err
 
 
 def test_the_falsifier_is_provenanced_on_the_block_its_number_is_read_from(

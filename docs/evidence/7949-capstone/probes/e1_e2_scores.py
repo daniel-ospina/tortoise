@@ -166,15 +166,48 @@ def _consistent_share(where: str, share, bare, objects) -> None:
         raise _refuse(f"{where} carries no bare_definite/objects beside its "
                       "share, so the share cannot be reconciled against the "
                       "counts it is supposed to be a fraction OF")
-    if objects <= 0:
-        raise _refuse(f"{where} carries objects={objects}, so its share is not "
-                      "a fraction of any population")
+    # ⛔ CONVERT FIRST, THEN BOUND (#10610 review at `21b2af22`). The `objects <= 0` test used
+    # to run BEFORE the conversion, so a non-numeric field escaped as a TypeError traceback
+    # (exit 1) instead of the refusal the `except` below advertises — measured: `objects:
+    # "78"` produced "ESCAPED TypeError: '<=' not supported between instances of 'str' and
+    # 'int'". A run an operator cannot tell from a crash is not a refusal.
+    #
+    # ⛔ AND A NON-NUMBER IS REFUSED, not coerced. `float("78")` would ACCEPT a string field
+    # and then the raw string travels on to the comparisons below, which is exactly how the
+    # traceback got out; every artifact here is JSON with real numbers, so a string is an
+    # edited record or a different producer's shape, not a value to be helpfully parsed.
+    # `bool` is an `int` in Python, so it is excluded explicitly (the same rule
+    # `capstone_measure.parse_bars`' floor helpers apply).
+    for field, value in (("bare_definite", bare), ("objects", objects),
+                         ("share", share)):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise _refuse(f"{where} carries {field}={value!r}, which is not a "
+                          "number — a share and the counts it is a fraction of "
+                          "are numeric fields, so this is an edited record or "
+                          "another producer's shape")
     try:
-        implied = float(bare) / float(objects)
+        bare_n = float(bare)
+        objects_n = float(objects)
         declared = float(share)
     except (TypeError, ValueError) as exc:
         raise _refuse(f"{where} carries bare_definite={bare!r} / "
-                      f"objects={objects!r}, which is not a share: {exc}") from exc
+                      f"objects={objects!r} / share={share!r}, which is not a "
+                      f"share: {exc}") from exc
+    if not math.isfinite(objects_n) or objects_n <= 0:
+        raise _refuse(f"{where} carries objects={objects}, so its share is not "
+                      "a fraction of any population")
+    # ⛔ THE NUMERATOR IS BOUNDED TOO (#10610 review at `21b2af22`). Only the lower bound was
+    # checked, so a `bare_definite` ABOVE its own population — which no producer can write
+    # (`len(bare) / len(names)`) and which is therefore an edit — reconciled happily against
+    # `share = 100/78` and wrote a DECIDED `PASS`: measured, `bound 0.641` against an after
+    # share of 0.2131 PASSES both pairings, flipping E1 from REFUSED to a decided PASS off
+    # the numerator. A share outside [0, 1] is not a fraction of a population.
+    if not (0.0 <= bare_n <= objects_n):
+        raise _refuse(f"{where} carries bare_definite={bare} of objects={objects}, "
+                      "which is not a subset of the population its share is a "
+                      "fraction of — a share above 1 (or below 0) is a numerator "
+                      "edited away from its own denominator")
+    implied = bare_n / objects_n
     # ⛔ NON-FINITE IS A REFUSAL, not a value (#10610 review at `e079c8dd`). `share=nan`
     # parses fine, and `abs(nan - implied) > 1e-9` is False — every comparison against NaN
     # is False — so the reconciliation below PASSED and a log with `share=nan` wrote a
@@ -647,7 +680,13 @@ def e2_score(repo: Path, floors: dict) -> dict:
         raise _refuse(f"the falsifier reaches {injected_survived}/{units}, not "
                       f"{units}/{units} — an injected anchor that moves nothing "
                       "means the counter is inert")
-    if not gates.get("predicate_alive"):
+    # ⛔ `is not True`, NEVER a truthiness test (#10610 review at `21b2af22`). `if not
+    # gates.get("predicate_alive")` refuses `false`/`null`/absent but ACCEPTS the string
+    # `"false"` — measured: a bundle with E2a at 13/14 (bar MET) and this field set to the
+    # STRING `"false"` wrote `e2 = PASS`, a GREEN row whose own artifact states its positive
+    # controls no longer drop. That is the exact shape the falsifier's `injected_anchor`
+    # guard one function over already refuses with `is not True`.
+    if gates.get("predicate_alive") is not True:
         raise _refuse("the value-gate positive controls no longer drop — the "
                       "mechanism count measures nothing")
 
@@ -778,8 +817,12 @@ def score(repo: Path = _ROOT) -> dict:
                       f"{e2a_record.get('graph')!r} — they are the same "
                       "measurement and cannot come from different runs")
     if e2a_record.get("graph") != gates_record.get("graph"):
-        raise _refuse("the E2a record and the gate-drops record come from "
-                      "different graphs — one record cannot mix them")
+        raise _refuse(f"the E2a record and the gate-drops record come from "
+                      f"different graphs — {E2A_RECORD} cites "
+                      f"{e2a_record.get('graph')!r} and {GATE_DROPS} cites "
+                      f"{gates_record.get('graph')!r}; one record cannot mix "
+                      "them, and two runs of the SAME head are still two "
+                      "graphs")
     e1 = e1_pairings(before_arms, after, floors)
     e2 = e2_score(repo, floors)
     if after["corpus_sha256"] != normalise_pin(floors["fixtures_hash"]):
