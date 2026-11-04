@@ -3507,7 +3507,7 @@ def duplicate_mapping_key_issues(manifest_path: Path | None = None) -> list[str]
     if tools_dir not in sys.path:
         sys.path.insert(0, tools_dir)
     try:
-        import registry_integrity  # noqa: PLC0415 — sibling TOOL, not a package
+        import registry_integrity
     except Exception as exc:  # pragma: no cover - it ships beside this file
         return [f"{path}: duplicate-key check UNAVAILABLE ({exc}) — not clean"]
     return registry_integrity.check([path])
