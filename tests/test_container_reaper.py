@@ -180,7 +180,18 @@ def box(monkeypatch, tmp_path):
     monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-0123456789")
     # The sweep must not consult the lease registry of the real box.
     monkeypatch.setattr(tl, "_started_epoch", lambda name: None)
-    monkeypatch.setattr(tl, "_unused_gap", lambda name: None)
+    # ⛔ THE ORPHAN IS COLD, NOT MERELY CLIENT-FREE. The owner-gone arm demands
+    # docker's own TERMINAL state, OR no attached client ACROSS `OWNER_GRACE_H`,
+    # for BOTH owner sources — the fold's `0abaa51a5` (#10841 review P1), landed
+    # concurrently with this file and covering the name-record path too. A bare
+    # "answered False" was enough on the pre-fold arm, whose only act was
+    # `docker rm -f`; on the merged tree it is not, and `None` reads as "first
+    # sighting" — the lane-between-steps shape, deliberately KEPT. So this box
+    # models the population the deployed reaper is actually armed for: a
+    # container nothing has touched for longer than the grace.
+    monkeypatch.setattr(
+        tl, "_unused_gap",
+        lambda name: tl.OWNER_GRACE_H + 1.0 if name == ORPHAN else None)
     monkeypatch.setattr(tl, "_touch_lease", lambda name: None)
     # The withheld proofs 2/3 stay withheld: this test is about the DEFAULT.
     monkeypatch.delenv(tl.LANE_GONE_REAP_ENV, raising=False)
@@ -309,7 +320,12 @@ def test_an_UNDECIDABLE_orphan_is_exit_2_not_a_clean_sweep(box, monkeypatch,
     out = json.loads(capsys.readouterr().out)
     assert rc == 2, out
     assert out["ok"] is False and out["decided"] is False, out
-    assert any("unreadable" in n for n in out["notes"]), out
+    # Either spelling of the SAME undecided shape: `container_reaper.undecided`
+    # matches "unreadable" OR "fail-closed" on a `… is gone` line, so the
+    # predicate is what is under test here, not one arm's wording — the pre-fold
+    # probe said "(unreadable)", the merged ladder says "report only,
+    # fail-closed" (#10841 review P1).
+    assert any("unreadable" in n or "fail-closed" in n for n in out["notes"]), out
     assert box.removals == []
 
 
