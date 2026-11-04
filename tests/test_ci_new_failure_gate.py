@@ -995,7 +995,9 @@ def _condition_holds(expr, *, run_cancelled: bool, legs_failed: bool) -> bool:
     An expression using a function outside that vocabulary RAISES, so widening a
     condition is a deliberate act rather than a silent pass.
     """
-    text = str(expr or "success()").strip()
+    # `expr is None` (not `expr or ...`): a YAML `if: false` parses to a falsy non-string
+    # and must reach the vocabulary check and RAISE, not be silently read as `success()`.
+    text = "success()" if expr is None else str(expr).strip()
     if text.startswith("${{"):
         text = text[3:].strip()
     if text.endswith("}}"):
@@ -1021,6 +1023,28 @@ def _condition_holds(expr, *, run_cancelled: bool, legs_failed: bool) -> bool:
     return (not value) if negate else value
 
 
+def test_both_jobs_stay_literal_always():
+    """The exact-string pin for BOTH jobs — the behavioural check is not a substitute.
+
+    A behavioural check over `(run_cancelled, legs_failed)` cannot distinguish `always()`
+    from `!cancelled()` in the one state it does not sample, and the aggregate's
+    `ci-introduced-failure` row carries the `-` selector, so a skipped verdict REDs the
+    required check. Distinct defect, distinct pin: this one is exact.
+    """
+    import yaml
+
+    workflow = yaml.safe_load((REPO / ".github" / "workflows" / "python-ci.yml")
+                              .read_text(encoding="utf-8"))
+    for slug in ("ci-introduced-failure", "python-ci-gate"):
+        cond = workflow["jobs"][slug].get("if")
+        assert cond in ("always()", "${{ always() }}"), (
+            f"{slug} must be `if: always()` (got {cond!r}). Skipping it is not a neutral "
+            "no-op: a skipped required check reports Success to branch protection and is "
+            "counted non-red by `admin-merge.sh` NON_RED_CONC, and a skipped verdict REDs "
+            "the aggregate via its `-` row. See #10911 for the measured wedge and why "
+            "`${{ !cancelled() }}` is refused.")
+
+
 def test_the_required_aggregate_must_not_be_skippable_on_a_cancelled_run():
     """#10911 — a skipped REQUIRED check is a green check, so the gate must not skip.
 
@@ -1033,8 +1057,10 @@ def test_the_required_aggregate_must_not_be_skippable_on_a_cancelled_run():
     conditions during cancellation, and `always()` is true there — so the cancelled run
     re-arms these jobs onto a run never scheduled again, and (per GitHub's own
     troubleshooting docs) a stuck run keeps blocking later runs in the same concurrency
-    group. That is a real wedge and it fails SAFE: the required context never posts, so
-    the rail refuses with BLOCKED-CI-UNTESTED.
+    group. That is a real wedge and it fails SAFE, but slowly: the required context never
+    posts, so the rail holds the merge slot waiting for first checks until
+    `ADMIN_MERGE_FIRST_CHECKS_CEILING` (default 18064 s) and only then blocks — which is
+    the "0 merges in ~2 h" measured above.
 
     ⛔ The obvious fix — `${{ !cancelled() }}` — is a FALSE PASS and is refused here.
     A job skipped by a conditional concludes `skipped`, which branch protection reports
