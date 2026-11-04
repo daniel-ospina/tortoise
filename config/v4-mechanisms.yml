@@ -771,13 +771,77 @@ mechanisms:
       and neither is a colon-form value that happens to be a valid clock shape
       without being a clock (`4:32` read as a marathon time) — the two are the
       same token shape and nothing in the text separates them;
-      (d) a unit WORD the engine's own `_UNIT_WORDS` vocabulary does not carry
-      (`seconds`, `minute`, `hour`, `day`, `mile`, …) is never fused into the
-      value token — apart or not — so a minutes→seconds rewrite is not judged:
-      an ENGINE VOCABULARY limit, not a tolerance of this rule (the units it
-      does fuse are compared); a unit SPELLING outside `_UNIT_EQUIV` fails open
-      on purpose, because refusing `800millis`/`800ms` is the false-accusation
-      direction this rule must never take; (e) the S5
+      (d) a RATE unit written as `per <unit>` (`forty thousand requests per
+      day` against `… per week`) is not judged: no unit is ADJACENT to the
+      number, so `_value_bindings` fuses nothing and the pair fails open. That
+      is the carve-out's own fifth example. ⛔ The ADJACENCY half that used to
+      stand here is CLOSED: `_UNIT_WORDS` now carries the spellings the
+      carve-out names (`second(s)`, the millisecond family, `minute`, `day(s)`)
+      **plus their conventional siblings** (`hour`, `week(s)`, `month(s)`,
+      `year(s)`, `mile(s)` — the carve-out names none of those five, they are
+      here because a duration family with a hole in it is how the
+      original gap survived review; ⛔ `percent`/`pct` are deliberately NOT among
+      them: fusing `percent` REFUSED the truthful pair `20k%`/`20000 percent`,
+      because an ATTACHED `k%` loses its `%` to the tokeniser (`20k%` binds as
+      `20k`, while `20 %` and `20%` keep it) — measured, #10804 review P1), so
+      `back under 800 seconds` against
+      `back under 800 milliseconds` and `a ten minute TTL` against
+      `a ten hour TTL` are REFUSED — pinned by
+      `tests/test_state_value_verbatim_10360.py::test_the_carve_outs_own_ADJACENT_time_units_are_judged`,
+      whose spelling controls (`3 days`/`3 d`, `5 years`/`5 yr`) pin the
+      false-accusation direction for every identity added. What SURVIVES of the
+      old (d) is the SPELLING case — a unit outside `_UNIT_EQUIV` (`800millis`)
+      still fails open on purpose, because refusing `800millis`/`800ms` is the
+      false-accusation direction this rule must never take; ⛔ and that same
+      tolerance now also covers a `k`-prefixed value beside a FUSED unit word,
+      which is the price this widen pays and is recorded rather than implied
+      (#10804 review P3, measured): `the batch took 5k seconds` against `… 5
+      minutes` REFUSED at `origin/main` `525fde4a9` and TOLERATES here, because
+      the fused suffix `kseconds` is outside `_UNIT_EQUIV` so both sides' cores
+      coincide at `5` and the unknown-unit tolerance fires. That is a MISSED
+      REWRITE, the fail-open direction this rule explicitly prefers to a false
+      accusation; the SAME mechanism already tolerated `3k minutes`/`3 hours` at
+      the base, and it is what makes `3k minutes`/`3000 minutes` (a FALSE
+      ACCUSATION at the base) agree now. Pinned by
+      `tests/test_state_value_verbatim_10360.py::test_a_magnitude_prefix_beside_a_unit_word_is_COMPOSED_not_refused`.
+      ⛔ A SECOND, SEPARATE tolerance, and it comes from the COMPOSITION arm
+      rather than from that unknown-suffix path: `the ride was 20kms` against
+      `… 20000 ms` REFUSED at `origin/main` `525fde4a9` and TOLERATES here,
+      because `_composed_identity` reads `k`+`ms` as a kilo-MILLISECOND. ⛔ The
+      unit tables do NOT endorse that reading — UCUM and Pint both forbid a
+      prefix on an already-prefixed atom — so this is the arm choosing fail-open
+      over a refusal on an AMBIGUOUS colloquial spelling, not a new unit. The
+      colloquially-correct `20kms`/`20km` is unaffected (it stays tolerated) and
+      `20kms`/`20000 m` stays REFUSED at both heads.
+      ⛔ AND A THIRD thing the same arm tolerates, which it did NOT until review
+      cycle 7 measured it: the SIDE THAT STATES NO UNIT. `the fleet drove 20k
+      miles` against `the fleet drove 20000` was TOLERATED at `origin/main`
+      `525fde4a9` — `miles` was not fused there, so the value bound as a bare `k`
+      and `_magnitude_agrees` closed the gap — and REFUSED here, because the
+      arm's match was an EXACT identity equality that `('', '20000', None)` can
+      never satisfy. Every spelling this widen fuses inherits it (`3k days`/
+      `3000`, `5k seconds`/`5000`, `5k milliseconds`/`5000`). It is now the
+      module's OLDEST tolerance (`800`/`800ms` — the unit is written or not)
+      applied to the composed form, with the same sign and post-fold core. Scoped
+      deliberately: a rewritten NUMBER (`20k miles`/`21000`), two STATED units
+      (`20k miles`/`20000 km`, `3k days`/`3000 hours`) and a stated spelling from
+      outside the tables (`5k millis`/`5000 ms`, #10876) are all still REFUSED.
+      Pinned by
+      `tests/test_state_value_verbatim_10360.py::test_a_composed_prefix_against_a_UNITLESS_side_keeps_the_omitted_unit_tolerance`.
+      ⛔ The OPPOSITE direction is REFUSED, and it is a FALSE ACCUSATION: when
+      the magnitude side carries no MAPPED unit — either a spelling outside both
+      tables (`5k millis`, `5k dys`) or NO unit word at all (`5k` alone) — the
+      binding is a bare `5k`, so `_magnitude_agrees`' `_K_ABBREVIATES` gate
+      (`{"km", "kg"}`) refuses it against any KNOWN unit (`5000 ms`, `5000
+      days`) and the truthful point is withheld. PRE-EXISTING in mechanism (`5k
+      millis` against `5000 hours` is refused at `origin/main` `525fde4a9` too);
+      this
+      widen extended which right-hand units trigger it. ⛔ NOT fixed here on
+      purpose: that gate's narrowness is a recorded decision (#10513 review P1 —
+      `20k`/`20m` is 20 km against 20 metres), so splitting it needs that ruling
+      reversed deliberately, not patched here. Tracked and argued as **#10876**, and pinned here so the pair cannot
+      silently start agreeing without that issue moving.
+      (e) the S5
       minted-endpoint site is not judged against its own quote — there `quote` is
       the point's OWN text, cut with the module's one truncation helper
       (`_write_span`), so a rewrite is impossible by construction and a rule
@@ -950,7 +1014,8 @@ mechanisms:
       `we have 12 billion events` returns NO divergence, likewise `5 million`
       against `5 thousand` and `12 million` against `12` (pinned by
       `test_a_scale_WORD_rewrite_is_unjudged_because_the_engine_fuses_none`).
-      ⛔ A DIFFERENT CLASS from (d): (d) is a unit SPELLING the tables lack, this
+      ⛔ A DIFFERENT CLASS from (d): (d) is a RATE unit with no number adjacent
+      (or a unit SPELLING the tables lack), this
       is a MAGNITUDE the engine never multiplies, so closing it belongs in
       `_value_bindings` and would be its own change; a second scale reading inside
       this seam is the parallel-classifier shape the review P2 rejected. Stated
@@ -965,7 +1030,8 @@ mechanisms:
       UNJUDGEABLE and fails OPEN. Before this the pair was REFUSED, withholding a
       truthful point — "we have 12000000 events" against "we have 12 million
       events" is ONE value in two forms, the same tolerance this seam applies to
-      `20%`/`20 percent`. Reading a scale is `value_normalizer`'s territory and
+      a unit it cannot read (`800millis` against `800ms`). Reading a scale is
+      `value_normalizer`'s territory and
       #2817's "no magnitude table" ruling is NOT reopened here (the `OVERRIDES:`
       on #10360 covers the `k` unit identity only), so the class is outside the
       judged set rather than scaled. The scale is COMPARED, not dropped: a
