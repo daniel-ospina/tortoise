@@ -1974,6 +1974,104 @@ def test_a_map_present_id_is_unjudged_when_the_fold_loses_the_file(
             sdk.close()
 
 
+def test_a_map_present_id_outlives_an_unlink_after_the_fold(
+        tmp_path, monkeypatch, caplog):
+    """#10515 review round 17, finding 1: ``stat_after is None`` has its OWN evidence.
+
+    ``unlink(2)`` keeps a file readable through an already-open descriptor —
+    "the file will remain in existence until the last file descriptor referring
+    to it is closed" — so a deletion that lands AFTER the fold's ``open()`` and
+    BEFORE its post-fold ``os.stat`` raises nothing inside the fold: the fold
+    really did read this journal's bytes, and the only trace is ``stat_after is
+    None``. That makes ``known`` EVIDENCE for this call, not a stale map.
+
+    Pre-fix the two facts shared one arm, the needle was called MAP-FREE, and
+    the answer for a map-PRESENT id was ``False`` — "a typo": no WARNING and no
+    counter, i.e. the silent loss #10515 indicator 1 forbids, and a regression
+    against ``main``'s loud ``known.get(point_id, False)``.
+
+    Non-vacuity: the position sidecar is deleted WITH the journal, so
+    ``carried_records()`` answers ``False`` and only the retained map can
+    produce ``journal_unreadable``; the pre-fix arm increments nothing.
+    """
+    from tortoise import monitoring
+
+    sdk, journal = _sdk_journaled(tmp_path, "midfoldUnlink")
+    try:
+        # ⛔ INITIALISE THE PROJECTION FIRST: the embedded lane auto-replays a
+        # journal into an EMPTY db on first use, which would put the id in the
+        # live graph and retire the ABSENT arm entirely.
+        sdk._get_proj()
+        log = sdk._get_event_log()
+        pid = "kept-0011"
+        log.append({"type": "PointAdded", "point": {"id": pid}})
+        assert not sdk.get_point(pid), (
+            "the live graph must NOT hold the point — the journal alone does")
+
+        # a first absent write folds the journal and RETAINS the map from it
+        assert sdk.update_point(str(uuid.uuid4()), confidence=0.9) == {}
+        memo = sdk._journal_presence_memo
+        assert memo is not None, "the fixture needs a RETAINED map to test"
+        assert memo['known'].get(pid) is True, (
+            f"the map must hold the id as PRESENT: {memo['known'].get(pid)}")
+
+        # an append makes the next call RESUME (a fold that starts above byte 0)
+        log.append({"type": "PointAdded", "point": {"id": "grow-1111"}})
+
+        # The unlink lands between the fold and the POST-FOLD stat. unlink(2)
+        # leaves the descriptor the fold already holds readable, so the fold
+        # completes normally and only `_journal_stat_key` sees the path gone —
+        # the `stat_after is None` arm, not the fold's FileNotFoundError arm.
+        real_stat_key = TortoiseSDK._journal_stat_key
+        calls = {'n': 0}
+
+        def stat_key_then_unlink(log):
+            calls['n'] += 1
+            if calls['n'] == 2:
+                for path in (journal, journal + ".position"):
+                    with contextlib.suppress(FileNotFoundError):
+                        os.unlink(path)
+                return None
+            return real_stat_key(log)
+
+        monkeypatch.setattr(TortoiseSDK, '_journal_stat_key',
+                            staticmethod(stat_key_then_unlink))
+        calls['n'] = 0
+
+        before = monitoring.silent_revision_loss_counts().get(
+            "journal_unreadable", 0)
+        known_before = monitoring.silent_revision_loss_counts().get(
+            "journal_known", 0)
+        caplog.clear()
+        with caplog.at_level("WARNING"):
+            assert sdk.update_point(pid, confidence=0.9) == {}
+        assert calls['n'] == 2, (
+            "the fixture must reach the POST-FOLD stat (the resume path), not "
+            f"the fold's own FileNotFoundError arm: {calls['n']} stat calls")
+        assert not os.path.exists(journal), (
+            "the fixture must actually remove the journal before the re-fold")
+        assert monitoring.silent_revision_loss_counts().get(
+            "journal_unreadable", 0) == before + 1, (
+            "the fold read a file this call watched disappear, and the "
+            "retained map said it HELD this id — answering \"a typo\" is the "
+            "silence #10515 indicator 1 forbids")
+        assert monitoring.silent_revision_loss_counts().get(
+            "journal_known", 0) == known_before, (
+            "the map proves the journal CARRIED the id but cannot prove it "
+            "still does, so this is UNREADABLE, not known")
+        assert any("could not be READ to rule a typo out" in r.getMessage()
+                   for r in caplog.records), (
+            "the loss must be LOUD in the log, not only in a counter")
+        assert not any("the journal still holds the id" in r.getMessage()
+                       for r in caplog.records), (
+            "the map proves the journal CARRIED the id, not that it still "
+            "does — the reason must be unreadable, never known")
+        assert sdk._journal_presence_memo is None, (
+            "a map folded from a file whose path is gone must not be kept")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
 
 def test_an_empty_id_does_not_scan_the_journal_at_all(tmp_path, monkeypatch):
     """An EMPTY id can never be a journaled point, and its needle is every line.
