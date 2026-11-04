@@ -48752,7 +48752,7 @@ def _validate_extracted_from(props: dict, *, door: str) -> None:
 # on `main`, pulling `value_gate`/`vet_gate`/`near_dup_merge`/`failure_policy`
 # with it. That contradicts this repo's own documented policy for this module
 # (`hosted_api` keeps the same import function-local because "`extractor_v2` is
-# a documented cold-start cost", which is why `:15488` and `:13685` do it that
+# a documented cold-start cost", which is why `:17466` and `:38136` do it that
 # way). So the installed attribute is a ONE-SHOT lazy entry: the first call pays
 # the import, rebinds the class attribute to the real wrapper, and every later
 # call goes straight there. `functools.wraps` keeps the name, docstring and
