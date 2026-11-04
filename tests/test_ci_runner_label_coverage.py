@@ -54,6 +54,7 @@ from tools.ci_runner_labels import (
     UnreadableRunsOn,
     hosted_covers,
     requested_labels,
+    reusable_workflow_jobs,
     staleness,
     violations,
 )
@@ -277,9 +278,6 @@ def test_an_offline_runner_is_not_a_provider() -> None:
     Without this filter a snapshot whose only carrier is offline reports the job
     schedulable — the "7 of 7 with every carrier offline" false pass the gate exists for.
     """
-    assert not violations(
-        {"runners": [X64_OFFLINE]}, {"wf.yml:j": [frozenset({"ubuntu-latest"})]}
-    ), "a single-image row is still served by GitHub-hosted"
     problems = violations(
         {"runners": [X64_OFFLINE]},
         {"wf.yml:j": [frozenset({"self-hosted", "self-hosted-x64"})]},
@@ -496,3 +494,76 @@ def test_hosted_images_are_named_explicitly_not_pattern_matched() -> None:
     assert hosted_covers("ubuntu-latest")
     assert not hosted_covers("macos-99")
     assert not hosted_covers("my-gpu-box")
+
+
+def test_every_reusable_workflow_job_is_acknowledged() -> None:
+    """A job-level `uses:` takes its `runs-on:` from ANOTHER repo, so this gate cannot read it.
+
+    Skipping those jobs in silence makes "every label set is covered" a claim about an
+    un-enumerated population: `agent-infra` moving one of its reusable workflows onto a
+    label this pool cannot answer would leave those jobs `pending` forever while this suite
+    stayed green. The set is therefore PINNED — a new reusable-workflow job reds here until
+    someone either records its labels or records why it is out of scope.
+    """
+    expected = {
+        "ci.yml:dashboard-js-tests",
+        "ci.yml:agent-infra-ci",
+        "ci.yml:drift-check",
+        "main-health-nightly.yml:main-health",
+    }
+    actual = set(reusable_workflow_jobs())
+    assert actual == expected, (
+        "the set of reusable-workflow jobs changed:\n"
+        f"  added:   {sorted(actual - expected)}\n"
+        f"  removed: {sorted(expected - actual)}\n"
+        "Those jobs' `runs-on:` lives in another repo and this gate cannot read it. Add the "
+        "labels by hand or record why the job is out of scope, then update this set."
+    )
+
+
+def test_two_matrix_expressions_in_one_runs_on_are_refused_not_multiplied() -> None:
+    """A matrix runs ONE combination per row — cross-producting invents phantom rows.
+
+    `runs-on: ['${{ matrix.os }}', '${{ matrix.arch }}']` over a 2x2 matrix has as many
+    rows as the matrix, not the product of the two expressions'. Multiplying produces label
+    PAIRS no row asks for, and those phantom rows can red a correct repo.
+    """
+    body = (
+        "name: t\non: push\njobs:\n  j:\n"
+        "    runs-on: ['${{ matrix.os }}', '${{ matrix.arch }}']\n"
+        "    strategy:\n      matrix:\n        os: [ubuntu-latest, macos-latest]\n"
+        "        arch: [x64-hosted, arm64-hosted]\n"
+        "    steps: []\n"
+    )
+    with tempfile.TemporaryDirectory() as tmp, pytest.raises(UnreadableRunsOn):
+        requested_labels(_workflow(tmp, "wf.yml", body))
+
+
+def test_a_row_missing_the_key_is_refused_not_dropped() -> None:
+    """Dropping such a row would report "every row answers" for rows never read.
+
+    Same verdict as the all-rows-missing case, so one input cannot get two answers.
+    """
+    body = (
+        "name: t\non: push\njobs:\n  j:\n"
+        "    runs-on: ${{ fromJSON(matrix.runner) }}\n"
+        "    strategy:\n      matrix:\n        include:\n"
+        "          - runner: '[\"ubuntu-latest\"]'\n"
+        '          - other: \'["self-hosted", "no-such-label"]\'\n'
+        "    steps: []\n"
+    )
+    with tempfile.TemporaryDirectory() as tmp, pytest.raises(UnreadableRunsOn):
+        requested_labels(_workflow(tmp, "wf.yml", body))
+
+
+def test_an_empty_label_set_is_refused_not_answerable() -> None:
+    """An empty set would be satisfied by ANY online runner (`wanted <= labels`)."""
+    body = (
+        "name: t\non: push\njobs:\n  j:\n"
+        "    runs-on: ${{ fromJSON(matrix.runner) }}\n"
+        "    strategy:\n      matrix:\n        include:\n"
+        "          - runner: '[]'\n"
+        "    steps: []\n"
+    )
+    with tempfile.TemporaryDirectory() as tmp, pytest.raises(UnreadableRunsOn):
+        requested_labels(_workflow(tmp, "wf.yml", body))

@@ -193,6 +193,19 @@ def _row_sets_from_runs_on(value: object, where: str, job: dict | None = None) -
     group"), which is different from an unreadable value and must not red the tree.
     """
     if isinstance(value, list):
+        # ⛔ MORE THAN ONE MATRIX EXPRESSION IN ONE ARRAY IS REFUSED, NEVER
+        # CROSS-PRODUCTED. A matrix runs ONE combination per row, so
+        # `runs-on: ['${{ matrix.os }}', '${{ matrix.arch }}']` has as many rows as the
+        # matrix does — not the product of the two expressions'. Multiplying invents
+        # label PAIRS no row asks for, and those phantom rows can red a correct repo with
+        # a message blaming "the label set". Refusing is the contract: never guess.
+        expressions = [i for i in value if isinstance(i, str) and "${{" in i]
+        if len(expressions) > 1:
+            raise UnreadableRunsOn(
+                f"{where}: runs-on names {len(expressions)} matrix expressions "
+                f"({expressions}); their rows cannot be cross-producted without inventing "
+                f"combinations the matrix never runs"
+            )
         sets: list[list[str]] = [[]]
         for item in value:
             if not isinstance(item, str):
@@ -275,8 +288,16 @@ def _matrix_rows(job: dict, key: str, where: str, json_array: bool) -> list[list
         )
     row_sets: list[list[str]] = []
     for row in rows:
-        if not isinstance(row, dict) or key not in row:
-            continue
+        if not isinstance(row, dict):
+            raise UnreadableRunsOn(f"{where}: matrix `include` carries a non-mapping row {row!r}")
+        if key not in row:
+            # ⛔ NOT `continue`. A row that omits the key cannot be evaluated, and dropping
+            # it would report "every row answers" for ROWS NEVER READ — the same
+            # cleared-instead-of-refused defect the all-rows-missing case already fixes.
+            raise UnreadableRunsOn(
+                f"{where}: a matrix `include` row carries no `{key}`, so that row's "
+                f"`runs-on` cannot be evaluated — refusing rather than skipping it"
+            )
         raw = row[key]
         if isinstance(raw, list) and all(isinstance(x, str) for x in raw):
             # An `include` value may itself be a label ARRAY — a documented `runs-on` form.
@@ -293,15 +314,46 @@ def _matrix_rows(job: dict, key: str, where: str, json_array: bool) -> list[list
                 ) from exc
             if not isinstance(parsed, list) or not all(isinstance(x, str) for x in parsed):
                 raise UnreadableRunsOn(f"{where}: matrix.{key} is not a label array: {raw!r}")
+            if not [x for x in parsed if x]:
+                raise UnreadableRunsOn(f"{where}: matrix.{key} is an EMPTY label array")
             row_sets.append([x for x in parsed if x])
+        elif raw.strip():
+            row_sets.append([raw])
         else:
-            row_sets.append([raw] if raw.strip() else [])
+            raise UnreadableRunsOn(f"{where}: matrix.{key} is EMPTY, so it names no label")
     if not row_sets:
         raise UnreadableRunsOn(
             f"{where}: the matrix's `include` rows carry no `{key}`, so `matrix.{key}` "
             f"cannot be read — refusing rather than substituting an unrelated label set"
         )
     return row_sets
+
+
+def reusable_workflow_jobs(workflows_dir: Path = WORKFLOWS_DIR) -> list[str]:
+    """`<workflow>:<job>` for every job that delegates to a REUSABLE WORKFLOW.
+
+    ⛔ A job-level `uses:` takes its `runs-on:` from the CALLED workflow, which lives in
+    another repo — so this gate can never read it. Silently skipping those jobs is how
+    "every label set is covered" becomes a claim about a population nobody enumerated:
+    `agent-infra` moving one of its reusable workflows onto a label this pool cannot answer
+    would leave those jobs `pending` forever while this suite stayed green.
+
+    They are therefore COUNTED and PINNED rather than skipped in silence: the suite asserts
+    the exact set, so a NEW reusable-workflow job reds until someone either adds its labels
+    here or records why it is out of scope.
+    """
+    found: list[str] = []
+    if not workflows_dir.is_dir():
+        return found
+    for path in sorted(set(workflows_dir.glob("*.yml")) | set(workflows_dir.glob("*.yaml"))):
+        doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+        jobs = doc.get("jobs") if isinstance(doc, dict) else None
+        if not isinstance(jobs, dict):
+            continue
+        for job_name, job in jobs.items():
+            if isinstance(job, dict) and "uses" in job and "runs-on" not in job:
+                found.append(f"{path.name}:{job_name}")
+    return found
 
 
 def requested_labels(workflows_dir: Path = WORKFLOWS_DIR) -> dict[str, list[frozenset[str]]]:
