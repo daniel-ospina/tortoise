@@ -1173,9 +1173,15 @@ def test_the_pinned_linter_accepts_the_rendered_table(hostile, tmp_path):
 def test_the_committed_census_matches_its_own_content_digest():
     """The committed snapshot must be exactly what `render` emitted.
 
-    This FAILS on any hand-edited census — including the prose-only edit that produced the
-    review finding (no row moved, so nothing else in the suite could see it) — and it fails
-    on a document that carries no digest at all, because absence proves nothing.
+    This FAILS on a hand-edited census that did NOT also recompute the header hex — including the
+    prose-only edit that produced the review finding (no row moved, so nothing else in the suite
+    could see it) — and it fails on a document that carries no digest at all, because absence
+    proves nothing.
+
+    ⛔ It is NOT a provenance proof, and cycle 15 measured the difference: the digest is unkeyed and
+    its algorithm is in this repo, so an edit that re-derives the hex afterwards verifies. This test
+    answers "was this file edited by accident after generation", never "did `render` emit these
+    rows" — see the qualified prose `render` emits, and `verify_census_document`'s own docstring.
     """
     ac = _load()
     committed = Path(__file__).resolve().parent.parent / "operations" / "attest-census.md"
