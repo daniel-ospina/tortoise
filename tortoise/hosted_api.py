@@ -8772,9 +8772,13 @@ def _gate_sdk_for(org: dict, resource: str):
     ⚠️ The two arms answer DIFFERENT questions and must not be folded: THIS
     function asks "which graph does this request OPEN" (so a graph-bound key
     counts its bound graph — #4051), while `_org_sdk_for_credential` asks
-    "which graph is this org's DEFAULT" (which is why it answers None for a
-    graph-bound binding — #10180). Delegating the org-wide arm to it is safe
-    precisely because a graph-bound credential never reaches it.
+    "which graph is this org's DEFAULT" — the resolver it calls,
+    `_default_graph_name`, answers None for a graph-bound binding (that function
+    is the one that answers None there, NOT `_org_sdk_for_credential`, which
+    always builds an SDK), leaving the historical `namespace=org_id` fallback
+    this gate must NOT take for such a key (#10180). Delegating the org-wide arm
+    to it is safe precisely because a graph-bound credential never reaches it:
+    the `graph_id` arm above returns first.
 
     Two deliberate non-uses:
     - registry-scoped resources get `None`: their count is a control-plane read

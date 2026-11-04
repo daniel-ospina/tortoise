@@ -1304,9 +1304,13 @@ class MentionScan:
         meaningful. Adding ``O_NOFOLLOW`` here would silently retire that guard.
 
         A non-regular file RAISES, which is what ``open`` already did for a
-        directory: the caller (:func:`_journal_knows_point`) has exactly one safe
-        reading of an unreadable journal — drop the memo and re-fold — and it
-        must be reached through the same path as any other read failure.
+        directory. ⛔ The CALLER's reading of that raise is NOT "drop the memo and
+        re-fold" — that is ``tail_bytes``'s reading on the seam path. A raising
+        scan reaches :func:`_journal_knows_point`'s ``except Exception`` arm,
+        which answers UNJUDGED (``None`` ⇒ ``journal_unreadable``) and leaves the
+        retained memo alone: it is still a valid prefix of the journal, and this
+        failure says nothing about those bytes. Unjudged is the conservative
+        direction — the loss is REPORTED, never asserted to be a typo.
         """
         fd = os.open(self._path, os.O_RDONLY | os.O_NONBLOCK)
         try:
