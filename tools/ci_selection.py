@@ -3639,9 +3639,9 @@ def duplicate_mapping_key_issues(manifest_path: Path | None = None) -> list[str]
     ``durations:`` row to DIFFERENT values keeps both copies — a merge, a
     rebase, or a re-applied commit. An identical change on both sides, or a
     replay only one side touched, emits the row once. This batch PR (#10726)
-    re-created the class on most of its forward-merges; the per-event counts are
-    in that PR body's own fold ledger, where they are a record of what happened
-    rather than a claim about the next merge.
+    has re-created the class on repeated forward-merges; each occurrence is
+    recorded, dated, in that PR body's fold ledger — a record of what happened,
+    not a claim about the next merge.
 
     ⛔ DO NOT RESTATE THOSE COUNTS HERE. A series of event counts describes a
     mechanism that fires on every merge, so it is guaranteed to go stale — and
