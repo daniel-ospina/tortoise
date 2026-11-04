@@ -1392,13 +1392,16 @@ def test_a_repo_that_injects_a_line_cannot_displace_the_header_digest():
     assert len([ln for ln in text.splitlines() if ln.startswith("Repo `")]) == 1, (
         "the header must be exactly one line whatever the repo value contains"
     )
-    # ⛔ The assertion above CANNOT fail on the pre-fix shape: a newline-injected header still
-    # yields exactly ONE line starting with `Repo ` (the other two are the injected span and
-    # `rest`). Cycle 18 measured that it passed while the test reddened only on the verifier
-    # assertion below — an inert half in the test that names the property. This one is the real
-    # pin: the rendered header element itself must carry no newline.
+    # ⛔ THREE assertions, and two of them were INERT for two cycles — so state what discriminates.
+    # After the fix the header element is ONE line carrying the real digest; with `repo` newline-
+    # injected the first line starting with `Repo ` holds only `Repo `a` and the token lands on an
+    # INJECTED line, so it does not contain `content sha256` at all. Testing `splitlines()` elements
+    # for `\n` is a tautology (they cannot contain it), and "line 3 is the first `Repo ` line" is
+    # true on the pre-fix tree too — measured, cycle 19, with both mutations.
     header_line = next(ln for ln in text.splitlines() if ln.startswith("Repo `"))
-    assert "\n" not in header_line and "\r" not in header_line
+    assert "content sha256 `" in header_line, (
+        f"the header line must carry the digest itself, not merely start the header: {header_line!r}"
+    )
     assert text.splitlines()[2] == header_line, "the header must be line 3 of the document"
     assert ac.verify_census_document(text) == "", "and the document must not refuse itself"
 
@@ -1453,6 +1456,73 @@ def test_a_flush_that_fails_only_at_exit_is_rc_2_not_120(monkeypatch, tmp_path):
 
     monkeypatch.setattr(ac.sys, "stdout", _BufferedPipe())
     assert ac.main(["--reviews-dir", str(tmp_path), "--no-gate", "--out", str(tmp_path / "o.md")]) == 2
+
+
+def _run_with_shim(tmp_path, extra_args, stdout, preexec_fn=None):
+    """Run the REAL entry point against a `gh` shim, with `stdout` as the child's fd 1.
+
+    A subprocess is not optional for these two cases: one needs fd 1 CLOSED at interpreter start
+    (CPython then sets `sys.stdout = None`), and the other needs the failure to happen at SHUTDOWN,
+    after `main` has returned. Neither can be modelled by patching `sys.stdout` in-process.
+    """
+    shim = tmp_path / "bin"
+    shim.mkdir(exist_ok=True)
+    gh = shim / "gh"
+    gh.write_text("#!/bin/sh\nprintf '%s' '[]'\n", encoding="utf-8")
+    gh.chmod(0o755)
+    reviews = tmp_path / "reviews"
+    reviews.mkdir(exist_ok=True)
+    env = dict(os.environ)
+    env["PATH"] = shim.as_posix() + os.pathsep + env.get("PATH", "")
+    cmd = [
+        sys.executable, str(TOOL), *extra_args,
+        "--reviews-dir", str(reviews), "--no-gate", "--out", str(tmp_path / "o.md"),
+    ]
+    return subprocess.run(cmd, cwd=str(tmp_path), env=env, stdout=stdout, stderr=subprocess.PIPE,
+                          timeout=120, preexec_fn=preexec_fn)
+
+
+def test_a_closed_fd1_is_rc_2_not_1(tmp_path):
+    """`1>&-` makes CPython set `sys.stdout = None`, where `print()` SILENTLY no-ops — so only the
+    `flush()` in `_emit_report` raises, and `AttributeError` was not in its `except`.
+
+    MEASURED (#10687 review cycle 19): `… --out o.md 1>&-` went **rc 0 → rc 1** on this commit
+    versus both its parent and `origin/main` — a contract regression introduced by the very call
+    that closes the size-dependent escape. Both surfaces are checked, because that is exactly how
+    the previous one of these hid.
+    """
+
+    def _close_fd1():
+        os.close(1)
+
+    for args in ([], ["--json"]):
+        proc = _run_with_shim(tmp_path, args, None, preexec_fn=_close_fd1)
+        assert proc.returncode == 2, (
+            f"{args or ['markdown']}: a closed fd 1 must be rc 2, never 1 or 120 "
+            f"(got {proc.returncode})\nstderr={proc.stderr[-1500:]!r}"
+        )
+        assert b"Traceback" not in proc.stderr, proc.stderr[-1500:]
+
+
+def test_a_small_report_against_a_dead_reader_is_rc_2_not_120(tmp_path):
+    """The SIZE-DEPENDENT escape, end to end: a report under the ~8 KiB stdout buffer flushes only at
+    SHUTDOWN, and a dead reader there makes `_Py_Finalize` return -1 and `Py_Exit` exit **120**.
+
+    `_emit_report`'s `flush()` + `_neutralise_stdout()` are what turn that into 2. This is the only
+    test that pins `_neutralise_stdout` — delete it on a copy and this must red, because the
+    in-process stub above cannot model a shutdown-time flush.
+    """
+    read_fd, write_fd = os.pipe()
+    os.close(read_fd)  # the reader is already gone before the child starts
+    try:
+        proc = _run_with_shim(tmp_path, [], write_fd)
+    finally:
+        os.close(write_fd)
+    assert proc.returncode == 2, (
+        f"a dead reader on a SMALL report must be rc 2, not 120 (got {proc.returncode})\n"
+        f"stderr={proc.stderr[-1500:]!r}"
+    )
+    assert (tmp_path / "o.md").exists(), "the report was still written to --out"
 
 
 def test_the_json_surface_has_the_SAME_stdout_guard(monkeypatch, tmp_path):

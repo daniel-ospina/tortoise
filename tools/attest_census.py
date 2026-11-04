@@ -715,7 +715,15 @@ def _emit_report(text: str) -> str:
         print(text)
         sys.stdout.flush()
         return ""
-    except (OSError, ValueError) as exc:  # a closed pipe is an OSError; an unencodable char a ValueError
+    # ⛔ `AttributeError` is NOT defensive padding here: CPython sets `sys.stdout = None` when fd 1 is
+    # closed at startup, and `print()` SILENTLY NO-OPS in that state — so the only thing that raises
+    # is the `flush()` above, and without this class it escaped as a traceback and **rc 1** on a run
+    # that had already written its report (measured #10687 cycle 19: `… --out o.md 1>&-` went
+    # rc 0 → rc 1 versus both the parent commit and `origin/main`). That is the same contract break
+    # this helper exists to close, reintroduced by the call that closes the size-dependent one.
+    # `_neutralise_stdout` above already suppresses it, and the precedent this file cites
+    # (`validation/check-license-surface.py`) suppresses the same triple.
+    except (OSError, ValueError, AttributeError) as exc:  # closed pipe / unencodable char / no stdout
         _neutralise_stdout()
         return str(exc)
 
