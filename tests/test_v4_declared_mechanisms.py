@@ -954,8 +954,11 @@ def _test_node_names(path: Path) -> set[str] | None:
         as a pin:
           * `xfail(strict=True)` REDS on an unexpected pass — it carries a red; and
           * `xfail(cond, …)` with a condition that may be FALSY runs the test
-            normally, so it can red: its FIRST POSITIONAL argument (or a
-            `condition=`/`cond=` keyword) is a condition, not a reason.
+            normally, so it can red: EVERY positional argument is a condition
+            (pytest applies the mark when ANY of them is true), and a
+            `condition=` keyword is one too — it REPLACES the positional args
+            rather than joining them (`_pytest/skipping.py::
+            evaluate_xfail_marks`).
         Everything else cannot red, and is therefore not a watch: a bare `xfail()`
         / `xfail(reason=…)`; a condition that is a literal TRUTHY constant,
         `xfail(True)` / `xfail(1)` / `xfail(condition=True)`, which pytest xfails
@@ -1035,23 +1038,43 @@ def _test_node_names(path: Path) -> set[str] | None:
             return any(_literal_condition_truth(expr) is True for expr in conditions)
 
         def _xfail_condition(call: ast.expr) -> tuple[bool, bool | None]:
-            """`(present, truth)`: truth is True/False for a literal, None if unknowable."""
-            exprs: list[ast.expr] = []
+            """`(present, truth)` over EVERY condition pytest would apply.
+
+            truth is True/False for a literal, None if unknowable.
+
+            pytest takes ALL positional args as conditions and applies the mark
+            as soon as ANY is true (`_pytest/skipping.py::evaluate_xfail_marks`:
+            `if "condition" not in mark.kwargs: conditions = mark.args`), while a
+            `condition=` keyword REPLACES them — the same ANY-of rule the skipif
+            arm above implements. Reading only `call.args[0]` accepted
+            `xfail(False, True)` and `xfail(COND, True)` as pins although pytest
+            xfails them unconditionally, so nothing could red: the #5064/#10636
+            fail-open reached by a spelling the gate mis-modelled (review cycle
+            14, P2). Collapsed to the single truth this arm consumes: any
+            literal-TRUE condition applies the mark always; only ALL-FALSE means
+            it never applies (the body runs and can red); anything else is
+            unknowable and keeps the pin.
+            """
+            conditions: list[ast.expr] = []
             if isinstance(call, ast.Call):
-                if call.args:
-                    exprs.append(call.args[0])
                 # `cond=` is NOT an xfail parameter: pytest ignores it, so a call
                 # carrying only `cond=` is a BARE xfail that always applies and can
                 # never red (measured, review cycle 6, P1). Only `condition=` is a
                 # condition here — the same reading the skipif arm documents.
-                exprs.extend(
+                keyword_conditions = [
                     keyword.value
                     for keyword in call.keywords
                     if keyword.arg == "condition"
-                )
-            if not exprs:
+                ]
+                conditions.extend(keyword_conditions or call.args)
+            if not conditions:
                 return (False, None)
-            return (True, _literal_condition_truth(exprs[-1]))
+            truths = [_literal_condition_truth(expr) for expr in conditions]
+            if any(truth is True for truth in truths):
+                return (True, True)  # always applied: nothing can red
+            if all(truth is False for truth in truths):
+                return (True, False)  # never applied: the body runs, so it can red
+            return (True, None)  # one unknowable condition: keep the pin
 
         name = _dotted_decorator(decorator)
         if name in never_red_skips:
@@ -6134,6 +6157,27 @@ def test_an_unconditional_skip_or_xfail_is_not_a_pin(tmp_path):
     run=False)` (`[NOTRUN]`, exit 0). `skipif(False)` and
     `xfail(False, strict=True, run=False)` still RUN and still fail, so both stay
     legitimate pins.
+
+    `xfail` carries the SAME ANY-of rule as `skipif`, and it was reasoned about
+    but not measured until review cycle 14 (P2):
+    `_pytest/skipping.py::evaluate_xfail_marks` takes EVERY positional arg as a
+    condition (`conditions = mark.args`; a `condition=` keyword REPLACES them)
+    and applies the mark as soon as ANY of them is true — so `xfail(False, True)`
+    and `xfail(COND, True)` are unconditional xfails that can never red, however
+    falsy the FIRST positional is. Both are refused here, next to the `skipif`
+    ANY-of control (`test_skipif_any_of`), while
+    `test_xfail_any_of_falsy_then_unknown` stays a pin: with an unknowable second
+    condition the mark may not apply, so the body can still red — the gate's
+    documented limit, which errs toward KEEPING a pin.
+
+    ⚠️ MEASURED against real pytest 9.1.1 while adding those cases: the ANY-of
+    readings above carry `reason=` (`3 xfailed, 1 failed` on the probe). A
+    BOOLEAN condition with NO `reason=` never gets as far as the verdict —
+    `_pytest/skipping.py::evaluate_condition` fails with *"you need to specify
+    reason=STRING when using booleans as conditions"* — so `xfail(False)` and
+    `xfail(True)` both ERROR at setup. An error is a red, which is why the
+    no-reason spellings remain pins here; this arm does not model the reason
+    requirement, and it only ever refuses the spellings a working row could use.
     """
     module = tmp_path / "test_pinned.py"
     module.write_text(
@@ -6222,6 +6266,18 @@ def test_an_unconditional_skip_or_xfail_is_not_a_pin(tmp_path):
         "def test_skipif_any_of():\n"
         "    assert False\n"
         "\n"
+        "@pytest.mark.xfail(False, True, reason='any-of: the literal decides')\n"
+        "def test_xfail_any_of_falsy_then_true():\n"
+        "    assert False\n"
+        "\n"
+        "@pytest.mark.xfail(CONDITION, True, reason='any-of: the literal decides')\n"
+        "def test_xfail_any_of_unknown_then_true():\n"
+        "    assert False\n"
+        "\n"
+        "@pytest.mark.xfail(False, CONDITION, reason='any-of: unknowable, kept')\n"
+        "def test_xfail_any_of_falsy_then_unknown():\n"
+        "    assert True\n"
+        "\n"
         "@pytest.mark.skipif(cond=VARIABLE, reason='cond= is ignored')\n"
         "def test_skipif_cond_kw_only():\n"
         "    assert False\n"
@@ -6261,6 +6317,7 @@ def test_an_unconditional_skip_or_xfail_is_not_a_pin(tmp_path):
         "test_xfail_condition_kw_counts",  # condition= is a real condition
         "test_skipif_condition_replaces_args",  # condition= replaces args
         "test_falsy_wins_over_notrun",  # literal-falsy beats run=False
+        "test_xfail_any_of_falsy_then_unknown",  # any-of with an unknowable: kept
         "test_conditionally_skipped",
         "test_skips_in_body",
         "TestGroup::test_kept",
