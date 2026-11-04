@@ -810,13 +810,39 @@ def commit_client():
 
 
 class TestCommitEndpointWarnings:
-    def test_clean_commit_has_empty_warnings(self, commit_client):
+    def test_clean_commit_has_no_DOMAIN_warnings(self, commit_client):
+        """A clean payload raises no DOMAIN warning; the narrative-home ADVISORY
+        is the only entry, and it is present.
+
+        ⛔ The old premise — "a clean commit has EMPTY `warnings`" — died with
+        #10000. The commit's only narrative write is now the `SessionNarrated`
+        carrier, and when that does not take the prose the receipt SAYS so
+        (`_report_narrative_home` → `_narrative_home_advisory`) instead of a 200
+        implying it landed. Here it cannot take it: `tests/conftest.py`'s
+        autouse `_no_ambient_record_arming` deletes `TORTOISE_RECORD_DSN` for
+        every test and `tests/_http_fixtures.py` drops the journal path, so the
+        home is `"nowhere"` — which is also the hosted steady state while the
+        record is unarmed (#9548). That is the intended behaviour; this pin owns
+        the DOMAIN rules, and `advisory: True` (#7819's additive channel, never
+        a 4xx) is how the other entry declares it is not one.
+
+        Discriminating both ways: pre-#10000 `warnings` was `[]`, so the code
+        assertion below fails; with the advisory dropped it fails as well.
+        """
+        from tortoise.hosted_api import NARRATIVE_NOT_RECORDED
+
         raw = _raw_payload([_mk_point(1, "decision")])
         r = commit_client.post("/v1/sessions/commit", json=raw)
         assert r.status_code == 200
         body = r.json()
         assert "warnings" in body
-        assert body["warnings"] == []
+        # No DOMAIN warning: every entry is marked advisory.
+        assert [w for w in body["warnings"]
+                if w.get("advisory") is not True] == []
+        # …and the one advisory is the narrative's home, never a silent 200.
+        assert [w["code"] for w in body["warnings"]] == [
+            NARRATIVE_NOT_RECORDED]
+        assert body["warnings"][0]["session_id"] == "s1"
 
     def test_leapfrog_commit_200_with_warnings(self, commit_client):
         """Warn-first: a leapfrog payload WRITES (200) and carries warnings[]."""
