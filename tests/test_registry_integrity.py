@@ -215,11 +215,22 @@ def test_the_integrity_entry_point_names_a_duplicate_durations_key(tmp_path, mon
     LAST row and reports nothing, while the same file makes `--integrity` exit 1
     naming the duplicate. Remove the `duplicate_mapping_key_issues()` term from
     the composition and the message disappears from the output.
+
+    ⛔ THE PLANTED ROW CARRIES A DIFFERENT VALUE (0.9) FROM THE REAL ONE (0.1),
+    and that is load-bearing (#10648 review P3). Planted with the SAME value the
+    assertion below held under EITHER resolution order, so it pinned only "the
+    key parses" and would have stayed green if the loader flipped to first-wins
+    — the arm that matters, because a `merge=union` duplicate leaves the STALE
+    row in the file and only the resolution order decides whether the shard
+    packer reads the fresh weight or the superseded one. With 0.9 planted ahead
+    of the real 0.1 row, `safe_load` returning 0.1 IS last-wins and any
+    first-wins loader returns 0.9 and reds here.
     """
     from tools import ci_selection
 
     text = ci_selection.MANIFEST.read_text(encoding="utf-8")
-    dup = "  test_7818_plan_record_5362.py: 0.1  # duplicate planted by this test\n"
+    # 0.9, deliberately != the real row's 0.1 — see the docstring.
+    dup = "  test_7818_plan_record_5362.py: 0.9  # duplicate planted by this test\n"
     anchor = "  test_7818_plan_record_5362.py: "
     at = text.index(anchor)
     planted = text[:at] + dup + text[at:]
