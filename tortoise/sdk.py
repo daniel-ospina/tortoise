@@ -12688,9 +12688,9 @@ class TortoiseSDK:
                 # id's whole fan-out (#7822 — one statement, one classifier),
                 # and the #10368 refusal needs the same verdict the #7819 one
                 # does. Read it ONCE, above both, instead of adding a second
-                # read path (#2892). Skipped when the call carries neither props
-                # nor an authored word (a bare dedup hit), so that path costs no
-                # extra query.
+                # read path (#2892). Skipped when the call carries neither a prop
+                # this fold would APPLY nor an authored word (a bare dedup hit),
+                # so that path costs no extra query.
                 #
                 # ⛔ The predicate is what this fold would APPLY, never the raw
                 # bag. `content_hash` is DERIVED (written near the top of this
