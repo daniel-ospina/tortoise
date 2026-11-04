@@ -112,6 +112,23 @@ hits first if they try `git show e0fc940b5:…`. `tools/capstone_preregistration
 docs/evidence/7949-capstone` exits 0 against the frozen bytes, which is why this is disclosed HERE
 instead of "fixed" there.
 
+⛔ **AND THAT RECORD WAS AMENDED SIX MINUTES AFTER THIS RUN — quoting its current hash alone says
+the opposite.** The scored run at `9152448d7` (`# generated: 2026-11-02T12:16:06Z`) read the record
+whose `document_sha256` was
+`sha256:5ff05906cf383f50a873dafeee12216d5eafc80b89ae9676c78a109f16714fbe` — what
+`PRE-REGISTRATION.md` hashed to *at that commit*. The record in this tree hashes to
+`sha256:e8b838724a344251d5a8ef51a641e097b97f18319d03a82f1c8de714ad6ddb45`, because `8bc2fbed1`
+(`#10215` / PR `#10509`, merged 2026-11-02T12:22:19Z) amended it: the step set is restated as **all
+eight ACCOUNTED** — seven observed plus the one the record declares conditional. That amendment is
+the same DISCLOSED class of revision the record's §8 change-control protocol covers, but it is
+**post-run**, so the document this run was measured against is `5ff05906…` and **not** `e8b83872…`.
+**The artifact does not STATE this, and the gate CANNOT see it.** The shipped log's machine block
+names the commit it read the record from (`read_from: git show
+9152448d7:docs/evidence/7949-capstone/preregistration.json`), so the difference is one `git show`
+away — but the log asserts no hash of its own, and the gate compares the tree's bytes with the
+tree's record, so each version passes in its own tree. That is why it is stated here instead of
+being left to be inferred.
+
 ---
 
 ## The measured run
@@ -178,9 +195,15 @@ them.** That log renders, for the capture path's `proj.link_source_to_event` cal
 `tortoise/sdk.py` line 15506, and for `_TURN_WRITE_CYPHER` the number `tortoise/sdk.py` line 2408
 — written here WITHOUT the `file:line` form on purpose, because these are not live cites and must
 not be read as such. At the base it ships from (`9152448d7`) those lines are exactly those symbols;
-at THIS head they are a comment and a different statement, because the `#10215` integration on this
-branch moved `sdk.py` around them. Neither number is a defect and the log is not edited for it — a
-log is the record of what the run rendered — but do NOT follow them as pointers at this head.
+at THIS head they are a **blank line** and a line **inside a docstring**, because six commits merged
+to `main` after the run moved `sdk.py` around them (`a33af140f`, `c833c41cd`, `62e3f2f61`,
+`5028881f8`, `63981d152`, `2180f0054` — `git log 9152448d7..origin/main -- tortoise/sdk.py`), and the
+fold adds `a6e20f05b` and `e4ee966f4` on top. ⛔ **Not `#10215` and not this branch:** `8bc2fbed1`
+touches no `tortoise/` file at all, and neither does this PR, so the movers are `main`'s — which is
+why the symbols now sit at `_TURN_WRITE_CYPHER` and the `proj.link_source_to_event` call site
+instead of at those numbers. Neither number is a defect and the log is not edited for it — a
+log is the record of what the run rendered — but do NOT
+follow them as pointers at this head.
 
 The **SUPERSEDED** `capstone-measured-e0fc940b.log` carried the cites **as-of its own
 stamp**, and those are the numbers listed here — the ones that log rendered, exactly as it
