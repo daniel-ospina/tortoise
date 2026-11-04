@@ -2083,11 +2083,17 @@ def test_a_truncation_under_the_fold_keeps_the_map_as_witness(
     is not the same evidence: no new file exists there, the bytes the fold read
     were merely truncated away, and ``known`` was folded over exactly those
     bytes. So a truncation landing between the fold and the post-fold ``stat``
-    answered "a typo" — no counter, no WARNING — where ``main`` answered
-    ``known.get(point_id, False)``: LOUD. The mirror image of the round-16
-    silence, in the direction #10515 indicator 1 forbids. The comparison the
-    field makes is the same one: identity (inode) decides REPLACEMENT, offset vs
-    size decides TRUNCATION.
+    answered "a typo" — no counter, no WARNING. ⚠️ That silence is this
+    branch's own, not `main`'s parity: `origin/main` folds truncation together
+    with replacement into ONE map-free arm
+    (``stat_after[2] < resume or stat_after[:2] != stat_key[:2]`` →
+    ``_journal_presence_needle(log, point_id)``), so the base answers ``False``
+    for this interleaving too. The witness is a deliberate TIGHTENING over it;
+    the ``known.get(point_id, False)`` this docstring used to cite as "`main`
+    LOUD" is the older `fcc742b8a` single-arm shape, not the base. The mirror
+    image of the round-16 silence, in the direction #10515 indicator 1 forbids.
+    The comparison the field makes is the same one: identity (inode) decides
+    REPLACEMENT, offset vs size decides TRUNCATION.
 
     The position sidecar goes away WITH the bytes on purpose, so
     ``_journal_carried_records`` cannot answer and only the retained map can
@@ -2153,7 +2159,8 @@ def test_a_truncation_under_the_fold_keeps_the_map_as_witness(
         truncated = os.stat(journal)
         assert (truncated.st_dev, truncated.st_ino) == memo['ident'], (
             "the fixture must truncate the SAME inode — a new inode is the "
-            "REPLACEMENT arm, whose answer is deliberately map-free")
+            "REPLACEMENT arm, which re-folds the NEW file and hands the map on "
+            "as a witness too, so it would exercise different evidence")
         assert truncated.st_size < resume, (
             "the fixture must shrink the journal BELOW the folded offset")
         assert monitoring.silent_revision_loss_counts().get(
@@ -2375,9 +2382,12 @@ def test_a_replacement_reports_a_map_present_id_as_unjudged_not_a_typo(
     arm that stayed QUIET: the re-read of the NEW file finds no line for the id
     and returns ``False``, `_journal_knows_point` reads ``False`` as "a typo"
     and `_report_absent_revision` returns without a line or a counter. That is
-    #10515 indicator 1 — a silent legitimate-revision loss — and it is a
-    REGRESSION against `main`, which sent every post-fold interleaving through
-    ``known.get(point_id, False)`` and so reported this one as ``journal_known``.
+    #10515 indicator 1 — a silent legitimate-revision loss. ⚠️ It is a
+    TIGHTENING over this PR's base, not a restoration of parity: `origin/main`
+    folds truncation together with replacement into ONE map-free arm, so the
+    base answers ``False`` (silent) here as well. The "`main` reported it as
+    ``journal_known``" reading this docstring used to give is the older
+    `fcc742b8a` single-arm shape, which the base no longer carries.
 
     The witness is applied in the round-19 shape, so it can only make the answer
     LOUDER: the re-read carries no line for the id, so its ``False`` is VACUOUS
@@ -2388,9 +2398,12 @@ def test_a_replacement_reports_a_map_present_id_as_unjudged_not_a_typo(
 
     ⛔ NON-VACUITY, and the reason the docstring that used to sit here was
     deleted: it claimed "it passes on both trees", which is measurably false.
-    On `main` this interleaving returns ``True`` (``journal_known`` +1) and on
-    the map-free tree it returns ``False`` (silent) — so the assertion below on
-    ``journal_unreadable`` fails on BOTH, and only the fixed tree satisfies it.
+    On `main` this interleaving returns ``False`` — the shared truncation-or-
+    replacement arm is MAP-FREE there, so it increments nothing — and on this
+    branch's own pre-round-20 tree it also returns ``False`` (silent), so the
+    assertion below on ``journal_unreadable`` fails on BOTH and only the fixed
+    tree satisfies it. (The earlier "``main`` returns ``True`` (``journal_known``
+    +1)" reading described `fcc742b8a`'s single arm, not this base.)
     The ``old-0055`` id is in the journal that was replaced away, which is why
     it is a LOSS and not the "absent from BOTH graph and journal" typo shape
     that #10515 indicator 2 reserves silence for.
@@ -2461,8 +2474,9 @@ def test_a_replacement_reports_a_map_present_id_as_unjudged_not_a_typo(
             "the retained map — folded, through a live fd, from the file this "
             "path no longer names — says the journal CARRIED this id, and the "
             "re-read of the new file cannot rule the loss out. Answering "
-            "\"a typo\" is the silence #10515 indicator 1 forbids, and it is "
-            "a regression against `main`'s loud `known.get(point_id, False)`")
+            "\"a typo\" is the silence #10515 indicator 1 forbids — a "
+            "tightening over `main`, whose shared truncation-or-replacement arm "
+            "is map-free and stays silent here")
         assert monitoring.silent_revision_loss_counts().get(
             "journal_known", 0) == known_before, (
             "the map proves the journal CARRIED the id, not that the file at "

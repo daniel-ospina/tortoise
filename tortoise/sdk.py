@@ -10413,8 +10413,19 @@ class TortoiseSDK:
         #   records that really existed at this path and really named this point.
         #   It is handed on as the WITNESS, like the two arms below (review round
         #   20, finding 1: leaving this arm map-free made it the ONLY post-fold
-        #   arm that stayed quiet, so a rotate/`mv`/restore inside the fold went
-        #   silent where `main` reported ``journal_known``).
+        #   arm that stayed quiet). ⚠️ This arm is a deliberate TIGHTENING over
+        #   this PR's base, NOT the parity the ``stat_after is None`` arm has:
+        #   `origin/main` folded truncation TOGETHER WITH replacement into one
+        #   MAP-FREE arm (``stat_after[2] < resume or stat_after[:2] !=
+        #   stat_key[:2]`` → ``_journal_presence_needle(log, point_id)``), so an
+        #   id the retained map held PRESENT answered ``False`` there — "a
+        #   typo", with no counter and no WARNING. The window is NARROW: the
+        #   rotate/`mv`/restore must land INSIDE one fold, because a rotation
+        #   between calls is absorbed by the memo-identity check above, where
+        #   `known` is still ``{}`` and the witness is inert. But `rename(2)`
+        #   makes the map valid evidence for the question being asked, and
+        #   silence about a destroyed record is the class #10515 indicator 1
+        #   forbids.
         # * TRUNCATION of the SAME inode (``stat_after[2] < resume``): no new file
         #   exists — the bytes the fold read were merely cut away — and this arm
         #   is reachable ONLY when the fold consumed them, so `known` is the one
@@ -10470,9 +10481,17 @@ class TortoiseSDK:
             # and the shrink proves those bytes were destroyed after that read.
             # The map is therefore the witness of what existed, and the re-fold
             # of the now-shorter file cannot see it. Answering "a typo" there is
-            # the silent loss #10515 indicator 1 forbids — and `main` reported
-            # this exact interleaving loudly via ``known.get(point_id, False)``,
-            # so a map-free answer here would be a regression against it.
+            # the silent loss #10515 indicator 1 forbids. ⚠️ This arm is a
+            # deliberate TIGHTENING over this PR's base, NOT parity: `origin/main`
+            # folded truncation together with replacement into one MAP-FREE arm
+            # (``stat_after[2] < resume or stat_after[:2] != stat_key[:2]`` →
+            # ``_journal_presence_needle(log, point_id)``), so a retained PRESENT
+            # map met a re-read that no longer holds the id and the call answered
+            # ``False`` — silent. (At the older `fcc742b8a` the single arm did
+            # consult the map via ``known.get(point_id, False)``, which is where
+            # the parity reading came from; that is not the base this branch
+            # lands on.) The answer can only get LOUDER, never manufacture a
+            # ``journal_known``.
             self._journal_presence_memo = None
             return self._journal_presence_needle(log, point_id, known)
         self._journal_presence_memo = {
@@ -10555,12 +10574,15 @@ class TortoiseSDK:
 
         The honest answer once the retained map has been declared
         untrustworthy for THIS path: the map is always dropped from the memo, and
-        only on the REPLACEMENT arm is it also dropped from this call's answer —
-        there the path no longer names the file it was folded from, so the
-        re-fold answers for the file that is there now. On the truncation arm the
-        path DOES still name the same inode, and on the ``stat_after is None``
-        arm the fold read that inode through a live fd: on both, the map is the
-        one surviving witness of what was destroyed, so it is handed on.
+        it is ALSO handed to this call as a WITNESS on all THREE post-fold arms.
+        On the ``stat_after is None`` arm and on the truncation arm the path still
+        names the inode the fold read (through its fd, or after a shrink); on the
+        REPLACEMENT arm the fd the fold read still named the OLD file, which
+        `rename(2)` leaves untouched. So on every one of them `known` is a record
+        of what the path held while the re-fold answers for the file that is there
+        now — which is why dropping the witness on the replacement arm made it the
+        ONE post-fold arm that stayed silent about a destroyed record (review
+        round 20, finding 1).
         Filtered to the one id, so the pass is bounded in memory (at most one
         entry) and single-purpose.
 
