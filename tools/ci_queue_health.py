@@ -31,7 +31,7 @@ SIX STATES, DELIBERATELY NOT INTERCHANGEABLE
               work is starved of slots. THIS tool's state, and the only one that
               no per-commit reading can produce.
   PR-BACKLOGGED
-              per REPO — PR CI IS executing, and a queued PR-event run has waited
+              per REPO — PR CI IS executing, and a WAITING PR-event run has waited
               past ``max_pr_wait_seconds``. The SERVING half of the starvation
               class, and the one state a saturated-but-moving queue produces: the
               other two starvation witnesses both require ``pr_running == 0``,
@@ -61,7 +61,7 @@ SIX STATES, DELIBERATELY NOT INTERCHANGEABLE
               is exactly this state; GitHub's own only bound is a 24-hour queued-
               job cancellation (Actions limits, "Job queue time"), which for a
               required merge check is indistinguishable from a hang.
-  PR-STARVED  per REPO — no PR-event run is executing and a queued PR-event run
+  PR-STARVED  per REPO — no PR-event run is executing and a WAITING PR-event run
               has waited past ``min_age_seconds``, and the dominance clause
               declined: the queue's largest non-PR share is below the dominance
               floor, OR below the PR share (the queue is PR-dominated). A
@@ -452,12 +452,14 @@ class QueueHealth:
     #: tell a raised floor from a queue that got better, and so a JSON consumer
     #: never has to guess which threshold a reading was taken against.
     pr_wait_budget_seconds: float | None = None
-    #: Was the PR WAIT itself read? `True` only where a queued-or-pending PR-event run
-    #: existed and every one of their ages was measured (the same number
-    #: `pr_wait_budget_seconds` was compared against). `False` covers the ways the wait
-    #: goes unread: no PR-event run in either leg at all, a run whose timestamp would
+    #: Was the PR WAIT itself read? `True` only where a WAITING PR-event run existed in
+    #: some leg and every one of their ages was measured (the same number
+    #: `pr_wait_budget_seconds` was compared against). The population is THREE legs —
+    #: `queued`, `pending`, `requested` — because they are distinct API statuses and
+    #: `requested` is a cancel target (#10831 review P2). `False` covers the ways the
+    #: wait goes unread: no PR-event run in any leg at all, a run whose timestamp would
     #: not parse (that one degrades to `PR-UNWITNESSED`, already not `OK`), and a cut
-    #: `pending` leg (same degradation).
+    #: `pending` or `requested` leg (same degradation).
     #:
     #: ⛔ IT IS NOT THE SAME FACT AS `verdict == OK`. `OK` is also emitted for "no
     #: PR-event run is QUEUED", which the code two clauses below says in as many
@@ -500,7 +502,11 @@ class QueueHealth:
             # `oldest=unmeasured` is the dimension that was not witnessed.
             oldest = self.oldest_pr_queued_age_seconds
             waited = f"{oldest:.0f}s" if oldest is not None else "unmeasured"
-            feed = "truncated" if self.truncated else "read"
+            # `feed` must reflect EVERY leg the reading covers: a `PR-UNWITNESSED`
+            # caused by a cut `pending`/`requested` leg that still printed `feed=read`
+            # would assert the opposite of its own `reasons` (#10831 review P3).
+            feed = ("truncated" if (self.truncated or self.pending_truncated
+                                    or self.requested_truncated) else "read")
             return (
                 f"CI: PR-UNWITNESSED(queued={self.queued_total}, "
                 f"pr_running={self.pr_running}, pr_queued={self.pr_queued}, "
@@ -651,11 +657,16 @@ class QueueHealth:
             "global_max_queued": self.global_max_queued,
             "pr_running": self.pr_running,
             "pr_queued": self.pr_queued,
-            # The other leg of the wait population, emitted so a consumer can see that
+            # The other legs of the wait population, emitted so a consumer can see that
             # the clearance was not taken from the `status=queued` feed alone (#10641
-            # review P2), and whether that leg was read to completion.
+            # review P2, #10831 review P2/P3), and whether each leg was read to
+            # completion. `pending` and `requested` are SEPARATE API statuses, so they
+            # are separate keys: a payload that emitted only `pending` could not show the
+            # leg this fix added.
             "pr_pending": self.pr_pending,
+            "pr_requested": self.pr_requested,
             "pending_truncated": self.pending_truncated,
+            "requested_truncated": self.requested_truncated,
             "oldest_pr_queued_age_seconds": self.oldest_pr_queued_age_seconds,
             "pr_wait_budget_seconds": self.pr_wait_budget_seconds,
             # Whether the number above was READ or merely unavailable: the fact
@@ -819,7 +830,7 @@ def classify_queue(
     # the PR work that cannot start. `None` means "not witnessed"; the wait itself
     # is the witness, so an unreadable timestamp never satisfies it.
     # ⛔ THE LEG TEST IS `wait_runs`, NOT `pr_queued_runs` (#10831 review P1). The wait
-    # this clause compares (`oldest_pr_age`) is measured over BOTH legs, so gating the
+    # this clause compares (`oldest_pr_age`) is measured over EVERY leg, so gating the
     # witness on the queued leg alone let a queue whose only PR wait sat in `pending`
     # certify MEASURED CLEAR: measured on the pre-fix code, 12 `finding-provenance`
     # queued + 1 PR run executing + 12 PR runs in `pending` at 4 h returned
@@ -941,10 +952,10 @@ def classify_queue(
 
         The one `OK` that does NOT come through here is the `no PR run waiting`
         clause below. For the VERDICT that is sound — with no PR-event run waiting in
-        EITHER leg there is no wait to be past a budget — but it is NOT sound for the
-        destructive gate unless both legs were actually read, which is why that clause
-        keys on `wait_runs` (queued + pending, #10831 review P1) and returns
-        `pr_wait_measured=False`.
+        ANY leg there is no wait to be past a budget — but it is NOT sound for the
+        destructive gate unless every leg was actually read, which is why that clause
+        keys on `wait_runs` (queued + pending + requested) and returns
+        `pr_wait_measured=False`, and why a CUT leg degrades instead of returning `OK`.
         Where a wait DOES exist and cannot be read — including the MIXED shape, where
         one queued PR run's timestamp parses and a sibling's does not — this seam
         refuses `OK` and returns `PR-UNWITNESSED`; an unmeasured wait is not a
@@ -1018,7 +1029,7 @@ def classify_queue(
         # cancelled" here would contradict the payload it is printed in.
         reasons.append(
             f"PR-BACKLOGGED: PR CI IS executing ({pr_running} run(s)), but the oldest "
-            f"queued PR-event run has waited {backlogged_wait:.0f}s "
+            f"WAITING PR-event run has waited {backlogged_wait:.0f}s "
             f"(> max_pr_wait_seconds={max_pr_wait_seconds:.0f}s), so the REQUIRED "
             f"checks cannot answer inside that wait. Largest share: "
             f"'{global_leader or 'unknown'}' ({global_max} of {len(queued)}); "
@@ -1050,7 +1061,7 @@ def classify_queue(
         # So the leader and its trim-safety are reported as FACTS, with no causal
         # claim; the clause that returned here is named by the reason above it.
         reasons.append(
-            f"PR-STARVED: no PR-event run is executing and the oldest queued "
+            f"PR-STARVED: no PR-event run is executing and the oldest WAITING "
             f"PR-event run has waited {starved_wait:.0f}s "
             f"(> {min_age_seconds:.0f}s), so PR CI is NOT RUNNING. Largest share: "
             f"'{global_leader or 'unknown'}' ({global_max} of {len(queued)}); "
@@ -1094,23 +1105,37 @@ def classify_queue(
         )
         return healthy()
     if not wait_runs:
-        # Nothing was waiting on PR CI — in EITHER leg. That is NOT evidence of health,
+        # Nothing was waiting on PR CI — in ANY leg. That is NOT evidence of health,
         # and it is deliberately not reported as starvation either: the honest answer is
         # "starvation was not witnessed", and this clause says which.
+        # ⛔ BUT A CUT LEG MAKES "NOTHING WAS WAITING" UNSUPPORTED (#10831 review P3).
+        # A capped read drops its OLDEST runs, so an empty result off a cut leg is not
+        # an empty population — and returning `OK` there contradicts this field's own
+        # contract ("a read that did not finish is never presented as a healthy queue").
+        # The gate still refuses (`pr_wait_measured=False`), so this was a CLAIM defect
+        # rather than a permit; the verdict now degrades to match the claim.
+        if pending_truncated or requested_truncated:
+            reasons.append(
+                "PR-UNWITNESSED: no PR-event run is waiting in any leg that was READ, "
+                "but a `pending`/`requested` leg was cut at the page cap and those "
+                "feeds are NEWEST-FIRST, so an empty result cannot rule a wait out — "
+                "not reported as OK"
+            )
+            return health(PR_UNWITNESSED, pr_queued=0,
+                          oldest_pr_queued_age_seconds=None, pr_wait_measured=False)
         reasons.append(
             "not a flood: no PR-event run is WAITING (queued/pending/requested), so "
             "starvation of PR CI was not witnessed (an idle fleet looks the same)"
         )
         # `pr_wait_measured=False` EXPLICITLY: there was no wait to read, so this
-        # reading can never certify a queue CLEAR to a destructive gate — the
-        # `status=queued` feed cannot see a `pending`/`waiting`/`requested` PR run at
-        # all, so "nothing waiting" is only a fact once BOTH legs were read.
+        # reading can never certify a queue CLEAR to a destructive gate — and "nothing
+        # waiting" is only a fact once EVERY leg was read to completion.
         return health(OK, pr_queued=0, oldest_pr_queued_age_seconds=None,
                       pr_wait_measured=False)
     if oldest_pr_age is None:
         reasons.append(
-            "not a flood: the queued PR-event run(s) carry no readable timestamp, so "
-            "the wait cannot be measured"
+            "not a flood: the WAITING PR-event run(s) — queued, pending or requested "
+            "— carry no readable timestamp, so the wait cannot be measured"
         )
         # Through the seam, not straight to `OK`: a wait nobody measured is not a
         # measured-healthy one, and `healthy()` is where that refusal lives. The

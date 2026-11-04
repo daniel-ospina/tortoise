@@ -1413,6 +1413,70 @@ def test_the_REQUESTED_leg_is_read_and_is_a_witness():
     assert cut.congests_pr is None
 
 
+def test_the_reason_lines_name_the_population_they_measured():
+    """⛔ The reason line must not name a leg the same reading reports empty.
+
+    `backlogged_wait`/`starved_wait` are the oldest age over `queued + pending +
+    requested`, so "the oldest queued PR-event run has waited 14400s" was a false
+    statement about a reading that also prints `pr_queued=0` — the operator is sent to
+    a leg the reading itself says is empty (#10831 review P3, in the file whose review
+    history is largely about reason lines that misname their population).
+    """
+    backlogged = classify(flood_queued(12),
+                          in_progress=[run(1, "Python CI", event="pull_request",
+                                           age_seconds=60)],
+                          pending=[run(7000, "Python CI", event="pull_request",
+                                       age_seconds=4 * 3600)])
+    text = "\n".join(backlogged.reasons)
+    assert backlogged.pr_queued == 0
+    assert "oldest queued PR-event run" not in text, (
+        "this reading has NO queued PR run — naming one is a falsehood")
+    assert "oldest WAITING PR-event run" in text
+
+
+class TestTheReportingSurfacesCoverEveryLeg:
+    """⛔ The JSON, the state line and the empty-population clause (#10831 review P3).
+
+    The `requested` leg reached the population and the decision but not every reporting
+    surface: `to_dict()` omitted it, `state_line()` derived `feed=` from `truncated`
+    alone (printing `feed=read` for a reading whose own reasons say a leg was cut), and
+    the `no PR run waiting` clause returned `OK` off a cut leg — contradicting this
+    field's own contract that *a read that did not finish is never presented as a
+    healthy queue*.
+    """
+
+    def test_to_dict_emits_the_requested_leg_and_its_truncation(self):
+        payload = classify(flood_queued(12),
+                           in_progress=[run(1, "Python CI", event="pull_request",
+                                            age_seconds=60)],
+                           requested=[run(7600, "Python CI", event="pull_request",
+                                          age_seconds=60)],
+                           requested_truncated=True).to_dict()
+        assert payload["pr_requested"] == 1
+        assert payload["requested_truncated"] is True
+        assert payload["pr_pending"] == 0 and payload["pending_truncated"] is False
+
+    def test_the_state_line_says_the_feed_was_cut_when_a_LEG_was_cut(self):
+        line = classify(flood_queued(12),
+                        in_progress=[run(1, "Python CI", event="pull_request",
+                                         age_seconds=60)],
+                        pending_truncated=True).state_line
+        assert line.startswith("CI: PR-UNWITNESSED"), line
+        assert "feed=truncated" in line, (
+            "`truncated` (the queued feed) is False here, but the reading says a leg "
+            f"was cut — `feed=read` would contradict its own reasons: {line!r}")
+
+    def test_a_cut_leg_with_nothing_waiting_is_not_OK(self):
+        health = classify(flood_queued(12), pending_truncated=True)
+        assert health.pr_queued == 0 and health.pr_pending == 0
+        assert health.verdict == Q.PR_UNWITNESSED, (
+            "a capped `pending` read drops its OLDEST runs, so an empty result cannot "
+            "be presented as a healthy queue")
+        assert health.pr_wait_measured is False
+        assert health.congests_pr is None
+        assert any("cut" in r for r in health.reasons)
+
+
 def test_a_CUT_pending_leg_cannot_certify_the_queue_clear():
     """The other pole: an unread leg is an ABSTENTION, never a clearance.
 

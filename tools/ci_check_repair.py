@@ -2069,10 +2069,10 @@ def main(argv: list[str] | None = None) -> int:
         # deliberately NOT that — on a MEASURED congestion the suppression is the
         # correct, self-clearing outcome and must stay exit 0. But when the queue
         # reading was NOT MEASURED (`congestion is None`: `--no-queue-health`, a
-        # failed read, `UNKNOWN`, `PR-UNWITNESSED`, a truncated `OK`, or the
-        # `OK(pr_queued=0)` that the `status=queued` filter produces for a run sitting
-        # in `pending`), the refusal does not depend on anything that will change by
-        # itself: no later window measures that queue either, and the pass returns
+        # failed read, `UNKNOWN`, `PR-UNWITNESSED`, a truncated `OK`, or an `OK` with
+        # no waiting PR run in ANY leg), the refusal does not depend on anything that
+        # will change by itself: no later window measures that queue either, and the
+        # pass returns
         # the same 0 forever while a PR whose required check can never be produced is
         # skipped every 30 minutes. That co-existence is what
         # `docs/ci/ci-check-repair-red-surface.md` §Fact 2 declares unsound ("exit 0
