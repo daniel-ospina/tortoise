@@ -84,14 +84,11 @@ WHAT IT PROBES, AND WHY EACH CHOICE IS THE ONE IT IS
        (`github_pat_…`) sends **no scope header at all**, so absence of `repo` is not evidence.
        The broken token in #10930 IS a fine-grained PAT (the box's `gh auth status` says so).
 
-4. **RATE LIMIT** — checked from the READ response *before* either write probe, and again from each
+5. **RATE LIMIT** — checked from the READ response *before* either write probe, and again from each
    probe's own response. A `403` is either a permission refusal or a rate limit, and confusing them
    wastes an hour the wrong way: re-minting a token does nothing for a rate limit, waiting does
    nothing for a missing permission. The discriminator is the body plus the headers
    (`x-ratelimit-remaining: 0`, `retry-after`), never the bare status code.
-
-5. **RATE LIMIT** is checked from the READ response *before* any write probe, and again from each
-   probe's own response, for the reason in the paragraph below.
 
 6. **REDIRECTS ARE NEVER FOLLOWED.** Only `422` counts as "authorised"; a 2xx on a must-be-invalid
    payload is evidence the response did not come from GitHub's validation path. See `_WRITE_OK`.
@@ -225,15 +222,24 @@ def _validate_api_base(api_base: str) -> str:
     """
     if not api_base:
         return "--api-base is empty — pass " + DEFAULT_API + " or a loopback stub"
+    # ⛔ EVERY MESSAGE BELOW ECHOES `_printable_base(api_base)`, NEVER THE RAW VALUE. This function's
+    # refusals ARE a printing path: the string becomes `result["detail"]`, which reaches stdout on the
+    # `GH-WRITE-UNAVAILABLE(...)` line AND inside the `--json` artifact a lane pastes into a PR. Round 8
+    # redacted only the `api_base` KEY, so the two guards below — which run BEFORE the userinfo check —
+    # printed `user:pass@` verbatim. MEASURED at head `76a21dfd8`:
+    #     --api-base 'http://user:hunter2@127.0.0.1:9?x=1'
+    #       → ... must not carry a query or fragment (got 'http://user:hunter2@127.0.0.1:9?x=1')
+    # Hoisting the userinfo check does NOT close the class (see `_printable_base`), and redacting here
+    # keeps the invariant true regardless of branch order, so a future check added above cannot reopen it.
     # A bare `?`/`#` parses to an EMPTY query/fragment, so `parts.query` alone cannot see it — but a
     # base carrying one still gets mangled when the probe path is joined onto it.
     if "?" in api_base or "#" in api_base:
-        return f"--api-base must not carry a query or fragment (got {api_base!r})"
+        return f"--api-base must not carry a query or fragment (got {_printable_base(api_base)!r})"
     parts = urllib.parse.urlsplit(api_base)
     if parts.scheme not in ("http", "https") or not parts.hostname:
-        return f"--api-base must be an absolute http(s) URL with a host (got {api_base!r})"
-    # ⛔ NEVER ECHO THESE CREDENTIALS BACK. The refused base is NOT repeated in this message on
-    # purpose: `user:pass@host` would otherwise be printed to stdout, which is the leak this branch
+        return f"--api-base must be an absolute http(s) URL with a host (got {_printable_base(api_base)!r})"
+    # ⛔ NEVER ECHO THESE CREDENTIALS BACK. The refused base's userinfo is NOT repeated in this message
+    # on purpose: `user:pass@host` would otherwise be printed to stdout, which is the leak this branch
     # exists to stop, arriving in the error message about stopping it.
     if parts.username is not None or parts.password is not None:
         return (f"--api-base host {parts.hostname!r} carries credentials ('user:pass@' in the URL) — the "
@@ -241,11 +247,11 @@ def _validate_api_base(api_base: str) -> str:
     try:
         _ = parts.port
     except ValueError:
-        return f"--api-base has an invalid port (got {api_base!r})"
+        return f"--api-base has an invalid port (got {_printable_base(api_base)!r})"
     if api_base.rstrip("/") == DEFAULT_API:
         return ""
     if not _is_loopback(parts.hostname):
-        return (f"--api-base {api_base!r} is neither {DEFAULT_API} nor a loopback stub — a verdict from an "
+        return (f"--api-base {_printable_base(api_base)!r} is neither {DEFAULT_API} nor a loopback stub — a verdict from an "
                 f"unrecognised endpoint is not a verdict about the credential (only 127.0.0.0/8, ::1 and "
                 f"localhost are accepted as the hermetic test seam)")
     return ""
@@ -268,10 +274,17 @@ def _printable_base(api_base: str) -> str:
         parts = urllib.parse.urlsplit(api_base)
     except ValueError:
         return "[unparseable --api-base, not echoed]"
-    if parts.username is None and parts.password is None:
-        return api_base
-    return urllib.parse.urlunsplit(
-        (parts.scheme, parts.netloc.rsplit("@", 1)[-1], parts.path, "", ""))
+    if parts.username is not None or parts.password is not None:
+        return urllib.parse.urlunsplit(
+            (parts.scheme, parts.netloc.rsplit("@", 1)[-1], parts.path, "", ""))
+    # ⛔ `urlsplit` IS BLIND TO USERINFO IN A VALUE IT CANNOT PARSE AS A URL AT ALL. `user:hunter2@host`
+    # (no scheme) comes back as scheme='user', netloc='', path='hunter2@host', username=None,
+    # password=None — so the branch above returns it VERBATIM and a schemeless credentialed base leaks
+    # exactly as the query-bearing one did. Any '@' surviving both branches is userinfo-shaped, so the
+    # prefix is redacted and the tail (the host) kept for attributability.
+    if "@" in api_base:
+        return "[redacted userinfo]@" + api_base.rsplit("@", 1)[-1]
+    return api_base
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):

@@ -403,11 +403,26 @@ def test_gh_config_dir_is_honoured_over_xdg():
             env["GH_CONFIG_DIR"] = cfg
             p = subprocess.run([sys.executable, str(TOOL), "--repo", "daniel-ospina/tortoise"],
                                capture_output=True, text=True, env=env, timeout=120)
+        # ⛔ THE SOURCE LABEL IS ASSERTED ON A REFUSED RUN, BECAUSE THAT IS THE ONLY PATH THAT PRINTS
+        # IT. `main()` emits the `credential:` line inside `if not res["ok"]:` only, so on the success
+        # path above stderr is ALWAYS empty — the previous assertion ended `or p.stderr == ""`, a
+        # disjunct that is true pass or fail and therefore proved nothing about which store answered
+        # (review round 9). Same store, a stub that REFUSES the token: the run fails, and the label
+        # must name `hosts.yml` — the config-dir store — never `env:` (both env legs are unset by
+        # `_env`) and never a bare `none`.
+        with _Stub(reject_tokens={"ghp_from_gh_config_dir"}) as refused_stub:
+            env = _env(refused_stub.base, None)
+            env["XDG_CONFIG_HOME"] = xdg
+            env["GH_CONFIG_DIR"] = cfg
+            refused = subprocess.run([sys.executable, str(TOOL), "--repo", "daniel-ospina/tortoise"],
+                                     capture_output=True, text=True, env=env, timeout=120)
     # The ONLY store with a token is GH_CONFIG_DIR, so a pass PROVES that leg was read; ignoring it
     # would find no credential at all and answer `no-credential`.
     assert p.returncode == 0, p.stdout + p.stderr
     assert "GH-WRITE-OK" in p.stdout, p.stdout
-    assert "gh_config_dir" in p.stdout or "GH_CONFIG_DIR" in p.stderr or p.stderr == "", p.stderr
+    assert refused.returncode != 0, refused.stdout + refused.stderr
+    assert "credential: hosts.yml:" in refused.stderr, refused.stderr
+    assert "credential: env:" not in refused.stderr, refused.stderr
 
 
 def test_exhausted_quota_is_caught_before_any_write_probe():
@@ -566,6 +581,70 @@ def test_json_verdict_redacts_a_credentialed_base():
     # …still attributable: the host survives the redaction, so a consumer can see what was refused.
     assert res["api_base"].endswith(s.base.split("//", 1)[1]), res
     assert "@" not in res["api_base"], res
+    assert seen == [], f"the credential was sent before the base was refused: {seen}"
+
+
+def test_api_base_refusals_never_echo_a_credential_in_any_shape():
+    """EVERY refusal branch of `_validate_api_base` must redact userinfo — not just the one that names it.
+
+    MEASURED at head `76a21dfd8` (the defect this arm exists for): round 8 redacted the `api_base` KEY,
+    but the userinfo guard is the FOURTH check, so the query/fragment guard, the scheme/host guard and
+    the port guard all echoed the raw value into `detail` — which is printed on the
+    `GH-WRITE-UNAVAILABLE(...)` line and serialised by `--json`:
+
+        --api-base 'http://user:hunter2@127.0.0.1:9?x=1'  → the secret, in stdout
+        --api-base 'user:hunter2@host'                    → `urlsplit` sees scheme='user', not userinfo
+
+    Each row asserts the refusal BOTH refuses and does not carry the password, so a future check added
+    ahead of the userinfo guard cannot silently reopen the class.
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("gh_write_preflight", TOOL)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    leaking_shapes = [
+        "http://user:hunter2@127.0.0.1:9?x=1",        # query guard fires BEFORE the userinfo guard
+        "http://user:hunter2@127.0.0.1:9#f",          # fragment guard, same ordering
+        "ftp://user:hunter2@127.0.0.1:9/x",           # scheme guard
+        "user:hunter2@host",                          # schemeless: urlsplit cannot see the userinfo
+        "http://user:hunter2@127.0.0.1:notaport",     # port guard
+        "http://user:hunter2@",                       # no host
+    ]
+    for base in leaking_shapes:
+        msg = mod._validate_api_base(base)
+        assert msg != "", f"accepted a base it must refuse: {base!r}"
+        assert "hunter2" not in msg, f"the refusal echoed the credential: {msg!r}"
+    # …and the redaction must not be achieved by echoing NOTHING: the host still has to be attributable
+    # on the shapes where one exists, or a lane cannot tell which endpoint was refused.
+    assert "host" in mod._validate_api_base("user:hunter2@host")
+    assert "127.0.0.1" in mod._validate_api_base("http://user:hunter2@127.0.0.1:9?x=1")
+    # …while an uncredentialed base is still echoed verbatim (no over-redaction to hide behind).
+    assert "http://127.0.0.1:9?x=1" in mod._validate_api_base("http://127.0.0.1:9?x=1")
+
+
+def test_json_verdict_never_echoes_a_credentialed_base_bearing_a_query():
+    """The union shape the three existing arms all missed: credentials AND a query (review round 9).
+
+    `test_api_base_carrying_credentials_is_refused_and_never_echoed` uses a credentialed base with NO
+    query, and `test_json_verdict_redacts_a_credentialed_base` likewise — both take the one branch that
+    redacts. `test_api_base_validation_table` lists the query-bearing and the credentialed shapes as
+    SEPARATE rows and only asserts `!= ""`, so the combination — the leaking one — was untested.
+    """
+    with _Stub() as s:
+        credentialed = s.base.replace("http://", "http://user:hunter2@", 1) + "?x=1"
+        p = subprocess.run([sys.executable, str(TOOL), "--repo", "daniel-ospina/tortoise", "--json",
+                            "--api-base", credentialed],
+                           capture_output=True, text=True,
+                           env=_env(s.base, "ghp_NOT_A_REAL_CREDENTIAL"), timeout=120)
+        seen = list(s.seen)
+    assert p.returncode != 0, p.stdout
+    assert "hunter2" not in p.stdout + p.stderr, (
+        f"the refusal echoed the credential into the verdict artifact: {p.stdout}")
+    res = json.loads(p.stdout)
+    assert res["reason"] == "usage", res
+    assert "hunter2" not in json.dumps(res), res
     assert seen == [], f"the credential was sent before the base was refused: {seen}"
 
 
