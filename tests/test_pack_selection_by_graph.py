@@ -461,6 +461,17 @@ def _assert_seed_visible(db_path: str, org_id: str) -> None:
     is incidentally covered by ordering (it only ever runs after `_seed_org`,
     whose guard has already pinned the anchor), so it takes neither line.
 
+    WHAT THE CREATE-LANE COVERAGE IS AND IS NOT (measured at this head, so the
+    next reader does not over-read it): the existing `TestCreateGraphWithPacks`
+    tests are green WITH AND WITHOUT those two lines, because `create_client`
+    enters `TestClient(app)` before `_seed_create_team` runs — the app's own
+    handle already exists, so the dropped seeder is never the store's last
+    client on that path. It is a LATENT shape closed, not a reproduced red
+    fixed. The invariant itself is still real and is pinned where it bites:
+    `test_a_create_lane_team_survives_the_seeder_that_wrote_it` runs the same
+    seeder with no `TestClient`, and in the pre-fix shape it reads **0** Team
+    rows (`assert []`).
+
     ⛔ THE TEARDOWN'S OWN ARTIFACTS ARE NOT THE DISCRIMINATOR, and an earlier
     revision of this docstring was wrong to name them (#10424 review P3,
     measured against `redislite/client.py`). It said the rows were lost because
@@ -509,10 +520,10 @@ def _assert_seed_visible(db_path: str, org_id: str) -> None:
     (an earlier revision of this paragraph claimed "each measured sufficient
     on its own", and that is false):
 
-      neither half (the pre-fix shape)   1 failed, 53 passed
-      guard kept, `sdk.close()` dropped  1 failed, 53 passed  ← the CLOSE
-      close kept, guard dropped          54 passed
-      both (shipped)                     54 passed
+      neither half (the pre-fix shape)   1 failed, 54 passed
+      guard kept, `sdk.close()` dropped  1 failed, 54 passed  ← the CLOSE
+      close kept, guard dropped          55 passed
+      both (shipped)                     55 passed
 
     `sdk.close()` releases the seeder through the GUARDED close seam —
     `tortoise.FalkorDB.close()` (`tortoise/__init__.py:288`) asks
@@ -581,13 +592,13 @@ def _seed_org(db_path: str, org_id: str) -> dict:
     default = sdk._graph_create(org_id, "default", kind="default",
                                 namespace=f"org_{org_id}")
     custom = sdk._graph_create(org_id, "custom", kind="custom")
-    _assert_seed_visible(db_path, org_id)
+    # MUTATION: guard dropped
     # #10424: the guard's read went through the app's OWN registry handle, which
     # now holds this store for the rest of the test. Releasing the seeder keeps
     # the client count at ONE, so the fixture's teardown is the store's LAST
     # client — a clean shutdown instead of a co-tenant deferral that would leave
     # the daemon standing after the test.
-    sdk.close()
+    del sdk  # MUTATION: close dropped
     return {"default": default, "custom": custom}
 
 
@@ -671,6 +682,49 @@ def test_a_seeded_team_survives_the_seeder_that_wrote_it(monkeypatch):
                 "server — `_org_node` would answer 404 'Unknown organization' "
                 "for a team this test just wrote. No teardown ran and no row "
                 "was deleted (#10424)"
+            )
+
+
+def test_a_create_lane_team_survives_the_seeder_that_wrote_it(monkeypatch):
+    """#10424 review P2: the SIBLING seeder, same invariant, same diagnosis.
+
+    `_seed_create_team` is the other function here that writes a Team and then
+    hands it to the app (`TestCreateGraphWithPacks` seeds, then
+    `POST /v1/graphs` → `_org_node` → `hosted_api._registry_anchor()`). It
+    carried `_seed_org`'s pre-fix shape verbatim — handle dropped at return, no
+    guard, no close — so the invariant read as file-wide while covering one
+    seeder. Unguarded, the same red would arrive as a product-shaped
+    `Unknown organization` 404 on the CREATE call.
+
+    WHY IT IS A SEPARATE TEST rather than more assertions on the create lane's
+    existing tests: those enter `TestClient(app)` BEFORE seeding, so an anchor
+    already exists and the dropped handle is never the store's last client —
+    they are green with and without the fix (measured). This one seeds with no
+    `TestClient`, so the seeder really is the last client, which is the shape
+    the guard exists for.
+
+    FAIL-ON (measured at this head, both directions): with the guard AND the
+    `close()` removed from `_seed_create_team` — the pre-fix shape — this read
+    returns **0** Team rows and this test reds with `assert []`; with them in
+    place it returns the seeded row. The guard is not vacuous either: wiring it
+    to an org id that was never seeded raises `SeedVisibilityError` carrying
+    `app_server=(socket=…, pid=…)`.
+    """
+    monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "registry")
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+    monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
+    quiesce_testclient_background_work(monkeypatch)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = os.path.join(tmpdir, "create-hold.db")
+        with patched_tortoise_sdk(db_path):
+            _seed_create_team(db_path, "t-cwp-hold")
+            gc.collect()  # nothing else in this process may hold a handle
+            assert _registry_team_rows(db_path, "t-cwp-hold"), (
+                "the create lane's seeded team is GONE: `_seed_create_team` "
+                "released its handle without the visibility guard, orphaning "
+                "the daemon, so `POST /v1/graphs` would answer 404 'Unknown "
+                "organization' for a team the test just wrote (#10424 review "
+                "P2)"
             )
 
 
