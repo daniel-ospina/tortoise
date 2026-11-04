@@ -1279,11 +1279,14 @@ def test_the_bounce_does_not_append_a_SECOND_key_when_the_flow_already_has_one()
             f"a {label} must be REPLACED by the minted key, not left beside it: the consumers "
             f"read the FIRST value, so {keys} leaves the visitor keyless")
 
-    # ⛔ A DUPLICATE PAIR — the shape that DEFEATED the `any(...)` gate the blank arms above do
-    # not reach (review P3). `attempt_key=&attempt_key=K2` cleared `any(v.strip())`, so nothing
-    # was minted; the AS gate (LAST value) saw `K2`, `start` (FIRST value) saw `""` and invented a
-    # third key — the pre-fix dead end, restored for that link. The fix collapses the pair to
-    # exactly ONE segment, so there is no ordering left for the two readers to disagree about.
+    # ⛔ A DUPLICATE PAIR — the shape the blank arms above do not reach (review P3). On the ONE
+    # caller that can be handed a duplicate (the page's sign-in link, whose `raw_query` is the
+    # caller's), `attempt_key=&attempt_key=K2` reads `""` for the page's FIRST-value reader and
+    # `K2` for the AS gate's LAST-value one, so which key the flow adopts depended on which hop
+    # you asked. The fix collapses the pair to exactly ONE segment, so there is no ordering left
+    # for the two readers to disagree about on the URL this hop emits. (The AS's own gate never
+    # sees such a pair — it reads the LAST value, so it renders the PAGE — and that branch is a
+    # separate, PRE-EXISTING dead end recorded in #10865, not closed here.)
     for label, raw_dup in (
         ("blank FIRST then a real key",
          f"client_id=c1&state=s1&{CONSENT_ATTEMPT_KEY_PARAM}="

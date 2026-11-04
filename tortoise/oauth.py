@@ -2737,13 +2737,24 @@ def _is_attempt_key_segment(segment: str) -> bool:
       re-embed it", `consent_page_html`) → the **FIRST** value of the query this
       function was HANDED, not of the URL it emits.
 
-    So a value-blind ``any()`` gate could satisfy one reader while another read
-    ``""``: ``attempt_key=&attempt_key=K2`` made the AS take the bounce branch,
-    skip the mint, and hand ``start`` a first value of ``""`` — which invented a
-    third key and restored the very dead end this hop exists to close. Dropping
-    EVERY segment that names the parameter and re-emitting exactly one makes
-    first == last == any on the URL this function returns, so no reader of THAT
-    URL can disagree about which key the flow adopts.
+    A duplicate pair therefore makes the readers disagree about which key the
+    flow adopts, and the disagreement is not harmless: on the ONE caller that
+    can actually be handed one — the page's sign-in link (``consent_page_html``
+    → ``SIGNIN_URL``, whose ``raw_query`` is the caller's) —
+    ``attempt_key=&attempt_key=K2`` reads ``""`` for the page's first-value
+    reader and ``K2`` for the AS gate's last-value one. Dropping EVERY segment
+    that names the parameter and re-emitting exactly one makes first == last ==
+    any on the URL this function returns, so no reader of THAT URL can disagree
+    about which key the flow adopts.
+
+    ⛔ THIS DOES NOT REACH THE AS's OWN DUPLICATE GATE, and must not be read as
+    closing it (measured: `QueryParams('attempt_key=&attempt_key=K2').get(...)`
+    answers `K2`, the LAST value): a pair whose LAST value is non-blank
+    never arrives here at all, because ``hosted_api.oauth_authorize`` tests
+    ``request.query_params.get(...)`` — the LAST value — and renders the PAGE
+    instead. On that branch the page's own first-value read can still be ``""``
+    and dead-ends with no sign-in link offered. That is a separate, PRE-EXISTING
+    arm recorded in #10865, not closed by this hop.
 
     The page's reader is the reason the collapse must keep a caller's real key
     rather than always minting: it reads the input query, so the value this hop
@@ -2787,10 +2798,16 @@ def consent_bounce_url(app_origin: str, raw_query: str) -> str:
       refused with `403 flow_not_yours`: the row was already claimed by a key
       nobody could present. Generating the key HERE makes it the property of the
       flow rather than of one emitted URL — the bounce, the sign-in return, and
-      every re-entry carry the same value, so `start` ADOPTS it on the insert
-      and the insert-only row is never poisoned. It is `secrets`, not a
-      counter: it is the browser's only proof of ownership, so it must not be
-      predictable from the `state` (which is client-chosen and public).
+      every re-entry through a URL this hop emits carry the same value, so
+      `start` ADOPTS it on the insert and the insert-only row is never poisoned.
+      ⛔ IT IS MINTED PER REQUEST, so a SECOND fresh bounce of the same flow
+      yields a different key and does not own the row the first one wrote: a
+      Back-button return to the ORIGINAL keyless authorize URL is still
+      `403 flow_not_yours` for a signed-in visitor (#10865 — closing that needs a
+      RESUMABLE binding for an ownerless row, not a different mint). It is
+      `secrets`, not a counter: it is the browser's only proof of ownership, so
+      it must not be predictable from the `state` (which is client-chosen and
+      public).
     """
     inner = CONSENT_START_PATH + (("?" + raw_query) if raw_query else "")
     # ⛔ EMIT EXACTLY ONE ATTEMPT-KEY SEGMENT — NEVER ZERO, NEVER TWO (review P3, #10487).
@@ -2800,12 +2817,13 @@ def consent_bounce_url(app_origin: str, raw_query: str) -> str:
     # the flow will actually adopt, because the hops that read it DISAGREE about duplicates:
     # `start.ts` (`url.searchParams.get`) takes the FIRST value, and this server's own gate
     # (`request.query_params.get`, Starlette `MultiDict.__getitem__` → `_dict[key] = values[-1]`)
-    # takes the LAST. A value-blind `any(...)` gate satisfied neither: `attempt_key=&attempt_key=K2`
-    # cleared it, so nothing was minted, `start` saw a first value of `""`, invented a third key
-    # and the visitor met the very dead end this hop exists to close. Collapsing every segment
-    # that names the parameter to ONE makes first == last == any, so there is nothing to disagree
-    # about; `attempt_key=K1&attempt_key=K2` likewise collapses to the first (`K1`), which is the
-    # value the app was already adopting.
+    # takes the LAST. A value-blind gate therefore satisfies neither: on the one caller that can be
+    # handed a duplicate (the page's sign-in link, whose `raw_query` is the caller's),
+    # `attempt_key=&attempt_key=K2` reads `""` for the first-value reader and `K2` for the
+    # last-value one, so which key the flow adopted depended on which hop you asked. Collapsing
+    # every segment that names the parameter to ONE makes first == last == any, so there is nothing
+    # to disagree about; `attempt_key=K1&attempt_key=K2` likewise collapses to the first (`K1`),
+    # which is the value the app was already adopting.
     #
     # ⛔ THE "ALREADY EXACTLY ONE, AND NON-BLANK" CASE IS LEFT BYTE-EXACT AND UNTOUCHED. That is
     # the page's sign-in leg, i.e. the common path — it re-emits nothing.
