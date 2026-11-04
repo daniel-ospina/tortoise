@@ -134,7 +134,8 @@ def test_capture_and_indexer_source_field_parity(sdk) -> None:
     from tortoise.sdk import _source_search_text
 
     # 1) capture path (sdk._materialize_session_source) — no title, so the
-    #    summary is the searchable text.
+    #    derived summary is the searchable text. Since #10000 that summary is the
+    #    session's TOPIC LEXICON, never the turn's own wording (§9.1/D1).
     sdk._materialize_session_source(
         "sess-parity", None, "2026-09-01T10:00:00+00:00",
         [{"role": "user", "content": CAPTURE_UTTERANCE}])
@@ -148,13 +149,23 @@ def test_capture_and_indexer_source_field_parity(sdk) -> None:
     g = sdk._get_proj().g
     rows = dict(g.query(
         "MATCH (s:Source) RETURN s.url, s._searchText").result_set)
-    assert rows["session:sess-parity"] == CAPTURE_UTTERANCE, rows
+    summaries = dict(g.query(
+        "MATCH (s:Source) RETURN s.url, s.summary").result_set)
+    # #10000 (§9.1/D1): the capture's node carries a topic descriptor, NOT the
+    # session's own turn text — and because `_searchText` is that same
+    # derivation, the prose cannot survive in the FTS index after leaving the
+    # graph. Asserted here as an absence so a future writer cannot restore the
+    # prose route and still pass on "both writers agree".
+    assert CAPTURE_UTTERANCE not in (summaries["session:sess-parity"] or ""), \
+        summaries
     assert rows["corpus://parity/s1.md"] == "PARITYPHRASE auth refactor session", \
         rows
 
-    # Both resolved through the shared rule (the parity pin).
+    # Both resolved through the shared rule (the parity pin) — the capture arm is
+    # read off the node's OWN stored summary, so this stays a statement about the
+    # RULE and not about which prose the derivation happened to emit.
     assert rows["session:sess-parity"] == _source_search_text(
-        summary=CAPTURE_UTTERANCE)
+        summary=summaries["session:sess-parity"])
     assert rows["corpus://parity/s1.md"] == _source_search_text(
         title="PARITYPHRASE auth refactor session")
 

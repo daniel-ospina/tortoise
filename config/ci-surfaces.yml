@@ -3613,6 +3613,16 @@ surfaces:
   - test_write_op_reachability.py
   - test_write_session_and_turns_3551.py  # #3551: the shared _write_session_and_turns primitive (Session MERGE + turn store); dual: api
   - test_10000_turns_record_only.py  # #10000: record-vs-graph turn store + turn_max_index sweep; dual: api
+  # #10000 (§9.1/D1): the session `:Source` must not carry TURN prose — the assertion is a
+  # GRAPH-WIDE scan over every node's string properties, not a read of the field the defect
+  # used to live on, because the rule is about the text's PRESENCE on a node and a field read
+  # would be satisfied by moving it. core ONLY, on the `test_10017_backfill_census.py`
+  # precedent: the test drives a raw falkordb scan through the SDK handle, never the hosted
+  # API, so unlike the 3551/10000_turns rows above it has no api leg. Mutation check: deleting
+  # this line makes `tools/ci_selection.py --integrity` report `manifest drift:
+  # ['test_10000_source_prose.py']`, which is exactly how this row's absence reddened the
+  # required `manifest-integrity` job on head d6fc65f67 (run 41775305727, job 126404267037).
+  - test_10000_source_prose.py
   - test_10025_graph_identity.py  # #10025: graph id vs user-editable name; default-graph record tenant; dual: api
   - test_10046_session_oauth_record_tenant.py  # #10046: SESSION/JWT + OAuth `oat_` credential classes install the record tenant; dual: api
   - test_10046_two_tenants_never_share_a_credential_tenant.py  # #10046: two orgs live in one process — no credential resolves into the OTHER tenant (and the tenantless arm never names one); dual: api

@@ -16308,9 +16308,13 @@ class TortoiseSDK:
         index is declared on — via the shared ``_source_search_text`` rule
         (title-else-summary; the capture path has no title). Without it the
         captured session was created but NOT findable through
-        ``tortoise_fts_query(entity_type='source')``. The SET is a
-        ``coalesce``, so a re-capture of an empty transcript cannot erase the
-        text a previous capture (or the indexer path) established.
+        ``tortoise_fts_query(entity_type='source')``. The SET is
+        ``CASE WHEN $st IS NOT NULL THEN $st ELSE <stored> END`` (#10000): a
+        non-NULL derivation REPLACES the stored text, so a node captured before
+        the prose route was removed heals instead of keeping it forever, and an
+        empty/wordless transcript still cannot erase what a previous capture (or
+        the indexer path) established — the property the old ``coalesce`` was
+        added for.
         Additive and idempotent: never touches ``_link_source`` or
         ``_session_event_write``; re-capturing a session re-MERGEs the same
         url. The references edge is skipped when ``event_id`` is None (Event
@@ -16347,9 +16351,10 @@ class TortoiseSDK:
         # capture path MUST populate it or the captured session stays
         # unfindable. The capture path has no title (the indexer path is the
         # one that carries frontmatter), so the shared rule resolves to the
-        # derived summary. `coalesce` keeps an existing value when a
-        # re-capture of an empty transcript yields no text, mirroring the
-        # merge semantics `_upsert_source` applies on the indexer side.
+        # derived summary. The SET is CASE-based, NOT a `coalesce` (#10000): a
+        # non-NULL derivation replaces the stored text, and only an empty /
+        # wordless transcript falls back to what a previous writer established
+        # (`_upsert_source`'s merge semantics on the indexer side).
         search_text = _source_search_text(summary=summary)
         params = {
             "url": url,
