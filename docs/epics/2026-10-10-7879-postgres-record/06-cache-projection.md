@@ -241,6 +241,31 @@ disabled this exclusion on the corpus #9914 targets"*. Here the cost is worse �
 the prose guard would strip a document's own frontmatter summary and its
 title-derived `_searchText`, silently un-indexing it in the cache.
 
+#### The identity is read AS THE NODE WILL CARRY IT — the `props` tail included
+
+`props` is written to the node **verbatim**, so it can carry identity, not only
+prose: a row whose `source_kind` column is NULL while the tail holds
+`sourceKind='agentSession'` produces a node `is_episodic_source_node` calls a
+captured session. A predicate reading the **columns alone** therefore answered
+*"document"* for a node the reconciler classified as a session — R1 (*"from any
+row shape"*) failing **open**, with nothing red: the column door never fired,
+the prose landed, and the reconciler counted the pair as CACHE-OWNED
+(`graph_only`) instead of as the divergence it is. That is the same hazard the
+`props`-tail filter below exists for, defeated from the other side (#10867
+review).
+
+So `_is_episodic_source_row` reads a **merged view** (columns + decoded tail,
+`_row_identity_view`), which is what makes it agree with
+`is_episodic_source_node` on every shape — the agreement legs pin it. Two
+bounds, both deliberate:
+
+* **a COLUMN value wins** the same coordinate, preserving the asymmetry above:
+  an ambiguous row is read as a DOCUMENT and keeps its prose (the pre-existing
+  defect) rather than stripping a document's metadata;
+* **only the KIND can travel**, because `url` is the label's CONTRACT KEY —
+  `node_from_row` refuses a NULL one (`UnprojectableRecord`, the schema's own
+  CHECK), so the tail never decides the `session:` arm.
+
 ### Three costs, named rather than implied
 
 * the **journal fold** still projects the value until #10000's capture-side change
@@ -287,10 +312,13 @@ DOCUMENT with a differing summary is still counted field by field;
 ONE LEG PER ARM; the FOUR negative legs (a plain-document baseline, then one per
 term that must not be a signal: a transcript document carrying a `session_id`, a
 `corpus://` permalink stamped `agentSession`, a document stamped `is_episodic`);
-the row/node predicate-agreement legs; the `props`-tail leg; and the record row
+the row/node predicate-agreement legs, including the tail-carried identity; the
+`props`-tail legs (prose AND the `sourceKind` identity, plus the negative that a
+tail-carried kind alone does not strip a `corpus://` document); and the record row
 that must not be mutated. Mutation-checked, one at a time: each identity arm, EACH
 OF THE TWO DOORS (the column loop and the `props` tail — the tail filter undoes
-only the keys the tail added, so neither door subsumes the other), the label gate,
+only the keys the tail added, so neither door subsumes the other), the tail read in
+the predicate (column-only reds 2 legs), the label gate,
 the call-time resolution of the placement spellings, and each of the three flags
 re-added — every one reds at least the leg that names it, plus the row/node
 agreement shape that exists to catch exactly that drift.

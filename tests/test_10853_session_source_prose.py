@@ -355,6 +355,96 @@ def test_the_props_tail_cannot_smuggle_the_prose_past_the_guard():
     assert "_search_text" not in node.props
 
 
+# ── THE IDENTITY CAN MOVE TOO, and the guard must follow it there ──────────
+
+
+def test_the_identity_is_read_through_the_props_tail():
+    """A tail-carried `sourceKind` makes an EPISODIC node, so the guard must fire.
+
+    `props` is written to the node VERBATIM, so this row produces a node whose
+    `sourceKind` says `agentSession` while its `source_kind` COLUMN is NULL. A
+    predicate reading the columns alone answered "document", the column door
+    never fired, and the prose landed on the node — while
+    `is_episodic_source_node` (reading the merged map) called that same node a
+    session and the reconciler therefore counted the pair as CACHE-OWNED. R1
+    ("from any row shape") failed open, and nothing reddened (#10867 review).
+    """
+    row = _source_row(
+        url="session.md",
+        id="s-10853",
+        name="s-10853",
+        source_kind=None,
+        summary=UTTERANCE,
+        _search_text=UTTERANCE,
+        props='{"sourceKind": "agentSession", "summary": "TAIL PROSE"}',
+    )
+    before = dict(row)
+    node = node_from_row("Source", row)
+
+    assert "summary" not in node.props, (
+        "a tail-carried `sourceKind` classified the node as a session but the "
+        f"prose reached it anyway: {node.props.get('summary')!r}"
+    )
+    assert "_searchText" not in node.props
+    assert node.props["sourceKind"] == "agentSession", (
+        "the identity the tail carries must still project — this leg must not be "
+        "satisfiable by projecting nothing"
+    )
+    assert row == before, "the projection MUTATED the record row"
+
+
+def test_a_tail_carried_kind_does_not_strip_a_DOCUMENT():
+    """The separator arm still applies through the tail — the false positive is worse.
+
+    `file_indexer` stamps `agentSession` on per-FILE `corpus://` permalinks, so a
+    tail-carried kind alone must never be a signal. This is the leg that reds if
+    the tail read is implemented as "the kind is present" instead of "the kind
+    is present AND the url names a session".
+    """
+    row = _document_row(
+        source_kind=None,
+        props='{"sourceKind": "agentSession", "url": "corpus://t/weekly.md"}',
+    )
+    _assert_kept(node_from_row("Source", row),
+                 "a `corpus://` permalink in the tail was read as episodic")
+
+
+def test_the_row_and_node_predicates_agree_when_the_tail_carries_the_identity():
+    """The shape that made them disagree: the predicate must judge the node's map.
+
+    The reconciler reads the NODE (`is_episodic_source_node`, merged properties)
+    while the projector read the ROW. Any row whose identity lives in the tail
+    put those two functions on opposite answers — a permanently suppressed
+    divergence on one side or a stripped document on the other.
+
+    ⚠️ ONLY THE KIND CAN TRAVEL: `url` is the label's CONTRACT KEY, so
+    `node_from_row` refuses a row whose `url` column is NULL
+    (`UnprojectableRecord` — the schema's own CHECK would refuse it too). A
+    `url` in the tail therefore never decides the arm, and the COLUMN wins where
+    the two carry the same coordinate — which is what the third case pins.
+    """
+    from tortoise import cache_projection as cp
+
+    # (column url, props tail, expected). The COLUMN url is the contract key and
+    # always wins the coordinate, so the corpus/https rows stay documents even
+    # when the tail claims the session kind — that is the false positive the
+    # separator arm exists to prevent.
+    for column_url, props_tail, expected in (
+        ("session.md", '{"sourceKind": "agentSession"}', True),
+        ("session.md", '{"sourceKind": "agentSession", "url": "session:s-1"}', True),
+        ("https://example.com/q3", '{"sourceKind": "agentSession"}', False),
+        ("https://example.com/q3", '{"sourceKind": "document"}', False),
+        ("session:s-10853", "{}", True),
+    ):
+        row = _source_row(url=column_url, source_kind=None, props=props_tail)
+        node = node_from_row("Source", row)
+        assert cp.is_episodic_source_node(node.props) is expected, (column_url, props_tail)
+        assert cp._is_episodic_source_row(row) is expected, (
+            f"the row predicate disagreed with the node predicate on "
+            f"{column_url!r} + {props_tail}"
+        )
+
+
 @pytest.mark.parametrize("shape", [
     {"url": "session:s-1"},
     {"url": "session.md", "source_kind": "agentSession"},

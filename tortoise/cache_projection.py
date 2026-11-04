@@ -1341,7 +1341,58 @@ def _episodic_source_kind_property() -> str:
     return canonical_property("source", "source_kind")
 
 
-def _is_episodic_source_row(row: Mapping[str, Any]) -> bool:
+#: Distinguishes "the caller did not decode the tail" from an EMPTY tail.
+_UNRESOLVED_TAIL: Any = object()
+
+
+def _decoded_tail(raw: Any) -> Mapping[str, Any]:
+    """The row's `props` tail as a mapping, decoded once.
+
+    `None`/empty — and anything that is not a mapping — answers `{}`. The
+    WRITER's refusal for a malformed tail stays in :func:`_props_from_row`;
+    this helper only feeds the identity read, so it must not pre-empt it.
+    """
+    if raw is None:
+        return {}
+    tail = json.loads(raw) if isinstance(raw, str) else raw
+    return tail if isinstance(tail, Mapping) else {}
+
+
+def _row_identity_view(row: Mapping[str, Any],
+                       tail: Mapping[str, Any]) -> Mapping[str, Any]:
+    """The row's identity AS THE NODE WILL CARRY IT: the columns + `props` tail.
+
+    ⛔ THE TAIL CARRIES IDENTITY, NOT ONLY PROSE (#10867 review). `props` is
+    written to the node VERBATIM, so a row whose `source_kind` column is NULL
+    while the tail carries `sourceKind='agentSession'` produces an EPISODIC
+    node — `is_episodic_source_node` says so, because it reads the MERGED map.
+    A predicate that read the COLUMNS alone therefore answered "document" for a
+    node the reconciler then classified as a captured session: the prose reached
+    the node through the column door (which never fired), and the reconciler
+    counted the pair as CACHE-OWNED (`graph_only`) instead of as the divergence
+    it is — R1 ("from any row shape") failing OPEN, and the same hazard the
+    `tail_keys` filter exists for, defeated from the other side.
+
+    A COLUMN VALUE WINS over the tail's spelling of the same coordinate, which
+    preserves the asymmetry :func:`_is_episodic_source_row` declares: an
+    AMBIGUOUS row is read as a DOCUMENT, so it keeps its prose (the pre-existing
+    defect) rather than stripping a document's own metadata.
+
+    The row itself is NEVER mutated — a fresh mapping is returned.
+    """
+    if not tail:
+        return row
+    merged: dict[str, Any] = {k: v for k, v in row.items() if k != "props"}
+    kind_property = _episodic_source_kind_property()
+    if merged.get("source_kind") is None and kind_property in tail:
+        merged["source_kind"] = tail[kind_property]
+    if not merged.get("url") and "url" in tail:
+        merged["url"] = tail["url"]
+    return merged
+
+
+def _is_episodic_source_row(row: Mapping[str, Any],
+                            tail: Any = _UNRESOLVED_TAIL) -> bool:
     """Is this `public.source` row a captured session's Source?
 
     The two identity arms are declared at :data:`_EPISODIC_SOURCE_URL_PREFIX`,
@@ -1365,11 +1416,19 @@ def _is_episodic_source_row(row: Mapping[str, Any]) -> bool:
     `session_source_migration._LEGACY_CANDIDATES` — and a record-sourced rebuild
     writes `sourceKind` from the column). Fail-closed by direction, and left
     named.
+
+    The identity is read through :func:`_row_identity_view`, so the `props` tail
+    participates: a tail-carried `sourceKind`/`url` is an identity the NODE will
+    carry, and a predicate that ignored it disagreed with the reconciler on that
+    row shape (see the view's docstring).
     """
-    url = row.get("url")
+    if tail is _UNRESOLVED_TAIL:
+        tail = _decoded_tail(row.get("props"))
+    view = _row_identity_view(row, tail) if tail else row
+    url = view.get("url")
     if isinstance(url, str) and url.startswith(_EPISODIC_SOURCE_URL_PREFIX):
         return True
-    return (row.get("source_kind") == _EPISODIC_SOURCE_KIND
+    return (view.get("source_kind") == _EPISODIC_SOURCE_KIND
             and isinstance(url, str) and "://" not in url and "/" not in url)
 
 
@@ -1424,15 +1483,17 @@ def _props_from_row(table: str, row: Mapping[str, Any], *,
     placed = placement_columns().get(table, {})
     refused = _refused(table)
     projected = projected_columns(table)
-    # §9.1/D1 (#10853): resolved ONCE per row, from the row itself.
-    episodic_source = table == "source" and _is_episodic_source_row(row)
+    # The tail is decoded ONCE: it feeds the identity read below AND the verbatim
+    # `out.update`, and decoding is what decides whether the identity participates.
+    tail = _decoded_tail(row.get("props"))
+    # §9.1/D1 (#10853): resolved ONCE per row, from the row's identity AS THE
+    # NODE WILL CARRY IT — the columns AND the `props` tail.
+    episodic_source = (table == "source"
+                       and _is_episodic_source_row(row, tail))
     out: dict[str, Any] = {}
     tail_keys: set[str] = set()
     for column, value in row.items():
         if column == "props":
-            tail = value
-            if isinstance(tail, str):
-                tail = json.loads(tail) if tail else {}
             if tail:
                 tail_keys = set(tail)
                 refused_tail = sorted(set(tail) & refused)
