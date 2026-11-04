@@ -235,7 +235,7 @@ mechanism — see 2.5.
 | | Deliverable | Depends on |
 |---|---|---|
 | **3.1** | The 27 tools implemented **on the frozen SDK** | Phase 2 |
-| **3.2** | The **9 retired** tools removed. **2** are tenancy-only and **1** is absorbed into a builder-only SDK method that is not on the MCP, so **87 are absorbed** into the 27 targets — many-to-one. Writing "99 − 27 = 72 retired" conflates the two and is wrong. | 3.1 |
+| **3.2** | The retired tools removed. **2** are tenancy-only and **1** is absorbed into a builder-only SDK method that is not on the MCP, so the absorbed names fold into the 27 targets — many-to-one. Writing "99 − 27 = 72 retired" conflates the two and is wrong. ⚠️ **The `run_onboarding` slice of this row LANDED 2026-11-04** (`#4282`, five tools deleted) — an early slice, not the row: after it the registry is **94** tools, **4** remain `RETIRED_USE_INSTEAD` and **76** are advertised. The "9 retired" figure above is the pre-slice count; the 64 absorbed names still wait on 3.1. | 3.1 |
 | **3.3** | The `co_firstlineno` guard defect fixed — see *Coordination* | — |
 
 ### Phase 4 — verification

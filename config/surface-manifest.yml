@@ -42,6 +42,14 @@
 # YAML dumps no comments, so any comment below this block is SILENTLY DROPPED. Keep
 # rationale here or in the docs, never in an ad-hoc comment in the body.
 #
+# LOWERED 82 → 76 on 2026-11-04 by PR #10906 (#4282 Phase 3.2, the first tool batch:
+# the five `run_onboarding` tools deleted). The pin is lowered for the same reason it is
+# raised elsewhere — it is only meaningful at the live surface: left at 82 it would carry
+# six slots of slack, so re-adding any of the five (the regression
+# `tests/test_tool_registry.py` pins) would pass `tools/surface-guard.py` green.
+# ⛔ 76 IS DELIBERATE, NOT AN ANOMALY: if you are reading `tools: 76` next to a live 76
+# and wondering whether to "restore" 82, do not — that re-opens the slack.
+#
 # THE BASELINE BELOW IS A FREEZE OF WHAT EXISTS, NOT THE APPROVED TARGET. It exists so
 # drift is visible (tools/surface-guard.py). The approved TARGET is recorded in
 # docs/product/canonical-mcp-tools.md and docs/product/beta-sdk-surface.md; compliance
@@ -49,7 +57,7 @@
 # a constant here.
 manifest_version: 1
 issue: 3863
-cut_at_commit: 7595f7c92
+cut_at_commit: 61af70a1ca
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -699,12 +707,6 @@ counts:
     link: 4
     operate: 5
 high_water_counts:
-  # Lowered 82 -> 76 in #4282 Phase 3.2 (five `run_onboarding` tools retired). This is the
-  # deliberate, reviewable act the pin requires: leaving it at 82 would give a re-cut over the
-  # reduced surface six slots of slack, so re-adding any of the five (the regression
-  # `tests/test_tool_registry.py` pins) would pass `tools/surface-guard.py` green.
-  # ⚠️ A re-cut DROPS this comment (it emits the block, not the prose) — re-add it with the
-  # value if you cut again, or the reason for the pin is lost while the pin survives.
   tools: 76
   sdk_public_methods: 150
 retired:
@@ -3935,7 +3937,7 @@ rows:
   job: Public SDK method TortoiseSDK.dream_health_check.
   dependency: 'reached by 1 registered tool(s): tortoise_dream_health'
   lifecycle: active
-  used_by: tooling, docs
+  used_by: eval-harness, tooling, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -5753,7 +5755,7 @@ rows:
   job: Public SDK method TortoiseSDK.set_point_baseline.
   dependency: 'reached by 1 registered tool(s): tortoise_set_point_baseline'
   lifecycle: active
-  used_by: tooling, docs
+  used_by: eval-harness, tooling, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null

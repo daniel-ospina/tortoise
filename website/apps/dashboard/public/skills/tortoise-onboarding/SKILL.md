@@ -881,9 +881,10 @@ the two seed anchors with `POST /v1/onboarding/seed` — section 1.)
   source) stays. The tool's own payload reports `enforcement: "intent-only"` —
   repeat that rather than telling a user the source has stopped.
 - **Agent-session recording** — `tortoise_manage_sources(action="enable"|"disable", source="agent_sessions")`
-  (`enabled` in the tool's `list` payload, `session_recording` in
-  `onboarding.operational`); read it back with `tortoise_manage_sources(action="list")`, which reports the
-  stored operational keys under `onboarding.operational` (#8686). **Self-hosted this is the
+  (read it back as `sources.agent_sessions.enabled` in the tool's `list` payload;
+  the raw flag is `session_recording` at the TOP level of the hosted projection's
+  `onboarding` key, and under `onboarding.operational` only on a self-hosted
+  deployment — `read_selfhost_state` is what nests it, #8686). **Self-hosted this is the
   ONE connect-style leg that works** — both the write and the read-back land on
   the deployment's own node. Both were fixed by #8686; before it, the write
   no-opped and reported success anyway.
