@@ -575,8 +575,10 @@ class SelfhostSeedRequest(BaseModel):
 
 @router.get("/onboarding/state", dependencies=[Depends(_require_key)])
 async def selfhost_onboarding_state():
-    """Self-hosted onboarding FLOW projection (registry: GET
-    /v1/onboarding/state).
+    """Self-hosted onboarding FLOW projection (GET /v1/onboarding/state).
+
+    Declared by hand here; the registry does not carry this route (#4282
+    Phase 3.2).
 
     Graph-DOWN → 200 with the ``'unavailable'`` markers (never fabricated
     defaults, never a false "N of M complete") — the same contract the
@@ -593,7 +595,10 @@ async def selfhost_onboarding_state():
 async def selfhost_onboarding_seed(body: SelfhostSeedRequest):
     """File the two onboarding anchor Subjects (Organization/organization +
     User/naturalPerson linked memberOf) from the self-hosted user's two
-    answers (registry: POST /v1/onboarding/seed).
+    answers (POST /v1/onboarding/seed).
+
+    Declared by hand here; the registry does not carry this route (#4282
+    Phase 3.2).
 
     Idempotent (replay reuses the anchors); a same-name Subject that is not
     this deployment's anchor returns ``status='collision'`` with ZERO writes

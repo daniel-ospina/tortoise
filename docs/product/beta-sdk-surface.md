@@ -179,8 +179,10 @@ tenancy off the MCP:
 **What is lost, stated exactly:** the **MCP** surface loses both reads. They are *not* rehomed onto
 an MCP tool — `check_connection` is *"programmatic, returns a result — not a wizard"*, and
 onboarding-progress state is wizard state, so folding it there would contradict this doc's own
-description of the row. Both reads remain reachable at the REST endpoints above (their `rest_spec`
-is unchanged in `tortoise/tool_registry.py`), so no capability is deleted; what changes is *which
+description of the row. Both reads remain reachable at the REST endpoints above — their routes are
+hand-written in `tortoise/hosted_api.py` (`GET /v1/onboarding/state`, `GET
+/v1/onboarding/github/status`), and the registry no longer declares them since #4282 Phase 3.2
+removed both tools — so no capability is deleted; what changes is *which
 surface* serves it.
 
 ### Ruling B (2026-10-12) re-admits ONE consolidated source-management tool
