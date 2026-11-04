@@ -1004,8 +1004,10 @@ def _bindings_of_statement(node: ast.stmt) -> list[tuple[str, int]]:
     `import` / `from … import` bindings, and `def` / `class` names.
 
     ⚠️ What this does NOT model, by design, is enumerated as a MEASURED residual in
-    `_UNMODELLED_module_scope_binders`: `except … as` names, `match` captures, a
-    module-scope `:=`, and a PEP 695 `type` alias.
+    `_UNMODELLED_module_scope_binders`: `match` captures, a module-scope `:=`, and a
+    PEP 695 `type` alias. (`except … as name` is deliberately NOT in that list: PEP
+    3110 deletes the target at handler exit, so it binds nothing here — see
+    `_DELETED_module_scope_names` for the one hazard it does carry.)
     """
     if isinstance(node, ast.Assign):
         return [(name, node.lineno) for t in node.targets for name in _from_target(t)]
@@ -1053,8 +1055,18 @@ def _compound_clause_bodies(node: ast.stmt) -> list[list[ast.stmt]]:
 
     `node.body` alone is not enough: a name bound in `else:`, `except …:`, `finally:`
     or a `match` `case` body binds at the same scope as one in `if X:` above it.
+
+    ⚠️ `ast.Match` is the one form in `_COMPOUND_STATEMENTS` that owns NO `.body`: its
+    clause bodies hang off the `match_case` nodes in `.cases` (CPython ASDL
+    `Match(expr subject, match_case * cases)`; verified on this interpreter,
+    `ast.Match._fields == ('subject', 'cases')`). Reading `.body` unconditionally
+    therefore raised `AttributeError: 'Match' object has no attribute 'body'` on the
+    first module-level `match` that reached here — a crash, not a detection, in the
+    guard whose whole purpose is that a claimed form is a mechanism (#10703 review at
+    `4d7517dfa`, P2). `.cases` is walked below; `.body` is read only where it exists.
     """
-    bodies = [node.body]
+    own_body = getattr(node, "body", None)
+    bodies: list[list[ast.stmt]] = [own_body] if own_body is not None else []
     for attr in ("orelse", "finalbody"):
         value = getattr(node, attr, None)
         if value:
@@ -1071,7 +1083,9 @@ def _compound_body_bound_names(tree: ast.Module) -> list[tuple[str, int]]:
 
     The other half of the module scope, and the half the first round of this guard
     was blind to: `_module_scope_bound_names` reads `tree.body`, so
-    `if __name__ == "__main__": import os` (`tests/test_closes_landing.py:3489`) was
+    `if __name__ == "__main__": import os` — the `import os` inside THIS file's own
+    `if __name__ == "__main__":` block, cited as a SYMBOL because the line number this
+    used to carry had already drifted — was
     invisible to it AND unreported by `_UNMODELLED_module_scope_binders`, while the
     docstring claimed every module-scope binder form was collected. Measured before
     this walk existed: `import os` added at the top of that file rebinds `os` at
@@ -1126,6 +1140,16 @@ def _UNMODELLED_module_scope_binders(tree: ast.Module) -> list[tuple[str, int]]:
     module-level compound). Between the three there is no module-scope binder shape
     that is silently unwatched: a form is either COLLECTED by one of the walks, or
     REPORTED by this one.
+
+    ⚠️ `except … as name` is NOT one of these forms, and reporting it here was a false
+    red (#10703 review at `4d7517dfa`, P2). The target does not bind module scope at
+    all: PEP 3110 gives it a cleanup semantic — `except E as N:` runs as `N = <exc>` …
+    `finally: N = None; del N` — so after the handler `N` is UNBOUND (measured on this
+    interpreter: `'exc' in globals()` is `False` after a module-scope handler). A
+    plain module-scope `except ImportError as exc:` is a legal, idiomatic shape this
+    tree holds 12 times across 9 files, and the assertion this feeds reds the moment
+    one appears — with a remedy (`extend _bindings_of_statement`) that cannot be
+    implemented, because an `ExceptHandler` is never handed that function.
     """
     found: list[tuple[str, int]] = []
 
@@ -1133,9 +1157,11 @@ def _UNMODELLED_module_scope_binders(tree: ast.Module) -> list[tuple[str, int]]:
         for child in ast.iter_child_nodes(node):
             if isinstance(child, _OTHER_SCOPES):
                 continue
-            if isinstance(child, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)) and child.name:
-                # `except … as name` and a `match` capture both bind `name`; the walk
-                # models neither, so returning them keeps the residual measurable.
+            if isinstance(child, (ast.MatchAs, ast.MatchStar)) and child.name:
+                # A `match` CAPTURE binds `name` for the rest of the case body and the
+                # walk models it nowhere, so returning it keeps the residual
+                # measurable. (`except … as name` is NOT here: PEP 3110 deletes it at
+                # handler exit, so it binds nothing module-scope — see the docstring.)
                 found.append((child.name, child.lineno))
             elif isinstance(child, ast.MatchMapping) and child.rest:
                 found.append((child.rest, child.lineno))
@@ -1148,6 +1174,47 @@ def _UNMODELLED_module_scope_binders(tree: ast.Module) -> list[tuple[str, int]]:
     for statement in tree.body:
         if not isinstance(statement, _OTHER_SCOPES):
             _visit(statement)
+    return found
+
+
+def _DELETED_module_scope_names(tree: ast.Module) -> list[tuple[str, int]]:
+    r"""`(name, lineno)` of a module-level `except … as name` that DESTROYS a live binding.
+
+    The one hazard the `except … as` shape actually carries, kept measurable after it
+    stopped being reported as an unmodelled BINDER (#10703 review at `4d7517dfa`, P2).
+    PEP 3110 deletes the `as` target at the end of the handler, so the form binds
+    nothing — but when `name` is ALREADY bound at module scope, the handler overwrites
+    that binding and then deletes it, and every later reader of the module name sees an
+    `UnboundLocalError`/`NameError` where the module's own binding used to be. That is
+    the "the copy you read is dead" outcome the guard above exists to red on, reached
+    by deletion instead of by shadowing.
+
+    ONLY the collision is reported, and only when the live binding precedes the handler
+    (a name the module binds AFTER the handler has nothing to clobber). Reporting every
+    handler is the false red that gets a guard deleted; reporting no handler loses the
+    real defect the narrowing would otherwise drop.
+
+    Scope matches the binder walks: `tree.body` statements, descending into nested
+    compound bodies, stopping at `_OTHER_SCOPES` — an `except` inside a function is that
+    function's local, not the module's.
+    """
+    live: dict[str, int] = {}
+    for name, lineno in _module_scope_bound_names(tree):
+        live[name] = min(lineno, live.get(name, lineno))
+    found: list[tuple[str, int]] = []
+
+    def _visit(statements: list[ast.stmt]) -> None:
+        for statement in statements:
+            if isinstance(statement, _OTHER_SCOPES):
+                continue
+            for handler in getattr(statement, "handlers", ()):
+                if handler.name and live.get(handler.name, handler.lineno) < handler.lineno:
+                    found.append((handler.name, handler.lineno))
+            if isinstance(statement, _COMPOUND_STATEMENTS):
+                for body in _compound_clause_bodies(statement):
+                    _visit(body)
+
+    _visit(tree.body)
     return found
 
 
@@ -1181,7 +1248,9 @@ def test_no_module_level_name_is_REBOUND_because_the_second_copy_wins():
     `with` / `match` body, because a binder there still binds at module scope — and
     the guard reds on a name bound in BOTH passes. That cross-pass check is the
     live defect from the second review round: this file carries `import os` inside
-    its `if __name__ == "__main__":` block (`tests/test_closes_landing.py:3489`), so
+    its `if __name__ == "__main__":` block (cited as a SYMBOL, not a line number: the
+    number this comment used to carry had already drifted, which is the citation-drift
+    class this same file argues against two tests lower), so
     a top-level `import os` would have rebound `os` at import while the top-level
     walk counted ONE binding and reported nothing.
     `test_the_REBIND_guard_DETECTS_a_duplicate_in_EVERY_form_it_collects` proves each
@@ -1189,12 +1258,15 @@ def test_no_module_level_name_is_REBOUND_because_the_second_copy_wins():
     `test_the_REBIND_guard_DETECTS_a_duplicate_through_a_module_level_COMPOUND_body`
     does the same for the compound pass, plus its legal-shape negative controls.
 
-    ⚠️ The forms NEITHER pass collects — `except … as` names, `match` captures, a
-    module-scope `:=`, and a PEP 695 `type` alias — are not merely written down here:
+    ⚠️ The forms NEITHER pass collects — `match` captures, a module-scope `:=`, and a
+    PEP 695 `type` alias — are not merely written down here:
     `_UNMODELLED_module_scope_binders` measures them on both scanned files (top-level
     and compound-nested alike) and the assertion below reds the moment one appears,
     so a gap cannot open silently while the docstring keeps saying the class is
-    watched.
+    watched. A module-level `except … as name` is NOT one of those forms (PEP 3110
+    deletes the target at handler exit, so it binds nothing); the clobber-and-delete
+    it can still cause over a LIVE module binding is measured separately by
+    `_DELETED_module_scope_names`, also asserted below.
 
     ⚠️ BOTH SCOPES ARE SCANNED, and the second one is not a nicety: while resolving
     the #10703 forward merge of `origin/main`, the conflicted WORKING TREE carried
@@ -1220,6 +1292,12 @@ def test_no_module_level_name_is_REBOUND_because_the_second_copy_wins():
             f"{source.name} binds module-scope name(s) through a form the rebind scan "
             f"does not collect {sorted(unmodelled)}: extend `_bindings_of_statement` "
             f"rather than leaving that form unwatched (#10703 review)")
+        deleted = _DELETED_module_scope_names(tree)
+        assert not deleted, (
+            f"{source.name} deletes a module-scope name through a module-level "
+            f"`except … as <same name>` handler {sorted(deleted)}: PEP 3110 runs `del "
+            f"<name>` at the end of the handler, so the module binding it overwrote is "
+            f"UNBOUND for every later reader — rename the handler target (#10703 review)")
         per_file: dict[str, list[int]] = {}
         for name, lineno in _module_scope_bound_names(tree):
             per_file.setdefault(name, []).append(lineno)
@@ -1237,8 +1315,8 @@ def test_no_module_level_name_is_REBOUND_because_the_second_copy_wins():
         f"only {total_bindings} module-level bindings found: not measuring")
     assert compound_bindings, (
         "the compound-body pass found NO binder at all, so the cross-pass check below "
-        "cannot fire: this file's own `if __name__ == \"__main__\": import os` "
-        "(`tests/test_closes_landing.py:3489`) is the live instance it measures")
+        "cannot fire: this file's own `import os`, inside its "
+        "`if __name__ == \"__main__\":` block, is the live instance it measures")
     rebound = {
         f"{source.name}:{name}": lines
         for source, per_file in seen.items()
@@ -1258,6 +1336,82 @@ def test_no_module_level_name_is_REBOUND_because_the_second_copy_wins():
         f"repeated because it is the one a maintainer reads first. Bindings in "
         f"different clause bodies of ONE compound (`try: import a as x` / "
         f"`except ImportError: import b as x`) are NOT reported — exactly one runs.")
+
+
+def test_the_REBIND_guard_does_NOT_red_on_a_module_level_except_as_handler():
+    r"""#10703 review at `4d7517dfa`, P2 — `except … as name` is NOT a module binder.
+
+    `_UNMODELLED_module_scope_binders` reported every module-scope `except … as name`
+    as a binder "the walk models neither", and the guard above asserts that set is
+    EMPTY — so appending the repo's own `try: sys.exit(main())` / `except Exception as
+    exc:` idiom to either scanned file turned this suite red, with a remedy that cannot
+    be implemented: an `ExceptHandler` is never handed to `_bindings_of_statement` (it
+    takes `ast.stmt`s from a body list, and `_compound_clause_bodies` yields
+    `handler.body`, never the handler), so "extend `_bindings_of_statement`" changes
+    nothing and the guard stays red.
+
+    The premise was false, and the primary source says why. PEP 3110 ("Catching
+    Exceptions in Python 3000") gives the `as` target a cleanup semantic — the handler
+    runs as `N = <exc>` … `finally: N = None; del N` — so after it the name is UNBOUND,
+    not bound: a module-scope `except … as exc:` binds nothing (measured on this
+    interpreter: `'exc' in globals()` is `False` after a module-scope handler).
+    Reporting it as an unmodelled BINDER is a false red on a legal, idiomatic shape —
+    the direction this guard's own docstring rules out ("a guard that reds on [a legal
+    shape] gets deleted within a week") — and the shape is not hypothetical here: 12
+    module-scope `except … as <name>` handlers live across 9 files in `tests/` and
+    `tools/`.
+
+    The hazard the shape DOES carry is narrower and real: when the handler name is
+    already bound at module scope the handler overwrites that binding and then deletes
+    it, leaving the module name unbound for every later reader. That is a different
+    defect class from an unmodelled binder, so it has its own measurement
+    (`_DELETED_module_scope_names`), asserted here in BOTH directions — the narrowing
+    cannot silently lose the real defect, and the new check cannot silently widen back
+    into the false red it replaced.
+    """
+    module_text = MODULE_PATH.read_text()
+
+    # NEGATIVE CONTROL — the plain, legal shape: a handler target the module never
+    # bound. It is not a binder, so none of the three walks may report it.
+    legal = "\ntry:\n    import json\nexcept ImportError as exc:\n    raise\n"
+    tree = ast.parse(module_text + legal)
+    assert not [n for n, _ in _UNMODELLED_module_scope_binders(tree) if n == "exc"], (
+        "`_UNMODELLED_module_scope_binders` reports a module-scope `except … as exc` as "
+        "an unmodelled BINDER: PEP 3110 deletes the target at handler exit, so it binds "
+        "nothing at module scope — this is the false red the #10703 review at "
+        "`4d7517dfa` found, and it reds on the repo's own `except Exception as exc:` "
+        "idiom")
+    assert not [n for n, _ in _compound_body_bound_names(tree) if n == "exc"], (
+        "`except … as exc` must not be collected as a compound-body binder either: the "
+        "target is deleted at handler exit and binds nothing at module scope")
+    assert not [n for n, _ in _DELETED_module_scope_names(tree) if n == "exc"], (
+        "the deletion check reports `exc`, which the module never bound — there is no "
+        "live binding to clobber, so reporting it would be the same false red one "
+        "function over")
+
+    # POSITIVE CONTROL — the collision the narrowing must NOT lose: the handler name IS
+    # bound at module scope ABOVE the handler, so the delete destroys a live binding.
+    clobber = (
+        "\nimport json as _PROBE_EXC\n"
+        "try:\n    _PROBE_EXC.loads('')\n"
+        "except ValueError as _PROBE_EXC:\n    pass\n")
+    clobbered = [
+        n for n, _ in _DELETED_module_scope_names(ast.parse(module_text + clobber))]
+    assert "_PROBE_EXC" in clobbered, (
+        f"a module-level `except … as _PROBE_EXC` over a LIVE `_PROBE_EXC` binding "
+        f"deletes it at handler exit, so the module name is unbound afterwards — the "
+        f"guard must say so rather than stay silent (got {clobbered})")
+
+    # NEGATIVE CONTROL — order matters: a handler name the module binds only LATER is
+    # not clobbered (nothing is live at handler time), so it is not reported either.
+    later = (
+        "\ntry:\n    import json\nexcept ImportError as _PROBE_LATER:\n    raise\n"
+        "_PROBE_LATER = 1\n")
+    assert "_PROBE_LATER" not in [
+        n for n, _ in _DELETED_module_scope_names(ast.parse(module_text + later))], (
+        "the handler runs BEFORE the module binds `_PROBE_LATER`, so its delete has "
+        "nothing to destroy — reporting it would fire on a legal ordering a module may "
+        "legitimately hold")
 
 
 def test_the_REBIND_guard_DETECTS_a_duplicate_in_EVERY_form_it_collects():
@@ -1341,11 +1495,13 @@ def test_the_REBIND_guard_DETECTS_a_duplicate_through_a_module_level_COMPOUND_bo
     form this pair of files can hold", but `_module_scope_bound_names` iterates
     `tree.body` only, so a binder nested inside a module-level `if` / `try` / `for` /
     `while` / `with` / `match` body was invisible to it — and
-    `_UNMODELLED_module_scope_binders` enumerates the residual FORMS (`except … as`,
-    `match` captures, `:=`, `type` aliases), not that position, so it did not report
-    it either. The claim was false, and the file it scans contains the counterexample:
-    `tests/test_closes_landing.py:3489` binds `os` inside its
-    `if __name__ == "__main__":` block. A top-level `import os` there would rebind
+    `_UNMODELLED_module_scope_binders` enumerates the residual FORMS (`match`
+    captures, `:=`, `type` aliases — and, in that revision, `except … as` names,
+    which it wrongly reported as binders; see the negative control below), not that
+    position, so it did not report it either. The claim was false, and the file it
+    scans contains the counterexample: this file's own `import os`, inside its
+    `if __name__ == "__main__":` block (cited as a symbol — the line number drifted
+    once already). A top-level `import os` there would rebind
     `os` at import, the top-level walk would count ONE binding, and the guard would
     stay green — the "second copy wins, the copy you read is dead" class this PR
     exists to close, re-introduced inside the fix for it.
@@ -1401,6 +1557,14 @@ def test_the_REBIND_guard_DETECTS_a_duplicate_through_a_module_level_COMPOUND_bo
             "_PROBE_T, _PROBE_U = (1, 2)\nif False:\n    pass\nelse:\n"
             "    _PROBE_T, _PROBE_U = (3, 4)\n",
             "_PROBE_T"),
+        # `ast.Match` is a CLAUSE-BODY owner with no `.body` of its own — its bodies sit
+        # on the `match_case` nodes in `.cases` — so it is the one form here that used to
+        # fail by RAISING (`AttributeError: 'Match' object has no attribute 'body'`)
+        # instead of by missing a binding (#10703 review at `4d7517dfa`, P2).
+        "reassignment inside a match case body": (
+            "_PROBE_MATCH = 1\nmatch _PROBE_MATCH:\n    case 1:\n"
+            "        _PROBE_MATCH = 2\n",
+            "_PROBE_MATCH"),
     }
     missed_by_fixed_walk = {
         label: expected
