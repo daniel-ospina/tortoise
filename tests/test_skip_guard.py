@@ -249,9 +249,18 @@ class TestGuardAcceptsCleanLog:
         80 cols (drops test_ep_directional's reason, guard would fail open), and
         pytest 9.1.1 REPLACES the report set on repeated -r flags — so a
         trailing -rfE would suppress the skip summary the guard depends on.
-        -r fEs is the order-independent superset (f=FAILED, E=ERROR, s=SKIPPED)."""
+        -r fEs is the order-independent superset (f=FAILED, E=ERROR, s=SKIPPED).
+
+        The SELECTION is the fragile half: EIGHT watchdog-wrapped `python -m
+        pytest` command lines in this file match the duration prefix, and TWO of
+        them write `--junitxml="$PYTEST_JUNIT"` — the fast gating run and, since
+        #10028, the single-process `test-slow` leg. The selection below therefore
+        reads ONE JOB (`gating_pytest_runs(…, "test")`) rather than the whole
+        file: a token that stops discriminating does not error, it silently
+        compares another leg's command line — and reading the wrong job can pass
+        by coincidence (measured: `assert 2 == 1` the moment `test-slow` adopted
+        the same spelling). The count floor below stays load-bearing."""
         fast_run = gating_pytest_runs(PYTHON_CI.read_text())
-        # A retarget here is INVISIBLE without these two floors: every pytest
         # invocation in this file carries `-r fEs`, and the retired literal still
         # matched the `test-slow` leg, so reading the WRONG job passed silently
         # (measured: the old filter matched exactly one line, and it was
@@ -261,7 +270,18 @@ class TestGuardAcceptsCleanLog:
             "the pinned invocation does not expand $FILES — it is not the "
             f"fast-suite gating run: {fast_run[0]}"
         )
-        assert fast_run, "fast-suite pytest invocation not found"
+        # The third floor names the leg this pin must NOT read. `-n` is what
+        # makes the fast job the SHARDED, xdist run; `-p no:cacheprovider` is
+        # what makes `test-slow`'s single-process run recognisable. If a future
+        # edit gives the slow leg `-n` too, this reds by NAME instead of the
+        # count floor reding with a two-line diff a reader has to decode.
+        assert '-p no:cacheprovider' not in fast_run[0], (
+            "the pinned invocation is the single-process `test-slow` leg, not "
+            f"the sharded fast-suite gating run: {fast_run[0]}"
+        )
+        # (No `assert fast_run` here: `assert len(fast_run) == 1` above and the
+        # two `fast_run[0]` reads already fail first, so an emptiness guard on
+        # this line could never be the message a reader sees.)
         assert "-r fEs" in fast_run[0], (
             "fast-suite pytest must report skips in the summary (-r fEs): -v "
             "truncates skip reasons at 80 cols and a trailing -rfE replaces the "

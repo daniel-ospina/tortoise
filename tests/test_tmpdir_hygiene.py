@@ -992,7 +992,16 @@ _PYTEST_LOG_MIGRATED_JOBS = (
 
 # A host-global artifact path: `/tmp/pytest.log`, or any other bare `/tmp/...`
 # spelling. The runner's per-job temp dir is `$RUNNER_TEMP` / `${{ runner.temp }}`.
-_HOST_TMP_PATH_RE = re.compile(r"(?:^|[\s=]>'\"])(/tmp/[A-Za-z0-9._-]+)")
+#
+# ⛔ The prefix is a CHARACTER CLASS `[\s=>'"]`, not `[\s=]>'"`: the `]` closes the
+# class, so one stray `>` turns the three quote characters into literals and the
+# prefix can then only match `<space-or-=> > ' "` — i.e. never, in a shell line.
+# Measured against `origin/main:.github/workflows/python-ci.yml` on the same
+# `_code_lines`/`"\n".join` corpus this pin builds: 50 `/tmp/<path>` occurrences in
+# non-comment lines, `findall` → **0** with the stray `>`, **50** without it. Half 2
+# of the pin was therefore INERT: a reader reverted to a host-global path stayed
+# green while the leg's verdict came from a co-tenant's file (#10179 review, P2).
+_HOST_TMP_PATH_RE = re.compile(r"(?:^|[\s=>'\"])(/tmp/[A-Za-z0-9._-]+)")
 
 
 def _code_lines(text: str) -> list[str]:
