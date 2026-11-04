@@ -195,6 +195,29 @@ def test_the_header_ledger_is_a_ledger() -> None:
     assert len(retired) >= len(pairs), (pairs, sorted(retired))
 
 
+def test_the_paired_construction_retires_both_of_its_lines() -> None:
+    """`§2a` cited `/v1/points` as `:10265-10266` — the route line AND its handler `def`.
+
+    A ledger that retires `10265` and only *names* `10915` in prose leaves `10266`
+    retired nowhere, so a stale `:10266` cite passes the coordinate check while
+    pointing at unrelated code at the anchor head. That is the same one-construction-
+    two-coordinate-systems defect this module exists for, surviving inside the ledger.
+
+    ⚠️ Measured before this pin: rewriting both the `/v1/points` table row and §2a to
+    cite `hosted_api.py:10266` passed every test in this module (`retired` held no
+    `10266`). The numbers are historical constants, not a moving measurement — they
+    belong to the fixed retired head `d72983b99` and its target `d3f148a56`, where
+    `10265` is `@app.get("/v1/points")` and `10266` is `async def list_points(`.
+    """
+    header, _body = _split_document()
+    sources = [source for source, _target in _ledger_pairs(header)]
+    assert any({10265, 10266} <= source for source in sources), (
+        "the header does not retire `/v1/points`'s full `10265-10266` extent, so a"
+        " stale cite to the second half (`list_points`'s `def` line) would pass the"
+        f" coordinate check: pairs={sources}"
+    )
+
+
 def test_no_live_citation_points_at_a_retired_coordinate() -> None:
     """The document must carry ONE coordinate system per construction.
 

@@ -30,7 +30,9 @@ seven re-derivations below, and all nine citation sites that carry them.**
 lines to `tortoise/hosted_api.py`, and **no other cited file moved** (`git diff --stat d72983b99
 d3f148a56` over the eight cited paths reports `hosted_api.py` alone). Those seven therefore shift by a
 *uniform* +649, read at the anchor: `/v1/events` `10217`→`10866`, its `Query(…, le=_MAX_EVENT_PAGE)`
-`10221`→`10870`, `/v1/points` `10265`→`10914` with `list_points` at `10915`, its return `10324`→`10973`,
+`10221`→`10870`, `/v1/points` `10265-10266`→`10914-10915` (`@app.get` and the `list_points` `def` — retired
+as the whole extent, because §2a cited it as a range and half a construction retired is the other
+half retired nowhere), its return `10324`→`10973`,
 and the `/v1/search` marker pair `10804-10813`→`11453-11462`. Every other figure below is unchanged
 from `d72983b99`, and the control still holds: `event_store.py`, `selfhost_api.py`, `tool_registry.py`
 and `config/surface-manifest.yml` are byte-identical between the two heads. This is the third
