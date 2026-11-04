@@ -5098,8 +5098,13 @@ def tortoise_operator_action(action: str, id: str, reason: str | None = None,
     """Consolidated operator write action — action=mitigate|annotate.
 
     mitigate: reason (required) + strength (0-1, default 0.5) — creates/updates
-    the mitigation Point (idempotent). annotate: bias/precision/consistency/
+    the mitigation Point, and is NOT idempotent: a re-assertion after a
+    withdrawal mints a NEW Point. annotate: bias/precision/consistency/
     directness (all required, 0-1).
+
+    ⛔ `mitigate` and `tortoise_mitigate_operator` reach the SAME
+    `mitigate_operator` SDK call, so this description must not claim more for it
+    than that tool's own does.
     """
     if action == "mitigate":
         if not reason:

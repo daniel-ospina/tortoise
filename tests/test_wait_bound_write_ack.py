@@ -196,11 +196,14 @@ def test_retry_safe_is_derived_from_the_registry_not_a_second_list():
     """The retry-safety verdict is the registry's, not a second hand-kept list.
 
     #10849's measured asymmetry, now machine-readable at the call site:
-    ``create_point`` dedups on ``(pointKind, content_hash)`` and ``ingest``
-    reaches that same fold for its points, so a props-free repeat CONVERGES;
-    ``create_operator`` has no dedup at all, so a repeat DUPLICATES the edge.
-    (NOT because of ``batch_id`` — that is a STAMP written after the fact
-    (``_stamp_batch_id``), never a dedup key, which is exactly why ingest's
+    ``create_point`` dedups on ``(pointKind, content_hash)``, so a props-free
+    repeat CONVERGES; ``create_operator`` has no dedup at all, so a repeat
+    DUPLICATES the edge. ``ingest`` REACHES that fold for its points and is still
+    NOT safe, which is the point of the asymmetry being read from the registry
+    rather than inferred from the fold: a tool is safe only if it is safe for
+    EVERY leg of the call, and ingest's ``entities`` leg appends.
+    (The fold is NOT keyed on ``batch_id`` — that is a STAMP written after the
+    fact (``_stamp_batch_id``), never a dedup key, which is exactly why ingest's
     ``entities`` leg had to be handled separately.)
 
     (The FAIL-CLOSED half — an unresolvable name is never advertised as safe —
