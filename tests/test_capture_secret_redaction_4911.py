@@ -856,7 +856,15 @@ def test_the_source_sink_scans_a_bounded_window(sdk, monkeypatch):
         session_id=sid)
 
     rows = sdk._get_proj().g.query(
-        "MATCH (s:Source {url:$u}) RETURN s.summary, s.topics",
+        # ⛔ `_searchText` IS THE BLOB NOW (#10000 §9.1/D1). This sink's evidence
+        # used to come from `s.summary`, which was the transcript's first
+        # substantive utterance — a verbatim slice of RAW turn text the capture
+        # writer no longer puts on the node. Deleting the assertion would retire
+        # the only pin proving this sink MARKS rather than drops, so the evidence
+        # moved to the field that still carries the same redacted text
+        # (`_searchText`, #3518/D10 — `tests/test_capture_redaction_sinks_5445.py`
+        # already includes it in `_source_blob`).
+        "MATCH (s:Source {url:$u}) RETURN s._searchText, s.topics",
         params={"u": f"session:{sid}"}).result_set
     assert rows
     blob = (rows[0][0] or "") + " " + " ".join(rows[0][1] or [])

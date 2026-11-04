@@ -2524,12 +2524,16 @@ def _assert_the_text_is_in_exactly_one_store(proj, needle: str, *, in_graph: boo
     property can carry prose, not because a writer does. A writer that carried
     turn text under a SEVENTH name (`body`, `summary`, `raw`…) would be outside
     this population. That is not hypothetical: this tree derives the session's first
-    substantive utterance into a `summary` (`sdk._session_source_metadata`) and
-    writes it on the session `:Source` (`s.summary=$sum`), so a `:Source.summary`
-    hit is a route this scan cannot see. The scan therefore guards against a
-    changed label, id space or wiring — the shapes the sibling id-space
-    assertions cannot see — and not against a renamed property. Read the claim no
-    wider than that.
+    substantive utterance into a `summary` (`sdk._session_source_metadata`) and,
+    until #10000's §9.1/D1 fix, wrote it on the session `:Source`
+    (`s.summary=$sum`) — a `:Source.summary` hit was a route this scan could not
+    see. That write is GONE (both the live SET and the replay fold), and the
+    route now has its own pin in this file
+    (`test_a_captured_session_source_keeps_the_transcript_off_the_node`), so the
+    class is covered without widening these six names. The scan therefore guards
+    against a changed label, id space or wiring — the shapes the sibling
+    id-space assertions cannot see — and not against a renamed property. Read
+    the claim no wider than that.
 
     ⚠️ `tests/test_10017_record_carrier.py::_text_hits` is a SECOND copy of this
     same query, and this diff widens BOTH: two scans that disagree about the
@@ -3227,3 +3231,105 @@ def test_the_shared_read_predicate_accepts_0_and_rejects_a_short_claim():
     assert (armed, armed_reason) != (3, ""), (
         "the armed arm published a count its rows do not back: "
         f"({armed!r}, {armed_reason!r})")
+
+
+# ── #10000 §9.1/D1 on the session `:Source` — the second prose passthrough ──
+#
+# The six-name scan above CANNOT SEE THIS ONE, and its own docstring says so:
+# `sdk._session_source_metadata` derives the transcript's first substantive
+# utterance into `summary`, and `_materialize_session_source` USED TO carry it
+# on its `SourceCreated` record, from which the `:Source` MERGE wrote it (and,
+# for a record restore, `cache_projection.node_from_row` re-wrote it). The
+# carrier no longer carries it — see the test below. The scan's population is
+# still a property-name allow-list, so a `:Source.summary` hit WOULD be a route
+# it cannot reach; that class is covered by its own pin rather than by widening
+# these six names.
+_SOURCE_SUMMARY_SCAN = (
+    "MATCH (s:Source) WHERE s.summary CONTAINS $needle "
+    "RETURN coalesce(s.url, s.id, '')")
+_SOURCE_SEARCHTEXT_SCAN = (
+    "MATCH (s:Source) WHERE s._searchText CONTAINS $needle "
+    "RETURN coalesce(s.url, s.id, '')")
+
+
+def _source_prop_hits(proj, cypher: str, needle: str) -> list[str]:
+    return [row[0] for row in proj.g.query(cypher, params={"needle": needle}).result_set]
+
+
+def test_a_captured_session_source_keeps_the_transcript_off_the_node(sdk):
+    """#10000 §9.1/D1 on the `:Source` — the route the six-name scan cannot see.
+
+    `docs/verify/2026-10-31-record-capstone.md` §4 item 2 measured this on a
+    deployed tree: *"A `:Source` still carries raw TURN text in `summary` — 80 B,
+    written by the capture path itself (`sdk._session_source_metadata`)"*. It is
+    recorded on #10000 as the second prose passthrough onto a node, and no PR
+    carried it.
+
+    ⛔ THREE HALVES, so this leg cannot pass vacuously and cannot pass by
+    deleting the derivation:
+      * the node must NOT carry the utterance in `summary` — nothing reads it for
+        a session Source (the search-result enrichment reads `n.summary` only
+        under `documentKind IS NOT NULL`, i.e. documents), and the codebase's own
+        D10 declaration is that *"a `:Source` stores no raw bytes — the text
+        lives on `_searchText`"* (`tortoise/search_engine.py:1895`);
+      * the `SourceCreated` CARRIER must not carry it either — that is the ONE
+        door this fix closes, and it is what the record→cache door would
+        otherwise re-materialise on `tortoise record-restore` (a placed
+        `public.source.summary` column is written back onto the node by
+        `cache_projection.node_from_row`);
+      * the FTS field `_searchText` MUST still carry it. That field is #3518's
+        decision and D10's declared home for a Source's searchable text;
+        removing it is a #3518/D10 **reopen**, not a cleanup, and this pin would
+        redden rather than let a lane take that decision quietly.
+
+    The needle is the FIRST substantive utterance on purpose: that is exactly the
+    slice `_session_source_metadata` picks, so a needle anywhere else would make
+    this test green for the wrong reason.
+    """
+    needle = "the first utterance that must not become node prose"
+    out = sdk.capture_session(
+        [{"role": "user", "content": needle},
+         {"role": "assistant", "content": "acknowledged"}],
+        session_id="source-prose-session",
+    )
+    assert out.get("session_id") == "source-prose-session", out
+    proj = sdk._get_proj()
+
+    # ── non-vacuity FIRST: the capture really derived this text ─────────────
+    searchtext_hits = _source_prop_hits(proj, _SOURCE_SEARCHTEXT_SCAN, needle)
+    assert searchtext_hits, (
+        "the capture did not derive the first utterance at all, so the absence "
+        "asserted below would be vacuous — `_session_source_metadata` is the "
+        "derivation this test is about (the FTS field is its DECLARED home, "
+        "#3518/D10)")
+
+    summary_hits = _source_prop_hits(proj, _SOURCE_SUMMARY_SCAN, needle)
+    assert summary_hits == [], (
+        "a session `:Source` carries the transcript's first utterance in "
+        f"`summary` — raw turn text on the graph (§9.1/D1), on the node the "
+        f"capture path writes most: {summary_hits!r}. `_searchText` is the "
+        "declared home for a Source's searchable text (#3518/D10); `summary` "
+        "beside it is a second, undeclared copy with no reader.")
+
+    # ── the CARRIER half: the record must not carry it either ──────────────
+    import json
+    import os
+
+    log_path = os.path.join(
+        os.environ["TORTOISE_EVENT_LOG_BASE_DIR"], "events.jsonl")
+    with open(log_path, encoding="utf-8") as fh:
+        carriers = [json.loads(line) for line in fh if line.strip()]
+    source_carriers = [
+        r for r in carriers
+        if r.get("type") == "SourceCreated"
+        and r.get("url") == "session:source-prose-session"
+    ]
+    assert source_carriers, (
+        "the capture emitted no `SourceCreated` carrier at all, so the carrier "
+        "half below would pass vacuously")
+    leaked = [r for r in source_carriers if r.get("summary") is not None]
+    assert leaked == [], (
+        "the `SourceCreated` carrier still carries the transcript slice, so a "
+        "record restore (`cache_projection.node_from_row` writes a placed "
+        f"`public.source.summary` back onto the node) re-creates the prose "
+        f"§9.1/D1 keeps out of the graph: {[r.get('summary') for r in leaked]!r}")

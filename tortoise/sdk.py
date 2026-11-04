@@ -16275,17 +16275,35 @@ class TortoiseSDK:
         §4.6 + #909 §4.3 #6 register it as the session source kind), else
         ``document`` (#3263) — so this MERGE now mainly upgrades LEGACY stubs
         minted before that change, plus: contentHash of the stored transcript,
-        cheap summary + topics, sessionId, capturedAt, eventId. It wires
+        cheap topics, sessionId, capturedAt, eventId. It wires
         ``(Source)-[:references]->(sessionCaptured Event)`` — parity with the
         ``_session_event_write`` agentSession pattern and the backfill's
         references edge (test_backfill_sources.py).
 
+        ⛔ #10000 §9.1/D1: it does NOT set ``summary``, and — deliberately — it
+        does not journal it either. That value is the transcript's first
+        substantive utterance, a verbatim slice of the RAW turn text, and the raw
+        transcript lives outside the graph. The derivation still runs and its
+        text still reaches the node's searchable field (``_searchText``,
+        #3518/D10), so the session stays findable and nothing is lost: what this
+        write stops doing is shipping the same prose as NODE METADATA (a placed
+        ``public.source.summary`` column is written straight back onto the node by
+        the record→cache door, i.e. the one recovery engine a journal fold cannot
+        constrain). Applying and replaying therefore AGREE without any further
+        clause — there is no `summary` write on either side — and no ``REMOVE`` is
+        issued here: an unconditional one would destroy a caller-authored
+        ``summary`` on a ``session:``-keyed ``:Source`` (`summary` is
+        caller-settable) while replay kept it, which is the same live != replay
+        class in the other direction (measured in review).
+
         #4911: the transcript is SCRUBBED before anything is derived from it or
-        persisted. ``summary`` is the first substantive utterance and ``topics``
-        are the six most frequent content words — i.e. the session's own turn
-        text — so redacting only the turn Points left the SAME credential in
-        ``Source.summary`` / ``Source.topics`` on the same write (reproduced in
-        review). ``contentHash`` is taken over the redacted transcript too, so
+        persisted. The derived metadata is the session's own turn text, so
+        redacting only the turn Points would have left the SAME credential in
+        ``Source.topics`` / ``Source._searchText`` on the same write (reproduced
+        in review). ⚠️ ``Source.summary`` was the third sink until #10000 §9.1/D1
+        stopped this writer storing it at all; it is listed here no longer
+        because it is no longer written, NOT because it was safe to skip.
+        ``contentHash`` is taken over the redacted transcript too, so
         the hash describes what is stored.
 
         #3518: it also populates ``_searchText`` — the field the Source FTS
@@ -16341,7 +16359,19 @@ class TortoiseSDK:
             "sid": session_id,
             "cap": now,
             "ch": content_hash,
-            "sum": summary,
+            # ⛔ `sum` IS DELIBERATELY ABSENT FROM THIS STATEMENT (#10000 §9.1/D1).
+            # `summary` is the transcript's FIRST SUBSTANTIVE UTTERANCE — a
+            # verbatim slice of the raw turn text (`_session_source_metadata`) —
+            # and §9.1/D1 keeps the raw transcript OUT of the graph. It used to
+            # ride `s.summary=$sum` here, which made the session `:Source` a
+            # second home for turn text that `_TEXT_PROPERTIES`' six-name scan
+            # cannot see (`tests/test_10000_turns_record_only.py` names that
+            # escape). The value is still DERIVED, and its text still reaches the
+            # node through `_searchText` — D10/#3518's declared home for a
+            # Source's searchable text — but it is neither written here as a
+            # property nor carried on the `SourceCreated` record below: a placed
+            # `public.source.summary` would be written back onto the node by the
+            # record→cache door.
             "topics": topics,
             "st": search_text,
             "now": now,
@@ -16367,7 +16397,9 @@ class TortoiseSDK:
             "OR s.contentHash <> $ch THEN $now "
             "ELSE coalesce(s.updatedAt, $now) END",
             "s.contentHash=$ch",
-            "s.summary=$sum",
+            # NO `s.summary=` — see the `sum` note in the params dict above:
+            # a captured session's summary is raw turn text (§9.1/D1), and the
+            # node keeps its searchable text on `_searchText` alone.
             "s.topics=$topics",
             f"s.{SOURCE_SEARCH_TEXT_FIELD}=coalesce($st, s.{SOURCE_SEARCH_TEXT_FIELD})",
             # ⛔ THIS STAYS A `coalesce` — #398's NEVER-OVERWRITE CONTRACT, and
@@ -16521,7 +16553,37 @@ class TortoiseSDK:
             **{SOURCE_SEARCH_TEXT_FIELD: search_text},
             sessionId=session_id,
             capturedAt=now,
-            summary=summary,
+            # ⛔ NO `summary=` (#10000 §9.1/D1 — the ONE door). The derived value
+            # is the transcript's first substantive utterance: a VERBATIM SLICE
+            # OF THE RAW TURN TEXT, which §9.1/D1 keeps out of the graph. It was
+            # carried here and written by the `:Source` MERGE, so the node held
+            # it on every capture.
+            #
+            # ⛔ WHY THE *CARRIER* AND NOT THREE DOWNSTREAM EXCEPTIONS. The
+            # record row's `summary` is a placed PRIMARY column fed from THIS
+            # record, and the record→cache door (`cache_projection.node_from_row`)
+            # writes a placed column back onto the node — so a carrier that still
+            # carried it would re-create the prose on `tortoise record-restore`,
+            # in the one recovery engine the journal fold cannot constrain. Doing
+            # it here leaves ONE door (the value is simply never journaled as
+            # node metadata) and needs no shape-keyed special case in the fold,
+            # in `_props_from_row`, or a conditional `REMOVE` in the live SET —
+            # each of which keyed the rule differently (`_stub_completion` vs
+            # `source_kind` vs unconditional), and an unconditional `REMOVE`
+            # would have DESTROYED a caller-authored `summary` on a
+            # `session:`-keyed Source while replay kept it (measured in review).
+            #
+            # ⚠️ SCOPE: this closes the door for rows written FROM HERE ON. A row a
+            # PRE-FIX build already placed still holds the column and is restored
+            # onto the node by that same door — a data migration, not a code path
+            # (#10853).
+            #
+            # ⛔ WHAT DOES NOT CHANGE, deliberately: the derivation still runs,
+            # and its text still reaches the node's searchable field
+            # (`_searchText`, #3518/D10's declared home for a Source's text) — so
+            # the session stays findable and this is not a silent data deletion.
+            # `create_source(summary=…)` and a DOCUMENT's authored `summary` ride
+            # their own writers and are untouched.
             topics=topics,
             **(({"eventId": event_id}) if event_id else {}),
         )

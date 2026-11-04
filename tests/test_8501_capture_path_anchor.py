@@ -43,9 +43,21 @@ CONV = [
 #: often CREATES the stub (rather than upgrading ``_link_source``'s), so it has
 #: to reproduce that stub's create-time shape (`title=url`, `canonicalUrl`,
 #: `urlAliases`, `is_episodic=true` for `session:` refs, ...) exactly.
+#: The session `:Source`'s shape (post-#8501) — property for property.
+#:
+#: ⛔ `summary` LEFT THIS SET DELIBERATELY (#10000 §9.1/D1), and the way it left
+#: is the point: this pin is exactly what caught it. `summary` was the
+#: transcript's first substantive utterance — a verbatim slice of the RAW turn
+#: text — and §9.1/D1 keeps the raw transcript out of the graph, so
+#: `sdk._materialize_session_source` no longer sets it AND no longer carries it on
+#: the `SourceCreated` record (a placed `public.source.summary` would be written
+#: back onto the node by the record→cache door); the node's searchable text stays
+#: on `_searchText`, D10/#3518's declared home. Nothing reads `summary` for a
+#: session Source. Removing it here is the pin being UPDATED on purpose, not
+#: silenced: a future key appearing or disappearing still reddens.
 _PRE_FIX_SOURCE_KEYS = {
     "_searchText", "canonicalUrl", "capturedAt", "contentHash", "eventId",
-    "ingestedAt", "is_episodic", "sessionId", "sourceKind", "summary", "title",
+    "ingestedAt", "is_episodic", "sessionId", "sourceKind", "title",
     "topics", "updatedAt", "url", "urlAliases",
 }
 

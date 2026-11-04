@@ -4,9 +4,16 @@
 *individually-correct edits to a shared writer* can still leave a replay
 non-faithful. `SDKTortoise._materialize_session_source` is exactly such a
 writer: a RAW Cypher MERGE on the capture path that stores the session
-`:Source`'s derived metadata (``summary``/``topics``/``contentHash``/
-``_searchText``/``sessionId``/``capturedAt``/``eventId``) — every one of them
-computed from the #4911-REDACTED transcript, i.e. this lane's own output.
+`:Source`'s derived metadata (``topics``/``contentHash``/``_searchText``/
+``sessionId``/``capturedAt``/``eventId``) — every one of them computed from the
+#4911-REDACTED transcript, i.e. this lane's own output. ⛔ ``summary`` is NOT in
+that list any more: §9.1/D1 (#10000) keeps the raw transcript out of the graph,
+so this writer sets neither the node property nor the ``SourceCreated`` payload —
+the carrier is where the key used to travel, and dropping it there is what stops
+the record→cache door placing it back on the node. ⛔ There is NO fold-side deny
+to lean on: ``_upsert_source`` allows ``summary`` (it is caller-settable), so a
+carrier that carried it would write it straight onto the node. See
+`test_the_capture_summary_is_never_on_the_node_and_never_on_the_carrier`.
 
 Before the fix it had NO journal carrier, so a rebuild silently reverted the
 whole block:
@@ -104,7 +111,16 @@ CONV = [
 #: pins that, and adding them here would make the precondition assert a
 #: `version` the live node does not have.
 DERIVED_KEYS = (
-    "summary", "topics", "contentHash", "_searchText",
+    # ⛔ `summary` IS NOT HERE, and its absence is load-bearing (#10000 §9.1/D1).
+    # The capture derives it from the transcript's first substantive utterance —
+    # a VERBATIM SLICE OF THE RAW TURN TEXT, which the raw-transcript rule keeps
+    # out of the graph — so the writer sets neither the node property nor the
+    # `SourceCreated` carrier key (a placed `public.source.summary` would be
+    # written straight back onto the node by the record→cache door). Pinning it
+    # here would assert a property the node must never hold again —
+    # `test_the_capture_summary_is_never_on_the_node_and_never_on_the_carrier`
+    # is where that half is asserted.
+    "topics", "contentHash", "_searchText",
     "sessionId", "capturedAt", "eventId", "sourceKind",
     "updatedAt", "title", "is_episodic",
 )
@@ -199,20 +215,64 @@ def test_the_carrier_holds_the_redacted_text_not_the_raw_turn(captured):
     """#4911 runs BEFORE durability: the journal must not hold the credential."""
     sdk, log_path = captured
     record = _carrier(log_path)
-    for key in ("summary", "topics", "_searchText"):
+    # ⛔ `summary` is NOT in this loop any more (#10000 §9.1/D1): the carrier no
+    # longer carries it at all — see
+    # `test_the_capture_summary_is_never_on_the_node_and_never_on_the_carrier`.
+    # Its redaction evidence moved to `_searchText`, which carries the SAME
+    # redacted derivation, so the scrubber's MARK is still asserted below rather
+    # than dropped with the key.
+    for key in ("topics", "_searchText"):
         value = record.get(key)
         text = " ".join(map(str, value)) if isinstance(value, list) else str(value)
         assert SECRET not in text, f"{key!r} carried the credential into the journal"
         assert "ghp_" not in text, f"{key!r} carried a credential-shaped run"
     # Positive half: the carrier is the REDACTED derivation, not a copy of the
     # raw input — the redaction marker is visible where the secret was.
-    assert "[REDACTED:github_token]" in (record.get("summary") or ""), (
-        "the carrier's summary is not the redacted transcript's first utterance")
+    assert "[REDACTED:github_token]" in (record.get("_searchText") or ""), (
+        "the carrier's searchable text is not the redacted derivation")
     # And it describes the SAME bytes the node stores (the #4911 rule: the hash
     # is taken over the redacted transcript).
     stored = _source_props(sdk._get_proj(), SOURCE_URL)
     assert record["contentHash"] == stored["contentHash"]
     assert SECRET not in str(stored.get("_searchText") or "")
+
+
+def test_the_capture_summary_is_never_on_the_node_and_never_on_the_carrier(captured):
+    """#10000 §9.1/D1 on the session `:Source` — derived, NOT stored, NOT journaled.
+
+    The property this pins exists in three places with three different answers,
+    and a test that looked at only one of them would pass for the wrong reason:
+
+    | where | holds `summary`? | why |
+    |---|---|---|
+    | the derivation (`sdk._session_source_metadata`) | yes | it is the transcript's first substantive utterance |
+    | the `SourceCreated` CARRIER | **no** | it is a placed `public.source.summary` column, and the record→cache door writes a placed column back onto the node — so carrying it here re-creates the prose on `tortoise record-restore` |
+    | the `:Source` NODE | **no** | that utterance is a verbatim slice of the RAW turn text, and §9.1/D1 keeps the raw transcript out of the graph |
+
+    The node's searchable text is `_searchText` — D10/#3518's declared home for a
+    Source's searchable text (`tortoise/search_engine.py:1895`: *"a `:Source`
+    stores no raw bytes — the text lives on `_searchText`"*) — and that field
+    still carries the text. That is what makes this an absence of the RAW TIER
+    rather than a lost value: the derivation still runs, the session is still
+    findable, and removing `_searchText` too would be a #3518/D10 **reopen**.
+    """
+    _sdk, log_path = captured
+    record = _carrier(log_path)
+
+    props = _source_props(_sdk._get_proj(), SOURCE_URL)
+    # ── non-vacuity FIRST: the derivation ran, and it landed somewhere ──────
+    search_text = props.get("_searchText")
+    assert isinstance(search_text, str) and search_text.strip(), (
+        "the capture derived no searchable text at all, so the absences below "
+        "would be vacuous — `_session_source_metadata` is the derivation this "
+        "test is about, and `_searchText` (#3518/D10) is its declared home")
+    assert "summary" not in record, (
+        "the `SourceCreated` carrier still carries the transcript slice; a "
+        "record restore would write it back onto the node (the placed "
+        f"`public.source.summary` column): {record.get('summary')!r}")
+    assert "summary" not in props, (
+        "the session :Source carries a `summary` — raw turn text on the graph "
+        f"(§9.1/D1): {props.get('summary')!r}")
 
 
 def test_rebuild_restores_the_session_source_metadata(captured):
@@ -231,8 +291,12 @@ def test_rebuild_restores_the_session_source_metadata(captured):
     assert not lost, (
         f"a rebuild diverged the session :Source from the live node: {lost}")
     # The redaction survives the round trip too — a rebuild must not resurrect
-    # the credential from the journal.
-    assert SECRET not in str(after.get("summary") or "")
+    # the credential from the journal. The prose now lives on `_searchText`
+    # (§9.1/D1 moved `summary` off the node), so THAT is where the check binds:
+    # asserting on `summary` would be structurally vacuous — the key is always
+    # absent after a rebuild, so the assertion could never fail.
+    assert SECRET not in str(after.get("_searchText") or ""), (
+        "a rebuild resurrected the credential onto the node's searchable text")
 
 
 def test_rebuild_all_restores_the_session_source_metadata(captured):

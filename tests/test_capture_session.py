@@ -1587,16 +1587,28 @@ def test_capture_session_source_is_agent_session(sdk):
     rows = proj.g.query(
         "MATCH (s:Source {url:$url}) "
         "RETURN s.sourceKind, s.sessionId, s.capturedAt, s.contentHash, "
-        "       s.summary, s.topics, s.eventId",
+        "       s.summary, s.topics, s.eventId, s._searchText",
         params={"url": f"session:{sid}"},
     ).result_set
     assert rows, f"no Source at session:{sid}"
-    kind, s_sid, captured_at, content_hash, summary, topics, event_id = rows[0]
+    (kind, s_sid, captured_at, content_hash, summary, topics, event_id,
+     search_text) = rows[0]
     assert kind == "agentSession", f"sourceKind must be agentSession, got {kind!r}"
     assert s_sid == sid, "sessionId must mirror the capture session id"
     assert captured_at, "capturedAt must be set"
     assert content_hash, "contentHash must be populated from the transcript"
-    assert summary, "summary must be derived from the conversation"
+    # ⛔ #10000 §9.1/D1: the derived summary is the transcript's FIRST SUBSTANTIVE
+    # UTTERANCE — a verbatim slice of the RAW turn text — so the NODE must not
+    # hold it. The derivation still runs and its text is still on the node's
+    # DECLARED searchable field (`_searchText`, #3518/D10), which is what keeps
+    # "metadata was derived" asserted rather than dropped: a writer that stopped
+    # deriving would fail the `_searchText` half below.
+    assert summary is None, (
+        "the session :Source carries the transcript slice in `summary` again "
+        f"(§9.1/D1): {summary!r}")
+    assert search_text, (
+        "the derived capture metadata is gone from the node entirely — it used "
+        "to be asserted on `summary`, and its declared home is `_searchText`")
     assert isinstance(topics, list) and topics, "topics must be derived"
     assert event_id, "eventId must reference the sessionCaptured Event"
     # (Source)-[:references]->(sessionCaptured Event)
