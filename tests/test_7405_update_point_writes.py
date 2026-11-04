@@ -2361,19 +2361,39 @@ def test_a_delete_in_the_recreated_path_is_answered_not_escalated(
             sdk.close()
 
 
-def test_a_replacement_is_not_answered_from_the_old_maps_witness(
+def test_a_replacement_reports_a_map_present_id_as_unjudged_not_a_typo(
         tmp_path, monkeypatch, caplog):
-    """The witness is evidence about ONE file: a REPLACEMENT stays map-free.
+    """A REPLACEMENT is evidence about the OLD file, not an erasure of it.
 
-    The companion of the round-18 split — it pins the ORDER of the two arms. An
-    id the OLD map held as PRESENT, absent from the REPLACEMENT journal, must
-    still answer a silent "typo": the map describes a file that is no longer at
-    this path, so applying it to the new file would alarm a healthy lane
-    (#10515 indicator 2, and the calibration the ABSENT arm exists to keep).
+    Review round 20, finding 1. `rename(2)`: *"Open file descriptors for oldpath
+    are also unaffected"* — so the fd the fold read is still the OLD journal even
+    after the path resolves to a new inode. The retained map was folded from
+    that fd, so an entry saying ``True`` is a RECORD of a revision that existed
+    at this path and that the live graph does not hold.
 
-    This is a guard against the over-correction of the two tests above, not a
-    pre-fix pin: it passes on both trees, and a fix that passed ``known`` on the
-    replacement arm would fail it.
+    The tree used to answer this arm MAP-FREE, which made it the only post-fold
+    arm that stayed QUIET: the re-read of the NEW file finds no line for the id
+    and returns ``False``, `_journal_knows_point` reads ``False`` as "a typo"
+    and `_report_absent_revision` returns without a line or a counter. That is
+    #10515 indicator 1 — a silent legitimate-revision loss — and it is a
+    REGRESSION against `main`, which sent every post-fold interleaving through
+    ``known.get(point_id, False)`` and so reported this one as ``journal_known``.
+
+    The witness is applied in the round-19 shape, so it can only make the answer
+    LOUDER: the re-read carries no line for the id, so its ``False`` is VACUOUS
+    and the answer is UNJUDGED (``None`` ⇒ ``journal_unreadable`` + WARNING). A
+    folded delete or merge loser (``point_id in state``) still answers ``False``
+    and stays silent — see
+    `test_a_delete_in_the_recreated_path_is_answered_not_escalated`.
+
+    ⛔ NON-VACUITY, and the reason the docstring that used to sit here was
+    deleted: it claimed "it passes on both trees", which is measurably false.
+    On `main` this interleaving returns ``True`` (``journal_known`` +1) and on
+    the map-free tree it returns ``False`` (silent) — so the assertion below on
+    ``journal_unreadable`` fails on BOTH, and only the fixed tree satisfies it.
+    The ``old-0055`` id is in the journal that was replaced away, which is why
+    it is a LOSS and not the "absent from BOTH graph and journal" typo shape
+    that #10515 indicator 2 reserves silence for.
     """
     from tortoise import monitoring
     from tortoise.log import EventLog
@@ -2424,21 +2444,38 @@ def test_a_replacement_is_not_answered_from_the_old_maps_witness(
 
         monkeypatch.setattr(EventLog, "mention_lines", spy)
 
-        before = monitoring.silent_revision_loss_counts()
+        before = monitoring.silent_revision_loss_counts().get(
+            "journal_unreadable", 0)
+        known_before = monitoring.silent_revision_loss_counts().get(
+            "journal_known", 0)
         caplog.clear()
         with caplog.at_level("WARNING"):
             assert sdk.update_point(pid, confidence=0.9) == {}
-        assert monitoring.silent_revision_loss_counts() == before, (
-            "the REPLACED file holds no record for the id, and the old map is "
-            "not evidence about it — a healthy typo must stay silent")
-        assert not any("will not be replayed" in r.getMessage()
-                       for r in caplog.records), (
-            "the old map must not raise an alarm about a different file")
         new_stat = os.stat(journal)
         assert (new_stat.st_dev, new_stat.st_ino) != (
             old_stat.st_dev, old_stat.st_ino), (
             "the fixture must actually REPLACE the journal (a new inode), or "
-            "this is the truncation arm and asserts nothing about ordering")
+            "this is the truncation arm and asserts nothing about this one")
+        assert monitoring.silent_revision_loss_counts().get(
+            "journal_unreadable", 0) == before + 1, (
+            "the retained map — folded, through a live fd, from the file this "
+            "path no longer names — says the journal CARRIED this id, and the "
+            "re-read of the new file cannot rule the loss out. Answering "
+            "\"a typo\" is the silence #10515 indicator 1 forbids, and it is "
+            "a regression against `main`'s loud `known.get(point_id, False)`")
+        assert monitoring.silent_revision_loss_counts().get(
+            "journal_known", 0) == known_before, (
+            "the map proves the journal CARRIED the id, not that the file at "
+            "this path still does — so this is UNREADABLE, never known")
+        assert any("could not be READ to rule a typo out" in r.getMessage()
+                   for r in caplog.records), (
+            "the loss must be LOUD in the log, not only in a counter")
+        assert not any("the journal still holds the id" in r.getMessage()
+                       for r in caplog.records), (
+            "nothing re-read here names the id, so the reason is unreadable, "
+            "never known")
+        assert sdk._journal_presence_memo is None, (
+            "the memo still came from a file the path no longer names")
     finally:
         with contextlib.suppress(Exception):
             sdk.close()

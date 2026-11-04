@@ -10405,8 +10405,16 @@ class TortoiseSDK:
         #   #10515 indicator 1, and is exactly what `main` reported loudly.
         # * REPLACEMENT: a new `st_dev`/`st_ino` (a rotate, an `mv`, a restore),
         #   so `resume`/`seam` describe the NEW file while `known` came from the
-        #   OLD one. The map is NOT evidence about anything at this path, and the
-        #   re-fold is deliberately MAP-FREE.
+        #   OLD one. The map is NOT evidence about presence at THIS path — the
+        #   re-fold answers that, and the memo is always dropped. But it IS
+        #   evidence about the question `_journal_knows_point` actually asks
+        #   ("was a revision LOST"): `rename(2)` guarantees the fd the fold read
+        #   still named the OLD file, so a map entry of ``True`` was folded from
+        #   records that really existed at this path and really named this point.
+        #   It is handed on as the WITNESS, like the two arms below (review round
+        #   20, finding 1: leaving this arm map-free made it the ONLY post-fold
+        #   arm that stayed quiet, so a rotate/`mv`/restore inside the fold went
+        #   silent where `main` reported ``journal_known``).
         # * TRUNCATION of the SAME inode (``stat_after[2] < resume``): no new file
         #   exists — the bytes the fold read were merely cut away — and this arm
         #   is reachable ONLY when the fold consumed them, so `known` is the one
@@ -10437,8 +10445,23 @@ class TortoiseSDK:
             # discarded map is re-derived from the file that is there NOW,
             # needle-filtered: bounded memory, one pass, and an answer that
             # describes THIS path rather than the one that was moved away.
+            #
+            # ⛔ AND `known` GOES WITH IT AS A WITNESS (review round 20, finding
+            # 1). Round 16 was right that this map cannot answer for the NEW
+            # file — so the re-fold answers, and the memo goes — but the same
+            # `rename(2)` fact cuts the other way too: the fd the fold read is
+            # still the OLD file, so a map entry of ``True`` is a record of a
+            # revision that existed HERE and that the live graph does not hold.
+            # Answering a bare "a typo" for it is the silence #10515 indicator 1
+            # forbids, and it made this the only post-fold arm that is QUIET
+            # while both of its siblings are loud. The needle applies it the
+            # round-19 way, so it can only ever make the answer LOUDER: a
+            # vacuous re-read (`point_id not in state`) ⇒ ``None``
+            # (`journal_unreadable`), a folded delete/merge-loser ⇒ ``False``
+            # (silent, its own evidence), so no `journal_known` is ever claimed
+            # that this call cannot support.
             self._journal_presence_memo = None
-            return self._journal_presence_needle(log, point_id)
+            return self._journal_presence_needle(log, point_id, known)
         if stat_after[2] < resume:
             # ⛔ THE SAME INODE, WITH THE FOLDED BYTES TRUNCATED AWAY (review
             # round 18, finding 1). This is NOT the replacement case above: no
@@ -10531,22 +10554,34 @@ class TortoiseSDK:
         """Re-fold the journal AS IT IS NOW, filtered to *point_id* (#10543 r16).
 
         The honest answer once the retained map has been declared
-        untrustworthy for THIS path: the map is dropped from the memo, and — on
-        the replacement/truncation arm — from this call's answer too, because it
-        was folded from a file the path no longer names. Filtered to the one id,
-        so the pass is bounded in memory (at most one entry) and single-purpose.
+        untrustworthy for THIS path: the map is always dropped from the memo, and
+        only on the REPLACEMENT arm is it also dropped from this call's answer —
+        there the path no longer names the file it was folded from, so the
+        re-fold answers for the file that is there now. On the truncation arm the
+        path DOES still name the same inode, and on the ``stat_after is None``
+        arm the fold read that inode through a live fd: on both, the map is the
+        one surviving witness of what was destroyed, so it is handed on.
+        Filtered to the one id, so the pass is bounded in memory (at most one
+        entry) and single-purpose.
 
-        *known* is the RETAINED MAP as a WITNESS, and it is passed only where it
-        IS evidence: the ``stat_after is None`` arm, where the fold read a file
-        this very call watched disappear (``open()`` binds the inode; unlink(2)
-        keeps it readable), and the truncation arm, where the same inode still
-        exists but the bytes the fold read were cut away. A map that says
-        ``True`` was folded from records that named this point, so a path that
-        no longer answers for it cannot be judged (``None`` ⇒
-        ``journal_unreadable``) — the same reading the fold's own
-        ``FileNotFoundError`` arm applies to its retained map. The replacement
-        arm passes nothing, because there the map describes a DIFFERENT file and
-        a ``True`` in it says nothing about this one.
+        *known* is the RETAINED MAP as a WITNESS, and it is passed on EVERY
+        post-fold arm, because on every one of them it is evidence about a
+        different question from the one the re-fold answers. The re-fold answers
+        "does this file, HERE AND NOW, name the id". `known` answers "did a
+        revision at this path NAME the id that the live graph no longer holds" —
+        which is the question ``_journal_knows_point`` exists to report, and
+        ``rename(2)`` ("Open file descriptors for oldpath are also unaffected") /
+        unlink(2) (an open file survives its name) are what make the fold's own
+        map valid evidence for it even when the path has moved on: the
+        ``stat_after is None`` arm (the path went away while the fold read it),
+        the truncation arm (the same inode, its folded bytes cut away), and the
+        replacement arm (a new inode at the path, the fold having read the old
+        one). A map that says ``True`` was folded from records that named this
+        point, so a path that no longer answers for it cannot be judged
+        (``None`` ⇒ ``journal_unreadable``) — the same reading the fold's own
+        ``FileNotFoundError`` arm applies to its retained map. No entry of it can
+        invent an alarm: only ``True`` is ever consulted, and only when the
+        re-read has no line for the id.
 
         ⛔ THE WITNESS IS APPLIED TO EVERY NON-ANSWER, NOT JUST THE RAISED ONE
         (review round 18, finding 1). A re-read that SUCCEEDS and carries no LINE
