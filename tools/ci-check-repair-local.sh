@@ -400,7 +400,11 @@ if [ "$signature" != "$last" ]; then
         # composed there from the record's own `queue_congestion_measured`, so the
         # MEASURED pole no longer sends the operator to read a queue that was read
         # and found congested, nor disclaims a credential the same pass may need.
-        notify "ci-check-repair RAN LOCALLY and is STILL UNRESOLVED in ${mode_word} mode (${reason}). PRs needing repair: ${needing}. Refused zero-job repairs: ${refused}. $(exit_one_cause "$needing" "$refused" "$measured") See $OUT_FILE."
+        # The cause is composed into a VARIABLE first: bash 3.2 (the plist's
+        # /bin/bash) is the target, and a nested double quote inside `$( )` inside a
+        # double-quoted string is the shape this file's header warns about.
+        cause="$(exit_one_cause "$needing" "$refused" "$measured")"
+        notify "ci-check-repair RAN LOCALLY and is STILL UNRESOLVED in ${mode_word} mode (${reason}). PRs needing repair: ${needing}. Refused zero-job repairs: ${refused}. ${cause} See $OUT_FILE."
     else
         notify "ci-check-repair COULD NOT MEASURE locally (${reason}), exit=$rc. No further action was taken; any repair already issued is not undone. See $LOG_FILE."
     fi
