@@ -1292,6 +1292,12 @@ surfaces:
   # would run on no change that can break it.
   - test_own_key_selfservice_2446.py
   - test_mcp_client.py
+  # #10605: the stdio↔HTTP bridge's guards (per-request credential resolution,
+  # the named MCP-KEY-EMPTY refusal, session propagation). Registered here
+  # because `tortoise/mcp_bridge.py` is an exact `api` SOURCE_PATTERNS entry —
+  # a bridge-only diff replaces the `core` fallback, so the guard has to run
+  # from this surface or it runs nowhere (the #7076 self-guard class).
+  - test_mcp_bridge.py
   - test_mcp_http.py
   - test_mcp_rename_table.py  # #4282: Phase 0.3 rename table — old name → new name, per tool
   - test_mcp_route_challenge.py  # #2864: RFC 9728 challenge on /mcp 401s + /mcp route canonicalization (docker lane)
@@ -2553,6 +2559,13 @@ surfaces:
   - test_backfill_references_5141.py
   - test_cache_projection.py
   - test_cache_projection_live.py
+  # #10853: the §9.1/D1 narrowing at the RECORD->CACHE door
+  # (`tortoise/cache_projection.py::_EPISODIC_SOURCE_PROSE_COLUMNS`) — an
+  # episodic Source must never project `summary`/`_searchText`. Registered on
+  # the same surface as the two cache-projection suites above for the same
+  # reason: `cache_projection.py` is the subject and this is the arm that pins
+  # the new rule, so a change to it runs here rather than going silently green.
+  - test_10853_session_source_prose.py
   # #4197: the saved-backlog ledger (`tortoise/capture_backlog.py`) and its
   # CLI surface (`tortoise/__main__.py`). `capture_backlog.py` matches no
   # named SOURCE_PATTERN, so it falls through to `core` — registering the
@@ -3538,6 +3551,17 @@ surfaces:
   # network/Docker/FalkorDB), so it is deliberately NOT carve_out-registered:
   # it is DB-free and runs on any lane, not embedded-only.
   - test_lane_stash.py
+  # #10812: a lane's UNCOMMITTED work is not in the object DB, so `git worktree
+  # remove --force` on a dirty worktree destroys it irrecoverably at rc=0 (the
+  # measured 4,500-line loss). This guards `tools/lane_wip.py`, which pins the
+  # working state into `refs/pi-lane-wip/<lane-key>/<n>` without touching HEAD,
+  # the real index or the working tree. Registered `core` with the paired
+  # `CORE_ALSO` entry in `tools/ci_selection.py` (the `tools/lane_stash.py`
+  # pattern): `tools/` is a flat NON_PYTHON_PREFIXES entry, so without it a
+  # tools-only diff selects NO surface and this pin never runs on the file it
+  # guards (the #1349/#3332/#3616 silent-drop class). Hermetic — real temp git
+  # repos and real worktrees, no network/Docker/FalkorDB.
+  - test_lane_wip.py
   # agent-infra#2344 (owner ruling): the runner-capacity guard. It owns
   # `tools/runner_autoscale.py` — the measured ceiling (cores 8→3, 4→2 plus the
   # additive memory arm), the five-way classification (OTHER-REPO / BUSY /
@@ -8823,6 +8847,24 @@ durations:
   # published here re-stales silently — the per-reading counts stay only because a
   # reading is meaningless without the run it came from.
   test_lane_stash.py: 355.0
+  # #10812: a file ADDED BY A PR has no CI junit measurement (the refresher samples
+  # push-to-main runs only), so 92.0 is this branch's LOCAL reading under the
+  # `# unmeasured` convention: `TORTOISE_TEST_CARVE_OUT=1 uv run python -m pytest
+  # tests/test_lane_wip.py -q` -> "86 passed in 91.92s" on a fleet-loaded cell,
+  # measured 2026-11-04. Hermetic (temp git repos, real worktrees; no DB, no
+  # network), so the spread is host load. The row is needed for the WEIGHT, not
+  # for the #2876 coverage floor: `duration_coverage_issues` is clear WITH this row
+  # and clear WITHOUT it, so dropping it does not break the floor. ⛔ NO pool figure
+  # is restated here — see the #4387 rule a few hundred lines above: the fast pool
+  # grows as PRs add files, so a percentage or a per-shard total re-stales at every
+  # base merge (this note shipped the pre-forward-merge reading and was already
+  # wrong at the merge head, which is that rule firing). What dropping the row does
+  # is pack this file at `DEFAULT_FAST_WEIGHT` (2.0 s) instead of 92.0, taking ~90 s
+  # out of the fast-pool TOTAL: LPT re-packs, so all nine shards drop ~10 s each —
+  # NOT one named shard by 90 s. The shards are positional letters and `core` is a
+  # SURFACE name, so the shard holding this file loses only its own share and not
+  # the whole row. Refresh from the first post-merge push run that includes it.
+  test_lane_wip.py: 92.0
   # #5612: 12.2 is the HIGHER of two local readings of this file at head 4b112ccbc
   # (5.9 s / 12.2 s; hermetic — temp-dir journals + the committed fixture, no DB;
   # the spread is fleet I/O, same as #6144 above). Erring high is correct for
@@ -8954,6 +8996,7 @@ durations:
   test_file_human_approval.py: 4.3  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 2.4
   test_kind_eval_set.py: 2.6  # ci-timing top-15 2026-10-20 (run 39467226356); was 1.5
   test_mcp_client.py: 1.6  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 1.8
+  test_mcp_bridge.py: 2.0  # new in #10605 — the #3400/#4348 trap: a file a PR ADDS cannot carry a CI junit reading yet, so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading. The `api` registration above puts it in `fast_pool()`, and a fast file added by a PR must carry a weight at all ("a default is not a reading"). It spawns a real bridge subprocess per case, so 2.0 UNDERSTATES it until `tools/ci_timing.py --refresh-durations` replaces this row from junit. `tools/ci_selection.py --integrity` is the authority.
   test_sdk_props_coercion.py: 4.6  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 1.9
   test_volunteer_pipeline.py: 4.0  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 2.6
   eval/retrieval/test_1348.py: 6.5  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 6.1
@@ -10110,6 +10153,10 @@ durations:
   test_5089_operator_prop_parity.py: 1.5
   test_5089_operator_status_parity.py: 0.6
   test_5097_capture_source_replay.py: 5.8
+  # #10853: new in this PR, so the refresher (which samples push-to-main junit)
+  # cannot have measured it — the flat `DEFAULT_FAST_WEIGHT` is the only honest
+  # row. `tools/ci_timing.py --refresh-durations` replaces it.
+  test_10853_session_source_prose.py: 2.0  # unmeasured — new in #10853
   test_5140_pending_extraction.py: 2.1
   # #5140 finding 8: the relabel migration's own suite (live-FalkorDB cases on
   # per-test graphs; two of the functions are parametrised, so the collected
