@@ -2801,7 +2801,11 @@ def retrieve_for_question(
     # this window's). ``min(cap, cut)`` is what the reader can receive: the
     # assembled item cap, bounded by the prefix that survived truncation.
     # ⛔ Not a hard ceiling on the COUNT — see the ``top_k > eff_item_cap``
-    # under-count the comment at ``_sr_reader_window`` records. ──
+    # under-count the comment at ``_sr_reader_window`` records. The arm's own
+    # ``latency_ms`` (above) was taken BEFORE this block, so it measures
+    # SEED → MERGE and not the measurement: the census is a pure in-memory
+    # pass, and it no longer rides the arm's cost now that it runs after R6.
+    # ──
     _sr_window = (_sr_reader_window if _sr_prefix_cut is None
                   else min(_sr_reader_window, _sr_prefix_cut))
     sr_window_displacement["window"] = _sr_window
