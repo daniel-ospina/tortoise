@@ -33,6 +33,7 @@ from __future__ import annotations
 import inspect
 import json
 import pathlib
+import re
 
 import pytest
 
@@ -100,9 +101,10 @@ BATTERY = (
     # units are VALUE, not form: a minutes->hours rewrite is refused, while a
     # unit SPELLED differently is not (review P2 on the first round).
     ("the TTL is 20 minutes", "the TTL is 20 hours", True, "unit rewritten"),
-    # `_value_bindings` fuses only the units in its own `_UNIT_WORDS`, so the
-    # judged form is the fused one (`800ms`); a unit written APART is not
-    # fused by the engine and therefore not a unit identity here either.
+    # `_value_bindings` fuses a unit the engine's `_UNIT_WORDS` carries, whether
+    # it is ATTACHED (`800ms`) or written APART (`800 ms`) — so both forms are
+    # unit identities and are compared. Only a spelling OUTSIDE `_UNIT_EQUIV`
+    # (`800millis`) falls back to the unstated-unit tolerance.
     ("the timeout is 800ms", "the timeout is 800s", True, "unit rewritten 2"),
     ("the TTL is 20 minutes", "the TTL is 20 mins", False, "unit spelling"),
     ("the p95 is 0.5 seconds", "the p95 is .5 seconds", False, "leading dot"),
@@ -219,8 +221,9 @@ def test_a_scale_WORD_rewrite_is_unjudged_because_the_engine_fuses_none():
     #10513 review cycle-13 P2, measured: `_value_bindings` fuses no scale word,
     so `million`/`billion`/`thousand` are IGNORED and both sides bind the same
     core — a 10^3..10^9 rewrite is written as verbatim. This is a different class
-    from residual (d) (a unit word outside `_UNIT_WORDS`): it is not a spelling
-    the table lacks, it is a MAGNITUDE the engine never multiplies, so the fix
+    from residual (d) (a RATE unit with no number adjacent, or a unit SPELLING
+    the tables lack): it is not a unit adjacency the engine never fuses and not a
+    spelling, it is a MAGNITUDE the engine never multiplies, so the fix
     belongs in `_value_bindings` and would be its own change — a second scale
     reading here is the parallel-classifier shape that killed the previous
     attempt at this issue.
@@ -915,6 +918,517 @@ def test_the_unit_table_covers_every_unit_the_engine_can_fuse():
     Mutating any of the six `k/km/mi/m/kg/lb` rows reds this.
     """
     assert set(v2._UNIT_WORDS) <= set(v2._UNIT_EQUIV)
+
+
+def test_the_unit_tables_carry_no_DUPLICATED_literal_row():
+    """A merge union can add a row TWICE and nothing at runtime notices.
+
+    `_UNIT_EQUIV` is a dict literal, so a duplicate key silently keeps the LAST
+    value: the two sides of a forward-merge can each add `"mile": "mi"` in a
+    disjoint hunk, git reports no conflict, and the tree reads as if it were
+    hand-written once. That is exactly what happened folding #10804 onto this
+    branch (the widen and the fold's `mile`/`miles` row), and a missing
+    re-derivation is invisible in every behavioural test because the duplicate
+    resolves to the same identity.
+
+    ⛔ This must read the SOURCE, not the runtime dict: by the time the literal
+    is evaluated the duplicate is gone. Non-vacuity — appending
+    `"mile": "mi",` to `_UNIT_EQUIV` in `tortoise/extractor_v2.py` reds this
+    with the key and both line numbers.
+    """
+    import ast
+    from pathlib import Path as _P
+
+    src = _P(v2.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    wanted = {"_UNIT_EQUIV", "_UNIT_WORDS"}
+    seen_nodes = 0
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+            continue
+        target = node.targets[0]
+        if not isinstance(target, ast.Name) or target.id not in wanted:
+            continue
+        value = node.value
+        if isinstance(value, ast.Call):        # frozenset({...})
+            value = value.args[0] if value.args else None
+        if isinstance(value, ast.Set):
+            literal = {(k.value, k.lineno) for k in value.elts
+                       if isinstance(k, ast.Constant)}
+        elif isinstance(value, ast.Dict):
+            literal = {(k.value, k.lineno) for k in value.keys
+                       if isinstance(k, ast.Constant)}
+        else:                                  # pragma: no cover - shape guard
+            raise AssertionError(
+                f"{target.id} is assigned a {type(value).__name__}, not a literal "
+                "— this pin reads the SOURCE, so its shape has to stay inspectable")
+        seen_nodes += 1
+        by_value: dict[object, list[int]] = {}
+        for val, lineno in literal:
+            by_value.setdefault(val, []).append(lineno)
+        dupes = {v: lines for v, lines in by_value.items() if len(lines) > 1}
+        assert not dupes, (
+            f"{target.id} declares the same key twice: {dupes} — a dict literal "
+            "keeps the last one silently, so this is a merge union that was never "
+            "de-duplicated, not a harmless repetition")
+    assert seen_nodes == 2, (
+        f"found {seen_nodes} of the two unit-table literals this pin covers — the "
+        "table was renamed or its shape changed, so this pin is now vacuous")
+
+
+def test_the_carve_outs_own_ADJACENT_time_units_are_judged():
+    """Residual (d)'s ADJACENCY half, closed: a unit beside a value is judged.
+
+    ``STATE_VALUE_CARVE_OUT`` states its operational examples in time units —
+    "back under 800 milliseconds", "a ten minute TTL". At ``a6e20f05b05d`` every
+    one of those unit words was OUTSIDE ``_UNIT_WORDS``: ``_value_bindings``
+    fuses a following token only when that table carries it, so ``800 seconds``
+    bound a value with NO unit, ``_value_identity_matches`` read an absent unit
+    as the deliberate "one side omits the unit" tolerance, and the rewrite was
+    WRITTEN as verbatim. That is the silent-correctness class this issue exists
+    to close, on the guarantee's own worked examples.
+
+    ⛔ NOT the whole of residual (d): the carve-out's RATE example ("forty
+    thousand requests per day") has no unit adjacent to its number, so it is
+    still unjudged and is named as residual (d) in `config/v4-mechanisms.yml`.
+    This test is scoped to what it actually closes.
+
+    MUTATION CHECK TARGET: remove ``seconds``/``minute``/``days``/``miles``
+    (or the ``d``/``wk``/``mo``/``y``/``mi`` identities) from the tables and
+    this goes red.
+    """
+    for content, quote in (
+            ("back under 800 seconds", "back under 800 milliseconds"),
+            ("a ten minute TTL", "a ten hour TTL"),
+            ("the lease is 3 hours", "the lease is 3 days"),
+            ("the drive is 20 miles", "the drive is 20 km"),
+            # The two abbreviations the abbreviation set itself omitted: a
+            # table with a hole in it is how this gap survived review, so the
+            # siblings the widen introduced are pinned, not just the words.
+            ("the lease is 3 mos", "the lease is 3 years"),
+            ("back under 800 millisec", "back under 800 seconds")):
+        assert v2._value_slot_divergence(content, quote), (
+            content, quote)
+    # …and the WRITE refuses the point, not just the pure function
+    result = _write("back under 800 seconds", "back under 800 milliseconds")
+    assert result["payload"]["points"] == [], (
+        "a time-unit rewrite of the carve-out's own example reached the write "
+        "path — residual (d) is open again")
+    assert any("REWRITES its own verbatim quote" in w
+               for w in result["warnings"]), result["warnings"]
+    # ⛔ THE FALSE-ACCUSATION DIRECTION, pinned for EVERY new identity: the SAME
+    # value with its unit spelled differently (word vs symbol vs attached) must
+    # stay EQUAL. Without these rows a typo in any new value (`miles` → `ml`,
+    # `days` → `dd`) turns a truthful point into a refusal — the direction this
+    # carve-out must never break — and nothing else in this file notices.
+    for content, quote in (
+            ("the drive is 20 miles", "the drive is 20 mi"),
+            ("the lease is 3 days", "the lease is 3 d"),
+            ("the sprint is 2 weeks", "the sprint is 2 wk"),
+            ("the lease is 3 months", "the lease is 3 mo"),
+            ("the SLA is 5 years", "the SLA is 5 yr"),
+            ("the cache TTL is 900 milliseconds", "the cache TTL is 900 ms"),
+            ("the cache TTL is 900 milliseconds", "the cache TTL is 900 millisec"),
+            ("the lease is 3 months", "the lease is 3 mos"),
+            ("the TTL is 20 minutes", "the TTL is 20 mins"),
+            ("the share is 20 percent", "the share is 20%"),
+            ("back under 800 milliseconds", "back under 800ms")):
+        assert v2._value_slot_divergence(content, quote) == (), (
+            content, quote)
+    # …and the RATE form the carve-out also names is NOT judged: pinned so the
+    # registry row's surviving (d) cannot be closed by accident, and so a future
+    # lane closing it has to move that row.
+    assert v2._value_slot_divergence(
+        "forty thousand requests per day",
+        "forty thousand requests per week") == ()
+
+
+def test_a_magnitude_prefix_beside_a_unit_word_is_COMPOSED_not_refused():
+    """#10804 review P1 — the widen must not REFUSE a truthful point.
+
+    ``_value_bindings`` glues a value to the unit word written beside it with NO
+    prefix arithmetic (``value + seq[i + 1]``), so ``20k`` + ``miles`` binds ONE
+    token, ``20kmiles``, whose suffix is not a ``_UNIT_EQUIV`` key. It therefore
+    reads as an UNKNOWN unit with the numeric core still ``20``, and against
+    ``20000 miles`` (core ``20000``, unit ``mi``) the cores DIVERGE.
+
+    ⛔ MEASURED, not predicted: every row below returned ``()`` at `origin/main`
+    `525fde4a9` — ``miles``/``days``/``milliseconds``/``weeks``/``percent`` were
+    not in ``_UNIT_WORDS``, so the pair fell open on the unknown-unit tolerance —
+    and every one REFUSED with the widened tables and no composition arm. That
+    is the FALSE-ACCUSATION direction this carve-out must never take, so the
+    widen is only admissible WITH the composition (``_composed_identity``).
+
+    MUTATION CHECK TARGET: delete the ``_composed_identity`` arm from
+    ``_value_identity_matches`` and the first loop goes red; the second loop (the
+    rewrites) must stay green either way — it is what stops the arm from being
+    widened into a tolerance that lets a real rewrite through.
+    """
+    # A prefix followed by a SPACE-SEPARATED unit word: one value, two spellings.
+    for content, quote in (
+            ("the fleet drove 20000 miles", "the fleet drove 20k miles"),
+            ("the lease is 3000 days", "the lease is 3k days"),
+            ("back under 5000 milliseconds", "back under 5k milliseconds"),
+            ("the sprint is 2000 weeks", "the sprint is 2k weeks")):
+        assert v2._value_slot_divergence(content, quote) == (), (
+            content, quote)
+    # …and the WRITE does not withhold the point (the whole of the harm).
+    result = _write("the fleet drove 20000 miles", "the fleet drove 20k miles")
+    assert result["payload"]["points"], (
+        "a truthful point was WITHHELD because `20k miles` and `20000 miles` "
+        "are one value written two ways — the false-accusation direction")
+    assert not any("REWRITES its own verbatim quote" in w
+                   for w in result["warnings"]), result["warnings"]
+    # ⛔ NOT VACUOUS IN THE OTHER DIRECTION: composing the prefix must not turn a
+    # rewritten number or a changed unit into a match. `20k miles`/`21k miles`
+    # composes to 20000 mi against 21000 mi, and `20k miles`/`20000 km` to
+    # 20000 mi against 20000 km.
+    for content, quote in (
+            ("the fleet drove 20k miles", "the fleet drove 21000 miles"),
+            ("the fleet drove 20k miles", "the fleet drove 21k miles"),
+            ("the fleet drove 20k miles", "the fleet drove 20000 km"),
+            ("the lease is 3k days", "the lease is 3000 hours")):
+        assert v2._value_slot_divergence(content, quote), (content, quote)
+    # ⛔ A unit the table ALREADY KNOWS is never composed, and a multi-run core
+    # (one suffix for several numbers) is never scaled — pinned so a later widen
+    # cannot quietly reinterpret `20km` as 20000 metres.
+    assert v2._value_core("20km") == ("", "20", "km")
+    assert v2._value_core("24h/7d/4w") == ("", "24/7/4", "w")
+    assert v2._composed_identity(("", "20", "km")) is None
+    # ⛔ `kdays`, not `kw`: `w` is not a `_UNIT_EQUIV` key, so a `kw` assertion
+    # passes at the `rest is None` step and never reaches the multi-run guard it
+    # claims to pin (measured — review P3).
+    assert v2._composed_identity(("", "24/7/4", "kdays")) is None
+    # …and the AMBIGUOUS colloquial spelling keeps today's fail-open rather than
+    # becoming a refusal: `20kms` composes, but `20km` does not, so the pair is
+    # still tolerated (reading "kms" as kilo-milliseconds would REFUSE).
+    assert v2._value_slot_divergence("the ride was 20kms", "the ride was 20km") == ()
+    # NOT FUSED, pinned so a later lane cannot quietly re-add percent/pct.
+    assert "percent" not in v2._UNIT_WORDS and "pct" not in v2._UNIT_WORDS
+    assert v2._value_slot_divergence(
+        "the share is 20k%", "the share is 20000 percent") == ()
+    # ⛔ THE percent family is EQUAL by the PRE-EXISTING factor arm, not by the
+    # composition arm — it does not discriminate the arm under test, so it is
+    # asserted here with its own gate rather than inside the loop above
+    # (review P3).
+    assert v2._value_slot_divergence(
+        "the share is 20k percent", "the share is 20000 percent") == ()
+    # ⛔ AND THE ONE NEW TOLERANCE IS DISCLOSED, not silently opened (review P3).
+    # `20kms` is the ambiguous colloquial spelling; composing `k`+`ms` gives it a
+    # kilo-MILLISECOND reading, so it now AGREES with `20000 ms` — REFUSED at
+    # `origin/main` `525fde4a9`. That is the fail-open direction (a possible
+    # rewrite tolerated), not a false refusal, and it is the price of the arm;
+    # neither UCUM nor Pint permits a prefix on an already-prefixed atom, so the
+    # unit tables do not sanction it — this pin exists so the trade is recorded.
+    assert v2._value_slot_divergence("the ride was 20kms", "the ride was 20000 ms") == ()
+    # …while the colloquially-correct reading stays REFUSED at both heads.
+    assert v2._value_slot_divergence("the ride was 20kms", "the ride was 20000 m")
+    # ⛔ THE SECOND case changed SHAPE in the merge of #10804's widen with the
+    # fold's FUSION-TIME composition, and the change is a CORRECTION rather than a
+    # new tolerance: a fused suffix outside `_UNIT_EQUIV` (`kseconds`) used to
+    # leave the core UNSCALED at `5`, so it coincided with `5 minutes` and the
+    # unknown-unit tolerance fired — `the batch took 5k seconds`/`… 5 minutes`
+    # REFUSED at `origin/main` `525fde4a9` and TOLERATED with the widen alone.
+    # That was a MISSED REWRITE (5k seconds is 5000 s, not 5 min) sitting in the
+    # fail-open direction. With `_compose_magnitude_and_unit` in the fusion
+    # branch the prefix is multiplied, so the pair binds `5000s` against `5min`
+    # and is REFUSED — the truthful verdict. Pinned in BOTH directions so neither
+    # half can be narrowed silently.
+    assert v2._value_slot_divergence(
+        "the batch took 5k seconds", "the batch took 5 minutes") == (
+            ("took", "5000s", "5min"),)
+    # …and the same value written two ways still AGREES (the composition is a
+    # reading, not a refusal): `5k seconds` is 5000 seconds.
+    assert v2._value_slot_divergence(
+        "the batch took 5k seconds", "the batch took 5000 seconds") == ()
+    # …and the false accusation the SAME mechanism REPAIRS, which is why the
+    # trade was taken: `3k minutes`/`3000 minutes` REFUSED at base.
+    assert v2._value_slot_divergence(
+        "the job ran 3k minutes", "the job ran 3000 minutes") == ()
+    # ⛔ THE OPPOSITE DIRECTION IS STILL REFUSED — a FALSE ACCUSATION recorded as
+    # #10876, not fixed here. When the magnitude side's spelling is UNMAPPED
+    # (`millis`, `dys`) the binding is a bare `5k`, and `_magnitude_agrees`'
+    # `_K_ABBREVIATES` gate ({"km", "kg"}) refuses it against any KNOWN unit, so
+    # a truthful point is withheld. Pre-existing (`5k millis`/`5000 hours`
+    # refuses at `origin/main` `525fde4a9`); the widen extended which right-hand
+    # units trigger it. Pinned so it cannot start agreeing silently either — the
+    # gate's narrowness is a RECORDED DECISION (#10513 review P1: `20k`/`20m` is
+    # 20 km against 20 metres), so #10876 must move before this changes.
+    assert v2._value_slot_divergence("the batch took 5k millis", "the batch took 5000 ms")
+    assert v2._value_slot_divergence("the lease is 5k dys", "the lease is 5000 days")
+    # ⛔ AND THE MOST GENERAL INSTANCE: a BARE `5k`, with NO unit word at all on
+    # that side. #10876's first scope clause used to require an unmapped
+    # spelling, which excludes this shape entirely — yet it is the same refusal
+    # and the widest one (every newly fused unit triggers it). TOLERATED at
+    # `origin/main` `525fde4a9`, REFUSED here; pinned so #10876 cannot be closed
+    # against the narrow shape alone.
+    assert v2._value_slot_divergence("the took 5k", "the took 5000 ms")
+    assert v2._value_slot_divergence("the took 5k", "the took 5000 days")
+    assert v2._value_slot_divergence("the took 5k", "the took 5000 second")
+    # …while the units `k` may abbreviate, and a bare number, still agree.
+    assert v2._value_slot_divergence("the took 5k", "the took 5000 km") == ()
+    assert v2._value_slot_divergence("the took 5k", "the took 5000") == ()
+    assert v2._value_slot_divergence(
+        "the batch took 5k millis", "the batch took 5000 millis") == ()
+
+
+def test_a_composed_prefix_against_a_UNITLESS_side_keeps_the_omitted_unit_tolerance():
+    """#10804 review (cycle 7) P2 — the widen newly WITHHELD a truthful point.
+
+    The composition arm's match was `composed == other`, an EXACT identity
+    equality, so it could only rescue a side that STATES a unit. A side with NO
+    unit at all is ``('', '20000', None)``, which no composed identity can equal:
+    so ``20k miles`` against ``20000`` fell through to the core comparison (20
+    against 20000) and the write REFUSED the point.
+
+    ⛔ MEASURED at `origin/main` `525fde4a9` (a scratch worktree, not a revert):
+    every row in the first loop returned ``()`` there — `miles`/`days`/`seconds`/
+    `milliseconds` were not in `_UNIT_WORDS`, so the value bound as a BARE `k`
+    and `_magnitude_agrees` closed the gap — and every one REFUSED at the head
+    before this fix. That is the false-accusation direction this carve-out must
+    never take, introduced by the widen.
+
+    MUTATION CHECK TARGET: drop the `other[2] is None` branch from
+    `_composed_identities_agree` and the first loop goes red; the second loop (a
+    rewritten number, a re-read unit, a stated spelling outside the tables) must
+    stay green either way — it is what stops the tolerance from becoming one that
+    lets a real rewrite through.
+    """
+    # The unit is written on ONE side only — the module's oldest tolerance.
+    for content, quote in (
+            ("the fleet drove 20000", "the fleet drove 20k miles"),
+            ("the lease is 3000", "the lease is 3k days"),
+            ("back under 5000", "back under 5k milliseconds"),
+            ("the batch took 5000", "the batch took 5k seconds")):
+        assert v2._value_slot_divergence(content, quote) == (), (
+            content, quote)
+    # ...and the WRITE does not withhold the point.
+    result = _write("the fleet drove 20000", "the fleet drove 20k miles")
+    assert result["payload"]["points"], (
+        "a truthful point was WITHHELD because `20k miles` and `20000` are one "
+        "value with the unit written on one side only")
+    assert not any("REWRITES its own verbatim quote" in w
+                   for w in result["warnings"]), result["warnings"]
+    # The arm itself: the fold rescues a UNITLESS side, and this is the exact
+    # equality branch still working beside it.
+    assert v2._composed_identities_agree(("", "20", "kmiles"),
+                                         ("", "20000", "mi"))
+    assert v2._composed_identities_agree(("", "20", "kmiles"),
+                                         ("", "20000", None))
+    # ⛔ NOT VACUOUS IN THE OTHER DIRECTION — a rewritten NUMBER still refuses,
+    # against a unitless side as much as against a stated one.
+    for content, quote in (
+            ("the fleet drove 20k miles", "the fleet drove 21000"),
+            ("the lease is 3k days", "the lease is 3001"),
+            ("the batch took 5k seconds", "the batch took 5001")):
+        assert v2._value_slot_divergence(content, quote), (content, quote)
+    # ...and a re-read UNIT does, including against a side that states its own.
+    for content, quote in (
+            ("the fleet drove 20k miles", "the fleet drove 20000 km"),
+            ("the lease is 3k days", "the lease is 3000 hours"),
+            ("the batch took 5k seconds", "the batch took 5000 minutes")):
+        assert v2._value_slot_divergence(content, quote), (content, quote)
+    # ⛔ THE TOLERANCE IS SCOPED TO `None`, and the scope is load-bearing: a side
+    # stating an UNKNOWN SPELLING (`millis`) is NOT rescued this way — that
+    # refusal is `_magnitude_agrees`' `_K_ABBREVIATES` gate, a recorded decision
+    # (#10513 review P1) and #10876's open root, so this fix must not reach it.
+    assert not v2._composed_identities_agree(("", "20", "kmiles"),
+                                            ("", "20000", "millis"))
+    assert v2._value_slot_divergence("the batch took 5k millis",
+                                     "the batch took 5000 ms")
+
+
+#: The patterns that assert the ADJACENCY gap is OPEN again — the thing
+#: `test_the_registry_row_names_the_residual_that_still_stands` must red on.
+#: Deliberately narrow: each one names a REOPENING, so a truthful rewording of
+#: "this gap is closed" passes, and `fails open` (true of the SPELLING case) is
+#: not matched (review cycles 5 and 6, measured).
+#: ⛔ WHAT THIS CANNOT CATCH, stated rather than implied: it is a pattern list, so
+#: a reopening phrased with none of these words ("`minute` is back in the open
+#: set") passes. The pin's job is to catch the shapes a lane actually writes —
+#: the seven below covered every one produced by four review cycles — not to be a
+#: semantic reader of English. Closing that gap needs a human or a different
+#: instrument, not a longer regex.
+_ADJACENCY_REOPENING = (
+    # `not closed`, allowing an adverb inside the negation (`is not yet / not
+    # fully / not really closed`) — the adverb-free form was the whole class
+    # one word away (review cycle 6, MEASURED: all three PASSED before this).
+    r"\bnot\b[^.;]{0,30}\bclosed\b",
+    r"\bisn'?t\b[^.;]{0,30}\bclosed\b",
+    r"\bno\s+longer\s+(closed|fuses|judged|caught|compared|enforced|retained)\b",
+    r"\bunclosed\b",
+    r"\bre-?open",
+    # The verb arm covers the INFLECTIONS, not just the present tense (review
+    # cycle 7, MEASURED: `stayed open`, `remained open`, `has stayed open`,
+    # `keeps open` and `is left open` all PASSED against the previous
+    # `stays?|remains?` arm — one inflection defeated it).
+    r"\b(is|are|was|were|remain(s|ed)?|stay(s|ed)?|keep(s)?)\b[^.;]{0,25}\bopen\b",
+    r"\bopen\s+again\b",
+)
+
+#: The closure ASSERTION the adjacency sentence must carry. Not the bare word
+#: `closed`: a sentence reading "the ADJACENCY half is now UNJUDGED, unlike the
+#: closed spellings" contains `closed` while asserting the gap is open (review
+#: cycle 7, MEASURED: it PASSED the `"closed" in sentence` check, at both the
+#: previous revision and this one).
+_ADJACENCY_CLOSED_CLAIM = (
+    r"\b(is|are|was|were)\b[^.;]{0,20}\bclosed\b",
+    r"\b(has|have|had)\s+been\s+closed\b",
+    r"\bwe\s+have\s+closed\b",
+    r"\bclosed\s+by\s+this\s+table\b",
+)
+
+
+#: The ONE exemption for the full adjacency scan in the trailing region: a
+#: sentence that discloses the still-open SPELLING class AND names no unit at all.
+#: The unit-token arm is what keeps an appended reopening from hiding behind the
+#: word `spelling` (review cycle 8, MEASURED: scanning the tail with the NARROW
+#: subset instead let 7 end-appended reopenings PASS, e.g. "except `minute`, which
+#: is open again" — the shape the block's own comment calls the likeliest edit).
+_UNIT_TOKEN = re.compile(
+    r"\b(minute|minutes|second|seconds|hour|hours|day|days|week|weeks|month|"
+    r"months|year|years|mile|miles|percent|pct|millisecond|milliseconds|"
+    r"time-unit)\b")
+
+
+#: The floor for an EXEMPT tail sentence — one that discloses the still-open
+#: SPELLING class and names no unit. It is not skipped: these reopenings say a
+#: unit stopped being fused/judged, which reopens the adjacency gap whatever else
+#: the sentence is about (review cycle 7, MEASURED: exempting that sentence
+#: wholesale let "the SPELLING gap is not closed and `minute` no longer fuses"
+#: PASS; cycle 9: skipping it entirely let "… the value class is no longer
+#: judged" PASS). `not closed` / `is open` are deliberately absent — the SPELLING
+#: gap IS open and saying so is the row's own honest disclosure.
+_SPELLING_SENTENCE_REOPENING = (
+    r"\bno\s+longer\s+(closed|fuses|judged|caught|compared|enforced|retained)\b",
+    r"\bunclosed\b",
+    r"\bre-?open",
+)
+
+
+def test_the_registry_row_names_the_residual_that_still_stands():
+    """`config/v4-mechanisms.yml` must not describe a CLOSED gap as open.
+
+    The row's (d) is the artifact a lane reads ("⛔ WHAT IS STILL NOT ENFORCED —
+    read this before improving a number"). It named the ADJACENCY gap
+    (`seconds`, `minute`, `hour`, `day`, `mile`) as unjuged; that gap is closed
+    by the tables above, so the row was left FALSE and nothing red on it. This
+    pins both halves: the closed class must not come back into the row, and the
+    still-open RATE class must stay named there.
+    """
+    row = (pathlib.Path(__file__).resolve().parent.parent
+           / "config" / "v4-mechanisms.yml").read_text(encoding="utf-8")
+    residual = row.split("(d) a RATE unit", 1)
+    assert len(residual) == 2, (
+        "the registry row no longer states residual (d) as the RATE-unit gap — "
+        "if the adjacency gap was reopened, say so there; if (d) was closed, "
+        "delete this pin and the row together")
+    after = residual[1][:1200]
+    assert "per\n      day" in after or "per day" in after, after
+    assert "ADJACENCY" in after.upper(), after
+    # ⛔ BOTH HALVES, or the pin is half-vacuous (review cycle 3, MEASURED: with
+    # only the two assertions above, flipping `is CLOSED` to `is still OPEN`
+    # stayed GREEN — the header and the word ADJACENCY survive any rewording of
+    # the verdict).
+    #
+    # ⛔ AND A BARE `CLOSED` SUBSTRING IS STILL HALF-VACUOUS (review cycle 4,
+    # MEASURED: `is not closed:` contains `CLOSED`).
+    #
+    # ⛔ AND A PHRASE MATCH PLUS A NEGATION ALLOWLIST IS STILL FAIL-OPEN, on the
+    # exact shapes a lane writes (review cycle 5, MEASURED). Two leaks:
+    #   (a) the two checks were DECOUPLED, so keeping the closed sentence and
+    #       appending "the ADJACENCY half remains open" passed — the negation
+    #       list is an unbounded-enemy allowlist and "remains open" / "open
+    #       again" / "except `minute`, which is open again" are not on it;
+    #   (b) the guard read `[:1200]` while residual (d) runs 1339 chars, so a
+    #       reopening note appended where a lane APPENDS it was invisible EVEN
+    #       with a phrase from the list ("no longer closed").
+    # So: scope to the WHOLE (d) block (up to `(e) the`), scan EVERY sentence for
+    # a reopening, and separately require the block to still NAME the adjacency
+    # claim as closed — the scan is not limited to sentences that say
+    # `adjacency`, because a reopening that names the gap another way
+    # ("`minute` no longer fuses", "the time-unit half is no longer closed",
+    # "except `minute`, which is open again") is the likeliest edit of all
+    # (review cycle 6, MEASURED: with the scan gated on `adjacency`, all five of
+    # those PASSED). Verified against 15 reopening mutations (all FAIL) and 8
+    # truthful statements (all PASS: "is now CLOSED", "has been CLOSED", "We have
+    # closed the ADJACENCY half", "the ADJACENCY gap is closed", "closed by this
+    # table", and the two TRUE spelling disclosures and "no longer fails open")
+    # — plus the structural rule that the still-open SPELLING disclosure must be
+    # its OWN sentence, because one sentence carrying both claims must satisfy
+    # both and cannot.
+    block = row.split("(d) a RATE unit", 1)[1].split("(e) the", 1)[0]
+    flat = " ".join(block.split()).lower()
+    sentences = re.split(r"(?<=[.!?;])\s+", flat)
+    # ⛔ REGION A = every sentence up to AND INCLUDING the LAST one that names
+    # the adjacency claim. The strict scan lives here. Region B is the trailing
+    # DISCLOSURE that the SPELLING class is still open — it is TRUE that it is
+    # open, so applying the adjacency rules to it refused a true statement
+    # (review cycle 7, MEASURED: "the SPELLING case is still open on purpose",
+    # "the SPELLING gap, which is not closed" and "remains open by design" all
+    # FAILED), and exempting it wholesale re-opened "the SPELLING gap is not
+    # closed and `minute` no longer fuses" — so region B keeps a narrower ban.
+    adjacency_at = [i for i, s in enumerate(sentences) if "adjacency" in s]
+    assert adjacency_at, (
+        "the row no longer makes any ADJACENCY claim in residual (d) — this "
+        "table closed that gap; if it was reopened, say so AND delete this pin")
+    last = adjacency_at[-1]
+    # ⛔ THE CLAIM ITSELF must still say CLOSED, per SENTENCE (review cycle 7 P1,
+    # MEASURED: collapsing this to a block-wide `"closed" in flat` let a row that
+    # says "the ADJACENCY half is not currently judged; the closed set grows"
+    # pass — any unrelated `closed` in the 1339-char block satisfied it).
+    for i in adjacency_at:
+        assert any(re.search(p, sentences[i])
+                   for p in _ADJACENCY_CLOSED_CLAIM), (
+            "the row does not ASSERT the ADJACENCY gap as CLOSED (a `closed` "
+            f"elsewhere in the sentence is not enough): {sentences[i]!r}")
+    for sentence in sentences[:last + 1]:
+        for pattern in _ADJACENCY_REOPENING:
+            m = re.search(pattern, sentence)
+            assert m is None, (
+                f"the row says {m.group(0)!r}, which reopens the adjacency gap "
+                f"this table closed: {sentence!r}")
+    # ⛔ AND THE TAIL IS SCANNED WITH THE FULL LIST, exempting only a sentence that
+    # discloses the SPELLING class and names NO unit (review cycle 8, MEASURED:
+    # the narrow subset let `except \`minute\`, which is open again.` — appended at
+    # the very end — PASS, a regression against the parent commit).
+    # ⛔ AND AN EXEMPT SENTENCE STILL GETS A FLOOR — it is not skipped (review
+    # cycle 9, MEASURED: `continue` applied NO list at all, so "The SPELLING gap
+    # is open, and the value class is no longer judged.", "… the numeric side is
+    # no longer compared." and "… the carve-out reopens." went FAIL→PASS against
+    # the parent commit — phrases `_ADJACENCY_REOPENING` itself advertises). The
+    # exempt arm therefore applies `_SPELLING_SENTENCE_REOPENING`, whose whole
+    # job is to say a unit stopped being fused/judged whatever else the sentence
+    # is about; the non-exempt arm applies the full list.
+    tail = sentences[last + 1:]
+    for sentence in tail:
+        # ⛔ THE WAIVER IS CLAUSE-SCOPED, NOT SENTENCE-SCOPED (review cycle 10,
+        # MEASURED: with the waiver on the whole sentence,
+        # "The SPELLING gap is open, and the carve-out is still open." and
+        # "…, and the carve-out is not closed." both PASSED — they match the
+        # full list's own `is … open` arm, waived only because the FIRST clause
+        # is honestly about spelling). A waiver for an honest clause must not
+        # travel to the next one.
+        for clause in re.split(r";|,?\s+(?:and|but)\s+", sentence):
+            exempt = ("spelling" in clause
+                      and not _UNIT_TOKEN.search(clause))
+            for pattern in (_SPELLING_SENTENCE_REOPENING if exempt
+                            else _ADJACENCY_REOPENING):
+                m = re.search(pattern, clause)
+                assert m is None, (
+                    f"the row says {m.group(0)!r}, which reopens the adjacency "
+                    f"gap this table closed: {clause!r}")
+    assert not tail or any("spelling" in s for s in tail), (
+        "a sentence after the adjacency claim says something other than the "
+        f"disclosed SPELLING residual — inspect it: {tail!r}")
+    if tail:
+        assert any("spelling" in s and "open" in s for s in tail), (
+            "the row no longer discloses that the SPELLING class is open: "
+            f"{tail!r}")
+    # positive control: the RATE class IS still open, and it must stay NAMED, or
+    # the assertions above could be satisfied by a row that says nothing at all.
+    assert "not judged" in flat, block
+    assert "per day" in flat or "per\n      day" in block, block
 
 
 def test_the_suffix_comes_from_the_last_digit_run():
@@ -1780,3 +2294,332 @@ def test_a_BARE_parenthetical_numeral_is_still_judged():
     assert result["payload"]["points"] == [], result["warnings"]
     assert any("REWRITES its own verbatim quote" in w
                for w in result["warnings"]), result["warnings"]
+
+
+# ── 23. the engine's own unit VOCABULARY, which was declared but not fused ──
+
+def test_a_declared_unit_WORD_is_fused_so_a_unit_rewrite_cannot_hide():
+    """Residual (d) of the registry row, CLOSED — and the row said how.
+
+    `config/v4-mechanisms.yml`'s `state_value_carve_out` row carried this as a
+    limit rather than a tolerance:
+
+    > (d) a unit WORD the engine's own `_UNIT_WORDS` vocabulary does not carry
+    > (`seconds`, `minute`, `hour`, `day`, `mile`, …) is never fused into the
+    > value token — apart or not — so a minutes→seconds rewrite is not judged:
+    > an ENGINE VOCABULARY limit, NOT a tolerance of this rule.
+
+    It was exactly that: `_UNIT_EQUIV` DECLARED those spellings while
+    `_UNIT_WORDS` — the set `_value_bindings` can actually FUSE — did not carry
+    them, so the value was emitted with NO unit, and a unit-less side reads as
+    "unit not stated" and FAILS OPEN. Measured on the shipped tree:
+
+        content "the TTL is 20 minutes"  quote "the TTL is 20 seconds"
+          bindings      c=('ttl', '20minutes')  q=('ttl', '20')
+          divergence    ()          <-- a minutes→seconds rewrite, unrefused
+
+    while the SAME class was already refused for `20 minutes`/`40 minutes`
+    (`('ttl', '20min', '40min')`). The verdict depended on the SPELLING of the
+    unit, which is the false-negative direction the carve-out exists to stop.
+
+    ⛔ The `True` rows are the re-opened class; the `False` rows are the
+    tolerance the completion must NOT buy its detection with — a unit spelled
+    differently is still FORM, not value, and refusing it is the
+    false-accusation direction this rule must never take.
+    """
+    # the rewrite class, previously fail-open for every row below
+    for content, quote in (
+        ("the TTL is 20 minutes", "the TTL is 20 seconds"),      # plural → plural
+        ("the timeout is 90 seconds", "the timeout is 90 minutes"),
+        ("the wait is 2 hour", "the wait is 2 second"),          # singular forms
+        ("the timeout is 800 ms", "the timeout is 800 s"),        # ABBREVIATION, APART
+        ("the drive is 20 miles", "the drive is 20 km"),          # mile → mi identity
+        ("the TTL is 20 milliseconds", "the TTL is 20 minutes"),
+    ):
+        assert v2._value_slot_divergence(content, quote), (content, quote)
+
+    # …and the tolerance bound is unchanged: same unit, different spelling
+    for content, quote in (
+        ("the TTL is 20 minutes", "the TTL is 20 min"),
+        ("the TTL is 20 minutes", "the TTL is 20 mins"),
+        ("the timeout is 800 ms", "the timeout is 800 msec"),
+        ("the timeout is 800 milliseconds", "the timeout is 800 msecs"),
+        ("the drive is 20 mile", "the drive is 20 miles"),
+        ("the drive is 20 miles", "the drive is 20 mi"),
+        ("the drop was 20 percent", "the drop was 20 pct"),
+        ("the drop was 20 percent", "the drop was 20 %"),
+        ("the wait is 2 hours", "the wait is 2 hrs"),
+        ("the wait is 2 hour", "the wait is 2hr"),
+    ):
+        assert v2._value_slot_divergence(content, quote) == (), (content, quote)
+
+    # …and the rewrite is REFUSED at the write boundary, not merely detectable
+    result = _write("the TTL is 20 minutes", "the TTL is 20 seconds")
+    assert result["payload"]["points"] == [], result["warnings"]
+    assert any("REWRITES its own verbatim quote" in w
+               for w in result["warnings"]), result["warnings"]
+
+
+def test_the_unit_vocabulary_is_complete_in_the_direction_that_matters():
+    """The MECHANICAL invariant that keeps residual (d) from re-opening.
+
+    `test_the_unit_table_covers_every_unit_the_engine_can_fuse` pins one
+    direction — a FUSED unit is never UNKNOWN. The direction that produced
+    #10360's gap is the other one: a unit the module KNOWS (a key of
+    `_UNIT_EQUIV`, which is what `_value_identity_matches` compares) but cannot
+    FUSE, so the pair is never judged at all. Nothing pinned that, which is why
+    the two tables could disagree for as long as they did.
+
+    `%`/`percent`/`pct` are the named exceptions, and they are not an escape
+    hatch — they are the ONE place a DECLARED identity is left unfused on
+    purpose, and the reason is measured (#10360 review cycles 3 and 6, P2).
+    `%` reaches a pair by two routes that disagree: `20 %` is merged onto its
+    numeral by the TOKENIZER, but `20k %` is not (`['20k', '%']`), and the
+    attached `20k%` tokenises to `['20k']`, dropping the symbol. Fusing
+    `percent` therefore composed one side and not the other and REFUSED a
+    truthful point. ⚠️ Leaving them unfused refuses nothing HEAD did not already
+    refuse across same-value percent pairs, and its cost is the missed detection
+    of a `20 percent`→`20 seconds` rewrite — the fail-OPEN direction. Both
+    halves are asserted below, so neither the exception nor its cost is implied.
+
+    ⛔ This reds the moment a lane adds a spelling to `_UNIT_EQUIV` and forgets
+    `_UNIT_WORDS` — the exact edit that would silently re-create residual (d).
+    """
+    assert set(v2._UNIT_WORDS) <= set(v2._UNIT_EQUIV)          # the other direction
+    assert set(v2._UNIT_EQUIV) - set(v2._UNIT_WORDS) == {
+        "%", "percent", "pct"}, sorted(
+        set(v2._UNIT_EQUIV) - set(v2._UNIT_WORDS))
+    # the two routes `%` arrives by, which is WHY it cannot be fused: a BARE
+    # numeral is merged by the tokenizer...
+    assert "20%" in v2._guard_token_seq(v2._canonicalise_clocks("the drop was 20 %"))
+    assert "20%" in v2._guard_token_seq(v2._canonicalise_clocks("the drop was 20\t%"))
+    assert v2._value_core("20 %") == ("", "20", "%")
+    assert v2._value_core("20%") == ("", "20", "%")
+    # ...but a PREFIXED one is NOT (the symbol stays a separate token, and the
+    # attached form is dropped entirely), so fusing `percent` would compose one
+    # side and not the other
+    assert v2._guard_token_seq(v2._canonicalise_clocks("the drop was 20k %")) == [
+        "the", "drop", "was", "20k", "%"]
+    assert v2._guard_token_seq(v2._canonicalise_clocks("the drop was 20k%")) == [
+        "the", "drop", "was", "20k"]
+    # the fail-OPEN consequence, pinned so it is a stated choice not an accident
+    for content, quote in (
+        ("the drop was 20 percent", "the drop was 20 seconds"),
+        ("the drop was 20k percent", "the drop was 20k %"),
+        ("the value was 20k%", "the value was 20000 percent"),
+    ):
+        assert v2._value_slot_divergence(content, quote) == (), (content, quote)
+    # positive control: the invariant's set is not trivially satisfiable by an
+    # inert table — the completions this issue added are all live
+    for word in ("minute", "second", "seconds", "hour", "millisecond",
+                 "milliseconds", "msec", "msecs", "mile", "miles", "ms"):
+        assert word in v2._UNIT_WORDS, word
+    # …and the three the row leaves UNFUSED on purpose are absent, so this pin
+    # cannot be satisfied by quietly fusing them again
+    for word in ("%", "percent", "pct"):
+        assert word not in v2._UNIT_WORDS, word
+
+
+def test_a_magnitude_prefix_COMPOSES_with_the_unit_word_that_follows_it():
+    """#10360 review cycle 1, P2 — the false accusation completing the table reached.
+
+    `_value_bindings` fuses a unit WORD that follows a value onto it. On a value
+    that already carried a magnitude prefix that produced `20k` + `miles` →
+    `20kmiles`, whose suffix maps to nothing: `_value_core` returned an UNKNOWN
+    unit, the `k` reading was lost, and the pair diverged on the numeric CORE
+    (20 vs 20000) — reaching the write boundary and withholding a truthful
+    point, which is the false-accusation direction this rule must never take.
+
+    Reproduce by reverting `_compose_magnitude_and_unit` in the fusion branch:
+    the first row below REFUSES and the write path drops the point.
+
+    ⚠️ The shape PRE-EXISTED for every already-fusable unit — `5k min` against
+    `5000 min` was refused on the pre-change tree — so this is a repair of that
+    class too, not only a hedge around the new vocabulary.
+    """
+    # a prefixed value and a plain one name the SAME number once composed
+    for content, quote in (
+        ("the fleet drove 20000 miles", "the fleet drove 20k miles"),
+        ("the wait was 5000 min", "the wait was 5k min"),
+        ("the wait was 20500 seconds", "the wait was 20.5k seconds"),
+        ("the timeout was 3000 ms", "the timeout was 3k ms"),
+        ("the retry took 2000 hours", "the retry took 2k hours"),
+    ):
+        assert v2._value_slot_divergence(content, quote) == (), (content, quote)
+
+    # …and the composition did not buy that by going blind: a DIFFERENT number
+    # behind the same prefix is still refused
+    for content, quote in (
+        ("the fleet drove 20000 miles", "the fleet drove 21k miles"),
+        ("the wait was 5000 min", "the wait was 6k min"),
+        ("we ran 20k", "we ran 21km"),
+        ("the delta is -20k", "the delta is 20km"),
+    ):
+        assert v2._value_slot_divergence(content, quote), (content, quote)
+
+    # the pre-existing FAIL-OPEN rows the composition must not disturb
+    for content, quote in (
+        ("we saw 5k QPS", "we saw 5000 QPS"),      # `QPS` is not a fused unit
+        ("the drive is 20k", "the drive is 20km"),  # `k` as a bare unit word
+        ("the value is 20kms", "the value is 20km"),  # ONE token: still kilometres
+    ):
+        assert v2._value_slot_divergence(content, quote) == (), (content, quote)
+
+    # end to end: the truthful point is WRITTEN, not withheld
+    result = _write("the fleet drove 20000 miles", "the fleet drove 20k miles")
+    assert result["payload"]["points"], result["warnings"]
+
+
+def test_the_composition_reads_a_SIGNED_or_SPACED_prefix_as_the_same_value():
+    """#10360 review cycles 2 and 3 — the shapes a private regex kept missing.
+
+    The first composition required a bare ``\\d+`` core, so spellings the module
+    ALREADY reads as one value fell to the raw glue and became an unknown unit
+    again — a truthful point withheld:
+
+    * **the sign** (`_reads_as_sign`): `-20k` + `miles` → `-20kmiles` → the `k`
+      reading is lost and the pair diverges on the CORE (-20 vs -20000);
+    * **the leading dot** (`_LEADING_DOT`: "``.5`` is a legitimate written form of
+      ``0.5``"): `.5k miles` → `.5kmiles`, same shape, against `500 miles`;
+    * **a SPACED prefix**: `k` is itself a `_UNIT_WORDS` member, so `20 k min`
+      fused `k` and STOPPED — the unit word after it was never reached, leaving
+      `('20k')` against `('20000min')`. The cycle-2 reviewer measured 260 refused
+      pairs of this single shape over its own spelling grid.
+
+    ⛔ And a THIRD revision still had it wrong (#10360 review cycle 3, P1): it
+    admitted only `-`/U+2212 while `_reads_as_sign` admits the whole `Pd` family
+    (en/em dash, hyphen, U+2011) and `_value_core` skips every `Sc`/`Sm`
+    decoration (`~ + > < $ ≈ ±`) — the sign/decoration reading now comes from
+    `_value_core` itself, so it cannot drift again.
+    """
+    # the sign, in every glyph family the module treats as one sign
+    for content, quote in (
+        ("the delta is -20000 miles", "the delta is -20k miles"),
+        ("the delta is \u221220000 miles", "the delta is \u221220k miles"),
+        ("the delta is \u201320000 miles", "the delta is \u201320k miles"),
+        ("the delta is \u201420000 miles", "the delta is \u201420k miles"),
+        ("the delta is \u201120000 miles", "the delta is \u201120k miles"),
+        ("the delta is -5000 min", "the delta is -5k min"),
+    ):
+        assert v2._value_slot_divergence(content, quote) == (), (content, quote)
+
+    # …and the decorations `_value_core` ignores are ignored here too
+    for content, quote in (
+        ("the fleet drove ~20000 miles", "the fleet drove ~20k miles"),
+        ("the fleet drove 20000 miles", "the fleet drove ~20000 miles"),
+        ("the fleet drove +20000 miles", "the fleet drove +20k miles"),
+        ("the fleet drove \u224820000 miles", "the fleet drove \u224820k miles"),
+        ("the fleet drove \u00b120000 miles", "the fleet drove \u00b120k miles"),
+    ):
+        assert v2._value_slot_divergence(content, quote) == (), (content, quote)
+
+    # the leading dot — the same value `_LEADING_DOT` already accepts
+    for content, quote in (
+        ("the drive was 500 miles", "the drive was .5k miles"),
+        ("the drive was 500 miles", "the drive was 0.5k miles"),
+    ):
+        assert v2._value_slot_divergence(content, quote) == (), (content, quote)
+
+    # a prefix written APART, and a prefix spelled as a number word
+    for content, quote in (
+        ("the wait was 20000 min", "the wait was 20 k min"),
+        ("the fleet drove 20000 miles", "the fleet drove 20 k miles"),
+        ("the wait was 20000 min", "the wait was twenty k min"),
+    ):
+        assert v2._value_slot_divergence(content, quote) == (), (content, quote)
+
+    # ⛔ a NON-ASCII decimal script is the same value (#10513 cycle 16 pins the
+    # fold; this pins that the composition reads through it — cycle 6, P2:
+    # an ASCII-only head class refused `２０k` and withheld the truthful point)
+    for content, quote in (
+        ("the fleet drove 20000 miles", "the fleet drove \uff12\uff10k miles"),
+        ("the fleet drove 20000 miles", "the fleet drove \u0662\u0660k miles"),
+    ):
+        assert v2._value_slot_divergence(content, quote) == (), (content, quote)
+
+    # ⛔ the `_MAGNITUDE_TAIL` POSITIVE branch, pinned (#10360 review cycle 5,
+    # P3): `20k k miles` already carries a prefix, so the standalone `k` must
+    # NOT be consumed a second time. Forcing that guard to always fire yields
+    # `20kkiles` here instead of `20000k`, and nothing else in this file noticed.
+    assert v2._value_bindings("the value was 20k k miles") == (
+        ("value", "20000k"),), v2._value_bindings("the value was 20k k miles")
+
+    # …and the WHOLE same-value spelling grid, which is how the 260 were found:
+    # no spelling of one number may be refused against another. 9 fused unit
+    # SPELLINGS (7 identities — `miles`/`mi` and `min`/`minutes` share one each)
+    # × 6 forms × 6 forms, 54 of them the trivial `a == b` diagonal.
+    for unit in ("miles", "mi", "km", "seconds", "min", "minutes", "ms",
+                 "hours", "kg"):
+        for a in ("20000", "20k", "20 k", "twenty k", "20K", "20.0k"):
+            for b in ("20000", "20k", "20 k", "twenty k", "20K", "20.0k"):
+                assert v2._value_slot_divergence(
+                    f"the value was {a} {unit}",
+                    f"the value was {b} {unit}") == (), (a, b, unit)
+
+    # the composition still is not blind: a different number behind the sign
+    for content, quote in (
+        ("the delta is -20000 miles", "the delta is -21k miles"),
+        ("the drive was 500 miles", "the drive was .6k miles"),
+    ):
+        assert v2._value_slot_divergence(content, quote), (content, quote)
+
+
+def test_the_composition_does_not_smuggle_the_SEPARATOR_decision_back_in():
+    """#10360 review cycle 3 — a crash and a recorded decision, both measured.
+
+    `_compose_magnitude_and_unit` reads the value through `_value_core`, which
+    returns `None` for a token it deliberately does NOT read: a SEPARATOR-bearing
+    numeral (`1,200`). Unguarded, the composition raised
+
+        TypeError: cannot unpack non-iterable NoneType object
+
+    on `latency was 1200 ms` against `latency was 1,200 ms` — a BATTERY row, so
+    the suite caught it. ⛔ The guard must also not REFUSE those pairs: deciding
+    that `1,200` is 1200 IS the locale question `tortoise/value_normalizer.py`
+    excludes by the owner's #2817 ruling ("No separator rule, at all"), and a
+    unit fused onto the numeral would smuggle that decision back in through the
+    unit. So a `None` identity leaves the token unchanged, and the pair stays
+    outside the judged set.
+    """
+    assert v2._value_core("1,200") is None
+    assert v2._value_core("1.234") is None
+    for content, quote in (
+        ("latency was 1200 ms", "latency was 1,200 ms"),
+        ("latency was 1200 minutes", "latency was 1,200 minutes"),
+        ("the p95 hit 4,2 seconds", "the p95 hit 4.2 seconds"),
+        ("the drive was 1.234 km", "the drive was 1234 km"),
+    ):
+        assert v2._value_slot_divergence(content, quote) == (), (content, quote)
+    # …while the SAME unit on an unseparated pair is still judged, so the guard
+    # did not simply disable the composition for anything with a unit
+    assert v2._value_slot_divergence("latency was 1200 ms", "latency was 1300 ms")
+
+
+def test_an_IDENTIFIER_shaped_token_is_not_read_as_a_quantity():
+    """#10360 review cycle 5, P3 — the composition multiplied an ARRAY INDEX.
+
+    `_value_core` reads the LAST numeric run of ANY token, so the
+    identifier-shaped `s4[k` also returns core `4` + suffix `k`. Composing it
+    with a following unit word turned an array index into 4000 — measured on this
+    repo's own docs corpus (`docs/plans/2026-08-27-1789-s4-delta-contract.md`),
+    which is `_value_core`'s own doctrine about never inventing a second
+    interpretation of one token (#2817). `_NUMERIC_HEAD` requires the token —
+    after its leading decoration — to START with a digit or a dot, so an
+    identifier keeps the pre-change reading.
+
+    ⛔ This test exists because the guard was UNPINNED when it landed: mutation
+    (`_NUMERIC_HEAD` replaced with an always-matching pattern) left the whole
+    file green (#10360 review cycle 6, P3).
+    """
+    # an identifier-shaped token keeps the OLD reading — no 4000-style core
+    ident = v2._value_bindings("any(_is_content_list(s4[k k")
+    assert ident == (("", "any(_is_content_list(s4[kk"),), ident
+    assert v2._value_core(v2._value_bindings("the see was x4k ms")[0][1])[1] == "4"
+    # …while every genuine quantity shape still composes (a decorated value and a
+    # leading-dot one), so the head guard did not simply disable the composition
+    assert v2._value_core(
+        v2._value_bindings("the value was $20k miles")[0][1]) == (
+            "", "20000", "mi")
+    assert v2._value_core(
+        v2._value_bindings("the value was .5k miles")[0][1]) == (
+            "", "500", "mi")

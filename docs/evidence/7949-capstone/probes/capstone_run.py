@@ -16,14 +16,14 @@ the corrected reading:
 1. **A single entry point DOES exist.** The body says *"whether any single
    entry point … can drive all eight in one pass"* is an open question. It can:
    ``TortoiseSDK.capture_session`` → ``sdk._extract_session_v2``
-   (``sdk.py:15526``, called at ``:14563``) →
-   ``extractor_v2.extract_session_v2`` (``extractor_v2.py:10085``) calls
-   ``_edus_from_conversation`` (S0, ``:10203``), ``run_s1`` (S1, ``:10243``),
-   ``run_s2`` (S2.1, ``:10267``), ``_run_vet_pass`` (S2.2, ``:10296``),
-   ``kind_classifier.classify_items`` (S2.3, ``:10311``),
-   ``_apply_classify_kinds`` (S2.3, ``:10312``), ``search_graph`` (S3,
-   ``:10328``), ``run_s4`` (the gap filler, ``:10349``), and ``execute_embed``
-   (S5+S6, ``:10548``). ONE cite per symbol, on the line that symbol is on:
+   (``sdk.py:15621``, called at ``:14658``) →
+   ``extractor_v2.extract_session_v2`` (``extractor_v2.py:10252``) calls
+   ``_edus_from_conversation`` (S0, ``:10370``), ``run_s1`` (S1, ``:10410``),
+   ``run_s2`` (S2.1, ``:10434``), ``_run_vet_pass`` (S2.2, ``:10463``),
+   ``kind_classifier.classify_items`` (S2.3, ``:10478``),
+   ``_apply_classify_kinds`` (S2.3, ``:10479``), ``search_graph`` (S3,
+   ``:10495``), ``run_s4`` (the gap filler, ``:10516``), and ``execute_embed``
+   (S5+S6, ``:10715``). ONE cite per symbol, on the line that symbol is on:
    S2.3 makes TWO calls two lines apart, and the single ``:NNNN`` a
    ``a``/``b`` pair cite could carry is only ever checkable for one of them —
    that pair form is how ``_apply_classify_kinds`` sat on ``:9210`` (naming

@@ -24,6 +24,33 @@
 > `!` note (its exit code is unchanged — the link IS correct), and `--pin-check` makes it a verdict.
 > They are separate invocations on purpose and are REFUSED together (`--check --pin-check` exits 2)
 > rather than silently answering only the cheaper question — run each on its own line.
+>
+> ⛔ **NEITHER answers the third question, and its absence is what made #10114 a no-op: "is the code
+> this box EXECUTES the pinned bytes?"** `--check` grades the repo's `scripts/` pointer and
+> `--pin-check` grades the checkout, but the fleet RUNS `~/.pi/agent/scripts` — a **copy** farm that
+> `pi-bootstrap/setup.sh` materialises at install time. Neither mode reads it. Measured 2026-11-03 on
+> the `cmux` cell, both of the above green: the farm was **15 files stale**, including a
+> `pr-doctor.py` still carrying the pre-**agent-infra**#2888 flat `SPAWN_TIMEOUT_S=2400` — below the
+> fleet's 2700 s progress allowance, so the wall-clock backstop pre-empted the bound that is supposed
+> to decide `wedged`. Two green lines read as "the harness is fine" over a fleet capping every repair
+> lane at 40 minutes.
+>
+> The deployed-surface grader is **agent-infra's**, not this repo's — `scripts/check-farm-drift.sh` in
+> an agent-infra checkout (it is not itself farmed, so no copy under `~/.pi/agent/scripts` exists).
+> Two things make its verdict easy to miss. First, **the installer's exit is not the verdict, and only
+> one installer grades the farm at all**: `pi-bootstrap/setup.sh` runs the checker as its last leg and
+> fails the install on the checker's `1` alone — on `2` (cannot verify) or `3` (no deploy can fix it)
+> it prints `this is NOT a pass` and still ends with `Done!` — while `cell-install.sh` has no farm leg,
+> its own `verify_layer` comparing only against the tree it just installed from. Second, **the grader
+> reads the farm the installer's base names, which need not be the one this box executes**: a
+> `$HOME`-rooted run on a `CELL_HOME`-rooted box grades `$HOME/.pi/agent/scripts`, so neither its `OK`
+> nor its `COULD NOT VERIFY` says anything about the executed farm. That farm is materialised only by
+> the installer, so run it from a checkout **at the pin**: from a tree at any other commit it re-farms
+> bytes that are not the pin's, and advancing the pin alone leaves the farm stale. Direct invocation
+> from a pi session may be refused as `script-indirection`, with a message that never mentions drift
+> (agent-infra#3173, the #709 false positive) — so **a refusal is not a clean result**. Do **not** add
+> a tortoise-side mirror — a second owner of that predicate was refused (tortoise#10722, closed
+> superseded); the farm arrays and `is_declared_local` live in agent-infra.
 
 ---
 
@@ -542,6 +569,19 @@ for three sends to one pane that were recorded as `OK` and never consumed.
 ### Git Workflow
 
 - **Before any commit:** invoke `commit-workflow` skill
+- **⛔ Never `git worktree remove --force` a dirty worktree — pin the work first.**
+  `worktree remove --force` on a worktree with uncommitted changes returns **0** and destroys the
+  content **irrecoverably**: an uncommitted line was never in the object DB, so there is no reflog
+  entry, no `git fsck --unreachable` commit and no repair recipe — measured on a lane carrying
+  ~4,500 uncommitted lines when its worktree vanished under a live reviewer process (#10812).
+  Unlike the `lane_stash` hazard below, this one is NOT recoverable after the fact. Run
+  `uv run python tools/lane_wip.py pin` first — before a long step, a reviewer hand-off, or any
+  `remove`/`rm -rf`/reaper window. It snapshots BOTH views (`lane_wip`'s scratch-index tree of
+  tracked modifications + untracked non-ignored files + deletions, and the real index tree) into
+  `refs/pi-lane-wip/<lane-key>/<n>` **without touching HEAD, the index or the working tree**, so a
+  pin is safe to take. `... list` shows the lane's pins, `... recover <ref> --into <path>` puts one
+  back (the positional is the pin ref or its sha, NOT an index), and `... recipe` prints the
+  recovery path instead of leaving it as folklore.
 - **⛔ Never run a bare `git stash pop` / `git stash apply` / `git stash drop` in a worktree lane.**
   `refs/stash` and its reflog live in the **common** git dir, so the stack is repo-GLOBAL: a peer
   lane's `git stash push` renumbers YOUR entry, and your unqualified `git stash pop` then applies

@@ -3,7 +3,7 @@
 # pattern: stage the client subset of the `tortoise` package into a temp
 # tree, overlay the client-only shim files, then build.
 #
-# Shared modules (mcp_client.py, config.py, exceptions.py,
+# Shared modules (mcp_client.py, mcp_bridge.py, config.py, exceptions.py,
 # status_vocabulary.py) are COPIED from the canonical repo tree (tortoise/)
 # at build time — single source of truth, zero drift. The `cp` lines below
 # ARE that source: client/shared_modules.sh derives the module set from them
@@ -36,6 +36,10 @@ cp "$REPO_ROOT/tortoise/exceptions.py" "$STAGE/tortoise/exceptions.py"
 # #3805: the recorded status vocabulary — the ONE declaration both client
 # surfaces import (the thin probe and the S9 skill-wiring client).
 cp "$REPO_ROOT/tortoise/status_vocabulary.py" "$STAGE/tortoise/status_vocabulary.py"
+# #10605: the stdio↔Streamable-HTTP bridge, so a client-only install can declare
+# a local command instead of a static `Authorization` header (the harness
+# `${VAR}` expansion is a capture, not a lookup — see the module docstring).
+cp "$REPO_ROOT/tortoise/mcp_bridge.py" "$STAGE/tortoise/mcp_bridge.py"
 
 # Client-only shim files (checked into client/ — NOT copies of the engine's
 # __init__, which imports redislite).
