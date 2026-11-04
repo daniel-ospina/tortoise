@@ -831,6 +831,63 @@ def test_a_MALFORMED_props_tail_is_REFUSED_not_dropped_in_silence():
     with pytest.raises(ValueError):
         node_from_row("Source", row)
 
+    # ⛔ THE DECLARED RESIDUAL, PINNED SO IT CANNOT BE READ AS PARITY (#10867
+    # review, closing pass). PostgreSQL's `jsonb` maps JSON `null` and JSON `""`
+    # onto the SAME Python values as the two spellings of ABSENT, so a DECODING
+    # driver cannot tell `props='null'::jsonb` from an absent tail: it projects
+    # there while the identical row as TEXT is refused. Not closable at the
+    # absence test — the decoded values ARE the lenient spellings — and it carries
+    # NO content (neither has keys), so it is declared and pinned, not fixed.
+    for text_form in ("null", '""'):
+        row = _captured_session_row()
+        row["props"] = text_form
+        with pytest.raises(CacheProjectionError):
+            node_from_row("Source", row)
+
+
+def test_the_row_predicate_ANSWERS_on_a_decoded_json_STRING_tail():
+    """The predicate must never raise on a shape a driver can hand back (#10867
+    review, closing pass).
+
+    `_decoded_tail` answers for EVERY shape a row can hold — that is its whole
+    contract, because `_is_episodic_source_row` is called before anything decides
+    whether to project. But it routed every `str` through `json.loads`, which is
+    right for the TEXT driver (a `jsonb` string arrives as its JSON SOURCE,
+    `'"hello"'`) and wrong for a DECODING one (psycopg hands back the decoded
+    `str` `'hello'`, which is not JSON text): the predicate raised
+    `JSONDecodeError` on one driver and answered on the other, for the same row.
+    It now answers `{}` — the DOCUMENT arm, this module's declared safe
+    asymmetry. The WRITER path is untouched and stays LOUD, which the same test
+    pins beside it so a later fix cannot quieten both.
+    """
+    from tortoise.cache_projection import _decoded_tail, _is_episodic_source_row
+
+    # The DECODED form of `props='"hello"'::jsonb`: not JSON text at all.
+    assert _decoded_tail("hello") == {}, (
+        "a decoded `jsonb` string tail must answer `{}` — the row predicate must "
+        "answer for every shape a row can hold, never raise"
+    )
+    row = _captured_session_row()
+    row["props"] = "hello"
+    assert _is_episodic_source_row(row) is True, (
+        "the predicate must still ANSWER (the agentSession column arm decides "
+        "here) rather than raising out of the identity read"
+    )
+
+    # ⛔ The writer path must NOT inherit that leniency: this row would otherwise
+    # project with its tail silently dropped, which is the loss the module
+    # refuses by name. A ``str`` that is not valid JSON text stays LOUD — as
+    # `JSONDecodeError` (a `ValueError`), the same shape the broken-text case
+    # above pins, because the writer decodes through `_tail_payload` directly.
+    assert row.get("source_kind") == "agentSession"
+    with pytest.raises(ValueError):
+        node_from_row("Source", row)
+
+    # And the TEXT spelling of the same column (`'"hello"'`, valid JSON text)
+    # decodes to a `str` payload, so the predicate answers too — parity where
+    # parity is possible.
+    assert _decoded_tail('"hello"') == {}
+
 
 def test_the_identity_view_NEVER_aliases_the_record_row():
     """`_row_identity_view` promises a FRESH mapping on EVERY branch (#10867 P3).

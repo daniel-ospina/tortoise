@@ -1370,6 +1370,20 @@ def _tail_payload(raw: Any) -> Any:
     record aborting one `record-restore` as `RestoreUnavailable` and projecting
     cleanly through the other. So the test is IDENTITY against the two absent
     spellings, never truthiness.
+
+    ⛔ DECLARED RESIDUAL — TWO DEGENERATE SCALARS STILL SPLIT ON THE DRIVER.
+    PostgreSQL's `jsonb` maps JSON `null` and JSON `""` onto the SAME Python
+    values as the absent spellings above (`null` → `None`, `""` → `''`), so a
+    DECODING driver cannot distinguish `props='null'::jsonb` from an absent tail
+    — those two project as absence there while the identical row as TEXT
+    (`'null'`, `'""'`) is refused below. That asymmetry is not closable at this
+    operator: the decoded values ARE the mandated lenient spellings, and
+    widening the lenient set to admit `'null'`/`'""'` as well would re-spell
+    ABSENCE rather than detect it. It is declared rather than fixed because it
+    carries NO content: neither a JSON `null` nor a JSON empty string has keys,
+    so no tail property is lost either way (`test_a_MALFORMED_props_tail_is_
+    REFUSED_not_dropped_in_silence` pins the split so it cannot be read as
+    parity).
     """
     if raw is None or raw == "":
         return {}
@@ -1384,8 +1398,28 @@ def _decoded_tail(raw: Any) -> Mapping[str, Any]:
     hold. That leniency is deliberately NOT shared with :func:`_props_from_row`:
     the writer path decodes through :func:`_tail_payload` and RAISES on a
     non-object, so a malformed tail is refused where it would otherwise be
-    projected (and silently dropped)."""
-    tail = _tail_payload(raw)
+    projected (and silently dropped).
+
+    ⛔ IT MUST NOT RAISE, AND A DECODED JSON STRING IS NOT JSON TEXT (#10867
+    review, closing pass). `_tail_payload` routes any `str` through `json.loads`,
+    which is right for the TEXT driver — where a `jsonb` string tail arrives as
+    its JSON SOURCE (`'"hello"'`). A DECODING driver (psycopg) hands the same
+    column back as the decoded Python `str` `'hello'`, which is not JSON text at
+    all: `json.loads` raised `JSONDecodeError` out of the ROW PREDICATE, so
+    `_is_episodic_source_row` — the function whose whole contract is to ANSWER
+    for every shape a row can hold — answered on one driver and raised on the
+    other. Unparseable non-objects answer `{}` here (the DOCUMENT arm, which is
+    this module's declared safe asymmetry: a missed legacy session keeps its
+    prose, a false positive strips a document's metadata). The WRITER path is
+    untouched and stays LOUD — `_props_from_row` decodes through
+    :func:`_tail_payload` directly, so `props='{not json'` still raises."""
+    try:
+        tail = _tail_payload(raw)
+    except (ValueError, TypeError):
+        # Unparseable, i.e. not JSON text — a decoded string tail as the driver
+        # spells it. NOT `CacheProjectionError` (a RuntimeError) and NOT the
+        # writer path, which must keep raising.
+        return {}
     return tail if isinstance(tail, Mapping) else {}
 
 
