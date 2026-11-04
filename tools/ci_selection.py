@@ -3635,26 +3635,25 @@ def duplicate_mapping_key_issues(manifest_path: Path | None = None) -> list[str]
     so the post-landing sweep rewrites a weight the shard packer never reads.
 
     It is not hypothetical: ``config/ci-surfaces.yml`` is ``merge=union``
-    (``.gitattributes``), so any merge that touches a ``durations:`` hunk emits
-    the row twice. This one batch PR (#10726) has produced it repeatedly — 62
-    keys, then 13, then 1, then 2 (each recorded in its fold ledger), then 6 at
-    ``13a53ef7e`` and 5 at ``aba51cf97``. The FIRST of those was caught only by
-    the required ``manifest-integrity`` leg after a push, while ``--integrity``
-    — the check that PR body cited as proof of "0 duplicates" — was green at
-    the time (``02133e21b``'s ``--integrity`` does not COMPOSE this walk:
-    ``duplicate_mapping_key_issues`` does not exist in ``tools/ci_selection.py``
-    there, though ``tools/registry_integrity.py`` already had it — which is why
-    the ``manifest-integrity`` leg still saw the 62), and that is exactly why the
-    walk is now COMPOSED INTO ``--integrity`` (``dd4f66e6a``): a POST-MERGE,
-    PRE-PUSH run names it locally, by the same instrument the PR body quotes.
+    (``.gitattributes``), so ANY replay of a hunk onto a ``durations:`` block
+    emits the row twice — a merge, a rebase, or a re-applied commit. This one
+    batch PR (#10726) has produced it repeatedly — 62 keys, then 13, then 1,
+    then 2 (each recorded in its fold ledger), and 6 measured on
+    ``13a53ef7e``'s own tree. ``--integrity`` — the check that PR body cited as
+    proof of "0 duplicates" — did not compose this walk at the time
+    (``02133e21b`` has no ``duplicate_mapping_key_issues`` in
+    ``tools/ci_selection.py``, though ``tools/registry_integrity.py::check_registry``
+    already walked for duplicate keys), so the required ``manifest-integrity``
+    leg was the only instrument that could see them. That is why the walk is now
+    COMPOSED INTO ``--integrity`` (``dd4f66e6a``).
 
-    ⛔ POST-MERGE IS THE LIMIT, NOT A GUARANTEE. ``13a53ef7e`` is AFTER
-    ``dd4f66e6a`` and still carried 6 duplicates, because THE MERGE ITSELF
-    reintroduces them through ``merge=union`` — and that merge was pushed BEFORE
-    the check ran (``c660ffcee`` records it). So a green ``--integrity`` from
-    before a merge does not cover the merge: re-run it after EVERY merge into
-    this branch — of ``main``, of a sibling lane, or of a fold constituent —
-    because the merge is where this defect is created.
+    ⛔ A GREEN RUN FROM BEFORE A REPLAY DOES NOT COVER THE REPLAY.
+    ``13a53ef7e`` is AFTER ``dd4f66e6a`` and still carried 6, because the replay
+    itself created them and that merge was pushed BEFORE the check ran
+    (``c660ffcee`` records it). Re-run ``--integrity`` after every merge, rebase
+    or re-applied commit into this branch, and judge the COMMITTED TREE rather
+    than a commit subject: a fold merge's subject announces the duplicates its
+    own resolution then removes.
 
     The walk lives in ``tools/registry_integrity.py`` and is imported rather
     than re-spelled, so the two entry points cannot disagree about what a
