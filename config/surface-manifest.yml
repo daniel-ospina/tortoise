@@ -508,8 +508,10 @@ response_fields:
     provenance retrofit (#7704) still folds, so an evidence-bearing re-run keeps its source. All of these codes ride
     the SAME key on the dedup-hit return, so a re-run reports them together rather than dropping
     one'
-  unchanged_when_off: n/a — not flag-gated; the key is ABSENT on a sourced or word-bearing write, and on every write
-    whose fold actually applied, so that response stays byte-identical
+  unchanged_when_off: n/a — not flag-gated; the key is PRESENT only when the write carries no source and no authored
+    word, when its dedup target is a TERMINAL claim the fold would write to (the FOURTH code above — an authored word
+    on a terminal target IS reported, which is why a word-bearing write is not absent by itself), or when the declared
+    kind is declared only on another layer. A write that trips none of the four codes keeps its byte-identical response
 - response: tortoise_check_structure
   field: _meta.tortoise_error
   emitted_when: 'only for the transport wait-bound refusal — the ONE producer whose failure payload is a `{code,
