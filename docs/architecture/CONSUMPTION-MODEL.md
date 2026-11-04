@@ -283,8 +283,18 @@ dimension and `read_error` / `period_error` refused by the gate.
 
 **OVERRIDES:** `#4051` §1b's "the reader is MEASUREMENT ONLY — no request path calls it" — the ruled token dimension
 has no other meter, so enforcement has to read this one; the measurement-only reading would leave the owner's
-2026-09-26 token ruling unenforceable. The gate is INERT until an allowance value is configured (no resolver emits
-one), so nothing is refused today — see §5's classification rule and the reopen recorded on `#4051`.
+2026-09-26 token ruling unenforceable. See §5's classification rule and the reopen recorded on `#4051`.
+
+**⚠️ "INERT" IS ABOUT WHAT THE GATE REFUSES, NOT ABOUT WHAT IT READS** — the correction that replaces the earlier
+"so nothing is refused today" wording here. No resolver emits an allowance value, so no dimension can be over its
+allowance and the gate refuses none on that ground. It is **not** free and it is **not** silent: `hosted_api._check_org_limit`
+and `mcp_server._enforce_quota` fill the missing allowance keys from `quota.resolve_org_limits` on every **gated**
+request (`points` / `documents` / `sessions`), so each such request performs one control-plane read — a PostgREST GET
+in Supabase mode, an SDK open plus a `MATCH (t:Team {id:…})` in registry/self-host mode — and a **fault** in that read
+is a `QuotaCheckError` → HTTP 500 **even with no allowance configured**. That is the read side of the `#3981` tension,
+chosen deliberately (a config read we could not complete must never degrade to "unlimited"); the state that is NOT
+refused is a resolver LOOKUP MISS — an org with no record keeps the caller's already-authoritative dict, because a cap
+cannot be armed from a record that does not exist.
 
 ---
 

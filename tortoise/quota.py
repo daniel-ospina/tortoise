@@ -1328,10 +1328,11 @@ def enforce_org_limit(limits: dict | None, resource: str, sdk=None, *,
     try:
         from .allowance_gate import enforce_allowances
     except Exception as e:
-        # unmapped 500 this gate promises never to produce (#4051). The gate's
-        # own drift check is deliberately LOUD at import (a renamed dimension is
-        # a hard failure), so the loudness is preserved inside the documented
-        # refusal type instead of escaping as a KeyError/ImportError.
+        # A swallowed import here would emit an unmapped 500 this gate promises
+        # never to produce (#4051). The gate's own drift check is deliberately
+        # LOUD at import (a renamed dimension is a hard failure), so the
+        # loudness is preserved inside the documented refusal type instead of
+        # escaping as a KeyError/ImportError.
         _logger.error(
             "allowance gate unavailable (fail-closed): team=%s error=%r",
             org_id, e)

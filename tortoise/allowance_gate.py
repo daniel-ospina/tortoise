@@ -23,7 +23,13 @@ NOT mean the gate is free. ``hosted_api._check_org_limit`` fills the missing key
 at the REST seam from ``quota.resolve_org_limits``, so every gated REST request
 (``points``, ``documents``, ``sessions``) performs ONE control-plane read, and a
 **fault** in that read is a ``QuotaCheckError`` → HTTP 500 **even with no allowance
-configured**. That is an over-block on our own bookkeeping fault, and the read
+configured**. ⚠️ "One read" is the SUPABASE shape: in registry/self-host mode the
+same fill is an SDK construction plus a ``MATCH (t:Team {id:…})`` query
+(``resolve_org_limits``'s registry arm → ``_make_sdk(namespace="registry")``), so
+the per-request figure is larger there — it is an SDK open, not an HTTP GET
+(#9567 review round 12, P2). Both substrates are disclosed rather than averaged:
+this gate is inert about what it REFUSES on every substrate, but never about what
+it READS, and a self-hosted deployment pays the bigger read. That is an over-block on our own bookkeeping fault, and the read
 side of the ``#3981`` tension this module states below: the ruling forbids
 refusing a paying org over a METERING fault, while a cap that serves past our
 fault is a cap that can be evaded during an outage. We chose refuse-and-name it
@@ -64,17 +70,28 @@ invariant.
 
 **⚠️ HOW AN ALLOWANCE REACHES THE GATE (the arming seam).** The gate reads the
 limits dict it is GIVEN, so a key a surface never carried is not a warning — it
-is UNLIMITED. Two carriers, both enumerated from :data:`ALLOWANCE_KEYS`, close
-that on every surface: the MCP capture bridge carries them out of the resolved
-limits it already holds, and ``hosted_api._check_org_limit`` (the ONE REST
-convergence point) fills any key the lane's hand-assembled dict is missing from
-``quota.resolve_org_limits`` — the ONE resolver allowed to emit an allowance
-(#3874's rule: *"there is ONE resolver, so the two cannot drift"*). So arming an
-allowance in the resolver reaches BOTH lanes with no second edit, instead of
-refusing on MCP while REST silently serves past it. The REST fill runs in
-``_check_org_limit``, which REST doors must call OFF the event loop — it is one
-control-plane round-trip per gated request, not a dict lookup (#9567 review
-round 10).
+is UNLIMITED. Three carriers close that on every surface, and the two that
+enumerate from :data:`ALLOWANCE_KEYS` do so generically:
+
+* ``hosted_api._check_org_limit`` (the ONE REST convergence point) fills any key
+  the lane's hand-assembled dict is missing from ``quota.resolve_org_limits`` —
+  the ONE resolver allowed to emit an allowance (#3874's rule: *"there is ONE
+  resolver, so the two cannot drift"*).
+* ``mcp_server._enforce_quota`` (the pre-write gate for every ``_quota_gated``
+  MCP tool) does the same fill, because the MCP lane's ContextVar carries none
+  of the three in Supabase mode (``mcp_auth`` sets ``limits = org``, the
+  ``resolve_api_key`` dict, which has no allowance column). Without it, arming
+  in the resolver would REFUSE on REST and SERVE WITHOUT LIMIT on ~19 MCP
+  points/documents tools — the same fail-open, one surface short (#9567 review
+  round 15).
+* the MCP capture BRIDGE (``mcp_server.tortoise_session_capture``) carries them
+  out of the resolved limits dict it already holds.
+
+So arming an allowance in the resolver reaches BOTH lanes with no second edit,
+instead of refusing on one while the other silently serves past it. The REST
+fill runs in ``_check_org_limit``, which REST doors must call OFF the event
+loop — it is one control-plane round-trip per gated request, not a dict lookup
+(#9567 review round 10).
 
 **Three outcomes per configured dimension, and only three:**
 
@@ -125,6 +142,26 @@ module refuses on. ``get_unmetered_increments`` cannot close it as-is (it is
 org-CUMULATIVE with no window, so gating on it would refuse forever after one past
 drop); closing it needs a WINDOW-scoped drop counter, which is a follow-up tracked
 by #10776 and declared here rather than left to be discovered.
+
+⚠️ **BOUNDARY 4 — WHERE the carry runs (no lock, its own lane).** The fill above
+is a network read, so it must not be submitted to a pool (or a LOCK) that
+belongs to a different substrate, and it must not be held under a per-org
+mutex. Every gated REST door satisfies both: the ``points``/``documents`` doors
+run it through ``hosted_api._check_org_limit_off_loop`` (Supabase → the
+control-plane pool, self-host → the graph pool, because the registry IS the
+graph connection), the capture door runs the whole check on a worker thread,
+and ``POST /v1/sessions/commit`` runs the carry in the HANDLER, before its
+per-graph commit lock is taken, handing the stamped dict down (review round 13
+— held inside that lock, a control-plane stall was a network wait every other
+commit for the org queued behind, since #9567 made that in-lock gate perform
+this read). ONE door is the declared exception: ``/v1/demo`` runs the check
+inside its own per-org seed lock, deliberately, because the idempotent
+``existing`` short-circuit must come BEFORE the read — a re-seed of an
+already-seeded org must not pay a control-plane read, and the lock is held only
+once per org's first seed. Any NEW gated door has to make this choice
+explicitly; inheriting whichever pool or lock the rest of its work uses is how
+review round 12 (a PostgREST read on the graph pool) and round 13 (the same
+read inside the commit lock) both happened.
 
 ⚠️ **RESIDUAL, named rather than hidden:** the ``sessions`` door is
 ``_check_org_limit(org, "sessions")`` in ``hosted_api._capture_session_impl``,
@@ -400,6 +437,22 @@ ALLOWANCE_KEYS: dict[str, str] = {
     "capture_extraction": "max_extraction_tokens",
 }
 
+#: Set by a caller that has ALREADY run :func:`carry_resolved_allowances` for
+#: this limits dict, so a SECOND call — the graph-lane half of
+#: ``hosted_api._check_org_limit_off_loop``, which runs the enforcement after
+#: the fill was performed on the control-plane lane — pays no second resolver
+#: read (#9567 review round 12).
+#:
+#: Why a marker and not "the keys are present": the resolver's LOOKUP MISS
+#: (``OrgNotFoundError``) is the one carried state that adds NO key, and it is a
+#: STATE, not a fault — so without this the graph lane would resolve the very
+#: same missing record again, i.e. re-run the PostgREST read on the pool the
+#: caller just moved it off. The key is deliberately private and inert: the gate
+#: iterates ``DIMENSIONS`` by their declared ``limit_key``, and
+#: ``enforce_org_limit`` validates presence per key, never the key SET — so an
+#: extra key changes nothing it can observe.
+CARRIED_MARKER_KEY = "_allowances_carried"
+
 DIMENSIONS: tuple[AllowanceDimension, ...] = (
     _dimension(
         "graph_storage", ALLOWANCE_KEYS["graph_storage"],
@@ -525,6 +578,12 @@ def carry_resolved_allowances(
     """
     if limits is None:
         return None
+    if limits.get(CARRIED_MARKER_KEY):
+        # Already carried by the caller (an off-loop fill that then hands the
+        # dict to a second lane — see CARRIED_MARKER_KEY). Returning UNCHANGED
+        # is the same answer the all-keys-present arm below gives: the caller's
+        # resolution stands and no resolver read is repeated.
+        return limits
     org_id = org_id or limits.get("org_id")
     if not org_id:
         return limits  # stdio/operator — no org context, nothing to resolve
@@ -621,9 +680,24 @@ def _reading(dim: AllowanceDimension, org_id: str,
     if meter is None:
         if observed_only:
             return None
+        # ⛔ A missing meter is NOT a blocked dimension (#9567 review round 12,
+        # P2). The two states are different and a fail-closed refusal must not
+        # misdescribe its own: before this branch the message rendered
+        # "… but is BLOCKED — None" for a dimension with no ``blocked_reason``
+        # at all (reachable through the ``meters=`` seam), i.e. it named a
+        # ruling that does not exist. Branch on ``dim.blocked``.
+        if dim.blocked:
+            raise QuotaCheckError(
+                f"dimension {dim.dimension!r} has an allowance configured for "
+                f"team {org_id!r} but is {BLOCKED.upper()} — "
+                f"{dim.blocked_reason}")
+        _logger.error(
+            "allowance dimension has no meter (fail-closed): team=%s "
+            "dimension=%s", org_id, dim.dimension)
         raise QuotaCheckError(
             f"dimension {dim.dimension!r} has an allowance configured for team "
-            f"{org_id!r} but is {BLOCKED.upper()} — {dim.blocked_reason}")
+            f"{org_id!r} but has no meter plumbed — nothing can measure "
+            f"{dim.limit_key}, so the allowance cannot be enforced")
     try:
         reading = meter(org_id)
     except Exception as e:
@@ -743,9 +817,21 @@ def enforce_allowances(
         # a NaN reading would SILENTLY PASS (a disarmed allowance), and ``inf``
         # would raise a bare OverflowError out of ``int(used)`` below — an
         # unmapped 500 this module promises never to produce (#4051). And a
-        # NON-NUMERIC reading (``None``, ``"5"``, a Decimal) would raise a bare
-        # TypeError at the comparison. So the figure is COERCED once, here, and
-        # every shape that is not a finite number is REFUSED.
+        # reading that is not number-LIKE at all (``None``, ``"five"``, an
+        # arbitrary object) would raise a bare TypeError at the comparison. So
+        # the figure is COERCED once, here, and every shape that does not coerce
+        # to a FINITE float is REFUSED.
+        #
+        # ⚠️ Coercion, not a type gate — and the honest statement matters more
+        # than a tidier one (#9567 review round 12, P2). ``float()`` accepts a
+        # NUMERIC STRING: ``MeterReading(used="5")`` is read as ``5.0``, and
+        # ``used="1e9"`` is refused as OVER the cap, not as non-numeric. That is
+        # sound for what this refusal exists to stop (never a silently-passing
+        # or uncomparable figure — the two shipped meters both hand back a
+        # float), and a stricter ``isinstance(used, (int, float))`` gate would
+        # refuse a ``Decimal`` meter for its TYPE rather than its value. What is
+        # REFUSED is exactly: a value that raises out of ``float()``, and the
+        # non-finite ones NaN / +/-inf.
         raw_used = getattr(reading, "used", None)
         try:
             used = float(raw_used)
