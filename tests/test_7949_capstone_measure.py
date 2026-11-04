@@ -2976,22 +2976,42 @@ def test_the_shipped_log_states_EVERY_row_note_the_same_way_in_both_copies():
     #9738 to #5087" from the human `row E5 note:` line alone also stayed green. Binding
     every criterion closes both, and closes the next one nobody has thought of.
 
-    Non-vacuity: either of those one-sided edits reds here.
+    ⛔ AND A DUPLICATE HUMAN LINE IS A FINDING, NOT AN OVERWRITE (`#10679` review
+    round 5). The first cut built the human map with `dict(re.findall(...))`, which
+    keeps the LAST match per criterion, and then only compared the criteria SETS — so
+    a CONTRADICTORY `row E4 note:` line inserted ABOVE the real one was neither counted
+    nor compared. Measured in a throwaway copy: inserting one such line, reverting
+    "no open issue owns the residual" to "the residual is owned by #9596", left the
+    whole suite green at 163 passed while the log carried a human sentence its own
+    machine copy refutes — the very attribution round 4 was closing, still readable as
+    emitter output. Occurrence COUNTS are compared now, so a duplicate is the finding.
+
+    Non-vacuity: a one-sided edit to E4 or E5 reds here, and so does a duplicated line.
     """
     log = _newest_log(_scored_logs())
     text = log.read_text()
     record = cvc.extract_block(text)
     machine = {row["criterion"]: row["note"] for row in record["rows"]}
-    human = dict(re.findall(r"^row (E[1-5][ab]?) note: (.*)$", text, re.MULTILINE))
-    assert human, "the shipped log carries no `row <C> note:` line"
-    assert set(human) == set(machine), (
-        f"the log's human copies cover {sorted(human)} but its machine record covers "
-        f"{sorted(machine)} — a row with one copy is a copy nothing can compare")
+    human_lines = re.findall(r"^row (E[1-5][ab]?) note: (.*)$", text, re.MULTILINE)
+    assert human_lines, "the shipped log carries no `row <C> note:` line"
+    # ⛔ COUNTS, not a dict: `dict(...)` silently keeps the last of a duplicate pair,
+    # and the set comparison below cannot see that a THIRD copy exists.
+    per_criterion: dict[str, list[str]] = {}
+    for criterion, note in human_lines:
+        per_criterion.setdefault(criterion, []).append(note)
+    assert len(human_lines) == len(per_criterion), (
+        "the log carries MORE THAN ONE `row <C> note:` line for the same criterion — a "
+        "duplicate is a copy nothing compares, so a contradictory one can sit above the "
+        f"real line and read as emitter output: "
+        f"{ {c: len(v) for c, v in per_criterion.items() if len(v) > 1} }")
+    assert set(per_criterion) == set(machine), (
+        f"the log's human copies cover {sorted(per_criterion)} but its machine record "
+        f"covers {sorted(machine)} — a row with one copy is a copy nothing can compare")
     for criterion in sorted(machine):
-        assert human[criterion] == machine[criterion], (
+        assert per_criterion[criterion] == [machine[criterion]], (
             f"the log's human and machine copies of the {criterion} note disagree — one "
             f"of them was hand-edited alone, which reads as emitter output:\n"
-            f"  human:   {human[criterion]}\n"
+            f"  human:   {per_criterion[criterion]}\n"
             f"  machine: {machine[criterion]}")
 
 
@@ -4535,12 +4555,14 @@ def test_no_document_cites_the_run_probe_by_a_number_nothing_can_resolve():
 
     # 2. The claim survives as a symbol — the ban above must not be satisfied
     #    by deleting the sentence (that would trade a rotting cite for a
-    #    dropped measurement, and the README's paragraph at `README.md:918-923` is
-    #    where it tells a consumer the committed log predates the conditional split
-    #    — `E1-E5-PROOFS.md:219` says it too, so "only place" was never true). That
-    #    range was `809-815` until this branch's own README insertions moved the
-    #    paragraph; the assertion below resolves the SYMBOL, not the number, which is
-    #    why the stale comment never redded anything.
+    #    dropped measurement, and the README's paragraph on the committed log
+    #    predating the conditional split is where it tells a consumer that —
+    #    `E1-E5-PROOFS.md:219` says it too, so "only place" was never true). ⛔ Cited
+    #    by SENTENCE, not by line number: that range was `809-815`, then `918-923`,
+    #    then `922-927` as this branch's own README insertions walked it, and a
+    #    comment carrying the number was stale within one commit every time. The
+    #    assertion below resolves the SYMBOL, which is why no stale number ever
+    #    redded anything.
     readme_lines = (_REPO / "docs/evidence/7949-capstone/README.md").read_text(
         encoding="utf-8").splitlines()
     carrying = [i + 1 for i, ln in enumerate(readme_lines)

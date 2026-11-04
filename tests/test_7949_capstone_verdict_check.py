@@ -1354,8 +1354,11 @@ def test_a_degraded_search_is_not_s3():
     degraded=True) is exactly the shape of a search that failed. Scoring that
     attempt as resolved let V5, the epic's ONLY closing gate, pass on a step
     that never resolved, and every E-row measured on the run was then published
-    as valid. `README.md:305` records the rule ("a degraded search is not S3")
-    and the sibling probe already implements it
+    as valid. The README's `S3 RESOLVE` step row records the rule ("a degraded
+    search is not S3") — cited by its SENTENCE, not a line number, because this
+    branch's own README insertions moved it twice: `298` -> `305` -> `309`, each time
+    correct when written, each time stale after the next insertion — and the sibling
+    probe already implements it
     (`capstone_measure.py::observe_steps`, the arm that writes that sentence into
     the step's own note).
 

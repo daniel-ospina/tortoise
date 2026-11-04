@@ -28,8 +28,9 @@ committed in this tree and is read as a file. The SCORED run below is stamped se
 COUNT is deliberately not restated here — it changed twice while this was open, and a stale
 integer in the one paragraph a reviewer bounds the PR by is worse than no integer):
 the bundle itself — `docs/evidence/7949-capstone/**` (this `README.md`, `E1-E5-PROOFS.md`, the
-scored log `capstone-measured-9152448d.log` that replaces `capstone-measured-e0fc940b.log`, and
-`probes/capstone_measure.py`) and
+scored log `capstone-measured-9152448d.log` — `#10601`'s re-measurement, which replaced a log that
+`main` had already deleted before this branch's base, so that file is named nowhere here as a
+touched one — and `probes/capstone_measure.py`) and
 `tools/capstone_verdict_check.py` with `tests/test_7949_capstone_verdict_check.py` (the V12 arm and
 its pins) plus `tests/test_7949_capstone_measure.py` (the bundle's own claim pins); its registration
 (`config/ci-surfaces.yml` `core`/`tier1`/`durations` arms, `docs/00_index.md`).
@@ -1062,7 +1063,7 @@ gated the pass off, or the stage produced nothing.
 |---|---|
 | `#9075` pre-register the corpus/split/scoring | **CLOSED COMPLETED** — landed `a6085af84` (#9507); the record is in this directory and G0 reads it |
 | `#9076` E1+E2 on one run | **CLOSED COMPLETED** — its artifact is `e1-e2.log`, and the rows above show why it is not scorable against the frozen bars |
-| `#9077` E4 on the real extraction leg | **CLOSED COMPLETED** — its frozen-pin receipts are what E4 now selects (`5/15`); the `2/15` receipt it originally cited is on a different corpus revision |
+| `#9077` E4 on the real extraction leg | **CLOSED COMPLETED** — it built the real-extraction leg, and the receipt E4 used to cite (`w2b-operator-2026-10-19.json`, `2/15`) is ITS artifact, on a different corpus revision. The frozen-pin receipts E4 now selects (`5/15`) are **not** `#9077`'s: they landed with `#8503`/`#9873` (`2cba48d3c`), which is the provenance §E4 above and `E1-E5-PROOFS.md` both state |
 | `#5199` the version anchor stops at Points | **CLOSED COMPLETED** — the anchor is on the derivation link by design; #9736 owns the metric contradiction that leaves behind |
 | `#7947` the raw-vs-narrative measurement | **CLOSED COMPLETED** — E5 re-scores its arms |
 | `#9116` the capture receipt's step surface | **LANDED** — this PR's seam copies each stage's own facts onto `stats["step_witness"]`, so `capture_session`'s receipt now names all eight; `S2.2` is witnessed by any post-seam re-run, and `S2.3` is WITNESSED by this one — the shipped log's `step S2.3 WITNESSED` line carries `assigned_llm: 7`, so the classify pass is NOT idle on this corpus (`#10215` restated V5/G5 as all-eight-accounted, and this run is 8/8 witnessed) |
