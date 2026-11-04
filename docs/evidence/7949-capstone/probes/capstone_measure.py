@@ -52,16 +52,19 @@ gate is measured with its flags forced ON"). ``TORTOISE_VALUE_GATE`` is pinned
 UNSET for the same reason: it also switches S2.2 on, so an ambient value would
 silently change the arm. The ``arm:`` line is that read-back, never a typed
 literal — a run that cannot read a flag back as set REFUSES rather than printing a
-claim nothing supports. They are still UNWITNESSABLE through
-``capture_session``'s receipt, and the failure is ONE LAYER UP from where it was
-first attributed: ``extract_session_v2`` DOES build the surfaces
-(``result["classify_later"]`` at ``tortoise/extractor_v2.py:8873-8879`` and
-``result["vet"]`` at ``:8883-8887``); they are dropped at the meta fold,
-``tortoise/sdk.py:13402`` (``"stats": out.get("stats") or {}`` inside
-``_extract_session_v2`` — the sibling key is never copied). That is #9116, cited
-rather than worked around: working around
-it would mean reading a wrapper's state, which is the instrumentation E4's row
-forbids.
+claim nothing supports. Both passes are ON-PATH for this pass, and since #9116's
+seam they are also WITNESSABLE through ``capture_session``'s receipt:
+``extract_session_v2`` builds the surfaces (``result["classify_later"]`` at
+``tortoise/extractor_v2.py:8873-8879`` and ``result["vet"]`` at ``:8883-8887``),
+and ``_extract_session_v2``'s meta fold now forwards them through
+``_capture_stats_with_step_witness`` (symbol-only on purpose — see the CITE
+CONVENTION below; the fold calls ``"stats": _capture_stats_with_step_witness(out,
+len(extracted))``), putting them under ``stats["step_witness"]``. BEFORE that seam
+the same fold dropped the block (``"stats": out.get("stats") or {}`` — the sibling
+key was never copied), and that is the state the SHIPPED log below was measured
+in: its S2.2/S2.3 rows are the PRE-SEAM instrument, and a re-run at this head is
+what moves them. Citing #9116 rather than working around it is the rule here —
+reading a wrapper's state is the instrumentation E4's row forbids.
 
 📌 CITE CONVENTION (this bundle). Every ``file:line`` is re-derived from the tree
 at the head the bundle is stamped at, and is paired with the SYMBOL it names —
@@ -148,7 +151,7 @@ ANCHOR_OUT = ("extractedFrom",)
 #: ->(Event|Document)``, written by ``_EdgeHandlers.link_source_to_event``
 #: (``tortoise/projection/edges.py:2432-2457``, ``MERGE (s)-[r:references]->(e)
 #: ON CREATE SET r.sourceVersion = s.contentHash``) and reached from the capture
-#: path at ``tortoise/sdk.py:13683`` (``proj.link_source_to_event(source_key,
+#: path at ``tortoise/sdk.py:13727`` (``proj.link_source_to_event(source_key,
 #: event_id)`` — ``(Source)-[:references]->(sessionCaptured Event)``). The anchor
 #: is on the same link, but the DERIVED node is its TARGET.
 #: ⚠️ Counting this one in the ``extractedFrom`` direction counts SOURCES.
@@ -163,7 +166,7 @@ E3_RULE = (
     "((Point)-[:extractedFrom]->(GraphEvent|Event)), while references points AT "
     "the derived node ((Source)-[:references]->(Event|Document) — "
     "tortoise/projection/edges.py:2432-2457 link_source_to_event, reached from "
-    "the capture path at tortoise/sdk.py:13683 "
+    "the capture path at tortoise/sdk.py:13727 "
     "(proj.link_source_to_event(source_key, event_id))). The anchor is a "
     "property of the "
     "DERIVATION LINK (tortoise/projection/edges.py:502-510 "
@@ -1293,7 +1296,6 @@ def observe_steps(runs: list[dict], census_data: dict) -> tuple[dict, dict]:
     receipt_keys = sorted({key for run in runs
                            for key in (run.get("receipt_keys") or ())})
     stats_key_total = sum(len(run.get("stats") or {}) for run in runs)
-    ran = sorted({run["session_id"] for run in runs})
 
     if edus and chunks:
         observed["S0"] = (f"the reader segmented the corpus: stats.edus={edus} "

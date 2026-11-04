@@ -956,6 +956,38 @@ def test_two_verdict_blocks_is_a_usage_error_not_a_stale_green(tmp_path, capsys)
 # is the object a CURRENT ``capture_session`` returns — built by calling the real
 # SDK helper, never by hand (a hand-built witness could not red when the SDK
 # stops producing one, which is the whole point of pinning this).
+#: ``_run_vet_pass``'s REAL return shape (``extractor_v2.py`` — the
+#: ``stats = {"stats": out["stats"], "batch": out["batch"], "decisions":
+#: out["decisions"]}`` assembly): the pass's counts under ``stats``, its batch
+#: accounting, and one ``decisions`` entry PER CANDIDATE carrying that
+#: candidate's FULL text. The #9116 seam must forward the counts and DROP the
+#: decisions (the receipt is returned to every SDK caller and serialized by the
+#: hosted ``/v1/sessions`` body), so this fixture carries a real decisions map
+#: and the pin below asserts that none of its text reaches the receipt.
+_VET_S2 = {
+    "stats": {"candidates": 3, "by_outcome": {"KEEP": 2, "DISCARD": 1},
+              "discarded": 1, "arbiter": "none"},
+    "batch": {"narrative_statements": 7, "candidates": 3,
+              "by_section": {"entities": 0, "events": 0, "points": 3,
+                             "operators": 0},
+              "coverage_ratio": 0.429, "coverage_suspect": False},
+    "decisions": {
+        "pt_1": {"section": "points", "index": 0,
+                 "text": "Daniel Ospina at Premise Labs approved the rollout.",
+                 "outcome": "KEEP", "rule_id": "fail_open",
+                 "reason": "no verdict"},
+        "pt_2": {"section": "points", "index": 1,
+                 "text": "Ana Ruiz owns the Postgres record migration.",
+                 "outcome": "DISCARD", "rule_id": "identifier-only",
+                 "reason": "identifier-only"},
+        "pt_3": {"section": "points", "index": 2,
+                 "text": "The rollout lands on 2026-11-01.",
+                 "outcome": "KEEP", "rule_id": "fail_open",
+                 "reason": "no verdict"},
+    },
+}
+
+
 def _extractor_result(**over) -> dict:
     """``extract_session_v2``'s return — NOT what the probe is handed."""
     result = {
@@ -969,7 +1001,7 @@ def _extractor_result(**over) -> dict:
         "story_arc": "A narrative.",
         "embed_list": {"entities": [1], "events": [1], "points": [1],
                        "operators": [1]},
-        "vet": {"enabled": True, "s2": {"kept": 3}},
+        "vet": {"enabled": True, "s2": _VET_S2},
         "classify_later": {"enabled": True, "s2": {"assigned": 3}, "union": {}},
         "search": {"mode": "docker", "degraded": False, "reason": None,
                    "queries_run": 15, "entities": [{"id": "o_1"}],
@@ -1139,11 +1171,24 @@ def test_the_production_capture_path_puts_the_witness_on_the_receipt(monkeypatch
     (the pre-fix line) and the ``step_witness`` key disappears from a REAL
     capture.
 
-    ⚠️ It asserts **7 of 8**, not 8: the mock's classify pass is ENABLED and does
-    NO work (``{'enabled': True, 's2': {}, 'union': {}}``), so S2.3 is not
-    witnessed — and must not be. Claiming it would be the "OFF population under an
-    ON label" failure the bundle already paid for once (#9823). What S2.3 needs is
-    a run whose classify pass assigns kinds, not a looser rule here.
+    ⚠️ It asserts **6 of 8 unconditionally**, and S2.3/S3 conditionally:
+
+    * S2.3 — the mock's classify pass is ENABLED and does NO work
+      (``{'enabled': True, 's2': {}, 'union': {}}``), so it is not witnessed and
+      must not be. Claiming it would be the "OFF population under an ON label"
+      failure the bundle already paid for once (#9823). What S2.3 needs is a run
+      whose classify pass assigns kinds, not a looser rule here.
+    * S3 — the witness requires a SEARCHABLE backend: an embedded/URI-less run
+      short-circuits ``search_graph`` with ``queries_run: 0, degraded: True``.
+      This file is a ``core`` fast-surface member and runs in URI-less legs, so
+      asserting S3 there would red a lane for the backend it was handed, not for
+      this seam (#10214 review). S3 is therefore pinned as a CONSISTENCY — the
+      observer's verdict must equal the search pass's own report — and it is
+      still a hard expectation in a lane that does have a searchable graph.
+
+    ⛔ The graph is named ``test_capstone_9116_*`` on purpose: ``wipe_server``
+    DETACH-DELETEs only ``test_`` / ``tortoise_test_*`` names, so any other
+    prefix mints a graph no sweep ever reaps on the shared instance (#5084).
     """
     import uuid as _uuid
 
@@ -1152,7 +1197,7 @@ def test_the_production_capture_path_puts_the_witness_on_the_receipt(monkeypatch
     monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
     monkeypatch.setenv("TORTOISE_VET", "1")
     monkeypatch.setenv("TORTOISE_CLASSIFY_LATER", "1")
-    graph = f"capstone_9116_e2e_{_uuid.uuid4().hex[:10]}"
+    graph = f"test_capstone_9116_{_uuid.uuid4().hex[:10]}"
     sdk = TortoiseSDK(graph_name=graph)
     try:
         receipt = sdk.capture_session(
@@ -1175,12 +1220,53 @@ def test_the_production_capture_path_puts_the_witness_on_the_receipt(monkeypatch
         sorted(set(probe.WITNESS_KEYS) ^ set(witness)))
 
     seen = probe.observe_steps(receipt)
-    assert set(seen) == set(cvc.STEPS) - {"S2.3"}, sorted(set(cvc.STEPS) - set(seen))
+    # Six steps are witnessed on ANY backend. S2.3 is the pass's own "idle"
+    # answer (below) and S3 depends on the graph this lane was handed, so S3 is
+    # pinned as agreement with the search pass's own report rather than as a
+    # fixed expectation: an embedded/URI-less run must witness NEITHER, and a
+    # searchable one must witness it.
+    assert set(cvc.STEPS) - {"S2.3", "S3"} <= set(seen), sorted(
+        set(cvc.STEPS) - {"S2.3", "S3"} - set(seen))
+    assert ("S3" in seen) == bool(witness["search"]["queries_run"]), (
+        "the S3 witness disagrees with the search pass's own report: "
+        f"{witness['search']}")
     # S2.3's absence is the PASS's own answer, quoted from its block
     assert witness["classify_later"]["s2"] == {}, witness["classify_later"]
     assert witness["vet"]["s2"], witness["vet"]
-    assert witness["search"]["queries_run"], witness["search"]
     assert witness["commit"]["payload_produced"] is True, witness["commit"]
+
+
+def test_the_vet_witness_carries_the_pass_counts_and_never_its_candidate_text():
+    """#10214 review P1: the witness is BOUNDED — counts in, per-candidate text out.
+
+    ``_run_vet_pass`` returns ``decisions`` keyed by candidate id, each carrying
+    that candidate's FULL extracted text (``vet_gate.vet_candidates``), plus a
+    counterfactual quoting 120 more characters of it. The receipt is returned to
+    every SDK caller and serialized by the hosted ``/v1/sessions`` body, so
+    copying that block whole puts extraction-proportional content on the shipped
+    write contract — the one thing the seam's own docstring says it never does.
+
+    Mutation that reds it: revert ``vet.s2`` to ``vet.get("s2") or {}``.
+    """
+    from tortoise.sdk import _capture_step_witness
+
+    witness = _capture_step_witness(_extractor_result(), committed=15)
+    s2 = witness["vet"]["s2"]
+    # the whole thing is still there for the observer
+    assert s2, witness["vet"]
+    # …as COUNTS: the pass's own stats and its batch accounting
+    assert s2["candidates"] == 3, s2
+    assert s2["by_outcome"] == {"KEEP": 2, "DISCARD": 1}, s2
+    assert s2["discarded"] == 1, s2
+    assert s2["batch"]["narrative_statements"] == 7, s2
+    # …and the per-candidate decisions are NOT carried, only counted
+    assert "decisions" not in s2, sorted(s2)
+    assert s2["decisions_dropped"] == 3, s2
+    rendered = json.dumps(witness)
+    for text in ("Daniel Ospina at Premise Labs approved the rollout.",
+                 "Ana Ruiz owns the Postgres record migration."):
+        assert text not in rendered, (
+            f"candidate text rode the witness onto the receipt: {text!r}")
 
 
 def test_a_vet_disabled_pass_does_not_observe_s2_2():
