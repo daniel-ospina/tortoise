@@ -1562,13 +1562,21 @@ def episodic_source_declined_properties() -> frozenset[str]:
     spelling because ``_search_text`` IS a real column.
 
     ⛔ ONE declaration, because the decline is read by THREE consumers and a
-    second list is how they drift: :func:`_props_from_row`'s tail door (what it
-    pops), `record_reconcile.scan_cache_view` (what it marks cache-owned), and
+    second list is how they drift. Two need BOTH spellings and take this
+    function: :func:`_props_from_row`'s open-set door (what it pops — the tail
+    is an open set, so the snake spelling really can appear there) and
     `record_serve.parity_difference` (what it EXPLAINS instead of reddening —
-    #10867 review ISSUE 1). Before this function existed each consumer spelled
-    the union itself, and the third one did not spell it at all: the parity
-    instrument reported a legacy session node's own prose as an unexplained
-    projection gap, i.e. a sanctioned decline and a real gap were the same red.
+    #10867 review ISSUE 1). The third, `record_reconcile.scan_cache_view`,
+    compares two GRAPH-vocabulary name sets, so it takes
+    :func:`episodic_source_prose_properties` — the subset — deliberately: a
+    snake name is not in either side's vocabulary there, and subtracting it from
+    a graph-name set would suggest a comparison this module does not make.
+
+    What must NOT happen is the drift #10867 caught: before this function
+    existed, `_props_from_row` spelled the union inline and the parity
+    instrument spelled nothing at all, so it reported a legacy session node's
+    own prose as an unexplained projection gap — a sanctioned decline and a real
+    defect as the same red.
 
     Derived, cached, resolved at CALL time for the same reasons as
     :func:`episodic_source_prose_properties`.
