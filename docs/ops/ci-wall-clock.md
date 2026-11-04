@@ -215,6 +215,18 @@ document exists to remove.
 | `ai-review-gate` (REQUIRED, entry gate) | 14 | 0.03 | 0.10 | 0.13 | **15 (was none)** |
 | `drift-guard` (merge path, not a required context) | 22 | 0.33 | 0.37 | 0.43 | **15 (was none)** |
 
+⚠️ **The `drift-guard` row above is HISTORICAL as of 2026-10-29:** GitHub reports that workflow
+`disabled_manually` (`gh api repos/<owner>/<repo>/actions/workflows/drift-guard.yml` →
+`state=disabled_manually`, `updated_at=2026-10-29T02:33:12Z`; the last run for it is `cancelled`
+from `2026-10-29T02:28Z`, while dozens of `pull_request` events have fired since). `finding-provenance`
+was disabled in the same window. **The numbers and the 15 m cap were measured while it still ran, so
+they describe the job's cost when it runs again — they are not a live signal**; the disablement is a
+deliberate state whose reversal is its own reviewed decision (it restores a merge-path gate).
+Recorded here because this is where the next reader looks for why a `drift-guard` row exists and
+produces no runs — and because a warn-only step added to that workflow never executes at all
+(`#10597`: the `Closes-coherence` instrument was first mounted there and moved to
+`.github/workflows/closes-coherence.yml`, #10634 review P1).
+
 **Rule used.** ONE rule with two arms, and every moved row follows its arm:
 
 - **The job's cold save is NOT the 3.6 GB torch/embeddings archive** — cap = **2 × measured max**,

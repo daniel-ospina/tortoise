@@ -416,6 +416,190 @@ def test_e3_zero_one_whole_derived_node_must_be_anchored():
     assert result["outcome"] == "FAIL", result
 
 
+def test_e3_cannot_pass_on_a_registered_class_leg_that_is_empty():
+    """#9736: `= 1.000` is a claim about the REGISTERED class set, and an empty leg did not pass it.
+
+    Measured FALSE GREEN on this probe before the fix: with `Event` and `Document` carrying zero
+    nodes and every node of the classes that DO exist anchored, the row read
+    `e3 numerator=30 denominator=30 … outcome=PASS` — verdict GREEN — because `e3_outcome` only
+    ever sees two summed integers. `e3_blocks` selects `per_label[label] for label in
+    DERIVED_LABELS`, so a registered class the graph holds none of contributes `0/0` and vanishes
+    from both halves of the ratio.
+
+    That is not hypothetical: `:Document` is a RETIRED label — the writer remaps `Document` onto
+    `:Source` (`tortoise/projection/edges.py:2765-2769`, D10) — and §10.1 of the pre-registration,
+    computed on the superseded run's census, records no `Document` written at all (the scored log
+    agrees: `e3 label=Document nodes=0`). So the vacuous leg is the PRODUCTION
+    shape, and only the owner's §9736 ruling can change which spelling E3 names.
+
+    The rule this pins is the ruling-free one the issue's own decision card declares
+    (`NOT-A-DECISION(9736-gate-empty-leg)`): an empty registered leg must FAIL rather than pass by
+    arithmetic. It does not pick a spelling, move a threshold, or re-cut the denominator.
+    """
+    green = measure.e3_outcome(anchored=30, derived=30, bars=BARS)
+    assert green["outcome"] == "PASS", green
+    blocked = measure.e3_outcome(anchored=30, derived=30, bars=BARS,
+                                 unmeasured_legs=("Document", "Event"))
+    assert blocked["outcome"] == "FAIL", blocked
+    assert measure.verdict_word(blocked) == "RED", blocked
+    assert blocked["unmeasured_legs"] == ("Document", "Event"), blocked
+    assert "Document" in blocked["bar"] and "empty" in blocked["bar"].lower(), blocked["bar"]
+    # NO SOFTENING and NO NEW RED: the shipped reading (148/383) was already RED and stays RED,
+    # with the empty leg disclosed rather than silently folded in.
+    shipped = measure.e3_outcome(anchored=148, derived=383, bars=BARS,
+                                 unmeasured_legs=("Document",))
+    assert shipped["outcome"] == "FAIL", shipped
+    # the floor still wins where it applies — a too-small population is REFUSED, never a verdict
+    # NOT a Document-only guard: a tuple whose empty leg is `Event` must fail too, or an
+    # implementation that honoured only the class the issue happens to name would pass every arm.
+    assert measure.e3_outcome(anchored=30, derived=30, bars=BARS,
+                              unmeasured_legs=("Event",))["outcome"] == "FAIL"
+    # and a FLOOR refusal outranks it — a too-small population is not a verdict either way
+    below = measure.e3_outcome(anchored=5, derived=20, bars=BARS,
+                              unmeasured_legs=("Document",))
+    assert below["outcome"] == "REFUSED", below
+
+
+def test_e3_unmeasured_legs_reads_the_census_and_never_counts_object():
+    """The empty-leg detector reads the CENSUS, so it sees what the run measured — not the row.
+
+    `:Object` is the class #5199 option A leaves unanchored BY DESIGN and #10525 dropped from E3, so
+    it must never come back as a "missing" leg (that would re-red the row for the recorded
+    decision). An ABSENT block counts as empty: a census that never enumerated a registered class
+    did not measure it, and "absent" must not read as "fine".
+    """
+    census = {"Point": {"nodes": 10, "anchored": 8},
+              "Document": {"nodes": 0, "anchored": 0},
+              "Object": {"nodes": 50, "anchored": 0},
+              "Event": {"nodes": 1, "anchored": 1}}
+    assert measure.e3_unmeasured_legs(census) == ("Document",), measure.e3_unmeasured_legs(census)
+    assert measure.e3_unmeasured_legs({"Point": {"nodes": 10, "anchored": 10}}) == (
+        "Document", "Event")
+    full = {"Point": {"nodes": 10, "anchored": 10},
+            "Document": {"nodes": 1, "anchored": 1},
+            "Event": {"nodes": 1, "anchored": 1}}
+    assert measure.e3_unmeasured_legs(full) == ()
+
+
+def test_main_feeds_the_census_legs_into_e3_and_renders_them():
+    """The empty-leg rule is only real if PRODUCTION asks the census for the legs.
+
+    `e3_outcome`'s guard is a pure function, so an unwired rule is indistinguishable from no rule:
+    `main` would keep summing the totals and a class the run never wrote would keep disappearing.
+    This reads `main`'s own AST and requires (a) `e3_outcome` to be called with an
+    `unmeasured_legs=` argument built from `e3_unmeasured_legs(census_data[...])`, and (b)
+    `render_log` to DERIVE the log's own `e3 unmeasured_legs=` line from that same CENSUS
+    (`e3_legs_line(census_data[...])`) rather than reading it back off the row — because the
+    defect this closes was `0/0` being invisible in both places at once, and a caller-built row
+    that happens to lack the key would otherwise render "every registered class carried nodes"
+    two lines beneath `e3 label=Document nodes=0`; and (c) `main` to hand `e3_row_note` the E3
+    OUTCOME dict, because the note reads the clause through a `.get`-with-default and a mis-wire
+    there drops the disclosure with no error.
+    """
+    tree = ast.parse(PROBE.read_text())
+    main = next(node for node in tree.body
+                if isinstance(node, ast.FunctionDef) and node.name == "main")
+    call = next(node for node in ast.walk(main)
+                if isinstance(node, ast.Call)
+                and getattr(node.func, "id", None) == "e3_outcome")
+    kwargs = {kw.arg: kw.value for kw in call.keywords}
+    assert "unmeasured_legs" in kwargs, (
+        "main calls e3_outcome without unmeasured_legs — a registered class the run wrote zero of "
+        "is dropped from both halves of the ratio again, and the row can report 1.000 over a "
+        "strict subset of the registered population (#9736)")
+    wired = kwargs["unmeasured_legs"]
+    assert isinstance(wired, ast.Call) and getattr(wired.func, "id", None) == (
+        "e3_unmeasured_legs"), ast.dump(wired)
+    # the argument is the CENSUS, not a typed tuple: a hardcoded class list would be the very
+    # narrowing this rule exists to refuse, and would re-stale with the class set.
+    assert "census_data" in ast.dump(wired), ast.dump(wired)
+    # ...and the class set must not be NARROWED at the call site: `labels=("Document",)` would keep
+    # this AST pin green while a run that wrote no `Event` scored PASS over a narrower population —
+    # the same defect, one layer up from the pure rule. Neither spelling of the narrowing may pass:
+    # the keyword is refused here, and `labels` is KEYWORD-ONLY in the signature so a second
+    # positional argument cannot slip past it either (round 3 measured exactly that mutation green).
+    assert not [kw for kw in wired.keywords if kw.arg == "labels"], (
+        "main narrows e3_unmeasured_legs' class set at the call site — the registered set must come "
+        "from DERIVED_LABELS, or the wiring re-creates the hole the rule closes: " + ast.dump(wired))
+    assert not wired.args[1:], (
+        "main passes e3_unmeasured_legs a second POSITIONAL argument (a class tuple) — the registered "
+        "set must come from DERIVED_LABELS: " + ast.dump(wired))
+    sig = next(node for node in tree.body
+               if isinstance(node, ast.FunctionDef) and node.name == "e3_unmeasured_legs")
+    names = [a.arg for a in sig.args.args]
+    assert sig.args.kwonlyargs and not sig.args.defaults, (
+        "e3_unmeasured_legs' `labels` is no longer keyword-only — a positional class tuple at the "
+        "call site would then be unpinnable: args=" + repr(names))
+
+    render = next(node for node in tree.body
+                  if isinstance(node, ast.FunctionDef) and node.name == "render_log")
+    rendered = [n for n in ast.walk(render)
+                if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                and n.func.id == "e3_legs_line"]
+    assert rendered, (
+        "render_log no longer prints the `e3 unmeasured_legs=` line — the log's per-label lines show "
+        "a 0-node leg as `nodes=0 anchored=0 unanchored=0`, which reads as a clean class rather than "
+        "an unmeasured one")
+    # ...and it must read the line from the CENSUS, not from a row a caller may have built by hand:
+    # a positive "every registered class carried nodes" asserted from an ABSENT key is the same
+    # claim-from-nothing this line exists to disclose.
+    assert "census_data" in ast.dump(rendered[0]), ast.dump(rendered[0])
+
+    # (c) the ROW NOTE must be fed the E3 OUTCOME, not the row being built. `e3_row_note` reads the
+    # clause through `e3_result.get("unmeasured_legs") or ()` — a `.get` with a default, so a caller
+    # that hands it the ROW (whose key is `note`, still being built) yields the empty clause instead
+    # of a `KeyError`: the note silently stops disclosing the leg while every other pin stays green.
+    # Measured before this arm existed: mutating this call to `e3_result=e3` left the file green
+    # (129 passed, 1 unrelated failure), i.e. the note was wired but unpinned.
+    notes = [n for n in ast.walk(main)
+             if isinstance(n, ast.Call) and getattr(n.func, "id", None) == "e3_row_note"]
+    assert len(notes) == 1, (
+        "main no longer calls e3_row_note exactly once for the E3 row: " + repr(len(notes)))
+    note_kwargs = {kw.arg: kw.value for kw in notes[0].keywords}
+    assert isinstance(note_kwargs.get("e3_result"), ast.Name) and note_kwargs[
+        "e3_result"].id == "e3_result", (
+        "main feeds e3_row_note something other than the E3 outcome dict — the row's note is the "
+        "third disclosure site, and `e3_result.get(...) or ()` makes a mis-wire SILENT: the leg "
+        "vanishes from `row E3 note:` while the bar and the log line still carry it: "
+        + ast.dump(notes[0]))
+
+
+def test_the_empty_leg_line_and_note_are_derived_from_the_census():
+    """Both disclosures are DERIVED, and the arms are discriminated in both directions.
+
+    The row note must gain the clause when a leg is empty and lose it when none is (an
+    implementation that always appended it, or never did, fails here). The log line must read the
+    census it is printed beside: this bundle's own render fixture builds the E3 row by hand over a
+    canned census whose `Document` leg is 0, so a line taken from the ROW would print "every
+    registered class carried nodes" two lines below `e3 label=Document nodes=0`.
+    """
+    full_census = {"Point": {"nodes": 10, "anchored": 10},
+                   "Document": {"nodes": 1, "anchored": 1},
+                   "Event": {"nodes": 1, "anchored": 1}}
+    assert "=none" in measure.e3_legs_line(full_census), measure.e3_legs_line(full_census)
+    empty_census = {"Point": {"nodes": 10, "anchored": 10},
+                    "Document": {"nodes": 0, "anchored": 0},
+                    "Event": {"nodes": 1, "anchored": 1}}
+    line = measure.e3_legs_line(empty_census)
+    assert "Document" in line and "narrower than the registered one" in line, line
+    # an ABSENT census entry is empty, not "fine" — the same rule the detector applies
+    assert "Document" in measure.e3_legs_line({"Point": {"nodes": 1, "anchored": 1}})
+
+    graph, corpus_sha = "capstone_measure_test_1", "sha256:" + "f" * 64
+    noted = measure.e3_row_note(
+        composition=_shipped_composition(),
+        e3_result=measure.e3_outcome(anchored=30, derived=30, bars=BARS,
+                                     unmeasured_legs=("Document",)),
+        graph=graph, corpus_sha=corpus_sha)
+    assert "NARROWER THAN THE REGISTRATION" in noted, noted
+    assert "Document" in noted.split("NARROWER THAN THE REGISTRATION", 1)[1][:200], noted
+    clean = measure.e3_row_note(
+        composition=_shipped_composition(),
+        e3_result=measure.e3_outcome(anchored=30, derived=30, bars=BARS),
+        graph=graph, corpus_sha=corpus_sha)
+    assert "NARROWER THAN THE REGISTRATION" not in clean, clean
+
+
 def test_e4_is_scored_over_the_frozen_fifteen():
     red = measure.e4_outcome(edge_correct=2, planted=15, bars=BARS)
     assert red["outcome"] == "FAIL" and measure.verdict_word(red) == "RED"
@@ -1504,6 +1688,11 @@ def test_the_renderer_renders_a_log_from_the_committed_record(monkeypatch):
 
     text = render(_prereg())
     assert "e1 note: both before realizations clear E1's own floors" in text
+    # #9736: the empty-leg line is read from the CENSUS, not from the `e3_out` built by hand above
+    # it. This fixture's canned census carries `Document` = 0 nodes while `e3_out` was constructed
+    # WITHOUT the legs, so a line taken from the row would print "=none" here — two lines below
+    # `e3 label=Document nodes=0`. That is the escape this assertion closes.
+    assert "e3 unmeasured_legs=Document" in text, text[-2000:]
     assert "e1_min_before_share 0.2" in text, text[-3000:]
     # The number is READ, not typed: the same render over a moved floor moves it.
     moved = _prereg()
