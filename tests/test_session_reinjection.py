@@ -652,7 +652,8 @@ def test_product_shaped_turn_is_injected_via_its_session(seeded_sdk):
     ``Session-[:CONTAINS]->Point``). The fetch's group key must therefore
     fall back to the ``:Session`` id — and the key must equal the seed's
     ``session_id`` (or the group is orphaned into the merge's defensive
-    tail). The non-turn ``event`` (demo-seed shape) is NOT a turn."""
+    tail). The non-turn ``event`` (the pre-#10000 demo-seed shape) is NOT a
+    turn."""
     from tools.longmem_eval.retrieve import retrieve_for_question
     _create_product_turn(seeded_sdk, "srApv0",
                          TURN_PREFIX + OFF_POOL_TURN_CONTENT)
@@ -670,7 +671,7 @@ def test_product_shaped_turn_is_injected_via_its_session(seeded_sdk):
     assert st["injected_per_session"] == {SR_A: 3}
     assert st["injected_merged"] == 3
     assert {"srAq0", "srAq1", "srApv0"} <= ids
-    # the demo-seed ``event`` shares the KIND but fails the SHAPE
+    # the pre-#10000 demo-seed ``event`` shares the KIND but fails the SHAPE
     # (``is_episodic`` absent) — it must not be injected
     assert "srAev0" not in ids
 
