@@ -507,6 +507,28 @@ def test_a_gh_that_cannot_execute_is_not_reported_as_missing(tmp_path, monkeypat
     assert rd._head_sha(tmp_path, "o/r", 5) == "unreadable"
 
 
+def test_a_failed_chdir_is_not_reported_as_a_missing_binary(tmp_path):
+    """A `chdir` failure is ALSO a `FileNotFoundError`, but the missing thing is the CWD.
+
+    CPython 3.12 `subprocess.py:1940-1955`: a failed `chdir` sets
+    `err_filename = cwd`, while a failed exec sets it to the executable. So the
+    `filename == "gh"` discrimination in `_gh` is load-bearing — without it the
+    two failures collapse and the operator is told that a binary they have is
+    absent, sending them to install the wrong thing.
+
+    ⛔ WHY THIS ARM EXISTS (rail review, P2 on `f25cda23d`): the refusal arm above
+    is a `PermissionError`, which takes the `except OSError` branch and NEVER
+    reaches the discrimination — so mutating `filename == "gh"` to `if True:`
+    left the whole suite GREEN. This arm reddens on that mutant.
+    """
+    missing = tmp_path / "this-cwd-does-not-exist"
+    out = rd._gh(["repo", "view"], missing)
+    assert out.returncode == 126, (out.returncode, out.cause)
+    assert "is not on PATH" not in out.cause, out.cause
+    assert str(missing) in out.cause, (
+        f"the cause must name the CWD that could not be entered: {out.cause}")
+
+
 def test_the_ghless_path_helper_stages_the_tools_it_is_asked_for(tmp_path):
     """`_path_without_gh(tmp, "cat")` must stage `cat` — a shadowed form raised TypeError.
 
