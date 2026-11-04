@@ -1699,6 +1699,24 @@ def test_the_shipped_logs_blocker_cells_are_the_emitters_own():
         "a hand-typed E4 note would still pass")
     assert e4_sentence in record["rows"][3]["note"], record["rows"][3]["note"]
 
+    # ⛔ THE CORRECTED RESIDUAL CLAUSE IS PINNED TOO (`#10679` review round 2, F6).
+    # The token above survived a hand-edit that restored the FALSE attribution — it
+    # sits earlier in the same sentence — so with only that token bound, a log hand-
+    # edited back to "the residual is owned by #9596" stayed `162 passed`: exactly the
+    # artifact/emitter divergence this pin exists to refuse, on the one sentence this
+    # change corrects. Both halves are now bound, in the emitter AND in the artifact.
+    unowned = "no open issue owns the residual"
+    assert unowned in source_joined, (
+        "the E4 note's UNOWNED-residual clause is not in the committed probe — "
+        "#9596 owns the receipt's retrievability gap, not the planted-edge residual, "
+        "and #8503's own body says 'No open issue owns it.'")
+    assert unowned in record["rows"][3]["note"].lower(), (
+        "the shipped log's E4 note still attributes the residual to an owner: "
+        f"{record['rows'][3]['note']}")
+    assert "residual is owned by" not in record["rows"][3]["note"], (
+        "the shipped log's E4 note carries the refuted '#9596 owns the residual' "
+        f"attribution: {record['rows'][3]['note']}")
+
 
 def test_the_shipped_log_discloses_what_the_run_did_not_emit():
     """A post-run edit is allowed only when the artifact SAYS it happened.

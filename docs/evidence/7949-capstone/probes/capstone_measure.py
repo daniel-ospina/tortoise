@@ -991,11 +991,14 @@ def build_rows(*, head: str, out_path: str, log_corpus_sha: str,
             corpus_sha256=e4["corpus_sha256"],
             artifact_corpus_sha256=(e4["corpus_sha256"] if e4_off_this_corpus
                                     else None),
-            # #9596 owns the residual for a red row — NOT #8503, which CLOSED
-            # 2026-10-24 (its closure records the DISPROOF, so it is this row's
-            # measurement record and not a live blocker), and which `#10601`'s V12
-            # now REFUSES a row for naming: a blocker recorded CLOSED in
-            # `blocker-states.json` is a finding.
+            # `#9596` is the row's LIVE BLOCKER POINTER on a red row — NOT the owner
+            # of the unformed edges. It is the only OPEN issue on E4 and it owns a
+            # DIFFERENT gap (the receipt's unmeasured retrievability rate); the
+            # planted-edge residual is UNOWNED, which `build_e4_row`'s note states and
+            # `#8503`'s own body says in its own words. `#8503` is not the pointer
+            # because it CLOSED 2026-10-24 — that closure records the DISPROOF, so it
+            # is this row's measurement record — and `#10601`'s V12 REFUSES a row for
+            # naming a blocker recorded CLOSED in `blocker-states.json`.
             #
             # ⛔ The literal is unconditional HERE because the GREEN invariant is
             # enforced one layer down, in `row()`: "GREEN carries a blocker … green and
@@ -2509,9 +2512,13 @@ def build_e4_row(receipt: dict, *, bars: dict, corpus_sha: str) -> dict:
     # future scored log. The row's `blocked_by` cell is still `#9596`, because the gate
     # requires a non-green row to name a LIVE issue and that is the only open one on
     # E4 — but the CELL is a pointer, and this NOTE is where its scope is stated.
+    # ⛔ NOT "#8503's fix holds here": there IS no fix. `#8503` closed 2026-10-24 as a
+    # DISPROOF, so a receipt that reaches the bar is evidence the edges were formed on
+    # that artifact — not that a fix landed. The PASS arm is printed into a future
+    # scored log, so it must not name work no issue ever did.
     if result["outcome"] == "PASS":
-        edge_clause = ("the planted-edge bar IS met by this receipt, so #8503's fix "
-                       "holds here")
+        edge_clause = ("the planted-edge bar IS met by this receipt, so nothing is "
+                       "missing on this row")
     elif receipt["edge_correct"] < receipt["planted"]:
         edge_clause = ("the planted edges are still not all formed (#8503 — CLOSED "
                        "2026-10-24: that closure records the DISPROOF, so it is this "
@@ -3025,6 +3032,16 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         raise SystemExit(f"capstone-measure: REFUSED — {exc}") from exc
     corpus_sha = check_corpus(prereg)
+    # ⛔ THE E4 ARTIFACT IS RESOLVED HERE, WITH THE OTHER PRE-FLIGHT READS, AND FOR
+    # THE SAME REASON: `select_e4_receipt` has ~8 refusal arms (absent pin, no match
+    # on the pin, unreadable / non-object / non-UTF-8 file, non-string `corpus_hash`,
+    # unorderable date, would-have-won unscorable) and every one of them is a property
+    # of the ARTIFACTS, not of the run. Resolved where it used to be — after
+    # `run_corpus` — a bad receipts tree burned the full 7-session extraction cost and
+    # wrote NOTHING, which is the exact class `#9889`'s own pin exists for ("a real run
+    # burned its 7-session LLM cost and wrote NOTHING"). The receipt is CARRIED to the
+    # E4 section rather than re-read, so this is one read, not two.
+    receipt = load_e4(frozen_pin=corpus_sha)
 
     ready, why = backend_ready()
     if not ready:
@@ -3141,7 +3158,8 @@ def main(argv: list[str] | None = None) -> int:
     }
 
     # ── E4 ────────────────────────────────────────────────────────────────
-    receipt = load_e4(frozen_pin=corpus_sha)
+    # `receipt` was resolved by the PRE-FLIGHT, before the model pass, so a refusal
+    # cannot land after the spend. It is the same object, not a second read.
     e4_result = e4_outcome_for(receipt, bars)
     e4 = build_e4_row(receipt, bars=bars, corpus_sha=corpus_sha)
 

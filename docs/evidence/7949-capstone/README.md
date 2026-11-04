@@ -245,9 +245,16 @@ run, this lane re-pointed those two attributions (`#8503 → #9596`, `#9738 → 
 explains the move. **No numerator, denominator or verdict was touched — the numbers are the run's.**
 The third is prose in the same class: the E4 note said the mechanism *is* `#8503`, which CLOSED
 2026-10-24 — so the note now states that the closure records E4's DISPROOF (the row's measurement
-record, not a live blocker) and names `#9596` as the residual owner. The log's own
-`POST-RUN CORRECTION` block states all three, the committed probe now EMITS both cells, the E4
-note sentence and the E5 tail so a re-run reproduces the file instead of contradicting it, and two pins in
+record, not a live blocker) and says the planted-edge residual is UNOWNED — `#9596`,
+which is the row's live blocker pointer and the receipt's unmeasured retrievability
+rate, owns a DIFFERENT gap, and a later correction to the note says so. The log's own
+`POST-RUN CORRECTION` block states all three AND the second correction to the third, and the
+committed probe now EMITS both cells, the E4
+note sentence and the E5 tail. ⛔ It does **NOT** follow that a re-run reproduces this file: since
+`#7949`'s selector the committed probe reads the receipt ON the frozen pin, so a re-run at this tree
+scores E4 at **5/15** from `w2b-operator-2026-10-24-8503-b.json` and writes a NEW
+`capstone-measured-<head>.log` — it SUPERSEDES this one, which is the bundle's documented rule. Two
+pins in
 `tests/test_7949_capstone_measure.py` (`…blocker_cells_are_the_emitters_own`,
 `…discloses_what_the_run_did_not_emit`) RED if the artifact and its emitter diverge again or if the
 disclosure disappears. This was found in review and is recorded rather than absorbed: a cell edited
@@ -509,10 +516,14 @@ was NOT measured on the frozen corpus.
 
 ⛔ **SUPERSEDED as the row's artifact (2026-11-02).** This receipt's `corpus_hash` is not the
 frozen `fixtures_hash`, so the row above was a measurement of a different corpus revision — on
-code that predates `#8503`'s fix. `probes/capstone_measure.py` now selects E4's receipt **by its
+code that predates `#8503`'s own measurement work. ⛔ Not "before `#8503`'s fix" — there is no such
+fix: `#8503` CLOSED 2026-10-24 as a **DISPROOF**, and its own body closes with *"No open issue owns
+it."* `probes/capstone_measure.py` now selects E4's receipt **by its
 own `corpus_hash`** (`select_e4_receipt`): the newest receipt on the frozen pin wins, and no match
-REFUSES instead of falling back. Three receipts on the frozen pin (`w2b-operator-2026-10-24-8503-{preleg,a,b}.json`,
-all after `#8503`) read **5/15**, with `content_ok` 11–13 and `operators_total` 29–33 across the
+REFUSES instead of falling back. Three receipts on the frozen pin (`w2b-operator-2026-10-24-8503-{preleg,a,b}.json`
+— `#8503`'s OWN measurement receipts, dated `2026-10-24T05:46:51Z`/`06:03:47Z`/`06:10:47Z`, i.e. ~14 h
+BEFORE that issue's `closedAt` of `2026-10-24T20:50:13Z`, so they are not "after its fix" either) read
+**5/15**, with `content_ok` 11–13 and `operators_total` 29–33 across the
 three (the row reads `b`: `content_ok=11`, `operators_total=33`, commit `a999be41e`).
 So **E4 is 5/15, still RED** against the 15/15 bar. The verdict did not move; the number did, and
 it is now a measurement of the pre-registered corpus. The scored log below keeps its 2/15 because
@@ -843,8 +854,10 @@ completed run, asserts a live cause — that is what V12 checks.
 
 **Two ATTRIBUTIONS were corrected, and no number was touched.** Re-measuring moves the numbers; it
 does not re-point a blocker, so the two rows whose cited issue had closed were re-attributed to the
-issue that owns the residual **now** — E4 `#8503` → **`#9596`** (the receipt's retrievability rate is
-UNMEASURED, which E4's own note already named), E5 `#9738` → **`#5087`** (raw recovery 0.4800 against
+only OPEN issue their artifact still has — a blocker POINTER, not an ownership claim on the residual
+(which is unowned: `#8503` says so itself, and E4's note now says so too). E4 `#8503` → **`#9596`**
+(the receipt's retrievability rate is UNMEASURED, which E4's own note already named), E5 `#9738` →
+**`#5087`** (raw recovery 0.4800 against
 the 0.80 floor is S3 selection recovery; `#9738` closed on its own §10 *record* correction, which is
 not a measurement of this number). `probes/capstone_measure.py` carries the same two constants so the
 next run emits them. Every NUMBER in the table below is the run's own, at `9152448d7`.
