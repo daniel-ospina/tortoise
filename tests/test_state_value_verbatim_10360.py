@@ -980,6 +980,70 @@ def test_the_carve_outs_own_ADJACENT_time_units_are_judged():
         "forty thousand requests per week") == ()
 
 
+def test_a_magnitude_prefix_beside_a_unit_word_is_COMPOSED_not_refused():
+    """#10804 review P1 — the widen must not REFUSE a truthful point.
+
+    ``_value_bindings`` glues a value to the unit word written beside it with NO
+    prefix arithmetic (``value + seq[i + 1]``), so ``20k`` + ``miles`` binds ONE
+    token, ``20kmiles``, whose suffix is not a ``_UNIT_EQUIV`` key. It therefore
+    reads as an UNKNOWN unit with the numeric core still ``20``, and against
+    ``20000 miles`` (core ``20000``, unit ``mi``) the cores DIVERGE.
+
+    ⛔ MEASURED, not predicted: every row below returned ``()`` at `origin/main`
+    `525fde4a9` — ``miles``/``days``/``milliseconds``/``weeks``/``percent`` were
+    not in ``_UNIT_WORDS``, so the pair fell open on the unknown-unit tolerance —
+    and every one REFUSED with the widened tables and no composition arm. That
+    is the FALSE-ACCUSATION direction this carve-out must never take, so the
+    widen is only admissible WITH the composition (``_composed_identity``).
+
+    MUTATION CHECK TARGET: delete the ``_composed_identity`` arm from
+    ``_value_identity_matches`` and the first loop goes red; the second loop (the
+    rewrites) must stay green either way — it is what stops the arm from being
+    widened into a tolerance that lets a real rewrite through.
+    """
+    # A prefix followed by a SPACE-SEPARATED unit word: one value, two spellings.
+    for content, quote in (
+            ("the fleet drove 20000 miles", "the fleet drove 20k miles"),
+            ("the lease is 3000 days", "the lease is 3k days"),
+            ("back under 5000 milliseconds", "back under 5k milliseconds"),
+            ("the sprint is 2000 weeks", "the sprint is 2k weeks"),
+            ("the share is 20000 percent", "the share is 20k percent")):
+        assert v2._value_slot_divergence(content, quote) == (), (
+            content, quote)
+    # …and the WRITE does not withhold the point (the whole of the harm).
+    result = _write("the fleet drove 20000 miles", "the fleet drove 20k miles")
+    assert result["payload"]["points"], (
+        "a truthful point was WITHHELD because `20k miles` and `20000 miles` "
+        "are one value written two ways — the false-accusation direction")
+    assert not any("REWRITES its own verbatim quote" in w
+                   for w in result["warnings"]), result["warnings"]
+    # ⛔ NOT VACUOUS IN THE OTHER DIRECTION: composing the prefix must not turn a
+    # rewritten number or a changed unit into a match. `20k miles`/`21k miles`
+    # composes to 20000 mi against 21000 mi, and `20k miles`/`20000 km` to
+    # 20000 mi against 20000 km.
+    for content, quote in (
+            ("the fleet drove 20k miles", "the fleet drove 21000 miles"),
+            ("the fleet drove 20k miles", "the fleet drove 21k miles"),
+            ("the fleet drove 20k miles", "the fleet drove 20000 km"),
+            ("the lease is 3k days", "the lease is 3000 hours")):
+        assert v2._value_slot_divergence(content, quote), (content, quote)
+    # ⛔ A unit the table ALREADY KNOWS is never composed, and a multi-run core
+    # (one suffix for several numbers) is never scaled — pinned so a later widen
+    # cannot quietly reinterpret `20km` as 20000 metres.
+    assert v2._value_core("20km") == ("", "20", "km")
+    assert v2._value_core("24h/7d/4w") == ("", "24/7/4", "w")
+    assert v2._composed_identity(("", "20", "km")) is None
+    assert v2._composed_identity(("", "24/7/4", "kw")) is None
+    # …and the AMBIGUOUS colloquial spelling keeps today's fail-open rather than
+    # becoming a refusal: `20kms` composes, but `20km` does not, so the pair is
+    # still tolerated (reading "kms" as kilo-milliseconds would REFUSE).
+    assert v2._value_slot_divergence("the ride was 20kms", "the ride was 20km") == ()
+    # NOT FUSED, pinned so a later lane cannot quietly re-add percent/pct.
+    assert "percent" not in v2._UNIT_WORDS and "pct" not in v2._UNIT_WORDS
+    assert v2._value_slot_divergence(
+        "the share is 20k%", "the share is 20000 percent") == ()
+
+
 #: The patterns that assert the ADJACENCY gap is OPEN again — the thing
 #: `test_the_registry_row_names_the_residual_that_still_stands` must red on.
 #: Deliberately narrow: each one names a REOPENING, so a truthful rewording of
