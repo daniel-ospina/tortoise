@@ -9216,7 +9216,9 @@ async def _check_org_limit_off_loop(org: dict, resource: str, *,
                                     sdk=None) -> None:
     """``_check_org_limit`` for an ``async def`` door — each read on ITS lane.
 
-    The gate is two reads, and they belong to two different pools:
+    The gate's two ALLOWANCE reads belong to two different pools (and, for
+    `sessions`, a THIRD — the extractor's meter, riding inside the count's graph
+    submission — is latent and filed as #10949):
 
     * the allowance CARRY is a CONTROL-PLANE read (``quota.resolve_org_limits``
       → ``_orgs_row_fail_soft``'s PostgREST ladder in Supabase mode; the
@@ -17521,10 +17523,13 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # ⛔ "Off the loop" is not the whole rule (main-repair, 2026-11-04, after
     # the #9567 round-12/13 pool split landed): `asyncio.to_thread` runs the
     # call on the LOOP'S DEFAULT EXECUTOR, which carries this file's graph-lane
-    # work (`_commit_sync`, `_seed_demo_sync`). The gate is TWO reads on TWO
-    # substrates — the allowance CARRY is a control-plane read, the COUNT is a
-    # graph read — and round 12's rule is that a read is submitted to the pool
-    # ITS OWN substrate lives in. Submitted as one blob to the default
+    # work (`_commit_sync`, `_seed_demo_sync`). The gate's TWO ALLOWANCE reads
+    # sit on TWO substrates — the allowance CARRY is a control-plane read, the
+    # COUNT is a graph read — and round 12's rule is that a read is submitted to
+    # the pool ITS OWN substrate lives in. (For `sessions` there is also a THIRD
+    # read — the extractor's meter, riding INSIDE the count's graph submission.
+    # It is latent and is the SECOND DECLARED RESIDUAL below, filed as #10949,
+    # so "two reads" is exact about this seam and not about the whole gate.) Submitted as one blob to the default
     # executor, a control-plane stall occupied a slot that the commit lane
     # needs, and it answered `500 "Quota check failed"` where the identical
     # stall on `/v1/points` answers `503 control_plane_unavailable` — one
@@ -17559,8 +17564,9 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # capture-shaped `unavailable=` factory threaded through
     # `_carry_allowances_off_loop` (which already accepts one at `_cp_offload`),
     # and it is named here rather than left for someone to discover from a
-    # dashboard line. The `error_code` (`control_plane_unavailable`) is correct
-    # either way.
+    # dashboard line. Filed as #10967 (review cycle 6 required the id next to
+    # the claim, not only the diagnosis). The `error_code`
+    # (`control_plane_unavailable`) is correct either way.
     #
     # ⚠️ SECOND DECLARED RESIDUAL (main-repair review cycle 3, P1): for
     # `resource="sessions"` the gate has a THIRD read, and it is a control-plane
