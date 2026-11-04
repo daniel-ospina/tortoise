@@ -639,10 +639,14 @@ class TestDistinguishingDifference:
         # that a script is unknown.
         assert v2.fold_allowed("we ship the \u0568 build",
                                "we ship \u0568")
-        # Letters in a NAMED script are unaffected.  LATIN includes its
-        # accented blocks, so an accent is latin rather than "unknown" —
-        # otherwise dropping an accent ("caf\u00e9"/"cafe") would refuse a
-        # fold that has nothing to do with language.
+        # Letters in a NAMED script are unaffected.  ⚠️ This pair is a JOINT pin,
+        # not the Latin supplement's discriminator: an accented letter is `latin`
+        # through the NFD-BASE STEP alone (`é` → `e`), so it stays `latin` even
+        # with `_LATIN_SUPPLEMENT_BLOCKS` emptied.  The surfaces the table
+        # actually carries are the NFD-STABLE ones (`ª` U+00AA, `µ` U+00B5, `ʃ`
+        # U+0283) and the compatibility-decomposed ones (`ﬁ`, `ａ`, which NFD does
+        # not decompose) — the loop below pins those, and THAT is the leg that
+        # reds when the table is emptied.
         assert v2.fold_allowed("we study the caf\u00e9 menu",
                                "we study the cafe menu")
         # A non-letter outside every block (an emoji, a currency symbol) is not

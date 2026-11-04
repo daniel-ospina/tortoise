@@ -13163,10 +13163,20 @@ extract_session_v2 = _run_scoped_vocabulary_gap(extract_session_v2)
 # insertion ABOVE the marker re-stales every one of them, which is how this
 # change put five capstone tests red before it was moved down here.
 
-#: Accented and compatibility LATIN, which the ASCII branch in `_script_of`
-#: cannot see.  Without these ranges an accented letter is in NO block, so
-#: dropping an accent (`café`/`cafe`) would refuse a fold that has nothing to do
-#: with language.
+#: LATIN letters the ASCII branch in `_script_of` cannot see **and that NFD does
+#: not reduce to an ASCII base**: `ª` U+00AA, `µ` U+00B5 and `ʃ` U+0283 are
+#: NFD-stable (they decompose to themselves), and `ﬁ` U+FB01 / `ａ` U+FF41 carry
+#: only COMPATIBILITY decompositions, which NFD does not apply.  Without these
+#: ranges each is in NO block, reads `unlisted`, and refuses any fold it appears
+#: on one side of.
+#:
+#: ⛔ NOT for accented letters, and an earlier revision of this comment said it
+#: was: `é`/`Ā` decompose under NFD to an ASCII base, so `_script_of`'s
+#: NFD-base step already reads them `latin`.  Measured with this table EMPTIED,
+#: `_script_of('é')` is still `latin` and `café`/`cafe` still folds — so the
+#: `café` assertion in the tests is a JOINT pin (either mechanism alone keeps it
+#: green), and the discriminating leg for this table is the surface loop over
+#: `ª µ ʃ ﬁ ａ`.
 #:
 #: ⛔ LETTERS ONLY, and separate from `_SCRIPT_BLOCKS` for that reason: Latin-1
 #: Supplement also holds `U+00D7` (`×`) and `U+00F7` (`÷`), which are MATHS
@@ -13203,8 +13213,12 @@ _LATIN_SUPPLEMENT_BLOCKS = (
 #: ⚠️ Declared residuals, so they are not mistaken for coverage: this closes the
 #: LETTER case only.  A DIGIT or MARK in an unlisted script reaches no dimension
 #: (Thai `๑๒๓` against `123` reads as a `number` difference, which permits a
-#: SUPERSEDE), and a MODIFIER letter (category Lm, e.g. `ʰ` U+02B0) is treated
-#: as not script-bearing, which is what it was before this reading existed.
+#: SUPERSEDE), and a MODIFIER letter (category Lm, e.g. `ʰ` U+02B0) **in no
+#: `_SCRIPT_BLOCKS` range** is treated as not script-bearing, which is what it was
+#: before this reading existed.  (An Lm *inside* a listed block does carry it —
+#: `ー` U+30FC is `kana` — which the previous sentence about ranges already
+#: implies; the unqualified "an Lm is not a script" is false and was corrected
+#: here.)
 #:
 #: ⚠️ And a LABEL residual, which costs no decision and is stated anyway so a
 #: reader does not mistake the name for precision: `_UNLISTED_SCRIPT` is a
@@ -13232,7 +13246,9 @@ def _script_of(ch: str) -> str | None:
     a refused identity difference into a permitted `number` SUPERSEDE); and
     finally a LETTER that no block names, which is searched one level deeper
     under NFD — a precomposed letter belongs to its BASE's script — before it is
-    an unknown script.  A non-letter, or a modifier letter, is not a script.
+    an unknown script.  A NON-LETTER is not a script, and neither is a modifier
+    letter (Lm) **in no `_SCRIPT_BLOCKS` range** — an Lm INSIDE one does carry
+    that block (`ー` U+30FC is `kana`).
     """
     if ch.isascii():
         return "latin" if ch.isalpha() else None
