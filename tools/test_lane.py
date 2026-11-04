@@ -2326,7 +2326,10 @@ def _live_lane_paths() -> set[str] | None:
     return found
 
 
-def _container_in_use(name: str) -> bool | None:
+def _container_in_use(
+        name: str,
+        *,
+        idle_within_s: float | None = ACTIVE_CLIENT_IDLE_S) -> bool | None:
     """Does the container itself say a client is using it right now?
 
     The one liveness datum that does not depend on knowing the owner at all: it
@@ -2334,6 +2337,19 @@ def _container_in_use(name: str) -> bool | None:
     owner this clone cannot resolve. ``CLIENT LIST`` includes the connection
     that asked (``cmd=client|list``), which is excluded or every container would
     report itself busy.
+
+    ``idle_within_s`` is the QUESTION, and the two callers ask different ones:
+
+      * the SWEEP passes the default — "has anyone attached *recently*", i.e.
+        within ``ACTIVE_CLIENT_IDLE_S``. That is the unused-lease measure, and a
+        client idle for a full suite step is the population arm 3 exists for.
+      * the EXIT HOOK passes ``None`` — "is ANYTHING attached at all". A peer
+        consumer that established the container with `uri` and went quiet for
+        longer than ``ACTIVE_CLIENT_IDLE_S`` still holds an open socket, and
+        removing the container under it fails ITS run with connection errors
+        that read as test verdicts (#10813 review P2). The hook removes a
+        container only AFTER its own child has exited, so nothing of its own can
+        still be attached: any remaining client belongs to someone else.
 
     ``None`` when the container could not be asked (exec failed, no `redis-cli`,
     a wedged server). Unreadable is NOT "unused": it authorises no removal.
@@ -2362,7 +2378,11 @@ def _container_in_use(name: str) -> bool | None:
         if cmd and cmd.group(1) == "client|list":
             continue  # this probe, not a client
         idle = re.search(r"\bidle=(\d+)", line)
-        if idle and int(idle.group(1)) < ACTIVE_CLIENT_IDLE_S:
+        if idle_within_s is None:
+            # "is ANYTHING attached?" — a client with no `idle=` field at all (a
+            # pub/sub or MONITOR client) is attached just as much as a quiet one.
+            return True
+        if idle and int(idle.group(1)) < idle_within_s:
             return True
     return False
 
@@ -2698,11 +2718,18 @@ def reap_orphans(own_name: str | None = None) -> list[str]:
        it), so the reaping decision is a lookup rather than a guess. This tool
        can therefore only ever remove a container whose owner it has
        POSITIVELY established is gone — never a peer lane's, and never this
-       worktree's own (`stop()` is the only thing that removes that one). It
-       does not consult the container's STATE at all: an owner that is gone
-       means nothing will start that container again, whatever docker last said
-       about it (`paused`/`restarting`/`created` included — ``_LIVE_ISH_STATES``
-       gates only the state arm below, not this one).
+       worktree's own (`stop()` and `cmd_run`'s exit hook are the two things
+       that remove that one). Its STATE is consulted only to decide whether the
+       container can be ASKED about its clients (``_container_in_use``):
+       ``docker exec`` reaches a container only while docker is RUNNING it.
+       MEASURED (docker 27): ``created`` answers *"Container … is not running"*
+       and ``paused`` answers *"Container … is paused, unpause the container
+       before exec"*, both exit 1 — so ``_LIVE_ISH_STATES``
+       (``paused``/``created``/``restarting``/``removing``) is precisely the set
+       that cannot answer. Those orphans are REPORTED with the one command that
+       releases them and never removed, and the line is not an ``undecided``
+       tick (``tools/container_reaper.py`` reds the timer on those, which for a
+       state no retry can change would be a permanent false alarm).
 
     A second proof — **the container is in a TERMINAL state** (`exited`/`dead`,
     ``_TERMINAL_STATES``) — is **WITHHELD BY DEFAULT** (`STOPPED_REAP_ENV`),
@@ -2962,8 +2989,37 @@ def reap_orphans(own_name: str | None = None) -> list[str]:
             # reports a live client is SPARED and reported; a TERMINAL one cannot
             # have one, so the probe is skipped rather than failing on a dead
             # server. `None` (unreadable) also spares: unreadable is not "unused".
-            busy = (False if state in _TERMINAL_STATES
-                    else _container_in_use(name))
+            if state in _TERMINAL_STATES:
+                busy: bool | None = False
+            elif state in _LIVE_ISH_STATES:
+                # MEASURED (docker 27, both exit 1): `exec` into `created` is
+                # "container … is not running", into `paused` is "paused,
+                # unpause the container before exec". Probing anyway returns
+                # `None`, which kept the container AND (via the (unreadable)
+                # shape below) marked it `undecided` — so a paused orphan was
+                # unreapable by ANY arm and reddened the timer on every tick,
+                # forever, because no retry can ever ask the question
+                # (#10813 review P2). Keep it, say why, name the remedy.
+                #
+                # ⛔ The wording must NOT contain "unreadable" or
+                # "fail-closed": those are exactly what
+                # `container_reaper`'s `undecided` predicate matches, and this is
+                # a PERMANENT state, not a transient read failure.
+                out.append(
+                    f"reap: kept {name} — its owning worktree {owner} is gone, "
+                    f"but it is {state}, so it cannot be asked about its clients "
+                    f"(docker exec only reaches a RUNNING container) and is not "
+                    f"removed; release it with `docker rm -f {name}`")
+                continue
+            else:
+                # `running` — and any state this module does not recognise. An
+                # unreadable state is NOT a reason to skip the question: docker
+                # may well be running it, and if the probe answers `None` the
+                # sweep is `undecided` (a red tick), which is how a drift in
+                # `docker ps` output surfaces instead of silently killing the
+                # reap. Only a state docker POSITIVELY reported as not-running
+                # can never be answered.
+                busy = _container_in_use(name)
             if busy is not False:
                 out.append(
                     f"reap: kept {name} — its owning worktree {owner} is gone, "
@@ -3613,7 +3669,16 @@ def cmd_run(args: argparse.Namespace) -> int:
                 # Cheap check FIRST: on the reuse path (the commonest — `uri`
                 # then `run`) the probe can cost a 60 s `docker exec` and the
                 # answer is unused.
-                in_use = None if not created else _container_in_use(name)
+                #
+                # `idle_within_s=None`: the hook asks "is ANYTHING attached?",
+                # not "did anything attach in the last 5 minutes". A consumer
+                # that opened this container through `uri` writes no `run`
+                # marker, so when it is idle through a heavy non-DB test file its
+                # ONLY signal is the socket it still holds — and the sweep's
+                # `ACTIVE_CLIENT_IDLE_S` measure would call that "unused" and
+                # `rm -f` its target (#10813 review P2).
+                in_use = (None if not created
+                          else _container_in_use(name, idle_within_s=None))
                 if not created:
                     kept = True
                     print(f"test-lane: NOT reaping {name} on exit — this run "

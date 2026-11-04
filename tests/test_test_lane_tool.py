@@ -68,6 +68,20 @@ def lane(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _reap_state_dir_is_isolated(tmp_path, monkeypatch):
+    """The lease/marker registry is REAL box state, so no test may touch it.
+
+    `REAP_STATE_DIR` defaults to `~/.pi/agent/state/lane-reap/`, and the hook
+    tests drive the REAL `_peer_run_is_live` / `_touch_lease` (a live peer marker
+    is exactly what one of them asserts). Left pointing at the home directory
+    they wrote markers and leases into the developer's own registry and read
+    whatever a LIVE peer lane had left there — a test whose result depended on the
+    box, on a file registered to a docker-free CI surface (#10813 review).
+    """
+    monkeypatch.setattr(tl, "REAP_STATE_DIR", tmp_path / "lane-reap")
+
+
+@pytest.fixture(autouse=True)
 def _host_probe_and_sweep_are_stubbed(monkeypatch):
     """#8180: `_ping_over_host` is a REAL TCP connect, and `start()` now sweeps
     orphans with real git/docker calls. Unit tests stub `_docker` only, so
@@ -4411,7 +4425,11 @@ def _stub_start(monkeypatch, *, port: int = 16406):
     and suppresses the reap the hook tests assert. Its own behaviour has a test.
     """
     monkeypatch.setattr(tl, "start", lambda _p=None: (LANE_FIXTURE_NAME, port))
-    monkeypatch.setattr(tl, "_container_in_use", lambda _n: False)
+    # `**kwargs`: the hook asks the probe a STRICTER question than the sweep does
+    # (`idle_within_s=None` — "is anything attached at all", see `cmd_run`), so a
+    # stub that only accepts the name would raise TypeError and the hook's own
+    # `except Exception` would swallow it as "could not reap".
+    monkeypatch.setattr(tl, "_container_in_use", lambda _n, **_k: False)
     # The module-wide fixture disables automatic reaping (`TORTOISE_TEST_LANE_REAP=0`)
     # so no test touches the real box's containers; `run` now HONOURS that opt-out
     # (#10813 review P2-4), so the run tests have to re-enable it for themselves.
@@ -4649,15 +4667,76 @@ def test_the_hook_NEVER_takes_a_container_a_peer_is_using(lane, monkeypatch, cap
                         (None, "could not be read")):
         reaped.clear()
         leases.clear()
-        monkeypatch.setattr(tl, "_container_in_use", lambda _n, a=answer: a)
+        monkeypatch.setattr(tl, "_container_in_use",
+                            lambda _n, _a=answer, **_k: _a)
         assert tl.main(["run", "--", "-q", "tests/"]) == 0
-        assert reaped == [], f"reaped while the client list said {answer!r}"
         assert why in capsys.readouterr().err
+        assert reaped == [], f"reaped while the client list said {answer!r}"
         # The container SURVIVED, so its lease must be re-stamped at the END of
         # the use — otherwise a container spared here enters the next sweep
         # already past OWNER_GRACE_H (#10806 review P2-4).
         assert leases == [LANE_FIXTURE_NAME], (
             f"a spared container was left with a stale lease: {leases}")
+
+
+def test_the_hook_asks_whether_ANYTHING_is_ATTACHED_not_whether_it_is_RECENT(
+        lane, monkeypatch, capsys):
+    """The reverse ordering: the consumer is the one that did NOT create it.
+
+    A consumer that opened the container with `uri` writes no `run` marker, so when
+    it sits idle through a heavy non-DB test file its ONLY signal is the socket it
+    still holds. The sweep's `ACTIVE_CLIENT_IDLE_S` (300 s) measure calls that
+    "unused" — which made the hook `rm -f` a live peer consumer's target, and its
+    connection errors were then reported as test verdicts (#10813 review P2).
+
+    The hook removes only AFTER its own child exits, so nothing of its own can
+    still be attached: a remaining client is someone else's, however long it has
+    been quiet. Mutation: pass the sweep's default here and this test reds.
+    """
+    _stub_start(monkeypatch, port=16412)
+    reaped: list = []
+    seen: list = []
+    monkeypatch.setattr(tl.subprocess, "run", lambda *a, **k: _R(0, "", ""))
+    monkeypatch.setattr(tl, "stop", lambda: (reaped.append(1), "removed")[1])
+    monkeypatch.setattr(tl, "_touch_lease", lambda _n: None)
+
+    def probe(_name, **kw):
+        seen.append(kw)
+        # Attached, but quiet for far longer than the sweep's window.
+        return kw.get("idle_within_s") is None
+
+    monkeypatch.setattr(tl, "_container_in_use", probe)
+    assert tl.main(["run", "--", "-q", "tests/"]) == 0
+    assert seen == [{"idle_within_s": None}], seen
+    assert reaped == [], (
+        "the 300 s 'unused' measure took a live consumer's database")
+    assert "a live client is using it" in capsys.readouterr().err
+
+
+def test_container_in_use_can_answer_ANY_attached_client(monkeypatch):
+    """The hook's question, pinned at the probe itself (not just at its caller).
+
+    `idle_within_s=None` = "is anything attached at all": a client that has been
+    quiet for hours still holds the socket, and a client with no `idle=` field at
+    all (a pub/sub or MONITOR client) is attached just as much. The DEFAULT is
+    unchanged, so the sweep's unused-lease measure keeps its semantics.
+    """
+    quiet = "id=7 cmd=lrange idle=4200\nid=8 cmd=client|list idle=0\n"
+    monkeypatch.setattr(tl, "_docker", lambda *a, **k: _R(0, quiet, ""))
+    assert tl._container_in_use("fdb-lane-x") is False, (
+        "the sweep's 300 s measure must still call a long-idle client 'unused'")
+    assert tl._container_in_use("fdb-lane-x", idle_within_s=None) is True
+
+    # A subscriber carries no `idle=` field at all.
+    sub = "id=7 cmd=subscribe\nid=8 cmd=client|list idle=0\n"
+    monkeypatch.setattr(tl, "_docker", lambda *a, **k: _R(0, sub, ""))
+    assert tl._container_in_use("fdb-lane-x") is False
+    assert tl._container_in_use("fdb-lane-x", idle_within_s=None) is True
+
+    # …and the probe's own line is never the client it reports.
+    monkeypatch.setattr(tl, "_docker", lambda *a, **k: _R(
+        0, "id=8 cmd=client|list idle=0\n", ""))
+    assert tl._container_in_use("fdb-lane-x", idle_within_s=None) is False
 
 
 def test_SIGTERM_reaches_the_hook_and_the_run_exits_143(lane, monkeypatch):

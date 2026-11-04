@@ -354,6 +354,144 @@ def test_every_line_carries_name_age_owner_and_bytes(box, capsys):
     assert "bytes=" in line, line
 
 
+def _stamp(seconds_ago: float) -> str:
+    """Docker's own `ps` creation rendering, relative to now."""
+    import time as _t
+    return _t.strftime("%Y-%m-%d %H:%M:%S +0000 UTC",
+                       _t.gmtime(_t.time() - seconds_ago))
+
+
+class _Two(_Docker):
+    """Two owner-gone orphans: one TERMINAL, one RUNNING.
+
+    The population the deployed unit is armed for. The terminal one is removed
+    without any probe (`busy = False`); the running one can only be removed if its
+    `CLIENT LIST` answers, so a probe failure leaves exactly one removal and one
+    undecidable candidate in ONE sweep.
+    """
+
+    TERMINAL = "fdb-lane-dddddddddd"
+    RUNNING = "fdb-lane-eeeeeeeeee"
+
+    def __init__(self):
+        super().__init__()
+        self.rows = (f"{self.TERMINAL}\texited\t{_stamp(6 * 3600)}\t\t\n"
+                     f"{self.RUNNING}\trunning\t{_stamp(6 * 3600)}\t\t\n")
+        self.size_rows = (f"{self.TERMINAL}\t1MB (virtual 2MB)\n"
+                          f"{self.RUNNING}\t1MB (virtual 2MB)\n")
+
+
+def _two_orphan_box(monkeypatch, docker):
+    monkeypatch.setattr(tl, "_docker", docker)
+    monkeypatch.setattr(tl, "_worktree_slugs", lambda: {
+        _Two.TERMINAL[len(tl.NAME_PREFIX):]: "/gone/one",
+        _Two.RUNNING[len(tl.NAME_PREFIX):]: "/gone/two",
+    })
+    monkeypatch.setattr(tl, "_live_lane_paths", lambda: set())
+    monkeypatch.setattr(tl, "_container_in_use", lambda _n: None)
+    monkeypatch.setattr(tl, "_termination_report", lambda _n, **_k: "")
+    monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-0123456789")
+    monkeypatch.setattr(tl, "_started_epoch", lambda _n: None)
+    monkeypatch.setattr(tl, "_unused_gap", lambda _n: None)
+    monkeypatch.setattr(tl, "_touch_lease", lambda _n: None)
+    monkeypatch.setenv("TORTOISE_TEST_LANE_REAP", "0")
+    monkeypatch.setenv("TORTOISE_CONTAINER_REAPER_SHA256", "")
+
+
+def test_an_INCOMPLETE_tick_that_ALSO_removed_one_never_says_NOTHING_was(
+        monkeypatch, capsys):
+    """The summary must not contradict its own body (#10813 review issue 1).
+
+    `undecided` is a PER-CONTAINER list, so one sweep can remove a terminal orphan
+    and be unable to decide about a running one. The verdict used to print
+    "NOTHING was decided or removed" on exactly that sweep — a false
+    operator-facing claim from a destructive tool, and the same
+    summary-contradicts-its-body class this module was written to refuse (see the
+    `acted` comment in `main()`). Exit 2 is still right: the tick is INCOMPLETE.
+    """
+    docker = _Two()
+    _two_orphan_box(monkeypatch, docker)
+    rc = cr.main(["reap", "--apply"])
+    out = capsys.readouterr()
+    assert rc == 2, (rc, out.out, out.err)
+    assert docker.removals == [_Two.TERMINAL], docker.removals
+    assert "1 removal(s) DID complete" in out.err, out.err
+    assert "NOTHING was decided or removed" not in out.err, out.err
+
+    # …and a sweep that removed NOTHING keeps the absolute claim, so the
+    # conditional did not just delete the sentence.
+    nothing = _Two()
+    nothing.rows = f"{_Two.RUNNING}\trunning\t{_stamp(3600)}\t\t\n"
+    nothing.size_rows = f"{_Two.RUNNING}\t1MB (virtual 2MB)\n"
+    _two_orphan_box(monkeypatch, nothing)
+    rc = cr.main(["reap", "--apply"])
+    out = capsys.readouterr()
+    assert rc == 2, (rc, out.out, out.err)
+    assert nothing.removals == [], nothing.removals
+    assert "NOTHING was removed" in out.err, out.err
+
+
+def test_a_PAUSED_orphan_is_REPORTED_never_probed_and_never_reds_the_timer(
+        monkeypatch, capsys):
+    """`docker exec` cannot reach a container docker is not RUNNING.
+
+    MEASURED (docker 27, exit 1 both): `created` -> "container … is not running";
+    `paused` -> "Container … is paused, unpause the container before exec". The
+    proof-1 probe therefore came back `None` for those states, which (a) kept the
+    container from EVERY arm — it could never be reaped — and (b) matched the
+    (unreadable) shape the actuator classifies as `undecided`, i.e. a 15-minute
+    timer red FOREVER over a question no retry can answer (#10813 review P2).
+
+    It must also spend no `exec` on it: 60 s per wedged probe is load a loaded
+    cell does not have.
+    """
+    paused = "fdb-lane-ffffffffff"
+    docker = _Two()
+    docker.rows = f"{paused}\tpaused\t{_stamp(3600)}\t\t\n"
+    docker.size_rows = f"{paused}\t1MB (virtual 2MB)\n"
+    _two_orphan_box(monkeypatch, docker)
+    monkeypatch.setattr(tl, "_worktree_slugs",
+                        lambda: {paused[len(tl.NAME_PREFIX):]: "/gone/wt"})
+
+    def _never(_n):        # pragma: no cover - asserted not to run
+        raise AssertionError("a container docker is not RUNNING was probed")
+
+    monkeypatch.setattr(tl, "_container_in_use", _never)
+    rc = cr.main(["reap", "--apply"])
+    out = capsys.readouterr()
+    # A permanent "cannot be asked" is a DECISION to keep, not an undecided tick.
+    assert rc == 0, (rc, out.out, out.err)
+    assert docker.removals == []
+    assert not [c for c in docker.calls if c[:1] == ("exec",)], docker.calls
+    lines = "\n".join([out.out, out.err])
+    assert paused in lines
+    assert "cannot be asked about its clients" in lines, lines
+    assert "docker rm -f" in lines, lines          # the remedy is named
+    # ⛔ and it must not wear the shape the actuator reads as INCOMPLETE.
+    assert "unreadable" not in lines, lines
+    assert "fail-closed" not in lines, lines
+
+
+def test_a_PER_CONTAINER_undecided_tick_does_not_claim_the_sweep_NEVER_RAN(
+        box, monkeypatch, capsys):
+    """`skipped` carries two different facts; the census line must not merge them.
+
+    A whole-sweep refusal means NO decision was taken about any row — that is what
+    "NOT DECIDED (the sweep did not run)" is for. A per-container `undecided` keep
+    means the sweep DID run: every other row has its own verdict, and a row with
+    none was simply not a candidate (#10813 review issue 1).
+    """
+    monkeypatch.setattr(tl, "reap_orphans", lambda: [
+        f"reap: kept {ORPHAN} — its owning worktree /x/y is gone, but the "
+        f"container reports nothing about its clients (unreadable); not "
+        f"removing a database that may be in use"])
+    rc = cr.main(["reap", "--apply"])
+    out = capsys.readouterr()
+    assert rc == 2, (rc, out.out, out.err)
+    assert "NOT DECIDED (the sweep did not run)" not in out.out, out.out
+    assert "kept (not a candidate)" in out.out, out.out
+
+
 def test_the_dry_run_REFUSES_a_writing_verb_the_sweep_might_issue(monkeypatch,
                                                                  capsys):
     """The interception is a deny-list; its refusals had no test at all.
@@ -479,6 +617,13 @@ def test_the_rendered_unit_pins_the_sha256_of_the_reaper_it_installs():
     assert str(ROOT / "tools" / "container_reaper.py") in r.stdout, r.stdout
     # The timer must name the service, or it schedules nothing.
     assert "Unit=tortoise-container-reaper.service" in r.stdout, r.stdout
+    # The service bound must sit ABOVE the work, not at the alarm: every probe the
+    # sweep issues is bounded by DOCKER_TIMEOUT (60 s), and systemd cannot tell a
+    # mid-pass kill apart from a stale pin (both read FAILED) — so 300 s was a red
+    # tick waiting for a loaded cell, not a defect signal (#10813 review).
+    bounds = [int(ln.split("=", 1)[1]) for ln in r.stdout.splitlines()
+              if ln.startswith("TimeoutStartSec=")]
+    assert bounds and bounds[0] >= 600, bounds
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="cells are Linux; macOS has no systemd")

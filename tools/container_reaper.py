@@ -67,9 +67,15 @@ USAGE
 
 Exit codes
 ----------
-  0  complete (dry run or apply); nothing outstanding and unreadable
-  2  INCOMPLETE — docker could not be read, so NOTHING was decided or removed
-     (a failed ``docker ps`` is never "no containers")
+  0  complete (dry run or apply): every candidate was DECIDED, and nothing that
+     needed removing is still there (a deliberately kept container — proof 2/3
+     withheld, or one whose client list shows a live client — is a decision)
+  2  INCOMPLETE — at least one candidate could NOT be decided: ``docker ps`` or
+     ``git worktree list`` could not be read (a failed read is never "no
+     containers"), a container's ``CLIENT LIST`` was unreadable, or the
+     directory of its owning worktree could not be examined. Removals that DID
+     complete in the same sweep are still counted and reported — see the
+     summary line, which is a count of what this run actually did
   3  usage error (argparse itself exits 2 before `main`, so a malformed command
      line is indistinguishable from INCOMPLETE — it is reported, never guessed at)
   4  STALE COPY — ``TORTOISE_CONTAINER_REAPER_SHA256`` (this file) or
@@ -121,7 +127,7 @@ if str(Path(__file__).resolve().parent.parent) not in sys.path:
 from tools import test_lane as tl  # the sibling package module
 
 EXIT_OK = 0
-EXIT_INCOMPLETE = 2      # nothing was DECIDED (a read failed) — not "nothing to do"
+EXIT_INCOMPLETE = 2      # a candidate was NOT DECIDED (a read failed) — not "nothing to do"
 EXIT_USAGE = 3
 EXIT_STALE = 4
 EXIT_PARTIAL = 5         # a removal was attempted and FAILED
@@ -148,8 +154,10 @@ POLICY_ENV = "TORTOISE_TEST_LANE_POLICY_SHA256"
 #: One `docker ps` for the whole population: name, state, creation, and the two
 #: ownership labels #10712 writes at creation. Reading the labels HERE (rather
 #: than per container with `docker inspect`) keeps the sweep to two docker calls
-#: on a box that is already overloaded — and the labels are read defensively, so
-#: this module needs no edit when that PR lands.
+#: (this one and, only when there is a candidate, the `ps -s` size read below —
+#: three in total; see the note there) on a box that is already overloaded — and
+#: the labels are read defensively, so this module needs no edit when that PR
+#: lands.
 CENSUS_FORMAT = (
     "{{.Names}}\t{{.State}}\t{{.CreatedAt}}"
     '\t{{.Label "' + getattr(tl, "LABEL_CREATED", "tortoise.test-lane.created") + '"}}'
@@ -504,7 +512,14 @@ def reap(*, apply: bool, as_json: bool = False) -> int:
             # A swept population is empty when the sweep FAIL-CLOSED, so a default
             # verdict here would report a decision nobody took — and the
             # per-container line is what an operator greps (#10813 review P3).
-            "NOT DECIDED (the sweep did not run)" if skipped
+            #
+            # Keyed on the WHOLE-SWEEP refusal (`_SWEEP_SKIPPED`), NOT on
+            # `skipped`: that list also carries per-container `undecided` keeps,
+            # and on those the sweep DID run and DID decide about every other
+            # row — saying "the sweep did not run" there was false in the same
+            # way the summary line was (#10813 review).
+            "NOT DECIDED (the sweep did not run)"
+            if any(ln.startswith(_SWEEP_SKIPPED) for ln in skipped)
             else "kept (not a candidate)")
         freed = row["bytes"] if verdict.lower().startswith(
             ("removed", "would remove")) else None
@@ -533,7 +548,7 @@ def reap(*, apply: bool, as_json: bool = False) -> int:
             "lines": rendered,
             "notes": notes,
         }, indent=2))
-        return _exit_for(skipped, failed)
+        return _exit_for(skipped, failed, acted)
 
     for line in rendered:
         print(line)
@@ -547,24 +562,34 @@ def reap(*, apply: bool, as_json: bool = False) -> int:
           f"{len(acted)}; {_human_bytes(total_bytes)} of writable layer "
           f"{'reclaimed' if apply else 'reclaimable'}"
           + ("" if apply else " — DRY RUN, pass --apply to act"))
-    return _exit_for(skipped, failed)
+    return _exit_for(skipped, failed, acted)
 
 
-def _exit_for(skipped: list[str], failed: list[str]) -> int:
+def _exit_for(skipped: list[str], failed: list[str],
+              acted: list[str] = ()) -> int:
     """The verdict: a failed removal beats an undecided sweep, which beats OK.
 
     Both were measured reporting `ok: true` / exit 0 before this existed — the
     timer's journal said the sweep was clean while nothing had been decided or
     something that needed removing was still up.
+
+    ⛔ `acted` is not decoration: the `undecided` list is built per CONTAINER, so
+    one sweep can remove an orphan and be unable to decide about another. The
+    summary must then say what it DID, never "NOTHING was decided or removed" —
+    a summary contradicting its own body is the exact defect class this module
+    exists to refuse (see the `acted` comment above). Exit 2 stands either way:
+    the tick is still INCOMPLETE.
     """
     if failed:
         print("container_reaper: PARTIAL — at least one removal was attempted "
               "and FAILED; the container is still on the host", file=sys.stderr)
         return EXIT_PARTIAL
     if skipped:
-        print("container_reaper: INCOMPLETE — the sweep could not decide "
-              "(see its reason above); NOTHING was decided or removed. "
-              "This is exit 2, never a clean sweep.", file=sys.stderr)
+        did = (f"{len(acted)} removal(s) DID complete in this sweep"
+               if acted else "NOTHING was removed")
+        print("container_reaper: INCOMPLETE — at least one container could not "
+              "be decided (see its reason above); " + did +
+              ". This is exit 2, never a clean sweep.", file=sys.stderr)
         return EXIT_INCOMPLETE
     return EXIT_OK
 

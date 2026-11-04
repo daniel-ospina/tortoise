@@ -86,10 +86,25 @@ removes a container someone else is using turns their green suite into a false r
    test file runs;
 2. it declines while another `run` holds this worktree (a per-PID marker, not a
    client socket — a peer still collecting ~41 842 tests is not a redis client);
-3. it asks the container itself (`CLIENT LIST`) and declines if a client is
-   attached **or if the answer cannot be read**;
+3. it asks the container itself (`CLIENT LIST`) and declines if **any** client is
+   attached — at any idle time — **or if the answer cannot be read**. The hook
+   asks a stricter question than the sweep does: the sweep treats a client quiet
+   for `ACTIVE_CLIENT_IDLE_S` (300 s) as unused, but the hook runs only AFTER its
+   own child has exited, so a socket still attached belongs to someone else
+   however long it has been quiet — a `uri` consumer sitting through a heavy
+   non-DB test file is exactly that shape, and the 300 s measure used to hand it
+   to `rm -f`;
 4. `--keep-container`, and the box-wide `TORTOISE_TEST_LANE_REAP=0` (any falsy
    spelling), both leave it up.
+
+**An orphan in a state `docker exec` cannot reach is reported, not probed.**
+`paused`, `created`, `restarting` and `removing` cannot answer a `CLIENT LIST`
+(measured on docker 27: *"Container … is paused, unpause the container before
+exec"*; *"container … is not running"*), so proof 1 keeps such a container and
+prints the `docker rm -f` that releases it. It is deliberately **not** classified
+as `undecided`: that verdict reds the 15-minute timer, and a state no retry can
+change would be a permanent false alarm — the shape that destroys the signal a
+`FAILED` tick is supposed to be.
 
 The cost of rule 1, stated: a lane that opens its DB with `uri` and then calls
 `run` **reuses** the container, so the hook never reaps it and — while the

@@ -224,7 +224,15 @@ WorkingDirectory=$REPO
 ExecStart="$PY" "$SOURCE" --apply --json
 # Never compete with a lane for CPU: this is a background sweep, not a deadline.
 Nice=10
-TimeoutStartSec=300
+# ⛔ NOT 300. Every probe the sweep issues is bounded by DOCKER_TIMEOUT (60 s in
+# \`tools/test_lane.py\`), so a WEDGED daemon costs 60 s per container it can be
+# asked about — measured on cell-1 with 76 containers at load 285, a 300 s bound
+# can kill a HEALTHY sweep mid-pass. A mid-pass kill is loud but it is not a
+# policy signal, and systemd cannot tell it apart from a stale pin (both read
+# \`FAILED\`), so the bound has to sit above the work, not at the alarm. Progress
+# is preserved either way (the sweep is idempotent), so this is headroom, not a
+# correctness knob.
+TimeoutStartSec=600
 # Exit 5 = a removal FAILED (a container that needed to go is still up),
 # 4 = stale copy, 2 = docker unreadable / the sweep could not decide, 3 = usage.
 # ALL of them are REPORTED by the unit FAILING; none is swallowed into green.
