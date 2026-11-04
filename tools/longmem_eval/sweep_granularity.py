@@ -258,6 +258,17 @@ def run_sweep(
     ``--skip-preflight`` waiver; it continues (the documented debugging /
     offline escape hatch) but the status is recorded on every cell, so the
     receipt can never read as a dense measurement.
+
+    PRECEDENCE, stated because the two parameters overlap (#4821 review
+    observation): when a caller supplies ``embedder_status`` it WINS over
+    ``dense_leg_required`` — the status is what a gate already returned for
+    THIS run, and ``main`` obtains it once, before the dataset load, then
+    threads it here so the sweep cannot probe a second time (#4821: "do not
+    write a second pre-flight"). A caller with no status must state the
+    requirement instead, so exactly one of the two is always explicit.
+    Consequence for tests: a test that drives ``dense_leg_required`` while
+    ALSO supplying a status proves nothing about the gate — drive the gate
+    (``gate_dense_leg``) or the status.
     """
     if ingest_mode not in ("deterministic", "v2"):
         raise ValueError(f"ingest_mode must be deterministic|v2, got {ingest_mode!r}")
