@@ -862,7 +862,8 @@ def _write(tmp_path, name: str, obj) -> str:
 def _cli_execute(tmp_path, monkeypatch, *, report, plan=None, health=None,
                  proof=None, approval=None, note="test target",
                  digest=None, journal_lines=1, health_url=None,
-                 record_dsn: str = _DSN, health_json: bool = False):
+                 record_dsn: str = _DSN, health_json: bool = False,
+                 journal_arg: str | None = None):
     _patch_live_census(monkeypatch, report)
     called: list[dict] = []
     monkeypatch.setattr(purge, "_execute",
@@ -875,7 +876,8 @@ def _cli_execute(tmp_path, monkeypatch, *, report, plan=None, health=None,
                      journal_path=str(journal))
     argv = [*_TARGET_ARGV, "--target-note", note, "--execute",
             "--record-dsn", record_dsn,
-            "--event-log-path", str(journal),
+            "--event-log-path",
+            (str(journal) if journal_arg is None else journal_arg),
             "--plan", _write(tmp_path, "plan.json", plan),
             "--confirm-plan-digest", plan["plan_digest"] if digest is None
             else digest]
@@ -1673,6 +1675,137 @@ def test_the_preview_census_set_failure_is_named_UNREADABLE(tmp_path, capsys):
     err = capsys.readouterr().err
     assert purge.REFUSE_CENSUS_UNREADABLE in err
     assert purge.REFUSE_CENSUS_NOT_CLEAN not in err
+
+
+# ── round 11: the journal's IDENTITY, and the two blockers the preview hid ──
+#
+# The v2 digest closed "where the removal is recorded" as a REVIEWED FIELD, but
+# both the token and `_execute`'s equality check compared STRINGS: one relative
+# path minted in one directory and replayed in another named two files and
+# compared equal. And two things the destructive arm refuses outright — a
+# journal it cannot use, a census that refused on its anomaly partition — were
+# silent in the preview, so the plan a human signed was one it could never act
+# on.
+
+def test_a_RELATIVE_journal_path_names_one_file_not_two(tmp_path, monkeypatch,
+                                                       capsys):
+    """P1: `events.jsonl` approved in A and `events.jsonl` run in B is the same
+    string and two different files. The artefact must name the FILE, and a run
+    that would append somewhere else must refuse BEFORE any delete."""
+    approved = tmp_path / "approved"
+    elsewhere = tmp_path / "elsewhere"
+    approved.mkdir()
+    elsewhere.mkdir()
+    (approved / "events.jsonl").write_text('{"type": "PointAdded"}\n',
+                                            encoding="utf-8")
+    (elsewhere / "events.jsonl").write_text('{"type": "PointAdded"}\n',
+                                             encoding="utf-8")
+    setup = _exec_setup(tmp_path, monkeypatch, ids=("s1_t0",))
+    monkeypatch.chdir(approved)
+    # Re-mint the artefact under the RELATIVE spelling, in the approved dir.
+    setup.plan = purge.build_plan(
+        _report(clean=[_clean_with_ids("s1", ["s1_t0"])]),
+        target=setup.target, health=_health(), restore_proof=_proof(),
+        target_note="t", recovery_missing=[], journal_path="events.jsonl")
+    assert setup.plan["journal"]["path"] == str((approved / "events.jsonl").resolve())
+    assert setup.plan["plan_digest"] == purge.plan_digest(
+        setup.plan["purge"]["sessions"], str((approved / "events.jsonl").resolve()))
+    # …then run it from a directory where that same spelling is a DIFFERENT file:
+    # same string, same digest, and the removals would go somewhere the target's
+    # rebuild never reads.
+    monkeypatch.chdir(elsewhere)
+    setup.args.event_log_path = "events.jsonl"
+    rc = purge._execute(setup.plan, setup.args, setup.target)
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert purge.REFUSE_JOURNAL_UNUSABLE in err
+    assert "events.jsonl" in err or "journal" in err
+    assert setup.graph.statements("DETACH DELETE") == []
+    assert setup.journaled == []
+
+
+def test_the_preview_names_a_journal_execute_would_refuse(tmp_path, capsys):
+    """P2: `_execute` requires the journal to EXIST and be NON-EMPTY (an append
+    CREATES a file, so a typo silently starts a fresh journal at ordinal 1). The
+    preview named the path and said nothing, exiting 0 on a plan the destructive
+    arm refuses."""
+    census = _write(tmp_path, "c.json",
+                    _report(clean=[_clean_with_ids("s1", ["s1_t0"])]))
+    missing = tmp_path / "typo-journal.jsonl"
+    rc = purge.main([*_TARGET_ARGV, "--target-note", "t",
+                     "--census-json", census,
+                     "--event-log-path", str(missing),
+                     "--plan-out", str(tmp_path / "plan.json")])
+    assert rc == 0                    # a preview still writes the artefact…
+    out = capsys.readouterr().out
+    assert "DOES NOT EXIST" in out and purge.REFUSE_JOURNAL_UNUSABLE in out
+    # …and the EMPTY journal is the same refusal, named for its own reason.
+    missing.write_text("", encoding="utf-8")
+    plan_path = tmp_path / "plan2.json"
+    assert purge.main([*_TARGET_ARGV, "--target-note", "t",
+                       "--census-json", census,
+                       "--event-log-path", str(missing),
+                       "--plan-out", str(plan_path)]) == 0
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    assert any("EMPTY" in m for m in plan["recovery"]["missing"])
+    # …and a real journal is silent, so this is a measurement and not a constant.
+    missing.write_text('{"type": "PointAdded"}\n', encoding="utf-8")
+    assert purge.main([*_TARGET_ARGV, "--target-note", "t",
+                       "--census-json", census,
+                       "--event-log-path", str(missing)]) == 0
+    assert "DOES NOT EXIST" not in capsys.readouterr().out
+
+
+def test_the_preview_names_a_census_that_refused_on_its_anomaly_partition(
+        tmp_path, capsys):
+    """P2: `evaluate_gate` refuses such a census UNCONDITIONALLY, on a real
+    pre-#10000 graph these anomalies are expected, and the preview exited 0 with
+    a clean-looking census and no mention of it — so the digest a human signed
+    was routinely one the destructive arm could never act on."""
+    report = _report(clean=[_clean_with_ids("s1", ["s1_t0"])])
+    report["refused_for"] = ["outside_population"]
+    report["anomalies"] = {"orphan": ["x"], "cross_wired": ["y", "z"]}
+    plan_path = tmp_path / "plan.json"
+    rc = purge.main([*_TARGET_ARGV, "--target-note", "t",
+                     "--census-json", _write(tmp_path, "c.json", report),
+                     "--plan-out", str(plan_path)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "anomalies" in out and "orphan=1" in out and "cross_wired=2" in out
+    assert purge.REFUSE_CENSUS_NOT_CLEAN in out
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    assert any(purge.REFUSE_CENSUS_NOT_CLEAN in m
+               for m in plan["recovery"]["missing"])
+
+
+def test_no_health_source_at_all_is_not_named_a_FILE():
+    """Round 11 P2: with `health is None` and `health_fetched=False` the gate
+    said the evidence "was supplied as a FILE (--health-json)" — sending the
+    operator to replace an argument they never passed — and used
+    `armed-evidence-stale` for the condition `no-armed-evidence` already names.
+
+    The FILE case is kept distinct and still named for what it is: `--health-url`
+    is the fix there too, but the fact is different."""
+    plan = _plan([_clean_with_ids("s1", ["s1_t0"])])
+    live = _report(clean=[_clean_with_ids("s1", ["s1_t0"])])
+
+    def _gate_with(health):
+        # NOT `_gate`: its `health=None` default means "use the fixture", which
+        # is exactly the distinction under test.
+        return purge.evaluate_gate(
+            plan=plan, live_report=live, health=health, restore_proof=_proof(),
+            approval=_approval(plan["plan_digest"]),
+            confirm_digest=plan["plan_digest"], target_note="test target",
+            live_target=plan["target"], health_fetched=False,
+            record_dsn=_DSN)
+
+    code, message = _gate_with(None)
+    assert code == purge.REFUSE_NO_ARMED_EVIDENCE, message
+    assert "FILE" not in message
+    # A body, but a captured one: the file is the fact, and the code says so.
+    code, message = _gate_with(_health())
+    assert code == purge.REFUSE_ARMED_EVIDENCE_STALE, message
+    assert "FILE" in message
 
 
 # ── evidence has an AGE and an ADDRESS ──────────────────────────────────
