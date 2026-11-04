@@ -1148,6 +1148,18 @@ about the string (`tools/ci_selection.py:4493-4500`). So the fail-safe covers ty
 typo'd or invented labels. At this writing the pool offers `["self-hosted"]`,
 `["self-hosted", "self-hosted-x64"]`, or `["ubuntu-latest"]`.
 
+⚠️ **Every one of those is a deliberate choice with a cost, and none is free.** `["ubuntu-latest"]` is
+main's current label but is also attached to the self-hosted pool as a FALLBACK while GitHub-hosted is
+unhealthy (`scripts/ci_runner_gate.sh`), so it is not really a hosted-only class; a `self-hosted` class
+in either form has NO hosted escape — during a hosted outage the fold's legs wait instead of failing
+over, the same exposure `docs/ops/ci-runner-x64.md` records for every pool-only departure — and bare
+`["self-hosted"]` spans architectures, so a leg can land on the ARM64 box measured 5.49× slower
+(`python-ci.yml:1885-1886`) and killed at 32m12s of a 30m budget (`python-ci.yml:1911`) — the same
+failure this section cites as the reason the `canary_producer` row is exempt. A priority mechanism that
+routes a fold onto a slower or stalled class makes the fold slower, which is the opposite of its
+purpose. Declare the class **and** the reason the fold may have it: on this fleet that reason is
+"dedicated fold capacity exists", and it does not yet.
+
 `tools/ci_selection.py::resolve_fold_runner` then, per matrix row:
 
 - PR has no `batch-fold` label → the row's own `runner`, **byte-identical** to main's;
