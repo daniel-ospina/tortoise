@@ -803,3 +803,127 @@ def test_the_section_the_e1_probe_cites_really_carries_the_sentence_it_quotes():
     assert " ".join(quote.split()) in " ".join(doc.split()), (
         "the probe's quoted refusal must be the one §3.2 states, not a paraphrase of it"
     )
+
+
+# ── the SCORING driver's replication guard (#10833 review) ──────────────────
+#
+# `e1_e2_scores.py` reads TWO before artifacts because `#9889`'s design needs two
+# INDEPENDENT realizations: the aggregate refuses (`decidable` is the SET of
+# pairings) exactly when they can disagree. Two copies of ONE run pair
+# identically, so the verdict set is a singleton and the row prints a DECIDED
+# E1/PASS/FAIL off the replication that never happened — pseudoreplication
+# (Hurlbert 1984). `docs/evidence/9889/README.md` states the refusal in its
+# "It **refuses** (exit 2, no record) when …" list, so the driver owes it.
+
+e1_e2_scores = _load("e1_e2_scores")
+
+_EVIDENCE_9889 = _REPO / "docs/evidence/9889"
+_PREREG_REL = Path("docs/evidence/7949-capstone/preregistration.json")
+
+
+def _scoring_repo(tmp_path, *, second_graph: str | None = None,
+                  drop_graph_from: str | None = None) -> Path:
+    """A replica of the committed bundle with ONE before artifact mutated.
+
+    The WHOLE `docs/evidence/9889` directory is copied, not just the two arms:
+    a refusal case that also lacks `on-arm.log` would exit 2 for the WRONG
+    reason, and a test cannot tell those apart without mutating a real tree.
+    """
+    import shutil
+
+    (tmp_path / _PREREG_REL.parent).mkdir(parents=True)
+    (tmp_path / _PREREG_REL).write_text((_REPO / _PREREG_REL).read_text())
+    shutil.copytree(_EVIDENCE_9889, tmp_path / e1_e2_scores.EVIDENCE)
+    evidence = tmp_path / e1_e2_scores.EVIDENCE
+    for index, name in enumerate(e1_e2_scores.OFF_ARMS, start=1):
+        record = json.loads((_EVIDENCE_9889 / name).read_text())
+        if drop_graph_from == name:
+            record.pop("graph", None)
+        if index == 2 and second_graph is not None:
+            record["graph"] = second_graph
+        (evidence / name).write_text(json.dumps(record))
+    return tmp_path
+
+
+def test_two_before_artifacts_on_one_graph_are_refused_and_write_no_record(
+        tmp_path, capsys):
+    """Two copies of one OFF run are ONE realization, not two.
+
+    `e1_paired_arm.py` takes the graph from `--graph` and mints nothing, so
+    pointing the second artifact at the first's graph needs no misuse of any
+    record and satisfies every other check in `read_off_arms` (share, Objects,
+    arm block, four switches). The driver must exit **2** and write nothing.
+
+    Non-vacuity, measured on the pre-fix driver: this same replica SCORES — the
+    bundle is complete, so nothing else can refuse — and the record it writes
+    carries `e1.decidable: true` off one realization. That is asserted below on
+    the driver's own `e1_pairings`, so the claim is proved rather than described;
+    restore `read_off_arms` without the duplicate check and the `pytest.raises`
+    arm reds with a written record instead of an exit 2.
+    """
+    import pytest
+
+    first = json.loads((_EVIDENCE_9889 / e1_e2_scores.OFF_ARMS[0]).read_text())
+    repo = _scoring_repo(tmp_path, second_graph=first["graph"])
+    out = tmp_path / "scores.json"
+
+    with pytest.raises(SystemExit) as caught:
+        e1_e2_scores.main(["--repo", str(repo), "--out", str(out)])
+
+    assert caught.value.code == 2, caught.value
+    assert not out.exists(), "a refused score must write no record"
+    stderr = capsys.readouterr().err
+    assert "one realization" in stderr and "DECIDED E1" in stderr, (
+        f"the refusal must name the replication it refuses, not another input: {stderr!r}")
+
+    # …and the thing it prevents: two identical readings pair identically, so the
+    # verdict set is a singleton and `decidable` becomes True off ONE realization.
+    floors = e1_e2_scores.frozen_denominators(_REPO)
+    arms = e1_e2_scores.read_off_arms(_REPO, floors)
+    duplicated = [dict(arms[0]), dict(arms[0])]
+    decided = e1_e2_scores.e1_pairings(
+        duplicated, e1_e2_scores.read_on_arm(_REPO), floors)
+    assert decided["decidable"] is True, decided
+    assert decided["outcome"] in ("PASS", "FAIL"), decided
+
+
+def test_a_before_artifact_carrying_no_graph_is_refused(tmp_path, capsys):
+    """An absent run is not a distinct realization — it is indistinguishable from a copy.
+
+    The only other graph check is `score()`'s head-substring test, which reports a
+    MISSING run as a head mismatch ("does not name head …") and cannot see a
+    duplicate at all — so the absence has to be refused where the arms are read,
+    and the refusal has to SAY which of the two it is.
+
+    Non-vacuity: on the pre-fix driver this replica exits 2 as well, but with the
+    head-mismatch message — the `'carries no graph'` assertion reds on it.
+    """
+    import pytest
+
+    repo = _scoring_repo(tmp_path, drop_graph_from=e1_e2_scores.OFF_ARMS[1])
+    out = tmp_path / "scores.json"
+
+    with pytest.raises(SystemExit) as caught:
+        e1_e2_scores.main(["--repo", str(repo), "--out", str(out)])
+
+    assert caught.value.code == 2, caught.value
+    assert not out.exists(), "a refused score must write no record"
+    stderr = capsys.readouterr().err
+    assert "carries no graph" in stderr, (
+        f"an absent graph must be named as an absent run, not as a head mismatch: {stderr!r}")
+
+
+def test_the_shipped_before_pair_is_two_REALIZATIONS_and_still_scoreable():
+    """The guard must not over-refuse: the committed pair is two distinct runs.
+
+    A refusal that also rejects the shipped artifacts would trade a fail-open for
+    a fail-closed and call it a fix, so the positive control is the real tree.
+    """
+    floors = e1_e2_scores.frozen_denominators(_REPO)
+    arms = e1_e2_scores.read_off_arms(_REPO, floors)
+
+    assert len(arms) == len(e1_e2_scores.OFF_ARMS), arms
+    graphs = [arm["graph"] for arm in arms]
+    assert all(graphs), f"a shipped before artifact carries no graph: {graphs}"
+    assert len(set(graphs)) == len(graphs), (
+        f"the committed before pair is ONE realization twice: {graphs}")

@@ -61,7 +61,12 @@ absent provenance is not an inherited one), sits on another run, or reads counts
 that are not the E2a record's (that block IS the E2a reading), when the
 value-gate positive controls are dead, when a before arm's `arm` block is
 absent, PRESENT but EMPTY, or missing one of its four switches (a key that was
-never written is not a key that was written as unset), when the after arm's own
+never written is not a key that was written as unset), when the TWO before
+artifacts name the SAME graph (two copies of one run are one realization, not
+two — and `decidable` is the SET of pairings, so two copies of one reading can
+only ever agree and would report a DECIDED E1 off the replication the design
+requires and never got), when a before artifact carries NO graph at all (an
+absent run cannot be told apart from a duplicated one), when the after arm's own
 `# arm:` readback does not show the two measured passes ON or does not show the
 two switches that must stay OFF, or when a before/after share is absent —
 because a score computed over an unproven counter is the exact failure mode this
@@ -241,6 +246,20 @@ def read_off_arms(repo: Path, floors: dict) -> list[dict]:
     returns `None`, which stringifies to `"none"` — a token of the OFF
     vocabulary — so a block that wrote nothing would certify the arm it is
     supposed to prove.
+
+    The FOURTH refusal is the one that decides whether the before arm is a
+    *replication*: the two artifacts must not name the same graph. `#9889`'s
+    design needs two INDEPENDENT realizations, and the aggregate only refuses
+    (`decidable` is the SET of pairings) when they can disagree — two copies of
+    one OFF run pair identically, so `verdicts` is a singleton, `decidable` is
+    True, and the row prints a DECIDED E1/PASS/FAIL off the replication that
+    never happened. That is pseudoreplication (Hurlbert 1984: replicates must be
+    statistically independent), and it is reachable without misusing any record:
+    `e1_paired_arm.py` takes the graph from `--graph` and mints nothing, so
+    re-running the OFF arm onto the same graph yields two artifacts that satisfy
+    every other check here. A before artifact with NO graph is refused on the
+    same rule rather than left to the head-substring check in `score()`, which
+    reports a missing run as a head MISMATCH and cannot see a duplicate at all.
     """
     arms: list[dict] = []
     for name in OFF_ARMS:
@@ -280,14 +299,33 @@ def read_off_arms(repo: Path, floors: dict) -> list[dict]:
                     f"{name} was measured with {var}={state!r}, so it is not a "
                     "before arm — scoring it as one compares a treatment against "
                     "itself and still reports a decided E1")
+        graph = str(record.get("graph") or "").strip()
+        if not graph:
+            raise _refuse(
+                f"{name} carries no graph, so the run it was taken on cannot be "
+                "told apart from a COPY of the other before artifact's run — an "
+                "absent run is not a distinct realization, and two copies of one "
+                "realization can only agree (see `read_off_arms`'s docstring)")
         arms.append({
             "artifact": f"{EVIDENCE / name}",
-            "graph": record.get("graph"),
+            "graph": graph,
             "objects": objects,
             "bare_definite": record.get("bare_definite"),
             "share": share,
             "arm": arm,
         })
+    # …and the two realizations must BE two runs. Checked over the arms as a map so
+    # a third artifact cannot slip a duplicate past a hand-written pairwise test.
+    seen: dict[str, str] = {}
+    for arm in arms:
+        first = seen.setdefault(arm["graph"], arm["artifact"])
+        if first != arm["artifact"]:
+            raise _refuse(
+                f"{arm['artifact']} and {first} were both taken on graph "
+                f"{arm['graph']!r} — two copies of ONE run are one realization, "
+                "not two, and `decidable` is the SET of pairings: identical "
+                "copies can only agree, so the row would report a DECIDED E1 "
+                "off the replication the design requires and never got")
     return arms
 
 
