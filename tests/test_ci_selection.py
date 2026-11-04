@@ -4448,6 +4448,23 @@ def test_test_lane_tool_change_selects_core_not_tier1():
     assert set(r["test_files"]) != _tier1()
 
 
+def test_container_reaper_change_selects_core_not_tier1():
+    # #10806 review P1: tools/container_reaper.py (the actuator) and
+    # tools/install-container-reaper-timer.sh (the clock that arms it) own
+    # tests/test_container_reaper.py (`core`). The flat "tools/" prefix swallowed
+    # both, so editing the dry-run allow-list, the `--apply` path or the
+    # deployed-vs-source pins selected NO surface and ran none of the safety
+    # cases — for a tool that DELETES containers. Same silent-drop class as
+    # #5084/#6138 above.
+    for changed in ("tools/container_reaper.py",
+                    "tools/install-container-reaper-timer.sh"):
+        r = _sel([changed])
+        assert r["full"] is False, (changed, r)
+        assert "core" in r["surfaces"], (changed, r)
+        assert "test_container_reaper.py" in r["test_files"], (changed, r)
+        assert set(r["test_files"]) != _tier1(), changed
+
+
 def test_queue_conflict_census_tool_change_selects_core_not_tier1():
     # #6138 review P1: tools/queue_conflict_census.py owns
     # tests/test_queue_conflict_census.py (`core`). Without the CORE_ALSO entry

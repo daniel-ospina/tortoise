@@ -202,10 +202,26 @@ class TestProbeDb:
 
         Determinism over the knife-edge: the per-attempt bound and the retry
         delay are MONKEYPATCHED DOWN so the measured total is small, and the
-        SDK fails well INSIDE the (small) attempt bound so nothing races the
-        worker's own timeout. ``time.sleep`` can overshoot but never undershoot,
+        SDK fails well INSIDE the attempt bound so nothing races the worker's
+        own timeout. ``time.sleep`` can overshoot but never undershoot,
         so the LOWER bound is safe; the UPPER backstop carries a generous NAMED
         tolerance.
+
+        WHY THE BOUND IS SECONDS AND NOT 0.4s. The headroom was sized against
+        the SLEEP, and the sleep is not the term that reddens this test. The
+        attempt runs on the process-lifetime ``_probe_worker()`` daemon, and its
+        RESET-per-test fixture (``_fresh_probe_worker``) means the first phase of
+        every test starts a NEW thread: the caller's ``future.result(timeout=…)``
+        clock then covers THREAD CREATION + first pickup + the work, and a
+        loaded CI runner can lose that race without the DB ever being slow.
+        Measured on ``test-slow (e)`` at run 41777020878: 0.05s of work under a
+        0.4s bound still timed out, ``calls['n']`` stayed 1, and "the transient
+        retry did not happen" reddened a HEALTHY probe — 8x headroom over the
+        sleep, and ZERO over the unbounded scheduling term. So the deadline here
+        is sized for the unbounded term (≈100x the work, ~5s), which costs
+        nothing on a healthy run: the test still takes work+delay per attempt and
+        only a genuinely red one pays the bound. The structural assertions above
+        are what bound the retry budget; the wall clock is a backstop.
         """
         import time
 
@@ -218,14 +234,16 @@ class TestProbeDb:
         shipped_delay = monitoring.PROBE_RETRY_DELAY
         shipped_total = monitoring.PROBE_DB_TOTAL_TIMEOUT
 
-        attempt_bound = 0.4
+        attempt_bound = 5.0
         retry_delay = 0.15
-        # 8x headroom under ``attempt_bound``. This was 0.3 (100ms of slack),
-        # which is a knife-edge of the SAME class this test was de-flaked for:
-        # if the sleep overshoots, ``_probe_once`` hits its own per-attempt
-        # timeout, and a TIMEOUT is never retried (only transient connect
-        # errors are), so ``calls['n']`` becomes 1 and the retry assertion
-        # fails. Measured 45% failure under load at 0.3; 0.05 leaves 8x.
+        # 100x headroom under ``attempt_bound``, and the headroom is deliberately
+        # NOT the thing under test — SCHEDULING is. This was 0.3 (100ms of slack,
+        # "measured 45% failure under load"), then 0.05 (8x over the sleep), and
+        # both still assumed the deadline clock starts with a warm worker on an
+        # idle core. It does not: see the docstring's 0.4s CI measurement. What
+        # the attempt must prove is that a TRANSIENT failure is retried, so the
+        # work stays trivial (it must fit inside the bound with room for the
+        # scheduler to be late) and the bound absorbs the lateness.
         per_attempt_work = 0.05
         monkeypatch.setattr(monitoring, "PROBE_TIMEOUT", attempt_bound)
         monkeypatch.setattr(monitoring, "PROBE_RETRY_DELAY", retry_delay)
