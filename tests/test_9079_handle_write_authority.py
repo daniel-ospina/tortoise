@@ -869,7 +869,20 @@ def test_schema_ddl_survives_the_armed_guard(armed_sdk, enforced):
     with _graph_metadata_write_scope("test-fixture: drop the indexes"):
         proj.g._g.query("DROP INDEX ON :Point(pointKind)")
         proj.g._g.query("CALL db.idx.fulltext.drop('Point')")
-    before = index_cells(index_rows_after_settle(proj))
+    #
+    # ⛔ AND QUIESCENCE ALONE IS NOT ENOUGH (#10807, review Finding 1). A catalogue
+    # read taken BEFORE the engine picked the drops up is internally CONSISTENT — no
+    # `UNDER CONSTRUCTION`, the idle `OPERATIONAL` status, the PRE-drop definition —
+    # so a quiescence-only wait returns it on its FIRST read and the guards below
+    # refuse a good fixture: the same false red as `test (g)`, just narrower. The
+    # caller's own preconditions are what make that read WAIT, which is what the
+    # sibling at `tests/test_search_engine.py:720` already does.
+    def _both_indexes_gone(rows) -> bool:
+        cells = index_cells(rows)
+        return (not any("pointKind" in c for c in cells)
+                and not any("content" in c and "search_keys" in c for c in cells))
+
+    before = index_cells(index_rows_after_settle(proj, until=_both_indexes_gone))
     assert not any("pointKind" in c for c in before), (
         "the fixture could not drop the Point range index, so the assertion "
         f"below would pass vacuously; catalogue={sorted(before)}")

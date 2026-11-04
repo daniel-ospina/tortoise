@@ -2,7 +2,7 @@
 
 WHY THIS FILE EXISTS
 --------------------
-`tests/_live_utils.index_rows_after_settle` is the ONE definition of "wait until
+`tests/_index_settle.index_rows_after_settle` is the ONE definition of "wait until
 the FalkorDB index catalogue has SETTLED", shared by two fixtures that each lost
 the same race in a different file:
 
@@ -24,6 +24,8 @@ tolerant pass — the property both callers' unchanged assertions depend on.
 """
 from __future__ import annotations
 
+import ast
+from pathlib import Path
 from types import SimpleNamespace
 
 from tests._index_settle import (
@@ -149,6 +151,51 @@ def test_index_kind_absent_reads_the_kinds_map_and_fails_closed():
     assert index_kind_absent(
         [["Object", ["name"], {"name": ["fulltext"]}]], "Object", "name",
         "FULLTEXT") is False
+
+
+def test_every_consumer_passes_the_caller_precondition():
+    """The module's contract, applied at BOTH call sites — not just one (#10807).
+
+    Quiescence alone is not sufficient: a read taken before the engine applied
+    the drop is internally consistent (no `UNDER CONSTRUCTION`, the idle
+    `OPERATIONAL` status, the pre-drop definition), so it is returned on the
+    FIRST read and the caller asserts about a drop that has not happened yet.
+    That was review Finding 1 at `8a3324949`: `test (b)` passed an `until` and
+    `test (g)` did not, so the false red this module exists to remove could
+    still fire in the write-authority suite.
+
+    pinned STRUCTURALLY because the defect is invisible behaviourally on an idle
+    lane (`test (b)`'s window measures 3 ms) and only reds under CI load — the
+    same reason this whole file exists. This module is exempt: it drives the raw
+    wait on purpose, including quiescence-only.
+    """
+    missing: dict[str, list[int]] = {}
+    call_sites: dict[str, list[int]] = {}
+    for path in sorted(Path(__file__).resolve().parent.glob("test_*.py")):
+        if path.name == Path(__file__).name:
+            continue
+        source = path.read_bytes()
+        # Cheap pre-filter: parsing all ~1,200 test modules to find two call
+        # sites would cost the suite seconds for nothing.
+        if b"index_rows_after_settle" not in source:
+            continue
+        for node in ast.walk(ast.parse(source)):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if not (isinstance(func, ast.Name)
+                    and func.id == "index_rows_after_settle"):
+                continue
+            call_sites.setdefault(path.name, []).append(node.lineno)
+            if not any(kw.arg == "until" for kw in node.keywords):
+                missing.setdefault(path.name, []).append(node.lineno)
+    assert len(call_sites) >= 2, (
+        "the scan must find the two call sites this module documents — fewer "
+        f"means the pin went vacuous (a rename?): {call_sites}")
+    assert not missing, (
+        "these `index_rows_after_settle` calls pass no `until`, so a stale "
+        "pre-drop read (idle, no `UNDER CONSTRUCTION`) is returned on the first "
+        f"read and the caller's guard can refuse a GOOD fixture: {missing}")
 
 
 def test_index_cells_flattens_every_row():
