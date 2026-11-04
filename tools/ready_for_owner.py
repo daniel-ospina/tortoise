@@ -200,6 +200,7 @@ NON_CLEAN_RE = re.compile(
 #: is GitHub's own record of "not clean yet".
 CHANGES_REQUESTED = "CHANGES_REQUESTED"
 APPROVED = "APPROVED"
+DISMISSED = "DISMISSED"
 
 #: A PR that DECLARES it reverses a recorded decision. The `OVERRIDES:` line (AGENTS.md
 #: USER QUESTIONS PROTOCOL) is what such a departure must carry; without it the reversal
@@ -605,7 +606,13 @@ def check_exclusions(probe: Probe) -> Check:
     if not probe.pr_state:
         # The one place on the newest surface where an ABSENT field would otherwise
         # default to the PASSING side. A payload with no `state` is not "open".
-        return Check("exclusions", False, probe.labels_raw or "-", "unreadable", unreadable=True)
+        return Check(
+            "exclusions",
+            False,
+            "the PR payload carried no `state` field",
+            "unreadable",
+            unreadable=True,
+        )
     if probe.merged or probe.pr_state.lower() != "open":
         reasons.append(f"not-open:{probe.pr_state}{'-merged' if probe.merged else ''}")
         parts.append(f"state={probe.pr_state} merged={str(probe.merged).lower()}")
@@ -834,7 +841,14 @@ class Gh:
             if "rate limit" in lowered or " 403" in lowered or "429" in lowered:
                 raise RateLimited(url, message)
             raise ReadError(f"gh api {url}: {message}")
-        pages = _decode_pages(proc.stdout)
+        try:
+            pages = _decode_pages(proc.stdout)
+        except (ValueError, TypeError) as exc:
+            # ⛔ A body that is not JSON (a banner, a truncated response) must become a
+            # READ FAILURE. It used to escape `Gh.pages`, so `main()` died with a
+            # traceback and printed NO verdict line — the third output shape this module
+            # promises never to produce.
+            raise ReadError(f"gh api {url} returned unparseable JSON: {exc}") from exc
         if not pages:
             # An empty body is a READ FAILURE, never an empty surface.
             raise ReadError(f"gh api {url} returned an empty body")
@@ -1232,6 +1246,11 @@ def _read_comments(gh: Gh, pr: int) -> tuple[tuple[Mapping[str, Any], ...], str]
                 continue
             body = str(item.get("body") or "")
             state = str(item.get("state") or "").upper()
+            # A DISMISSED review is neutral REGARDLESS of its body: it was dismissed, so
+            # its findings no longer stand. Keeping a non-empty dismissed body graded its
+            # `[P0]/[P1]/[P2]` lines as open forever.
+            if state == DISMISSED:
+                continue
             # A BARE GitHub-UI review (empty body) still carries a STATE, and that state
             # is the verdict: an empty-bodied APPROVED is the commonest approval shape, and
             # dropping it made the approval arm unreachable for exactly that shape.
@@ -1279,17 +1298,19 @@ def collect_probe(
         probe.review_raw = probe.comments_raw = probe.coverage_raw = str(exc)
         return probe
 
-    head = str(pull.get("head", {}).get("sha") or "")
+    # `or {}`: a present-but-NULL `head`/`base` would raise AttributeError and escape.
+    head = str((pull.get("head") or {}).get("sha") or "")
     probe.head = head
-    probe.base = str(pull.get("base", {}).get("ref") or "")
-    probe.is_draft = bool(pull.get("draft"))
+    probe.base = str((pull.get("base") or {}).get("ref") or "")
+    # An OMITTED `draft` is not "not a draft": read the key, do not assume it.
+    probe.is_draft = pull.get("draft") is True
     probe.mergeable = _mergeable_flag(pull.get("mergeable"))
     # REST spells it `mergeable_state`; GraphQL (`gh pr view --json`) spells it
     # `mergeStateStatus`. Read both, so the reported value is the same either way.
     probe.merge_state = str(pull.get("mergeable_state") or pull.get("mergeStateStatus") or "")
     probe.body = str(pull.get("body") or "")
     probe.pr_state = str(pull.get("state") or "")
-    probe.merged = bool(pull.get("merged") or pull.get("merged_at"))
+    probe.merged = bool(pull.get("merged") is True or pull.get("merged_at"))
     labels = pull.get("labels")
     if isinstance(labels, list):
         probe.labels = tuple(

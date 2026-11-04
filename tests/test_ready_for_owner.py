@@ -1024,6 +1024,93 @@ def test_collect_probe_marks_an_unreadable_declared_union(
     assert verdict.ready is False
 
 
+def test_read_comments_keeps_a_bare_empty_bodied_approval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ROUND-5 P3: the approval arm was tested only through the EVALUATOR, so a revert of
+    the reader's `state not in (CHANGES_REQUESTED, APPROVED)` would leave every test green
+    while a bare GitHub-UI approval became invisible again (permanent false NOT-READY)."""
+    fake = _FakeGh(
+        {
+            "/reviews": [
+                {
+                    "id": 1,
+                    "state": "CHANGES_REQUESTED",
+                    "body": "",
+                    "submitted_at": "2026-11-04T11:40:00Z",
+                },
+                {
+                    "id": 2,
+                    "state": "APPROVED",
+                    "body": "",
+                    "submitted_at": "2026-11-04T11:55:00Z",
+                },
+            ],
+            "/comments": [],
+        }
+    )
+    items, raw = rfo._read_comments(fake, 1)
+    assert [i["state"] for i in items] == ["CHANGES_REQUESTED", "APPROVED"], raw
+    verdict = rfo.evaluate(rfo.probe_from_dict(_fixture(comments=list(items))))
+    assert next(c for c in verdict.checks if c.name == "blocking-finding").passed is True
+
+
+def test_read_comments_drops_a_dismissed_review_even_with_a_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _FakeGh(
+        {
+            "/reviews": [
+                {
+                    "id": 3,
+                    "state": "DISMISSED",
+                    "body": "[P0] tortoise/sdk.py:1 — dismissed finding",
+                    "submitted_at": "2026-11-04T11:40:00Z",
+                }
+            ],
+            "/comments": [],
+        }
+    )
+    items, raw = rfo._read_comments(fake, 1)
+    assert items == (), raw
+
+
+def test_a_non_json_gh_body_is_a_read_failure_not_a_traceback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ROUND-5 P3: `json.JSONDecodeError` escaped `Gh.pages`, so `main()` died with a
+    traceback and printed NO verdict line — a third output shape."""
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *a, **kw: subprocess.CompletedProcess(a[0], 0, "not json at all", ""),
+    )
+    with pytest.raises(rfo.ReadError):
+        rfo.Gh(REPO).pages("pulls/1")
+
+
+def test_read_coverage_per_path_failure_is_unreadable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ROUND-5 P3: the per-path `select` is inside the fail-closed conversion; without
+    that, a raise escapes `collect_probe` and `main()` prints nothing."""
+    from tools import ci_selection
+
+    real = ci_selection.select
+    calls = {"n": 0}
+
+    def flaky(paths, event, manifest, explain=None):
+        calls["n"] += 1
+        if calls["n"] > 1:  # the first (whole-set) call succeeds, the per-path one raises
+            raise RuntimeError("per-path select blew up")
+        return real(paths, event, manifest, explain)
+
+    monkeypatch.setattr(ci_selection, "select", flaky)
+    uncovered, raw = rfo._read_coverage(("tools/ready_for_owner.py",))
+    assert uncovered is None
+    assert "blew up" in raw
+
+
 def test_collect_probe_routes_an_empty_declared_union_to_the_fail_arm(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

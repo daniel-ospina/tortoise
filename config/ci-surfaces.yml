@@ -2966,7 +2966,7 @@ surfaces:
   # (`Probe` fixtures, no DB, no network, no gh), so `core` is the correct surface and the
   # fast band is where it belongs. The registration is LOAD-BEARING, not cosmetic: without
   # it `ci_selection --integrity` reds `manifest-integrity` (which `python-ci-gate` needs,
-  # so the aggregate reds), and no leg selects the 96 tests at all — measured
+  # so the aggregate reds), and no leg selects the tests at all — measured
   # `❌ manifest drift: ['test_ready_for_owner.py']` before this line.
   - test_ready_for_owner.py
   # #10131: the catch-history measurement (which pre-merge `slow_files` have ever gone red
@@ -9861,7 +9861,7 @@ durations:
   test_ready_for_owner.py: 2.0  # #10930: a NEW file has no CI junit measurement (a file that
   # never ran cannot appear in an artifact), so this is `DEFAULT_FAST_WEIGHT`, NOT a local
   # reading — a local wall is forbidden as a shard-layout input (#2818/#3419/#9003). The
-  # local private-lane wall at this PR's head was ~5.2 s for 96 offline tests, stated only so
+  # local private-lane wall at this PR's head was ~9.4 s for 122 offline tests, stated only so
   # the next sweep can compare; `tools/ci_timing.py --refresh-durations` replaces this row
   # from junit once a push-to-main run includes it.
   test_ci_catch_history.py: 9.5  # #10131: a NEW file has no CI junit measurement (a file that
