@@ -184,3 +184,94 @@ to have none.
 * **Normalising the ~9,700 legacy ids** (`#7955` §1.4, W1b).
 * **No migration-safety surface** (owner scope ruling, 2026-10-10).
 * **No public surface change.**
+
+## §9.1/D1 at the projection door — an EPISODIC Source carries no turn prose (#10853)
+
+**A declared narrowing** of the field set — the only one — in the opposite
+direction from the three widening exceptions the module names
+(`FOLD_ON_CREATE_DEFAULTS`, `DERIVED_FROM_RECORD`, `EVENT_STREAM_FOLDS`):
+`public.source.summary` and `public.source._search_text` are §9.1/D1 turn prose
+when the Source is a captured session, so
+`cache_projection._EPISODIC_SOURCE_PROSE_COLUMNS` declines to project them onto
+the node. The record keeps the values (the row is not mutated, and they are
+retrievable by a column read — `record_serve.read_node`, `record-text`; there is
+no record-side text INDEX), and `topics` — the capture's word lexicon — still
+projects.
+
+Why it lives here rather than only in the capture: every record-sourced read and
+rebuild goes through `cache_projection.node_from_row` — `tortoise record-restore`
+and `rebuild_from_record` materialise a node with it, and
+`record_serve.read_node` answers with the same map because its contract is
+that a served node and a rebuilt node cannot drift. So a row written by a build
+that still placed the key either re-creates the prose **whatever build is reading
+it** or makes the served answer disagree with the rebuild — the one-way divergence
+`#10853` measured. Sweeping the existing rows instead would decay: at this head
+the capture still writes the value, so the next capture of the same session writes
+it straight back.
+
+### Which rows are EPISODIC — two identity arms, and three flags that are NOT signals
+
+`_is_episodic_source_row` mirrors the repo's existing declaration of the same
+question (`sdk.py`'s document-source exclusion, with
+`session_source_migration._LEGACY_CANDIDATES` as the second arm's definition):
+
+* `url LIKE 'session:%'` — the capture's URL shape, and the prefix the stub
+  minter and `derive_session_source_url` both land on;
+* `source_kind='agentSession'` **on a separator-free bare-filename url** — the
+  pre-#4005 identity (`os.path.basename(ref.path)`, literally `session.md`).
+
+⛔ Three plausible terms are **not** signals, because each fires on real
+DOCUMENTS — this is measured, three times, by review on the change itself, and
+each has a NEGATIVE leg in the suite:
+
+| term | why it is not an identity |
+|---|---|
+| `session_id` | a legitimate DOCUMENT coordinate: `EventAPI.add_document` takes one, and `tortoise/ingest.py` passes a transcript's `sessionId` frontmatter into it |
+| `source_kind='agentSession'` alone | `file_indexer` classifies a transcript FILE and writes that kind on a per-FILE `corpus://` permalink (`CLASSIFIER_TO_SOURCE_KIND`, pinned §6.2/I26) |
+| `is_episodic=TRUE` | the capture commit stamps it on every EXTERNAL source of `payload.sources`, and `backfill_is_episodic.py` on every Source reachable from a session point |
+
+`sdk.py` records the same lesson and its cost: keying on the flags *"silently
+disabled this exclusion on the corpus #9914 targets"*. Here the cost is worse —
+the prose guard would strip a document's own frontmatter summary and its
+title-derived `_searchText`, silently un-indexing it in the cache.
+
+### Three costs, named rather than implied
+
+* the **journal fold** still projects the value until #10000's capture-side change
+  lands, so the two rebuild paths disagree on that one column until then — in the
+  ruling's direction, and converging with it;
+* graph-side FTS over a session Source's own utterances goes with the prose. The
+  value survives in the record (retrievable by a column read; there is no
+  record-side text index), and #10000 replaces the capture's summary with a topic
+  lexicon;
+* `python -m tortoise record-reconcile` builds its RECORD side through the same
+  projector, so its truth side omits what the cache holds. **The population is not
+  "legacy"**: at this head the capture still writes and journals the pair, so
+  every session this build captures would report `field_mismatches` forever — the
+  "signal indistinguishable from noise" the reconciler's own docstring grades P1.
+  So `scan_cache_view` marks the pair CACHE-OWNED for an episodic Source
+  (`cache_projection.episodic_source_prose_properties()`) and the run counts it
+  under its own `graph_only` bucket: visible, and not a divergence against a
+  record that is correct. The graph side is repaired by a record-sourced
+  re-projection (`record-restore` / `rebuild_from_record`, which re-materialise
+  through this projector) — **for a node the projection CREATES**. The write is
+  additive (`MERGE … SET n += $props`), so a node that ALREADY carries the pair
+  keeps it across a re-projection: this arm stops the pair being re-written, it
+  does not clear one. Clearing a populated cache's stale pair needs an explicit
+  property clear, and the sweep is #10000's capture change.
+
+### The pin
+
+`tests/test_10853_session_source_prose.py`: the drop; the narrowness of the drop;
+the reconciler counting the declined pair as `graph_only` (not divergence) while a
+DOCUMENT with a differing summary is still counted field by field;
+ONE LEG PER ARM; the FOUR negative legs (a plain-document baseline, then one per
+term that must not be a signal: a transcript document carrying a `session_id`, a
+`corpus://` permalink stamped `agentSession`, a document stamped `is_episodic`);
+the row/node predicate-agreement legs; the `props`-tail leg; and the record row
+that must not be mutated. Mutation-checked, one at a time: each identity arm, EACH
+OF THE TWO DOORS (the column loop and the `props` tail — the tail filter undoes
+only the keys the tail added, so neither door subsumes the other), the label gate,
+the call-time resolution of the placement spellings, and each of the three flags
+re-added — every one reds at least the leg that names it, plus the row/node
+agreement shape that exists to catch exactly that drift.
