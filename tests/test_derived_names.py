@@ -299,6 +299,20 @@ _ROUTED_FROM_URI_SITES: dict[str, list[str]] = {
         r"from_uri\(_uri\)",
         r"from_uri\(_uri\(\)\)",
     ],
+    # #10203: module live-FalkorDB availability probe for the identifier-token
+    # file — construct on the lane URI, `close()`, never a bulk DETACH. The
+    # handle is either the job's own `TORTOISE_DB_URI` or the test-prefixed
+    # `_live_utils.docker_uri("tortoise_test_identifier_8933")` fallback, and
+    # SAFETY IS NOT "that URI is test-prefixed" (on CI it is the SHARED lane
+    # graph, exactly as in the `test_indexes.py` / `test_search_engine_gaps.py`
+    # rows above) — it is that the probe only ever constructs and closes it.
+    # Every DETACH DELETE in this file targets a `graph_name=`-qualified
+    # per-test projection; a future bulk DETACH on the probe handle would be a
+    # real clobber and this row would NOT catch it, so the regex is narrow to
+    # the one call shape that exists today.
+    "test_identifier_tokens_8933.py": [
+        r"from_uri\(_LANE_URI\)",
+    ],
     # (removed #10170: a `test_session_capture_e2e.py` row lived here declaring
     # `from_uri(os.environ["TORTOISE_DB_URI"])`, and that file has ZERO
     # `from_uri(` sites — the declaration described a call shape the file no

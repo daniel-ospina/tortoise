@@ -465,8 +465,7 @@ def _values_equal(a, b) -> bool:
     return False
 
 
-def _canonical_point_fields(props: dict, skip: frozenset = frozenset(), *,
-                            derive_identifier_aliases: bool = True) -> dict:
+def _canonical_point_fields(props: dict, skip: frozenset = frozenset()) -> dict:
     """The projection's declared content view of ONE point (side-agnostic).
 
     Applied to both the journal fold and the graph read, so the two views are
@@ -505,38 +504,25 @@ def _canonical_point_fields(props: dict, skip: frozenset = frozenset(), *,
     #8933 Stage 2: the derived IDENTIFIER ALIASES the writer appends to
     ``search_keys`` (``_upsert_point_props``). The alias is a pure function of
     the payload's own ``content``/``search_keys`` and is never recorded in the
-    journal, so a checker that compared the payload's form without applying the
-    SAME derivation would report a FALSE content divergence on ``search_keys``
-    for every faithfully replayed Point whose text carries an identifier — the
-    #8317/#10053 class (a writer-side derivation the reference fold does not
-    mirror), in its false-FAIL direction.
+    journal, so a reference view built from the payload's own form would report
+    a FALSE content divergence on ``search_keys`` for every faithfully replayed
+    Point whose text carries an identifier — the #8317/#10053 class (a
+    writer-side derivation the reference fold does not mirror).
 
-    ⛔ It is applied to the JOURNAL (reference) view ONLY — never to the graph
-    view or to :func:`_graph_fingerprint`; those pass
-    ``derive_identifier_aliases=False``. Deriving on the graph side too
-    over-corrects from "false red on a faithful graph" into a **false PASS**:
-
-      * the graph side must be the node's OWN content, because the comparison
-        target is ``replay(journal)``. Deriving there makes a node that is
-        MISSING the alias canonicalise to the same view as one that holds it,
-        so a graph-only strip of the alias, and the whole pre-#8933 backfill
-        state, become indistinguishable from a fully replayed graph — the
-        checker would certify a graph that is not what a replay produces,
-        which is the one thing it exists to refuse. With the asymmetry, a
-        missing alias is a TRUE, clearable divergence (its action, **replay
-        the journal**, is exactly the documented backfill) — the signal that
-        otherwise has no instrument at all (#8933 has no separate backfill).
-      * ``_graph_fingerprint`` feeds ``db_hash``, so deriving there would move
-        every stored baseline whose graph carries an identifier-shaped span.
-        The first post-upgrade run then reads a healthy graph as
-        ``unrecorded-mutation`` with ``state_recorded`` false — a false red
-        whose action sends the operator hunting an unjournalled writer that
-        does not exist, exactly the class ``_PROJECTION_STATE_FORMAT_HISTORY``
-        exists to prevent (which is why a value change there requires
-        appending a format; not moving the value avoids needing one).
-
-    Idempotent where the journal already carries the alias (the append is a set
-    difference), and skipped when the fold declared ``search_keys`` uncarried.
+    ⛔ That mirroring does NOT live here. It lives in :func:`_fold_journal`'s
+    UPSERT doors (``_fold_identifier_aliases``), because the writer derives the
+    alias ONCE per upsert and a content EDIT does not re-derive it:
+    ``_revise_point`` never touches ``search_keys`` and the live
+    ``update_point`` writes ``SET n += $props`` without one. Deriving here would
+    therefore derive from the WRONG GENERATION — from the folded (post-edit)
+    ``content`` instead of the content the graph's alias was made from — and
+    report an unclearable ``divergence="content"`` on the ordinary
+    edit-a-points-text path (#10203 review P1). Deriving here was also the only
+    reason this function needed to know WHICH side it was canonicalising, and
+    with it gone the graph view and :func:`_graph_fingerprint` canonically keep
+    the node's OWN props (so a graph MISSING the alias is still a TRUE,
+    replay-clearable divergence — the backfill signal, #8933 has no separate
+    backfill — and ``db_hash`` does not move).
 
     Operator ``content``/``pointKind`` are NOT dropped here: `_compare_views`
     decides them (compared when both sides carry them, reported when one-sided),
@@ -548,17 +534,12 @@ def _canonical_point_fields(props: dict, skip: frozenset = frozenset(), *,
         k: v for k, v in props.items()
         if k not in _NOT_COMPARED and k not in skip and v is not None
     }
-    # The writer's OWN normalization, so the checker's view of a point matches
-    # what the writer makes of it (#8006, #8933). Derived from ``props`` — the
-    # RAW payload — exactly as ``_upsert_point_props`` derives it, and appended
-    # to the flattened copy the same way. Skipped when the fold declared
-    # ``search_keys`` uncarried for this point, so the append cannot re-add a
-    # key the uncarried classification deliberately excluded.
-    #
-    # Journal/reference view only: see the asymmetry note in the docstring.
+    # The writer's OWN flatten normalization, so the checker's view of a point
+    # matches what the writer makes of it (#8006). The identifier-ALIAS half of
+    # the writer's derivation is NOT applied here — see the docstring's #8933
+    # note: it belongs to the fold's upsert doors, not to a view that cannot
+    # tell which content generation it is looking at.
     flatten_search_keys_prop(out)
-    if derive_identifier_aliases and "search_keys" not in skip:
-        append_identifier_aliases(out, point_identifier_aliases(props))
     prov = props.get("provenance")
     if isinstance(prov, dict) and prov.get("source_id"):
         out["provenanceSource"] = prov["source_id"]
@@ -711,13 +692,8 @@ def _compare_views(journal_by_id: dict, graph_by_id: dict,
             if k in _EXCLUSION_REASONS:
                 excluded_seen.setdefault(k, _EXCLUSION_REASONS[k])
         skip = frozenset(uncarried.get(pid, {}))
-        # The JOURNAL side is the reference: it is what ``replay(journal)``
-        # produces, so it carries the writer's derived alias. The GRAPH side is
-        # the node's own content and must NOT — see the docstring's asymmetry
-        # note (deriving there would mask a missing alias and move db_hash).
         jf = _canonical_point_fields(jprops, skip)
-        gf = _canonical_point_fields(
-            gprops, skip, derive_identifier_aliases=False)
+        gf = _canonical_point_fields(gprops, skip)
         is_operator = bool(jf.get("is_operator") or gf.get("is_operator"))
         fields: list[str] = []
         for k in sorted(set(jf) | set(gf)):
@@ -927,8 +903,7 @@ def _graph_fingerprint(graph_view: dict,
             continue
         skip = set(_ONE_SIDED_REASONS) | set(_GRAPH_DEFAULTED_PROPS)
         skip |= set(uncarried.get(nid, {}))
-        view = _canonical_point_fields(
-            props, frozenset(skip), derive_identifier_aliases=False)
+        view = _canonical_point_fields(props, frozenset(skip))
         if props.get("is_operator"):
             for k in _OPERATOR_ABSENT_PROPS:
                 view.pop(k, None)
@@ -1215,6 +1190,47 @@ class _RestampSignatureError(TypeError):
     """
 
 
+def _fold_identifier_aliases(entry: dict) -> dict:
+    """Apply the writer's IDENTIFIER-ALIAS derivation to a reference-fold entry.
+
+    #8933 Stage 2 / #10203 review P1. The shared Point writer
+    (``projection/entities.py::_upsert_point_props``) appends a normalised copy
+    of every identifier in the payload's own ``content``/``search_keys`` to the
+    node's ``search_keys`` (``ERR-4032`` -> ``err4032``). The value is DERIVED,
+    never journalled, so a reference view built from the journal's own form
+    reports a FALSE ``content`` divergence on ``search_keys`` for every
+    faithfully replayed identifier-bearing Point — the #8317/#10053 class (a
+    writer-side derivation the reference fold does not mirror).
+
+    ⛔ It is applied HERE, at the fold's UPSERT doors, and NOT inside
+    :func:`_canonical_point_fields`, because the writer derives the alias
+    exactly ONCE PER UPSERT: a content EDIT re-derives ``content_hash`` and the
+    vector (``update_point`` / ``_revise_point``) but leaves ``search_keys``
+    alone. A canonicalisation that re-derived from the folded ``content`` would
+    therefore derive from a DIFFERENT GENERATION than the node's, so the
+    ordinary ``update_point(content=…)`` path became an UNCLEARABLE
+    ``divergence="content"`` — the verdict's own action ("replay the journal")
+    re-applies the same edit and leaves the alias exactly where the graph has
+    it. Mirroring the door is what keeps the reference equal to
+    ``replay(journal)`` by construction, in both directions (an edit that GAINS
+    an identifier, and one that loses it).
+
+    ``entry`` is the fold's OWN point dict, never the journal record's: the
+    journal must keep E3's ``list[str]`` spelling and this is a derived GRAPH
+    value. A copy is returned whenever a derivation applies; otherwise the
+    entry is returned untouched so an identifier-free Point compares exactly as
+    it did before #8933 (and the whole helper is a no-op when
+    ``TORTOISE_IDENTIFIER_TOKENS`` is off).
+    """
+    aliases = point_identifier_aliases(entry)
+    if not aliases:
+        return entry
+    out = dict(entry)
+    flatten_search_keys_prop(out)
+    append_identifier_aliases(out, aliases)
+    return out
+
+
 def _fold_journal(events: list[dict]) -> dict:
     """The journal side of the comparison: the writer's own fold, PLUS the
     lifecycle arms `fold` does not have.
@@ -1371,6 +1387,19 @@ def _fold_journal(events: list[dict]) -> dict:
                 entry = by_id.get(oid) if isinstance(oid, str) else None
                 if isinstance(entry, dict):
                     entry["status"] = "live"
+            # #8933 Stage 2: a promotion SNAPSHOT reaches the same shared writer
+            # (`apply()` -> `_upsert`/`_upsert_point_props`), which re-derives
+            # the alias from the snapshot's own content and appends it to the
+            # payload's already-aliased `search_keys` (idempotent, a set
+            # difference). So the reference entry carries it for exactly the
+            # reason a creation's does. Idempotent here too, which is why this
+            # fires on the no-snapshot fallback arm as a harmless no-op.
+            _ppid = p.get("id") if isinstance(p, dict) else None
+            if not isinstance(_ppid, str):
+                _ppid = ev.get("id") or ev.get("event_id")
+            _pentry = by_id.get(_ppid) if isinstance(_ppid, str) else None
+            if isinstance(_pentry, dict):
+                by_id[_ppid] = _fold_identifier_aliases(_pentry)
             continue
         if t in ("PointRetracted", "PointSuperseded", "PointInvalidated"):
             pid = ev.get("id")
@@ -1514,6 +1543,17 @@ def _fold_journal(events: list[dict]) -> dict:
                    journal_seq=seq,
                    journal_existence=_epistemic_existence,
                    journal_recreate=seq in _recreate_seqs)
+        # #8933 Stage 2 / #10203 review P1: the create/re-create door is one of
+        # the writer's TWO derivation sites (the other is a promotion snapshot,
+        # folded above), so this is where the reference view mirrors it — see
+        # `_fold_identifier_aliases` for why it cannot live in the canonical
+        # view instead.
+        if t in ("PointAdded", "OperatorAdded"):
+            _ap = ev.get("point")
+            _apid = _ap.get("id") if isinstance(_ap, dict) else None
+            _aentry = by_id.get(_apid) if _writable_id(_apid) else None
+            if isinstance(_aentry, dict):
+                by_id[_apid] = _fold_identifier_aliases(_aentry)
         # #4208: a content EDIT re-derives the vector. The live `update_point`
         # and the replay's `_revise_point` both re-encode from the new content,
         # so the journal states no vector for the edited point — yet the entry
