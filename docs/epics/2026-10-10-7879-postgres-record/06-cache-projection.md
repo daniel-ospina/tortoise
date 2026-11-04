@@ -296,10 +296,16 @@ bounds, both deliberate:
   under its own `graph_only` bucket: visible, and not a divergence against a
   record that is correct. The graph side is repaired by a record-sourced
   re-projection (`record-restore` / `rebuild_from_record`, which re-materialise
-  through this projector) — **for a node the projection CREATES**. The write is
-  additive (`MERGE … SET n += $props`), so a node that ALREADY carries the pair
-  keeps it across a re-projection: this arm stops the pair being re-written, it
-  does not clear one. Clearing a populated cache's stale pair needs an explicit
+  through this projector) — **for a node the projection CREATES, and only on a
+  SERVER graph**. The write is additive (`MERGE … SET n += $props`), so a node
+  that ALREADY carries the pair keeps it across a re-projection: this arm stops
+  the pair being re-written, it does not clear one. And
+  `rebuild_from_record` runs `_assert_test_graph`, which refuses a SERVER graph
+  not named `test_`/`tortoise_test`-prefixed — i.e. every production graph
+  (`org_<org_id>`). An embedded `path=` target is exempt from that NAME check,
+  so on that lane the rebuild does wipe and re-create and the pair IS cleared;
+  this bound is about a server cache, which is the population this rule is for.
+  Clearing a populated server cache's stale pair therefore needs an explicit
   property clear, and the sweep is #10000's capture change.
 
 ### Obligation: `#10852` DELETES this rule, it does not converge with it
@@ -324,10 +330,11 @@ follow-up obligation on #10853.
 enumerations** (#10867 review, ISSUE 2). An obligation that named only the
 projection's own names was a trap in both directions:
 
-* `episodic_source_declined_properties` (`cache_projection.py:1583`) is a
+* `cache_projection.episodic_source_declined_properties` is a
   **caller** of `episodic_source_prose_properties`, so deleting the latter alone
   leaves `NameError` on the `props` tail for every episodic row;
-* `record_serve.parity_difference` (`record_serve.py:1145-1151`) imports **both**
+* `record_serve.parity_difference` (it imports both names in the function body,
+  and resolves the decline at its top) imports **both**
   `episodic_source_declined_properties` and `is_episodic_source_node` — the
   tree's SECOND record↔cache comparison instrument. A partial deletion is an
   `ImportError` on every `Source` comparison, loud today only because three legs
@@ -340,11 +347,25 @@ projection's own names was a trap in both directions:
 
 So the check is not "were the names in this list deleted" but **"does any
 reference survive"**: after the deletion, re-run
-`grep -rn 'episodic_source_prose_properties\|episodic_source_declined_properties\|_EPISODIC_SOURCE_PROSE_COLUMNS\|is_episodic_source_node\|_is_episodic_source_row\|_row_identity_view\|_decoded_tail\|_UNRESOLVED_TAIL\|_episodic_source_kind_property\|_EPISODIC_SOURCE_URL_PREFIX\|_EPISODIC_SOURCE_KIND' tortoise/ tests/`
+`grep -rn 'episodic_source_prose_properties\|episodic_source_declined_properties\|_EPISODIC_SOURCE_PROSE_COLUMNS\|is_episodic_source_node\|_is_episodic_source_row\|_row_identity_view\|_decoded_tail\|_UNRESOLVED_TAIL\|_episodic_source_kind_property\|_EPISODIC_SOURCE_URL_PREFIX\|_EPISODIC_SOURCE_KIND' tortoise/ tests/ config/ MEMORY.md`
 and expect **no** hits outside the new lexicon-SURVIVES legs (#10867 review
 ISSUE 2, from the external pass: removal guides converge on *enumerate every
 reference — including test, documentation and CI callers — then re-run the
 search to prove zero*, because a hand-kept list is what goes stale).
+
+⛔ **The roots are `tortoise/ tests/ config/ MEMORY.md`, and the last two are not
+decoration (#10867 review, P3).** Two references live outside the code tree and
+BOTH would survive a correct deletion:
+
+* `config/ci-surfaces.yml` — the registry comment that names
+  `tortoise/cache_projection.py::_EPISODIC_SOURCE_PROSE_COLUMNS` and states the
+  rule it exists to enforce;
+* `MEMORY.md` — the `[projection-door-not-capture]` gotcha, which names the set
+  as the home of the narrowing.
+
+A grep rooted only at `tortoise/ tests/` answers "zero" while both keep
+pointing at a symbol that no longer exists — the exact FALSE CLEAN this
+paragraph warns about.
 
 ⚠️ The pattern is deliberately WIDER than the seven touch points above (#10867
 review, P3): the rule's PREDICATE and its helpers (`_is_episodic_source_row`,
@@ -358,7 +379,7 @@ command it prescribes reports a FALSE CLEAN, which is worse than no check.
 ⛔ **`_tail_payload` is deliberately NOT in the pattern, and that is the other
 half of the same rule (#10867 review, P3).** It is the module's GENERAL tail
 DECODER — `_props_from_row` decodes through it for EVERY table
-(`cache_projection.py:1667`), not only for a `Source` — so it SURVIVES the
+(`_props_from_row` decodes every table's tail through it), not only for a `Source` — so it SURVIVES the
 `#10852` deletion and its own definition stays a hit. Adding it would have made
 a correct deletion report a permanent, unavoidable RED, and the exits from that
 are both wrong: treat a legitimate hit as a failure, or delete the decoder and

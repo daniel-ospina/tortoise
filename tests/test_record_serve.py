@@ -558,7 +558,7 @@ def test_a_record_served_read_carries_no_derived_name():
     assert not (set(props) & _refused("point")), set(props) & _refused("point")
 
 
-# ── the FOURTH explanation: §9.1/D1's decline (#10867 review ISSUE 1) ────────
+# ── the THIRD asymmetry: §9.1/D1's decline (#10867 review ISSUE 1) ──────────
 #
 # `record_serve.parity_difference` and `record_reconcile.scan_cache_view` are the
 # tree's TWO record↔cache field-comparison instruments. #10853 taught the second

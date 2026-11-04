@@ -131,11 +131,12 @@ column nor an invented field can hide behind the carve-out. A field the cache
 has and the record does not, and that is **not** in the refused set, is an
 UNEXPLAINED absence and reddens the test.
 
-⛔ TWO sanctioned asymmetries, not one, and BOTH are enumerated in
+⛔ THREE sanctioned asymmetries, not one, and ALL of them are enumerated in
 :func:`parity_difference` rather than absorbed by a tolerant comparison: the
-SCHEMA's refusal set (the EP carve-out above) and, since #10853, the
-PROJECTION's own §9.1/D1 decline of an episodic Source's turn prose
-(``cache_projection.episodic_source_declined_properties``). The second one
+SCHEMA's refusal set (the EP carve-out above), the fold's ``ON CREATE`` default
+(the constant the projection fills when the record is SILENT, #9634), and —
+since #10853 — the PROJECTION's §9.1/D1 decline of an episodic Source's turn
+prose (``cache_projection.episodic_source_declined_properties``). The last one
 exists because this module's parity rule is one of the TWO record↔cache field
 comparison instruments in the tree; teaching only `record_reconcile` about the
 decline (#10867 review ISSUE 1) left this one reporting a legacy session node's
@@ -1084,14 +1085,19 @@ def parity_difference(cache_props: Mapping[str, Any],
     function so the rule has ONE home: the tests call it, and an audit of a
     production pair can call it without re-deciding what "the same" means.
 
-    Four explanations, and every one of them comes from a declaration the other
-    halves of the epic already made — none is re-listed here. ⛔ It was THREE
-    before #10853, and the fourth arrived with the narrowing that made it
+    Three explanations, and every one of them comes from a declaration the other
+    halves of the epic already made — none is re-listed here. ⛔ It was TWO
+    before #10853, and the third arrived with the narrowing that made it
     necessary (#10867 review ISSUE 1): an asymmetry absent from this list is not
     explained by omission, it is a RED, so a declared asymmetry that this rule
     did not know about turned a sanctioned decline into the same signal as a
     projection gap — *"a signal indistinguishable from noise is not
     observability"*, the class this same change treats as P1 elsewhere.
+
+    ⚠️ These three are the sanctioned ASYMMETRIES, and the count is not
+    cosmetic: `tests/test_record_serve.py` and this module's own header count
+    the same three. "Nothing else" below is the closing rule, not a fourth
+    member of the list.
 
     * **the EP carve-out** — a field absent from the record whose name the SCHEMA
       refuses (``cache_projection._refused(table)``: ``confidence``,
@@ -1115,9 +1121,9 @@ def parity_difference(cache_props: Mapping[str, Any],
     * **nothing else.** A field the cache answers and the record does not, with no
       explanation, is a projection gap — and it reddens. A field the record
       answers and the cache does not is an invention — and it reddens too. The
-      carve-out is the ONLY sanctioned asymmetry the SCHEMA declares, the decline
-      above is the only one the PROJECTION declares, and because both are
-      enumerated they cannot be used to hide a gap.
+      carve-out is the only asymmetry the SCHEMA declares; the fold default and
+      the decline are the only two the PROJECTION declares; and because all
+      three are enumerated they cannot be used to hide a gap.
 
     ⚠️ The decline explains an ABSENCE FROM THE RECORD'S ANSWER, never a VALUE:
     the record's answer here is the projection's own map

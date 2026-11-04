@@ -1273,14 +1273,18 @@ def _scalar(value: Any) -> Any:
 #: a divergence against a record that is correct. The graph side is repaired by a
 #: record-sourced re-projection (`record-restore` / `rebuild_from_record`, which
 #: re-materialise through this projector) — **for a node the projection CREATES,
-#: and only on a test-named graph**. Two bounds, both measured, and neither is an
+#: and only on a SERVER graph**. Two bounds, both measured, and neither is an
 #: asterisk: the write is additive (`MERGE … SET n += $props`,
 #: :func:`node_statement`), so a node that ALREADY carries the pair KEEPS it across
 #: a re-projection — this table stops the pair being re-written, it does not clear
 #: an existing one; and `rebuild_from_record` runs `_assert_test_graph`, which
-#: refuses any graph not named `test_`/`tortoise_test`-prefixed — i.e. EVERY
-#: production graph (`org_<org_id>`). Clearing a populated cache's stale pair
-#: needs an explicit property clear, and the sweep is #10000's capture change.
+#: refuses a SERVER graph not named `test_`/`tortoise_test`-prefixed — i.e. EVERY
+#: production graph (`org_<org_id>`). ⛔ `_assert_test_graph` is a NAME check and
+#: an embedded `path=` target is exempt from it (`projection/__init__.py`), so on
+#: that lane the rebuild DOES wipe and re-create and the pair is cleared; the
+#: bound above is about a server cache, which is the population this table is
+#: for. Clearing a populated server cache's stale pair therefore needs an
+#: explicit property clear, and the sweep is #10000's capture change.
 #:
 #: ⛔ **THIS TABLE MUST BE DELETED BY `#10852`, and that is a contract term, not a
 #: hope (#10867 review, P1).** `#10852` makes the capture's `summary` a TOPIC
