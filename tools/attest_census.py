@@ -192,9 +192,14 @@ def _evidence_defect(evidence: object, repo: str, pr: int) -> str:
             f"evidence ({evidence!r}) carries no attributable repository — this census cannot tell "
             "which repo it points at, so re-posting it could quote another repository's artifact"
         )
-    # ⛔ Repeated slashes are COLLAPSED before splitting, because GitHub collapses them when it
-    # resolves the URL — the same normalisation, applied one layer earlier.
-    segs = [s for s in re.sub(r"/{2,}", "/", unquote(urlsplit(ref).path)).split("/") if s]
+    # ⛔ Repeated slashes needed no collapsing: the `if s` below already drops empty segments, and
+    # `%2e%2e` needs the `unquote` (a server decodes it; a naive split does not). An earlier cycle put
+    # a `re.sub(r"/{2,}", …)` here and credited it with the `//` refusals — it was INERT (measured
+    # review cycle 26: 1,000 combinatorial paths + 200,000 random, 0 differences), and the refusals are
+    # carried by the fail-closed `_GITHUB_URL_SLUG is None` arm above. Deleted rather than kept as
+    # decoration: a line a comment credits with a guard it does not perform is the claim/artifact
+    # mismatch this file keeps having to fix.
+    segs = [s for s in unquote(urlsplit(ref).path).split("/") if s]
     if any(s in (".", "..") for s in segs):
         return (
             f"evidence ({evidence!r}) carries a path-traversal segment — it normalises to a "
@@ -589,7 +594,12 @@ def read_gate(repo: str, head: str) -> tuple[str, str]:
     def _group(run: dict) -> tuple[str, str]:
         app = run.get("app")
         slug = app.get("slug") if isinstance(app, dict) else None
-        match = re.search(r"/actions/runs/(\d+)/", str(run.get("details_url") or ""))
+        # ⛔ The canonical pattern, not a narrower one of our own (review cycle 26): the run id may end
+        # the URL, or be followed by `/job/<id>`, `/`, `?` or `#`. `tools/ci_verdict.py`'s `RUN_ID_RE`
+        # and `tools/merge_throughput.py` both accept those, so a narrower one here would classify a
+        # resolvable workflow as unresolvable and (after the fallback below) turn a real GREEN into
+        # UNKNOWN — an over-block of exactly the rows the census exists to report.
+        match = re.search(r"/actions/runs/(\d+)(?=[/?#]|$)", str(run.get("details_url") or ""))
         return str(slug or ""), (match.group(1) if match else "")
 
     newest_per_group: dict[tuple[str, str], dict] = {}
@@ -612,6 +622,26 @@ def read_gate(repo: str, head: str) -> tuple[str, str]:
     else:
         in_flight = [r for r in contenders if r.get("status") != "completed"]
         newest = max(in_flight or contenders, key=lambda r: r["id"])
+    # ⛔ §622's FALLBACK, which this function was only half-implementing (review cycle 26). The rule
+    # reads: *"an unresolvable `details_url` makes that group `UNKNOWN` (exit 2), **never GREEN**"*,
+    # and the repo's two canonical readings of it say the same in code — `tools/merge_throughput.py`
+    # (*"a GREEN is unprovable and is UNKNOWN, never GREEN"*) and `tools/ci_verdict.py`. Measured with
+    # two attempts sharing `details_url: null`, an older red and a newer green: this function answered
+    # `('completed', 'success')` where `merge_throughput` answered `UNKNOWN`, and `classify` turned
+    # that into `OK` — "gate green; no re-post owed" — on the attestation gate itself.
+    #
+    # ⛔ Only a GREEN is refused. A red or an un-concluded answer is NOT a positive claim about the
+    # workflow, so it stays as it was: turning a real red into UNREADABLE would over-block in the
+    # direction that hides a refusal a lane needs to see.
+    if (
+        _group(newest)[1] == ""
+        and str(newest.get("status") or "") == "completed"
+        and str(newest.get("conclusion") or "") in _NON_RED_CONCLUSIONS
+    ):
+        raise RuntimeError(
+            f"check-run {GATE_CHECK} on {head[:12]}… has no resolvable workflow identity "
+            "(details_url) — a group this census cannot attribute is UNKNOWN, never GREEN"
+        )
     return str(newest.get("status") or ""), str(newest.get("conclusion") or "")
 
 

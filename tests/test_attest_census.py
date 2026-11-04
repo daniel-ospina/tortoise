@@ -620,11 +620,90 @@ def test_read_gate_ignores_another_check_that_has_the_highest_id(monkeypatch):
     payload = {
         "check_runs": [
             {"id": 50, "name": "python-ci", "status": "completed", "conclusion": "failure"},
-            {"id": 10, "name": ac.GATE_CHECK, "status": "completed", "conclusion": "success"},
+            # ⛔ A resolvable `details_url` is now REQUIRED for a GREEN to be reported (see the §622
+            # fallback in `read_gate`): a group this census cannot attribute is UNKNOWN, never GREEN.
+            # The fixture carries one so the filter is what this test measures, not the fallback.
+            {"id": 10, "name": ac.GATE_CHECK, "status": "completed", "conclusion": "success",
+             "app": {"slug": "github-actions"},
+             "details_url": "https://github.com/o/r/actions/runs/77/job/88"},
         ]
     }
     monkeypatch.setattr(ac, "gh_json", lambda args: payload)
     assert ac.read_gate("o/r", "a" * 40) == ("completed", "success")
+
+
+def test_read_gate_refuses_a_green_whose_workflow_identity_is_unresolvable(monkeypatch):
+    """⛔ Cycle 26, P2: this function implemented §622's GROUPING but not its FALLBACK.
+
+    §622: *"an unresolvable `details_url` makes that group `UNKNOWN` (exit 2), **never GREEN**"* — and
+    the repo's two canonical readings say the same in code (`tools/merge_throughput.py`: *"a GREEN is
+    unprovable and is UNKNOWN, never GREEN"*; `tools/ci_verdict.py`). Measured pre-fix with two
+    attempts sharing `details_url: null`, an older red and a newer green: `read_gate` answered
+    `('completed', 'success')` where `merge_throughput` answered `UNKNOWN`, and `classify` turned that
+    into `OK` — "gate green; no re-post owed" — on the attestation gate itself. That is a false PASS on
+    the one predicate whose job is to refuse one.
+
+    `details_url` is schema-legal as `null` (the CheckRun schema has it required **and** nullable), so
+    this is a payload GitHub can hand back, not a hypothetical. Today only one workflow publishes the
+    name, which makes the failure LATENT rather than absent — and a latent false GREEN here is exactly
+    what this tool exists to refuse.
+    """
+    for share_null in (True, False):
+        payload = {
+            "check_runs": [
+                {"id": 2, "name": ac.GATE_CHECK, "status": "completed", "conclusion": "failure",
+                 "app": {"slug": "github-actions"}},
+                {"id": 3, "name": ac.GATE_CHECK, "status": "completed", "conclusion": "success",
+                 "app": {"slug": "github-actions"}},
+            ]
+        }
+        if not share_null:
+            # the SINGLETON green shape, which §622 refuses for the same reason
+            payload = {"check_runs": [payload["check_runs"][1]]}
+        monkeypatch.setattr(ac, "gh_json", lambda args, p=payload: p)
+        try:
+            ac.read_gate("o/r", "a" * 40)
+        except RuntimeError as exc:
+            assert "workflow identity" in str(exc), exc
+        else:
+            raise AssertionError("a GREEN from an unattributable group must be UNKNOWN, not reported green")
+
+    # ... and the SAME payload with a resolvable identity still answers, so this is an attribution test
+    # and not a ban on reporting success.
+    monkeypatch.setattr(
+        ac, "gh_json",
+        lambda args: {"check_runs": [
+            {"id": 3, "name": ac.GATE_CHECK, "status": "completed", "conclusion": "success",
+             "app": {"slug": "github-actions"},
+             "details_url": "https://github.com/o/r/actions/runs/1001/job/9001"},
+        ]},
+    )
+    assert ac.read_gate("o/r", "a" * 40) == ("completed", "success")
+    # ⛔ A RED is not a positive claim about the workflow, so it is NOT refused — turning a real red
+    # into UNREADABLE would over-block in the direction that hides a refusal a lane needs to see.
+    monkeypatch.setattr(
+        ac, "gh_json",
+        lambda args: {"check_runs": [
+            {"id": 3, "name": ac.GATE_CHECK, "status": "completed", "conclusion": "failure",
+             "app": {"slug": "github-actions"}},
+        ]},
+    )
+    assert ac.read_gate("o/r", "a" * 40) == ("completed", "failure")
+    # The canonical run-id shapes (`/runs/<id>` ending the URL, `?query`, `/job/<id>`) all resolve.
+    for url in (
+        "https://github.com/o/r/actions/runs/1001/job/9001",
+        "https://github.com/o/r/actions/runs/1001",
+        "https://github.com/o/r/actions/runs/1001?check_suite_id=5",
+    ):
+        monkeypatch.setattr(
+            ac,
+            "gh_json",
+            lambda args, u=url: {"check_runs": [
+                {"id": 3, "name": ac.GATE_CHECK, "status": "completed", "conclusion": "success",
+                 "app": {"slug": "github-actions"}, "details_url": u},
+            ]},
+        )
+        assert ac.read_gate("o/r", "a" * 40) == ("completed", "success"), url
 
 
 def test_no_gate_run_at_all_reports_absent_not_green(monkeypatch):
