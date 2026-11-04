@@ -4155,6 +4155,31 @@ def test_the_bare_continuation_cites_name_what_they_say():
             ("136", 'STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", '
                     '"S5", "S6")'),
         ), "capstone_verdict_check"),
+        # ⛔ THE VET BLOCK'S OWN "BEFORE" CLAIM (#10833 review, P2 — the SECOND
+        # time this file's early-return cite went stale). `_BUNDLE_CITE` resolves
+        # the NAMED `extractor_v2.py:10367`, but the `(:NNNNN)` one clause later
+        # is a bare continuation — invisible to the sweep — and the fold's `+33`
+        # shift moved it from `:10371` to `:10237`, a line inside
+        # `_run_vet_pass`'s BODY. The sentence then asserted that `:10367` is
+        # BEFORE `:10237` (impossible), and sent the reader 150 lines below the
+        # return it names, while every gate reported OK. Two rows because the
+        # claim wraps over two lines and a row scopes to ONE line.
+        ("README.md", "i.e. BEFORE the", (
+            ("10367", "vet_enabled = (vet_arbiter is not None or _vet_enabled()"),
+        )),
+        ("README.md", "early return (`", (
+            ("10371", "if not edus:"),
+        )),
+        # ⛔ The #2684 row's cite (#10833 review, P2): the fold rewrote a CORRECT
+        # `5042-5043` into `4948-4949` — inside `_refuse_rewritten_value`, an
+        # unrelated #10360 function — on a file BYTE-IDENTICAL to `origin/main`,
+        # so no drift can explain it. A full `file:line` cite is not a pin:
+        # `_BUNDLE_CITE` resolves that the number exists and lands on a code
+        # line, never that it is the code the sentence names. Held by content.
+        ("docs/00_index.md", "refuses a value-free point at", (
+            ("5042", "if not _carries_value(content, quote):"),
+            ("5043", "return None"),
+        )),
     )
     # The SAME document states two of its claims as the RULE's own text rather than a
     # line number — a quoted rule cannot drift by an insertion above it, which is why

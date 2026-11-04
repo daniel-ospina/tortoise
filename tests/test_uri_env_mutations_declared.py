@@ -816,6 +816,26 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # lane flip. Do not cite it as a measured leak (review finding, baf951165).
     "test_cli_config_show.py": [
         r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
+    # ⛔ NO `test_7949_capstone_measure.py` row here. This branch had added one
+    # declaring `r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*"docker://:@127\.0\.0\.1:1/'`
+    # for #10610, with a comment describing a pin that drives the producer's
+    # `main()` under an unreachable docker DSN — and MEASUREMENT refutes both
+    # halves: the module holds no `TORTOISE_DB_URI` token at all (`grep -c` → 0,
+    # and the declared regex over the same bytes → 0 matches), and the pin the
+    # comment names (`test_the_readmes_floor_provenance_claim_matches_the_code`)
+    # takes no fixtures, never calls `main()` and never sets an environment
+    # variable. The mutation the comment describes lives in
+    # `test_9889_capstone_probes.py:225` (`_run_paired_arm`) and is already
+    # covered by THIS module's broad `test_9889_capstone_probes.py` row above.
+    # Nothing redded: this guard reports UNdeclared sites and checks that a key
+    # resolves to a real module — it never asks the reverse question (does a
+    # declared pattern match a site?), so a pattern matching nothing was silent.
+    # That is this file's own named class, "a dead declaration that reads as
+    # coverage while authorizing nothing", and a table whose whole purpose is
+    # auditable provenance cannot carry an entry whose stated justification its
+    # own module refutes. Deleted rather than corrected: there is nothing to
+    # declare. (The reverse check is the missing pin — filed separately, not
+    # smuggled into a fold.)
 }
 
 # Carve-out TEST-MODULE stems (Task 5 wires these into TEST_NO_REDIRECT_STEMS;
