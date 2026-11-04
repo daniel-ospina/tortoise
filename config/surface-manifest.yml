@@ -57,10 +57,6 @@
 # a constant here.
 manifest_version: 1
 issue: 3863
-# ⛔ ONE value, not two: the auto-merge of `origin/main` into this branch left a duplicate
-# key here (main's `ee2a15891…`, whose tree carries 81 tools, next to this branch's
-# `61af70a1ca`, whose tree carries the 76 recorded below). YAML keeps the LAST duplicate,
-# so the surviving value must be the one whose tree matches `counts.tools`.
 cut_at_commit: 61af70a1ca
 allowed_transforms:
 - _HTTPToolFilter
@@ -505,13 +501,13 @@ response_fields:
     never re-labels (a Point is a different record, not a relabel of an entity), so `kind_layer_routed` cannot fire
     here. A FOURTH code rides it too (#10368): `terminal_fold_refused`, when the write DEDUP-hits a point that is
     already a terminal claim and the fold carries NO temporal prop while it would write anything else — a caller
-    prop and/or an authored word — because a dedup hit never writes onto a settled belief: on the content leg the caller never named the
-    point (a content coincidence picked the target), and a `key`-resolved hit is an identity match, not a licence
-    to rewrite a settled record (#6110 decides identity; ingest already refuses the same fold, #10377). The whole fold is dropped, the HIT is still reported, and the
-    message names `update_point` as the addressed route that does revise a dead claim deliberately. The journaled
-    provenance retrofit (#7704) still folds, so an evidence-bearing re-run keeps its source. All of these codes ride
-    the SAME key on the dedup-hit return, so a re-run reports them together rather than dropping
-    one'
+    prop and/or an authored word — because a dedup hit never writes onto a settled belief: on the content leg the
+    caller never named the point (a content coincidence picked the target), and a `key`-resolved hit is an identity
+    match, not a licence to rewrite a settled record (#6110 decides identity; ingest already refuses the same fold,
+    #10377). The whole fold is dropped, the HIT is still reported, and the message names `update_point` as the addressed
+    route that does revise a dead claim deliberately. The journaled provenance retrofit (#7704) still folds, so
+    an evidence-bearing re-run keeps its source. All of these codes ride the SAME key on the dedup-hit return, so
+    a re-run reports them together rather than dropping one'
   unchanged_when_off: n/a — not flag-gated; the key is ABSENT on a sourced or word-bearing write, and on every write
     whose fold actually applied, so that response stays byte-identical
 - response: tortoise_check_structure
@@ -1062,7 +1058,7 @@ rows:
   class: agent-reachable
   cluster_canonical: tortoise_index_files
 - name: tortoise_create_point
-  served_from: tortoise/mcp_server.py:5e4536f4f6e7983f
+  served_from: tortoise/mcp_server.py:9860ad2503ad1b45
   served_attributes: edb6c4d045fc0522
   family: memory
   family_rank: 1
@@ -1073,15 +1069,18 @@ rows:
   keyword_rank: 2
   cluster: null
   canonical: null
-  job: 'Create a Point node (statement, decision, vision, hypothesis, etc.). dedup=True (default): idempotent —
-    returns existing Point if content matches. Declaring extractedFrom materializes that :Source and links it (#8171);
-    a fresh write with no source and no provenance is advised (advisories: [{code: no_source, node_id, message}]
-    — advisory only, never a block). validTo accepts an ISO-8601 instant (representational variance such as ''2024-3-1''
-    or ''2024/03/01'' is normalised silently), or a DECLARED no-date value — ''unknown'', TBD, TBA, TBC, N/A, NA,
-    -, --, an em dash, or ''?'' — which is stored as the canonical un-datable end (no end plus validToPrecision=''unknown'',
-    reading end_state=''unknown'') and echoed back as valid_to_shaped; None or omitted means the end is OPEN. An
-    impossible calendar day, a month outside 01-12, an epoch passed as a string, or prose with no recoverable date
-    is REFUSED, naming the fault and the accepted forms (#9202).'
+  job: 'Create a Point node (statement, decision, vision, hypothesis, etc.). dedup=True (default) folds onto an
+    existing Point when the content matches, but that is not unconditional: dedup=False mints a second Point, and
+    a props payload can take the node out of the fold''s own predicate. The idempotency hint below is per OPERATION;
+    whether a given call converges depends on its arguments, and a refused call reports the per-call verdict on
+    its own error payload. Declaring extractedFrom materializes that :Source and links it (#8171); a fresh write
+    with no source and no provenance is advised (advisories: [{code: no_source, node_id, message}] — advisory only,
+    never a block). validTo accepts an ISO-8601 instant (representational variance such as ''2024-3-1'' or ''2024/03/01''
+    is normalised silently), or a DECLARED no-date value — ''unknown'', TBD, TBA, TBC, N/A, NA, -, --, an em dash,
+    or ''?'' — which is stored as the canonical un-datable end (no end plus validToPrecision=''unknown'', reading
+    end_state=''unknown'') and echoed back as valid_to_shaped; None or omitted means the end is OPEN. An impossible
+    calendar day, a month outside 01-12, an epoch passed as a string, or prose with no recoverable date is REFUSED,
+    naming the fault and the accepted forms (#9202).'
   dependency: declares TortoiseSDK.create_point (resolves)
   lifecycle: active
   used_by: agents, tooling, docs
@@ -1755,7 +1754,7 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_ingest
-  served_from: tortoise/mcp_server.py:ca8c49ac54f1b068
+  served_from: tortoise/mcp_server.py:4f8e3f1f130f8d65
   served_attributes: c0ea3c28d0df1685
   family: graph
   family_rank: 2
@@ -1778,8 +1777,9 @@ rows:
     variants, nested props={...}, and terminal statuses included) — use promotion_policy=''auto'' or promote after
     ingest via update_point(status=''live''). promotion_policy=''auto'' preserves the #131 promote-on-wire lifecycle
     (null-status sources only — an explicit draft is never retro-promoted, #1088; terminal sources are never resurrected;
-    deduped connections never retro-promote). Idempotent-ish: points dedup by content hash + kind, sources by url,
-    operators by input set.'
+    deduped connections never retro-promote). NOT declared idempotent: points dedup by content hash + kind, sources
+    by url and operators by input set, but the entities leg is append-only for document/event — a repeat can write
+    a second Source.'
   dependency: declares TortoiseSDK.ingest (resolves)
   lifecycle: active
   used_by: never called, tooling, docs
@@ -1848,7 +1848,7 @@ rows:
   cluster_canonical: tortoise_delete
   cluster_note: group `delete` is split across ['graph', 'memory']; proposed family `memory` — waits for your approval
 - name: tortoise_operator_action
-  served_from: tortoise/mcp_server.py:3af6911898fcddce
+  served_from: tortoise/mcp_server.py:b5350b7ce9cb752c
   served_attributes: 07f3aa2bf8138e28
   family: graph
   family_rank: 2
@@ -1860,7 +1860,8 @@ rows:
   cluster: operator-action
   canonical: true
   job: 'Consolidated operator write action — action=mitigate|annotate. mitigate: reason + strength (0-1) — creates/updates
-    the mitigation Point (idempotent). annotate: bias/precision/consistency/directness (0-1).'
+    a CURRENT mitigation Point; a re-assertion after withdrawal MINTS A NEW Point, so NOT idempotent then. annotate:
+    bias/precision/consistency/directness (0-1).'
   dependency: 'handler-served: no declared SDK link'
   lifecycle: active
   used_by: never called, tooling, docs
@@ -2752,7 +2753,8 @@ rows:
   keyword_rank: 2
   cluster: create
   canonical: false
-  job: Create a document — a :Source keyed by url (research, planDoc, meetingNotes, etc.).
+  job: 'Create a document — a :Source (research, planDoc, meetingNotes, etc.). NOT keyed by url: every call mints
+    a fresh id, so a repeat writes a second Source and a second DocumentCreated.'
   dependency: declares TortoiseSDK.create_document (resolves)
   lifecycle: active
   used_by: never called, tooling, docs
@@ -2845,7 +2847,7 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_approve_merge
-  served_from: tortoise/mcp_server.py:6fdf72e74dbf2aa4
+  served_from: tortoise/mcp_server.py:38a54d630028d971
   served_attributes: 7ef9ac912a56d88b
   family: review
   family_rank: 9
@@ -2856,8 +2858,9 @@ rows:
   keyword_rank: 8
   cluster: null
   canonical: null
-  job: Review a dedup/temporal candidate — action=merge|reject. Wiring deferred to promotion for live priors. WRITES
-    review flags + wires edges (idempotent for repeats).
+  job: 'Review a dedup/temporal candidate — action=merge|reject. Wiring deferred to promotion for live priors. WRITES
+    review flags + wires edges. NOT idempotent for every branch: a repeat of a DEDUP review records its event again,
+    so it is visible twice to poll_events (the temporal branch does guard one).'
   dependency: declares TortoiseSDK.approve_merge (resolves)
   lifecycle: active
   used_by: never called, tooling, docs
