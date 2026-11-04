@@ -1016,13 +1016,23 @@ def test_floor_keeps_the_pass_for_a_small_positive_install_time():
 # round-trip test) or deleted along with its acceptance claim".
 
 
-def test_source_round_trips_through_the_http_boundary(tmp_path):
+def test_source_round_trips_through_the_http_boundary(tmp_path, monkeypatch):
     """The drop was at the CALL SITE, not in the store — so a test that calls
     `_write_session_and_turns` directly CANNOT see it and passes on the broken
     code. Only a real POST pins it.
 
     MUTATION THAT REDS THIS: delete `source=body.source` from the
     `_write_session_and_turns` call in `hosted_api` (the exact defect).
+
+    The transport wait bound is widened for this request because the property
+    under test is the STORE's `source`, not the bound: the POST is the first
+    request this process makes into the app, so it pays whatever cold setup the
+    runner has left, and on a loaded shard that setup outlived the shipped 10 s
+    and the middleware answered 503 with `_TRANSPORT_WAIT_BOUND_MESSAGE`
+    (observed on CI shard `a` of this PR — a bound property, already pinned by
+    `tests/test_transport_wait_bound.py`, deciding a persistence assertion).
+    Precedent for pinning the constant in a test that needs headroom:
+    `tests/test_transport_wait_bound.py:539`.
     """
     import os
 
@@ -1034,6 +1044,7 @@ def test_source_round_trips_through_the_http_boundary(tmp_path):
         _restore_tortoise_sdk_init,
         _seed_team_graphs,
     )
+    from tortoise import mcp_auth as mcp_auth_mod
 
     org = "team-3516-src"
     db_path = os.path.join(str(tmp_path), "src.db")
@@ -1044,6 +1055,10 @@ def test_source_round_trips_through_the_http_boundary(tmp_path):
     try:
         key = sdk.apikey_create(org, "11111111-2222-3333-4444-555555555555")
         h = {"Authorization": f"Bearer {key['api_key']}"}
+        # Read at request time by the middleware (`hosted_api` passes
+        # `mcp_auth._TRANSPORT_WAIT_BOUND_S` into `await_under_wait_bound`), so
+        # patching the module attribute governs this POST and nothing else.
+        monkeypatch.setattr(mcp_auth_mod, "_TRANSPORT_WAIT_BOUND_S", 600.0)
         with TestClient(ha_mod.app, raise_server_exceptions=False) as tc:
             r = tc.post("/v1/sessions", headers=h, json={
                 "conversation": [{"role": "user", "content": "hello"}],
