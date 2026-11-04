@@ -4481,6 +4481,52 @@ def test_a_permission_denied_path_is_announced_by_name(hub: Path) -> None:
     assert "WARNING" in combined or pinned.returncode != 0, combined
 
 
+def test_git_is_asked_for_english_diagnostics(hub: Path, tmp_path: Path) -> None:
+    """Every skip marker this module parses is git's own PROSE, so the locale must be pinned.
+
+    `strerror` strings are gettext-translated. Measured through a shim that kept real git and
+    translated only `Permission denied`: `pin` exited 0 with an EMPTY stderr and held HEAD's
+    bytes for a path inside a no-execute directory, while the disk held the lane's only copy.
+    `git status` does not list that path at all, so `_skipped_paths` is the ONLY detector for
+    that shape — a host-locale-dependent guard is a guard that is absent on most hosts.
+    """
+    real = shutil.which("git")
+    assert real, "git must be on PATH"
+    shim = tmp_path / "locale-shim"
+    shim.mkdir()
+    record = tmp_path / "locale.txt"
+    (shim / "git").write_text(
+        f'#!/bin/sh\nprintf "%s|%s\\n" "$LC_ALL" "$LANGUAGE" >> "{record}"\nexec "{real}" "$@"\n'
+    )
+    (shim / "git").chmod(0o755)
+
+    wt = clean_lane(hub, "wt-locale")
+    (wt / "tracked.txt").write_text("the lane's work\n")
+
+    env = dict(os.environ)
+    env["PATH"] = f"{shim}{os.pathsep}{env.get('PATH', '')}"
+    # A HOSTILE AMBIENT LOCALE: the tool must override it, not inherit it.
+    env["LC_ALL"] = "de_DE.UTF-8"
+    env["LANGUAGE"] = "de"
+    cp = subprocess.run(
+        [PYTHON, str(TOOL), "pin"],
+        cwd=str(wt),
+        capture_output=True,
+        text=True,
+        errors="surrogateescape",
+        env=env,
+        check=False,
+    )
+    assert cp.returncode == 0, cp.stdout + cp.stderr
+
+    seen = {ln.strip() for ln in record.read_text().splitlines() if ln.strip()}
+    assert seen, "the shim never ran: the tool did not invoke git at all"
+    assert all(s.startswith("C|") for s in seen), (
+        "git must be asked for ENGLISH diagnostics (LC_ALL=C, LANGUAGE unset) whatever the "
+        f"host locale, or every skip marker is unmatched: {seen}"
+    )
+
+
 def test_a_dangling_symlink_does_not_refuse_a_genuine_pin(hub: Path) -> None:
     """`hash-object <path>` on a dangling link FAILS, so the link must be hashed by its target.
 

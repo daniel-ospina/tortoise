@@ -151,6 +151,18 @@ def _git(
 ) -> subprocess.CompletedProcess:
     """`git`, with an extra env layer and `-C cwd` when a caller names one."""
     env = lane_stash._env()
+    # ⛔ PARSE ENGLISH, SO ASK FOR ENGLISH. EVERY marker this module matches on
+    # (`_SKIP_MARKERS`, `_is_bare_denied`, `_ABSENT_OBJECT_MARKERS`, `_NOT_A_WORKTREE`, …) is
+    # git's own diagnostic PROSE, and git's `strerror` strings are gettext-translated. Nothing
+    # pinned the locale, so on a host that renders "Permission denied" as
+    # "Keine Berechtigung" the bare skip line matched NOTHING: measured through a shim that
+    # retained real git and translated only that string, `pin` exited 0 with an EMPTY stderr
+    # and held HEAD's bytes for a path inside a no-execute directory — while the disk held the
+    # lane's only copy, and `git status` does NOT list that path, so `_skipped_paths` is the
+    # ONLY detector for it. That is this module's forbidden verdict, rendered as a fact.
+    # `LANGUAGE` overrides `LC_ALL` for gettext, so dropping `LC_ALL`'s companion matters.
+    env["LC_ALL"] = "C"
+    env.pop("LANGUAGE", None)
     env.update(extra_env or {})
     env.update(_IDENTITY)
     cmd = ["git", *(["-C", str(cwd)] if cwd is not None else []), *args]
@@ -735,8 +747,10 @@ def snapshot(root: Path, *, branch: str, note: str = "") -> tuple[str, list[str]
         print(
             f"lane_wip: WARNING — some paths could NOT be added to this pin and are NOT "
             f"recoverable from it:\n{unreadable}\n"
-            "  (an unreadable file OR DIRECTORY does this — `chmod` it and pin again if its "
-            "content matters; a directory needs `chmod +x` as well as `+r`)",
+            "  (two different causes need two different fixes: a path that is NOT READABLE "
+            "needs `chmod` — a DIRECTORY needs `+x` as well as `+r`. A path that is NOT A "
+            "REGULAR FILE (a FIFO, socket or device) cannot be indexed at all, so no "
+            "permission change can help: replace it with a real file or remove it)",
             file=sys.stderr,
         )
     worktree_clean = tree == head_tree
@@ -750,8 +764,8 @@ def snapshot(root: Path, *, branch: str, note: str = "") -> tuple[str, list[str]
         # A partial add must never be presented as "nothing to save".
         raise LaneWipError(
             f"{root} has paths that could not be indexed (see the warning above), so the "
-            "pin would hold LESS than the lane's work while looking complete — fix the "
-            "permissions and pin again"
+            "pin would hold LESS than the lane's work while looking complete — fix or remove "
+            "the path named above and pin again"
         )
     # ⛔ NOT GATED ON `worktree_clean`. The check exists because two `add`-built views agree
     # while an edit sits on disk — and that is just as true when the lane ALSO has a
