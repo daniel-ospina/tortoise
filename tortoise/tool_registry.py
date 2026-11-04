@@ -702,7 +702,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         # operator over the same endpoints: `sdk.create_operator` has no
         # adoption/existence check — `_find_operator`, the adopt-by-endpoint-set
         # path `ingest` uses, is called from `ingest`'s connection loop only
-        # (`sdk.py:27368`, verified) — and its `_distinct_preserving_order`
+        # (`sdk.py:27371`, verified) — and its `_distinct_preserving_order`
         # collapse only removes repeats WITHIN one request. `ep.py` builds its
         # factor from the edge list, so the duplicate double-counts the claim's
         # EP weight. Declaring `idempotent=True` here (as this entry did until
@@ -1048,9 +1048,14 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "deduped connections never retro-promote). NOT declared "
                     "idempotent: points dedup by content hash + kind, sources by url "
                     "and operators by input set — but the fold does NOT cover "
-                    "everything: document/event entities are append-only, and the point "
-                    "fold SKIPS operator nodes, so a repeat can write a second Source "
-                    "or a second operator Point. Read created/deduped to tell which.",
+                    "everything, and the set is OPEN, not a list. Two measured point-"
+                    "side mechanisms alone: operator nodes are skipped by the fold's "
+                    "predicate, and a `pointKind` arriving through the props "
+                    "passthrough WINS over the kind the fold queries. Either one "
+                    "makes an identical resubmission write a second Point, and the "
+                    "entity legs are append-only on top of that. Read "
+                    "created/deduped to tell what happened — do not infer it from "
+                    "this description.",
         risk="write",
         # ⛔ NOT idempotent — and this is a corrected declaration, not a tier
         # default (#10849 review). `ingest` looked convergent on three separate

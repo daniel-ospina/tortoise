@@ -26759,10 +26759,13 @@ class TortoiseSDK:
           source). ORTHOGONAL to granularity: both modes honor the same
           policy.
         - Idempotent-ish where the fold applies: points dedup by
-          (content_hash, pointKind) via create_point(dedup=True) — EXCEPT
-          operator nodes, which the fold's predicate skips, so a point item
-          carrying ``is_operator`` appends a second node on an identical
-          re-ingest; sources merge by url; Subject/Object
+          (content_hash, pointKind) via create_point(dedup=True) — EXCEPT a point
+          whose node identity differs from what the fold QUERIES, which is not one
+          case but at least two: operator nodes are skipped by the predicate, and
+          a ``pointKind`` in the props passthrough WINS over the positional kind
+          on the node while the query still scopes by the positional kind. Either
+          appends a second node on an identical re-ingest. Treat the set as OPEN;
+          sources merge by url; Subject/Object
           resolve-or-mint on the name (#3590: the MERGE key is `id`, so the
           second item naming a live name RESOLVES to it rather than minting
           a second carrier); operator connections dedup by (op_type, input

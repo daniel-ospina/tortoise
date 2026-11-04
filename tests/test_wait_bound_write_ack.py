@@ -193,8 +193,17 @@ def test_a_breached_write_ships_a_retry_rule_not_a_fabricated_recipe():
     assert "converges" in safe["retry_rule"]
 
 
-def test_the_three_declared_tools_get_the_verdicts_10849_measured():
-    """The three resolvable declarations produce the verdicts #10849 measured.
+def test_the_three_tools_10849_measured_get_their_verdicts():
+    """The three tools #10849 measured produce the verdicts it measured.
+
+    ⛔ NOT "the three declared tools": only `create_point` here carries an
+    `idempotent` declaration. `create_operator` declares NOTHING (`idempotent=None`
+    -> `idempotentHint` False, as the fail-closed test above states), and `ingest`
+    is declared False on purpose. The other two tools that DO declare
+    `idempotent=True` — `checkpoint` and `create_source` — are exercised by
+    `test_the_verdict_FOLLOWS_a_flipped_registry_entry` and by
+    `_LITERAL_EXPECTATIONS` below. An earlier name said "the three declared
+    tools", which described neither this body nor the registry.
 
     ⛔ NAME SCOPED TO WHAT THIS ASSERTS, on purpose. It was
     `test_retry_safe_is_derived_from_the_registry_not_a_second_list`, which the
@@ -221,8 +230,9 @@ def test_the_three_declared_tools_get_the_verdicts_10849_measured():
 
     (The FAIL-CLOSED half — an unresolvable name is never advertised as safe —
     is pinned separately in ``test_an_unresolvable_write_name_still_fails_closed``;
-    this test covers the three resolvable declarations, and DERIVATION is pinned
-    by ``test_the_verdict_FOLLOWS_a_flipped_registry_entry``.)
+    this test covers the three tools #10849 measured, NOT the three that carry a
+    declaration, and DERIVATION is pinned by
+    ``test_the_verdict_FOLLOWS_a_flipped_registry_entry``.)
     """
     def safe(name):
         return _error(ms._wait_bound_refusal_result(name))["data"]["retry_safe"]

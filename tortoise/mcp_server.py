@@ -787,7 +787,7 @@ def _arguments_disable_convergence(name: str, arguments) -> bool:
     #   * `entities` of type document/event are APPEND-ONLY (`sdk.py` "Document
     #     records are append-only — never deduped"; `docs/INGEST_CONTRACT.md` row
     #     1 `append_only_items`), and the SDK lowercases the type on BOTH legs
-    #     (`sdk.py:23741` admission, `sdk.py:27129` dispatch), so a case variant
+    #     (`sdk.py:23741` admission, `sdk.py:27132` dispatch), so a case variant
     #     reaches the writer too;
     #   * `bundle` may arrive as a JSON STRING — the handler calls
     #     `_parse(bundle)` after this seam runs and the served schema puts no
@@ -5402,9 +5402,12 @@ def tortoise_ingest(bundle: Any = None, granularity: str = "bulk",
     connections never retro-promote (promotion fires on FIRST edge creation
     only).
     ⛔ NOT declared idempotent: points dedup by content hash + kind, sources by
-    url and operators by input set — but the fold does NOT cover everything:
-    document/event entities are APPEND-ONLY, and the point fold SKIPS operator
-    nodes, so a repeat can write a second Source or a second operator Point.
+    url and operators by input set — but the fold does NOT cover everything, and
+    that set is OPEN rather than a list. Two measured point-side mechanisms
+    alone: operator nodes are skipped by the fold's predicate, and a `pointKind`
+    arriving through the props passthrough WINS over the kind the fold queries.
+    Either makes an identical resubmission write a second Point; the entity legs
+    are append-only on top. Read created/deduped rather than inferring it here.
     """
     bundle = _parse(bundle)
     if bundle is None:

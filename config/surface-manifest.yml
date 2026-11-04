@@ -49,7 +49,7 @@
 # a constant here.
 manifest_version: 1
 issue: 3863
-cut_at_commit: 015fcc7b855eb1b771dde299428f94d54071509a
+cut_at_commit: 3417a0e20dbe09c41ec1e6f3c798e2edd7982385
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -1740,7 +1740,7 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_ingest
-  served_from: tortoise/mcp_server.py:9066893c99be8c14
+  served_from: tortoise/mcp_server.py:83826395a24c54d8
   served_attributes: c0ea3c28d0df1685
   family: graph
   family_rank: 2
@@ -1764,9 +1764,11 @@ rows:
     ingest via update_point(status=''live''). promotion_policy=''auto'' preserves the #131 promote-on-wire lifecycle
     (null-status sources only — an explicit draft is never retro-promoted, #1088; terminal sources are never resurrected;
     deduped connections never retro-promote). NOT declared idempotent: points dedup by content hash + kind, sources
-    by url and operators by input set — but the fold does NOT cover everything: document/event entities are append-only,
-    and the point fold SKIPS operator nodes, so a repeat can write a second Source or a second operator Point. Read
-    created/deduped to tell which.'
+    by url and operators by input set — but the fold does NOT cover everything, and the set is OPEN, not a list.
+    Two measured point-side mechanisms alone: operator nodes are skipped by the fold''s predicate, and a `pointKind`
+    arriving through the props passthrough WINS over the kind the fold queries. Either one makes an identical resubmission
+    write a second Point, and the entity legs are append-only on top of that. Read created/deduped to tell what
+    happened — do not infer it from this description.'
   dependency: declares TortoiseSDK.ingest (resolves)
   lifecycle: active
   used_by: never called, tooling, docs

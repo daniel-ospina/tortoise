@@ -15,11 +15,13 @@ The ingest surface writes a whole **bundle** — points, entities, sources, and
 the connections between them — in one coherent call that is **duplicate-averse**
 on the items its dedup fold covers — points, sources and connections. It is NOT
 idempotent end to end: the fold does not cover `document`/`event` entities
-(append-only occurrence records) and it SKIPS operator nodes, so a repeat can
-append a second record *by design*. It does so **silently**, with no warning key
-to look for (the `append_only_items` token in [§3.2](#32-warnings--the-thirteen-keys) is reserved
-vocabulary, not observable today). [§15](#15-timeout--failure) names every exclusion it
-knows, and the check that survives the ones it does not. Both retry sections below
+(append-only occurrence records), and a point can escape it too — operator nodes
+by the fold's predicate, or a `pointKind` arriving through the props passthrough —
+so a repeat can append a second record *by design*. It does so **silently**, with
+no warning key to look for (the `append_only_items` token in [§3.2](#32-warnings--the-thirteen-keys) is reserved
+vocabulary, not observable today). [§15](#15-timeout--failure) names the mechanisms it
+knows and explains why that set is OPEN rather than a list — the response counts,
+not this document, are the authority for a given bundle. Both retry sections below
 ([§7](#7-kill-recovery), [§15](#15-timeout--failure)) carry that exception
 explicitly. This document is the granular customer contract for that surface:
 bundle shape, worked examples with the exact response shape, the full error
@@ -209,10 +211,11 @@ Key points:
   bundle items (it is server-managed — a bundle carrying it is a violation).
 - **`created` / `deduped`** each count `{points, entities, sources, connections}`.
   Re-submitting the identical bundle returns the same ids with everything in
-  `deduped` — **except** for the classes the fold does not cover: `document`/
-  `event` entities (append-only occurrence records) and any point the content fold
-  excludes (it skips operator nodes). Those are counted in `created` again, with
-  no warning. Read these two counts to tell which happened
+  `deduped` — **except** for what the fold does not cover: `document`/`event`
+  entities (append-only occurrence records) and a point whose node identity differs
+  from what the fold queries (operator nodes by predicate, or a `pointKind`
+  arriving through the props passthrough). Those are counted in `created` again,
+  with no warning — read these two counts to tell which happened
   ([§15](#15-timeout--failure)).
 - **`ids["connections"]`** — the connection descriptor contract. A connection
   routed to an **operator** appends the bare operator-id string:
@@ -791,18 +794,24 @@ which is why the counts and not this sentence are the authority. Never "fix" a t
 bundle before retrying — a modified retry is a different logical bundle and can
 strand run-1 residue.
 
-**The exception, stated once.** Not every item in a bundle is duplicate-averse.
-The fold covers points (by kind + content hash), sources (by url) and
-connections (by endpoint set + arity). It does **not** cover:
+**What is not covered — and why this is NOT a list.** The fold covers points (by
+kind + content hash), sources (by url) and connections (by endpoint set + arity).
+Everywhere else an identical resubmission writes again, and a POINT can do that by
+at least two independent mechanisms:
 
 * `document` and `event` entities — occurrence records, append-only by contract
   (`sdk.ingest` sets `existed = []` on both legs: "never deduped");
-* any point the fold's own predicate EXCLUDES — it skips operator nodes, so a
-  points item that declares itself an operator mints a second node on an
-  identical resubmission (measured: `created.points: 1` on both runs,
-  `deduped.points: 0`, `warnings: []`).
+* a point whose node identity differs from what the fold QUERIES. The fold skips
+  operator nodes by predicate; and the props passthrough can carry `pointKind`
+  itself, which WINS over the positional kind on the node while the query still
+  scopes by the positional kind — so `{"content": "x", "pointKind": "decision"}`
+  resubmitted mints a second node with the SAME `content_hash` (measured:
+  `created.points: 1` on both runs, `deduped.points: 0`, `warnings: []`, and the
+  node is a plain point, not an operator).
 
-Neither class warns. (`append_only_items` in [§3.2](#32-warnings--the-thirteen-keys) is reserved
+⛔ **Two mechanisms, not two exclusions.** An earlier version of this section
+named only the operator case and was false for the `pointKind` one, so treat this
+set as OPEN and never as complete. None of them warns. (`append_only_items` in [§3.2](#32-warnings--the-thirteen-keys) is reserved
 vocabulary, not emitted today — so waiting for it learns nothing.)
 
 ⛔ **Do not infer convergence from this document — read the response.** The
