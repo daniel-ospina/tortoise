@@ -4411,8 +4411,15 @@ def _value_core(token: str) -> tuple[str, str, str | None] | None:
     _stripped = raw.lstrip()
     if _stripped and not _reads_as_sign(_stripped[0]):
         _skip = 0
+        # ⛔ THE RUN STOPS AT A SIGN (#10513 review cycle-18 P1, measured). U+2212
+        # MINUS SIGN is itself `Sm`, so a skip that consumed every `Sm` ate the
+        # sign it was there to find: `_value_core("$\u22124")` returned
+        # `('', '4', None)` and `"\u20ac\u221250"` was REFUSED against `"-50"` —
+        # the same false accusation the ASCII `$-4` case had, one codepoint over,
+        # and U+2212 is what Word and PDF math autocorrect emit.
         while (_skip < len(_stripped)
-               and unicodedata.category(_stripped[_skip]) in ("Sc", "Sm")):
+               and unicodedata.category(_stripped[_skip]) in ("Sc", "Sm")
+               and not _reads_as_sign(_stripped[_skip])):
             _skip += 1
         _stripped = _stripped[_skip:]
     sign = "-" if _stripped and _reads_as_sign(_stripped[0]) else ""
@@ -4534,7 +4541,7 @@ def _value_identity_matches(a: tuple[str, str, str | None],
 #: POSITIVE (`($4)` against `-4` is one value and was REFUSED). Deliberately
 #: narrow: the decoration between `(` and the digit is limited to whitespace and
 #: a currency sign, so a prose citation like `(see 2019)` is NOT swallowed.
-_PAREN_NUMERAL_RE = re.compile(r"\(\s*[-$\u20ac\u00a3\u00a5]?\s*-?\d")
+_PAREN_NUMERAL_RE = re.compile(r"\(\s*[-$\u20ac\u00a3\u00a5]\s*-?\d")
 
 
 #: The scale words that make a numeral's VALUE a reading rather than an
@@ -4696,15 +4703,28 @@ def _write_span(text: object, cap: int, *,
     graph. This cuts at a token boundary instead, and the SAME span is what the
     write stores, so the judged pair and the written pair are one string.
 
-    ⛔ A value can only be read SHORT by losing DIGITS (review cycle-14 P2,
-    measured): a numeral cut to ``12`` out of ``1200`` is the false-accusation
-    shape. So when the cut splits a token, the token is dropped WHOLE only when
-    BOTH hold:
+    ⛔ A value can only be read SHORT by losing a character the value engine
+    READS (review cycles 14 and 18, both measured): a numeral cut to ``12`` out
+    of ``1200``, or a NUMBER WORD cut to ``four`` out of ``fourteen``
+    (``_value_bindings`` binds number words, so the truncated prefix states a
+    DIFFERENT value — 4 against 14 — and refused a truthful point). So when the
+    cut splits a token, the token is dropped WHOLE only when BOTH hold:
 
     * the discarded remainder carries an alphanumeric character (a real split,
       not a full stop), and
-    * the part of the split token that would be KEPT carries a DECIMAL digit
-      (Unicode `Nd`, the class the value engine's digit run matches).
+    * the split token is one the VALUE ENGINE READS — its kept prefix carries a
+      DECIMAL digit (Unicode `Nd`, the class the engine's digit run matches), or
+      the token's WORD RUN is a number word.
+
+    ⛔ The NUMBER-WORD half asks the token's WORD RUN, located with ``re.search``
+    so punctuation on either side cannot hide it (``fourteen``, ``fourteen.``,
+    ``(fourteen``, ``twenty-five``) — and NOT the kept prefix, which is the wrong
+    question for a WORD in BOTH directions, measured: ``fourteen-widgets`` keeps
+    ``four``, itself a number word, while the engine reads no value from the
+    whole token, so the span must STAY; ``twenty-five`` keeps ``twen``, no value
+    at all, while the whole token binds 25, so the span must MOVE. (The NUMERAL
+    half above does use the kept prefix, deliberately: the question there is
+    whether a decimal DIGIT spans the cut.)
 
     ⛔ **That second condition is what keeps this helper on the IDENTITY cap**
     (#10513 review cycle-18, both P1s, measured). ``_MAX_CONTENT`` is not only a
@@ -4758,14 +4778,59 @@ def _write_span(text: object, cap: int, *,
                 discarded_alnum = True
                 break
             rest = rest[1:]
-        if discarded_alnum and any(ch.isdecimal() for ch in split_kept):
+        # The WHOLE split token, so a NUMBER WORD can be recognised as the value
+        # it is (#10513 review cycle-18 P2, measured): `_value_bindings` binds
+        # number words (`four` is 4, `fourteen` is 14), so a cut inside one keeps
+        # a prefix that states a DIFFERENT value — `"the "*249 + "fourteen
+        # widgets"` stored `… the four` and REFUSED the truthful point with
+        # `point says '4', quote says '14'`. Asked of the FULL token rather than
+        # the kept prefix, and the kept prefix is the wrong question in BOTH
+        # directions (measured): `fourteen-widgets` keeps `four` — itself a number
+        # word — while the engine reads no value from the whole token, so a prefix
+        # probe would move an identity span over nothing; and `twenty-five
+        # widgets` keeps `twen`, no value at all, while the whole token binds 25,
+        # so a prefix probe would MISS it.
+        split_full = split_kept
+        _j = cap
+        while _j < len(s) and not s[_j].isspace():
+            split_full += s[_j]
+            _j += 1
+        # ⛔ PUNCTUATION MUST NOT HIDE A NUMBER WORD — ON EITHER SIDE (#10513
+        # review cycle-18 P1, measured twice): `_num_word_value` strips whitespace
+        # only, so it answers None for `fourteen.`/`fourteen,`/`(fourteen` while
+        # `_value_bindings` — the engine this arm is DEFINED against — reads 14
+        # from all three. Probing the raw split token therefore left the defect
+        # this arm exists to close LIVE one punctuation mark away, from BOTH
+        # directions: `"the "*249 + "fourteen. widgets"` (trailing) stored
+        # `… the four`, and so did `"the "*248 + "ab (fourteen widgets"`
+        # (leading) — each refusing the truthful point with `point says '4',
+        # quote says '14'`. `re.match` was anchored, so it fixed only the
+        # trailing half; the probe is `re.search` and asks the token's word run
+        # wherever it sits.
+        #
+        # The word run — not the raw token — so a token that merely CONTAINS a
+        # number word does not fire: `tender` → `tender` → None (the engine reads
+        # nothing from it). A hyphenated number-word
+        # PAIR (`twenty-five`, `forty-five`) stays ONE run because the engine
+        # reads it as 25/45. Measured agreement with `_value_bindings` across
+        # `fourteen`, `(fourteen`, `fourteen.`, `fourteen,`, `-fourteen`,
+        # `−fourteen`, `«fourteen`, `twenty-five`, `4.0`, `2019-05`, `tender`,
+        # `x-fourteen`, `fourteen-widgets`, `ten-thirty`; the one shape it
+        # deliberately does NOT fire on is a Unicode `No` superscript (`⁹`),
+        # which is the cycle-14 `isdecimal`-not-`isdigit` exclusion above.
+        _word_run = re.search(r"[^\W\d_]+(?:-[^\W\d_]+)?", split_full)
+        _split_is_value = (
+            any(ch.isdecimal() for ch in split_kept)
+            or (_word_run is not None
+                and _num_word_value(_word_run.group(0)) is not None))
+        if discarded_alnum and _split_is_value:
             # `isdecimal` is exactly Unicode `Nd`, the class the value engine's
             # digit run (`_VALUE_DECIMALS`) matches — so the span moves only for a
             # character a value could actually be made of. `isdigit` is broader
             # (`No` superscripts: `unicodedata.decimal('⁹')` is undefined while
             # `digit('⁹')` is 9), and firing on those would move the identity
             # span over a character the engine never reads as a number.
-            # a numeral is cut in two: drop the split token whole
+            # a value is cut in two: drop the split token whole
             cut = kept
     if not cut:
         # ⛔ The text is ONE token longer than the cap (a 250-char run with no
