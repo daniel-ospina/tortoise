@@ -104,7 +104,13 @@ from __future__ import annotations
 import sys
 
 # #5128: refuse a <3.12 interpreter before the imports below — a module-level
-# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+# 3.11+-only import would fail first (D9 shape).
+# (Wording generic deliberately: this file imports nothing newer than 3.8, so the
+# `from datetime import UTC` phrase `origin/main` uses is a boilerplate copy from
+# its sibling `tools/ci_runner_labels.py:86`, which does import it. Verified absent
+# here on both sides — a comment naming an import this file does not have is a trap
+# for the next reader, inside a guard whose whole job is being trustworthy about
+# import order.)
 if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     raise SystemExit(
         f"tools/batch_open.py requires Python >= 3.12 (got "
