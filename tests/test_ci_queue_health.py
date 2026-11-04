@@ -1336,6 +1336,49 @@ def test_a_PENDING_ONLY_wait_past_the_budget_cannot_clear_the_gate():
         "the wait WAS witnessed — the clause that declines to act must not be reached")
 
 
+def test_a_PENDING_ONLY_wait_while_PR_CI_IS_SERVING_is_a_BACKLOG():
+    """⭐ P1 (review), the SAME review's other age clause — and it was unpinned.
+
+    The test above pins `starved_wait` (`pr_running == 0`). Its cases B and C cannot
+    pin `backlogged_wait` (`pr_running > 0` past `max_pr_wait_seconds`): B is the same
+    shape INSIDE the budget (it must stay `OK`), and C has nothing executing. Their
+    MIXED-shape predecessor has a NON-EMPTY queued PR leg too, so `and pr_queued_runs`
+    and `and wait_runs` behave identically there and neither mutant is caught.
+
+    MEASURED at `3787cfb1b0` (the head that fixed the finding): reverting
+    `backlogged_wait` to `and pr_queued_runs` left the ENTIRE suite GREEN — so the
+    fail-open this PR exists to close was still one line from coming back through the
+    #10237 shape ("serving a couple of runs while a day's worth waits behind them"),
+    with nothing to redden it. This test is that missing case, and it is not
+    hypothetical: measuring it against the mutant gives
+
+        classify_queue([], in_progress=[serving PR run], pending=[PR run @4 h])
+        MUTANT : verdict=OK            congests_pr=False   # authorises the cancel
+        FIXED  : verdict=PR-BACKLOGGED congests_pr=True     # refuses, and names it
+
+    Discriminating: with `backlogged_wait` keyed on `pr_queued_runs` this reddens;
+    with every other guard intact it passes.
+    """
+    health = classify(
+        [],
+        in_progress=[run(1, "Python CI", event="pull_request", age_seconds=60)],
+        pending=[run(4247, "Python CI", event="pull_request", age_seconds=4 * 3600)],
+    )
+    assert health.pr_queued == 0 and health.pr_pending == 1, (
+        "the fixture must be PENDING-ONLY — that is the only shape where the two "
+        "populations differ, and the only shape the mutant survives")
+    assert health.oldest_pr_queued_age_seconds == 4 * 3600, (
+        "the number the budget is compared against is the max over the whole wait "
+        "population")
+    assert health.verdict == Q.PR_BACKLOGGED, (
+        "PR CI is executing and the only PR run waiting has waited four hours — a "
+        f"backlog, not a clearance; got {health.verdict!r}")
+    assert health.pr_wait_measured is True
+    assert health.congests_pr is True, (
+        "this wait must REFUSE a destructive cancel, not authorise one")
+    assert any("PR-BACKLOGGED" in reason for reason in health.reasons)
+
+
 def test_a_PENDING_ONLY_wait_with_an_unreadable_stamp_is_UNWITNESSED():
     """The unreadable-timestamp refusal covers the WHOLE wait population too.
 
