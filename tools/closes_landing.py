@@ -236,15 +236,20 @@ def _closing_re(sep: str) -> re.Pattern[str]:
 _CLOSING_RE = _closing_re(_CLOSING_SEPARATORS["lenient"])
 _CLOSING_RE_ONELINE = _closing_re(_CLOSING_SEPARATORS["strict"])
 
-#: A BLANK line, i.e. the end of a paragraph. An inline code span cannot cross
-#: it (§6.1 keeps a span inside one paragraph), so it is where the STRICT inline
-#: scan stops looking for a closing backtick run (`_span_limit`).
-_BLANK_LINE_RE = re.compile(r"\n[ \t]*\n")
-
 #: A line that STARTS a new block, tested on the line's text AFTER its blockquote
 #: prefix. A span is inline content and cannot cross a block boundary, and most
-#: blocks end the paragraph WITHOUT a blank line — which is why the strict scan
-#: needed this as well as `_BLANK_LINE_RE` (see `_paragraph_end`).
+#: blocks end the paragraph WITHOUT a blank line — so `_paragraph_end` needs this
+#: AS WELL AS its own blank-line test (`if not line.strip()`), which is inline
+#: there because it is already positioned at a line start and needs no pattern.
+#: ⚠️ There is deliberately no `_BLANK_LINE_RE` constant beside this one: one
+#: existed and was READ BY NOTHING while two comments said it bound the strict
+#: scan, so a maintainer could "restore" it into `_paragraph_end` and reinstate
+#: the blank-line-only bound that let an unmatched backtick pair with the OPENER
+#: of a real span in a later block and expose the keyword that span held — a
+#: false `lands`, the fail-open direction this module forbids (#10634 review P2).
+#: Deleting it is the fix for that claim (#10634 review P3); splicing it back in
+#: is not, because its pattern is anchored on a LEADING newline and would match
+#: nothing at a line start.
 _BLOCK_START_RE = re.compile(
     r"(?: {0,3}(?:[-*+]|\d{1,9}[.)])(?:[ \t]|$)"          # a list item marker
     r"| {0,3}#{1,6}(?:[ \t]|$)"                             # an ATX heading
@@ -277,15 +282,31 @@ def _paragraph_end(text: str, start: int) -> int:
     never a false closure, so the boundary tests err toward stopping: the
     container is compared by DEPTH (never by prefix string) and any line that
     could start a block ends the span.
+
+    ⚠️ "Err toward stopping" has a HARD floor, and it is §5.1's LAZY
+    CONTINUATION: a paragraph inside a block quote continues on the next line
+    whether or not that line carries a `>` marker, so a line at a LOWER depth
+    than the opener is still the same paragraph — the renderer keeps opener and
+    closer in ONE paragraph and puts the keyword in `<code>`:
+
+        > The old body said `Closes
+        #100` and nothing fired.
+
+    stops nothing. Requiring an equal depth there ended the span early, left the
+    backticks unmatched, and the keyword survived as "prose" in BOTH arms —
+    `lands`, exit 0, no annotation, on the arm the whole tool exists to protect
+    (#10634 review P1, fail-open). Only a DEPTH INCREASE or a new block ends the
+    paragraph, and the direction is the safe one: reading a line as a lazy
+    continuation can only blank MORE, i.e. cost a pass.
     """
     line_start = text.rfind("\n", 0, start) + 1
     first_end = text.find("\n", start)
     if first_end < 0:
         return len(text)
     # The opener's own container: a span MAY cross lines inside ONE block (a
-    # continuation of the same quote or list item), and must not cross into
-    # another — `> a `Closes\n> #100` b` is one span, `a `x\n> `Closes #100``
-    # is not.
+    # continuation of the same quote or list item, or a LAZY continuation line
+    # carrying no marker at all), and must not cross into another —
+    # `> a `Closes\n> #100` b` is one span, `a `x\n> `Closes #100`` is not.
     depth = _quote_depth(_split_prefix(text[line_start:first_end])[0])
     pos = first_end + 1
     while pos < len(text):
@@ -296,8 +317,8 @@ def _paragraph_end(text: str, start: int) -> int:
         if not line.strip():
             return pos                      # a blank line ends the paragraph
         prefix, rest = _split_prefix(line)
-        if _quote_depth(prefix) != depth:
-            return pos                      # a different container
+        if _quote_depth(prefix) > depth:
+            return pos                      # a DEEPER container: a new block
         if _BLOCK_START_RE.match(rest):
             return pos                      # a new block type
         pos = end + 1
@@ -331,10 +352,13 @@ def _span_limit(text: str, start: int, strict: bool) -> int:
       renderer keeps literal (an indented code line pairing with a tick in a
       later paragraph, `    a `b\nprose `c Closes #100`) would LOSE a real
       closure — the harmful direction for a warning — so it refuses to pair
-      across a line break at all and over-reports the multi-line span instead.
-      For the shapes in `_COMMONMARK_SHAPES` that costs a false warning and was
-      measured to cost a claim in none: the renderer's CODE shapes here are all
-      reported by the strict arm's paragraph bound below.
+      across a line break and over-reports the multi-line span instead.
+      ⚠️ Refusing to pair is not the same as ignoring the renderer: a run left
+      literal by the line bound is still closed by the next run of its length in
+      the paragraph (`_strip_inline_code`'s `pending` set), so the under-report
+      that rule used to cost — `` a` `` / `` `Closes #100` `` is prose to the
+      renderer and was blanked away here (#10634 review P3) — is gone rather
+      than recorded. That set can only blank LESS, so it cannot cost a claim.
     """
     if strict:
         return _paragraph_end(text, start)
@@ -357,10 +381,32 @@ def _strip_inline_code(text: str, *, strict: bool = False) -> str:
     span that crosses a SOFT LINE BREAK (one paragraph, §6.1) was left unstripped
     by a per-line bound, so `` `Closes\n#10541` `` bought a `lands` in both pass
     arms (#10634 review P2, fail-open).
+
+    ⚠️ The LENIENT arm searches only to the end of the line, which means a run it
+    leaves literal here is not the last word: the renderer pairs it with the next
+    run of the SAME length anywhere in the paragraph, and that run may be the
+    opener of a pair on the very next line. `` a` `` / `` `Closes #100` `` is
+    therefore PROSE to the renderer while a per-line scan blanks the keyword and
+    reports nothing — a lost claim, the harmful direction for the FINDING arms
+    (#10634 review P3). `pending` closes it the honest way: a length left literal
+    in this paragraph is remembered, and the next run of that length CLOSES it
+    instead of opening a span. It can only ever blank LESS, so it cannot cost a
+    claim — the one direction this arm must not move.
     """
     out: list[str] = []
+    #: Run lengths left LITERAL earlier in this paragraph (lenient arm only):
+    #: the next run of that length closes one, exactly as the renderer pairs
+    #: them. Cleared at a paragraph break, because spans cannot cross one.
+    pending: set[int] = set()
     i, n = 0, len(text)
     while i < n:
+        if text[i] == "\n":
+            nxt = text.find("\n", i + 1)
+            if not text[i + 1:(n if nxt < 0 else nxt)].strip():
+                pending.clear()          # a blank line ends the paragraph
+            out.append("\n")
+            i += 1
+            continue
         if text[i] != "`":
             out.append(text[i])
             i += 1
@@ -369,6 +415,13 @@ def _strip_inline_code(text: str, *, strict: bool = False) -> str:
         while i < n and text[i] == "`":
             i += 1
         run = i - opener
+        if not strict and run in pending:
+            # This run CLOSES a literal one earlier in the paragraph, so it is
+            # not an opener and nothing on this line is inside a span opened
+            # here — blanking the rest of the line is what lost the claim.
+            pending.discard(run)
+            out.append(text[opener:i])
+            continue
         limit = _span_limit(text, i, strict)
         closer = -1
         j = i
@@ -385,6 +438,8 @@ def _strip_inline_code(text: str, *, strict: bool = False) -> str:
             j = k
         if closer < 0:
             out.append(text[opener:i])  # unmatched: a literal run, not a span
+            if not strict:
+                pending.add(run)
             continue
         # Replace the span with spaces, keeping NEWLINES so the line structure
         # the strict parse reasons about is untouched.
@@ -556,6 +611,14 @@ class _Fence:
     missed the dedent, and kept the fence open over top-level prose (#10634
     review). A marker-line fence has its item INSIDE the quote, so it leaves
     this 0 and is measured after the prefix via `close_base`.
+
+    `item_depth` is the depth the enclosing ITEM was opened at, and it is what
+    selects WHICH of the two numbers above applies — not whether `item_col_raw`
+    happens to be non-zero. An item at the fence's own depth is measured in `rest`
+    space; a shallower one in raw space. Choosing by "is the field set" read a
+    quoted item's `rest` column against a raw indent, which kept the block open
+    over a dedent (a false `lands`) once quoted markers started being tracked at
+    all (#10634 review P1).
     """
 
     opener: tuple[str, int]
@@ -563,6 +626,7 @@ class _Fence:
     close_base: int
     in_list: bool
     item_col_raw: int = 0
+    item_depth: int = 0
 
     @property
     def container_col(self) -> int:
@@ -619,8 +683,55 @@ def _fence_line_column(line: str, depth: int) -> tuple[int, int, int]:
     return consumed, i - start, i
 
 
+@dataclass(frozen=True)
+class _ListItem:
+    """One OPEN list item, in BOTH spaces a dedent can be measured in.
+
+    * `depth` — the blockquote depth the marker line was written at;
+    * `rest_col` — the item's CONTENT column after that line's blockquote prefix,
+      i.e. in the space `rest` lives in;
+    * `raw_col` — the same column in RAW coordinates (`len(prefix) + rest_col`),
+      which is where an item that sits OUTSIDE the fence's blockquote is matched:
+      CommonMark matches the OUTER container first, so such an item ends on a raw
+      dedent.
+
+    Both spellings of ONE number, computed once at push time, so a later
+    comparison cannot silently use a `rest` column against a raw indent — the
+    mixing that bought a false `lands` on one family of shapes and lost a real
+    claim on another in two earlier review rounds (#10634 review).
+    """
+
+    depth: int
+    rest_col: int
+    raw_col: int
+
+
+def _item_dedented(line: str, item: _ListItem) -> bool:
+    """Has `line` dedented out of `item` — so the item, and its fence, END?
+
+    Measured after the item's OWN blockquote markers, which is the space its
+    content column is expressed in: `_fence_line_column(line, item.depth)`
+    consumes at most that many markers, so `>   text` against a depth-1 item's
+    2-column content comes out at 2 (inside) while `> text` at column 0 comes out
+    at 0 (outside). A line carrying FEWER markers than the item lives under has
+    left the item's quote entirely, and so dedents out of everything inside it.
+
+    This is the ONE rule, applied at every depth. Before it, only markers on the
+    RAW line were tracked, so a marker inside a quote (`> - item`) was invisible,
+    the item list stayed empty, and a fence opened under that item had no edge at
+    all: the renderer ended the containing block there and opened a FRESH fence,
+    while the tool kept the old one open and read the keyword inside the new
+    block as prose. `lands` on a body GitHub renders into `<pre><code>` (#10634
+    review P1, fail-open).
+    """
+    consumed, residual, _ = _fence_line_column(line, item.depth)
+    if consumed < item.depth:
+        return True                      # the item's own quote closed
+    return residual < item.rest_col
+
+
 def _fence_candidate(prefix: str, rest: str,
-                     list_cols: list[int]) -> _Fence | None:
+                     list_items: list[_ListItem]) -> _Fence | None:
     """The fence `(prefix, rest)` opens, or None if the line is prose.
 
     A fence may open ON a list-marker line itself (`- ``` `, `1. ``` `):
@@ -640,6 +751,11 @@ def _fence_candidate(prefix: str, rest: str,
     # the one this very line opens), else column 0. It is passed INTO the opener
     # test as well as stored, because `content_col + 3` is where CommonMark's
     # "up to three spaces" budget ends (#10634 review P1).
+    #
+    # ⚠️ `rest` is already post-prefix, so the column handed to `_fence_open` is a
+    # `rest` column. Passing a RAW one measured the run against the wrong columns
+    # and read a 4-column indented block (inside a quote inside an item) as a
+    # fence, blanking a real claim (#10634 review).
     item = _LIST_MARKER_RE.match(rest) if rest.strip() else None
     if item:
         m_indent = len(item.group("indent"))
@@ -649,14 +765,33 @@ def _fence_candidate(prefix: str, rest: str,
         opener = _fence_open(rest[base:])
         if opener is None:
             return None
-        return _Fence(opener, prefix, base, True)
-    content_col = list_cols[-1] if list_cols else 0
-    residual_col = max(0, content_col - len(prefix))
+        # A marker on THIS line opens the item in `rest` space; its raw column
+        # differs only by the prefix, and both are carried (see `_ListItem`).
+        return _Fence(opener, prefix, base, True, len(prefix) + base,
+                      _quote_depth(prefix))
+    depth = _quote_depth(prefix)
+    if not list_items:
+        opener = _fence_open(rest, 0)
+        if opener is None:
+            return None
+        return _Fence(opener, prefix, 0, False)
+    enclosing = list_items[-1]
+    if enclosing.depth == depth:
+        # SAME container: the item's column is already a `rest` column, so the
+        # dedent is measured with it directly and no raw number is needed.
+        opener = _fence_open(rest, enclosing.rest_col)
+        if opener is None:
+            return None
+        return _Fence(opener, prefix, enclosing.rest_col, True, 0,
+                      enclosing.depth)
+    # The item is OUTSIDE the fence's blockquote, so it is matched BEFORE the
+    # quote's markers and its edge is the RAW column (`item_col_raw`).
+    residual_col = max(0, enclosing.rest_col - len(prefix))
     opener = _fence_open(rest, residual_col)
     if opener is None:
         return None
-    return _Fence(opener, prefix, residual_col, bool(list_cols),
-                  content_col if list_cols else 0)
+    return _Fence(opener, prefix, residual_col, True, enclosing.raw_col,
+                  enclosing.depth)
 
 
 def strip_code(body: str, strict: bool = False) -> str:
@@ -709,7 +844,7 @@ def strip_code(body: str, strict: bool = False) -> str:
     """
     out: list[str] = []
     fence: _Fence | None = None
-    list_cols: list[int] = []
+    list_items: list[_ListItem] = []
     for raw in body.splitlines():
         line = raw.expandtabs(4)
         indent = len(line) - len(line.lstrip(" "))
@@ -734,7 +869,7 @@ def strip_code(body: str, strict: bool = False) -> str:
             consumed, residual, column = _fence_line_column(line, fence_depth)
             ended = consumed < fence_depth
             if not ended and fence.in_list and line.strip():
-                if fence.item_col_raw:
+                if fence.item_depth < fence_depth:
                     # The item is OUTSIDE the fence's blockquote (its content
                     # column sits at or before the quote's markers), so the item
                     # is matched BEFORE them and its edge is the RAW column.
@@ -744,6 +879,13 @@ def strip_code(body: str, strict: bool = False) -> str:
                     # prose, losing a real claim (#10634 review).
                     ended = indent < fence.item_col_raw
                 elif line[column:].strip():
+                    # …and an item at THIS depth is measured in `rest` space,
+                    # which is the space `close_base` holds for it. The branch is
+                    # selected by the item's DEPTH, never by whether the raw
+                    # column happens to be set: a quoted item's `rest` column
+                    # compared against a raw indent reads as "dedented" on every
+                    # content line, ends the block on the first one, and exposes
+                    # the keyword inside it (#10634 review P1, fail-open).
                     ended = residual < fence.close_base
             if not ended:
                 # A closer is measured from the CONTAINING BLOCK's content
@@ -751,7 +893,17 @@ def strip_code(body: str, strict: bool = False) -> str:
                 # need not match the opener's) — so the run has to sit where the
                 # container's content starts, and the text after that column is
                 # what must be nothing but fence and whitespace.
-                past = column - fence.container_col
+                #
+                # ⚠️ BOTH sides are in ONE space. `residual` is the indent after
+                # this line's own markers, which is the space `close_base` holds
+                # (the item's column past the prefix). Subtracting a RAW column
+                # (`column - container_col`) instead charged the MARKER'S allowance
+                # twice — the opener's `  > ` is 4 raw columns, the closer's `> `
+                # only 2, so a 4-space-indented run `>     ``` ` came out 2 columns
+                # past the container and closed a fence the renderer keeps open:
+                # `lands`, exit 0, no annotation (#10634, found by a sweep against
+                # the CommonMark reference implementation, not by a reviewer).
+                past = residual - fence.close_base
                 if (past <= _MAX_FENCE_INDENT
                         and _is_closer(line[column:], fence.opener)):
                     fence = None
@@ -766,18 +918,32 @@ def strip_code(body: str, strict: bool = False) -> str:
         # phantom item that then "ended" the block on a dedented claim it should
         # have blanked, and the claim became a `lands` (#10634 review P2). The
         # dedent-pop runs FIRST, on every non-blank line, so a marker that dedents
-        # past an outer item pops it before pushing its own column.
+        # past an outer item pops it before pushing its own.
+        #
+        # The marker is matched on `rest`, not on the raw line: a marker inside a
+        # blockquote (`> - item`) is a real item, and matching the raw line never
+        # saw it — the block it opened under then had no edge and the keyword
+        # inside the block the renderer calls CODE read as prose (#10634 review
+        # P1, fail-open). `_item_dedented` is the matching pop, in the same space.
         if line.strip():
-            while list_cols and indent < list_cols[-1]:
-                list_cols.pop()
-            marker = _LIST_MARKER_RE.match(line)
+            while list_items and _item_dedented(line, list_items[-1]):
+                list_items.pop()
+            marker = _LIST_MARKER_RE.match(rest)
             if marker:
-                list_cols.append(len(marker.group(0)))
-        fence = _fence_candidate(prefix, rest, list_cols)
+                rest_col = len(marker.group(0))
+                list_items.append(
+                    _ListItem(_quote_depth(prefix), rest_col,
+                              len(prefix) + rest_col))
+        fence = _fence_candidate(prefix, rest, list_items)
         if fence:
             out.append("")
             continue
-        if strict and (rest_indent > _MAX_FENCE_INDENT or rest.startswith("\t")):
+        # `rest_indent` is the ONLY indentation test: `line` was `expandtabs(4)`d
+        # a few lines up, so a tab can never survive into `rest` — the
+        # `rest.startswith("\t")` this clause used to carry was unreachable and
+        # read as a live guard (#10634 review P3, twice). A tab-indented line is
+        # already a `rest_indent >= 4` line by the time it gets here.
+        if strict and rest_indent > _MAX_FENCE_INDENT:
             out.append("")
             continue
         out.append(raw)   # prose: keep it, keywords and all
@@ -828,7 +994,9 @@ def resolve_carrier(pr: PullRequest, by_head: dict[str, PullRequest],
     Returns `pr` itself when it already targets the default branch. Returns
     None when the stack cannot be followed to a default-branch PR (a base
     branch with no PR, a cycle, or a stack deeper than MAX_STACK_DEPTH) — the
-    caller reports that as `unresolved`, never as a pass.
+    caller reports that as `unresolved`, never as a pass. WHICH of the three it
+    was is `_carrier_walk`'s second return value, because the message must name
+    the cause that happened.
     """
     path = carrier_path(pr, by_head, default_branch)
     return path[-1] if path else None
@@ -841,27 +1009,99 @@ def carrier_path(pr: PullRequest, by_head: dict[str, PullRequest],
     `classify` needs the intermediate links, not just the top: a subject's
     commits reach the default branch only THROUGH them, so "the work did land"
     cannot be judged from the two endpoints alone (#10634 cycle 3).
+
+    None means the walk could not reach the default branch; `_carrier_walk` is
+    the same walk with the REASON attached, which is what a message needs —
+    "no PR exists" and "the walk stopped" are different facts.
+    """
+    path, why = _carrier_walk(pr, by_head, default_branch)
+    return None if why else path
+
+
+def _carrier_walk(pr: PullRequest, by_head: dict[str, PullRequest],
+                  default_branch: str) -> tuple[list[PullRequest], str | None]:
+    """([pr, …, deepest hop], why the walk stopped | None).
+
+    THREE distinct causes return no carrier, and a caller that emits ONE message
+    for all of them asserts a fact it cannot see (#10634 review P3):
+
+    * `no-pr`  — the deepest base has no PR on it at all, so nothing can be shown
+      to carry the work yet. This is the only cause where a PR is MISSING;
+    * `cycle`  — the bases point back at a PR the walk already visited. Every PR
+      in it exists, and telling its author to open one is the single action that
+      cannot repair a cycle;
+    * `depth`  — the stack is deeper than `MAX_STACK_DEPTH`. Every PR in it
+      exists too: measurement STOPPED, evidence is not missing.
+
+    The path is always returned, so the caller can NAME the hops it did see.
     """
     seen: set[int] = {id(pr)}
     path = [pr]
     cur = pr
     for _ in range(MAX_STACK_DEPTH):
         if cur.base == default_branch:
-            return path
+            return path, None
         nxt = by_head.get(cur.base)
         if nxt is None:
-            return None
+            return path, "no-pr"
         # IDENTITY, not the PR number: the offline mode's records carry no
         # number (they are all 0), so a number comparison would report a cycle
         # on the very first hop and turn every offline judgement into
         # `unresolved`. Identity is also the correct cycle test in the live
         # mode, where every record comes from `by_head` and is therefore stable.
         if id(nxt) in seen:
-            return None  # a cycle: no PR in it targets the default branch
+            return path, "cycle"
         seen.add(id(nxt))
         path.append(nxt)
         cur = nxt
-    return None
+    return path, "depth"
+
+
+def _no_carrier_detail(pr: PullRequest, issue: int, default_branch: str,
+                       path: list[PullRequest], why: str,
+                       by_head: dict[str, PullRequest]) -> str:
+    """The `carrier is None` message, for the cause that actually happened.
+
+    The verdict is `unresolved` either way and it is fail-closed; what differs is
+    the CAUSE and the remedy the reader infers from it. The module states the
+    rule in two other arms (`classify`'s lenient-only arm and
+    `_closure_tense`) — a message must not name a cause the tool cannot
+    distinguish — and this arm was the one place it was not applied: all three
+    causes emitted "no PR with that head branch exists", which is FALSE for a
+    cycle (the PR exists, it is the other half of the cycle) and false for the
+    depth cap (every PR exists; measurement stopped). The remedy the false
+    sentence implies — open a PR on that base — is the one action that cannot
+    repair either (#10634 review P3).
+    """
+    head = (f"PR #{pr.number} says `Closes #{issue}` but targets "
+            f"`{pr.base}`, and ")
+    if why == "cycle":
+        cur = path[-1]
+        back = by_head.get(cur.base)
+        if back is not None:
+            pair = (f"PR #{cur.number} targets `{cur.base}` and PR #{back.number} "
+                    f"targets `{back.base}` — each is the other's head branch")
+        else:                                    # unreachable, but never a lie
+            pair = f"PR #{cur.number} targets `{cur.base}`, a PR already visited"
+        return (head +
+                f"the stack it sits in is a CYCLE: {pair} — so no PR in it "
+                f"targets `{default_branch}`. NO PR IS MISSING here: nothing can "
+                f"be shown to carry #{issue} to `{default_branch}` because the "
+                f"bases point at each other. Re-target one of them at "
+                f"`{default_branch}` (or at a branch whose PR targets it) and the "
+                f"keyword fires on that merge.")
+    if why == "depth":
+        return (head +
+                f"its stack is deeper than this tool follows "
+                f"(`MAX_STACK_DEPTH = {MAX_STACK_DEPTH}` hops): measurement "
+                f"stopped one hop short of the PR whose head is "
+                f"`{path[-1].base}`. Every PR in the stack exists — this is a cap "
+                f"on the walk, not a missing PR — so nothing can be shown to "
+                f"carry #{issue} to `{default_branch}` YET. Re-state the keyword "
+                f"on a PR closer to `{default_branch}` in the chain, or raise the "
+                f"cap deliberately.")
+    return (head + f"no PR with that head branch exists — nothing can be shown "
+            f"to carry #{issue} to `{default_branch}` yet.")
 
 
 def classify(pr: PullRequest, by_head: dict[str, PullRequest],
@@ -870,8 +1110,8 @@ def classify(pr: PullRequest, by_head: dict[str, PullRequest],
     refs = parse_closing_refs(pr.body, repo)
     if not refs:
         return []
-    path = carrier_path(pr, by_head, default_branch)
-    carrier = path[-1] if path else None
+    path, why = _carrier_walk(pr, by_head, default_branch)
+    carrier = None if why else path[-1]
     # Only the `lands` arm needs this, and it is the SAME body for every ref, so
     # it is computed once (review c6).
     strict_refs = set(parse_closing_refs(pr.body, repo, strict=True))
@@ -881,10 +1121,8 @@ def classify(pr: PullRequest, by_head: dict[str, PullRequest],
             findings.append(Finding(
                 issue=issue, pr=pr.number, base=pr.base, verdict="unresolved",
                 carrier=None,
-                detail=(f"PR #{pr.number} says `Closes #{issue}` but targets "
-                        f"`{pr.base}`, and no PR with that head branch exists — "
-                        f"nothing can be shown to carry #{issue} to "
-                        f"`{default_branch}` yet."),
+                detail=_no_carrier_detail(pr, issue, default_branch, path,
+                                          why or "no-pr", by_head),
             ))
             continue
         # A SUBJECT that was CLOSED WITHOUT MERGING never fired the keyword — but
@@ -1733,21 +1971,24 @@ _MERGED_GH_FIELDS = (
 _ISSUE_GH_FIELDS = "number,state,body"
 
 #: A `gh` call that never returns must not hang the run (#10634 review P2). This
-#: tool runs inside an always-on drift-guard job, and a job-level timeout kills
-#: the WHOLE job — `continue-on-error: true` covers a step's exit status, not a
-#: step that never finishes — so an unreachable API would take the rest of the
-#: drift guard down with it instead of reporting UNMEASURED. Bounded here, at the
-#: one place every live call goes through.
+#: tool runs inside a small advisory CI job (`.github/workflows/
+#: closes-coherence.yml`), and a job-level timeout kills the WHOLE job —
+#: `continue-on-error: true` covers a step's exit status, not a step that never
+#: finishes — so an unreachable API would take the rest of that job down instead
+#: of reporting UNMEASURED. Bounded here, at the one place every live call goes
+#: through.
 _GH_TIMEOUT_SECONDS = 60
 
 #: …and the bound is PER CALL, which is not enough for the run (#10634 review P2):
 #: one `--pr` run issues `2 + L` sequential calls (identity, the PR, one per base
 #: branch up the stack) and `collect_stack` follows the stack as far as it goes,
 #: so `L` is not capped by `MAX_STACK_DEPTH` — thirteen calls at the per-call cap
-#: already reach the job's `timeout-minutes: 15`. So there is also an aggregate
-#: budget: once it is gone the run reports UNMEASURED instead of spending the
-#: job, which is the same contract the per-call bound has (exit 2, never a pass,
-#: never a red the advisory step cannot cover).
+#: are 780s, and the ONLY workflow that runs this tool,
+#: `.github/workflows/closes-coherence.yml`, caps its job at `timeout-minutes: 10`
+#: (600s). So there is also an aggregate budget: once it is gone the run reports
+#: UNMEASURED instead of spending the job, which is the same contract the
+#: per-call bound has (exit 2, never a pass, never a red the advisory step
+#: cannot cover).
 _GH_RUN_BUDGET_SECONDS = 300
 
 _run_budget_started: float | None = None
