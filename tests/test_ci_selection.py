@@ -7644,18 +7644,27 @@ def test_the_9548_rows_note_is_readable_by_the_guard_whatever_its_shape():
     attachment is carried ENTIRELY by the `⛔` that opens the block, because
     `tools.ci_timing._NOTE_OPENER_RE` (`^(?:#?\\d{3,5}…|[A-Z])`) reads the block's
     semantic first word — "The CASE COUNT …" — as a NEW note. Drop the emoji in a
-    routine cleanup and the whole note silently stops being read; measured at
+    routine cleanup and the whole note silently stops being read: measured at
     `2ec1f36d1`, that edit takes the joined note from 2,150 chars to **0**.
 
-    ⛔ NOT `_row_continuation_lines(...) >= 1`. The writer FLATTENS a wrapped note on
-    a CUT or a wholesale replacement, so requiring a committed wrap reds a HEALTHY
-    map — the sibling `tests/test_ci_timing.py::_assert_preamble_shape` refused
-    exactly that clause for that reason (#10575 review, P2). This asserts
-    READABILITY instead, which both healthy shapes satisfy and a detached block does
-    not: the note's LAST line must be reachable in the text
-    `_durations_row_comments` joins. Measured at `2ec1f36d1` — committed: True
-    (2,150 chars); after one `render_refreshed_manifest` (flattened): True (2,150);
-    emoji dropped (detached): False (0).
+    ⛔ NOT `_row_continuation_lines(...) >= 1`, AND NOT `assert block` either. The
+    writer FLATTENS a wrapped note on a CUT or a wholesale replacement
+    (`tools/ci_timing.py:2939-2945`: `lines[index] = f"{rendered_row}{tail}"` plus
+    `drop.update(continuation)`), so a HEALTHY map can have ZERO continuation lines
+    with the whole note read off the row line. The sibling
+    `tests/test_ci_timing.py::_assert_preamble_shape` refused the same clause for
+    that reason (#10575 review, P2). Measured at this head, read-only:
+
+        committed                                        span = 31, reader joins 2,150
+        CUT-arm shape, built as `tools/ci_timing.py:2939-2945` writes it
+                                                         span =  0, reader joins 2,154
+        `⛔` dropped so the block opens a note           span =  0, reader joins      0
+
+    So the shapes are told apart by READABILITY alone, and the pin below is the one
+    property every healthy shape satisfies and a detached block does not: whatever
+    the row carries must be REACHABLE in the text `_durations_row_comments` joins.
+    The expected text is derived from the map ITSELF (never a phrase baked in here),
+    so a legitimate rewrite of the note stays green.
     """
     text = cs.MANIFEST.read_text(encoding="utf-8")
     lines = text.splitlines()
@@ -7664,22 +7673,37 @@ def test_the_9548_rows_note_is_readable_by_the_guard_whatever_its_shape():
     row = next(i for i, ln in enumerate(lines)
                if i > block_start and ln.startswith(f"  {key}:"))
 
+    # Collect the block below the row with the READER's span semantics, not a
+    # stricter one of our own: a blank line does NOT end a note and any other
+    # non-comment line does (`tools/ci_timing.py:2208`, mirrored by
+    # `_durations_row_comments`). A loop that stopped at a blank line red a map both
+    # production predicates still accept (measured: writer span 31, reader 2,150).
     block: list[str] = []
     for ln in lines[row + 1:]:
+        if not ln.strip():
+            continue
         if not (ln[:1] in (" ", "\t") and ln.strip().startswith("#")):
             break
         block.append(ln)
-    assert block, (
-        "this row carries no note at all — the note is its rationale, restore it")
-    last_claim = block[-1].strip().lstrip("#").strip()
-    assert last_claim, "the note's last line is an empty comment marker"
 
     joined = dict(_durations_row_comments(text))[key]
-    assert last_claim in joined, (
-        "the note below this row is DETACHED: its first line OPENS a note of its "
-        "own (`tools.ci_timing._starts_a_new_note`), so `_durations_row_comments` "
-        "never joins it and no duration guard reads what it claims. Start the block "
-        f"with a line that CONTINUES the row's sentence. (joined: {len(joined)} chars)")
+    if block:
+        last_claim = block[-1].strip().lstrip("#").strip()
+        assert last_claim, "the note's last line is an empty comment marker"
+        assert last_claim in joined, (
+            "the note below this row is DETACHED: its first line OPENS a note of its "
+            "own (`tools.ci_timing._starts_a_new_note`), so `_durations_row_comments` "
+            "never joins it and no duration guard reads what it claims. Start the "
+            f"block with a line that CONTINUES the row's sentence. (joined: "
+            f"{len(joined)} chars)")
+    else:
+        # The FLATTENED shape. There is no block to detach here — the writer moved
+        # the whole note onto the row line — so the only way this shape loses the
+        # guard is by the row carrying no note at all.
+        assert joined.strip(), (
+            "this row carries NO note in either shape: no continuation block below "
+            "it and no tail on its row line, so no duration guard reads what it "
+            "claims. The note is the row's rationale — restore it.")
 
 
 # ── a row may not state ZERO cases for a file that defines tests ──────────────
