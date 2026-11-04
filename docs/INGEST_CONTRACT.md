@@ -444,10 +444,13 @@ If the ingest call dies mid-flight (client killed, network drop, server
 SIGKILL), you get **no response** — but the write may have partially
 committed. The recovery signal is a single rule:
 
-> **Re-submit the identical bundle, unpatched.** Convergence is exactly-once:
-> items that committed dedup, items that didn't commit are created, and the
-> whole logical bundle carries **one `batch_id`** across kill + retry
-> (`batch_id` is content-derived, not per-call — a retry mints the same id).
+> **Re-submit the identical bundle, unpatched.** Convergence is exactly-once for
+> `points`, `sources` and the connections between them: those that committed
+> dedup, those that didn't are created — **not** for `document`/`event` ENTITY
+> items, which append (§15's carve-out, and the reason this is not a blank
+> "resubmit anything" licence). The whole logical bundle carries **one
+> `batch_id`** across kill + retry (`batch_id` is content-derived, not per-call —
+> a retry mints the same id).
 
 - The killed call returns no structured error; there is nothing to parse.
 - **Metering note:** a transport-killed call commits its writes but is never
@@ -481,8 +484,8 @@ with the exact retry action:
 | 4 | `ERR_QUOTA_SERVER` `{error, code}` | Transient quota-counting failure (fail-closed). | **Backoff-retry** (transient). |
 | 5 | `ERR_UNAUTHORIZED` `{error, code}` | 401 — missing/invalid `Bearer tt_<key>`. | **Fix credentials; never retry.** |
 | 6 | `ERR_REGISTRY` `{error, code}` | 503 — team registry (key→team resolution) unavailable. The `-32099` **static-auth-misconfigured** variant ("Static auth misconfigured: no API key set") is a server configuration problem. | Transient → **backoff-retry**. The `-32099` static-misconfig variant → **operator fix (config), don't retry**. |
-| 7 | Phase-2 failure `{error}` — **no code** | A write failed mid-commit; partial state is committed. The error names the section/index/item; it carries the already-computed `batch_id`. | **Re-send converges** — the retry dedups what committed and writes the rest. Audit via `batch_id` first if you like. |
-| 8 | Transport death — **no response** | The call may have committed anything. | **Re-send the identical bundle**; exactly-once convergence ([§7](#7-kill-recovery)). |
+| 7 | Phase-2 failure `{error}` — **no code** | A write failed mid-commit; partial state is committed. The error names the section/index/item; it carries the already-computed `batch_id`. | **Re-send converges** — the retry dedups what committed and writes the rest (points/sources/connections; `document`/`event` entity items append instead — [§15](#15-timeout--failure)). Audit via `batch_id` first if you like. |
+| 8 | Transport death — **no response** | The call may have committed anything. | **Re-send the identical bundle**; exactly-once convergence for points/sources/connections — **NOT** for `document`/`event` entity items, which append ([§7](#7-kill-recovery), [§15](#15-timeout--failure)). |
 | 9 | `EmbeddedStoreBusyError` — named class prefix in `{error}` (**planned**) | Cross-process contention on an embedded store (another process holds the db). **planned:** fail-fast with a named error replaces today's blocking flock-with-timeout handling. | **planned:** do **NOT** retry until the holder exits. Unlike phase-2 partial-state errors, re-sending while the store is busy does **not** converge — it re-errors. (Fail-fast replaces the old silent second-daemon behavior.) |
 
 **planned:** `ERR_BUNDLE_INVALID` is a new exported constant classified as a
@@ -809,9 +812,12 @@ true`, and re-sending is safe once the advertised delay has elapsed.)
   returns "artifacts stamped with the batch_id, **created OR adopted via
   dedup**".
 - **Scope of audit:** the STAMPED classes — points + operator/mitigation
-  Points + direct edges. Entities and sources are **not** stamped (they are
-  url/name-keyed) and are unreachable by `batch_id` — documented as out of
-  stamp scope.
+  Points + direct edges. Entities and sources are **not** stamped, and are
+  unreachable by `batch_id` — documented as out of stamp scope. The reason differs
+  by kind and is NOT "entities are all keyed": `sources` are url-keyed, and
+  `subject`/`object` entities are name-keyed (a re-ingest resolves onto the same
+  node), while `event`/`document` entity items mint a FRESH id per write — they are
+  outside stamp scope for that reason, not because a key resolves them (§15).
 - **Batch discovery:** **planned** — a batch discovery/audit primitive
   (`list_batch(batch_id)` or a batch_id filter on `query()`) ships with this
   release. It is what lets you find what committed when transport death ate
