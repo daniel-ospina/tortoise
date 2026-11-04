@@ -874,6 +874,57 @@ def test_a_pid_d_claim_refusal_names_the_check_and_the_remedy(tmp_path):
         wrapper.wait()
 
 
+def test_the_duplicate_rail_guard_keys_on_the_repo_not_its_spelling(tmp_path, monkeypatch):
+    """⛔ TWO SPELLINGS OF ONE REPO ARE ONE RAIL (#10691 review).
+
+    A `flock` is held on the open FILE (`flock(2)`), so the guard is only as strong
+    as the identity the path is keyed on — and the artifact used to be named from the
+    RAW repo string. Measured at the pre-fix head: `launch(7, "o/r")` and
+    `launch(7, "github.com/o/r")` wrote two records, took two locks and BOTH STARTED
+    — two live rails on one PR, the #3061 collision this guard exists to refuse —
+    while a third launch with the SAME spelling was correctly refused (the case
+    above).
+
+    Non-vacuity: put `_slug` back to `repo.replace("/", "-")` and the second launch
+    spawns a second rail and RETURNS a `Launch` instead of raising.
+    """
+    co = make_checkout(tmp_path)
+    sd = tmp_path / "state"
+    monkeypatch.setenv("FAKE_RAIL_SLEEP", "20")
+    ln = rd.launch(7, cwd=co, state_dir=sd, repo="o/r")
+    try:
+        assert wait_state(sd, 7, rd.WAITING).state == rd.WAITING
+        for spelling in ("github.com/o/r", "GitHub.com/O/R", "o/r"):
+            with pytest.raises(rd.Refused) as exc:
+                rd.launch(7, cwd=co, state_dir=sd, repo=spelling)
+            assert "ALREADY LIVE" in str(exc.value), spelling
+    finally:
+        kill_group(ln.pid)
+
+
+def test_one_record_is_readable_under_any_spelling_of_its_repo(tmp_path, monkeypatch):
+    """The record a spelling resolves to is ONE file, in every direction.
+
+    A canonical lock path is only half the property: if `collect` resolved a
+    different file for a differently-spelled repo, the guard's holder check and the
+    operator's `collect` would disagree about which record describes the rail — the
+    same split, one verb over.
+    """
+    co = make_checkout(tmp_path)
+    sd = tmp_path / "state"
+    monkeypatch.setenv("FAKE_RAIL_SLEEP", "4")
+    ln = rd.launch(76, cwd=co, state_dir=sd, repo="o/r")
+    try:
+        assert (rd.artifact_path(sd, "github.com/o/r", 76)
+                == rd.artifact_path(sd, "o/r", 76))
+        st = rd.collect(sd, "github.com/o/r", 76)
+        assert st is not None, "collect lost a record that launch just wrote"
+        assert st.pr == 76
+        assert st.state == rd.WAITING, st.as_dict()
+    finally:
+        kill_group(ln.pid)
+
+
 def test_an_announced_merge_outranks_a_recycled_child_pid(tmp_path):
     """⛔ ANNOUNCED BEATS `lost` — INCLUDING THE `lost` A RECYCLED PID DRAWS.
 

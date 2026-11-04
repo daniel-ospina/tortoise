@@ -266,7 +266,22 @@ _PS_USABLE: bool | None = None
 
 # ── paths ────────────────────────────────────────────────────────────────────
 def _slug(repo: str) -> str:
-    return repo.replace("/", "-")
+    """The artifact/lock name for a repo — ONE name per repo, whatever its spelling.
+
+    ⛔ THE DUPLICATE-RAIL GUARD IS THE LOCK, AND A LOCK IS ONLY AS GOOD AS THE
+    IDENTITY IT IS KEYED ON (`flock(2)`: locks are held on the open FILE, so two
+    spellings that produce two paths are two locks). Keying this on the raw repo
+    string made `o/r` and `github.com/o/r` two different artifacts — measured, both
+    `launch()` calls started and ran concurrently, i.e. TWO LIVE RAILS ON ONE PR,
+    the #3061 collision the guard exists to refuse, while a third launch with the
+    SAME spelling was correctly refused.
+
+    So the name is derived from `_repo_key` — the module's ONE canonicaliser, which
+    lowercases and drops an attestable host prefix — and every consumer of this
+    function (`artifact_path`, `log_path`, and the `.lock` which is derived from the
+    artifact) inherits the single key without repeating it.
+    """
+    return _repo_key(repo).replace("/", "-")
 
 
 def artifact_path(state_dir: Path, repo: str, pr: int) -> Path:
@@ -1545,7 +1560,13 @@ def launch(pr: int, *, cwd: Path, state_dir: Path, repo: str | None = None,
                 "a bypass. Unset it and re-run: detachment changes who outlives whom, "
                 "never what is checked"
             )
-    repo = repo or _resolve_repo(Path(cwd))
+    repo = _repo_key(repo or _resolve_repo(Path(cwd)))
+    # ⛔ CANONICALISED ONCE, AT THE TOP, because `repo` is the identity THREE
+    # things key on: the artifact/lock path (via `_slug`), the `REPO=` line written
+    # into it, and every `gh` call that reads the PR head. Writing the raw spelling
+    # while the path is canonical is how the duplicate-rail guard was bypassed —
+    # `o/r` and `github.com/o/r` produced two artifacts, two locks and two live
+    # rails on one PR (#10691 review). One form, everywhere.
     # ⛔ RESOLVE, because the child runs with `cwd=<checkout>`: a relative
     # `--state-dir` would otherwise resolve the artifact/log against the CHECKOUT
     # while the launcher writes them against the lane's own cwd — splitting one
