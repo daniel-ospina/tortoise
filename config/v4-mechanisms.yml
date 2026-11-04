@@ -797,6 +797,21 @@ mechanisms:
       over a refusal on an AMBIGUOUS colloquial spelling, not a new unit. The
       colloquially-correct `20kms`/`20km` is unaffected (it stays tolerated) and
       `20kms`/`20000 m` stays REFUSED at both heads.
+      ⛔ AND A THIRD thing the same arm tolerates, which it did NOT until review
+      cycle 7 measured it: the SIDE THAT STATES NO UNIT. `the fleet drove 20k
+      miles` against `the fleet drove 20000` was TOLERATED at `origin/main`
+      `525fde4a9` — `miles` was not fused there, so the value bound as a bare `k`
+      and `_magnitude_agrees` closed the gap — and REFUSED here, because the
+      arm's match was an EXACT identity equality that `('', '20000', None)` can
+      never satisfy. Every spelling this widen fuses inherits it (`3k days`/
+      `3000`, `5k seconds`/`5000`, `5k milliseconds`/`5000`). It is now the
+      module's OLDEST tolerance (`800`/`800ms` — the unit is written or not)
+      applied to the composed form, with the same sign and post-fold core. Scoped
+      deliberately: a rewritten NUMBER (`20k miles`/`21000`), two STATED units
+      (`20k miles`/`20000 km`, `3k days`/`3000 hours`) and a stated spelling from
+      outside the tables (`5k millis`/`5000 ms`, #10876) are all still REFUSED.
+      Pinned by
+      `tests/test_state_value_verbatim_10360.py::test_a_composed_prefix_against_a_UNITLESS_side_keeps_the_omitted_unit_tolerance`.
       ⛔ The OPPOSITE direction is REFUSED, and it is a FALSE ACCUSATION: when
       the magnitude side carries no MAPPED unit — either a spelling outside both
       tables (`5k millis`, `5k dys`) or NO unit word at all (`5k` alone) — the
