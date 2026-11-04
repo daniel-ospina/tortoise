@@ -16385,7 +16385,18 @@ class TortoiseSDK:
             "s.contentHash=$ch",
             "s.summary=$sum",
             "s.topics=$topics",
-            f"s.{SOURCE_SEARCH_TEXT_FIELD}=coalesce($st, s.{SOURCE_SEARCH_TEXT_FIELD})",
+            # #3518's coalesce kept the FIRST search text this node ever got, so
+            # a Source captured before #10000 kept the transcript prose in the
+            # field the FTS index is declared on even after the derivation
+            # stopped producing prose — the fix would stop NEW leaks and heal
+            # no old one. The rule is now "this capture's own derivation wins":
+            # a non-NULL `$st` (a transcript with topics) REPLACES the stored
+            # text, and an empty/wordless transcript still cannot erase what a
+            # previous capture (or the indexer path) established — the property
+            # the coalesce was added for. The two capture writes cannot collide
+            # with the indexer: this writer only touches `session:<id>` Sources.
+            f"s.{SOURCE_SEARCH_TEXT_FIELD}=CASE WHEN $st IS NOT NULL "
+            f"THEN $st ELSE s.{SOURCE_SEARCH_TEXT_FIELD} END",
             # ⛔ THIS STAYS A `coalesce` — #398's NEVER-OVERWRITE CONTRACT, and
             # #9451's fix is in the RECORD, not here. `ingestedAt` means "when
             # Tortoise FIRST saw this source" (`_upsert_document`'s note below,

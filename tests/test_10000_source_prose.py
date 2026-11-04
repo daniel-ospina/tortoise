@@ -112,3 +112,32 @@ def _is_turn_store(labels: list[str]) -> bool:
     """
     return labels == ["Point"] or (
         "Point" in labels and len(labels) == 1)
+
+
+def test_a_recapture_replaces_the_prose_a_pre_fix_write_left_behind(sdk):
+    """The fix must HEAL, not only stop new leaks.
+
+    A Source captured before this change carries the utterance in ``summary``
+    and (because #3518's ``_searchText`` SET was a ``coalesce``) in the field
+    the FTS index is declared on — so a re-capture that merely stopped
+    PRODUCING prose would leave the old prose on the node and in the index
+    forever. This seeds that exact pre-fix state and asserts the next capture
+    replaces it.
+    """
+    session_id = "sess-source-prose-heal-10000"
+    url = f"session:{session_id}"
+    stale = f"{MARKER} stale prose from a pre-fix write"
+    proj = sdk._get_proj()
+    proj.g.query(
+        "MERGE (s:Source {url:$u}) SET s.summary=$sum, s._searchText=$st",
+        params={"u": url, "sum": stale, "st": stale})
+    assert _nodes_carrying(sdk, MARKER), "the seeded pre-fix state is missing"
+
+    _capture(sdk, session_id)
+
+    offenders = [(labels, props) for labels, props in _nodes_carrying(sdk, MARKER)
+                 if not _is_turn_store(labels)]
+    assert not offenders, (
+        "a re-capture left the pre-fix prose on the node — the SET must replace "
+        "a non-empty derivation instead of coalescing into the old value:\n"
+        + "\n".join(f"  {labels} {props}" for labels, props in offenders))
