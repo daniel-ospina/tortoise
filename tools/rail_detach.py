@@ -460,13 +460,26 @@ def _in_group(pid: int, pgid: int) -> bool:
     both preserve the group) where an argv marker does not — the rail may exec
     anything — and it defeats pid reuse, because a recycled pid is in some other
     group. `getpgid` raises for a pid that is gone, so this also answers "exists".
+    ONE-SIDED, like every probe here: a denied probe (`PermissionError`) answers
+    True, because "I may not look" is not "it is not ours".
     """
     if pid <= 0 or pgid <= 0:
         return False
     try:
         return os.getpgid(pid) == pgid
-    except OSError:
+    # ⛔ THE ERRNO IS THE WHOLE ANSWER, so only ESRCH is "gone".
+    # `getpgid` raises `PermissionError` for a process that EXISTS and that we may
+    # not inspect, and a blanket `except OSError` reads that as "not ours" — the
+    # `lost` direction this module forbids (`_rail_alive`'s killpg arm states the
+    # same rule 100 lines below, and `psutil.pid_exists` is the canonical
+    # implementation: True on PermissionError, False only on ProcessLookupError).
+    # Unmeasurable ⇒ keep the claim, exactly as `_ps_stat` and `_pid_is_a_stranger`
+    # do, because `lost` is the state `start` ACCEPTS: reading a live rail as dead
+    # lets a SECOND rail through on a PR that is still merging (#3061).
+    except ProcessLookupError:
         return False
+    except OSError:
+        return True
 
 
 def _pid_alive(pid: int, marker: str = "", *, pgid: int | None = None) -> bool:
@@ -493,8 +506,15 @@ def _pid_alive(pid: int, marker: str = "", *, pgid: int | None = None) -> bool:
     if pgid is None:
         try:
             os.kill(pid, 0)
-        except OSError:
+        # ⛔ SAME THREE-VALUED ANSWER AS `_in_group` AND `_rail_alive`'s killpg arm:
+        # `PermissionError` means the process EXISTS and we may not signal it, i.e.
+        # a rail that is still merging. Only ESRCH is `gone`; anything else is
+        # unmeasurable, and unmeasurable keeps the claim (`_ps_stat`) — reading it
+        # as `lost` releases `start` on a live rail (#3061).
+        except ProcessLookupError:
             return False
+        except OSError:
+            return True
     elif not _in_group(pid, pgid):
         return False
     # A ZOMBIE still answers kill(0) and its cmdline is EMPTY — reporting it alive
@@ -716,6 +736,95 @@ class RailState:
         }
 
 
+@dataclass
+class _Snapshot:
+    """ONE read of the artifact, plus the attempt-scoped tail of its log.
+
+    ⛔ EVERY VALUE A VERDICT READS COMES FROM ONE SNAPSHOT. It replaces the loose
+    `text` / `log` / `exits` triple, which let a re-read update `text` while `log`
+    and `exits` still described the PRE-probe artifact — so a merge line the rail
+    had already written was invisible to `_merge_evidence` and the rail read
+    `lost`. "Read after the probe" has to be a property of the whole verdict, not
+    of one field in it.
+    """
+    text: str
+    log: str
+    logp: str
+    exits: list[str]
+    pid: int
+    child: int
+
+
+def _read_snapshot(art: Path, logp_default: Path,
+                   text: str | None = None) -> _Snapshot:
+    """Read the artifact (unless the caller hands back the exact text it just
+    compared) and derive every field a verdict reads from THAT one read."""
+    if text is None:
+        text = art.read_text(encoding="utf-8", errors="replace")
+    logp = Path(read_field(text, "LOG", str(logp_default)))
+    log = ""
+    if logp.exists():
+        full = logp.read_text(encoding="utf-8", errors="replace")
+        # ⛔ THE LOG IS APPEND-ONLY ACROSS ATTEMPTS. Parsing the whole file lets a
+        # DEAD attempt inherit a PREVIOUS attempt's `✅ merged` line and be
+        # reported merged — evidence forged by concatenation. Every verdict read
+        # is scoped to the LAST attempt.
+        cut = full.rfind(ATTEMPT_MARK)
+        # ⛔ NO MARK ⇒ NO SCOPED EVIDENCE. Our launcher always writes the mark
+        # before it spawns, so a log without one is not this attempt's: reading it
+        # whole would let a dead attempt inherit ANY earlier `✅ merged` line — the
+        # forged-evidence shape the scoping exists to prevent. Fail CLOSED (empty
+        # evidence ⇒ refused/lost), never "read everything".
+        log = full[cut:] if cut >= 0 else ""
+    return _Snapshot(
+        text=text,
+        log=log,
+        logp=str(logp),
+        exits=_attempt_exits(text),
+        pid=_int_or_none(read_field(text, "PID", "0")) or 0,
+        child=_int_or_none(read_field(text, "CHILD_PID", "0")) or 0,
+    )
+
+
+def _state_from(snap: _Snapshot, pr: int, art: Path) -> RailState:
+    """The `waiting` skeleton a verdict is filled into."""
+    return RailState(
+        pr=pr,
+        state=WAITING,
+        run_ids=sorted(set(RUN_ID_RE.findall(snap.log)), key=lambda s: int(s)),
+        since=read_field(snap.text, "STARTED_AT"),
+        head=read_field(snap.text, "HEAD"),
+        pid=snap.pid,
+        child=snap.child,
+        artifact=str(art),
+        log=snap.logp,
+    )
+
+
+def _exit_verdict(st: RailState, snap: _Snapshot) -> RailState:
+    """The verdict for an artifact that carries this attempt's `EXIT=`."""
+    code = _int_or_none(snap.exits[-1])
+    st.exit_code = code
+    merged, sha = _merge_evidence(snap.log)
+    if merged == MERGED:
+        st.state, st.merge_sha = MERGED, sha
+        if not sha:
+            st.reason = ("merged; the rail could not read the merge commit "
+                         "(admin-merge.sh deliberately does not print it)")
+        return st
+    # Exit 0 with no merge line: the rail DECLINED to merge (a --dry-run,
+    # a --print-bounds, a help exit) or refused. Either way there is no
+    # merge, and saying `merged` would release the next beat's gate on
+    # evidence that does not exist.
+    st.state = REFUSED
+    hits = REFUSAL_RE.findall(snap.log)
+    st.reason = (hits[-1].strip()[:400] if hits else
+                 (f"exited {code} without a merge line — the rail did not "
+                  "merge (e.g. --dry-run), so this is not a merge"
+                  if code == 0 else "no refusal line in the log"))
+    return st
+
+
 def collect(state_dir: Path, repo: str, pr: int) -> RailState | None:
     """Read the artifact and the rail's log. NO side effects: no writes, no
     network, no process signals. The only external call is a local `ps` state
@@ -726,93 +835,69 @@ def collect(state_dir: Path, repo: str, pr: int) -> RailState | None:
         return None
     logp_default = log_path(state_dir, repo, pr)
     # ⛔ TWO PASSES, AND THE SECOND IS NOT A RETRY OF A FAILURE — it closes a
-    # STALE READ. `text` is read BEFORE the liveness probe, so a rail that writes
-    # `EXIT=` and exits *while* that probe runs is seen as GONE holding a read
-    # that predates its EXIT: `merged` with `exit_code=None` and the false reason
-    # "the EXIT line was never written", for a rail that wrote one. The state was
-    # still `merged` (the rail's own success line was in the log) so no gate
-    # moved, but the exit code and the explanation were both wrong — and it is
-    # not theoretical: it made `test_merged_state_names_the_sha_the_rail_printed`
+    # STALE READ. The artifact is read BEFORE the liveness probe, so a rail that
+    # writes `EXIT=` and exits *while* that probe runs is seen as GONE holding a
+    # read that predates its EXIT: `merged` with `exit_code=None` and the false
+    # reason "the EXIT line was never written", for a rail that wrote one. The
+    # state was still `merged` (the rail's own success line was in the log) so no
+    # gate moved, but the exit code and the explanation were both wrong — and it
+    # is not theoretical: it made `test_merged_state_names_the_sha_the_rail_printed`
     # flake 2/2 at load 27 on 2026-11-03 while passing in isolation.
     #
-    # So the "gone" conclusion is only drawn from an artifact re-read AFTER the
+    # So the "gone" conclusion is only drawn from a SNAPSHOT taken after the
     # probe. One extra read, and only on the path where we are about to declare a
     # rail dead.
-    for _ in range(2):
-        text = art.read_text(encoding="utf-8", errors="replace")
-        logp = Path(read_field(text, "LOG", str(logp_default)))
-        log = ""
-        if logp.exists():
-            full = logp.read_text(encoding="utf-8", errors="replace")
-            # ⛔ THE LOG IS APPEND-ONLY ACROSS ATTEMPTS. Parsing the whole file lets a
-            # DEAD attempt inherit a PREVIOUS attempt's `✅ merged` line and be
-            # reported merged — evidence forged by concatenation. Every verdict read
-            # is scoped to the LAST attempt.
-            cut = full.rfind(ATTEMPT_MARK)
-            # ⛔ NO MARK ⇒ NO SCOPED EVIDENCE. Our launcher always writes the mark
-            # before it spawns, so a log without one is not this attempt's: reading it
-            # whole would let a dead attempt inherit ANY earlier `✅ merged` line — the
-            # forged-evidence shape the scoping exists to prevent. Fail CLOSED (empty
-            # evidence ⇒ refused/lost), never "read everything".
-            log = full[cut:] if cut >= 0 else ""
-
-        exits = _attempt_exits(text)
-        pid = _int_or_none(read_field(text, "PID", "0")) or 0
-        child = _int_or_none(read_field(text, "CHILD_PID", "0")) or 0
-        st = RailState(
-            pr=pr,
-            state=WAITING,
-            run_ids=sorted(set(RUN_ID_RE.findall(log)), key=lambda s: int(s)),
-            since=read_field(text, "STARTED_AT"),
-            head=read_field(text, "HEAD"),
-            pid=pid,
-            child=child,
-            artifact=str(art),
-            log=str(logp),
-        )
-
-        if exits:
-            code = _int_or_none(exits[-1])
-            st.exit_code = code
-            merged, sha = _merge_evidence(log)
-            if merged == MERGED:
-                st.state, st.merge_sha = MERGED, sha
-                if not sha:
-                    st.reason = ("merged; the rail could not read the merge commit "
-                                 "(admin-merge.sh deliberately does not print it)")
-            else:
-                # Exit 0 with no merge line: the rail DECLINED to merge (a --dry-run,
-                # a --print-bounds, a help exit) or refused. Either way there is no
-                # merge, and saying `merged` would release the next beat's gate on
-                # evidence that does not exist.
-                st.state = REFUSED
-                hits = REFUSAL_RE.findall(log)
-                st.reason = (hits[-1].strip()[:400] if hits else
-                             (f"exited {code} without a merge line — the rail did not "
-                              "merge (e.g. --dry-run), so this is not a merge"
-                              if code == 0 else "no refusal line in the log"))
-            return st
+    #
+    # ⛔ AND THE RE-READ IS ADOPTED, NOT JUST COMPARED. Two passes narrow the race
+    # window but cannot close it if the value the loop used to DETECT the change is
+    # not the value the verdict is drawn from: when the artifact moved on the LAST
+    # pass the loop could not take another pass, so every conclusion below read the
+    # PRE-probe snapshot instead — a rail that wrote `✅ merged …` and then `EXIT=`
+    # in the second window was reported `lost`, the same defect one pass over, and
+    # the one direction the module must never answer (a real merge scoped out, and
+    # `start` released on a merged PR — #2235, #3061). The adoption below makes the
+    # final snapshot a post-probe read in EVERY exit from the loop, including the
+    # ones that conclude.
+    snap = _read_snapshot(art, logp_default)
+    probes = 2
+    while True:
+        st = _state_from(snap, pr, art)
+        if snap.exits:
+            return _exit_verdict(st, snap)
 
         # No EXIT line yet. Alive ⇒ waiting; gone ⇒ lost (NEVER merged). ⛔ ALIVE
         # IS "THE WRAPPER **OR** THE RAIL": a killed wrapper leaves the rail
         # running, and reading that as `lost` was the P1 (module docstring).
-        if _rail_alive(pid, child, str(art), age=_age_seconds(st.since)):
+        if probes > 0 and _rail_alive(snap.pid, snap.child, str(art),
+                                      age=_age_seconds(st.since)):
             st.state = WAITING
             return st
+        if probes == 0:
+            # Both probes said gone and the adopted snapshot is the post-probe
+            # read: conclude from it. A third probe would only re-open the same
+            # window, and an artifact that keeps moving is a broken rail — the
+            # verdict below still reads the FRESHEST read taken after a probe.
+            break
+        probes -= 1
 
         # Everything below concludes from the ABSENCE of `EXIT=`, so it needs a
-        # read taken after the probe that just said the writer is gone. Loop once
-        # on the fresh text when the artifact has moved; break when it has not
-        # (including `CHILD_STARTED=`, which the child appends and which changes
-        # nothing a verdict reads).
+        # read taken after the probe that just said the writer is gone. Loop on the
+        # fresh text when the artifact has moved; break when it has not (including
+        # `CHILD_STARTED=`, which the child appends and which changes nothing a
+        # verdict reads).
         fresh = art.read_text(encoding="utf-8", errors="replace")
         # `CHILD_PID=` is the same race one process over: the wrapper can be
         # killed in the instant between the spawn and the child naming itself, so
         # a first read that missed it is not yet "no rail".
-        if (_attempt_exits(fresh) != exits
-                or (not child and read_field(fresh, "CHILD_PID"))):
-            continue
-        break
+        if (_attempt_exits(fresh) == snap.exits
+                and not (not snap.child and read_field(fresh, "CHILD_PID"))):
+            break
+        # The artifact moved under the probe ⇒ adopt THAT read (and re-derive the
+        # log tail from it) before looping, so no verdict below can be drawn from
+        # the snapshot the move just invalidated.
+        snap = _read_snapshot(art, logp_default, text=fresh)
+    text, log, exits = snap.text, snap.log, snap.exits
+    pid, child = snap.pid, snap.child
     if pid == 0 and read_field(text, "SPAWNING") and not exits:
         # Between `SPAWNING=1` and the `PID=` append the rail IS alive but
         # unnamed. Reporting `lost` there defeats the same guard that refuses a

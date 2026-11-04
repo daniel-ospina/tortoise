@@ -440,6 +440,190 @@ def test_a_rail_that_exits_during_the_liveness_probe_keeps_its_exit_code(tmp_pat
     assert st.reason == "", st.reason            # not the "never written" lie
 
 
+def _reaped_pid() -> int:
+    """A pid that is provably GONE: a child that has already been reaped.
+
+    `/bin/true` is not on every box (measured: absent on this one), so the child is
+    the interpreter already running the suite.
+    """
+    proc = subprocess.Popen([sys.executable, "-c", ""])
+    proc.wait()
+    return proc.pid
+
+
+def test_a_permission_denied_probe_keeps_the_claim_and_only_esrch_is_gone(monkeypatch):
+    """⛔ THE ERRNO IS THE ANSWER, and this probe used to read `PermissionError`
+    as `gone`. `kill(pid, 0)` / `getpgid(pid)` raise it for a process that
+    **exists** and that we may not signal — a rail that is still merging — so a
+    blanket `except OSError` drew `lost` for a live rail. `lost` is exactly the
+    state `start` ACCEPTS, so the next beat truncates the artifact and scopes a
+    real merged line out for good (#3061, #2235). The canonical implementation is
+    `psutil.pid_exists`: True on `PermissionError`, False only on
+    `ProcessLookupError`.
+
+    The control arm is the SAME shape raising ESRCH: it must still answer False,
+    so this cannot be satisfied by a probe that answers True for everything.
+    """
+    pid = 900001
+
+    def raising(exc):
+        def probe(p, *a):
+            raise exc
+        return probe
+
+    denied = PermissionError(1, "Operation not permitted")
+    gone = ProcessLookupError(3, "No such process")
+
+    monkeypatch.setattr(os, "kill", raising(denied))
+    assert rd._pid_alive(pid, "/state/rail-o-r-1.md") is True    # pre-fix: False
+    monkeypatch.setattr(os, "kill", raising(gone))
+    assert rd._pid_alive(pid, "/state/rail-o-r-1.md") is False   # the control
+
+    monkeypatch.setattr(os, "getpgid", raising(denied))
+    assert rd._in_group(pid, 42) is True                          # pre-fix: False
+    monkeypatch.setattr(os, "getpgid", raising(gone))
+    assert rd._in_group(pid, 42) is False                         # the control
+
+
+def _deny_probes(monkeypatch, denied: set[int]) -> None:
+    """Make BOTH liveness probes answer `EPERM` for `denied` — the one errno that
+    means "the process EXISTS and you may not signal it". Pids outside the set are
+    probed for real, so a teardown can still kill the rail."""
+    real_kill, real_getpgid = os.kill, os.getpgid
+
+    def kill(pid, sig):
+        if pid in denied:
+            raise PermissionError(1, "Operation not permitted")
+        return real_kill(pid, sig)
+
+    def getpgid(pid):
+        if pid in denied:
+            raise PermissionError(1, "Operation not permitted")
+        return real_getpgid(pid)
+
+    monkeypatch.setattr(os, "kill", kill)
+    monkeypatch.setattr(os, "getpgid", getpgid)
+
+
+def test_a_live_rail_whose_wrapper_probe_is_denied_is_waiting_not_lost(tmp_path, monkeypatch):
+    """The consequence of the errno arm above, at the verb the fleet reads: a rail
+    that is LIVE and merging, on a box where `kill(pid, 0)` is DENIED for both its
+    wrapper and the rail itself, must read `waiting`. Pre-fix it read `lost` — the
+    durable-wrong direction, since `lost` releases `start` on a merged PR.
+    """
+    co = make_checkout(tmp_path)
+    sd = tmp_path / "state"
+    monkeypatch.setenv("FAKE_RAIL_SLEEP", "20")
+    ln = launch(sd, co, pr=76)
+    art = rd.artifact_path(sd, "o/r", 76)
+    child = int(wait_field(art, "CHILD_PID") or 0)
+    assert child > 0, art.read_text()
+    denied = {ln.pid, child}
+    _deny_probes(monkeypatch, denied)
+    try:
+        st = rd.collect(sd, "o/r", 76)
+    finally:
+        denied.clear()      # teardown needs the real probes back
+    assert st.state == rd.WAITING, st.as_dict()     # pre-fix: `lost`
+    assert st.exit_code is None, st.as_dict()
+    # …and the claim LIFTS when the rail really exits: the probe is one-sided, not
+    # one-way. A killed rail writes no EXIT, so this is `lost`.
+    kill_group(ln.pid)
+    st2 = wait_state(sd, 76, rd.LOST)
+    assert st2.state == rd.LOST, st2.as_dict()
+
+
+def test_a_denied_group_probe_for_the_rail_itself_keeps_the_claim(tmp_path, monkeypatch):
+    """THE OTHER ARM — the one `_in_group` carries. The wrapper here is genuinely
+    GONE (a reaped pid), so `kill(pid, 0)` cannot answer for the rail at all and the
+    only probe left is `getpgid(CHILD_PID)`, which raises `EPERM` for a LIVE rail
+    the caller may not inspect. Reading that as "not ours" drew `lost` for a rail
+    that is still merging; it must keep the claim, and it must still lift when the
+    process genuinely exits.
+    """
+    sd = tmp_path / "state"
+    sd.mkdir()
+    art = rd.artifact_path(sd, "o/r", 77)
+    logp = rd.log_path(sd, "o/r", 77)
+    rail = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(20)"],
+                            start_new_session=True, stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        art.write_text(
+            f"PR=77\nREPO=o/r\nHEAD=deadbeef\nSTARTED_AT={rd._iso_now()}\n"
+            f"LOG={logp}\nATTEMPT_ID=t77\nPID={_reaped_pid()}\n"
+            f"CHILD_PID={rail.pid}\n",
+            encoding="utf-8",
+        )
+        logp.write_text(f"\n===== rail attempt started {rd._iso_now()} (detached) =====\n",
+                        encoding="utf-8")
+        denied = {rail.pid}
+        _deny_probes(monkeypatch, denied)
+        try:
+            st = rd.collect(sd, "o/r", 77)
+        finally:
+            denied.clear()
+        assert st.state == rd.WAITING, st.as_dict()   # pre-fix: `lost`
+        rail.kill()
+        rail.wait()
+        st2 = rd.collect(sd, "o/r", 77)               # the claim lifts on a real exit
+        assert st2.state == rd.LOST, st2.as_dict()
+    finally:
+        with contextlib.suppress(OSError):
+            rail.kill()
+            rail.wait()
+
+
+def test_a_merge_written_during_the_second_probe_window_is_not_lost(tmp_path, monkeypatch):
+    """The two-pass loop exists so a `lost` conclusion is drawn only from a read
+    taken AFTER the liveness probe. It still failed on the LAST pass: the `continue`
+    that detected the move threw that read away, so every conclusion below read the
+    PRE-probe `text`/`log`/`exits` — a rail that wrote its merge line and then
+    `EXIT=` in the second window was reported `lost`, i.e. a real merge scoped out
+    and `start` released on a merged PR (#2235, #3061).
+
+    The race is reproduced WITHOUT a race: the probe writes `CHILD_PID=` in the
+    first window (so the loop must take its second pass) and the merge line plus
+    `EXIT=` in the second, then answers "gone" both times. Pre-fix: `lost` with no
+    exit code and no sha; post-fix: the rail's own evidence.
+    """
+    sd = tmp_path / "state"
+    sd.mkdir()
+    art = rd.artifact_path(sd, "o/r", 75)
+    logp = rd.log_path(sd, "o/r", 75)
+    wrapper, child = _reaped_pid(), _reaped_pid()
+    art.write_text(
+        f"PR=75\nREPO=o/r\nHEAD=deadbeef\nSTARTED_AT={rd._iso_now()}\n"
+        f"LOG={logp}\nATTEMPT_ID=t75\nPID={wrapper}\n",
+        encoding="utf-8",
+    )
+    logp.write_text(
+        f"\n===== rail attempt started {rd._iso_now()} (detached) =====\n"
+        "admin-merge: … FIRST-CHECKS wait: run 41557371710 is pending\n",
+        encoding="utf-8",
+    )
+    calls: list[int] = []
+
+    def probe(leader, child_pid, marker, **_kw):
+        calls.append(1)
+        if len(calls) == 1:
+            with art.open("a", encoding="utf-8") as fh:
+                fh.write(f"CHILD_PID={child}\n")
+        else:
+            with logp.open("a", encoding="utf-8") as fh:
+                fh.write("admin-merge: ✅ merged PR #75 at deadbeefcafe1234 "
+                         "(state=MERGED confirmed via the API)\n")
+            with art.open("a", encoding="utf-8") as fh:
+                fh.write("EXIT_ATTEMPT=t75\nEXIT=0\n")
+        return False                                     # GONE, both times
+
+    monkeypatch.setattr(rd, "_rail_alive", probe)
+    st = rd.collect(sd, "o/r", 75)
+    assert st.state == rd.MERGED, st.as_dict()            # pre-fix: `lost`
+    assert st.exit_code == 0, st.as_dict()                # pre-fix: None
+    assert st.merge_sha == "deadbeefcafe1234", st.as_dict()   # the rail's own line
+
+
 def test_previous_attempts_merge_line_is_not_inherited(tmp_path):
     """The log is append-only across attempts: a NEW attempt that dies with no EXIT
     must not inherit the OLD attempt's `✅ merged` — that is forged evidence."""
