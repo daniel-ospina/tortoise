@@ -1,6 +1,7 @@
 """#9548 — the record DROPPED every Point carrying `search_keys`.
 
-THE DEFECT. `public.point.search_keys` is `jsonb`. The graph — and therefore
+THE DEFECT. At #9548's head `public.point.search_keys` was `jsonb` (the
+narrowing that retired that premise is item 1 below). The graph — and therefore
 every `PointAdded`/`PointPromoted` journal snapshot, which carries the NODE's own
 value — stores the **space-joined STRING** FalkorDB's Point FULLTEXT index needs
 (`projection/entities.py::flatten_search_keys_prop`; a list-valued property is
@@ -19,12 +20,22 @@ column: the seam logged `type(exc).__name__` and threw `str(exc)` away.
 
 WHAT IS PINNED HERE, and why each half is needed.
 
-1. **The OLD shape is refused, and the test that says so fails on the pre-fix
-   code.** The projection now emits a JSON *document* for a `jsonb` column, so
-   the value bound for `search_keys` is `json.loads`-able and decodes back to
-   the graph's own string. Before the fix that parameter was the bare
-   `err4032 release deploy`, whose `json.loads` raises — i.e. the exact input
-   Postgres refused with `22P02`.
+1. **The ENCODING half is pinned where it still applies, and the COLUMN half has
+   since superseded the motivating case.** #9548 fixed the encoder — for a
+   `jsonb` column the projection emits a JSON *document*, so the bound value is
+   `json.loads`-able and decodes back to the graph's own string; before the fix
+   that parameter was the bare `err4032 release deploy`, whose `json.loads`
+   raises, i.e. exactly the input Postgres refused with `22P02`.
+   ⚠️ **THAT IS NO LONGER WHAT HAPPENS TO `search_keys`.** #10620's migration
+   `20261102000002_record_point_search_keys_text.sql` narrowed
+   `point.search_keys` to `text`, so on the landed schema the bound value is the
+   graph's own string VERBATIM — a JSON-quoting encoder there stores the quotes
+   as DATA, with no error and no counter. Both halves are asserted on the SAME
+   statement by
+   `test_the_bound_search_keys_value_is_the_graph_s_string_verbatim` (its
+   docstring carries the full inversion): the verbatim string for this column,
+   and a JSON document for every parameter whose column the schema still
+   declares `jsonb`.
 2. **The NEW shape APPLIES and round-trips through the record's OWN reader.** A
    green write is not enough: the record is a CACHE OF THE GRAPH
    (`cache_projection.node_from_row` reads the column straight back onto the

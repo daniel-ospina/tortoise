@@ -1972,13 +1972,17 @@ def _jsonb_or_scalar(column: str, value: Any) -> Any:
     journal/record disagreement and coercing it here would hide it.
 
     ⛔ A `jsonb` COLUMN IS A DOCUMENT CONTAINER, NOT A LIST (#9548). A bare
-    string bound to it is a JSON *scalar* — `search_keys` is the case: the graph
+    string bound to it is a JSON *scalar* — `search_keys` WAS the case: the graph
     stores it SPACE-JOINED (`flatten_search_keys_prop`, because FalkorDB's
     Point FULLTEXT index cannot match an array-valued property, #5482) and the
     journal carries the node's own value. Passing that string through unencoded
     made Postgres read it as raw JSON TEXT and refuse EVERY such record with
     `22P02` ("invalid input syntax for type json"); the seam counted one
     `write_failed` and dropped the row. 302 drops were measured live at #9548.
+    ⚠️ That column is `text` since #10620 (`20261102000002_record_point_search_
+    keys_text.sql`), so THIS function now passes that one string through
+    untouched — the rule below still governs every column that IS `jsonb`, and
+    a live column added back to `jsonb_columns()` gets encoded.
 
     ⚠️ `json.dumps` — not "store the array instead". The record is a CACHE OF
     THE GRAPH (`cache_projection.node_from_row` reads this column straight back

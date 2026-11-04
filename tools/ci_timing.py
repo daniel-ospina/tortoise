@@ -2134,7 +2134,7 @@ def _balance_cut_parens(text: str) -> str:
 #
 # `_DURATION_LINE_RE` reads a row's note as the tail on its own line, but a
 # note CAN wrap: an indented `#` line under a row can continue THAT row's note
-# (measured at this head: 1 row of 1225 does — `test_source_staleness_
+# (measured at this head: 1 row of 1239 does — `test_source_staleness_
 # sweep_5038.py` — and re-derive it, do not trust the figure, because a refresh
 # re-emits notes and moves it). The guard that judges the written map joins a
 # row's tail with its continuations before it judges a note
@@ -2219,7 +2219,9 @@ def _row_continuation_lines(lines: list[str], index: int) -> list[int]:
        an indented block documents. This map's DOMINANT convention is the opposite
        of the one the previous two conditions imply — an indented block PRECEDES
        the row it documents (measured at this head with this module's own
-       predicates: 73 of the 74 such blocks open a new note, and the ones sampled
+       predicates: 77 of the 78 such blocks open a new note — a SNAPSHOT of a
+       moving denominator, re-derived at `e49e641f4`; re-run the command rather
+       than trust the figure — and the ones sampled
        document the row BELOW — `# #4071: …` sits
        above `test_embedded_lane_canonical_store_4071.py`, `# #5612: …` above
        `test_journal_growth.py`, and the `355.0 IS A DELIBERATE CAP … #9172` block

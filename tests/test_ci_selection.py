@@ -6659,7 +6659,7 @@ ROWED_BY_THIS_FOLD = (
 )
 
 
-def test_every_test_file_the_fold_added_carries_a_durations_row():
+def test_every_fast_file_this_fold_rows_carries_a_durations_row():
     """#2148 P3: the ENTRY RULE, pinned — an added fast file has a row of its own."""
     from tools.ci_selection import load_manifest
     durations = load_manifest()["durations"]
@@ -6998,8 +6998,9 @@ def _durations_row_comments(text: str):
     row does this block document" — §3.2.3.3 of the YAML spec says comments are "a
     presentation detail … not associated with a particular node" — and this map's
     dominant convention is the OPPOSITE of "the block continues the row above": the
-    block PRECEDES the row it documents (73 of the 74 such blocks at this head open
-    a new note). Joining anyway attributes a neighbour's prose to the wrong key,
+    block PRECEDES the row it documents (77 of the 78 such blocks at this head open
+    a new note — re-derived at `e49e641f4` with `ci_timing._starts_a_new_note`, and
+    a SNAPSHOT of a moving denominator: main keeps adding rows). Joining anyway attributes a neighbour's prose to the wrong key,
     which matters because these guards read CLAIMS off the joined text — a stale
     case count or a `WATCHDOG_FLOOR_MIN` claim from the block below then lands on a
     row whose value it does not describe. The writer bounds its span identically
