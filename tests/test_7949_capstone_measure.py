@@ -4722,8 +4722,14 @@ def test_a_before_arm_with_no_graph_is_refused(tmp_path, capsys):
     the same rule the falsifier's `as_written` block is held to: "an absent
     provenance is not an inherited one".
 
-    Non-vacuity: at the pre-fix head the bundle scores (the head check downstream
-    is the only reader of `graph`, and it runs after this pair is assembled).
+    Non-vacuity, MEASURED at this pin's own parent commit `9aee307c8`: the bundle
+    does not score there either — `read_off_arms` already collected `graph` as
+    `None`, so `score()`'s head loop refuses ONE CHECK LATER with "was taken on
+    graph None, which does not name head 54922a80" (`PRE-FIX REFUSES: code=2`).
+    The discriminator this pin asserts is therefore the MESSAGE and not the
+    refusal: neither "carries no `graph`" nor "SECOND realization" appears in
+    the pre-fix text, so the two assertions below red at `9aee307c8` while the
+    refusal itself would look like a pass to a pin that only checked the exit.
     """
     repo = _bundle(tmp_path)
     path = repo / "docs/evidence/9889/e1-paired-off-arm-2.json"
