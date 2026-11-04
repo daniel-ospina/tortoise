@@ -6119,8 +6119,9 @@ def test_a_stripped_basis_clause_does_not_orphan_a_parenthesis() -> None:
 # ── a WRAPPED note is ONE note (the 2026-11-02 refresh's half-parenthesis) ────
 #
 # A row's note is not the tail on its row line: a note CAN wrap across indented `#`
-# continuation lines (measured at this head: 1 row of 1222 — the block's
-# dominant shape is the PREAMBLE for the row below, 73 of its 74 indented blocks),
+# continuation lines (measured at `a91123c76`: 1 row of 1222 did — the block's
+# dominant shape is the PREAMBLE for the row below, so almost every indented block
+# in it opens a note of its own; re-derive both figures at your own head),
 # and the guard that judges a written map joins them before judging
 # (`tests/test_ci_selection.py`
 # `_durations_row_comments`). The renderer used to reason about the row-line
@@ -6284,7 +6285,8 @@ def test_a_registered_row_is_appended_after_the_last_rows_wrapped_note() -> None
 # ── …and the OTHER convention: a block that OPENS a note is not the row above's ──
 #
 # This map's dominant convention is the block that PRECEDES the row it documents
-# (73 of the 74 blocks beside a row at this head open a note of their own),
+# (almost every block beside a row opens a note of its own — re-derive the ratio at
+# the head you are reading; it moves with the map),
 # and nothing in YAML says which row a comment belongs to — §3.2.3.3 of the spec:
 # comments are “a presentation detail … not associated with a particular node”.
 #
@@ -6295,7 +6297,7 @@ def test_a_registered_row_is_appended_after_the_last_rows_wrapped_note() -> None
 # the real map at this head, every row re-based once: **36 rows lost their block,
 # 349 lines folded into row lines**. The committed instance is the
 # `355.0 IS A DELIBERATE CAP … #9172` block: it lies directly under
-# `test_work_claim.py: 3.8` and documents `test_lane_stash.py: 25.4`.
+# `test_work_claim.py: 3.8` and documents `test_lane_stash.py: 355.0`.
 _NOTE_BLOCK_FOR_THE_ROW_BELOW_MANIFEST = """\
 surfaces:
   core:
@@ -6818,8 +6820,9 @@ def test_a_floor_that_names_no_row_or_sits_above_one_is_red() -> None:
     smaller number. Neither is reachable through the writer, so each is a hand-edit
     that left the other half behind — the state a reader cannot reconcile.
 
-    Non-vacuity: with `floor_issues` absent from the composition (pre-fix), both
-    maps are green.
+    Non-vacuity: every arm below calls `floor_issues` DIRECTLY, so this test pins the
+    check's own logic and says nothing about whether it is WIRED — that half is
+    `test_the_floor_check_is_composed_into_the_shared_map_contract` below.
     """
     import ci_manifest
 
@@ -6877,6 +6880,36 @@ def test_a_floor_that_names_no_row_or_sits_above_one_is_red() -> None:
     # a floor to be inconsistent with, and one red per declared floor would turn
     # that UNKNOWN into a wall of reds.
     assert ci_manifest.floor_issues({"durations_floors": {"test_a.py": 355.0}}) == []
+
+
+def test_the_floor_check_is_composed_into_the_shared_map_contract() -> None:
+    """`floor_issues` must be reached through `map_issues`, not only called directly.
+
+    `tools/ci_manifest.py`'s `+ floor_issues(manifest)` inside `map_issues` is the
+    ONLY line that makes a declared cap enforcing at BOTH entry points
+    (`ci_selection --integrity` and `ci_timing.integrity_problems`, via `check`).
+    Every other floor test calls the function directly, so deleting that one line
+    disabled every declared cap with the whole suite green — a false PASS in the
+    required `manifest-integrity` leg, which is why this pin exists.
+
+    Driven on the REAL map, because a hand-built one raises inside `duration_issues`
+    (it has no `surfaces:`), and because the point is that the committed map's own
+    declarations are enforced.
+
+    Non-vacuity: remove `floor_issues(manifest)` from `map_issues` and both
+    assertions below fail.
+    """
+    import ci_manifest
+
+    manifest = yaml.safe_load((REPO_ROOT / "config" / "ci-surfaces.yml").read_text())
+    assert manifest["durations"]["test_lane_stash.py"] == 355.0
+    assert ci_manifest.map_issues(manifest) == []
+    # A hand-edit that discounts a DECLARED CAP is what the sweep must never do
+    # silently: this is the #10575 P1 reading, injected.
+    manifest["durations"]["test_lane_stash.py"] = 25.4
+    assert any("durations_floors" in issue for issue in ci_manifest.map_issues(manifest))
+    red, _unknown = ci_manifest.check(manifest)
+    assert any("durations_floors" in issue for issue in red), red
 
 
 def test_the_real_maps_cap_is_a_declared_floor_and_is_never_lowered(

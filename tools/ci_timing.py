@@ -2134,9 +2134,10 @@ def _balance_cut_parens(text: str) -> str:
 #
 # `_DURATION_LINE_RE` reads a row's note as the tail on its own line, but a
 # note CAN wrap: an indented `#` line under a row can continue THAT row's note
-# (measured at this head: 1 row of 1222 does — `test_source_staleness_
-# sweep_5038.py` — and re-derive it, do not trust the figure, because a refresh
-# re-emits notes and moves it). The guard that judges the written map joins a
+# (measured at `a91123c76`, the sha this paragraph was written at: 1 row of 1222
+# did — `test_source_staleness_sweep_5038.py` — and re-derive it AT YOUR HEAD, do
+# not trust the figure, because a refresh re-emits notes and moves it: the map
+# held 1236 rows at `7e6d1d8da`). The guard that judges the written map joins a
 # row's tail with its continuations before it judges a note
 # (`tests/test_ci_selection.py::_durations_row_comments`).
 #
@@ -2218,8 +2219,10 @@ def _row_continuation_lines(lines: list[str], index: int) -> list[int]:
        associated with a particular node", so *nothing* in the file says which row
        an indented block documents. This map's DOMINANT convention is the opposite
        of the one the previous two conditions imply — an indented block PRECEDES
-       the row it documents (measured at this head with this module's own
-       predicates: 73 of the 74 such blocks open a new note, and the ones sampled
+       the row it documents (measured with this module's own predicates: almost
+       every such block opens a new note — ⚠️ re-derive the ratio at the head you
+       are reading rather than trusting one here, because a refresh re-emits notes
+       and moves it — and the ones sampled
        document the row BELOW — `# #4071: …` sits
        above `test_embedded_lane_canonical_store_4071.py`, `# #5612: …` above
        `test_journal_growth.py`, and the `355.0 IS A DELIBERATE CAP … #9172` block
@@ -2503,8 +2506,10 @@ def _declared_floors(manifest_text: str) -> dict[str, DeclaredFloor]:
       the very reading its note says must not become the weight — the hand-edit a
       human had already made once, done silently by the sweep instead.
 
-    Absent or unreadable → no declarations, so every caller and fixture that
-    carries no such key keeps its output.
+    Absent → no declarations, so every caller and fixture that carries no such key
+    keeps its output. UNREADABLE → `DurationsBridgeError`, NEVER "no declarations":
+    that fail-open reading is the #10575 P1 this mechanism exists to prevent, and
+    the four refused shapes are enumerated in the body below.
     """
     import yaml
     try:
