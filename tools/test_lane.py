@@ -365,6 +365,29 @@ def assert_pinned_image(image: str) -> str:
 LANE_FALKORDB_ARGS = "THREAD_COUNT 8 TIMEOUT_MAX 30000"
 NAME_PREFIX = "fdb-lane-"
 
+#: ── OWNERSHIP IS ALSO WRITTEN INTO THE CONTAINER, NOT ONLY INTO ITS NAME ────
+#:
+#: The name is `fdb-lane-<sha1(abs worktree path)[:10]>` — a ONE-WAY digest of
+#: the very path that teardown deletes. So the record of ownership is destroyed
+#: by the event that creates the orphan: once `git worktree remove`/prune drops
+#: the entry, the slug can never be resolved again by `_worktree_slugs()`, the
+#: owner reads as INDETERMINATE, and the container lands in the population that
+#: `reap_orphans` may only REPORT (`OWNER_INDETERMINATE_REAP_ENV`). Measured on
+#: the dev box 2026-11-03: 2 of 7 live `fdb-lane-*` containers already had no
+#: worktree claiming them, at 6 minutes and 1.1 hours old.
+#:
+#: So the owner path is ALSO stamped on the container as a docker label at
+#: creation — the mechanism Testcontainers' Ryuk and Kubernetes
+#: `ownerReferences` both use — which survives the deletion of the worktree.
+#: That does NOT settle #8180's open arm: it makes the owner DETERMINED, so the
+#: container qualifies for the one proof the ruling already authorises armed
+#: ("a `fdb-lane-*` container MAY be reaped when the worktree that owns it is
+#: gone") instead of falling into the INDETERMINATE bucket whose default the
+#: owner has not ruled on. Every default stays exactly as `origin/main` set it.
+LABEL_OWNER = "tortoise.test-lane.worktree"
+LABEL_SLUG = "tortoise.test-lane.slug"
+LABEL_CREATED = "tortoise.test-lane.created"
+
 #: ── OWNERSHIP LIVENESS, and the bound that makes it a reap instead of a report ──
 #:
 #: The measured kill (2026-11-03, cell-1): 68 `fdb-lane-*` containers alive, the
@@ -394,7 +417,12 @@ NAME_PREFIX = "fdb-lane-"
 #: container's own statement that nobody is using it). The age below is a
 #: BACKSTOP on top of that evidence, exactly as #8180's Outcome specifies ("an
 #: age backstop for containers whose owner can no longer be determined"); it is
-#: never the proof, and it can never fire on a live owner.
+#: never the proof, and it can never fire on an owner this host can OBSERVE is
+#: alive: a live process holding the owning worktree, or an attached client (both
+#: positive reads), keeps the container AND refreshes the lease, so a lane a
+#: sweep can see alive is spared at any age (#10693 review F1). The lease marks
+#: the last OBSERVED use, not the last use — `REAP_STATE_DIR` states what that
+#: leaves uncovered. The lease itself is stated in full there.
 #:
 #: ⛔ WHAT THE **DEFAULT** AUTHORISES (#10693 review F2) — the ownership evidence
 #: above is necessary and NOT sufficient. #8180's owner ruling is the operative
@@ -1262,9 +1290,54 @@ def container_name(slug: str) -> str:
     return f"{NAME_PREFIX}{slug}"
 
 
+def _lane_identity() -> tuple[str, Path]:
+    """THIS worktree's container name AND the root it was derived from, from ONE
+    `repo_root()` read.
+
+    Both ownership records this tool writes must describe the SAME worktree: the
+    container NAME is ``fdb-lane-<slug(root)>``, and the label pair is
+    ``<root>`` plus ``slug_for(root)``. `repo_root()` has a documented, PER-CALL
+    degraded mode — ``Path.cwd()`` on a git timeout, on git being absent, on
+    ``OSError``, or on a non-zero `rev-parse` — so reading it once for the name
+    and again for the label lets exactly one of the two degrade, and the two
+    records then name two different worktrees.
+
+    That pair is not cosmetic: `reap_orphans()` treats a label whose slug
+    disagrees with the container name as "no evidence about this container", and
+    once the container's worktree is gone the name no longer resolves either —
+    so a container created across ONE degraded read is kept for life and
+    reported with a cause that blames the label. That is the #8180 leak
+    ("reported on every `up` and reaped by nothing, forever") re-entered through
+    the mechanism meant to close it. Deriving both records from THIS one read
+    makes them agree by construction.
+    """
+    root = repo_root()
+    return container_name(slug_for(root)), root
+
+
 def lane_name() -> str:
     """The one container this tool can act on. Never a parameter."""
-    return container_name(slug_for(repo_root()))
+    return _lane_identity()[0]
+
+
+def _label_args(root: Path | str) -> list[str]:
+    """The ownership stamp written at creation (see `LABEL_OWNER`).
+
+    ``root`` is REQUIRED and is the caller's single `repo_root()` read (see
+    `_lane_identity`): reading it again here is what let the label name a
+    different worktree than the container's own name.
+
+    ``created`` is a DIAGNOSTIC for a human `docker inspect` (or a host-level
+    reader) — nothing decides on it. ``slug`` is NOT: it is the CORROBORATING
+    half of the pair, and `reap_orphans()` reads it back and DECIDES on it (a
+    slug that disagrees with the container it sits on makes the whole label
+    non-evidence), while ``worktree`` decides which owner is resolved.
+    """
+    return [
+        "--label", f"{LABEL_OWNER}={Path(root).resolve()}",
+        "--label", f"{LABEL_SLUG}={slug_for(root)}",
+        "--label", f"{LABEL_CREATED}={datetime.now().isoformat()}",
+    ]
 
 
 def is_managed(name: str) -> bool:
@@ -1675,14 +1748,24 @@ def start(port: int | None = None) -> tuple[str, int]:
     # leaves a container that dies at the NEXT start instead of surviving until
     # someone notices. Reported, and never fatal: a sweep that cannot run must
     # not stop a lane from starting.
+    #
+    # ONE `repo_root()` read for the whole `start()`: the container NAME, the
+    # ownership LABEL pair, the ORPHAN SWEEP's own identity (`own_name=`) and
+    # every removal guard below (`root=`) are all derived from THIS read, and
+    # `repo_root()` can degrade per call (see `_lane_identity`). Threaded in
+    # explicitly so no later second read can disagree with the container this
+    # call just created. That disagreement is not hypothetical: the guard used
+    # to re-read `repo_root()` itself, and a degraded read there REFUSES to
+    # clean up OUR OWN half-started container, leaving it holding a reserved
+    # port — the #8180 leak, produced by the guard meant to prevent it.
+    name, root = _lane_identity()
     if os.environ.get("TORTOISE_TEST_LANE_REAP", "1") == "1":
         try:
-            for _line in reap_orphans():
+            for _line in reap_orphans(own_name=name):
                 print(_line, file=sys.stderr)
         except Exception as _exc:   # a sweep that cannot run must not stop a lane
             print(f"reap: the sweep failed and was skipped ({_exc!r}); "
                   f"nothing else is affected", file=sys.stderr)
-    name = lane_name()
     state = container_state(name)
     if state == "running":
         # #8124: the reuse path must not hand back an engine the pin never
@@ -1848,9 +1931,9 @@ def start(port: int | None = None) -> tuple[str, int]:
         # evidence-before-`rm -f` rule the fresh path below states for itself.
         # The ownership guard runs FIRST, so an unmanaged name is refused before
         # any docker call (read or removal).
-        _assert_removal_allowed(name)
+        _assert_removal_allowed(name, root=root)
         prior = _termination_report(name, live=False)
-        outcome = _remove_and_describe(name)
+        outcome = _remove_and_describe(name, root=root)
         if outcome.startswith("FAILED"):
             raise SystemExit(
                 f"test-lane: {name} exists, is not running, and could not be "
@@ -1868,6 +1951,11 @@ def start(port: int | None = None) -> tuple[str, int]:
         # "container <id> is zombie and can not be killed. Use the `--init`
         # option", leaving a container no `down()` could remove.
         "run", "-d", "--init", "--name", name,
+        # #8180: ownership stamped INTO the container so it outlives the
+        # worktree teardown that destroys the name's meaning (see `LABEL_OWNER`).
+        # `root` is `start()`'s single `repo_root()` read — the same one the name
+        # came from — so the two records cannot name different worktrees.
+        *_label_args(root),
         # #7357: the KERNEL cap (see CONTAINER_MEMORY_ENV). `--init` and the
         # cap are independent: one reaps orphaned children, the other bounds
         # what a runaway instance can take from every neighbour on the host.
@@ -1918,7 +2006,8 @@ def start(port: int | None = None) -> tuple[str, int]:
         killed = _termination_report(name, live=False)
         logs = _docker("logs", "--tail", "20", name)
         raise SystemExit(
-            f"test-lane: {name} never answered PING; {_remove_and_describe(name)}. "
+            f"test-lane: {name} never answered PING; "
+            f"{_remove_and_describe(name, root=root)}. "
             f"Logs:\n{logs.stdout}{logs.stderr}{killed}"
         )
     asked, published = _published_port(name)
@@ -1931,16 +2020,39 @@ def start(port: int | None = None) -> tuple[str, int]:
                else "it publishes no port")
         raise SystemExit(
             f"test-lane: {name} answered PING but {why}; "
-            f"{_remove_and_describe(name)}"
+            f"{_remove_and_describe(name, root=root)}"
         )
     _touch_lease(name)   # the lane has a usable DB: this is USE
     return name, published
 
 
-def _assert_removal_allowed(name: str) -> None:
+def _assert_removal_allowed(name: str, root: Path | str | None = None) -> None:
     """The ownership guard EVERY removal intent must pass, factored out so a
     read that precedes a removal cannot reach docker for a container this tool
     does not own (and so the rule lives in one place instead of at call sites).
+
+    ``root`` is the root the CALLER derived ``name`` from — `start()` takes
+    exactly ONE `repo_root()` read (`_lane_identity`) and threads it into every
+    removal that reaches this guard. It is not cosmetic: without it the guard
+    compares
+    against a FRESH `repo_root()`, and `repo_root()` has a documented PER-CALL
+    degraded mode (`Path.cwd()` on a git timeout — the overloaded hosts this
+    tool exists for). A read that degraded between the two would then refuse to
+    clean up the container the SAME call just created, leaving it holding a
+    reserved port: the #8180 leak, produced by the guard meant to prevent it.
+
+    No production call site omits it. `start()` reads the root ONCE
+    (`_lane_identity`) and threads it into the THREE removals that reach this
+    guard: the stale-container replacement, the never-answered-PING cleanup and
+    the publishes-no-port cleanup. `start()`'s fourth removal — the
+    `docker run`-failed cleanup — never consults a root at all, and must not:
+    it targets the container ID docker itself printed for the container THAT
+    call just created (falling back to the name only when no ID was reported,
+    under `is_managed`), while this guard compares NAMES, so an ID could never
+    match. `stop()` removes directly rather than through this guard. The
+    default is retained only so the guard stays callable without a prior read;
+    a caller that HAS read the root passing `None` is the bug this parameter
+    prevents.
     """
     if not is_managed(name):
         raise SystemExit(f"test-lane: refusing to remove unmanaged {name!r}")
@@ -1948,22 +2060,26 @@ def _assert_removal_allowed(name: str) -> None:
     # exactly the container ITS OWN worktree derives, and nothing else — not
     # even a peer lane's `fdb-lane-*`. Ownership is then an invariant the code
     # enforces, instead of call-site discipline the suite cannot check.
-    if name != lane_name():
+    mine = lane_name() if root is None else container_name(slug_for(root))
+    if name != mine:
         raise SystemExit(
             f"test-lane: refusing to remove {name!r} — this worktree's container "
-            f"is {lane_name()!r}; a peer lane's database is not ours to delete"
+            f"is {mine!r}; a peer lane's database is not ours to delete"
         )
 
 
-def _remove_and_describe(name: str) -> str:
+def _remove_and_describe(name: str, root: Path | str | None = None) -> str:
     """Remove a container this tool just created, and say what actually
     happened — a cleanup whose result is unread is how a running container with
     a reserved port survives to make every later `start()` refuse.
 
     Guarded like every other removal intent, so "no removal bypasses the
     ownership check" is true of the whole module and not just of `stop()`.
+    ``root`` is passed straight through to that guard (see
+    `_assert_removal_allowed`): a caller that already read the root must not
+    make the guard read it a second time.
     """
-    _assert_removal_allowed(name)
+    _assert_removal_allowed(name, root=root)
     rm = _docker("rm", "-f", name)
     return ("removed it" if rm.returncode == 0
             else "FAILED to remove it — check `docker ps -a`")
@@ -1975,11 +2091,23 @@ def _worktree_slugs() -> dict[str, str] | None:
     `None` means the ownership record could NOT be read. That is deliberately
     distinct from `{}` ("git answered, and nothing claims any container"): the
     first must never authorize a delete, the second may. #8180 fail-closed rule.
+
+    This is the only read in `reap_orphans()` that takes its own root, and it is
+    safe to: it answers "which strangers does git still list", never "is the
+    container this call created mine" (that identity is threaded in — see
+    `reap_orphans`'s ``own_name``). A degraded cwd here is `Path.cwd()`, which is
+    inside this very repo, so the list is unchanged; if git answers with FEWER
+    worktrees (or fails, which is `None` and fail-closed) the affected container
+    drops out of the DETERMINED bucket into INDETERMINATE — where the default
+    REPORTS and removal needs an explicit operator switch
+    (`OWNER_INDETERMINATE_REAP_ENV`), and where a live lane is still spared by
+    the `/proc` arm.
     """
     try:
         r = subprocess.run(
             ["git", "worktree", "list", "--porcelain"],
-            cwd=str(repo_root()), capture_output=True, text=True,
+            cwd=str(repo_root()),
+            capture_output=True, text=True,
             timeout=GIT_TIMEOUT, env=_git_env(),
         )
     except (OSError, subprocess.SubprocessError):
@@ -1998,6 +2126,45 @@ def _worktree_slugs() -> dict[str, str] | None:
             path = line[len("worktree "):]
             found[slug_for(path)] = path
     return found
+
+
+def _trusted_label_owner(name: str, stamped: str,
+                         stamped_slug: str) -> tuple[str, str]:
+    """``(owner, contradiction)`` — the label's owner path, ONLY if it describes
+    the container it is stamped on.
+
+    A label is a fact written by SOMEONE (possibly a predecessor version, a
+    copied `docker run`, or a hand-written `--label`), so it is an ownership
+    record only when it CORROBORATES the thing it labels:
+
+      * the pair must be self-consistent — ``slug_for(worktree) == slug`` — which
+        is the only reason `LABEL_SLUG` is written; and
+      * that slug must be THIS container's own name slug, i.e. the label names
+        the very worktree whose digest created this container.
+
+    Anything else is reported and IGNORED as an ownership record: without this
+    a stale or copied label (measured shape: ``worktree=/tmp``) keeps a
+    container forever under a path it never came from. Ignored is not deleted:
+    the container falls back to the name record and then to whatever arm its
+    state licenses.
+
+    ``("", "")`` when there is no label at all: absence is not a contradiction,
+    it is the pre-label population, and it must stay silent.
+    """
+    if not stamped:
+        return "", ""
+    if not stamped_slug:
+        return "", (f"it names {stamped} but carries no {LABEL_SLUG} label, so "
+                     f"the pair cannot be corroborated")
+    digest = slug_for(stamped)
+    if digest != stamped_slug:
+        return "", (f"its {LABEL_SLUG} label ({stamped_slug}) is not the digest "
+                     f"of the worktree it names ({stamped} -> {digest})")
+    if stamped_slug != name[len(NAME_PREFIX):]:
+        return "", (f"its {LABEL_SLUG} label ({stamped_slug}) is not this "
+                     f"container's own slug ({name[len(NAME_PREFIX):]}), so it "
+                     f"describes a DIFFERENT worktree")
+    return stamped, ""
 
 
 _WORKTREE_MARK = "/.worktrees/"
@@ -2188,12 +2355,15 @@ def _container_in_use(name: str) -> bool | None:
 #:     so the gap could never elapse and the arm was inert (caught by the
 #:     real-container proof, not by a unit test).
 #:
-#: What is implemented is a LEASE the LANE writes: `<container id> <epoch>`,
-#: refreshed by `_touch_lease` at every successful `start()`, at the END of every
-#: `run` (the lane just used the container for as long as the child ran), and at a
-#: first sighting. The clock is the wall time since that lease. During a long
-#: `run` the lane's own process holds the worktree, which is `_holds`' spare; the
-#: lease covers the between-steps gaps.
+#: What is implemented is a LEASE: `<container id> <epoch>`, refreshed by
+#: `_touch_lease` at every successful `start()`, at the END of every `run` (the
+#: lane just used the container for as long as the child ran), at a first
+#: sighting, AND at every POSITIVE observation of use by a peer sweep (a live
+#: process holding the owning worktree, or an attached client). The clock is the
+#: wall time since that lease — "the last moment the container was demonstrably
+#: in use", never "the last time the lane called `start()`". During a long `run`
+#: the lane's own process holds the worktree, which is `_holds`' spare; the lease
+#: covers the between-steps gaps.
 #:
 #: ⛔ THE REFRESH AT THE END OF `run` IS LOAD-BEARING, not decoration (#10693
 #: review F1): with the epoch written only at `start()`, the gap is measured from
@@ -2206,9 +2376,10 @@ def _container_in_use(name: str) -> bool | None:
 #: inherits a dead one's gap.
 #:
 #: The uncovered class, stated as a MECHANISM rather than an instance: a container
-#: that (a) no process on this host names, (b) whose lane has neither `start()`ed
-#: nor `run` pytest against it for the grace, and (c) has no client attached
-#: within `ACTIVE_CLIENT_IDLE_S` — is reaped by design. A `run`
+#: that (a) no process on this host names, (b) whose lane has neither `start()`ed,
+#: nor `run` pytest against it, nor been OBSERVED using it (a hold on the worktree
+#: or an attached client — either refreshes the lease) for the grace, and (c) has
+#: no client attached within `ACTIVE_CLIENT_IDLE_S` — is reaped by design. A `run`
 #: invoked from OUTSIDE its worktree for longer than the grace is one instance of
 #: it.
 #:
@@ -2222,7 +2393,10 @@ REAP_STATE_DIR = (Path(os.environ.get("CELL_HOME", os.path.expanduser("~")))
 
 
 def _reap_state_path(name: str) -> Path:
-    # The name is `fdb-lane-<...>` from `is_managed()`, so it cannot traverse.
+    # Cannot traverse: docker container names may not contain `/` (the daemon's
+    # name grammar is `[a-zA-Z0-9][a-zA-Z0-9_.-]*`), so the single path segment
+    # is the whole invariant. `is_managed()` only checks the `fdb-lane-` PREFIX
+    # and would not stop a slash on its own.
     return REAP_STATE_DIR / f"{name}.unused"
 
 
@@ -2309,18 +2483,43 @@ def _unused_gap(name: str) -> float | None:
 
 
 def _touch_lease(name: str) -> None:
-    """Record that the container's LANE is using it right now.
+    """Record that the container is demonstrably IN USE right now.
 
-    Called at every successful `start()` and at the END of `cmd_run`'s child —
-    the two moments a lane demonstrably uses its DB. Re-stamping at the end of
-    the `run` is what makes the grace a BETWEEN-steps bound rather than an "age
-    since the last `start()`" bound (#10693 review F1); without it a run longer
-    than the grace ends with an already-expired lease.
+    Called at every successful `start()`, at the END of `cmd_run`'s child, at a
+    first sighting, and at every POSITIVE observation by a peer sweep: a live
+    process holding the owning worktree (``held`` / ``live_slugs``) or an
+    attached client (``_container_in_use`` — at the sweep and at the moment of
+    action). Re-stamping at the end of the `run` is what makes the grace a
+    BETWEEN-steps bound rather than an "age since the last `start()`" bound
+    (#10693 review F1); without it a run longer than the grace ends with an
+    already-expired lease.
+
+    The sweep-side stamps are the other half of the same rule (#10693 review F1)
+    and they are what makes the promise above (`REAP_STATE_DIR`) true: the
+    documented `uri="$(... test_lane.py uri)"; eval "$uri"` form calls `start()`
+    ONCE, so a lane that then runs pytest against the exported URI for hours
+    would age its lease past `OWNER_GRACE_H` while being completely alive. A sweep
+    that OBSERVES the hold or the client refreshes the epoch, so the gap is "time
+    since the container was last demonstrably in use". Stamping only ever
+    SHORTENS a gap — it can never enable a removal — so it is safe on every
+    fail-closed/keep path. Cost: one `inspect` per observed-in-use container per
+    sweep, bounded by the number of live lanes — paid only for containers the
+    sweep observed IN USE, never on the common keep path.
 
     What it deliberately does NOT claim: that the lease follows every step of a
-    live lane. Only these call sites write it, so a lane whose work happens
-    entirely inside the child (`pytest`) is covered by this record plus its own
-    process holding the worktree — not by a per-step refresh.
+    live lane. No sweep can see a lane that names nothing on this host, so a
+    container whose lane is invisible to `/proc` ages from its last observation —
+    which is exactly what the age backstop is for. The same holds for a lane that
+    keeps using an ALREADY-started container without a `run`-end stamp (the
+    documented `uri` / `eval "$uri"` form): its lease advances only when some
+    sweep OBSERVES that use, so if no sweep runs during the lane's final
+    `OWNER_GRACE_H` the gap over-reports by the unobserved stretch. Under the
+    DEFAULT that only mis-states a report; on the ARMED arms it advances the
+    grace, so a lane that no sweep OBSERVED for `OWNER_GRACE_H` is a removal
+    candidate while it is between steps — the class the block above already names
+    as reaped by design, and what the opt-in accepts. It is never a mid-RUN
+    removal: a sweep that can see the lane keeps it outright (`held` /
+    `live_slugs`), and both reads are re-taken at the moment of action.
 
     RESIDUAL (documented in the PR): a `run` invoked from OUTSIDE its worktree is
     covered by the lease while it runs, and by nothing afterwards if the lane's
@@ -2366,7 +2565,7 @@ def _started_epoch(name: str) -> float | None:
         return None
 
 
-def reap_orphans() -> list[str]:
+def reap_orphans(own_name: str | None = None) -> list[str]:
     """Remove `fdb-lane-*` containers that are PROVABLY out of service.
 
     The PROOF is never a clock — it is OWNERSHIP, established positively. A clock
@@ -2426,9 +2625,13 @@ def reap_orphans() -> list[str]:
 
     Age is a BACKSTOP, never the proof (see ``OWNER_GRACE_H`` /
     ``ORPHAN_MAX_AGE_H``). A runnable lane container is only ever removed after
-    POSITIVE evidence its lane is gone; a clock can never fire on a live owner's
-    database, which would be a far worse bug than the leak it fixes — the rule the
-    whole module defends. `paused`/`restarting`/`created` are live-ish in exactly
+    POSITIVE evidence its lane is gone; a clock can never fire on an owner THIS
+    HOST CAN OBSERVE alive — an observed hold or an attached client keeps the
+    container and refreshes the lease (``_touch_lease``), so a live lane's
+    database is spared at any age, and for ``OWNER_GRACE_H`` after its last
+    OBSERVED use (the uncovered population is stated on ``REAP_STATE_DIR``),
+    which would be a far worse bug than the leak it fixes — the rule the whole
+    module defends. `paused`/`restarting`/`created` are live-ish in exactly
     the same way (``_LIVE_ISH_STATES``) and never reach the STATE arm, which fires
     only on ``_TERMINAL_STATES``.
 
@@ -2464,12 +2667,27 @@ def reap_orphans() -> list[str]:
        be determined, do NOT delete", so the default reports and the owner's
        ruling (reopened on #8180) decides.
 
+    ``own_name`` is the container name the CALLER already derived (``start()``
+    takes exactly one `repo_root()` read — see `_lane_identity`). It is not a
+    parameter a peer could aim at another lane's container: it only ever names
+    the container this sweep must SKIP as "this worktree's own", so a value that
+    disagrees with a container merely stops that container being short-circuited
+    and sends it through the ordinary ownership resolution below (which keeps it).
+    Omitting it (`None`) resolves the name here instead, for the CLI paths.
+
     Fail-closed: if the worktree list or `docker ps` cannot be read, nothing is
     removed and the reason is reported; a state this module does not recognise
     is reported, never inferred to be terminal. Returns one line per container
     this function ACTED on or decided to KEEP; a name refused by `is_managed()`
     is not reported (it was never a candidate), so a caller reports what
     actually happened instead of counting.
+
+    ONE container can produce TWO lines, and that is deliberate rather than a
+    miscount: a label that is not evidence is reported first (``carries an
+    ownership label that is not evidence`` — the reason the stamp was ignored)
+    and then again by whatever arm the container's own state licenses (the
+    outcome). The two lines answer different questions about one container, so
+    a reader counting containers must count DISTINCT NAMES, not lines.
     """
     slugs = _worktree_slugs()
     if slugs is None:
@@ -2490,19 +2708,29 @@ def reap_orphans() -> list[str]:
     if live_paths is not None:
         live_slugs = {slug_for(a) for p in live_paths for a in _ancestors(p)}
     listed = _docker("ps", "-a", "--filter", f"name={NAME_PREFIX}",
-                     "--format", "{{.Names}}\t{{.State}}")
+                     "--format",
+                     '{{.Names}}\t{{.State}}'
+                     '\t{{.Label "' + LABEL_OWNER + '"}}'
+                     '\t{{.Label "' + LABEL_SLUG + '"}}')
     if listed.returncode != 0:
         return ["reap: skipped — `docker ps` failed; NOTHING was removed "
                 "(fail-closed)"]
     states: dict[str, str] = {}
+    stamped_labels: dict[str, dict[str, str]] = {}
     for line in (listed.stdout or "").splitlines():
-        name, _, state = line.partition("\t")
-        name = name.strip()
-        if name:
-            # A missing state is `unknown`, never terminal: the state arm may
-            # only fire on a state docker actually reported.
-            states[name] = state.strip().lower() or "unknown"
-    mine = lane_name()
+        parts = line.split("\t")
+        name = parts[0].strip()
+        if not name:
+            continue
+        # A missing state is `unknown`, never terminal: the state arm may
+        # only fire on a state docker actually reported.
+        states[name] = ((parts[1].strip().lower() if len(parts) > 1 else "")
+                        or "unknown")
+        stamped_labels[name] = {
+            "owner": parts[2].strip() if len(parts) > 2 else "",
+            "slug": parts[3].strip() if len(parts) > 3 else "",
+        }
+    mine = lane_name() if own_name is None else own_name
     out: list[str] = []
     for name in sorted(states):
         if not is_managed(name):
@@ -2511,10 +2739,38 @@ def reap_orphans() -> list[str]:
             out.append(f"reap: kept {name} — this is THIS worktree's container")
             continue
         owner = slugs.get(name[len(NAME_PREFIX):])
+        # Whether `owner` came from the LABEL rather than the name record. Arm 1
+        # below cannot tell the difference from `owner` alone, and the two
+        # populations must NOT be treated alike there (see the client probe).
+        labelled_owner = False
         # The slug the container's OWN name encodes. `_live_lane_paths` gives the
         # slugs of every worktree a live process holds, in ANY clone on this host,
         # so this is how a cross-clone owner is still recognised as alive.
         slug_for_name = name[len(NAME_PREFIX):]
+        # THE LABEL, when the name can no longer answer. `_worktree_slugs()` maps
+        # a slug back to a path through `git worktree list`, so a container whose
+        # worktree was REMOVED (the exact event that strands it) resolves to
+        # nothing here — and lands in the INDETERMINATE bucket, whose default no
+        # owner has ruled on (`OWNER_INDETERMINATE_REAP_ENV`). The label stamped
+        # at creation survives that teardown, so it upgrades the container from
+        # INDETERMINATE to DETERMINED-AND-GONE, i.e. the ONE proof #8180
+        # authorises armed. It can only ever SPARE a container or move it out of
+        # the unruled bucket — it never widens an arm and never changes a
+        # default.
+        if owner is None:
+            stamped = stamped_labels.get(name, {})
+            trusted, why_not = _trusted_label_owner(
+                name, stamped.get("owner", ""), stamped.get("slug", ""))
+            if trusted:
+                owner = trusted
+                labelled_owner = True
+            elif why_not:
+                # Reported, not believed. A label that does not describe the
+                # container it sits on is not an ownership record (see
+                # `_trusted_label_owner`); the name record and the age arm are
+                # then all that is left, exactly as before this change.
+                out.append(f"reap: {name} carries an ownership label that is "
+                           f"not evidence — {why_not}")
         state = states[name]
         # Ownership is a DETERMINED owner plus what its recorded worktree says.
         # Resolved ONCE, before either proof, so no arm can report a worktree as
@@ -2533,6 +2789,34 @@ def reap_orphans() -> list[str]:
                        f"could not be examined (fail-closed, report only)")
             continue
         if owner is not None and present is False:
+            # ⛔ A LABEL-DERIVED owner must not skip the client probe. The name
+            # record can only produce arm 1 for a worktree `git worktree list`
+            # still lists, but the label reaches a NEW population: a worktree
+            # torn down (`git worktree remove --force` / `prune`) while the
+            # lane's process is STILL RUNNING. That process's cwd is a deleted
+            # directory, so `_live_lane_paths` cannot name it either — the
+            # container's own `CLIENT LIST` is the only thing left that knows a
+            # test run is in progress. On `origin/main` this population lands in
+            # the INDETERMINATE bucket, which ASKS (`_container_in_use`) and
+            # keeps an in-use container (#10693 review F1); without this probe
+            # the label would flip that from `kept` to `rm -f` and kill a live
+            # lane's database. Name-derived arm 1 is left exactly as main had
+            # it: this probe is scoped to the label.
+            if labelled_owner:
+                busy = (False if state in _TERMINAL_STATES
+                        else _container_in_use(name))
+                if busy:
+                    _touch_lease(name)   # observed use: the epoch follows the proof
+                    out.append(f"reap: kept {name} — its labelled worktree "
+                               f"{owner} is gone but it HAS an active client, "
+                               f"so a lane is still using it")
+                    continue
+                if busy is None:
+                    out.append(f"reap: kept {name} — its labelled worktree "
+                               f"{owner} is gone but the container could not "
+                               f"be asked whether it is in use; report only, "
+                               f"fail-closed")
+                    continue
             # Proof 1, the ONLY armed proof: the worktree that owns this
             # container is gone, so this is what #8180 authorises. #7357: the
             # facts are read BEFORE the removal — `rm -f` destroys the only
@@ -2613,24 +2897,50 @@ def reap_orphans() -> list[str]:
             #
             # So the worktree only establishes WHOSE the container is. Whether
             # that owner is still ALIVE is a separate, positive read — and a
-            # live owner is still never reaped, at any age.
+            # live owner a sweep can SEE is never reaped, at any age. A lane that
+            # is between steps is bounded by the lease's `OWNER_GRACE_H`, which
+            # measures the last OBSERVED use (`REAP_STATE_DIR`).
             held = live_paths is not None and any(
                 _holds(p, owner) for p in live_paths)
             if held:
+                # POSITIVE use observed: refresh the lease so the gap is "time
+                # since the container was last demonstrably in use" — not "time
+                # since the lane last called `start()`/`run`" (#10693 review
+                # F1). Without this, the documented `eval "$uri"` form ages its
+                # lease past `OWNER_GRACE_H` while pytest is running against it,
+                # and the first between-steps instant would look like a dead
+                # lane. Stamping only SHORTENS the gap: it can never enable a
+                # removal.
+                _touch_lease(name)
                 out.append(f"reap: kept {name} — its owning lane is LIVE in "
                            f"{owner}")
                 continue
             age = _started_epoch(name)
             if live_paths is None or age is None:
                 # Unreadable liveness or age, and both are needed to prove the
-                # lane is gone. REPORT, never destroy (fail-closed).
-                out.append(
-                    f"reap: kept {name} — its owning worktree exists ({owner}) "
-                    f"and no live process holds it, but "
-                    + ("the liveness surface (/proc) could not be read"
-                       if live_paths is None
-                       else "its start time could not be read")
-                    + "; report only, fail-closed")
+                # lane is gone. REPORT, never destroy (fail-closed) — and the
+                # line must not state an unreadable read AS A RESULT (#10693
+                # review, P2). `held` above is
+                # `live_paths is not None and any(...)`, so when `/proc` could
+                # not be read it is False BY CONSTRUCTION, never by a read:
+                # saying "no live process holds it" there is the exact reading
+                # `_live_lane_paths`' docstring forbids ("an unreadable
+                # liveness surface must never be read as 'nothing is alive'").
+                # It is not hypothetical — on a host with no `/proc` EVERY
+                # ownered peer container takes this branch, so a live lane
+                # mid-run was reported as unheld. Arm 3 already words this
+                # correctly; these are the same two shapes.
+                if live_paths is None:
+                    out.append(
+                        f"reap: kept {name} — its owning worktree exists "
+                        f"({owner}) and whether a live process holds it is "
+                        f"UNKNOWN (the liveness surface /proc could not be "
+                        f"read); report only, fail-closed")
+                else:
+                    out.append(
+                        f"reap: kept {name} — its owning worktree exists "
+                        f"({owner}) and no live process holds it, but its start "
+                        f"time could not be read; report only, fail-closed")
                 continue
             # The container must be older than the grace before its idleness is
             # even interesting: a container created moments ago belongs to a lane
@@ -2650,6 +2960,7 @@ def reap_orphans() -> list[str]:
                            f"in use; report only, fail-closed")
                 continue
             if busy:
+                _touch_lease(name)   # observed use: the epoch follows the proof
                 out.append(f"reap: kept {name} — no live process holds {owner} "
                            f"but it HAS an active client, so something is using "
                            f"it")
@@ -2668,8 +2979,8 @@ def reap_orphans() -> list[str]:
                 continue
             if gap_h < OWNER_GRACE_H:
                 out.append(f"reap: kept {name} — no live process holds {owner} "
-                           f"and it has done no work, but only {gap_h:.1f}h of "
-                           f"{OWNER_GRACE_H:g}h grace has passed")
+                           f"and it shows no OBSERVED use, but only "
+                           f"{gap_h:.1f}h of {OWNER_GRACE_H:g}h grace has passed")
                 continue
             # Moment of action: re-read LIVENESS (not the age — re-reading the age
             # proves nothing, because a lane reuses the running container and
@@ -2677,8 +2988,16 @@ def reap_orphans() -> list[str]:
             # since the sweep snapshot is spared here.
             now_live = _live_lane_paths()
             busy_now = _container_in_use(name)
-            if now_live is None or busy_now is not False \
-                    or any(_holds(p, owner) for p in now_live):
+            now_held = now_live is not None and any(
+                _holds(p, owner) for p in now_live)
+            if busy_now is True or now_held:
+                # The moment-of-action probe POSITIVELY observed use, so refresh
+                # the lease here too: a lane that adopted this container mid-sweep
+                # would otherwise keep the epoch from before its own `start()`,
+                # and the NEXT sweep could find the gap expired during a normal
+                # between-steps window (#10693 review F1).
+                _touch_lease(name)
+            if now_live is None or busy_now is not False or now_held:
                 # `busy_now is not False`: None (unreadable) must never fall
                 # through the `or` chain to the removal, or an unreadable probe
                 # becomes the one fail-open step on a destructive path.
@@ -2695,9 +3014,15 @@ def reap_orphans() -> list[str]:
                 # releases the container from its own worktree, and the armed
                 # switch names the reopen that would make removal the default.
                 out.append(
+                    # The report must carry BOTH measures: the container's age
+                    # (`age_h`) and the lease gap (`gap_h`) are deliberately
+                    # different facts here, and the age is not implied by the
+                    # gap — a lane reuses the running container, so a 9 h old
+                    # container can have a 3 h unused gap (#10693 review, P3).
                     f"reap: kept {name} — nothing holds {owner} (no live process "
                     f"names it, no client attached within "
-                    f"{ACTIVE_CLIENT_IDLE_S}s, unused {gap_h:.1f}h > "
+                    f"{ACTIVE_CLIENT_IDLE_S}s, {age_h:.1f}h old, no OBSERVED "
+                    f"use for {gap_h:.1f}h > "
                     f"{OWNER_GRACE_H:g}h), but its owning worktree still EXISTS "
                     f"and #8180 authorises a reap only when that worktree is "
                     f"gone. Release it from its own worktree: `cd {owner} && uv "
@@ -2710,7 +3035,7 @@ def reap_orphans() -> list[str]:
                 f"reap: {'removed' if rm.returncode == 0 else 'FAILED to remove'} "
                 f"{name} — the lane that owns {owner} is GONE (no live process "
                 f"holds it, no client attached within "
-                f"{ACTIVE_CLIENT_IDLE_S}s, and it has done no work for "
+                f"{ACTIVE_CLIENT_IDLE_S}s, and it shows no OBSERVED use across "
                 f"{gap_h:.1f}h > {OWNER_GRACE_H:g}h). The worktree still exists, "
                 f"which is why this used to survive")
             continue
@@ -2740,6 +3065,12 @@ def reap_orphans() -> list[str]:
                        f"report only, fail-closed")
             continue
         if slug_for_name in live_slugs:
+            # POSITIVE use observed (a cross-clone lane's own process names the
+            # worktree): refresh the lease, exactly as arm 2 does for a hold
+            # (#10693 review F1). This arm is the one a cross-`CELL_HOME` lane
+            # depends on, and that lane's lease lives on the other CELL_HOME — so
+            # this observation is the only fresh evidence the sweep ever gets.
+            _touch_lease(name)
             out.append(f"reap: kept {name} — no worktree in THIS clone names it, "
                        f"but a LIVE process elsewhere on the host owns that "
                        f"worktree, so its lane is alive")
@@ -2766,6 +3097,7 @@ def reap_orphans() -> list[str]:
                        f"whether it is in use; report only, fail-closed")
             continue
         if busy:
+            _touch_lease(name)   # observed use: the epoch follows the proof
             out.append(f"reap: kept {name} — no owner here but it HAS an active "
                        f"client, so something is using it")
             continue
@@ -2796,9 +3128,14 @@ def reap_orphans() -> list[str]:
         now_live = _live_lane_paths()
         now_busy = (False if now_state in _TERMINAL_STATES
                     else _container_in_use(name))
-        if now_live is None or now_busy is not False \
-                or slug_for_name in {slug_for(a) for p in now_live
-                                     for a in _ancestors(p)}:
+        now_named = (now_live is not None and slug_for_name in
+                     {slug_for(a) for p in now_live for a in _ancestors(p)})
+        if now_busy is True or now_named:
+            # The moment-of-action probe POSITIVELY observed use: refresh the
+            # lease, so a lane that adopted this container mid-sweep does not
+            # keep an epoch from before its own `start()` (#10693 review F1).
+            _touch_lease(name)
+        if now_live is None or now_busy is not False or now_named:
             out.append(f"reap: kept {name} — it became LIVE at the moment of "
                        f"action (a lane appeared mid-sweep), or liveness could "
                        f"not be re-established (fail-closed)")
@@ -2811,10 +3148,15 @@ def reap_orphans() -> list[str]:
             # (review F2). Report the whole chain instead: an operator can act
             # on it, and the armed switch is the operator's explicit widening.
             out.append(
+                # `age_txt` (container uptime) is carried here for the same
+                # reason as in arm 2: uptime and the lease gap are distinct
+                # measures, and the doc promises the report names both
+                # (#10693 review, P3).
                 f"reap: kept {name} — no worktree in this clone names it, no "
                 f"live process on this host owns it, no client attached within "
-                f"{ACTIVE_CLIENT_IDLE_S}s, and it has done no work for "
-                f"{gap_h:.1f}h (> {ORPHAN_MAX_AGE_H:g}h) — but its owner cannot "
+                f"{ACTIVE_CLIENT_IDLE_S}s, it is {age_txt}, and it shows no "
+                f"OBSERVED use for {gap_h:.1f}h (> {ORPHAN_MAX_AGE_H:g}h) — but its "
+                f"owner cannot "
                 f"be determined HERE (#8180: report only, fail-closed). It may "
                 f"belong to another clone/CELL_HOME on this box; remove it only "
                 f"if you can attribute it, or rule on #8180 to arm "
@@ -2826,7 +3168,7 @@ def reap_orphans() -> list[str]:
             f"reap: {'removed' if rm.returncode == 0 else 'FAILED to remove'} "
             f"{name} — no worktree in this clone or live process on this host "
             f"owns it, it has no client attached within "
-            f"{ACTIVE_CLIENT_IDLE_S}s, and it has done no work for "
+            f"{ACTIVE_CLIENT_IDLE_S}s, and it shows no OBSERVED use across "
             f"{gap_h:.1f}h (> {ORPHAN_MAX_AGE_H:g}h backstop)")
     return out
 
@@ -3074,7 +3416,13 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 
 def cmd_down(args: argparse.Namespace) -> int:
-    print(f"test-lane: {lane_name()} -> {stop()}", file=sys.stderr)
+    # ONE `repo_root()` read, inside `stop()`. Printing `lane_name()` here as
+    # well was a second read, and `repo_root()` degrades PER CALL to `Path.cwd()`
+    # on a git timeout — so the name printed could disagree with the container
+    # actually removed. `stop()` takes no argument by design (naming a target is
+    # how one lane would delete a peer's DB), so the fix is to print what it
+    # ACTED ON, not a separately-derived name.
+    print(f"test-lane: down -> {stop()}", file=sys.stderr)
     return 0
 
 

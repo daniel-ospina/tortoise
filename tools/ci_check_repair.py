@@ -2195,17 +2195,41 @@ def main(argv: list[str] | None = None) -> int:
                   f"rerun={[x['run'] for x in r['rerun']]} missing_run={r['missing_run']} "
                   f"reopened={r['reopened']} reopen_attempts={r['reopen_attempts']} "
                   f"needs_user_actor={r['needs_user_actor']}")
-        if summary["starved"]:
-            # Named state, named remedy. A starved head is not repaired by anything
-            # this tool can do: the missing resource is a runner slot.
-            print("ci-check-repair: STARVED — the required checks exist as QUEUED runs "
-                  "that no runner slot has started; PR CI is not slow, it is not "
-                  "running. No per-PR repair can clear this: unjam the queue with "
-                  "`uv run python tools/ci_queue_health.py --apply`.", file=sys.stderr)
-        if code != 0:
-            print("ci-check-repair: some repairs need a credential that can trigger events "
-                  "(the local fallback covers this) — see --json for per-PR detail",
-                  file=sys.stderr)
+    # ⛔ THESE TWO REMEDY LINES ARE OUTSIDE THE FORMAT BRANCH ON PURPOSE (#10766).
+    # Both production callers pass `--json` — `.github/workflows/ci-check-repair.yml`
+    # (`--apply --json`) and `tools/ci-check-repair-local.sh` (`--json`, stderr
+    # appended to the durable log) — so while they sat INSIDE the `else` branch they
+    # never printed in the state they describe, at all, for anyone. That is not a
+    # cosmetic loss: the STARVED sentence is the only place the unjam remedy is
+    # named, and it is the state in which no per-PR repair can help, so the reader's
+    # only remaining move is the one being withheld.
+    # `if args.json:` / `else:` above now governs ONLY the human-readable rendering.
+    # ⛔ STDERR, NOT STDOUT, and that is what makes this safe: `--json` writes ONE
+    # document to stdout and both callers parse that stream, so a note on stdout
+    # ahead of the document makes `json.load` raise (the local fallback swallows it
+    # with `2>/dev/null` and reports "PRs needing repair: ?").
+    if summary["starved"]:
+        # Named state, named remedy. A starved head is not repaired by anything
+        # this tool can do: the missing resource is a runner slot.
+        print("ci-check-repair: STARVED — the required checks exist as QUEUED runs "
+              "that no runner slot has started; PR CI is not slow, it is not "
+              "running. No per-PR repair can clear this: unjam the queue with "
+              "`uv run python tools/ci_queue_health.py --apply`.", file=sys.stderr)
+    # ⛔ EXIT 1 IS PRODUCED BY TWO DIFFERENT CAUSES, and the credential sentence is
+    # only true of one of them. `report()` returns 1 for a repair only a user
+    # credential can perform (`needs_user_actor`), and this function ALSO raises 1
+    # for a refusal made under a queue reading that did not certify the queue clear
+    # (#10641, above). While this line sat inside the `else:` branch that
+    # distinction could not matter — production passes `--json`, so the line was
+    # unreachable. #10766 moved it out (correctly: the remedy must survive `--json`),
+    # which made it fire on a QUEUE refusal too and name a credential as the cause of
+    # a jam. That is the exact misdiagnosis this tool exists to end — `ci_queue_health`
+    # is the remedy there, and `tools/ci-check-repair-local.sh` already branches its
+    # own exit-1 text for it. So the sentence is gated on the claim it actually makes.
+    if code != 0 and any(r.get("needs_user_actor") for r in records):
+        print("ci-check-repair: some repairs need a credential that can trigger events "
+              "(the local fallback covers this) — the per-PR detail is in the report",
+              file=sys.stderr)
     return code
 
 

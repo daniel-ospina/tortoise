@@ -377,11 +377,47 @@ class Refused(Exception):
     """A precondition the launcher itself enforces (never a rail verdict)."""
 
 
+def _gh(argv: list[str], cwd: Path) -> subprocess.CompletedProcess:
+    """Run `gh`; a MISSING BINARY is a failed query, never a crash.
+
+    Both callers below are best-effort (`_head_sha` already answers `unreadable`
+    on a non-zero exit, `_resolve_repo` refuses), but an absent `gh` raised
+    `FileNotFoundError` OUT of `launch()` — so the launcher died instead of
+    stamping its artifact, and every arm of `tests/test_rail_detach.py` read as
+    a failure on the #9018 fallback pool, whose `ubuntu-latest` is a bare runner
+    with a minimal non-login PATH and no `gh` (measured 2026-11-03: 20 red arms
+    on `pi-runner-vm-2`, `gh: No such file or directory`, on a PR whose diff
+    touches neither this tool nor its test). rc=127 is what a shell reports for
+    a missing command, so the callers' `returncode != 0` arms handle it — the
+    same shape `tools/who_is_on.py` already uses for `git`
+    (`except FileNotFoundError: return 127, "", "<bin>: command not found"`).
+
+    ⛔ A SECOND, INDEPENDENT MEASUREMENT OF THE SAME DEFECT, kept from the other
+    side of this merge (#10622): `test (h)` on `pi-runner-vm-6`/Linux-ARM64, run
+    41732583553, killed all 20 cases in `tests/test_rail_detach.py` at this
+    call. Two pool boxes, one root — the missing binary, not a rail defect.
+
+    The `-> subprocess.CompletedProcess` annotation above is a CONTRACT, not a
+    hint: this function NEVER returns `None` (the `except` arm fabricates a
+    process with rc=127), so neither caller may carry an `out is not None`
+    guard. Two of them did for a while — inherited from the branch side of the
+    #10622 merge, where `_gh` was allowed to return `None` — and they were
+    unreachable branches contradicting their own annotation. Dropped rather
+    than kept: a guard that cannot fire is not defence in depth, it is a
+    second, wrong description of what this function returns.
+    """
+    try:
+        return subprocess.run(argv, cwd=str(cwd), capture_output=True, text=True)
+    except FileNotFoundError:
+        return subprocess.CompletedProcess(argv, 127, "",
+                                           "gh: command not found")
+
+
 def _resolve_repo(cwd: Path) -> str:
     env_repo = os.environ.get("GH_REPO", "")
-    out = subprocess.run(
+    out = _gh(
         ["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
-        cwd=str(cwd), capture_output=True, text=True,
+        Path(cwd),
     )
     if out.returncode == 0 and out.stdout.strip():
         repo = out.stdout.strip()
@@ -393,14 +429,24 @@ def _resolve_repo(cwd: Path) -> str:
                 "unset GH_REPO rather than detaching a rail at an unknown target"
             )
         return repo
-    raise Refused("could not resolve the repo from this checkout (`gh repo view` failed)")
+    detail = (out.stderr or "").strip().splitlines()
+    # ⛔ BOTH SIDES' WORDING (#10622 merge): this branch's test asserts the message
+    # says WHAT to fix ("installed", `test_a_missing_gh_is_a_REFUSAL_not_a_traceback`),
+    # and main's carries the stderr detail plus the two remedies. Taking either side
+    # alone fails the other's assertion or drops the operator's remedy.
+    raise Refused(
+        "could not resolve the repo from this checkout (`gh repo view` failed"
+        + (f": {detail[-1]}" if detail else "")
+        + ") — is `gh` installed and authenticated? pass `--repo owner/name` to name "
+        "the artifact yourself, or install the `gh` CLI"
+    )
 
 
 def _head_sha(cwd: Path, repo: str, pr: int) -> str:
-    out = subprocess.run(
+    out = _gh(
         ["gh", "pr", "view", str(pr), "--repo", repo, "--json", "headRefOid",
          "-q", ".headRefOid"],
-        cwd=str(cwd), capture_output=True, text=True,
+        Path(cwd),
     )
     return out.stdout.strip() if out.returncode == 0 else "unreadable"
 

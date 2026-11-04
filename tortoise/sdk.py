@@ -21335,15 +21335,36 @@ class TortoiseSDK:
                 _q, params={"id": point_id}).result_set)
         promoted = []
         for (oid,) in rows:
+            # ⛔ #10828: the endpoint read carries the ``outdated`` FLAG as well
+            # as the status. Liveness is NOT the status alone: ``invalidate_point``
+            # sets ``outdated = true`` and deliberately leaves ``status`` alone
+            # (``live.py`` says so in as many words), and ``ep.py``'s selection
+            # already strips a flag-dead input (``status in
+            # TERMINAL_EXCLUDED_STATUSES or bool(outdated)``). A gate that read
+            # only the status admitted an operator over a flag-dead endpoint, so
+            # the operator flipped ``live``, EP then dropped the input, the
+            # factor degenerated, and the operator was left permanently live
+            # over a dead endpoint — the exact pollution the draft lifecycle
+            # exists to prevent.
             eps = proj.g.query(
                 "MATCH (o:Point {id:$oid})-[r]->(s) "
                 f"WHERE {epistemic_disjunction('s')} "
-                "RETURN s.id, s.status",
+                "RETURN s.id, s.status, coalesce(s.outdated, false)",
                 params={"oid": oid},
             ).result_set
             if not eps:
                 continue  # no endpoints — nothing to gate on
-            all_live = all((st or "live") == "live" for _, st in eps)
+            # TWO arms, and BOTH are needed (``live.is_terminal_status`` alone is
+            # NOT the gate): the terminal predicate is the canonical mirror of
+            # the flag + terminal-status exclusion, and ``draft`` is not in
+            # ``TERMINAL_EXCLUDED_STATUSES`` — a draft endpoint is un-promoted,
+            # not dead, and admitting it here would re-open the pollution #944
+            # closed. Unset status stays LIVE (the legacy-node rule), which is
+            # what ``(st or "live")`` preserves.
+            all_live = all(
+                (st or "live") == "live" and not is_terminal_status(st, bool(od))
+                for _, st, od in eps
+            )
             if not all_live:
                 continue  # keep draft until every endpoint is live
             # CAS-guarded SET: only an explicitly-draft operator may flip,
@@ -48727,3 +48748,36 @@ def _validate_extracted_from(props: dict, *, door: str) -> None:
         f"non-empty strings (got {ref!r}); a non-string scalar would mint a "
         "corrupt Source, and raising after the write would leave an "
         "un-journaled orphan (#3263/#8171)")
+
+
+# ── #10626: the run-level reader on the M2 capture lane ────────────────────
+# The v2 capture entry is wrapped where it is DEFINED (`extractor_v2`), so every
+# lane that routes through it (`sdk`, `hosted_api`, `ingest_v2`,
+# `run_v2_pipeline`) gets the #5329 census reading on its own receipt.  The
+# opt-in M2 lane (`TORTOISE_SESSION_EXTRACTOR=m2` → `_extract_session_llm`) does
+# NOT route through that entry: it folds in-capture through
+# `dedup_classify.rephrase_hit`, and a `rephrase_linked` fold there DETACH-DELETEs
+# the duplicate node — the most destructive fold in the product.  Leaving it
+# unwrapped would make the reader cover the lane that keeps both claims and skip
+# the lane that deletes one.
+#
+# Wrapped here, at module scope, rather than by inserting lines inside the method:
+# `sdk.py`'s line numbers are cited by the #7949 capstone bundle (`:15484`,
+# `:15765`, …) and a hook inside the method re-stales them.  `functools.wraps`
+# keeps the name, docstring and signature, so every `self._extract_session_llm`
+# call site and every test that inspects the method resolve to the wrapper.
+#
+# The import is FUNCTION-local and the wiring is one module-level CALL, not a
+# module-level `import`: a bare import down here is `E402` (module level import
+# not at top of file), which the repo's ruff baseline selects — and moving it to
+# the import block would shift every line of this file, re-staling the same
+# #7949 cites the wrapper exists to leave alone.
+def _wire_vocabulary_gap_run_reader_10626() -> None:
+    """Rebind the M2 entry through the #10626 run-level reader (once)."""
+    from .extractor_v2 import _run_scoped_vocabulary_gap as _scope_run
+
+    TortoiseSDK._extract_session_llm = _scope_run(
+        TortoiseSDK._extract_session_llm)
+
+
+_wire_vocabulary_gap_run_reader_10626()

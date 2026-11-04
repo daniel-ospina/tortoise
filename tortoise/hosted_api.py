@@ -3197,11 +3197,14 @@ _DREAM_QUEUE_TTL_S = 600
 # other `to_thread` sites on that pool are enough on their own to park every
 # worker during a burst (prod is 2 vCPU →
 # `min(32, cpu+4)` = 6) and stall unrelated tenants BEFORE their handlers —
-# #10618 removed the last PER-REQUEST tenant of that pool (`first_api_call` and
-# `_abuse_post_auth`, both awaited on every authenticated request; they ride the
-# bounded telemetry lane now), which shortens no fuse: the shared pool is still
-# unbounded-wait and still `min(32, cpu+4)`. While `/health` stays green by
-# design (#2850), nothing would notice. That
+# #10618 removed the last PER-REQUEST tenant of that pool on THIS (REST/hosted)
+# auth path (`first_api_call` and `_abuse_post_auth`, both awaited on every
+# authenticated request; they ride the bounded ``abuse`` lane now), which
+# shortens no fuse: the shared pool is still unbounded-wait and still
+# `min(32, cpu+4)`. It is not empty of per-request hops — the `/mcp` side still
+# awaits `abuse.check_new_country` there (pre-existing, tracked as #10720) — so
+# read this as "one tenant moved", never "the hazard is gone". While `/health`
+# stays green by design (#2850), nothing would notice. That
 # is the #3060 starvation path relocated, not removed. Dream therefore gets its
 # OWN pool: it can only ever starve itself.
 #
@@ -3228,8 +3231,10 @@ _DREAM_EXECUTOR = ThreadPoolExecutor(
 # is an unbounded all-time scan of an org's Sessions + CONTAINS (the windowed
 # funnel rides the same hand-off), so this is the "long / stallable" class the
 # comment at the top of this file says must NOT share the loop's default
-# executor with ~80 other `to_thread` sites and the auth middleware's abuse
-# hooks. Its own small pool means a slow graph can only starve the scorecard.
+# executor with ~80 other `to_thread` sites (the auth path's per-request abuse
+# hooks were among them until #10618 moved them to the bounded ``abuse`` lane —
+# the pool itself is unchanged: `min(32, cpu+4)` with an unbounded wait). Its
+# own small pool means a slow graph can only starve the scorecard.
 _SCORECARD_EXECUTOR = ThreadPoolExecutor(
     max_workers=max(1, min(_int_env("TORTOISE_SCORECARD_WORKERS", 2), 8)),
     thread_name_prefix="activation-scorecard")
@@ -6310,6 +6315,14 @@ def _record_health() -> dict:
       * ``counters_error`` — why the counter snapshot could not be read, or ``None``.
         Kept distinct from ``error`` so the documented pairing
         (*``error`` non-null ⇔ set-but-unusable value*) stays true.
+      * ``refusal_error`` — why the refusal VERDICT could not be read, or ``None``.
+        The same reasoning, one field further: ``record_refusing()`` is not a
+        DSN, and a failed read of it published as ``error`` would send an
+        operator to rotate a secret that is fine (#9548 review P2's exact
+        misdiagnosis). ⚠️ When it is non-``null`` the verdict was NOT
+        EVALUATED, so ``degraded`` is ``None`` and not ``False`` — ``False``
+        states "no armed write was refused inside the window", which is a claim
+        a read that never happened cannot make.
       * ``tenancy_error`` — why ``single_tenant_declared`` could not be read, or
         ``None``. ``False`` means "multi-tenant", which is the SAFE answer, so
         publishing it for a read that failed would render a broken safety check
@@ -6370,8 +6383,10 @@ def _record_health() -> dict:
                 "record_non_journal_skips": None,
                 "record_position_unproven": None,
                 "degraded": None, "degraded_reasons": None,
-                "refusing": None,
+                # No ``refusing``: nothing was evaluated, so the key is ABSENT
+                # rather than ``None`` (#10648 review P3).
                 "counters_error": reason, "tenancy_error": reason,
+                "refusal_error": reason,
                 "fetched_at": datetime.now(UTC).isoformat(),
                 "error": reason}
     # NOTE the shape: keys are assigned, never `**counters`-spread. A spread
@@ -6398,12 +6413,21 @@ def _record_health() -> dict:
         # with no verdict is a counter nobody reads.
         "degraded": None,
         "degraded_reasons": None,
-        # WHAT is refusing and HOW LONG AGO, or ``None``. ``degraded`` is this
-        # block's boolean; ``refusing`` is its identity, so an operator reading
-        # a red deployment never has to guess which arm tripped.
-        "refusing": None,
+        # ⛔ NOT SEEDED HERE (#10648 review P3). WHAT is refusing and HOW LONG
+        # AGO is set on the SUCCESS path only — ``{"reason", "age_s"}`` or
+        # ``None``. ``degraded`` is this block's boolean; ``refusing`` is its
+        # identity, so an operator reading a red deployment never has to guess
+        # which arm tripped. An unevaluated read publishes neither: a seeded
+        # ``None`` would state "nothing is refusing" for a read that never
+        # happened, which is the same fail-open as ``degraded: false``.
         "counters_error": None,
         "tenancy_error": None,
+        # WHY the refusal verdict could not be read, or ``None``. Its own key for
+        # the reason ``counters_error``/``tenancy_error`` have one: ``error`` is
+        # reserved for a value that was SET and REFUSED, and filing a failed
+        # monitoring read there is what sends an operator to rotate a healthy
+        # secret (#9548 review P2, #10648 review — observation 1).
+        "refusal_error": None,
         "error": None,
         # WHEN this block was read. A consumer that keeps the body (an operator
         # capturing the arming evidence for a destructive run, #10017's purge
@@ -6479,19 +6503,42 @@ def _record_health() -> dict:
         # a monitoring fix into a 500 on the endpoint Fly probes. No current
         # raiser exists (`record_refusing` touches one module global and
         # `time.monotonic`); the guard is the contract, not a bug workaround.
+        refusal_error = None
         try:
             refusing = record_refusing()
         except Exception as exc:  # liveness must answer, always
             refusing = None
+            refusal_error = f"refusal state unreadable: {str(exc)[:160]}"
             block["ok"] = False
-            block["error"] = f"refusal state unreadable: {str(exc)[:160]}"
-        block["refusing"] = refusing
-        reason = refusing["reason"] if refusing else None
-        block["degraded"] = bool(refusing)
-        block["degraded_reasons"] = (
-            {reason: failures.get(reason, 0)} if isinstance(reason, str) else {})
-        if refusing:
-            block["ok"] = False
+            # NOT ``error``: that field's documented meaning is *a value was SET
+            # and the seam REFUSED it*, and a monitoring read is neither — the
+            # runbook's remedy for ``error`` is "fix the DSN", which is the
+            # wrong runbook row for an unreadable module global (#10648 review,
+            # observation 1).
+            block["refusal_error"] = refusal_error
+        if refusal_error is not None:
+            # ⛔ NOT EVALUATED is not "not refusing" — of ``degraded`` *and* of
+            # ``refusing`` (#10648 review P3). ``degraded`` stays ``None`` (the
+            # documented "could not be evaluated"), and ``refusing`` is not
+            # published AT ALL: the block's own ``None`` is the documented
+            # "nothing is refusing", which is exactly the claim a read that
+            # raised cannot make. So ABSENCE and "not evaluated" are one fact
+            # here, and a consumer keying on ``refusing is None`` for *now* can
+            # never read a failed read as a quiet window — the fail-open shape
+            # #10185 exists to end, one field over from an unread counter
+            # reading as a zero. ``refusal_error`` beside it is non-null, which
+            # is how the two unevaluated causes stay distinguishable.
+            block["degraded"] = None
+            block["degraded_reasons"] = None
+        else:
+            block["refusing"] = refusing
+            reason = refusing["reason"] if refusing else None
+            block["degraded"] = bool(refusing)
+            block["degraded_reasons"] = (
+                {reason: failures.get(reason, 0)}
+                if isinstance(reason, str) else {})
+            if refusing:
+                block["ok"] = False
     try:
         block["single_tenant_declared"] = record_writer.single_tenant_declared()
     except Exception as exc:
@@ -7159,9 +7206,10 @@ async def get_current_org(request: Request) -> dict:
         # tortoise/analytics.py); distinct_id is the key creator's user UUID
         # (joins web + server funnels), with org_id fallback for legacy/
         # bootstrap keys that predate created_by.
-        # #10618: activation telemetry, so it rides the bounded telemetry lane
-        # — NOT the loop's shared default executor, which is what made this
-        # per-request hop able to park a request BEFORE its handler.
+        # #10618: activation telemetry, so it rides the bounded ``abuse`` lane
+        # (`_telemetry_hook_off_loop`) — NOT the loop's shared default executor,
+        # which is what made this per-request hop able to park a request BEFORE
+        # its handler.
         if first_api_call_pending(org_id):
             try:  # noqa: SIM105
                 await _telemetry_hook_off_loop(
@@ -7351,9 +7399,10 @@ async def _get_current_org_supabase(request: Request, token: str) -> dict:
         # #528: activation telemetry — first successful API auth per org.
         # created_by (key creator's user UUID) joins web + server funnels,
         # with org_id fallback for keys that predate created_by.
-        # #10618: activation telemetry, so it rides the bounded telemetry lane
-        # — NOT the loop's shared default executor, which is what made this
-        # per-request hop able to park a request BEFORE its handler.
+        # #10618: activation telemetry, so it rides the bounded ``abuse`` lane
+        # (`_telemetry_hook_off_loop`) — NOT the loop's shared default executor,
+        # which is what made this per-request hop able to park a request BEFORE
+        # its handler.
         if first_api_call_pending(org_id):
             try:  # noqa: SIM105
                 await _telemetry_hook_off_loop(
@@ -7368,7 +7417,7 @@ async def _get_current_org_supabase(request: Request, token: str) -> dict:
         request.state.tier = org["tier"]
         _publish_default_namespace(org)
         # #308: R3 read velocity + R4 geo (best-effort). #10618: it rides the
-        # bounded telemetry lane, never the loop's shared default executor —
+        # bounded ``abuse`` lane, never the loop's shared default executor —
         # this hook is awaited on EVERY authenticated request.
         await _abuse_post_auth(request, org)
         # #2600: canonical actor_user_id alias (UUID-gated, reads created_by
@@ -8769,20 +8818,19 @@ def _gate_sdk_for(org: dict, resource: str):
       `None`, and NOT because the gate's reading is harmless: what holds is that
       **no write can occur either way** — `_data_sdk` refuses the request 403
       GRAPH_NOT_FOUND — so returning `None` cannot widen access. Substituting a
-      graph here WOULD be a fail-open widening. ⚠️ At the three
-      `/v1/{points,objects,subjects}` sites the gate runs before that 403, so the
-      default-graph count is still taken first and a 402 can pre-empt the 403 —
-      the same ordering the residual below records for the RESOLVED arm; this
-      arm is not exempt from it.
+      graph here WOULD be a fail-open widening. At the three
+      `/v1/{points,objects,subjects}` sites that 403 now precedes the gate (#8906
+      moved `_data_sdk_offloaded` ahead of `_check_org_limit`), and those sites
+      pass `sdk=` anyway, so this arm is not reachable from them at all.
 
-    ⛔ KNOWN RESIDUAL (recorded, not fixed): on the three `/v1/{points,objects,
-    subjects}` sites the gate runs BEFORE `_data_sdk`'s `_assert_graph_owned`, so
-    for a binding whose namespace RESOLVES but is not owned (a DB-inconsistency
-    window, never client input — `graph_namespace` is auth-stamped) the gate now
-    counts that graph and a 402 can pre-empt the 403. Closing it means either
-    moving the gate after the SDK open at those three sites or gating the graph
-    SDK on a completed ownership check; both are their own change. The commit
-    lane is NOT in this class: it opens `_data_sdk` before its gate.
+    ✅ The RESIDUAL this docstring used to record is CLOSED for all three
+    `/v1/{points,objects,subjects}` sites by #8906's reorder: they await
+    `_data_sdk_offloaded(org)` BEFORE the gate, so `_data_sdk`'s GRAPH_NOT_FOUND
+    and `_assert_graph_owned` 403s are both raised first and no 402 can pre-empt
+    them. The commit lane was never in the class (it opens `_data_sdk` before its
+    gate). What remains true generally: a caller that OMITS `sdk=` at a
+    tenant-graph door is gated before any ownership check, so a future door that
+    forgets the keyword re-opens this ordering window.
     """
     if resource not in _GRAPH_SCOPED_QUOTA_RESOURCES:
         return None
@@ -8797,14 +8845,50 @@ def _gate_sdk_for(org: dict, resource: str):
 
 
 def _check_org_limit(org: dict, resource: str, *,
-                     slot_credit: int = 0) -> None:
+                     slot_credit: int = 0, sdk=None) -> None:
     """Enforce per-org limits. Raises 402 (payment required) when at capacity.
 
     resource: 'points' | 'api_keys' | 'sessions' | 'users' | 'graphs'
+        | 'documents'  (the declared universe is ``quota.GATEABLE_RESOURCES``)
     slot_credit (#4355): slots this same operation RELEASES — the rotate
     primitive passes 1 so the admission check is evaluated post-release. Only
     the rotate path may pass a non-zero credit, and only after
     ``quota.api_key_occupies_slot`` proved the displaced row is counted.
+    sdk (#8906): the SDK this request WRITES through — pass it for every
+    resource. It WINS over the omitted-sdk fallback, and the point of passing it
+    is IDENTITY, not the graph: the count then runs on the very handle the write
+    uses, so the two cannot disagree even if the default resolution moves
+    between two constructions of it. The contract for what an OMITTED sdk
+    counts lives at the seam that owns the trap
+    (``quota.enforce_org_limit``'s ``sdk:``/``sdk_factory:`` docs) — at this
+    seam the fallback is ``_gate_sdk_for(org, resource)``, which mirrors the
+    OPENER's own call forms: a graph-BOUND credential's ``graph_namespace``
+    (so the count follows the BINDING), an org-wide credential's promotion-aware
+    default (#10180 — so the count follows a PROMOTION), and ``None`` for the
+    registry-scoped resources. ⚠️ It ALSO answers ``None`` for the second of its
+    two deliberate non-uses — an UNRESOLVED binding (``_data_graph_name`` →
+    ``None``) — and that arm is not a wrong-graph count: no write can occur
+    either way (``_data_sdk`` refuses 403), so substituting a graph would be a
+    fail-open widening. At the REST doors that arm is unreachable and costs
+    nothing in ordering — those three sites pass `sdk=` and have already awaited
+    `_data_sdk` (which raises the 403) BEFORE the gate, which is exactly why
+    #8906 reordered them. Both non-uses are recorded in ``_gate_sdk_for``'s own
+    docstring. That fallback is
+    what #10637 landed and what
+    makes this keyword an optimisation rather than the whole fix; before it, an
+    omitted sdk made ``_count_resource`` mint ``_make_sdk(namespace=org_id)`` —
+    the org's DEFAULT graph ``org_{org_id}`` — while a custom-graph-bound key
+    wrote its own ``org_{org_id}_{gid}``, so the cap was compared against a
+    graph the request never touched, in BOTH directions (a full default graph
+    refused every write to an EMPTY one — the permanent REST freeze — and a full
+    custom graph was admitted because the default was small). That history is
+    why #8906's doors pass this keyword; the rule it restores is the MCP house
+    rule (`mcp_server._enforce_quota`: "Count on the SAME org SDK the tool
+    writes to … so the count and the write can never target different
+    databases").
+    Registry-scoped resources (api_keys/users/graphs) are unaffected by ``sdk``
+    for the count, so callers may pass it for every resource.
+
     Fail-closed decision (#686)
     ~~~~~~~~~~~~~~~~~~~~~~~~~~~
     Counting errors raise HTTP 500 (QuotaCheckError) — never a silent pass.
@@ -8836,26 +8920,36 @@ def _check_org_limit(org: dict, resource: str, *,
         quota_refusal_payload,
     )
     try:
-        # #4051 + #10180: the points/sessions/documents counts are TENANT-graph
-        # counts, so the SDK they run against decides WHICH graph the cap is
-        # measured on. Two orthogonal ways that went wrong, both closed by
-        # `_gate_sdk_for`: (a) #4051 — a graph-BOUND key was counted in the org's
-        # DEFAULT graph while its write went to a custom one, so the gate was
-        # present and vacuous; (b) #10180 — a PROMOTED default was counted where
-        # it used to be, so a stale-low count admitted an org past its real cap
-        # (the money gate failing OPEN). `org` is the RESOLVED CREDENTIAL (not
-        # the org ROW): an org-wide one carries `graph_namespace` — its
-        # default's namespace, resolved once at auth — so this needs no
-        # control-plane read and cannot fail open.
+        # #8906: the request's OWN sdk WINS — the count and the write then
+        # target one graph, and one HANDLE (a door that already opened the SDK it
+        # writes through must not build a second construction of the same graph).
+        # When the caller passes none, the fallback is #4051's `_gate_sdk_for`
+        # through `sdk_factory=`, which closes BOTH orthogonal ways an
+        # omitted-sdk count went wrong: (a) #4051 — a graph-BOUND key was counted
+        # in the org's DEFAULT graph while its write went to a custom one, so the
+        # gate was present and vacuous; (b) #10180 — a PROMOTED default was
+        # counted where it used to be, so a stale-low count admitted an org past
+        # its real cap (the money gate failing OPEN) and a stale-high one refused
+        # writes it was under. `org` is the RESOLVED CREDENTIAL (not the org
+        # ROW): an org-wide one carries `graph_namespace` — its default's
+        # namespace, resolved once at auth — so this needs no control-plane read
+        # and cannot fail open. (An earlier draft read `graph_name` here, a key no
+        # credential dict has: every gate then took the I/O branch, i.e. a
+        # blocking PostgREST read on the event loop of the capture path.)
+        # `_gate_sdk_for` returns None for the registry-scoped resources, so
+        # `api_keys`/`users`/`graphs` — counted from the control plane or the
+        # registry — never pay for an SDK they do not touch.
         #
-        # `sdk_factory=` (lazy), NOT `sdk=`: a gate that RETURNS before counting
-        # must not build a graph handle to prove it. `sessions` is unlimited by
-        # #4010 and `documents` returns for an unlimited `max_points`, so an
-        # eager resolve was measured as 0 -> 1 `_make_sdk` per capture, 764 us of
-        # it embedded, on the event loop — for a count that never ran.
-        enforce_org_limit(org, resource,
-                          sdk_factory=lambda: _gate_sdk_for(org, resource),
-                          slot_credit=slot_credit)
+        # `sdk_factory=` (lazy), NOT an eager `sdk=`: a gate that RETURNS before
+        # counting must not build a graph handle to prove it. `sessions` is
+        # unlimited by #4010 and `documents` returns for an unlimited
+        # `max_points`, so an eager resolve was measured as 0 -> 1 `_make_sdk` per
+        # capture, 764 us of it embedded, on the event loop — for a count that
+        # never ran. A caller that DOES pass `sdk=` has already paid it.
+        enforce_org_limit(
+            org, resource, slot_credit=slot_credit, sdk=sdk,
+            sdk_factory=(None if sdk is not None
+                         else (lambda: _gate_sdk_for(org, resource))))
     except QuotaExceededError as e:
         # #4614: the refusal is a STRUCTURED, distinguishable state — a `code`
         # plus the resource/used/limit the gate actually compared — not the
@@ -9174,7 +9268,7 @@ async def _abuse_post_auth(request: Request, org: dict) -> None:
     """Async wrapper — never raises into the auth path.
 
     #10618: awaited on EVERY authenticated request, so it rides the bounded
-    ``telemetry`` lane (``_telemetry_hook_off_loop``) and never the loop's
+    ``abuse`` lane (``_telemetry_hook_off_loop``) and never the loop's
     shared default executor. ``request.headers``/``request.method`` are read
     HERE, on the loop: ``Request`` is not thread-safe and a worker must not
     touch it.
@@ -9198,7 +9292,7 @@ def _abuse_record_points_sync(org: dict, n: int) -> None:
 
 async def _abuse_record_points(request: Request, org: dict, n: int) -> None:
     try:  # noqa: SIM105
-        # #10618: the bounded telemetry lane, never the shared default pool.
+        # #10618: the bounded ``abuse`` lane, never the shared default pool.
         await _telemetry_hook_off_loop(
             functools.partial(_abuse_record_points_sync, org, n),
             op="abuse.record_points")
@@ -9214,7 +9308,7 @@ def _abuse_evaluate_keys_sync(org_id: str) -> None:
 
 async def _abuse_evaluate_keys(org_id: str) -> None:
     try:  # noqa: SIM105
-        # #10618: the bounded telemetry lane, never the shared default pool.
+        # #10618: the bounded ``abuse`` lane, never the shared default pool.
         await _telemetry_hook_off_loop(
             functools.partial(_abuse_evaluate_keys_sync, org_id),
             op="abuse.evaluate_keys")
@@ -11310,12 +11404,14 @@ async def create_object(body: CreateObjectRequest, request: Request,
     returns the canonical node). objectKind/status/… ride the props.
     """
     _require_scope(org, "graphs:write", "create_object")
-    # #3773: the quota count and the SDK open are SYNC FalkorDB work too — they
+    # #3773: the SDK open and the quota count are SYNC FalkorDB work too — both
     # go through the #3498 offload seam (graph pool) instead of running on the
     # loop before the off-loaded write below.
-    await _graph_offload(lambda: _check_org_limit(org, "points"),
-                         op="check_org_limit.points")
+    # #8906: sdk FIRST, then the gate, so the count runs on the graph this
+    # request writes (see `_check_org_limit`'s `sdk:` doc).
     sdk = await _data_sdk_offloaded(org)
+    await _graph_offload(lambda: _check_org_limit(org, "points", sdk=sdk),
+                         op="check_org_limit.points")
     # #5475: the kind must not widen the graph's own approval set. #9572: only a
     # NAMED kind is checked — an absent one is not a kind, and the fold supplies
     # the ``'other'`` default ON CREATE. #9572 review P2: BLANK is not a kind
@@ -11374,10 +11470,12 @@ async def create_subject(body: CreateSubjectRequest, request: Request,
     as the first graph entities.
     """
     _require_scope(org, "graphs:write", "create_subject")
-    # #3773: same off-load of the quota count + SDK open as create_object above.
-    await _graph_offload(lambda: _check_org_limit(org, "points"),
-                         op="check_org_limit.points")
+    # #3773: same off-load of the SDK open + quota count as create_object above.
+    # #8906: same ORDER too — the count must run on the graph this request
+    # writes (`_check_org_limit`'s `sdk:` doc).
     sdk = await _data_sdk_offloaded(org)
+    await _graph_offload(lambda: _check_org_limit(org, "points", sdk=sdk),
+                         op="check_org_limit.points")
     # #5475: the same input constraint as /v1/objects, on the subject door
     # (#9572: only a NAMED kind — see CreateObjectRequest; BLANK is not a kind,
     # per ``kind_fallbacks.named_kind``).
@@ -11411,12 +11509,15 @@ async def create_subject(body: CreateSubjectRequest, request: Request,
 async def create_point(body: CreatePointRequest, request: Request, org: dict = Depends(get_current_org_session_ungated)):  # noqa: B008
     """Create a Point in the org's graph."""
     _require_scope(org, "graphs:write", "create_point")
-    # #3773: the quota count and the SDK open are SYNC FalkorDB work too — they
+    # #3773: the SDK open and the quota count are SYNC FalkorDB work too — they
     # go through the #3498 offload seam (graph pool) instead of running on the
     # loop before the off-loaded write below.
-    await _graph_offload(lambda: _check_org_limit(org, "points"),
-                         op="check_org_limit.points")
+    # #8906: sdk BEFORE the gate — this is the door the P0 was measured on (the
+    # write graph held 200 Points in 48 minutes while the gate reported a frozen
+    # `used=25000` read from the org's default graph).
     sdk = await _data_sdk_offloaded(org)
+    await _graph_offload(lambda: _check_org_limit(org, "points", sdk=sdk),
+                         op="check_org_limit.points")
     try:
         # #3718: sdk.create_point + the about edge are SYNC FalkorDB socket
         # I/O — both run in ONE worker thread (a single hand-off keeps the
@@ -11616,7 +11717,18 @@ async def list_points(
     # GET /v1/points/{id}, not by list. No include param on REST v1 (surface
     # minimal).
     conditions.append("(n.status IS NULL OR n.status <> 'retracted')")
-    params: dict = {"limit": limit}
+    # #8447 (C2): this route capped at ``limit`` and answered
+    # ``{"points": …, "count": len(results)}`` — a FULL page was byte-identical
+    # to a COMPLETE one, and there is no offset and no cursor on this surface, so
+    # a row past the cap was unreachable by any follow-up call. That is the
+    # defect #8447 exists for, on the highest-traffic list route.
+    #
+    # The probe is how the marker is PROVED without a second round trip: ask the
+    # store for one row MORE than the caller asked for and drop it. ``limit+1``
+    # is an INTERNAL probe, never a caller-visible cap — the caller's bound still
+    # governs what is delivered, so the route's ``le=1000`` stays the caller's
+    # ceiling and no cap VALUE changes here (only its marking).
+    params: dict = {"limit": limit + 1}
     if kind:
         conditions.append("n.pointKind = $kind")
         params["kind"] = kind
@@ -11643,13 +11755,36 @@ async def list_points(
     rows = await _read_offload(
         lambda: sdk._get_proj().g.query(query, params=params).result_set,
         op="list_points")
+    # The candidate set AS THE PROBE CAN SEE IT — capped at ``limit+1``, so the
+    # population is BOUNDED, while the VERDICT (``candidates > returned``) is
+    # decided rather than estimated: it is true iff the store held more rows
+    # than the caller asked for.
+    # That boundedness is why ``exact=False`` below and why ``total_available``
+    # is withheld — publishing ``limit+1`` as a total is a lower bound wearing a
+    # total's clothes (``truncation.py``). Do NOT pass ``exact=True`` here.
+    candidates = len(rows)
     results = []
-    for r in rows:
+    for r in rows[:limit]:
         d = r[0]
         if "pointKind" in d:
             d["kind"] = d.pop("pointKind")
         results.append(d)
-    return {"points": results, "count": len(results)}
+    from tortoise.truncation import mark_truncation, truncation_field
+
+    # ``exact=False``: the probe proves THERE ARE MORE, not HOW MANY. An exact
+    # total would need a second COUNT over the whole graph, and publishing the
+    # probe's own ``limit+1`` as ``total_available`` would be a lower bound
+    # wearing a total's clothes (`truncation.py`). So a truncated page here takes
+    # the contract's THIRD state — incomplete, total unknown — and a complete one
+    # is positively marked complete rather than left un-marked.
+    trunc_out: dict = {}
+    mark_truncation(trunc_out, returned=len(results),
+                    candidates=candidates, exact=False)
+    body: dict = {"points": results, "count": len(results)}
+    # ⚠️ ``count`` keeps its exact prior meaning — rows DELIVERED — so a caller
+    # that ignores the new field is unaffected; ``truncated`` is the instrument.
+    body.update(truncation_field(trunc_out))
+    return body
 
 
 @app.get("/v1/points/{point_id}")
@@ -13982,7 +14117,7 @@ _DEMO_POINT_IDS: frozenset[str] = frozenset(
 ) | {_DEMO_SENTINEL_ID}
 
 
-def _seed_demo_graph(org_id: str) -> dict:
+def _seed_demo_graph(org_id: str, sdk=None) -> dict:
     """Seed the 4-layer OPT-IN demo/sample graph for an org. Idempotent
     (sentinel). #2360: NEVER called on the fresh-org provisioning path —
     fresh orgs get the REAL starter seed (/internal/starter-seed) instead.
@@ -14008,7 +14143,12 @@ def _seed_demo_graph(org_id: str) -> dict:
     filings; deleting the sentinel and re-seeding, or a one-shot backfill of
     `tags` from the existing `TAGGED` edges, closes it per graph.
     """
-    sdk = _org_sdk(org_id)
+    # #8906: a caller that ALREADY opened this graph (and gated its count on that
+    # handle, `public_demo`) passes it in, so the count and the write are one
+    # handle rather than two `_org_sdk(org_id)` constructions that agree only
+    # while the default resolution does not move between them. `sdk=None` keeps
+    # every other caller unchanged (they open it here, as before).
+    sdk = sdk if sdk is not None else _org_sdk(org_id)
     proj = sdk._get_proj()
     now = datetime.now(UTC).isoformat()
 
@@ -17034,7 +17174,15 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # Removing it needs that contract re-pointed at `max_points` AND a decision
     # for the store-only lanes, so it is tracked separately rather than copied
     # half-way here.
-    _check_org_limit(org, "sessions")
+    #
+    # #8906: `sdk=` is passed for the same reason as the points doors — this is a
+    # TENANT-GRAPH resource, so an omitted sdk makes `_count_resource` mint
+    # `org_{org_id}` (the org DEFAULT graph) while a graph-bound key's Sessions
+    # land in its own `graph_namespace`. Vacuous TODAY only because every
+    # resolver emits `max_sessions: None` (#4010), so `enforce_org_limit` returns
+    # before counting; the moment a finite session cap ships, an omitted sdk
+    # re-arms #8906 on this door. Count on the handle the capture writes through.
+    _check_org_limit(org, "sessions", sdk=sdk)
     # Optional frontmatter-metadata validation (#1362) — warn-only, gated by
     # TORTOISE_VALIDATE_FRONTMATTER=1 (default OFF). The SessionRequest is a
     # payload (no frontmatter block), so the shape validator runs over a
@@ -20518,7 +20666,11 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
         # per-graph-locked region. The site (after every replay return, before the
         # budget adjudication) is unchanged, so an idempotent re-POST is still
         # never gated.
-        _check_org_limit(org, "points")
+        #
+        # #8906: count on the SAME SDK this commit writes through — `sdk` is the
+        # handle the handler opened off-loop above, so the count and the writes
+        # below target one graph (`_check_org_limit`'s `sdk:` doc).
+        _check_org_limit(org, "points", sdk=sdk)
 
         # [4c] #4051 §3.1 — the per-ORG ingest budget. The gates above bound the
         # REQUEST (payload shape, #9425) and the org's ALREADY-COUNTED nodes
@@ -22158,8 +22310,9 @@ _RETENTION_MAX_ORGS = 1000
 #: self-inflicted `org_read_timeout`. The read is a control-plane HTTP walk of
 #: up to `max_pages` round trips per org, which is the "long / stallable"
 #: class the #3060 doctrine above says must NOT share the loop's default
-#: executor with ~80 other `to_thread` sites and the auth middleware's abuse
-#: hooks.
+#: executor with ~80 other `to_thread` sites (the auth path's per-request abuse
+#: hooks left that pool in #10618; its width and its unbounded wait did not
+#: change, so the doctrine stands).
 _RETENTION_MAX_CONCURRENCY = 4
 
 
@@ -36392,10 +36545,21 @@ async def public_demo(org: dict = Depends(get_current_org_gated)):  # noqa: B008
         # like any other Point-creating write — the REST surface was the
         # 0-quota bypass (bug-hunt 2026-08-28 server P2-13). Idempotent
         # re-calls short-circuit above and skip the gate (no write).
-        _check_org_limit(org, "points")
-        # The shared demo seeder (extracted from /internal/demo) opens its own
-        # SDK and writes ~10 Points.
-        return {"existing": False, "created": _seed_demo_graph(org["org_id"])}
+        # #8906: this door is DEFAULT-GRAPH ONLY by construction —
+        # `_reject_graph_bound_org_surface` refuses a graph-bound key above, and
+        # `_org_sdk(org_id)` is #10180's promotion-aware default resolver (NOT a
+        # bare ``namespace=org_id``). The count runs on the handle this closure
+        # probed, and that SAME handle is handed to the seeder below, so the
+        # count and the write are one handle rather than two constructions of
+        # the same graph (#8906 review, P2: a promotion landing between the two
+        # `_org_sdk` calls would split them, and the second call is a second
+        # control-plane read when the auth hint is absent).
+        _check_org_limit(org, "points", sdk=sdk)
+        # The shared demo seeder (extracted from /internal/demo) writes ~13
+        # Points through the handle passed in (it opens its own when called
+        # without one, e.g. from `/internal/demo`).
+        return {"existing": False,
+                "created": _seed_demo_graph(org["org_id"], sdk=sdk)}
 
     async with await _demo_seed_lock(org["org_id"]):
         out = await asyncio.to_thread(_seed_demo_sync)
