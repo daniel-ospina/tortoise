@@ -1846,7 +1846,16 @@ _CLAUSE_SEPARATORS = (" — ", "; ", ". ", ", ")
 # `top-15` is what every row ALREADY IN the map carries. Recognizing only the new
 # shape would leave the oldest rows' bases unpinned and let each one grow a second
 # sentence on its next hold — the defect this strip exists to prevent.
-_SAMPLE_LABEL_RE = r"ci-timing (?:junit-census\+top-15|top-15)"
+# ⛔ ONE source of truth, and it is the tuple the WRITER selects from (#10575 review,
+# P3). The reader's pattern and the label `main` emits used to be spelled twice — the
+# regex here, and a literal pair at the call site — so the drift that made #9134's
+# run-agreement arm UNREACHABLE (the writer moved to `junit-census+top-15` while the
+# guard still read `top-15`) was not structurally closed: a third shape written at the
+# call site would leave the guard blind, with no red until a healthy map went red.
+# `main` now picks from THIS tuple, and the regex is derived from it, so a new shape
+# cannot be emitted without also being readable.
+_SAMPLE_LABELS = ("junit-census+top-15", "top-15")
+_SAMPLE_LABEL_RE = "ci-timing (?:" + "|".join(re.escape(s) for s in _SAMPLE_LABELS) + ")"
 _PRIOR_BASIS_RE = re.compile(
     rf"(?:^[ \t]*#[ \t]*|[ \t]+—[ \t]+){_SAMPLE_LABEL_RE} \d{{4}}-\d{{2}}-\d{{2}} "
     r"\(run [^)]*\)"
@@ -1905,7 +1914,14 @@ def _prior_basis_spans(tail: str) -> list[tuple[int, int, str]]:
 # set with NO space, because the text it re-joins was adjacent before a basis was
 # injected between the two halves. `…` is in the set because the map's notes use it
 # as a sentence-final mark.
-_ATTACHING_PUNCTUATION = frozenset(",.;:!?)]}\"'…")
+# ⛔ A QUOTE IS NOT UNCONDITIONALLY ATTACHING (`_closes_a_quote` below): `"` and `'`
+# OPEN as often as they close, so treating them as attaching put the join at the
+# mercy of a coin flip — a mid-note basis spliced before `"the guard is inert"`
+# would emit `registered"the guard`, which no guard can see. They therefore attach
+# only when the surviving left half has an UNCLOSED quote of that mark, which is the
+# only shape in which the mark really is a closer (#10575 review, P3).
+_ATTACHING_PUNCTUATION = frozenset(",.;:!?)]}…")
+_QUOTE_MARKS = frozenset("\"'")
 
 
 def _without_span(tail: str, start: int, end: int) -> str:
@@ -1932,8 +1948,28 @@ def _without_span(tail: str, start: int, end: int) -> str:
     if not after.strip():
         return before
     rest = after.lstrip()
-    glue = "" if rest[:1] in _ATTACHING_PUNCTUATION else " "
+    first = rest[:1]
+    if first in _ATTACHING_PUNCTUATION:
+        glue = ""
+    elif first in _QUOTE_MARKS and _closes_a_quote(before, first):
+        glue = ""
+    else:
+        glue = " "
     return f"{before}{glue}{rest}".rstrip()
+
+
+def _closes_a_quote(before: str, mark: str) -> bool:
+    """Does `mark` CLOSE a quote the surviving left half left open?
+
+    Only `"` is decidable: an odd count in `before` means the fragment stopped
+    inside a double-quoted span, so the mark that follows re-attaches. `'` is not —
+    English apostrophes (`don't`, `note's`) make its parity meaningless, so a single
+    quote always keeps its space. The failure directions are not symmetric: a
+    spurious space before a CLOSING quote leaves the words intact (`… map " read`),
+    while a missing space before an OPENING one fuses two words (`map"reads`) — so
+    the undecidable case takes the space.
+    """
+    return mark == '"' and before.count('"') % 2 == 1
 
 
 def _strip_prior_held_basis(tail: str) -> str:
@@ -1990,7 +2026,12 @@ def _strip_prior_basis(tail: str) -> str:
 # is HELD: the value is still carried forward, so the meaning is RESTATED rather
 # than deleted, which is what clearing the whole tail did to this marker's
 # long-form rows (#9134 review, P2).
-# groups: 1 = the note's own `# ` prefix, 2 = the marker's separator (if any)
+# groups: 1 = the note's own `# ` prefix, 2 = the marker's em/en dash separator, 3 =
+# the ASCII-hyphen separator (both `None` when the note has no separator). Two groups
+# because the dash is re-emitted by `_restate_unmeasured_marker` and the ASCII form is
+# only a separator when it stands alone between spaces — an unspaced `-` belongs to a
+# WORD (`CI-only`), which is what made `# unmeasured by CI-only lanes` come out as
+# `# only lanes` (#10575 review, P3).
 #
 # The marker's QUALIFIER is part of the marker: authors write `# unmeasured by CI`,
 # `# unmeasured on CI`, `# unmeasured in CI`, and consuming only the single word
@@ -2001,10 +2042,23 @@ def _strip_prior_basis(tail: str) -> str:
 # stub is invisible to the guard added for the class, because the guard looks for the
 # phrase this deletion DESTROYS. `by` is included because that is the shipped shape;
 # `on`/`in` are the two the guard already spells.
+# ⛔ The SEPARATOR is not "an optional dash in any spacing" (#10575 review, P3).
+# Two faces of that were wrong, both measured:
+#   • an UNSPACED `-` was consumed as a separator, so `# unmeasured by CI-only lanes`
+#     became `# only lanes` — the marker's qualifier is not followed by a dash there,
+#     the hyphen belongs to the WORD;
+#   • the note's OWN punctuation was left behind, so `# unmeasured, so the flat
+#     default holds` became `# , so …` and `# unmeasured. Some note follows` became
+#     `# . Some note follows` — the same stranded-stub class the qualifier group
+#     above exists to close.
+# So: an em/en dash attaches in any spacing (it is the separator this module writes),
+# an ASCII hyphen only when it stands ALONE between spaces, and a leading
+# `,;:.!?` is ABSORBED with the marker. `CI(?![\-\w])` keeps `CI-only` a word.
 _UNMEASURED_LEAD_RE = re.compile(
     r"^([ \t]*#[ \t]*)unmeasured\b"
-    r"(?:[ \t]+(?:on|in|by)[ \t]+CI\b)?"
-    r"[ \t]*([—–-])?[ \t]*"
+    r"(?:[ \t]+(?:on|in|by)[ \t]+CI(?![\-\w]))?"
+    r"(?:[ \t]*([—–])[ \t]*|[ \t]+(-)[ \t]+|[ \t]*[,;:.!?])?"
+    r"[ \t]*"
 )
 _CARRIED_FORWARD = "carried forward (not a full-file CI measurement)"
 
@@ -2449,7 +2503,7 @@ def _restate_unmeasured_marker(tail: str) -> str:
     match = _UNMEASURED_LEAD_RE.match(tail)
     if not match:
         return tail
-    prefix, dash, rest = match.group(1), match.group(2), tail[match.end():]
+    prefix, dash, rest = match.group(1), (match.group(2) or match.group(3)), tail[match.end():]
     # the marker's OWN separator, re-emitted as it was (never beside a second
     # one, which is what stranded the original dash); ` — ` only when the
     # original note ran straight on after the marker word.
@@ -2546,7 +2600,13 @@ def _declared_floors(manifest_text: str) -> dict[str, DeclaredFloor]:
     except yaml.YAMLError:
         return {}
     floors = data.get("durations_floors") if isinstance(data, dict) else None
-    if floors is None:
+    if floors is None or floors == {}:
+        # ⛔ BOTH spellings of "declares nothing": `null` AND the empty mapping `{}`.
+        # A missing entry-point is absent (legal — every fixture that carries no such
+        # key keeps its output); `{}` is a block whose entries were deleted, which is
+        # exactly how a merge-resolution tidy drops duplicate twins. Pinning only
+        # `null` left the other half of the class silent on BOTH sides, so every
+        # declared cap reverted on the next sweep with nothing red (#10575 review, P3).
         if isinstance(data, dict) and "durations_floors" in data:
             # PRESENT but NULL. Absent is legal (every fixture that carries no such
             # key keeps its output); a key that is THERE and declares nothing is a
@@ -2555,7 +2615,8 @@ def _declared_floors(manifest_text: str) -> dict[str, DeclaredFloor]:
             # rule the LIST shape got (#10575 review, F2), applied to the other face
             # of the same container (#10575 review, P3).
             raise DurationsBridgeError(
-                "`durations_floors` is present but declares nothing (null) — a "
+                "`durations_floors` is present but declares nothing (null or an "
+                "empty mapping) — a "
                 "declaration block the writer cannot read must be REFUSED rather "
                 "than silently treated as absent, or every declared cap reverts on "
                 "the next sweep (state the declaration or drop the key, #9172)"
@@ -4051,8 +4112,11 @@ def main() -> int:
         # A sweep that read NO census (its only justification is
         # `--allow-window-only`) is labelled `top-15`, which is then the truth.
         sweep_sources = {m["source"] for m in measurements.values()}
-        reading = ("junit-census+top-15" if "census" in sweep_sources
-                   else "top-15")
+        # …from `_SAMPLE_LABELS`, never from a literal: the reader's pattern is
+        # derived from that tuple (`_SAMPLE_LABEL_RE`), so this selection cannot
+        # drift out of its sight (#10575 review, P3).
+        reading = (_SAMPLE_LABELS[0] if "census" in sweep_sources
+                   else _SAMPLE_LABELS[1])
         sample_label = (f"ci-timing {reading} {captured_at[:10]} "
                         f"(run {args.run_id.strip() or 'unknown'})")
         return refresh_durations(
