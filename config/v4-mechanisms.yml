@@ -776,7 +776,19 @@ mechanisms:
       false-accusation direction for every identity added. What SURVIVES of the
       old (d) is the SPELLING case — a unit outside `_UNIT_EQUIV` (`800millis`)
       still fails open on purpose, because refusing `800millis`/`800ms` is the
-      false-accusation direction this rule must never take; (e) the S5
+      false-accusation direction this rule must never take; ⛔ and that same
+      tolerance now also covers a `k`-prefixed value beside a FUSED unit word,
+      which is the price this widen pays and is recorded rather than implied
+      (#10804 review P3, measured): `the batch took 5k seconds` against `… 5
+      minutes` REFUSED at `origin/main` `525fde4a9` and TOLERATES here, because
+      the fused suffix `kseconds` is outside `_UNIT_EQUIV` so both sides' cores
+      coincide at `5` and the unknown-unit tolerance fires. That is a MISSED
+      REWRITE, the fail-open direction this rule explicitly prefers to a false
+      accusation; the SAME mechanism already tolerated `3k minutes`/`3 hours` at
+      the base, and it is what makes `3k minutes`/`3000 minutes` (a FALSE
+      ACCUSATION at the base) agree now. Pinned by
+      `tests/test_state_value_verbatim_10360.py::test_a_magnitude_prefix_beside_a_unit_word_is_COMPOSED_not_refused`.
+      (e) the S5
       minted-endpoint site is not judged against its own quote — there `quote` is
       the point's OWN text, cut with the module's one truncation helper
       (`_write_span`), so a rewrite is impossible by construction and a rule
