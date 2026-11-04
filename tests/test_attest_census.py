@@ -681,6 +681,107 @@ def test_a_c_locale_cannot_turn_a_good_run_into_exit_1(tmp_path):
     assert "naïve-ünicode" in out.read_bytes().decode("utf-8")
 
 
+def test_cell_sanitises_a_lone_surrogate_so_the_document_stays_encodable():
+    """The digest, the file write and the stdout all encode — so one unencodable code point
+    anywhere in a dynamic cell killed a census that had read everything correctly.
+
+    MEASURED (review cycle 15): RFC 8259 permits a lone surrogate, `json.loads` accepts one, and a
+    hand-written record carrying `"evidence": "comment:1 \\ud800"` reached the table. `_content_digest`
+    encodes the WHOLE document, so `.encode("utf-8")` raised `UnicodeEncodeError` inside `render()`
+    — BEFORE the `except (OSError, ValueError)` around the write could see it — and the tool exited
+    1, the one code this file publishes as impossible. `print(text)` raised on the same code point.
+
+    Mutation proof: remove the `.encode("utf-8", "backslashreplace")` half of `_cell` and the
+    `render(...)` call below raises `UnicodeEncodeError` instead of returning a document.
+    """
+    sanitised = ac._cell("comment:1 \ud800")
+    sanitised.encode("utf-8")  # the encode that used to raise, one layer down
+    assert "\\ud800" in sanitised, "the evidence must stay READABLE, not silently dropped"
+
+    record = ac.Record(
+        path=Path("daniel-ospina-tortoise-5.json"),
+        head_sha=LIVE,
+        mint="fresh",
+        verdict="clean",
+        evidence="comment:1 \ud800",
+    )
+    row = ac.Row(
+        pr=5,
+        head=LIVE,
+        branch="b\ud800",
+        title="t\ud800",
+        record=record,
+        gate_status="completed",
+        gate_conclusion="failure",
+        gate_checked=True,
+    )
+    row.outcome, row.why = ac.classify(LIVE, record, "completed", "failure")
+    assert row.why, "precondition: the surrogate must actually reach a rendered cell"
+
+    text = ac.render([row], "daniel-ospina/tortoise", "2026-11-04T00:00:00Z")
+    text.encode("utf-8")  # `_content_digest`'s own encode: this is the line that used to raise
+    assert ac.verify_census_document(text) == "", "and the document must still prove its provenance"
+
+
+def test_an_unrenderable_character_is_rc_2_not_a_traceback(monkeypatch, tmp_path):
+    """The belt behind `_cell`: a value that reaches `render` WITHOUT passing a cell (argv, e.g.
+    `--repo $'\ud800'`) must still land inside the published `0`/`2` contract.
+
+    Before the guard, `render` was called OUTSIDE every handler, so its `ValueError` escaped `main`
+    as a traceback and rc 1. Pins the exit code, not the message.
+    """
+
+    def _boom(*_args, **_kwargs):
+        raise UnicodeEncodeError("utf-8", "x\ud800", 0, 1, "surrogates not allowed")
+
+    monkeypatch.setattr(ac, "gh_json", lambda args: [])
+    monkeypatch.setattr(ac, "render", _boom)
+    assert ac.main(["--reviews-dir", str(tmp_path), "--no-gate", "--out", str(tmp_path / "o.md")]) == 2
+    assert not (tmp_path / "o.md").exists()
+
+
+def test_a_lone_surrogate_in_a_record_cannot_turn_a_good_census_into_exit_1(tmp_path):
+    """The end-to-end measurement of the same defect: the REAL entry point, a record on disk whose
+    evidence carries a lone surrogate, `gh` shimmed — no network.
+
+    Runs in a subprocess because the claim under test is the process's EXIT CODE (`0`/`2`, never
+    `1`), which an in-process assertion can only approximate. On the pre-fix tree this returns 1
+    with a `UnicodeEncodeError` traceback and writes no report.
+    """
+    shim = tmp_path / "bin"
+    shim.mkdir()
+    payload = json.dumps([{"number": 5, "headRefOid": LIVE, "headRefName": "b", "title": "t"}])
+    gh = shim / "gh"
+    gh.write_text("#!/bin/sh\nprintf '%s' '" + payload + "'\n", encoding="utf-8")
+    gh.chmod(0o755)
+    reviews = tmp_path / "reviews"
+    reviews.mkdir()
+    # Written as literal JSON text on purpose: `\ud800` is a legal RFC 8259 escape, which is
+    # exactly why a hand-written or `gh`-relayed record can carry one.
+    (reviews / "daniel-ospina-tortoise-5.json").write_text(
+        '{"repo":"daniel-ospina/tortoise","pr":5,"head_sha":"' + LIVE + '","mint":"fresh",'
+        '"verdict":"clean","evidence":"comment:1 \\ud800"}',
+        encoding="utf-8",
+    )
+    out = tmp_path / "o.md"
+    env = dict(os.environ)
+    env["PATH"] = shim.as_posix() + os.pathsep + env.get("PATH", "")
+    proc = subprocess.run(
+        [sys.executable, str(TOOL), "--reviews-dir", str(reviews), "--no-gate", "--out", str(out)],
+        cwd=str(tmp_path),
+        env=env,
+        capture_output=True,
+        timeout=120,
+    )
+    assert proc.returncode == 0, (
+        f"a lone surrogate in a record turned a good run into rc {proc.returncode} "
+        f"(contract: 0 or 2, never 1)\nstdout={proc.stdout[-2000:]!r}\nstderr={proc.stderr[-2000:]!r}"
+    )
+    text = out.read_bytes().decode("utf-8")
+    assert "\\ud800" in text, "the sanitised evidence must appear, so the row still says what it read"
+    assert ac.verify_census_document(text) == "", "and the written report must still verify"
+
+
 def test_no_gate_does_not_overwrite_a_record_present_reason(monkeypatch, tmp_path):
     """A record-present NOTHING row keeps its own reason (evidence-less), not "no record".
 

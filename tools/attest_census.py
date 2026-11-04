@@ -433,6 +433,16 @@ def _cell(value: object) -> str:
     linter: `evidence` = `"comment:1\\|x"` produced `MD056 [Expected: 10; Actual: 11]`.
     A corrupt or hand-written record is exactly the input this census must survive, so
     "a `|` would add a cell" was still false until the backslash was escaped too.
+
+    ⛔ The ENCODE is the third half of the same promise, and it is here rather than at the write
+    for the same reason the other two are: an unencodable code point must not outlive this
+    boundary. MEASURED (review cycle 15): RFC 8259 permits a lone surrogate, `json.loads` accepts
+    one, and a hand-written record carrying `"evidence": "comment:1 \\ud800"` reached the table —
+    where `.encode("utf-8")` raised `UnicodeEncodeError` inside `_content_digest` (a 'surrogates
+    not allowed' escape) BEFORE the `except (OSError, ValueError)` around the write could see it,
+    so a census that had read every surface correctly died with a traceback and **rc 1**, breaking
+    this file's published `0`/`2`-never-`1` contract. `print(text)` afterwards raised on the same
+    code point. `backslashreplace` keeps the evidence (`\ud800`) readable instead of dropping it.
     """
     return (
         str(value)
@@ -441,6 +451,11 @@ def _cell(value: object) -> str:
         .replace("\r", " ")
         .replace("\n", " ")
         .strip()
+        # LAST, so the escapes it introduces are not themselves doubled, and so it cannot
+        # reintroduce a live `|`. Every dynamic cell goes through here, which is why one
+        # sanitise point is enough for the table, the digest, the file write and the stdout.
+        .encode("utf-8", "backslashreplace")
+        .decode("utf-8")
     )
 
 
@@ -760,7 +775,16 @@ def main(argv: list[str] | None = None) -> int:
         }, indent=2))
         return 0 if unreadable == 0 else 2
 
-    text = render(rows, args.repo, generated_at, truncated=truncated, limit=args.limit)
+    # Belt to `_cell`'s braces. `_cell` sanitises every RECORD- and `gh`-derived cell, but this
+    # string is not the only source of one: `--repo` is ARGV, so `--repo $'\ud800'` reaches the
+    # header line unescaped. Without this the digest encoded it, `str.encode` raised
+    # `UnicodeEncodeError` (a `ValueError`) OUTSIDE any handler, and the tool exited 1 on a run
+    # that read everything correctly — the one exit code this file publishes as impossible.
+    try:
+        text = render(rows, args.repo, generated_at, truncated=truncated, limit=args.limit)
+    except ValueError as exc:  # an unrenderable character is rc 2, never a traceback
+        print(f"attest_census: could not render the report: {exc}", file=sys.stderr)
+        return 2
     try:
         out = Path(args.out).expanduser()
     except RuntimeError as exc:  # symmetric with --reviews-dir: an unresolvable ~ is rc 2, not rc 1
@@ -771,14 +795,22 @@ def main(argv: list[str] | None = None) -> int:
         # ⛔ `encoding="utf-8"` is part of the CONTRACT, not tidiness (review cycle 14): this file is
         # read by the pinned markdownlint, by `verify_census_document` (which re-derives its sha256)
         # and by lanes grepping rows, so its bytes cannot be whatever locale the invoking shell
-        # exported. And `ValueError` in the `except` is load-bearing: `UnicodeEncodeError` is a
-        # `ValueError`, NOT an `OSError`, so an unencodable payload (a lone surrogate from a `gh`
-        # payload is the real shape) would escape the old `except OSError` as a traceback and rc 1.
+        # exported. `ValueError` stays in the `except` because `UnicodeEncodeError` is a
+        # `ValueError`, NOT an `OSError` — but cycle 15 measured that the lone-surrogate shape it was
+        # added for could never reach THIS line: `_content_digest` encodes the whole document first,
+        # so it died at `render` before this `try` was entered, and the claim that this `except`
+        # handled it was false. `render` and `print` are now guarded in their own right and `_cell`
+        # sanitises the payload, so this clause is a belt over an already-closed door rather than the
+        # fix — do not delete it, and do not describe it as the fix.
         out.write_text(text, encoding="utf-8")
     except (OSError, ValueError) as exc:  # unwritable/unencodable --out is not a finding
         print(f"attest_census: could not write {out}: {exc}", file=sys.stderr)
         return 2
-    print(text)
+    try:
+        print(text)
+    except UnicodeEncodeError as exc:  # same contract on the stdout surface as on the file
+        print(f"attest_census: could not write the report to stdout: {exc}", file=sys.stderr)
+        return 2
     print(f"attest_census: wrote {out}", file=sys.stderr)
     return 0 if unreadable == 0 else 2
 
