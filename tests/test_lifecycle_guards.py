@@ -419,10 +419,17 @@ def test_duplicate_id_with_an_operator_sibling_is_refused(sdk):
 #     sdk.update_point(p, validTo="2026-06-10")  # ...accepted, window written
 #
 # The guard is scoped to `_TEMPORAL_RESTAMP_PROPS` (window bounds + their
-# precision markers + `expiredAt` + `when`) because a content/metadata revision
-# of a terminal claim is a recorded capability (#3305). Both halves are pinned
-# here: what is refused, and what keeps working. `update_entity`'s Point arms
-# open a second door onto the same window and are tracked separately as #9649.
+# precision markers + `expiredAt` + `when`) because an ADDRESSED content/
+# metadata revision of a terminal claim is a recorded capability (#3305). Both
+# halves are pinned here: what is refused, and what keeps working. `update_entity`'s
+# Point arms open a second door onto the same window and are tracked separately
+# as #9649.
+#
+# #10368 then split the two doors: `create_point`'s content-dedup fold is
+# UNADDRESSED, so it refuses EVERY write onto a terminal claim (temporal or
+# not), while `update_point` — which requires the caller to name the point —
+# keeps this scope. The dedup half is pinned here; the addressed half in
+# `tests/test_10368_terminal_create_fold.py`.
 
 def _stored(pid, key, sdk):
     rows = sdk._get_proj().g.query(
@@ -870,17 +877,38 @@ def test_create_point_dedup_folds_a_window_onto_a_live_claim(sdk):
     assert _stored(pid, "confidence", sdk) == pytest.approx(0.97)
 
 
-def test_create_point_dedup_without_a_window_still_folds(sdk):
-    """The boundary: a fold with NO temporal prop keeps applying, dead target or
-    not — the same rule as any other revision of a dead claim (#3305)."""
+def test_create_point_dedup_without_a_window_is_refused_on_a_dead_claim(sdk):
+    """#10368: the boundary moved — a fold with NO temporal prop no longer
+    applies to a dead claim either.
+
+    #7819 left this case applying, reading it as "the same rule as any other
+    revision of a dead claim (#3305)". That reading conflated an UNADDRESSED
+    content-matched create fold with an ADDRESSED revision: here the caller
+    never named the point — a content coincidence picked it — so the fold
+    rewrote the graph's record of a settled belief without addressing it.
+    #10368 refuses it. The #3305 capability itself is untouched because it is
+    an `update_point` capability (a caller who NAMES the point), pinned by
+    `tests/test_10368_terminal_create_fold.py::
+    test_an_addressed_revision_still_applies_to_a_terminal_point`.
+
+    Fails on the pre-fix tree: `confidence` landed at 0.99, `updatedAt` moved,
+    and no advisory was reported.
+    """
     content = f"dedup metadata {uuid.uuid4().hex[:8]}"
     pid = sdk.create_point("statement", content)["id"]
     sdk.retract_point(pid)
+    before = sdk.get_point(pid)
     again = sdk.create_point("statement", content, confidence=0.99,
                              dedup=True)
-    assert again["id"] == pid
-    assert sdk.get_point(pid)["confidence"] == pytest.approx(0.99)
-    assert sdk.get_point(pid)["status"] == "retracted"
+    after = sdk.get_point(pid)
+    assert again["id"] == pid, "a dedup HIT is still reported"
+    assert after["confidence"] == pytest.approx(before["confidence"]), (
+        "a content-matched create folded a prop onto a terminal claim")
+    assert after["status"] == "retracted"
+    assert after["updatedAt"] == before["updatedAt"], (
+        "the fold moved a settled claim's updatedAt")
+    codes = [a.get("code") for a in (again.get("advisories") or [])]
+    assert "terminal_fold_refused" in codes, again
 
 
 # ── #7819 after-care: the two surfaces the guard's consequence reaches ─────
@@ -955,7 +983,23 @@ def test_hosted_commit_receipt_carries_a_dropped_fold_advisory():
     """
     import tortoise.hosted_api as hosted
 
-    write_phase = inspect.getsource(hosted._execute_commit_writes)
+    # ⛔ Count CODE, not prose. A comment that QUOTES a call site (the #10368
+    # channel note above the write loop quotes this very line) makes a plain
+    # `str.count` on the source read 3, so the census reds or greens on how a
+    # comment is worded instead of on how many legs the phase actually has.
+    # `tokenize` drops COMMENT tokens, so a quote can neither satisfy the count
+    # nor defeat it.
+    def _code_only(text: str) -> str:
+        import io
+        import tokenize
+        lines = text.splitlines()
+        for tok in tokenize.generate_tokens(io.StringIO(text).readline):
+            if tok.type == tokenize.COMMENT:
+                row, col = tok.start
+                lines[row - 1] = lines[row - 1][:col]
+        return "\n".join(lines)
+
+    write_phase = _code_only(inspect.getsource(hosted._execute_commit_writes))
     assert write_phase.count('_written.get("advisories")') == 2, (
         "both create_point legs of the write phase must carry the advisories")
     assert "return _write_advisories" in write_phase
