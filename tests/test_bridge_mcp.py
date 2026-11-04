@@ -40,7 +40,8 @@ def _warm_daemon() -> None:
     means the socket accepts connections; it does NOT mean the embedded store is
     up, so the FIRST dispatched tool call pays the whole redislite boot plus
     graph start, and it must fit inside the 10s transport wait bound
-    (`mcp_auth._TRANSPORT_WAIT_BOUND_S`, enforced at `mcp_server.py:879`).
+    (`mcp_auth._TRANSPORT_WAIT_BOUND_S`, enforced in
+    `mcp_server._await_under_mcp_wait_bound`).
 
     Measured on shard `test (d)`, job 126325424780 (head `9fe385d09c69`): the
     first `tortoise_create_point` — the call `test_push_creates_points_over_mcp`
