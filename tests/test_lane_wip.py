@@ -234,6 +234,41 @@ def test_list_says_a_lane_has_no_pin_rather_than_nothing(hub: Path) -> None:
     assert "lane_wip.py pin" in listed.stdout
 
 
+def test_an_empty_pin_list_names_the_repository_it_read(hub: Path) -> None:
+    """A SCOPED empty list must not read as the unscoped fact "the work is gone".
+
+    The pins are read from `root`, which can be a DIFFERENT repo than the caller's
+    (`pin --path <other repo>` writes the ref there), and RECIPE step 3 tells the operator
+    that an EMPTY list means "the work is genuinely gone". So an unqualified "no pin" is
+    that false verdict: measured, `list --all` from repoA answered "no lane has any wip
+    pin" at exit 0 while the pin sat one ref away in repoB, and the operator who follows
+    the recipe stops looking.
+    """
+    empty = dirty_lane(hub, "wt-empty")
+    assert run_tool("list", "--all", cwd=empty).returncode == 0
+    all_out = run_tool("list", "--all", cwd=empty)
+    assert "no lane has any wip pin" in all_out.stdout
+    # `root` is the worktree the answer was read from (`repo_root()`), which is the
+    # repository whose ref namespace was actually scanned.
+    assert str(empty.resolve()) in all_out.stdout, (
+        f"the empty answer must name the repository it read: {all_out.stdout!r}"
+    )
+
+    lane_out = run_tool("list", cwd=empty)
+    assert "has no wip pin" in lane_out.stdout
+    assert str(empty.resolve()) in lane_out.stdout, (
+        f"the lane-scoped empty answer must name its repository too: {lane_out.stdout!r}"
+    )
+
+    recipe = run_tool("recipe", cwd=empty)
+    assert recipe.returncode == 0, recipe.stderr
+    assert "pin list is EMPTY" in recipe.stdout
+    assert "in this repository" in recipe.stdout, (
+        "RECIPE must qualify the EMPTY-list conclusion to the repository it read, or it "
+        f"advises giving up on work pinned elsewhere: {recipe.stdout!r}"
+    )
+
+
 def test_list_shows_the_pin_after_pinning(hub: Path) -> None:
     wt = dirty_lane(hub)
     assert run_tool("pin", cwd=wt).returncode == 0
@@ -712,6 +747,53 @@ def test_recover_restores_the_staged_unstaged_split(hub: Path) -> None:
     assert git("diff", "--cached", "--name-only", cwd=wt).stdout.split() == before_cached
     assert (wt / "staged.txt").read_text() == "staged content\n"
     assert (wt / "unstaged.py").read_text() == "unstaged\n"
+
+
+def test_a_staged_rename_does_not_invent_a_dirty_path(hub: Path) -> None:
+    """Porcelain `-z` emits a rename's ORIGINAL path as a bare second field.
+
+    That field carries no `XY ` prefix, so a parser applying `entry[3:]` to every chunk
+    turns `src/old.py` into a phantom `/old.py` — a path `git status` never called dirty.
+    The clean cross-check then demanded the pin hold it and refused a perfectly good pin
+    at exit 3 with the false claim that `git status` reported a change the pin does not
+    hold. Measured before the fix: `['/old.py']` from a lane whose only change was a clean
+    `git mv`, and `pin` exited 3.
+    """
+    # ⛔ THE PHANTOM MUST COLLIDE WITH A FILE THAT EXISTS, or `_pin_lacks_change` skips it as
+    # a DELETION ("recorded by absence") and the bug is invisible. The phantom a mis-parsed
+    # rename invents is `orig[3:]`, so renaming `abcnotes.txt` invents `notes.txt` — made to
+    # exist here as an IGNORED file, which the pin legitimately does not hold.
+    (hub / "abcnotes.txt").write_text("notes at base\n")
+    assert git("add", "abcnotes.txt", cwd=hub).returncode == 0
+    assert git("commit", "-qm", "notes", cwd=hub).returncode == 0
+
+    wt = clean_lane(hub, "wt-rename")
+    (wt / "src").mkdir()
+    # ⛔ THE SOURCE MUST BE UNCHANGED relative to HEAD, or git reports `D`+`A` instead of a
+    # rename and the bare-original-path field under test never appears. A CLEAN rename is
+    # 100% similar, so `-z` emits `R  src/renamed.txt\0abcnotes.txt`.
+    assert git("mv", "abcnotes.txt", "src/renamed.txt", cwd=wt).returncode == 0
+    raw = git("status", "--porcelain", "-z", "--untracked-files=normal", cwd=wt).stdout
+    assert raw.startswith("R  "), f"fixture must produce a clean staged rename: {raw!r}"
+    (wt / ".gitignore").write_text("ignored/\nnotes.txt\n")
+    (wt / "notes.txt").write_text("ignored scratch, never pinned\n")
+
+    pinned = run_tool("pin", cwd=wt)
+    combined = pinned.stdout + pinned.stderr
+    assert pinned.returncode == 0, combined
+    assert "does NOT hold" not in combined, (
+        f"a clean staged rename must not fabricate a path the pin cannot hold: {combined!r}"
+    )
+    assert pin_ref(pinned.stdout), combined
+    # The phantom only ever reached the CLEAN cross-check, so a pin that succeeded and
+    # names its ref is the proof it was never demanded. Recover the rename end-to-end so a
+    # swallowed rename (captured as `D` with the new path missing) also fails here.
+    ref = pin_ref(pinned.stdout)
+    assert destroy(hub, wt).returncode == 0
+    out = run_tool("recover", ref, "--into", str(wt), "--branch", "lane-wt-rename", cwd=hub)
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert (wt / "src" / "renamed.txt").is_file(), out.stdout
+    assert not (wt / "abcnotes.txt").exists(), "the rename's old path must be gone"
 
 
 def test_recover_without_branch_leaves_the_work_uncommitted(hub: Path) -> None:

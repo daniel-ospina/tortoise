@@ -970,6 +970,17 @@ def _paths_git_calls_dirty(root: Path) -> list[str]:
         "--porcelain",
         "-z",
         "--untracked-files=normal",
+        # ⛔ `--no-renames`, OR A STAGED RENAME INVENTS A PHANTOM "DIRTY PATH". Porcelain v1
+        # emits a rename's ORIGINAL path as a BARE second NUL field with no `XY ` prefix, so
+        # the `entry[3:]` parser below turns `src/old.py` into `/old.py` — a path `git status`
+        # never called dirty (measured: `['/old.py']` from a lane whose only change was a clean
+        # `git mv`). `_pin_lacks_change` then demands the pin hold it and refuses a good pin at
+        # exit 3 with the false claim "`git status` reports 1 change(s) … that this pin does NOT
+        # hold". With renames split into `A`/`D` both halves stay STAGED-ONLY (`Y` is a space),
+        # so they are excluded by the rule below exactly as before, and a rename that ALSO has a
+        # worktree-side edit still reports `AM <new>` — the change this function must catch.
+        # Same choice as `_apply_staged_delta`'s `diff-tree --no-renames`.
+        "--no-renames",
         check=False,
         cwd=root,
     )
@@ -1363,11 +1374,17 @@ def cmd_list(args: argparse.Namespace) -> int:
         refs += [ln.strip() for ln in cp.stdout.splitlines() if ln.strip()]
     refs = list(dict.fromkeys(refs))
     if not refs:
+        # ⛔ NAME THE REPOSITORY THE ANSWER CAME FROM. `root` can be a DIFFERENT repo than the
+        # caller's (`pin --path <other repo>` writes the ref THERE), so an unqualified "no pin"
+        # is a SCOPED empty list rendered as the unscoped fact "the work is gone" — and RECIPE
+        # step 3 advises exactly that conclusion. Measured: `list --all` from repoA answered
+        # "no lane has any wip pin" at exit 0 while the pin sat one ref away in repoB, and the
+        # operator who follows the recipe stops looking.
         scope = (
-            "no lane has any wip pin"
+            f"no lane has any wip pin in {root}"
             if args.all
             else (
-                f"lane {lane_stash.lane_key(keyed)} has no wip pin — "
+                f"lane {lane_stash.lane_key(keyed)} has no wip pin in {root} — "
                 "run `tools/lane_wip.py pin` before anything that could remove this worktree"
             )
         )
@@ -2305,7 +2322,9 @@ dirty tree returns 0 and the content is gone; nothing in git gets it back.
    with `read-tree --reset -u`, which restores modifications, untracked files AND
    deletions — the working state as it was, not the commit.
 
-3. If the pin list is EMPTY, the work is genuinely gone. The only remaining hope is
+3. If the pin list is EMPTY **in this repository**, the work is genuinely gone HERE — but
+   a pin taken with `pin --path <other repo>` lives in THAT repo's ref namespace, so re-run
+   `list --all` from there before concluding anything. The only remaining hope is
    a copy that left the worktree: a reviewer's diff snapshot (e.g.
    `/tmp/<lane>-review-diff.txt`, which is what saved lane `p1-10538`), a `git
    stash` entry, or a peer lane's checkout. Re-apply it by hand.
