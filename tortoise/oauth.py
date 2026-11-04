@@ -2724,22 +2724,30 @@ def _is_attempt_key_segment(segment: str) -> bool:
     segment.
 
     ⛔ IT DELIBERATELY IGNORES THE VALUE, and that is the whole point (review P3,
-    #10487). The three hops that read this parameter do NOT agree about
-    duplicates:
+    #10487). The hops that read this parameter do NOT agree about duplicates —
+    and they do not even agree about WHICH query they are reading:
 
     * ``start.ts`` uses ``url.searchParams.get()`` → the **FIRST** value;
     * ``hosted_api.oauth_authorize`` uses ``request.query_params.get()``, and
       Starlette's ``MultiDict.__getitem__`` returns ``_dict[key]``, which
       ``setlist`` fills with ``values[-1]`` → the **LAST** value;
-    * the mint gate below used to decide from ``any(...)`` → *some* value.
+    * the mint gate below used to decide from ``any(...)`` → *some* value;
+    * the rendered page's own inline script reads the **caller's original**
+      query (``ATTEMPT_KEY_PARAM`` carries only the NAME — "the server does not
+      re-embed it", `consent_page_html`) → the **FIRST** value of the query this
+      function was HANDED, not of the URL it emits.
 
     So a value-blind ``any()`` gate could satisfy one reader while another read
     ``""``: ``attempt_key=&attempt_key=K2`` made the AS take the bounce branch,
     skip the mint, and hand ``start`` a first value of ``""`` — which invented a
     third key and restored the very dead end this hop exists to close. Dropping
     EVERY segment that names the parameter and re-emitting exactly one makes
-    first == last == any, so no reader can disagree about which key the flow
-    adopts.
+    first == last == any on the URL this function returns, so no reader of THAT
+    URL can disagree about which key the flow adopts.
+
+    The page's reader is the reason the collapse must keep a caller's real key
+    rather than always minting: it reads the input query, so the value this hop
+    emits has to be the value the flow already carries wherever one exists.
     """
     name, _sep, _value = segment.partition("=")
     return unquote_plus(name) == CONSENT_ATTEMPT_KEY_PARAM
