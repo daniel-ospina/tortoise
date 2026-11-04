@@ -167,10 +167,15 @@ Measured 2026-10-31 on `main@eac49c0dd9aababd01016325a34a327481dd006c`.
 > a part/whole (`composedOf`/`decomposesInto`/…) operator has `:Point` endpoints
 > reachable through NO such edge, its edges being `hasPart` (`sdk.py:22396`),
 > so the old query could not reach it in any pass, and the new sweep promotes it
-> (as the engine does). `ingest_v2` mints none of these — its operator loop keeps
-> `op_type` to `IMPL`/`NAND` (`ingest_v2.py:401-404`) — so this sample contains
-> neither the part/whole shape nor the resumed-ingest shape. Treat these cells as
-> pre-fix values until a re-cut says otherwise.
+> (as the engine does). The same goes for an operator whose endpoint is a
+> `:Subject`/`:Object`/`:Event` rather than a `:Point`: the deleted pattern
+> required `(c:Point)` and the new read is label-wide (#7853), so that shape is
+> newly reachable too — though there the sweep can be the ONLY promotion route,
+> since `promote_point` cannot promote a non-`:Point` at all. `ingest_v2` mints
+> none of these — its operator loop keeps `op_type` to `IMPL`/`NAND` and every
+> endpoint is a point it wrote (`ingest_v2.py:401-404`) — so this sample contains
+> neither shape, nor the resumed-ingest shape. Treat these cells as pre-fix
+> values until a re-cut says otherwise.
 
 > **Line citations below are into the MEASUREMENT commit** —
 > `main@eac49c0dd9aababd01016325a34a327481dd006c`, the tree this run was taken

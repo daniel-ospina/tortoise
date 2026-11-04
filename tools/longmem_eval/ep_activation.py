@@ -841,14 +841,34 @@ def activate_beliefs(sdk, *, namespace: str | None = None,
     # reading each candidate's endpoints.
     #
     # The old incident query is DELETED rather than unioned, and the honest
-    # statement of what that changes is THREE-part — the naive "strict subset"
+    # statement of what that changes is FOUR-part — the naive "strict subset"
     # argument is FALSE against main, because the deleted query also matched an
     # unset-status operator (``o.status IS NULL OR o.status = 'draft'``) while
     # the sweep is explicit-``draft`` only:
-    #   * the EP FACTOR GRAPH is unchanged. An unset status is LIVE under the
-    #     canonical read model (``live.py``: "an ABSENT status is LIVE — the
-    #     legacy-node rule"), so ``ep._live_only('o.status')`` already admitted
-    #     such an operator as a factor; not re-promoting it removes no factor.
+    #   * for the UNSET-STATUS arm specifically, the EP FACTOR GRAPH is
+    #     unchanged: an unset status is LIVE under the canonical read model
+    #     (``live.py``: "an ABSENT status is LIVE — the legacy-node rule"), so
+    #     ``ep._live_only('o.status')`` already admitted such an operator as a
+    #     factor; not re-promoting it removes no factor. ⛔ But that is NOT a
+    #     claim that the factor graph cannot move — see the FOURTH bullet.
+    #   * the factor graph CAN LOSE a factor, on a shape ``main`` promoted and
+    #     this gate refuses. The deleted query matched on ``-[:IMPL|NAND]->``
+    #     alone, so it promoted a draft operator incident to a promoted draft
+    #     claim even when the operator ALSO carried ``mitigated_by`` to a
+    #     RETRACTED mitigation; the engine's read is label-wide, so this gate
+    #     refuses exactly that operator. MEASURED: the deleted query matches the
+    #     operator over a retracted mitigation (``main`` promoted it, and a live
+    #     IMPL operator over live claims is a factor — the shape
+    #     ``test_an_operator_minted_over_live_claims_moves_its_conclusion``
+    #     measures at conf 0.5945 with ``factors == 1``), while
+    #     ``_promote_operator_row`` returns ``False`` and the manifest publishes
+    #     ``operators_promoted: 0, factors: 0, no_ep_reason: 'no_ep_factors'``
+    #     with the conclusion unmeasured. That direction is DELIBERATE (engine
+    #     parity: the engine keeps it draft too, pinned by
+    #     ``test_the_gate_reads_every_operator_edge_not_just_impl``), and it is
+    #     the price of never publishing a promotion the engine cannot produce.
+    #     A future census showing factors DOWN against these pre-fix cells has
+    #     this as its explanation.
     #   * the MANIFEST and the JOURNAL do change, deliberately: a legacy
     #     status-less operator incident to a promoted draft claim used to be
     #     flipped to explicit ``'live'`` with an ``OperatorPromoted`` event, and
@@ -906,8 +926,9 @@ def activate_beliefs(sdk, *, namespace: str | None = None,
 
     # Cost: one ``:Point`` label scan (the complement predicate
     # ``_SELECT_DRAFT_POINT_IDS`` and ``_COUNT_POINTS_TOTAL`` scan the label
-    # unconditionally too) plus one endpoint read per DRAFT operator, so on the
-    # all-draft path this is ~2N round trips. There is deliberately no memo for
+    # unconditionally too) plus one endpoint read AND one CAS write per DRAFT
+    # operator, so on the all-draft path this is ~2N round trips (N reads + N
+    # CAS writes; the swept operators that fail the gate pay the read only). There is deliberately no memo for
     # a draft operator permanently blocked by a terminal endpoint: it is
     # re-gated on every call, which is bounded by the draft-operator count and
     # keeps a later ``promote_point`` from being invisible (an un-memoised read
