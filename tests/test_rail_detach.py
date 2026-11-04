@@ -351,41 +351,6 @@ def test_refuses_when_the_rail_script_is_absent(tmp_path):
         rd.launch(3, cwd=bare, state_dir=tmp_path / "state", repo="o/r")
 
 
-# ── a missing `gh` binary is an UNREADABLE answer, never a traceback ──────────
-# Measured 2026-11-03 (CI shard `test (d)`): 21 of this file's tests died with
-# `FileNotFoundError: 'gh'` on a runner with no GitHub CLI. The tool's own
-# contract already names the degraded answer (`_head_sha` → "unreadable",
-# `_resolve_repo` → `Refused`); only the spawn was unguarded, so the missing
-# binary escaped as an exception the callers never see in production.
-def _path_without_gh(tmp_path: Path, *needed: str) -> str:
-    """A `PATH` holding just the binaries the detached child needs, never `gh`."""
-    bin_dir = tmp_path / "nogh-bin"
-    bin_dir.mkdir()
-    for name in ("bash", "sleep", "date", *needed):
-        src = shutil.which(name)
-        assert src, f"the fixture needs {name} on the host PATH"
-        (bin_dir / name).symlink_to(src)
-    assert not (bin_dir / "gh").exists()
-    return str(bin_dir)
-
-
-def test_a_missing_gh_binary_yields_an_unreadable_head_not_a_crash(tmp_path, monkeypatch):
-    """`launch()` degrades to `head=unreadable`; pre-fix it raised FileNotFoundError."""
-    co = make_checkout(tmp_path)
-    monkeypatch.setenv("PATH", _path_without_gh(tmp_path))
-    ln = launch(tmp_path / "state", co, pr=17)
-    assert ln.pid > 0
-    assert ln.head == "unreadable"
-    assert "HEAD=unreadable" in Path(ln.artifact).read_text(encoding="utf-8")
-
-
-def test_resolving_a_repo_without_gh_names_the_missing_binary(tmp_path, monkeypatch):
-    """The refusal says what is missing; pre-fix this was a bare FileNotFoundError."""
-    monkeypatch.setenv("PATH", _path_without_gh(tmp_path))
-    with pytest.raises(rd.Refused, match="`gh` is not on PATH"):
-        rd._resolve_repo(tmp_path)
-
-
 def test_child_invokes_only_the_one_lander(tmp_path):
     """#1178: no second lander. The child argv is `bash <rail> <pr> --repo <r>`."""
     co = make_checkout(tmp_path)
@@ -397,6 +362,72 @@ def test_child_invokes_only_the_one_lander(tmp_path):
     assert body.count("admin-merge.sh") == 1
     assert "--dry-run" in body          # operator args pass through verbatim
     assert "AGENT_ADMIN_MERGE_OVERRIDE" not in body
+
+
+# ── the runner's TOOL CONTRACT: `gh` ABSENT is a failed query, not a crash ───
+def _path_without_gh(tmp_path: Path) -> str:
+    """A PATH that resolves what the rail needs but has NO `gh` on it.
+
+    #9018: `runs-on: ubuntu-latest` names a GitHub-hosted IMAGE, but the
+    fallback pool carries that same label on a bare runner whose service PATH is
+    a minimal non-login one — where `gh` is simply absent (measured 2026-11-03:
+    `test (a)` on `pi-runner-vm-2`, `FileNotFoundError: 'gh'`, 20 arms red on a
+    PR that touches neither this tool nor this file). Absence is SIMULATED here
+    rather than inherited, so the arm means the same thing on every runner.
+    """
+    b = tmp_path / "bin-no-gh"
+    b.mkdir(exist_ok=True)
+    # `date` too: the detached child's artifact body shells out to `$(date -u …)`,
+    # so a PATH holding only `bash`/`sleep` would make the stamp an empty string
+    # and the arm would pass for a reason other than the one it names.
+    for tool in ("bash", "sleep", "date"):
+        src = shutil.which(tool)
+        assert src, f"{tool} must exist for this arm to mean anything"
+        (b / tool).symlink_to(src)
+    return str(b)
+
+
+def _cli(tmp_path: Path, *args: str) -> subprocess.CompletedProcess:
+    env = {k: v for k, v in os.environ.items()
+           if k not in rd.FORBIDDEN_ENV}   # the launcher refuses a carried bypass
+    env["PATH"] = _path_without_gh(tmp_path)
+    return subprocess.run(
+        [sys.executable, str(REPO_ROOT / "tools" / "rail_detach.py"), *args],
+        env=env, capture_output=True, text=True,
+    )
+
+
+def test_launch_without_the_gh_cli_starts_and_stamps_an_unreadable_head(tmp_path):
+    """The launcher must not CRASH on a runner with no `gh`.
+
+    Pre-fix `_head_sha`'s `subprocess.run(["gh", ...])` raised out of `launch()`,
+    so the CLI printed a traceback, wrote no artifact and returned 1 — the rail
+    never started at all on the bare pool. `HEAD=unreadable` is the honest stamp:
+    the head is a best-effort read (the rail's own log remains the primary
+    record), never a reason to refuse to detach.
+    """
+    co = make_checkout(tmp_path)
+    sd = tmp_path / "state"
+    proc = _cli(tmp_path, "start", "77", "--repo", "o/r", "--cwd", str(co),
+                "--state-dir", str(sd))
+    assert proc.returncode == 0, (proc.returncode, proc.stdout, proc.stderr)
+    assert proc.stdout.startswith("STARTED(#77, pid "), proc.stdout
+    art = rd.artifact_path(sd, "o/r", 77).read_text(encoding="utf-8")
+    assert "HEAD=unreadable" in art, art
+
+
+def test_collect_without_the_gh_cli_refuses_by_name_instead_of_tracebacking(tmp_path):
+    """No `--repo` and no artifact ⇒ refuse (rc 2), naming what is missing.
+
+    Pre-fix this arm exited 1 with `FileNotFoundError` — a read-only status verb
+    tracebacking, which is worse than any verdict (the fleet beat then gets no
+    state to act on). The artifact path never needs `gh` (the arm above).
+    """
+    proc = _cli(tmp_path, "collect", "778", "--state-dir", str(tmp_path / "state"))
+    assert proc.returncode == 2, (proc.returncode, proc.stdout, proc.stderr)
+    assert "could not resolve the repo" in proc.stderr
+    assert "command not found" in proc.stderr      # names the cause, not just the effect
+    assert "Traceback" not in proc.stderr
 
 
 # ── PROOF + MUTANT: detached survives the lane's group kill; undetached dies ──
