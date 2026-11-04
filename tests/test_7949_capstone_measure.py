@@ -3665,10 +3665,10 @@ def test_the_bare_continuation_cites_name_what_they_say():
     rows = (
         # `each VET pass is gated on the LIST` — the gate AND its call, twice.
         ("docs/00_index.md", "each VET pass is gated on the LIST", (
-            ("10295", "if vet_enabled and embed_list:"),
-            ("10296", "vet_s2_stats, _w, vet_s2_pool = _run_vet_pass("),
-            ("10417", "if vet_enabled and complete_list:"),
-            ("10418", "vet_union_stats, _w, _ = _run_vet_pass("),
+            ("10328", "if vet_enabled and embed_list:"),
+            ("10329", "vet_s2_stats, _w, vet_s2_pool = _run_vet_pass("),
+            ("10450", "if vet_enabled and complete_list:"),
+            ("10451", "vet_union_stats, _w, _ = _run_vet_pass("),
         )),
         # the VET block's start; its three lines of keys (10587-10589) close on
         # line 10590 — DERIVED by content, not by arithmetic: `result["vet"] = {`
@@ -3679,25 +3679,25 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # sides' bump disagreed here and why every ASSERTED number in this table
         # is verified by content instead.
         ("docs/00_index.md", "emitted unconditionally at", (
-            ("10576", 'result["classify_later"] = {'),
-            ("10586", 'result["vet"] = {'),
+            ("10609", 'result["classify_later"] = {'),
+            ("10619", 'result["vet"] = {'),
         )),
         # `_IDLE_CITES["vet"]`: the early return and the surface it emits
         ("probes/capstone_measure.py", "its vet surface", (
-            ("10204", "if not edus:"),
-            ("10220", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
+            ("10237", "if not edus:"),
+            ("10253", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
         )),
         # ...and the same claim in the rule's own docstring
         ("probes/capstone_measure.py", "with the flag ON", (
-            ("10220", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
+            ("10253", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
         )),
         ("probes/capstone_measure.py", "follows at", (
-            ("10203", "edus = _edus_from_conversation(conversation)"),
+            ("10236", "edus = _edus_from_conversation(conversation)"),
         )),
         # the S2.2/S2.3 block this probe names as the #9116 seam's subject
         ("probes/capstone_measure.py", 'result["vet"]`` at', (
-            ("10586", 'result["vet"] = {'),
-            ("10590", ("exact", "}")),
+            ("10619", 'result["vet"] = {'),
+            ("10623", ("exact", "}")),
         )),
         # The E-row audit's cites on the GATE ITSELF. `_BUNDLE_CITE` matches only
         # `sdk|edges|extractor_v2`, so a `tools/*.py` number is invisible to the
