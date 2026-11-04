@@ -587,7 +587,20 @@ def _namespace_is_org_scoped(call) -> bool:
 
 
 def _operand_calls(value) -> list:
-    """The call expressions a value is made of, flattening `or`/`if else`."""
+    """The call expressions a value is made of, flattening `or`/`if else`/`await`.
+
+    `await` is unwrapped for the same reason `or` and `if else` are (#10723
+    review F1): it is a TRANSPARENT wrapper around the call, so leaving it on
+    made `_handle_state` answer `None` — "not an SDK handle at all" — for
+    `sdk = await _data_sdk_offloaded(org)`. That is a fail-OPEN on an awaited
+    `_UNBOUND_OPENERS` member (the write looks past the handle and the scan is
+    GREEN, the false PASS this file exists to prevent) and a FALSE POSITIVE on
+    the documented fix when the rebind is spelled with the async twin. `await`
+    is not a hypothetical spelling here: `hosted_api.py` assigns
+    `sdk = await _data_sdk_offloaded(org)` at 23 sites.
+    """
+    if isinstance(value, ast.Await):
+        return _operand_calls(value.value)
     if isinstance(value, ast.BoolOp):
         return [expr for operand in value.values
                 for expr in _operand_calls(operand)]
@@ -747,6 +760,59 @@ def _binds_as_parameter(scope, key: str) -> bool:
         if arg is not None and arg.arg == key:
             return True
     return False
+
+
+def _binds_locally(scope, key: str) -> bool:
+    """Does `scope` BIND `key` itself — by any statement, resolvable or not?
+
+    PEP 227's escape clause, which the outward walk must respect (#10723 review
+    round 3 P2, shape ii): *"names bound in B are visible in A unless A contains
+    a name binding that hides the binding in B"*. A nested `def` that assigns
+    `sdk = _safe_handle()` holds a DIFFERENT variable from the enclosing lane's
+    `sdk`, so folding the enclosing definition onto its write is a false
+    positive — it tells the reader to install a tenant on a handle the write
+    never touches.
+
+    `_binds_as_parameter` covers the handed-in half; this covers the
+    re-bound half. Only the BINDINGS that make the name local are tested, not
+    resolvability: `_handle_state` answers `None` for `_safe_handle()`, so an
+    unresolvable rebind records no event and the outward walk would otherwise
+    see "no local event" and resolve the enclosing name. A name that is not
+    bound here at all (the genuine closure capture) still resolves outward.
+    """
+    for sub in _nodes_of_one_scope(scope):
+        targets: list[ast.expr] = []
+        if isinstance(sub, ast.Assign):
+            targets = list(sub.targets)
+        elif isinstance(sub, (ast.AnnAssign, ast.AugAssign, ast.For,
+                             ast.AsyncFor)):
+            targets = [sub.target]
+        elif isinstance(sub, (ast.With, ast.AsyncWith)):
+            targets = [item.optional_vars for item in sub.items
+                       if item.optional_vars is not None]
+        for target in targets:
+            for node in ast.walk(target):
+                if isinstance(node, ast.Name) and node.id == key:
+                    return True
+    return False
+
+
+def _nodes_of_one_scope(scope) -> list:
+    """Every node of `scope` WITHOUT descending into a nested function body.
+
+    A nested `def`'s bindings are its OWN locals: descending into them would read
+    a sibling function's `sdk` as this function's, which is the fail-open the
+    bounded walk exists to avoid.
+    """
+    found: list = []
+    stack = list(ast.iter_child_nodes(scope))
+    while stack:
+        node = stack.pop()
+        found.append(node)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            continue
+        stack.extend(ast.iter_child_nodes(node))
+    return found
 
 
 def _position_of(node) -> tuple[int, int]:
@@ -1084,8 +1150,17 @@ def _unbound_record_writes(tree) -> list[str]:
             #     because a too-late event in a middle scope would otherwise
             #     reset the answer instead of inheriting the outer binding.
             initial = inherited.get(key)
+            # A nested scope that BINDS the name itself holds a DIFFERENT
+            # variable, so no enclosing definition reaches its write (PEP 227's
+            # "unless A contains a name binding that hides the binding in B").
+            # `_handle_state` answers `None` for an unresolvable value, so such a
+            # rebind records no event and the walk below would otherwise resolve
+            # the enclosing name — reporting a lane that shadows its handle with
+            # a SAFE one as unbound (#10723 review round 3 P2, shape ii).
+            # Answering `inherited` (unknown) is the honest state, not "bound".
+            shadowed = scope is not lane and _binds_locally(scope, key)
             anchor = scope
-            while anchor is not lane:
+            while not shadowed and anchor is not lane:
                 if _binds_as_parameter(anchor, key):
                     initial = inherited.get(key)
                     break
@@ -1274,9 +1349,19 @@ def test_no_lane_ANYWHERE_in_the_package_writes_records_through_an_unbound_sdk()
     reached through a lambda or local factory. ORDER is modelled, but only
     WITHIN one function (`_handle_events_by_scope`): a definition reaches a
     write positionally, so an install arms only the writes after it and an
-    unconditional rebind kills the earlier definition — while a write in a
-    DIFFERENT function is judged by that function's own definitions. The shipped
-    shape that costs is a callback FACTORY, `_run_dream_on_pool(_drain,
+    unconditional rebind kills the earlier definition. A write in a DIFFERENT
+    function is judged by that function's own definitions when the handle is
+    handed in as a PARAMETER, and by the ENCLOSING function's definitions when
+    it is a CLOSURE CAPTURE — resolved at the nested `def`'s position, and again
+    at the enclosing scope's end, because a closure runs at CALL time (PEP 227:
+    names bound in the enclosing function are visible in the nested one *unless
+    the nested one binds the name itself*, which `_binds_locally` honours). The
+    trade that buys is one CONSERVATIVE false positive: an install positioned
+    between the nested `def` and its CALL is not seen (the fold anchors at the
+    def's position), so such a lane is flagged although the install does run
+    first — kept because the alternative re-opens the `finally`-install
+    fail-open, and it is pinned as the asserted answer rather than left silent.
+    The shipped shape that costs is a callback FACTORY, `_run_dream_on_pool(_drain,
     _open_sdk)` in `hosted_api.py`: `_open_sdk` opens and arms the handle,
     `_drain` writes it, and the write's handle is therefore unknown rather than
     assumed bound (the local-factory indirection above, one spelling over).
@@ -1299,8 +1384,14 @@ def test_no_lane_ANYWHERE_in_the_package_writes_records_through_an_unbound_sdk()
     in another, and armed by a positional, keyword or method-form install), the
     ORDER of a handle's definitions within a function (an install arms only the
     writes after it; an unconditional rebind kills the earlier one; a conditional
-    one is worst-wins), `with … as sdk` (EVERY item of a multi-item `with`), and
-    module-qualified dispatch (`_ha._make_sdk(...)`).
+    one is worst-wins), `with … as sdk` (EVERY item of a multi-item `with`), a
+    CLOSURE CAPTURE of an enclosing function's handle (with a nested local that
+    SHADOWS the name answered as its own, per PEP 227), an `await`ed opener in
+    either direction (`sdk = await _data_sdk_offloaded(org)` is the package's
+    ordinary async spelling — 23 sites in `hosted_api.py` — and leaving the
+    `ast.Await` wrapper on made it a non-handle, i.e. a fail-open on the unbound
+    direction and a false positive on the bound one), and module-qualified
+    dispatch (`_ha._make_sdk(...)`).
     """
     modules = sorted(_PACKAGE_ROOT.rglob("*.py"))
     assert len(modules) >= 200, (
@@ -1889,6 +1980,28 @@ def _lane(org_id):
         "an install after the inner write, in the MIDDLE scope, must not clear "
         "the outer unbound definition")
 
+    # The CONSERVATIVE trade the fold buys, stated as a contract rather than
+    # left to be discovered (#10723 review round 3, P2 shape i). The fold anchors
+    # the nested scope at the `def`'s position, so an install positioned BETWEEN
+    # the def and its CALL is not seen — the lane is flagged although the install
+    # does run first. Kept, because seeing it would mean folding the enclosing
+    # scope to its END, which re-opens the `finally`-install fail-open on the
+    # line above. A false POSITIVE is the direction this file may err in; a
+    # false PASS is not.
+    install_between_def_and_call = '''
+def _lane(org_id):
+    sdk = _make_sdk(namespace=org_id)
+    def _write():
+        sdk.create_point("Subject", {})
+    _bind_default_graph_record_tenant(sdk, org_id)
+    _write()
+'''
+    assert _flagged(install_between_def_and_call), (
+        "the asserted CONSERVATIVE answer: an install between the nested def and "
+        "its call is not modelled, so the lane reads unbound. If this ever goes "
+        "silent, the fold has started reading the enclosing scope to its END — "
+        "which is the fail-open `late_install_one_scope_out` pins against")
+
 
 def test_a_nested_def_writing_through_a_PARAMETER_is_still_silent():
     """The declared indirection the scoped fold exists for, preserved.
@@ -1931,6 +2044,64 @@ def _lane(org_id):
     assert _flagged(parameter_two_hops) == [], (
         "the stop must fire on a parameter of an ENCLOSING function, two hops "
         "out, not only on the writing scope's own")
+
+
+def test_a_nested_def_that_SHADOWS_the_enclosing_handle_is_silent():
+    """PEP 227's escape clause: a local binding HIDES the enclosing one.
+
+    #10723 review round 3 (P2, shape ii). The outward walk resolves a closure
+    capture against the enclosing function, which is right only while the nested
+    scope does NOT bind the name itself: *"names bound in B are visible in A
+    unless A contains a name binding that hides the binding in B"*. A nested
+    `sdk = _safe_handle()` holds a DIFFERENT variable — but `_handle_state`
+    answers `None` for an unresolvable opener, so the rebind records NO event and
+    the walk saw "no local event" and resolved the enclosing unbound name,
+    reporting a lane that had already replaced its handle with a safe one. That
+    is the round-6/7 false-positive family (“the guard rejected its own
+    documented fix”) one scope out.
+
+    Mutation this reddens on: deleting the `_binds_locally` stop in `state_at`
+    (the enclosing `_make_sdk` then answers for the shadowed write), or widening
+    `_binds_locally` to descend into a nested `def`'s body (the `deeper` case
+    below then stops the walk on a SIBLING's binding — a fail-open).
+    """
+    shadowed = '''
+def _lane(org_id):
+    sdk = _make_sdk(namespace=org_id)
+    def _write():
+        sdk = _safe_handle()
+        sdk.create_point("Subject", {})
+    _write()
+'''
+    assert _flagged(shadowed) == [], (
+        "a nested local that REPLACES the handle is a different variable — the "
+        "enclosing unbound definition does not reach its write")
+
+    shadowed_by_a_with_binding = '''
+def _lane(org_id):
+    sdk = _make_sdk(namespace=org_id)
+    def _write():
+        with _safe_handle() as sdk:
+            sdk.create_point("Subject", {})
+    _write()
+'''
+    assert _flagged(shadowed_by_a_with_binding) == [], (
+        "a `with … as sdk` binds the name too, so it hides the outer one")
+
+    deeper = '''
+def _lane(org_id):
+    sdk = _make_sdk(namespace=org_id)
+    def _write():
+        def _unrelated():
+            sdk = _safe_handle()
+            return sdk
+        sdk.create_point("Subject", {})
+    _write()
+'''
+    assert _flagged(deeper), (
+        "the shadowing stop reads THIS scope's bindings only — a nested `def`'s "
+        "local must not silence the write one scope out, which is the "
+        "fail-open a plain `ast.walk(scope)` would introduce")
 
 
 def test_a_literal_namespace_is_not_an_org_scoped_site():
@@ -2038,6 +2209,60 @@ def _run_new_lane(org_id: str) -> None:
         f"a lane writing records through an unbound `{opener}()` handle must be "
         "flagged — the scan cannot treat the default-graph resolver as a "
         "non-handle")
+
+
+def test_an_AWAITED_unbound_opener_is_flagged_and_an_awaited_rebind_is_clean():
+    """#10723 review F1: `await` is a TRANSPARENT wrapper, not a non-handle.
+
+    `_operand_calls` flattened `or`/`if else` but left `ast.Await` on, so
+    `sdk = await _data_sdk_offloaded(org)` recorded NO event for `sdk`:
+    `_handle_state` never ran a branch and answered `None` — "not an SDK handle
+    at all" — and the write-detector then looked straight past it. Both
+    directions of the round-6/7 defect came back at once, and only for the async
+    spelling:
+
+    - a fail-OPEN on an awaited `_UNBOUND_OPENERS` member (the write is GREEN
+      while the handle carries no tenant — the false PASS this file exists to
+      stop), and
+    - a FALSE POSITIVE on the documented fix when the rebind is spelled with the
+      async twin (`_data_sdk_offloaded` IS an `_INSTALLING_OPENERS` member).
+
+    Not a hypothetical spelling: `hosted_api.py` assigns
+    `sdk = await _data_sdk_offloaded(org)` at 23 sites, so the census's "0
+    unbound" says nothing about those handles unless this is covered.
+
+    Mutation this reddens on: dropping the `ast.Await` unwrap in
+    `_operand_calls` — the unbound case goes silent and the rebind case reds.
+    """
+    awaited_unbound = '''
+async def _lane(org_id):
+    sdk = await _org_sdk(org_id)
+    sdk.create_point("Subject", {})
+'''
+    assert _flagged(awaited_unbound), (
+        "an AWAITED unbound opener returns the same tenantless SDK — answering "
+        "'not a handle' for it is the fail-open the review found")
+
+    awaited_rebind = '''
+async def _lane(org):
+    sdk = _make_sdk(namespace=org["org_id"])
+    sdk = await _data_sdk_offloaded(org)
+    sdk.create_point("Subject", {})
+'''
+    assert _flagged(awaited_rebind) == [], (
+        "`_data_sdk_offloaded` binds before returning, awaited or not — the "
+        "SYNC twin of this rebind is silent, and the spelling must not decide")
+
+    awaited_conditional = '''
+async def _lane(org):
+    sdk = _make_sdk(namespace=org["org_id"])
+    if not sdk:
+        sdk = await _data_sdk_offloaded(org)
+    sdk.create_point("Subject", {})
+'''
+    assert _flagged(awaited_conditional), (
+        "the conditional case must keep its worst-wins answer through the "
+        "unwrap too: the branch may not run")
 
 
 def test_an_org_sdk_lane_that_binds_is_clean():
