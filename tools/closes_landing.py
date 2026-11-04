@@ -847,9 +847,11 @@ def strip_code(body: str, strict: bool = False) -> str:
             # The container can END the block: the quote it lived in closed, or
             # (for a fence opened inside a list item) the item did.
             #
-            # Both tests are measured in ONE coordinate space — the RAW line,
-            # with at most the fence's own blockquote depth consumed, or the
-            # item's `close_base` for an item at this depth. Two review cycles did
+            # Both tests are measured in exactly ONE coordinate space PER
+            # BRANCH — the RAW column when the item sits OUTSIDE the fence's
+            # blockquote (`item_col_raw`), the `rest` column when it sits at this
+            # depth (`close_base`) — and the branch is selected by the item's
+            # DEPTH, never by which field happens to be set. Two review cycles did
             # this in two spaces at once (a raw indent against a `rest` column,
             # then a `rest` indent against a raw column) and each way bought a
             # false `lands` on one family of shapes while losing a real claim on

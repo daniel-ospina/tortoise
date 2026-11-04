@@ -530,7 +530,7 @@ def test_a_spawn_failure_names_the_childs_own_stderr():
             "if os.fork() == 0:\n"
             "    devnull = os.open(os.devnull, os.O_WRONLY)\n"
             "    os.dup2(devnull, 1)\n"
-            "    time.sleep(20); os._exit(0)\n"
+            "    time.sleep(5); os._exit(0)\n"
             "sys.exit(4)\n"))
     elapsed = time.monotonic() - started
     assert held in str(exc2.value), str(exc2.value)

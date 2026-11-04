@@ -988,8 +988,9 @@ def test_no_module_level_name_is_REBOUND_because_the_second_copy_wins():
 
     `origin/main` binds it ONCE, so the duplicate was introduced on this branch.
     """
-    seen: dict[str, list[int]] = {}
+    seen: dict[Path, dict[str, list[int]]] = {}
     for source in (MODULE_PATH, Path(__file__)):
+        per_file: dict[str, list[int]] = {}
         for node in ast.parse(source.read_text()).body:
             if isinstance(node, ast.Assign):
                 targets = node.targets
@@ -1001,13 +1002,23 @@ def test_no_module_level_name_is_REBOUND_because_the_second_copy_wins():
                 continue
             for target in targets:
                 if isinstance(target, ast.Name):
-                    seen.setdefault(target.id, []).append(node.lineno)
+                    per_file.setdefault(target.id, []).append(node.lineno)
+        seen[source] = per_file
     # A scan that finds nothing proves nothing — this asserts the guard MEASURES.
-    assert len(seen) > 20, f"only {len(seen)} module-level bindings found: not measuring"
-    rebound = {name: lines for name, lines in seen.items() if len(lines) > 1}
+    total_bindings = sum(len(per_file) for per_file in seen.values())
+    assert total_bindings > 20, (
+        f"only {total_bindings} module-level bindings found: not measuring")
+    rebound = {
+        f"{source.name}:{name}": lines
+        for source, per_file in seen.items()
+        for name, lines in per_file.items()
+        if len(lines) > 1
+    }
     assert not rebound, (
         f"name(s) rebound at module scope {sorted(rebound.items())}: the LAST binding "
-        f"wins at import, so the first is dead code that reads as live (#10703 review)")
+        f"wins at import, so the first is dead code that reads as live (#10703 review). "
+        f"Each entry is `<file>:<name>` — the two files are SEPARATE namespaces, so the "
+        f"same name in each is not a rebind and is never reported as one.")
 
 
 def test_no_property_is_DEAD_because_its_docstring_can_claim_the_live_rule():
@@ -1026,6 +1037,19 @@ def test_no_property_is_DEAD_because_its_docstring_can_claim_the_live_rule():
 
     Loads are collected from BOTH the module and this test file, because a
     property asserted only by a test (`Acceptance.all_checked`) is read, not dead.
+
+    ⚠️ KEYED BY CLASS, not by bare name — a bare-name dict silently COLLAPSES a
+    name two classes both define, and this module already contains the shape:
+    `PullRequest.merged` (`tools/closes_landing.py:472`) and `MergedPR.merged`
+    (`:1715`) are both `@property`, so a bare-name map holds 5 entries for 6
+    properties and the shadowed one is never evaluated at all (#10703 review).
+
+    Residual, stated rather than implied: `loaded` is a set of attribute NAMES,
+    because the AST cannot tell which object an `x.merged` load is on without
+    type inference. So a property name carried by two classes is read as live when
+    EITHER one is loaded. The report is class-qualified so that masking is visible
+    in the output; closing it would need the receiver's type, which this file does
+    not have.
     """
     tree = ast.parse(MODULE_PATH.read_text())
     properties: dict[str, int] = {}
@@ -1036,7 +1060,7 @@ def test_no_property_is_DEAD_because_its_docstring_can_claim_the_live_rule():
             if not isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
             if any(getattr(deco, "id", None) == "property" for deco in member.decorator_list):
-                properties[member.name] = member.lineno
+                properties[f"{node.name}.{member.name}"] = member.lineno
     loaded = {
         node.attr
         for source in (MODULE_PATH, Path(__file__))
@@ -1045,10 +1069,13 @@ def test_no_property_is_DEAD_because_its_docstring_can_claim_the_live_rule():
     }
     # A scan that finds nothing proves nothing — this asserts the guard MEASURES.
     assert properties, "no @property found on any module class: the scan is not measuring"
-    dead = {name: line for name, line in properties.items() if name not in loaded}
+    dead = {
+        name: line for name, line in properties.items()
+        if name.rsplit(".", 1)[-1] not in loaded
+    }
     assert not dead, (
-        f"property/ies {sorted(dead.items())} (name → line) have no reader anywhere in "
-        f"the module or this suite: a dead accessor whose docstring can claim the live "
+        f"property/ies {sorted(dead.items())} (CLASS.name → line) have no reader anywhere "
+        f"in the module or this suite: a dead accessor whose docstring can claim the live "
         f"rule is exactly the fail-open shape #10634/#10703 reviews removed")
 
 
