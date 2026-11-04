@@ -2599,35 +2599,61 @@ def test_the_run_agreement_guard_reads_BOTH_sample_label_shapes() -> None:
     exists for ("the two shipped artifacts are grounded on the same RUN") was
     unreachable, and only the weaker date-vs-stamp arm could ever fire.
 
-    Non-vacuity is the LAST two assertions: they are the pre-fix behaviour. With the
-    legacy-only reading the primary arm is unreachable (`newest != sampled_date`) and
-    the map's `41375596528` notes are invisible; with the writer's pattern the arm is
-    live and every legacy match is still covered, so the repair is a superset and not
-    a substitution.
+    ⛔ Non-vacuity is proved on a SYNTHETIC pair, NOT on the live map. The map's
+    legacy-shaped notes are a DECAYING population that this branch's own writer
+    destroys: `render_refreshed_manifest` prunes the basis it supersedes
+    (`_strip_prior_basis`) and emits `junit-census+top-15` exclusively, so it writes
+    no new legacy note and every re-based legacy row loses its old one. Measured at
+    `6bbc0c2ed` against the shipped map — 5 legacy-shaped notes, **2 after ONE
+    adopting sweep** — so `assert legacy` was a SCHEDULED false red on a healthy
+    artifact: the §10.1 (P2) class this PR already repaired once, firing in a
+    required push leg from a commit `tortoise-ci[bot]` writes, which cannot edit a
+    `.py` assertion to clear it (#10575 review, P2).
+
+    The claim that wanted pinning is about the PATTERN, so it is pinned on a sample
+    the sweep cannot touch: the legacy expression is a STRICT subset of the writer's,
+    and that difference is exactly what makes the guard's primary arm reachable.
     """
-    text = (REPO_ROOT / "config" / "ci-surfaces.yml").read_text()
-    snapshot = json.loads((REPO_ROOT / "docs" / "ci-timing.json").read_text())
-    sampled_date = str(snapshot["sampled_run"]["sample_time"])[:10]
-
     # the PRE-FIX expression, verbatim
-    legacy = re.findall(r"ci-timing top-15 (\d{4}-\d{2}-\d{2}) \(run ([^)]+)\)", text)
-    both = re.findall(
-        rf"{ci_timing._SAMPLE_LABEL_RE} (\d{{4}}-\d{{2}}-\d{{2}}) \(run ([^)]+)\)", text)
+    legacy_only = r"ci-timing top-15 (\d{4}-\d{2}-\d{2}) \(run ([^)]+)\)"
+    wider = rf"{ci_timing._SAMPLE_LABEL_RE} (\d{{4}}-\d{{2}}-\d{{2}}) \(run ([^)]+)\)"
 
-    # The map still carries legacy notes (a sweep holds a row rather than rewriting
-    # it), so this is a COVERAGE difference and not a dead pattern: both readings are
-    # non-empty, and the wider one is a strict SUPERSET.
-    assert legacy, "no legacy-shaped note left in the map — re-derive this test"
-    assert set(legacy) < set(both), (
-        f"the writer's pattern is not a superset of the legacy one: "
-        f"{sorted(set(legacy) - set(both))}")
+    # A sample carrying BOTH shapes with the WRITER'S label newest — the live map's
+    # shape while it still has legacy notes, made unconditional.
+    sampled_date = "2026-11-02"
+    sample = (
+        "  test_old.py: 3.0  # ci-timing top-15 2026-10-19 (run 39000000001); was 9.9\n"
+        "  test_new.py: 1.0  # ci-timing junit-census+top-15 2026-11-02"
+        " (run 41379999999); was 0.9\n"
+    )
+    pre_fix = re.findall(legacy_only, sample)
+    fixed = re.findall(wider, sample)
 
-    # …and the difference decides the guard, which is why it is a defect and not a
-    # tidy-up: pre-fix the primary arm is UNREACHABLE at this head, post-fix it fires.
-    assert max(d for d, _ in legacy) != sampled_date, "pre-fix the arm was already live"
-    assert max(d for d, _ in both) == sampled_date, (
-        f"the broader pattern's newest note is {max(d for d, _ in both)}, not the "
-        f"artifact's {sampled_date} — the arm would still be unreachable")
+    # (1) The writer's pattern is a strict SUPERSET: it covers the legacy shape and
+    #     the census shape the legacy expression cannot see. Fails on the pre-fix
+    #     reading, where the two findings are equal.
+    assert set(pre_fix) < set(fixed), (
+        f"the writer's pattern is not a strict superset of the legacy one: "
+        f"{sorted(set(pre_fix) - set(fixed))} / {sorted(set(fixed) - set(pre_fix))}")
+    assert set(pre_fix) == {("2026-10-19", "39000000001")}, pre_fix
+
+    # (2) …and the difference DECIDES the guard's primary arm, which is why this was
+    #     a defect and not a tidy-up: reading only the legacy shape the newest note
+    #     predates the artifact's sample, so `newest == sampled_date` can never hold
+    #     and only the weaker date-vs-stamp arm can fire.
+    assert max(d for d, _ in pre_fix) != sampled_date, "pre-fix the arm was already live"
+    assert max(d for d, _ in fixed) == sampled_date
+
+    # On the LIVE map, assert only what a sweep cannot invalidate: the writer's
+    # pattern finds notes (so the guard above is not vacuous), and no legacy-shaped
+    # note in the shipped map is INVISIBLE to it. Both hold when the decaying
+    # population reaches zero, which is the direction it is travelling.
+    text = (REPO_ROOT / "config" / "ci-surfaces.yml").read_text()
+    live = re.findall(wider, text)
+    assert live, "the writer's pattern finds no note in the shipped map"
+    assert set(re.findall(legacy_only, text)) <= set(live), (
+        f"a legacy-shaped note in the map is invisible to the writer's pattern: "
+        f"{sorted(set(re.findall(legacy_only, text)) - set(live))}")
 
 
 def test_a_negated_guard_skips_the_DEAD_side(tmp_path: Path) -> None:
