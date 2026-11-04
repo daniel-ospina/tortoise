@@ -70,6 +70,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from tortoise.env_truthy import is_truthy
 from tortoise.status_vocabulary import STATUS_UNCONFIGURED
 
 _logger = logging.getLogger(__name__)
@@ -92,6 +93,13 @@ _UNAVAILABLE = "tortoise_unavailable"
 #: --api-key` writes exactly that file, so a user who deliberately keeps their
 #: credential in the project sets this to say so — rather than every cloned repo
 #: silently inheriting the right to choose the endpoint.
+#:
+#: ⛔ Read it through `is_truthy`, NEVER by presence (`os.environ.get(X)` is
+#: truthy for EVERY non-empty string, so `=0`/`=false`/`=off`/`=no` — the
+#: spellings `tortoise/env_truthy.py` (#4097) declares as OFF — would switch the
+#: P0 this module exists to close back ON, and the module would report itself as
+#: disabled while doing it). This is a BOOLEAN opt-in, not a key/URI/path, so the
+#: V5 presence shape that contract scopes out does not reach it.
 _PROJECT_STORE_OPT_IN = "TORTOISE_MCP_ALLOW_PROJECT_STORE"
 
 #: Env names a credential may arrive through, in precedence order.
@@ -292,10 +300,12 @@ def _credential_paths(*, global_only: bool = False) -> tuple[Path, ...]:
     The escape hatch is `TORTOISE_MCP_ALLOW_PROJECT_STORE=1`: a user who
     deliberately keeps their credential in the project (the file
     `tortoise init --api-key` writes) says so once, instead of a clone getting
-    that say silently.
+    that say silently. It is decided by the VALUE through `is_truthy` (#4097),
+    so the declared OFF spellings (`=0`, `=false`, `=no`, `=off`) are no-ops —
+    a presence read would have let a value that READS as "disabled" enable it.
     """
     global_store = Path.home() / ".tortoise" / "credentials.json"
-    if global_only and not os.environ.get(_PROJECT_STORE_OPT_IN):
+    if global_only and not is_truthy(os.environ.get(_PROJECT_STORE_OPT_IN)):
         return (global_store,)
     return (Path.cwd() / ".tortoise", global_store)
 
@@ -940,6 +950,39 @@ def get_client():
     return _client(_BearerProvider(resolve_connection(global_only=True).url))
 
 
+def _resolve_provider() -> _BearerProvider:
+    """Build the live-credential provider for a TRANSMITTING entry point.
+
+    ⛔ Called from INSIDE each entry point's guarded region, never as an argument
+    evaluated before it. Resolving the connection is I/O — `Path.home()` (which
+    raises `RuntimeError("Could not determine home directory.")` for an
+    unregistered uid, the arbitrary-uid container case), then a `stat`, a
+    `read_text` and a `json.loads` — so it can fail, and it fails in the same
+    places a request can. Accepting `_BearerProvider(resolve_connection(…).url)`
+    as a pre-built argument moved that I/O outside every handler: the raise
+    escaped `status()`/`available()`, which promise never to raise, as a
+    traceback instead of the `tortoise_unavailable` payload a script caller skips
+    cleanly on. Pre-#10605 the resolution happened INSIDE the probed coroutine and
+    was therefore caught by `except Exception` (the module's own premise: both
+    redaction sites wrap the same call in `contextlib.suppress(Exception)`).
+    """
+    return _BearerProvider(resolve_connection(global_only=True).url)
+
+
+def _failure_url(provider: _BearerProvider | None) -> str:
+    """The endpoint to NAME on a failure payload — resolved without any I/O.
+
+    `_url` falls back to `mcp_url()`, which re-resolves the connection. That is
+    the very I/O that may have just failed, so a failure payload must not depend
+    on it: it would re-raise out of the very `except` it is building. `provider`
+    is None only when the resolution itself failed, and the built-in default is
+    then the truthful answer (nothing else was ever named).
+    """
+    if provider is None:
+        return _DEFAULT_URL
+    return provider.sent.url if provider.sent is not None else provider.url
+
+
 def status() -> dict[str, Any]:
     """Connectivity + surface probe. Never raises.
 
@@ -949,27 +992,32 @@ def status() -> dict[str, Any]:
     `unconfigured` term — a set-up gap, not an outage, #3805), else
     {"status": "tortoise_unavailable", "url": ..., "error": ...}.
     """
-    provider = _BearerProvider(resolve_connection(global_only=True).url)
+    provider: _BearerProvider | None = None
 
-    async def _probe() -> dict[str, Any]:
-        async with _client(provider) as client:
+    async def _probe(prov: _BearerProvider) -> dict[str, Any]:
+        async with _client(prov) as client:
             tools = await client.list_tools()
-        return {"status": "ok", "url": _url(provider), "tools": len(tools)}
+        return {"status": "ok", "url": _url(prov), "tools": len(tools)}
 
     try:
-        return _run_guarded(_probe(), provider)
+        provider = _resolve_provider()
+        return _run_guarded(_probe(provider), provider)
     except (MCPKeyEmptyError, MCPCredentialHostMismatchError,
             MCPCredentialNotCarriedError) as exc:
         # Both are CONFIGURATION facts, not outages: report them under the recorded
         # `unconfigured` term so a caller's exit code (4 — a set-up gap) cannot
         # read as "the store is down" (3).
         _logger.debug("tortoise unconfigured: %s", exc)
-        return {"status": STATUS_UNCONFIGURED, "url": _url(provider), "error": str(exc)}
+        return {
+            "status": STATUS_UNCONFIGURED,
+            "url": _failure_url(provider),
+            "error": str(exc),
+        }
     except Exception as exc:  # noqa: BLE001, RUF100
         _logger.debug("tortoise unavailable: %s", describe_failure(exc, provider))
         return {
             "status": _UNAVAILABLE,
-            "url": _url(provider),
+            "url": _failure_url(provider),
             "error": describe_failure(exc, provider),
         }
 
@@ -981,14 +1029,12 @@ def available() -> bool:
 
 def list_tools() -> list[str]:
     """Names of the tools exposed by the daemon (registry surface)."""
-    provider = _BearerProvider(resolve_connection(global_only=True).url)
-
-    async def _list() -> list[str]:
-        async with _client(provider) as client:
+    async def _list(prov: _BearerProvider) -> list[str]:
+        async with _client(prov) as client:
             tools = await client.list_tools()
         return [t.name for t in tools]
 
-    return _run_guarded(_list(), provider)
+    return _run_resolved(_list)
 
 
 def call_tool(name: str, arguments: dict[str, Any] | None = None) -> Any:
@@ -998,10 +1044,22 @@ def call_tool(name: str, arguments: dict[str, Any] | None = None) -> Any:
     should check `available()` first (or catch exceptions). An auth rejection
     with no credential resolved raises `MCPKeyEmptyError`.
     """
-    provider = _BearerProvider(resolve_connection(global_only=True).url)
-
-    async def _call() -> Any:
-        async with _client(provider) as client:
+    async def _call(prov: _BearerProvider) -> Any:
+        async with _client(prov) as client:
             return await client.call_tool(name, arguments or {})
 
-    return _run_guarded(_call(), provider)
+    return _run_resolved(_call)
+
+
+def _run_resolved(operation):
+    """Resolve the provider, then run `operation(provider)` under the guard.
+
+    ⛔ The RESOLUTION is the one step that cannot be CLASSIFIED: every named
+    refusal `_classify_failure` builds is keyed on the provider's own endpoint,
+    and the provider is exactly what failed to exist. So a resolution fault
+    propagates as itself — which is what these two entry points document
+    ("raises on transport/auth failure"). `status()`, which promises never to
+    raise, is the caller that wraps this in its own handler instead.
+    """
+    provider = _resolve_provider()
+    return _run_guarded(operation(provider), provider)

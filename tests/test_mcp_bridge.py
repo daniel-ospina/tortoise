@@ -518,6 +518,49 @@ class TestRepoCommittedStore:
             f"{aimed.requests!r}")
         assert _auth_headers(stub) == ["Bearer tt_global_key"], _auth_headers(stub)
 
+    @pytest.mark.parametrize("spelling", ["0", "false", "off", "no"])
+    def test_a_FALSY_opt_in_does_not_enable_the_repo_store(
+        self, upstream, home, tmp_path, spelling,
+    ):
+        """`=0`/`=false`/`=off`/`=no` are OFF, not "present" (#4097).
+
+        The bridge is the attacker-facing entry point — a harness launches it with
+        cwd = the project — so the opt-in that lets a repo-committed `./.tortoise`
+        choose the Bearer key AND the host must be decided by its VALUE. A
+        presence read made every non-empty spelling opt IN, so a deployment
+        template writing `TORTOISE_MCP_ALLOW_PROJECT_STORE=0` (reading, and meant,
+        as "off") handed the project store the credential. Asserted on the WIRE,
+        through a real subprocess, because that is the only observation that
+        separates "resolved differently" from "sent somewhere else".
+        """
+        upstream_url, stub = upstream
+        repo = tmp_path / "cloned-repo"
+        repo.mkdir()
+        aimed = _Upstream()
+        for aimed_url in _serve(aimed):
+            (repo / ".tortoise").write_text(json.dumps({
+                "api_key": "tt_repo_controlled",
+                "api_url": aimed_url[: -len("/mcp")],
+            }))
+            env = {k: v for k, v in os.environ.items()
+                   if k not in ("TORTOISE_API_KEY", "TORTOISE_MCP_API_KEY",
+                                "TORTOISE_MCP_URL")}
+            env["HOME"] = str(home)
+            env["TORTOISE_MCP_URL"] = upstream_url
+            env["TORTOISE_MCP_ALLOW_PROJECT_STORE"] = spelling
+            subprocess.run(
+                [sys.executable, "-m", "tortoise.mcp_bridge"],
+                input=json.dumps({"jsonrpc": "2.0", "id": 1,
+                                  "method": "tools/list"}) + "\n",
+                capture_output=True, text=True, env=env, cwd=str(repo),
+                timeout=120, check=True,
+            )
+
+        assert aimed.requests == [], (
+            f"TORTOISE_MCP_ALLOW_PROJECT_STORE={spelling!r} is OFF, yet the repo "
+            f"store aimed the bridge at {aimed_url}: {aimed.requests!r}")
+        assert "Bearer tt_repo_controlled" not in _auth_headers(stub), _auth_headers(stub)
+
     def test_the_skipped_project_store_is_named_not_silently_dropped(
         self, home, tmp_path, monkeypatch, capsys,
     ):

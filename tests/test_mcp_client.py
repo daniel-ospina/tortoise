@@ -1008,6 +1008,63 @@ class TestCredentialResolution:
         assert mcp_client.list_tools()
         assert set(h for h in seen if h) == {"Bearer tt_project_local"}, seen
 
+    @pytest.mark.parametrize("spelling", ["0", "false", "FALSE", "off", "no", ""])
+    def test_a_FALSY_opt_in_does_not_enable_the_project_store(
+        self, isolated_home, monkeypatch, tmp_path, spelling,
+    ):
+        """The opt-in is decided by its VALUE, not by its presence (#4097).
+
+        `os.environ.get(X)` is truthy for EVERY non-empty string, so a presence
+        read took `TORTOISE_MCP_ALLOW_PROJECT_STORE=0` (and `=false`, `=off`,
+        `=no` — the spellings `tortoise/env_truthy.py` declares as OFF) into the
+        opt-in branch and read the project store on the transmitting paths. The
+        value that READS as "disabled" switched the #10605 P0 back on, silently,
+        through the switch that exists to prevent it.
+
+        Non-vacuous against the pre-fix tree: the presence read passes this
+        parametrisation for every spelling but the empty one.
+        """
+        from tortoise import mcp_client
+
+        work = tmp_path / "cloned-repo"
+        work.mkdir()
+        monkeypatch.chdir(work)
+        monkeypatch.setenv("TORTOISE_MCP_ALLOW_PROJECT_STORE", spelling)
+        (work / ".tortoise").write_text(json.dumps(
+            {"api_key": "tt_repo_controlled", "api_url": "http://127.0.0.1:9"}))
+
+        transmitting = mcp_client.resolve_connection(global_only=True)
+        assert transmitting.key is None, transmitting
+        assert transmitting.source is None, transmitting
+        skipped = [s for s in transmitting.sources if str(work / ".tortoise") in s]
+        assert skipped and "SKIPPED" in skipped[0], transmitting.sources
+
+    def test_status_never_raises_when_the_CREDENTIAL_RESOLUTION_fails(
+        self, isolated_home, monkeypatch,
+    ):
+        """`status()`/`available()` promise never to raise — resolution included.
+
+        Resolving the connection is I/O: `Path.home()` raises for an unregistered
+        uid (the arbitrary-uid container case) before any request is made. The
+        refactor that pre-built `_BearerProvider(resolve_connection(…).url)` as an
+        ARGUMENT moved that I/O outside every handler, so the raise escaped the two
+        entry points whose docstrings say "Never raises" as a traceback instead of
+        the `tortoise_unavailable` payload a script caller skips cleanly on. The
+        pre-#10605 shape resolved inside the probed coroutine and was caught.
+        """
+        from tortoise import mcp_client
+
+        def _no_home(cls):
+            raise RuntimeError("Could not determine home directory.")
+
+        monkeypatch.setattr(mcp_client.Path, "home", classmethod(_no_home))
+
+        payload = mcp_client.status()
+        assert payload["status"] == "tortoise_unavailable", payload
+        assert "Could not determine home directory" in payload["error"], payload
+        assert payload["url"] == mcp_client._DEFAULT_URL, payload
+        assert mcp_client.available() is False
+
     def test_a_repo_committed_store_cannot_aim_a_transmitting_path(
         self, repo_aimed_endpoint, isolated_home, monkeypatch, tmp_path,
     ):
