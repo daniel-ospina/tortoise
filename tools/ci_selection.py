@@ -3636,8 +3636,9 @@ def duplicate_mapping_key_issues(manifest_path: Path | None = None) -> list[str]
 
     It is not hypothetical: ``config/ci-surfaces.yml`` is ``merge=union``
     (``.gitattributes``), so a replay in which BOTH sides changed the SAME
-    ``durations:`` row keeps both copies — a merge, a rebase, or a re-applied
-    commit; a replay only one side touched emits the row once. This one batch PR
+    ``durations:`` row to DIFFERENT values keeps both copies — a merge, a
+    rebase, or a re-applied commit. An identical change on both sides, or a
+    replay only one side touched, emits the row once. This one batch PR
     (#10726) has produced it repeatedly — 62 keys, then 13, then 1, then 2 (each
     recorded in its fold ledger), and 6 measured on ``13a53ef7e``'s own tree.
     ``--integrity`` — the check that PR body cited as proof of "0 duplicates" —
