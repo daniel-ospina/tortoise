@@ -2410,3 +2410,67 @@ def test_two_processes_racing_start_produce_exactly_one_rail(tmp_path, monkeypat
         st = rd.collect(sd, "o/r", 76)
         if st is not None and st.pid:
             kill_group(st.pid)
+
+
+def test_the_start_ticks_writer_agrees_with_the_reader_when_comm_has_a_space(tmp_path):
+    """`CHILD_START_TICKS=` must be written with the SAME split `_proc_start_ticks` reads.
+
+    `/proc/<pid>/stat` field 2 (`comm`) is parenthesised and may itself contain
+    spaces (`proc_pid_stat(5)`), so splitting the whole line POSITIONALLY reads a
+    different field as soon as it does. That failure is silent, not loud: the
+    artifact receives a plausible integer that can never equal the reader's value,
+    the reader compares it to the live rail's ticks, and a MATCHING live rail is
+    reported as a RECYCLED pid — i.e. `lost`, the one state `launch` accepts. A
+    second rail on a PR that is still merging is the #3061 defect this whole ticks
+    anchor exists to prevent.
+
+    The child is `bash` today, whose comm has no space, so this is LATENT rather
+    than live. The test pins the SYMMETRY (writer construction == reader
+    construction) so it cannot become live by accident when that invocation
+    changes, and it asserts the old positional `$22` construction DISAGREES on the
+    same entry, so the arm is discriminating rather than merely green.
+    """
+    if not Path("/proc/self/stat").exists():
+        pytest.skip("no procfs on this box — the ticks anchor cannot exist here")
+    sleeper = shutil.which("sleep") or "/bin/sleep"
+    # A COPY, not a symlink: comm is the basename of the executed file itself, and a
+    # name with a space is exactly the shape a positional split cannot survive.
+    spaced = tmp_path / "a b"
+    shutil.copy(sleeper, spaced)
+    spaced.chmod(0o755)
+    proc = subprocess.Popen([str(spaced), "30"], start_new_session=True,
+                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL)
+    try:
+        raw = None
+        for _ in range(100):
+            try:
+                raw = Path(f"/proc/{proc.pid}/stat").read_text()
+                break
+            except OSError:
+                time.sleep(0.02)
+        assert raw is not None, "the spaced-comm child never appeared in /proc"
+        assert "(a b)" in raw, (
+            f"the fixture is not exercising the trap — comm is not spaced in {raw[:40]!r}")
+
+        ticks = rd._proc_start_ticks(proc.pid)
+        assert ticks is not None
+        out = subprocess.run(
+            ["bash", "-c", f"child={proc.pid}; {rd.START_TICKS_SH}"],
+            capture_output=True, text=True, timeout=30)
+        assert out.returncode == 0, out.stderr
+        assert out.stdout.strip() == str(ticks), (
+            "the writer and `_proc_start_ticks` must read the same field: "
+            f"artifact would carry {out.stdout.strip()!r}, the reader answers {ticks}")
+
+        # Non-vacuity: the construction this replaced must DISAGREE here, or the
+        # assertion above would pass on the pre-fix code too.
+        legacy = subprocess.run(
+            ["bash", "-c", f"child={proc.pid}; awk '{{print $22}}' /proc/$child/stat"],
+            capture_output=True, text=True, timeout=30)
+        assert legacy.stdout.strip() != str(ticks), (
+            "the positional `$22` construction agrees on this entry, so this test "
+            "does not discriminate writer from reader")
+    finally:
+        proc.kill()
+        proc.wait()

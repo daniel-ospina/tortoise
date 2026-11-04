@@ -207,6 +207,20 @@ IDENTITY_SLACK_S = 5
 # wall clock, so comparing it is exact — no slack, no step sensitivity — which is
 # why the ticks path is preferred over the timestamp path wherever procfs answers.
 PROC_STARTTIME_FIELD = 22
+# The SHELL half of `_proc_start_ticks`, for the writer inside `child_script` — and
+# deliberately the SAME construction, for the reason the reader's comment gives:
+# `comm` (field 2) is parenthesised and may itself contain spaces, so splitting the
+# whole line POSITIONALLY reads a different field whenever it does. A writer that
+# disagrees with the reader does not crash — it prints a plausible number that can
+# never match, so a LIVE rail reads `lost`, which is exactly the state `start`
+# accepts (a second rail on #3061). `sed` strips up to the LAST `) `, after which
+# field 3 (`state`) is element 1, i.e. starttime is element `FIELD - 2`.
+# A named constant so a test can run THIS text against a real `/proc` entry whose
+# comm contains a space and compare it with the Python reader.
+START_TICKS_SH = (
+    "sed 's/^.*) //' /proc/$child/stat 2>/dev/null"
+    f" | awk '{{print ${PROC_STARTTIME_FIELD - 2}}}'"
+)
 
 # Every `gh` call here is INFORMATIONAL and every one of them is bounded. An
 # unbounded one is not a slow read, it is a WEDGE: `_head_sha` runs while this
@@ -1518,7 +1532,7 @@ def child_script(rail: Path, repo: str, pr: int, logp: Path, art: Path,
         # where procfs answers, identity is EXACT and needs no slack. Empty where
         # there is no procfs (macOS) — the reader then falls back to the wall stamp.
         f"printf 'CHILD_START_TICKS=%s\\n' "
-        f"\"$(awk '{{print $22}}' /proc/$child/stat 2>/dev/null)\" >> {_shquote(art)}\n"
+        f"\"$({START_TICKS_SH})\" >> {_shquote(art)}\n"
         f"wait \"$child\"; rc=$?\n"
         f"printf 'EXIT_ATTEMPT=%s\\nEXIT=%s\\nFINISHED_AT=%s\\n' "
         f"{_shquote(attempt)} \"$rc\" \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" >> {_shquote(art)}\n"
