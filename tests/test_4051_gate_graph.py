@@ -160,8 +160,8 @@ def test_a_FULL_default_graph_cannot_refuse_a_write_into_an_EMPTY_bound_graph():
     That is also the one mutation this arm uniquely reds: a gate counting the
     org AGGREGATE (the sum, or the max, of both graphs) passes the cap-hole arm
     above — sum 5 → 402 — and inverts only phase 1, so the aggregate reading of
-    the entitlement (the default #8906's recorded decision OVERRIDES) is red
-    here and nowhere else in this file.
+    the entitlement (the default **that** #8906's recorded decision OVERRIDES) is
+    red here and nowhere else in this file.
 
     RED pre-fix, measured against the pre-#10637 `_check_org_limit` body as
     `hosted_api.py` actually carried it, restored with a throwaway pytest
