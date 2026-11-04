@@ -605,7 +605,13 @@ def test_public_demo_seed_is_serialized_per_org(client, monkeypatch):
     # hanging — the second party never arrives, so ``wait`` raises.
     entered = threading.Barrier(2, timeout=3)
 
-    def _slow_seed(org_id):
+    # #8906: the demo door now hands its already-open SDK to the seeder, so a
+    # stub that does not accept it breaks the call instead of standing in for it.
+    # Same signature surface as the two stubs in
+    # `test_onboarding_truth_surface.py` (`:667`, `:861`) — an optional
+    # keyword-only-by-default `sdk`, not `**kw` (which would also swallow a
+    # mistyped keyword that production would 500 on).
+    def _slow_seed(org_id, sdk=None):
         with gate:
             state["concurrent"] += 1
             state["max"] = max(state["max"], state["concurrent"])
