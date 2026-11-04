@@ -90,6 +90,22 @@ def _git(repo: Path, *args: str) -> None:
     assert completed.returncode == 0, completed.stderr
 
 
+def _fake_git(monkeypatch, tmp_path, exit_code: int) -> None:
+    """Put a `git` on PATH that exits with `exit_code` and prints nothing.
+
+    Lets a test reach the arms of `_git_tracks` that a real checkout cannot
+    produce on demand: the FATAL that means "git could not answer" (an
+    unreadable index, dubious ownership on a bind-mounted clone, a corrupt
+    `.git`) as distinct from `1`, which means "answered: untracked".
+    """
+    bindir = tmp_path / "fakebin"
+    bindir.mkdir(exist_ok=True)
+    script = bindir / "git"
+    script.write_text(f"#!/bin/sh\nexit {exit_code}\n")
+    script.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}")
+
+
 def _mcp_app(record: list | None = None):
     """The MCP daemon app (auth none, embedded DB), optionally recording auth.
 
@@ -1032,6 +1048,81 @@ class TestCredentialResolution:
         payload = mcp_client.status()  # must NOT raise
         assert payload["status"] == "tortoise_unavailable", payload
         assert payload["url"] == "http://127.0.0.1:9/mcp", payload
+
+    def test_a_repository_git_cannot_read_still_fails_CLOSED(
+        self, isolated_home, monkeypatch, tmp_path,
+    ):
+        """A git FATAL is not an answer — the store is IGNORED, not trusted.
+
+        `git ls-files` returns **128** for "not a git repository" AND for
+        "dubious ownership" (a bind-mounted checkout owned by another uid — the
+        ordinary container case), an unreadable/corrupt index, and a `.git` git
+        will not parse. Reading every non-zero as "not tracked" fails OPEN on
+        exactly those checkouts, and a committed store supplies BOTH halves of the
+        identity again. Only `1` is an answer.
+        """
+        from tortoise import mcp_client
+
+        (isolated_home / ".tortoise").mkdir(parents=True, exist_ok=True)
+        (isolated_home / ".tortoise" / "credentials.json").write_text(
+            json.dumps({"api_key": "tt_legit_user_key"}))
+        repo = tmp_path / "unreadable-checkout"
+        repo.mkdir()
+        (repo / ".tortoise").write_text(json.dumps({"api_key": "tt_attacker"}))
+        (repo / ".git").mkdir()  # a repository IS here; git just cannot read it
+        monkeypatch.chdir(repo)
+        _fake_git(monkeypatch, tmp_path, 128)
+
+        connection = mcp_client.resolve_connection()
+        assert connection.key == "tt_legit_user_key", connection
+        assert any("git-tracked: ignored" in s for s in connection.sources), connection.sources
+
+    def test_the_same_fatal_outside_any_repository_still_reads_the_store(
+        self, isolated_home, monkeypatch, tmp_path,
+    ):
+        """Negative: with no `.git` above it, nothing can have committed the file.
+
+        This is the arm that keeps the guard from becoming "never trust a
+        project-local store", which would reverse #1708 D5.
+        """
+        from tortoise import mcp_client
+
+        plain = tmp_path / "tarball"
+        plain.mkdir()
+        (plain / ".tortoise").write_text(json.dumps({"api_key": "tt_local_key"}))
+        monkeypatch.chdir(plain)
+        _fake_git(monkeypatch, tmp_path, 128)
+
+        connection = mcp_client.resolve_connection()
+        assert connection.key == "tt_local_key", connection
+
+    def test_endpoint_declared_describes_the_endpoint_the_connection_USES(
+        self, isolated_home, monkeypatch,
+    ):
+        """The PRODUCER half of the `degraded` vs `unconfigured` split.
+
+        `client/tortoise_client/cli.py` stubs this in its probe tests, so without
+        this pin reverting the producer (`declared=` on the three returns, or
+        `endpoint_declared` itself) reddens nothing — the wiring would be pinned
+        and the value not.
+        """
+        from tortoise import mcp_client
+
+        monkeypatch.delenv("TORTOISE_MCP_URL", raising=False)
+        assert mcp_client.endpoint_declared() is False  # nothing declared anywhere
+
+        monkeypatch.setenv("TORTOISE_MCP_URL", "http://127.0.0.1:9/mcp")
+        assert mcp_client.endpoint_declared() is True  # the env declares one
+        monkeypatch.delenv("TORTOISE_MCP_URL", raising=False)
+
+        store = isolated_home / ".tortoise"
+        store.mkdir(parents=True, exist_ok=True)
+        (store / "credentials.json").write_text(json.dumps(
+            {"api_key": "tt_store_key", "api_url": "http://127.0.0.1:9"}))
+        assert mcp_client.endpoint_declared() is True  # a store declares one
+
+        (store / "credentials.json").write_text(json.dumps({"api_key": "tt_store_key"}))
+        assert mcp_client.endpoint_declared() is False  # a key is not an endpoint
 
     def test_a_directory_named_tortoise_is_not_a_corrupt_store(
         self, isolated_home, monkeypatch, tmp_path,

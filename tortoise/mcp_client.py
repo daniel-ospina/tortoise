@@ -297,9 +297,27 @@ def _git_tracks(path: Path) -> bool:
     a stored Bearer is sent to.
 
     NO LOCK-INVERSION: a store outside any repository (a plain directory, a
-    tarball) cannot have been committed, so it is read as before. When git cannot
-    be asked at all, the question still gets answered mechanically — by looking
-    for a `.git` above the store — and an undeterminable case fails CLOSED.
+    tarball) cannot have been committed, so it is read as before.
+
+    ONLY TWO GIT EXIT CODES ARE ANSWERS, and every other one is a FAIL-CLOSED
+    fallback: `0` (tracked) and `1` (this repository does not track it). A fatal
+    MUST NOT read as "not tracked" — `128` is shared by "not a git repository",
+    "dubious ownership" (a bind-mounted repo owned by another uid, the ordinary
+    container case), an unreadable or corrupt index, and a `.git` git will not
+    parse. Reading those as a negative fails OPEN on exactly the checkouts a
+    container sees, and a repo-committed store then supplies BOTH halves again.
+    So the fatal arm asks the mechanical question instead — is there a `.git`
+    above the store? — and the same arm answers a git that cannot be run at all.
+
+    WHAT THIS GUARD IS, AND IS NOT: it stops the file that ARRIVES WITH A
+    CHECKOUT, which is the case that needs no local code execution. It is not a
+    general "repo-controlled file is never an identity" rule — a repo-run step
+    (`setup.sh`, a devcontainer `postCreateCommand`) or an extracted archive can
+    write an UNTRACKED `./.tortoise`, and #1708 D5 requires that store to be read
+    (it is indistinguishable from the one `tortoise init` leaves). Closing that
+    case means excluding the project-local candidate from TRANSMITTING resolution
+    entirely, as #3660 does — a reversal of D5, which needs an owner decision and
+    is not taken here.
     """
     try:
         completed = subprocess.run(
@@ -311,9 +329,11 @@ def _git_tracks(path: Path) -> bool:
         )
     except (OSError, subprocess.SubprocessError):
         return _in_a_git_work_tree(path.parent)
-    # 0 = tracked. 1 = not tracked by this repository. 128 = no repository here
-    # at all. The last two both mean "no repository can have committed it".
-    return completed.returncode == 0
+    if completed.returncode == 0:
+        return True  # tracked: the store came from the repository
+    if completed.returncode == 1:
+        return False  # git ANSWERED: this repository does not track it
+    return _in_a_git_work_tree(path.parent)  # a fatal is not an answer
 
 
 def _warn_if_store_is_git_tracked(path: Path) -> None:
@@ -323,14 +343,20 @@ def _warn_if_store_is_git_tracked(path: Path) -> None:
     the credential would leave a cloned repo free to re-aim the endpoint, which is
     the whole defect. The line exists so the operator learns WHY their store went
     unread instead of seeing only the `MCP-KEY-EMPTY` that names it.
+
+    The wording covers both arms of `_git_tracks`: git may have said the file is
+    TRACKED, or may have been unable to answer at all while a `.git` sits above it
+    (failed closed). Claiming "tracked" for the second would be a guess dressed
+    as a fact.
     """
     label = str(path)
     if label in _WARNED_TRACKED_STORES:
         return
     _WARNED_TRACKED_STORES.add(label)
     print(
-        f"⚠️  {label} is tracked by git — a repository can commit that file, so it "
-        f"is NOT trusted as a credential source and is IGNORED. Remove it from the "
+        f"⚠️  {label} is tracked by git, or sits in a git work tree git could not "
+        f"read — either way a repository can commit that file, so it is NOT "
+        f"trusted as a credential source and is IGNORED. Remove it from the "
         f"repository (`git rm --cached {path.name}`) and let `tortoise init "
         f"--api-key` write a gitignored store, or set TORTOISE_API_KEY.",
         file=sys.stderr,
@@ -364,10 +390,12 @@ def resolve_connection() -> Connection:
     """Resolve the endpoint + credential NOW.
 
     Precedence: env (`TORTOISE_API_KEY`, then the `TORTOISE_MCP_API_KEY` alias)
-    then the stored `~/.tortoise/credentials.json` — the same env-and-store shape
-    `tortoise/__main__.py::_resolve_config_path` uses (#1708 D1/D4/D5), reproduced
-    here rather than imported because this module ships in the client-only wheel
-    (it cannot depend on the engine's `__main__`).
+    then the two STORES in #1708 D5 order — the project-local `./.tortoise`
+    `tortoise init --api-key` writes, then `~/.tortoise/credentials.json` — the
+    same env-and-store shape `tortoise/__main__.py::_resolve_config_path` uses
+    (#1708 D1/D4/D5), reproduced here rather than imported because this module
+    ships in the client-only wheel (it cannot depend on the engine's `__main__`).
+    A store git TRACKS is skipped rather than read; `_git_tracks` says why.
 
     A blank/whitespace value is treated as ABSENT (never as an empty credential).
     A store that exists but cannot be parsed or read is NOT reported as absent

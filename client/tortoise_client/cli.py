@@ -98,12 +98,16 @@ def _probe_payload() -> dict:
     whether a missing key was the cause.
 
     BOUNDARY, stated rather than implied: for the UNAVAILABLE word, "no endpoint
-    is DECLARED" IS the definition of unconfigured on this probe — neither
-    `TORTOISE_MCP_URL` nor any store's `api_url`. A self-hoster who runs the
-    default daemon having declared nothing, and then loses that daemon, reads as
-    `unconfigured`, not `degraded` — the probe cannot tell "intended the default"
-    from "never set up" and does not pretend to. Declare an endpoint (even the
-    default) to move a down daemon into the can't-reach-it state.
+    that this client will USE is declared" IS the definition of unconfigured on
+    this probe — `declared` describes the RESOLVED connection, so it is false when
+    neither `TORTOISE_MCP_URL` nor the store that supplies the credential records
+    an `api_url`. (A store may record an `api_url` and still yield `declared:
+    False`: with no usable `api_key` in it the store is not a credential source and
+    its endpoint is never read.) A self-hoster who runs the default daemon having
+    declared nothing, and then loses that daemon, reads as `unconfigured`, not
+    `degraded` — the probe cannot tell "intended the default" from "never set
+    up" and does not pretend to. Declare an endpoint (even the default) to move a
+    down daemon into the can't-reach-it state.
 
     The rewritten payload drops `url` (the driver filled in the UNCONFIGURED
     default, so keeping it would advertise an endpoint the probe just said was
