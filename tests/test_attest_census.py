@@ -2136,3 +2136,95 @@ def test_an_in_process_caller_with_buffered_stdout_gets_no_oserror(monkeypatch, 
     # A failed stdout write is the CODE 2 (the report could not be emitted), never a raise.
     assert rc == 2, f"a failed stdout write must be rc 2, not an exception (got {rc!r})"
     assert (tmp_path / "o.md").exists(), "the artifact is written before the stdout emit"
+
+
+def test_read_gate_does_not_let_one_workflow_mask_a_red_attempt_in_another(monkeypatch):
+    """§622 / AGENTS.md: group by `(app.slug, workflow, job name)`, then apply POLARITY.
+
+    ⛔ A NAME-ONLY read merges two workflows that publish the same job name, so the newest of one
+    masks the other. Measured (review cycle 24): the payload below — an older `success` from run 1
+    and a newer `failure` from run 2 — answered `('completed', 'success')`, i.e. "gate green, no
+    re-post owed" on a head whose gate was red. Today only one job emits `ai-review-gate`, so this
+    is a latent false GREEN; the rule is implemented anyway, because a latent false GREEN on the
+    attestation gate is the exact failure this tool exists to refuse.
+
+    The workflow is not in the check-runs payload, but the RUN ID inside `details_url` pins it (one
+    run = one workflow), so the group key is `(app.slug, run id)`.
+    """
+    payload = {
+        "check_runs": [
+            # ⛔ The RED attempt is the OLDER one and the newer is GREEN, which is what makes this
+            # fixture discriminating: with a name-only read the newest id (30, success) wins and the
+            # red one is masked. Reversing them would make the test pass on the buggy code.
+            {"id": 20, "name": ac.GATE_CHECK, "status": "completed", "conclusion": "failure",
+             "app": {"slug": "github-actions"},
+             "details_url": "https://github.com/o/r/actions/runs/1002/job/9002"},
+            {"id": 30, "name": ac.GATE_CHECK, "status": "completed", "conclusion": "success",
+             "app": {"slug": "github-actions"},
+             "details_url": "https://github.com/o/r/actions/runs/1001/job/9001"},
+        ]
+    }
+    monkeypatch.setattr(ac, "gh_json", lambda args: payload)
+    assert ac.read_gate("o/r", "a" * 40) == ("completed", "failure")
+
+
+def test_read_gate_reports_in_flight_over_a_non_red_completed_group(monkeypatch):
+    """Polarity, the other two arms: red wins outright; otherwise in-flight beats a settled non-red.
+
+    A settled non-red group (here `cancelled`) must NOT be reported while another group is still
+    running, because the head's answer is not yet known — and `cancelled` is non-red, not green.
+    """
+    payload = {
+        "check_runs": [
+            {"id": 30, "name": ac.GATE_CHECK, "status": "completed", "conclusion": "cancelled",
+             "app": {"slug": "github-actions"},
+             "details_url": "https://github.com/o/r/actions/runs/2001/job/9101"},
+            {"id": 40, "name": ac.GATE_CHECK, "status": "in_progress", "conclusion": None,
+             "app": {"slug": "github-actions"},
+             "details_url": "https://github.com/o/r/actions/runs/2002/job/9102"},
+        ]
+    }
+    monkeypatch.setattr(ac, "gh_json", lambda args: payload)
+    assert ac.read_gate("o/r", "a" * 40) == ("in_progress", "")
+
+
+def test_a_foreign_record_cannot_report_real_evidence_on_the_json_surface(tmp_path):
+    """The JSON boolean must agree with the row that says `(foreign)` — attribution is the claim.
+
+    ⛔ `real_evidence` alone answers "does this record attest a review of SOME PR"; a foreign record
+    answers that about another PR. Measured (review cycle 24): under an `UNREADABLE` row, `--json`
+    emitted `real_evidence: true`, so `jq 'select(.record.real_evidence)'` selected a record that is
+    not this PR's evidence at all. The markdown table labels that row `(foreign)`; a machine
+    consumer keying the boolean must not get the opposite answer.
+
+    Driven through the REAL entry point, because `Record.error` is set by `load_record` — a
+    hand-built `Record` cannot reproduce the state this pins.
+    """
+    import json as _json
+
+    reviews = tmp_path / "reviews"
+    reviews.mkdir(exist_ok=True)
+    # A well-formed record that claims to be for ANOTHER repo — the state the attribution gate exists
+    # for. Its own head matches, so only `repo` can refuse it.
+    (reviews / "daniel-ospina-tortoise-1.json").write_text(
+        _json.dumps({
+            "head_sha": LIVE,
+            "verdict": "clean",
+            "evidence": "comment:6596200336",
+            "repo": "evil/evil",
+            "pr": 1,
+        }),
+        encoding="utf-8",
+    )
+    payload = '[{"number": 1, "headRefOid": "' + LIVE + '", "headRefName": "b", "title": "t"}]'
+    proc = _run_with_shim(
+        tmp_path, ["--json"], subprocess.PIPE, gh_stdout=payload,
+    )
+    assert proc.returncode in (0, 2), f"unexpected rc {proc.returncode}: {proc.stderr[-800:]!r}"
+    rows = _json.loads(proc.stdout.decode("utf-8"))["rows"]
+    assert len(rows) == 1, rows
+    assert rows[0]["record"] is not None, "the record must have been read, or the pin is vacuous"
+    assert rows[0]["outcome"] == "UNREADABLE", rows[0]
+    assert rows[0]["record"]["real_evidence"] is False, (
+        "a foreign record must not report real_evidence on the machine-readable surface"
+    )

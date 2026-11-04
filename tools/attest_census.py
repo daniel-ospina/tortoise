@@ -105,6 +105,11 @@ GATE_CHECK = "ai-review-gate"
 # of vocabulary accident.
 CLEAN_VERDICTS = {"clean", "clean-micro", "clean-low"}
 
+# A check-run conclusion that is neither red nor pending. `cancelled`/`stale` describe an attempt that
+# never answered, so they are NON-RED. Every OTHER conclusion — including one GitHub has not documented
+# yet — is RED: an unnamed value must never fall through a gap and read as green (`read_gate`).
+_NON_RED_CONCLUSIONS = {"success", "neutral", "skipped", "cancelled", "stale"}
+
 
 def _is_carried(mint: str) -> bool:
     """Normalised, because this guard is FAIL-OPEN if it ever misses.
@@ -539,7 +544,42 @@ def read_gate(repo: str, head: str) -> tuple[str, str]:
     # reached from the other side, and the previous test only covered a single-element payload.
     if any(not isinstance(r.get("id"), int) for r in runs):
         raise RuntimeError(f"check-runs payload for {head[:12]}… carries a non-integer id — cannot order attempts")
-    newest = max(runs, key=lambda r: r["id"])
+    # ⛔ GROUP BEFORE ORDERING, or one workflow's attempt masks another's. `docs/plans/2026-09-26-5215-
+    # merge-throughput.md` §622 and AGENTS.md "Reading verification state" require grouping by
+    # `(app.slug, workflow, job name)` precisely because "two workflows can publish the same job name —
+    # grouping on the name alone merges them, so the newest of one masks the other". The workflow is
+    # not in this payload, but the RUN ID inside `details_url` pins it (one run = one workflow), so the
+    # key is `(app.slug, run id)`. Measured (review cycle 24): a NAME-ONLY read answered
+    # `('completed', 'success')` for a pair whose OTHER group was red — the rollup error this rule
+    # forbids, reached from the grouping side. Today only one job emits this name, so that was latent
+    # rather than a wrong row; the rule is implemented anyway, because a latent false GREEN on the
+    # attestation gate is the exact failure this tool exists to refuse.
+    def _group(run: dict) -> tuple[str, str]:
+        app = run.get("app")
+        slug = app.get("slug") if isinstance(app, dict) else None
+        match = re.search(r"/actions/runs/(\d+)/", str(run.get("details_url") or ""))
+        return str(slug or ""), (match.group(1) if match else "")
+
+    newest_per_group: dict[tuple[str, str], dict] = {}
+    for run in runs:
+        key = _group(run)
+        if key not in newest_per_group or run["id"] > newest_per_group[key]["id"]:
+            newest_per_group[key] = run
+    contenders = list(newest_per_group.values())
+    # ⛔ POLARITY ACROSS GROUPS, exactly as the recorded rule states it: a completed RED in ANY group
+    # is final and nothing in flight can un-fail it; otherwise an un-concluded group means the answer
+    # is not yet known; otherwise the groups agree the head is non-red. Red is decided by an ALLOW-LIST
+    # of non-red conclusions, so a conclusion nobody has named yet cannot fall through a gap and read
+    # as green.
+    red = [
+        r for r in contenders
+        if r.get("status") == "completed" and str(r.get("conclusion") or "") not in _NON_RED_CONCLUSIONS
+    ]
+    if red:
+        newest = max(red, key=lambda r: r["id"])
+    else:
+        in_flight = [r for r in contenders if r.get("status") != "completed"]
+        newest = max(in_flight or contenders, key=lambda r: r["id"])
     return str(newest.get("status") or ""), str(newest.get("conclusion") or "")
 
 
@@ -945,14 +985,17 @@ def main(argv: list[str] | None = None) -> int:
     # library-boundary fix, but a guard on one of four sibling paths is the coin flip this file's
     # own rule forbids.
     with contextlib.suppress(OSError, ValueError, AttributeError):
-        # ⛔ `errors="backslashreplace"` is the last piece of the `0`/`2`-never-`1` contract. When
-        # fd 2 is closed `sys.stderr` is None, and a `print(..., file=None)` then falls back to
-        # STDOUT — so with a C-locale argv (non-ASCII `--out` decoded as lone surrogates) the
-        # courtesy message raised `UnicodeEncodeError` AFTER a complete census. Measured #10687
-        # cycle 20: `LC_ALL=C PYTHONUTF8=0 PYTHONCOERCECLOCALE=0 --out café/…` with fd 2 closed was
-        # rc 1 while each ingredient alone was rc 0. `backslashreplace` is also exactly what
-        # CPython's own `create_stdio` gives a real stderr, which is why the same message is harmless
-        # when fd 2 is open.
+        # ⛔ `errors="backslashreplace"` keeps a courtesy message RENDERABLE when fd 2 is closed:
+        # `sys.stderr` is None there, so `print(..., file=None)` falls back to STDOUT, and with a
+        # C-locale argv (a non-ASCII `--out` decoded to lone surrogates) the message raised
+        # `UnicodeEncodeError` — measured #10687 cycle 20, rc 1 while each ingredient alone was rc 0.
+        # It is also exactly what CPython's own `create_stdio` gives a real stderr, which is why the
+        # same message is harmless when fd 2 is open.
+        # ⚠️ NOT load-bearing for the EXIT CODE any more, and saying otherwise would be the
+        # claim/artifact mismatch this file keeps fixing: since cycle 22 every courtesy write goes
+        # through `_say`, which catches `UnicodeEncodeError` itself, so deleting this argument leaves
+        # the suite green (measured, review cycle 24). It is message FIDELITY plus a guard for any
+        # future direct write, not "the last piece of the `0`/`2` contract".
         sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--repo", default="daniel-ospina/tortoise")
@@ -1111,7 +1154,14 @@ def main(argv: list[str] | None = None) -> int:
                     "record": None if r.record is None else {
                         "path": str(r.record.path), "head_sha": r.record.head_sha, "mint": r.record.mint,
                         "verdict": r.record.verdict, "evidence": r.record.evidence,
-                        "real_evidence": r.record.real_evidence,
+                        # ⛔ Attribution is part of the CLAIM, not a column note. `real_evidence`
+                        # alone answers "does this record attest a review of SOME PR"; a foreign
+                        # record answers that about another PR (measured, review cycle 24: a record
+                        # declaring `evil/evil` emitted `real_evidence: true` under an `UNREADABLE`
+                        # row, so `jq 'select(.record.real_evidence)'` selected it). The markdown
+                        # table labels the row `(foreign)`; this boolean must not disagree with the
+                        # string a consumer keys on, which is the sibling-path rule of this file.
+                        "real_evidence": r.record.real_evidence and not r.record.error,
                     },
                 }
                 for r in rows
