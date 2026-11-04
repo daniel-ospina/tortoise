@@ -5373,8 +5373,9 @@ def tortoise_ingest(bundle: Any = None, granularity: str = "bulk",
     connections never retro-promote (promotion fires on FIRST edge creation
     only).
     ⛔ NOT declared idempotent: points dedup by content hash + kind, sources by
-    url and operators by input set — but the entities leg is APPEND-ONLY for
-    document/event, so a repeat can write a second Source.
+    url and operators by input set — but the fold does NOT cover everything:
+    document/event entities are APPEND-ONLY, and the point fold SKIPS operator
+    nodes, so a repeat can write a second Source or a second operator Point.
     """
     bundle = _parse(bundle)
     if bundle is None:

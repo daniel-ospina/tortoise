@@ -13,11 +13,13 @@ aboutObjects: tortoise-ingest, tortoise-mcp
 
 The ingest surface writes a whole **bundle** — points, entities, sources, and
 the connections between them — in one coherent call that is **duplicate-averse**
-on points, sources and connections. It is NOT idempotent end to end: `document`
-and `event` entities are append-only occurrence records, and re-ingesting them
-appends again *by design* — **silently**, with no warning key to look for (the
-`append_only_items` token in [§3.2](#32-warnings--the-thirteen-keys) is reserved
-vocabulary, not observable today). Both retry sections below
+on the items its dedup fold covers — points, sources and connections. It is NOT
+idempotent end to end: the fold does not cover `document`/`event` entities
+(append-only occurrence records) and it SKIPS operator nodes, so a repeat can
+append a second record *by design*. It does so **silently**, with no warning key
+to look for (the `append_only_items` token in [§3.2](#32-warnings--the-thirteen-keys) is reserved
+vocabulary, not observable today). [§15](#15-timeout--failure) names every exclusion it
+knows, and the check that survives the ones it does not. Both retry sections below
 ([§7](#7-kill-recovery), [§15](#15-timeout--failure)) carry that exception
 explicitly. This document is the granular customer contract for that surface:
 bundle shape, worked examples with the exact response shape, the full error
@@ -450,20 +452,22 @@ corrected content is a different logical item.
 
 ## 7. Kill recovery
 
-**Transport death → resubmission is duplicate-averse, and that is the
-contract** (except the append-only entity legs — [§15](#15-timeout--failure)).
+**Transport death → resubmission is duplicate-averse where the fold applies,
+and that is the contract** — [§15](#15-timeout--failure) names what it does not cover.
 
 If the ingest call dies mid-flight (client killed, network drop, server
 SIGKILL), you get **no response** — but the write may have partially
 committed. The recovery signal is a single rule:
 
-> **Re-submit the identical bundle, unpatched.** Points, sources and connections
-> converge: items that committed dedup, items that didn't commit are created, and
+> **Re-submit the identical bundle, unpatched.** What the fold covers converges:
+> items that committed dedup, items that didn't commit are created, and
 > the whole logical bundle carries **one `batch_id`** across kill + retry
 > (`batch_id` is content-derived, not per-call — a retry mints the same id).
-> ⛔ **Not exactly-once for `document`/`event` entities** — those are append-only
-> and a resubmission appends a second one, silently. A bundle carrying them is
-> the one case where "how many did I create?" cannot be answered by the retry.
+> ⛔ **Not exactly-once for anything the fold does not cover** — append-only
+> `document`/`event` entities, and any point the fold excludes (operator nodes):
+> a resubmission appends a second one, silently. A bundle carrying such an item
+> is the case where "how many did I create?" cannot be answered by the retry
+> alone — [§15](#15-timeout--failure).
 
 - The killed call returns no structured error; there is nothing to parse.
 - **Metering note:** a transport-killed call commits its writes but is never
@@ -499,8 +503,8 @@ with the exact retry action:
 | 4 | `ERR_QUOTA_SERVER` `{error, code}` | Transient quota-counting failure (fail-closed). | **Backoff-retry** (transient). |
 | 5 | `ERR_UNAUTHORIZED` `{error, code}` | 401 — missing/invalid `Bearer tt_<key>`. | **Fix credentials; never retry.** |
 | 6 | `ERR_REGISTRY` `{error, code}` | 503 — team registry (key→team resolution) unavailable. The `-32099` **static-auth-misconfigured** variant ("Static auth misconfigured: no API key set") is a server configuration problem. | Transient → **backoff-retry**. The `-32099` static-misconfig variant → **operator fix (config), don't retry**. |
-| 7 | Phase-2 failure `{error}` — **no code** | A write failed mid-commit; partial state is committed. The error names the section/index/item; it carries the already-computed `batch_id`. | **Re-send converges** for points/sources/connections — the retry dedups what committed and writes the rest. ⛔ Not for `document`/`event` entities: those append, so a re-send can leave two ([§15](#15-timeout--failure)). Audit via `batch_id` first if you like. |
-| 8 | Transport death — **no response** | The call may have committed anything. | **Re-send the identical bundle**; duplicate-averse convergence on points/sources/connections, and the append-only `document`/`event` exception ([§7](#7-kill-recovery), [§15](#15-timeout--failure)). |
+| 7 | Phase-2 failure `{error}` — **no code** | A write failed mid-commit; partial state is committed. The error names the section/index/item; it carries the already-computed `batch_id`. | **Re-send converges** where the fold applies — the retry dedups what committed and writes the rest. ⛔ Not for the items [§15](#15-timeout--failure) excludes (append-only `document`/`event` entities, operator points): those append, so a re-send can leave two. Audit via `batch_id` first if you like. |
+| 8 | Transport death — **no response** | The call may have committed anything. | **Re-send the identical bundle**; duplicate-averse where the fold applies, and the exclusions [§15](#15-timeout--failure) names ([§7](#7-kill-recovery)). |
 | 9 | `EmbeddedStoreBusyError` — named class prefix in `{error}` (**planned**) | Cross-process contention on an embedded store (another process holds the db). **planned:** fail-fast with a named error replaces today's blocking flock-with-timeout handling. | **planned:** do **NOT** retry until the holder exits. Unlike phase-2 partial-state errors, re-sending while the store is busy does **not** converge — it re-errors. (Fail-fast replaces the old silent second-daemon behavior.) |
 
 **planned:** `ERR_BUNDLE_INVALID` is a new exported constant classified as a
@@ -735,8 +739,8 @@ not schema — no version bump.
 | 3 | **Label conflict on same-pair plain connections** | label-differing same-pair plain connections created two operators | Phase-1 violation — **narrowed by #8623:** now a violation only on the **direct-edge** route — any pair with no plain `:Point` endpoint (`Object↔Object`, `Subject↔Object`, `Event↔…`), where the second edge would MERGE onto `(src, tgt, type)` and overwrite the first's label. A Point-bearing pair is operator-mediated (#8499), and that route's dedup key includes `label` — so two label-differing connections between Points are accepted and commit as two distinct operators | Point-bearing pair: **none** — write the two labels directly, no `reify: true` needed. Object↔Object pair: `reify:true` ×2 (operator route keeps both labels), or unify the label |
 | 4 | **Route-scoped attribute rejection** | `confidence`/`weight` on operator-routed connections and `direction`/`confidence`/`weight` on relations were silently dropped | Phase-1 violation — and since #5244 also `mitigation` on a relation (a structural edge has no operator bridge to damp). ⚠️ **#9749 — judged by the EFFECTIVE route:** a plain IMPL/NAND between Points is promoted to the operator route by the endpoint-kind gate (#8499), so its `confidence`/`weight` are a violation too (before #9749 they validated as direct-edge attributes and were then DROPPED by the operator write). On the route where the rule allows them — the operator-less direct edge — they were also being dropped: `ingest` never forwarded them to `create_direct_edge`. Both halves are fixed in the same release: the direct route now stores them (and replays them on rebuild), and the operator route refuses them | Drop the attributes (confidence/weight belong on the plain direct-edge path only — a pair with **no** plain `:Point` endpoint). For a Point-bearing pair there is no ingest route that carries them: drop the key, or write the operator-less edge explicitly with `sdk.create_direct_edge(op_type, src, tgt, confidence=…, weight=…)`. For a mitigation, express the connection as `operator` + `mitigation` or call `sdk.mitigate_operator` |
 | 5 | **Mitigation-reason conflict** | same-pair same-label IMPL+mitigation with differing reasons committed with an order-dependent survivor | Phase-1 violation | Unify the reason, or use label-differing pairs (legal) |
-| 6 | **Label-absent strict matching** | a no-label request was a wildcard matching labeled operators (order-dependent commit) | absent ≠ present; Phase-1 conflict for same-pair {labeled + absent}; a label-dropped resubmit creates a second operator + `label_dropped_resubmit` warning | Re-add the label, or use `reify` ×2 under auto |
-| 7 | **Direction-absent strict matching (per-op-type)** | a direction-absent lookup was a wildcard | absent ≡ op-type default for dedup (IMPL→`bidirectional`, NAND→`unidirectional`); {IMPL absent, `unidirectional`} and {NAND absent, `bidirectional`} are conflicts; a direction-dropped resubmit creates a second operator + `direction_dropped_resubmit` warning | Declare the direction, or accept the extraction default — **NAND=unidirectional, IMPL=bidirectional** |
+| 6 | **Label-absent strict matching** | a no-label request was a wildcard matching labeled operators (order-dependent commit) | absent ≠ present; Phase-1 conflict for same-pair {labeled + absent}; a label-dropped resubmit creates a second operator — and reports **no** warning, because `label_dropped_resubmit` is reserved vocabulary [§3.2](#32-warnings--the-thirteen-keys) says nothing emits today | Re-add the label, or use `reify` ×2 under auto |
+| 7 | **Direction-absent strict matching (per-op-type)** | a direction-absent lookup was a wildcard | absent ≡ op-type default for dedup (IMPL→`bidirectional`, NAND→`unidirectional`); {IMPL absent, `unidirectional`} and {NAND absent, `bidirectional`} are conflicts; a direction-dropped resubmit creates a second operator — and reports **no** warning, because `direction_dropped_resubmit` is reserved vocabulary (same paragraph) | Declare the direction, or accept the extraction default — **NAND=unidirectional, IMPL=bidirectional** |
 | 8 | **A connection's `mitigation` is applied** (#5244) | the field was validated and then DISCARDED: the operator was written, no mitigation Point, no `mitigated_by` edge, no warning | the operator is created/deduped/absorbed, then the mitigation Point + `(op)-[:mitigated_by]->(m)` edge are written and `batch_id`-stamped; a re-submission updates in place and reports `mitigation_strength_change` (row 6). #9962: a re-submission whose mitigation has been WITHDRAWN is decided on its assertion — the same `(reason, strength)` writes nothing (no revive, no duplicate), a different one mints a live mitigation | None — this is what [§3.2](#32-warnings--the-thirteen-keys) already promised. Expect one extra Point in the graph and in `list_batch` counts for a mitigation-bearing bundle |
 
 ---
@@ -757,7 +761,7 @@ Combined cross-epic upgrade notes (epic #902 ingest + epic #900 index).
   ingestion moves to the bundle surface: convert your corpus walk into a
   bundle (points + entities + sources + connections) and call
   `tortoise_ingest` — you get the coherent multi-section write, duplicate-averse
-  retry (with the `document`/`event` exception in [§15](#15-timeout--failure)),
+  retry (with the exclusions [§15](#15-timeout--failure) names),
   `batch_id` audit, and the full error contract of this document. The
   corpus tools remain for the transition window only.
 
@@ -826,7 +830,9 @@ lands, not only while the first attempt is still running. So the over-MCP answer
 and this section's "re-send the identical bundle" are answering different
 questions — the section answers *"the call is dead and I want the data in"*; the
 refusal answers *"I do not know whether it is dead"*, and for ingest the safe
-move there is to read back, not to re-send.
+move there is to look before re-sending — `tortoise_list_batches` names a recent
+`batch_id` and `tortoise_list_batch` shows what it committed, so re-sending becomes
+a decision about the items that are missing rather than a guess about all of them.
 
 ---
 
@@ -847,11 +853,11 @@ move there is to read back, not to re-send.
   Points + direct edges. Entities and sources are **not** stamped (they are
   url/name-keyed) and are unreachable by `batch_id` — documented as out of
   stamp scope.
-- **Batch discovery:** **planned** — a batch discovery/audit primitive
-  (`list_batch(batch_id)` or a batch_id filter on `query()`) ships with this
-  release. It is what lets you find what committed when transport death ate
-  the response (you never saw a `batch_id`). Until it ships, retrieve via
-  the `ids` from the response + `query(status="draft")`.
+- **Batch discovery:** SHIPPED — `sdk.list_batch(batch_id)` / `list_batches(limit)`,
+  served as `tortoise_list_batch` / `tortoise_list_batches`. This is what lets you
+  find what committed when transport death ate the response and you never saw a
+  `batch_id`: `list_batches` names recent ones. Entities and sources are outside
+  batch scope (above), so they are not in these counts.
 - **Outside audit scope:** editorial supersede artifacts (the superseding
   point `p2`, created via `supersede_point` with no batch) are **not** in
   the batch's stamped set; repointed edges **remain** in their originating

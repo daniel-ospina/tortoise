@@ -268,7 +268,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "dedup=True (default) folds onto an existing Point when the content "
                     "matches, but that is not unconditional: dedup=False mints a second "
                     "Point, and a props payload can take the node out of the fold's own "
-                    "predicate. The idempotency hint below is per OPERATION; whether a "
+                    "predicate. The `idempotentHint` annotation is per OPERATION; whether a "
                     "given call converges depends on its arguments, and a call refused "
                     "on the TRANSPORT WAIT BOUND reports the per-call verdict on its "
                     "error payload (no other refusal carries one). "
@@ -1046,8 +1046,10 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "is never retro-promoted, #1088; terminal sources are never resurrected; "
                     "deduped connections never retro-promote). NOT declared "
                     "idempotent: points dedup by content hash + kind, sources by url "
-                    "and operators by input set, but the entities leg is append-only "
-                    "for document/event — a repeat can write a second Source.",
+                    "and operators by input set — but the fold does NOT cover "
+                    "everything: document/event entities are append-only, and the point "
+                    "fold SKIPS operator nodes, so a repeat can write a second Source "
+                    "or a second operator Point. Read created/deduped to tell which.",
         risk="write",
         # ⛔ NOT idempotent — and this is a corrected declaration, not a tier
         # default (#10849 review). `ingest` looked convergent on three separate
