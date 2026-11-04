@@ -71,7 +71,8 @@ _SESSION_SOURCE_KEYS = {
 #: more `SourceCreated` carrier key (`summary=`). Nothing else differs.
 #:
 #: ⛔ Read THIS one as ground truth for "what a node written by a pre-fix build
-#: already carries" — that is what the `#10853` residue sweep is sized against.
+#: already carries" — that is what a residue sweep is sized against; the sweep
+#: itself is unswept and tracked on `#10000` (the `#10853` that named it is closed).
 #: It is deliberately NOT the same set as the shipped shape above: a residue
 #: sweep sized against the post-fix set would miss every node still holding the
 #: transcript's first utterance, so the two must not be collapsed into one.
@@ -202,7 +203,7 @@ def test_capture_path_source_shape_is_unchanged_by_the_early_materialization(pro
         "the early materialization changed the session Source's shape — "
         f"missing={sorted(_SESSION_SOURCE_KEYS - keys)} "
         f"extra={sorted(keys - _SESSION_SOURCE_KEYS)} (a PRE-FIX build wrote "
-        f"{sorted(_PRE_FIX_SOURCE_KEYS - _SESSION_SOURCE_KEYS)} more: #10853)")
+        f"{sorted(_PRE_FIX_SOURCE_KEYS - _SESSION_SOURCE_KEYS)} more: #10000)")
 
 
 def test_a_recapture_neither_advances_nor_drops_the_anchor(prov):

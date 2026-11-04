@@ -111,7 +111,7 @@ THE FOUR PROPERTIES, AND WHERE EACH LIVES
      carries the pair keeps it across a re-projection; this arm stops the pair
      being re-written, it does not clear an existing one. Clearing a populated
      cache's stale pair needs an explicit property clear, which `#10858`'s
-     capture change does NOT perform — that sweep is #10853's migration.
+     capture change does NOT perform — that sweep is unswept on #10000.
 4. **A cold region reads ``not-hot``, never ``empty``.** ``declaration_for``
    writes the known-hot set **after** the writes and as a function of what was
    materialized, so a record key the projection did not write is not claimed
@@ -1208,7 +1208,7 @@ def _scalar(value: Any) -> Any:
 #: with what a rebuild can carry — and nothing reds either way: a one-way
 #: divergence (`#10853`). The DECAY argument here is history: it held while the
 #: capture still placed the key, and `#10858` removed that write — so the residue
-#: is now a MIGRATION debt this rule declines to re-create (#10853), nothing more.
+#: is now a MIGRATION debt this rule declines to re-create — unswept on #10000.
 #:
 #: ⛔ THE PAIR IS ONE DATUM, which is why both COLUMNS are here (`summary`,
 #: `_search_text` — the graph property its mapping produces is `_searchText`). On
@@ -1231,16 +1231,16 @@ def _scalar(value: Any) -> Any:
 #: RECORD side through :func:`read_record_view` → `node_from_row`, so the truth
 #: side omits these two properties while the CACHE side holds them. That
 #: population is not ONE shape: `_searchText` is written and journaled by
-#: EVERY capture (`#3518`/D10's home for the text), so every session this
-#: build captures reports `field_mismatches=1`; a SECOND field means a
-#: pre-fix row (#10853) — the class the reconciler itself grades P1
-#: (*"a signal indistinguishable from noise"*), so it is not left to carry:
+#: EVERY capture (`#3518`/D10's home for the text), a SECOND field only by a
+#: pre-fix row — the class the reconciler itself grades P1 (*"a signal
+#: indistinguishable from noise"*), so it is not left to carry:
 #: :func:`episodic_source_prose_properties` and
 #: `record_reconcile.scan_cache_view` mark the pair CACHE-OWNED for an episodic
-#: Source, and the reconciler counts them under `graph_only` — visible, and not
-#: a divergence against a record that is correct. The repair for the graph side
-#: is a record-sourced re-projection (`record-restore` / `rebuild_from_record`,
-#: which re-materialise through this projector), and clearing one is #10853.
+#: Source, and the run reports them under `graph_only` — NEVER as
+#: `field_mismatches`, which counts a DIVERGENCE against the record. So the
+#: reading is the instrument's own bucket, not a number: visible, and not noise.
+#: The repair for the graph side is a record-sourced re-projection; clearing a
+#: stale pair is unswept, tracked on `#10000`.
 _EPISODIC_SOURCE_PROSE_COLUMNS: frozenset[str] = frozenset({
     "summary", "_search_text",
 })

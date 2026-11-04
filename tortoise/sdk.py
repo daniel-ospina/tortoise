@@ -16791,7 +16791,7 @@ class TortoiseSDK:
             # ⛔ WHY THE *CARRIER*. A `SourceCreated` record carrying `summary`
             # is written onto the node by THIS writer's own passthrough —
             # `_persist_extra_props(..., allow_keys=_SOURCE_EXTRA_PROPS)`, with
-            # `summary` in it (`projection/entities.py:1840`, call `:6816`) — on
+            # `summary` in it (`_upsert_source`'s `_persist_extra_props` call) — on
             # apply AND on replay (`test_projection.py:3468`); NOT the record→
             # cache door, which DROPS the pair for an episodic Source
             # (`cache_projection.py:1244`/`:1420`; `test_10853_session_source_`
@@ -16805,7 +16805,7 @@ class TortoiseSDK:
             # ⚠️ SCOPE: this closes the door for rows written FROM HERE ON. A row a
             # PRE-FIX build already placed keeps the column and the node it wrote
             # keeps the prose — GRAPH-ONLY, since the record→cache door drops the
-            # pair (#10853: a data migration, not a code path).
+            # pair (unswept: #10853, which tracked it, is closed — see #10000).
             #
             # ⛔ WHAT DOES NOT CHANGE, deliberately: the derivation still runs,
             # and its text still reaches the node's searchable field

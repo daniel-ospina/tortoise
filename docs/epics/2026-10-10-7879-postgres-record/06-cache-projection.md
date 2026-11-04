@@ -243,24 +243,25 @@ title-derived `_searchText`, silently un-indexing it in the cache.
   — #10853's residue, in the ruling's direction;
 * graph-side FTS over a session Source's own utterances goes with the prose. The
   value survives in the record (retrievable by a column read; there is no
-  record-side text index), and #10000 replaces the capture's summary with a topic
-  lexicon;
+  record-side text index), and what replaces it — removal (`#10858`) or a topic
+  lexicon (`#10852`) — is the ruling pending on `#10000`;
 * `python -m tortoise record-reconcile` builds its RECORD side through the same
   projector, so its truth side omits what the cache holds. **The population is not
-  ONE shape**: `_searchText` is written and journaled by every capture, so
-  every session this build captures reports `field_mismatches=1` — the
-  "signal indistinguishable from noise" the reconciler's own docstring grades P1.
-  So `scan_cache_view` marks the pair CACHE-OWNED for an episodic Source
-  (`cache_projection.episodic_source_prose_properties()`) and the run counts it
-  under its own `graph_only` bucket: visible, and not a divergence against a
-  record that is correct. The graph side is repaired by a record-sourced
-  re-projection (`record-restore` / `rebuild_from_record`, which re-materialise
-  through this projector) — **for a node the projection CREATES**. The write is
-  additive (`MERGE … SET n += $props`), so a node that ALREADY carries the pair
-  keeps it across a re-projection: this arm stops the pair being re-written, it
-  does not clear one. Clearing a populated cache's stale pair needs an explicit
-  property clear, which #10858's capture change does NOT perform — that sweep is
-  #10853's migration.
+  ONE shape**: `_searchText` is written and journaled by every capture, a SECOND
+  field only by a pre-fix row — the "signal indistinguishable from noise" the
+  reconciler's own docstring grades P1. So `scan_cache_view` marks the pair
+  CACHE-OWNED for an episodic Source
+  (`cache_projection.episodic_source_prose_properties()`) and the run reports it
+  under its own `graph_only` bucket — never as `field_mismatches`, which counts a
+  DIVERGENCE against the record: visible, and not a divergence against a record
+  that is correct. The graph side is repaired by a record-sourced re-projection
+  (`record-restore` / `rebuild_from_record`, which re-materialise through this
+  projector) — **for a node the projection CREATES**. The write is additive
+  (`MERGE … SET n += $props`), so a node that ALREADY carries the pair keeps it
+  across a re-projection: this arm stops the pair being re-written, it does not
+  clear one. Clearing a populated cache's stale pair needs an explicit property
+  clear, which #10858's capture change does NOT perform — that sweep is unswept
+  on #10000.
 
 ### The pin
 

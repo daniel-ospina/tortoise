@@ -1995,8 +1995,10 @@ by merge order.** It must not be decided that way.
 `public.source` keeps its `summary`, and the node that build wrote keeps the prose. The record→cache
 door does NOT restore it — `_props_from_row` drops the `summary`/`_search_text` pair for an episodic
 Source (`_EPISODIC_SOURCE_PROSE_COLUMNS`, `cache_projection.py:1244-1246`; skip at `:1420-1424`), and
-`tests/test_10853_session_source_prose.py` pins exactly that — so what `#10853` sizes is a
+`tests/test_10853_session_source_prose.py` pins exactly that — so what is left is a
 GRAPH-ONLY residue, and a record-sourced re-materialisation already reclaims both columns. That is
-a **data migration**, not a code path, and it is `#10853`'s — which is why
+a **data migration**, not a code path, and it has **no owner yet**: `#10853` tracked it and was closed
+by a rule rather than a sweep, its closing comment handing the graph-side half on. The unswept
+population is tracked on `#10000` — which is why
 `tests/test_8501_capture_path_anchor.py` states `_PRE_FIX_SOURCE_KEYS` (`_SESSION_SOURCE_KEYS` plus
 `summary`) as a separate ground truth rather than reusing the shipped set.
