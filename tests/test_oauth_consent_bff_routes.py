@@ -1747,8 +1747,10 @@ def test_start_ADOPTS_a_presented_attempt_key_so_a_cold_flow_can_return() -> Non
     is ADOPTED on the insert rather than replaced by a freshly generated one.
 
     Non-vacuity: this is a PIN, not the fix's proof. `presentedKey || newAttemptKey()` predates
-    this PR — `website/` is not in its diff at all — so this test passes on the PRE-FIX tree and
-    reds only against a mutation of `start.ts`. The fix's proof is
+    this PR — `website/` is not in its diff at all — so this test passes on the PRE-FIX tree. It
+    reds only against a mutation of the browser-side route or store (`start.ts` /
+    `consent-bridge.ts` — the harness executes both, `_HOOKS_MJS` imports the shipped store), and
+    this PR touches neither. The fix's proof is
     `test_the_AS_bounce_key_is_the_key_start_records_and_the_flow_completes` above: it crosses the
     AS→app seam and `KeyError`s on `attempt_key` without the AS mint (measured: reverting
     `consent_bounce_url` to `origin/main`'s no-mint form reds that test and leaves this one green).
