@@ -1503,6 +1503,39 @@ def test_a_CUT_pending_leg_cannot_certify_the_queue_clear():
     assert "feed=read" not in health.state_line
 
 
+def test_an_OK_line_never_renders_a_CUT_leg_as_a_completed_read():
+    """⛔ The `OK` branch had the same hole, reached by a DIFFERENT clause.
+
+    `pending_truncated`'s own field doc promises "a read that did not finish is never
+    presented as a healthy queue", and the `feed=` fix above enforced it on
+    `PR-UNWITNESSED` — but `classify_queue`'s `not wait_runs` clause returns `OK`
+    directly (a documented VERDICT choice: with nothing waiting in any READ leg there
+    is no wait to be past a budget) and printed a BARE `OK(...)` over a leg that had
+    been cut at the page cap. The destructive gate is unaffected
+    (`pr_wait_measured=False` -> `congests_pr is None`), but the line the FLEET
+    samples claimed a completed read of a truncated feed.
+
+    Measured pre-fix on this exact fixture: `verdict=OK`, `pending_truncated=True`,
+    `state_line=CI: OK(queued=6, pr_running=0, pr_queued=0, pr_pending=0)` — no
+    marker at all. Discriminating: removing the `feed=` append reddens it, and the
+    second assertion keeps a measured reading from being relabelled.
+    """
+    queued = [run(i, "finding-provenance", event="push", age_seconds=10)
+              for i in range(1, 7)]
+    health = classify(queued, pending_truncated=True)
+    assert health.verdict == Q.OK, health.reasons
+    assert health.pending_truncated is True
+    assert health.pr_wait_measured is False, (
+        "the verdict is a documented choice; the WAIT still was not measured")
+    assert "feed=truncated" in health.state_line, (
+        f"the sampled line must carry the cut: {health.state_line!r}")
+
+    measured = classify(queued)
+    assert measured.verdict == Q.OK
+    assert "feed=" not in measured.state_line, (
+        "a fully read queue must not be relabelled as cut")
+
+
 # ── a QUEUED RE-RUN is aged from its current attempt, never from `created_at` ──
 #
 # `created_at` does not move on a rerun (measured live by the sibling module:

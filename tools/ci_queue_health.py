@@ -610,10 +610,26 @@ class QueueHealth:
         # `pr_queued` and `pr_pending` are on the non-FLOOD line too: an `OK` that hid
         # a long PR backlog would be the same "slow CI" reading this tool exists to
         # replace, and a wait leg omitted from the line is one a reader cannot audit.
+        #
+        # ⛔ AND `OK` MUST CARRY THE SAME `feed=` MARKER (#10641 review P2). The
+        # `feed=` fix above closed the cut-leg hole on `PR-UNWITNESSED`, but this
+        # branch printed a bare `OK(...)` while a leg had been CUT at the page cap:
+        # `classify_queue([6 non-PR queued], [], NOW, pending=[],
+        # pending_truncated=True)` answers `OK` through the `not wait_runs` clause,
+        # which is documented as a deliberate VERDICT choice (nothing is waiting in any
+        # READ leg) and leaves the destructive gate unaffected
+        # (`pr_wait_measured=False` -> `congests_pr is None`). A deliberate verdict is
+        # not a licence to print the line as a COMPLETED read: `pending_truncated`'s
+        # own field doc says "a read that did not finish is never presented as a
+        # healthy queue", and this is the ONE string the fleet samples. The marker is
+        # emitted only when a leg really was cut, so no measured reading is relabelled.
+        feed = ""
+        if self.truncated or self.pending_truncated:
+            feed = ", feed=truncated"
         return (
             f"CI: {self.verdict}(queued={self.queued_total}, "
             f"pr_running={self.pr_running}, pr_queued={self.pr_queued}, "
-            f"pr_pending={self.pr_pending})"
+            f"pr_pending={self.pr_pending}{feed})"
         )
 
     @property
