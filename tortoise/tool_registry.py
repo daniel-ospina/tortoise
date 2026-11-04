@@ -1391,9 +1391,9 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         name="tortoise_operator_action",
         id="surface.operator_action",
         description="Consolidated operator write action — action=mitigate|annotate. "
-                    "mitigate: reason + strength (0-1) — creates/updates the mitigation "
-                    "Point (idempotent). annotate: bias/precision/consistency/directness "
-                    "(0-1).",
+                    "mitigate: reason + strength (0-1) — creates/updates a CURRENT mitigation "
+                    "Point; a re-assertion after withdrawal MINTS A NEW Point, so NOT "
+                    "idempotent then. annotate: bias/precision/consistency/directness (0-1).",
         risk="destructive",
         http_policy=True,
         sdk_method="",  # custom handler in mcp_server.py (dispatches to sdk.mitigate_operator / sdk.annotate_operator; #3904)

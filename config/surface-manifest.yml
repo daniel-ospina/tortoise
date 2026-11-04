@@ -1833,7 +1833,7 @@ rows:
   cluster_canonical: tortoise_delete
   cluster_note: group `delete` is split across ['graph', 'memory']; proposed family `memory` — waits for your approval
 - name: tortoise_operator_action
-  served_from: tortoise/mcp_server.py:3af6911898fcddce
+  served_from: tortoise/mcp_server.py:b5350b7ce9cb752c
   served_attributes: 07f3aa2bf8138e28
   family: graph
   family_rank: 2
@@ -1845,7 +1845,8 @@ rows:
   cluster: operator-action
   canonical: true
   job: 'Consolidated operator write action — action=mitigate|annotate. mitigate: reason + strength (0-1) — creates/updates
-    the mitigation Point (idempotent). annotate: bias/precision/consistency/directness (0-1).'
+    a CURRENT mitigation Point; a re-assertion after withdrawal MINTS A NEW Point, so NOT idempotent then. annotate:
+    bias/precision/consistency/directness (0-1).'
   dependency: 'handler-served: no declared SDK link'
   lifecycle: active
   used_by: never called, tooling, docs

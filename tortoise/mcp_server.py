@@ -5098,8 +5098,9 @@ def tortoise_operator_action(action: str, id: str, reason: str | None = None,
     """Consolidated operator write action — action=mitigate|annotate.
 
     mitigate: reason (required) + strength (0-1, default 0.5) — creates/updates
-    the mitigation Point (idempotent). annotate: bias/precision/consistency/
-    directness (all required, 0-1).
+    a CURRENT mitigation Point (idempotent only while it is current: a
+    re-assertion after withdrawal mints a NEW Point). annotate:
+    bias/precision/consistency/directness (all required, 0-1).
     """
     if action == "mitigate":
         if not reason:
