@@ -4317,7 +4317,7 @@ jobs:
     # re-arms this job and pins it `queued` for ever, blocking that PR's own newer run
     # in the same concurrency group. That wedge is real. But the `if:` is not where it
     # is fixed: this job is NOT a required context, and skipping it turns every
-    # cancelled run into a RED required check (worse: it would red PRs on `reopened`).
+    # cancelled run into a RED required check, which is a worse trade than the wedge.
     # The wedge belongs where the verdict is CONSUMED.
     #
     # Pinned exactly by tests/test_ci_new_failure_gate.py
@@ -4445,10 +4445,13 @@ jobs:
     #
     # ⛔ `always()` MUST stay non-skippable. This IS the required context
     # (`merge_conditions`), and the measured wedge (#10911) — a cancelled run re-arming
-    # this job into a permanent `queued` state so it never posts at all — currently
-    # fails SAFE: the rail holds the merge slot waiting for the first checks and then
-    # blocks (`ADMIN_MERGE_FIRST_CHECKS_CEILING`, default 18064 s) rather than merging.
-    # Making the gate skippable would replace that block with a green check.
+    # this job into a permanent `queued` state so it never posts at all — fails SAFE:
+    # the rail REFUSES BY NAME (`check-unresolved:<name>:<status>/<conclusion>`) at
+    # `ADMIN_MERGE_CHECK_UNRESOLVED_BOUND` (default 3600 s, `admin-merge.sh:1006`),
+    # which exists for precisely this shape — its own doc block says a run "queued
+    # because the whole pool is saturated never stops moving, so no progress-based
+    # clock can ever reach it". Making the gate skippable would replace that refusal
+    # with a green check.
     #
     # Pinned exactly by tests/test_ci_new_failure_gate.py
     # ::test_both_jobs_stay_literal_always, and behaviourally by

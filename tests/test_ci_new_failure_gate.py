@@ -1057,10 +1057,12 @@ def test_the_required_aggregate_must_not_be_skippable_on_a_cancelled_run():
     conditions during cancellation, and `always()` is true there — so the cancelled run
     re-arms these jobs onto a run never scheduled again, and (per GitHub's own
     troubleshooting docs) a stuck run keeps blocking later runs in the same concurrency
-    group. That is a real wedge and it fails SAFE, but slowly: the required context never
-    posts, so the rail holds the merge slot waiting for first checks until
-    `ADMIN_MERGE_FIRST_CHECKS_CEILING` (default 18064 s) and only then blocks — which is
-    the "0 merges in ~2 h" measured above.
+    group. That is a real wedge and it fails SAFE: the required context never posts, so
+    the rail REFUSES BY NAME (`check-unresolved:<name>:<status>/<conclusion>`) at
+    `ADMIN_MERGE_CHECK_UNRESOLVED_BOUND` (default 3600 s,
+    `agent-infra/scripts/admin-merge.sh:1006`) — the bound written for exactly this
+    shape, whose doc block notes a run "queued because the whole pool is saturated never
+    stops moving, so no progress-based clock can ever reach it".
 
     ⛔ The obvious fix — `${{ !cancelled() }}` — is a FALSE PASS and is refused here.
     A job skipped by a conditional concludes `skipped`, which branch protection reports
