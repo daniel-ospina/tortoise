@@ -492,7 +492,9 @@ def test_main_feeds_the_census_legs_into_e3_and_renders_them():
     (`e3_legs_line(census_data[...])`) rather than reading it back off the row — because the
     defect this closes was `0/0` being invisible in both places at once, and a caller-built row
     that happens to lack the key would otherwise render "every registered class carried nodes"
-    two lines beneath `e3 label=Document nodes=0`.
+    two lines beneath `e3 label=Document nodes=0`; and (c) `main` to hand `e3_row_note` the E3
+    OUTCOME dict, because the note reads the clause through a `.get`-with-default and a mis-wire
+    there drops the disclosure with no error.
     """
     tree = ast.parse(PROBE.read_text())
     main = next(node for node in tree.body
@@ -542,6 +544,24 @@ def test_main_feeds_the_census_legs_into_e3_and_renders_them():
     # a positive "every registered class carried nodes" asserted from an ABSENT key is the same
     # claim-from-nothing this line exists to disclose.
     assert "census_data" in ast.dump(rendered[0]), ast.dump(rendered[0])
+
+    # (c) the ROW NOTE must be fed the E3 OUTCOME, not the row being built. `e3_row_note` reads the
+    # clause through `e3_result.get("unmeasured_legs") or ()` — a `.get` with a default, so a caller
+    # that hands it the ROW (whose key is `note`, still being built) yields the empty clause instead
+    # of a `KeyError`: the note silently stops disclosing the leg while every other pin stays green.
+    # Measured before this arm existed: mutating this call to `e3_result=e3` left the file green
+    # (129 passed, 1 unrelated failure), i.e. the note was wired but unpinned.
+    notes = [n for n in ast.walk(main)
+             if isinstance(n, ast.Call) and getattr(n.func, "id", None) == "e3_row_note"]
+    assert len(notes) == 1, (
+        "main no longer calls e3_row_note exactly once for the E3 row: " + repr(len(notes)))
+    note_kwargs = {kw.arg: kw.value for kw in notes[0].keywords}
+    assert isinstance(note_kwargs.get("e3_result"), ast.Name) and note_kwargs[
+        "e3_result"].id == "e3_result", (
+        "main feeds e3_row_note something other than the E3 outcome dict — the row's note is the "
+        "third disclosure site, and `e3_result.get(...) or ()` makes a mis-wire SILENT: the leg "
+        "vanishes from `row E3 note:` while the bar and the log line still carry it: "
+        + ast.dump(notes[0]))
 
 
 def test_the_empty_leg_line_and_note_are_derived_from_the_census():
