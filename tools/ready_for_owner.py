@@ -232,7 +232,10 @@ FINDINGS_DECLARED_RE = re.compile(
 ANY_SEVERITY_TOKEN_RE = re.compile(r"(?i)\bP([0-3])\b")
 #: ⛔ `no blocking` only counts as a DECLARATION when it ENDS there — "No blocking other
 #: than the P1" is the opposite claim, and matching it was the round-7→8 false PASS.
-ZERO_BLOCKING_RE = re.compile(r"(?i)\b0\s+blocking\b|\bno\s+blocking\b(?=\s*(?:[.,;:!)\]]|$))")
+ZERO_BLOCKING_RE = re.compile(
+    r"(?i)\b0\s+blocking\b"
+    r"|\bno\s+blocking\b(?=\s*(?:[.,;:!)\]]|$|\s+(?:findings?|defects?|issues?|problems?)\b))"
+)
 #: The ISSUE block's SIBLING fields. A real finding always carries at least one of these
 #: next to its severity; bare prose that happens to say "severity: P1" does not. Used to
 #: tell a DECLARATION from a sentence ABOUT a past finding — round 8 measured 5 of 6 natural
@@ -252,6 +255,20 @@ SIBLING_FIELD_RE = re.compile(
 #: `severity: P1`), optionally bulleted, bolded, quoted or backticked.
 SEVERITY_LINE_START_RE = re.compile(
     r"(?im)^\s*(?:[-*>]\s*)*\W{0,2}`?severity`?\s*\**\s*:?\s*\**\s*P[0-2]\b"
+)
+
+#: ⛔ THE VERDICT-HEADER SHAPES AN EARLIER ROUND STILL MISSED — all measured on live bodies:
+#: `**Outcome: ISSUES 3** — 1 code defect (security), 2 false statements` (#10956), `##
+#: Code review — ISSUES FOUND (1 × P1, 1 × P2)` (#10929), `## Code review — ISSUES FOUND (1 ×
+#: P2)` (#10920), `### ⛔ P1, verified by reproduction` (#10938), `Do not land this PR as it
+#: stands — it carries a known P1` (#10945). Each read NEUTRAL, and each as a PR's LAST
+#: artifact printed READY-FOR-OWNER.
+ISSUES_FOUND_RE = re.compile(r"(?i)(?<!no )\bissues?\s+found\b|\bISSUES\s+\d+\b")
+#: A severity named in a HEADING, or a plain "do not land / known P1" verdict.
+SEVERITY_HEADING_RE = re.compile(
+    r"(?im)(?:^\s*#{1,6}[^\n]*\bP[0-2]\b"
+    r"|\bdo\s+not\s+land\b"
+    r"|\bknown\s+P[0-2]\b)"
 )
 
 #: A FORMAL change request is a blocking record even when the review body is empty — the
@@ -789,6 +806,21 @@ def _parse_instant(value: str) -> datetime | None:
 # ── condition 6 — no OPEN blocking finding ──────────────────────────────────
 
 
+def _line_finding(text: str) -> bool:
+    """A line-leading (or quoted) `[P1] file:line — …` finding — but NOT a severity TALLY.
+
+    `P1: 0, P2: 0, P3: 2` inside an `**Outcome: CLEAN.**` body is a REVIEW OF A CLEAN ROUND,
+    and matching it as a finding made a P3-only PR permanently uncertifiable (round 10).
+    A finding names a LOCATION; a tally names a count.
+    """
+    for match in BLOCKING_RE.finditer(text):
+        tail = text[match.end() : match.end() + 12]
+        if re.match(r"\s*:?\s*0\b", tail):
+            continue
+        return True
+    return False
+
+
 def _grades_as_blocking(text: str, item: Mapping[str, Any]) -> bool:
     """Does this review artifact record a blocker? Every arm is independent; any one blocks.
 
@@ -807,10 +839,16 @@ def _grades_as_blocking(text: str, item: Mapping[str, Any]) -> bool:
         severity is not None and bool(SIBLING_FIELD_RE.search(text))
     )
     zero_blocking = bool(ZERO_BLOCKING_RE.search(text))
+    # A body that DECLARES it named nothing blocking, and names no P0/P1/P2 token anywhere,
+    # may still say "issues found" — `**OUTCOME: 2 issues found (both P3), no blocking
+    # defect.**` is a P3-only summary, not an open finding.
+    p3_only_declared = zero_blocking and not (severities & {"0", "1", "2"})
 
     hard = bool(
-        BLOCKING_RE.search(text)
+        _line_finding(text)
         or (issues and int(issues.group(1)) > 0)
+        or (ISSUES_FOUND_RE.search(text) and not p3_only_declared)
+        or SEVERITY_HEADING_RE.search(text)
         # The recorder's own unconditional arms (1) and (1b).
         or NON_CLEAN_RE.search(text)
         # Its arm (2): loose `not…clean`, suppressed by an explicit `Outcome: clean`.
@@ -1249,26 +1287,25 @@ def _review_script(workdir: Path) -> Path | None:
     return script if script.is_file() else None
 
 
-def _read_review(
-    pr: int,
-    repo: str,
-    workdir: Path,
-    recorded_diff: str | None = None,
-    recorded_head: str | None = None,
-) -> tuple[str | None, int | None, str]:
+def _read_review(pr: int, repo: str, workdir: Path) -> tuple[str | None, int | None, str]:
     """Ask the gate's OWN predicate: ``record-review.sh --check-carry``.
 
     The script is the single reader of "does this record cover what would merge", so it
     is invoked rather than re-implemented. Its first stdout field is the verdict token.
 
     ⛔ THE RECORD FILE IS PER-MACHINE (``$HOME/.pi/agent/reviews``), so a review minted on
-    ANOTHER box is invisible to the default read — ``record-review.sh``'s own header
-    measures that population ("of 45 open PRs, 12 had a marker whose ``diff=`` equals the
-    PR's live diff and no record file here"). ``--recorded-diff``/``--recorded-head`` is
-    the recorder's seam for exactly that reader (#3315); this tool passes them through
-    rather than parsing the signed marker itself, because a second marker parser is a
-    second definition. Without them a cross-box review reads ``norecord`` — which FAILS,
-    so the direction is safe, but it costs a re-review the fleet already paid for.
+    ANOTHER box is invisible here and reads ``norecord`` — which FAILS. That is a FALSE
+    BLOCK, the acceptable direction, and it is documented as a limitation.
+
+    ⛔ AND THE CALLER-SUPPLIED PAIR IS DELIBERATELY *NOT* PASSED THROUGH. Round 10 measured
+    that forwarding ``record-review.sh --recorded-diff/--recorded-head`` turns this arm into
+    a self-attestation: the recorder's supplied-pair arm short-circuits its record lookup,
+    the diff digest is computable by anyone from the public diff
+    (``record-review.sh --print-diff-hash <PR>``), and ``--recorded-diff aaa…a
+    --recorded-head <live head>`` made condition 3 PASS on a PR with no review at all. The
+    gate cannot distinguish a caller asserting a review from a caller forwarding one it
+    holds, so it asks the box — and FAILS when the box has nothing. That is the only
+    version of this arm that cannot be talked into a PASS.
     """
     script = _review_script(workdir)
     if script is None:
@@ -1278,12 +1315,7 @@ def _read_review(
             f"{workdir / 'scripts' / 'record-review.sh'} is absent "
             "(the scripts/ pointer is not materialised)",
         )
-    cmd = ["bash", str(script), "--check-carry", str(pr), repo]
-    if recorded_diff:
-        cmd += ["--recorded-diff", recorded_diff]
-        if recorded_head:
-            cmd += ["--recorded-head", recorded_head]
-    proc = _run(cmd, GIT_TIMEOUT, cwd=workdir)
+    proc = _run(["bash", str(script), "--check-carry", str(pr), repo], GIT_TIMEOUT, cwd=workdir)
     token = ""
     for line in (proc.stdout or "").splitlines():
         fields = line.split("\t")
@@ -1494,8 +1526,6 @@ def collect_probe(
     repo: str = DEFAULT_REPO,
     workdir: Path | None = None,
     now: datetime | None = None,
-    recorded_diff: str | None = None,
-    recorded_head: str | None = None,
 ) -> Probe:
     """Read the live world into a Probe. Every unreadable input is recorded, not raised.
 
@@ -1558,9 +1588,7 @@ def collect_probe(
         gh, lambda g: _read_check_groups(g, head, repo), surface="check-runs"
     )
     probe.tree, probe.tree_raw = _try_tree(gh, pr, head, workdir)
-    probe.review_token, probe.review_exit, probe.review_raw = _try_review(
-        pr, repo, workdir, recorded_diff, recorded_head
-    )
+    probe.review_token, probe.review_exit, probe.review_raw = _try_review(pr, repo, workdir)
     probe.touched, probe.touched_raw = _try(gh, lambda g: _read_touched(g, pr))
     if probe.body:
         entries, _union_raw = declared_union(probe.body)
@@ -1625,15 +1653,9 @@ def _try_tree(gh: Gh, pr: int, head: str, workdir: Path) -> tuple[bool | None, s
         return None, str(exc)
 
 
-def _try_review(
-    pr: int,
-    repo: str,
-    workdir: Path,
-    recorded_diff: str | None = None,
-    recorded_head: str | None = None,
-) -> tuple[str | None, int | None, str]:
+def _try_review(pr: int, repo: str, workdir: Path) -> tuple[str | None, int | None, str]:
     try:
-        return _read_review(pr, repo, workdir, recorded_diff, recorded_head)
+        return _read_review(pr, repo, workdir)
     except ReadError as exc:
         return None, None, str(exc)
 
@@ -1668,21 +1690,6 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="evaluate a Probe JSON fixture instead of reading the live world (tests)",
     )
-    parser.add_argument(
-        "--recorded-diff",
-        default=None,
-        help=(
-            "the 64-hex diff_sha256 a review record carries, when the record FILE is not on "
-            "this box (a review minted elsewhere). Passed straight through to "
-            "`record-review.sh --check-carry` — this tool does not parse the signed marker "
-            "itself, because a second marker parser is a second definition."
-        ),
-    )
-    parser.add_argument(
-        "--recorded-head",
-        default=None,
-        help="the 40-hex head that record was minted at (only with --recorded-diff)",
-    )
     return parser
 
 
@@ -1696,13 +1703,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.fixture:
             probe = probe_from_dict(json.loads(Path(args.fixture).read_text()))
         else:
-            probe = collect_probe(
-                args.pr,
-                args.repo,
-                workdir,
-                recorded_diff=args.recorded_diff,
-                recorded_head=args.recorded_head,
-            )
+            probe = collect_probe(args.pr, args.repo, workdir)
         # ⛔ INSIDE the try: `evaluate()`, `render()` and `json.dumps` were OUTSIDE it, so a
         # crash in a condition (or in a `--fixture` payload whose comment `id` is not an int)
         # still printed a traceback and NO verdict line — the very shape the handler exists to

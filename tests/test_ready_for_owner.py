@@ -924,6 +924,17 @@ ROUND9_CORPUS: tuple[tuple[str, bool], ...] = (
     ("NO ISSUES FOUND — verified the severity: P1 finding from round 3 is now closed.", False),
     ("**Outcome: 2 findings (2 × P3).**", False),
     ("**OUTCOME: 2 issues found (both P3), no blocking defect.**", False),
+    # ROUND-10: the verdict-header shapes harvested from LIVE bodies (#10956, #10929,
+    # #10920, #10938, #10945). Each read NEUTRAL and, as a PR's last artifact, printed
+    # READY-FOR-OWNER.
+    ("**Outcome: ISSUES 3** — 1 code defect (security), 2 false statements", True),
+    ("## Code review — ISSUES FOUND (1 × P1, 1 × P2)", True),
+    ("## Code review — ISSUES FOUND (1 × P2)", True),
+    ("### ⛔ P1, verified by reproduction — `pin` refuses in two shapes", True),
+    ("⛔ **Do not land this PR as it stands — it carries a known P1**", True),
+    # …and the two CLEAN shapes that were over-blocked: a severity TALLY is not a finding.
+    ("**Outcome: CLEAN.**\n\nP1: 0, P2: 0, P3: 2 (nits filed as follow-ups).", False),
+    ("**Outcome: 3 findings (0 blocking).**\n\n- P1: 0\n- P2: 0\n- P3: 3", False),
 )
 
 
@@ -1209,21 +1220,26 @@ def test_absent_scripts_pointer_is_unreadable_not_a_pass(monkeypatch: pytest.Mon
     assert "absent" in raw
 
 
-def test_recorded_diff_is_passed_through_to_the_recorder(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Cross-box reviews: the pair must reach `record-review.sh`'s own `--recorded-diff`."""
+def test_a_caller_supplied_record_pair_cannot_self_attest(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ROUND-10 P1: forwarding `--recorded-diff/--recorded-head` to the recorder made this
+    arm a SELF-ATTESTATION — its supplied-pair path short-circuits the record lookup, the
+    digest is computable from the public diff, and `--recorded-diff aaa…a --recorded-head
+    <live head>` made condition 3 PASS on a PR with no review at all. The flags are gone;
+    the CLI must not accept them, and the argv must never carry them."""
     seen: list[list[str]] = []
 
     def fake_run(cmd, timeout, cwd=None):
         seen.append(list(cmd))
-        return subprocess.CompletedProcess(cmd, 0, "carry\tabc\tabc\n", "")
+        return subprocess.CompletedProcess(cmd, 4, "norecord\t-\t-\n", "")
 
     monkeypatch.setattr(rfo, "_review_script", lambda workdir: Path("/fake/record-review.sh"))
     monkeypatch.setattr(rfo, "_run", fake_run)
-    token, rc, _raw = rfo._read_review(
-        7, REPO, REPO_ROOT, recorded_diff="a" * 64, recorded_head="b" * 40
-    )
-    assert (token, rc) == ("carry", 0)
-    assert seen and seen[0][-4:] == ["--recorded-diff", "a" * 64, "--recorded-head", "b" * 40]
+    token, rc, _raw = rfo._read_review(7, REPO, REPO_ROOT)
+    assert (token, rc) == ("norecord", 4)
+    assert seen and "--recorded-diff" not in seen[0]
+    # …and the CLI surface refuses it outright rather than silently ignoring a caller.
+    with pytest.raises(SystemExit):
+        rfo.build_parser().parse_args(["7", "--recorded-diff", "a" * 64])
 
 
 # ── the READ LAYER: both round-1 defects lived here, and neither had a test ──
