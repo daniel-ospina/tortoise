@@ -70,7 +70,8 @@ Exit codes
   0  complete (dry run or apply); nothing outstanding and unreadable
   2  INCOMPLETE — docker could not be read, so NOTHING was decided or removed
      (a failed ``docker ps`` is never "no containers")
-  3  usage error
+  3  usage error (argparse itself exits 2 before `main`, so a malformed command
+     line is indistinguishable from INCOMPLETE — it is reported, never guessed at)
   4  STALE COPY — ``TORTOISE_CONTAINER_REAPER_SHA256`` (this file) or
      ``TORTOISE_TEST_LANE_POLICY_SHA256`` (``tools/test_lane.py``, the decision
      half) does not match, so a scheduler that pinned an old copy is refused
@@ -461,8 +462,17 @@ def reap(*, apply: bool, as_json: bool = False) -> int:
     # container whose probe fails is a report, not an undecided tick, and making
     # every such container red a 15-minute timer is the over-block this project
     # classifies B (#10813 review P1-2).
+    # Two arms of proof 1 — the only population the unit removes — can keep a
+    # container because a surface they NEED was unreadable: the container's client
+    # list, or the owning worktree's directory (`EACCES` is reachable: a worktree
+    # under another user's CELL_HOME is unexaminable for this unit's user, and the
+    # doc cites cross-clone lanes on one host). Both are "kept because we could not
+    # decide", so both are INCOMPLETE — the third shape of the same class
+    # (#10813 review). Neither predicate can fire on a proof-2 report, so the
+    # timer is not reddened for a peer whose probe merely failed.
     undecided = [ln for ln in lines
-                 if ln.startswith("reap: kept") and "is gone" in ln
+                 if ln.startswith("reap: kept")
+                 and ("is gone" in ln or "could not be examined" in ln)
                  and ("unreadable" in ln or "fail-closed" in ln)]
     skipped = skipped + undecided
     failed = [ln for ln in lines if "FAILED to remove" in ln]

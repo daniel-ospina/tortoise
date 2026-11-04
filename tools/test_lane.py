@@ -1638,6 +1638,19 @@ LANE_GONE_REAP_ENV = "TORTOISE_TEST_LANE_REAP_LANE_GONE"
 OWNER_INDETERMINATE_REAP_ENV = "TORTOISE_TEST_LANE_REAP_OWNER_INDETERMINATE"
 
 
+#: Spellings that DISABLE automatic reaping. One predicate for both consumers —
+#: `start()`'s sweep and the exit hook — because they used to read the same
+#: variable two different ways (`start()` enabled only on a literal "1", so
+#: `=false` disarmed the sweep and left the hook armed) (#10813 review).
+_REAP_OFF = frozenset({"0", "false", "no", "off"})
+
+
+def _reap_enabled() -> bool:
+    """Is automatic container reaping on for this process?"""
+    return os.environ.get("TORTOISE_TEST_LANE_REAP", "1").strip().lower() \
+        not in _REAP_OFF
+
+
 def _env_consent(var: str) -> bool:
     """Whether the OPERATOR asked for a deletion that crosses a recorded boundary.
 
@@ -1775,7 +1788,7 @@ def start(port: int | None = None) -> tuple[str, int]:
     # clean up OUR OWN half-started container, leaving it holding a reserved
     # port — the #8180 leak, produced by the guard meant to prevent it.
     name, root = _lane_identity()
-    if os.environ.get("TORTOISE_TEST_LANE_REAP", "1") == "1":
+    if _reap_enabled():
         try:
             for _line in reap_orphans(own_name=name):
                 print(_line, file=sys.stderr)
@@ -3563,9 +3576,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     # Any falsy spelling disables it (`0`/`false`/`no`/`off`): the sweep's own
     # switch only reads a literal "1", so `=false` used to disable the sweep and
     # leave the HOOK armed — the same word with two meanings (#10813 review).
-    _opt_out = os.environ.get("TORTOISE_TEST_LANE_REAP", "1").strip().lower()
-    keep = (bool(getattr(args, "keep_container", False))
-            or _opt_out in ("0", "false", "no", "off"))
+    keep = bool(getattr(args, "keep_container", False)) or not _reap_enabled()
     # …and a container this run did not CREATE is never its to remove.
     created = _LAST_START_CREATED
     rc: int | None = None

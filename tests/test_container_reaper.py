@@ -295,6 +295,30 @@ def test_an_UNDECIDABLE_orphan_is_exit_2_not_a_clean_sweep(box, monkeypatch,
     assert box.removals == []
 
 
+def test_an_UNEXAMINABLE_owner_is_exit_2_too(monkeypatch, capsys):
+    """`EACCES` on the owning worktree is the third shape of the same class.
+
+    `pathlib` suppresses ENOENT/ENOTDIR/ELOOP but NOT EACCES, and a worktree under
+    another user's `CELL_HOME` is unexaminable for the timer's user — so "kept,
+    could not be examined (fail-closed, report only)" is an undecided proof-1
+    candidate, not a clean sweep (#10813 review). Driven from the sweep's OWN line
+    so the predicate is what is under test, not pathlib's error taxonomy.
+    """
+    monkeypatch.setattr(tl, "_docker", _Docker())
+    monkeypatch.setattr(tl, "_worktree_slugs", lambda: {"aaaaaaaaaa": "/x/y"})
+    monkeypatch.setattr(tl, "_live_lane_paths", lambda: set())
+    monkeypatch.setenv("TORTOISE_CONTAINER_REAPER_SHA256", "")
+    monkeypatch.setenv("TORTOISE_TEST_LANE_POLICY_SHA256", "")
+    monkeypatch.setattr(tl, "reap_orphans", lambda: [
+        f"reap: kept {ORPHAN} — its owning worktree /x/y could not be examined "
+        f"(fail-closed, report only)"])
+    rc = cr.main(["reap", "--apply", "--json"])
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 2, out
+    assert out["ok"] is False and out["decided"] is False, out
+    assert any("could not be examined" in n for n in out["notes"]), out
+
+
 def test_a_FAILED_removal_is_not_reported_as_a_clean_sweep(box, monkeypatch, capsys):
     """`docker rm` refusing must surface, not read as `removed: 0` (#10806 P1-2)."""
     def refusing(*args, **kwargs):

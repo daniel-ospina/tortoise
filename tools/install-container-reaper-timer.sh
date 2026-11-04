@@ -213,6 +213,10 @@ User=${SUDO_USER:-$(id -un)}
 # installer after any edit. Installer: tools/install-container-reaper-timer.sh
 Environment=TORTOISE_CONTAINER_REAPER_SHA256=$SHA
 Environment=TORTOISE_TEST_LANE_POLICY_SHA256=$POLICY_SHA
+# ⛔ CLEAR the arming vars: the unit sets none, but a manager-level
+# `DefaultEnvironment=` would arm a proof with no installer re-run and no pin
+# change — an armed deletion nobody can see in this file (#10813 review).
+UnsetEnvironment=TORTOISE_TEST_LANE_REAP_LANE_GONE TORTOISE_TEST_LANE_REAP_OWNER_INDETERMINATE TORTOISE_TEST_LANE_REAP_STOPPED
 # ⛔ `WorkingDirectory=` takes NO quoting — systemd reads the quotes as part of the
 # path ("path is not absolute: \"/home/…\"") and the unit is a fatal error.
 # `ExecStart=` DOES, and a checkout path with a space needs it there.
