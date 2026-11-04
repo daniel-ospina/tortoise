@@ -55,12 +55,17 @@ jobs:
   check:
     # ── HOSTED-ONLY PIN (deliberate, measured 2026-10-27) ─────────────
     # `ubuntu-latest` is served by BOTH GitHub-hosted runners AND this repo's
-    # self-hosted pool (the pool advertises that label), and measured over these
-    # observer workflows' own scheduled runs, 23 of 35 jobs went to hosted and 8
-    # to the pool. So the pin is not "escape a queue that is always the pool";
-    # it removes the arm that FAILS.
+    # self-hosted pool (the pool advertises that label **only while the fallback
+    # is engaged** — `fallback_engaged()` in tools/install-ci-runner-x64.sh reads
+    # the ARM64 pool's live labels for exactly that condition, and the label is
+    # taken back off when the fallback releases), and measured over these
+    # observer workflows' own scheduled runs on 2026-10-27 (00:00–12:00 UTC):
+    # 115 runs created, 82 got a runner — 71 hosted, 11 on the pool — and 32
+    # never got one at all (no job record: cancelled while pending). So the pin
+    # is not "escape a queue that is always the pool"; it removes the arm that
+    # FAILS.
     #
-    # The pool arm does not starve — it HANGS. Both jobs that landed there died
+    # The pool arm does not starve — it HANGS. The two runs that died there both
     # in `actions/checkout` and were killed at this job's `timeout-minutes: 10`
     # with the measuring step SKIPPED, which reads as a finished run that
     # measured nothing:
@@ -70,21 +75,33 @@ jobs:
     # completed 1 of its last 8 scheduled runs — 6 cancelled, 1 pending.)
     #
     # ⛔ THE PIN IS NOT A COMPLETE FIX, and this comment must not read as one.
-    # Hosted is queued too: 18 jobs were waiting on `ubuntu-24.04` with a max
-    # wait of 56m, and one `ci-queue-health` run spent 65 minutes on a hosted
-    # runner to do 15 seconds of work. GitHub keeps only ONE pending run per
+    # Hosted is QUEUED too — and the queue WAIT, not the runner, is the cost:
+    # 18 jobs were waiting on `ubuntu-24.04` with a max wait of 56m, and one
+    # `ci-queue-health` job waited **80.7 minutes in the queue** and then ran
+    # **15 seconds** (run 40462259877: created 06:38:00Z, started 07:58:43Z,
+    # completed 07:58:58Z). GitHub keeps only ONE pending run per
     # concurrency group, so while a wait exceeds this workflow's cadence each
     # tick still cancels the previous PENDING tick. The pin removes the arm that
     # hangs and usually serves in minutes; the cadence/concurrency question stays
     # open and is tracked separately.
     #
-    # `ubuntu-24.04` is HOSTED-ONLY here — verified live: all nine runners
-    # advertise `ubuntu-latest` and NONE advertises `ubuntu-24.04`; the
-    # installer's `resolve_labels()` can emit only `self-hosted-x64` or
-    # `self-hosted-x64,ubuntu-latest` (tools/install-ci-runner-x64.sh, and
-    # docs/ops/ci-runner-x64.md:26 records the same rule), and
-    # `tests/test_ci_runner_x64_install.py:127` asserts it. Public repo, so
-    # hosted minutes are free: this spends nothing.
+    # `ubuntu-24.04` is HOSTED-ONLY here, and — unlike `ubuntu-latest` — the
+    # installer never attaches it in EITHER fallback state: `resolve_labels()`
+    # can emit only `self-hosted-x64` or `self-hosted-x64,ubuntu-latest`
+    # (tools/install-ci-runner-x64.sh; the rule is recorded in
+    # docs/ops/ci-runner-x64.md "The finding", `:56`), and
+    # `tests/test_ci_runner_x64_install.py:127` asserts it.
+    # ⛔ OBSERVED CLEAR, NOT ENFORCED — do not read that as a guarantee. Nothing
+    # strips a label attached OUT OF BAND: `tools/runner_autoscale.py`'s
+    # `_preserve_labels()` keeps every label that is not host-derived, so a
+    # stray `ubuntu-24.04` survives re-registration. And the pool HAS carried
+    # it: `.github/workflows/finding-provenance.yml:202-206` records run
+    # 40141219586's `classify` served by `pi-runner-vm-3` with
+    # `labels: [ubuntu-24.04]` (38 of the 39 `classify` failures on 2026-10-24
+    # held that label on `pi-runner-vm-2/3/4/5/6`). Measured 2026-10-27: none of
+    # the online runners carried `ubuntu-24.04`. Re-registering a runner is the
+    # moment to RE-MEASURE the live label set, not to trust this paragraph.
+    # Public repo, so hosted minutes are free: this spends nothing.
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:

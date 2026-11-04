@@ -4222,8 +4222,9 @@ def test_the_merged_tree_guard_check_accepts_presentation_only_edits() -> None:
 # Two independent reasons a tick is lost; the first is this file's subject and
 # the second is why the pin has to be a LABEL, not a flag:
 #
-#   1. `runs-on: ubuntu-latest` resolves to the repo's SELF-HOSTED pool, so the
-#      governor queues behind every test shard in the fleet;
+#   1. `runs-on: ubuntu-latest` resolves to the repo's SELF-HOSTED pool while the
+#      fallback is engaged, so the governor queues behind every test shard in the
+#      fleet;
 #   2. GitHub keeps ONE pending run per concurrency group, so each 10-minute
 #      tick cancels the previous PENDING tick while it waits — `cancel-in-progress:
 #      false` prevents cancelling a RUNNING governor and does nothing for a
@@ -4231,11 +4232,14 @@ def test_the_merged_tree_guard_check_accepts_presentation_only_edits() -> None:
 #
 # So a guard whose job is to relieve a full pool must not run ON that pool.
 # `ubuntu-24.04` is the hosted-only pin this repo already uses for
-# `finding-provenance`; it stays hosted-only because the pool is forbidden from
-# claiming it (`tests/test_ci_runner_x64_install.py`), and the measured label
-# set on 2026-10-27 confirmed all nine runners advertise `ubuntu-latest` and
-# none advertises `ubuntu-24.04`. The repo is public, so hosted minutes are
-# free — the pin costs nothing.
+# `finding-provenance`. The installer never attaches it in either fallback state
+# (`tests/test_ci_runner_x64_install.py`), but that is FORBIDDING, not
+# enforcement: nothing strips a label attached out of band
+# (`tools/runner_autoscale.py::_preserve_labels` keeps every non-host-derived
+# one), and the pool HAS carried it — `.github/workflows/finding-provenance.yml`
+# records `classify` served by `pi-runner-vm-3` with `labels: [ubuntu-24.04]`
+# (2026-10-24). Measured 2026-10-27: no online runner carried `ubuntu-24.04`.
+# The repo is public, so hosted minutes are free — the pin costs nothing.
 HOSTED_ONLY_PIN = "ubuntu-24.04"
 
 #: Workflows whose job is to OBSERVE or GOVERN the fleet rather than to test
@@ -4258,13 +4262,13 @@ def test_a_fleet_observer_runs_on_the_hosted_pin_not_the_pool_it_observes() -> N
         assert job.get("runs-on") == HOSTED_ONLY_PIN, (
             f"{name}:{job_id} runs on {job.get('runs-on')!r}. An observer or "
             f"governor of the runner pool must run on the HOSTED-only pin "
-            f"({HOSTED_ONLY_PIN!r}) — `ubuntu-latest` is served by the "
-            f"self-hosted pool this repo fills with test shards, so the "
-            f"arm that FAILS: `ubuntu-latest` is served by both, and the jobs "
-            f"that land on the pool hung in `actions/checkout` (8m40s, 4m41s) "
-            f"until the job's own timeout killed them with the measuring step "
-            f"SKIPPED (measured 2026-10-27; same day ci-queue-health completed 1 "
-            f"of its last 8 scheduled runs). Public repo: hosted is free.")
+            f"({HOSTED_ONLY_PIN!r}) — `ubuntu-latest` is served by both hosted "
+            f"and, while the fallback is engaged, the self-hosted pool this repo "
+            f"fills with test shards; the jobs that land on the pool hang in "
+            f"`actions/checkout` (8m40s, 4m41s) until the job's own timeout "
+            f"kills them with the measuring step SKIPPED (measured 2026-10-27; "
+            f"same day ci-queue-health completed 1 of its last 8 scheduled "
+            f"runs). Public repo: hosted is free.")
 
 
 def _runs_on_labels(job: dict) -> set[str]:
@@ -4301,7 +4305,8 @@ def test_no_observer_job_keeps_the_pools_fallback_label_in_any_runs_on_form() ->
     test cannot express: it reads ``runs-on`` through a flattening helper, so a
     job written ``runs-on: [self-hosted, ubuntu-latest]`` (legal, satisfies
     nothing this PR wants, and equal to no single string) is reported by name
-    here instead of crashing the other test's set comprehension.
+    here, with the offending labels in the message, rather than as a bare
+    ``'runs-on' != 'ubuntu-24.04'`` from the sibling's strict equality.
 
     The pool's fallback label is ``ubuntu-latest`` — the installer's
     ``resolve_labels()`` attaches it deliberately (``self-hosted-x64,ubuntu-

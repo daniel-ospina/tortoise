@@ -23,7 +23,7 @@ Every pool-eligible job in this repo asks for a **label**, never an architecture
 | `runs-on:` | count | who claims it |
 | --- | --- | --- |
 | `ubuntu-latest` | 83 | GitHub-hosted **and** (while the fallback is engaged) the self-hosted pool |
-| `ubuntu-24.04` | 5 | **GitHub-hosted only** — pinned on purpose (`test-slow`, `workflow-lint`, `finding-provenance` ×2, `mirror-images`) |
+| `ubuntu-24.04` | 9 | **GitHub-hosted only** — pinned on purpose (`test-slow`, `workflow-lint`, `finding-provenance` ×2, `mirror-images`, and the four fleet observers `availability-liveness:check`, `availability-watchdog:probe`, `ci-check-repair:repair`, `ci-queue-health:queue-health`) |
 
 The architecture labels are **derived by GitHub from the host at registration** and cannot be
 set by hand: the ARM64 VMs register `self-hosted, Linux, ARM64, self-hosted-arm64, ubuntu-latest`,
