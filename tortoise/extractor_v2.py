@@ -13307,10 +13307,16 @@ def _script_of(ch: str) -> str | None:
 # by number from the #7949 capstone bundle, `docs/00_index.md`, the runbook and
 # the hash-pinned `PRE-REGISTRATION.md`, so an insertion above them re-stales
 # every cite (that class produced a P0 on this very PR last cycle). Appending
-# after the last line shifts nothing, and the arm that calls these is a 3-for-3
-# line swap, so **the file's line numbering is unchanged by this fix** —
-# `git diff --numstat origin/main -- tortoise/extractor_v2.py` still reads
-# `33 0`, the same 21+12 the cite re-derivation was computed against.
+# after the last line shifts nothing. The two edits that touch the cited region
+# are both NET-ZERO swaps (the magnitude arm, 2 lines for 2; the `_UNIT_WORDS`
+# spelling line, 1 for 1), so **the file's line numbering above this append is
+# unchanged by this fix** — the insert above the cites is still the same 21+12
+# = 33 lines the cite re-derivation was computed against. Verified with
+# `git diff origin/main -- tortoise/extractor_v2.py | grep '^@@'`: every hunk
+# over a cited line has equal old/new counts (8→8, 7→7) and the only hunk that
+# grows starts at the END OF FILE. The total `--numstat` is therefore NOT 33/0
+# (it is 150/2) and quoting that pair as the invariant would be wrong — the
+# invariant is "equal counts on every hunk over a cited line".
 #
 # THE DEFECT.  `_value_bindings` glues a value to the unit word written beside
 # it with NO prefix arithmetic (``value + seq[i + 1]``), so a magnitude-prefixed

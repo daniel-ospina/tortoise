@@ -1006,8 +1006,7 @@ def test_a_magnitude_prefix_beside_a_unit_word_is_COMPOSED_not_refused():
             ("the fleet drove 20000 miles", "the fleet drove 20k miles"),
             ("the lease is 3000 days", "the lease is 3k days"),
             ("back under 5000 milliseconds", "back under 5k milliseconds"),
-            ("the sprint is 2000 weeks", "the sprint is 2k weeks"),
-            ("the share is 20000 percent", "the share is 20k percent")):
+            ("the sprint is 2000 weeks", "the sprint is 2k weeks")):
         assert v2._value_slot_divergence(content, quote) == (), (
             content, quote)
     # …and the WRITE does not withhold the point (the whole of the harm).
@@ -1033,7 +1032,10 @@ def test_a_magnitude_prefix_beside_a_unit_word_is_COMPOSED_not_refused():
     assert v2._value_core("20km") == ("", "20", "km")
     assert v2._value_core("24h/7d/4w") == ("", "24/7/4", "w")
     assert v2._composed_identity(("", "20", "km")) is None
-    assert v2._composed_identity(("", "24/7/4", "kw")) is None
+    # ⛔ `kdays`, not `kw`: `w` is not a `_UNIT_EQUIV` key, so a `kw` assertion
+    # passes at the `rest is None` step and never reaches the multi-run guard it
+    # claims to pin (measured — review P3).
+    assert v2._composed_identity(("", "24/7/4", "kdays")) is None
     # …and the AMBIGUOUS colloquial spelling keeps today's fail-open rather than
     # becoming a refusal: `20kms` composes, but `20km` does not, so the pair is
     # still tolerated (reading "kms" as kilo-milliseconds would REFUSE).
@@ -1042,6 +1044,22 @@ def test_a_magnitude_prefix_beside_a_unit_word_is_COMPOSED_not_refused():
     assert "percent" not in v2._UNIT_WORDS and "pct" not in v2._UNIT_WORDS
     assert v2._value_slot_divergence(
         "the share is 20k%", "the share is 20000 percent") == ()
+    # ⛔ THE percent family is EQUAL by the PRE-EXISTING factor arm, not by the
+    # composition arm — it does not discriminate the arm under test, so it is
+    # asserted here with its own gate rather than inside the loop above
+    # (review P3).
+    assert v2._value_slot_divergence(
+        "the share is 20k percent", "the share is 20000 percent") == ()
+    # ⛔ AND THE ONE NEW TOLERANCE IS DISCLOSED, not silently opened (review P3).
+    # `20kms` is the ambiguous colloquial spelling; composing `k`+`ms` gives it a
+    # kilo-MILLISECOND reading, so it now AGREES with `20000 ms` — REFUSED at
+    # `origin/main` `525fde4a9`. That is the fail-open direction (a possible
+    # rewrite tolerated), not a false refusal, and it is the price of the arm;
+    # neither UCUM nor Pint permits a prefix on an already-prefixed atom, so the
+    # unit tables do not sanction it — this pin exists so the trade is recorded.
+    assert v2._value_slot_divergence("the ride was 20kms", "the ride was 20000 ms") == ()
+    # …while the colloquially-correct reading stays REFUSED at both heads.
+    assert v2._value_slot_divergence("the ride was 20kms", "the ride was 20000 m")
 
 
 #: The patterns that assert the ADJACENCY gap is OPEN again — the thing
