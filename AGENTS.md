@@ -552,8 +552,9 @@ for three sends to one pane that were recorded as `OK` and never consumed.
   `remove`/`rm -rf`/reaper window. It snapshots BOTH views (`lane_wip`'s scratch-index tree of
   tracked modifications + untracked non-ignored files + deletions, and the real index tree) into
   `refs/pi-lane-wip/<lane-key>/<n>` **without touching HEAD, the index or the working tree**, so a
-  pin is safe to take. `... list` shows the lane's pins, `... restore <n>` puts one back, and
-  `... recipe` prints the recovery path instead of leaving it as folklore.
+  pin is safe to take. `... list` shows the lane's pins, `... recover <ref> --into <path>` puts one
+  back (the positional is the pin ref or its sha, NOT an index), and `... recipe` prints the
+  recovery path instead of leaving it as folklore.
 - **⛔ Never run a bare `git stash pop` / `git stash apply` / `git stash drop` in a worktree lane.**
   `refs/stash` and its reflog live in the **common** git dir, so the stack is repo-GLOBAL: a peer
   lane's `git stash push` renumbers YOUR entry, and your unqualified `git stash pop` then applies

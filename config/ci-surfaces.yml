@@ -8780,11 +8780,14 @@ durations:
   # tests/test_lane_wip.py -q` -> "86 passed in 91.92s" on a fleet-loaded cell,
   # measured 2026-11-04. Hermetic (temp git repos, real worktrees; no DB, no
   # network), so the spread is host load. The row is needed for the WEIGHT, not
-  # for the #2876 coverage floor — that floor is 96.2% WITH or WITHOUT this row
-  # (measured), so dropping it does not break the floor; what dropping it does is
-  # pack this file at `DEFAULT_FAST_WEIGHT` (2.0 s) instead of 92.0 and
-  # under-weight the `core` shard by ~90 s. Refresh from the first post-merge push
-  # run that includes it.
+  # for the #2876 coverage floor — measured, the floor holds either way (96.31%
+  # with this row, 96.22% without), so dropping it does not break the floor. What
+  # dropping it does is pack this file at `DEFAULT_FAST_WEIGHT` (2.0 s) instead of
+  # 92.0, which takes ~90 s out of the fast-pool TOTAL: LPT re-packs, so every one
+  # of the nine shards drops ~10 s (the one holding it, `test (g)`, 813.6 -> 803.7
+  # s), NOT one named shard by 90 s — the shards are positional letters, and
+  # `core` is a SURFACE name. Refresh from the first post-merge push run that
+  # includes it.
   test_lane_wip.py: 92.0
   # #5612: 12.2 is the HIGHER of two local readings of this file at head 4b112ccbc
   # (5.9 s / 12.2 s; hermetic — temp-dir journals + the committed fixture, no DB;
