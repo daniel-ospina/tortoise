@@ -829,6 +829,16 @@ surfaces:
   # used to justify the api entry: it matches no SOURCE_PATTERNS rule and an
   # unmapped-path change already fails closed to the full matrix.)
   - test_transport_wait_bound.py
+  # #10849: the write half of the same wait-bound refusal — `committed` /
+  # `retry_safe` / `retry_rule` on a refused write. The `api` row is
+  # load-bearing, not belt-and-braces: `tortoise/mcp_auth.py` holds the refusal
+  # IDENTITY (`_TRANSPORT_WAIT_BOUND_MESSAGE`, matched by exact equality in
+  # `tests/_verdict.py`) and the owner-pinned `_TRANSPORT_WAIT_BOUND_S`, and the
+  # selector maps it to `api` ALONE (measured: `select(['tortoise/mcp_auth.py'])`
+  # -> ['api'], full=False). Without this row an `mcp_auth`-only diff — the diff
+  # that would change the write message this file pins — runs no leg that
+  # contains it. Dual-registered with `core` for the reason given there.
+  - test_wait_bound_write_ack.py
   - test_agent_signup.py
   - test_agent_signup_idempotency.py
   - test_api.py
@@ -3600,6 +3610,17 @@ surfaces:
   # CI has no safety suite.
   - test_container_reaper.py
   - test_transport_wait_bound.py  # #3834: transport wait bound + cold-half gate wiring (dual: api)
+  # #10849: the write-refusal contract. The `core` row is load-bearing too, for a
+  # path neither `api` nor the full matrix covers: `config/surface-manifest.yml`
+  # selects `core` ALONE (measured: `select(['config/surface-manifest.yml'])` ->
+  # ['core'], full=False), and that manifest is where the served
+  # `idempotentHint` values are re-cut — the exact input this file's
+  # `_write_retry_safety` derives `retry_safe` from. So a re-cut that flips a
+  # hint back to `true` would otherwise land with no leg running this pin
+  # (the #1349/#2938 silent-drop class). DB-free and pure-unit, so it needs no
+  # slow/carve_out row and no `durations` weight — `duration_coverage_issues()`
+  # is a coverage FLOOR, measured [] for this manifest revision.
+  - test_wait_bound_write_ack.py
   # #2877: DB-free guards that a dead backup watcher degrades /health (the file
   # it guards, tortoise/hosted_api.py, selects the `api` surface, so it is
   # dual-registered `api`+`core` for the same reason as the boot guards).
