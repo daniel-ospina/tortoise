@@ -2007,6 +2007,14 @@ surfaces:
   # NON_PYTHON_PREFIXES before the `core` fallback runs). Pinned by
   # tests/test_dod_5090_probe.py::test_the_instrument_is_selected_by_its_own_subjects.
   - test_dod_5090_probe.py
+  # #10687: `tools/attest_census.py` owns its own suite — the hermetic arms pin the
+  # RESTORE/RE-REVIEW partition (repair separated from fabrication), the 0/2-never-1
+  # exit contract, and the report shape the REQUIRED `docs` check lints whole. `core`
+  # like every entry here, because `tests/` is not a SOURCE_PATTERN: a diff touching
+  # only `tests/test_attest_census.py` falls through to `core` anyway, and a
+  # `tools/attest_census.py` diff is caught by its own `TOOL_CARVEOUTS` entry (which
+  # fails closed to the FULL matrix), so this line makes the ownership explicit for
+  # the file-level selection rather than relying on that fallback.
   - test_attest_census.py
   # #9964: the kind↔layer partition — `tortoise/kind_layers.py` is the ONE
   # authority (a new module: no SOURCE_PATTERNS entry, so a diff touching only it
