@@ -671,13 +671,30 @@ def _wait_bound_refused() -> bool:
 #: So the machine-actionable answer is the one the registry can actually support:
 #: ``retry_safe``. An idempotent operation converges on a repeat and needs no
 #: read-back; a non-idempotent one must not be repeated at all, because no
-#: read-back can be offered for it here. A per-tool verify recipe is left to
+#: read-back can be offered for it here.
+#:
+#: ⛔ ``idempotent=True`` is a SEQUENTIAL claim, and the rule must not silently
+#: promote it to "re-send now". These dedups are CHECK-THEN-WRITE with no
+#: uniqueness constraint behind them (``create_point``: `_resolve_dedup_hit(...)`
+#: then a separate `ulid()` + CREATE; ``checkpoint``'s `_content_exists` then
+#: `create_point`; the demo sentinel then a MERGE loop). So a retry that lands
+#: while the ABANDONED first write is still running is not a repeat — both can
+#: read absent, and both create. Measured on the embedded lane: two in-process
+#: concurrent `create_point(..., dedup=True)` calls minted two nodes with the
+#: identical `content_hash` in 14 of 20 rounds, while the sequential control
+#: converged on one id. That is the absent fourth precondition of #5064, tracked
+#: as #9879 — not something this seam can fix, and exactly why this rule names the
+#: condition under which its promise holds instead of asserting it outright.
+#:
+#: A per-tool verify recipe is left to
 #: #10849's remaining half (making ``create_operator`` adopt on endpoint-set +
 #: label + direction the way ``ingest`` already does), which makes the question
 #: moot for the family that needs it most.
 _WAIT_BOUND_RETRY_RULE_SAFE = (
-    "this operation is idempotent, so repeating it converges — a retry is safe "
-    "once the advertised delay has elapsed"
+    "this operation converges when repeated, so a retry is safe once the first "
+    "attempt can no longer be running. Do NOT re-send while it may still be in "
+    "flight: this convergence is a check-then-write with no uniqueness guard "
+    "behind it, so two overlapping attempts can both find nothing and both write."
 )
 #: No dispatch was ever STARTED (the transport refused before this seam scheduled
 #: one, or the argument check bailed out having already been answered), so there
@@ -834,11 +851,17 @@ def _call_folds_siblings_into_props(arguments) -> bool:
     # None: merged["credibility"] = credibility`. A generic "is it truthy" test is
     # WRONG here and fails OPEN: `credibility` is a documented numeric ladder
     # ("T0-T4 or numeric 0-4") and `0 == False` in Python, so `credibility=0` read
-    # as absent while the handler folds it — measured, that shipped `retry_safe:
-    # true` for a call whose repeat then runs the dedup-hit word leg
-    # (`credibility_prior(0)` → `('T0', …)`, so `_word_applied` is set and
-    # `set_point_baseline` + `update_point` run): a real write on the "converged"
-    # path, in the failing direction.
+    # as ABSENT while the handler folds it — and the call was then advertised
+    # `retry_safe: true` even though it carries a props payload.
+    #
+    # ⛔ Do not claim that repeat WRITES: measured with the handler's own argument
+    # shape, the second `create_point(kind, C, credibility=0, dedup=True)` produced
+    # a byte-identical node (no prop diff, `updatedAt` unchanged) and touched
+    # neither `set_point_baseline` nor `update_point` — the dedup-hit word leg is
+    # gated on `_existing_label and _existing.get("baseline_set")`, which a first
+    # write has already satisfied. The rule still blocks it, for the reason the
+    # `props` rule exists: the channel is caller-controlled, so convergence is not
+    # PROVABLE — not because this particular value diverges.
     if arguments.get("authoredBy"):                 # handler: `if authoredBy:`
         return True
     if arguments.get("credibility") is not None:     # handler: `is not None`

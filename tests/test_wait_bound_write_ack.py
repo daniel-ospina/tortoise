@@ -178,7 +178,10 @@ def test_a_breached_write_ships_a_retry_rule_not_a_fabricated_recipe():
     assert err["data"]["retry_rule"] == ms._WAIT_BOUND_RETRY_RULE_UNSAFE
     assert "do NOT re-send it" in err["data"]["retry_rule"]
     assert "operation" not in err["data"]["retry_rule"], (
-        "this tool's operation IS declared idempotent — the rule is about the CALL")
+        "the rule is about the CALL. `tortoise_create_operator` declares NOTHING "
+        "(idempotent=None -> idempotentHint False), so a claim about its operation "
+        "would be a claim the registry never made; on the create_point(dedup=False) "
+        "arm the same words would contradict a registry that DOES declare it.")
     # ...and the unsafe rule must not send the caller to the recipe that is
     # unsound for this very tool, nor claim what a repeat would DO.
     assert "search" not in err["data"]["retry_rule"]
@@ -308,9 +311,18 @@ def test_the_unsafe_rule_speaks_about_the_CALL_never_the_operation():
     assert "operation" not in ms._WAIT_BOUND_RETRY_RULE_UNSAFE, (
         "a claim about the OPERATION is false on the create_point(dedup=False) arm,"
         " where the registry declares the operation idempotent")
-    # the SAFE rule may name the operation: it is reachable only when the
-    # declaration AND the arguments both hold.
-    assert "operation is idempotent" in ms._WAIT_BOUND_RETRY_RULE_SAFE
+    # the SAFE rule MAY name the operation: it is reachable only when the
+    # declaration AND the arguments both hold. It must also name the CONDITION its
+    # promise rests on — the registry's flag is a SEQUENTIAL claim, and the dedup
+    # is a check-then-write with no uniqueness guard, so a retry that overlaps the
+    # abandoned write can mint a second row (measured: 14 of 20 rounds on the
+    # embedded lane, identical content_hash; the absent fourth precondition of
+    # #5064 = #9879).
+    safe_rule = ms._WAIT_BOUND_RETRY_RULE_SAFE
+    assert "converges when repeated" in safe_rule
+    assert "may still be in flight" in safe_rule, (
+        "the promise must be bounded by the condition it holds under")
+    assert "uniqueness guard" in safe_rule
 
 
 def test_the_verdict_is_per_CALL_not_per_name():
@@ -529,10 +541,12 @@ def test_an_argument_that_LOOKS_read_only_is_not_taken_at_face_value():
     missing"). So the arm could have committed a write while telling the caller
     nothing could have been.
 
-    The same reasoning removed `tortoise_onboarding_seed`'s no-name arm (a
-    COMPACT org has no person gap, so the same no-name call falls through to
-    `seed_onboarding_anchors`). Both are STATE-conditional, which no argument
-    predicate can see — so both stay UNSAFE, and the rule count stays four.
+    `tortoise_onboarding_seed`'s no-name call was ruled out PRE-EMPTIVELY for the
+    same reason (a COMPACT org has no person gap, so the same no-name call falls
+    through to `seed_onboarding_anchors`) — that exclusion is the only thing ever
+    written about it: no arm for it was added and then removed. Both are
+    STATE-conditional, which no argument predicate can see, so both stay UNSAFE
+    and the rule count stays four.
     """
     listing = _error(ms._wait_bound_refusal_result(
         "tortoise_manage_sources", {"action": "list"}))["data"]
