@@ -1110,7 +1110,10 @@ likely to over-credit.
 ⛔ **The draft gates ENTRY, not the MERGE — the residual window is real, and it is one queue cycle
 wide.** `.mergify.yml`'s own configuration contract states the split in a single line:
 `queue_conditions` gates **ENTRY** (evaluated against the PR head) and `merge_conditions` gates the
-**MERGE** (evaluated against the queue branch). `-draft` is a `queue_conditions` entry, so
+**MERGE**. Its **check** conditions are the ones evaluated against the queue branch / temporary queue
+PR; non-check conditions such as `label` and `draft` stay the pull request's own attributes (Mergify's
+`merge_conditions` doc scopes the temporary-PR substitution to "the merge conditions **for checks**").
+`-draft` is a `queue_conditions` entry, so
 un-drafting makes the PR *eligible*; it does not pin the base. From there:
 
 - `merge_method: squash` applies the batch's diff to `main` **as it is at merge time**, not to
