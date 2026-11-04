@@ -545,7 +545,9 @@ def test_mcp_registry_entry_and_http_allowlist():
     """tortoise_audit is a read-only registry entry wired to the SDK audit()
     method; the HTTP allow-list is derived (both surfaces pick it up)."""
     from tortoise.tool_registry import (
-        RETIRED_USE_INSTEAD, TOOL_REGISTRY, get_http_allowed,
+        RETIRED_USE_INSTEAD,
+        TOOL_REGISTRY,
+        get_http_allowed,
     )
 
     # #4282: the `audit` DOOR retired into the `graph_overview` container, so the

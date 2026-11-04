@@ -289,4 +289,4 @@ class TestDefaultSummaryIsUnchanged:
                     "status", "stale"]
         assert seen == expected
         assert list(result) == expected
-        assert ms._OVERVIEW_DEFAULT_SUMMARY_KEYS == tuple(expected)
+        assert tuple(expected) == ms._OVERVIEW_DEFAULT_SUMMARY_KEYS
