@@ -224,6 +224,7 @@ ATTEMPT_MARK = "===== rail attempt started"
 # announced one). Carrying the id in the mark makes the boundary attributable:
 # a mark whose id is not ours bounds nothing.
 ATTEMPT_MARK_ID_RE = re.compile(r"\battempt=(\S+)")
+REPO_EVIDENCE_RE = re.compile(r"admin-merge: repo (\S+) \(resolved from")
 ALREADY_MERGED_RE = re.compile(r"PR #(\d+) is ALREADY MERGED")
 REFUSAL_RE = re.compile(r"(?:✗|BLOCK|REFUSING|REFUSED)[^\n]*")
 
@@ -543,6 +544,20 @@ def _group_has_a_live_member(pgid: int) -> bool | None:
     out = _ps("-A", "-o", "pid=,pgid=,stat=")
     if out is None:
         return None
+    # ⛔ PROVE THE PROBE CAN SPEAK THIS FORMAT BEFORE AN EMPTY ANSWER MEANS "EMPTY".
+    # `_ps` returns stdout whether or not `ps` ACCEPTED the request, so a `ps` that
+    # rejects `pid=,pgid=,stat=` (or answers header-only / with other columns) hands
+    # back an empty string — and falling through to `False` below would report a
+    # LIVE rail's group as empty, i.e. `lost` for a rail that is still merging: the
+    # fail-danger direction this whole arm exists to prevent. `_ps_stat` already
+    # carries this rule ("macOS returns 1 for BOTH — trusting it would read a live
+    # rail as dead on a box with a different `ps`"); it is the SAME box class, so the
+    # same answer: ask for the one pid the probe MUST be able to see (ours) in the
+    # same format, and treat a miss as unmeasurable rather than as evidence.
+    own = _ps("-o", "pid=,pgid=,stat=", "-p", str(os.getpid()))
+    fields = (own or "").split()
+    if len(fields) < 3 or fields[0] != str(os.getpid()):
+        return None
     for line in out.splitlines():
         parts = line.split()
         if len(parts) < 3 or parts[1] != str(pgid):
@@ -760,7 +775,7 @@ def _attempt_exits(text: str) -> list[str]:
     return out
 
 
-def _merge_evidence(log: str, pr: int) -> tuple[str, str]:
+def _merge_evidence(log: str, pr: int, repo: str = "") -> tuple[str, str]:
     """(state, sha) from the rail's OWN words about THIS PR, or ('', '') when it
     said nothing usable.
     ⛔ A CODE-0 EXIT IS NOT A MERGE: `admin-merge.sh --dry-run` (and --help,
@@ -778,7 +793,20 @@ def _merge_evidence(log: str, pr: int) -> tuple[str, str]:
     publishes is about the PR it was asked to collect, and "merged" for a PR that
     did not merge is the one claim #2235 forbids. A mismatched number is therefore
     NO EVIDENCE, which fails closed (refused/lost), never open.
+
+    ⛔ AND THE NUMBER ALONE DOES NOT IDENTIFY A PR — THE REPO DOES. `start 12 --
+    --repo other/repo` reaches the rail's passthrough, whose argument loop takes the
+    LAST `--repo`, so the rail grades `other/repo#12` … and then prints `✅ merged
+    PR #12`, whose NUMBER matches this artifact's. The number check cannot see that;
+    the REPO can, because the rail prints the target it resolved on every run
+    (`admin-merge.sh` `resolve_rail_repo`: `admin-merge: repo <owner/name> (resolved
+    from <source>)`), and its own #2235 note says exactly why a bare number is not
+    enough: it "exists in both". So, where that line is present, it must name the
+    repo this artifact names. ONE-SIDED: no such line ⇒ nothing to contradict
+    (legacy logs and stub rails keep working); a differing line ⇒ no evidence.
     """
+    if not _names_this_repo(log, repo):
+        return "", ""
     m = MERGED_AT_RE.search(log)
     if m:
         return (MERGED, m.group(2)) if _names_this_pr(m.group(1), pr) else ("", "")
@@ -799,11 +827,26 @@ def _names_this_pr(found: str, pr: int) -> bool:
     return _int_or_none(found) == pr
 
 
+def _names_this_repo(log: str, repo: str) -> bool:
+    """Does the rail's own evidence line say it graded the repo this artifact
+    names? ONE-SIDED: no evidence line, or no `REPO=` in the artifact, means there
+    is nothing to contradict, so the answer is True; a line naming a different repo
+    is False (no evidence). The LAST line wins — a rail prints one per resolution
+    and every later call uses the final answer."""
+    found = REPO_EVIDENCE_RE.findall(log)
+    if not found or not repo:
+        return True
+    return found[-1].strip().lower() == repo.strip().lower()
+
+
 # ── collect ──────────────────────────────────────────────────────────────────
 @dataclass
 class RailState:
     pr: int
     state: str
+    # The repo the ARTIFACT names, not the one `collect` was called with: it is what
+    # the rail's own evidence line has to agree with (`_names_this_repo`).
+    repo: str = ""
     run_ids: list[str] = field(default_factory=list)
     since: str = ""
     head: str = ""
@@ -937,6 +980,7 @@ def _state_from(snap: _Snapshot, pr: int, art: Path) -> RailState:
     return RailState(
         pr=pr,
         state=WAITING,
+        repo=read_field(snap.text, "REPO"),
         run_ids=sorted(set(RUN_ID_RE.findall(snap.log)), key=lambda s: int(s)),
         since=read_field(snap.text, "STARTED_AT"),
         head=read_field(snap.text, "HEAD"),
@@ -951,7 +995,7 @@ def _exit_verdict(st: RailState, snap: _Snapshot) -> RailState:
     """The verdict for an artifact that carries this attempt's `EXIT=`."""
     code = _int_or_none(snap.exits[-1])
     st.exit_code = code
-    merged, sha = _merge_evidence(snap.log, st.pr)
+    merged, sha = _merge_evidence(snap.log, st.pr, st.repo)
     if merged == MERGED:
         st.state, st.merge_sha = MERGED, sha
         if not sha:
@@ -1096,7 +1140,7 @@ def collect(state_dir: Path, repo: str, pr: int) -> RailState | None:
         # The test is ONE-SIDED on purpose (`_pid_is_a_stranger`): it can only ever
         # conclude "not our rail", never "ours", so it cannot produce a false `lost`
         # and it never expires a live rail however long the queue takes. Fails CLOSED.
-        merged, sha = _merge_evidence(log, pr)
+        merged, sha = _merge_evidence(log, pr, st.repo)
         if merged == MERGED:
             st.state, st.merge_sha = MERGED, sha
             st.reason = ("the rail's log records the merge"
@@ -1140,7 +1184,7 @@ def collect(state_dir: Path, repo: str, pr: int) -> RailState | None:
     # `state=MERGED`. Reading it is not a gate being relaxed: the rail's gates ran
     # to completion, only the bookkeeping line was lost. Anything short of that
     # announcement stays `lost` (a vanished rail has NO verdict — #2235).
-    merged, sha = _merge_evidence(log, pr)
+    merged, sha = _merge_evidence(log, pr, st.repo)
     if merged == MERGED:
         st.state, st.merge_sha = MERGED, sha
         st.reason = ("the rail's log records the merge"
@@ -1402,8 +1446,12 @@ def launch(pr: int, *, cwd: Path, state_dir: Path, repo: str | None = None,
             )
 
         head = _head_sha(Path(cwd), repo, pr)
-        # A fresh attempt starts a fresh record; the previous attempt stays in the
-        # .log (the child appends), which is what the merged-sha parse reads.
+        # The ARTIFACT is a fresh record per attempt — `ATTEMPT_ID` is the same idea
+        # for the EXIT line, because the truncation below has no ordering against the
+        # PREVIOUS wrapper's late append. The `.log` is TRUNCATED with it (a fresh
+        # attempt starts a fresh log, rather than paying every earlier attempt's bytes
+        # on every `collect`), so nothing a verdict needs comes from a previous
+        # attempt's output.
         # `SPAWNING=1` is written BEFORE the spawn, because the window between the
         # two is a rail that exists but has no pid yet — and `collect` must not
         # call that `lost` (nor let a second rail through). `ATTEMPT_ID` is the

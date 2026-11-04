@@ -1023,6 +1023,36 @@ def test_a_live_group_member_is_not_lost_past_the_grace(tmp_path):
             os.killpg(leader.pid, signal.SIGKILL)
 
 
+def test_an_unparseable_group_probe_is_unmeasurable_not_empty(monkeypatch):
+    """⛔ `_ps` RETURNS STDOUT WHETHER OR NOT IT ACCEPTED THE REQUEST.
+
+    On the no-procfs box class a `ps` that RUNS but rejects `pid=,pgid=,stat=`
+    hands back an empty string. Falling through to "no live member" there reports a
+    LIVE rail's group as empty — `lost` for a rail that is still merging, which is
+    the fail-danger direction the group bound exists to prevent, and the exact trap
+    `_ps_stat` already documents ("macOS returns 1 for BOTH … trusting it would read
+    a live rail as dead on a box with a different `ps`"). The probe now asks for a
+    pid it MUST be able to see, in the SAME format, before believing an empty answer.
+
+    Both arms are here so the fix cannot be "always answer None": the second arm is
+    a `ps` that DOES speak the format, and it must still find the live member.
+    """
+    real_path = rd.Path
+
+    def no_procfs(p="/", *a, **k):
+        if str(p).startswith("/proc"):
+            raise OSError("this box has no procfs")
+        return real_path(p, *a, **k)
+
+    monkeypatch.setattr(rd, "Path", no_procfs)
+    monkeypatch.setattr(rd, "_ps", lambda *a, **k: "")          # format rejected
+    assert rd._group_has_a_live_member(os.getpgrp()) is None     # pre-fix: False
+
+    speaking = f"{os.getpid()} {os.getpgrp()} S\n"
+    monkeypatch.setattr(rd, "_ps", lambda *a, **k: speaking)
+    assert rd._group_has_a_live_member(os.getpgrp()) is True
+
+
 def test_the_group_probe_reads_member_state_not_membership(tmp_path):
     """The two directions of `_group_has_a_live_member`, so neither can drift:
     a live member answers True, a ZOMBIE-ONLY group answers False. Answering
@@ -1060,6 +1090,52 @@ def test_a_log_without_an_attempt_mark_is_no_evidence(tmp_path):
     st = rd.collect(sd, "o/r", 69)
     assert st.state != rd.MERGED, st.as_dict()
     assert st.merge_sha == ""
+
+
+def test_a_merge_line_for_another_repo_is_not_this_prs_merge(tmp_path):
+    """⛔ THE NUMBER ALONE DOES NOT IDENTIFY A PR — THE REPO DOES.
+
+    `start 12 -- --repo other/repo` reaches the rail's passthrough, whose argument
+    loop takes the LAST `--repo`, so the rail grades `other/repo#12` … and prints
+    `✅ merged PR #12`, whose NUMBER matches this artifact's. The PR-number check
+    cannot see that. The rail prints the target it resolved on every run
+    (`admin-merge.sh` `resolve_rail_repo`), so that line must name this artifact's
+    repo; a differing one is NO evidence, which fails closed.
+
+    Both halves present: one-sidedness (a log with no evidence line still reads its
+    merge) is the control, so this cannot be satisfied by refusing every log.
+    """
+    sd = tmp_path / "state"
+    sd.mkdir()
+    art = rd.artifact_path(sd, "o/r", 12)
+    logp = rd.log_path(sd, "o/r", 12)
+    art.write_text(
+        f"PR=12\nREPO=o/r\nSTARTED_AT={rd._iso_now()}\nLOG={logp}\n"
+        f"ATTEMPT_ID=a12\nPID={_reaped_pid()}\n",
+        encoding="utf-8",
+    )
+    mark = f"\n{rd.ATTEMPT_MARK} x attempt=a12 (detached) =====\n"
+    merged_line = ("admin-merge: ✅ merged PR #12 at deadbeefcafe1234 "
+                   "(state=MERGED confirmed via the API)\n")
+    logp.write_text(
+        mark + "admin-merge: repo other/repo (resolved from --repo)\n" + merged_line,
+        encoding="utf-8")
+    st = rd.collect(sd, "o/r", 12)
+    assert st.state != rd.MERGED, st.as_dict()      # pre-fix: MERGED for o/r#12
+    assert st.merge_sha == ""
+
+    # CONTROL — the same log naming THIS artifact's repo is the merge…
+    logp.write_text(
+        mark + "admin-merge: repo o/r (resolved from --repo)\n" + merged_line,
+        encoding="utf-8")
+    st = rd.collect(sd, "o/r", 12)
+    assert st.state == rd.MERGED, st.as_dict()
+    assert st.merge_sha == "deadbeefcafe1234"
+
+    # …and ONE-SIDED: no evidence line at all is not a contradiction (legacy logs,
+    # and every stub rail this suite uses).
+    logp.write_text(mark + merged_line, encoding="utf-8")
+    assert rd.collect(sd, "o/r", 12).state == rd.MERGED
 
 
 def test_the_attempt_mark_names_its_attempt_so_a_previous_tail_is_not_ours(tmp_path):
