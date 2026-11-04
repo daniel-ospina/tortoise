@@ -1901,6 +1901,13 @@ def _prior_basis_spans(tail: str) -> list[tuple[int, int, str]]:
     return spans
 
 
+# Punctuation that ATTACHES to the word before it. `_without_span` joins on this
+# set with NO space, because the text it re-joins was adjacent before a basis was
+# injected between the two halves. `…` is in the set because the map's notes use it
+# as a sentence-final mark.
+_ATTACHING_PUNCTUATION = frozenset(",.;:!?)]}\"'…")
+
+
 def _without_span(tail: str, start: int, end: int) -> str:
     """`tail` with `[start:end)` removed, without leaving a double space behind.
 
@@ -1908,11 +1915,25 @@ def _without_span(tail: str, start: int, end: int) -> str:
     `tail[:start].rstrip()`, byte-identical to what this module wrote before the
     mid-note case existed. A MID-NOTE span keeps the text on both sides, joined by
     the single space the ` — ` separator it consumed used to occupy.
+
+    ⛔ THAT SPACE IS NOT UNCONDITIONAL. The dash a mid-note span consumes is the
+    RENDERER's separator, not the note's: the pre-fix writer appended its basis to
+    the row-line FRAGMENT, which can end mid-sentence, so the note's own remainder
+    starts wherever the fragment stopped. `#5256`'s row is that shape — the
+    fragment ends `… not carve_out-registered` and the continuation opens
+    `. The count is re-derived …` — so joining with a space emitted
+    `… carve_out-registered . The count …`, a space before a sentence period that
+    nothing catches (the map carries zero such occurrences, and the guard on the
+    wrapped row asserts surviving WORDS, which a spurious space does not change).
+    An attaching mark therefore joins WITHOUT a space; every other continuation
+    keeps the single space the dash occupied.
     """
     before, after = tail[:start].rstrip(), tail[end:]
     if not after.strip():
         return before
-    return f"{before} {after.lstrip()}".rstrip()
+    rest = after.lstrip()
+    glue = "" if rest[:1] in _ATTACHING_PUNCTUATION else " "
+    return f"{before}{glue}{rest}".rstrip()
 
 
 def _strip_prior_held_basis(tail: str) -> str:

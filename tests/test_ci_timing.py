@@ -6546,6 +6546,95 @@ def test_the_wrapped_row_prune_guard_survives_the_next_sweep() -> None:
             raise AssertionError(f"after one {outcome} sweep: {exc}") from exc
 
 
+# The join `_without_span` performs when a MID-NOTE basis is pruned. The dash such a
+# span consumes is the RENDERER's separator, not the note's, and the note's own
+# remainder starts wherever the row-line FRAGMENT stopped, so the two halves may be
+# adjacent to the note's own punctuation.
+_SPACE_BEFORE_ATTACHING_PUNCTUATION_RE = re.compile(r"[a-z] \. [A-Z]|[a-z] , [a-z]")
+
+
+def test_a_mid_note_prune_re_attaches_the_notes_own_punctuation() -> None:
+    """A pruned mid-note basis must not leave `word . Next` behind (#10575 review, P3).
+
+    The shape is the map's, verbatim: `#5256`'s row and its continuation read
+    `… not carve_out-registered` + `. The count is re-derived …` once the note is
+    joined the way the writer joins it (`_joined_note_tail`), and a prior basis sits
+    between the two halves. Re-joining the survivors with the single space the dash
+    occupied emitted `… carve_out-registered . The count …`.
+
+    Non-vacuity: on the module before `_without_span` grew the attaching-punctuation
+    arm, the first assertion fails with `# note . The count is re-derived …`.
+    """
+    # (1) the note's own sentence period follows the pruned span.
+    assert ci_timing._strip_prior_basis(
+        "  # #5256: not carve_out-registered — ci-timing junit-census+top-15 "
+        "2026-11-02 (run 41375596528); was 5.8. The count is re-derived"
+    ) == "  # #5256: not carve_out-registered. The count is re-derived"
+    # (2) …and so does a comma.
+    assert ci_timing._strip_prior_basis(
+        "  # rationalised — ci-timing junit-census+top-15 2026-11-02 "
+        "(run 41375596528); was 5.8, so the row packs high"
+    ) == "  # rationalised, so the row packs high"
+    # (3) A CONTINUATION THAT OPENS A WORD keeps the single space the dash occupied.
+    # This is the shape `#5038`'s row has (its fragment ends `34 tests` and the
+    # continuation opens `embedded (TORTOISE_TEST_CARVE_OUT=1) lane`), and keeping
+    # the space is what re-attaches the two halves of the note's own sentence.
+    assert ci_timing._strip_prior_basis(
+        "  # #5038: deliverable 3: 34 tests — ci-timing junit-census+top-15 "
+        "2026-11-02 (run 41375596528); was 3.2 embedded (…"
+    ) == "  # #5038: deliverable 3: 34 tests embedded (…"
+
+
+def _sweep_adopting_every_row(text: str) -> str:
+    """`text` re-rendered with an ADOPTING reading for EVERY `durations` row.
+
+    A whole-map sweep, so a post-condition is checked over the writer's entire
+    surface instead of over the rows one test happens to name. +10 % moves every row
+    above the `0.1` value floor, and no `coverage` witness is supplied, so no row is
+    held back as a LOWER bound — each one takes the reading and re-bases.
+    """
+    lines = text.split("\n")
+    _index, entries = ci_timing._locate_durations_block(lines)
+    readings = {}
+    for key, i in entries.items():
+        match = ci_timing._DURATION_LINE_RE.match(lines[i])
+        assert match is not None, lines[i]
+        readings[key] = float(match.group("value")) * 1.1 + 0.1
+    rendered, stats = ci_timing.render_refreshed_manifest(
+        text, readings, "2026-11-09T00:00:00Z",
+        sample_label="ci-timing junit-census+top-15 2026-11-09 (run 41379999999)")
+    assert stats["sampled_keys"] == len(entries), (
+        "the sweep did not reach every row, so it does not cover the writer")
+    return rendered
+
+
+def test_no_re_base_leaves_a_space_before_the_notes_own_punctuation() -> None:
+    """The join defect is invisible to every guard that owns the row — so pin it here.
+
+    `_assert_a_re_base_supersedes_the_newest_basis` asserts the surviving WORDS, and
+    a spurious space changes none of them; `tests/test_ci_selection.py`'s reader twin
+    reads the same words. So the damage ships unnoticed on the first sweep that
+    re-values the row, and `tortoise-ci[bot]` commits it unattended. The assertion is
+    therefore a property of the WHOLE map the writer emits, not of one row.
+
+    Non-vacuity, measured: the committed map carries ZERO occurrences and an
+    adopting sweep at the reviewed head carried exactly one — the `#5256` row.
+    """
+    text = (REPO_ROOT / "config" / "ci-surfaces.yml").read_text()
+    assert _SPACE_BEFORE_ATTACHING_PUNCTUATION_RE.findall(text) == [], (
+        "the committed map already carries the shape this guard exists to stop, so "
+        "a clean sweep would not prove the writer's join")
+    swept = _sweep_adopting_every_row(text)
+    offenders = [ln for ln in swept.split("\n")
+                 if _SPACE_BEFORE_ATTACHING_PUNCTUATION_RE.search(ln)]
+    assert offenders == [], (
+        f"a re-base inserted a space before the note's own punctuation: {offenders}")
+    # …and the row the reviewer reproduced it on, named, so a failure says WHICH join
+    # went wrong rather than only that one did.
+    note = _durations_row_note(swept, "test_source_version_extractedfrom_5038.py")
+    assert "carve_out-registered. The count" in note, note
+
+
 def _indented_block_shape(text: str) -> tuple[int, int, int]:
     """`(wrapped, preamble, column0)` for a map's `durations` block.
 
