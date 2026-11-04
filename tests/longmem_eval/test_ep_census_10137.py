@@ -367,15 +367,22 @@ def _outcomes(n: int = 2, **over) -> list[dict]:
              "belief_activation": _manifest(**over)} for i in range(n)]
 
 
-def _report_doc(outcomes, *, n=None, activation=None) -> dict:
+def _report_doc(outcomes, *, n=None, activation=None, n_failed_flag=False) -> dict:
     """A REPORT shape: ``outcomes`` + ``methodology`` (that pair is what routes
     the probe to the report branch). The aggregate is the runner's own, so the
-    per-question rows are summed from the same manifests a real report carries."""
+    per-question rows are summed from the same manifests a real report carries.
+
+    ``n_failed_flag`` writes a literal JSON-style ``n_failed: true`` — a shape
+    the probe must read as "no count", never as one failed question.
+    """
     summary = activation if activation is not None else \
         mp.summarize_belief_activation(outcomes, requested=True)
-    return {"n_questions": len(outcomes) if n is None else n,
-            "outcomes": outcomes,
-            "methodology": {"measurement_posture": {"activation": summary}}}
+    doc = {"n_questions": len(outcomes) if n is None else n,
+           "outcomes": outcomes,
+           "methodology": {"measurement_posture": {"activation": summary}}}
+    if n_failed_flag:
+        doc["n_failed"] = True
+    return doc
 
 
 def _write(tmp_path, doc) -> str:
@@ -600,11 +607,46 @@ def test_census_probe_counts_an_overlapped_qid_once(tmp_path):
         out["questions_failed"]
 
 
+def test_census_probe_refuses_a_boolean_failure_count(tmp_path):
+    """``n_failed: true`` is NOT a count of one (#10137 review, P3).
+
+    ``isinstance(True, int)`` is ``True`` in Python, so a bare ``isinstance``
+    check read a JSON boolean as an ablation and fabricated a failure over a
+    clean population — the same rule ``measurement_posture._optional_int``
+    states for the manifest cells ("a bool is not a count").
+    """
+    out = _probe().cells(_write(tmp_path, _report_doc(_outcomes(2),
+                                                      n_failed_flag=True)))
+
+    assert out["questions_failed"] == 0
+    assert out["questions_in_run"] == 2
+
+
+def test_census_probe_does_not_invent_a_question_from_a_repeated_failure(tmp_path):
+    """A repeated failure qid is ONE question, not a pruned list (#10137
+    review, P3).
+
+    ``n_failed`` counts ENTRIES (``report.py:2793``) while the ids are distinct,
+    so ``len(failed_ids) + (n_failed - len(failed_ids))`` added a phantom
+    question for a duplicated entry. Both witnesses bound the ablation from
+    below, so the published count is their MAX, never their sum.
+    """
+    doc = _report_doc(_outcomes(2))
+    doc["failures"] = [{"question_id": "f1"}, {"question_id": "f1"}]
+    doc["n_failed"] = 2
+    out = _probe().cells(_write(tmp_path, doc))
+
+    assert out["questions_failed"] == 1          # f1, once
+    assert out["questions_in_run"] == 3          # 2 outcomes + f1
+    assert out["questions_in_run"] - out["questions"] == \
+        out["questions_failed"]
+
+
 def test_census_probe_keeps_the_disclosure_invariant_on_a_duplicate_qid(tmp_path):
     """``questions_in_run - questions == questions_failed`` holds for EVERY
     input, including one whose outcome ids are not distinct (#10137 review, P3).
 
-    ``summary["questions"]`` is ``len(rows)`` (``measurement_posture.py:353``)
+    ``summary["questions"]`` is ``len(rows)`` (``measurement_posture.py:339``)
     and the failure ids are distinct ids, so two independent counts made the
     published total SMALLER than the ratio's own denominator (``-1``) for a
     duplicate-qid input. The total is now DERIVED from the denominator plus the
