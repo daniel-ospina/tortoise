@@ -4160,3 +4160,74 @@ class TestQueryAllKeysetWalk:
         with pytest.raises(RuntimeError, match="not a list of rows"):
             SupabaseControlPlane.query_all(
                 _NotAList(), "analytics_events", select=["id"])
+
+
+# ── #9567 D11/D12 / #4051: the capture-token READER, production mode ───
+#
+# ``metering_get_capture_usage`` is the distinction the whole fail-closed
+# extraction allowance rests on: NO ROW is "no reading", while a row of ZEROS is
+# a real reading (#5045: a capture whose extraction reported no provider usage
+# records zero tokens). The registry-mode test in ``tests/test_allowance_gate.py``
+# cannot cover this branch, because the test lane runs registry mode — so a
+# regression that flattened an absent row into a measured zero would pass every
+# other test and silently DISARM the allowance.
+#
+# ⚠️ ONE reader name, deliberately. #4051 landed ``metering_get_capture_usage``
+# returning the columns as a dict; the #9567 branch defined ``metering_get_capture``
+# returning ``None`` for an absent row. Two names for one read is how a merge
+# keeps both sides silently (Python does not error on a duplicate ``def``) and how
+# the LAST definition wins while both callers keep importing. The presence fact
+# travels as ``measured`` / ``unmeasured_reason`` instead of as ``None``, so the
+# landed name and the landed ``capture_cost_usd`` column survive.
+
+
+class _StubCp:
+    def __init__(self, rows):
+        self._rows = rows
+        self.calls = []
+
+    def query(self, table, select=None, filters=None):
+        self.calls.append({"table": table, "select": select, "filters": filters})
+        return self._rows
+
+
+def test_metering_get_capture_usage_reports_no_reading_for_an_absent_row():
+    """NO ROW ⇒ ``measured`` False / ``"absent"`` — never a measured zero."""
+    from tortoise.supabase_control import metering_get_capture_usage
+
+    row = metering_get_capture_usage(_StubCp([]), "org-x", "2026-10-01")
+    assert row == {"measured": False, "unmeasured_reason": "absent",
+                   "capture_calls": 0, "capture_tokens_in": 0,
+                   "capture_tokens_out": 0, "capture_cost_usd": 0.0}
+
+
+def test_metering_get_capture_usage_returns_a_recorded_zero_row_as_a_reading():
+    """A RECORDED zero (#5045) IS a reading — the distinction the gate needs."""
+    from tortoise.supabase_control import metering_get_capture_usage
+
+    row = metering_get_capture_usage(
+        _StubCp([{"capture_calls": 0, "capture_tokens_in": 0,
+                  "capture_tokens_out": 0, "capture_cost_usd": 0.0}]),
+        "org-x", "2026-10-01")
+    assert row == {"measured": True, "unmeasured_reason": None,
+                   "capture_calls": 0, "capture_tokens_in": 0,
+                   "capture_tokens_out": 0, "capture_cost_usd": 0.0}
+
+
+def test_get_capture_usage_reads_no_reading_from_an_absent_row(monkeypatch):
+    """The supabase branch of ``get_capture_usage``: absent row ⇒ measured False."""
+    from tortoise import metering
+
+    monkeypatch.setattr(metering, "_supabase_mode", lambda: True)
+    from datetime import UTC, datetime
+
+    monkeypatch.setattr(
+        metering, "_current_period",
+        lambda org_id: metering.MeteringPeriod(
+            start=datetime(2026, 10, 1, tzinfo=UTC),
+            end=datetime(2026, 11, 1, tzinfo=UTC)))
+    monkeypatch.setattr(
+        "tortoise.supabase_control.get_control_plane", lambda: _StubCp([]))
+    usage = metering.get_capture_usage("org-x")
+    assert usage["measured"] is False
+    assert usage["unmeasured_reason"] == "absent"

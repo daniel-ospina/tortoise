@@ -1050,6 +1050,21 @@ place a machine reads it.
   so it has no path to a measured leg at all; §7 item 8 states this rather than implying a gate
   covers it, and the rule is pinned by the probe's own cases.
 
+### 10.7 — the §11 cite block re-pointed after a 33-line insert above it (2026-11-04, `#10360`)
+
+- **Original value (as this record was last cut):** `_collect_classify_items` at
+  `tortoise/extractor_v2.py:9767`, its extent `:9767-9789`, the two `if items:` gates at `:10310`
+  and `:10442`, and the two fail-open `except` arms at `:10323`/`:10453`.
+- **New value:** the same symbols at `:9800`, `:9800-9822`, `:10343`/`:10475` and
+  `:10356`/`:10486`.
+- **Why:** these are HEAD-relative cites, and `#10360` inserts 33 lines into `extractor_v2.py`
+  above line 6049 (`21` in `_UNIT_EQUIV`, `12` in `_UNIT_WORDS`), so every cite past it moves by
+  exactly +33 while the symbols are unchanged. §10.5 already carried the head-true `:9800-9822`
+  pair; the remaining occurrences lagged it, which is the drift this entry closes.
+- **What moved: nothing else.** No metric, denominator, threshold, class set, corpus pin or `steps`
+  block is touched; the numbers this record exists to freeze are byte-identical. `document_sha256`
+  is re-cut in this same commit, per §8's rule for *any* edit to this file.
+
 ## 11. The step set V5 gates over — seven unconditional, one conditional (`#10215`)
 
 **Why this section exists.** `tools/capstone_verdict_check.py`'s V5 and `probes/capstone_run.py`'s G5

@@ -4079,9 +4079,9 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # `each VET pass is gated on the LIST` — the gate AND its call, twice.
         ("docs/00_index.md", "each VET pass is gated on the LIST", (
             ("10328", "if vet_enabled and embed_list:"),
-            ("10329", "vet_s2_stats, _w, vet_s2_pool = _run_vet_pass("),
+            ("10329", "embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass("),
             ("10450", "if vet_enabled and complete_list:"),
-            ("10451", "vet_union_stats, _w, _ = _run_vet_pass("),
+            ("10451", "complete_list, vet_union_stats, _w, _ = _run_vet_pass("),
         )),
         # the VET block's start; its three lines of keys (10587-10589) close on
         # line 10590 — DERIVED by content, not by arithmetic: `result["vet"] = {`

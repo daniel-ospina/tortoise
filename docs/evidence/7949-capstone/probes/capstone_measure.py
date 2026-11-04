@@ -1277,7 +1277,7 @@ _IDLE_CITES: dict[str, str] = {
         "`if vet_enabled and complete_list:` (:10450) — so "
         "a block that says enabled=true proves the FLAG, never that the pass "
         "ran. A FAILED vet pass leaves the same empty stats (`_run_vet_pass` "
-        "returns {} on its fail-open path, :10079-10082)."
+        "returns {} on its fail-open path, :10112-10115)."
     ),
     "classify_later": (
         "The extractor emits exactly this shape when the flag is ON and the "
@@ -1322,7 +1322,7 @@ def _pass_ran(block: dict) -> bool | None:
     proves the flag was read, never that the pass did anything.
 
     ⛔ The VET lines above are the VET pass's, not the rule's: the CLASSIFY pass
-    is different code (``classify_later`` at `:10169`, its own early-return
+    is different code (``classify_later`` at `:10202`, its own early-return
     block, its ``if classify_later and …`` gates around ``if items:``, its own
     fail-open ``except``), so the rule is stated pass-agnostically here and the
     CITES a reader gets are raised per surface from ``_IDLE_CITES`` — never one

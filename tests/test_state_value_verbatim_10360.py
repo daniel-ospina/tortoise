@@ -945,7 +945,12 @@ def test_the_carve_outs_own_ADJACENT_time_units_are_judged():
             ("back under 800 seconds", "back under 800 milliseconds"),
             ("a ten minute TTL", "a ten hour TTL"),
             ("the lease is 3 hours", "the lease is 3 days"),
-            ("the drive is 20 miles", "the drive is 20 km")):
+            ("the drive is 20 miles", "the drive is 20 km"),
+            # The two abbreviations the abbreviation set itself omitted: a
+            # table with a hole in it is how this gap survived review, so the
+            # siblings the widen introduced are pinned, not just the words.
+            ("the lease is 3 mos", "the lease is 3 years"),
+            ("back under 800 millisec", "back under 800 seconds")):
         assert v2._value_slot_divergence(content, quote), (
             content, quote)
     # …and the WRITE refuses the point, not just the pure function
@@ -967,6 +972,8 @@ def test_the_carve_outs_own_ADJACENT_time_units_are_judged():
             ("the lease is 3 months", "the lease is 3 mo"),
             ("the SLA is 5 years", "the SLA is 5 yr"),
             ("the cache TTL is 900 milliseconds", "the cache TTL is 900 ms"),
+            ("the cache TTL is 900 milliseconds", "the cache TTL is 900 millisec"),
+            ("the lease is 3 months", "the lease is 3 mos"),
             ("the TTL is 20 minutes", "the TTL is 20 mins"),
             ("the share is 20 percent", "the share is 20%"),
             ("back under 800 milliseconds", "back under 800ms")):
@@ -978,6 +985,193 @@ def test_the_carve_outs_own_ADJACENT_time_units_are_judged():
     assert v2._value_slot_divergence(
         "forty thousand requests per day",
         "forty thousand requests per week") == ()
+
+
+def test_a_magnitude_prefix_beside_a_unit_word_is_COMPOSED_not_refused():
+    """#10804 review P1 — the widen must not REFUSE a truthful point.
+
+    ``_value_bindings`` glues a value to the unit word written beside it with NO
+    prefix arithmetic (``value + seq[i + 1]``), so ``20k`` + ``miles`` binds ONE
+    token, ``20kmiles``, whose suffix is not a ``_UNIT_EQUIV`` key. It therefore
+    reads as an UNKNOWN unit with the numeric core still ``20``, and against
+    ``20000 miles`` (core ``20000``, unit ``mi``) the cores DIVERGE.
+
+    ⛔ MEASURED, not predicted: every row below returned ``()`` at `origin/main`
+    `525fde4a9` — ``miles``/``days``/``milliseconds``/``weeks``/``percent`` were
+    not in ``_UNIT_WORDS``, so the pair fell open on the unknown-unit tolerance —
+    and every one REFUSED with the widened tables and no composition arm. That
+    is the FALSE-ACCUSATION direction this carve-out must never take, so the
+    widen is only admissible WITH the composition (``_composed_identity``).
+
+    MUTATION CHECK TARGET: delete the ``_composed_identity`` arm from
+    ``_value_identity_matches`` and the first loop goes red; the second loop (the
+    rewrites) must stay green either way — it is what stops the arm from being
+    widened into a tolerance that lets a real rewrite through.
+    """
+    # A prefix followed by a SPACE-SEPARATED unit word: one value, two spellings.
+    for content, quote in (
+            ("the fleet drove 20000 miles", "the fleet drove 20k miles"),
+            ("the lease is 3000 days", "the lease is 3k days"),
+            ("back under 5000 milliseconds", "back under 5k milliseconds"),
+            ("the sprint is 2000 weeks", "the sprint is 2k weeks")):
+        assert v2._value_slot_divergence(content, quote) == (), (
+            content, quote)
+    # …and the WRITE does not withhold the point (the whole of the harm).
+    result = _write("the fleet drove 20000 miles", "the fleet drove 20k miles")
+    assert result["payload"]["points"], (
+        "a truthful point was WITHHELD because `20k miles` and `20000 miles` "
+        "are one value written two ways — the false-accusation direction")
+    assert not any("REWRITES its own verbatim quote" in w
+                   for w in result["warnings"]), result["warnings"]
+    # ⛔ NOT VACUOUS IN THE OTHER DIRECTION: composing the prefix must not turn a
+    # rewritten number or a changed unit into a match. `20k miles`/`21k miles`
+    # composes to 20000 mi against 21000 mi, and `20k miles`/`20000 km` to
+    # 20000 mi against 20000 km.
+    for content, quote in (
+            ("the fleet drove 20k miles", "the fleet drove 21000 miles"),
+            ("the fleet drove 20k miles", "the fleet drove 21k miles"),
+            ("the fleet drove 20k miles", "the fleet drove 20000 km"),
+            ("the lease is 3k days", "the lease is 3000 hours")):
+        assert v2._value_slot_divergence(content, quote), (content, quote)
+    # ⛔ A unit the table ALREADY KNOWS is never composed, and a multi-run core
+    # (one suffix for several numbers) is never scaled — pinned so a later widen
+    # cannot quietly reinterpret `20km` as 20000 metres.
+    assert v2._value_core("20km") == ("", "20", "km")
+    assert v2._value_core("24h/7d/4w") == ("", "24/7/4", "w")
+    assert v2._composed_identity(("", "20", "km")) is None
+    # ⛔ `kdays`, not `kw`: `w` is not a `_UNIT_EQUIV` key, so a `kw` assertion
+    # passes at the `rest is None` step and never reaches the multi-run guard it
+    # claims to pin (measured — review P3).
+    assert v2._composed_identity(("", "24/7/4", "kdays")) is None
+    # …and the AMBIGUOUS colloquial spelling keeps today's fail-open rather than
+    # becoming a refusal: `20kms` composes, but `20km` does not, so the pair is
+    # still tolerated (reading "kms" as kilo-milliseconds would REFUSE).
+    assert v2._value_slot_divergence("the ride was 20kms", "the ride was 20km") == ()
+    # NOT FUSED, pinned so a later lane cannot quietly re-add percent/pct.
+    assert "percent" not in v2._UNIT_WORDS and "pct" not in v2._UNIT_WORDS
+    assert v2._value_slot_divergence(
+        "the share is 20k%", "the share is 20000 percent") == ()
+    # ⛔ THE percent family is EQUAL by the PRE-EXISTING factor arm, not by the
+    # composition arm — it does not discriminate the arm under test, so it is
+    # asserted here with its own gate rather than inside the loop above
+    # (review P3).
+    assert v2._value_slot_divergence(
+        "the share is 20k percent", "the share is 20000 percent") == ()
+    # ⛔ AND THE ONE NEW TOLERANCE IS DISCLOSED, not silently opened (review P3).
+    # `20kms` is the ambiguous colloquial spelling; composing `k`+`ms` gives it a
+    # kilo-MILLISECOND reading, so it now AGREES with `20000 ms` — REFUSED at
+    # `origin/main` `525fde4a9`. That is the fail-open direction (a possible
+    # rewrite tolerated), not a false refusal, and it is the price of the arm;
+    # neither UCUM nor Pint permits a prefix on an already-prefixed atom, so the
+    # unit tables do not sanction it — this pin exists so the trade is recorded.
+    assert v2._value_slot_divergence("the ride was 20kms", "the ride was 20000 ms") == ()
+    # …while the colloquially-correct reading stays REFUSED at both heads.
+    assert v2._value_slot_divergence("the ride was 20kms", "the ride was 20000 m")
+    # ⛔ THE SECOND new tolerance, and it comes from the WIDEN, not from the arm
+    # above (review P3, measured): a fused suffix outside `_UNIT_EQUIV`
+    # (`kseconds`) leaves the core UNSCALED at `5`, so it coincides with
+    # `5 minutes` and the unknown-unit tolerance fires. `the batch took 5k
+    # seconds`/`… 5 minutes` REFUSED at `origin/main` `525fde4a9` and TOLERATES
+    # here. That is a MISSED REWRITE — the fail-open direction this rule prefers
+    # to a false accusation — and the same mechanism already tolerated
+    # `3k minutes`/`3 hours` at the base. Pinned so it cannot widen unnoticed.
+    assert v2._value_slot_divergence(
+        "the batch took 5k seconds", "the batch took 5 minutes") == ()
+    # …and the false accusation the SAME mechanism REPAIRS, which is why the
+    # trade was taken: `3k minutes`/`3000 minutes` REFUSED at base.
+    assert v2._value_slot_divergence(
+        "the job ran 3k minutes", "the job ran 3000 minutes") == ()
+    # ⛔ THE OPPOSITE DIRECTION IS STILL REFUSED — a FALSE ACCUSATION recorded as
+    # #10876, not fixed here. When the magnitude side's spelling is UNMAPPED
+    # (`millis`, `dys`) the binding is a bare `5k`, and `_magnitude_agrees`'
+    # `_K_ABBREVIATES` gate ({"km", "kg"}) refuses it against any KNOWN unit, so
+    # a truthful point is withheld. Pre-existing (`5k millis`/`5000 hours`
+    # refuses at `origin/main` `525fde4a9`); the widen extended which right-hand
+    # units trigger it. Pinned so it cannot start agreeing silently either — the
+    # gate's narrowness is a RECORDED DECISION (#10513 review P1: `20k`/`20m` is
+    # 20 km against 20 metres), so #10876 must move before this changes.
+    assert v2._value_slot_divergence("the batch took 5k millis", "the batch took 5000 ms")
+    assert v2._value_slot_divergence("the lease is 5k dys", "the lease is 5000 days")
+    # ⛔ AND THE MOST GENERAL INSTANCE: a BARE `5k`, with NO unit word at all on
+    # that side. #10876's first scope clause used to require an unmapped
+    # spelling, which excludes this shape entirely — yet it is the same refusal
+    # and the widest one (every newly fused unit triggers it). TOLERATED at
+    # `origin/main` `525fde4a9`, REFUSED here; pinned so #10876 cannot be closed
+    # against the narrow shape alone.
+    assert v2._value_slot_divergence("the took 5k", "the took 5000 ms")
+    assert v2._value_slot_divergence("the took 5k", "the took 5000 days")
+    assert v2._value_slot_divergence("the took 5k", "the took 5000 second")
+    # …while the units `k` may abbreviate, and a bare number, still agree.
+    assert v2._value_slot_divergence("the took 5k", "the took 5000 km") == ()
+    assert v2._value_slot_divergence("the took 5k", "the took 5000") == ()
+    assert v2._value_slot_divergence(
+        "the batch took 5k millis", "the batch took 5000 millis") == ()
+
+
+def test_a_composed_prefix_against_a_UNITLESS_side_keeps_the_omitted_unit_tolerance():
+    """#10804 review (cycle 7) P2 — the widen newly WITHHELD a truthful point.
+
+    The composition arm's match was `composed == other`, an EXACT identity
+    equality, so it could only rescue a side that STATES a unit. A side with NO
+    unit at all is ``('', '20000', None)``, which no composed identity can equal:
+    so ``20k miles`` against ``20000`` fell through to the core comparison (20
+    against 20000) and the write REFUSED the point.
+
+    ⛔ MEASURED at `origin/main` `525fde4a9` (a scratch worktree, not a revert):
+    every row in the first loop returned ``()`` there — `miles`/`days`/`seconds`/
+    `milliseconds` were not in `_UNIT_WORDS`, so the value bound as a BARE `k`
+    and `_magnitude_agrees` closed the gap — and every one REFUSED at the head
+    before this fix. That is the false-accusation direction this carve-out must
+    never take, introduced by the widen.
+
+    MUTATION CHECK TARGET: drop the `other[2] is None` branch from
+    `_composed_identities_agree` and the first loop goes red; the second loop (a
+    rewritten number, a re-read unit, a stated spelling outside the tables) must
+    stay green either way — it is what stops the tolerance from becoming one that
+    lets a real rewrite through.
+    """
+    # The unit is written on ONE side only — the module's oldest tolerance.
+    for content, quote in (
+            ("the fleet drove 20000", "the fleet drove 20k miles"),
+            ("the lease is 3000", "the lease is 3k days"),
+            ("back under 5000", "back under 5k milliseconds"),
+            ("the batch took 5000", "the batch took 5k seconds")):
+        assert v2._value_slot_divergence(content, quote) == (), (
+            content, quote)
+    # ...and the WRITE does not withhold the point.
+    result = _write("the fleet drove 20000", "the fleet drove 20k miles")
+    assert result["payload"]["points"], (
+        "a truthful point was WITHHELD because `20k miles` and `20000` are one "
+        "value with the unit written on one side only")
+    assert not any("REWRITES its own verbatim quote" in w
+                   for w in result["warnings"]), result["warnings"]
+    # The arm itself: the fold rescues a UNITLESS side, and this is the exact
+    # equality branch still working beside it.
+    assert v2._composed_identities_agree(("", "20", "kmiles"),
+                                         ("", "20000", "mi"))
+    assert v2._composed_identities_agree(("", "20", "kmiles"),
+                                         ("", "20000", None))
+    # ⛔ NOT VACUOUS IN THE OTHER DIRECTION — a rewritten NUMBER still refuses,
+    # against a unitless side as much as against a stated one.
+    for content, quote in (
+            ("the fleet drove 20k miles", "the fleet drove 21000"),
+            ("the lease is 3k days", "the lease is 3001"),
+            ("the batch took 5k seconds", "the batch took 5001")):
+        assert v2._value_slot_divergence(content, quote), (content, quote)
+    # ...and a re-read UNIT does, including against a side that states its own.
+    for content, quote in (
+            ("the fleet drove 20k miles", "the fleet drove 20000 km"),
+            ("the lease is 3k days", "the lease is 3000 hours"),
+            ("the batch took 5k seconds", "the batch took 5000 minutes")):
+        assert v2._value_slot_divergence(content, quote), (content, quote)
+    # ⛔ THE TOLERANCE IS SCOPED TO `None`, and the scope is load-bearing: a side
+    # stating an UNKNOWN SPELLING (`millis`) is NOT rescued this way — that
+    # refusal is `_magnitude_agrees`' `_K_ABBREVIATES` gate, a recorded decision
+    # (#10513 review P1) and #10876's open root, so this fix must not reach it.
+    assert not v2._composed_identities_agree(("", "20", "kmiles"),
+                                            ("", "20000", "millis"))
+    assert v2._value_slot_divergence("the batch took 5k millis",
+                                     "the batch took 5000 ms")
 
 
 #: The patterns that assert the ADJACENCY gap is OPEN again — the thing
