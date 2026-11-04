@@ -467,12 +467,18 @@ def _self_test() -> int:
     fail the session, reintroducing the same misattribution from the other direction.
 
     ⛔ AND THE URI'S *EXPECTATION* GOES WITH IT (`SELF_TEST_SCRUBBED_ENV`). Both halves
-    must be removed together: `TORTOISE_TEST_EXPECT_URI=1` is the docker-half's
-    "this session must run against the server" declaration, and a child that has the
-    server taken away while keeping the declaration fails the session at
-    `tests/conftest.py::_assert_backend_identity` — the same "environment gate presented
-    as the guard's own test failure" defect, arriving from the other side (CI-measured,
-    run 41897901625, shard `test (b)`).
+    must be removed together: the docker half of `python-ci.yml` exports
+    `TORTOISE_TEST_EXPECT_URI=1` beside its URI, and
+    `tests/conftest.py::_assert_backend_identity` fails any session that declares it
+    while carrying no URI. A child that has the server taken away while keeping the
+    declaration therefore dies at setup (`conftest.py:1791`, zero guard cases run) and
+    the tool reports the OUTER lane's gate as its own red suite — the same
+    "environment gate presented as the guard's own test failure" defect, arriving from
+    the other side (CI-measured, run 41897901625, shard `test (b)`).
+
+    ⛔ The child is neutralised HERE, never in `conftest.py`: teaching the URI gate to
+    accept `CARVE_OUT=1` beside `EXPECT_URI=1` would let a docker leg silently green-pass
+    on the embedded lane — the exact vacuous pass `EXPECT_URI` exists to close.
     """
     env = dict(os.environ)
     for name in SELF_TEST_SCRUBBED_ENV:
