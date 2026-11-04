@@ -488,6 +488,17 @@ class PrPlan:
     # it, and would withhold the unjam remedy from a queue that is still starved at
     # this window. The two keys are different questions, and each answers one.
     starved_repaired: list[str] = field(default_factory=list)
+    #: The QUEUED producing runs each `starved_repaired` context was repaired BY,
+    #: keyed by context. `starved_repaired` is a DECISION taken in `classify()` — it
+    #: says the exemption covers this context, before anything is attempted — and a
+    #: decision is not an outcome: in a report-only pass no act happens at all, and in
+    #: an apply pass `_rerun` can answer `deferred`, `head_moved`, `target_moved`,
+    #: `cancel_unobserved` or `denied`. Without this mapping the remedy sentence could
+    #: only re-read the decision, so it called a run "ISSUED" that no POST ever
+    #: reached (#10641 review P2). It is the join key between the decision and the
+    #: `rerun[]` record that carries what actually happened, which is why it is
+    #: recorded rather than re-derived by the reader.
+    starved_repaired_runs: dict[str, list[int]] = field(default_factory=dict)
     # Runs whose zero-job repair was SUPPRESSED by the congestion gate (`crowded`
     # below), i.e. a repair this pass identified and deliberately did not perform.
     # Each entry is ``{run, workflow, reason, measured}``. It exists because such a
@@ -1241,6 +1252,13 @@ def classify(pr: dict, checks: list[dict], all_runs: list[Run], required: list[s
                 # record, not a re-derivation of it.
                 if all(r in plan.self_witness for r in runs):
                     plan.starved_repaired.append(ctx)
+                    # THE RUNS THE ACT WILL NAME, recorded beside the decision so the
+                    # remedy can look up what `_rerun` actually answered for exactly
+                    # these ids instead of assuming the act happened (#10641 review
+                    # P2). `runs` is this CONTEXT's queued producing set — the same
+                    # list the `all(...)` above just tested — so the entry can never
+                    # name a run the exemption did not cover.
+                    plan.starved_repaired_runs[ctx] = [r.id for r in runs]
             continue
         # Completed runs, check never landed. Prefer the newest attempts.
         dead = sorted(runs, key=lambda r: r.run_attempt, reverse=True)
@@ -1853,6 +1871,73 @@ def queue_congestion_gate(congestion: bool | None) -> bool:
     return congestion is not False
 
 
+#: The five things a `starved_repaired` context's repair can have actually done. A
+#: DECISION to act is not one of them: `starved_repaired` says the exemption covers the
+#: context, and only these say what became of it (#10641 review P2).
+STARVED_OUTCOME_NOT_ATTEMPTED = "not_attempted"
+STARVED_OUTCOME_ISSUED = "issued"
+STARVED_OUTCOME_RERUN_WITHOUT_CANCEL = "rerun_without_cancel"
+STARVED_OUTCOME_CANCEL_ACCEPTED = "cancel_accepted"
+STARVED_OUTCOME_CANCEL_EFFECT_UNKNOWN = "cancel_effect_unknown"
+STARVED_OUTCOME_NOT_ISSUED = "not_issued"
+
+
+def _starved_repair_outcomes(plan: PrPlan, reruns: list[dict],
+                             apply: bool) -> dict[str, str]:
+    """What the pass ACTUALLY did for each starved context the exemption covered.
+
+    `plan.starved_repaired` is produced by `classify()`, a PURE function that decides
+    the exemption applies — it runs before `report()` and knows nothing of what
+    `_rerun` will later answer. This function is the join between that decision and the
+    act's own record (`reruns`, built from `_rerun`'s return), so a sentence built from
+    it cannot claim an act that never left this process.
+
+    Poles, each of which is a DIFFERENT claim and is named as itself:
+
+      ``not_attempted``            a report-only pass (no ``--apply``): `report()`'s
+                                   apply branch is never entered, so no POST was sent
+                                   and the record holds ``{"ok": None}``.
+      ``issued``                   every exempted run's record says ``ok is True``.
+      ``rerun_without_cancel``     ``ok is True`` but the API refused the cancel (409,
+                                   the orphan shape), so the DIRECT re-run is what was
+                                   issued — not a cancel-then-rerun.
+      ``cancel_accepted``          the cancel POST was accepted and its settle was
+                                   never observed: a destructive act was REQUESTED and
+                                   may have taken effect, and no replacement was
+                                   issued. Neither "issued" nor "nothing happened".
+      ``cancel_effect_unknown``    the cancel POST was sent and its ANSWER was lost;
+                                   the run MAY be cancelled. Nothing is claimed.
+      ``not_issued``               attempted and skipped — `deferred`, `head_moved`,
+                                   `target_moved`, or `denied` (a permanent refusal).
+
+    The pole is taken per CONTEXT and is the WEAKEST of its runs: a context is only
+    `issued` when the act reached every run the exemption covered.
+    """
+    by_run = {r["run"]: r for r in reruns}
+    outcomes: dict[str, str] = {}
+    for ctx in plan.starved_repaired:
+        run_ids = plan.starved_repaired_runs.get(ctx, [])
+        if not apply:
+            outcomes[ctx] = STARVED_OUTCOME_NOT_ATTEMPTED
+            continue
+        recs = [by_run[rid] for rid in run_ids if rid in by_run]
+        if not recs:
+            # No record for any of its runs means the pass never reached the act for
+            # this context — an abstention, never an issuance.
+            outcomes[ctx] = STARVED_OUTCOME_NOT_ISSUED
+        elif all(r["ok"] is True for r in recs):
+            outcomes[ctx] = (STARVED_OUTCOME_RERUN_WITHOUT_CANCEL
+                             if any(r.get("cancel_refused_409") for r in recs)
+                             else STARVED_OUTCOME_ISSUED)
+        elif any(r.get("cancel_accepted") for r in recs):
+            outcomes[ctx] = STARVED_OUTCOME_CANCEL_ACCEPTED
+        elif any(r.get("cancel_effect_unknown") for r in recs):
+            outcomes[ctx] = STARVED_OUTCOME_CANCEL_EFFECT_UNKNOWN
+        else:
+            outcomes[ctx] = STARVED_OUTCOME_NOT_ISSUED
+    return outcomes
+
+
 def report(plans: list[PrPlan], apply: bool, trigger_ok: bool, repo: str,
            cooldown_min: int, max_attempts: int = 3) -> tuple[int, list[dict]]:
     """Apply the repairs the credential allows; return (exit_code, records).
@@ -1916,7 +2001,14 @@ def report(plans: list[PrPlan], apply: bool, trigger_ok: bool, repo: str,
                      "starved_repaired": list(p.starved_repaired),
                      "no_verdict": list(p.no_verdict),
                      "repair_refused": list(p.repair_refused),
-                     "self_witness_rerun": [r.id for r in p.self_witness],
+                     # ⛔ AN EXEMPTION IS NOT A RERUN (#10641 review P2). This key used
+                     # to be `self_witness_rerun`, which asserted an act for a list that
+                     # is, by its own field docstring and by the renamed summary key
+                     # beside it (`self_witness_exempted`), EXEMPTED FROM THE GATE — not
+                     # re-run. In a report-only pass, or when the exempted run's `_rerun`
+                     # deferred, the old key named a run that was never re-run. It now
+                     # says what the list is, so the record and the summary agree.
+                     "self_witness_exempted": [r.id for r in p.self_witness],
                      "reopen_attempts": 0, "needs_user_actor": False}
         for nv in p.no_verdict:
             # THE NAMED REFUSAL. A zero-job run older than the floor cannot produce a
@@ -2075,6 +2167,13 @@ def report(plans: list[PrPlan], apply: bool, trigger_ok: bool, repo: str,
                                               or r.get("deferred") or r.get("skipped"))
                    for r in rec["rerun"]):
                 escalations += 1
+        # ⛔ COMPUTED FROM WHAT THE PASS DID, NOT FROM WHAT IT DECIDED (#10641 review
+        # P2). `starved_repaired` is filled in `classify()` before any act exists, so
+        # a remedy composed from it stated an act on a report-only pass and on every
+        # apply pass where `_rerun` deferred — the same "report the opposite of what
+        # happened" defect this cycle fixed for `repair_refused` one block up. The
+        # answer now comes from `rec["rerun"]`, which is the act's own record.
+        rec["starved_repaired_outcome"] = _starved_repair_outcomes(p, rec["rerun"], apply)
         records.append(rec)
     # exit 1 only when something needs acting on and we could not act.
     return (1 if escalations else 0), records
@@ -2459,6 +2558,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  #{r['pr']} absent={r['absent']} pending={r['pending']} "
                   f"starved={r.get('starved', [])} "
                   f"starved_repaired={r.get('starved_repaired', [])} "
+                  f"starved_repaired_outcome={r.get('starved_repaired_outcome', {})} "
                   f"rerun={[x['run'] for x in r['rerun']]} missing_run={r['missing_run']} "
                   f"reopened={r['reopened']} reopen_attempts={r['reopen_attempts']} "
                   f"needs_user_actor={r['needs_user_actor']}")
@@ -2487,26 +2587,83 @@ def main(argv: list[str] | None = None) -> int:
         # landed was impossible, and the per-PR record (`starved: [...]` beside
         # `rerun: [...]`) could not say which had happened. So the remedy is
         # composed from the RECORD's own two lists — the same data a reader of
-        # `--json` sees — and it names the repair where one was issued. The unjam
-        # is never withheld in the repaired pole: the queue reading is still
-        # starved at this window and the fresh attempt is queued behind it.
+        # `--json` sees. The unjam is never withheld in the repaired pole: the queue
+        # reading is still starved at this window and the fresh attempt is queued
+        # behind it.
+        #
+        # ⛔ AND THE RECORD'S LIST IS THE *OUTCOME*, NOT THE DECISION (#10641 review
+        # P2, second round). `starved_repaired` comes from `classify()`, which runs
+        # before any act: it says the exemption COVERS a context, not that anything
+        # was issued. Composing this sentence from it made the tool state that a
+        # cancel was "ISSUED" on a report-only `DRY=1` pass — where `report()` never
+        # enters its apply branch and sends no POST at all — and on every apply pass
+        # where `_rerun` answered `deferred`, `head_moved`, `target_moved`,
+        # `cancel_unobserved` or `denied`. The one decision this line exists to inform
+        # ("do I need to run this with `--apply` / unjam the queue now?") was answered
+        # falsely in the direction that leaves the PR stuck. `starved_repaired_outcome`
+        # is built from `rerun[]` — the act's own record — so each pole below is a
+        # claim the pass can actually support, and the unobserved ones are named as
+        # themselves rather than folded into "issued".
         repaired = [c for r in records for c in r.get("starved_repaired", [])]
         unrepaired = [c for r in records for c in r.get("starved", [])
                       if c not in r.get("starved_repaired", [])]
+        outcomes: dict[str, list[str]] = {}
+        for r in records:
+            by_ctx = r.get("starved_repaired_outcome") or {}
+            for c in r.get("starved_repaired", []):
+                outcomes.setdefault(by_ctx.get(c, STARVED_OUTCOME_NOT_ISSUED),
+                                    []).append(c)
+
+        def _repaired_sentences() -> list[str]:
+            """One sentence per OUTCOME pole present, in the order it is claimed."""
+            out: list[str] = []
+            if outcomes.get(STARVED_OUTCOME_ISSUED):
+                out.append(f"For the {len(outcomes[STARVED_OUTCOME_ISSUED])} starved "
+                           "context(s) whose only witness was a repairable zero-job "
+                           "run, this pass ISSUED the cancel-then-rerun above")
+            if outcomes.get(STARVED_OUTCOME_RERUN_WITHOUT_CANCEL):
+                out.append(f"For the {len(outcomes[STARVED_OUTCOME_RERUN_WITHOUT_CANCEL])} "
+                           "starved context(s) whose only witness was a repairable "
+                           "zero-job run, the API REFUSED the cancel and this pass "
+                           "issued the DIRECT re-run instead")
+            if outcomes.get(STARVED_OUTCOME_CANCEL_ACCEPTED):
+                out.append(f"For the {len(outcomes[STARVED_OUTCOME_CANCEL_ACCEPTED])} "
+                           "starved context(s) whose only witness was a repairable "
+                           "zero-job run, the cancel was ACCEPTED but its effect was "
+                           "never observed and no replacement was issued — the run may "
+                           "be cancelled, and the next window acts on what is then true")
+            if outcomes.get(STARVED_OUTCOME_CANCEL_EFFECT_UNKNOWN):
+                out.append(f"For the {len(outcomes[STARVED_OUTCOME_CANCEL_EFFECT_UNKNOWN])} "
+                           "starved context(s) whose only witness was a repairable "
+                           "zero-job run, a cancel was SENT and its answer was lost — "
+                           "the run MAY be cancelled and nothing is claimed about it")
+            if outcomes.get(STARVED_OUTCOME_NOT_ATTEMPTED):
+                out.append(f"Nothing was ATTEMPTED in this report-only pass (no "
+                           f"--apply) for the "
+                           f"{len(outcomes[STARVED_OUTCOME_NOT_ATTEMPTED])} starved "
+                           "context(s) whose only witness is a repairable zero-job "
+                           "run: the exemption covers them and the next APPLY pass "
+                           "issues the repair")
+            if outcomes.get(STARVED_OUTCOME_NOT_ISSUED):
+                out.append(f"The cancel-then-rerun was NOT issued for the "
+                           f"{len(outcomes[STARVED_OUTCOME_NOT_ISSUED])} starved "
+                           "context(s) whose only witness was a repairable zero-job "
+                           "run (the attempt was deferred or skipped this pass, or "
+                           "the credential was denied) — see `rerun[]` for which")
+            return out
+
         if not repaired:
             remedy = ("No per-PR repair can clear this: unjam the queue with "
                       "`uv run python tools/ci_queue_health.py --apply`.")
         elif not unrepaired:
-            remedy = (f"For the {len(repaired)} starved context(s) whose only "
-                      "witness was a repairable zero-job run, this pass ISSUED the "
-                      "cancel-then-rerun above; the unjam is still needed for the "
-                      "QUEUE itself if that fresh attempt does not start: "
+            remedy = ("; ".join(_repaired_sentences()) +
+                      "; the unjam is still needed for the QUEUE itself if a fresh "
+                      "attempt does not start: "
                       "`uv run python tools/ci_queue_health.py --apply`.")
         else:
-            remedy = (f"The cancel-then-rerun above WAS issued for "
-                      f"{len(repaired)} starved context(s) whose only witness was a "
-                      f"repairable zero-job run; for the remaining {len(unrepaired)} "
-                      "no per-PR repair can clear this: unjam the queue with "
+            remedy = ("; ".join(_repaired_sentences()) +
+                      f"; for the remaining {len(unrepaired)} no per-PR repair can "
+                      "clear this: unjam the queue with "
                       "`uv run python tools/ci_queue_health.py --apply`.")
         print("ci-check-repair: STARVED — the required checks exist as QUEUED runs "
               "that no runner slot has started; PR CI is not slow, it is not "

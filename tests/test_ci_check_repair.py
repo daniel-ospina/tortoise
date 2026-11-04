@@ -2257,7 +2257,7 @@ def test_a_MEASURED_congested_refusal_does_not_escalate(monkeypatch, capsys, tmp
     assert summary["self_witness_exempted"] == 0, (
         "the exemption must NOT fire when another old wait witnesses the congestion")
     assert summary["prs"][0]["rerun"] == [], "the cancel is still suppressed"
-    assert summary["prs"][0]["self_witness_rerun"] == []
+    assert summary["prs"][0]["self_witness_exempted"] == []
     assert [d["measured"] for d in summary["prs"][0]["repair_refused"]] == [True], (
         "the witness for the OTHER pole: this refusal came from a congestion that "
         "was actually READ (#10641 review P2)")
@@ -2367,7 +2367,7 @@ def test_the_SOLE_witness_target_is_REPAIRED_not_stranded_forever(
     assert summary["self_witness_exempted"] == 1
     assert summary["repair_refused"] == 0, "nothing was stranded this window"
     assert [r["run"] for r in summary["prs"][0]["rerun"]] == [target]
-    assert summary["prs"][0]["self_witness_rerun"] == [target]
+    assert summary["prs"][0]["self_witness_exempted"] == [target]
     assert "REFUSED-REPAIR" not in captured.err, (
         "nothing was refused, so the notice must not fire")
     assert summary["zero_job_named"] == 1, (
@@ -2450,11 +2450,146 @@ def test_a_starved_context_the_exemption_repaired_keeps_the_remnant_remedy(
         "only the context whose every queued run crossed the gate was repaired")
     assert [d["run"] for d in summary["prs"][0]["rerun"]] == [target], (
         "the repaired context's run is the one that was actually cancelled and re-run")
-    assert "WAS issued for 1 starved context(s)" in captured.err, (
+    assert "this pass ISSUED the cancel-then-rerun above" in captured.err, (
         "the mixed pole must name the repair it issued")
     assert "for the remaining 1" in captured.err, (
         "…and must not let it mask the context no per-PR repair can clear")
     assert "ci_queue_health.py" in captured.err, "…and still names the unjam remedy"
+
+
+def _starved_target_reading():
+    """The reading this PR's exemption exists for: one lone aged `pending` PR run."""
+    from tools import ci_queue_health as Q
+
+    reading = _queue_reading(pending=[_queue_run(41480218593, age_s=5700.0)])
+    assert reading.verdict == Q.PR_STARVED, reading.reasons
+    assert reading.congests_pr_apart_from(41480218593) is False
+    return reading
+
+
+def test_a_REPORT_ONLY_pass_must_not_say_it_ISSUED_the_starved_repair(
+        monkeypatch, capsys, tmp_path):
+    """⛔ P2 (review): the STARVED remedy stated an ACT from a DECISION.
+
+    `starved_repaired` is appended in `classify()` — a PURE function that runs before
+    `report()` and knows nothing of `_rerun`. `report()`'s apply branch is the only
+    place the act is attempted, and in a report-only pass it is never entered at all
+    (`rec["rerun"]` holds `{"ok": None}`). The remedy nevertheless read "this pass
+    ISSUED the cancel-then-rerun", and `tools/ci-check-repair-local.sh`'s `DRY=1`
+    passes no `--apply` — so the documented dry run told the operator the repair had
+    landed, in the direction that leaves the PR stuck.
+
+    Discriminating: pre-fix this fixture prints "ISSUED the cancel-then-rerun" and has
+    no `starved_repaired_outcome` key at all (KeyError), so both assertions below red.
+    The `--apply` sibling test above pins the opposite pole, so this is not
+    "never claim an act".
+    """
+    target = 41480218593
+    reading = _starved_target_reading()
+
+    monkeypatch.setattr(R, "read_queue_health", lambda repo: reading)
+    monkeypatch.setattr(R, "open_prs", lambda repo, include_drafts: [pr(1)])
+    monkeypatch.setattr(R, "check_runs_at", lambda repo, head: [])
+    monkeypatch.setattr(R, "runs_at_head", lambda repo, head: [
+        aged_run(target, jobs=0, age_s=5700.0, path="ci.yml", name="CI")])
+    rerun_calls = []
+    monkeypatch.setattr(R, "_rerun", lambda *a, **k: rerun_calls.append(a[1].id) or "rerun")
+
+    # NO `--apply`: the documented dry run.
+    assert R.main(["--repo", "o/r", "--no-live", "--json",
+                   "--record", str(_flood_record(tmp_path))]) == 0
+    captured = capsys.readouterr()
+    summary = json.loads(captured.out)
+    assert summary["apply"] is False
+    assert rerun_calls == [], "nothing is attempted without --apply — that is the point"
+    assert [r["ok"] for r in summary["prs"][0]["rerun"]] == [None], (
+        "the record itself says the act was never attempted")
+    assert summary["prs"][0]["starved_repaired"] == ["docs"], (
+        "the DECISION still stands — the exemption covers this context")
+    assert summary["prs"][0]["starved_repaired_outcome"] == {
+        "docs": R.STARVED_OUTCOME_NOT_ATTEMPTED}, (
+        "…and the OUTCOME is its own key: covered, not attempted")
+    assert "ISSUED the cancel-then-rerun" not in captured.err, (
+        "pre-fix the dry run claimed the repair was issued")
+    assert "WAS issued" not in captured.err, "…in either of its two pre-fix wordings"
+    assert "Nothing was ATTEMPTED in this report-only pass" in captured.err, (
+        "the sentence must be the one `repair_refused` already uses one block above")
+    assert "ci_queue_health.py" in captured.err, (
+        "the unjam remedy is not withheld just because nothing was attempted")
+
+
+def test_an_APPLY_pass_whose_rerun_DEFERRED_must_not_say_it_ISSUED(
+        monkeypatch, capsys, tmp_path):
+    """⛔ P2 (review), the APPLY pole: attempted is not issued.
+
+    In apply mode the act is attempted, but `_rerun` answers `deferred` whenever the
+    cancel could not be sent (no budget, `gh` could not start, an unclassifiable
+    refusal). `report()` records exactly that — `{"ok": False, "deferred": True}` —
+    and the remedy ignored it, still claiming ISSUED. An operator reading the durable
+    log is told a jammed PR was repaired when nothing was sent.
+
+    Discriminating: pre-fix this prints "ISSUED the cancel-then-rerun"; the outcome
+    key does not exist.
+    """
+    target = 41480218593
+    reading = _starved_target_reading()
+
+    monkeypatch.setattr(R, "read_queue_health", lambda repo: reading)
+    monkeypatch.setattr(R, "open_prs", lambda repo, include_drafts: [pr(1)])
+    monkeypatch.setattr(R, "check_runs_at", lambda repo, head: [])
+    monkeypatch.setattr(R, "runs_at_head", lambda repo, head: [
+        aged_run(target, jobs=0, age_s=5700.0, path="ci.yml", name="CI")])
+    monkeypatch.setattr(R, "_rerun", lambda *a, **k: "deferred")
+
+    assert R.main(["--repo", "o/r", "--no-live", "--apply", "--json",
+                   "--record", str(_flood_record(tmp_path))]) == 0, (
+        "a deferral is a SKIP, not a failure: the next window acts")
+    captured = capsys.readouterr()
+    summary = json.loads(captured.out)
+    assert [r.get("deferred") for r in summary["prs"][0]["rerun"]] == [True], (
+        "the record says the act was deferred, not performed")
+    assert summary["prs"][0]["starved_repaired_outcome"] == {
+        "docs": R.STARVED_OUTCOME_NOT_ISSUED}
+    assert "ISSUED the cancel-then-rerun" not in captured.err, (
+        "pre-fix a deferred attempt was reported as an issued repair")
+    assert "was NOT issued" in captured.err, (
+        "the sentence must name the deferral as the absence of the act")
+    assert "see `rerun[]` for which" in captured.err, (
+        "…and point at the record that says WHY (deferred / head_moved / denied)")
+
+
+def test_a_cancel_ACCEPTED_but_UNOBSERVED_is_named_as_itself(
+        monkeypatch, capsys, tmp_path):
+    """⛔ P2 (review): the middle pole — a destructive act REQUESTED, `ok` False.
+
+    `cancel_unobserved` means the cancel POST was accepted and its settle was never
+    observed: `ok is False` (nothing is claimed as repaired) with `cancel_accepted`
+    set. "Issued the cancel-then-rerun" is false (no replacement was issued) and
+    "nothing happened" is equally false (a cancel may have landed), so the sentence
+    must be this pole's own. Discriminating: pre-fix prints "ISSUED".
+    """
+    target = 41480218593
+    reading = _starved_target_reading()
+
+    monkeypatch.setattr(R, "read_queue_health", lambda repo: reading)
+    monkeypatch.setattr(R, "open_prs", lambda repo, include_drafts: [pr(1)])
+    monkeypatch.setattr(R, "check_runs_at", lambda repo, head: [])
+    monkeypatch.setattr(R, "runs_at_head", lambda repo, head: [
+        aged_run(target, jobs=0, age_s=5700.0, path="ci.yml", name="CI")])
+    monkeypatch.setattr(R, "_rerun", lambda *a, **k: "cancel_unobserved")
+
+    assert R.main(["--repo", "o/r", "--no-live", "--apply", "--json",
+                   "--record", str(_flood_record(tmp_path))]) == 0
+    captured = capsys.readouterr()
+    summary = json.loads(captured.out)
+    assert summary["prs"][0]["rerun"][0]["cancel_accepted"] is True
+    assert summary["prs"][0]["starved_repaired_outcome"] == {
+        "docs": R.STARVED_OUTCOME_CANCEL_ACCEPTED}
+    assert "ISSUED the cancel-then-rerun" not in captured.err
+    assert "the cancel was ACCEPTED but its effect was never observed" in captured.err, (
+        "an accepted-but-unobserved cancel is its own claim")
+    assert "no replacement was issued" in captured.err, (
+        "…and must not be read as a completed repair")
 
 
 def test_the_exemption_is_asked_with_the_WHOLE_head_wide_repairable_set(monkeypatch):
