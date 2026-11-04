@@ -764,17 +764,26 @@ residue.
 (content hash + kind), `sources` (url) and the connections between them. It is
 **not** idempotent for `document`/`event` ENTITY items: those are append-only
 occurrence records, so re-sending a full bundle mints a NEW `:Event` occurrence
-(new id), a NEW `:Source`, and therefore a NEW operator over them — reported as
-the `append_only_items` warning (§3.2 row 1; the note under §5 row 6, "Endpoint
-typing"). Re-send the identical bundle only when minting a second occurrence is
-what you want; otherwise re-send the point-only or connection-only half.
+(new id), a NEW `:Source`, and therefore a NEW operator over them. Re-send the
+identical bundle only when minting a second occurrence is what you want;
+otherwise re-send the point-only or connection-only half.
+
+⚠️ **This duplication is SILENT — do not wait for a warning.** §3.2 row 1
+declares an `append_only_items` key, but the entity leg does not emit it today
+(measured: re-ingesting a bundle holding one `event` and one `document` entity
+returns `created.entities: 2` and `warnings: []`). To detect a duplicate, compare
+`created.entities` across the retry — a non-zero count on the second run **is**
+the second occurrence. The declared-but-unemitted key is a contract gap tracked
+under #7534's burn-down, not a signal you can key on.
 
 ⚠️ **This is also why `tortoise_ingest` is NOT declared idempotent on the MCP
 surface** (`annotations.idempotentHint: false`). A `-32009` wait-bound refusal on
-an ingest therefore answers `error.data.retry_safe: false` with the UNSAFE
-`retry_rule`: the abandoned call may still be running, and a blind retry races
-it into the append-only leg above. `error.data.committed` is `"unknown"` for a
-dispatched ingest — it is never a statement that nothing was written.
+a **dispatched** ingest therefore answers `error.data.retry_safe: false` with the
+UNSAFE `retry_rule`: the abandoned call may still be running, and a blind retry
+races it into the append-only leg above. `error.data.committed` is `"unknown"` for
+a dispatched ingest — it is never a statement that nothing was written. (An ingest
+refused BEFORE any dispatch is the other arm: `committed: "none"`, `retry_safe:
+true`, and re-sending is safe once the advertised delay has elapsed.)
 
 ---
 

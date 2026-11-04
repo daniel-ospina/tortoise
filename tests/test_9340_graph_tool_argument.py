@@ -1617,6 +1617,12 @@ def test_an_excluded_tool_is_not_a_graph_error_when_the_transport_refused(
     # write it never sent — i.e. it silently drops the retry, which is the exact
     # defect `dispatched=False` was added to fix.
     _refusal_text = "\n".join(getattr(c, "text", "") for c in (result.content or []))
+    # The pin below is only discriminating while this tool is a WRITE — the whole
+    # contract hangs off `name in WRITE_TOOL_NAMES`. Assert the precondition too,
+    # so a re-tier reds HERE with the real reason instead of blaming the prose.
+    assert name in mcp_server.WRITE_TOOL_NAMES, (
+        f"{name} is no longer a write tool — this pin can no longer observe the "
+        "write refusal arm it exists for")
     assert _refusal_text == mcp_auth._TRANSPORT_WAIT_BOUND_NOT_SENT_MESSAGE, (
         "the no-dispatch arm served the DISPATCHED-write prose "
         f"({_refusal_text!r}) — a caller would reconcile a write that was never "

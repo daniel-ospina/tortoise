@@ -17,7 +17,7 @@
     "lychee": "lychee 0.24.2",
     "population": "git ls-files '*.md' (minus vendored) \u2014 772 files",
     "counts": {
-      "markdownlint": 3297,
+      "markdownlint": 3296,
       "lychee": 46,
       "relative_links": 0
     },
@@ -42,7 +42,6 @@
     "docs/HANDOFF-2026-08-28-blog-ai-seo.md|MD028|1|Blank line inside blockquote",
     "docs/HANDOFF-2026-08-28-blog-ai-seo.md|MD028|1|Blank line inside blockquote",
     "docs/HANDOFF-2026-08-28-blog-ai-seo.md|MD028|1|Blank line inside blockquote",
-    "docs/INGEST_CONTRACT.md|MD018|1|No space after hash on atx style heading [Context: \"#785-era post-resolution state...\"]",
     "docs/adr/ADR-008-client-side-content-encryption.md|MD018|1|No space after hash on atx style heading [Context: \"#235/#454 do not hardcode cont...\"]",
     "docs/adr/ADR-008-client-side-content-encryption.md|MD040|1|Fenced code blocks should have a language specified [Context: \"```\"]",
     "docs/adr/ADR-008-client-side-content-encryption.md|MD050|14|Strong style [Expected: asterisk; Actual: underscore]",
