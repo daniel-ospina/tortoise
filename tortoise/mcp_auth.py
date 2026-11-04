@@ -815,14 +815,29 @@ _TRANSPORT_WAIT_BOUND_MESSAGE = (
 #: called, so it cannot claim anything about a mutation, and its body is pinned
 #: byte-for-byte by callers and tests. The write-ambiguity belongs to the seam
 #: that DOES know the tool name — ``mcp_server._wait_bound_refusal_result``.
+#: The refusal for a WRITE that was never DISPATCHED — the transport refused
+#: before the seam scheduled any work (or the argument check had already been
+#: answered). Its own message, not the one below, because the two say opposite
+#: things about whether a write can be in flight: here nothing was sent, so
+#: nothing can complete, and re-sending is the safe action rather than a risk.
+#: Serving the dispatched-write prose on this arm told a caller to reconcile a
+#: write it never issued AND to withhold the safe re-send (#10849 review).
+_TRANSPORT_WAIT_BOUND_NOT_SENT_MESSAGE = (
+    "The server's wait budget for this request was exceeded before a response "
+    "was ready, and this request was refused BEFORE any work started — nothing "
+    "was sent, so nothing was written and there is nothing to reconcile. "
+    "Re-sending it is safe once the advertised delay has elapsed."
+)
+
 #: Static and digit-free for the same reason as the message above: the
 #: advertised delay has exactly one source (``_TRANSPORT_WAIT_RETRY_AFTER_S``).
 _TRANSPORT_WAIT_BOUND_WRITE_MESSAGE = (
     "The server's wait budget for this request was exceeded before a response "
     "was ready. This call targets a WRITE surface: unless it was a preview, the "
     "write may still complete on the server, so this refusal is NOT a statement "
-    "that nothing was written. Read error.data.committed, then follow "
-    "error.data.retry_rule — a repeat is only ever safe for an operation that "
+    "that nothing was written. Read error.data.committed — or, on a tool with a "
+    "wrapped result, _meta.tortoise_error.data.committed — then follow its "
+    "retry_rule: a repeat is only ever safe for an operation that "
     "converges, or for one that was a preview and wrote nothing. Wait for the "
     "advertised delay before retrying."
 )

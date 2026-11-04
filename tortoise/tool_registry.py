@@ -1215,7 +1215,13 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         description="Create a document — a :Source keyed by url (research, planDoc, "
                     "meetingNotes, etc.).",
         risk="write",
-        idempotent=True,
+        # ⛔ NOT idempotent, and it must not say it is (#10849 review). The
+        # description says ":Source keyed by url", but the DOOR does not key by
+        # url: `sdk.create_document` mints a FRESH id per call
+        # (`did = self.ulid()`), and `_upsert_document` MERGEs the :Source on
+        # that id — so a retry writes a second Document Source and a second
+        # `DocumentCreated` (the SDK's own note on `_create_entity`, #2296).
+        # `write` tier already defaults to `idempotentHint: false`.
         http_policy=True,
         sdk_method="create_document",
     ),

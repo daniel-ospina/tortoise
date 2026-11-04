@@ -333,7 +333,10 @@ class TestHintsCannotDrift:
             # write tier, idempotent by operation (dedup on content/identity)
             ("tortoise_approve_merge", True),
             ("tortoise_checkpoint", True),
-            ("tortoise_create_document", True),
+            # ⛔ `tortoise_create_document` is NOT here: the door mints a fresh
+            # ulid per call and `_upsert_document` MERGEs on that id, so a retry
+            # writes a second Document Source (#10849 review). It carried
+            # `idempotent=True` until then — a false retry-safety claim.
             # ⛔ `tortoise_create_operator` is NOT here: it has no adoption path
             # (`_find_operator` is `ingest`-only), so a repeat writes a second
             # edge and double-counts the claim's EP weight. It carried

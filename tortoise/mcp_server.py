@@ -626,14 +626,16 @@ def _wait_bound_refused() -> bool:
     return bool(state.get(_WAIT_BOUND_REFUSED_KEY)) if state is not None else False
 
 
-#: The three retry rules shipped WITH a breached write's refusal. Exactly ONE is
+#: The four retry rules shipped WITH a breached write's refusal. Exactly ONE is
 #: returned for any breached write, so a caller is never left to infer a retry
 #: protocol from prose. Which one, and why:
 #:
-#:   * PREVIEW  — the call declared itself a preview (``dry_run=True``) and wrote
-#:                nothing, so a repeat is safe REGARDLESS of idempotency. This is
-#:                the one arm that says "retry" for a tool the registry has not
-#:                declared idempotent, and it is sound because nothing was
+#:   * NOT_SENT — no dispatch was started, so nothing was sent at all.
+#:   * PREVIEW  — the call declared itself a preview (``dry_run=True``, or
+#:                ``tortoise_delete`` with no ``confirmation``) and wrote nothing,
+#:                so a repeat is safe REGARDLESS of idempotency. These two are
+#:                the arms that say "retry" for a tool the registry has not
+#:                declared idempotent, and they are sound because nothing was
 #:                written in the first place.
 #:   * SAFE     — the registry declared the operation idempotent AND this call's
 #:                arguments did not switch that off.
@@ -675,13 +677,23 @@ _WAIT_BOUND_RETRY_RULE_SAFE = (
     "this operation is idempotent, so repeating it converges — a retry is safe "
     "once the advertised delay has elapsed"
 )
-#: A call whose arguments declare it a PREVIEW (``dry_run=True``) wrote nothing,
-#: so neither of the other two rules describes it: "may have committed" is false
-#: for it, and "do NOT repeat it" forbids the one safe action — which is the
-#: action that matters most for a preview of a destructive operation.
+#: No dispatch was ever STARTED (the transport refused before this seam scheduled
+#: one, or the argument check bailed out having already been answered), so there
+#: is nothing to reconcile and re-sending is safe.
+_WAIT_BOUND_RETRY_RULE_NOT_SENT = (
+    "this request was refused before any work started, so nothing was written "
+    "and re-sending it is safe once the advertised delay has elapsed"
+)
+
+#: A call that is a PREVIEW wrote nothing, so none of the other rules describes
+#: it: "may have committed" is false for it, and "do NOT repeat it" forbids the
+#: one safe action — which is the action that matters most for a preview of a
+#: destructive operation. Two shapes are previews: ``dry_run=True`` on a tool
+#: that declares the parameter, and ``tortoise_delete`` with no ``confirmation``
+#: (its two-call design — the first call only mints the token).
 _WAIT_BOUND_RETRY_RULE_PREVIEW = (
-    "this call was a PREVIEW (dry_run) and wrote nothing, so repeating it is "
-    "safe — no reconciliation is needed"
+    "this call was a PREVIEW and wrote nothing, so repeating it is safe — no "
+    "reconciliation is needed"
 )
 
 #: ⛔ Deliberately does NOT say what a repeat would do (a duplicate is true for a
@@ -758,7 +770,19 @@ def _arguments_say_preview(name: str, arguments) -> bool:
     """
     if not isinstance(arguments, dict):
         return False
-    return name in _dry_run_tool_names() and arguments.get("dry_run") is True
+    if name in _dry_run_tool_names() and arguments.get("dry_run") is True:
+        return True
+    # `tortoise_delete` is a TWO-CALL tool whose FIRST call is also a preview,
+    # and it is the surface's most destructive tool, so getting this wrong is the
+    # worst place to get it wrong: with no `confirmation`, its own contract says
+    # "CHANGES NOTHING: it reports … and returns a short-lived confirmation
+    # token bound to this id" (`_preview_delete`; the token is signed, it
+    # persists nothing). Reading only `dry_run` reported that call as a possible
+    # mutation and told the caller NOT to re-send it — which is the one call the
+    # delete cannot proceed without.
+    if name == "tortoise_delete":
+        return arguments.get("confirmation") is None
+    return False
 
 
 def _write_retry_safety(name: str, arguments=None) -> bool:
@@ -791,7 +815,7 @@ def _write_retry_safety(name: str, arguments=None) -> bool:
 
 
 def _wait_bound_refusal_result(name: str | None = None,
-                               arguments=None) -> ToolResult:
+                               arguments=None, *, dispatched: bool = True) -> ToolResult:
     """The ONE refusal result both wait-bound paths return.
 
     The message and the advertised delay come from the single module both
@@ -816,10 +840,13 @@ def _wait_bound_refusal_result(name: str | None = None,
     classifies the refusal by that envelope and a restructured one would read as
     a genuine product failure on a busy host:
 
-    * ``data.committed`` — ``"unknown"`` for a write (the seam cannot know, and
-      saying so is the whole fix), or ``"none"`` for a call whose ARGUMENTS
-      declare it a preview (``dry_run=True``), which writes nothing by
-      construction.
+    * ``data.committed`` — ``"unknown"`` for a write that may have been
+      dispatched (the seam cannot know, and saying so is the whole fix), or
+      ``"none"`` when nothing can have been committed. ``"none"`` has THREE
+      producers, all knowable at this call site: ``dispatched=False`` (no
+      dispatch was ever started), ``dry_run=True`` on a tool that declares it,
+      and ``tortoise_delete`` with no ``confirmation`` (its two-call design: the
+      first call only mints the token).
     * ``data.retry_safe`` — the registry's own retry-safety verdict for this
       call, so the caller does not have to re-derive it from prose (a new writer
       defaults to UNSAFE). ⛔ Derived from the NAME **and the ARGUMENTS**: a
@@ -842,18 +869,33 @@ def _wait_bound_refusal_result(name: str | None = None,
     was a ``tortoise_create_point`` refused on the wire. The message field is
     the refusal's IDENTITY; the write consequence is its PAYLOAD.
 
-    ⚠️ On the ``transport_refused`` short-circuit below no dispatch is started,
-    so nothing can commit — and both ``committed: "unknown"`` AND the write
-    prose are conservative there (the prose says the write "may still complete",
-    which on that arm it cannot). Both are kept uniform rather than branched:
-    this function does not know which arm it is serving, and one field with one
-    meaning is what a caller can act on. "unknown" is never wrong about a write
-    whose dispatch this function did not itself observe.
+    ⚠️ ``dispatched=False`` is passed by EXACTLY the two arms that never schedule
+    a dispatch (the ``transport_refused`` short-circuit, and the argument-check
+    fall-through that has already been answered). On those nothing was sent and
+    nothing can commit, so ALL THREE fields branch — ``committed: "none"``, a
+    re-send-safe rule, AND their own message
+    (``_TRANSPORT_WAIT_BOUND_NOT_SENT_MESSAGE``), because the dispatched-write
+    prose says the write "may still complete", which is false here. Leaving them uniform with the real breach was a defect
+    (#10849 review), not conservatism — for a non-idempotent write it told the
+    caller to reconcile a write it never issued AND to withhold the safe
+    re-send, i.e. it silently dropped it. Every other call site uses the
+    default, because there the dispatch really was started and abandoned.
     """
     data: dict = {"retry_after": _mcp_auth._TRANSPORT_WAIT_RETRY_AFTER_S}
     # The human channel. A read mutated nothing, so it reads as it always has.
     prose = _mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE
-    if name and name in WRITE_TOOL_NAMES:
+    if name and name in WRITE_TOOL_NAMES and not dispatched:
+        # The transport refused BEFORE any dispatch was scheduled, so nothing
+        # was sent and nothing can commit. That is KNOWABLE here — the caller
+        # need not reconcile anything, and withholding the safe re-send would
+        # silently drop a write the caller never even issued.
+        prose = _mcp_auth._TRANSPORT_WAIT_BOUND_NOT_SENT_MESSAGE
+        data.update({
+            "committed": "none",
+            "retry_safe": True,
+            "retry_rule": _WAIT_BOUND_RETRY_RULE_NOT_SENT,
+        })
+    elif name and name in WRITE_TOOL_NAMES:
         prose = _mcp_auth._TRANSPORT_WAIT_BOUND_WRITE_MESSAGE
         if _arguments_say_preview(name, arguments):
             # A preview writes nothing BY CONSTRUCTION, so the honest outcome is
@@ -1017,7 +1059,7 @@ async def _await_under_mcp_wait_bound(name: str, arguments, *, version,
             "MCP tools/call %s already refused at the transport; this seam's "
             "refusal is redundant and no dispatch is started",
             _mcp_auth._sanitize_for_log(name))
-        return _wait_bound_refusal_result(name, arguments)
+        return _wait_bound_refusal_result(name, arguments, dispatched=False)
     # #4055 (P2): bind an opaque owner token for this dispatch, then create the
     # dispatch task INSIDE the binding so it copies the token. A one-time
     # embedder load this dispatch triggers stamps that token as the load's
@@ -2364,7 +2406,7 @@ async def _wrapped_call_tool(name: str, arguments: dict[str, Any] | None = None,
             # and FALL THROUGH, so the classification below still labels the row
             # (`refused`/`transport_wait_bound`) and the refusal is repaired by
             # the same envelope path as every other one.
-            result = _wait_bound_refusal_result(name, arguments)
+            result = _wait_bound_refusal_result(name, arguments, dispatched=False)
         else:
             result = await _await_under_mcp_wait_bound(
                 name, arguments, version=version, task_meta=task_meta,

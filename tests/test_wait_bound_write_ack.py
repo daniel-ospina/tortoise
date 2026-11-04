@@ -275,6 +275,80 @@ def test_a_forged_dry_run_prop_cannot_claim_a_preview():
     assert forged["committed"] == "unknown"
 
 
+def test_a_no_dispatch_arm_claims_nothing_was_sent():
+    """When no dispatch was ever started, "the write may have committed" is FALSE.
+
+    Both arms that reach the refusal without scheduling a dispatch (the
+    ``transport_refused`` short-circuit and the argument-check fall-through) are
+    knowable at the call site. Reporting them as ``"unknown"`` + "do NOT repeat
+    it" told a caller to reconcile a write it never sent and to withhold the safe
+    re-send — i.e. it silently dropped the write.
+    """
+    result = ms._wait_bound_refusal_result(
+        "tortoise_create_operator", {}, dispatched=False)
+    data = _error(result)["data"]
+    # ...and the SERVED PROSE has to match the payload on this arm too: the
+    # dispatched-write message says the write "may still complete", which is
+    # false when no dispatch exists.
+    assert _text(result) == ma._TRANSPORT_WAIT_BOUND_NOT_SENT_MESSAGE
+    assert "nothing was written" in _text(result)
+    assert data["committed"] == "none"
+    assert data["retry_safe"] is True
+    assert data["retry_rule"] == ms._WAIT_BOUND_RETRY_RULE_NOT_SENT
+    # the same tool, actually dispatched, is a real mutation
+    real = _error(ms._wait_bound_refusal_result(
+        "tortoise_create_operator", {}))["data"]
+    assert real["committed"] == "unknown" and real["retry_safe"] is False
+
+
+def test_the_two_call_delete_preview_counts_as_a_preview():
+    """`tortoise_delete`'s FIRST call writes nothing, and it is the most
+    destructive tool on the surface.
+
+    Its own contract: with no `confirmation` it "CHANGES NOTHING: it reports …
+    and returns a short-lived confirmation token bound to this id"
+    (`_preview_delete`; the token is signed and persists nothing). Reading only
+    `dry_run` reported that call as a possible mutation and told the caller not
+    to re-send — which is the one call the delete cannot proceed without.
+    """
+    first = _error(ms._wait_bound_refusal_result("tortoise_delete", {"id": "x"}))["data"]
+    assert first["committed"] == "none"
+    assert first["retry_safe"] is True
+    assert first["retry_rule"] == ms._WAIT_BOUND_RETRY_RULE_PREVIEW
+    # ...a CONFIRMED call is a real deletion.
+    done = _error(ms._wait_bound_refusal_result(
+        "tortoise_delete", {"id": "x", "confirmation": "tok"}))["data"]
+    assert done["committed"] == "unknown"
+    assert done["retry_safe"] is False
+
+
+def test_create_document_is_not_advertised_as_repeatable():
+    """The door mints a fresh ulid per call; `_upsert_document` MERGEs on it.
+
+    So a retry writes a SECOND Document Source and a second `DocumentCreated`
+    (#2296). The registry declared `idempotent=True` on the strength of the
+    description ("keyed by url") rather than the code — the same false
+    retry-safety claim this branch corrected for `create_operator`.
+    """
+    data = _error(ms._wait_bound_refusal_result("tortoise_create_document"))["data"]
+    assert data["retry_safe"] is False
+    assert data["retry_rule"] == ms._WAIT_BOUND_RETRY_RULE_UNSAFE
+
+
+def test_the_write_message_names_both_homes_of_the_payload():
+    """A wrap-envelope write tool re-homes the payload to `_meta.tortoise_error`.
+
+    `_schema_error_result` DROPS `structuredContent` when the refusal violates a
+    declared output schema — and `tortoise_delete_entity` is exactly that tool. A
+    message that pointed only at `error.data` sent its caller to a field that is
+    not there, on a destructive tool, where the committed/retry_rule distinction
+    is the whole value of the change.
+    """
+    msg = ma._TRANSPORT_WAIT_BOUND_WRITE_MESSAGE
+    assert "error.data.committed" in msg
+    assert "_meta.tortoise_error.data.committed" in msg
+
+
 def test_a_getter_in_the_write_tier_is_repeatable():
     """`tortoise_get_source_reliability` is a getter that writes a CACHE.
 
