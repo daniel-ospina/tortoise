@@ -3621,10 +3621,15 @@ def duplicate_mapping_key_issues(manifest_path: Path | None = None) -> list[str]
 
     It is not hypothetical: ``config/ci-surfaces.yml`` is ``merge=union``
     (``.gitattributes``), so any merge that touches a ``durations:`` hunk emits
-    the row twice — FOUR occurrences on one batch PR (#10726: 62 keys, then 13,
-    then 1, then 2), each caught only by the required ``manifest-integrity``
-    leg after a push, while ``--integrity`` — the check that PR body cited as
-    proof of "0 duplicates" — stayed green.
+    the row twice. This one batch PR (#10726) has produced it repeatedly — 62
+    keys, then 13, then 1, then 2 (each recorded in its fold ledger), then 6 at
+    ``13a53ef7e`` and 5 at ``aba51cf97``. The FIRST of those was caught only by
+    the required ``manifest-integrity`` leg after a push, while ``--integrity``
+    — the check that PR body cited as proof of "0 duplicates" — was green at
+    the time (``02133e21b`` does not contain this walk at all), and that is
+    exactly why the walk is now COMPOSED INTO ``--integrity`` (``dd4f66e6a``):
+    every later occurrence is named locally, before the push, by the same
+    instrument the PR body quotes.
 
     The walk lives in ``tools/registry_integrity.py`` and is imported rather
     than re-spelled, so the two entry points cannot disagree about what a
