@@ -444,8 +444,10 @@ contract; single-source the chunk kind and the `match_source` leg across the eva
   floor_term: bool, guard_per_session_cap: int}`
   (per-session dicts + `injected_merged` are the non-derivable signals; `seeded`/
   `injected_total` are documented reader conveniences, never a second source of
-  truth). `sessions_lost` is `null` on the census-failure path (its siblings are
-  `null` there too) and `measured: False` on every path where no census ran —
+  truth). On the census-failure path the four COUNTS and `sessions_lost` are
+  `null`, while `window` still reports the window the census ATTEMPTED (an int,
+  never `null` — it is resolved before the census runs), and `measured: False` is
+  set on every path where no census ran —
   including the whole OFF arm, where the counts are a zeroed DESIGN and not a
   measurement, so a consumer must filter on `measured` before deriving a rate;
   `r1_knobs` + **always-present resolved-bool fingerprint** entries for both
