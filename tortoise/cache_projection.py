@@ -109,11 +109,12 @@ THE FOUR PROPERTIES, AND WHERE EACH LIVES
      whole pair, remain CACHE-OWNED (:func:`episodic_source_prose_properties`,
      consumed by `record_reconcile.scan_cache_view`) and are counted under their
      own `graph_only` bucket — visible, and not a divergence against a record that
-     is correct. The repair for a legacy node is a re-capture (the capture now
-     overwrites the pair with the lexicon) or a record-sourced re-projection for a
-     node the projection CREATES: the write is additive
-     (`MERGE … SET n += $props`, :func:`node_statement`), so a node that ALREADY
-     carries the old pair keeps it across a re-projection.
+     is correct. The repair for a legacy node is a re-capture of a transcript that
+     still derives a lexicon (the capture replaces the whole pair then — its own
+     `coalesce` keeps the stored value only when the derivation is empty) or a
+     record-sourced re-projection for a node the projection CREATES: the write is
+     additive (`MERGE … SET n += $props`, :func:`node_statement`), so a node that
+     ALREADY carries the old pair keeps it across a re-projection.
 4. **A cold region reads ``not-hot``, never ``empty``.** ``declaration_for``
    writes the known-hot set **after** the writes and as a function of what was
    materialized, so a record key the projection did not write is not claimed
@@ -1429,6 +1430,12 @@ def episodic_source_prose_properties() -> frozenset[str]:
     silent no-match). Cached, and resolved at CALL time — see
     :func:`_episodic_source_kind_property` for why a module-level evaluation is
     forbidden here.
+
+    ⭐ It stays the FULL pair even though `_searchText` is now projected for a
+    post-#10000 row (#10965): the exclusion is what keeps a LEGACY row's prose
+    from being counted as divergence, and on a post-#10000 row it costs nothing —
+    `_partition_cache_owned` keeps every name the RECORD side holds, so the
+    projected `_searchText` is compared there regardless of this set.
     """
     return frozenset(canonical_property("source", column)
                      for column in _EPISODIC_SOURCE_PROSE_COLUMNS)
