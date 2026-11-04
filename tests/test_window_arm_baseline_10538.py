@@ -76,7 +76,8 @@ def test_the_receipt_disclaims_the_measurement_it_is_not():
     assert reachable["chunk_bearing_pools"] is True, reachable
     # ⛔ THE AGGREGATE MUST SAY WHICH ROWS COULD SPEAK (fresh-context review,
     # finding 3). `additive`/`evicted_ids` are entailed to be True/empty when the
-    # reader's capped pool is SHALLOWER than the window, so a shape whose only
+    # reader's capped pool is no deeper than the window (it holds the WHOLE
+    # pool), so a shape whose only
     # rows are that shallow supports no displacement claim either way. The deep
     # pool is the one that fills the window after the cap, so it is the one the
     # chunk-bearing half may be read from.
@@ -483,7 +484,14 @@ def test_the_caps_reach_is_measured_at_each_window_not_inferred():
         for window in (7, SHIPPED_WINDOW):
             assert rows[window]["pick_ranks"] == [3, 4], name
             assert rows[window]["graded_by_recall_all_at_5"] == 2, name
-        assert rows[13]["graded_by_recall_all_at_5"] >= 1, name
+        # w=13 is pinned EXACTLY, per pool (review cycle 17, finding 1): one
+        # pick on the probe ([11,12] -> [4,5], graded 1), both on the other two
+        # ([11,12] -> [3,4], graded 2). A `>= 1` could not red on that clause.
+        assert (rows[13]["pick_ranks_before_dedup"], rows[13]["pick_ranks"],
+                rows[13]["graded_by_recall_all_at_5"]) == (
+            ([11, 12], [4, 5], 1)
+            if name == "chunk_bearing_issue_probe"
+            else ([11, 12], [3, 4], 2)), name
         # the deep-window end, where the cap stops being sufficient on the probe
         assert {n: r[14]["graded_by_recall_all_at_5"]
                 for n, r in bearing.items()} == {
@@ -494,16 +502,24 @@ def test_the_caps_reach_is_measured_at_each_window_not_inferred():
 
 
 def test_displacement_fields_are_read_only_where_they_are_expressible():
-    """⛔ A SHALLOW CAPPED POOL CANNOT REPORT A DISPLACEMENT AT ALL
-    (fresh-context review, finding 3).
+    """⛔ A POOL NO DEEPER THAN THE WINDOW CANNOT REPORT A DISPLACEMENT AT ALL
+    (fresh-context review, findings 3 and 17-2).
 
     ``evicted_ids`` is ``[i for i in base_ids if i not in fused_set]`` over two
-    ``[:window]`` windows of the SAME pool. When the reader's capped pool is
-    shallower than the window, BOTH windows hold the whole pool, so
-    ``evicted_ids == []`` and ``additive is True`` are arithmetic — true whatever
-    the arm does. Every row now publishes ``displacement_expressible`` so a
-    reader cannot take that vacuous True as a measurement, and the verdict
-    aggregate reads only the rows where it is true.
+    ``[:window]`` windows of the SAME pool. When the reader's capped pool is no
+deeper than the window — SHALLOWER, or exactly the window's height — BOTH
+windows hold the whole pool, so ``evicted_ids == []`` and ``additive is True``
+are arithmetic, true whatever the arm does. (Equality is NOT a rare case: six
+committed rows sit at ``reader_pool_depth == window`` — the ``depth=12`` shallow
+row, ``partial_cluster_nothing_new`` at 13, the w=14 rows of three pools, and
+``chunk_bearing_whole_window_cluster`` at w=6.) Every row now publishes
+``displacement_expressible`` so a reader cannot take that vacuous True as a
+measurement, and the verdict aggregate reads only the rows where it is true.
+
+⚠️ This pin's own wording was the cycle-17 finding: it said "SHALLOWER", which
+is refuted by those six rows — the predicate is ``>``, so equality also reads
+``false``, and the entailment argument is the same at equality (both slices are
+the whole pool).
     """
     receipt = json.loads(baseline.RECEIPT_PATH.read_text(encoding="utf-8"))
     rows = [r for rows in receipt["by_pool"].values() for r in rows]
@@ -525,6 +541,42 @@ def test_displacement_fields_are_read_only_where_they_are_expressible():
                 if r["pool_depth"] > 20 and r["chunk_bearing"])
     assert deep["displacement_expressible"] is True
     assert deep["reader_pool_depth"] > SHIPPED_WINDOW
+    # ⛔ EQUALITY IS NOT EXPRESSIBILITY (review cycle 17, finding 2): the flag is
+    # `>`, so a row whose capped pool is EXACTLY the window's height holds the
+    # whole pool and reports nothing about displacement either. If this pin ever
+    # finds no such row, the prose's "no deeper than the window" is stale.
+    equal_depth = [r for r in rows
+                   if r["reader_pool_depth"] == r["window"]]
+    assert equal_depth, (
+        "no committed row sits at reader_pool_depth == window — the prose's "
+        "'no deeper than the window (it holds the whole pool)' is then "
+        "unmeasured")
+    for row in equal_depth:
+        assert row["displacement_expressible"] is False, row["window"]
+        assert row["evicted_ids"] == [] and row["additive"] is True, (
+            "at equality both [:window] slices are the whole pool, so the "
+            "displacement fields must be the vacuous ones")
+
+
+def test_the_most_favourable_pool_names_the_windows_it_is_additive_at():
+    """⛔ OVER-RESTRICTING A CLAIM IS A FINDING TOO (review cycle 17, #3).
+
+    The ``whole_window_cluster`` entry said the arm is additive here "at the
+    SHIPPED window … ⚠️ Only at window 12", and that "deeper in the sweep" it
+    starts deleting while citing the w=13 rows. The receipt says the +2 / no-
+    deletion condition is true at windows 6, 7 AND 12, and that the deletion
+    starts at 13 — so the caveat was pointing at the wrong window in both
+    directions. Both halves are pinned from the rows.
+    """
+    receipt = json.loads(baseline.RECEIPT_PATH.read_text(encoding="utf-8"))
+    rows = {r["window"]: r for r in receipt["by_pool"]["whole_window_cluster"]
+            if r["placement"] == "tail"}
+    additive = sorted(w for w, r in rows.items() if r["additive"])
+    assert additive == [3, 4, 5, 6, 7, SHIPPED_WINDOW], additive
+    assert [w for w, r in rows.items() if r["net"] == 2] == [6, 7, SHIPPED_WINDOW]
+    assert rows[SHIPPED_WINDOW]["deleted_sessions"] == []
+    assert rows[13]["deleted_sessions"] == ["sD"]
+    assert rows[14]["deleted_sessions"] == ["sE"]
 
 
 def test_the_head_counterfactual_is_measured_on_BOTH_shapes():

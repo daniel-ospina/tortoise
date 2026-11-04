@@ -214,7 +214,7 @@ def pool_for(name: str) -> list[dict]:
 #: ingested as raw transcript chunks (the shape the corpus is actually written
 #: in, added by the finding-1 remedy), and ``chunk_bearing_deep_window`` is a
 #: PURPOSE-BUILT shape with no pre-existing counterpart, added by the finding-3
-#: remedy because both chunk-bearing pools above cap down to a pool SHALLOWER
+#: remedy because both chunk-bearing pools above cap down to a pool NO DEEPER
 #: than the window and so cannot express a displacement at all. It is not an
 #: argument the record already made; it is the shape the record's question needs
 #: in order to be answerable, and its entry says so.
@@ -236,12 +236,12 @@ POOLS: dict[str, dict] = {
         "clustered": True,
     },
     # the decision card's most favourable shape: the failure taken to its end,
-    # one session owning the WHOLE window — at the SHIPPED window the arm is
-    # genuinely additive here (+2 distinct). ⚠️ Only at window 12: deeper in the
-    # sweep the picks reach past the window's tail and start deleting the
-    # single-slot sessions below it (window 13 rows carry ``additive: false``,
-    # ``deleted_sessions: ["sD"]``), which is the same finding in the other
-    # direction and is why the receipt publishes the whole sweep.
+    # one session owning the WHOLE window — and the arm is genuinely additive
+    # here (+2 distinct, no deletion) at windows 6, 7 AND the shipped 12.
+    # ⚠️ From 13 the picks reach past the window's tail and start deleting:
+    # w=13 deletes ["sD"] (net falls to +1), w=14 deletes ["sE"] (net 0). That
+    # is the same finding in the other direction, and it is why the receipt
+    # publishes the whole sweep rather than the shipped row alone.
     "whole_window_cluster": {
         "spec": [("sA", 12), ("sD", 1), ("sE", 1), ("sF", 1)],
         "clustered": True,
@@ -301,10 +301,11 @@ POOLS: dict[str, dict] = {
     },
     # ⛔ THE DISPLACEMENT-EXPRESSIBLE CHUNK-BEARING SHAPE (fresh-context review,
     # finding 3). On BOTH pools above the reader's chunk cap leaves the pool
-    # SHALLOWER than the window — reader depth 8 and 6 against window 12 — so the
+    # no deeper than the window — 8 and 6 against window 12 — so the
     # reader's window holds the WHOLE pool, and `evicted_ids`, `deleted_sessions`
     # and `additive` cannot express a displacement at all: they are entailed by
-    # `reader_pool_depth < window`, not measured, so an `additive: True` row there
+    # `reader_pool_depth <= window`, not measured, so an `additive: True` row
+    # there
     # would read as "nothing was displaced" when it means "nothing COULD be".
     # This pool keeps the same shape (one raw-chunk session above the fold, the
     # reusable evidence below it) but carries enough compact sessions that the
@@ -407,8 +408,9 @@ def _row(pool: list[dict], *, window: int, limit: int, placement: str) -> dict:
         "base_graded_evicted": retention["base_graded_evicted"],
         # ⛔ CAN THIS ROW EXPRESS A DISPLACEMENT AT ALL? `evicted_ids` is
         # `[i for i in base_ids if i not in fused_set]` over two `[:window]`
-        # windows of the SAME pool, so when the reader's pool is SHALLOWER than
-        # the window both windows hold the whole pool and the displacement
+        # windows of the SAME pool, so when the reader's pool is NO DEEPER than
+        # the window (shallower OR exactly the window's height) both windows hold
+        # the whole pool and the displacement
         # fields are entailed to be empty/True by arithmetic, not by the arm.
         # A row with this False says NOTHING about displacement in either
         # direction; the fields that name it (`additive`,
@@ -523,7 +525,9 @@ def measure() -> dict[str, Any]:
                      "reader's chunk cap has removed the raw chunks above the "
                      "pick. Where a row carries "
                      "`displacement_expressible: false` the capped pool is "
-                     "SHALLOWER than the window, so its `additive` / "
+                     "no deeper than the window (it holds the WHOLE pool, and "
+                     "six non-expressible rows are exactly the window's "
+                     "height), so its `additive` / "
                      "`evicted_ids` / `deleted_sessions` are arithmetic, not "
                      "measurement — read them only where it is true.",
             "shipped_tail_picks_graded_by_recall_all_at_5":
@@ -550,7 +554,8 @@ def measure() -> dict[str, Any]:
             # ⛔ THE CHUNK-BEARING HALF IS READ ONLY FROM EXPRESSIBLE ROWS
             # (fresh-context review, finding 3). `additive` / `evicted_ids` are
             # entailed to be True/empty when the reader's capped pool is
-            # SHALLOWER than the window, so a row carrying
+            # no deeper than the window (it holds the whole pool), so a row
+            # carrying
             # `displacement_expressible: false` cannot support a claim about
             # displacement in either direction. The excluded rows are NAMED
             # rather than silently dropped, and a shape with no expressible row
