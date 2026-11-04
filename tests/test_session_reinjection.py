@@ -466,9 +466,14 @@ def test_the_differential_pins_the_eval_retrieval_budget(seeded_sdk,
     then ``None`` (the SDK's product default), and that is the deadline under
     which CI's loaded runner degraded ONE of two compared reads (fts>
     500 ms, 0/2 collected) into the corpus-wide fallback and turned the arm
-    differential into a false RED. It also FAILS IF the pin is raised past
-    the server's ``TIMEOUT_MAX``: the leg then fails outright rather than
-    degrading, which lands on the same corpus fallback.
+    differential into a false RED.
+
+    ⛔ The budget's HEADROOM is a SEPARATE, BY-VALUE pin at the end of this
+    test — not a claim in this docstring. Comparing ``EVAL_RETRIEVAL_BUDGET_MS``
+    with a bound that is itself written in terms of
+    ``EVAL_RETRIEVAL_BUDGET_MS`` moves with it and asserts nothing; the earlier
+    revision of this docstring claimed a ``TIMEOUT_MAX`` falsifier that no
+    assertion here could have had (#10675 review P3).
     """
     from tools.longmem_eval.retrieve import retrieve_for_question
 
@@ -485,6 +490,20 @@ def test_the_differential_pins_the_eval_retrieval_budget(seeded_sdk,
     assert captured == [EVAL_RETRIEVAL_BUDGET_MS] * len(captured), (
         "the reads in this module must carry the eval's collective deadline; "
         f"got {captured} against {EVAL_RETRIEVAL_BUDGET_MS}")
+    # ⛔ A LITERAL ceiling, deliberately not a comparison against the constant
+    # itself — that is the only shape here that can red on the pin being raised
+    # too far, and it is what makes the headroom half non-vacuous. The lane's
+    # ``TIMEOUT_MAX`` does NOT degrade above the cap: the server REFUSES the
+    # query, so the leg ends in ``query_failed`` and lands on the same
+    # corpus-wide fallback the fixture above exists to keep out of the
+    # comparison (measured: 60000 -> fts + structural ``query_failed``).
+    assert EVAL_RETRIEVAL_BUDGET_MS < 30000, (
+        "the eval's retrieval deadline must stay under the private lane's "
+        "`TIMEOUT_MAX`, else a read is refused instead of degraded and the "
+        "arm comparison measures the refusal. Ceiling source: "
+        "tools/test_lane.py::LANE_FALKORDB_ARGS = "
+        "'THREAD_COUNT 8 TIMEOUT_MAX 30000' (the lane this module runs in). "
+        f"Got EVAL_RETRIEVAL_BUDGET_MS={EVAL_RETRIEVAL_BUDGET_MS}")
 
 
 def test_a_pair_served_by_different_legs_is_not_compared():

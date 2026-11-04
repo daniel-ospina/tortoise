@@ -28,6 +28,7 @@ constant) — no graph, no network.
 """
 from __future__ import annotations
 
+import ast
 import re
 import subprocess
 import sys
@@ -1166,8 +1167,19 @@ _GUARD_BLOCK = "# ── the " + "DELETED demo turn writer"
 #: Where the guard's machinery ENDS and the population file resumes. Excising
 #: from the header to EOF would leave every test appended after it unscanned —
 #: measured (round 12, P2): a present-tense claim appended at EOF stayed GREEN.
-_GUARD_END = ("def " +
-              "test_no_home_states_the_deleted_demo_turn_writer_as_current_fact(")
+#:
+#: ⛔ It ends the guard's BODY, not its ``def`` line. Ending at the ``def``
+#: prefix excised the header block only and returned the guard's own ~3.3 kB
+#: body — docstring, assertion messages and all — to the scanned population,
+#: which is the same self-grading the header excision exists to prevent, moved
+#: one block down: measured, an ordinary comment added inside the guard's body
+#: (``the demo seed writes `pointKind='event'` for each turn``) flipped the pin
+#: to RED on its own file (#10675 review P3).
+#:
+#: ⛔ Spelled as a CONCATENATION for the same reason as ``_GUARD_BLOCK``: the
+#: check below requires exactly ONE occurrence, and a self-matching literal
+#: here would split at this assignment.
+_GUARD_END = "# ── " + "END of the guard's machinery"
 
 
 def _narrative_text(rel: str) -> str:
@@ -1187,11 +1199,13 @@ def _narrative_text(rel: str) -> str:
             "grading its own commentary, so a reworded header must update "
             "`_GUARD_BLOCK` too")
         rest = parts[1]
-        assert _GUARD_END in rest, (
-            f"the guard's machinery end marker {_GUARD_END!r} was not found "
-            f"after the guard block in `{rel}` — without it the excision would "
-            "swallow every test below the guard, which is where a later lane "
-            "appends")
+        assert rest.count(_GUARD_END) == 1, (
+            f"the guard's machinery end marker {_GUARD_END!r} must occur "
+            f"exactly once after the guard block in `{rel}`; it occurs "
+            f"{rest.count(_GUARD_END)} time(s). Without exactly one, the "
+            "excision either swallows every test below the guard (which is "
+            "where a later lane appends) or returns the guard's own body to "
+            "the population, letting this pin grade its own commentary")
         raw = parts[0] + rest.split(_GUARD_END, 1)[1]
     return " ".join(raw.split())
 
@@ -1309,3 +1323,48 @@ def test_no_home_states_the_deleted_demo_turn_writer_as_current_fact():
                 "beside it, so the reader cannot tell the seed's `event` nodes "
                 "are a LEGACY population the conjunct is retained for. Got: "
                 f"...{window}...")
+
+
+# ── END of the guard's machinery — below this line the population resumes
+
+
+def test_the_population_scan_excludes_the_guards_own_body():
+    """The excision must end this guard's BODY, not its ``def`` line.
+
+    FAILS ON the shape that ended at the ``def`` prefix: that removed the header
+    block and returned the guard test's own body — docstring, assertion messages
+    and all — to the scanned population, so the pin graded its own commentary.
+    Measured there: an ordinary comment added inside the guard's body, naming
+    that writer as a present-tense producer of the legacy turn shape, flipped
+    the pin to RED on its own file with nothing pointing at the cause
+    (#10675 review P3).
+
+    The probe is the guard's OWN docstring, read through ``ast`` rather than
+    spelled here: a hard-coded sample would go stale the first time the
+    docstring is reworded, and this test would then pass for the wrong reason.
+    """
+    source = (_REPO / "tests/test_session_reinjection_rules.py").read_text(
+        encoding="utf-8")
+    guard = next(
+        (node for node in ast.parse(source).body
+         if isinstance(node, ast.FunctionDef) and node.name ==
+         "test_no_home_states_the_deleted_demo_turn_writer_as_current_fact"),
+        None)
+    assert guard is not None, (
+        "this file no longer defines the guard test the excision is written "
+        "for, so `_GUARD_END` names nothing and this pin would be vacuous")
+
+    doc = ast.get_docstring(guard) or ""
+    lines = [line.strip() for line in doc.splitlines() if line.strip()]
+    assert lines, (
+        "the guard test lost its docstring; this pin uses its first non-empty "
+        "line as body-only text the scanned population must NOT contain")
+    probe = lines[0]
+
+    flat = _narrative_text("tests/test_session_reinjection_rules.py")
+    assert probe not in flat, (
+        "the guard test's own body is back inside the scanned population — "
+        f"its docstring line {probe!r} was found. The excision ended at the "
+        "guard's `def` prefix instead of the END of its body, so this pin can "
+        "grade its own commentary (the round-10/11 self-grading class, returned "
+        "one block down)")
