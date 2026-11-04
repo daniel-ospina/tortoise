@@ -3145,6 +3145,21 @@ TOOL_CARVEOUTS = (
     "tools/ci_check_repair_launchd.py",
     "tools/ci-check-repair-local.sh",
     "tools/install-ci-check-repair-schedule.sh",
+    # #10930: tools/gh_write_preflight.py owns tests/test_gh_write_preflight.py — the arms that pin
+    # the ONLY two properties that make the preflight worth running: it can never announce
+    # GH-WRITE-OK for a credential that cannot write a PR (a false PASS sends a landing lane to merge
+    # and then fail silently at the closure step), and it never charges a rate limit or a service
+    # fault to the token. SAME silent-drop class as attest_census/ci_check_repair above: `tools/` is a
+    # flat NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row matches this tool, so a tool-only diff
+    # came back `surfaces: []`, `full: false` with `test_gh_write_preflight.py` ABSENT from
+    # `test_files` — select() took the docs-only early return (which bypasses the
+    # `if not matched: matched.add("core")` fallback). MEASURED on this change: a lane improving the
+    # tool (e.g. dropping the `_NoRedirect` handler) would have got a GREEN PR whose own 25 arms never
+    # ran, degrading the gate to the very false PASS it exists to prevent.
+    # Registering the TEST file under `core` in ci-surfaces.yml does NOT cover this: that applies to
+    # edits of the test file, not of the tool.
+    # Pinned by test_ci_selection.test_gh_write_preflight_tool_change_fails_closed_to_full.
+    "tools/gh_write_preflight.py",
 )
 
 

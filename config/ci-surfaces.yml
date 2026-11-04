@@ -2071,6 +2071,7 @@ surfaces:
   # fails closed to the FULL matrix), so this line makes the ownership explicit for
   # the file-level selection rather than relying on that fallback.
   - test_attest_census.py
+  - test_gh_write_preflight.py
   # #9964: the kind↔layer partition — `tortoise/kind_layers.py` is the ONE
   # authority (a new module: no SOURCE_PATTERNS entry, so a diff touching only it
   # falls through to `core`), `tortoise/sdk.py` is a SHARED_MODULE (full matrix,
