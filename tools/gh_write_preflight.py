@@ -1,0 +1,426 @@
+#!/usr/bin/env python3
+"""gh_write_preflight — prove THIS lane's credential can WRITE, before it does any work.
+
+WHY THIS EXISTS (measured 2026-11-04, issue #10930)
+───────────────────────────────────────────────────
+A landing lane on a cell reported: *"the lane's token cannot write to PRs (403 …)"*. It could read,
+verify trees, and decide — but **could not write**, and every closure it owed died there. The
+verdict comment it could not post is the `--evidence` artifact the merge rail reads, so the failure
+does not look like an error: a landing that merges and then cannot close its constituents is
+**indistinguishable from "landed and closed nothing"** — the exact failure mode the fleet spent the
+day fighting. A lane discovers this at the END, after the merge, when the closures are owed.
+
+⛔ THE TRAP THIS TOOL EXISTS TO AVOID — AND THAT ITS FIRST VERSION FELL INTO
+────────────────────────────────────────────────────────────────────────────
+**`Issues: write` and `Pull requests: write` are DIFFERENT permissions, and a PR comment uses the
+PR one.** On a fine-grained PAT they are granted separately. The verbatim evidence from #10930:
+
+    POST /repos/daniel-ospina/tortoise/issues/10902/comments  → 403 "Resource not accessible by personal access token"   (#10902 IS A PR)
+    POST /repos/daniel-ospina/tortoise/issues/10774/comments  → 201                                                       (#10774 is an ISSUE)
+    GET  /repos/daniel-ospina/tortoise/pulls/10902            → 200
+    GET  /repos/daniel-ospina/tortoise/issues/10902/comments   → 200
+
+Note those two comment calls are the **same endpoint** — `/issues/{n}/comments` — and differ only in
+whether `{n}` names a PR or an issue. A token with `Issues: write` and no `Pull requests: write`
+therefore comments on issues and is refused on PRs.
+
+⇒ **A probe that only touches an issue proves the wrong permission.** The first version of this tool
+deleted a repo label (an *issues* resource); it passes exactly the token this bug is about. This
+version probes **both surfaces independently** and refuses unless **both** are writable, naming
+which one is missing.
+
+WHAT IT PROBES, AND WHY EACH CHOICE IS THE ONE IT IS
+───────────────────────────────────────────────────
+1. **READ** — `GET /repos/{owner}/{repo}`. The *disambiguator*: without it a `404` from a write probe
+   could mean "no permission" or "you cannot see this repo", and those need different fixes. 200
+   here also yields `default_branch` for the pull probe.
+
+2. **ISSUES WRITE** — `POST /repos/{o}/{r}/issues` with an **empty body**.
+   MEASURED 2026-11-04: `422 Invalid request` when authorised, `403` when not. ⛔ **Zero side
+   effect by construction**: the payload fails validation, so no issue is created. No issue number
+   is needed, so it runs before the lane has chosen a target.
+
+3. **PULL REQUESTS WRITE** — `POST /repos/{o}/{r}/pulls` with a **deliberately non-existent head
+   ref** (`refs/heads/gh-write-preflight-<16 random hex>`) and the repo's default branch as base.
+   MEASURED: `422 Validation Failed` (`field: head, code: invalid`) when authorised, `403` when not.
+   ⛔ Zero side effect: the head ref cannot exist, so no PR can be created. (The random name is what
+   makes that a property rather than a hope.)
+
+   Alternatives rejected, with the measurement behind each:
+     * `DELETE .../labels/<name>` — this is what the FIRST version used. It is an **issues**
+       resource, so it passes a token with `Issues: write` and no `Pull requests: write` — i.e. it
+       cannot see this bug. Kept out on purpose.
+     * `POST .../issues/{n}/labels` with a real label — mutates, and notifies watchers.
+     * `POST .../issues/{n}/comments` — creates a notification even when deleted immediately, and
+       needs a target number.
+     * `GET /repos/{o}/{r}` → `.permissions` — **DOES NOT WORK, and this is the second trap.**
+       MEASURED: this same read-only-for-PRs token reports `{"admin":true,"maintain":true,
+       "push":true,"pull":true,"triage":true}`, because `permissions` describes the USER's access to
+       the repo, not the granular permissions the TOKEN carries. #10930's own body records the same
+       finding. Any preflight built on it passes the broken token.
+     * `X-Oauth-Scopes` — a real signal, but **only for classic/OAuth tokens**. A fine-grained PAT
+       (`github_pat_…`) sends **no scope header at all**, so absence of `repo` is not evidence.
+       The broken token in #10930 IS a fine-grained PAT (the box's `gh auth status` says so).
+
+4. **RATE LIMIT** — checked from the READ response *before* either write probe, and again from each
+   probe's own response. A `403` is either a permission refusal or a rate limit, and confusing them
+   wastes an hour the wrong way: re-minting a token does nothing for a rate limit, waiting does
+   nothing for a missing permission. The discriminator is the body plus the headers
+   (`x-ratelimit-remaining: 0`, `retry-after`), never the bare status code.
+
+REASONS (`GH-WRITE-UNAVAILABLE(<reason>)`), each with its own fix
+─────────────────────────────────────────────────────────────────
+  no-credential                no GH_TOKEN, no GITHUB_TOKEN, no github.com entry in hosts.yml
+  bad-credentials              401 — expired, revoked, or mistyped
+  repo-not-visible             404 on the READ probe
+  wrong-host                   GH_HOST names a host other than github.com
+  rate-limited                 403/429 with rate-limit wording / remaining==0 / retry-after
+                               NOT a permission problem — do not re-mint the token for it
+  server-error                 5xx from GitHub — a service fault, not a verdict about the token
+  token-read-only              403 "Resource not accessible by …" on BOTH surfaces
+  pull-requests-write-missing  issues writable, PRs refused  ← THE #10930 BUG
+                               fix: re-mint the fine-grained PAT with `Pull requests: write`
+  issues-write-missing         PRs writable, issues refused (a landing also closes issues)
+  sso-unauthorized             403 naming SAML/SSO — authorise the token for the org
+  forbidden                    4xx that is neither a permission refusal nor a known class (e.g. 410
+                               Issues-disabled, 400 from a proxy, 451) — NOT charged to the token
+  transport                    could not reach the API — NOT a verdict about the token
+  usage                        bad arguments
+
+USAGE
+─────
+  uv run python tools/gh_write_preflight.py --repo daniel-ospina/tortoise
+  uv run python tools/gh_write_preflight.py --repo "$OR" --json
+  GH_WRITE_PREFLIGHT_API=http://127.0.0.1:PORT uv run python tools/gh_write_preflight.py …   # test seam
+
+  exit 0 = GH-WRITE-OK(issues+pull-requests writable)    exit 1 = GH-WRITE-UNAVAILABLE(<reason>)
+
+The credential is NEVER printed, logged, or included in any output — not even truncated.
+"""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import json
+import os
+import secrets
+import sys
+import urllib.error
+import urllib.request
+
+DEFAULT_API = "https://api.github.com"
+TIMEOUT_S = 25
+
+# Probe outcomes that mean "the authorisation gate was PASSED and the request was merely invalid".
+# 422 is the measured answer for both probes; 200/201/204 would mean the request actually SUCCEEDED
+# (which for these payloads is impossible, so it is treated as a surprising-but-writable signal).
+_WRITE_OK = (200, 201, 204, 422)
+
+
+# ── credential resolution ────────────────────────────────────────────────────────────────────────
+# gh's OWN ORDER: GH_TOKEN, then GITHUB_TOKEN, then the config file. Reading the file beats asking
+# the binary (`gh auth token`): that is a subprocess on the critical path, and it would inherit the
+# same shim/host hazards this tool exists to report. Mirrors `objective.py::_gh_token` and
+# `pr-doctor.py::_gh_token` deliberately, so the three cannot disagree about who the lane is.
+def _hosts_path() -> str:
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    if xdg:
+        return os.path.join(xdg, "gh", "hosts.yml")
+    return os.path.expanduser("~/.config/gh/hosts.yml")
+
+
+def _token_from_hosts() -> tuple[str, str]:
+    """Return (token, login) from the ACTIVE (depth-1) github.com entry only.
+
+    A multi-account hosts.yml nests other logins under `users:` ABOVE the active account's own keys,
+    so taking the first `oauth_token` anywhere in the block returns a DIFFERENT identity's credential
+    (#2138 r4). gh's own layout puts the active account at depth 1.
+    """
+    try:
+        with open(_hosts_path(), encoding="utf-8", errors="replace") as fh:
+            lines = fh.readlines()
+    except OSError:
+        return "", ""
+    in_github = False
+    token = login = ""
+    for raw in lines:
+        line = raw.rstrip("\n")
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if not line[:1].isspace():                      # a depth-0 key starts a new host block
+            in_github = line.split(":", 1)[0].strip() == "github.com"
+            continue
+        if not in_github or not line.startswith("    ") or line.startswith("        "):
+            continue
+        stripped = line.strip()
+        if stripped.startswith("oauth_token:") and not token:
+            token = stripped.split(":", 1)[1].strip().strip("\"'")
+        elif stripped.startswith("user:") and not login:
+            login = stripped.split(":", 1)[1].strip().strip("\"'")
+    return token, login
+
+
+def resolve_credential() -> tuple[str, str]:
+    """Return (token, source). `source` is a LABEL, never a value."""
+    host = (os.environ.get("GH_HOST") or "github.com").strip().lower()
+    if host in ("github.com", "api.github.com"):
+        for var in ("GH_TOKEN", "GITHUB_TOKEN"):
+            tok = (os.environ.get(var) or "").strip()
+            if tok:
+                return tok, f"env:{var}"
+    tok, login = _token_from_hosts()
+    if tok:
+        return tok, f"hosts.yml:{(login or 'active')}"
+    return "", "none"
+
+
+def token_shape(tok: str) -> str:
+    """Classify the token TYPE from its documented prefix. Never the value."""
+    for prefix, label in (
+        ("github_pat_", "fine-grained-PAT (no OAuth scopes by design; permissions are per-resource)"),
+        ("ghp_", "classic-PAT (OAuth scopes apply)"),
+        ("gho_", "OAuth user-to-server (OAuth scopes apply)"),
+        ("ghs_", "server-to-server (OAuth scopes apply)"),
+        ("ghu_", "user-to-server (OAuth scopes apply)"),
+    ):
+        if tok.startswith(prefix):
+            return label
+    return "unrecognised prefix"
+
+
+# ── the probes ───────────────────────────────────────────────────────────────────────────────────
+def _request(url: str, token: str, method: str = "GET", body: bytes | None = None) -> tuple[int, dict, str]:
+    """One API call. Returns (status, headers-lowercased, body). Transport failure -> status 0."""
+    req = urllib.request.Request(url, data=body, method=method)
+    req.add_header("Authorization", f"Bearer {token}")
+    req.add_header("Accept", "application/vnd.github+json")
+    req.add_header("X-GitHub-Api-Version", "2022-11-28")
+    req.add_header("User-Agent", "gh-write-preflight/2")
+    if body is not None:
+        req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT_S) as resp:
+            return resp.status, {k.lower(): v for k, v in resp.headers.items()}, \
+                resp.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        payload = e.read().decode("utf-8", "replace") if e.fp else ""
+        return e.code, {k.lower(): v for k, v in (e.headers or {}).items()}, payload
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        return 0, {}, str(e)
+
+
+def _classify_403(headers: dict, body: str) -> tuple[str, str]:
+    """Distinguish a RATE LIMIT from a PERMISSION refusal. Order matters."""
+    low = (body or "").lower()
+    remaining = (headers.get("x-ratelimit-remaining") or "").strip()
+    retry_after = (headers.get("retry-after") or "").strip()
+    # Rate limit FIRST: mis-classifying it sends the operator to re-mint a perfectly good token.
+    if "rate limit" in low or "abuse detection" in low or "secondary rate" in low:
+        return "rate-limited", "the API named a rate limit in the refusal body"
+    if remaining == "0" or retry_after:
+        return "rate-limited", (f"no quota left (x-ratelimit-remaining={remaining or '?'}, "
+                                f"retry-after={retry_after or '?'})")
+    if "saml" in low or "sso" in low:
+        return "sso-unauthorized", "the refusal names SAML/SSO — the token is not authorised for the org"
+    # The exact wording GitHub uses when a FINE-GRAINED token lacks a resource permission.
+    if "resource not accessible" in low:
+        return "not-permitted", "the token lacks write on this resource ('Resource not accessible by …')"
+    return "forbidden", "403 with no rate-limit or SSO signal — see the body below"
+
+
+def _write_probe(url: str, token: str, body: bytes) -> dict:
+    """Run one write-surface probe. Returns {'ok': bool, 'reason': str, 'detail': str, 'status': int}."""
+    status, headers, payload = _request(url, token, method="POST", body=body)
+    if status == 0:
+        return {"ok": False, "reason": "transport", "detail": f"could not reach {url}: {payload[:160]}",
+                "status": 0}
+    if status in _WRITE_OK:
+        return {"ok": True, "reason": "permitted",
+                "detail": f"authorised (HTTP {status} — the payload was rejected, the permission was not)",
+                "status": status}
+    if status == 401:
+        return {"ok": False, "reason": "bad-credentials", "detail": "401 from the write probe", "status": status}
+    if status == 403:
+        reason, detail = _classify_403(headers, payload)
+        return {"ok": False, "reason": reason, "detail": detail, "status": status}
+    if status == 404:
+        return {"ok": False, "reason": "repo-not-visible", "detail": "404 from the write probe", "status": status}
+    # ⛔ AN HTTP 429 IS A RATE LIMIT REGARDLESS OF ITS BODY. It is NOT a permission refusal, and it
+    # must never fall through to the generic branch below — a 429 on the pulls surface would then be
+    # reported as `pull-requests-write-missing` and send the operator to re-mint a perfectly good
+    # token, which is the exact hour-wasting misdirection this tool exists to prevent.
+    if status == 429:
+        return {"ok": False, "reason": "rate-limited",
+                "detail": "HTTP 429 Too Many Requests — a shared-account limit, not a permission defect",
+                "status": status}
+    # ⛔ A 5xx IS GITHUB'S FAULT, NOT THE TOKEN'S. Reporting it as a permission verdict would charge
+    # an outage to the credential.
+    if status >= 500:
+        return {"ok": False, "reason": "server-error",
+                "detail": f"HTTP {status} from GitHub — a service fault, not a verdict about the token",
+                "status": status}
+    return {"ok": False, "reason": "forbidden", "detail": f"unexpected HTTP {status}: {payload[:200]}",
+            "status": status}
+
+
+def preflight(repo: str, api_base: str, token: str, source: str) -> dict:
+    result: dict = {
+        "repo": repo,
+        "credential_source": source,
+        "token_shape": token_shape(token) if token else "none",
+        "ok": False,
+        "reason": "",
+        "detail": "",
+        "surfaces": {},
+    }
+
+    gh_host = (os.environ.get("GH_HOST") or "").strip().lower()
+    if gh_host and gh_host not in ("github.com", "api.github.com"):
+        result.update(reason="wrong-host",
+                      detail=f"GH_HOST={gh_host!r} — this preflight, and the rail it protects, speak github.com")
+        return result
+
+    if not token:
+        result.update(reason="no-credential",
+                      detail="GH_TOKEN and GITHUB_TOKEN are unset and hosts.yml holds no active github.com token")
+        return result
+
+    # ── 1. READ: the disambiguator for any 404 that follows, and the source of default_branch.
+    status, headers, body = _request(f"{api_base}/repos/{repo}", token)
+    if status == 0:
+        result.update(reason="transport", detail=f"could not reach {api_base}: {body[:160]}")
+        return result
+    if status == 401:
+        result.update(reason="bad-credentials", detail="the API returned 401 — expired, revoked, or mistyped")
+        return result
+    if status == 404:
+        result.update(reason="repo-not-visible",
+                      detail=f"{repo} is not visible to this credential — an access question, not a write question")
+        return result
+    if status == 403:
+        reason, detail = _classify_403(headers, body)
+        result.update(reason=reason, detail=f"on the READ probe: {detail}")
+        return result
+    if status == 429:
+        result.update(reason="rate-limited",
+                      detail="HTTP 429 on the READ probe — a shared-account limit, not a permission defect")
+        return result
+    if status >= 500:
+        result.update(reason="server-error",
+                      detail=f"HTTP {status} on the READ probe — a GitHub service fault, not a verdict about the token")
+        return result
+    if status != 200:
+        result.update(reason="forbidden", detail=f"unexpected HTTP {status} on the read probe: {body[:160]}")
+        return result
+
+    result["read_ok"] = True
+    result["scopes"] = headers.get("x-oauth-scopes", "")      # classic/OAuth ONLY
+    result["ratelimit_remaining"] = (headers.get("x-ratelimit-remaining") or "").strip()
+
+    # ── 2. RATE LIMIT pre-check: never spend a write probe on an exhausted account, and never
+    #      report a permission defect for a bucket that will refill.
+    if result["ratelimit_remaining"] == "0":
+        result.update(reason="rate-limited",
+                      detail=f"x-ratelimit-remaining=0 on the read (reset={headers.get('x-ratelimit-reset', '?')}); "
+                             f"the token may be perfectly good — shared-account exhaustion, not a permission defect")
+        return result
+
+    default_branch = "main"
+    with contextlib.suppress(ValueError, AttributeError):
+        default_branch = json.loads(body).get("default_branch") or "main"
+
+    # ── 3. ISSUES WRITE — empty payload, so nothing can be created.
+    issues = _write_probe(f"{api_base}/repos/{repo}/issues", token, b"")
+    result["surfaces"]["issues"] = issues["status"]
+
+    # ── 4. PULL REQUESTS WRITE — a head ref that cannot exist, so no PR can be created.
+    bogus_head = f"gh-write-preflight-{secrets.token_hex(8)}"
+    pulls_body = json.dumps({"head": f"refs/heads/{bogus_head}", "base": default_branch,
+                             "title": "gh-write-preflight (never created)"}).encode()
+    pulls = _write_probe(f"{api_base}/repos/{repo}/pulls", token, pulls_body)
+    result["surfaces"]["pull_requests"] = pulls["status"]
+
+    issues_ok, pulls_ok = issues["ok"], pulls["ok"]
+
+    # ── 5. Verdict. ⛔ ONLY A `not-permitted` PROBE MAY PRODUCE A PERMISSION VERDICT.
+    # This is deliberately a ONE-item allow-list and not a list of known non-permission reasons.
+    # It used to be the latter, which meant every status nobody had thought of — a 410 (Issues
+    # disabled on the repo), a 400 from a proxy/WAF, a 451 — fell through to `forbidden` and was then
+    # PROMOTED to `pull-requests-write-missing` / `issues-write-missing`, sending the operator to
+    # re-mint a perfectly good token. A list of known-bad reasons fails open for the unknown ones;
+    # naming the ONE reason that is allowed to claim a missing permission fails closed instead.
+    for name, probe in (("issues", issues), ("pull_requests", pulls)):
+        if not probe["ok"] and probe["reason"] != "not-permitted":
+            result.update(reason=probe["reason"], detail=f"on the {name} surface: {probe['detail']}")
+            return result
+
+    if issues_ok and pulls_ok:
+        result.update(ok=True, reason="issues+pull-requests writable",
+                      detail=f"both write surfaces authorised (issues HTTP {issues['status']}, "
+                             f"pull_requests HTTP {pulls['status']})")
+        return result
+
+    # ── 6. Both refused → the token cannot write at all; one refused → name WHICH permission.
+    # Every probe reaching here is `not-permitted`, so the naming below is a real statement about
+    # which permission is missing rather than a guess about an unrecognised status.
+    if not issues_ok and not pulls_ok:
+        result.update(reason="token-read-only",
+                      detail=f"both write surfaces refused (issues HTTP {issues['status']}, "
+                             f"pull_requests HTTP {pulls['status']}): {pulls['detail']}")
+        return result
+    if not pulls_ok:
+        result.update(reason="pull-requests-write-missing",
+                      detail=f"issues are writable (HTTP {issues['status']}) but PULL REQUESTS are not "
+                             f"(HTTP {pulls['status']}: {pulls['detail']}) — a landing lane posts its verdict "
+                             f"comment on a PR, so it would fail at the closure step")
+        return result
+    result.update(reason="issues-write-missing",
+                  detail=f"pull requests are writable (HTTP {pulls['status']}) but ISSUES are not "
+                         f"(HTTP {issues['status']}: {issues['detail']}) — a landing also closes issues")
+    return result
+
+
+def main(argv: list[str]) -> int:
+    ap = argparse.ArgumentParser(
+        description="Prove this lane's credential can WRITE (issues AND pull requests) before it does any work.")
+    ap.add_argument("--repo", default=os.environ.get("OR", ""), help="owner/name (default: $OR)")
+    ap.add_argument("--api-base", default=os.environ.get("GH_WRITE_PREFLIGHT_API", DEFAULT_API),
+                    help="API base URL (test seam; default https://api.github.com)")
+    ap.add_argument("--json", action="store_true", help="emit the result as JSON")
+    args = ap.parse_args(argv)
+
+    if not args.repo or "/" not in args.repo:
+        print("GH-WRITE-UNAVAILABLE(usage) — pass --repo owner/name (or set $OR)")
+        return 1
+
+    token, source = resolve_credential()
+    res = preflight(args.repo, args.api_base.rstrip("/"), token, source)
+
+    if args.json:
+        print(json.dumps(res, indent=2, sort_keys=True))
+    elif res["ok"]:
+        print(f"GH-WRITE-OK({res['reason']}) — {res['detail']}")
+    else:
+        print(f"GH-WRITE-UNAVAILABLE({res['reason']}) — {res['detail']}")
+
+    if not res["ok"]:
+        print(f"  credential: {res['credential_source']} · shape: {res['token_shape']}", file=sys.stderr)
+        if res.get("surfaces"):
+            print(f"  surfaces: issues={res['surfaces'].get('issues')} "
+                  f"pull_requests={res['surfaces'].get('pull_requests')} "
+                  f"(422 = authorised+rejected, 403 = refused)", file=sys.stderr)
+        if res.get("scopes"):
+            print(f"  oauth scopes: {res['scopes']}", file=sys.stderr)
+        elif res["token_shape"].startswith("fine-grained"):
+            print("  oauth scopes: (none sent — fine-grained PATs carry PER-RESOURCE permissions, not scopes)",
+                  file=sys.stderr)
+        print("  fix per reason: pull-requests-write-missing→re-mint with `Pull requests: write` · "
+              "rate-limited→wait (shared account), do NOT re-mint · token-read-only→re-mint with write · "
+              "bad-credentials→re-source · no-credential→supply one · sso→authorise for org", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
