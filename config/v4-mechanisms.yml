@@ -786,7 +786,11 @@ mechanisms:
       and it was never a tolerance — the row said so: a unit WORD the engine's own
       `_UNIT_EQUIV` DECLARED was missing from `_UNIT_WORDS`, the set
       `_value_bindings` can FUSE, so the value was emitted with NO unit and a
-      unit-less side reads as "unit not stated" and FAILED OPEN. Measured on the
+      unit-less side reads as "unit not stated" and FAILED OPEN. ⚠️ That is the
+      TIME family (`minute`/`second`/`seconds`/`hour`/`millisecond(s)`/`msec(s)`/
+      `ms`) — DECLARED but unfused; `mile`/`miles` were in NEITHER table before
+      this change and are added onto the existing `mi` identity, which mints no
+      new identity. Both ended in the same fail-open. Measured on the
       shipped tree: `the TTL is 20 minutes` against the quote `the TTL is 20
       seconds` gave `('ttl', '20minutes')` vs `('ttl', '20')` and
       `_value_slot_divergence()` == `()` — a minutes→seconds rewrite, the

@@ -6130,13 +6130,13 @@ _UNIT_WORDS = frozenset({
     "s", "sec", "secs", "minutes", "hours",
     # ⛔ The SINGULAR/spelling forms of the SAME identities (#10360). This set is
     # what `_value_bindings` can FUSE; `_UNIT_EQUIV` is what this module KNOWS.
-    # The two disagreed: the table declared `minute`/`second`/`seconds`/`hour`/
-    # `millisecond(s)`/`msec(s)`/`mile(s)` and this set carried only some of
-    # their spellings (`minutes`/`hours` plural, `min`/`hr`/`sec` abbreviated),
-    # so `_value_bindings` emitted the value with NO unit on the missing side
-    # and `_value_identity_matches` read that as "unit not stated" and FAILED
-    # OPEN. Measured: `the TTL is 20 minutes` against the quote
-    # `the TTL is 20 seconds` produced `_value_slot_divergence()` == `()` — a
+    # The TIME family (`minute`/`second`/`seconds`/`hour`/`millisecond(s)`/`msec(s)`/`ms`)
+    # was DECLARED there and missing here (`minutes`/`hours` were carried; the
+    # singular forms and `ms` were not). `mile`/`miles` were in NEITHER table —
+    # both carried `mi` alone — and are ADDED here onto that existing identity,
+    # minting no new one. Either gap emitted the value with NO unit, which reads
+    # as "unit not stated" and FAILED OPEN. Measured: `the TTL is 20 minutes`
+    # against the quote `the TTL is 20 seconds` produced `_value_slot_divergence()` == `()` — a
     # minutes→seconds rewrite, the carve-out's literal prohibition, recorded as
     # verbatim. The SAME class was already refused for `20 minutes`/`40 minutes`,
     # so the gap was an inconsistency between the two tables, not a tolerance
