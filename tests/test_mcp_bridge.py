@@ -93,6 +93,41 @@ def test_no_artifact_restates_the_refuted_capture_mechanism():
             f"{name} must name what is actually frozen: process.env")
 
 
+def test_the_timeout_knob_is_declared_and_matches_the_code_default():
+    """`TORTOISE_MCP_BRIDGE_TIMEOUT` is read by the bridge and declared NOWHERE else.
+
+    #10727 review (residual): the knob was read at `main()` and named only inside a
+    comment in this module — not in `.env.example`, which this repo treats as its
+    env CONTRACT (`AGENTS.md`), and not in §8a, the one recipe a harness operator
+    follows. So the operator who hits a legitimately slow call had a knob they
+    could not find, and the only documented reading of a timeout was "outage".
+
+    The value is pinned too, not just the name: a declared default that disagrees
+    with `_DEFAULT_TIMEOUT` is the same drift one layer down, and it is the copy an
+    operator will trust.
+    """
+    import re
+
+    import tortoise.mcp_bridge as bridge_module
+
+    env_text = (REPO_ROOT / ".env.example").read_text(encoding="utf-8")
+    assert "TORTOISE_MCP_BRIDGE_TIMEOUT" in env_text, (
+        ".env.example is this repo's env contract and does not declare the "
+        "bridge's only knob")
+    declared = re.search(r"^#\s*TORTOISE_MCP_BRIDGE_TIMEOUT=(\S+)\s*$", env_text, re.M)
+    assert declared, (
+        ".env.example must show the knob's real default on its declaration line")
+    assert float(declared.group(1)) == bridge_module._DEFAULT_TIMEOUT, (
+        f".env.example declares {declared.group(1)}, the code defaults to "
+        f"{bridge_module._DEFAULT_TIMEOUT}")
+
+    split_doc = (REPO_ROOT / "docs" / "client-server-split.md").read_text(
+        encoding="utf-8")
+    assert "TORTOISE_MCP_BRIDGE_TIMEOUT" in split_doc, (
+        "§8a is the operator's recipe for the bridge; it must name the knob that "
+        "answers a slow call")
+
+
 # ── A spec-shaped Streamable-HTTP upstream that records what it receives ──────
 
 

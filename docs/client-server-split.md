@@ -267,6 +267,12 @@ the same class reached by a variable-name mismatch).
    Server text is quoted as evidence, but a credential VALUE echoed back by the
    server is redacted before it reaches the harness's transcript or logs.
 
+   One operational knob: `TORTOISE_MCP_BRIDGE_TIMEOUT` is the seconds allowed per
+   forwarded request (default 120, declared in `.env.example`). It is generous on
+   purpose because a `tortoise_search` carries the server's own wait budget; a
+   legitimately slow call is answered by raising it, not by reading the resulting
+   timeout as an outage. A malformed value falls back to the default.
+
 **WHICH SOURCE IS ACTUALLY LIVE — stated, because "reads the live environment" is
 too generous.** The bridge is a CHILD process, so its environment is a snapshot
 of the harness's at spawn: a key exported in another shell after the session
