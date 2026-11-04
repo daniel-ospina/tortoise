@@ -17,10 +17,16 @@ snapshot warning marks as per-box and short-lived.)
 """
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
+import os
+import re
+import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 TOOL = Path(__file__).resolve().parent.parent / "tools" / "attest_census.py"
 
@@ -389,8 +395,6 @@ def test_the_filename_lookup_is_case_insensitive_like_gh(tmp_path):
 
 
 def test_an_unreadable_registry_raises_instead_of_reporting_absence(tmp_path):
-    import pytest
-
     with pytest.raises(ac.RegistryUnreadable):
         ac.load_record(tmp_path / "does-not-exist", "daniel-ospina", "tortoise", 1)
 
@@ -618,6 +622,167 @@ def test_an_unwritable_out_path_is_rc_2_not_a_traceback(monkeypatch, tmp_path):
     assert ac.main(["--reviews-dir", str(tmp_path), "--out", str(blocker / "o.md")]) == 2
 
 
+def test_a_c_locale_cannot_turn_a_good_run_into_exit_1(tmp_path):
+    """The artifact's BYTES must not depend on the ambient locale, and no encoding failure may
+    escape as rc 1 — the published contract is `0`/`2`, never `1`.
+
+    Measured shape (review cycle 14, the finding this test closes): under
+    `LC_ALL=C PYTHONCOERCECLOCALE=0 PYTHONUTF8=0`, `Path.write_text(text)` with NO `encoding=`
+    raises `UnicodeEncodeError` — a `ValueError`, **not** an `OSError` — so the `except OSError`
+    around the write let it escape as a traceback and rc 1, AFTER a run that had already read
+    everything correctly. A branch name or a `gh` stderr line carrying one non-ASCII character is
+    the whole trigger, and the file would otherwise have been the report every downstream reader
+    consumes (the pinned markdownlint, `verify_census_document`, a lane grepping rows): UTF-8 by
+    contract, so its encoding cannot be whatever the invoking shell happened to export.
+
+    Runs the real entry point in a subprocess on purpose: the default encoding of `open()` is
+    decided by the C library at interpreter start-up and cannot be monkeypatched in-process, so an
+    in-process test could not fail here. A `gh` shim supplies the payload — no network.
+    """
+    shim = tmp_path / "bin"
+    shim.mkdir()
+    payload = json.dumps(
+        [{"number": 5, "headRefOid": LIVE, "headRefName": "fix/naïve-ünicode", "title": "t"}]
+    )
+    gh = shim / "gh"
+    gh.write_text("#!/bin/sh\nprintf '%s' '" + payload + "'\n", encoding="utf-8")
+    gh.chmod(0o755)
+    reviews = tmp_path / "reviews"
+    reviews.mkdir()
+    out = tmp_path / "o.md"
+    # Drop every locale/encoding variable the ambient shell may export, then force the C locale:
+    # a leftover `PYTHONIOENCODING`/`PYTHONUTF8` would make this test vacuous on the box that runs it.
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if k not in ("PYTHONIOENCODING", "PYTHONUTF8", "PYTHONCOERCECLOCALE", "LC_ALL", "LANG")
+    }
+    env.update(
+        {
+            "PATH": shim.as_posix() + os.pathsep + env.get("PATH", ""),
+            "LC_ALL": "C",
+            "LANG": "C",
+            "PYTHONCOERCECLOCALE": "0",
+            "PYTHONUTF8": "0",
+        }
+    )
+    proc = subprocess.run(
+        [sys.executable, str(TOOL), "--reviews-dir", str(reviews), "--no-gate", "--out", str(out)],
+        cwd=str(tmp_path),
+        env=env,
+        capture_output=True,
+        timeout=120,
+    )
+    assert proc.returncode == 0, (
+        f"a C-locale box turned a good run into rc {proc.returncode} "
+        f"(contract: 0 or 2, never 1)\nstdout={proc.stdout[-2000:]!r}\nstderr={proc.stderr[-2000:]!r}"
+    )
+    assert out.exists(), f"rc 0 but no report was written: {sorted(p.name for p in tmp_path.iterdir())}"
+    # Decoded as UTF-8 deliberately: mojibake or a locale-encoded byte would not decode here.
+    assert "naïve-ünicode" in out.read_bytes().decode("utf-8")
+
+
+def test_cell_sanitises_a_lone_surrogate_so_the_document_stays_encodable():
+    """The digest, the file write and the stdout all encode — so one unencodable code point
+    anywhere in a dynamic cell killed a census that had read everything correctly.
+
+    MEASURED (review cycle 15): RFC 8259 permits a lone surrogate, `json.loads` accepts one, and a
+    hand-written record carrying `"evidence": "comment:1 \\ud800"` reached the table. `_content_digest`
+    encodes the WHOLE document, so `.encode("utf-8")` raised `UnicodeEncodeError` inside `render()`
+    — BEFORE the `except (OSError, ValueError)` around the write could see it — and the tool exited
+    1, the one code this file publishes as impossible. `print(text)` raised on the same code point.
+
+    Mutation proof: remove the `.encode("utf-8", "backslashreplace")` half of `_cell` and the
+    `render(...)` call below raises `UnicodeEncodeError` instead of returning a document.
+    """
+    sanitised = ac._cell("comment:1 \ud800")
+    sanitised.encode("utf-8")  # the encode that used to raise, one layer down
+    assert "\\ud800" in sanitised, "the evidence must stay READABLE, not silently dropped"
+
+    record = ac.Record(
+        path=Path("daniel-ospina-tortoise-5.json"),
+        head_sha=LIVE,
+        mint="fresh",
+        verdict="clean",
+        evidence="comment:1 \ud800",
+    )
+    row = ac.Row(
+        pr=5,
+        head=LIVE,
+        branch="b\ud800",
+        title="t\ud800",
+        record=record,
+        gate_status="completed",
+        gate_conclusion="failure",
+        gate_checked=True,
+    )
+    row.outcome, row.why = ac.classify(LIVE, record, "completed", "failure")
+    assert row.why, "precondition: the surrogate must actually reach a rendered cell"
+
+    text = ac.render([row], "daniel-ospina/tortoise", "2026-11-04T00:00:00Z")
+    text.encode("utf-8")  # `_content_digest`'s own encode: this is the line that used to raise
+    assert ac.verify_census_document(text) == "", "and the document must still prove its provenance"
+
+
+def test_an_unrenderable_character_is_rc_2_not_a_traceback(monkeypatch, tmp_path):
+    """The belt behind `_cell`: a value that reaches `render` WITHOUT passing a cell (argv, e.g.
+    `--repo $'\ud800'`) must still land inside the published `0`/`2` contract.
+
+    Before the guard, `render` was called OUTSIDE every handler, so its `ValueError` escaped `main`
+    as a traceback and rc 1. Pins the exit code, not the message.
+    """
+
+    def _boom(*_args, **_kwargs):
+        raise UnicodeEncodeError("utf-8", "x\ud800", 0, 1, "surrogates not allowed")
+
+    monkeypatch.setattr(ac, "gh_json", lambda args: [])
+    monkeypatch.setattr(ac, "render", _boom)
+    assert ac.main(["--reviews-dir", str(tmp_path), "--no-gate", "--out", str(tmp_path / "o.md")]) == 2
+    assert not (tmp_path / "o.md").exists()
+
+
+def test_a_lone_surrogate_in_a_record_cannot_turn_a_good_census_into_exit_1(tmp_path):
+    """The end-to-end measurement of the same defect: the REAL entry point, a record on disk whose
+    evidence carries a lone surrogate, `gh` shimmed — no network.
+
+    Runs in a subprocess because the claim under test is the process's EXIT CODE (`0`/`2`, never
+    `1`), which an in-process assertion can only approximate. On the pre-fix tree this returns 1
+    with a `UnicodeEncodeError` traceback and writes no report.
+    """
+    shim = tmp_path / "bin"
+    shim.mkdir()
+    payload = json.dumps([{"number": 5, "headRefOid": LIVE, "headRefName": "b", "title": "t"}])
+    gh = shim / "gh"
+    gh.write_text("#!/bin/sh\nprintf '%s' '" + payload + "'\n", encoding="utf-8")
+    gh.chmod(0o755)
+    reviews = tmp_path / "reviews"
+    reviews.mkdir()
+    # Written as literal JSON text on purpose: `\ud800` is a legal RFC 8259 escape, which is
+    # exactly why a hand-written or `gh`-relayed record can carry one.
+    (reviews / "daniel-ospina-tortoise-5.json").write_text(
+        '{"repo":"daniel-ospina/tortoise","pr":5,"head_sha":"' + LIVE + '","mint":"fresh",'
+        '"verdict":"clean","evidence":"comment:1 \\ud800"}',
+        encoding="utf-8",
+    )
+    out = tmp_path / "o.md"
+    env = dict(os.environ)
+    env["PATH"] = shim.as_posix() + os.pathsep + env.get("PATH", "")
+    proc = subprocess.run(
+        [sys.executable, str(TOOL), "--reviews-dir", str(reviews), "--no-gate", "--out", str(out)],
+        cwd=str(tmp_path),
+        env=env,
+        capture_output=True,
+        timeout=120,
+    )
+    assert proc.returncode == 0, (
+        f"a lone surrogate in a record turned a good run into rc {proc.returncode} "
+        f"(contract: 0 or 2, never 1)\nstdout={proc.stdout[-2000:]!r}\nstderr={proc.stderr[-2000:]!r}"
+    )
+    text = out.read_bytes().decode("utf-8")
+    assert "\\ud800" in text, "the sanitised evidence must appear, so the row still says what it read"
+    assert ac.verify_census_document(text) == "", "and the written report must still verify"
+
+
 def test_no_gate_does_not_overwrite_a_record_present_reason(monkeypatch, tmp_path):
     """A record-present NOTHING row keeps its own reason (evidence-less), not "no record".
 
@@ -648,9 +813,6 @@ def test_an_absent_gate_run_is_not_reported_as_a_marker_absence(monkeypatch, tmp
     assert ac.main(["--reviews-dir", str(tmp_path), "--out", str(tmp_path / "o.md")]) == 0
     text = (tmp_path / "o.md").read_text()
     assert "gate reported nothing readable on this head" in text
-    # ⛔ the phrase the TOOL actually emits (cycle 5: the old `"and no head-bound …"` matched
-    # nothing the tool can print, so the assertion that reads as the guard could not fail).
-    assert "found no head-bound published marker" not in text
 
 
 def test_the_positive_marker_clause_does_fire_when_the_gate_reported_red(monkeypatch, tmp_path):
@@ -669,7 +831,6 @@ def test_the_positive_marker_clause_does_fire_when_the_gate_reported_red(monkeyp
     # fails before reading markers when its key is unset, when every candidate fails HMAC, when
     # the comment fetch 403s, or when the diff hash cannot be computed.
     assert "whether a published marker exists is answered by the gate's own annotation" in text
-    assert "found no head-bound published marker" not in text
 
 
 def test_a_directory_named_like_a_record_is_unreadable_not_a_crash(tmp_path):
@@ -697,7 +858,21 @@ def test_no_gate_run_does_not_assert_a_github_absence_it_never_read(monkeypatch,
     assert ac.main(["--reviews-dir", str(tmp_path), "--no-gate", "--out", str(tmp_path / "o.md")]) == 0
     text = (tmp_path / "o.md").read_text()
     assert "published-marker surface was NOT" in text
-    assert "found no head-bound published marker" not in text
+
+
+def test_the_unqualified_marker_absence_claim_cannot_reappear_in_the_emitter():
+    """Cycle 5 removed a sentence that read as a guard but could not fail, and left the same
+    defect behind: three tests asserted an "absence" phrase NO code path can emit, so those
+    lines held on every tree, including one that had re-introduced the claim.
+
+    The claim they meant to forbid is real — telling a reader "no marker was ever published"
+    when the gate never read markers (cycle 3) or failed before reading them (cycle 6) — so the
+    pin lives where it CAN fail: the emitter's own source. Putting the phrase back into
+    `tools/attest_census.py` reds this; the runtime tests above assert the QUALIFIED clauses that
+    must actually appear (`gate reported nothing readable on this head`, `whether a published
+    marker exists is answered by the gate's own annotation`, `published-marker surface was NOT`).
+    """
+    assert "found no head-bound published marker" not in TOOL.read_text()
 
 
 def test_a_record_declaring_another_pr_AS_A_STRING_is_never_evidence(tmp_path):
@@ -784,3 +959,416 @@ def test_gh_json_wraps_a_non_json_answer_as_runtime_error(monkeypatch):
         assert "non-JSON" in str(exc)
     else:
         raise AssertionError("a non-JSON answer must raise RuntimeError (contract: never exit 1)")
+
+
+def test_an_old_interpreter_is_refused_with_exit_2_and_an_attributable_message(monkeypatch, capsys):
+    """The #5128 guard's CODE, which the class-wide gate (`test_entry_point_python_guard.py`)
+    deliberately does not decide per tool.
+
+    Its shape and message are gated there; its exit code is this file's own contract. `classify`
+    publishes 0 completed / 2 unreadable — "never 1, so a caller cannot mistake 'unreadable' for
+    'found a problem'" — and `raise SystemExit(<str>)` exits 1. So the guard is compiled from the
+    tool's own AST and EXECUTED at a simulated 3.9, asserting the code and the attribution: it
+    refuses rc-1 and a silent refusal, the two ways an old interpreter could read as a verdict.
+    """
+    tree = ast.parse(TOOL.read_text())
+    guard = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.If) and "version_info" in ast.unparse(node.test)
+    )
+    module = ast.Module(body=[guard], type_ignores=[])
+    ast.fix_missing_locations(module)
+    code = compile(module, "tools/attest_census.py", "exec")
+
+    monkeypatch.setattr(sys, "version_info", (3, 9, 6))
+    with pytest.raises(SystemExit) as refusal:
+        exec(code, {"__name__": "__main__", "sys": sys})
+    message = str(refusal.value) + capsys.readouterr().err
+    assert refusal.value.code == 2, f"must not exit 1 (rc 1 is the tool's forbidden status): {message!r}"
+    assert ">= 3.12" in message and "(got 3.9)" in message, f"unattributable refusal: {message!r}"
+    assert "uv run python tools/attest_census.py" in message, f"must name the working form: {message!r}"
+
+
+# ── MD036: the report's shape is gated by the REQUIRED `docs` check (#10687) ─────────
+#
+# `render` writes `operations/attest-census.md`, a COMMITTED artifact. It therefore sits
+# in the changed-markdown set of every PR that regenerates it, is linted WHOLE by the
+# `docs` job's pinned `markdownlint-cli2@0.23.3`, and a finding in it is `new` against
+# `config/docs-lint-baseline.json` — which under #7435's Option 1 (the snapshot is a
+# CEILING, not an amnesty) is a real failure. The totals line used to be
+# `f"**{totals}**"`, a paragraph consisting ENTIRELY of emphasis = MD036, so ANY change
+# that re-ran the census reddened a required check on a finding it did not write.
+
+# `markdownlint@0.41.1` `helpers/helpers.cjs:41` `allPunctuation`, VERBATIM — the rule
+# builds `new RegExp("[" + punctuation + "]$")` from it (`lib/md036.mjs:29-30`). Note it
+# has NO ellipsis and DOES carry six full-width marks: an earlier hand-written
+# `".,;:!?…"` was wrong in both directions and measured so (`**Foo bar…**` FIRES,
+# `**Foo bar。**` does not).
+_MD036_PUNCTUATION = ".,;:!?。，；：！？"
+
+# `md036.mjs:45-46` fires only when the emphasis TEXT token has exactly one child and it
+# is `data`. A code span, link, autolink or NESTED emphasis adds a child, so the paragraph
+# is not a heading candidate (measured: `**Foo *bar* baz**`, `_Foo **bar**_`,
+# `**Foo `code` bar**` and `**Foo [l](u)**` are all clean).
+_MD036_INLINE_MARKUP = "`[]<*"
+
+
+def _emphasis_only_paragraphs(text: str) -> list[str]:
+    """Return the paragraphs in `text` that MD036 fires on.
+
+    A PROXY for the pinned linter, not a reimplementation of markdownlint: the AUTHORITY
+    is the `docs` job. It is pinned to 21 measured shapes in
+    `test_the_md036_model_matches_the_measured_linter`; if the two ever disagree, this
+    model is what is wrong.
+
+    It models the rule's three conditions (`lib/md036.mjs`):
+      * the paragraph must have ONE meaningful child — i.e. the whole paragraph is one
+        emphasis span, so a PARAGRAPH is judged, not a line (`**Foo**\\nbar` is two
+        children and is clean). Non-paragraph lines are skipped: headings, blockquotes,
+        table rows, list items (`* ` with the SPACE — `*Foo*` is emphasis, not a bullet),
+        and code.
+      * the emphasis text must be plain: `_MD036_INLINE_MARKUP` absent, and at most one
+        `_` (a single intraword underscore stays `data` — `**a_b**` FIRES).
+      * the text must not end in `_MD036_PUNCTUATION`.
+    Delimiters are tried longest-first so `**` wins over `*`.
+
+    A 4-space line is indented code only at the START of a paragraph: after a paragraph
+    line it is a LAZY CONTINUATION, so `**Foo**\\n    bar` is one two-child paragraph and
+    is clean (measured).
+    """
+    offenders: list[str] = []
+    paragraph: list[str] = []
+    in_fence = False
+
+    def flush() -> None:
+        if not paragraph:
+            return
+        joined = "\n".join(paragraph).strip()
+        paragraph.clear()
+        for marker in ("**", "__", "*", "_"):
+            if len(joined) <= 2 * len(marker):
+                continue
+            if not (joined.startswith(marker) and joined.endswith(marker)):
+                continue
+            inner = joined[len(marker) : -len(marker)]
+            if not inner.strip():
+                return
+            if any(ch in inner for ch in _MD036_INLINE_MARKUP) or inner.count("_") > 1:
+                return
+            if not inner.rstrip().endswith(tuple(_MD036_PUNCTUATION)):
+                offenders.append(joined)
+            return
+
+    for raw in [*text.splitlines(), ""]:
+        s = raw.strip()
+        if s.startswith("```"):
+            in_fence = not in_fence
+            flush()
+            continue
+        if in_fence:
+            continue
+        is_bullet = len(s) > 1 and s[0] in "-+*" and s[1] == " "
+        indented_code = not paragraph and (raw.startswith("    ") or raw.startswith("\t"))
+        if not s or indented_code or s.startswith(("#", ">", "|")) or is_bullet:
+            flush()
+            continue
+        paragraph.append(s)
+    return offenders
+
+
+# Every shape below was MEASURED with the `docs` job's own producer
+# (`markdownlint-cli2@0.23.3`, repo config) over a real file under `operations/`, each run
+# confirming `Linting: 1 file`. That check is not ceremony: a copy outside the lint root
+# reports `Linting: 0 files` and a vacuous 0-issue "pass", which is how the first attempt
+# at this verification nearly went.
+_MD036_FIRES = [
+    "_Foo bar baz_",  # underscore emphasis — a `*`-only model missed this
+    "__Foo bar baz__",
+    "**Foo bar baz**",
+    "*Foo bar baz*",
+    "**Foo bar…**",  # ellipsis is NOT in the rule's punctuation set, so this FIRES
+    "**a_b**",  # one intraword underscore is still plain `data`
+]
+_MD036_CLEAN = [
+    "**Totals:**",  # ends in `:` — the shape this PR introduces
+    "**Totals:** RE-REVIEW=5",  # text outside the span: two children
+    "**Foo bar baz...**",  # punctuation
+    "**Foo bar baz.**",  # punctuation
+    "**Foo bar。**",  # full-width punctuation IS in the set
+    "**Foo**\nbar",  # one paragraph, two meaningful children
+    "**Foo**\n    bar",  # 4 spaces after a paragraph line is a LAZY CONTINUATION
+    "    **Indented code**",  # code block
+    "> **In a quote**",  # not a top-level paragraph
+    "- **In a list**",  # not a paragraph
+    "****",  # empty span
+    "**Foo *bar* baz**",  # nested emphasis -> more than one child
+    "_Foo **bar**_",  # nested strong -> more than one child
+    "**Foo `code` bar**",  # code span -> more than one child
+    "**Foo [l](u)**",  # link -> more than one child
+]
+
+
+def test_the_md036_model_matches_the_measured_linter():
+    """Pin the proxy above to the pinned linter's MEASURED boundary.
+
+    If markdownlint's rule changes, THIS test is what notices that the proxy and the gate
+    have parted company — rather than a docstring continuing to claim an agreement that
+    no longer holds.
+    """
+    for body in _MD036_FIRES:
+        assert _emphasis_only_paragraphs(f"Prose.\n\n{body}\n\n|x|\n|-|\n"), f"must fire (measured): {body!r}"
+    for body in _MD036_CLEAN:
+        assert not _emphasis_only_paragraphs(f"Prose.\n\n{body}\n\n|x|\n|-|\n"), f"measured clean: {body!r}"
+def test_the_report_never_renders_an_emphasis_only_paragraph():
+    """#10687: the required `docs` check was RED on this PR's own regenerated census.
+
+    Pinned as the CLASS, not the one line that broke: `render` builds ~20 lines and a
+    future one could reintroduce MD036 without touching the totals. The summary is also
+    asserted to be LABELLED — the label is what clears the rule, and it says what the
+    numbers are (they were previously unlabelled totals a reader had to infer).
+    """
+    ac = _load()
+
+    rows = [
+        ac.Row(pr=1, head=LIVE, branch="b", title="t", record=None, outcome=ac.IN_FLIGHT, why="w"),
+        ac.Row(pr=2, head=LIVE, branch="b", title="t", record=None, outcome=ac.OK, why="w"),
+    ]
+    text = ac.render(rows, "o/r", "2026-11-03T00:00:00Z", truncated=True, limit=1)
+    offenders = _emphasis_only_paragraphs(text)
+    assert not offenders, f"render() emits an MD036 paragraph — the `docs` gate reds on it: {offenders}"
+
+    # The summary is LABELLED, and its content is the totals it always carried.
+    assert "**Totals:** IN-FLIGHT=1 · OK=1" in text, text
+
+    # An empty census has no totals, and a blank `**Totals:**` is a malformed report:
+    # the run read nothing and must say so rather than render a bare label.
+    empty = ac.render([], "o/r", "2026-11-03T00:00:00Z")
+    assert "**Totals:** no rows" in empty, empty
+    assert not _emphasis_only_paragraphs(empty), empty
+
+
+def test_a_pipe_in_a_record_field_cannot_break_the_table():
+    """#10687: registry and `gh` text reached `render` unescaped.
+
+    `evidence`, `verdict` and `mint` are read straight out of a record JSON on disk, and
+    `why` embeds `gh`'s MULTI-LINE stderr. A `|` emitted an extra table cell — measured
+    with the pinned linter, an `evidence` of `"comment:1 | injected"` produced
+    `MD056/table-column-count [Expected: 10; Actual: 11]`, the same "a regenerated census
+    reds the required `docs` check on a finding the lane did not write" class this PR
+    exists to close, plus silent column-shifting in a document lanes read to decide
+    RE-POST vs RE-REVIEW.
+
+    Three inputs are here because each was a SEPARATE leak, found in a separate cycle:
+      * `head` — `gh`'s `headRefOid`, rendered even when it is not a sha (the UNREADABLE
+        path), and escaped INSIDE its code span because a GFM table splits cells BEFORE
+        inline parsing.
+      * a value already containing `\\|` — escaping `|` alone turns it into `\\\\|`, an
+        escaped backslash plus a LIVE delimiter.
+      * a multi-line `why` — a raw newline breaks out of the bullet it was written into.
+    """
+    ac = _load()
+
+    rec = ac.Record(
+        path=Path("/tmp/daniel-ospina-tortoise-1.json"),
+        head_sha=LIVE,
+        mint="fresh",
+        verdict="clean | sneaky",
+        evidence="comment:1 | injected " + "\\" + "| tail",
+    )
+    row = ac.Row(
+        pr=1,
+        head="abc|def",  # not a sha: reachable via the UNREADABLE path
+        branch="b | c",
+        title="t",
+        record=rec,
+        outcome=ac.RE_REVIEW,
+        why="check-run read failed: gh pr view\n  failed rc=1: boom | splat",
+        notes=["note with | pipe\nand a newline"],
+    )
+    text = ac.render([row], "o/r", "2026-11-03T00:00:00Z")
+
+    def cells(line: str) -> int:
+        """Count live delimiters, not every `|`.
+
+        A naive `line.count("|")` counts the escaped ones too and measures nothing, and
+        "preceded by a backslash means escaped" shares `_cell`'s original blind spot: `\\|`
+        is an ESCAPED BACKSLASH followed by a LIVE delimiter, so a pipe is escaped only
+        after an EVEN run of backslashes (#10687 cycle 2).
+        """
+
+        def escaped(i: int) -> bool:
+            n = 0
+            while i - n - 1 >= 0 and line[i - n - 1] == "\\":
+                n += 1
+            return n % 2 == 1
+
+        return sum(1 for i, ch in enumerate(line) if ch == "|" and not escaped(i)) - 1
+
+    # No cell is injected: every table row carries the header's cell count.
+    header = next(ln for ln in text.splitlines() if ln.startswith("| PR |"))
+    width = cells(header)
+    for ln in text.splitlines():
+        if ln.startswith("| #"):
+            assert cells(ln) == width, f"row does not have {width} cells: {ln!r}"
+    # And the injected pipes survive as escaped DATA rather than becoming structure.
+    assert "comment:1 \\| injected" in text, text
+    assert "clean \\| sneaky" in text, text
+    assert "abc\\|def" in text, text
+
+    # A multi-line `why`/note cannot break out of its bullet.
+    assert "\n  failed rc=1" not in text, text
+    assert "\nand a newline" not in text, text
+
+
+@pytest.mark.parametrize("hostile", ["comment:1 | injected", "comment:1" + "\\" + "|x", "a\nb|c"])
+def test_the_pinned_linter_accepts_the_rendered_table(hostile, tmp_path):
+    """The assertion above counts cells with a helper; this asserts the LINTER agrees.
+
+    Two independent checks on purpose: the helper is a model, the pinned markdownlint is the
+    gate, and `test_the_md036_model_matches_the_measured_linter` exists precisely because a
+    model and its gate can drift. This one writes the rendered report to a file the linter
+    linted and asserts on its OWN verdict — `Linting: 1 file` included, so a run that linted
+    nothing cannot pass as clean. Skipped where the pinned linter is not installed (the unit
+    suite is hermetic; the `docs` job is the authority and runs it in CI).
+    """
+    ac = _load()
+    script = Path(__file__).resolve().parent.parent / ".github" / "scripts" / "docs-markdownlint.sh"
+    if not script.exists():
+        pytest.skip("docs-markdownlint.sh not present")
+    target = Path(__file__).resolve().parent.parent / "operations" / "zz-attest-census-probe.md"
+    nodelist = tmp_path / "probe.nul"
+    report = tmp_path / "probe.out"
+    rec = ac.Record(
+        path=Path("/tmp/r-1.json"), head_sha=LIVE, mint="fresh", verdict="clean", evidence=hostile
+    )
+    row = ac.Row(pr=1, head=LIVE, branch="b", title="t", record=rec, outcome=ac.OK, why="w")
+    target.write_text(ac.render([row], "o/r", "2026-11-03T00:00:00Z"), encoding="utf-8")
+    nodelist.write_bytes(b"./operations/zz-attest-census-probe.md\0")
+    try:
+        import subprocess
+
+        subprocess.run(
+            ["bash", str(script), "--cli2", "markdownlint-cli2@0.23.3",
+             "--files-from", str(nodelist), "--output", str(report), "--label", "probe"],
+            cwd=Path(__file__).resolve().parent.parent, capture_output=True, timeout=300,
+        )
+        out = report.read_text() if report.exists() else ""
+        if "Linting: 1 file" not in out:
+            pytest.skip(f"pinned linter unavailable here (report: {out[:200]!r})")
+        assert "Summary: 0 issues in 0 files" in out, f"the pinned linter rejects a hostile cell {hostile!r}: {out}"
+    finally:
+        target.unlink(missing_ok=True)
+
+
+# ── the artifact's own provenance: a digest of ITS OWN BODY (#10687 cycle 13) ────────
+#
+# `operations/attest-census.md` is COMMITTED, and the body of this PR promises it is
+# "regenerated, never hand-edited — the file is the authority". At the review head that was
+# false: the header read `generated 2026-11-03T05:22:14Z` while lines 15-19 had been reflowed
+# BY HAND eight hours later, so a lane filtering rows by that stamp read a population older
+# than the document it sat in. A run-time timestamp can never notice an edit after the run;
+# a digest of the body can, offline and without `gh`. Two tests: the artifact is checked as
+# committed, and the check itself is proved to discriminate.
+
+
+def test_the_committed_census_matches_its_own_content_digest():
+    """The committed snapshot must be exactly what `render` emitted.
+
+    This FAILS on a hand-edited census that did NOT also recompute the header hex — including the
+    prose-only edit that produced the review finding (no row moved, so nothing else in the suite
+    could see it) — and it fails on a document that carries no digest at all, because absence
+    proves nothing.
+
+    ⛔ It is NOT a provenance proof, and cycle 15 measured the difference: the digest is unkeyed and
+    its algorithm is in this repo, so an edit that re-derives the hex afterwards verifies. This test
+    answers "was this file edited by accident after generation", never "did `render` emit these
+    rows" — see the qualified prose `render` emits, and `verify_census_document`'s own docstring.
+    """
+    ac = _load()
+    committed = Path(__file__).resolve().parent.parent / "operations" / "attest-census.md"
+    assert committed.exists(), f"{committed} is the committed snapshot this PR promises"
+
+    reason = ac.verify_census_document(committed.read_text(encoding="utf-8"))
+    assert reason == "", (
+        f"{committed} does not match its own header digest → {reason}. "
+        "Regenerate it with `uv run python tools/attest_census.py`; never edit it by hand."
+    )
+
+
+def test_a_hand_edit_anywhere_in_the_body_breaks_the_digest():
+    """Non-vacuity: the three shapes a hand edit actually takes.
+
+    The review's incident was a PROSE edit (the `Totals:` line plus the RESTORE paragraph),
+    so the digest must cover prose and not merely the table. The row edit and the appended
+    footnote are the other two shapes, and the undigested document is the pre-fix tree.
+    """
+    ac = _load()
+    rows = [
+        ac.Row(pr=1, head=LIVE, branch="b", title="t", record=None, outcome=ac.IN_FLIGHT, why="w"),
+        ac.Row(pr=2, head=LIVE, branch="b", title="t", record=None, outcome=ac.OK, why="w"),
+    ]
+    text = ac.render(rows, "o/r", "2026-11-03T00:00:00Z")
+    assert ac.verify_census_document(text) == "", "a freshly rendered document must verify"
+
+    edits = {
+        # the measured incident: prose re-stated by hand, no row touched
+        "prose": text.replace("IN-FLIGHT=1 · OK=1", "IN-FLIGHT=2 · OK=1"),
+        "row": text.replace("| #1 |", "| #9 |"),
+        "appended": text + "\n> hand-written footnote\n",
+    }
+    for name, edited in edits.items():
+        assert edited != text, f"the {name} edit did not apply — this assertion would be vacuous"
+        reason = ac.verify_census_document(edited)
+        assert "edited after generation" in reason, f"the {name} edit went undetected: {reason!r}"
+
+    # And the pre-fix shape — no digest line at all — is REFUSED, never accepted as clean.
+    undigested = "\n".join(
+        ln for ln in text.splitlines() if "content sha256" not in ln
+    )
+    assert "no `content sha256`" in ac.verify_census_document(undigested)
+
+
+def test_a_record_containing_the_digest_placeholder_still_verifies():
+    """`render` substitutes the placeholder ONCE, in the header — never in record text.
+
+    A registry record is arbitrary JSON from disk, so its `why` can contain the token. If
+    `render` substituted every occurrence, the header hex plus the record's own hex could
+    never be re-derived into the pre-digest text, and a legitimately generated census would
+    report itself hand-edited.
+    """
+    ac = _load()
+    hostile = ac._DIGEST_PLACEHOLDER
+    rec = ac.Record(path=Path("/tmp/r-1.json"), head_sha=LIVE, mint="fresh", verdict="clean",
+                    evidence="comment:1")
+    row = ac.Row(pr=1, head=LIVE, branch="b", title="t", record=rec, outcome=ac.RE_REVIEW, why=hostile)
+    text = ac.render([row], "o/r", "2026-11-03T00:00:00Z")
+
+    assert hostile in text, "the record's own text must survive verbatim"
+    assert ac.verify_census_document(text) == "", "a record containing the token must still verify"
+
+
+def test_a_repo_containing_the_digest_placeholder_still_verifies():
+    """The OTHER field that can carry the token, and the one that sits ahead of the digest.
+
+    MEASURED (#10687 review cycle 16): the header line emits `repo` FIRST and the digest slot last
+    on the same line, so `body.replace(token, digest, 1)` filled the repo field and left the
+    header's slot literal — `--repo '__CENSUS_CONTENT_SHA256__'` exited 0 and wrote a census that
+    refuses itself ("no `content sha256` in the header"). The substitution is now by INDEX, so the
+    invariant holds for every value of an argv field rather than for every value except one.
+
+    Mutation proof: restore `body.replace(_DIGEST_PLACEHOLDER, digest, 1)` in `render` and this
+    test fails on the verifier reason below.
+    """
+    ac = _load()
+    text = ac.render([], ac._DIGEST_PLACEHOLDER, "2026-11-04T00:00:00Z")
+
+    header = text.splitlines()[2]
+    assert re.search(r"content sha256 `[0-9a-f]{64}`\.$", header), (
+        f"the header must carry the real digest, not the token: {header!r}"
+    )
+    assert ac.verify_census_document(text) == "", "and it must verify, not refuse itself"
+    # The other half of the same line: a repo whose text LOOKS like a digest must not be the span
+    # the verifier reads (the pattern is end-of-line anchored for exactly this).
+    lookalike = "r`content sha256 `" + "0" * 64 + "`."
+    assert ac.verify_census_document(ac.render([], lookalike, "2026-11-04T00:00:00Z")) == ""

@@ -48,8 +48,9 @@ WHY THE GATE STATE IS READ PER-COMMIT, NOT FROM THE ROLLUP
 instrument twice over: a re-run ADDS a red attempt rather than clearing one, so
 the rollup of a green commit can carry old `FAILURE` contexts; and the newest
 attempt per check NAME is only resolvable by check-run `id`. So the gate state is
-read the way AGENTS.md §"Reading verification state" says to read it — newest
-attempt by id, over `filter=all` — scoped with `check_name=` so the payload stays
+read the way the fleet's recorded rule says to read it
+(`docs/plans/2026-09-26-5215-merge-throughput.md` §622: group per check, newest
+attempt by `id`) — newest attempt by id, over `filter=all` — scoped with `check_name=` so the payload stays
 small enough for a rate-limited box. `--no-gate` drops only the PER-PR check-run reads (the
 expensive half); `gh pr list` is still required, so a fully offline run produces no report.
 
@@ -68,16 +69,25 @@ from __future__ import annotations
 
 import sys
 
-# #5128: refuse a <3.12 interpreter before the imports below — a module-level
-# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+# #5128 shape: refuse a <3.12 interpreter BEFORE the imports below. This is load-bearing here
+# rather than cosmetic — `from datetime import UTC` is a 3.11+ stdlib name, so on the ambient
+# `/usr/bin/python3` the tool would die with an unattributed ImportError before any of its own
+# messaging ran. The gate that enforces this shape is tests/test_entry_point_python_guard.py.
 if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
-    raise SystemExit(
+    # The exit code is 2, not `SystemExit(<str>)`'s 1: this file publishes `never 1` (0 completed /
+    # 2 unreadable), so a refusal reported through 1 would be indistinguishable, by exit code,
+    # from "the census found a problem" — and an old interpreter is an environment error.
+    print(
         f"tools/attest_census.py requires Python >= 3.12 (got "
         f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
-        f"`uv run python tools/attest_census.py`"
+        f"`uv run python tools/attest_census.py`",
+        file=sys.stderr,
     )
+    raise SystemExit(2)
 
 import argparse
+import contextlib
+import hashlib
 import json
 import re
 import subprocess
@@ -295,7 +305,10 @@ def load_record(
         return None
 
     try:
-        raw = chosen.read_text()
+        # ⛔ Pinned to UTF-8, not the ambient locale (review cycle 14). JSON is UTF-8 by RFC 8259 and
+        # `record-review.sh` writes it that way, so under a C locale the locale default turns a
+        # perfectly good record into a false `UNREADABLE` — under-reporting a restorable proof.
+        raw = chosen.read_text(encoding="utf-8")
     except (OSError, ValueError) as exc:
         # OSError: permission denied, dangling link, a DIRECTORY named *.json.
         # ValueError: invalid UTF-8 (`UnicodeDecodeError`) — cycle 3 measured it escaping as rc 1.
@@ -400,6 +413,107 @@ def read_gate(repo: str, head: str) -> tuple[str, str]:
 # ── render ───────────────────────────────────────────────────────────────────
 
 
+def _cell(value: object) -> str:
+    """Escape a value bound for a markdown TABLE cell (or for one bullet line).
+
+    Registry and `gh` text reaches `render` unescaped: `evidence`, `verdict` and `mint`
+    are read straight out of a record JSON on disk, and `why` embeds `gh`'s **multi-line**
+    stderr (`gh_json` keeps `out.stderr.strip()[:300]` of it). A `|` therefore emitted
+    extra table cells and a newline broke out of the bullet it was written into.
+
+    MEASURED (#10687): a record whose `evidence` is `"comment:1 | injected"` rendered an
+    11-cell row (`Expected: 10; Actual: 11`) and the PINNED linter fired
+    MD056/table-column-count. That is the SAME class this tool had just been fixed for —
+    a regenerated census reddening the REQUIRED `docs` check on a finding the lane did
+    not write — so the escape belongs here rather than in a later repair.
+
+    ⛔ The BACKSLASH is replaced FIRST, and that order is the whole point: escaping `|`
+    alone leaves data that already contains a literal `\\|` rendering as `\\\\|`, which GFM
+    reads as an ESCAPED BACKSLASH followed by a live delimiter. Measured with the pinned
+    linter: `evidence` = `"comment:1\\|x"` produced `MD056 [Expected: 10; Actual: 11]`.
+    A corrupt or hand-written record is exactly the input this census must survive, so
+    "a `|` would add a cell" was still false until the backslash was escaped too.
+
+    ⛔ The ENCODE is the third half of the same promise, and it is here rather than at the write
+    for the same reason the other two are: an unencodable code point must not outlive this
+    boundary. MEASURED (review cycle 15): RFC 8259 permits a lone surrogate, `json.loads` accepts
+    one, and a hand-written record carrying `"evidence": "comment:1 \\ud800"` reached the table —
+    where `.encode("utf-8")` raised `UnicodeEncodeError` inside `_content_digest` (a 'surrogates
+    not allowed' escape) BEFORE the `except (OSError, ValueError)` around the write could see it,
+    so a census that had read every surface correctly died with a traceback and **rc 1**, breaking
+    this file's published `0`/`2`-never-`1` contract. `print(text)` afterwards raised on the same
+    code point. `backslashreplace` keeps the evidence (`\ud800`) readable instead of dropping it.
+    """
+    return (
+        str(value)
+        .replace("\\", "\\\\")
+        .replace("|", "\\|")
+        .replace("\r", " ")
+        .replace("\n", " ")
+        .strip()
+        # LAST, so the escapes it introduces are not themselves doubled, and so it cannot
+        # reintroduce a live `|`. Every dynamic cell goes through here, which is why one
+        # sanitise point is enough for the table, the digest, the file write and the stdout.
+        .encode("utf-8", "backslashreplace")
+        .decode("utf-8")
+    )
+
+
+# ── the document's own ACCIDENTAL-EDIT detector ──────────────────────────────
+
+# The rendered document carries a digest of its OWN BODY, so the edit class that actually
+# happened here is caught offline instead of trusted against. Measured (#10687): the committed
+# snapshot's header read `generated 2026-11-03T05:22:14Z` while its RESTORE/RE-REVIEW prose had
+# been reflowed BY HAND eight hours later, so a lane filtering rows by that stamp read a
+# population older than the document it was in — AGENTS.md's "stale flag that records a past
+# state and is never revalidated". A timestamp can never notice that; a digest of the body can.
+#
+# ⛔ IT IS NOT A PROVENANCE PROOF, and the wording below says so (#10687 review cycle 15). The
+# digest is UNKEYED and its algorithm is in this repo, so it only distinguishes an edit that did
+# not recompute it from one that did. MEASURED at the cycle-14 head: flipping a row from
+# `RE-REVIEW` to `RESTORE` and re-deriving the header hex with these same three lines made
+# `verify_census_document` return "" — a forged RESTORE row, indistinguishable from machine
+# output, in the artifact a lane consults to decide whether to re-post a review proof. The claim
+# "it proves the file came out of the renderer unedited" was therefore false, and it is the reason
+# this comment and the emitted prose are qualified rather than merely shortened. A construct that
+# CANNOT deliver its stated guarantee is worse than no construct: see AGENTS.md "Fix Broken
+# Infrastructure" — a guarantee that reads as a guard but cannot fail is the class the #10687
+# cycle-5/cycle-6 findings were about.
+_DIGEST_PLACEHOLDER = "__CENSUS_CONTENT_SHA256__"
+# The header's digest is the LAST thing on its line (`… content sha256 `<hex>`.`), and the anchor
+# is the END of that line on purpose: `repo` is emitted on the same line AHEAD of it, so a plain
+# first-match search can be satisfied by a repo whose text contains a digest-shaped span. Measured
+# (#10687 review cycle 16) with `--repo` carrying the placeholder token; the `$` anchor is what
+# makes the header's own slot the one that is read, not whichever one appears first.
+_DIGEST_RE = re.compile(r"content sha256 `([0-9a-f]{64})`\.\s*$", re.MULTILINE)
+
+
+def _content_digest(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def verify_census_document(text: str) -> str:
+    """`""` when `text` matches the digest printed in its own header, else the reason it does not.
+
+    ⛔ An ABSENT digest is not a pass. A document with no header digest cannot prove it came out
+    of `render`, so it is refused with a reason — the same fail-closed rule the classifier applies
+    to a record with no usable `head_sha`, and for the same reason: absence is never evidence.
+    """
+    m = _DIGEST_RE.search(text)
+    if m is None:
+        return "no `content sha256` in the header — this file cannot prove it was emitted by render()"
+    # Rebuild the pre-digest text: the header's hex is the ONE span the digest cannot cover
+    # (it is computed over the body, then substituted in).
+    canonical = text[: m.start(1)] + _DIGEST_PLACEHOLDER + text[m.end(1) :]
+    actual = _content_digest(canonical)
+    if actual != m.group(1):
+        return (
+            f"content sha256 mismatch: header says {m.group(1)}, body hashes to {actual} — "
+            "this file was edited after generation"
+        )
+    return ""
+
+
 def render(rows: list[Row], repo: str, generated_at: str, truncated: bool = False, limit: int = 100) -> str:
     counts: dict[str, int] = {}
     for r in rows:
@@ -418,8 +532,20 @@ def render(rows: list[Row], repo: str, generated_at: str, truncated: bool = Fals
             "> is not a statement about them. Re-run with a larger `--limit`.",
             "",
         ]
+    # ⛔ The header is built as a SEPARATE string and spliced in by INDEX below, never found by
+    # searching for the placeholder. `repo` is emitted on this same line AHEAD of the digest, so a
+    # first-match `replace(..., 1)` puts the digest into the repo FIELD and leaves the header's
+    # slot literal — measured (#10687 review cycle 16): `--repo '__CENSUS_CONTENT_SHA256__'` exited
+    # 0 and wrote a census that `verify_census_document` refuses ("no `content sha256` in the
+    # header"), i.e. the invariant stated right below held for every repo except one.
+    header_prefix = (
+        f"Repo `{repo}` · generated {generated_at} by `tools/attest_census.py` ·"
+        " content sha256 `"
+    )
+    header_suffix = "`."
+    header_index = len(lines)
+    lines.append(header_prefix + _DIGEST_PLACEHOLDER + header_suffix)
     lines += [
-        f"Repo `{repo}` · generated {generated_at} by `tools/attest_census.py`.",
         "",
         "> ⚠️ **SNAPSHOT, NOT A LIVE VERDICT.** This file is machine-generated from *one box's*",
         "> registry at the timestamp above, and every push, review and gate re-run invalidates it.",
@@ -427,17 +553,36 @@ def render(rows: list[Row], repo: str, generated_at: str, truncated: bool = Fals
         "> an `OK` or `NOTHING-TO-RESTORE` row from this snapshot is **not** evidence about the",
         "> PR's current head, and `NOTHING-TO-RESTORE` never means \"nobody reviewed this\"",
         "> fleet-wide: `~/.pi/agent/reviews/` is per-machine.",
+        ">",
+        "> The header's `content sha256` is a digest of THIS FILE'S OWN BODY, so an edit that does not",
+        "> also recompute it cannot pass — the ACCIDENTAL edit (the hand reflow that produced this",
+        "> check, a sentence left stale by a later change) is caught offline, without `gh`. ⛔ It is",
+        "> **not a provenance proof**: the digest is unkeyed and its algorithm is in this repo, so an",
+        "> editor who recomputes it after editing produces a file that verifies. Read a matching digest",
+        "> as \"nobody edited this by accident\", never as \"the tool emitted these rows\". The row for",
+        "> the PR that regenerated this file names the head that PR had AT generation time, which is",
+        "> necessarily the parent of the commit adding the file: a document cannot contain the sha",
+        "> of the commit that contains it.",
         "",
         "One row per open PR: its head, whether a review record exists on **this box**, whether that",
         "record's head equals the PR's head, what the record claims, and what the `ai-review-gate`",
         "check says. `RESTORE` is the only outcome that licenses re-posting a proof — and even then the",
-        "verdict is quoted from the record, never synthesised. A record at any other head is not"
-        " evidence of the live code: it is `RE-REVIEW` when the gate has no green verdict, and `OK`",
-        " only because the gate itself already accepted the proof (so no re-post is owed).",
+        "verdict is quoted from the record, never synthesised. A record at any other head is not",
+        "evidence of the live code: it is `RE-REVIEW` when the gate has no green verdict, and `OK`",
+        "only because the gate itself already accepted the proof (so no re-post is owed).",
         "",
-        "## Census totals",
-        "",
-        totals,
+        # ⛔ LABELLED, never a bare emphasis-only paragraph (#10687). The line used to
+        # be `f"**{totals}**"`, which renders as a paragraph consisting ENTIRELY of
+        # emphasis — markdownlint's MD036/no-emphasis-as-heading (the `docs` job's
+        # PINNED markdownlint-cli2@0.23.3 fires it), so every PR that committed a
+        # regenerated census reddened the REQUIRED `docs` check on a finding it did
+        # not write. The label earns its place twice: it removes the emphasis-only
+        # paragraph, and it says what the numbers ARE (they were previously
+        # unlabelled totals a reader had to infer).
+        # `or 'no rows'` because an empty census yields an empty `totals` string, and
+        # a `**Totals:**` with nothing after it is a malformed report — the run read
+        # no rows and must say so rather than render a blank label.
+        f"**Totals:** {totals or 'no rows'}",
         "",
         "| PR | head | record | record head | match | mint | verdict | evidence | gate | outcome |",
         "|---|---|---|---|---|---|---|---|---|---|",
@@ -465,17 +610,40 @@ def render(rows: list[Row], repo: str, generated_at: str, truncated: bool = Fals
         verdict = "—" if rec is None else (rec.verdict or "—")
         ev = "—" if rec is None else ("null" if rec.evidence in (None, "", False) else str(rec.evidence))
         gate = "not-read" if not r.gate_checked else (r.gate_conclusion or r.gate_status or "absent")
+        # Every DYNAMIC cell is escaped — the record-derived ones (`rec_cell`, `verdict`,
+        # `mint`, `ev`), the `gh`-derived ones (`rhead`, `head`, `match`, `gate`), and the
+        # record FILENAME inside `rec_cell` — because a `|` in any of them adds a cell and
+        # breaks the table (#10687). `head` is escaped INSIDE its code span: a GFM table is
+        # split into cells BEFORE inline parsing, so an unescaped `|` there severs the row
+        # even though the value is wrapped in backticks (measured: a 12-cell row, MD056).
+        # The two literal columns (`#<pr>` is an int, `outcome` is one of our own constants)
+        # carry no external text.
         lines.append(
-            f"| #{r.pr} | `{r.head[:12]}…` | {rec_cell} | {rhead} | {match} | {mint} | {verdict} | {ev} | {gate} | **{r.outcome}** |"
+            "| #" + " | ".join(
+                [
+                    str(r.pr),
+                    f"`{_cell(r.head[:12])}…`",
+                    _cell(rec_cell),
+                    _cell(rhead),
+                    _cell(match),
+                    _cell(mint),
+                    _cell(verdict),
+                    _cell(ev),
+                    _cell(gate),
+                    f"**{r.outcome}**",
+                ]
+            ) + " |"
         )
 
     flagged = [r for r in rows if r.outcome in (RESTORE, RE_REVIEW, NOTHING, UNREADABLE, IN_FLIGHT)]
     if flagged:
         lines += ["", "## What each flagged row needs", ""]
         for r in flagged:
-            lines.append(f"- **#{r.pr}** `{r.branch}` — {r.outcome}: {r.why}")
+            # `why` can be `gh`'s multi-line stderr and `notes` are free text: a raw newline
+            # would break out of the bullet and render the rest as a new paragraph (#10687).
+            lines.append(f"- **#{r.pr}** `{_cell(r.branch)}` — {r.outcome}: {_cell(r.why)}")
             for n in r.notes:
-                lines.append(f"  - {n}")
+                lines.append(f"  - {_cell(n)}")
     lines += [
         "",
         "## Reading rules",
@@ -488,10 +656,25 @@ def render(rows: list[Row], repo: str, generated_at: str, truncated: bool = Fals
         "  this box's view, and the census says so rather than implying a fleet-wide clean bill.",
         "",
     ]
+    body = "\n".join(lines)
+    # ⛔ The substitution is by INDEX, not by search. A record whose own text contains the token must
+    # survive VERBATIM, or `verify_census_document` (which restores the same single span) could never
+    # re-derive this digest — and `repo` is the second untrusted field that can contain it, one that
+    # sits ahead of the digest on the very same line. Writing to `header_index` makes both true by
+    # construction: nothing is searched, so nothing else can be hit.
+    digest = _content_digest(body)
+    lines[header_index] = header_prefix + digest + header_suffix
     return "\n".join(lines)
 
 
 def main(argv: list[str] | None = None) -> int:
+    # ⛔ The report carries non-ASCII (`—`, `…`, the ⛔/⚠️ markers) in its own PROSE, so a C/POSIX
+    # stdout cannot encode it: without this, `print(text)` after a perfectly good run raises
+    # `UnicodeEncodeError` and the tool exits 1 — breaking its published `0`/`2`-never-`1` contract
+    # (measured: review cycle 14). Pinned the same way `validation/check-license-surface.py` pins a
+    # C-locale stream, and suppressed because `sys.stdout` may be a replaced stream without it.
+    with contextlib.suppress(AttributeError, ValueError):
+        sys.stdout.reconfigure(encoding="utf-8")
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--repo", default="daniel-ospina/tortoise")
     ap.add_argument("--reviews-dir", default=str(Path.home() / ".pi/agent/reviews"))
@@ -627,7 +810,16 @@ def main(argv: list[str] | None = None) -> int:
         }, indent=2))
         return 0 if unreadable == 0 else 2
 
-    text = render(rows, args.repo, generated_at, truncated=truncated, limit=args.limit)
+    # Belt to `_cell`'s braces. `_cell` sanitises every RECORD- and `gh`-derived cell, but this
+    # string is not the only source of one: `--repo` is ARGV, so `--repo $'\ud800'` reaches the
+    # header line unescaped. Without this the digest encoded it, `str.encode` raised
+    # `UnicodeEncodeError` (a `ValueError`) OUTSIDE any handler, and the tool exited 1 on a run
+    # that read everything correctly — the one exit code this file publishes as impossible.
+    try:
+        text = render(rows, args.repo, generated_at, truncated=truncated, limit=args.limit)
+    except ValueError as exc:  # an unrenderable character is rc 2, never a traceback
+        print(f"attest_census: could not render the report: {exc}", file=sys.stderr)
+        return 2
     try:
         out = Path(args.out).expanduser()
     except RuntimeError as exc:  # symmetric with --reviews-dir: an unresolvable ~ is rc 2, not rc 1
@@ -635,11 +827,25 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     try:
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(text)
-    except OSError as exc:  # unwritable --out is a surface we could not write, not a finding
+        # ⛔ `encoding="utf-8"` is part of the CONTRACT, not tidiness (review cycle 14): this file is
+        # read by the pinned markdownlint, by `verify_census_document` (which re-derives its sha256)
+        # and by lanes grepping rows, so its bytes cannot be whatever locale the invoking shell
+        # exported. `ValueError` stays in the `except` because `UnicodeEncodeError` is a
+        # `ValueError`, NOT an `OSError` — but cycle 15 measured that the lone-surrogate shape it was
+        # added for could never reach THIS line: `_content_digest` encodes the whole document first,
+        # so it died at `render` before this `try` was entered, and the claim that this `except`
+        # handled it was false. `render` and `print` are now guarded in their own right and `_cell`
+        # sanitises the payload, so this clause is a belt over an already-closed door rather than the
+        # fix — do not delete it, and do not describe it as the fix.
+        out.write_text(text, encoding="utf-8")
+    except (OSError, ValueError) as exc:  # unwritable/unencodable --out is not a finding
         print(f"attest_census: could not write {out}: {exc}", file=sys.stderr)
         return 2
-    print(text)
+    try:
+        print(text)
+    except UnicodeEncodeError as exc:  # same contract on the stdout surface as on the file
+        print(f"attest_census: could not write the report to stdout: {exc}", file=sys.stderr)
+        return 2
     print(f"attest_census: wrote {out}", file=sys.stderr)
     return 0 if unreadable == 0 else 2
 
