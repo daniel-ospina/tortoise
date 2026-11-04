@@ -10383,13 +10383,37 @@ class TortoiseSDK:
         # scan per absent write on the append-active lane #7405 describes.
         seam = self._journal_seam(log, resume)
         stat_after = self._journal_stat_key(log)
-        if (stat_after is None or stat_after[2] < resume
-                or stat_after[:2] != stat_key[:2]):
-            # The journal vanished, no longer holds the bytes that were folded, or
-            # was REPLACED under the fold (a new `st_dev`/`st_ino`: a rotate, an
+        if stat_after is None:
+            # ⛔ THE PATH WENT AWAY UNDER THE FOLD, AND THE MAP IS A WITNESS TO
+            # IT (review round 17, finding 1). unlink(2): "if the name was the
+            # last link to a file but any processes still have the file open,
+            # the file will remain in existence until the last file descriptor
+            # referring to it is closed"
+            # (<https://man7.org/linux/man-pages/man2/unlink.2.html>) — so a
+            # deletion that lands AFTER the fold's `open()` raises NOTHING
+            # inside the fold: the scan reads the (now nameless) inode to EOF
+            # through the live fd, and the disappearance surfaces only here, at
+            # the post-fold stat. That interleaving is the SAME world state as a
+            # deletion landing one microsecond earlier, which the fold's own
+            # `FileNotFoundError` arm answers UNJUDGED when the map holds the id
+            # — and the evidence here is STRONGER, because `known` was folded
+            # from bytes this very call just read. So the map earns the same
+            # answer: an id it holds as PRESENT is `None` (⇒
+            # `journal_unreadable`), never "a typo"; the inverse value stays
+            # silent, because that id's record was actually READ. One extra
+            # `known` entry cannot invent an alarm: it is the same predicate the
+            # normal map path reports `journal_known` from.
+            self._journal_presence_memo = None
+            return self._journal_presence_needle(log, point_id, known)
+        if stat_after[2] < resume or stat_after[:2] != stat_key[:2]:
+            # The journal no longer holds the bytes that were folded, or was
+            # REPLACED under the fold (a new `st_dev`/`st_ino`: a rotate, an
             # `mv`, a restore) — so `resume`/`seam` describe the NEW file while
             # `known` came from the OLD one. Memoising would serve another file's
-            # records; one re-fold costs less.
+            # records; one re-fold costs less. ⛔ AND THIS ARM STAYS MAP-FREE: a
+            # truncation or a replacement means the map describes bytes the file
+            # no longer has (round 9's rule), so `known` must not be consulted
+            # here — the re-fold answers for the file that is there now.
             #
             # ⛔ AND THE RE-FOLD IS THE ANSWER, NOT JUST THE MEMO'S FATE (review
             # round 16, finding 1). The comment above already says this map is
@@ -10482,7 +10506,7 @@ class TortoiseSDK:
             return False        # `None` = this path cannot answer ⇒ re-fold
         return got == expected
 
-    def _journal_presence_needle(self, log, point_id: str):
+    def _journal_presence_needle(self, log, point_id: str, known=None):
         """Re-fold the journal AS IT IS NOW, filtered to *point_id* (#10543 r16).
 
         The honest answer once the retained map has been declared untrustworthy:
@@ -10490,12 +10514,20 @@ class TortoiseSDK:
         was folded from a file the path no longer names. Filtered to the one id,
         so the pass is bounded in memory (at most one entry) and single-purpose.
 
+        ``known`` is the map the CALLER folded, and it is consulted ONLY by the
+        caller whose evidence still describes this journal: the post-fold
+        ``os.stat`` answering ``None`` (the path went away while the fold read it
+        through an open fd — review round 17, finding 1). Every other caller
+        passes nothing, because a truncated or REPLACED file never held the
+        folded bytes (round 9's rule).
+
         Three outcomes, the same vocabulary the rest of this method uses:
         ``True``/``False`` from the records that are there now, and ``None``
         (UNJUDGED ⇒ ``journal_unreadable``) when the re-read cannot answer — a
-        file that went away with records behind it, or any failure. ``False`` is
-        reserved for the shape its own evidence supports: a journal that carried
-        nothing, whose absent id really is just a typo.
+        file that went away with records behind it, **or one the caller's map
+        proves carried this id**, or any failure. ``False`` is reserved for the
+        shape its own evidence supports: a journal that carried nothing, whose
+        absent id really is just a typo.
         """
         state: dict[str, bool] = {}
         try:
@@ -10504,7 +10536,13 @@ class TortoiseSDK:
         except FileNotFoundError:
             # The SAME two facts the fold's own FileNotFoundError arm splits: a
             # path nothing ever wrote is a typo (silent), a journal that carried
-            # records and then went away is UNJUDGED.
+            # records and then went away is UNJUDGED. The caller's map is the
+            # third witness, and it is the only one that survives the deletion
+            # shape that takes the `.position` sidecar WITH the journal — a
+            # PRESENT entry proves the journal carried this id even when nothing
+            # else can answer.
+            if known is not None and known.get(point_id) is True:
+                return None
             return None if self._journal_carried_records(log) else False
         except Exception:  # noqa: BLE001, RUF100 — unjudged, never "a typo"
             _logger.warning(
