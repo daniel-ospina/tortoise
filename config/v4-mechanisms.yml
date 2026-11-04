@@ -781,9 +781,9 @@ mechanisms:
       units reach it. The verdict (a conversion is a different identity) is
       deliberate; the RATIO core is not a duration, and separating the two is
       the same unsolved token-shape problem this bullet describes;
-      (d) ⛔ CLOSED by #10360 (`tests/test_state_value_verbatim_10360.py::
-      test_a_declared_unit_WORD_is_fused_so_a_unit_rewrite_cannot_hide`), and it
-      was never a tolerance — the row said so: a unit WORD the engine's own
+      (d) ⛔ CLOSED by #10360
+      (`tests/test_state_value_verbatim_10360.py::test_a_declared_unit_WORD_is_fused_so_a_unit_rewrite_cannot_hide`),
+      and it was never a tolerance — the row said so: a unit WORD the engine's own
       `_UNIT_EQUIV` DECLARED was missing from `_UNIT_WORDS`, the set
       `_value_bindings` can FUSE, so the value was emitted with NO unit and a
       unit-less side reads as "unit not stated" and FAILED OPEN. Measured on the
