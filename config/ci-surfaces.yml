@@ -1292,6 +1292,12 @@ surfaces:
   # would run on no change that can break it.
   - test_own_key_selfservice_2446.py
   - test_mcp_client.py
+  # #10605: the stdio↔HTTP bridge's guards (per-request credential resolution,
+  # the named MCP-KEY-EMPTY refusal, session propagation). Registered here
+  # because `tortoise/mcp_bridge.py` is an exact `api` SOURCE_PATTERNS entry —
+  # a bridge-only diff replaces the `core` fallback, so the guard has to run
+  # from this surface or it runs nowhere (the #7076 self-guard class).
+  - test_mcp_bridge.py
   - test_mcp_http.py
   - test_mcp_rename_table.py  # #4282: Phase 0.3 rename table — old name → new name, per tool
   - test_mcp_route_challenge.py  # #2864: RFC 9728 challenge on /mcp 401s + /mcp route canonicalization (docker lane)
@@ -1397,6 +1403,22 @@ surfaces:
   # selecting `api` with this guard never run (the #1349 class), the
   # same reason tests/test_quota.py is registered here.
   - test_4503_edge_relationship_accounting.py
+  # #10668 review P1: the #9567 D11/D12 allowance-gate evidence.
+  # DUAL-REGISTERED with `core` (below). Two modules carry this subject and
+  # they classify DIFFERENTLY: `tortoise/quota.py` (`enforce_org_limit`, the
+  # gate's primary door) is an EXACT `api` SOURCE_PATTERN match, while
+  # `tortoise/allowance_gate.py` (the gate itself) matches none and falls
+  # through to the `core` fallback. Because a match REPLACES the fallback in
+  # `select()`, neither surface alone covers both diff classes. Measured before
+  # this entry: `--integrity` printed `❌ manifest drift:
+  # ['test_allowance_gate.py']` and exited 1 (redding the REQUIRED
+  # `manifest-integrity` leg), `classify_test_file` returned None, and
+  # `select(['tortoise/quota.py'])` -> surfaces ['api'] / `select([
+  # 'tortoise/allowance_gate.py'])` -> ['core'], both with this file ABSENT —
+  # i.e. the 28 tests that ARE the evidence for D11/D12 ran on no leg on any
+  # diff, so the suite would have stayed green if the gate were deleted. That is
+  # the #10513 / #1349 silent-drop class. Keep BOTH arms.
+  - test_allowance_gate.py
   # #4010: the session-cap removal — drives the hosted capture path + the
   # registry resolver, so it belongs with the quota/api surface.
   - test_issue_4010_sessions_unlimited.py
@@ -1845,6 +1867,15 @@ surfaces:
   # it guards span `tortoise/` — a battery-only or sdk-only change must run it.
   - test_vector_write_seam_4520.py
   core:
+  # #10668 review P1: the `core` arm of the #9567 D11/D12 allowance-gate
+  # evidence. `tortoise/allowance_gate.py` matches NO `SOURCE_PATTERNS` entry,
+  # so an allowance_gate.py-only diff falls through to the `core` fallback and
+  # the `api` row (above, beside `test_quota.py`) never applies — measured:
+  # `select(['tortoise/allowance_gate.py'])` -> surfaces ['core']. That is the
+  # mirror of the #9583/#10156 dual-registration idiom: one module the test
+  # guards is an exact `api` match, the other is a `core` fallback, and both
+  # diffs must select the evidence.
+  - test_allowance_gate.py
   - test_10000_narrative_record_home.py
   - test_10017_cache_tier.py
   - test_10017_purge_guard.py
@@ -3804,6 +3835,17 @@ surfaces:
   # `core` beside the other gate pins (`test_ci_selection.py`,
   # `test_merge_throughput.py`) because it constrains CI config, not the engine.
   - test_required_set_sync.py
+  # #2148 (owner's question, 2026-11-04): a fold's constituents must not land ahead
+  # of the fold. `tools/batch_open.py` closes a constituent ONLY when its work is
+  # provably in the fold tree, and `.mergify.yml`'s `queue_conditions` carries
+  # `-label=superseded-by-fold` so a labelled constituent is refused at queue ENTRY
+  # (auto_merge_conditions queues anything matching, with no human click — measured:
+  # fold #10894 was open while #10543/#10610/#10575 were all still eligible).
+  # The guard also re-asserts the configuration contract, whose breach deadlocks the
+  # queue for EVERY PR, and pins mechanism 3 as ORDERING rather than a `fold` runner
+  # pool (this fleet registers no such label; `runs-on` is the selector's alone).
+  # Hermetic: no DB, no network, no `gh`; every git/gh surface is injected.
+  - test_batch_gate.py
   # #6884: pins the `uri_requiring` declaration (re-derived BEHAVIOURALLY — it
   # runs the failing `pytest --collect-only` with an EMPTY TORTOISE_DB_URI and
   # compares) and
@@ -8926,6 +8968,7 @@ durations:
   test_file_human_approval.py: 4.3  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 2.4
   test_kind_eval_set.py: 2.6  # ci-timing top-15 2026-10-20 (run 39467226356); was 1.5
   test_mcp_client.py: 1.6  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 1.8
+  test_mcp_bridge.py: 2.0  # new in #10605 — the #3400/#4348 trap: a file a PR ADDS cannot carry a CI junit reading yet, so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading. The `api` registration above puts it in `fast_pool()`, and a fast file added by a PR must carry a weight at all ("a default is not a reading"). It spawns a real bridge subprocess per case, so 2.0 UNDERSTATES it until `tools/ci_timing.py --refresh-durations` replaces this row from junit. `tools/ci_selection.py --integrity` is the authority.
   test_sdk_props_coercion.py: 4.6  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 1.9
   test_volunteer_pipeline.py: 4.0  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 2.6
   eval/retrieval/test_1348.py: 6.5  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 6.1
