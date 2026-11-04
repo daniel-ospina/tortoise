@@ -4078,10 +4078,10 @@ def test_the_bare_continuation_cites_name_what_they_say():
     rows = (
         # `each VET pass is gated on the LIST` — the gate AND its call, twice.
         ("docs/00_index.md", "each VET pass is gated on the LIST", (
-            ("10328", "if vet_enabled and embed_list:"),
-            ("10329", "embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass("),
-            ("10450", "if vet_enabled and complete_list:"),
-            ("10451", "complete_list, vet_union_stats, _w, _ = _run_vet_pass("),
+            ("10462", "if vet_enabled and embed_list:"),
+            ("10463", "embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass("),
+            ("10584", "if vet_enabled and complete_list:"),
+            ("10585", "complete_list, vet_union_stats, _w, _ = _run_vet_pass("),
         )),
         # the VET block's start; its three lines of keys (10587-10589) close on
         # line 10590 — DERIVED by content, not by arithmetic: `result["vet"] = {`
@@ -4092,40 +4092,40 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # sides' bump disagreed here and why every ASSERTED number in this table
         # is verified by content instead.
         ("docs/00_index.md", "emitted unconditionally at", (
-            ("10609", 'result["classify_later"] = {'),
-            ("10619", 'result["vet"] = {'),
+            ("10743", 'result["classify_later"] = {'),
+            ("10753", 'result["vet"] = {'),
         )),
         # ⛔ THE CLASSIFY PASS'S OWN FAIL-OPEN PAIR (#10833 review, P2). The
         # `+33` shift the fold applied to this row moved the first member to
-        # `:10356` and left the second at its PRE-shift value, so `:10453` —
+        # `:10490` and left the second at its PRE-shift value, so `:10453` —
         # `vet_warnings.extend(_w)` inside the VET block — was printed as the
         # classify pass's second fail-open `except`. The same sentence one
         # clause earlier condemns exactly that defect ("a cause citing
         # `vet_enabled`/`_run_vet_pass` for S2.3 sent the reader to code that
         # pass never runs"). The two `except` lines are byte-identical, so the
         # anchors are the pair's own gate lines' company rather than the text:
-        # a reader following `:10486` must land in the `classify_later and
-        # complete_list` block, which the row below holds at `:10465`.
+        # a reader following `:10620` must land in the `classify_later and
+        # complete_list` block, which the row below holds at `:10599`.
         ("docs/00_index.md", "fail-open `except` at", (
-            ("10356", "except Exception as e:  # never block capture (P1)"),
-            ("10486", "except Exception as e:  # never block capture (P1)"),
+            ("10490", "except Exception as e:  # never block capture (P1)"),
+            ("10620", "except Exception as e:  # never block capture (P1)"),
         )),
         # `_IDLE_CITES["vet"]`: the early return and the surface it emits
         ("probes/capstone_measure.py", "its vet surface", (
-            ("10237", "if not edus:"),
-            ("10253", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
+            ("10371", "if not edus:"),
+            ("10387", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
         )),
         # ...and the same claim in the rule's own docstring
         ("probes/capstone_measure.py", "with the flag ON", (
-            ("10253", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
+            ("10387", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
         )),
         ("probes/capstone_measure.py", "follows at", (
-            ("10236", "edus = _edus_from_conversation(conversation)"),
+            ("10370", "edus = _edus_from_conversation(conversation)"),
         )),
         # the S2.2/S2.3 block this probe names as the #9116 seam's subject
         ("probes/capstone_measure.py", 'result["vet"]`` at', (
-            ("10619", 'result["vet"] = {'),
-            ("10623", ("exact", "}")),
+            ("10753", 'result["vet"] = {'),
+            ("10757", ("exact", "}")),
         )),
         # The E-row audit's cites on the GATE ITSELF. `_BUNDLE_CITE` matches only
         # `sdk|edges|extractor_v2`, so a `tools/*.py` number is invisible to the

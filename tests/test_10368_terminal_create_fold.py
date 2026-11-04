@@ -299,3 +299,61 @@ def test_a_prop_bearing_dedup_hit_DOES_read_the_verdict_once(sdk, monkeypatch):
         "a caller prop must be adjudicated by the terminal verdict, exactly "
         f"once — reads: {calls}")
     assert "terminal_fold_refused" in _advisory_codes(again), again
+def test_a_bare_dedup_hit_spends_no_terminal_read(sdk, monkeypatch):
+    """#10841 review (P3) — the read is skipped for the hit the comment names.
+
+    The shared `_lifecycle_terminal_marker` read is guarded so that the BARE
+    dedup hit ("no props, no authored word") costs no extra query. The guard
+    used to be `props or cred_prior is not None`, and `props` is never empty
+    there: `create_point` sets `props["content_hash"]` unconditionally (the
+    hash is persisted regardless of the dedup flag, fix #80) and does not pop
+    it until the fold's own write leg. So the condition admitted EVERY dedup
+    hit and the "costs no extra query" promise was false on the default
+    self-host path (dedup is the default and a same-word retry is normal).
+
+    This pins the QUERY COUNT rather than a reply, because the defect is a cost
+    and a contract, not a wrong answer — the refusal flag is computed from the
+    post-pop props either way, which is why the sibling test above stayed green.
+
+    MUTATION: restore `if (props or cred_prior is not None)` and arm 1 records
+    one read where it asserts zero.
+    """
+    content = _fresh_content("bare-read")
+    pid = sdk.create_point("statement", content)["id"]
+
+    reads: list[str] = []
+    real = sdk._lifecycle_terminal_marker
+
+    def _spy(point_id, *args, **kwargs):
+        reads.append(point_id)
+        return real(point_id, *args, **kwargs)
+
+    monkeypatch.setattr(sdk, "_lifecycle_terminal_marker", _spy)
+
+    # 1. BARE dedup hit: no prop, no authored word -> no terminal read at all.
+    bare = sdk.create_point("statement", content, dedup=True)
+    assert bare["id"] == pid, "a dedup HIT is still reported"
+    assert reads == [], (
+        "a bare dedup hit spent a LIFECYCLE_FANOUT_QUERY it does not need — "
+        f"the guard admitted `content_hash`, which is always set: {reads}")
+
+    # 2. …and a hit that CARRIES a caller prop still reads it, because the
+    #    #10368 verdict is what decides the refusal. The fix must not silence
+    #    the read when it is load-bearing.
+    sdk.retract_point(pid)
+    reads.clear()
+    with_prop = sdk.create_point("statement", content, dedup=True,
+                                 custom_probe="x")
+    assert with_prop["id"] == pid
+    assert reads == [pid], (
+        "the terminal verdict is still required for a fold that carries a "
+        f"caller prop: {reads}")
+    assert "terminal_fold_refused" in _advisory_codes(with_prop), with_prop
+
+    # 3. The authored-word leg reads it too (no props, but `cred_prior` set).
+    reads.clear()
+    with_word = sdk.create_point("statement", content, dedup=True,
+                                 credibility="low")
+    assert with_word["id"] == pid
+    assert reads == [pid], (
+        f"an authored word needs the same verdict: {reads}")

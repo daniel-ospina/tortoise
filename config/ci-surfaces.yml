@@ -4083,6 +4083,16 @@ surfaces:
   # itself instead of surfacing as a finding about the diff. Same `core` home as
   # its three docs-lint siblings above.
   - test_docs_markdownlint_producer.py
+  # PR #10841 review Finding 1: `MEMORY.md` is an INDEX with a documented cap
+  # (`AGENTS.md` → Memory Hygiene: "must stay under 150 lines", one
+  # `[category]: …` row per lesson), and nothing in the tree read it as one — so a
+  # forward-merge UNION carried `[text-scanning-pin]:` byte-identically twice
+  # (`MEMORY.md:136` and `:138` at 75400a23a) and landed silently, spending two cap
+  # slots on one lesson and giving one tag two homes. `core` because the pin is
+  # repo-wide hygiene with no source subject of its own; a `MEMORY.md`-only diff
+  # already falls through to the fail-closed FULL matrix (the path is unknown to
+  # every SOURCE_PATTERN), which is where this file runs for such a diff.
+  - test_memory_md_hygiene.py
   - test_doctor.py
   - test_domain_loader_adapter.py
   - test_domain_validators.py
@@ -9118,6 +9128,7 @@ durations:
   test_directional_impl.py: 2.0  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 0.9
   test_list_contexts.py: 0.8  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 0.7
   test_memory_orchestrator.py: 1.2  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 0.9
+  test_memory_md_hygiene.py: 2.0  # new in PR #10841 — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419). The row must EXIST, not merely default — the `core` registration above puts it in `fast_pool()`, and `tools/ci_selection.py --integrity` is the authority. What the weight covers: HERMETIC and near-free — it reads `MEMORY.md` and asserts two documented `AGENTS.md` properties (no byte-identical duplicate entry line, under the 150-line cap) plus three in-memory fixtures that keep the duplicate detector from firing on a legitimate repeated tag; no DB, no docker, no network, no model. The one local reading taken at the PR head (`TORTOISE_TEST_CARVE_OUT=1`, `--junitxml`) was 2.58s over 7 cases, marginally above the flat default and recorded as EVIDENCE only — the default is kept because the convention forbids hand-picking a shard-layout weight for a file no CI sweep has measured. `tools/ci_timing.py --refresh-durations` replaces this row from junit once a sweep collects it.
   test_sdk_dedup.py: 1.1
   test_session_semantic_search.py: 1.6  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 0.7
   test_source_credibility.py: 8.1  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 1.7

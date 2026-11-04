@@ -983,7 +983,23 @@ def test_hosted_commit_receipt_carries_a_dropped_fold_advisory():
     """
     import tortoise.hosted_api as hosted
 
-    write_phase = inspect.getsource(hosted._execute_commit_writes)
+    # ⛔ Count CODE, not prose. A comment that QUOTES a call site (the #10368
+    # channel note above the write loop quotes this very line) makes a plain
+    # `str.count` on the source read 3, so the census reds or greens on how a
+    # comment is worded instead of on how many legs the phase actually has.
+    # `tokenize` drops COMMENT tokens, so a quote can neither satisfy the count
+    # nor defeat it.
+    def _code_only(text: str) -> str:
+        import io
+        import tokenize
+        lines = text.splitlines()
+        for tok in tokenize.generate_tokens(io.StringIO(text).readline):
+            if tok.type == tokenize.COMMENT:
+                row, col = tok.start
+                lines[row - 1] = lines[row - 1][:col]
+        return "\n".join(lines)
+
+    write_phase = _code_only(inspect.getsource(hosted._execute_commit_writes))
     assert write_phase.count('_written.get("advisories")') == 2, (
         "both create_point legs of the write phase must carry the advisories")
     assert "return _write_advisories" in write_phase
