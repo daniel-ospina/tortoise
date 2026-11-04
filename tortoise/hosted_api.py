@@ -6885,7 +6885,19 @@ async def get_current_org(request: Request) -> dict:
         request.state.org_id = org_id
         request.state.tier = tier or "free"
         _publish_default_namespace({"org_id": org_id,
-                                    "graph_namespace": graph_namespace})
+                                    "graph_namespace": graph_namespace,
+                                    # #10180: the guard downstream is
+                                    # `not org.get("graph_id")`, and a
+                                    # GRAPH-BOUND key's `graph_namespace` is
+                                    # its own custom graph's — which passes
+                                    # `moved_default_namespace`'s
+                                    # `org_{org_id}_` shape test. Omitting the
+                                    # key made every publication here look
+                                    # org-wide, so this lane published the
+                                    # caller's binding as "the org's default".
+                                    # Passing it (None for an org-wide key)
+                                    # is what makes that guard a guard.
+                                    "graph_id": graph_id})
         lim = tier_limits(tier or "free")
         # max_orgs removed: multi-org is a USER capability, not a tier field
         # (per-org billing; tier limits come from pricing.json)
@@ -33073,8 +33085,7 @@ def _graph_has_org_namespace(
     lane with no credential hint (the MCP onboarding gate, a background pass)
     it paid TWO control-plane reads per projection instead of one. The default
     sentinel keeps every other caller byte-identical: it resolves exactly where
-    this function always did."""
-    # #3543: both tenant prefixes are probed — a graph minted before the
+    this function always did."""    # #3543: both tenant prefixes are probed — a graph minted before the
     # rename is `team_{org_id}`, and no data migration rewrites it. Probing
     # only `org_` reported "node absent" for every pre-rename org, which made
     # the onboarding projection take the no-write FLOW-defaults path.
@@ -33094,7 +33105,14 @@ def _graph_has_org_namespace(
     # resolver (fail-soft: unreadable control plane) keeps the historical
     # probe below, i.e. the pre-#10180 answer.
     if isinstance(moved, _NamespaceNotResolved):
-        moved = _org_default_namespace(org_id)
+        # An EMPTY listing cannot hold this org's default under ANY name, so the
+        # verdict is already decided and the resolution is not owed (#10180).
+        # Skipping it is what makes the projection's "one control-plane read per
+        # call" accounting true on the no-graph branch, where a background / MCP
+        # lane has no published credential hint to answer from. The ANSWER is
+        # unchanged: `moved` stays None and the prefix test below finds nothing
+        # in an empty set.
+        moved = _org_default_namespace(org_id) if listed else None
     if moved is not None:
         return moved in listed
     return any(name in listed
@@ -33364,8 +33382,11 @@ def _get_onboarding_projection(org_id: str) -> dict:
     # (a promotion landing between them makes the verdict about one graph and
     # the open about another), and two control-plane reads per projection on a
     # lane with no credential hint. `listed` decides whether a resolution is
-    # owed at all: a failed probe (`None`) fails open without one and an empty
-    # listing reaches the same early return, so neither pays a new read.
+    # owed at all: a failed probe (`None`) fails open without one, and an empty
+    # listing is answered from the sentinel the verdict helper no longer has to
+    # resolve — an empty set cannot hold the org's default under any name — so
+    # neither of those two branches pays a read. (The remaining branches pay
+    # exactly ONE, which is the point: the verdict and the open share it.)
     moved = _org_default_namespace(org_id) if listed else _NAMESPACE_NOT_RESOLVED
     if not _graph_has_org_namespace(org_id, listed=listed, moved=moved):
         state = dict(raw)

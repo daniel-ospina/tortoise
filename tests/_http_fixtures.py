@@ -53,17 +53,22 @@ def patched_tortoise_sdk(db_path: str) -> Iterator[None]:
     must contain that name) is a fiction here and must either
     ``monkeypatch.delenv("TORTOISE_DB_URI")`` for its own body (declared in
     ``DELIBERATE_URI_MUTATIONS``) or add its stem to
-    ``TORTOISE_TEST_NO_REDIRECT`` — ``tests/test_org_graph_open_tripwire.py``
-    shows both. Files that only need the constructions to agree WITH EACH
-    OTHER (control-plane assertions, receipts, tenancy) are unaffected: the
-    redirect is consistent within one test. The hash-renaming is what a
-    listing-based verdict cannot survive.
+    ``TORTOISE_TEST_NO_REDIRECT`` — then the redirect block is skipped and the
+    path is used verbatim. Two in-tree demonstrations, one per route:
+    ``tests/test_10180_promote_default_graph.py`` (delete the URI for the
+    fixture's body, declared in ``DELIBERATE_URI_MUTATIONS``) and
+    ``tests/test_org_graph_open_tripwire.py`` (``_exempt_from_uri_redirect``).
+    Files that only need the constructions to agree WITH EACH OTHER
+    (control-plane assertions, receipts, tenancy) are unaffected: the redirect
+    is consistent within one test. The hash-renaming is what a listing-based
+    verdict cannot survive.
 
     Enter:
     - patch ``tortoise.hosted_api.TortoiseSDK.__init__`` so every no-path
       construction binds ``db_path`` (mirrors tests/test_hosted_api.py:104-120).
-      ⚠️ ``db_path`` reaches ``TortoiseSDK`` only as the REDIRECT's input
-      under an ambient URI — see the block above.
+      ⚠️ Under an ambient URI ``db_path`` reaches ``TortoiseSDK`` as the
+      REDIRECT's input unless the file's stem is in
+      ``TORTOISE_TEST_NO_REDIRECT`` (see the block above).
     - deterministically close + clear ``_FALLBACK_KEEPALIVE`` (#1497/#1950:
       the module-level anchor dict survives test files, so a stale anchor
       bound to a PREVIOUS test's temp DB leaks state into this test — the

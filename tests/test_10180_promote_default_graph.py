@@ -1464,6 +1464,48 @@ def test_a_graph_bound_credential_publishes_no_default_namespace(monkeypatch):
     assert fake is not None
 
 
+def test_the_registry_lane_tells_the_guard_which_graph_it_bound(monkeypatch):
+    """`_publish_default_namespace`'s guard is `not org.get("graph_id")`, so a
+    caller that omits the key is treated as ORG-WIDE.
+
+    `get_current_org` (the registry lane) publishes
+    ``{"org_id", "graph_namespace"}`` with NO `graph_id`, and for a graph-bound
+    key its `graph_namespace` is that CUSTOM graph's — which passes
+    `moved_default_namespace`'s `org_{org_id}_` shape test. Omitted, the guard
+    inspects a dict that cannot express "bound", publishes the caller's binding
+    as "the org's default", and the docstring's guarantee ("Nothing is published
+    for that credential") is false at exactly the site it describes.
+
+    FAIL-ON: drop `graph_id` from that publish call and the dict this test
+    builds from the SITE's own shape publishes a value for a bound credential.
+    """
+    from pathlib import Path
+
+    src = (Path(__file__).resolve().parent.parent / "tortoise"
+           / "hosted_api.py").read_text(encoding="utf-8")
+    start = src.index("async def get_current_org(")
+    end = src.index("async def ", start + 1)
+    site = src[start:end]
+    assert '"graph_id": graph_id' in site, (
+        "get_current_org must pass the key it bound: without it the publication "
+        "guard cannot tell a graph-bound credential from an org-wide one, and "
+        "a bound key's custom namespace is published as the org's default")
+
+    # …and with that shape the guard does its job, both ways.
+    for bound, expected in ((NEW_ID, None), (None, f"org_{TEAM}")):
+        token = ha._resolved_default_namespace.set(None)
+        try:
+            ha._publish_default_namespace({
+                "org_id": TEAM, "graph_id": bound,
+                "graph_namespace": (f"org_{TEAM}_{NEW_ID}" if bound
+                                    else f"org_{TEAM}")})
+            published = ha._resolved_default_namespace.get()
+            assert (published[1] if published else None) == expected, (
+                f"bound={bound!r} published {published!r}")
+        finally:
+            ha._resolved_default_namespace.reset(token)
+
+
 def test_the_event_sweep_takes_the_namespace_from_its_enumeration():
     """The retention sweep must not pay a read per org: `graph_name` rides the
     page it already walks, and the parse must KEEP the column.
@@ -1934,3 +1976,37 @@ def test_the_projection_answers_both_questions_from_one_resolution(sb, monkeypat
     assert seen == [TEAM], (
         "the projection resolved the default namespace "
         f"{len(seen)} times — the verdict and the open must share ONE answer")
+
+
+def test_an_empty_listing_pays_no_resolution_at_all(sb, monkeypatch):
+    """The other half of the same accounting: an org with NO graph.
+
+    A falsy listing cannot hold the org's default under any name, so the verdict
+    is already decided and the resolution is not owed. Verified here because the
+    projection's comment claims it and nothing measured it: `moved` is passed as
+    the not-sampled sentinel on an empty listing, and a helper that resolves the
+    sentinel unconditionally pays one synchronous `organizations` read on
+    precisely the branch the premise makes unnecessary — on the lanes that have
+    no published credential hint (the MCP onboarding gate, a background pass).
+    """
+    _seed_onboarding(_OLD_NS, steps=_COMPLETE_STEPS, status="complete")
+    monkeypatch.setattr(ha, "_registry_existing_graphs", lambda: set())
+    seen: list[str] = []
+    real = ha._org_default_namespace
+
+    def _counting(org_id: str):
+        seen.append(org_id)
+        return real(org_id)
+
+    monkeypatch.setattr(ha, "_org_default_namespace", _counting)
+    assert ha._graph_has_org_namespace(
+        TEAM, listed=set(), moved=ha._NAMESPACE_NOT_RESOLVED) is False
+    assert seen == [], (
+        "an EMPTY listing resolved the default namespace "
+        f"{len(seen)} time(s) — nothing can be listed under any name, so the "
+        "answer was already decided")
+    # …and the not-sampled sentinel still resolves where it always did when the
+    # listing is non-empty, so the skip cannot silently weaken the verdict.
+    assert ha._graph_has_org_namespace(
+        TEAM, listed={_OLD_NS}, moved=ha._NAMESPACE_NOT_RESOLVED) is True
+    assert seen == [TEAM]
