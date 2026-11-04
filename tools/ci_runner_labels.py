@@ -33,16 +33,19 @@ TWO RULES, because they catch different failures
         step that can strand a job, and #6897/#9878 own that decision. R2 only says that
         IF the pool claims an x64 image, at least one provider must actually be x64.
 
-ALTERNATIVES, NOT ONE BIG SET
-    A matrix job emits SEVERAL label sets — one per row — and any ONE of them makes the
-    job schedulable. `tools/ci_selection.fast_shard_runner()` returns `["ubuntu-latest"]`
-    for one row and `["self-hosted", "self-hosted-x64"]` for the next. Those are
-    ALTERNATIVES. Unioning them would demand a single runner carrying `ubuntu-latest` AND
-    `self-hosted` — impossible — so the gate would red a correct repo precisely when the
-    pool is in its documented HEALTHY state (no pool runner claiming `ubuntu-latest`).
-    So: each alternative is a conjunction (AND over one runner); the alternatives are a
-    disjunction (any one suffices). Collapsing either direction makes this gate a false
-    pass or a false block.
+EVERY ROW IS A SEPARATE JOB — NONE OF THEM IS OPTIONAL
+    A matrix expands into one job instance PER ROW, and GitHub runs all of them. So a
+    single unanswered row is a job that sits `pending` forever and withholds the required
+    aggregate behind it — the 2026-11-04 mechanism exactly. Every set this module returns
+    is therefore REQUIRED, and `violations()` demands a provider for each one.
+
+    ⛔ BUT THE ROWS MUST BE CHECKED AS SEPARATE SETS, NOT AS ONE UNION. The rows are
+    `["ubuntu-latest"]` and `["self-hosted", "self-hosted-x64"]`
+    (`tools/ci_selection.fast_shard_runner()`). Unioned into one set they demand a single
+    runner carrying `ubuntu-latest` AND `self-hosted`, which no runner can be — so the
+    gate would red the required suite on a correct repo, precisely when the pool is in its
+    documented HEALTHY state. Conjunction WITHIN a row, disjunction ACROSS rows that are
+    each independently required: both halves have to be right.
 
 THE SNAPSHOT IS COMMITTED, NOT LIVE — AND IT IS A POINT-IN-TIME READ
     CI cannot call the Actions runners API (needs admin on the repo; the fleet token
@@ -125,7 +128,15 @@ X86_IMAGE_LABELS = frozenset({"ubuntu-latest", "ubuntu-22.04", "ubuntu-24.04", "
 X64_HOST_LABEL = "X64"
 
 #: `${{ fromJSON(matrix.<key>) }}`, tolerant of the spacing a human may add.
-_MATRIX_EXPR = re.compile(r"fromJSON\(\s*matrix\.([A-Za-z0-9_]+)\s*\)")
+_MATRIX_JSON_EXPR = re.compile(r"fromJSON\(\s*matrix\.([A-Za-z0-9_]+)\s*\)")
+#: The bare idiom `${{ matrix.<key> }}` — a label per row, not a JSON array.
+_MATRIX_BARE_EXPR = re.compile(r"matrix\.([A-Za-z0-9_]+)")
+
+#: The one matrix key whose rows are emitted by `tools/ci_selection.py` rather than
+#: written in the workflow. A computed matrix under any OTHER key cannot be read here,
+#: and substituting the shard routings for it would certify a job with labels it never
+#: asks for (the fabrication the visible-matrix branch refuses).
+_SHARD_MATRIX_KEY = "runner"
 
 
 class UnreadableRunsOn(RuntimeError):
@@ -138,109 +149,127 @@ class UnreadableRunsOn(RuntimeError):
 
 
 # ── the requested side ────────────────────────────────────────────────────────────────
-def _alternatives_from_scalar(value: str, where: str, job: dict | None = None) -> list[list[str]]:
-    """One label as a single alternative, or the resolved alternatives of an expression."""
+def _row_sets_from_scalar(value: str, where: str, job: dict | None = None) -> list[list[str]]:
+    """One label as one row-set, or the resolved row-sets of an expression.
+
+    ⛔ EVERY RETURNED SET IS REQUIRED — see the module docstring. A matrix's rows are all
+    run, so none of them is optional.
+    """
     text = value.strip()
     if "${{" not in text:
         return [[text]] if text else []
-    match = _MATRIX_EXPR.search(text)
-    if match is not None and job is not None:
-        static = _matrix_alternatives(job, match.group(1), where)
-        if static is not None:
-            return static
-        from tools.ci_selection import SHARD_RUNNER_HOSTED, SHARD_RUNNER_X64
+    if job is None:
+        raise UnreadableRunsOn(f"{where}: runs-on expression {text!r} has no resolvable label set")
 
-        # TWO alternatives, NOT their union: a row asks for one routing or the other.
-        return [list(SHARD_RUNNER_HOSTED), list(SHARD_RUNNER_X64)]
+    as_json = _MATRIX_JSON_EXPR.search(text)
+    if as_json is not None:
+        return _matrix_rows(job, as_json.group(1), where, json_array=True)
+    bare = _MATRIX_BARE_EXPR.search(text)
+    if bare is not None:
+        return _matrix_rows(job, bare.group(1), where, json_array=False)
     raise UnreadableRunsOn(f"{where}: runs-on expression {text!r} has no resolvable label set")
 
 
-def _alternatives_from_runs_on(
-    value: object, where: str, job: dict | None = None
-) -> list[list[str]]:
-    """The job's ALTERNATIVE label sets — any ONE of which makes it schedulable.
+def _row_sets_from_runs_on(value: object, where: str, job: dict | None = None) -> list[list[str]]:
+    """The job's REQUIRED label sets — one per matrix row; each an AND over one runner.
 
     Handles the documented forms: a scalar, a flow array, a block sequence, and a
     `group:`/`labels:` mapping. A runner GROUP is routing, not a label — a group-only
-    mapping therefore contributes no alternatives (it is READABLE and says "any runner in
-    this group"), which is different from an unreadable value and must not red the tree.
+    mapping therefore contributes no sets (it is READABLE and says "any runner in this
+    group"), which is different from an unreadable value and must not red the tree.
     """
     if isinstance(value, list):
-        alternatives: list[list[str]] = [[]]
+        sets: list[list[str]] = [[]]
         for item in value:
             if not isinstance(item, str):
                 raise UnreadableRunsOn(f"{where}: non-string member in runs-on array: {item!r}")
-            member = _alternatives_from_scalar(item, where, job)
-            alternatives = [a + b for a in alternatives for b in member]
-        return [a for a in alternatives if a]
+            row_sets = _row_sets_from_scalar(item, where, job)
+            sets = [a + b for a in sets for b in row_sets]
+        return [a for a in sets if a]
     if isinstance(value, dict):
         if "labels" in value:
-            return _alternatives_from_runs_on(value["labels"], where, job)
+            return _row_sets_from_runs_on(value["labels"], where, job)
         if "group" in value:
             return []  # a runner GROUP is not a label; the group decides the routing
         raise UnreadableRunsOn(f"{where}: runs-on mapping carries neither `labels:` nor `group:`")
     if isinstance(value, str):
-        return _alternatives_from_scalar(value, where, job)
+        return _row_sets_from_scalar(value, where, job)
     raise UnreadableRunsOn(f"{where}: unrecognised runs-on value {value!r}")
 
 
-def _matrix_alternatives(job: dict, key: str, where: str) -> list[list[str]] | None:
-    """The alternative label sets a `matrix.<key>` can hold, or None when the matrix is
-    not visible in the workflow at all.
+def _matrix_rows(job: dict, key: str, where: str, json_array: bool) -> list[list[str]]:
+    """Every row's label set for `matrix.<key>`.
 
-    ⛔ RESOLVED FROM THE JOB'S OWN MATRIX WHERE THAT IS POSSIBLE — one ALTERNATIVE per
-    row. A static `include` is READ. A matrix that is itself an expression (this tree's
-    `test` job: the whole matrix is emitted by `tools/ci_selection.py`) is invisible here,
-    and falls back to the selector's two routings as two ALTERNATIVES.
-
-    A matrix that IS visible but does not expose `key` is REFUSED. Substituting the
-    selector's union there would fabricate a label set for a job whose real rows ask for
-    something else, and the labels it really requests would go unchecked — the fail-open
-    this module exists to close.
+    Read from the job's own `include` rows where the matrix is visible. A matrix that is
+    itself an expression is invisible here; the ONLY such matrix this gate can resolve is
+    the shard selector's, whose rows `tools/ci_selection.fast_shard_runner()` emits under
+    the key `runner` — so those two row-sets are returned. Any other computed matrix is
+    REFUSED rather than certified against labels its rows never ask for.
     """
     matrix = (job.get("strategy") or {}).get("matrix")
     if isinstance(matrix, str) and "${{" in matrix:
-        return None  # computed outside the workflow
+        if key != _SHARD_MATRIX_KEY:
+            raise UnreadableRunsOn(
+                f"{where}: `matrix.{key}` comes from a computed matrix this tool cannot read, "
+                f"and only the shard selector's `matrix.runner` has known rows — refusing "
+                f"rather than certifying a label set the rows never ask for"
+            )
+        from tools.ci_selection import SHARD_RUNNER_HOSTED, SHARD_RUNNER_X64
+
+        # BOTH routings' rows, as SEPARATE required sets: a row is a job, so each must be
+        # answerable. Unioning them would demand one runner carrying both.
+        return [list(SHARD_RUNNER_HOSTED), list(SHARD_RUNNER_X64)]
     if not isinstance(matrix, dict):
-        return None
+        raise UnreadableRunsOn(f"{where}: no readable `strategy.matrix` for `matrix.{key}`")
+
+    axes = [k for k in matrix if k != "include"]
+    if axes:
+        # Axis-generated combinations are not written in the file, and an `include` entry
+        # that overwrites the only axis value ADDS a further combination rather than
+        # merging into it — so the real row set cannot be recovered here. Refusing beats
+        # a guess that leaves a real row unchecked.
+        raise UnreadableRunsOn(
+            f"{where}: matrix uses axis key(s) {axes} — the generated combinations cannot be "
+            f"read statically, so `matrix.{key}` cannot be resolved without guessing"
+        )
     rows = matrix.get("include")
     if not isinstance(rows, list):
-        # Visible, but written as AXES rather than `include`. The rows' values are not
-        # in the file, and guessing them is the fail-open.
         raise UnreadableRunsOn(
-            f"{where}: matrix is visible but carries no `include` rows, so `matrix.{key}` "
-            f"cannot be read — refusing rather than substituting an unrelated label set"
+            f"{where}: matrix carries no `include` rows, so `matrix.{key}` cannot be read"
         )
-    alternatives: list[list[str]] = []
+    row_sets: list[list[str]] = []
     for row in rows:
         if not isinstance(row, dict) or key not in row:
             continue
         raw = row[key]
         if not isinstance(raw, str):
             raise UnreadableRunsOn(f"{where}: matrix.{key} is not a string: {raw!r}")
-        try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise UnreadableRunsOn(
-                f"{where}: matrix.{key} is not a JSON label array: {raw!r} ({exc})"
-            ) from exc
-        if not isinstance(parsed, list) or not all(isinstance(x, str) for x in parsed):
-            raise UnreadableRunsOn(f"{where}: matrix.{key} is not a label array: {raw!r}")
-        alternatives.append([x for x in parsed if x])
-    if not alternatives:
+        if json_array:
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise UnreadableRunsOn(
+                    f"{where}: matrix.{key} is not a JSON label array: {raw!r} ({exc})"
+                ) from exc
+            if not isinstance(parsed, list) or not all(isinstance(x, str) for x in parsed):
+                raise UnreadableRunsOn(f"{where}: matrix.{key} is not a label array: {raw!r}")
+            row_sets.append([x for x in parsed if x])
+        else:
+            row_sets.append([raw] if raw.strip() else [])
+    if not row_sets:
         raise UnreadableRunsOn(
             f"{where}: the matrix's `include` rows carry no `{key}`, so `matrix.{key}` "
             f"cannot be read — refusing rather than substituting an unrelated label set"
         )
-    return alternatives
+    return row_sets
 
 
 def requested_labels(workflows_dir: Path = WORKFLOWS_DIR) -> dict[str, list[frozenset[str]]]:
-    """`<workflow>:<job>` -> its ALTERNATIVE label sets (any one makes it schedulable).
+    """`<workflow>:<job>` -> the REQUIRED label sets (one per matrix row; all must answer).
 
-    ⛔ THE ALTERNATIVES ARE KEPT APART ON PURPOSE — see the module docstring. A
-    conjunction must be checked as a set (AND over one runner); a matrix must be checked
-    as a disjunction of sets (a runner per row).
+    ⛔ EVERY SET IS REQUIRED. A matrix runs every row, so an unanswered row is a job that
+    never starts. Within a set it is an AND over one runner; across sets, each is
+    independently required — never unioned, and never "any one suffices".
     """
     if not workflows_dir.is_dir():
         raise UnreadableRunsOn(f"no workflows directory at {workflows_dir}")
@@ -261,10 +290,16 @@ def requested_labels(workflows_dir: Path = WORKFLOWS_DIR) -> dict[str, list[froz
             if not isinstance(job, dict) or "runs-on" not in job:
                 continue
             where = f"{path.name}:{job_name}"
-            alternatives = _alternatives_from_runs_on(job["runs-on"], where, job)
-            if not alternatives:  # group-only routing: nothing to check, and READABLE
+            row_sets = _row_sets_from_runs_on(job["runs-on"], where, job)
+            if not row_sets:  # group-only routing: nothing to check, and READABLE
                 continue
-            found[where] = [frozenset(a) for a in alternatives]
+            # de-duplicate while keeping a stable order (a matrix can repeat a row)
+            unique: list[frozenset[str]] = []
+            for row in row_sets:
+                frozen = frozenset(row)
+                if frozen not in unique:
+                    unique.append(frozen)
+            found[where] = unique
     return found
 
 
@@ -297,12 +332,12 @@ def _pool_answers(snapshot: dict, labels: frozenset[str]) -> list[dict]:
     ]
 
 
-def _alternative_is_answerable(snapshot: dict, labels: frozenset[str]) -> bool:
-    """Is this ONE alternative satisfiable — by the pool, or by GitHub-hosted?"""
+def _row_is_answerable(snapshot: dict, labels: frozenset[str]) -> bool:
+    """Is this ONE row satisfiable — by the pool, or by GitHub-hosted?"""
     if _pool_answers(snapshot, labels):
         return True
-    # A single-image job is served by GitHub-hosted. A CONJUNCTION is never: hosted
-    # carries one image and no `self-hosted`, so a multi-label set needs the pool.
+    # A single-image row is served by GitHub-hosted. A CONJUNCTION is never: hosted
+    # carries one image and no `self-hosted`, so a multi-label row needs the pool.
     return len(labels) == 1 and hosted_covers(next(iter(labels)))
 
 
@@ -311,32 +346,25 @@ def violations(snapshot: dict, requested: dict[str, list[frozenset[str]]]) -> li
     problems: list[str] = []
 
     for job in sorted(requested):
-        alternatives = requested[job]
-        if any(_alternative_is_answerable(snapshot, alt) for alt in alternatives):
-            continue
-        described = " | ".join(str(sorted(a)) for a in alternatives)
-        # Name the most useful cause: a label with no provider at all is a different
-        # repair from a conjunction no single runner carries.
-        detail = None
-        for alt in alternatives:
-            missing = [x for x in sorted(alt) if not pool_providers(snapshot, x)]
-            if missing:
-                detail = f"no provider for {missing}"
-                break
-        if detail is None:
+        for row in requested[job]:
+            if _row_is_answerable(snapshot, row):
+                continue
+            members = sorted(row)
+            missing = [m for m in members if not pool_providers(snapshot, m)]
             detail = (
-                "each label has a provider individually, but NO single runner carries the "
+                f"no provider for {missing}"
+                if missing
+                else "each label has a provider individually, but NO single runner carries the "
                 "whole set — `runs-on` is an AND over one runner"
             )
-        problems.append(
-            f"R1 {job} cannot be scheduled by any runner: runs-on {described} — {detail}. "
-            f"A label set nobody answers does not fail — the job sits `pending` forever, "
-            f"withholding any required check behind it."
-        )
+            problems.append(
+                f"R1 {job} cannot be scheduled on labels {members} — {detail}. A row that no "
+                f"runner answers does not fail: that job sits `pending` forever, and any "
+                f"required check waiting on it never reports."
+            )
 
-    # R2 is judged per LABEL: it is about which ARCHITECTURE serves an x86_64 image, so it
-    # applies whether the label is required or merely one alternative.
-    every_label = {label for alts in requested.values() for alt in alts for label in alt}
+    # R2 is judged per LABEL: it is about which ARCHITECTURE serves an x86_64 image.
+    every_label = {label for rows in requested.values() for row in rows for label in row}
     for label in sorted(X86_IMAGE_LABELS & every_label):
         providers = pool_providers(snapshot, label)
         if not providers:
