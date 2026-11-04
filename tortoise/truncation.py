@@ -101,6 +101,13 @@ are rather than naming them:
   ``tortoise_issue_insight`` surface).
 - ``tortoise/hosted_api.py::list_points`` — hosted ``GET /v1/points``, a
   store-side ``LIMIT`` with no offset and no cursor.
+- ``tortoise/hosted_api.py::search`` — hosted ``/v1/search``'s OUTAGE arm, the
+  one site that does not mark a CAP: when the store will not OPEN it answers a
+  degraded, empty, `incomplete` body rather than a raise (#10602's bounded read
+  lane), so a 0-row answer is never read as a complete empty. It joins this
+  register because the scan that keeps the register honest is an AST sweep of
+  `mark_truncation` call sites, and the rule the list exists for is "a new
+  marker site joins this list" — not "only cap sites do".
 
 Every such site must be on a DICT body; a field cannot ride a bare ``list``, so
 a list-shaped surface needs a return-shape decision first

@@ -12,17 +12,7 @@ aboutObjects: bounded operation, truncation marker, #8447, AIP-158
 # The bounded-operation contract
 
 **Issue:** #8447 (`P1-severe`) — *"contract: fail explicitly, never return a silently-truncated result"*.
-**Census measured at:** `origin/main = 62e3f2f61` (2026-11-02). **Every citation below re-derived at**
-`origin/main = d72983b99` (2026-11-03): `sdk.py` grew 695 lines, `hosted_api.py` 126 and
-`mcp_server.py` 19 between those two heads, so the line numbers moved by *non-uniform* deltas (+182 at
-the `CROSS_LENS_*` constants, +303 in the cross-lens body, +277 at `paginated_query`, +645 below
-`suggest_entry_points`, +123 in `hosted_api`, +19 in `mcp_server`) and were re-read at the anchor rather
-than shifted by a delta. This is the *second* re-derivation, and it is why the numbers below are not
-the ones an earlier head carried: `main` moved twice under them (`63981d152` → `223301c4`, which passed
-through the cited region untouched, → `d72983b99`, which did not), so the cites were read again rather
-than re-dated. The control that this was a READ and not a typed table: the four further
-cited files that no merge touched between those heads — `selfhost_api.py`, `tool_registry.py`,
-`event_store.py`, `config/surface-manifest.yml` — have unchanged numbers because the code did not move.
+**Census measured at:** `origin/main = 62e3f2f61` (2026-11-02).
 **Status:** C1 of #8447 (this document). C2 (boundary tests per surface) and C3 (the four doors)
 are tracked on the issue.
 
@@ -62,11 +52,7 @@ Three states, and only three:
 | **REFUSES** | an ask outside the surface's domain raises, rather than being quietly rewritten |
 | **SILENT** | **the defect.** The caller cannot tell. |
 
-Measured on this tree. ⛔ **The quoted code is the citation's anchor; the line number is convenience.**
-A bare `path:line` re-stales the moment a neighbouring PR inserts above it — this document has already
-been through it twice (`sdk.py` moved 695 lines under these same numbers between `62e3f2f61` and
-`d72983b99`, the exact class #10523's own commit records). So every row quotes the code it means, and
-a reader who finds the number has drifted should search the quoted fragment: that is the claim.
+Measured on this tree:
 
 | surface | bound | state | evidence |
 |---|---|---|---|
@@ -76,7 +62,6 @@ a reader who finds the number has drifted should search the quoted fragment: tha
 | MCP `tortoise_search` (`tortoise/tool_registry.py::TOOL_REGISTRY`) · `GET /search` (selfhost, `tortoise/selfhost_api.py::search`) | `limit` | **SILENT** | both return a bare list (`response_model=list[PointResponse]` on the route); recorded as a **deliberate limit** on #8447's 2026-11-01 comment (§6) and restated in `config/surface-manifest.yml` → `response_fields[tortoise_search].truncated` (*"returns a bare list, so it does not carry the field; wrapping a list in an object is a declared return-type change"*), because a marker here IS a return-shape change |
 | `TortoiseSDK.list_batches` (MCP: `tortoise_list_batches`) | `limit=20` | **SILENT** | `tortoise/sdk.py::list_batches` — `return items[:limit]`; the method's contract is `-> list[dict]`, so there is no field in which to say "there are more" |
 | `TortoiseSDK.suggest_entry_points` (MCP: `tortoise_suggest_entry_points`) | `limit=5` | **SILENT** | `tortoise/sdk.py::suggest_entry_points` — `results = results[:limit]` on a plain `[:limit]` cut with no offset and no cursor; declared `-> list[dict]` |
-| `tortoise_query(text=…)` (MCP, `tortoise/tool_registry.py::TOOL_REGISTRY`; the `text=` arm only) | `limit` (100 on that arm) | **SILENT** | `mcp_server.py::tortoise_query` calls `tortoise_fts_query(…, limit=eff_limit)` **without** the private marker sink, and the SDK method is declared `-> list[dict]` (`sdk.py::tortoise_fts_query`) — so even though `tortoise_fts_query` CAN compute the marker (`_truncation_out`, a keyword-only parameter on that signature), a bare list has nowhere to carry it. Its structural arm (`text=None`) is a different surface, and not all of its branches are marked, see ⚠️ below |
 | `GET /v1/points` (hosted, `tortoise/hosted_api.py::list_points`) | `limit=50` (`Query(50, ge=1, le=1000)`) | **MARKS** | the same function asks the store for `limit+1` (an internal probe row, dropped before delivery) and its own `mark_truncation`/`truncation_field` calls (`tortoise/truncation.py::truncation_field`) publish `truncated`; `total_available` is deliberately WITHHELD (`exact=False` — a probe proves *more exist*, not *how many*), so a truncated page takes the third state. `count` is still rows **delivered**, and the cap VALUES are unchanged |
 | `GET /points` (selfhost, `tortoise/selfhost_api.py::list_points`) | `limit=50` | **SILENT** | `response_model=list[PointResponse]` — a bare list on the route |
 | `GET /v1/events` (hosted, `tortoise/hosted_api.py::events_poll`) | `limit=100` (`le=_MAX_EVENT_PAGE`) | **REFUSES at the edge** | `limit: int = Query(100, ge=1, le=_MAX_EVENT_PAGE)` in `events_poll` refuses 0 at the route; the seam below it (`tortoise/event_store.py::read_after`) refuses both ends — see §3 |
@@ -88,7 +73,7 @@ failure mode this document exists to prevent is exactly "we audited the instance
 
 ### 2a. Why the remaining SILENT surfaces are parked, not fixed
 
-Six of the seven return a **bare list**, and each sits behind a published surface, so there is no
+Five of the six return a **bare list**, and each sits behind a published surface, so there is no
 non-breaking place to put an incompleteness marker:
 
 - adding a key to *each row* is not a marker (a caller counting rows cannot see it);
@@ -100,32 +85,21 @@ repo's hard rule requires Daniel's approval before any surface change (`AGENTS.m
 Surface Approval*). `tortoise_search` is the third of the same class — an MCP tool
 (`tortoise/tool_registry.py::TOOL_REGISTRY`), not a route — and the manifest's own note calls its
 list→object change *"an MCP Surface Approval decision"* (`config/surface-manifest.yml` →
-`response_fields[tortoise_search].truncated`). `tortoise_query` is the fourth: an MCP tool
-(`tortoise/tool_registry.py::TOOL_REGISTRY`) whose `text=` arm returns `tortoise_fts_query`'s bare
-list. So the four are recorded here as:
+`response_fields[tortoise_search].truncated`). So the three
+are recorded here as:
 
-> **NEEDS-APPROVAL(`tortoise_list_batches`, `tortoise_suggest_entry_points`, `tortoise_search`,
-> `tortoise_query`)** —
+> **NEEDS-APPROVAL(`tortoise_list_batches`, `tortoise_suggest_entry_points`, `tortoise_search`)** —
 > the fix for each is a return-shape change from a bare list to a marked result; the contract
 > cannot be honoured on a bare `list[dict]` without one.
 
 `selfhost GET /search` and selfhost `GET /points` are published **HTTP response models**
 (`response_model=list[PointResponse]`) rather than SDK methods or MCP tools, so they are recorded as
-**SILENT** with the same return-shape dependency. The deferral record's own sentence names **two**
+**SILENT** with the same return-shape dependency. The deferral record names **exactly two**
 surfaces: `tortoise_search` and selfhost `GET /search` — **#8447's 2026-11-01 comment** §6, verbatim:
 *"Deliberate limit: `tortoise_search` (MCP) and `selfhost_api`'s `/search` are list-shaped, so they
 still cannot say it"*, with §1 rows #13/#14 as the same pair and `config/surface-manifest.yml` →
 `response_fields[tortoise_search].truncated` restating the MCP half. It is **not** a scope note on
 any PR body.
-
-⚠️ **§1 of that same comment is not the same pair, and this is the trap the deferral sentence hides.**
-§1 row #13 is selfhost `/search` (`tortoise/selfhost_api.py::search`), but row #14 carries **two**
-surfaces — `tortoise_search` (`mcp_server.py::tortoise_search`) *and* `tortoise_query(text=…)`
-(`mcp_server.py::tortoise_query`), the second of which §6's sentence does not name. §1's own bullet
-list parks the whole `#13/#14` list-shaped set (*"a field cannot ride a list, and wrapping one is a
-declared return-type change = an **MCP/SDK surface decision (owner-only)**"*), so `tortoise_query`
-sits under the same class rule; it is censused here as **SILENT** rather than left off the table on
-the strength of a sentence that names only two of the three.
 
 ⚠️ **`selfhost GET /points` is NOT in that record.** It is the same shape and needs the same
 decision, but no artifact has decided it yet — so it is recorded here as **SILENT and undecided**,
@@ -136,7 +110,7 @@ being tracked.
 **dict**, not a list — the `list_points` body build — and the route declares no `response_model`
 (`@app.get("/v1/points")` carries none), so a marker rides it **additively**, exactly as it rides
 `/v1/search`: build the body, then `response.update(truncation_field(…))`. #10500 recorded that shape as a `response_fields` row in
-`config/surface-manifest.yml` (`:121-143`), **not** as an MCP/SDK surface approval — and its own
+`config/surface-manifest.yml` → `response_fields[tortoise_search].truncated`, **not** as an MCP/SDK surface approval — and its own
 note draws the line there: wrapping a *list* in an object is the return-type change; adding a field
 to an object body is not. So this one was **SILENT and fixable without an approval** — recorded here
 as **not yet done**, never as blocked — and it is **now done**: the §2 row above reads **MARKS**.
@@ -168,11 +142,8 @@ departures are deliberate. Recorded on the issue (#8447) **and** beside the cons
 AIP-158's own text for (1): *"If the user specifies page_size greater than the maximum permitted by
 the API, the API should coerce down to the maximum permitted page size."* We do not, because on this
 seam coerce-down *is* the silently-truncated result this contract forbids. Where a surface **does**
-have a true end-of-collection instrument, coerce-down remains available — that scoping is departure
-**(1)**'s, and only (1)'s. Departure **(2)** is instrument-independent: serving a 1-row page for an ask
-of 0 is the same rewritten ask in the other direction whatever token the seam carries, which is why
-AIP-158's unconditional 0-clause stays departed from here — the route's inherited `Query(ge=1)` is
-not itself the recording of that choice.
+have a true end-of-collection instrument, coerce-down remains available — departures (1) and (2) are
+scoped to a seam that has none.
 
 ---
 
@@ -203,9 +174,9 @@ A marker is only an instrument if a caller can act on it. Therefore:
   fleet from a PostgREST-truncated page. We fixed the instance, not the class; this is the class.
 - PR #10500 — merged: `GET /v1/search` marks its result incomplete (`truncated` + `total_available`
   via `truncation.py`); the list-shaped surfaces named there are a recorded deferral on #8447's
-  2026-11-01 comment (§6 names `tortoise_search` and selfhost `GET /search`; §1's bullet list parks
-  the wider list-shaped set including row #14's `tortoise_query` — see §2a), not a scope note on that PR.
-  ⚠️ selfhost `GET /points` is the same shape and is **undecided**, not deferred.
+  2026-11-01 comment (§1 census rows #13/#14 — `tortoise_search` and selfhost `GET /search` only),
+  not a scope note on that PR. ⚠️ selfhost `GET /points` is the same shape and is **undecided**, not
+  deferred.
 - PR #10518 — `read_after` refuses an out-of-domain `limit` instead of rewriting it.
 - PR #10622 (C2) — hosted `GET /v1/points` now **MARKS**: an internal `limit+1` probe row
   proves the cut, the probe is dropped before delivery, and the body carries `truncated`

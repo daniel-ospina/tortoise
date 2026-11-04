@@ -1305,11 +1305,19 @@ class TestTheMarkerSiteRegisterIsComplete:
             "tortoise/new_marker_site.py::a_new_bounded_read"
         }
 
-    def test_the_scan_finds_the_three_sites_the_register_names(self):
-        """Guard against a vacuous scan: the AST really does see all three."""
+    def test_the_scan_finds_the_four_sites_the_register_names(self):
+        """Guard against a vacuous scan: the AST really does see all four.
+
+        REBASE (#10602 × #8447): the folded tree's hosted `/v1/search` gained an
+        OUTAGE-arm marker site that this branch never saw, so the register and
+        this pinned set both carry FOUR entries here. The set is still derived
+        from the tree by the sibling case, which is what makes the count
+        maintainable; this one only proves the scan is not vacuous.
+        """
         sites = self._call_sites()
         assert sites == {
             "tortoise/hosted_api.py::list_points",
+            "tortoise/hosted_api.py::search",
             "tortoise/sdk.py::issue_insight",
             "tortoise/sdk.py::tortoise_fts_query",
         }, sites
