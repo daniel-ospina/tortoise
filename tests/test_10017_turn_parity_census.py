@@ -2355,6 +2355,91 @@ def test_the_docstring_states_the_local_legs_DECLARED_ABSENT_fields():
         "the contract must qualify which leg compares kind/status/createdAt")
 
 
+def test_the_contract_states_that_an_ARMED_graph_holds_POST_cutover_turns():
+    """#10627 review (P3): the contract claimed the opposite of what the writer
+    does, on the clause a purge-scoping lane reasons from.
+
+    The old sentence was "on an ARMED deployment the writer stops minting turn
+    nodes (#10000), so turn nodes present in an armed target's graph are
+    pre-cutover by construction". The writer does no such thing: `capture_session`
+    reads each record write's OUTCOME and sends every turn the record did not
+    take through `_graph_write_with_retry` ("the record did not take N of M
+    turn(s) — writing them to the GRAPH so the transcript is not lost"). An
+    armed graph therefore holds POST-cutover turns the record DECLINED — and
+    they are `missing_in_record` by construction (backfill, never delete).
+
+    The pin is anchored to the WRITER, not to prose: it reads `tortoise/sdk.py`
+    and requires the fallback's own names to exist there, so the contract
+    cannot be corrected into a claim about code that no longer exists either.
+
+    Mutations that go RED here: restoring the old "pre-cutover by construction"
+    sentence; deleting the `_unrecorded`/`_graph_write_with_retry` sentence.
+    """
+    import tortoise.sdk as sdk
+    doc = tpc.__doc__ or ""
+    sdk_src = Path(sdk.__file__).read_text(encoding="utf-8")
+    # The code path the contract describes really exists.
+    assert "_unrecorded" in sdk_src and "_graph_write_with_retry" in sdk_src, (
+        "the writer no longer has the #10000 graph fallback this contract "
+        "describes — the contract must be re-derived, not patched")
+    assert "the record did not take" in sdk_src
+    # …and the contract states it, by name, with the repair.
+    assert "pre-cutover by construction" not in doc, (
+        "the falsified premise is back: an armed graph holds post-cutover "
+        "turns the record declined")
+    assert "_unrecorded" in doc and "_graph_write_with_retry" in doc
+    assert "missing_in_record" in doc.split("_graph_write_with_retry", 1)[1][:1200], (
+        "the contract must say where a declined turn lands and that its repair "
+        "is a backfill, never a delete")
+
+
+def test_the_exit_code_table_names_BOTH_arms_of_exit_three():
+    """#10627 review (P3): exit 3 was documented as ONE arm ("a side could not
+    be READ"), and the operator's action table therefore pointed at a retry.
+
+    `census()` raises `CensusError` on three arms where BOTH sides were read
+    fine and only the COMPARISON was incomplete — an undeclinable
+    `declared_absent` name, an invented one, and any `embeddingText`-bearing
+    episodic node. An operator (or a monitor rule) keyed on the documented
+    table retries store reachability forever on a state whose only repair is a
+    code change to the comparison.
+
+    Mutations that go RED here: restoring the one-arm row; restoring the
+    one-arm `CensusError` docstring; dropping the "different repairs" warning.
+    """
+    doc = tpc.__doc__ or ""
+    start = doc.find("\n    3  ")
+    end = doc.find("THE NEGATIVE ARM")
+    assert start != -1 and end != -1 and end > start, (
+        "the exit-code table's row 3 is not where the scan expects it — the "
+        "scan is broken, not the contract")
+    row = " ".join(doc[start:end].split())
+    assert "be READ" in row, "row 3 no longer names the unreadable-side arm"
+    assert "COMPARISON could not be completed" in row, (
+        "row 3 must name the uncompleted-comparison arm, or the operator "
+        "retries a read that was never wrong")
+    assert "DIFFERENT repairs" in row, (
+        "the two arms have different repairs and the table must say so")
+    # The exception's own contract must agree with the table it is raised under.
+    err_doc = tpc.CensusError.__doc__ or ""
+    # ⛔ ASSERT THE FRAMING, NOT ONLY THE WORDS (measured: a mutant that restored
+    # the one-arm summary left READ/COMPARISON alive in the paragraph below it and
+    # the weaker assertion stayed GREEN). The SUMMARY is the sentence a reader
+    # takes away, so the claim is scoped to it.
+    summary = err_doc.split("\n\n")[0]
+    assert "Two arms" in err_doc, (
+        "CensusError's contract no longer states that it has two arms — the "
+        "one-arm framing is back")
+    assert "a side could not be read" not in summary.lower(), (
+        f"CensusError's summary still claims a single arm: {summary.strip()!r}")
+    assert "READ" in err_doc and "COMPARISON" in err_doc, (
+        "CensusError's docstring must name both arms by their repair")
+    # …and the arms it describes are the arms the code raises.
+    src = Path(tpc.__file__).read_text(encoding="utf-8")
+    assert "declared " in src and "undeclinable" in src
+    assert "embeddingText" in src
+
+
 def test_the_CLI_prints_the_tolerated_empty_days(tmp_path, capsys, monkeypatch):
     """The tolerance must be VISIBLE on stdout, not just in the code path: an
     undisclosed skip reads exactly like a day that went missing.
@@ -2459,3 +2544,165 @@ def test_a_DROPPED_interior_line_whose_turn_the_graph_never_held_is_exit_ZERO(
     assert "unparsable : 2026-11-02.jsonl:1" in out
     assert "NOT a parity pass" in out
     assert "verdict    : CLEAN" in out
+
+
+def test_an_EMPTY_filed_window_is_not_a_SECOND_capture_window(tmp_path):
+    """A `conversation` that windows to NOTHING is not a second window.
+
+    Review P2. The filing leg windows the same list and DEAD-LETTERS the session
+    as `no_conversation` when the window is empty
+    (`tortoise/session_events_drain.py`, `turns = _window(...)` →
+    `if not turns: return dead("no_conversation", ...)`), so an empty line filed
+    no turn and can hide none. Counting it as an `occurrence` made ONE real
+    window plus one empty line look like two capture windows of one index space,
+    which popped the session from the positional key space and REFUSED it as
+    `duplicate_window` — a false refusal, with a wrong cause and the wrong repair
+    advice, on exactly the class the duplicate arm exists to keep open.
+
+    Mutation that goes RED here: restoring the unconditional
+    `occurrences[sid] = occurrences.get(sid, 0) + 1`.
+    """
+    # An explicit `[]`, and a conversation whose only turn is blank (the window
+    # drops it) — the two shapes an empty FILED window comes in.
+    _local_record(tmp_path, {"s1": _conversation(("user", "hi"))},
+                  name="2026-11-01.jsonl")
+    (tmp_path / "2026-11-02.jsonl").write_text(
+        json.dumps({"session_id": "s1", "conversation": []}) + "\n"
+        + json.dumps({"session_id": "s2",
+                      "conversation": _conversation(("user", "   "))}) + "\n",
+        encoding="utf-8")
+    record = tpc.read_local_record_turns(tmp_path)
+    assert record["duplicate_window"] == [], record["duplicate_window"]
+    # s1 keeps its one real window and is certifiable; s2 held no turn at all.
+    assert list(record["rows_by_key"]) == ["s1_t0"]
+    assert record["sessions"] == 2
+    report = tpc.census(
+        {"nodes": {"s1_t0": _graph_node("s1_t0", "s1", content="[user] hi")}},
+        record, sample=5)
+    assert report["verdict"] == "CLEAN", report["parity"]
+    # …and the empty line does not overwrite the real window when it comes FIRST.
+    (tmp_path / "2026-11-03.jsonl").write_text(
+        json.dumps({"session_id": "s3", "conversation": []}) + "\n"
+        + json.dumps({"session_id": "s3",
+                      "conversation": _conversation(("user", "yo"))}) + "\n",
+        encoding="utf-8")
+    record = tpc.read_local_record_turns(tmp_path)
+    assert record["duplicate_window"] == []
+    assert record["rows_by_key"]["s3_t0"]["content"] == "[user] yo"
+
+
+def test_a_record_SHAPED_path_that_is_not_a_file_is_DISCLOSED(tmp_path):
+    """`is_file()` follows symlinks; a bare `continue` was a silent narrowing.
+
+    Review P3. A dangling `<day>.jsonl` (a seal that unlinked its target, a
+    half-finished rotate), a FIFO, or a directory named `<day>.jsonl` was dropped
+    and named in NO list — so `files` read as full coverage of a surface the leg
+    had quietly skipped, which is the one thing its own `skipped_files` contract
+    forbids ("a narrowed surface the artifact does not name is a silent claim of
+    coverage"). A plain directory (`archive/`) is not a narrowing and stays
+    unnamed.
+
+    Mutation that goes RED here: restoring the bare `if not entry.is_file():
+    continue`.
+    """
+    _local_record(tmp_path, {"s1": _conversation(("user", "hi"))},
+                  name="2026-11-01.jsonl")
+    (tmp_path / "2026-11-02.jsonl").mkdir()          # a directory, record-shaped
+    (tmp_path / "2026-11-03.jsonl").symlink_to(tmp_path / "gone.jsonl")
+    record = tpc.read_local_record_turns(tmp_path)
+    assert list(record["rows_by_key"]) == ["s1_t0"]
+    # ⛔ ITS OWN LIST, not `skipped_files` (cycle-2 review P3): that one is the
+    # day+shape COLLISION disclosure, and its stdout sentence states a collision
+    # cause per entry — so sharing it printed "not a regular file … same
+    # day+shape as a file the root store already supplies", a self-contradicting
+    # line naming a repair (reconcile a displaced copy) that does not exist for
+    # this class. The collision list must stay collision-only.
+    assert record["skipped_files"] == [], record["skipped_files"]
+    named = record["unreadable_paths"]
+    assert any(s.startswith("2026-11-02.jsonl") for s in named), named
+    assert any(s.startswith("2026-11-03.jsonl") for s in named), named
+    assert all("not a regular file" in s for s in named), named
+
+
+def test_a_record_SHAPED_path_that_is_not_a_file_gets_its_OWN_reason_on_stdout(
+        tmp_path, capsys, monkeypatch):
+    """The disclosure must name the cause that is TRUE for this class.
+
+    Cycle-2 review P3: the printer appends the COLLISION cause to every
+    `skipped_files` entry, so a not-a-regular-file path in that list printed a
+    sentence that contradicted itself and pointed at the wrong repair.
+    """
+    _local_record(tmp_path, {"s1": _conversation(("user", "hi"))},
+                  name="2026-11-01.jsonl")
+    (tmp_path / "2026-11-02.jsonl").symlink_to(tmp_path / "gone.jsonl")
+    monkeypatch.setattr(tpc, "read_graph_turns", lambda *a, **k: {
+        "nodes": {"s1_t0": _graph_node("s1_t0", "s1", content="[user] hi")},
+        "unidentifiable": []})
+    code = tpc.main(["--uri", "docker://:@127.0.0.1:1/g",
+                     "--local-record-dir", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert code == 0, out
+    assert "unreadable : 2026-11-02.jsonl" in out
+    assert "not a regular file" in out
+    # The collision sentence must NOT be glued onto this class.
+    assert "same day+shape" not in out
+
+
+def test_a_record_shaped_path_is_not_reported_as_an_EMPTY_record(tmp_path):
+    """EMPTY vs DAMAGED, on the path axis (cycle-2 review P3).
+
+    A directory whose only entry is a record-shaped path that cannot be read is
+    NOT an empty record: the previous message told the operator to check the
+    directory/path, when the truth is an unreadable day file.
+
+    Mutation that goes RED here: dropping the `unreadable_paths` clause from the
+    `not files` refusal.
+    """
+    (tmp_path / "2026-11-01.jsonl").symlink_to(tmp_path / "gone.jsonl")
+    with pytest.raises(tpc.CensusError) as excinfo:
+        tpc.read_local_record_turns(tmp_path)
+    message = str(excinfo.value)
+    assert "EMPTY" in message
+    assert "DAMAGED" in message, message
+    assert "2026-11-01.jsonl" in message, message
+
+
+def test_an_archive_symlink_that_does_not_resolve_REFUSES(tmp_path):
+    """An unmounted archive volume is not an archive that holds nothing.
+
+    Cycle-2 review P3: `exists()` follows links, so a dangling `archive/` was
+    skipped in silence while the artifact reported the four shape x directory
+    surfaces as covered. A GENUINELY missing `archive/` stays silent (the
+    common fresh-directory state); only an unresolvable symlink refuses.
+
+    Mutation that goes RED here: restoring the bare `if not scan_dir.exists():
+    continue`.
+    """
+    _local_record(tmp_path, {"s1": _conversation(("user", "hi"))})
+    (tmp_path / "archive").symlink_to(tmp_path / "unmounted-volume")
+    with pytest.raises(tpc.CensusError) as excinfo:
+        tpc.read_local_record_turns(tmp_path)
+    assert "does not resolve" in str(excinfo.value)
+    # …and a genuinely absent archive directory is still normal.
+    (tmp_path / "archive").unlink()
+    assert list(tpc.read_local_record_turns(tmp_path)["rows_by_key"]) == ["s1_t0"]
+
+
+def test_an_EMPTY_record_dsn_alongside_the_local_dir_is_REFUSED(tmp_path,
+                                                               capsys):
+    """Presence, not truthiness — on the MUTUAL-EXCLUSION arm too.
+
+    Review P3. `if args.record_dsn:` let `--local-record-dir DIR --record-dsn ""`
+    through, so the documented "an explicit flag combination is refused" guard
+    did not exist for the exact spelling an unset variable produces. No wrong
+    verdict followed (the local leg is the one named), but the guard was absent.
+
+    Mutation that goes RED here: restoring `if args.record_dsn:`.
+    """
+    _local_record(tmp_path, {"s1": _conversation(("user", "hi"))})
+    code = tpc.main(["--db-path", str(tmp_path / "g.db"),
+                     "--local-record-dir", str(tmp_path),
+                     "--record-dsn", ""])
+    err = capsys.readouterr().err
+    assert code == 1, err
+    assert "mutually exclusive" in err
