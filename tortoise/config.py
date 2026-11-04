@@ -399,33 +399,49 @@ def looks_like_uri_userinfo(value: str) -> bool:
 
     ONE predicate, shared by the two redaction sites that must agree: this
     module's `resolve_db_path` log line and `__main__`'s `config show` report.
-    They were two hand-written copies and BOTH leaked the same shape, because
-    both tested the `//` AUTHORITY prefix and neither tested the COLLAPSED form.
+    They were two hand-written copies, and both leaked the same shape.
 
-    Two arms, and both are required or one shape leaks:
+    Three arms. Each one exists because the arm before it missed a measured
+    shape, and the arms must stay in this order:
 
-    * **AUTHORITY FORM** — ``//user:pw@host/x.db`` or ``//token@host/x.db``.
-      The second carries a token as the user with NO ``:`` at all, which is why
-      a colon test alone is not enough. The authority is everything after the
-      leading ``//`` up to the next ``/``.
-    * **USERINFO COLLAPSED INTO A PATH** — `resolve_db_path` hands its caller an
-      ABSOLUTE path, and ``os.path.abspath`` collapses a leading ``///`` to
-      ``/``, so ``///user:pw@host/x.db`` reaches the reporter as
-      ``/user:pw@host/x.db`` where the ``//`` arm cannot see it. The same holds
-      for a `TORTOISE_DB_PATH` that is already absolute. The tell is a ``:``
-      BEFORE the last ``@`` — the ``user:password@`` boundary.
+    * **TWO OR MORE LEADING SLASHES** — the value still wears an AUTHORITY
+      (``//userinfo@host/…``) or the remnant of one after `os.path.abspath`
+      (``///userinfo@host/…``). Nothing else can occupy that position, so any
+      ``@`` there is userinfo. ⚠ The RAW value is what `resolve_db_path` redacts,
+      and it keeps all three slashes while the REPORT sees the collapsed path —
+      an arm that required ``@`` inside the first ``/``-delimited segment missed
+      the raw form, and a single-segment heuristic missed it too.
+    * **A COLON BEFORE THE LAST ``@``** — the ``user:password@`` tell, and it
+      spans a raw ``/`` in the password, which is why a `/`-boundary arm lost
+      ``//u:p/ss@host/x.db`` while the display masker redacted it.
+    * **NO DIRECTORY ABOVE THE ``@``** — the colon-less twin: a token used as
+      userinfo (``//token@host/x.db``) reaches the report as
+      ``/token@host/x.db``, which has a single segment before the ``@``. A real
+      absolute path with an ``@`` in it has a directory there
+      (``/tmp/me@work/db.fdb``), and that is the distinction both are pinned on.
 
-    Deliberately NOT "any ``@``": the tree's display masker fails closed on any
-    ``@``, but applying that here would redact two legal paths the suite pins as
-    legible — ``/tmp/me@work/db.fdb`` (an ``@`` with no credential) and
-    ``/tmp/a:b.db`` (a colon with no ``@``). Requiring the ``:``-before-``@``
-    boundary keeps both readable while covering every ``user:password@`` shape.
+    Deliberately NOT a bare ``@`` test: `_mask_display_target` fails closed on any
+    ``@`` in a scheme-less value, but `main` pins an absolute path with an ``@``
+    as a LEGIBLE path (`test_the_graph_store_classifies_the_target_instead_of_
+    crying_wolf`, `test_the_graph_target_keeps_the_maskers_fail_closed_rule`), and
+    that legibility is what a report exists for. The two rules agree on every
+    credential shape; this predicate adds the path-shaped exemption on top.
+
+    Residual, stated rather than discovered later: a COLON-LESS token embedded
+    under a real directory (``TORTOISE_DB_PATH=/srv/db/token@host/x.db``) is
+    indistinguishable from a legal path by any lexical tell, so it is treated as
+    one. A collapsed authority cannot take that shape (`abspath` leaves exactly
+    one leading slash), so this is only reachable by hand-writing a token into a
+    path — not by the copy-pasted DSN this predicate exists for.
     """
     if "@" not in value:
         return False
-    if value.startswith("//") and "@" in value.split("/", 2)[-1].split("/", 1)[0]:
+    if value.startswith("//"):
         return True
-    return ":" in value.rsplit("@", 1)[0]
+    before = value.rpartition("@")[0]
+    if ":" in before:
+        return True
+    return "/" not in before.lstrip("/")
 
 
 def raw_uri_userinfo(uri: str) -> tuple[str | None, str | None]:
@@ -528,16 +544,18 @@ def resolve_db_path(explicit: str | None = None) -> str:
         # shape that drops the scheme but keeps the authority). Cut the query, then
         # apply the same userinfo rule the display maskers apply; the two halves are
         # both needed or one shape leaks while the other is redacted. The predicate
-        # is written out rather than imported: `__main__` imports THIS module, so a
-        # masker import here would cycle.
+        # is the SHARED `looks_like_uri_userinfo`; it is CALLED, not imported as a
+        # masker, precisely because `__main__` imports THIS module and a masker
+        # import here would cycle.
         _shown = uri.split("?", 1)[0].split("#", 1)[0]
         # AUTHORITY FORM **or** USERINFO COLLAPSED INTO A PATH — one shared
         # predicate (`looks_like_uri_userinfo`), because this site and
         # `__main__`'s report used to be two hand-written copies of a
         # `startswith("//")` test and BOTH leaked `/user:pw@host/x.db`: the
         # value arrives ABSOLUTE here, and `os.path.abspath` collapses a leading
-        # `///` to `/`, so the `//` test never fires. Never a bare `@` test — two
-        # legal paths are pinned as legible (see the helper).
+        # `///` to `/`, so the `//` test never fires. The predicate is the
+        # masker's own rule (any `@` in a scheme-less value) — every narrower
+        # version of it leaked a shape, see its docstring.
         if looks_like_uri_userinfo(_shown):
             _shown = "<redacted: userinfo-shaped>"
         logger.warning(

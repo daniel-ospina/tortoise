@@ -1988,17 +1988,67 @@ def test_a_userinfo_dsn_collapsed_into_an_absolute_path_is_redacted(
     store = json.loads(cap.out)["graph_store"]
     assert "hunter2" not in json.dumps(store)
     assert store["target"].startswith("<")
-    assert store["target_kind"] == "unrecognised (redacted)"
+    # NOT "unrecognised": a scheme-less value is an embedded file path the resolver
+    # really opens (its own log line says "treating as embedded DB path"). The
+    # DISPLAY is redacted; the store is not inscrutable (#10655 review, F2).
+    assert store["target_kind"] == "embedded file path (redacted — userinfo-shaped)"
 
 
-def test_an_at_sign_without_a_password_boundary_stays_legible(
+@pytest.mark.parametrize("var, value", [
+    # The COLLAPSED form of a token-as-user DSN (`//token@host/x.db`): arm 1 only
+    # sees it while the `//` survives, and `os.path.abspath` eats it.
+    ("TORTOISE_DB_URI", "///token_SuperSecret12345@host/x.db"),
+    ("TORTOISE_DB_PATH", "/token_SuperSecret12345@host/x.db"),
+])
+def test_a_COLONLESS_token_collapsed_into_an_absolute_path_is_redacted(
+        monkeypatch, capsys, tmp_path, var, value):
+    """The colon-less twin of the P0 above — the shape arm 1 exists to catch.
+
+    `looks_like_uri_userinfo`'s AUTHORITY arm is documented as covering a token
+    with NO `:` (`//hunter2@host/x.db`), precisely because a colon test alone is
+    not enough. The collapsed arm was a colon test, so the moment `abspath`
+    removed the `//` the token form leaked while the password form was masked —
+    the predicate was narrower than its own stated rule.
+    """
+    _global(tmp_path)
+    monkeypatch.setenv(var, value)
+    assert _run(("config", "show", "--json")) == 0
+    cap = capsys.readouterr()
+    assert "SuperSecret12345" not in cap.out + cap.err
+    store = json.loads(cap.out)["graph_store"]
+    assert "SuperSecret12345" not in json.dumps(store)
+    assert store["target_kind"] == "embedded file path (redacted — userinfo-shaped)"
+
+
+def test_a_legal_path_that_looks_like_userinfo_is_redacted_but_not_denied(
         monkeypatch, capsys, tmp_path):
-    """The other side of the P0 fix: `/tmp/me@work/db.fdb` is a legal path.
+    """The fail-closed trade-off, pinned so nobody discovers it by surprise.
 
-    The tree's display masker fails closed on ANY `@`, so a bare-`@` predicate here
-    would redact this path — and it would also redact `/tmp/a:b.db`. The rule is
-    therefore the `user:password@` BOUNDARY (a `:` before the last `@`), not the
-    presence of `@`.
+    `/tmp/a:b/db@c.fdb` is a LEGAL embedded path (a colon with no credential, and
+    a real parent directory). The `:`-before-`@` tell cannot tell it from a
+    credential, so it is masked — that is the #2987/#5267 direction: a masked
+    path costs a line, an unmasked credential costs a transcript. What it must
+    NOT do is call a working store "unrecognised", which is a false statement
+    about the user's configuration.
+    """
+    _global(tmp_path)
+    monkeypatch.setenv("TORTOISE_DB_PATH", "/tmp/a:b/db@c.fdb")
+    assert _run(("config", "show", "--json")) == 0
+    store = json.loads(capsys.readouterr().out)["graph_store"]
+    assert store["target"] == "<uri-redacted-unrecognised-shape>"
+    assert store["target_kind"] == "embedded file path (redacted — userinfo-shaped)"
+
+
+def test_an_at_sign_in_a_path_directory_stays_legible(
+        monkeypatch, capsys, tmp_path):
+    """A real directory above the `@` is what separates a PATH from userinfo.
+
+    `main` pins this (`test_the_graph_store_classifies_the_target_instead_of_
+    crying_wolf`, `test_the_graph_target_keeps_the_maskers_fail_closed_rule`): a
+    report that hides a working path fails the thing it exists for. So the
+    predicate cannot be a bare-`@` test even though the display masker is —
+    that is the exemption this arm adds on top, and it is why the colon-less
+    arm is scoped to a value with NO directory above the `@`.
     """
     _global(tmp_path)
     monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "me@work" / "db.fdb"))
@@ -2006,6 +2056,36 @@ def test_an_at_sign_without_a_password_boundary_stays_legible(
     store = json.loads(capsys.readouterr().out)["graph_store"]
     assert store["target_kind"] == "embedded file path"
     assert "me@work" in store["target"]
+
+
+def test_a_colon_with_no_at_sign_is_still_a_path(monkeypatch, capsys, tmp_path):
+    """The other legible shape, so the boundary cannot drift: `a:b.db` has a
+    colon and no `@`, and nothing about it is credential-shaped."""
+    _global(tmp_path)
+    monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "a:b.db"))
+    assert _run(("config", "show", "--json")) == 0
+    store = json.loads(capsys.readouterr().out)["graph_store"]
+    assert store["target_kind"] == "embedded file path"
+    assert store["target"].endswith("a:b.db")
+
+
+def test_the_blank_org_hint_does_not_say_the_store_carries_none(
+        capsys, tmp_path):
+    """A blank field is treated as ABSENT (pinned by
+    `test_a_blank_org_field_is_absent_not_mistyped`: `signup`/`recover` copy the
+    server's value through, so `""` is reachable and is not a type error). The
+    HINT, though, said "the resolved store carries no org_id" about a store that
+    carries a blank one — the same false-claim class as the `(absent)` render
+    beside a `org_field_warning` (#10655 review, F3)."""
+    _write(tmp_path / ".tortoise" / "credentials.json", json.dumps({
+        "api_key": GLOBAL_KEY, "api_url": "https://api.premiselabs.co",
+        "org_id": "   ", "org_name": "agent-x",
+    }))
+    assert _run() == 0
+    out = capsys.readouterr().out
+    assert "agent-x" in out
+    assert "no USABLE org_id" in out
+    assert "carries no org_id" not in out
 
 
 def test_the_whitespace_relation_carries_the_endpoint_verdict(

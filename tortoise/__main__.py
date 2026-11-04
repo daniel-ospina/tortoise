@@ -3614,9 +3614,9 @@ def _cmd_config(args) -> int:
                 "an env-supplied key carries no coordinates. `tortoise team "
                 "info` with an org-wide key, or the dashboard, reports it"
                 if source.startswith("env:") else
-                "the resolved store carries no org_id (`init --api-key` writes "
-                "only the key). `tortoise team info` with an org-wide key, or "
-                "the dashboard, reports it"
+                "the resolved store has no USABLE org_id — absent, or present "
+                "but blank (`init --api-key` writes only the key). `tortoise "
+                "team info` with an org-wide key, or the dashboard, reports it"
             )
         if isinstance(org_id, str) and len(org_id) < 6:
             # Neither id can be this short: a hosted org_id is
@@ -3695,13 +3695,24 @@ def _cmd_config(args) -> int:
         # `startswith("//")` test and BOTH leaked `/user:pw@host/x.db`: the value is
         # ABSOLUTE here, and `os.path.abspath` collapses a leading `///` to `/`, so
         # the `//` test never fired and the password was printed as a plain path.
-        # Not a bare `@` test either — `/tmp/me@work/db.fdb` and `/tmp/a:b.db` are
-        # legal paths, pinned as legible below.
+        # The predicate is now the MASKER's own rule (any `@` in a scheme-less
+        # value, #2987/#5267) rather than a narrower second definition — see its
+        # docstring for the three shapes every narrowing leaked.
         userinfoish = looks_like_uri_userinfo(uri)
         if is_db_uri(uri) or "://" in uri or userinfoish:
             graph_store["target"] = _mask_display_target(uri)
             if graph_store["target"].startswith("<"):
-                graph_store["target_kind"] = "unrecognised (redacted)"
+                if userinfoish and not (is_db_uri(uri) or "://" in uri):
+                    # Scheme-less, so `resolve_db_path` really does treat this as an
+                    # embedded file path ("treating as embedded DB path (backward
+                    # compat)") — the value is masked, the STORE is not inscrutable.
+                    # Calling it "unrecognised" was the same false claim this block
+                    # refuses to make for a plain `/tmp/a:b.db`, and it hid which file
+                    # the CLI will open.
+                    graph_store["target_kind"] = (
+                        "embedded file path (redacted — userinfo-shaped)")
+                else:
+                    graph_store["target_kind"] = "unrecognised (redacted)"
             elif is_db_uri(uri):
                 graph_store["target_kind"] = "database URI"
             else:
