@@ -628,8 +628,17 @@ def test_two_HEALTHY_reads_on_different_legs_FAIL_rather_than_skip():
     "unmeasurable" forever, and the module's central arm differential would
     publish no verdict at all (#10675 review, P3).
 
-    FAILS ON the pre-fix guard: it called ``pytest.skip`` here, so the
-    ``pytest.raises(pytest.fail.Exception)`` body never fires (DID NOT RAISE).
+    FAILS ON the pre-fix guard: it called ``pytest.skip`` here instead.
+
+    ⛔ Why this does NOT use ``pytest.raises(pytest.fail.Exception)``: a
+    ``pytest.skip`` raises ``Skipped``, which that context manager does not
+    suppress, so the pre-fix guard would report as a SKIP — non-red for the
+    merge rail — and this pin would be fail-OPEN on the exact regression it
+    names. Measured (#10675 review, P2): the pre-fix guard skipped here, and so
+    did the realistic half-fix (restore the skip, keep the improved message),
+    with all three of these tests green. Catching ``BaseException`` is what
+    makes a FAIL and a SKIP distinguishable, so the skip arm can be asserted
+    against rather than silently satisfying the test.
     """
     fts_only = {"legs": [{"leg": "fts", "ran": True, "degraded": False,
                            "reason": "ok", "count": 7}]}
@@ -638,9 +647,24 @@ def test_two_HEALTHY_reads_on_different_legs_FAIL_rather_than_skip():
          "reason": "ok", "count": 7},
         {"leg": "structural", "ran": True, "degraded": False,
          "reason": "ok", "count": 3}]}
-    with pytest.raises(pytest.fail.Exception) as exc:
+    try:
         _require_one_leg_mix(fts_only, fts_and_structural, test="probe")
-    message = str(exc.value)
+    # BaseException on purpose: FAIL vs SKIP IS the assertion (see docstring).
+    except BaseException as exc:
+        assert not isinstance(exc, pytest.skip.Exception), (
+            "the guard SKIPPED two HEALTHY reads served from different legs, "
+            "so a code-caused divergence still publishes no verdict for the "
+            "module's central arm differential (#10675 review, P3); a skip "
+            f"is non-red to the rail. Got: {exc}")
+        assert isinstance(exc, pytest.fail.Exception), (
+            "expected a FAIL for a leg divergence with no degradation on "
+            f"either side, got {type(exc).__name__}: {exc}")
+        message = str(exc)
+    else:
+        raise AssertionError(
+            "the guard ACCEPTED two healthy reads served from different "
+            "legs: a difference with no degradation is the ARMS, not the "
+            "box, and must go RED rather than pass (#10675 review, P3)")
     # names the divergence AND that nothing degraded — the two facts the next
     # reader needs to tell "fix the arms" from "wait for a quieter box".
     assert "('structural', 3)" in message and "degraded legs: [[]" in message
