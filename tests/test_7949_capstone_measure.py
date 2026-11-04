@@ -5029,6 +5029,51 @@ def test_the_frozen_records_stale_E4_sentence_is_disclosed_and_not_edited():
         "produced it, or it only moves the contradiction one paragraph down")
 
 
+def test_the_v7_paragraph_states_the_merge_once_and_not_a_leftover_half_sentence():
+    """The V7 paragraph must state the merged result ONCE, in one grammatical sentence.
+
+    `origin/main` (`#9889`) re-pointed E1/E2 onto the frozen corpus while this branch
+    made E4 on-pin, and the two rewrote the SAME V7 paragraph. The merge kept a
+    fragment of the sentence both sides had replaced, so `3b1399ef6` shipped:
+
+        "... This table cannot satisfy that honestly:
+         measured row's `corpus_sha256` to equal the log's corpus. Two rows could not
+         satisfy that honestly: ..."
+
+    — the pre-fix clause stated twice in four lines, the second time as a fragment with
+    nothing opening it. This is the merge-damage class the bundle's own changes record
+    claims was repaired, and it is invisible to a conflict-marker check: no `<<<<<<<`
+    survived, only a duplicated sentence. Every review round on this PR ran on a head
+    before the merge, so no reviewer read this paragraph.
+
+    Non-vacuity: at `3b1399ef6` the clause appears twice and this reds; it also reds if
+    either half of the merge is dropped, because the paragraph is required to say BOTH
+    rows moved onto the frozen corpus and that no row takes the declaration now.
+    """
+    readme = README_DOC.read_text()
+    paragraph = readme[readme.index("*Is the table honest?*"):]
+    paragraph = paragraph[:paragraph.index("## Why the steps are observed")]
+    flat = " ".join(paragraph.split())
+
+    # The sentence BOTH sides replaced. One copy survives — the one that opens the
+    # argument; a second is the merge's leftover.
+    assert flat.count("to equal the log's corpus") == 1, (
+        "the V7 paragraph repeats the pre-merge sentence: the auto-merge kept a "
+        "fragment of the text main and this branch each rewrote, so the paragraph "
+        f"argues the same point twice\n{flat[:400]}")
+
+    # …and what it states is BOTH sides' intent, not one of them: each pre-merge copy
+    # described only its own row (main: E4; here: E1/E2), which is why the merged text
+    # has to name both.
+    assert "E1/E2" in flat and "E4" in flat, flat[:200]
+    assert "Both now measure the FROZEN corpus" in flat, (
+        "the paragraph must say BOTH rows moved onto the frozen pin — the pre-merge "
+        "copies each described only their own side of the conflict")
+    assert "no row in THIS table takes the declaration" in flat, (
+        "the arm's scope is the point of the paragraph: a reader must be told that no "
+        "row in THIS table declares `artifact_corpus_sha256` any more")
+
+
 def test_a_row_cites_the_receipt_the_selector_chose():
     """The evidence path on the ROW follows the selection, not the constant."""
     rows = measure.build_rows(

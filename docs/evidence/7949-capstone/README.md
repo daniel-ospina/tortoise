@@ -687,9 +687,8 @@ stop.
 
 **One gate change shipped with this run, and it only ever ADDS a check.** V7 used to require every
 measured row's `corpus_sha256` to equal the log's corpus. This table cannot satisfy that honestly:
-measured row's `corpus_sha256` to equal the log's corpus. Two rows could not satisfy that
-honestly: E1/E2 cited `#9076`'s arm run, which measured a *different* corpus revision, and E4 cited
-an operator receipt measured on another revision too. **Both now measure the FROZEN corpus** —
+E1/E2 cited `#9076`'s arm run, which measured a *different* corpus revision, and E4 cited an
+operator receipt measured on another revision too. **Both now measure the FROZEN corpus** —
 E1/E2 because `#9889` re-scored them there (their records say so), E4 because `select_e4_receipt`
 chooses its receipt BY the frozen pin, so its row carries the run's own corpus — and no row in
 THIS table takes the declaration any more. The arm stays, because a red row on a genuinely other
