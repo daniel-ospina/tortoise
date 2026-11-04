@@ -36108,13 +36108,7 @@ class TortoiseSDK:
                 # degraded read used to fetch the whole corpus per reader, so N
                 # concurrent agents cost N corpus reads and each call's latency
                 # grew with the fleet's concurrency (measured: 8 readers, 4.6 s
-                # each vs 595 ms for one). Coalescing adds NO cache entry and NO
-                # TTL — but it is NOT "no cache-policy change" and NOT
-                # result-identical: an overtaken build is no longer cached (so a
-                # write-heavy graph loses hits the old unconditional ``put`` had),
-                # and a reader racing a write's commit→invalidate tail can be served
-                # that cohort's pre-commit rows. See the COMMIT→INVALIDATE WINDOW
-                # note on ``get_or_build``.
+                # each vs 595 ms for one). Coalescing is result-identical.
                 from tortoise.fallback_snapshot import (  # noqa: I001
                     _store as _fb_store, snapshot_key, get_or_build,
                     search_snapshot,
