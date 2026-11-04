@@ -159,6 +159,10 @@ def test_reaper_reaps_an_unowned_container_and_keeps_a_live_owner(
     # (the measured conflation: 68 containers outlived their lanes by days).
     monkeypatch.setattr(tl, "_live_lane_paths", lambda: {str(alive)})
     monkeypatch.setattr(tl, "_started_epoch", lambda _n: 0.0)
+    # A real container ANSWERS the client probe; the flag's fake `docker` returns
+    # an empty `exec` body, which is an UNREADABLE probe and now keeps (Proof 1
+    # asks before removing — #10833 finding 3).
+    monkeypatch.setattr(tl, "_container_in_use", lambda _n: False)
     out = tl.reap_orphans()
     joined = "\n".join(out)
     assert "removed fdb-lane-dead" in joined, out
@@ -410,6 +414,9 @@ def test_reaper_reads_the_TERMINATION_FACTS_before_an_OWNER_GONE_removal(
     monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
     monkeypatch.setattr(tl, "_worktree_slugs",
                         lambda: {"gone": str(tmp_path / "removed-worktree")})
+    # Proof 1 asks the container whether a client is attached before it removes
+    # (#10833 finding 3); an unanswered probe is not "unused".
+    monkeypatch.setattr(tl, "_container_in_use", lambda _n: False)
     out = tl.reap_orphans()
     assert removed == [("-f", "fdb-lane-gone")], (removed, out)
     assert order == ["facts", "rm"], (order, out)   # read BEFORE the removal
@@ -596,6 +603,7 @@ def test_reaper_reports_NO_termination_facts_for_a_RUNNING_owner_gone_removal(
     monkeypatch.setattr(tl, "_docker", fake)
     monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
     monkeypatch.setattr(tl, "_worktree_slugs", lambda: {"lively": "/gone/worktree"})
+    monkeypatch.setattr(tl, "_container_in_use", lambda _n: False)  # no client
     monkeypatch.setattr(tl, "_termination_report",
                         lambda _n, live: "KILLED FOR MEMORY (OOMKilled=true)")
     out = tl.reap_orphans()
@@ -1942,6 +1950,9 @@ def test_start_sweeps_orphans_and_reports_them_on_stderr(
     monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
     monkeypatch.setattr(tl, "container_state", lambda _n: "absent")
     monkeypatch.setattr(tl, "_worktree_slugs", lambda: {"dead": str(dead)})
+    # The container must be ASKED before it is removed (#10833 finding 3); the
+    # `exec` arm above answers `PONG` for real, so answer the client probe too.
+    monkeypatch.setattr(tl, "_container_in_use", lambda _n: False)
     removed: list = []
 
     def fake(*a, **k):
@@ -4726,10 +4737,82 @@ def test_an_ownership_LABEL_makes_a_DEREGISTERED_worktree_still_reapable(
     # git answered: nothing claims this container any more (the teardown).
     monkeypatch.setattr(tl, "_worktree_slugs", lambda: {})
     monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
+    # The label moves this container onto Proof 1; Proof 1 now asks whether a
+    # client is still attached (#10833 finding 3), so the container answers.
+    monkeypatch.setattr(tl, "_container_in_use", lambda _n: False)
     out = tl.reap_orphans()
     joined = "\n".join(out)
     assert [c[1:3] for c in removed] == [("-f", name)], (removed, out)
     assert "owning worktree" in joined and "is gone" in joined, out
+
+
+def _labelled_gone_fixture(monkeypatch, tmp_path, busy):
+    """The `#10788`/label shape: a container whose owning worktree was REMOVED
+    (`git worktree remove`) and which the label still attributes, so it reaches
+    Proof 1 — with `busy` as what the container's own `CLIENT LIST` answers.
+
+    Returns ``(name, removed, out)``. `_live_lane_paths` is stubbed empty
+    because a removed worktree cannot be held by a live process; the client
+    probe is the ONLY liveness datum left, which is exactly why Proof 1 must ask
+    it.
+    """
+    gone = tmp_path / "deleted-worktree-with-a-live-client"
+    removed: list = []
+    name = tl.container_name(tl.slug_for(gone))
+    assert not gone.exists()
+
+    def fake(*a, **k):
+        if a[0] == "ps":
+            return _R(0, _labelled_row(name, "running", gone), "")
+        if a[0] == "rm":
+            removed.append(a)
+        return _R(0, "", "")
+
+    monkeypatch.setattr(tl, "_docker", fake)
+    monkeypatch.setattr(tl, "_worktree_slugs", lambda: {})
+    monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
+    monkeypatch.setattr(tl, "_live_lane_paths", lambda: set())
+    monkeypatch.setattr(tl, "_container_in_use", lambda _n: busy)
+    return name, removed, tl.reap_orphans()
+
+
+def test_Proof_1_KEEPS_a_container_that_still_HAS_a_client(monkeypatch,
+                                                           tmp_path):
+    """#10833 review finding 3, the defect itself.
+
+    "The owning worktree is gone" is silent about whether the container still
+    has a CLIENT — and a lane container outlives its worktree BY DESIGN, so a
+    pytest run still serving from it after `git worktree remove` is precisely the
+    state Proof 1 reaches. `main` never had to ask because `owner` came from
+    `git worktree list` and a removed worktree could not be named there, so that
+    population fell to INDETERMINATE, which probes and KEEPS. The ownership
+    label moves exactly that population onto Proof 1, so Proof 1 must carry the
+    probe — otherwise the label silently WEAKENS the delete on the default path.
+
+    Non-vacuity: on the pre-fix code `removed` is ``[("rm", "-f", name)]`` and
+    this fails; nothing else is stubbed, so only the probe can keep it.
+    """
+    name, removed, out = _labelled_gone_fixture(monkeypatch, tmp_path, True)
+    joined = "\n".join(out)
+    assert removed == [], f"a container with an attached client was REMOVED: {out}"
+    assert f"kept {name}" in joined, out
+    assert "HAS an active client" in joined, out
+
+
+def test_Proof_1_KEEPS_when_the_client_probe_cannot_ANSWER(monkeypatch,
+                                                           tmp_path):
+    """The fail-closed half (#10833 finding 3), and the one a later lane is most
+    likely to delete as noise: `None` is an UNREADABLE probe (no `redis-cli`, a
+    wedged server, a failed `exec`) and must never fall through to the removal.
+
+    Non-vacuity: `busy is None` removed the container on the pre-fix code; the
+    polarity `is not False` is the only thing keeping it here.
+    """
+    name, removed, out = _labelled_gone_fixture(monkeypatch, tmp_path, None)
+    joined = "\n".join(out)
+    assert removed == [], f"an UNANSWERABLE probe authorised a removal: {out}"
+    assert f"kept {name}" in joined, out
+    assert "could not be asked" in joined, out
 
 
 def test_a_LABEL_whose_SLUG_disagrees_with_the_container_is_not_evidence(

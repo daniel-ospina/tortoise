@@ -2770,6 +2770,38 @@ def reap_orphans(own_name: str | None = None) -> list[str]:
             # evidence of WHY it stopped, and nobody else will report it now
             # that its owner is gone.
             #
+            # ⛔ THE CLIENT PROBE IS PART OF THIS PROOF, not a refinement of it
+            # (#10833 review finding 3). "The owning worktree is gone" says
+            # nothing about whether the container still has a CLIENT: a lane
+            # container outlives its worktree by design, and this arm's own
+            # comment below says so — so a pytest run still serving from it
+            # after `git worktree remove` is precisely the state this arm
+            # reaches. `main` never had to ask, because `owner` there could
+            # only come from `_worktree_slugs()`, which cannot resolve a
+            # removed worktree: that population fell to INDETERMINATE, whose
+            # default probes `_container_in_use` and KEEPS. The ownership label
+            # moves exactly that population HERE, so this arm must carry the
+            # probe the arm it moved containers out of already had — otherwise
+            # adding the label silently weakens the delete on the DEFAULT path,
+            # which is the opposite of what a label may do.
+            #
+            # Polarity, same as every other destructive path here: `is not
+            # False` authorises nothing. `True` is an attached client (keep and
+            # count the use as the lease's positive observation); `None` is an
+            # unreadable probe, which is never "unused".
+            busy = _container_in_use(name)
+            if busy is True:
+                _touch_lease(name)
+            if busy is not False:
+                out.append(
+                    f"reap: kept {name} — its owning worktree {owner} is gone, "
+                    f"but "
+                    + ("it HAS an active client, so something is still using "
+                       "it" if busy else
+                       "the container could not be asked whether it is in "
+                       "use (fail-closed, report only)"))
+                continue
+            #
             # The facts are a claim about WHY it stopped, so they may only be
             # read for a container docker actually reports as STOPPED: this
             # path also fires for a RUNNING container whose owner worktree was
