@@ -684,6 +684,12 @@ def test_the_launcher_acts_on_a_failed_window_and_stays_idle_on_a_green_one(tmp_
                "CI_REPAIR_STATE_DIR": str(fire_dir),
                "PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}",
                "STUB_STATE": state, "STUB_RC": str(rc)}
+        # ⛔ The launcher resolves its repo as `${TORTOISE_REPO:-<this script's repo>}`.
+        # A host that exports TORTOISE_REPO (this cell does: it points at the MAIN
+        # checkout) silently redirects the launcher at ANOTHER checkout, so this test
+        # asserts on a tool the fold never touched — the tested-tree-is-not-the-head-tree
+        # class (#10399). Dropping the inherited value pins the checkout under test.
+        env.pop("TORTOISE_REPO", None)
         r = subprocess.run(["bash", launcher, "--apply"], capture_output=True,
                            text=True, timeout=180, env=env)
         log_path = fire_dir / "ci-check-repair.log"
@@ -1840,8 +1846,9 @@ def test_the_zero_job_floor_is_past_the_measured_queue_wait():
 
     `docs/ops/ci-wall-clock.md` §1 line 50 (54 `python-ci` runs) measures the wait for a
     run's FIRST job: p50 29.9 min, p95 77.0 min, max 81.9 min. The budget derivation
-    this floor defers to is `tools/ci_queue_health.py:300`
-    (`DEFAULT_MAX_PR_WAIT_SECONDS = 90 * 60.0`, "the first round number past" that max),
+    this floor defers to is `tools/ci_queue_health.py`'s `DEFAULT_MAX_PR_WAIT_SECONDS`
+    (`= 90 * 60.0`, "the first round number past" that max) — cited by symbol, because a
+    line citation here drifted in the very commit that added the paragraph above it,
     and `ci-wall-clock.md` §6 lines 326-332 records the same derivation in its own
     words ("max first-job wait 81.9 min → 90 min, so it fires past the measured-normal
     population rather than on it"). The floor was

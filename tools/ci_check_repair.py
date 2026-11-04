@@ -192,8 +192,9 @@ QUEUED_STATUSES = frozenset({"queued", "waiting", "requested", "pending"})
 #: THE BUDGET THIS FLOOR DEFERS TO, cited at each place for what it actually says:
 #: `docs/ops/ci-wall-clock.md` §1 line 50 is the MEASUREMENT (the table, 54 `python-ci`
 #: runs: p50 29.9 min, p95 77.0 min, max 81.9 min wait for a run's FIRST job);
-#: `tools/ci_queue_health.py:300` is the DERIVED VALUE,
-#: `DEFAULT_MAX_PR_WAIT_SECONDS = 90 * 60.0`; and `docs/ops/ci-wall-clock.md` §6
+#: `tools/ci_queue_health.py`'s `DEFAULT_MAX_PR_WAIT_SECONDS` (`= 90 * 60.0`) is the
+#: DERIVED VALUE — cited by SYMBOL, not by line, because line citations in this file
+#: have drifted three times; and `docs/ops/ci-wall-clock.md` §6
 #: (lines 326-332) records that derivation in its own words — *"The budget's default is
 #: derived from this document's own §1 measurement (max first-job wait 81.9 min →
 #: 90 min), so it fires past the measured-normal population rather than on it."* 5400 s
@@ -205,7 +206,7 @@ QUEUED_STATUSES = frozenset({"queued", "waiting", "requested", "pending"})
 #: and the SAME BULLET, three lines later, supplies the 81.9 → 90 min derivation. Read
 #: as a denial of a queue-wait budget it is a misreading that then discards the one
 #: section that supports this floor. A lane re-deriving 5400 s follows §1
-#: (measurement) → §6 / `ci_queue_health.py:300` (budget).
+#: (measurement) → §6 / `ci_queue_health.py` `DEFAULT_MAX_PR_WAIT_SECONDS` (budget).
 #:
 #: WHY THE ORDERING IS LOAD-BEARING: the repair for this class evaluates to
 #: cancel-then-rerun, and cancelling a run that is merely waiting for a slot discards
