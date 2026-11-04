@@ -1996,6 +1996,9 @@ def test_start_sweeps_orphans_and_reports_them_on_stderr(
     would corrupt a lane's target instead of aborting it."""
     dead = tmp_path / "dead-worktree"
     monkeypatch.setenv("TORTOISE_TEST_LANE_REAP", "1")
+    # `start()` is stubbed, so state its CREATE/REUSE verdict explicitly: the exit
+    # hook only removes a container this `run` created.
+    monkeypatch.setattr(tl, "_LAST_START_CREATED", True)
     monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
     monkeypatch.setattr(tl, "container_state", lambda _n: "absent")
     monkeypatch.setattr(tl, "_worktree_slugs", lambda: {"dead": str(dead)})
@@ -4414,6 +4417,9 @@ def _stub_start(monkeypatch, *, port: int = 16406):
     # (#10813 review P2-4), so the run tests have to re-enable it for themselves.
     # `start()` is stubbed above, so enabling it here cannot trigger a real sweep.
     monkeypatch.setenv("TORTOISE_TEST_LANE_REAP", "1")
+    # `start()` is stubbed, so state its CREATE/REUSE verdict explicitly: the exit
+    # hook only removes a container this `run` created.
+    monkeypatch.setattr(tl, "_LAST_START_CREATED", True)
 
 
 def _capture_run(monkeypatch, *, returncode: int = 0) -> dict:
@@ -4728,6 +4734,26 @@ def test_an_UNREADABLE_peer_state_fails_CLOSED(lane, monkeypatch, capsys):
     monkeypatch.setattr(tl, "_peer_run_is_live", lambda _n: None)
     assert tl.main(["run", "--", "-q", "tests/"]) == 0
     assert reaped == [], "an unreadable peer state reaped anyway"
+
+
+def test_the_hook_NEVER_removes_a_container_this_run_REUSED(lane, monkeypatch,
+                                                            capsys):
+    """The `uri` route creates the container and writes no `run` marker.
+
+    A `run` that finds it already up must leave it alone: the previous hook
+    removed it mid-suite and the `uri` consumer reported connection errors as test
+    verdicts (#10813 review P1). Reuse is the normal case for a lane that started
+    its DB with `uri` and then ran pytest.
+    """
+    _stub_start(monkeypatch, port=16412)
+    monkeypatch.setattr(tl, "_LAST_START_CREATED", False)
+    reaped: list = []
+    monkeypatch.setattr(tl.subprocess, "run", lambda *a, **k: _R(0, "", ""))
+    monkeypatch.setattr(tl, "stop", lambda: (reaped.append(1), "removed")[1])
+    monkeypatch.setattr(tl, "_container_in_use", lambda _n: False)
+    assert tl.main(["run", "--", "-q", "tests/"]) == 0
+    assert reaped == [], "a REUSED container was removed"
+    assert "REUSED it" in capsys.readouterr().err
 
 
 def test_the_box_wide_opt_out_ALSO_keeps_the_container(lane, monkeypatch, capsys):

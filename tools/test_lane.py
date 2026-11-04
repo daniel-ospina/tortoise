@@ -1706,6 +1706,21 @@ def _published_port(name: str) -> tuple[bool, int | None]:
     return True, None
 
 
+#: Did the most recent `start()` CREATE the container (True) or REUSE one that was
+#: already up (False)?
+#:
+#: The exit hook may only remove a container **this `run` created**. A container
+#: that was already running belongs to someone else — most importantly to the
+#: DOCUMENTED `uri` route (a lane sources the export line and then runs pytest in
+#: that shell), which writes no `run` marker and may hold no redis connection at
+#: all while a heavy non-DB test file runs. Measured recipe against the previous
+#: hook: shell B's `run` exiting reaped shell A's container mid-suite, and A
+#: reported connection errors as test verdicts (#10813 review P1). `reap_orphans()`
+#: would have kept it — so the hook must be at least as strict as the decision
+#: function, and this is the cheapest way to be.
+_LAST_START_CREATED = False
+
+
 def start(port: int | None = None) -> tuple[str, int]:
     """Start (or reuse) THIS LANE's container. Returns (name, published port).
 
@@ -1768,6 +1783,8 @@ def start(port: int | None = None) -> tuple[str, int]:
             print(f"reap: the sweep failed and was skipped ({_exc!r}); "
                   f"nothing else is affected", file=sys.stderr)
     state = container_state(name)
+    global _LAST_START_CREATED
+    _LAST_START_CREATED = state != "running"
     if state == "running":
         # #8124: the reuse path must not hand back an engine the pin never
         # approved. `assert_pinned_image` above validates what we WOULD create;
@@ -3543,8 +3560,14 @@ def cmd_run(args: argparse.Namespace) -> int:
     # well as `start()`'s sweep: a lane that disabled automatic reaping here
     # would otherwise still lose its container at the end of every `run`
     # (#10813 review P2).
+    # Any falsy spelling disables it (`0`/`false`/`no`/`off`): the sweep's own
+    # switch only reads a literal "1", so `=false` used to disable the sweep and
+    # leave the HOOK armed — the same word with two meanings (#10813 review).
+    _opt_out = os.environ.get("TORTOISE_TEST_LANE_REAP", "1").strip().lower()
     keep = (bool(getattr(args, "keep_container", False))
-            or os.environ.get("TORTOISE_TEST_LANE_REAP", "1") == "0")
+            or _opt_out in ("0", "false", "no", "off"))
+    # …and a container this run did not CREATE is never its to remove.
+    created = _LAST_START_CREATED
     rc: int | None = None
     _prev_term = None
     try:
@@ -3577,7 +3600,13 @@ def cmd_run(args: argparse.Namespace) -> int:
             # errors that read as test verdicts. `None` (unreadable) fails closed.
             try:
                 in_use = _container_in_use(name)
-                if in_use is None:
+                if not created:
+                    kept = True
+                    print(f"test-lane: NOT reaping {name} on exit — this run "
+                          f"REUSED it (another consumer, e.g. the `uri` route, "
+                          f"may be using it); the scheduled reaper decides",
+                          file=sys.stderr)
+                elif in_use is None:
                     kept = True
                     print(f"test-lane: NOT reaping {name} on exit — its client "
                           f"list could not be read (fail-closed; the scheduled "

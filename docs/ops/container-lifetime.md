@@ -76,10 +76,25 @@ Three signals are handled, and the difference matters:
 | `SIGTERM` (how a supervisor stops a lane) | ✅ — **only because the hook installs a handler**; the default disposition terminates without unwinding |
 | `SIGKILL` | ❌ — that is what the second clock is for |
 
-It also **will not take a peer's live target**: before reaping it asks the
-container itself (`CLIENT LIST`); if a client is attached — two `run`s in one
-worktree share one container — or the answer cannot be read, it leaves the
-container to the second clock rather than failing someone else's suite.
+It also **will not take what is not its own**, in four ways, because a `run` that
+removes a container someone else is using turns their green suite into a false red:
+
+1. it only ever removes a container **this run CREATED** — one that was already
+   up belongs to someone else, most importantly to the `uri` route (a lane
+   sources the export line and runs pytest in that shell), which leaves no
+   `run` marker and may hold no redis connection at all while a heavy non-DB
+   test file runs;
+2. it declines while another `run` holds this worktree (a per-PID marker, not a
+   client socket — a peer still collecting ~41 842 tests is not a redis client);
+3. it asks the container itself (`CLIENT LIST`) and declines if a client is
+   attached **or if the answer cannot be read**;
+4. `--keep-container`, and the box-wide `TORTOISE_TEST_LANE_REAP=0` (any falsy
+   spelling), both leave it up.
+
+What it cannot promise: check-then-reap is two steps, so a consumer that attaches
+in that window can still lose its target. The harm is a false red on a throwaway
+database, and the alternative — holding a lock across `docker rm` — would let a
+wedged daemon block a lane's exit.
 
 ### 2. The timer — the backstop (`tools/container_reaper.py` + systemd)
 
