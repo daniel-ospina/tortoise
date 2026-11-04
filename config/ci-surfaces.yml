@@ -2036,6 +2036,7 @@ surfaces:
   - test_9572_discriminator_not_clobbered.py
   - test_9555_session_narrative.py
   - test_9287_invisible_kind_write_door.py
+  - test_ci_cancel_guard.py
   - test_closes_landing.py
   # #10465 (review P1): the read-only instrument that scores `#5090`'s four DoD
   # bullets, and its falsifiers. `core` is where its subjects live —

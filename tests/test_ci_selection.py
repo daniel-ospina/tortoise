@@ -2859,6 +2859,28 @@ def test_inbound_relay_sweep_tool_change_selects_core_not_tier1():
     assert r["full"] is False, r
 
 
+def test_ci_cancel_guard_tool_change_selects_core_not_tier1():
+    """A change to the cancel guard must run the rules it pins (#10936 round-3 review).
+
+    `tests/test_ci_cancel_guard.py` is registered on the `core` surface and owns the
+    guard's fail-closed guarantees — a CURRENT-HEAD cancel is refused, a started job
+    blocks the act, an unreadable or ambiguous surface cancels nothing. That
+    registration is INERT for a tool-only diff: `tools/` is a flat
+    NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row matches
+    `tools/ci_cancel_guard.py`, so `select()` returns NO surface, takes the docs-only
+    early return and falls back to the tier-1 smoke set, which does not contain the
+    file. The diff that DELETES the CURRENT-HEAD arm would then be the one diff that
+    never ran the case refusing it.
+
+    Mutation check: removing the CORE_ALSO entry fails the FIRST assert
+    (`"core" in r["surfaces"]`).
+    """
+    r = _sel(["tools/ci_cancel_guard.py"])
+    assert "core" in r["surfaces"], r
+    assert "test_ci_cancel_guard.py" in r["test_files"], r
+    assert r["full"] is False, r
+
+
 def test_worktree_report_tool_change_selects_core_not_tier1():
     """A change to the lane report must run the rules it pins (#10220).
 
