@@ -9128,8 +9128,9 @@ class UnapprovedKindNamespace(ValueError):
 #: revision_does_not_end_at_the_supersede_ts``. ADDRESSED is the whole point:
 #: this constant scopes ``update_point``, which requires the caller to NAME the
 #: point. ``create_point``'s content-dedup fold is UNADDRESSED (a content
-#: coincidence picks the target), so it refuses EVERY write onto a terminal
-#: claim, temporal or not (#10368) — see the fold's own scope note.
+#: coincidence picks the target), so it refuses the CALLER'S every write onto a
+#: terminal claim, temporal or not (#10368) — see the fold's own scope note;
+#: #7704's journaled provenance retrofit is the one deliberate exemption.
 #:
 #: ``outdated`` is absent because ``_sanitize_props`` already refuses it as a
 #: server-managed lifecycle flag.
@@ -12691,8 +12692,16 @@ class TortoiseSDK:
                 # read path (#2892). Skipped when the call carries neither props
                 # nor an authored word (a bare dedup hit), so that path costs no
                 # extra query.
+                # The predicate names the CALLER'S OWN writes, not `props` as
+                # it stands here: `content_hash` is written above and popped
+                # below, and `extractedFrom` is the #7704 provenance fold — a
+                # bare dedup hit carrying either writes nothing this guard
+                # governs and must not pay for the read.
+                _caller_writes = bool(
+                    set(props) - {"content_hash", "extractedFrom"})
                 _terminal = (self._lifecycle_terminal_marker(pid)
-                             if (props or cred_prior is not None) else None)
+                             if (_caller_writes or cred_prior is not None)
+                             else None)
                 _temporal = _TEMPORAL_RESTAMP_PROPS & set(props)
                 if _temporal and _terminal is not None:
                     _logger.warning(
@@ -19023,10 +19032,12 @@ class TortoiseSDK:
 
         Shared by the two callers that need the verdict (#7819):
         ``_assert_lifecycle_guard`` (which raises on a marker) and
-        ``create_point``'s dedup fold (which drops a fold that would write the
-        window onto a dead claim). The fold writes through more than one route
-        — ``update_point`` and the server-owned baseline writers — which is why
-        the check is not placed beside any single write.
+        ``create_point``'s dedup fold (which refuses the CALLER'S props and
+        authored word on a dead claim — #7819 for the temporal case, #10368 for
+        every other write, while #7704's provenance retrofit still folds). The
+        fold writes through more than one route — ``update_point`` and the
+        server-owned baseline writers — which is why the check is not placed
+        beside any single write.
 
         Covers BOTH shapes the shared classifier can report a terminal node
         under: ``kind == "terminal"``, and ``kind == "operator"`` — the
@@ -43642,10 +43653,10 @@ class TortoiseSDK:
         "point it resolved to (by content, or by a `key` that point already "
         "holds) is a terminal claim; a dedup hit never writes onto a settled "
         "belief (#10368) — the CALLER'S "
-        "PROPS AND WORD were not applied and the stored record is returned "
-        "unchanged. (A declared `extractedFrom` still folds: a dedup hit keeps "
-        "the new evidence, #7704.) Revise the claim deliberately with "
-        "update_point(<id>, ...), the addressed door."
+        "PROPS AND WORD were NOT APPLIED to the stored record. (A declared "
+        "`extractedFrom` still folds: a dedup hit keeps the new evidence, "
+        "#7704, so the record can gain provenance.) Revise the claim "
+        "deliberately with update_point(<id>, ...), the addressed door."
     )
 
     def _temporal_not_applied_advisory(self, node_id: str | None) -> dict:

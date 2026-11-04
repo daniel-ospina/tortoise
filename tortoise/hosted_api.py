@@ -18702,7 +18702,9 @@ def _commit_response(
     * the payload's DOMAIN integrity warnings, derived from the payload alone
       — deterministic per payload, so an idempotent re-commit returns the
       same ones;
-    * WRITE-TIME advisories (``temporal_not_applied``, #7819; and
+    * WRITE-TIME advisories (``temporal_not_applied``, #7819;
+      ``terminal_fold_refused``, #10368 — a dedup fold carrying any other
+      caller write onto an already-terminal claim; and
       ``narrative_not_recorded``, #10000 — observed while the writes ran: a
       dedup fold dropped on an already-terminal claim wrote NOTHING, and a
       commit whose `SessionNarrated` carrier did not reach the record left
@@ -19314,11 +19316,11 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     now = datetime.now(UTC).isoformat()
     session_id = payload.session_id
     reconcile = plan.reconcile
-    # #7819: TRANSIENT write-time advisories this phase has to REPORT but that
-    # are not payload domain warnings — today the only one is
-    # `temporal_not_applied`, raised when `create_point`'s dedup branch DROPS a
-    # fold carrying a validity window because the content address resolves to a
-    # terminal claim. A dropped fold writes nothing, so without this the client
+    # #7819 / #10368: TRANSIENT write-time advisories this phase has to REPORT
+    # but that are not payload domain warnings — `temporal_not_applied` when
+    # `create_point`'s dedup branch DROPS a fold carrying a validity window
+    # because the content address resolves to a terminal claim, and
+    # `terminal_fold_refused` when it drops the caller's other writes there. A dropped fold writes nothing, so without this the client
     # gets a 200 whose `when` was silently not applied. The handler folds these
     # into the response's `warnings[]` (#405's additive channel).
     _write_advisories: list[dict] = []
