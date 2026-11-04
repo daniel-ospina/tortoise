@@ -1878,6 +1878,57 @@ def test_label_coverage_verdicts_only_the_label_this_script_can_register(tmp_pat
 
 
 # ── 3b. every DOCUMENTED `runs-on` form must be read, or refused ────────────────────────────
+def test_the_real_tree_refuses_because_the_fast_matrix_is_selector_emitted(tmp_path: Path):
+    """⛔ THIS REPO'S OWN `--status` IS THE `exit 4` STATE, AND 64 GREEN TESTS USED TO HIDE IT.
+
+    Every other arm of `label-coverage` is driven by a SYNTHETIC tree
+    (`_repo_with_workflows(tmp_path …)`), so nothing exercised the extractor over the workflows this
+    repo actually ships. #10186 then made the `test` job take its class from the selector —
+    `runs-on: ${{ fromJSON(matrix.runner) }}` at `.github/workflows/python-ci.yml:716`, with the
+    `include` rows emitted at run time by `tools/ci_selection.py`, nowhere in the file — and the
+    block began refusing on the real tree: exit 4, no per-label rows, and therefore the exit-5
+    erosion verdict, the `⚠️ PARTIAL` arm and the printed remedy all unreachable HERE while the
+    suite stayed green (measured 2026-10-30, head `244a20cc6`: `EXIT=4`, "could not read 1 runs-on:
+    block(s)").
+
+    That refusal is CORRECT — a selector-emitted matrix genuinely has no static label set, and
+    guessing the odd shards' `[self-hosted, self-hosted-x64]` from the mode would be the fail-open
+    this block exists to prevent. What was wrong was that nothing said so. This pin states the
+    current fact in both directions: the behaviour cannot silently become a partial CLEAR (a green
+    table over a tree it only half read), and it cannot silently start reading either — if the
+    extractor learns the `fromJSON(matrix.…)` form, this test reds and the runbook paragraph that
+    documents the refusal is re-derived with it.
+
+    Non-vacuity: restoring the pre-#10186 shape (a literal `runs-on: ubuntu-24.04` in that job)
+    makes the same copy report rows and exit 0/5, i.e. this assertion is about the real tree, not
+    about the harness.
+    """
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    copied = tools / "install-ci-runner-x64.sh"
+    copied.write_text(Path(INSTALLER).read_text())
+    wf = tmp_path / ".github" / "workflows"
+    wf.mkdir(parents=True)
+    # the REAL workflow, unedited: the expression and its selector wiring are the thing under test
+    shutil.copy(REPO_ROOT / ".github" / "workflows" / "python-ci.yml", wf / "python-ci.yml")
+
+    carrying = "pi-runner-x64-1\tonline\tbusy=false\tself-hosted,Linux,X64,self-hosted-x64,ubuntu-24.04"
+    stub = _stub_gh(tmp_path / "pool", "0", rows=carrying)
+    r = subprocess.run(
+        [BASH, str(copied), "--status", "--count", "1"],
+        capture_output=True, text=True,
+        env=_env(tmp_path, PATH=f"{stub}:{os.environ['PATH']}", CI_RUNNER_UNIT_DIR=str(tmp_path / "units")),
+    )
+    assert r.returncode == 4, (
+        "the real tree's selector-emitted `runs-on:` must REFUSE, not report coverage the read never "
+        f"established (rc={r.returncode}): {r.stderr}"
+    )
+    assert "could not read 1 runs-on: block(s) as a STATIC label set" in r.stderr, r.stderr
+    assert "ubuntu-24.04 =" not in r.stderr, (
+        f"a partial read must print NO per-label rows: {r.stderr}"
+    )
+
+
 def test_label_coverage_reads_every_documented_runs_on_form(tmp_path: Path):
     """A required label in ANY documented `runs-on` spelling must be counted — or refused, never cleared.
 
@@ -1910,6 +1961,13 @@ def test_label_coverage_reads_every_documented_runs_on_form(tmp_path: Path):
         ),
         "labels: mapping, block list": (
             "jobs:\n  a:\n    runs-on:\n      group: pool\n      labels:\n        - ubuntu-24.04\n"
+            "  b:\n    runs-on: ubuntu-latest\n    steps: []\n"
+        ),
+        # PyYAML's DEFAULT block spelling: the dash sits at the KEY's own indentation, not
+        # deeper. Refused before this fixture existed (`ind > pind`), so the most
+        # machine-generated form of the documented block sequence was a whole-read no-verdict.
+        "block sequence at the key's own indent": (
+            "jobs:\n  a:\n    runs-on:\n    - self-hosted-x64\n    - ubuntu-24.04\n"
             "  b:\n    runs-on: ubuntu-latest\n    steps: []\n"
         ),
         "labels: mapping, inline flow": (
@@ -2977,31 +3035,31 @@ def test_every_runbook_installer_ref_lands_on_the_line_it_names():
         338: r"^resolve_labels\(\) \{",
         377: r"label algebra: the UNION",  # "the union's label algebra at"
         401: r"^is_foreign_arch_label\(\) \{",  # "TWO NAMED CARVE-OUTS"
-        429: r"── status ──",  # the `--status` block
-        452: r"label-coverage — labels the workflows name",  # "the label-coverage block"
-        792: r"label-coverage read NOTHING",  # no workflows -> exit 4
-        800: r"could not read \$runs_on_unreadable",  # a partial read -> exit 4
-        809: r"found NO runs-on label to check",  # zero labels -> exit 4
+        431: r"── status ──",  # the `--status` block
+        454: r"label-coverage — labels the workflows name",  # "the label-coverage block"
+        800: r"label-coverage read NOTHING",  # no workflows -> exit 4
+        808: r"could not read \$runs_on_unreadable",  # a partial read -> exit 4
+        817: r"found NO runs-on label to check",  # zero labels -> exit 4
         375: r"^\}$",  # "whose body ends at its `}` on"
-        1027: r"exit 5",  # the uncovered verdict
-        1049: r'MODE" = repair',  # "--repair-labels UNIONS" / "--fallback off is REFUSED"
-        1074: r"UNREADABLE LABEL SET IS A REFUSAL",  # "An unreadable current label set is a REFUSAL"
-        1221: r"`relabelled` IS A CLAIM ABOUT THE SERVER",  # "relabelled … is a claim about the server"
-        1253: r'MODE" = labels',  # "`--print-labels`"
-        1280: r'MODE" = install',  # "the two mode blocks" / "only an install"
-        1285: r'\|\| die "this installer is for x86_64',  # "the refusal itself dies at"
-        1288: r"FORK HEADROOM FIRST",  # "forks"
-        1308: r"DISK NEXT",  # "disk"
-        1315: r"CPU LAST",  # "cpu/memory"
-        1332: r"^# ── uninstall",  # the span's first line ("`--uninstall` deletes only what it can PROVE")
-        1333: r'MODE" = uninstall',  # "`uninstall`"
-        1458: r'^for i in \$\(seq 1 "\$COUNT"\); do',  # "the scale loop"
-        1461: r"dry-run: would download",  # "the run at … is the dry-run echo"
-        1469: r'\[ "\$got" = "\$SHA256_LINUX_X64" \]',  # "sha256 pin" / "verify"
-        1472: r"registration-token",  # "token"
-        1477: r"^    set -- --unattended",  # "one argv"
-        1479: r'\./config\.sh "\$@"',  # "`config.sh`"
-        1489: r'svc\.sh install "\$actor"',  # "systemd install/start"
+        1035: r"exit 5",  # the uncovered verdict
+        1057: r'MODE" = repair',  # "--repair-labels UNIONS" / "--fallback off is REFUSED"
+        1082: r"UNREADABLE LABEL SET IS A REFUSAL",  # "An unreadable current label set is a REFUSAL"
+        1229: r"`relabelled` IS A CLAIM ABOUT THE SERVER",  # "relabelled … is a claim about the server"
+        1261: r'MODE" = labels',  # "`--print-labels`"
+        1288: r'MODE" = install',  # "the two mode blocks" / "only an install"
+        1293: r'\|\| die "this installer is for x86_64',  # "the refusal itself dies at"
+        1296: r"FORK HEADROOM FIRST",  # "forks"
+        1316: r"DISK NEXT",  # "disk"
+        1323: r"CPU LAST",  # "cpu/memory"
+        1340: r"^# ── uninstall",  # the span's first line ("`--uninstall` deletes only what it can PROVE")
+        1341: r'MODE" = uninstall',  # "`uninstall`"
+        1466: r'^for i in \$\(seq 1 "\$COUNT"\); do',  # "the scale loop"
+        1469: r"dry-run: would download",  # "the run at … is the dry-run echo"
+        1477: r'\[ "\$got" = "\$SHA256_LINUX_X64" \]',  # "sha256 pin" / "verify"
+        1480: r"registration-token",  # "token"
+        1485: r"^    set -- --unattended",  # "one argv"
+        1487: r'\./config\.sh "\$@"',  # "`config.sh`"
+        1497: r'svc\.sh install "\$actor"',  # "systemd install/start"
     }
 
     unknown = sorted(cited - anchors.keys())
@@ -3400,7 +3458,6 @@ _TOOLS_CITING_THE_RUNBOOK = ("tools/install-ci-runner-x64.sh", "tools/runner_aut
 # citing comment names. Keyed by the runbook line the citation must point at at THIS head.
 _TOOLS_RUNBOOK_ANCHORS: dict[int, str] = {
     13: r"^# x86_64 CI runners",
-    25: r"\*\*GitHub-hosted, plus — as a temporary mitigation",
     85: r"still does \*\*not\*\* claim any",
     90: r"DROPS the whole class on re-registration",
 }
