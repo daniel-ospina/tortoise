@@ -241,6 +241,15 @@ def test_the_reaper_never_removes_a_container_no_worktree_here_claims(monkeypatc
 
     monkeypatch.setattr(tl, "_docker", fake)
     monkeypatch.setattr(tl, "_worktree_slugs", lambda: {})
+    # Both arms below are decided by the sweep's /proc scan BEFORE the client
+    # probe, so leaving it real hands this test's verdict to the host: on a box
+    # without /proc `_live_lane_paths()` returns None, the sweep reports
+    # "ownership is NOT determined" and `continue`s, and the "active client"
+    # arm this test exists to pin is never reached (measured: red on macOS,
+    # green on the Linux runner — the #5049 "verdicts from conditions, not
+    # ambient machine state" defect). Pin the scan to a readable-and-empty
+    # answer so each arm asserts the rule it names on every host.
+    monkeypatch.setattr(tl, "_live_lane_paths", lambda: set())
     # YOUNG: the backstop is a bound, not a hair trigger. An unowned container
     # inside ORPHAN_MAX_AGE_H is REPORTED and removed by nothing.
     monkeypatch.setattr(tl, "_started_epoch", lambda _n: time.time())
