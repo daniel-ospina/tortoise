@@ -10403,18 +10403,25 @@ class TortoiseSDK:
         #   `_journal_carried_records` cannot see the loss either. Without the
         #   witness that loss was reported as "a typo" — silent — which is
         #   #10515 indicator 1, and is exactly what `main` reported loudly.
-        # * truncation / REPLACEMENT: `resume`/`seam` describe the NEW file while
-        #   `known` came from the OLD one, so the map is NOT evidence about
-        #   anything at this path and the re-fold is deliberately MAP-FREE.
+        # * REPLACEMENT: a new `st_dev`/`st_ino` (a rotate, an `mv`, a restore),
+        #   so `resume`/`seam` describe the NEW file while `known` came from the
+        #   OLD one. The map is NOT evidence about anything at this path, and the
+        #   re-fold is deliberately MAP-FREE.
+        # * TRUNCATION of the SAME inode (``stat_after[2] < resume``): no new file
+        #   exists — the bytes the fold read were merely cut away — and this arm
+        #   is reachable ONLY when the fold consumed them, so `known` is the one
+        #   surviving record of what was destroyed. It is handed on as the
+        #   WITNESS, exactly as on the ``stat_after is None`` arm (review round
+        #   18, finding 1: both sub-cases shared ONE map-free arm, and for this
+        #   interleaving that put the crossing call's answer BELOW `main`'s).
         if stat_after is None:
             self._journal_presence_memo = None
             return self._journal_presence_needle(log, point_id, known)
-        if stat_after[2] < resume or stat_after[:2] != stat_key[:2]:
-            # The journal no longer holds the bytes that were folded, or was
-            # REPLACED under the fold (a new `st_dev`/`st_ino`: a rotate, an
-            # `mv`, a restore) — so `resume`/`seam` describe the NEW file while
-            # `known` came from the OLD one. Memoising would serve another file's
-            # records; one re-fold costs less.
+        if stat_after[:2] != stat_key[:2]:
+            # The journal was REPLACED under the fold (a new `st_dev`/`st_ino`: a
+            # rotate, an `mv`, a restore) — so `resume`/`seam` describe the NEW
+            # file while `known` came from the OLD one. Memoising would serve
+            # another file's records; one re-fold costs less.
             #
             # ⛔ AND THE RE-FOLD IS THE ANSWER, NOT JUST THE MEMO'S FATE (review
             # round 16, finding 1). The comment above already says this map is
@@ -10432,6 +10439,19 @@ class TortoiseSDK:
             # describes THIS path rather than the one that was moved away.
             self._journal_presence_memo = None
             return self._journal_presence_needle(log, point_id)
+        if stat_after[2] < resume:
+            # ⛔ THE SAME INODE, WITH THE FOLDED BYTES TRUNCATED AWAY (review
+            # round 18, finding 1). This is NOT the replacement case above: no
+            # new file exists, so `known` still describes THIS journal — it was
+            # folded over ``[0, resume)`` from a file we are still looking at,
+            # and the shrink proves those bytes were destroyed after that read.
+            # The map is therefore the witness of what existed, and the re-fold
+            # of the now-shorter file cannot see it. Answering "a typo" there is
+            # the silent loss #10515 indicator 1 forbids — and `main` reported
+            # this exact interleaving loudly via ``known.get(point_id, False)``,
+            # so a map-free answer here would be a regression against it.
+            self._journal_presence_memo = None
+            return self._journal_presence_needle(log, point_id, known)
         self._journal_presence_memo = {
             'log': log, 'ident': stat_after[:2], 'folded_to': resume,
             'mtime_ns': stat_after[3], 'known': known, 'seam': seam,
@@ -10519,12 +10539,22 @@ class TortoiseSDK:
         *known* is the RETAINED MAP as a WITNESS, and it is passed only where it
         IS evidence: the ``stat_after is None`` arm, where the fold read a file
         this very call watched disappear (``open()`` binds the inode; unlink(2)
-        keeps it readable). A map that says ``True`` was folded from records
-        that named this point, so a path that has gone away cannot be judged
-        (``None`` ⇒ ``journal_unreadable``) — the same reading the fold's own
+        keeps it readable), and the truncation arm, where the same inode still
+        exists but the bytes the fold read were cut away. A map that says
+        ``True`` was folded from records that named this point, so a path that
+        no longer answers for it cannot be judged (``None`` ⇒
+        ``journal_unreadable``) — the same reading the fold's own
         ``FileNotFoundError`` arm applies to its retained map. The replacement
         arm passes nothing, because there the map describes a DIFFERENT file and
         a ``True`` in it says nothing about this one.
+
+        ⛔ THE WITNESS IS APPLIED TO EVERY NON-ANSWER, NOT JUST THE RAISED ONE
+        (review round 18, finding 1). A re-read that SUCCEEDS and simply does not
+        find the id is equally unable to confirm a witness that says the journal
+        HELD it — the path can be recreated between the post-fold ``stat`` and
+        this read, and then ``FileNotFoundError`` never fires. So a ``False``
+        from the re-read is ``None`` whenever the witness holds the id as
+        PRESENT: a destroyed record must never be reported as "a typo".
 
         Three outcomes, the same vocabulary the rest of this method uses:
         ``True``/``False`` from the records that are there now, and ``None``
@@ -10554,7 +10584,15 @@ class TortoiseSDK:
                 "rather than asserted to be a typo (#10515)",
                 point_id, exc_info=True)
             return None
-        return state.get(point_id, False)
+        answer = state.get(point_id, False)
+        if answer is False and known is not None and known.get(point_id) is True:
+            # The re-read SUCCEEDED and found nothing, but the witness proves
+            # the journal this call folded NAMED this point: the records are
+            # gone (a truncation, or a path recreated before this read), so the
+            # absence cannot be judged. ``False`` here is the silence #10515
+            # indicator 1 forbids.
+            return None
+        return answer
 
     @staticmethod
     def _journal_carried_records(log) -> bool:
