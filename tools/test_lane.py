@@ -2033,18 +2033,26 @@ def _assert_removal_allowed(name: str, root: Path | str | None = None) -> None:
 
     ``root`` is the root the CALLER derived ``name`` from — `start()` takes
     exactly ONE `repo_root()` read (`_lane_identity`) and threads it into every
-    removal it performs. It is not cosmetic: without it the guard compares
+    removal that reaches this guard. It is not cosmetic: without it the guard
+    compares
     against a FRESH `repo_root()`, and `repo_root()` has a documented PER-CALL
     degraded mode (`Path.cwd()` on a git timeout — the overloaded hosts this
     tool exists for). A read that degraded between the two would then refuse to
     clean up the container the SAME call just created, leaving it holding a
     reserved port: the #8180 leak, produced by the guard meant to prevent it.
 
-    No production call site omits it: `start()` reads the root ONCE
-    (`_lane_identity`) and threads it into all four removals it performs, and
-    `stop()` removes directly rather than through this guard. The default is
-    retained only so the guard stays callable without a prior read; a caller
-    that HAS read the root passing `None` is the bug this parameter prevents.
+    No production call site omits it. `start()` reads the root ONCE
+    (`_lane_identity`) and threads it into the THREE removals that reach this
+    guard: the stale-container replacement, the never-answered-PING cleanup and
+    the publishes-no-port cleanup. `start()`'s fourth removal — the
+    `docker run`-failed cleanup — never consults a root at all, and must not:
+    it targets the container ID docker itself printed for the container THAT
+    call just created (falling back to the name only when no ID was reported,
+    under `is_managed`), while this guard compares NAMES, so an ID could never
+    match. `stop()` removes directly rather than through this guard. The
+    default is retained only so the guard stays callable without a prior read;
+    a caller that HAS read the root passing `None` is the bug this parameter
+    prevents.
     """
     if not is_managed(name):
         raise SystemExit(f"test-lane: refusing to remove unmanaged {name!r}")
