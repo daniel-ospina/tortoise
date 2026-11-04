@@ -54,6 +54,7 @@ import pytest
 # register_kind("session-transcript") apply.
 import tools.longmem_eval.ingest  # noqa: F401
 from tests import _live_utils
+from tools.longmem_eval.retrieve import EVAL_RETRIEVAL_BUDGET_MS
 from tortoise.retrieval import (
     DEFAULT_POOL_SESSION_CAP,
     SESSION_TRANSCRIPT_KIND,
@@ -128,6 +129,85 @@ def _fresh_uri() -> str:
     """A dedicated per-test graph on the docker server — fresh indexes and
     an empty graph make the differential hermetic."""
     return f"{_uri()}_{uuid.uuid4().hex[:10]}"
+
+
+# ── the retrieval deadline: pinned, never inherited ──────────────────────
+#
+# ⛔ EVERY differential in this module compares TWO reads' hits. That is a
+# statement about the ARM only while both reads were served from the same
+# retrieval legs — and the SDK's product default (a 500 ms collective
+# deadline, #1786 R5) is ALSO the per-query ``TIMEOUT`` handed to FalkorDB
+# (search_engine.py:1730). When BOTH sparse strategies miss it the engine
+# collects 0/2, the SDK degrades to the corpus-wide ``tfidf_snapshot``
+# fallback, and that pool is a DIFFERENT COMPOSITION — measured on this
+# fixture's graph: 11 of 11 seeded Points, id-ordered, against the 7 the FTS
+# leg returns. So one read degrading while the other does not turns a loaded
+# box into a false RED: CI run 41741210621, job ``test (i)``, did exactly
+# that at 500 ms ("FTS query exceeded timeout: 1220ms > 500ms", "Strategies
+# timed out (500ms) — collected 0/2") and failed
+# ``test_reinjection_disabled_is_default_byte_identical`` with
+# ``srAc0``/``srAc1``/``srAq0``/``srAq1`` as the four extra items.
+#
+# Pinned to the EVAL's own budget rather than a larger number: this call path
+# is the eval's (``run.py`` passes ``EVAL_RETRIEVAL_BUDGET_MS``), and the
+# value must stay under the server's ``TIMEOUT_MAX``. The docker lane starts
+# FalkorDB with ``FALKORDB_ARGS=THREAD_COUNT 8 TIMEOUT_MAX 30000``
+# (tools/test_lane.py), and a per-query TIMEOUT above it does not degrade
+# gracefully — the LEG FAILS (measured here: 60000 → fts ``query_failed`` +
+# structural ``query_failed`` → the same corpus fallback, 11 hits).
+
+
+def _leg_mix(ret: dict) -> list[tuple[str, int]]:
+    """The legs that actually CONTRIBUTED hits to a read: ``(leg, count)``.
+
+    Two reads are comparable hit-for-hit only when these agree. A leg that
+    ran and returned ZERO cannot move the pool, so ``timeout`` vs
+    ``empty_results`` is deliberately NOT a difference here; a leg that
+    contributed hits is, and so is the corpus-wide ``fallback`` (its presence
+    at count>0 is the whole point of the guard).
+    """
+    return sorted((leg["leg"], leg["count"])
+                  for leg in ret.get("legs") or [] if leg.get("count"))
+
+
+def _require_one_leg_mix(*rets, test: str) -> None:
+    """Refuse to compare reads the box served from DIFFERENT legs.
+
+    The arm differential is unmeasurable in that state, and comparing anyway
+    is what produced the load-dependent RED this module now pins out. Skipped
+    with BOTH mixes named (never silently): the module already skips as a
+    whole when the lane cannot serve it, and this is the same class of
+    "this environment cannot answer the question" — except it is per-read and
+    must be visible in the log rather than converted into an id diff.
+    """
+    mixes = [_leg_mix(r) for r in rets]
+    if any(m != mixes[0] for m in mixes[1:]):
+        pytest.skip(
+            f"{test}: the box served these reads from different retrieval "
+            f"legs, so a hit-for-hit comparison would compare two different "
+            f"pools — measured mixes: {mixes}")
+
+
+@pytest.fixture(autouse=True)
+def _pinned_retrieval_budget(monkeypatch):
+    """Force the eval's collective deadline onto every read in this module.
+
+    Wraps ``hybrid_search`` — the ONE seam every ``retrieve_for_question``
+    call reaches — rather than passing ``retrieval_budget_ms`` at each call
+    site: a per-site pin is precisely what was missing (every call site
+    inherited the 500 ms product default), so a call site must not be able to
+    forget it. The value is FORCED, not defaulted: an explicit ``None`` from
+    the caller resolves to the SDK default, which is the deadline that made
+    this module load-dependent.
+    """
+    from tools.longmem_eval import retrieve as _retrieve
+
+    def _forced(*args, **kwargs):
+        kwargs["retrieval_budget_ms"] = EVAL_RETRIEVAL_BUDGET_MS
+        return _real(*args, **kwargs)
+
+    _real = _retrieve.hybrid_search
+    monkeypatch.setattr(_retrieve, "hybrid_search", _forced)
 
 
 @pytest.fixture(autouse=True)
@@ -371,25 +451,106 @@ def test_reinjection_disabled_is_default_byte_identical(seeded_sdk):
                                     pool_size=60)
     off = retrieve_for_question(seeded_sdk, q, ks=(5,), top_k=10,
                                 pool_size=60, session_reinjection=False)
+    _require_one_leg_mix(default, off, test="default-OFF == explicit-OFF")
     assert [h["id"] for h in default["hits"]] == [h["id"] for h in off["hits"]]
     assert default["session_reinjection"] is False
     assert default["session_reinjection_stats"] == \
         off["session_reinjection_stats"]
 
 
+def test_the_differential_pins_the_eval_retrieval_budget(seeded_sdk,
+                                                         monkeypatch):
+    """Every read here carries the eval's deadline, not the SDK's 500 ms.
+
+    FAILS IF: ``_pinned_retrieval_budget`` is removed — the captured value is
+    then ``None`` (the SDK's product default), and that is the deadline under
+    which CI's loaded runner degraded ONE of two compared reads (fts>
+    500 ms, 0/2 collected) into the corpus-wide fallback and turned the arm
+    differential into a false RED. It also FAILS IF the pin is raised past
+    the server's ``TIMEOUT_MAX``: the leg then fails outright rather than
+    degrading, which lands on the same corpus fallback.
+    """
+    from tools.longmem_eval.retrieve import retrieve_for_question
+
+    captured: list = []
+
+    def _capture(self, query, entity_type="point", limit=10, **kw):
+        captured.append(kw.get("_elevated_timeout_ms"))
+        return []
+
+    monkeypatch.setattr(TortoiseSDK, "tortoise_fts_query", _capture)
+    retrieve_for_question(seeded_sdk, _question(), ks=(5,), top_k=10,
+                          pool_size=60)
+    assert captured, "the read reached no tortoise_fts_query call at all"
+    assert captured == [EVAL_RETRIEVAL_BUDGET_MS] * len(captured), (
+        "the reads in this module must carry the eval's collective deadline; "
+        f"got {captured} against {EVAL_RETRIEVAL_BUDGET_MS}")
+
+
+def test_a_pair_served_by_different_legs_is_not_compared():
+    """``_require_one_leg_mix`` refuses the unmeasurable comparison.
+
+    FAILS IF: the guard degrades to a no-op (the load-dependent RED returns
+    as an id diff nobody can attribute) or starts refusing pairs that ARE
+    comparable.
+    """
+    healthy = {"legs": [{"leg": "vector", "ran": False,
+                          "reason": "no_embedder", "count": 0},
+                         {"leg": "fts", "ran": True,
+                          "reason": "ok", "count": 7}]}
+    degraded = {"legs": [{"leg": "vector", "ran": False,
+                          "reason": "no_embedder", "count": 0},
+                         {"leg": "fts", "ran": True,
+                          "reason": "query_failed", "count": 0},
+                         {"leg": "fallback", "ran": True,
+                          "reason": "tfidf_snapshot", "count": 11}]}
+    # comparable: same mix (a second read of the same healthy shape)
+    _require_one_leg_mix(healthy, {"legs": list(healthy["legs"])},
+                         test="probe")
+    with pytest.raises(pytest.skip.Exception) as exc:
+        _require_one_leg_mix(healthy, degraded, test="probe")
+    assert "different retrieval legs" in str(exc.value)
+    # the mixes are NAMED, so the log says which leg moved
+    assert "'fallback'" in str(exc.value) and "('fts', 7)" in str(exc.value)
+
+
+def test_a_zero_count_leg_difference_is_not_a_confound():
+    """A leg that ran and returned ZERO cannot move the pool.
+
+    ``timeout`` vs ``empty_results`` on a leg that contributed nothing is a
+    scheduling difference, not a pool difference — refusing to compare there
+    would throw away measurable runs on any loaded box, which is the opposite
+    failure to the one the guard fixes.
+
+    FAILS IF: the guard reverts to comparing ``(leg, ran, reason)`` — it then
+    skips this comparable pair.
+    """
+    empty_timeout = {"legs": [{"leg": "fts", "ran": True,
+                               "reason": "ok", "count": 7},
+                              {"leg": "structural", "ran": True,
+                               "reason": "timeout", "count": 0}]}
+    empty_none = {"legs": [{"leg": "fts", "ran": True,
+                            "reason": "ok", "count": 7},
+                           {"leg": "structural", "ran": True,
+                            "reason": "empty_results", "count": 0}]}
+    _require_one_leg_mix(empty_timeout, empty_none, test="probe")
+
+
 # ── (c) fail-open: fetch failure / zero new ids / merge exception ────────
 
-def _base_ids(sdk, q):
+def _base_pool(sdk, q):
+    """The arm-OFF read as a whole result — the fail-open tests below need
+    its ``legs`` as well as its ids (``_require_one_leg_mix``)."""
     from tools.longmem_eval.retrieve import retrieve_for_question
-    return [h["id"] for h in retrieve_for_question(
-        sdk, q, ks=(5,), top_k=10, pool_size=60)["hits"]]
+    return retrieve_for_question(sdk, q, ks=(5,), top_k=10, pool_size=60)
 
 
 def test_fetch_failure_keeps_the_base_pool(seeded_sdk, monkeypatch):
     from tools.longmem_eval.retrieve import retrieve_for_question
     from tortoise import session_reinjection as _sr
     q = _question()
-    base = _base_ids(seeded_sdk, q)
+    base_ret = _base_pool(seeded_sdk, q)
+    base = [h["id"] for h in base_ret["hits"]]
 
     def _boom(*a, **kw):
         raise RuntimeError("fetch blew up")
@@ -397,6 +558,7 @@ def test_fetch_failure_keeps_the_base_pool(seeded_sdk, monkeypatch):
     monkeypatch.setattr(_sr, "source_session_chunk_pass", _boom)
     ret = retrieve_for_question(seeded_sdk, q, ks=(5,), top_k=10,
                                 pool_size=60, session_reinjection=True)
+    _require_one_leg_mix(base_ret, ret, test="fetch failure keeps the pool")
     assert [h["id"] for h in ret["hits"]] == base
     st = ret["session_reinjection_stats"]
     # the SEED census survives the fail-open: "seeded but the fetch failed"
@@ -411,13 +573,15 @@ def test_zero_new_ids_skips_the_merge(seeded_sdk, monkeypatch):
     from tools.longmem_eval.retrieve import retrieve_for_question
     from tortoise import session_reinjection as _sr
     q = _question()
-    base = _base_ids(seeded_sdk, q)
+    base_ret = _base_pool(seeded_sdk, q)
+    base = [h["id"] for h in base_ret["hits"]]
     monkeypatch.setattr(
         _sr, "source_session_chunk_pass",
         lambda *a, **kw: {"ok": True, "by_session": {}, "total": 0,
                           "dropped_by_cap": 0, "total_cap_hit": False})
     ret = retrieve_for_question(seeded_sdk, q, ks=(5,), top_k=10,
                                 pool_size=60, session_reinjection=True)
+    _require_one_leg_mix(base_ret, ret, test="zero new ids keeps the pool")
     assert [h["id"] for h in ret["hits"]] == base
     st = ret["session_reinjection_stats"]
     assert st["fetch_ok"] is True
@@ -428,7 +592,8 @@ def test_merge_stage_exception_keeps_the_base_pool(seeded_sdk, monkeypatch):
     from tools.longmem_eval.retrieve import retrieve_for_question
     from tortoise import session_reinjection as _sr
     q = _question()
-    base = _base_ids(seeded_sdk, q)
+    base_ret = _base_pool(seeded_sdk, q)
+    base = [h["id"] for h in base_ret["hits"]]
 
     def _boom(*a, **kw):
         raise RuntimeError("merge blew up")
@@ -436,6 +601,7 @@ def test_merge_stage_exception_keeps_the_base_pool(seeded_sdk, monkeypatch):
     monkeypatch.setattr(_sr, "reinjection_merge_order", _boom)
     ret = retrieve_for_question(seeded_sdk, q, ks=(5,), top_k=10,
                                 pool_size=60, session_reinjection=True)
+    _require_one_leg_mix(base_ret, ret, test="merge exception keeps the pool")
     assert [h["id"] for h in ret["hits"]] == base
     st = ret["session_reinjection_stats"]
     # a MERGE-stage failure must not impersonate a graph outage: the FETCH
@@ -706,6 +872,7 @@ def test_guard_is_a_noop_on_a_single_session_pool(monkeypatch):
         off = retrieve_for_question(sdk, q, ks=(5,), top_k=10, pool_size=60,
                                     session_reinjection=True,
                                     session_reinjection_guard=False)
+        _require_one_leg_mix(on, off, test="guard-off re-cap parity")
         assert [h["id"] for h in on["hits"]] == \
             [h["id"] for h in off["hits"]]
     finally:
