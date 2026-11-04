@@ -16,7 +16,11 @@ A rule in a brief binds only the lanes that read it, and the failure is a
 program that refuses:
 
   PERMIT a cancel only when ALL of these hold, measured in ONE shot:
-    1. the run is `queued`/`pending`/`waiting` (never `in_progress`);
+    1. the run is `queued`/`pending`/`waiting`/`requested` (never `in_progress`)
+       — all four are documented run statuses GitHub itself sets, and this clause
+       must name every member of `CANCELLABLE_STATUSES`: a rule that omits one
+       leaves a value the code allows that the stated rule does not (`requested`
+       was omitted once — round-7 review F2);
     2. NO job of it has started (a `queued` run whose job has started is a run
        whose work would be DESTROYED — 32 of the 42 cancels in that window had
        started jobs);
@@ -106,6 +110,9 @@ MAX_COMPARISON_AGE_S = 60
 #: to act on a stale comparison.
 MAX_REMEASURE = 3
 DEFAULT_REPO = "daniel-ospina/tortoise"
+#: Run statuses a cancel may act on. EVERY member must be named by clause 1 of the
+#: module docstring — pinned by `test_the_docstring_rule_names_every_cancellable_status`,
+#: because a rule narrower than the code is how `requested` went unlisted once.
 CANCELLABLE_STATUSES = frozenset({"queued", "pending", "waiting", "requested"})
 #: A commit OID as GitHub emits it: 40 hex (SHA-1) today, 64 if SHA-256 repos arrive.
 #: Anything else — an abbreviation, `unknown`, a placeholder — is NOT a head, and two

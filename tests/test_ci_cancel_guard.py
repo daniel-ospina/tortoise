@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import re
 import stat
 import subprocess
 import sys
@@ -659,3 +660,41 @@ def test_a_red_self_test_is_70_never_the_post_failure_1(fixture, tmp_path):
     assert r.returncode == 70, r.stdout + r.stderr
     assert r.returncode != 1, "a red suite must not look like a failed cancel POST"
     assert "1 failed" in r.stdout, r.stdout
+
+
+def test_the_docstring_rule_names_every_cancellable_status():
+    """Round-7 finding 2 (P3): clause 1 of the module docstring stated the rule as
+    ``queued``/``pending``/``waiting``, while `CANCELLABLE_STATUSES` also allows
+    ``requested`` — a documented run status that GitHub itself sets (REST
+    `/actions/workflow-runs`). In a file whose whole thesis is that a rule must be
+    executable rather than prose, a reader auditing the code against the stated rule
+    met a value the rule did not name: the same claim/code drift this PR already
+    fixed once ("the exclusivity claim named the wrong carve-outs").
+
+    Both sides are read from the SOURCE TEXT, never imported, so this case also works
+    through the `CI_CANCEL_GUARD_TOOL` seam (a pre-fix blob, a foil) and has no side
+    effects. It discriminates in BOTH directions: adding a status to the constant
+    without naming it in clause 1 fails, and naming one the code refuses fails too.
+
+    Pre-fix this fails with `named - code == {'requested'}`.
+    """
+    src = TOOL.read_text()
+
+    clause = next((ln for ln in src.splitlines()
+                   if ln.strip().startswith("1. the run is `")), None)
+    assert clause, f"clause 1 of the docstring is missing from {TOOL}"
+    # The clause names the ALLOWED statuses, then names the one it denies in a
+    # parenthetical ("never `in_progress`"). Only the allowed list is compared.
+    allowed_text = clause.split("(never", 1)[0]
+    named = set(re.findall(r"`([a-z_]+)`", allowed_text))
+
+    declared = re.search(r"^CANCELLABLE_STATUSES = frozenset\(\{(.*?)\}\)", src, re.M)
+    assert declared, f"CANCELLABLE_STATUSES is not declared in {TOOL}"
+    code = set(re.findall(r"\"([a-z_]+)\"", declared.group(1)))
+
+    assert named == code, (
+        "the docstring's clause 1 must name exactly the statuses the code cancels on; "
+        f"named-but-not-allowed={sorted(named - code)} "
+        f"allowed-but-not-named={sorted(code - named)}")
+    # A guard against the assertion going vacuous if the declaration shape changes.
+    assert "in_progress" not in code, "in_progress is never cancellable"
