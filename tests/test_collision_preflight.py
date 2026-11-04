@@ -627,6 +627,110 @@ def _wait_for_deleted_cwd(pid: int, timeout: float = 10.0) -> None:
         "a live `pi` whose cwd is unreadable, so this run proves nothing")
 
 
+#: A `ps` that hides the BOX's UNATTRIBUTABLE `pi` rows from this suite.
+#:
+#: ⛔ THE PROCESS CENSUS IS AMBIENT STATE, THE SAME CLASS AS `HOME`. The tool asks
+#: `fleet_state.pi_processes()` who is bare-metally running on this machine, and
+#: `StaleHolder._census_complete` REFUSES any demotion while a live `pi` process's cwd
+#: cannot be read (`(deleted)` when a worktree was reaped under its lane, an `lsof`
+#: placeholder, `hidepid`). That refusal is CORRECT and deliberate (#8999: an
+#: unattributable live pid leaves the store UNMEASURED) and it is pinned at the
+#: DECISION level — `test_a_live_pi_whose_cwd_cannot_be_read_is_never_no_owner` and
+#: `test_an_unreadable_process_census_is_never_no_owner` mock `pi_processes`/
+#: `process_cwds` and never touch the box.
+#:
+#: But every CLI test in this file builds a HERMETIC temp repo and asserts a verdict
+#: about THAT tree, so its answer must not depend on what happens to run on the
+#: operator's or the runner's machine — measured 2026-11-04 on `pi-runner-cmux-x64-7`
+#: (run 41730804398, job 126281916250): ONE live pi with a reaped worktree (pid
+#: 1666486) turned five verdicts into COLLISION and redded shard `test (i)` for a PR
+#: that does not touch this tool. The row is dropped HERE, at the seam, exactly as
+#: `HOME` and `GH_STUB_DIR` are isolated — the tool's own semantics are untouched, so
+#: the fail-closed arm still refuses on a real box.
+#:
+#: ⛔ IT DROPS ONLY ROWS IT CANNOT ATTRIBUTE, so the tests that DELIBERATELY stand a
+#: fake `pi` in a checkout (c2, the unregistered-checkout pair) still see it: their
+#: cwd resolves. Attribution is asked of `fleet_state.process_cwds` — the tool's own
+#: reader — so the shim cannot disagree with the code under test about what
+#: "attributable" means, on either platform (``/proc`` on Linux, batched ``lsof`` on
+#: macOS).
+#:
+#: `{real_ps}` and `{root}` are substituted at write time: the real `ps` is resolved
+#: BEFORE the shim is on `PATH` (so the shim cannot exec itself), and `root` is the
+#: checkout the reader is imported from.
+CENSUS_PS_SHIM = r'''#!{python}
+"""`ps` with this BOX's unattributable `pi` rows removed (see CENSUS_PS_SHIM)."""
+import os
+import subprocess
+import sys
+
+REAL_PS = {real_ps!r}
+ROOT = {root!r}
+
+
+def _fields(line):
+    parts = line.split(None, 3)
+    return parts if len(parts) == 4 else None
+
+
+def _is_pi(parts):
+    return os.path.basename(parts[3].split(None, 1)[0]) == "pi"
+
+
+def main():
+    real = subprocess.run([REAL_PS] + sys.argv[1:], capture_output=True, text=True)
+    rows = real.stdout.splitlines()
+    pids = set()
+    for line in rows:
+        parts = _fields(line)
+        if parts is None or not _is_pi(parts):
+            continue
+        try:
+            pids.add(int(parts[0]))
+        except ValueError:
+            continue
+    cwds = dict()
+    if pids:
+        sys.path.insert(0, os.path.join(ROOT, "tools"))
+        import fleet_state
+        cwds, _err = fleet_state.process_cwds(sorted(pids))
+
+    def keep(line):
+        parts = _fields(line)
+        if parts is None or not _is_pi(parts):
+            return True
+        try:
+            return int(parts[0]) in cwds
+        except ValueError:
+            return True
+
+    out = "\n".join(line for line in rows if keep(line))
+    if out:
+        out += "\n"
+    sys.stdout.write(out)
+    return real.returncode
+
+
+raise SystemExit(main())
+'''
+
+
+def write_census_shim(where: Path, real_ps: str | None = None) -> Path:
+    """Write the census `ps` shim into `where` and return the DIRECTORY (a `PATH` entry).
+
+    `real_ps` is resolved HERE, before the directory is on `PATH`, so the shim cannot
+    exec itself. Any callable `ps` may be substituted — that is how the shim's own
+    filter is pinned without depending on what this box happens to be running.
+    """
+    where.mkdir(parents=True, exist_ok=True)
+    _write_exec(where / "ps", CENSUS_PS_SHIM.format(
+        python=PYTHON,
+        real_ps=real_ps or shutil.which("ps") or "/bin/ps",
+        root=str(ROOT),
+    ))
+    return where
+
+
 #: The cause `load_registry` records for the real #9392 incident: the roster was
 #: never written in that cell. Module-level so both test classes model the SAME
 #: cause text the tool actually prints.
@@ -814,6 +918,13 @@ class CollisionPreflightTest(unittest.TestCase):
         # holder writes its own with `fleet_board`.
         self.home = self.tmp / "home"
         self.fleet_board()
+        # ⛔ THE PROCESS CENSUS IS AMBIENT STATE TOO (see `CENSUS_PS_SHIM`). The tool
+        # asks the box who is running `pi`, and the empty-claim leg REFUSES every
+        # demotion while one such cwd is unreadable — correct, and fatal to a suite
+        # whose verdicts are about a hermetic TEMP repo. `run_tool` puts this directory
+        # first on `PATH`; only rows it cannot attribute are dropped, so a test that
+        # stands a fake `pi` in a checkout still sees it.
+        self.census_dir = write_census_shim(self.tmp / "census-ps")
         # Where a REBUILD's shadowed `gh`/`cmux` stubs record that they were
         # called, so a test can prove the rebuild ran through THIS path and not
         # the network (see `failing_rebuild_path`).
@@ -1059,6 +1170,37 @@ class CollisionPreflightTest(unittest.TestCase):
             _fleet_board_state(**kwargs),
         )
 
+    def tool_env(self, env_extra: dict | None = None) -> dict:
+        """The environment the tool subprocess runs in — the suite's whole isolation surface.
+
+        Every ambient store the tool reads is redirected here, because a verdict about a
+        hermetic TEMP repo must not be a function of the machine it runs on:
+
+          * `COLLISION_PREFLIGHT_*` is NEUTRALISED (review P2). Those seams are STATEFUL:
+            an exported `COLLISION_PREFLIGHT_BOARD_CACHE` would let one run's rebuild
+            answer a later test's pre-flight through a cache entry on the operator's own
+            disk, which makes the suite order-dependent — the same class
+            `tests/test_who_is_on.py` filters with its "no `COLLISION_PREFLIGHT_*` leak"
+            env. A test that WANTS one of them sets it via `env_extra`, applied after
+            this filter.
+          * `GH_STUB_DIR` / `HOME`: the GitHub surface and the FLEET BOARD. A missing or
+            aged board is REBUILT with live `gh`/`cmux`, so `setUp` writes a fresh,
+            answerable "no holders" board inside `self.home` and redirects `HOME` to it.
+          * `PATH` gets the census shim FIRST (`CENSUS_PS_SHIM`): the PROCESS CENSUS is
+            the same class of ambient state as the board, and one live `pi` with a reaped
+            worktree redded shard `test (i)` for this instrument on 2026-11-04. It is
+            prepended AFTER `env_extra`, so a `PATH` a test builds itself (e.g.
+            `failing_rebuild_path`) keeps its own stubs first AND the census behind them.
+        """
+        env = {k: v for k, v in os.environ.items()
+               if not k.startswith("COLLISION_PREFLIGHT_")}
+        env["GH_STUB_DIR"] = str(self.gh_dir)
+        env["HOME"] = str(self.home)
+        if env_extra:
+            env.update({k: str(v) for k, v in env_extra.items()})
+        env["PATH"] = f"{self.census_dir}{os.pathsep}{env.get('PATH', '')}"
+        return env
+
     def failing_rebuild_path(self) -> str:
         """A `PATH` on which a REBUILD's own reads fail locally (review P2).
 
@@ -1101,33 +1243,19 @@ class CollisionPreflightTest(unittest.TestCase):
                  extra_args: list[str] | None = None,
                  repo_arg: object = "__default__", cwd: Path | None = None,
                  gh_bin: Path | None = None):
-        env = dict(os.environ)
-        # ⛔ THE CACHE SEAMS ARE NEUTRALISED (review P2). They are STATEFUL: an
-        # exported `COLLISION_PREFLIGHT_BOARD_CACHE` would let one run's rebuild
-        # answer a later test's pre-flight through a cache entry on the operator's
-        # own disk, which makes the suite order-dependent — the same class
-        # `tests/test_who_is_on.py` filters with its "no `COLLISION_PREFLIGHT_*`
-        # leak" env. A test that WANTS the cache sets it via `env_extra`, which is
-        # applied after this filter.
-        env = {k: v for k, v in env.items()
-               if not k.startswith("COLLISION_PREFLIGHT_")}
-        env["GH_STUB_DIR"] = str(self.gh_dir)
-        # ⛔ HOME IS REDIRECTED. `collision_preflight` reads the FLEET BOARD at
-        # `$HOME/.pi/agent/state/fleet-state.json`, and a missing or aged board
-        # is REBUILT with live `gh`/`cmux`. `setUp` writes a fresh, answerable
-        # "no holders" board inside `self.home`; a test that wants a holder
-        # writes its own with `fleet_board`.
-        env["HOME"] = str(self.home)
-        if env_extra:
-            env.update({k: str(v) for k, v in env_extra.items()})
-        # ⛔ THE PROCESS CENSUS IS SERVED, NEVER INHERITED (#10823). Applied AFTER
-        # `env_extra` on purpose: a test that REPLACES `PATH` wholesale
-        # (`failing_rebuild_path`) must keep the census stub ahead of its own
-        # stubs and of the real `ps`. Without this, a live `pi` on the host whose
-        # cwd is a REAPED worktree (`… (deleted)`) makes the census a gap and
-        # fails every demotion closed — the host's lane list would decide a
-        # fixture's verdict.
-        env["PATH"] = f"{self.ps_dir}{os.pathsep}{env.get('PATH', '')}"
+        env = self.tool_env(env_extra)
+        # ⛔ THE SERVED PROCESS TABLE OUTRANKS THE CENSUS SHIM. `tool_env` puts
+        # main's `ps` census shim first on `PATH` (it drops the BOX's
+        # unattributable `pi` rows); a test that SERVES a table
+        # (`set_process_table` / `add_process_row`) needs ITS rows to win, because
+        # it models a live lane the shim could never invent. The stub therefore
+        # goes ahead of the shim and `PS_STUB_ROWS` names the rows. Both stubs
+        # neutralise the SAME ambient surface — whichever is first, the child's
+        # `ps` is a stub and never the box's — so neither arm's guarantee is
+        # weakened by the other; the order is what lets a test INJECT a row
+        # (#10823) and still leave the census shim as the default (`tool_env`'s
+        # own pins still assert `census_dir` first there).
+        env["PATH"] = f"{self.ps_dir}{os.pathsep}{env['PATH']}"
         env["PS_STUB_ROWS"] = str(self.ps_dir / "rows")
         cmd = [PYTHON, str(TOOL), str(issue)]
         if repo_arg == "__default__":
@@ -9154,6 +9282,76 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("could not resolve the cwd", basis)
         self.assertIn(str(os.getpid()), basis,
                       "the refusal must name WHICH process it could not read")
+
+    # ── the census SHIM: the suite's own whole-machine read ──────────────────
+
+    def _run_census_shim(self, shim_dir: Path) -> str:
+        """`ps` as the tool subprocess sees it, through `shim_dir` first on `PATH`."""
+        env = {**os.environ, "PATH": f"{shim_dir}{os.pathsep}{os.environ.get('PATH', '')}"}
+        return subprocess.run(
+            ["ps", "-ww", "-axo", "pid=,ppid=,uid=,command="],
+            capture_output=True, text=True, env=env, timeout=60, check=True,
+        ).stdout
+
+    def test_the_census_shim_drops_an_unattributable_lane_and_keeps_a_real_one(self):
+        """⛔ THE HERMETICITY ITSELF, PINNED — the shim must not be able to be a passthrough.
+
+        Measured 2026-11-04 (run 41730804398, job 126281916250): on the self-hosted pool a
+        single live `pi` whose worktree had been REAPED under it made
+        `StaleHolder._census_complete` refuse every demotion, and five verdicts that are
+        about a hermetic temp repo came back COLLISION — shard `test (i)` red for a PR
+        that does not touch this tool.
+
+        Both arms are driven from a STUB `ps`, so nothing here depends on what this box
+        happens to be running — which is the point of the shim, and the reason the test
+        cannot be written against real processes:
+
+          * a `pi` row whose cwd resolves (here this very process) is KEPT, because the
+            tests that deliberately stand a fake lane in a checkout must still see it;
+          * a `pi` row whose cwd CANNOT be resolved (a pid that does not exist stands in
+            for the reaped-tree / `hidepid` / placeholder classes) is DROPPED;
+          * a non-`pi` row is passed through untouched.
+
+        Non-vacuity: with the filter removed — i.e. the shim exec'ing `ps` verbatim — the
+        third assertion fails on the unattributable row surviving into the census.
+        """
+        out = self._run_census_shim(write_census_shim(
+            self.tmp / "census-shim-fake",
+            real_ps=self._write_fake_ps(
+                self.tmp / "fake-upstream" / "ps",
+                f"    1     0        0 /sbin/init\n"
+                f"{os.getpid()}     1        0 pi --model m\n"
+                f"999999999     1        0 pi --model m\n",
+            ),
+        ))
+        self.assertIn("/sbin/init", out, "a non-pi row must pass through the shim")
+        self.assertIn(f"{os.getpid()} ", out,
+                      "an ATTRIBUTABLE lane's row must survive the shim")
+        self.assertNotIn("999999999", out, (
+            "a `pi` row whose cwd cannot be resolved must be dropped: left in, it is the "
+            "census GAP that refuses every demotion on a busy box (see CENSUS_PS_SHIM)"
+        ))
+
+    def test_the_tool_subprocess_runs_with_the_census_shim_first_on_path(self):
+        """The wiring, pinned: a shim that exists but is not on the child's `PATH` is inert."""
+        env = self.tool_env()
+        self.assertEqual(env["PATH"].split(os.pathsep)[0], str(self.census_dir),
+                         "the census shim must be FIRST on the tool's `PATH`")
+        which = subprocess.run(["which", "ps"], capture_output=True, text=True, env=env,
+                               check=False)
+        self.assertEqual(which.stdout.strip(), str(self.census_dir / "ps"),
+                         "`ps` in the tool's environment must BE the shim")
+        # And the shim is only on the CHILD's path: this process keeps the real one, so
+        # the decision-level pins above still mock the reader rather than the box.
+        self.assertNotEqual(shutil.which("ps"), str(self.census_dir / "ps"))
+
+    @staticmethod
+    def _write_fake_ps(path: Path, table: str) -> str:
+        """A standalone `ps` that prints `table` — the shim's own upstream, substituted."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _write_exec(path, f"#!{PYTHON}\nimport sys\nsys.stdout.write({table!r})\n")
+        return str(path)
+
 
     def test_a_failed_git_status_in_the_worktree_reads_UNREADABLE(self):
         """CONDITION 3's other fail-closed arm: a dirt read that fails is not "clean".
