@@ -1189,9 +1189,22 @@ def _bounded_cause(exc: BaseException,
     which `invalid input syntax for type json` was absent). One number, in one
     place: `_failure_line` composes to it, so a line the projection composed
     reaches a log whole.
+
+    ⛔ AND A DRIVER'S TEXT IS NARROWED, NOT CARRIED (#10648 review P2). A raw
+    driver exception reaches this function by a second route — `replay()` composes
+    its own line for a STATEMENT failure, but `scope_connection()` runs before the
+    first statement, so its driver error propagates here untouched. On a driver
+    error ``str(exc)`` is the protocol's fields CONCATENATED, and the optional
+    `DETAIL`/`CONTEXT` fields quote the refused row (`Failing row contains (…)`)
+    or the fragment (`JSON data, line 1: …`). The same withhold therefore has to
+    hold at this seam, and it is applied by the SHAPE of the exception rather than
+    by its type: an exception carrying `diag`/`pgcode` is one of the driver's, and
+    only its primary message is kept (`record_projection._primary_message`). This
+    module's own errors are untouched — they are its own text, not a driver's.
     """
-    text = _bounded_text(str(exc), limit)
-    return text
+    if getattr(exc, "diag", None) is not None or getattr(exc, "pgcode", None):
+        return _bounded_text(record_projection._primary_message(exc), limit)
+    return _bounded_text(str(exc), limit)
 
 
 #: The payload fields a record's identity can live in, most specific first.
@@ -1209,6 +1222,16 @@ _RECORD_IDENTITY_KEYS: tuple[str, ...] = (
 #: document title — the same datum `record_projection._CONTENT_COLUMNS` withholds
 #: as ``title`` — so its value is withheld exactly as that attribution withholds
 #: it, and only its presence and length are logged (#10648 review P3).
+#:
+#: ⛔ THE TWO HALVES OF ONE LOG LINE MUST AGREE (#10648 review P2). Withholding it
+#: HERE while `record_projection._CONTENT_COLUMNS` printed the same string as
+#: ``name=Q3 pricing memo`` two clauses later was a withhold true of each half and
+#: false of the line. `name` (with ``canonical_name``/``subject``/``object``) is
+#: therefore in that list too, and
+#: `tests/test_record_searchkeys_10620.py::test_the_identity_withhold_list_is_
+#: a_subset_of_the_attribution_list` pins :data:`_IDENTITY_CONTENT_KEYS` as a
+#: SUBSET of it — a new content-bearing identity key here goes red there until the
+#: attribution half withholds it too.
 _IDENTITY_CONTENT_KEYS: frozenset[str] = frozenset({"name"})
 
 #: How much of ONE identity value the log line carries. An ``eventId`` is bounded

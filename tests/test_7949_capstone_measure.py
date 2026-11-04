@@ -3814,8 +3814,8 @@ def test_the_bare_continuation_cites_name_what_they_say():
             ("134", 'STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", '
                     '"S5", "S6")'),
         ), "capstone_verdict_check"),
-        ("E1-E5-PROOFS.md", "_step_accounting` (`:526`) refuses a GREEN row whose", (
-            ("526", "def _step_accounting("),
+        ("E1-E5-PROOFS.md", "_step_accounting` (`:605`) refuses a GREEN row whose", (
+            ("605", "def _step_accounting("),
         ), "capstone_verdict_check"),
         # ⛔ A SECOND DOCUMENT PRINTS THE SAME DECLARATION (#10601 review round 2).
         # `docs/00_index.md`'s capstone row cites this gate too, and it moved
@@ -4397,14 +4397,20 @@ def test_the_bare_entry_point_call_cite_resolves_to_the_call_it_names():
 # sweep in this file: not resolved, and — unlike a bare `:NNNN` continuation —
 # not even reported `unmatched`, because it carries a file name the sweep never
 # looks for. The bundle's own convention for a number in that position is
-# `README.md:174-180` (*"written here WITHOUT the `file:line` form on purpose …
+# `README.md:188-200` (*"written here WITHOUT the `file:line` form on purpose …
 # do NOT follow them as pointers at this head"*): the SYMBOL is authoritative,
 # the line is a convenience nothing re-derives.
 #
-# Measured on this branch, twice: the sentence that paragraph replaces was a
-# `capstone_run.py:19` cite, and `tests/test_7949_capstone_verdict_check.py:2089`
-# records that `capstone_run.py:19` and `README.md:615` "stated two different,
-# both-wrong call sites for one fact, and both pin files stayed green".
+# Measured provenance, stated exactly (the previous revision of this comment
+# misstated both halves, and this file's own docstring below contradicted it):
+# the README's sentence carried `capstone_run.py:813`, and `74d7d1f5e` re-pointed
+# it at the SYMBOL — `git log -S'capstone_run.py:19' -- docs/evidence/
+# 7949-capstone/README.md` returns NO commit, so the README never carried `:19`.
+# The `capstone_run.py:19` / `README.md:615` pair belongs to the SAME class one
+# file over: `4fbd69844` (main) recorded it in
+# `tests/test_7949_capstone_verdict_check.py`'s entry-point paragraph, and this
+# branch's `ef8d1ac08` dropped those two numbers from that paragraph — because it
+# outlived two heads and a quoted number IS the drift the paragraph describes.
 _PROBE_NUMERIC_CITE = re.compile(r"capstone_run\.py:(\d+)")
 
 #: The line this leg holds the README to, BY SYMBOL (never by a typed number).
@@ -4455,13 +4461,14 @@ def test_no_document_cites_the_run_probe_by_a_number_nothing_can_resolve():
         "`_BUNDLE_CITE` resolves `sdk|edges|extractor_v2` only and "
         "`_BUNDLE_TOOL_SOURCES` names only the gate, so the number rots "
         f"silently: {offenders}. Cite the SYMBOL instead (the bundle's own "
-        "convention, `README.md:174-180`), or add a resolver row for the probe "
+        "convention, `README.md:188-200`), or add a resolver row for the probe "
         "before writing a number into it")
 
     # 2. The claim survives as a symbol — the ban above must not be satisfied
     #    by deleting the sentence (that would trade a rotting cite for a
-    #    dropped measurement, and `README.md:790`'s paragraph is the only place
-    #    a consumer is told the frozen log predates the conditional split).
+    #    dropped measurement, and `README.md:809-815`'s paragraph is where the
+    #    README tells a consumer the frozen log predates the conditional split —
+    #    `E1-E5-PROOFS.md:219` says it too, so "only place" was never true).
     readme_lines = (_REPO / "docs/evidence/7949-capstone/README.md").read_text(
         encoding="utf-8").splitlines()
     carrying = [i + 1 for i, ln in enumerate(readme_lines)
