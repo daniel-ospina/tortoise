@@ -504,8 +504,16 @@ def _probe():
 
 
 def _manifest(**over) -> dict:
-    """The manifest ``ep_activation.activate_beliefs`` returns per question —
-    and the exact shape ``census.py`` reads its eight cells off."""
+    """The manifest ``ep_activation.activate_beliefs`` returns per question.
+
+    This default carries the EIGHT census cells the probe's per-question
+    projection read before #10493 (``operators``, ``factor_edges``,
+    ``points_with_ep``, ``points_unmeasured``, ``points_off_neutral``,
+    ``points_moved_off_neutral``, ``ep_ran``, ``no_op_reason``). The projection
+    now reads THIRTEEN: the four ``points_substrate`` / ``belief_eligible_*``
+    cells are absent here unless a caller passes them through ``**over``, and
+    that absence is load-bearing — it is exactly what makes a pre-#10493
+    manifest project four UNREAD cells rather than four measured ones."""
     m = {"ep_ran": True, "ep_engine": "ep", "operators": 171,
          "factor_edges": 0, "points_with_ep": 121, "points_unmeasured": 1038,
          "points_off_neutral": 8, "points_moved_off_neutral": 8,
@@ -1762,8 +1770,9 @@ def test_committed_census_rederives_its_own_aggregate():
         f"checks is how the headline ratio shipped editable (#10678 review)")
 
     # The disclosure fields describe THESE rows: nothing was unread. UNREAD is
-    # ``_optional_int(cell) is None`` — the one predicate the probe's
-    # ``_census_unread`` and the summarizer use — not ``value is None``, which
+    # ``_optional_int(cell) is None`` — the predicate the probe's
+    # ``_census_unread`` and the summarizer's own ``*_unread`` sums both use over
+    # ``_UNKNOWN_PER_MANIFEST_KEYS`` — not ``value is None``, which
     # would call a non-numeric cell (``operators: true``) READ here while its
     # ``cells.operators_unread`` companion calls it UNREAD.
     assert doc["per_question_source"] == "outcome.belief_activation"

@@ -210,9 +210,15 @@ null `ep_ran` / `points_with_ep` in such a block is indistinguishable from a mea
   claim a source it never read. A *partial* population still publishes its rows, and
   `per_question_unread` says how many questions inside them have an **unread** census — the same
   rule, and the same predicate (`measurement_posture._UNKNOWN_PER_MANIFEST_KEYS`, coerced through
-  the module's own `_optional_int`, which refuses a `bool` or any non-numeric cell), the summed
-  cells use for `<key>_unread`, so the two disclosures can never disagree (#10137 review, P2/P3: a
-  manifest PRESENT is not a census READ — the producer's fail-open shape
+  the module's own `_optional_int`, which refuses a `bool` or any non-numeric cell), the four
+  pre-#10493 summed cells use for `<key>_unread`. It does **not** cover the four `points_substrate` /
+  `belief_eligible_*` sums: #10493 keeps those in their own `_UNKNOWN_PER_MANIFEST_KEYS_10137` tuple
+  on purpose, so that adding a cell can never retroactively mark a pre-#10493 checkpoint's measured
+  census as unread. The two disclosures therefore CAN disagree, and on this artifact they do —
+  `per_question_unread: 0` beside `points_substrate_unread: 24` — because each is true of its own
+  key set: every question's four pre-#10493 cells were read, and no question read the eligibility
+  population. Reading one as the other's verdict is the misreading the separate tuple prevents
+  (#10137 review, P2/P3: a manifest PRESENT is not a census READ — the producer's fail-open shape
   `{"ep_ran": false, "error": …}` carries a manifest and no cells, and used to count as read; and
   `operators: true` is not a count).
   Each row also carries that manifest's `error`, so the reason a census is missing is readable per
