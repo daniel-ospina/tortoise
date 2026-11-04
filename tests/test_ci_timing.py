@@ -2560,7 +2560,20 @@ def test_the_artifact_and_the_map_cite_the_same_run() -> None:
     text = (REPO_ROOT / "config" / "ci-surfaces.yml").read_text()
     stamp = re.search(r'^durations_captured_at:\s*"(\d{4}-\d{2}-\d{2})', text, re.M)
     assert stamp, "durations_captured_at is missing or unparseable"
-    notes = re.findall(r"ci-timing top-15 (\d{4}-\d{2}-\d{2}) \(run ([^)]+)\)", text)
+    # BOTH sample-label shapes, via the writer's OWN pattern — not the legacy one.
+    # `ci-timing top-15 …` is the pre-2026-10 label; the writer emits
+    # `ci-timing junit-census+top-15 …` (`tools/ci_timing.py:4020`, the same pair
+    # `_SAMPLE_LABEL_RE` spells). Reading only the legacy spelling made the arm that
+    # #9134's P1 exists for UNREACHABLE: the newest legacy note is 2026-10-20, so
+    # `newest == sampled_date` could never hold and the guard always fell to its
+    # `else` (date-vs-stamp only) — a pair sampling run A while the map cited run B
+    # ON THE SAME DAY passed. Measured at `ac9a14c16`: the shipped pattern finds 5
+    # notes, newest 2026-10-20; the both-shapes pattern finds 1117, newest 2026-11-02
+    # = the sampled date, citing 41375596528. Two labels, two behaviours, so the
+    # pattern is pinned rather than restated (#10575 review, P3).
+    notes = re.findall(
+        rf"{ci_timing._SAMPLE_LABEL_RE} (\d{{4}}-\d{{2}}-\d{{2}}) \(run ([^)]+)\)",
+        text)
     assert notes, "the map carries no capture-dated note, so this guard is vacuous"
     newest = max(date for date, _ in notes)
     newest_runs = {run for date, run in notes if date == newest}
@@ -2573,6 +2586,48 @@ def test_the_artifact_and_the_map_cite_the_same_run() -> None:
         assert sampled_date == stamp.group(1), (
             f"the map's stamp {stamp.group(1)} and the artifact's sample date "
             f"{sampled_date} disagree, and no note records the artifact's run")
+
+
+def test_the_run_agreement_guard_reads_BOTH_sample_label_shapes() -> None:
+    """The guard above must read the label the WRITER emits, not only the legacy one.
+
+    `_SAMPLE_LABEL_RE` (`tools/ci_timing.py:1849`) spells both shapes because the map
+    carries both: `ci-timing top-15 …` is the pre-2026-10 spelling and
+    `ci-timing junit-census+top-15 …` is what the writer emits now. The guard read
+    only the legacy one, so `newest` was frozen at the last legacy note and
+    `newest == sampled_date` could never be true again — the arm that #9134's P1
+    exists for ("the two shipped artifacts are grounded on the same RUN") was
+    unreachable, and only the weaker date-vs-stamp arm could ever fire.
+
+    Non-vacuity is the LAST two assertions: they are the pre-fix behaviour. With the
+    legacy-only reading the primary arm is unreachable (`newest != sampled_date`) and
+    the map's `41375596528` notes are invisible; with the writer's pattern the arm is
+    live and every legacy match is still covered, so the repair is a superset and not
+    a substitution.
+    """
+    text = (REPO_ROOT / "config" / "ci-surfaces.yml").read_text()
+    snapshot = json.loads((REPO_ROOT / "docs" / "ci-timing.json").read_text())
+    sampled_date = str(snapshot["sampled_run"]["sample_time"])[:10]
+
+    # the PRE-FIX expression, verbatim
+    legacy = re.findall(r"ci-timing top-15 (\d{4}-\d{2}-\d{2}) \(run ([^)]+)\)", text)
+    both = re.findall(
+        rf"{ci_timing._SAMPLE_LABEL_RE} (\d{{4}}-\d{{2}}-\d{{2}}) \(run ([^)]+)\)", text)
+
+    # The map still carries legacy notes (a sweep holds a row rather than rewriting
+    # it), so this is a COVERAGE difference and not a dead pattern: both readings are
+    # non-empty, and the wider one is a strict SUPERSET.
+    assert legacy, "no legacy-shaped note left in the map — re-derive this test"
+    assert set(legacy) < set(both), (
+        f"the writer's pattern is not a superset of the legacy one: "
+        f"{sorted(set(legacy) - set(both))}")
+
+    # …and the difference decides the guard, which is why it is a defect and not a
+    # tidy-up: pre-fix the primary arm is UNREACHABLE at this head, post-fix it fires.
+    assert max(d for d, _ in legacy) != sampled_date, "pre-fix the arm was already live"
+    assert max(d for d, _ in both) == sampled_date, (
+        f"the broader pattern's newest note is {max(d for d, _ in both)}, not the "
+        f"artifact's {sampled_date} — the arm would still be unreachable")
 
 
 def test_a_negated_guard_skips_the_DEAD_side(tmp_path: Path) -> None:
@@ -6984,6 +7039,19 @@ def test_a_floor_that_names_no_row_or_sits_above_one_is_red() -> None:
         {"durations": {"test_a.py": 355.0},
          "durations_floors": ["test_a.py"]})
     assert len(block_as_list) == 1 and "mapping" in block_as_list[0], block_as_list
+    # …and the OTHER face of the same container: PRESENT but NULL. The list shape was
+    # fixed for reading as "no declarations" on both sides at once, and `null` was the
+    # shape left behind — a `durations_floors:` whose entries were deleted (exactly how
+    # a merge-resolution tidy drops duplicate twins) reverted every cap with nothing
+    # red on either side. ABSENT stays legal; present-but-NULL is a RED (delta review,
+    # P3 — measured: this map was green on all four gates pre-fix).
+    null_block = ci_manifest.floor_issues(
+        {"durations": {"test_a.py": 355.0}, "durations_floors": None})
+    assert len(null_block) == 1, null_block
+    assert "declares nothing" in null_block[0], null_block
+    assert "#9172" in null_block[0], null_block
+    assert ci_manifest.floor_issues(
+        {"durations": {"test_a.py": 355.0}}) == []
     # An ABSENT map is `check`'s UNKNOWN, not this check's red: there is no map for
     # a floor to be inconsistent with, and one red per declared floor would turn
     # that UNKNOWN into a wall of reds.
@@ -7180,12 +7248,16 @@ def test_an_unreadable_or_pinned_odd_declaration_refuses_the_write() -> None:
     """
     header = "durations:\n  test_capped.py: 355.0\n"
     for bad in ("durations_floors: [test_capped.py]\n",
+                "durations_floors:\n",
                 "durations_floors:\n  test_capped.py: [355.0]\n",
                 'durations_floors:\n  test_capped.py: "a lot"\n',
                 "durations_floors:\n  test_capped.py: {value: 355.0, pinned: maybe}\n",
                 "durations_floors:\n  test_capped.py: {value: 355.0, cap: true}\n"):
         with pytest.raises(ci_timing.DurationsBridgeError):
             ci_timing._declared_floors(f"{bad}{header}")
+    # …and an ABSENT block stays legal: every fixture manifest that declares no floor
+    # keeps its output (only the PRESENT-but-null shape above is refused).
+    assert ci_timing._declared_floors(header) == {}
     # …and the shapes that ARE readable parse to what they say
     parsed = ci_timing._declared_floors(
         "durations_floors:\n  a.py: 355.0\n  b.py: {value: 12.5, pinned: true}\n"
