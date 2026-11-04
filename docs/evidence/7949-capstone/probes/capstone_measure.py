@@ -23,10 +23,11 @@ working, and its refusal table stays the artifact that pins the refusal contract
     disposable graph: ``capture_session(turns, session_id=<sid>)`` per session.
   * **THE OBSERVATION** reads each of the eight steps off the object that actually
     carries it — ``stats`` for six of them, the live graph for the commit, and an
-    explicit UNOBSERVED-with-cause for the two the receipt has no key for. The
-    two #9116 steps are DECIDED from the surfaces the run actually carries (the
-    receipt's top-level keys and its stats block), so a seam fix makes them
-    OBSERVED without editing this probe, and the count is derived.
+    explicit UNOBSERVED-with-cause for a step the run does not witness. The two
+    #9116 steps are DECIDED from the surfaces the run actually carries (the
+    receipt's top-level keys, its stats block, and the ``stats["step_witness"]``
+    sub-key #9116's seam copies there), so a seam fix makes them OBSERVED without
+    editing this probe, and the count is derived.
   * **THE NUMBERS** are E3 (a census over the run's own graph), E4 (the committed
     operator receipt, read verbatim), E5 (a fresh re-score of the #7947 arms
     against this corpus's current gold), and E1/E1b/E2a/E2b (parsed out of the
@@ -52,16 +53,17 @@ gate is measured with its flags forced ON"). ``TORTOISE_VALUE_GATE`` is pinned
 UNSET for the same reason: it also switches S2.2 on, so an ambient value would
 silently change the arm. The ``arm:`` line is that read-back, never a typed
 literal — a run that cannot read a flag back as set REFUSES rather than printing a
-claim nothing supports. They are still UNWITNESSABLE through
-``capture_session``'s receipt, and the failure is ONE LAYER UP from where it was
-first attributed: ``extract_session_v2`` DOES build the surfaces
+claim nothing supports. ⚠️ THIS PARAGRAPH USED TO SAY THEY WERE UNWITNESSABLE — #9116 has
+SINCE LANDED, and the seam is what closes it: ``extract_session_v2`` builds the surfaces
 (``result["classify_later"]`` at ``tortoise/extractor_v2.py:8873-8879`` and
-``result["vet"]`` at ``:8883-8887``); they are dropped at the meta fold,
-``tortoise/sdk.py:13402`` (``"stats": out.get("stats") or {}`` inside
-``_extract_session_v2`` — the sibling key is never copied). That is #9116, cited
-rather than worked around: working around
-it would mean reading a wrapper's state, which is the instrumentation E4's row
-forbids.
+``result["vet"]`` at ``:8883-8887``), and the SDK's meta fold now COPIES them onto the
+receipt — ``tortoise/sdk.py:13433`` (``"stats": _capture_stats_with_step_witness(out,
+len(extracted))`` inside ``_extract_session_v2``) — as ``stats["step_witness"]``. That is
+the surface this probe READS (``_witness_block`` below, and the S2.2/S2.3 arms of
+:func:`observe_steps`), so it is cited, not worked around: working around it would mean
+reading a wrapper's state, which is the instrumentation E4's row forbids. A receipt that
+carries no ``step_witness`` at all — a replay, a keyless capture, the M2 lane — is still
+refused as the INSTRUMENT gap.
 
 📌 CITE CONVENTION (this bundle). Every ``file:line`` is re-derived from the tree
 at the head the bundle is stamped at, and is paired with the SYMBOL it names —
@@ -148,7 +150,7 @@ ANCHOR_OUT = ("extractedFrom",)
 #: ->(Event|Document)``, written by ``_EdgeHandlers.link_source_to_event``
 #: (``tortoise/projection/edges.py:2432-2457``, ``MERGE (s)-[r:references]->(e)
 #: ON CREATE SET r.sourceVersion = s.contentHash``) and reached from the capture
-#: path at ``tortoise/sdk.py:13683`` (``proj.link_source_to_event(source_key,
+#: path at ``tortoise/sdk.py:13714`` (``proj.link_source_to_event(source_key,
 #: event_id)`` — ``(Source)-[:references]->(sessionCaptured Event)``). The anchor
 #: is on the same link, but the DERIVED node is its TARGET.
 #: ⚠️ Counting this one in the ``extractedFrom`` direction counts SOURCES.
@@ -163,7 +165,7 @@ E3_RULE = (
     "((Point)-[:extractedFrom]->(GraphEvent|Event)), while references points AT "
     "the derived node ((Source)-[:references]->(Event|Document) — "
     "tortoise/projection/edges.py:2432-2457 link_source_to_event, reached from "
-    "the capture path at tortoise/sdk.py:13683 "
+    "the capture path at tortoise/sdk.py:13714 "
     "(proj.link_source_to_event(source_key, event_id))). The anchor is a "
     "property of the "
     "DERIVATION LINK (tortoise/projection/edges.py:502-510 "

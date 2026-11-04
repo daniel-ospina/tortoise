@@ -16,7 +16,7 @@ the corrected reading:
 1. **A single entry point DOES exist.** The body says *"whether any single
    entry point … can drive all eight in one pass"* is an open question. It can:
    ``TortoiseSDK.capture_session`` → ``sdk._extract_session_v2``
-   (``sdk.py:12574``, called at ``:11611``) →
+   (``sdk.py:12605``, called at ``:11611``) →
    ``extractor_v2.extract_session_v2`` (``extractor_v2.py:8396``) calls
    ``_edus_from_conversation`` (S0, ``:8507``), ``run_s1`` (S1, ``:8540``),
    ``run_s2`` (S2.1, ``:8564``), ``_run_vet_pass`` (S2.2, ``:8593``),
@@ -335,7 +335,13 @@ def observe_steps(result: dict) -> dict[str, str]:
     if merge.get("merged_items") is not None:
         seen["S5"] = (f"S5 merged {merge.get('merged_items')} item(s) "
                       f"into the commit list")
-    if commit.get("payload_produced"):
+    # S6 — the payload was produced AND the write loop resolved at least one
+    # point onto the receipt. `committed` counts points that REACHED the receipt
+    # (a dedup fold onto an existing canonical is a commit, not a skip), so it is
+    # 0 only when every point write FAILED — and a capture that wrote nothing is
+    # not S6, however complete its payload. Peeking `payload_produced` alone
+    # scored S6 on such a capture while the message asserted "committed".
+    if commit.get("payload_produced") and (commit.get("committed") or 0) > 0:
         seen["S6"] = ("the Layer-1 payload was produced and committed "
                       f"(step_witness['commit']: entities={commit.get('entities')}, "
                       f"points={commit.get('points')}, "

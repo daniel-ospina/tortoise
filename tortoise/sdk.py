@@ -5668,12 +5668,36 @@ _STEP_WITNESS_KEY = "step_witness"
 _STEP_EMBED_KINDS = ("entities", "events", "points", "operators")
 
 
+def _as_dict(value) -> dict:
+    """``value`` when it is a mapping, else ``{}`` — this seam must never raise.
+
+    The witness is built on the capture WRITE path, after the points have been
+    written: an exception here would fail a capture that already succeeded, so
+    every sub-block below goes through this and a stage returning a shape the
+    seam did not anticipate degrades to an empty block instead of a traceback.
+    """
+    return value if isinstance(value, dict) else {}
+
+
 def _step_embed_counts(block) -> dict[str, int]:
     """Per-lane item counts of an embed-list block ({} for a non-dict)."""
-    if not isinstance(block, dict):
-        return {}
-    return {k: len(block.get(k) or []) for k in _STEP_EMBED_KINDS}
+    return {k: len(_as_dict(block).get(k) or []) for k in _STEP_EMBED_KINDS}
 
+
+def _step_pass_counts(block) -> dict:
+    """The COUNTS a VET pass reports — never its ``decisions``.
+
+    ``_run_vet_pass`` returns ``{"stats": <counts>, "batch": …, "decisions": …}``
+    (``tortoise/extractor_v2.py``), and every decision carries the candidate's
+    own ``text`` (``tortoise/vet_gate.py``). Forwarding that surface verbatim
+    would put extracted candidate text on every SDK capture — and, because
+    ``hosted_api`` copies ``meta["stats"]`` onto its response, on the hosted
+    customer receipt too: the one thing this witness is bounded against. The
+    ``stats`` sub-dict is counts only (``candidates``/``discarded``/
+    ``by_outcome``/``arbiter``/``mechanical``) and is non-empty exactly when the
+    pass ran, which is all a witness reader needs.
+    """
+    return _as_dict(_as_dict(block).get("stats"))
 
 def _capture_step_witness(out: dict, *, committed: int) -> dict:
     """#9116: the facts that let a caller witness each extractor step in ONE pass.
@@ -5693,24 +5717,26 @@ def _capture_step_witness(out: dict, *, committed: int) -> dict:
 
     It carries FACTS, not a verdict: no step id is graded here. Each block
     names the values that prove its stage ran (``vet.s2``/``vet.union`` — the
-    VET gate's own stats; ``classify_later`` — the classify passes' own stats;
+    VET gate's own COUNTS; ``classify_later`` — the classify passes' own stats;
     ``search.queries_run``/``degraded`` — S3's own report;
     ``commit.payload_produced``/``committed`` — the Layer-1 payload's presence
-    plus the count the write loop actually committed). The caller decides what
+    plus the count of points the write loop RESOLVED). The caller decides what
     it witnessed, which is what keeps the observation independent of the thing
     observed.
 
     Bounded by construction: counts and the stage's OWN small stats dicts only
-    — never ``payload``, ``embed_list`` or the search rows.
+    — never ``payload``, ``embed_list``, the search rows, or a stage's decision
+    surface (the VET pass's ``decisions`` carry each candidate's own text, so
+    only the pass's ``stats`` is forwarded — see :func:`_step_pass_counts`).
     """
-    stats = out.get("stats") or {}
-    llm = stats.get("llm") or {}
-    by_stage = llm.get("by_stage") or {}
-    vet = out.get("vet") or {}
-    classify = out.get("classify_later") or {}
-    search = out.get("search") or {}
+    stats = _as_dict(out.get("stats"))
+    llm = _as_dict(stats.get("llm"))
+    by_stage = _as_dict(llm.get("by_stage"))
+    vet = _as_dict(out.get("vet"))
+    classify = _as_dict(out.get("classify_later"))
+    search = _as_dict(out.get("search"))
     payload = out.get("payload")
-    s4 = stats.get("s4_merge") or {}
+    s4 = _as_dict(stats.get("s4_merge"))
     return {
         # S0 — the reader segmented the source (the values already on stats,
         # mirrored so the witness is readable on its own).
@@ -5723,14 +5749,17 @@ def _capture_step_witness(out: dict, *, committed: int) -> dict:
         "map": {"items": _step_embed_counts(
             out.get("s2_embed") if out.get("s2_embed") is not None
             else out.get("embed_list"))},
-        # S2.2 — the VET gate's own evidence surface (#5005). ``enabled`` False
-        # is a real answer: a flag-off pass ran no S2.2.
+        # S2.2 — the VET gate's own COUNTS (#5005). ``enabled`` False is a real
+        # answer: a flag-off pass ran no S2.2. The pass's ``stats`` sub-dict, not
+        # its surface: ``decisions`` carries candidate text.
         "vet": {"enabled": bool(vet.get("enabled")),
-                "s2": vet.get("s2") or {}, "union": vet.get("union") or {}},
-        # S2.3 — the classify passes' own evidence surface (#1695 Task 5).
+                "s2": _step_pass_counts(vet.get("s2")),
+                "union": _step_pass_counts(vet.get("union"))},
+        # S2.3 — the classify passes' own evidence surface (#1695 Task 5), which
+        # is already a small counter block (``kind_classifier``'s ``stats``).
         "classify_later": {"enabled": bool(classify.get("enabled")),
-                           "s2": classify.get("s2") or {},
-                           "union": classify.get("union") or {}},
+                           "s2": _as_dict(classify.get("s2")),
+                           "union": _as_dict(classify.get("union"))},
         # S3 — the graph search's own report. ``queries_run`` is the budget it
         # actually spent (0 on the extractor's two skip paths, where the
         # backend is absent or embedded — a state the capstone's own G2 refuses
@@ -5747,14 +5776,16 @@ def _capture_step_witness(out: dict, *, committed: int) -> dict:
                   "s2_items": s4.get("s2_items"),
                   "s4_items": s4.get("s4_items")},
         # S6 — the Layer-1 payload was produced AND its points went through the
-        # commit loop (``committed`` is what the write loop actually resolved —
-        # 0 when every point folded onto an existing canonical, which is a
-        # commit, not a skip).
+        # commit loop. ``committed`` is what the write loop RESOLVED: the count
+        # of payload points that reached the receipt, which INCLUDES a point
+        # folded onto an existing canonical (a dedup hit is a commit, not a
+        # skip) and EXCLUDES a write that failed. So it is 0 only when every
+        # point write failed — never when every point folded.
         "commit": {"payload_produced": payload is not None,
-                   "entities": len((payload or {}).get("entities") or []),
-                   "events": len((payload or {}).get("events") or []),
-                   "points": len((payload or {}).get("points") or []),
-                   "operators": len((payload or {}).get("operators") or []),
+                   "entities": len(_as_dict(payload).get("entities") or []),
+                   "events": len(_as_dict(payload).get("events") or []),
+                   "points": len(_as_dict(payload).get("points") or []),
+                   "operators": len(_as_dict(payload).get("operators") or []),
                    "committed": committed},
     }
 

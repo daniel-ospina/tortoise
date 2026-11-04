@@ -969,7 +969,25 @@ def _extractor_result(**over) -> dict:
         "story_arc": "A narrative.",
         "embed_list": {"entities": [1], "events": [1], "points": [1],
                        "operators": [1]},
-        "vet": {"enabled": True, "s2": {"kept": 3}},
+        # The REAL `_run_vet_pass` shape (`tortoise/extractor_v2.py`): the pass's
+        # COUNTS under `stats`, plus the surface the witness must never forward
+        # — `decisions` carries each candidate's own `text` (`vet_gate.py`).
+        # Shaping this flat (`{"kept": 3}`) let a seam that forwarded the
+        # decision surface look correct here, so the fixture carries the real
+        # shape and `test_the_vet_witness_carries_counts_never_candidate_text`
+        # holds the seam to it.
+        "vet": {"enabled": True,
+                "s2": {"stats": {"candidates": 3, "discarded": 1,
+                                  "by_outcome": {"KEEP": 2, "DISCARD": 1},
+                                  "arbiter": "none",
+                                  "mechanical": {"enabled": False,
+                                                 "fired": 0}},
+                       "batch": {},
+                       "decisions": {"i_1": {"section": "entities",
+                                             "index": 0,
+                                             "text": "Daniel Ospina",
+                                             "outcome": "KEEP"}}},
+                "union": {}},
         "classify_later": {"enabled": True, "s2": {"assigned": 3}, "union": {}},
         "search": {"mode": "docker", "degraded": False, "reason": None,
                    "queries_run": 15, "entities": [{"id": "o_1"}],
@@ -984,13 +1002,16 @@ def _extractor_result(**over) -> dict:
     return result
 
 
-def _seam_receipt(**over) -> dict:
+def _seam_receipt(*, committed: int = 15, **over) -> dict:
     """A CURRENT ``capture_session`` receipt — built by the real SDK seam.
 
     ``tortoise.sdk._capture_stats_with_step_witness`` is the production code that
     puts ``stats["step_witness"]`` on the receipt (#9116), so calling it here
     makes every assertion below a statement about shipped behaviour: let the SDK
     stop copying a stage's block and these tests red.
+
+    ``committed`` is the value ``_extract_session_v2`` passes at the fold — the
+    count of points the write loop RESOLVED (``len(extracted)``).
     """
     from tortoise.sdk import _capture_stats_with_step_witness
 
@@ -998,14 +1019,14 @@ def _seam_receipt(**over) -> dict:
     return {
         "session_id": "capstone_abc123",
         "turns": 1,
-        "extracted": 15,
+        "extracted": committed,
         "points": [],
         "extraction_mode": "llm:deepseek-direct",
         "ok": True,
         "errors": [],
         "warnings": [],
         "diagnostics": [],
-        "stats": _capture_stats_with_step_witness(out, 15),
+        "stats": _capture_stats_with_step_witness(out, committed),
         "capture_redactions": 0,
     }
 
@@ -1213,6 +1234,60 @@ def test_a_flag_on_pass_with_no_activity_is_not_s2_2():
 def test_a_pass_without_a_payload_does_not_observe_s6():
     seen = probe.observe_steps(_seam_receipt(payload=None))
     assert "S6" not in seen
+
+
+def test_a_payload_nobody_committed_does_not_observe_s6():
+    """#10214 review 3 (3b): S6 is the COMMIT, not the payload's existence.
+
+    ``committed`` is ``len(extracted)`` — the points the write loop RESOLVED — and
+    a point whose write raised is counted in ``skipped``, never appended. So a
+    capture in which EVERY write failed still has ``payload_produced: True`` and
+    ``committed: 0``. Scoring S6 on ``payload_produced`` alone called that a
+    commit while the message beside it printed ``committed=0``.
+
+    Non-vacuity: revert the gate to ``if commit.get("payload_produced"):`` and the
+    first assertion reds. The second arm keeps the gate from over-correcting — a
+    capture whose points all folded onto existing canonicals is a COMMIT, and it
+    reports the folded count, not 0.
+    """
+    lost = probe.observe_steps(_seam_receipt(committed=0))
+    assert "S6" not in lost, lost.get("S6")
+    assert "S5" in lost, "one gated step must not cost the run its other witnesses"
+
+    folded = probe.observe_steps(_seam_receipt(committed=4))
+    assert "S6" in folded, "a fully-folded capture is a commit, not a skip"
+    assert "committed=4" in folded["S6"], folded["S6"]
+
+
+def test_the_vet_witness_carries_counts_never_candidate_text():
+    """#10214 review 3 (1): the witness is BOUNDED — and `vet` was the exception.
+
+    ``_run_vet_pass`` returns ``{"stats": counts, "batch": …, "decisions": …}``
+    and every decision carries the candidate's own ``text`` (``vet_gate.py``).
+    Forwarding that surface verbatim put extracted candidate text on every SDK
+    capture — and, because ``hosted_api`` copies ``meta["stats"]`` onto its
+    response, on the hosted customer receipt too — which is precisely what the
+    seam's own docstring says it never carries.
+
+    Non-vacuity: this fixture IS the production shape and it CARRIES a decision
+    with text, so a seam that forwards ``vet["s2"]`` verbatim reds all three
+    assertions. The pass's ``stats`` is kept, because it is what says the pass
+    ran (``_pass_ran`` and this observer both read its truthiness).
+    """
+    witness = _seam_receipt()["stats"]["step_witness"]
+    rendered = json.dumps(witness)
+    assert "decisions" not in rendered, (
+        "the witness forwards the VET pass's decision surface: "
+        f"{witness['vet']}")
+    assert "Daniel Ospina" not in rendered, (
+        "extracted candidate TEXT rode the receipt: " + rendered[:400])
+    assert witness["vet"]["s2"] == {"candidates": 3, "discarded": 1,
+                                    "by_outcome": {"KEEP": 2, "DISCARD": 1},
+                                    "arbiter": "none",
+                                    "mechanical": {"enabled": False,
+                                                   "fired": 0}}, witness["vet"]
+    # and the bounded block still WITNESSES the step
+    assert "S2.2" in probe.observe_steps(_seam_receipt())
 
 
 def test_a_g5_refusal_blames_the_instrument_not_the_pipeline(tmp_path, monkeypatch):
