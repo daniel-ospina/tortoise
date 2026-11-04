@@ -81,6 +81,60 @@ def test_no_artifact_restates_the_refuted_capture_mechanism():
             f"{name} must name what is actually frozen: process.env")
 
 
+def test_the_hosted_recipe_residual_has_a_home_this_fold_does_not_close():
+    """#10790 review (P2): the residual's declared home must OUTLIVE the fold.
+
+    `docs/client-server-split.md` section 8a records the half of #10605 that this
+    fold does NOT retire: the onboarding generator and the committed `.mcp.json`
+    still emit the `Authorization: Bearer ${TORTOISE_API_KEY}` capture for the
+    hosted shape. It used to name #10605 as that record — and this fold CLOSES
+    #10605, so after landing the residual was reachable only by someone who
+    already knew to read a closed issue's comments plus a code docstring. Its
+    open home is now #10885.
+
+    The assertion is a BICONDITIONAL on purpose, so the guard does not rot into a
+    tautology in either direction:
+
+    * the capture is still emitted and the doc has lost its open home -> RED
+      (the residual survives with no reachable record: the defect this pins);
+    * the capture is RETIRED and the doc still declares it -> RED (a stale claim
+      sending the next reader to a closed issue). Retiring the capture means
+      deleting the residual paragraph, and this test says so when it happens.
+    """
+    main_py = (REPO_ROOT / "tortoise" / "__main__.py").read_text(encoding="utf-8")
+    doc = (REPO_ROOT / "docs" / "client-server-split.md").read_text(encoding="utf-8")
+
+    # The residual is REAL while the onboarding generator still hands a user a
+    # config whose credential is captured at process start.
+    emitted = '"auth_header": "Bearer ${TORTOISE_API_KEY}"' in main_py
+
+    # Read the residual PARAGRAPH, not the whole file: a passing mention of the
+    # number anywhere else would let the declaration itself lose its home.
+    marker = "What this does NOT do"
+    assert marker in doc, (
+        "docs/client-server-split.md section 8a no longer declares the "
+        "hosted-recipe residual (#10605 / #10885) — if the capture was retired, "
+        "delete this test with the paragraph rather than leaving it dangling")
+    start = doc.index(marker)
+    end = doc.find("\n\n", start)
+    paragraph = doc[start:] if end == -1 else doc[start:end]
+    declared = "#10885" in paragraph
+
+    assert emitted == declared, (
+        "the residual and its declared home disagree (#10605 is closed by this "
+        f"fold; its open home is #10885): capture_still_emitted={emitted}, "
+        f"doc_names_the_open_home={declared}. If emitted, add #10885 to the "
+        "section 8a paragraph; if retired, DELETE the paragraph instead of "
+        "re-pointing it.")
+
+    # Naming #10605 as the ORIGIN is fine; the sentence that says where the
+    # residual is TRACKED must name an issue this fold leaves OPEN.
+    assert "tracked on #10885" in paragraph, (
+        "the section 8a residual paragraph must say where the residual is "
+        "TRACKED (#10885), not only where it was recorded — #10605 is closed by "
+        "this fold")
+
+
 # ── A spec-shaped Streamable-HTTP upstream that records what it receives ──────
 
 

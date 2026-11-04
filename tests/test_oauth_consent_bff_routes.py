@@ -28,6 +28,17 @@ TOOLCHAIN — same harness contract as `tests/test_oauth_session_flow_properties
 built-in type stripping, a resolver hook for extensionless `./x` imports, and a D1 stand-in.
 The fakes substitute the STORE and the PROVIDER only; the route modules under test are the
 shipped ones.
+
+WHAT THIS FILE PINS, AND WHAT IT DOES NOT (#10487 residual)
+-----------------------------------------------------------
+Both consent legs answer a STORE fault with the typed `503 consent_store_unavailable` below,
+and that response SHAPE is asserted here. What is neither asserted nor fixed is what the
+VISITOR sees: the reason is returned as raw JSON on a blank page. That arm is a store fault,
+not a carriage fault — it needs the Pages Function logs (`wrangler pages deployment tail`) to
+name the failing store call before it can be fixed honestly, so it is tracked OPEN on #10884
+rather than guessed at. #10487 (whose title names this arm) and its keyless-re-entry sibling
+are retired by the fold that lands this hop, so #10884 — not the closed thread — is the OPEN
+home; `tortoise/oauth.py` points at it from both residual docstrings.
 """
 
 from __future__ import annotations
@@ -2050,3 +2061,36 @@ def test_start_validates_the_params_the_way_the_AS_will(broken: dict, needle: st
     assert out["status"] == 400, out
     assert out["body"]["error"] == "invalid_request"
     assert needle in out["body"]["message"], out["body"]["message"]
+
+
+def test_the_store_fault_residual_names_a_home_this_fold_does_not_close() -> None:
+    """#10790 review (P2): the residual's declared home must OUTLIVE the fold.
+
+    Both consent legs still answer a store fault with the raw
+    `503 consent_store_unavailable` JSON asserted above, on a blank page. That arm was
+    recorded on #10487 — which this fold CLOSES — so after landing the residual was
+    reachable only by someone who already knew to read a closed issue's comments.
+    Its open home is #10884, filed from that review.
+
+    The assertion is a BICONDITIONAL so the guard cannot rot into a tautology either way:
+
+    * the arm is still emitted and this file's docstring has lost the open home → RED
+      (the residual survives with no reachable record: the defect this pins);
+    * the arm is FIXED and the docstring still declares it → RED (a stale claim pointing
+      the next reader at a closed thread). Fixing the arm means updating the note here,
+      and this test says so at the moment it happens.
+    """
+    routes = CONSENT_DIR / "start.ts", CONSENT_DIR / "token.ts"
+    arm_present = any(
+        "consent_store_unavailable" in path.read_text(encoding="utf-8")
+        for path in routes
+    )
+    declared = "tracked OPEN on #10884" in (__doc__ or "")
+
+    assert arm_present == declared, (
+        "the store-fault residual and its declared home disagree (#10487 is closed by "
+        f"this fold; its open home is #10884): arm_still_emitted={arm_present}, "
+        f"docstring_names_the_open_home={declared}. If the arm is present, keep the "
+        "#10884 paragraph in this module docstring; if it was fixed, DELETE the "
+        "paragraph instead of re-pointing it."
+    )

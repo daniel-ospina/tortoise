@@ -2696,6 +2696,9 @@ def presented_consent_attempt_key(query: str) -> str:
     strips on its own, so a whitespace `attempt_key` presented STRAIGHT to
     `/api/consent/start`, bypassing the AS, is still adopted verbatim there; that
     predates this hop and is recorded in #10487 rather than fixed silently here.
+    ⛔ #10487 is RETIRED by the fold that lands this hop, so the live home for
+    that residual is #10884, which is filed OPEN. Point a reader at the open
+    issue, not at a closed thread and not at this docstring.
     """
     values = parse_qs(query, keep_blank_values=True).get(
         CONSENT_ATTEMPT_KEY_PARAM, [])
@@ -2787,7 +2790,8 @@ def consent_bounce_url(app_origin: str, raw_query: str) -> str:
       would be predictable, and this is the browser's only proof of ownership).
       So a KEYLESS re-entry AFTER the row exists mints a DIFFERENT key and is
       refused exactly as before — #10487's remaining hole, deliberately not
-      closed in this lane: closing it needs a key an unauthenticated re-entry
+      closed in this lane (its OPEN home is #10884, filed rather than left in a
+      closed thread): closing it needs a key an unauthenticated re-entry
       can re-derive (an HMAC over the authorize request), which trades an
       unguessable carrier for a forgeable one. That is a decision, not a review
       fix. Recovery stays what it was — a NEW authorize request (fresh `state`).

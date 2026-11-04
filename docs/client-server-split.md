@@ -292,16 +292,18 @@ endpoint comes from that SAME file (`api_url`), never from a `TORTOISE_MCP_URL`
 the environment supplies: a harness config can be committed to a repository, so
 letting it choose the host for a stored credential would be an exfiltration path.
 
-**What this does NOT do (residual, recorded on #10605).** The onboarding
-generator (`tortoise/__main__.py::_harness_mcp_config`) and this repo's committed
-`.mcp.json` still emit the `Authorization: Bearer ${TORTOISE_API_KEY}` capture for
-the **hosted** shape. That is deliberate and product-facing, not an oversight:
+**What this does NOT do (residual — recorded on #10605, tracked on #10885).** The
+onboarding generator (`tortoise/__main__.py::_harness_mcp_config`) and this repo's
+committed `.mcp.json` still emit the `Authorization: Bearer ${TORTOISE_API_KEY}` capture
+for the **hosted** shape. That is deliberate and product-facing, not an oversight:
 the hosted recipe must work for a user who has installed *nothing* locally, and
 the bridge needs a Python package present. Switching those recipes — and the
 fleet's own harness configs, which agent-infra owns — is the follow-up that
 retires the capture everywhere; until it lands the bridge is the recipe for
 anyone with the client installed, and the named refusal is what everyone else now
-gets instead of a misleading 401.
+gets instead of a misleading 401. ⛔ The follow-up is tracked OPEN on **#10885** —
+issue #10605 records only where the residual came from, and it is retired by the
+fold that lands this hop, so a reader must not follow it for live scope.
 
 Both modules are staged into the client-only wheel (`client/build_client.sh`), and
 both have guards registered on the `api` CI surface:
