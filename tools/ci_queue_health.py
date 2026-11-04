@@ -325,8 +325,13 @@ EXIT_FOR = {
 #: moves it from a fresh measurement; it is not a tuning knob for a quiet queue.
 DEFAULT_MAX_PR_WAIT_SECONDS = 90 * 60.0
 
-#: The verdicts that name a MEASURED PR starvation: PR work has a queued run that
-#: has waited past the age floor and nothing of it is executing. They differ only
+#: The verdicts that name a MEASURED PR starvation: PR work has a WAITING PR-event
+#: run (queued/pending/requested) that
+#: has waited past the age floor and nothing of it is executing. ⛔ NOT "a queued run":
+#: both members key on `starved_wait`, which is the max over `wait_runs` — a queue whose
+#: only PR wait sits in `pending`/`requested` is `PR-STARVED` with `pr_queued=0`, and a
+#: reader who takes a queued-only definition literally re-gates the predicate on
+#: `pr_queued_runs`, restoring the #10831 P1 fail-open. They differ only
 #: in whether THIS READING reaches the governor's block — FLOOD's always does, and
 #: it trims only when its leader is trim-safe (a FLOOD led by an untrimmable
 #: workflow reaches the block and trims NOTHING); PR-STARVED's returns ABOVE the
@@ -541,7 +546,7 @@ class QueueHealth:
             waited = f", oldest={oldest:.0f}s" if oldest is not None else ""
             return (
                 f"CI: PR-STARVED(queued={self.queued_total}, "
-                f"pr_running={self.pr_running}, pr_queued={self.pr_queued}{waited})"
+                f"pr_running={self.pr_running}, {self._waiting_counts()}{waited})"
             )
         if self.verdict == PR_BACKLOGGED:
             # `oldest` is the WHOLE claim here — it is the measurement that says the
@@ -551,14 +556,28 @@ class QueueHealth:
             waited = f", oldest={oldest:.0f}s" if oldest is not None else ""
             return (
                 f"CI: PR-BACKLOGGED(queued={self.queued_total}, "
-                f"pr_running={self.pr_running}, pr_queued={self.pr_queued}{waited})"
+                f"pr_running={self.pr_running}, {self._waiting_counts()}{waited})"
             )
         # `pr_queued` is on the non-FLOOD line too: an `OK` that hid a long PR
         # backlog would be the same "slow CI" reading this tool exists to replace.
         return (
             f"CI: {self.verdict}(queued={self.queued_total}, "
-            f"pr_running={self.pr_running}, pr_queued={self.pr_queued})"
+            f"pr_running={self.pr_running}, {self._waiting_counts()})"
         )
+
+    def _waiting_counts(self) -> str:
+        """`pr_queued=N, pr_pending=M, pr_requested=K` — EVERY leg of the wait.
+
+        ⛔ THE LINE MUST NOT PRINT A NON-ZERO `oldest` BESIDE `pr_queued=0` WITH NO LEG
+        NAMED (#10831 review P3). `oldest` is the max over all three legs, so this line
+        is read by the fleet (`.github/workflows/ci-queue-health.yml` renders it) and by
+        `ci_check_repair.report()` — and it used to count only the queued leg, printing
+        `CI: PR-BACKLOGGED(… pr_queued=0, oldest=14400s)` for a wait that lived entirely
+        in `pending`. `to_dict()` already carried the fact; only the human line withheld
+        it, which is the worst place to withhold it.
+        """
+        return (f"pr_queued={self.pr_queued}, pr_pending={self.pr_pending}, "
+                f"pr_requested={self.pr_requested}")
 
     @property
     def starves_pr(self) -> bool:

@@ -27,9 +27,11 @@ without touching GitHub. Four things these tests exist to keep true:
 from __future__ import annotations
 
 import dataclasses
+import io
 import json
 import re
 import sys
+import tokenize
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -179,7 +181,8 @@ def test_a_deep_queue_of_pr_work_is_not_a_flood_but_it_is_not_OK_either():
     assert any("trim-safe offender present: True" in reason for reason in health.reasons)
     assert any("dominated by PR work" in reason for reason in health.reasons)
     assert health.state_line == (
-        "CI: PR-STARVED(queued=26, pr_running=0, pr_queued=20, oldest=1200s)"
+        "CI: PR-STARVED(queued=26, pr_running=0, pr_queued=20, pr_pending=0, "
+        "pr_requested=0, oldest=1200s)"
     )
 
 
@@ -972,7 +975,8 @@ def test_pr_starved_is_exit_0_with_its_own_state_line(monkeypatch, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert payload["verdict"] == "PR-STARVED"
     assert payload["state_line"] == (
-        "CI: PR-STARVED(queued=26, pr_running=0, pr_queued=20, oldest=1200s)"
+        "CI: PR-STARVED(queued=26, pr_running=0, pr_queued=20, pr_pending=0, "
+        "pr_requested=0, oldest=1200s)"
     )
 
 
@@ -1031,7 +1035,8 @@ def test_a_pr_backlog_past_the_wait_budget_is_not_ok_while_pr_ci_is_serving():
     assert health.pr_running == 2
     assert health.pr_queued == 20
     assert health.state_line == (
-        "CI: PR-BACKLOGGED(queued=20, pr_running=2, pr_queued=20, oldest=31620s)"
+        "CI: PR-BACKLOGGED(queued=20, pr_running=2, pr_queued=20, "
+        "pr_pending=0, pr_requested=0, oldest=31620s)"
     )
 
 
@@ -1974,18 +1979,77 @@ _QUEUED_RUN_ALLOWED = {
     "tools/ci_check_repair.py": {},
 }
 
-_QUEUED_RUN_PATTERN = re.compile(r"queued PR[- ](?:event[- ])?run")
+# ⛔ WIDE ON PURPOSE, AND MATCHED AGAINST A JOINED CORPUS (#10831 review P3). The two
+# shapes that re-introduced this class in THIS PR's own history were (a) a sentence
+# WRAPPED across two string literals, which a per-raw-line scan cannot see, and (b) "a
+# queued run" with no "PR" between the words. Both are matched, and the corpus is joined
+# before matching — see `_joined_source`.
+_QUEUED_RUN_PATTERN = re.compile(r"queued PR[- ](?:event[- ])?runs?\b")
+
+#: The WITNESS GRAMMAR, which is what actually drifted: "a queued run that has waited",
+#: with no "PR" between the words, is the same false claim about the witness and was
+#: invisible to a "queued PR run" pattern (#10831 review P3, `STARVING_VERDICTS`). Kept
+#: SEPARATE from the pattern above so that ordinary prose about the QUEUED FEED or the
+#: governor's TRIM SET ("cancels the offender's oldest queued runs") is not collateral.
+_WITNESS_PHRASE = re.compile(
+    r"queued (?:PR[- ])?(?:event[- ])?runs?\b\s+(?:that\s+)?(?:has\s+|have\s+)?"
+    r"(?:waited|waiting past|past the age floor|past (?:its|the) budget)")
 
 
-def _queued_run_offenders(relpath: str) -> list[tuple[int, str]]:
+def _joined_source(relpath: str) -> str:
+    """The file as ONE whitespace-collapsed stream, string literals and comments JOINED.
+
+    A per-raw-line scan cannot see a sentence split across a string concatenation — which
+    is how two survivors escaped an earlier phrase grep in this PR's history, and how a
+    mutation that wrapped the historical sentence across two literals left this guard
+    green. `tokenize` gives the literals and the comments, in source order, so adjacent
+    ones land next to each other exactly as a READER would see them.
+    """
+    raw = (_TOOLS_ROOT / relpath).read_text()
+    # ⛔ f-STRINGS ARE NOT `STRING` TOKENS in Python 3.12 (PEP 701 splits them into
+    # FSTRING_START / FSTRING_MIDDLE / FSTRING_END). Omitting FSTRING_MIDDLE made this
+    # helper blind to every reason-line f-string — i.e. to exactly the sentences this
+    # guard exists for, and to the line-wrapped mutation that proved it. The first
+    # version of this guard WAS blind in that way and reported green on the historical
+    # wording; the mutation check is what caught it.
+    wanted = {tokenize.STRING, tokenize.COMMENT}
+    fstring_middle = getattr(tokenize, "FSTRING_MIDDLE", None)
+    if fstring_middle is not None:
+        wanted.add(fstring_middle)
+    parts = [
+        # ⛔ A COMMENT token carries its own `#:` / `#` marker, and joining those
+        # verbatim injects punctuation between the words of a wrapped sentence — which
+        # is how the second mutation (a bare "a queued run that / has waited" across two
+        # comment lines) still slipped through. Strip the marker; keep the prose.
+        (tok.string.lstrip("#").lstrip(":").strip()
+         if tok.type == tokenize.COMMENT else tok.string)
+        for tok in tokenize.generate_tokens(io.StringIO(raw).readline)
+        if tok.type in wanted
+    ]
+    flat = " ".join(parts)
+    # Strip the quoting/prefix noise so a literal's CONTENT is what is matched.
+    flat = re.sub("\"[rbfuRBFU]{0,2}(?:\"\"\"|'''|\"|')", " ", flat)
+    return re.sub(r"\s+", " ", flat)
+
+
+def _queued_run_offenders(relpath: str) -> list[str]:
+    """Offending CONTEXTS from the joined corpus, minus the allow-listed ones."""
     allowed = _QUEUED_RUN_ALLOWED[relpath]
-    out: list[tuple[int, str]] = []
-    for n, line in enumerate((_TOOLS_ROOT / relpath).read_text().splitlines(), 1):
-        if not _QUEUED_RUN_PATTERN.search(line):
-            continue
-        if any(marker in line for marker in allowed):
-            continue
-        out.append((n, line.strip()))
+    corpus = _joined_source(relpath)
+    out: list[str] = []
+    spans: list[tuple[int, int]] = []
+    for pattern in (_QUEUED_RUN_PATTERN, _WITNESS_PHRASE):
+        for match in pattern.finditer(corpus):
+            window = corpus[max(0, match.start() - 120):match.end() + 120]
+            if any(marker in window for marker in allowed):
+                continue
+            spans.append((match.start(), match.end()))
+    seen: set[str] = set()
+    for start, end in spans:
+        window = corpus[max(0, start - 120):end + 120]
+        if window not in seen:
+            seen.add(window)
+            out.append(window)
     return out
 
 

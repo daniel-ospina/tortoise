@@ -1407,6 +1407,37 @@ def test_exhausted_context_escalates_even_when_the_pr_also_has_a_missing_run(mon
     assert recs[0]["exhausted"] == ["docs"]
 
 
+def test_the_exit_1_message_names_only_a_cause_that_is_true(monkeypatch, capsys, tmp_path):
+    """⛔ EXIT 1 HAS MORE THAN TWO CAUSES (#10831 review P3), AND THE MESSAGE LIED.
+
+    `report()` escalates at five sites where `needs_user_actor` is never set — a spend
+    attempt budget, a spent reopen budget, `left_closed`, a reopen that returned
+    `failed`, and a rerun refused without an exemption key. The closing stderr line
+    printed the CREDENTIAL sentence for all of them, so on a `left_closed` window — the
+    state this module calls *"worse than the absent check, and it needs a human
+    immediately"* — the operator was sent after a credential and told the local fallback
+    covers it. Measured here through `main()`, which is where the sentence is chosen.
+
+    Discriminating: pre-fix this stderr contains "some repairs need a credential".
+    """
+    plan = _plan(absent=["docs"], exhausted=["docs"])
+    monkeypatch.setattr(R, "build_plans", lambda *a, **k: [plan])
+    monkeypatch.setattr(R, "read_queue_health", lambda repo: None)
+    monkeypatch.setattr(R, "open_prs", lambda repo, include_drafts: [])
+    monkeypatch.setattr(R, "can_trigger_events", lambda: True)
+
+    code = R.main(["--repo", "o/r", "--no-live", "--apply", "--json",
+                   "--record", str(_flood_record(tmp_path))])
+    captured = capsys.readouterr()
+    assert code == 1, "a spent attempt budget is an escalation, not a discharged window"
+    json.loads(captured.out)              # stdout stays ONE document
+    assert "some repairs need a credential" not in captured.err, (
+        "no credential-only repair fired in this window — naming one is a false claim, "
+        f"and it argues against the real cause: {captured.err!r}")
+    assert "attempt budget is SPENT" in captured.err, (
+        f"the message must name the cause that DID fire: {captured.err!r}")
+
+
 def test_a_stuck_run_cannot_make_the_budget_escalation_unreachable(monkeypatch):
     """P1: the deferral was tested BEFORE the budget, so a permanently-queued run
     (the documented residual) kept `in_flight` true for ever and the escalation that

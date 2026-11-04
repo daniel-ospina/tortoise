@@ -2270,9 +2270,33 @@ def main(argv: list[str] | None = None) -> int:
                   "(`uv run python tools/ci_queue_health.py`); the per-PR detail is in "
                   "the report", file=sys.stderr)
         else:
-            print("ci-check-repair: some repairs need a credential that can trigger events "
-                  "(the local fallback covers this) — the per-PR detail is in the report",
-                  file=sys.stderr)
+            # ⛔ EXIT 1 HAS MORE THAN TWO CAUSES (#10831 review P3). `report()`
+            # escalates at five further sites where `needs_user_actor` is never set:
+            # `p.exhausted and apply`, a spent reopen budget, `left_closed`, a reopen
+            # that returned `failed`, and a rerun whose `ok is False` without an
+            # exemption key. Printing the credential sentence unconditionally told the
+            # operator to chase a credential on a `left_closed` window — the state this
+            # file's own comment calls "worse than the absent check, and it needs a human
+            # immediately" — and claimed the local fallback covers it. The sentence is
+            # now printed only when it is TRUE, and the remaining causes are named from
+            # the per-PR record, which already carries them.
+            if credential:
+                print("ci-check-repair: some repairs need a credential that can trigger "
+                      "events (the local fallback covers this) — the per-PR detail is in "
+                      "the report", file=sys.stderr)
+            elif any(r.get("left_closed") for r in records):
+                print("ci-check-repair: a PR was LEFT CLOSED by this pass and needs a "
+                      "human — reopening it is not something a credential fixes; the "
+                      "per-PR detail is in the report", file=sys.stderr)
+            elif any(r.get("exhausted") for r in records):
+                print("ci-check-repair: a repair attempt budget is SPENT (max_attempts) "
+                      "with the required check still absent — a human has to decide "
+                      "whether to keep spending attempts; the per-PR detail is in the "
+                      "report", file=sys.stderr)
+            else:
+                print("ci-check-repair: a repair this pass attempted did not take effect "
+                      "(a reopen that failed, or a rerun that was refused) — see --json "
+                      "for per-PR detail", file=sys.stderr)
     return code
 
 
