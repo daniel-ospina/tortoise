@@ -5407,9 +5407,12 @@ def test_the_three_routes_to_the_e1_e2_verdict_state_the_records_verdict():
     prose, so the suite stayed green while the bundle's own entry point told a reader the
     opposite of the table beside it.
 
-    (Cites re-derived at this head: `grep -oE 'README\\.md:[0-9]+' E1-E5-PROOFS.md` returns
-    `:69`, `:74-78` and `:670-671` — never `:65`, which is a bare `>` in the README and is
-    what an earlier draft of this docstring said. Quote the pointer the doc makes.)
+    (Cites re-derived at this head: `grep -oE 'README\\.md:[0-9]+(-[0-9]+)?'
+    E1-E5-PROOFS.md | sort | uniq -c` returns `README.md:69` x2, `README.md:74-78` x1 and
+    `README.md:670-671` x1 — never `65`, which is a bare `>` in the README and is what an
+    earlier draft of this docstring said. The `(-[0-9]+)?` is load-bearing: drop it and the
+    pattern stops at the first non-digit, printing `74` and `670` — a narrower answer than
+    this sentence promises. Quote the pointer the doc makes, and run the command you quote.)
 
     Every leg is DERIVED, and each document is held to the ARTIFACT IT DESCRIBES — which
     after the 2026-11-02 re-measure is two different artifacts, deliberately:
