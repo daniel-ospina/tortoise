@@ -2263,6 +2263,104 @@ def test_a_map_present_id_is_unjudged_when_the_path_is_recreated(
             sdk.close()
 
 
+def test_a_delete_in_the_recreated_path_is_answered_not_escalated(
+        tmp_path, monkeypatch, caplog):
+    """#10515 review round 19, finding 1: only a VACUOUS ``False`` is unjudged.
+
+    The companion of `test_a_map_present_id_is_unjudged_when_the_path_is_recreated`,
+    and the case that keeps round 18's witness override from overshooting. Both
+    tests put a witnessed id through a recreated path, and the re-read SUCCEEDS
+    in both; what differs is what the re-read FINDS:
+
+    * there, no line names the id, so the read has no evidence and the witness'
+      ``True`` is unconfirmed ⇒ ``None`` (``journal_unreadable``);
+    * here, an ``EntityMutated {op: delete}`` for that id is folded — the needle
+      MATCHED the line, parsed it, and folded it to ``False``. The journal now
+      says the point is GONE, which is an ANSWER, not an absence of one.
+
+    Round 18's condition tested the dumped value (``answer is False``) rather
+    than that fact, so this path answered ``None`` and filed `journal_unreadable`
+    for an ordinary write-after-delete — #10515 indicator 2, "a counter that
+    fires on every write-after-delete can never be alerted on", and the reading
+    ``_journal_knows_point`` already applies to its retained map
+    (``"The INVERSE map value (False) is NOT the same case"``).
+
+    Non-vacuity: on the pre-fix tree this call increments `journal_unreadable`
+    by one and warns "could not be READ to rule a typo out" — both asserted
+    AGAINST below, so reverting only the ``point_id not in state`` term reddens
+    this test.
+    """
+    from tortoise import monitoring
+
+    sdk, journal = _sdk_journaled(tmp_path, "midfoldRecreateDelete")
+    try:
+        sdk._get_proj()
+        log = sdk._get_event_log()
+        pid = "deleted-0023"
+        log.append({"type": "PointAdded", "point": {"id": pid}})
+        assert not sdk.get_point(pid), (
+            "the live graph must NOT hold the point — the journal alone does")
+
+        # a first absent write folds the journal and RETAINS the map from it
+        assert sdk.update_point(str(uuid.uuid4()), confidence=0.9) == {}
+        memo = sdk._journal_presence_memo
+        assert memo is not None and memo['known'].get(pid) is True, (
+            f"the fixture needs the id PRESENT in a retained map: {memo}")
+
+        # an append makes the next call RESUME (a fold that starts above byte 0)
+        log.append({"type": "PointAdded", "point": {"id": "grow-5555"}})
+
+        real_stat_key = TortoiseSDK._journal_stat_key
+        calls = {'n': 0}
+
+        def stat_key_then_recreate_with_delete(log):
+            calls['n'] += 1
+            if calls['n'] == 2:
+                # the post-fold stat observes NO file at the path …
+                for path in (journal, journal + ".position"):
+                    with contextlib.suppress(FileNotFoundError):
+                        os.unlink(path)
+                # … and a writer puts a NEW journal there before the needle
+                # re-reads, so that read SUCCEEDS and folds a DELETE for the id
+                with open(journal, "w", encoding="utf-8") as fh:
+                    fh.write(json.dumps({"type": "EntityMutated",
+                                         "id": pid, "label": "Point",
+                                         "op": "delete"}) + "\n")
+                return None
+            return real_stat_key(log)
+
+        monkeypatch.setattr(TortoiseSDK, '_journal_stat_key',
+                            staticmethod(stat_key_then_recreate_with_delete))
+        calls['n'] = 0
+
+        before = monitoring.silent_revision_loss_counts()
+        caplog.clear()
+        with caplog.at_level("WARNING"):
+            assert sdk.update_point(pid, confidence=0.9) == {}
+        assert calls['n'] == 2, (
+            "the fixture must reach the POST-FOLD stat: "
+            f"{calls['n']} stat calls")
+        assert monitoring.silent_revision_loss_counts() == before, (
+            "the recreated journal carries a DELETE for this id, so the re-read "
+            "has positive evidence that the point is gone — an ordinary "
+            "write-after-delete must never move the counter (#10515 "
+            "indicator 2: a counter that fires on every write-after-delete can "
+            "never be alerted on)")
+        assert not any("could not be READ to rule a typo out" in r.getMessage()
+                       for r in caplog.records), (
+            "a folded delete is a READ answer, not an UNREADABLE journal — the "
+            "round-18 witness override must not escalate it")
+        assert not any("will not be replayed" in r.getMessage()
+                       for r in caplog.records), (
+            "a deleted point is deliberately gone; it is not a lost revision")
+        assert sdk._journal_presence_memo is None, (
+            "the map still came from a file the path no longer names, so it "
+            "must not be kept, whatever this call answered")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
 def test_a_replacement_is_not_answered_from_the_old_maps_witness(
         tmp_path, monkeypatch, caplog):
     """The witness is evidence about ONE file: a REPLACEMENT stays map-free.

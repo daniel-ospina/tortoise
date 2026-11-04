@@ -10549,20 +10549,42 @@ class TortoiseSDK:
         a ``True`` in it says nothing about this one.
 
         ⛔ THE WITNESS IS APPLIED TO EVERY NON-ANSWER, NOT JUST THE RAISED ONE
-        (review round 18, finding 1). A re-read that SUCCEEDS and simply does not
-        find the id is equally unable to confirm a witness that says the journal
+        (review round 18, finding 1). A re-read that SUCCEEDS and carries no LINE
+        for the id is equally unable to confirm a witness that says the journal
         HELD it — the path can be recreated between the post-fold ``stat`` and
         this read, and then ``FileNotFoundError`` never fires. So a ``False``
         from the re-read is ``None`` whenever the witness holds the id as
         PRESENT: a destroyed record must never be reported as "a typo".
 
+        ⛔ BUT ONLY A VACUOUS ``False`` IS A NON-ANSWER (review round 19, finding
+        1). ``state.get(point_id, False)`` collapses two different facts, and
+        round 18's override tested the dumped value instead of the fact:
+
+        * VACUOUS — no record in the re-read names the id, so this read has no
+          evidence and the witness' ``True`` is unconfirmed ⇒ ``None``;
+        * POSITIVE — a presence-REMOVING record names the id and was folded to
+          ``False`` (``EntityMutated op='delete'``, a hard ``PointRetracted``, a
+          merge loser), so the needle MATCHED it, parsed it and folded it. The
+          journal now says the point is GONE, and that is the answer its own
+          evidence supports ⇒ ``False``, silent.
+
+        Escalating the second to ``None`` files ``journal_unreadable`` for an
+        ordinary write-after-delete — indicator 2 of the caller's own docstring,
+        "a counter that fires on every write-after-delete can never be alerted
+        on", and the exact reading this method family already applies to the
+        retained map a few hundred lines up (``sdk.py:10347-10359``: "The INVERSE
+        map value (``False``) is NOT the same case — it is a record the map READ
+        (a delete, a merge loser), so answering that silently is what its
+        evidence says"). ``point_id in state`` is what tells the two apart, and it
+        is the only term the round-18 condition lacked.
+
         Three outcomes, the same vocabulary the rest of this method uses:
         ``True``/``False`` from the records that are there now, and ``None``
         (UNJUDGED ⇒ ``journal_unreadable``) when the re-read cannot answer — a
         file that went away with records behind it, a witness that said it held
-        the id, or any failure. ``False`` is reserved for the shape its own
-        evidence supports: a journal that carried nothing, whose absent id
-        really is just a typo.
+        the id while this read found no line for it, or any failure. ``False`` is
+        reserved for the shape its own evidence supports: a journal that carried
+        nothing (a typo), or one that positively says the point is gone.
         """
         state: dict[str, bool] = {}
         try:
@@ -10585,12 +10607,20 @@ class TortoiseSDK:
                 point_id, exc_info=True)
             return None
         answer = state.get(point_id, False)
-        if answer is False and known is not None and known.get(point_id) is True:
-            # The re-read SUCCEEDED and found nothing, but the witness proves
-            # the journal this call folded NAMED this point: the records are
-            # gone (a truncation, or a path recreated before this read), so the
-            # absence cannot be judged. ``False`` here is the silence #10515
+        if (answer is False and point_id not in state
+                and known is not None and known.get(point_id) is True):
+            # The re-read SUCCEEDED and found no LINE for the id, but the witness
+            # proves the journal this call folded NAMED this point: the records
+            # are gone (a truncation, or a path recreated before this read), so
+            # the absence cannot be judged. ``False`` here is the silence #10515
             # indicator 1 forbids.
+            #
+            # ⛔ ``point_id not in state`` IS THE OTHER HALF (review round 19,
+            # finding 1). Without it this condition also caught a ``False`` that
+            # a DELETE record folded — positive evidence that the journal now
+            # says the point is gone — and escalated an ordinary
+            # write-after-delete to `journal_unreadable`, which is indicator 2 of
+            # the docstring this method answers to.
             return None
         return answer
 
