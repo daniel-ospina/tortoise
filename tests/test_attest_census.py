@@ -784,3 +784,53 @@ def test_gh_json_wraps_a_non_json_answer_as_runtime_error(monkeypatch):
         assert "non-JSON" in str(exc)
     else:
         raise AssertionError("a non-JSON answer must raise RuntimeError (contract: never exit 1)")
+
+
+# ── the TOTALS SECTION: both lineages, and the artifact is the arbiter ────────
+# #10726 review ISSUE 2. Two changes to this one section arrived on two branches
+# and ONE of them survived the merge, in a shape that was neither:
+#
+#   * `main` (`a6e20f05b`, #10717) added the `## Census totals` header;
+#   * this branch (`66e95eb42`) added an `Outcomes across the rows below:` lead-in
+#     to the RENDERED ARTIFACT, because a bare `**…**` line is emphasis-as-heading
+#     to markdownlint (MD036) — but never taught `render()` to emit it, so the
+#     committed artifact stopped being reproducible from the committed tool;
+#   * the `42030395b` re-integration resolved the hunk to `f"**{totals}**"`, i.e.
+#     main's header REVERTED and the artifact's line still unproducible.
+#
+# The property worth pinning is not the wording: it is that the SECTION the
+# COMMITTED artifact shows is the section the COMMITTED generator emits. A
+# generator-only fix leaves a hand-edited artifact looking generated (the class
+# `#9134` P1 exists for), and an artifact-only fix leaves the next regeneration
+# silently deleting the header again.
+REPO = Path(__file__).resolve().parent.parent
+TOTALS_HEADER = "## Census totals"
+TOTALS_LEAD_IN = "Outcomes across the rows below: **"
+
+
+def test_the_totals_section_is_the_one_the_artifact_shows():
+    """`render()` must emit BOTH halves, adjacent, as the artifact shows them.
+
+    Non-vacuity: at the pre-fix head `render()` emitted a bare `f"**{totals}**"`
+    with no header and no lead-in, so the first assertion reds; before `66e95eb42`
+    the artifact had no lead-in, so the artifact half reds.
+    """
+    lines = ac.render([], "o/r", "2026-11-03T00:00:00Z").splitlines()
+    assert TOTALS_HEADER in lines, (
+        "the generator no longer emits main's `## Census totals` header — the "
+        "42030395b re-integration reverted it, and a regeneration would delete it "
+        "from the artifact")
+    i = lines.index(TOTALS_HEADER)
+    assert lines[i + 1] == "", f"the header must be followed by a blank line: {lines[i:i + 3]}"
+    assert lines[i + 2].startswith(TOTALS_LEAD_IN), (
+        "the line under the header must carry the MD036 lead-in the committed "
+        f"artifact shows: {lines[i + 2]!r}")
+
+
+def test_the_committed_artifact_carries_the_section_its_generator_emits():
+    """The reverse direction: the artifact must still show what `render()` writes."""
+    art = (REPO / "operations" / "attest-census.md").read_text(encoding="utf-8")
+    assert f"{TOTALS_HEADER}\n\n{TOTALS_LEAD_IN}" in art, (
+        "operations/attest-census.md does not carry the header + MD036 lead-in "
+        "that tools/attest_census.py::render() emits — either it was hand-edited, "
+        "or it was regenerated with a generator that predates the union")

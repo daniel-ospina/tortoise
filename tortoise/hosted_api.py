@@ -11765,7 +11765,6 @@ async def list_points(
     rows = await _read_offload(
         lambda: sdk._get_proj().g.query(query, params=params).result_set,
         op="list_points")
-    # and /v1/search use.
     # The candidate set AS THE PROBE CAN SEE IT — capped at ``limit+1``, so the
     # population is BOUNDED, while the VERDICT (``candidates > returned``) is
     # decided rather than estimated: it is true iff the store held more rows

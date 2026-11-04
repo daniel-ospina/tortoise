@@ -435,7 +435,23 @@ def render(rows: list[Row], repo: str, generated_at: str, truncated: bool = Fals
         " evidence of the live code: it is `RE-REVIEW` when the gate has no green verdict, and `OK`",
         " only because the gate itself already accepted the proof (so no re-post is owed).",
         "",
-        f"**{totals}**",
+        # ⛔ BOTH LINEAGES, AND THE ARTIFACT IS THE ARBITER. `main` added the
+        # `## Census totals` header (`a6e20f05b`, #10717); this branch added the
+        # `Outcomes across the rows below:` lead-in to the RENDERED ARTIFACT
+        # (`66e95eb42`) because a bare `**…**` line is emphasis-as-heading to
+        # markdownlint (MD036) — but the generator was never taught to emit it,
+        # so the committed artifact stopped being reproducible from the committed
+        # tool. The `42030395b` re-integration then resolved this hunk to
+        # `f"**{totals}**"`, which is NEITHER side: no header (main's change
+        # reverted) and no lead-in (the artifact's line unproducible). The union
+        # is the header AND the labelled totals, which is exactly what
+        # `operations/attest-census.md` carries — so the artifact and its
+        # generator agree again, and a regeneration is a no-op on this section.
+        # `tests/test_attest_census.py::test_the_totals_section_is_the_one_the_artifact_shows`
+        # pins it.
+        "## Census totals",
+        "",
+        f"Outcomes across the rows below: **{totals}**",
         "",
         "| PR | head | record | record head | match | mint | verdict | evidence | gate | outcome |",
         "|---|---|---|---|---|---|---|---|---|---|",
