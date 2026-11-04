@@ -9573,19 +9573,25 @@ durations:
   # samples push-to-main runs only), so this row takes the header's flat
   # `DEFAULT_FAST_WEIGHT` (2.0) and NOT a dev-box reading, which this map forbids
   # as a SHARD-LAYOUT input (#2818/#3419/#4348) — exactly as the eight other
-  # files in `ADDED_BY_THIS_FOLD` do (`tests/test_ci_selection.py`). Its own
+  # files in `ROWED_BY_THIS_FOLD` do (`tests/test_ci_selection.py`). Its own
   # measurement note follows the row, because a continuation
   # block belongs to the row ABOVE it (#10055's reader) — a citation parked
   # above would be read as the PREVIOUS row's claim.
   test_9548_record_search_keys_shape.py: 2.0
   # ⛔ The CASE COUNT is deliberately NOT quoted, and neither is a pass count: a
   # hand-written count re-stales on every case a later round adds. This row
-  # carried one and it was wrong on arrival — the #10726 review at `ae9209738`
-  # re-derived the file's `^def test_` population with the instrument this map's
-  # ENTRY RULE names and found the note short by one, in the same commit
-  # (`c660ffcee`) that added the missing case, and the note's own local reading was
-  # short by the same arithmetic. The file is the only authority for what it
-  # collects; nothing is restated here. What the cases cover: the #10692 review P2 added
+  # carried one — `36b028494` wrote "12 cases" when the file's
+  # `grep -c '^def test_'` really WAS 12, so the citation was CORRECT on arrival
+  # and went stale by ORDINARY DRIFT: `c660ffcee`, 2 h 15 m later, added
+  # `test_a_message_string_with_a_cause_degrades_instead_of_raising` (12th -> 13th)
+  # and touched no note. The #10726 review found it and NO guard did, because the
+  # block below this row OPENED a note of its own, so `_durations_row_comments`
+  # never joined it (#10726 review, P2 — the block is attached now, and
+  # `tests/test_ci_selection.py` pins that mechanism). ⛔ An earlier revision of
+  # THIS paragraph said the count was "wrong on arrival" and that `c660ffcee`
+  # edited the note; both were false and are corrected here against
+  # `git log -S`. Do NOT restate a count: the file is the only authority for what
+  # it collects. What the cases cover: the #10692 review P2 added
   # `test_the_pre_fix_binding_shape_is_still_readable_when_built_by_hand`, the
   # pin for `Statement.value_types()`'s otherwise-unreachable
   # `→jsonb(NOT a JSON document)` arm, and a later round added
