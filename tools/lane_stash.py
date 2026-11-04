@@ -275,14 +275,30 @@ def lane_key(root: Path | None = None) -> str:
     while slug.lower().endswith(".lock"):
         slug = slug[: -len(".lock")]
     slug = slug.strip("-.") or "worktree"
-    # ⛔ `os.fsencode`, NOT `.encode()`. A strict UTF-8 encode cannot encode the lone
-    # surrogates a `surrogateescape` decode produces, so a worktree whose DIRECTORY name is
-    # not UTF-8 raised `UnicodeEncodeError` out of the primary verb: `pin` wrote no ref,
-    # printed no diagnostic and exited 1 (the code reserves 1 as "never a verdict about a
-    # lane's work"), and `list --path` crashed the same way. #10812's outcome, reached
-    # through the directory name. `os.fsencode` is the byte-exact inverse of the decode the
-    # path arrived through.
-    digest = hashlib.sha1(os.fsencode(root.resolve())).hexdigest()[:8]
+    # ⛔ UTF-8 + `surrogateescape`, NOT plain `.encode()` and NOT `os.fsencode`.
+    #
+    # Plain `.encode()` is UTF-8 *strict*, so it cannot encode the lone surrogates a
+    # `surrogateescape` decode produces: a worktree whose DIRECTORY name is not UTF-8 raised
+    # `UnicodeEncodeError` out of the primary verb — `pin` wrote no ref, printed no
+    # diagnostic and exited 1 (the code reserves 1 as "never a verdict about a lane's
+    # work"), and `list --path` crashed the same way. #10812's outcome, reached through the
+    # directory name. `surrogateescape` is the byte-exact inverse of that decode, so it
+    # cannot raise.
+    #
+    # `os.fsencode` fixes the crash on a UTF-8 box but is WRONG as the digest input on any
+    # other: it encodes with `sys.getfilesystemencoding()`, so wherever that encoding is not
+    # UTF-8 the digest of the SAME path changes — measured `'/tmp/café'` -> `19f0d7cb` as
+    # UTF-8 vs `89b4df2f` as latin-1 — and `refs/lane/<old>/…` / `refs/pi-lane-wip/<old>/…`
+    # written before become unreachable BY THE SAME LANE, the "pins look lost while they sat
+    # under the old key" verdict this function's own docstring forbids. (It also raises
+    # `UnicodeEncodeError` itself for a path the filesystem encoding cannot represent,
+    # measured under `PYTHONCOERCECLOCALE=0 LC_ALL=C`; at THIS call site `resolve()` above
+    # would raise first, so that is a property of the rejected input, not a separate crash
+    # path — stated precisely rather than overclaimed.) Naming UTF-8 explicitly makes the
+    # digest independent of the box's locale: byte-identical to the pre-#10812
+    # `str(...).encode()` for every path that already had a key, and unable to raise for one
+    # that did not.
+    digest = hashlib.sha1(str(root.resolve()).encode("utf-8", "surrogateescape")).hexdigest()[:8]
     return f"{slug}-{digest}"
 
 
