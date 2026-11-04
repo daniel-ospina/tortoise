@@ -132,7 +132,11 @@ file, and it is what keeps clauses 1-2 from firing on a quiet repo: a deep
 queue and zero PR runs is also what a fleet that is simply not pushing looks
 like. When ``pr_queued == 0`` nothing was waiting on PR CI, so starvation cannot
 be witnessed and the verdict stays ``OK`` — with ``pr_queued=0`` reported, so a
-reader sees what was NOT measured instead of reading a clean bill of health.
+reader sees what was NOT measured instead of reading a clean bill of health. That
+same reading carries ``pr_wait_measured=False``, because this module's feed is
+filtered to ``status=queued`` and a PR run can sit in ``pending`` / ``waiting`` /
+``requested`` — so ``congests_pr`` answers ``None`` there. The verdict may say
+"not starved"; only a measured wait may authorise a destructive act.
 
 The verdict is ``UNKNOWN`` when the queue cannot be read at all. An unreadable
 surface is never ``OK``: that is the fail-open this repo has removed from every
@@ -416,6 +420,21 @@ class QueueHealth:
     #: tell a raised floor from a queue that got better, and so a JSON consumer
     #: never has to guess which threshold a reading was taken against.
     pr_wait_budget_seconds: float | None = None
+    #: Was the PR WAIT itself read? `True` only where a queued PR-event run existed
+    #: and its age was measured (the same number `pr_wait_budget_seconds` was
+    #: compared against). `False` covers the two ways the wait goes unread: no
+    #: queued PR-event run in the feed at all, and a run whose timestamp would not
+    #: parse (that one degrades to `PR-UNWITNESSED`, which is already not `OK`).
+    #:
+    #: ⛔ IT IS NOT THE SAME FACT AS `verdict == OK`. `OK` is also emitted for "no
+    #: PR-event run is QUEUED", which the code two clauses below says in as many
+    #: words is *not* evidence of health — and that clause is reachable for the very
+    #: population a destructive gate acts on, because this module's feed is filtered
+    #: at the API to `status=queued` while a run can sit in `pending` / `waiting` /
+    #: `requested` (four non-completed labels: `ci_check_repair.QUEUED_STATUSES`).
+    #: A run the feed cannot contain is a run whose wait this reading never measured,
+    #: so `congests_pr` refuses to call that queue clear.
+    pr_wait_measured: bool = False
     #: Why the verdict is what it is, in one clause per clause of the rule, so a
     #: reader can check the decision instead of trusting it.
     reasons: tuple[str, ...] = ()
@@ -537,10 +556,23 @@ class QueueHealth:
 
         * ``True``  — congestion is WITNESSED: `FLOOD`, `PR-STARVED`, `PR-BACKLOGGED`.
         * ``False`` — a MEASURED, UNCUT reading found none: `OK` off an untruncated
-          feed, which is only emitted once the PR wait was read and found inside the
-          budget (see `healthy()`), or where no PR run is queued at all.
-        * ``None``  — NOT MEASURED: `UNKNOWN`, `PR-UNWITNESSED`, or ANY verdict carried
-          by a truncated feed. A gate must refuse rather than consume that silence.
+          feed WHERE THE WAIT ITSELF WAS READ (`pr_wait_measured`). That is the only
+          `False`: a positive witness that the number the budget applies to exists.
+        * ``None``  — NOT MEASURED: `UNKNOWN`, `PR-UNWITNESSED`, ANY verdict carried
+          by a truncated feed, **and an `OK` whose `pr_queued == 0`**. A gate must
+          refuse rather than consume that silence.
+
+        ⛔ "NOTHING IS QUEUED" IS NOT "MEASURED CLEAR" HERE. `OK` with `pr_queued=0`
+        is emitted by the clause whose own reason line says that state is *not*
+        evidence of health (an idle fleet looks the same), and its feed is filtered
+        at the API to `status=queued` while a run may sit in `pending`/`waiting`/
+        `requested` — the other three members of `ci_check_repair.QUEUED_STATUSES`.
+        The population this gate cancels is exactly a run that has not started, so
+        the state where it is invisible to the feed is the state where consuming a
+        `False` would authorise the act on a queue nobody read. Measured on this PR's
+        own head: a `status=queued` read returned 57 runs, all `queued`, while the
+        unfiltered feed held 12 more in `pending`. Hence `pr_wait_measured`, and
+        hence `None`.
 
         Truncation is `None` and not `False` because the runs feed is NEWEST-FIRST and
         ignores `sort`/`direction` (see the module docstring): a capped read drops the
@@ -551,7 +583,7 @@ class QueueHealth:
         """
         if self.delays_pr:
             return True
-        if self.verdict == OK and not self.truncated:
+        if self.verdict == OK and not self.truncated and self.pr_wait_measured:
             return False
         return None
 
@@ -568,6 +600,10 @@ class QueueHealth:
             "pr_queued": self.pr_queued,
             "oldest_pr_queued_age_seconds": self.oldest_pr_queued_age_seconds,
             "pr_wait_budget_seconds": self.pr_wait_budget_seconds,
+            # Whether the number above was READ or merely unavailable: the fact
+            # `congests_pr` turns on, emitted so a consumer can tell a measured-clear
+            # queue from one whose wait was never in the feed.
+            "pr_wait_measured": self.pr_wait_measured,
             "starves_pr": self.starves_pr,
             "delays_pr": self.delays_pr,
             # Three-valued: `null` here means congestion was NOT measured, which is a
@@ -752,6 +788,12 @@ def classify_queue(
             "pr_queued": len(pr_queued_runs),
             "oldest_pr_queued_age_seconds": oldest_pr_age,
             "pr_wait_budget_seconds": max_pr_wait_seconds,
+            # ONE DERIVATION, at the single constructor: the wait is MEASURED when
+            # there was a queued PR-event run whose age read. Every `OK` that reaches
+            # the destructive gate through here then carries the witness for its
+            # `False`; the one `OK` that bypasses this (`no queued PR run`) is below,
+            # explicitly unmeasured.
+            "pr_wait_measured": oldest_pr_age is not None,
             "truncated": truncated,
             "reasons": tuple(reasons),
         }
@@ -770,9 +812,12 @@ def classify_queue(
         why it is not routed through the `PR-UNWITNESSED` degradation.
 
         The one `OK` that does NOT come through here is the `no queued PR run`
-        clause below, and that is not a hole in the guarantee: with no queued
-        PR-event run there is no PR wait at all, so no wait can be past a budget
-        (the clause reports `pr_queued=0` so a reader sees what was not measured).
+        clause below. For the VERDICT that is sound — with no queued PR-event run in
+        the feed there is no wait in the feed to be past a budget — but it is NOT
+        sound for the destructive gate: the feed is filtered to `status=queued`, so
+        "no queued PR run" can also mean the run is in `pending`/`waiting`/`requested`
+        and therefore unread. That clause therefore returns `pr_wait_measured=False`,
+        and `congests_pr` answers `None` (refuse) rather than `False` (clear).
         Where a wait DOES exist and cannot be read, this seam refuses `OK` and
         returns `PR-UNWITNESSED` — an unmeasured wait is not a measured-healthy
         one, which is the same refusal the truncated feed gets.
@@ -901,7 +946,12 @@ def classify_queue(
             "not a flood: no PR-event run is QUEUED, so starvation of PR CI was "
             "not witnessed (an idle fleet looks the same)"
         )
-        return health(OK, pr_queued=0, oldest_pr_queued_age_seconds=None)
+        # `pr_wait_measured=False` EXPLICITLY: there was no wait to read, so this
+        # reading can never certify a queue CLEAR to a destructive gate — the feed
+        # is filtered to `status=queued` and cannot see a `pending`/`waiting`/
+        # `requested` PR run at all.
+        return health(OK, pr_queued=0, oldest_pr_queued_age_seconds=None,
+                      pr_wait_measured=False)
     if oldest_pr_age is None:
         reasons.append(
             "not a flood: the queued PR-event run(s) carry no readable timestamp, so "

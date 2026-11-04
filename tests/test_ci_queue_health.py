@@ -1088,8 +1088,10 @@ def test_congests_pr_is_three_valued_so_a_cancel_cannot_consume_silence():
     assert backlogged.verdict == Q.PR_BACKLOGGED
     assert backlogged.congests_pr is True
 
-    clear = classify(flood_queued(4))
+    clear = classify(flood_queued(4) + starving_pr_runs(1, age_seconds=60))
     assert clear.verdict == Q.OK
+    assert clear.pr_wait_measured is True, (
+        "the fixture must READ a PR wait, or the 'False' below is not the measured pole")
     assert clear.congests_pr is False, "a MEASURED clear queue is the only 'False'"
     assert clear.delays_pr is False
 
@@ -1112,15 +1114,65 @@ def test_congests_pr_is_three_valued_so_a_cancel_cannot_consume_silence():
     # from the VERDICT test and the `not self.truncated` clause is never reached — this
     # assertion was green with that guard deleted (measured). A serving PR run is what
     # makes the verdict `OK` (see `test_a_truncated_feed_with_a_pr_run_executing_is_still_ok`),
-    # so it is the shape that actually pins truncation.
+    # so it is the shape that actually pins truncation — and it must also carry a QUEUED
+    # PR run, or `pr_wait_measured` (not truncation) would be what answers `None` here and
+    # the truncation clause would be untested again.
     cut = classify(
-        flood_queued(4),
+        flood_queued(4) + starving_pr_runs(1, age_seconds=60),
         in_progress=[run(1, "Python CI", event="pull_request", age_seconds=60)],
         truncated=True,
     )
     assert cut.verdict == Q.OK, "the fixture must reach `OK`, or the guard is untested"
+    assert cut.pr_wait_measured is True, (
+        "the wait WAS read — truncation is what must answer `None` below")
     assert cut.congests_pr is None, (
         "a capped feed is not a measured-clear queue, even when its verdict is OK")
+
+
+def test_an_ok_with_nothing_queued_cannot_certify_the_queue_clear():
+    """⭐⭐ P1 (review): `OK(pr_queued=0)` is the clause that says it is NOT health.
+
+    `classify_queue`'s `no PR-event run is QUEUED` clause appends a reason line that
+    states the fact itself — *"starvation of PR CI was not witnessed (an idle fleet
+    looks the same)"* — and still emits `OK`. A destructive gate may not read that as
+    "the queue is clear": this module's feed is filtered at the API to `status=queued`
+    while `ci_check_repair.QUEUED_STATUSES` has FOUR non-completed labels, so the run a
+    cancel would act on can sit in `pending`/`waiting`/`requested` and be absent from
+    the feed entirely.
+
+    Measured on this PR's head (2026-11-03): `?status=queued&per_page=100` returned 57
+    runs, **all** `queued`, while the unfiltered feed carried 12 more in `pending`. So
+    "nothing is queued" here means "nothing I could see is queued".
+
+    Discriminating power: this test reddens the moment `congests_pr` drops its
+    `pr_wait_measured` clause — `OK and not truncated` alone answers `False`.
+    """
+    # The explicit `no PR-event run is QUEUED` clause (offender at/over the dominance
+    # floor, no PR run queued) ...
+    quiet = classify(flood_queued(12))
+    assert quiet.verdict == Q.OK
+    assert quiet.pr_queued == 0
+    assert any("no PR-event run is QUEUED" in r for r in quiet.reasons), (
+        "the fixture must be the clause under test")
+    assert quiet.pr_wait_measured is False, (
+        "there was no queued PR-event run, so no wait was read")
+    assert quiet.congests_pr is None, (
+        "'nothing I could see is queued' is not a measured-clear queue — a "
+        "pending / waiting / requested PR run is invisible to a status=queued feed")
+    # The REPORTING polarity is untouched: it still claims no congestion it did not read.
+    assert quiet.delays_pr is False
+    # ...and the fact is emitted, so a JSON consumer can tell the two OKs apart.
+    assert quiet.to_dict()["pr_wait_measured"] is False
+    # ...and the OTHER `OK` with no wait — the one that reaches `OK` through
+    # `no_flood() -> healthy()` because the offender never reaches the dominance
+    # floor — is the same fact with the same answer. Two paths, one polarity.
+    below_floor = classify(flood_queued(4))
+    assert below_floor.verdict == Q.OK and below_floor.pr_queued == 0
+    assert below_floor.pr_wait_measured is False
+    assert below_floor.congests_pr is None, (
+        "a `healthy()` that had no wait to read is not a measured-clear queue either")
+    assert (classify(flood_queued(4) + starving_pr_runs(1, age_seconds=60))
+            .to_dict()["pr_wait_measured"] is True)
 
 
 def test_a_pr_backlog_inside_the_wait_budget_is_ok():

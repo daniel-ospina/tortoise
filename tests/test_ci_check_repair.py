@@ -2002,6 +2002,22 @@ def test_an_unmeasured_queue_never_authorises_the_cancel(monkeypatch, capsys, tm
     assert summary["prs"][0]["rerun"] == [], (
         "silence is not permission: no cancel may be authorised by a queue nobody "
         "read")
+    # ⭐ P2 (review): the refusal must be VISIBLE in the aggregate, not only inside a
+    # per-PR record. `needing_repair` counts neither `no_verdict` nor a suppressed
+    # repair, so on this fixture it is 0 — and 0 is what the local rail quotes as a
+    # clean, covered window.
+    assert summary["needing_repair"] == 0, "the fixture must be the understating shape"
+    assert summary["no_verdict"] == 1, (
+        "a plan carrying a named-but-unrepairable zero-job context must be counted")
+    assert summary["repair_refused"] == 1, (
+        "the run the congestion gate suppressed must be counted beside "
+        "needing_repair, or `needing_repair=0` reads as a clean window")
+    assert [d["run"] for d in summary["prs"][0]["repair_refused"]] == [41480218593], (
+        "the record names the run that was identified and NOT acted on")
+    assert [d["reason"] for d in summary["prs"][0]["repair_refused"]] == [
+        "queue_congested=True"], (
+        "...and the gate that refused it; whether that `True` came from a reading "
+        "or from silence is the summary pair beside it, which is asserted above")
 
 
 def test_a_measured_clear_queue_still_authorises_the_cancel(monkeypatch, capsys,
@@ -2011,13 +2027,20 @@ def test_a_measured_clear_queue_still_authorises_the_cancel(monkeypatch, capsys,
     A MEASURED, uncut reading that found the queue clear is the state this repair was
     written for, and there the cancel must still fire — otherwise the zero-job class
     goes unrepairable and the fix trades one fail-open for a fail-shut.
+
+    ⛔ "CLEAR" NOW REQUIRES A WITNESS. The fixture carries a QUEUED PR-event run with
+    a readable age (`pr_queued=1`, `oldest_pr_queued_age_seconds`) and
+    `pr_wait_measured=True`, because `OK` with `pr_queued=0` is the state the module's
+    own reason line calls *not* evidence of health — the feed is filtered to
+    `status=queued`, so a `pending`/`waiting`/`requested` PR run is not in it (review
+    P1, fixed by `QueueHealth.pr_wait_measured`).
     """
     from tools import ci_queue_health as Q
 
     clear = Q.QueueHealth(
-        verdict=Q.OK, queued_total=0, in_progress_total=0, dominant_workflow=None,
-        dominant_queued=0, pr_running=0, pr_queued=0,
-        oldest_pr_queued_age_seconds=None)
+        verdict=Q.OK, queued_total=4, in_progress_total=0, dominant_workflow=None,
+        dominant_queued=0, pr_running=0, pr_queued=1,
+        oldest_pr_queued_age_seconds=60.0, pr_wait_measured=True)
     assert clear.congests_pr is False, "the fixture must actually be a measured clear"
 
     monkeypatch.setattr(R, "read_queue_health", lambda repo: clear)
@@ -2053,14 +2076,24 @@ def test_the_gate_refuses_every_unmeasured_queue_reading():
         "a queue that was never read (or failed to read) refuses the act")
     assert R.queue_congestion_gate(reading(Q.UNKNOWN).congests_pr) is True
     assert R.queue_congestion_gate(reading(Q.PR_UNWITNESSED).congests_pr) is True
-    assert R.queue_congestion_gate(
-        reading(Q.OK, truncated=True).congests_pr) is True, (
+    assert R.queue_congestion_gate(reading(Q.OK, truncated=True).congests_pr) is True, (
         "a NEWEST-FIRST feed cut at the page cap dropped the oldest queued runs — "
         "exactly the ones the wait clause needs, so it cannot rule a backlog out")
+    assert R.queue_congestion_gate(reading(Q.OK).congests_pr) is True, (
+        "⭐ P1 (review): an `OK` whose `pr_queued == 0` is the clause that says "
+        "itself 'starvation was not witnessed' — the feed is filtered to "
+        "status=queued and a pending/waiting/requested PR run is not in it, so "
+        "this is an UNREAD queue, not a measured-clear one")
+    assert R.queue_congestion_gate(
+        reading(Q.OK, pr_wait_measured=False).congests_pr) is True, (
+            "the same fact named explicitly: `False` requires the wait to have been read")
     assert gate_for(object()) is True, (
         "a reading that cannot answer the question at all is not a measured 'clear'")
-    # ...and the measured readings keep their answers.
-    assert gate_for(reading(Q.OK)) is False
+    # ...and the measured readings keep their answers. `pr_wait_measured=True` is the
+    # WITNESS a `False` needs. A verdict that WITNESSES congestion needs none:
+    # FLOOD / PR-STARVED / PR-BACKLOGGED are positive claims about runs that were read.
+    assert gate_for(reading(Q.OK, pr_queued=1, oldest_pr_queued_age_seconds=60.0,
+                            pr_wait_measured=True)) is False
     assert gate_for(reading(Q.FLOOD)) is True
     assert gate_for(reading(Q.PR_STARVED)) is True
     assert gate_for(reading(Q.PR_BACKLOGGED)) is True

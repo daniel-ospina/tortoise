@@ -456,6 +456,17 @@ class PrPlan:
     # ``{run, workflow, status, jobs, age_seconds}`` and is reported by name as
     # ``NO-VERDICT-WILL-ARRIVE(...)``.
     no_verdict: list[dict] = field(default_factory=list)
+    # Runs whose zero-job repair was SUPPRESSED by the congestion gate (`crowded`
+    # below), i.e. a repair this pass identified and deliberately did not perform.
+    # Each entry is ``{run, workflow, reason}``. It exists because such a run lands
+    # in `no_verdict` FIRST and then takes the `continue`, so it contributes nothing
+    # to `needing_repair` — and a pass that exits 0 reporting `needing_repair=0` is
+    # read by the local rail's notification and transition signature as a CLEAN,
+    # COVERED window. A refused repair is not a clean window: it is work waiting for
+    # a queue that is readable (or for the credential that can unjam it), so it is
+    # counted and printed beside `needing_repair` (module-level summary keys
+    # `no_verdict` / `repair_refused`).
+    repair_refused: list[dict] = field(default_factory=list)
 
     @property
     def actionable(self) -> bool:
@@ -474,7 +485,7 @@ class PrPlan:
         and escalated — dropping it is how an unrepairable check goes silent.
         """
         return bool(self.actionable or self.rerun or self.exhausted or self.starved
-                    or self.no_verdict)
+                    or self.no_verdict or self.repair_refused)
 
 
 def _run(argv: list[str], timeout: int = 120) -> subprocess.CompletedProcess:
@@ -966,6 +977,23 @@ def classify(pr: dict, checks: list[dict], all_runs: list[Run], required: list[s
                 # queued run had reached, and adding load to the wait it is stuck in —
                 # does not depend on what its SIBLINGS did, so neither may the refusal.
                 if crowded:
+                    # THE REFUSAL IS RECORDED, NOT SILENT. This run was named a
+                    # zero-job repair candidate above and is now not repaired;
+                    # without this entry the plan counts for nothing in
+                    # `needing_repair` and the pass reads as a clean window.
+                    # The reason names the refuser it can SEE here: measured
+                    # starvation, or the congestion gate. Whether that gate value
+                    # came from a real reading or from silence is NOT knowable at
+                    # this layer (`main()` collapses an unmeasured queue to `True`
+                    # through `queue_congestion_gate`) — the summary pair
+                    # `queue_congested` + `queue_congestion_measured` says it, and
+                    # the REFUSED-REPAIR notice prints both.
+                    reason = "queue_starved=True" if queue_starved else (
+                        "queue_congested=True")
+                    if not any(d["run"] == r.id for d in plan.repair_refused):
+                        plan.repair_refused.append(
+                            {"run": r.id, "workflow": r.name or r.path,
+                             "reason": reason})
                     continue
                 # ⛔ THE LOOP BOUND IS STRUCTURAL, NOT AN ABSTENTION (see
                 # `ZERO_JOB_MAX_REPAIRABLE_ATTEMPT`). Cancel-then-rerun turns attempt 1
@@ -1615,6 +1643,7 @@ def report(plans: list[PrPlan], apply: bool, trigger_ok: bool, repo: str,
                      "missing_run": p.missing_run, "exhausted": list(p.exhausted),
                      "starved": list(p.starved),
                      "no_verdict": list(p.no_verdict),
+                     "repair_refused": list(p.repair_refused),
                      "reopen_attempts": 0, "needs_user_actor": False}
         for nv in p.no_verdict:
             # THE NAMED REFUSAL. A zero-job run older than the floor cannot produce a
@@ -2001,6 +2030,17 @@ def main(argv: list[str] | None = None) -> int:
         # repair, so it is deliberately excluded from this count — otherwise the
         # number would report the normal in-flight state of every pushed PR.
         "needing_repair": sum(1 for p in plans if p.missing_run or p.rerun or p.exhausted),
+        # ⛔ `needing_repair=0` IS NOT "NOTHING WAS FOUND" ON ITS OWN. A zero-job run
+        # whose cancel the congestion gate suppressed is appended to `no_verdict` and
+        # then skipped, so neither count above sees it — the pass exits 0 and the
+        # local rail's notification/transition signature quotes `needing_repair` as a
+        # clean, covered window while a PR whose required check can never be produced
+        # is silently skipped every 30 minutes. Both are reported so the zero can be
+        # read next to the work it excludes: `no_verdict` counts PLANS carrying a
+        # named-but-unrepairable zero-job context, `repair_refused` counts the RUNS
+        # this pass identified and deliberately did not cancel.
+        "no_verdict": sum(1 for p in plans if p.no_verdict),
+        "repair_refused": sum(len(p.repair_refused) for p in plans),
         # Re-measures the "queued and never starts" residual every window (see
         # `PrPlan.oldest_pending_age_seconds`).
         "oldest_pending_age_seconds": (
@@ -2017,6 +2057,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{summary['queue']}")
         print(f"ci-check-repair [{mode}] repo={args.repo} open_prs={summary['open_prs']} "
               f"needing_repair={summary['needing_repair']} starved={summary['starved']} "
+              f"no_verdict={summary['no_verdict']} "
+              f"repair_refused={summary['repair_refused']} "
               f"trigger={summary['trigger_ok']}")
         for r in records:
             print(f"  #{r['pr']} absent={r['absent']} pending={r['pending']} "
@@ -2024,6 +2066,16 @@ def main(argv: list[str] | None = None) -> int:
                   f"rerun={[x['run'] for x in r['rerun']]} missing_run={r['missing_run']} "
                   f"reopened={r['reopened']} reopen_attempts={r['reopen_attempts']} "
                   f"needs_user_actor={r['needs_user_actor']}")
+        if summary["repair_refused"]:
+            # NAMED, because it is the one number above that can make a real problem
+            # look like a clean window. Stderr: `--json` owns stdout.
+            print(f"ci-check-repair: REFUSED-REPAIR — {summary['repair_refused']} "
+                  f"zero-job run(s) were identified and NOT cancelled/rerun because the "
+                  f"queue reading did not certify it clear "
+                  f"(queue_congestion_measured={summary['queue_congestion_measured']}, "
+                  f"queue_congested={summary['queue_congested']}). This window is NOT "
+                  f"discharged: read the queue, or run the repair with a credential "
+                  f"that can unjam it.", file=sys.stderr)
         if summary["starved"]:
             # Named state, named remedy. A starved head is not repaired by anything
             # this tool can do: the missing resource is a runner slot.
