@@ -757,6 +757,123 @@ def test_a_relaunch_during_the_probe_is_aged_from_the_adopted_artifact(tmp_path,
     assert "launching" in st.reason, st.reason
 
 
+def test_a_replaced_artifact_is_never_concluded_upon(tmp_path, monkeypatch):
+    """⛔ `launch` REPLACES THE ARTIFACT WHOLESALE, SO A NEW ATTEMPT IS A MOVE.
+
+    The move test covered `EXIT=`, an arriving `PID=` and an arriving `CHILD_PID=`,
+    but not a REPLACED record. A `start` landing inside this collect's probe window
+    therefore handed the loop an artifact with a new `ATTEMPT_ID` and a new `PID`
+    that no probe here had examined — and the loop broke anyway and published
+    `lost` for the live replacement, printing that very pid in the same verdict (the
+    state `start` accepts: #3061).
+
+    Reproduced without a race: probe 1 rewrites the artifact (new attempt, live
+    pid) and answers gone for the OLD pid; the next pass must examine the new one.
+    """
+    sd = tmp_path / "state"
+    sd.mkdir()
+    art = rd.artifact_path(sd, "o/r", 71)
+    logp = rd.log_path(sd, "o/r", 71)
+    art.write_text(f"PR=71\nREPO=o/r\nSTARTED_AT={rd._iso_now()}\nLOG={logp}\n"
+                   f"ATTEMPT_ID=old\nPID={_reaped_pid()}\n", encoding="utf-8")
+    logp.write_text(f"\n{rd.ATTEMPT_MARK} x attempt=old (detached) =====\n",
+                    encoding="utf-8")
+    wrapper = subprocess.Popen(["/bin/sleep", "20"], start_new_session=True,
+                               stdin=subprocess.DEVNULL,
+                               stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL)
+    try:
+        def probe(leader, child, marker, **_kw):
+            if leader != wrapper.pid:
+                art.write_text(
+                    f"PR=71\nREPO=o/r\nSTARTED_AT={rd._iso_now()}\nLOG={logp}\n"
+                    f"ATTEMPT_ID=new\nPID={wrapper.pid}\nSID={wrapper.pid}\n",
+                    encoding="utf-8")
+                return False                       # the OLD pid is gone (it is)
+            return True                            # the NEW wrapper is alive
+
+        monkeypatch.setattr(rd, "_rail_alive", probe)
+        st = rd.collect(sd, "o/r", 71)
+        assert st.state == rd.WAITING, st.as_dict()     # pre-fix: LOST
+        assert st.pid == wrapper.pid, st.as_dict()
+        # …and it is a REAL verdict for the new attempt, not the generic
+        # "re-collect" notice: a replaced identity forces another pass, which
+        # probes the pid the artifact now names.
+        assert "REPLACED" not in st.reason, st.reason
+    finally:
+        wrapper.kill()
+        wrapper.wait()
+
+
+def test_a_record_replaced_on_the_last_pass_is_a_recollect_not_a_verdict(tmp_path, monkeypatch):
+    """The LAST pass cannot re-probe, so a record that changed identity there must
+    not be concluded upon at all: the honest answer is `waiting` (so `start` stays
+    refused and nothing is truncated) plus a reason naming the one action, a
+    re-collect — which probes the new record. Pre-fix this published `lost` for the
+    live replacement."""
+    sd = tmp_path / "state"
+    sd.mkdir()
+    art = rd.artifact_path(sd, "o/r", 70)
+    logp = rd.log_path(sd, "o/r", 70)
+    dead1, dead2 = _reaped_pid(), _reaped_pid()
+    art.write_text(f"PR=70\nREPO=o/r\nSTARTED_AT={rd._iso_now()}\nLOG={logp}\n"
+                   f"ATTEMPT_ID=old\nPID={dead1}\n", encoding="utf-8")
+    logp.write_text(f"\n{rd.ATTEMPT_MARK} x attempt=old (detached) =====\n",
+                    encoding="utf-8")
+    calls: list[int] = []
+
+    def probe(leader, child, marker, **_kw):
+        calls.append(leader)
+        if len(calls) == 1:
+            # pass 1: the artifact moves (new pid) → the loop takes a second pass
+            art.write_text(f"PR=70\nREPO=o/r\nSTARTED_AT={rd._iso_now()}\nLOG={logp}\n"
+                           f"ATTEMPT_ID=old\nPID={dead2}\n", encoding="utf-8")
+        elif len(calls) == 2:
+            # pass 2 (the last one that probes): a LATER `start` owns it now
+            art.write_text(f"PR=70\nREPO=o/r\nSTARTED_AT={rd._iso_now()}\nLOG={logp}\n"
+                           f"ATTEMPT_ID=newer\nPID={dead2}\n", encoding="utf-8")
+        return False
+
+    monkeypatch.setattr(rd, "_rail_alive", probe)
+    st = rd.collect(sd, "o/r", 70)
+    assert st.state == rd.WAITING, st.as_dict()      # pre-fix: LOST
+    assert "REPLACED" in st.reason and "collect" in st.reason
+
+
+def test_a_pid_d_claim_refusal_names_the_check_and_the_remedy(tmp_path):
+    """A refusal that names no way out is a wedge with a friendly voice.
+
+    The pid'd claim is the ONE waiting arm where a RECYCLED pid never lifts: a
+    genuine wrapper lifts it by exiting, a stranger holding that number answers
+    forever. Saying nothing there left the operator with `pid 0`-less prose and no
+    action. The hint names the read-only check first, so the `rm` is never advice to
+    unlink a live rail's own record.
+    """
+    co = make_checkout(tmp_path)
+    sd = tmp_path / "state"
+    sd.mkdir(parents=True)
+    art = rd.artifact_path(sd, "o/r", 95)
+    # a session leader stands in for the wrapper: its pgid IS its pid, so the group
+    # arm answers it (the shape `launch` creates with `start_new_session=True`).
+    wrapper = subprocess.Popen(["/bin/sleep", "20"], start_new_session=True,
+                               stdin=subprocess.DEVNULL,
+                               stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL)
+    try:
+        art.write_text(f"PR=95\nREPO=o/r\nSTARTED_AT={rd._iso_now()}\nLOG={sd}/x.log\n"
+                       f"PID={wrapper.pid}\n", encoding="utf-8")
+        assert rd.collect(sd, "o/r", 95).state == rd.WAITING
+        with pytest.raises(rd.Refused) as exc:
+            rd.launch(95, cwd=co, state_dir=sd, repo="o/r")
+        msg = str(exc.value)
+        assert "ALREADY LIVE" in msg
+        assert f"ps -p {wrapper.pid}" in msg        # the read-only check, first
+        assert "rm " in msg and str(art) in msg      # then the conditional remedy
+    finally:
+        wrapper.kill()
+        wrapper.wait()
+
+
 def test_a_merge_line_naming_another_pr_is_not_this_prs_merge(tmp_path):
     """⛔ EVERY SUCCESS LINE CARRIES ITS PR NUMBER, AND THE NUMBER WAS IGNORED.
 
@@ -910,19 +1027,7 @@ def test_a_named_rail_under_spawning_is_not_no_rail(tmp_path):
             f"ATTEMPT_ID=attempt-98\nCHILD_PID={rail.pid}\n",
             encoding="utf-8",
         )
-        # arm 1 — the named rail already ANNOUNCED its merge
-        logp.write_text(
-            "\n===== rail attempt started x (detached) =====\n"
-            "admin-merge: ✅ merged PR #98 at deadbeefcafe1234 (state=MERGED)\n",
-            encoding="utf-8",
-        )
-        st = rd.collect(sd, "o/r", 98)
-        # pre-fix: LOST, "no rail ever started" — for a PR whose rail merged
-        assert st.state == rd.MERGED, st.as_dict()
-        assert st.merge_sha == "deadbeefcafe1234"
-        assert "EXIT line was never written" in st.reason
-
-        # arm 2 — a LIVE named rail, nothing announced yet: still waiting, not lost
+        # arm 1 — a LIVE named rail, nothing announced yet: waiting, not lost
         logp.write_text(
             "\n===== rail attempt started x (detached) =====\n"
             "admin-merge: … FIRST-CHECKS wait: run 41557371710 is pending\n",
@@ -931,6 +1036,27 @@ def test_a_named_rail_under_spawning_is_not_no_rail(tmp_path):
         st = rd.collect(sd, "o/r", 98)
         assert st.state == rd.WAITING, st.as_dict()     # pre-fix: LOST
         assert "CHILD_PID" in st.reason
+
+        # arm 2 — the named rail ANNOUNCED its merge and is STILL ALIVE.
+        # ⛔ ALIVE OUTRANKS ANNOUNCED (`STATES`): the arm used to answer `merged`
+        # here, which made `--assert-merged` exit 0 for an in-flight merge and
+        # released `start`'s duplicate guard (it refuses only `waiting`). The merge
+        # is NOT lost by waiting — the log keeps the line, and the verdict becomes
+        # `merged` the moment nothing that carries the rail is left.
+        logp.write_text(
+            "\n===== rail attempt started x (detached) =====\n"
+            "admin-merge: ✅ merged PR #98 at deadbeefcafe1234 (state=MERGED)\n",
+            encoding="utf-8",
+        )
+        st = rd.collect(sd, "o/r", 98)
+        assert st.state == rd.WAITING, st.as_dict()     # the documented precedence
+        rail.kill()
+        rail.wait()
+        st = rd.collect(sd, "o/r", 98)
+        # pre-fix (before the arm existed at all): LOST, "no rail ever started"
+        assert st.state == rd.MERGED, st.as_dict()
+        assert st.merge_sha == "deadbeefcafe1234"
+        assert "EXIT line was never written" in st.reason
     finally:
         rail.kill()
         rail.wait()

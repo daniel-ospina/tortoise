@@ -1013,6 +1013,17 @@ def _state_from(snap: _Snapshot, pr: int, art: Path) -> RailState:
     )
 
 
+def _identity(snap: _Snapshot) -> tuple[str, int, int]:
+    """Which ATTEMPT, and which processes, a snapshot describes.
+
+    The loop compares this before and after a probe so a conclusion is never drawn
+    from an artifact a `start` replaced underneath it: `launch` truncates and
+    rewrites the whole record (new `ATTEMPT_ID`, new `PID`), so identity — not the
+    field values read separately — is what says "this is still the record I probed".
+    """
+    return (read_field(snap.text, "ATTEMPT_ID"), snap.pid, snap.child)
+
+
 def _exit_verdict(st: RailState, snap: _Snapshot) -> RailState:
     """The verdict for an artifact that carries this attempt's `EXIT=`."""
     code = _int_or_none(snap.exits[-1])
@@ -1072,6 +1083,14 @@ def collect(state_dir: Path, repo: str, pr: int) -> RailState | None:
     # ones that conclude.
     snap = _read_snapshot(art, logp_default)
     probes = 2
+    # ⛔ WHAT THE PROBES ACTUALLY EXAMINED. `launch` REPLACES the artifact wholesale
+    # on every attempt, so a `start` that lands inside this collect's probe window
+    # hands the loop a record (new `ATTEMPT_ID`, new `PID`) that no probe here has
+    # ever looked at. Publishing a conclusion drawn from it is how a LIVE rail gets
+    # reported `lost` while the verdict prints that very pid — the class this module
+    # forbids (`lost` is the state `start` accepts, #3061). The identity is recorded
+    # per probe and re-checked before any conclusion.
+    probed: tuple[str, int, int] | None = None
     while True:
         st = _state_from(snap, pr, art)
         if snap.exits:
@@ -1080,10 +1099,12 @@ def collect(state_dir: Path, repo: str, pr: int) -> RailState | None:
         # No EXIT line yet. Alive ⇒ waiting; gone ⇒ lost (NEVER merged). ⛔ ALIVE
         # IS "THE WRAPPER **OR** THE RAIL": a killed wrapper leaves the rail
         # running, and reading that as `lost` was the P1 (module docstring).
-        if probes > 0 and _rail_alive(snap.pid, snap.child, str(art),
-                                      age=_age_seconds(st.since)):
-            st.state = WAITING
-            return st
+        if probes > 0:
+            probed = _identity(snap)
+            if _rail_alive(snap.pid, snap.child, str(art),
+                           age=_age_seconds(st.since)):
+                st.state = WAITING
+                return st
         if probes == 0:
             # Both probes said gone and the adopted snapshot is the post-probe
             # read: conclude from it. A third probe would only re-open the same
@@ -1110,7 +1131,13 @@ def collect(state_dir: Path, repo: str, pr: int) -> RailState | None:
         # pass, exactly as a newly-arrived `CHILD_PID=` does.
         moved = (_attempt_exits(fresh) != snap.exits
                  or (not snap.pid and bool(read_field(fresh, "PID")))
-                 or (not snap.child and bool(read_field(fresh, "CHILD_PID"))))
+                 or (not snap.child and bool(read_field(fresh, "CHILD_PID")))
+                 # A REPLACED record is a move: `launch` rewrites the artifact
+                 # wholesale, so a new `ATTEMPT_ID` (or a pid that CHANGED, not
+                 # merely arrived) is a different attempt whose carrier no probe
+                 # here has examined.
+                 or _identity(_read_snapshot(art, logp_default, text=fresh))
+                 != _identity(snap))
         # ⛔ ADOPT THE FRESH SNAPSHOT ON EVERY EXIT FROM THE LOOP — INCLUDING THE
         # `break` — because `_read_snapshot` is what re-reads the LOG, and the log
         # is where every word a verdict reads is written. The artifact does not move
@@ -1133,6 +1160,18 @@ def collect(state_dir: Path, repo: str, pr: int) -> RailState | None:
     # `STARTED_AT` and read `lost`, with a reason claiming a launch that just
     # started never spawned.
     st = _state_from(snap, pr, art)
+    if probed is not None and _identity(snap) != probed:
+        # ⛔ THE ONLY HONEST ANSWER FOR A RECORD THE PROBES NEVER SAW. Concluding
+        # from it would publish a verdict about one attempt using another's
+        # evidence — `lost` for a LIVE replacement, or `merged` for a merge this
+        # attempt did not make. `waiting` is the fail-CLOSED answer: `start` refuses
+        # a `waiting` claim, so nothing is truncated, and the reason tells the
+        # caller exactly what to do (one more collect, which probes the new record).
+        st.state = WAITING
+        st.reason = ("the artifact was REPLACED while this collect was probing — a "
+                     "new attempt owns it now and no probe here examined it; "
+                     "re-run `collect` to read that attempt's own verdict")
+        return st
     text, log = snap.text, snap.log
     pid, child = snap.pid, snap.child
     # ⛔ `not exits` USED TO BE SPELLED HERE and could never be false — the `if
@@ -1187,13 +1226,15 @@ def collect(state_dir: Path, repo: str, pr: int) -> RailState | None:
         # The test is ONE-SIDED on purpose (`_pid_is_a_stranger`): it can only ever
         # conclude "not our rail", never "ours", so it cannot produce a false `lost`
         # and it never expires a live rail however long the queue takes. Fails CLOSED.
-        merged, sha = _merge_evidence(log, pr, st.repo)
-        if merged == MERGED:
-            st.state, st.merge_sha = MERGED, sha
-            st.reason = ("the rail's log records the merge"
-                         + (" (no merge sha printed)" if not sha else "")
-                         + "; the EXIT line was never written")
-            return st
+        #
+        # ⛔ ALIVE OUTRANKS ANNOUNCED, SO THE CARRIER IS CHECKED FIRST. The `STATES`
+        # table says exactly that (an announcement beats `lost`, never `waiting`),
+        # and the order here used to say the opposite: a rail that had printed its
+        # success line and was still doing its post-merge bookkeeping read `merged`,
+        # which made `--assert-merged` exit 0 for an in-flight merge and released
+        # `start`'s duplicate guard (it refuses only `waiting`). The merge is not
+        # lost by waiting — the log keeps the line, and the verdict becomes `merged`
+        # when the carrier exits.
         if child > 0 and _pid_alive(child, ""):
             child_started = read_field(text, "CHILD_STARTED")
             child_ticks = read_field(text, "CHILD_START_TICKS")
@@ -1213,6 +1254,13 @@ def collect(state_dir: Path, repo: str, pr: int) -> RailState | None:
                 st.reason += ("; this artifact records no CHILD_STARTED, so that pid "
                               "cannot be identity-checked and a RECYCLED one would "
                               f"lift only when it exits — clear with `rm {st.artifact}`")
+            return st
+        merged, sha = _merge_evidence(log, pr, st.repo)
+        if merged == MERGED:
+            st.state, st.merge_sha = MERGED, sha
+            st.reason = ("the rail's log records the merge"
+                         + (" (no merge sha printed)" if not sha else "")
+                         + "; the EXIT line was never written")
             return st
         age = _age_seconds(st.since)
         if child <= 0 and age is not None and age <= SPAWNING_TTL_S:
@@ -1471,11 +1519,18 @@ def launch(pr: int, *, cwd: Path, state_dir: Path, repo: str | None = None,
             # that is mid-fork — its rail's `CHILD_PID=`/`EXIT=`/`✅ merged` appends
             # would then go to an unlinked inode (bash keeps the fd), so a real
             # merge reads back unreadable forever AND a second `start` is allowed.
-            # So: no hint for a pid'd claim, the identity warning for a named child,
-            # and the expiry for a bare sentinel. `ALREADY LIVE` leads every arm —
-            # that is the phrase lanes match on.
+            # So: the read-only check plus a CONDITIONAL remedy for a pid'd claim, the
+            # identity warning for a named child, and the expiry for a bare sentinel.
+            # `ALREADY LIVE` leads every arm — that is the phrase lanes match on.
+            # ⛔ A pid'd claim gets a hint because it is the ONE arm where a RECYCLED
+            # pid never lifts: a genuine wrapper lifts it by exiting, but a stranger
+            # holding that number answers forever. Saying nothing there is a refusal
+            # that names no way out. The `ps -p` gate is what keeps the `rm` from
+            # being advice to unlink a live rail's own record.
             if prior.pid:
-                hint = ""
+                hint = (f" — verify with `ps -p {prior.pid}`: a genuine wrapper lifts "
+                        "this when it exits, and a RECYCLED pid never does; if that "
+                        f"process is not this PR's rail, clear it with: rm {prior.artifact}")
             elif prior.child > 0:
                 hint = (f" — the rail named CHILD_PID={prior.child} and that process "
                         "answers, so no CLOCK lifts this claim: it lifts only when "
