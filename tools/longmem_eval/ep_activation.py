@@ -862,7 +862,7 @@ def activate_beliefs(sdk, *, namespace: str | None = None,
     #     ``test_an_operator_minted_over_live_claims_moves_its_conclusion``
     #     measures at conf 0.5945 with ``factors == 1``), while
     #     ``_promote_operator_row`` returns ``False`` and the manifest publishes
-    #     ``operators_promoted: 0, factors: 0, no_ep_reason: 'no_ep_factors'``
+    #     ``operators_promoted: 0, factors: 0, no_op_reason: 'no_ep_factors'``
     #     with the conclusion unmeasured. That direction is DELIBERATE (engine
     #     parity: the engine keeps it draft too, pinned by
     #     ``test_the_gate_reads_every_operator_edge_not_just_impl``), and it is
@@ -910,7 +910,10 @@ def activate_beliefs(sdk, *, namespace: str | None = None,
     # ⚠️ ``operators_promoted: 1, factors: 0`` is NOT by itself a defect signal,
     # and must not be read as one. The endpoint read is the ENGINE's, so a
     # part/whole (``hasPart``) operator over live claims IS promoted by this
-    # sweep — as it is by the engine — and EP builds no factor from ``hasPart``
+    # sweep, and the ENGINE's gate would admit it too (its read has no edge-type
+    # filter) — though the engine has no graph-wide sweep, so for already-live
+    # claims this sweep is the only route that exists. EP builds no factor from
+    # ``hasPart``
     # by design (``_FACTOR_EDGE_TYPES``). Measured: a ``composedOf`` operator
     # over two live claims publishes exactly ``operators_promoted=1, factors=0,
     # no_op_reason='no_ep_factors'`` while being a correct, engine-identical
