@@ -44917,12 +44917,15 @@ async def oauth_authorize(request: Request):
     # app never advanced this flow ⇒ hand the COMPLETE request to the app's
     # sign-in leg and let the one origin that holds the session decide.
     # ⛔ The predicate is the READERS' one — `presented_consent_attempt_key`, FIRST
-    # value, STRIPPED — not `query_params.get`, which answers the raw first value
-    # and so made blank and whitespace-only DIFFERENT states here while
-    # `consent_bounce_url` already judged both absent (#10487 review): a blank value
-    # bounced correctly but the bounce then emitted `<blank>&attempt_key=<minted>`,
-    # and a `%20` value did not bounce at all — the page rendered and `start.ts`
-    # bound the row to the guessable one-character key `" "`.
+    # value, STRIPPED — not `query_params.get`, which answers the raw value
+    # UNSTRIPPED (and, on a duplicate pair, the LAST one — Starlette's
+    # `ImmutableMultiDict` stores `values[-1]`, so it is not a first-value reader
+    # and must not be described as one) and so made blank and whitespace-only
+    # DIFFERENT states here while `consent_bounce_url` already judged both absent
+    # (#10487 review): a blank value bounced correctly but the bounce then emitted
+    # `<blank>&attempt_key=<minted>`, and a `%20` value did not bounce at all — the
+    # page rendered and `start.ts` bound the row to the guessable one-character key
+    # `" "`.
     if not presented_consent_attempt_key(request.url.query):
         return RedirectResponse(
             consent_bounce_url(app_origin, request.url.query), status_code=302)

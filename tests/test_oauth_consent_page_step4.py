@@ -1259,11 +1259,18 @@ def test_the_bounce_does_not_append_a_SECOND_key_when_the_flow_already_has_one()
     # one state rather than two: `oauth_authorize` bounces on the stripped predicate above, so
     # `%20` reaches this function in place of a key exactly like `` does.
     # ⛔ Assert what the READERS see — the FIRST value — not that a minted key exists SOMEWHERE in
-    # the string. ``["", "<minted>"]`` satisfies "a key is present" while all three readers
-    # (`request.query_params.get`, `start.ts::searchParams.get`, the page's `attemptKey()`) take the
-    # blank first value: `start` then minted its own key, i.e. the AS mint was dead on exactly the
-    # input it was added for. The whitespace form was worse — `%20` is TRUTHY upstream, so the page
-    # rendered and `start.ts` bound the row to the guessable one-character key `" "` (#10208).
+    # the string. ``["", "<minted>"]`` satisfies "a key is present" while BOTH consumers of the
+    # value (`start.ts::searchParams.get`, the page's `attemptKey()` — JS `URLSearchParams.get`
+    # included) take the blank first value: `start` then minted its own key, i.e. the AS mint was
+    # dead on exactly the input it was added for. The whitespace form was worse — `%20` is TRUTHY
+    # upstream, so the page rendered and `start.ts` bound the row to the guessable one-character
+    # key `" "` (#10208).
+    #
+    # ⛔ `request.query_params.get` is NOT a first-value reader and must not be listed as one
+    # (review P3). Starlette's `ImmutableMultiDict.__getitem__` returns `_dict[key]`, and `setlist`
+    # stores `values[-1]` — the LAST value (verified against the installed Starlette, not the
+    # prose). It is the AS's own reader, and the single-key emit is what makes it AGREE with the
+    # two first-value consumers; it was never pinned by the same assertion.
     for blankish in ("", "%20", "+"):
         blank = consent_bounce_url(
             APP_ORIGIN, f"client_id=c1&state=s1&{CONSENT_ATTEMPT_KEY_PARAM}={blankish}")
@@ -1272,14 +1279,104 @@ def test_the_bounce_does_not_append_a_SECOND_key_when_the_flow_already_has_one()
         keys = inner_blank[CONSENT_ATTEMPT_KEY_PARAM]
         assert len(keys) == 1, (
             f"the bounce emitted {len(keys)} attempt_key values for the blank input "
-            f"{blankish!r}. Every reader takes the FIRST value, so a blank pair beside a minted "
-            f"key leaves the mint unread and `start` mints its own: {keys}")
+            f"{blankish!r}. The page and `start.ts` take the FIRST value, so a blank pair beside "
+            f"a minted key leaves the mint unread and `start` mints its own: {keys}")
         assert len(keys[0].strip()) >= 32, (
             f"the blank input {blankish!r} was adopted as the flow's key instead of being "
             f"replaced by a minted one — a guessable key reopens the ownerless window (#10208): "
             f"{keys}")
         # The forwarded authorize request still rides along verbatim — only the key was replaced.
         assert (inner_blank["client_id"], inner_blank["state"]) == (["c1"], ["s1"]), inner_blank
+
+    # ⛔ A DUPLICATE PAIR — the ONE input the blank arms above cannot reach (review P2). Neither
+    # `""`, `"%20"` nor `"+"` is a duplicate, so a suite made only of those arms stays green while
+    # the collapse branch (`tortoise/oauth.py`: `if presented or not stripped: continue`) is
+    # deleted — measured: flipping it to `if not stripped:` leaves every other assertion in this
+    # file green and emits TWO `attempt_key` segments, restoring exactly the first-reader /
+    # last-reader disagreement #10487 was filed for. It is the page's own sign-in link that can be
+    # handed a pair (its `raw_query` is the caller's), and there a second segment puts the page and
+    # `start.ts` on different keys → `403 flow_not_yours` after sign-in.
+    #
+    # WHICH value must survive is not free: the page and `start.ts` read the FIRST value, so the
+    # collapse must ADOPT the first non-blank one and DROP the rest — never mint over it.
+    for label, raw_dup, expected in (
+        ("blank FIRST then a real key",
+         f"client_id=c1&state=s1&{CONSENT_ATTEMPT_KEY_PARAM}="
+         f"&{CONSENT_ATTEMPT_KEY_PARAM}=K2", "K2"),
+        ("real key FIRST then blank",
+         f"client_id=c1&state=s1&{CONSENT_ATTEMPT_KEY_PARAM}=K2"
+         f"&{CONSENT_ATTEMPT_KEY_PARAM}=", "K2"),
+        ("two different real keys",
+         f"client_id=c1&state=s1&{CONSENT_ATTEMPT_KEY_PARAM}=K1"
+         f"&{CONSENT_ATTEMPT_KEY_PARAM}=K2", "K1"),
+    ):
+        dup = consent_bounce_url(APP_ORIGIN, raw_dup)
+        inner_dup = parse_qs(urlsplit(parse_qs(urlsplit(dup).query)["next"][0]).query,
+                             keep_blank_values=True)
+        dup_keys = inner_dup[CONSENT_ATTEMPT_KEY_PARAM]
+        # ⛔ THE VALUE, NOT JUST THE SHAPE. Asserting only `len(keys) == 1 and keys[0]` lets an
+        # implementation that MINTED instead of ADOPTING a caller's real key pass every test —
+        # measured on main (#10757): replacing the adopt-the-first-survivor expression with a bare
+        # mint left the suite green. "Whatever the page reads first" is the assertion.
+        assert dup_keys == [expected], (
+            f"a duplicate pair ({label}) must collapse to exactly ONE key, and it must be the "
+            f"FIRST non-blank value the caller presented ({expected!r}): got {dup_keys}. The "
+            f"page reads the first value, so minting here instead of adopting puts the page and "
+            f"`start.ts` on different keys and restores `403 flow_not_yours` after sign-in")
+
+    # Every OTHER segment survives BYTE-EXACT — compared as bytes, not re-parsed, because the bug
+    # this guards is a re-ENCODING (`+` vs `%20`) that `parse_qs` would normalise away.
+    passable_raw = (f"redirect_uri=https%3A%2F%2Fc.example%2Fcb%3Fa%3D1&state=s1"
+                    f"&{CONSENT_ATTEMPT_KEY_PARAM}=")
+    emitted_passable = consent_bounce_url(APP_ORIGIN, passable_raw)
+    inner_raw = urlsplit(parse_qs(urlsplit(emitted_passable).query)["next"][0]).query
+    assert inner_raw.startswith("redirect_uri=https%3A%2F%2Fc.example%2Fcb%3Fa%3D1&state=s1&"), (
+        f"the mint path re-encoded a pass-through segment: {inner_raw}")
+
+
+def test_the_FIRST_value_predicate_and_the_AS_multidict_REALLY_do_disagree() -> None:
+    """The one FACT three comments on this hop got backwards (review P3, #10487).
+
+    `hosted_api.oauth_authorize` used to select the page-vs-bounce branch with
+    `request.query_params.get(...)`. Three sites on this hop described that reader as taking the
+    FIRST value — the same value `start.ts::searchParams.get` and the page's `attemptKey()` take —
+    so the single-key emit looked like a tidiness measure rather than the load-bearing thing it is.
+
+    It is not a first-value reader: Starlette's `ImmutableMultiDict.__getitem__` returns
+    `_dict[key]`, and `setlist` stores `values[-1]` — the LAST value. (Upstream documentation has
+    described it as "first" and been wrong; this asserts the library, not the prose.) So on a
+    duplicate pair the two readings genuinely DISAGREE, on both a blank-first and a two-real-key
+    pair — which is why the live predicate takes the consumers' reading and why
+    `consent_bounce_url` must emit exactly one segment instead of relying on any ordering.
+
+    Non-vacuity: this reds if `presented_consent_attempt_key` is ever changed to a last-value read
+    (the first assert pair), or if Starlette's `__getitem__` starts answering the first value (the
+    second) — i.e. exactly the two ways the comment that was deleted could come back true.
+    """
+    from urllib.parse import parse_qs
+
+    from starlette.datastructures import QueryParams
+
+    from tortoise.oauth import CONSENT_ATTEMPT_KEY_PARAM, presented_consent_attempt_key
+
+    # (1) blank FIRST: the AS's old reader saw a key, the consumers' predicate sees none.
+    blank_first = f"{CONSENT_ATTEMPT_KEY_PARAM}=&{CONSENT_ATTEMPT_KEY_PARAM}=K2"
+    assert presented_consent_attempt_key(blank_first) == "", (
+        "the consumers' predicate must read the FIRST value, so a blank first segment is ABSENT "
+        "— this is what makes `%20`/`` one state at the AS (#10208)")
+    assert parse_qs(blank_first, keep_blank_values=True)[CONSENT_ATTEMPT_KEY_PARAM][0] == ""
+    assert QueryParams(blank_first).get(CONSENT_ATTEMPT_KEY_PARAM) == "K2", (
+        "`query_params.get` must answer the LAST value — if this reds, Starlette changed and the "
+        "comments that claim it is a FIRST-value reader are not the only thing that was stale")
+
+    # (2) two real keys: FIRST for the consumers, LAST for that reader.
+    two_keys = f"{CONSENT_ATTEMPT_KEY_PARAM}=K1&{CONSENT_ATTEMPT_KEY_PARAM}=K2"
+    assert presented_consent_attempt_key(two_keys) == "K1"
+    assert QueryParams(two_keys).get(CONSENT_ATTEMPT_KEY_PARAM) == "K2"
+    assert presented_consent_attempt_key(two_keys) != QueryParams(two_keys).get(
+        CONSENT_ATTEMPT_KEY_PARAM), (
+        "the disagreement this hop's single-key emit exists to remove is no longer real — either "
+        "the predicate stopped being a first-value read, or the library changed")
 
 
 @pytest.mark.parametrize("blankish", ["", "%20", "+"])
