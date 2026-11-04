@@ -650,7 +650,7 @@ def _wait_bound_refused() -> bool:
 #:   * ``tortoise_search`` (``entity_type="point"``) indexes ``content`` +
 #:     ``search_keys`` only, while ``sdk.create_operator`` writes a ``:Point``
 #:     with ``{id, is_operator, op_type, direction, direction_basis, status}``,
-#:     plus ``label`` only ``if label:``, and NO ``content`` (``sdk.py:22417``) —
+#:     plus ``label`` only ``if label:``, and NO ``content`` (``sdk.py:22420``) —
 #:     so for EVERY created operator the recipe
 #:     returns nothing, "nothing" reads as "it did not commit", and the retry
 #:     duplicates the edge and double-counts its EP factor. That is the exact
@@ -787,12 +787,12 @@ def _arguments_disable_convergence(name: str, arguments) -> bool:
     #   * `entities` of type document/event are APPEND-ONLY (`sdk.py` "Document
     #     records are append-only — never deduped"; `docs/INGEST_CONTRACT.md` row
     #     1 `append_only_items`), and the SDK lowercases the type on BOTH legs
-    #     (`sdk.py:23731` admission, `sdk.py:27119` dispatch), so a case variant
+    #     (`sdk.py:23734` admission, `sdk.py:27122` dispatch), so a case variant
     #     reaches the writer too;
     #   * `bundle` may arrive as a JSON STRING — the handler calls
     #     `_parse(bundle)` after this seam runs and the served schema puts no
     #     `type` on it — so `json.dumps(...)` bypassed the whole check;
-    #   * and a bundle's points SPLAT `props` FLAT (`sdk.py:26661`: `[{kind,
+    #   * and a bundle's points SPLAT `props` FLAT (`sdk.py:26664`: `[{kind,
     #     content, ref?, status?, **props}]`), so a caller puts `is_operator`
     #     BESIDE `kind` rather than inside `props` — measured, that mints a
     #     second node while every key-allow-list reads it as props-free.
@@ -804,13 +804,15 @@ def _arguments_disable_convergence(name: str, arguments) -> bool:
         return False
     if _call_carries_props(arguments) or _call_folds_siblings_into_props(arguments):
         # ⛔ `props` is CALLER-CONTROLLED and open-ended, so no allow-list of prop
-        # keys can prove convergence — and a payload naming `is_operator` really
-        # does defeat the fold. Do not state that as "props defeats the fold" for
-        # ALL props: measured, `props={"confidence": 0.9}` and
-        # `props={"label": "supports"}` both fold onto the same id, and only
-        # `is_operator` mints a second node. The rule below is "proven only for a
-        # props-free call", which is about provability, not about what one
-        # particular payload does. Measured: `create_point(content=X, props={"is_operator":
+        # keys can prove convergence — and that is the WHOLE rule. Do not try to
+        # characterise the payloads instead, in either direction: "props defeats
+        # the fold" is false (`props={"confidence": 0.9}`, `{"label": "supports"}`
+        # and `{"op_type": "NAND"}` all fold onto one id, measured), and so is
+        # "only `is_operator` does" (`props={"pointKind": "decision"}` mints a
+        # SECOND node, measured — the props passthrough carries `pointKind` and it
+        # WINS over the positional kind, which the fold scopes on). Two measured
+        # examples, in opposite directions, and no finite list either way: that is
+        # why the rule is provability and not an enumeration. Measured: `create_point(content=X, props={"is_operator":
         # True})` twice mints TWO nodes with DIFFERENT ids, because the fold's own
         # predicate EXCLUDES operator nodes (`sdk.py`: `WHERE (n.is_operator IS
         # NULL OR n.is_operator = false) AND (n.op_type IS NULL OR n.is_operator =
@@ -871,7 +873,11 @@ def _call_folds_siblings_into_props(arguments) -> bool:
     # WRONG here and fails OPEN: `credibility` is a documented numeric ladder
     # ("T0-T4 or numeric 0-4") and `0 == False` in Python, so `credibility=0` read
     # as ABSENT while the handler folds it — and the call was then advertised
-    # `retry_safe: true` even though it carries a props payload.
+    # `retry_safe: true`. ⛔ It is NOT a props payload: `credibility` is a declared
+    # keyword-only parameter on `create_point`, so the handler's `merged` key binds
+    # THERE, never `**props`. The disqualifier is this check being conservative
+    # (the value channel is caller-controlled and `0 == False` fails open), not a
+    # write — measured byte-identical.
     #
     # ⛔ Do not claim that repeat WRITES: measured with the handler's own argument
     # shape, the second `create_point(kind, C, credibility=0, dedup=True)` produced

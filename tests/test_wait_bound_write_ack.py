@@ -226,8 +226,14 @@ def test_retry_safe_is_derived_from_the_registry_not_a_second_list():
         "double-counts the claim's EP weight (#10849)")
 
 
-def test_a_PROPS_PAYLOAD_defeats_the_dedup_fold_so_it_is_never_called_safe():
-    """`props` is an OPEN caller channel onto the node, and it can defeat dedup.
+def test_any_PROPS_PAYLOAD_makes_convergence_unprovable_so_it_is_never_called_safe():
+    """`props` is an OPEN caller channel onto the node, so it is never called safe.
+
+    ⛔ The claim is UNPROVABILITY, not "props defeats the fold" — that would be
+    false for most payloads (see the counter-examples below, which fold onto one
+    id) and the test name would then over-describe the population it drives. Two
+    payloads are known to mint a second node and neither bounds the set; that is
+    precisely why the rule is provability.
 
     Measured through the real MCP door, `create_point(content=X,
     props={"is_operator": True})` twice mints TWO nodes with DIFFERENT ids (and
@@ -266,10 +272,14 @@ def test_a_PROPS_PAYLOAD_defeats_the_dedup_fold_so_it_is_never_called_safe():
     # does not rest on that measurement.)
     assert safe("tortoise_create_point",
                 {"content": "X", "props": {"props": {"is_operator": True}}}) is False
-    # ⛔ And `props` is not the only argument the handler folds into the props
-    # dict: `authoredBy` / `credibility` are merged into it before the write, so a
-    # call carrying neither `props` NOR a folded sibling is the only props-free
-    # shape. Measured:
+    # ⛔ And `props` is not the only argument that disqualifies the call: the
+    # handler merges `authoredBy` and `credibility` into the SAME keyword bundle
+    # before the write, so the per-call check mirrors those two conditions too —
+    # and it must, or `credibility=0` (a real tier, and `0 == False` in Python)
+    # would read as absent and fail OPEN. ⛔ `credibility` is keyword-only on
+    # `create_point`, so it never reaches `**props`: it disqualifies because the
+    # check is conservative, not because it writes (measured byte-identical).
+    # Measured for `authoredBy`:
     # `create_point(content=x, authoredBy="me", dedup=True)` twice returns the
     # same id but the second lands on the dedup-hit UPDATE leg, emits
     # `PointRevised` and bumps `updatedAt` — so the repeat is visible to a reader
@@ -277,9 +287,10 @@ def test_a_PROPS_PAYLOAD_defeats_the_dedup_fold_so_it_is_never_called_safe():
     for sibling in ({"authoredBy": "me"}, {"credibility": 0.8},
                     {"credibility": 0}, {"credibility": 0.0}):
         assert safe("tortoise_create_point", {"content": "X", **sibling}) is False, (
-            f"{sibling} is folded into props by the handler — note `credibility=0`"
-            " is a real tier (T0), and `0 == False` in Python, so a truthiness test"
-            " reads it as absent while the handler folds it (`0 is not None`)")
+            f"{sibling} is folded by the handler into the argument bundle the write"
+            " takes, and the per-call check mirrors that — note `credibility=0` is a"
+            " real tier (T0) and `0 == False` in Python, so a truthiness test reads"
+            " it as absent and the call fails OPEN (`0 is not None`)")
 
 
 def test_a_STATE_conditional_writer_is_never_called_safe():
@@ -556,7 +567,7 @@ def test_an_ingest_bundle_with_append_only_entities_is_not_repeatable():
     # the RESOLUTION rather than an oversight: three review rounds each closed ONE
     # spelling of this hole (the append-only entities leg, the JSON-string bundle,
     # and the FLAT `props` splat), which is the signal that the enumeration is the
-    # defect. `sdk.py:26661` documents the points form as `{kind, content, ref?,
+    # defect. `sdk.py:26664` documents the points form as `{kind, content, ref?,
     # status?, **props}` — so `is_operator` sits BESIDE `kind`, not in `props`, and
     # no key allow-list sees it. The bundle's key space is open-ended, so the seam
     # reports what it knows ("not provable") instead of a claim it cannot ground.
