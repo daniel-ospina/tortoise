@@ -3804,6 +3804,17 @@ surfaces:
   # `core` beside the other gate pins (`test_ci_selection.py`,
   # `test_merge_throughput.py`) because it constrains CI config, not the engine.
   - test_required_set_sync.py
+  # #2148 (owner's question, 2026-11-04): a fold's constituents must not land ahead
+  # of the fold. `tools/batch_open.py` closes a constituent ONLY when its work is
+  # provably in the fold tree, and `.mergify.yml`'s `queue_conditions` carries
+  # `-label=superseded-by-fold` so a labelled constituent is refused at queue ENTRY
+  # (auto_merge_conditions queues anything matching, with no human click — measured:
+  # fold #10894 was open while #10543/#10610/#10575 were all still eligible).
+  # The guard also re-asserts the configuration contract, whose breach deadlocks the
+  # queue for EVERY PR, and pins mechanism 3 as ORDERING rather than a `fold` runner
+  # pool (this fleet registers no such label; `runs-on` is the selector's alone).
+  # Hermetic: no DB, no network, no `gh`; every git/gh surface is injected.
+  - test_batch_gate.py
   # #6884: pins the `uri_requiring` declaration (re-derived BEHAVIOURALLY — it
   # runs the failing `pytest --collect-only` with an EMPTY TORTOISE_DB_URI and
   # compares) and

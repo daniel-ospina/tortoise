@@ -5,9 +5,9 @@ domain: platform
 doc_status: live
 subjects.team: epistemic-team
 aboutSubjects: batch-integration, ci-wall-clock, ci-headroom-guards
-aboutObjects: tortoise, "#10399", .mergify.yml, .github/workflows/python-ci.yml, .github/workflows/post-merge-validation.yml, config/ci-surfaces.yml
+aboutObjects: tortoise, "#10399", "#2148", .mergify.yml, .github/workflows/python-ci.yml, .github/workflows/post-merge-validation.yml, config/ci-surfaces.yml, tools/batch_open.py, superseded-by-fold
 created: 2026-10-31
-updated: 2026-10-31
+updated: 2026-11-04
 ---
 
 # Batch integration — the gate is the batch, not the PR
@@ -940,6 +940,71 @@ count of it, because the set grows and any number written here is stale by the n
 Plain `uv sync` silently drops the dense-retrieval extras; retrieval then degrades to keyword-only and
 the run reports green for a product that no longer has embeddings. `uv sync --extra embeddings` alone
 drops `parity` (pyarrow). The extras are part of the lane definition, not setup trivia.
+
+### Before Phase 1 — close the constituents, so none of them lands ahead of the batch
+
+The batch is only *one* path to `main`. `.mergify.yml` sets
+`merge_protections_settings.auto_merge_conditions: true`, so **every PR that matches
+`queue_conditions` is queued with no human click** — including a constituent whose work the batch
+already carries. A constituent that wins that race is validated (~37 min) and squash-merged alone,
+and the batch then applies the same diff to a `main` that has moved, so its `tested-tree` is no
+longer the tree that lands (see [Landing](#landing--main-must-still-be-the-tree-you-tested)).
+
+That is not hypothetical. Measured 2026-11-04 with 32 open PRs and 10 open batch PRs: **7 of 7**
+open PRs named as some batch's constituent were ADMITTED by the entry gate. They were #10543
+(in #10894 and #10702), #10575 (#10894, #10704), #10610, #10641, #10850 and #10867 (the latter
+two both in #10880), and #10856 (#10895) — every one of them separately eligible to land ahead
+of the batch carrying it.
+
+Two mechanisms close that, and they are complementary — neither is sufficient alone:
+
+1. **The queue refuses a labelled constituent at ENTRY.** `queue_conditions` carries
+   `-label=superseded-by-fold`. Entry, not merge, because `merge_conditions` is evaluated against
+the queue *branch*, which carries no author labels — a label condition there could never become
+true and would **deadlock the queue for every PR**. Mergify also evicts an already-queued PR that
+stops satisfying `queue_conditions`, so the same line drains the queue.
+   ⚠️ **Measured limit: this gate refuses nothing until the label is applied.** With no label, all
+   7 were still admitted. So mechanism 2 is load-bearing; mechanism 1 is the belt.
+2. **`tools/batch_open.py` labels and closes the constituents when the batch opens.** A closed PR
+   cannot be queued, merged, or spend a runner slot.
+
+```bash
+# Dry run first — it mutates nothing and reports every constituent, contained or not.
+uv run python tools/batch_open.py --fold <batch PR> --constituent <n> --constituent <n>
+
+# Gate the queue without closing anything (reversible in one command):
+uv run python tools/batch_open.py --fold <batch PR> --label-only
+
+# Label + comment + close, once the dry run is clean:
+uv run python tools/batch_open.py --fold <batch PR> --apply
+```
+
+The tool closes a constituent **only** when its work is provably in the batch tree, by one of two
+routes: `CONTAINED-ANCESTOR` (`git merge-base --is-ancestor`) or `CONTAINED-CONTENT` (reverse-apply
+the constituent's own diff inside a scratch worktree of the batch head — the route that survives a
+squash-built batch, where ancestry is false though the work is present). Anything else is reported
+and **kept**, under `--apply` as well. Closing a PR whose work no batch carries destroys it.
+
+⛔ **The constituent list is never parsed from prose.** A batch title routinely names a PR it
+deliberately did **not** fold — #10894's title names `#10641`, which was dropped. Deriving the close
+list from that would close a PR the batch never carried, so the tool requires either a
+`fold-constituents: <n>, <n>` line in the batch PR body or explicit `--constituent` arguments, and
+exits 2 (listing the prose references only as a hint) when neither is present.
+
+The label is also what unblocks a PR: if the batch is abandoned, re-open the constituent and remove
+`superseded-by-fold`.
+
+**Priority for the batch itself.** A batch adds `queue-accelerator`, which the existing
+`priority_rules` resolves to `priority: high` with `allow_checks_interruption: true` — so the batch
+is not held behind dozens of constituents. That interruption spends CI time already paid for; it is
+the queue's own reliability/velocity trade, which is why the label goes on a batch and never on a
+preference. It is deliberately **not** a separate runner pool: this fleet registers no such label
+(`install-ci-runner-x64.sh --print-labels` → `self-hosted-x64`), and a `runs-on` naming an
+unregistered label selects zero runners — a job that never starts and never reports, which is worse
+than waiting in a queue.
+
+A batch PR is **still opened as a draft** and still owes every required context: closing the
+constituents removes the race, it does not exempt the batch from the landing rail.
 
 ## Aftermath
 
