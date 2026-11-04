@@ -624,7 +624,7 @@ exec {real} "$@"
                 "#!/usr/bin/env bash\n"
                 '# An ambient (host-PATH) stub: its OWN rows, not the fixture\'s.\n'
                 'case "$*" in\n'
-                f'  *command=*) cat {rows} ;;\n'
+                f'  *command=*) cat "{rows}" ;;\n'
                 "  *time=*)    printf '0 0 00:00:00\\n' ;;\n"
                 "  *)          exit 1 ;;\n"
                 "esac\n")
