@@ -24,8 +24,10 @@ Exit codes
 ----------
     0  the link resolves to ``$AGENT_INFRA_PATH/scripts`` (``--check``: and it already did)
     1  the link is missing, dangling, or points somewhere else (``--check``: a failure)
-    2  config error — no agent-infra checkout with a ``scripts/`` dir could be found, or an
-       explicit ``--infra`` was passed and has none (it is AUTHORITATIVE, never a first try)
+    2  config error OR cannot verify — no agent-infra checkout with a ``scripts/`` dir could be
+       found, an explicit ``--infra`` was passed and has none (it is AUTHORITATIVE, never a first
+       try), or a path that had to be resolved/read could not be (an unexpandable ``~``, a
+       symlink loop in ``--repo``, an unreadable pointer)
 
 ``--pin-check`` answers a DIFFERENT question — is the checkout behind this pointer the tree this
 box is PINNED to (``$HARNESS_PIN`` / ``${CELL_HOME:-$HOME}/.pi/agent/state/HARNESS-PIN``)? It never touches the
@@ -412,7 +414,22 @@ def pin_state(infra: Path, pin: Path | None) -> tuple[str, str]:
     head_sha = head.stdout.strip()
 
     present = _git(infra, "cat-file", "-e", f"{sha}^{{commit}}")
-    if present is None or present.returncode != 0:
+    if present is None:
+        # ``None`` is a TIMEOUT or a git that would not run at all — that is not an answer about
+        # the pin, so it cannot be "the pin is absent".
+        return PIN_UNREADABLE, (
+            f"git could not answer whether {infra} contains the pin {sha[:12]} — "
+            "cannot verify"
+        )
+    if present.returncode != 0:
+        # ⛔ NOT classified as an error, and that is MEASURED, not assumed: ``git cat-file -e``
+        # exits **128** both for an object this checkout simply does not have and for a broken
+        # object DB — it never uses 1 for "absent" the way ``merge-base --is-ancestor`` uses 1 for
+        # "no" (verified: a valid sha from another repo gives 128 here, and so does a garbage one).
+        # ``rev-parse --verify HEAD`` already SUCCEEDED above, so git can read this repository;
+        # an absent pin object in a readable repo is precisely the #10114 stale-checkout case, and
+        # reporting it as "cannot verify" would turn the drift verdict this whole module exists to
+        # deliver into exit 2 for every box whose checkout predates its pin.
         return PIN_ABSENT, (
             f"{infra} does not contain the pinned commit {sha[:12]} — the checkout predates the "
             "pin, so anything resolved through it is older than what this box runs"
@@ -420,11 +437,25 @@ def pin_state(infra: Path, pin: Path | None) -> tuple[str, str]:
 
     if head_sha == sha:
         return PIN_OK, f"{infra} is AT the pin {sha[:12]}"
+    # ⛔ ``merge-base --is-ancestor`` DOES use git's documented three-way contract — 0 = yes,
+    # 1 = no, >1 = error — so anything other than 0/1 (and ``None`` for a timeout) is a git that
+    # could not ANSWER, and falling through to DIVERGED would print "neither is an ancestor of the
+    # other" plus a ``git checkout`` remedy for a repository git never managed to inspect.
     contains = _git(infra, "merge-base", "--is-ancestor", sha, head_sha)
-    if contains is not None and contains.returncode == 0:
+    if contains is None or contains.returncode not in (0, 1):
+        return PIN_UNREADABLE, (
+            f"git could not decide whether {head_sha[:12]} contains the pin {sha[:12]} — "
+            "cannot verify"
+        )
+    if contains.returncode == 0:
         return PIN_OK, f"{infra} ({head_sha[:12]}) carries the pin {sha[:12]}"
     behind = _git(infra, "merge-base", "--is-ancestor", head_sha, sha)
-    if behind is not None and behind.returncode == 0:
+    if behind is None or behind.returncode not in (0, 1):
+        return PIN_UNREADABLE, (
+            f"git could not decide whether the pin {sha[:12]} is ahead of {head_sha[:12]} — "
+            "cannot verify"
+        )
+    if behind.returncode == 0:
         distance = _git(infra, "rev-list", "--count", f"{head_sha}..{sha}")
         count = (
             distance.stdout.strip() if distance is not None and distance.returncode == 0 else "?"
