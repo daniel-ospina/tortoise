@@ -193,10 +193,16 @@ direction from the three widening exceptions the module names
 `public.source.summary` and `public.source._search_text` are §9.1/D1 turn prose
 when the Source is a captured session, so
 `cache_projection._EPISODIC_SOURCE_PROSE_COLUMNS` declines to project them onto
-the node. The record keeps the values (the row is not mutated, and they are
-retrievable by a column read — `record_serve.read_node`, `record-text`; there is
-no record-side text INDEX), and `topics` — the capture's word lexicon — still
-projects.
+the node. The record keeps the values (the row is not mutated), and `topics` —
+the capture's word lexicon — still projects.
+
+⛔ **No in-tree verb reads the declined pair back** (#10867 review, P2).
+`record_serve.read_node` returns *this* projector's map — the narrowed one — and
+`record-text` reads `public.session_narrative`, a different table holding the
+session-level summary, never `public.source.summary`. The only read is a direct
+`SELECT summary, _search_text FROM public.source WHERE url = …`, and there is no
+record-side text INDEX. Stated in the negative because the opposite was written
+here first and it is the load-bearing half of "safe to decline".
 
 Why it lives here rather than only in the capture: every record-sourced read and
 rebuild goes through `cache_projection.node_from_row` — `tortoise record-restore`
@@ -239,7 +245,8 @@ title-derived `_searchText`, silently un-indexing it in the cache.
 
 * the **journal fold** still projects the value until #10000's capture-side change
   lands, so the two rebuild paths disagree on that one column until then — in the
-  ruling's direction, and converging with it;
+  ruling's direction, and it does **not** converge on its own (see the obligation
+  below);
 * graph-side FTS over a session Source's own utterances goes with the prose. The
   value survives in the record (retrievable by a column read; there is no
   record-side text index), and #10000 replaces the capture's summary with a topic
@@ -255,6 +262,22 @@ title-derived `_searchText`, silently un-indexing it in the cache.
   record that is correct. The graph side is repaired by a record-sourced
   re-projection (`record-restore` / `rebuild_from_record`, which re-materialise
   through this projector), then by #10000's capture change.
+
+### Obligation: `#10852` DELETES this rule, it does not converge with it
+
+`#10852` replaces the capture's `summary` with a TOPIC LEXICON descriptor and
+derives `_searchText` from `topics` — §4.4 metadata, not §9.1/D1 prose, which is
+what `docs/architecture/STORAGE-ARCHITECTURE.md:527` rules (*"`summary`/`title`
+stay on the node"*). The narrowing above is keyed on the ROW's IDENTITY, so it
+cannot tell that provenance from the prose: it would decline both, on the
+record→cache door only (the live journal fold keeps them), and the reconciler
+subtraction would keep that out of the mismatch count. So this rule is correct
+for a pre-fix row and **wrong** for a post-`#10852` one, and it must not outlive
+it — `#10852` deletes `_EPISODIC_SOURCE_PROSE_COLUMNS`, both guard doors in
+`_props_from_row`, `episodic_source_prose_properties`, `is_episodic_source_node`
+and the `scan_cache_view` subtraction, and adds a leg that a lexicon `summary` +
+a topics-derived `_searchText` SURVIVE the door with the rebuilt session Source
+still Source-FTS-indexed. Recorded on #10853 as a follow-up obligation.
 
 ### The pin
 

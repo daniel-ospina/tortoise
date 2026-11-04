@@ -91,11 +91,15 @@ THE FOUR PROPERTIES, AND WHERE EACH LIVES
 
    * the **journal fold** still projects the value until #10000's capture-side
      change lands, so the two rebuild paths disagree on that one column until
-     then — in the ruling's direction, and converging with it;
+     then — in the ruling's direction. ⛔ It does NOT converge by itself: see the
+     OBLIGATION below, which `#10852` owes;
    * **graph-side FTS** over a session Source's own utterances goes with the
-     prose. The value survives in the record and is retrievable by a column read
-     (`record_serve.read_node`, `record-text`); there is no record-side text
-     INDEX;
+     prose. The value survives in the RECORD (the row is not mutated), but no
+     in-tree verb serves it back: `record_serve.read_node` returns this very
+     projector's narrowed map, and `record-text` reads
+     `public.session_narrative` — a different table and a different datum — so
+     the only read is a direct `SELECT summary, _search_text FROM public.source
+     …`, and there is no record-side text INDEX;
    * **`record-reconcile`** builds its RECORD side through this same projector,
      so its truth side omits what the cache holds. The population is NOT
      "legacy": at this head the capture still writes and journals the pair, so
@@ -107,6 +111,24 @@ THE FOUR PROPERTIES, AND WHERE EACH LIVES
      The graph side is repaired by a record-sourced re-projection
      (`record-restore` / `rebuild_from_record`, which re-materialise through this
      projector), then by #10000's capture change.
+
+   ⛔ **OBLIGATION `#10852` OWES — named, not assumed (#10867 review, P1).**
+   `#10852` replaces the capture's `summary` with a TOPIC LEXICON descriptor and
+   derives `_searchText` from `topics` — a §4.4 METADATA value
+   (`STORAGE-ARCHITECTURE.md:527`: *"`summary`/`title` stay on the node — they
+   are §4.4 metadata, not the prose"*), not §9.1/D1 prose. This narrowing is
+   keyed on the ROW IDENTITY, never on the value's provenance, so it would
+   strip that descriptor too — on the record→cache door only, while the live
+   journal fold keeps it — and the reconciler is told not to judge the pair, so
+   nothing reds. It is correct for a pre-fix row and WRONG for a post-`#10852`
+   one, and it must not outlive it: `#10852` DELEGATES to this table, it does
+   not merely "converge" with it. `#10852` therefore deletes
+   :data:`_EPISODIC_SOURCE_PROSE_COLUMNS`, both guard doors in
+   :func:`_props_from_row`, :func:`episodic_source_prose_properties`,
+   :func:`is_episodic_source_node` and the `record_reconcile.scan_cache_view`
+   subtraction, and adds a leg that a lexicon `summary` + a topics-derived
+   `_searchText` SURVIVE the door and the rebuilt session Source is still
+   Source-FTS-indexed. Recorded on #10853 as the follow-up obligation.
 4. **A cold region reads ``not-hot``, never ``empty``.** ``declaration_for``
    writes the known-hot set **after** the writes and as a function of what was
    materialized, so a record key the projection did not write is not claimed
@@ -1233,9 +1255,22 @@ def _scalar(value: Any) -> Any:
 #: :func:`episodic_source_prose_properties` and
 #: `record_reconcile.scan_cache_view` mark the pair CACHE-OWNED for an episodic
 #: Source, and the reconciler counts them under `graph_only` — visible, and not
-#: a divergence against a record that is correct. The repair for the graph side
-#: is a record-sourced re-projection (`record-restore` / `rebuild_from_record`,
-#: which re-materialise through this projector), then #10000's capture change.
+#: a divergence against a record that is correct. The graph side is repaired by a
+#: record-sourced re-projection (`record-restore` / `rebuild_from_record`, which
+#: re-materialise through this projector), then #10000's capture change.
+#:
+#: ⛔ **THIS TABLE MUST BE DELETED BY `#10852`, and that is a contract term, not a
+#: hope (#10867 review, P1).** `#10852` makes the capture's `summary` a TOPIC
+#: LEXICON descriptor (§4.4 metadata, per `STORAGE-ARCHITECTURE.md:527`) and
+#: derives `_searchText` from `topics`. The predicate here is the ROW's IDENTITY,
+#: so it cannot tell that provenance from the prose — it would decline both, on
+#: the record→cache door only (the live fold keeps them), and the
+#: `record_reconcile` subtraction would keep that out of the mismatch count.
+#: So the rule is correct for a pre-fix row and wrong for a post-`#10852` one:
+#: `#10852` deletes this table, both guard doors in :func:`_props_from_row`,
+#: :func:`episodic_source_prose_properties`, :func:`is_episodic_source_node` and
+#: the `scan_cache_view` subtraction, and adds a leg that a lexicon `summary` +
+#: a topics-derived `_searchText` SURVIVE the door. Recorded on #10853.
 _EPISODIC_SOURCE_PROSE_COLUMNS: frozenset[str] = frozenset({
     "summary", "_search_text",
 })
