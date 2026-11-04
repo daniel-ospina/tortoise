@@ -1133,22 +1133,14 @@ def classify(pr: PullRequest, by_head: dict[str, PullRequest],
         # ONLY when its base IS the default branch: on a sibling base the question
         # is whether the CARRIER carries the keyword, which the arms below answer,
         # and claiming the subject "targets main" would be false (review c3-1).
-        if pr.closed_unmerged and pr.base == default_branch:
-            findings.append(Finding(
-                issue=issue, pr=pr.number, base=pr.base, verdict="unresolved",
-                carrier=pr.number,
-                detail=(f"PR #{pr.number} says `Closes #{issue}` and targets "
-                        f"`{default_branch}`, but it was CLOSED WITHOUT "
-                        f"MERGING — GitHub never fired the keyword, so "
-                        f"#{issue} stays open and its work is not on "
-                        f"`{default_branch}`. Re-open it, or carry the change "
-                        f"(and the keyword) on the PR that does land."),
-            ))
-            continue
-        # A SUBJECT that was CLOSED WITHOUT MERGING never fired the keyword — but
-        # ONLY when its base IS the default branch: on a sibling base the question
-        # is whether the CARRIER carries the keyword, which the arms below answer,
-        # and claiming the subject "targets main" would be false (review c3-1).
+        #
+        # ⚠️ STATED ONCE, and `continue`-guarded: #10703's integration merge added a
+        # byte-identical SECOND copy directly below this one, which the `continue`
+        # above made unreachable. That is the same class as the `import contextvars`
+        # the same merge dropped — silent — and it is worse than dead code in THIS
+        # module: the next maintainer edits the copy that never runs. No linter here
+        # catches it (ruff 0.16.4 over E/F/B/UP/I/SIM/RUF is green over a duplicate
+        # arm), so `test_the_closed_unmerged_arm_is_stated_ONCE...` pins the count.
         if pr.closed_unmerged and pr.base == default_branch:
             findings.append(Finding(
                 issue=issue, pr=pr.number, base=pr.base, verdict="unresolved",
@@ -2002,14 +1994,24 @@ _GH_TIMEOUT_SECONDS = 60
 
 #: …and the bound is PER CALL, which is not enough for the run (#10634 review P2):
 #: one `--pr` run issues `2 + L` sequential calls (identity, the PR, one per base
-#: branch up the stack) and `collect_stack` follows the stack as far as it goes,
-#: so `L` is not capped by `MAX_STACK_DEPTH` — thirteen calls at the per-call cap
-#: are 780s, and the ONLY workflow that runs this tool,
-#: `.github/workflows/closes-coherence.yml`, caps its job at `timeout-minutes: 10`
-#: (600s). So there is also an aggregate budget: once it is gone the run reports
-#: UNMEASURED instead of spending the job, which is the same contract the
-#: per-call bound has (exit 2, never a pass, never a red the advisory step
-#: cannot cover).
+#: branch up the stack) and `collect_stack` follows the stack as far as it goes —
+#: its walk is `while pending:`, so `L` is bounded by NOTHING (`MAX_STACK_DEPTH`
+#: caps `_carrier_walk`, which is a different walk). The ONLY workflow that runs
+#: this tool, `.github/workflows/closes-coherence.yml`, caps its job at
+#: `timeout-minutes: 10` (600s), and at the 60s per-call cap that ceiling is
+#: reached after `600 // 60` = 10 calls (`2 + 8`) — an eight-hop stack, which is
+#: INSIDE the depth the tool's own carrier walk treats as well-formed. So there is
+#: also an aggregate budget: once it is gone the run reports UNMEASURED instead of
+#: spending the job, which is the same contract the per-call bound has (exit 2,
+#: never a pass, never a red the advisory step cannot cover).
+#:
+#: ⚠️ The numbers above are DERIVED, not measured, and the derivation is pinned by
+#: `test_the_run_budget_is_justified_by_the_cap_of_the_workflow_that_HOSTS_it`:
+#: `L` has no maximum to measure (that is the point), so the honest statement is
+#: the depth at which the JOB CAP is reached. A quoted measurement would go stale
+#: on the next change to either cap — which is exactly the drift that test exists
+#: to catch, and that this comment carried when it said "thirteen calls" beside a
+#: five-deep gloss (#10703 review).
 _GH_RUN_BUDGET_SECONDS = 300
 
 _run_budget_started: float | None = None

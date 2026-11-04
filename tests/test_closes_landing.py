@@ -962,6 +962,63 @@ def test_no_module_level_constant_is_DEAD_because_a_dead_one_reads_as_live():
         f"name whose comment can claim it is the live mechanism (#10634 review P3)")
 
 
+def test_the_closed_unmerged_arm_is_stated_ONCE_because_a_dead_copy_reads_as_live():
+    r"""#10703 review, ISSUE 1. The integration merge left TWO byte-identical copies of
+    the "subject was CLOSED WITHOUT MERGING on the default branch" arm in
+    `classify()`, one directly below the other. The first ends in `continue`, so the
+    second could never execute — the same class as the `import contextvars` the same
+    merge silently DROPPED, only inverted (duplication instead of omission).
+
+    ⚠️ This is not tidy-up in this module, for the reason its own P3 doctrine gives
+    for the DEAD-constant guard above: a dead arm whose surroundings claim it is live
+    is a defect, because the next maintainer edits the copy that never runs — a fix
+    applied to the second copy would be invisible, and would look verified.
+    `origin/main` carries exactly ONE such arm, so the second was INTRODUCED here.
+
+    Why the check is AST and not `grep -c`: this repo's lint leg (ruff 0.16.4 over
+    `E,F,B,UP,I,SIM,RUF`) has no rule for a duplicated or unreachable statement arm —
+    `ruff check tools/closes_landing.py` is green over the duplicate — and a grep is
+    satisfied by the prose in this docstring. The AST sees the ARMS.
+    """
+    arms = [node for node in ast.walk(ast.parse(MODULE_PATH.read_text()))
+            if isinstance(node, ast.If) and _is_closed_unmerged_default_arm(node.test)]
+    assert len(arms) == 1, (
+        f"`classify` states the closed-unmerged/default-branch arm {len(arms)} times "
+        f"({[node.lineno for node in arms]}): a second copy after a `continue` is "
+        f"unreachable, and the copy a maintainer repairs is then the one that never "
+        f"runs")
+
+
+def _is_closed_unmerged_default_arm(test: ast.expr) -> bool:
+    """`pr.closed_unmerged and pr.base == default_branch`, matched STRUCTURALLY.
+
+    A substring test would be satisfied by the arm's own comment, and a rename of
+    either operand would leave a grep green over nothing — so this reads the shape:
+    an `and` of (a `.closed_unmerged` attribute) with (`.base == <Name>`).
+    """
+    if not isinstance(test, ast.BoolOp) or not isinstance(test.op, ast.And):
+        return False
+    if len(test.values) != 2:
+        return False
+    closed, compares = [], []
+    for part in test.values:
+        if isinstance(part, ast.Attribute) and part.attr == "closed_unmerged":
+            closed.append(part)
+        elif isinstance(part, ast.Compare):
+            compares.append(part)
+    if len(closed) != 1 or len(compares) != 1:
+        return False
+    compare = compares[0]
+    return (
+        isinstance(compare.left, ast.Attribute)
+        and compare.left.attr == "base"
+        and len(compare.ops) == 1
+        and isinstance(compare.ops[0], ast.Eq)
+        and isinstance(compare.comparators[0], ast.Name)
+        and compare.comparators[0].id == "default_branch"
+    )
+
+
 def test_a_closed_unmerged_subject_on_a_sibling_base_is_not_promised_a_carrier():
     """#10634 cycle 2 (P2): the sibling-base arm said "#100's work only lands when
     PR #carrier merges" for a subject that was CLOSED WITHOUT MERGING — its
@@ -1339,12 +1396,19 @@ def test_gh_clamps_each_call_to_the_runs_REMAINING_budget(monkeypatch):
 
 # ── …and the justification for that budget is a fact about its HOST ──────────
 
-#: The number of sequential `gh` calls the comment on `_GH_RUN_BUDGET_SECONDS`
-#: names as enough to reach the job cap: "thirteen calls at the per-call cap".
-#: It is the walk the pinned #10568/#10519 shape actually makes (`2 + L`: the
-#: identity call, the PR, and one per base up a five-deep stack, measured), not a
-#: ceiling — `collect_stack` walks as far as the stack goes.
-_DOCUMENTED_CALLS = 13
+#: The number of sequential `gh` calls at which the per-call bound ALONE has spent
+#: the job cap of the only workflow that hosts this tool — DERIVED in the test as
+#: `cap_seconds // cl._GH_TIMEOUT_SECONDS`, never quoted as a literal.
+#:
+#: It is a THRESHOLD, not the measurement it used to claim to be. The earlier
+#: `_DOCUMENTED_CALLS = 13` documented itself as "the walk the pinned #10568/#10519
+#: shape actually makes (`2 + L`: … one per base up a five-deep stack, measured)" —
+#: and `2 + 5` is 7, not 13, which is the eleven-deep depth the number implied. Both
+#: halves could not be true, the assertion below passed either way, and nothing in
+#: the tree settles which one was ever measured: `collect_stack`'s walk is
+#: `while pending:` with NO depth bound, so `2 + L` has no maximum to measure. What
+#: the tree DOES produce is the depth at which the job cap is reached, and that is
+#: the claim the budget needs (#10703 review).
 
 
 def _timeout_minutes(path: Path) -> int:
@@ -1378,6 +1442,16 @@ def test_the_run_budget_is_justified_by_the_cap_of_the_workflow_that_HOSTS_it():
 
     On the pre-fix tree this REDS on the prose leg: the comment region said
     `timeout-minutes: 15` while the only workflow that runs the tool caps at 10.
+
+    The CALL COUNT is derived here rather than declared, and the module's own
+    comment is checked against that derivation (#10703 review). It used to be a
+    `_DOCUMENTED_CALLS = 13` literal glossed as "one per base up a FIVE-deep stack"
+    — `2 + 5` = 7 — while 13 implies an eleven-deep one, and the assertion passed on
+    both because it never compared the two. `collect_stack`'s walk is
+    `while pending:` with no depth bound, so no stack depth is the tree's maximum:
+    the only number the tree PRODUCES is the depth that reaches the host's job cap.
+    So this measures that, and pins the module's comment to it — a re-cap of either
+    bound (or a re-worded comment) now moves one side only and reds here.
     """
     hosts = _workflows_running_the_tool()
     assert [path.name for path in hosts] == ["closes-coherence.yml"], (
@@ -1403,11 +1477,45 @@ def test_the_run_budget_is_justified_by_the_cap_of_the_workflow_that_HOSTS_it():
         f"the {cl._GH_RUN_BUDGET_SECONDS}s run budget must end the run BEFORE the "
         f"{cap_seconds}s job cap does, or the job timeout wins and a stalled API "
         f"reds a job that `continue-on-error: true` cannot cover")
-    assert cap_seconds < _DOCUMENTED_CALLS * cl._GH_TIMEOUT_SECONDS, (
-        f"{_DOCUMENTED_CALLS} calls at the {cl._GH_TIMEOUT_SECONDS}s per-call cap "
-        f"are {_DOCUMENTED_CALLS * cl._GH_TIMEOUT_SECONDS}s and must reach the "
-        f"{cap_seconds}s job cap — that arithmetic IS the justification for an "
-        f"aggregate budget; if it no longer holds, re-measure the comment")
+
+    # ── the derivation the budget rests on, and the comment pinned to it ─────
+    # `2 + L` calls (identity, the PR, one per base up the stack). At the per-call
+    # cap this many calls have spent the whole job cap:
+    calls_that_reach_the_cap = cap_seconds // cl._GH_TIMEOUT_SECONDS
+    assert calls_that_reach_the_cap * cl._GH_TIMEOUT_SECONDS >= cap_seconds, (
+        f"{calls_that_reach_the_cap} calls at the {cl._GH_TIMEOUT_SECONDS}s per-call "
+        f"cap are {calls_that_reach_the_cap * cl._GH_TIMEOUT_SECONDS}s, which does not "
+        f"reach the {cap_seconds}s job cap — then the per-call bound alone bounds the "
+        f"run and there is no arithmetic left to justify an aggregate budget")
+    hops_that_reach_the_cap = calls_that_reach_the_cap - 2  # identity + the PR
+    assert hops_that_reach_the_cap >= 1, (
+        f"reaching the {cap_seconds}s job cap at the {cl._GH_TIMEOUT_SECONDS}s "
+        f"per-call cap needs `2 + L` = {calls_that_reach_the_cap} calls, i.e. "
+        f"{hops_that_reach_the_cap} hops: a stack that deep is not a stack at all, so "
+        f"this derivation no longer says anything about a real run — re-measure the "
+        f"budget's justification")
+    assert hops_that_reach_the_cap <= cl.MAX_STACK_DEPTH, (
+        f"the per-call cap needs {hops_that_reach_the_cap} hops to spend the "
+        f"{cap_seconds}s job cap, but the tool's OWN carrier walk treats a stack up to "
+        f"`MAX_STACK_DEPTH = {cl.MAX_STACK_DEPTH}` as well-formed: a run on a stack it "
+        f"does not even call too deep would already overspend the job")
+
+    # The comment must name THESE numbers. A comment naming a number the tree does
+    # not produce is the defect class this module's P3s fix twice over, and the
+    # `13` this replaced is what it looks like when nobody compares the two.
+    named_calls = re.findall(r"=\s*(\d+)\s+calls", comment_block)
+    assert named_calls == [str(calls_that_reach_the_cap)], (
+        f"the comment justifying the run budget says {named_calls} calls reach the "
+        f"{cap_seconds}s job cap, but {cap_seconds} // {cl._GH_TIMEOUT_SECONDS} = "
+        f"{calls_that_reach_the_cap}")
+    named_hops = re.findall(r"`2 \+ (\d+)`", comment_block)
+    assert named_hops == [str(hops_that_reach_the_cap)], (
+        f"the comment's `2 + L` decomposition says {named_hops} hops for "
+        f"{calls_that_reach_the_cap} calls, but L = {calls_that_reach_the_cap} - 2 = "
+        f"{hops_that_reach_the_cap}")
+    # Both reads above red on a MISS too (`[] != [str(n)]`), which is deliberate: a
+    # re-worded comment must fail here rather than pass by not being measured — the
+    # empty-scan guard the DEAD-constant test carries one screen up.
 
 
 def test_main_starts_a_FRESH_run_budget(monkeypatch, tmp_path):
