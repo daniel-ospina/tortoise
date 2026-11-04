@@ -8773,20 +8773,8 @@ def _key_limit_refusal(
 #: red, because a literal cannot drift from a fact it does not share a source
 #: with (round-3 review, P2).
 #:
-#: #10180 named this same set `_TENANT_GRAPH_RESOURCES` and HAND-LISTED it
-#: (`frozenset({"points", "sessions", "documents"})`). The fold keeps BOTH names
-#: on the ONE derived declaration instead of picking a side: the hand-listed
-#: literal is precisely the drift #4051's round-3 review P2 forbids (add a
-#: gate-able resource to `_RESOURCE_LIMIT_KEYS` and a literal answers `None` for
-#: it — the org's DEFAULT graph counted while the write opens its own).
-#:
-#: ⚠️ `_TENANT_GRAPH_RESOURCES` is an ALIAS ONLY — nothing in the tree reads it
-#: (verified: `git grep` matches this definition and its comment, no test, tool
-#: or doc). It is kept so a lane porting #10180-era code finds the name already
-#: bound to the DERIVED set instead of reaching for a literal, which is the one
-#: thing that must not come back. Do not add a reader for it without converting
-#: that reader to `_GRAPH_SCOPED_QUOTA_RESOURCES`.
-_TENANT_GRAPH_RESOURCES = TENANT_GRAPH_RESOURCES
+#: This SUPERSEDES the `_TENANT_GRAPH_RESOURCES` literal #10180 added on this
+#: line: one name for the one set, so the two cannot drift.
 _GRAPH_SCOPED_QUOTA_RESOURCES = TENANT_GRAPH_RESOURCES
 
 
@@ -8803,30 +8791,25 @@ def _gate_sdk_for(org: dict, resource: str):
     the commit lane's points gate (measured: 5 points against a limit of 5, the
     default graph empty, no refusal).
 
-    This mirrors the opener's call form rather than re-deriving one: a
-    graph-bound key gets `graph_name=_data_graph_name(org)` (the value
-    `_data_sdk` passes verbatim). The org-wide arm is NOT re-derived here either
-    — it delegates to `_org_sdk_for_credential`, the credential-shaped twin the
-    other request paths use, because #10180 gave that form a SECOND fact this
-    function must not drop: an org-wide credential carries `graph_namespace`,
-    the DEFAULT's namespace resolved once at auth, so after a promotion the
-    writes it admits land in the PROMOTED graph. A bare
-    `namespace=org["org_id"]` here would count the DEMOTED graph — a stale-low
-    count admits an org past its cap (the money gate failing OPEN) and a
-    stale-high one refuses writes it is under. Delegating also keeps #10180's
-    AST inventory green (`test_every_org_wide_opener_is_converted_or_accounted_for`):
-    a `_make_sdk(namespace=…)` spelled in THIS function would be a new
-    unaccounted org-wide opener — the exact class that test exists to close.
+    This mirrors the opener's TWO call forms rather than re-deriving one:
+    a graph-bound key gets `graph_name=_data_graph_name(org)` (the value
+    `_data_sdk` passes verbatim), and an org-wide key gets exactly what
+    `_org_sdk_for_credential` builds — which is the SAME decision the #10180
+    promotion work put on this path, reused rather than restated: a moved
+    default opens `graph_name=<promoted namespace>`, and every other org opens
+    the historical `namespace=org_id`. Those two axes are ORTHOGONAL and both
+    were real — #10180 made an org-wide count follow a PROMOTION, #4051 makes a
+    graph-BOUND count follow the BINDING, and before the merge of the two each
+    fix left the other's lane vacuous.
 
     Mirroring the FORMS matters as much as the graph: `_make_sdk` keys its
-    embedded keepalive anchor on
-    `graph_name if graph_name is not None else namespace` (`_FALLBACK_KEEPALIVE`),
-    and that dict never evicts a HEALTHY anchor — it is only replaced when
-    `_anchor_usable` fails (#1502) and never to bound its size — so
-    `graph_name="org_team-001"` for an org-wide key would park a SECOND anchor
-    (`org_team-001` beside the write's `team-001`) for every org in the process.
-    Mirroring also preserves the "identical connection" property
-    `mcp_server._enforce_quota` states as the rule.
+    embedded keepalive anchor on `graph_name if graph_name is not None else
+    namespace` (`_FALLBACK_KEEPALIVE`), and that dict never evicts a HEALTHY
+    anchor — it is only replaced when `_anchor_usable` fails (#1502) and never to
+    bound its size — so `graph_name="org_team-001"` for an org-wide key would
+    park a SECOND anchor (`org_team-001` beside the write's `team-001`) for every
+    org in the process. Mirroring also preserves the "identical connection"
+    property `mcp_server._enforce_quota` states as the rule.
 
     Two deliberate non-uses:
     - registry-scoped resources get `None`: their count is a control-plane read
@@ -8858,7 +8841,6 @@ def _gate_sdk_for(org: dict, resource: str):
         return _make_sdk(graph_name=graph)
     if not org.get("org_id"):
         return None
-    # #10180's promoted default, via the shared credential-shaped resolver.
     return _org_sdk_for_credential(org)
 
 
@@ -8938,24 +8920,32 @@ def _check_org_limit(org: dict, resource: str, *,
         quota_refusal_payload,
     )
     try:
-        # Merged intent, and BOTH fixes are kept:
+        # #8906: the request's OWN sdk WINS — the count and the write then
+        # target one graph, and one HANDLE (a door that already opened the SDK it
+        # writes through must not build a second construction of the same graph).
+        # When the caller passes none, the fallback is #4051's `_gate_sdk_for`
+        # through `sdk_factory=`, which closes BOTH orthogonal ways an
+        # omitted-sdk count went wrong: (a) #4051 — a graph-BOUND key was counted
+        # in the org's DEFAULT graph while its write went to a custom one, so the
+        # gate was present and vacuous; (b) #10180 — a PROMOTED default was
+        # counted where it used to be, so a stale-low count admitted an org past
+        # its real cap (the money gate failing OPEN) and a stale-high one refused
+        # writes it was under. `org` is the RESOLVED CREDENTIAL (not the org
+        # ROW): an org-wide one carries `graph_namespace` — its default's
+        # namespace, resolved once at auth — so this needs no control-plane read
+        # and cannot fail open. (An earlier draft read `graph_name` here, a key no
+        # credential dict has: every gate then took the I/O branch, i.e. a
+        # blocking PostgREST read on the event loop of the capture path.)
+        # `_gate_sdk_for` returns None for the registry-scoped resources, so
+        # `api_keys`/`users`/`graphs` — counted from the control plane or the
+        # registry — never pay for an SDK they do not touch.
         #
-        # * #8906 — the request OWN sdk WINS: the count and the write then target
-        #   one graph and one HANDLE, so a door that already opened the SDK it
-        #   writes through must not build a second construction of the same graph.
-        # * #4051 — the fallback is LAZY: a gate that RETURNS before counting must
-        #   not build a graph handle to prove it (sessions is unlimited by #4010
-        #   and documents returns for an unlimited max_points; an eager resolve was
-        #   measured as 0 -> 1 _make_sdk per capture, 764 us embedded, on the
-        #   event loop, for a count that never ran).
-        # * #10180 — a PROMOTED default is counted where its writes land. That fact
-        #   lives inside _gate_sdk_for org-wide arm, which delegates to
-        #   _org_sdk_for_credential (the credential carries graph_namespace,
-        #   resolved at auth, so it is no I/O and cannot fail open). Spelling
-        #   _make_sdk(namespace=...) HERE instead would also be a new unaccounted
-        #   org-wide opener for the #10180 AST inventory.
-        # _gate_sdk_for returns None for the registry-scoped resources, so
-        # api_keys/users/graphs never pay for an SDK they do not touch.
+        # `sdk_factory=` (lazy), NOT an eager `sdk=`: a gate that RETURNS before
+        # counting must not build a graph handle to prove it. `sessions` is
+        # unlimited by #4010 and `documents` returns for an unlimited
+        # `max_points`, so an eager resolve was measured as 0 -> 1 `_make_sdk` per
+        # capture, 764 us of it embedded, on the event loop — for a count that
+        # never ran. A caller that DOES pass `sdk=` has already paid it.
         enforce_org_limit(
             org, resource, slot_credit=slot_credit, sdk=sdk,
             sdk_factory=(None if sdk is not None
@@ -14233,13 +14223,38 @@ def _seed_demo_graph(org_id: str, sdk=None) -> dict:
     #
     # ⚠️ NOT RETROACTIVE, the same posture as the `tags` note above: the sentinel
     # short-circuits before any write, so a demo graph seeded BEFORE this keeps
-    # its `epi_turn*` nodes. ⛔ RE-SEEDING DOES NOT REPAIR THEM — a re-seed
-    # writes nothing for those ids and deletes nothing (unlike the `tags` case,
-    # whose `MERGE` re-writes `p.tags`). Deleting those three nodes is the
-    # graph-side repair, and it is destructive, so it is out of this change's
-    # scope. Blast radius: opt-in sample content that `org.point_count`
-    # excludes — but the demo `:Session` is still returned by the session reads,
-    # so the pre-existing nodes stay reachable there and in search.
+    # its `epi_turn*` nodes AND its session's declared turn counter, which still
+    # reads 3 — the two are undone by DIFFERENT statements, and only the node
+    # delete is irreversible.
+    # ⛔ RE-SEEDING DOES NOT REPAIR THEM — a re-seed writes nothing for those
+    # ids and deletes nothing (unlike the `tags` case, whose `MERGE` re-writes
+    # `p.tags`). Deleting the sentinel and re-seeding, the idiom the note above
+    # documents, is WORSE than a no-op here: the seed then reaches the
+    # `:Session` write, sets `s.turn_count=0`, and leaves the three nodes — a
+    # Session declaring 0 beside three stored turns.
+    # ⛔ That half-state is QUIET, not loud, and that is why it is spelled out:
+    # `record_read.served_turn_count` refuses it on ONE arm only — a record that
+    # cannot be read at all (its stale-superset arm). An unarmed deployment
+    # publishes `turns: 0` BESIDE those three `turn_points` (a self-contradicting
+    # 200 — the shape the counter note above exists to eliminate), and an armed
+    # one serves the legacy 3. All three arms are pinned by
+    # `tests/test_10000_turns_record_only.py`'s predicate test, so this paragraph
+    # is falsifiable rather than prose an operator has to trust.
+    #
+    # The graph-side repair is BOTH halves in ONE step: `DETACH DELETE` the
+    # three `epi_turn*` nodes AND reset `s.turn_count=0` — or retire the demo
+    # `:Session` along with them. ⛔ That is a READ-BEFORE-WRITE rule, not two
+    # suggestions: doing the re-seed without the delete lands the quiet
+    # half-state above. The node delete ALONE is not the repair either: it
+    # leaves `declared=3, served=0`, so on an armed, journaling deployment the
+    # demo session's read refuses with `record_unavailable` (503), and on an
+    # unarmed one it serves `{"turns": 3, "turn_points": []}` — the exact split
+    # the counter note above exists to eliminate. Destructive, so it is out of
+    # this change's scope and belongs to the graph-side purge of §9.1's
+    # residual (a), `#10017`. Blast radius: opt-in sample content that
+    # `org.point_count` excludes — but the demo `:Session` is still returned by
+    # the session reads, so the pre-existing nodes stay reachable there and in
+    # search (with their counter, which is why the repair must move both).
 
     # ── Epistemic Layer — claims with evidence ───────────────────
     epistemic_points = _DEMO_EPISTEMIC_POINTS
@@ -36565,9 +36580,12 @@ async def public_demo(org: dict = Depends(get_current_org_gated)):  # noqa: B008
         # `_org_sdk` calls would split them, and the second call is a second
         # control-plane read when the auth hint is absent).
         _check_org_limit(org, "points", sdk=sdk)
-        # The shared demo seeder (extracted from /internal/demo) writes ~13
-        # Points through the handle passed in (it opens its own when called
-        # without one, e.g. from `/internal/demo`).
+        # The shared demo seeder (extracted from /internal/demo) writes ~10
+        # Points — the 9 seeded `:Point` nodes + `_demo_sentinel`, the same
+        # census the `point_count` below records — through the handle passed in
+        # (it opens its own when called without one, e.g. from
+        # `/internal/demo`). ⚠️ It said ~13 until #10675: that was true while
+        # the three `epi_turn*` nodes existed, and #10000 removed them (§9.1/D1).
         return {"existing": False,
                 "created": _seed_demo_graph(org["org_id"], sdk=sdk)}
 
