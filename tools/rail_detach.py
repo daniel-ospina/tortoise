@@ -396,6 +396,15 @@ def _gh(argv: list[str], cwd: Path) -> subprocess.CompletedProcess:
     side of this merge (#10622): `test (h)` on `pi-runner-vm-6`/Linux-ARM64, run
     41732583553, killed all 20 cases in `tests/test_rail_detach.py` at this
     call. Two pool boxes, one root — the missing binary, not a rail defect.
+
+    The `-> subprocess.CompletedProcess` annotation above is a CONTRACT, not a
+    hint: this function NEVER returns `None` (the `except` arm fabricates a
+    process with rc=127), so neither caller may carry an `out is not None`
+    guard. Two of them did for a while — inherited from the branch side of the
+    #10622 merge, where `_gh` was allowed to return `None` — and they were
+    unreachable branches contradicting their own annotation. Dropped rather
+    than kept: a guard that cannot fire is not defence in depth, it is a
+    second, wrong description of what this function returns.
     """
     try:
         return subprocess.run(argv, cwd=str(cwd), capture_output=True, text=True)
