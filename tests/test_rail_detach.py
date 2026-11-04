@@ -356,11 +356,12 @@ def test_refuses_when_the_rail_script_is_absent(tmp_path):
 #
 # `subprocess.run(["gh", …])` raises `FileNotFoundError` when the BINARY is
 # absent. That killed every case in this module on the fleet's pool, measured
-# TWICE before anyone believed it — `test (d)` on the #9018 fallback pool
-# (`pi-runner-vm-2`, 2026-11-03, `FileNotFoundError: 'gh'`, 21 red arms) and
-# `test (h)` on `pi-runner-vm-6`/Linux-ARM64, run `41732583553`, all 20 killed.
-# Both measurements are kept: each is the provenance a reader needs to know this
-# is a real pool condition, not a local quirk.
+# TWICE before anyone believed it — on `pi-runner-vm-2` (2026-11-03, shard
+# `test (d)` by this branch's record, `test (a)` by main's, 21 arms vs 20;
+# neither job log is retrievable here, so the root is what is asserted and not
+# the integer) and on `pi-runner-vm-6`/Linux-ARM64, run `41732583553`, where all
+# 20 were killed. Both pool measurements are kept: each is the provenance a
+# reader needs to know this is a real pool condition, not a local quirk.
 #
 # The tool's own contract already names the degraded answer (`_head_sha` →
 # "unreadable", `_resolve_repo` → `Refused`); only the spawn was unguarded, so
