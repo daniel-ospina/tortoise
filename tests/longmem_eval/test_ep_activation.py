@@ -96,12 +96,13 @@ class _FakeGraph:
                  cas_lost=(), op_endpoints=None):
         self.draft_ids = list(draft_ids)
         self.op_map = dict(op_map)
-        # #10137: draft operators the GRAPH-WIDE sweep finds — i.e. operators
-        # NOT reachable through ``op_map`` (which models the incident-to-a-
-        # promoted-point set). Defaults to ``op_map``'s own operators so the
-        # ordinary case models the SAME union the two real queries produce; pass
-        # an explicit id (or ``[]``) to model an operator whose endpoints were
-        # all already live, which is the shape the fix exists for.
+        # #10137: draft operators the GRAPH-WIDE sweep finds. There is only ONE
+        # real candidate query now (the per-chunk incident query was deleted), so
+        # this list is not a union of anything — ``op_map`` survives only as the
+        # fixture's convenient way to express "these operators over these ids".
+        # Defaults to ``op_map``'s own operators so the ordinary case keeps that
+        # shape; pass an explicit id (or ``[]``) to model an operator whose
+        # endpoints were all already live, which is the shape the fix exists for.
         self.graph_operators = (
             sorted({o for oids in self.op_map.values() for o in oids})
             if graph_operators is None else list(graph_operators))

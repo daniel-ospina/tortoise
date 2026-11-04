@@ -143,7 +143,12 @@ _PROMOTE_OPERATOR = (
 #:
 #: The selection this REPLACED was scoped to ``c.id IN $ids`` — the points
 #: promoted in THIS pass — so an operator was promoted only when one of its
-#: TARGETS was draft a moment ago. An operator whose endpoints were ALREADY live
+#: ENDPOINTS was draft a moment ago. "Endpoint", not "target": the source is
+#: written as an outgoing edge too (``idx:0``), and the deleted query matched
+#: ``(o)-[:IMPL|NAND]->(c:Point)``, so a promoted draft SOURCE reached it just as
+#: a promoted draft target did. The gap was never about which ENDS; it was that
+#: an operator with NO draft endpoint had no route at all. An operator whose
+#: endpoints were ALREADY live
 #: (a resumed/partial ingest: ``ingest_v2``'s ``_existing_point_ids`` batch probe
 #: (``ingest_v2.py:180``) skips points an earlier pass already wrote, while the
 #: operator loop still writes the draft operator over them — and the v2 ingest
@@ -686,9 +691,12 @@ def _promote_operator_row(sdk, g, oid, promoted_ops, on_input) -> bool:
     while the engine kept it draft. Measured: engine 3 rows → refuse, narrow 2
     rows → promoted.
 
-    ``on_input`` is called once per endpoint id so the caller can dirty-mark the
-    claims the newly-live factor connects (a raw status flip is invisible to an
-    incremental EP pass — the reason step 1c exists).
+    ``on_input`` is called once per endpoint ROW, not once per id, so the caller
+    can dirty-mark the claims the newly-live factor connects (a raw status flip
+    is invisible to an incremental EP pass — the reason step 1c exists). The
+    self-support shape ``create_operator(op, a, [a])`` writes two edges over one
+    id and therefore reports ``a`` twice; the caller dedupes
+    (``dict.fromkeys``), so do not count calls here — count ids.
     """
     if not oid or oid in promoted_ops:
         return False
