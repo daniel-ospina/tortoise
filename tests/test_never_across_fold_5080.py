@@ -656,17 +656,17 @@ class TestDistinguishingDifference:
         assert v2.distinguishing_difference("\u5f97\u308b \u00d7",
                                            "\u5f97\u308b") is None
         # The same claim in two spellings must fold: precomposed polytonic
-        # `ἀρχή` (U+1F00, inside the greek block) against its decomposed
-        # spelling (`α` + U+0313).
+        # `ἀρχή` against its decomposed spelling (`α` + U+0313).  ⚠️ U+1F00 is
+        # in NO block — it reads `greek` only through the NFD-base step — which
+        # is both why this pair already folds on BASE and why it is NOT the NFC
+        # leg (see the next comment).
         #
-        # ⚠️ INVARIANT pin, NOT the NFC one — do not read it as evidence that
-        # `_scripts` folds its input: it holds on BASE too (both spellings
-        # already resolve to {'greek'}, because U+0313 is a mark and so is not
-        # script-bearing either way) and it survives reverting `_fold_unicode`
-        # to the identity.  An earlier revision of this comment claimed the raw
-        # reading gave "DIFFERENT script sets" here; measured against
-        # `origin/main`'s module it does not, so that claim is withdrawn.  The
-        # leg below is the one the normalisation is load-bearing for.
+        # ⚠️ So this is an INVARIANT pin: it still passes with `_fold_unicode`
+        # reverted to the identity, and does not evidence that `_scripts` folds
+        # its input.  An earlier revision claimed the raw reading gave
+        # "DIFFERENT script sets" here — measured against `origin/main`'s module
+        # it does not — and the revision that withdrew it wrongly put U+1F00
+        # "inside the greek block"; both are corrected here.
         assert v2.fold_allowed("\u1f00\u03c1\u03c7\u03ae",
                                "\u03b1\u0313\u03c1\u03c7\u03ae")
         # ⚠️ THE DISCRIMINATING NFC LEG, and the Greek pair above is NOT one:
