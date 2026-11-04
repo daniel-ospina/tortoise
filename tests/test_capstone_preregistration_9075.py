@@ -3483,6 +3483,19 @@ _EXPECTED_AGGREGATE_MARKERS = ("needs.*.result", "failure")
 #:           checks stay quiet and this allow-list is not widened. The lever still reaches every emitter,
 #:           pinned by `tests/test_ci_selection.py::test_the_opt_in_reaches_every_matrix_emitter_in_the_changes_job`,
 #:           and job scope is now forbidden by `test_the_changes_job_carries_no_job_scope_env`.
+#:   #10897 — `changes`: `Emit push matrix (#1472/#6135)` + `Tier-2 duration split (#1473)` — digest-only
+#:           movement, and like #10186 it is the `env:` block WIDENED (two keys added beside
+#:           `CI_SHARD_ROUTING`), not the `run:` script. `_code()` is byte-identical on both steps;
+#:           neither writes `$GITHUB_PATH`/`$GITHUB_ENV`, neither swallows an exit code, there is no
+#:           `uses:`/`shell:`/`defaults.run` change and the step set/order is unchanged, so the
+#:           sibling-shim, shim and `_ALWAYS_RUN` checks stay quiet and `_SAFE_JOB_ENV` stays empty
+#:           (still STEP scope only, which is why both emitters carry the keys instead of the job).
+#:           The keys are `CI_PR_LABELS` (the PR's labels, empty on push) and `CI_FOLD_RUNNER_LABELS`
+#:           (the operator's declared fold runner class); the DECISION is
+#:           `tools/ci_selection.py::resolve_fold_runner`, so the lever is unit-tested and an unusable
+#:           declaration falls back to the row's own runner rather than routing a required check onto
+#:           a label no runner carries. Reaches every emitter, pinned by
+#:           `tests/test_ci_selection.py::test_the_fold_lever_reaches_every_matrix_emitter_in_the_changes_job`.
 _GATE_SENTINEL = "<the gate step — pinned by its own allow-list>"
 _EXPECTED_JOB_STEPS: dict[str, tuple[tuple[str, str], ...]] = {
     "changes": (
@@ -3495,20 +3508,16 @@ _EXPECTED_JOB_STEPS: dict[str, tuple[tuple[str, str], ...]] = {
         ("Tiered selection",
          "3e532b44ae1d76d09b0557c32139fdc8f0546fe5ed92bd11d1d4130f0a8d6ce8"),
         ("Emit push matrix (#1472/#6135)",
-         # Re-cut 2026-10-30 (PR #10186): an `env:` key added — `CI_SHARD_ROUTING`,
-         # the runner-split opt-in's ONE lever — with the `run:` script byte-identical.
-         # The lever cannot live at job scope (any job-scope key sits above the gate step
-         # and hooks its interpreter, which is what `_SAFE_JOB_ENV` refuses), so it is
-         # carried by each of this job's TWO emitters; the digests move by the env block
-         # alone, deliberately, per this pin's own instruction.
-         "f0e928484d97c448337a2110b86dc54718b6fd5e36611369ae515aafff88c3f0"),
+         # Re-cut 2026-11-04 (PR for #10897), env-only reason again: `CI_PR_LABELS` +
+         # `CI_FOLD_RUNNER_LABELS` added beside `CI_SHARD_ROUTING`, `run:` byte-identical.
+         "7428e8235db6656dd3c60f02dd4852ca8b4c742c75dc3539bf994a1a314591dd"),
         ("Non-gating lanes — what this gate does NOT run (#10194)",
          "9b6ec88d732ebef44f83fa29380ed9f73d8d9daa01cc61964939db0a1bd26bc7"),
         ("Tier-2 duration split (#1473)",
-         # Re-cut 2026-10-30 (PR #10186), same env-only reason as the push emitter above:
-         # this emitter's output OVERRIDES the push matrix on tier-2 PRs, so a lever on
-         # the push step alone is dead on exactly the event every PR uses.
-         "6a2cee39ab47ddba253e5c4a46b6a01650ea4c9a58cad56f68ba9255706bb7ca"),
+         # Re-cut 2026-11-04 (PR for #10897), same env-only reason as the push emitter
+         # above: this emitter's output OVERRIDES the push matrix on tier-2 PRs, so a
+         # lever on the push step alone is dead on exactly the event every PR uses.
+         "b9e84082afe9b62fdfe39bce221464e88b1e24d63d2525ffd069bd4d94e64cab"),
         ("Capstone pre-registration gate — the ordering half (#9075)", _GATE_SENTINEL),
         ("Secrets scan (evidence artifacts,",
          "81dbfb18f5279f51455a71da92c66a6754fa01a497df1b43be5f974af62569ce"),

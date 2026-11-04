@@ -862,6 +862,59 @@ def test_a_keyword_inside_a_WIDER_backtick_span_is_a_quotation_not_a_claim():
     assert "this tool can show fires" in blank.detail, blank.detail
 
 
+def test_a_BACKSLASH_ESCAPED_backtick_is_PROSE_not_a_code_span():
+    r"""#10841 review (P2): the blanker took ANY backtick run as a delimiter, so
+    ``\`Closes #100\``` — ESCAPED backticks — was blanked as if it were a code
+    span, while GFM renders it as prose carrying a live keyword:
+
+        "see \`Closes #100\` for the old wording"
+        -> <p>see `Closes #100` for the old wording</p>
+
+    On a stacked PR that is exactly the inert `Closes #N` this tool exists to
+    name, and it reported NOTHING and exited 0 — the MISSED-WARNING direction,
+    against the module's "never a false pass" contract.
+
+    The escape is CommonMark's (§2.4): ONE backslash escapes the delimiter, so
+    ``\\\`` is an escaped BACKSLASH followed by a real one. That parity is the
+    second arm below — a test that only asks "is the previous character a
+    backslash" reads the double-escape case BACKWARDS and blanks a real
+    quotation, which is the other direction (a lost pass on a correctly quoted
+    body).
+    """
+    escaped = r"see \`Closes #100\` for the old wording"
+    # The renderer is the authority, as everywhere in this file: no <code> at all.
+    assert "<code>" not in MarkdownIt("commonmark").render(escaped)
+    # …so BOTH arms must see the claim: nothing was ever inside a code span.
+    assert cl.parse_closing_refs(escaped) == [100], escaped
+    assert cl.parse_closing_refs(escaped, None, strict=True) == [100], escaped
+
+    # THE DOUBLE-ESCAPE CONTROL: `\\` is an escaped backslash, so the backtick
+    # after it IS a delimiter and this really is a quotation.
+    double = r"see \\`Closes #100\\` in a quoted shape"
+    assert "<code>" in MarkdownIt("commonmark").render(double)
+    assert cl.parse_closing_refs(double) == [], double
+    assert cl.parse_closing_refs(double, None, strict=True) == [], double
+
+    # THE ASYMMETRY, measured rather than reasoned: an escape stops a backtick
+    # from OPENING a span, but a span's closer is matched as a raw backtick run,
+    # so `` `Closes #100\` `` really IS a code span and the blanker must agree
+    # with the renderer on it. (This arm exists because the first cut of the fix
+    # guarded the closer too, and the renderer refuted it.)
+    escaped_closer = r"`Closes #100\` is literal"
+    assert "<code>" in MarkdownIt("commonmark").render(escaped_closer)
+    assert cl.parse_closing_refs(escaped_closer) == [], escaped_closer
+
+    # …and the CARRIER half, where the same bug pointed the other way: an escaped
+    # span in the carrier is live prose, so the carrier DOES restate the keyword
+    # and the subject lands. The pre-fix blanker read it as a quotation and called
+    # the subject `inert` — a warning about a closure that really does fire.
+    subject = _pr(140, SIBLING, "Closes #100")
+    escaped_carrier = _pr(141, DEFAULT, "Old body: \\`Closes #100\\`\n", head=SIBLING)
+    (finding,) = cl.classify(subject, _by_head(subject, escaped_carrier), DEFAULT)
+    assert finding.verdict == "lands", finding
+    assert finding.carrier == 141, finding
+
+
 def test_a_code_span_that_crosses_a_LINE_BREAK_cannot_buy_a_pass():
     r"""#10634 review P2 (fail-open): a span's closer search stopped at the END OF
     ITS LINE, so a code span whose opener and closer sit on two lines of the SAME
