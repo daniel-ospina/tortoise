@@ -780,12 +780,13 @@ def test_a_MALFORMED_props_tail_is_REFUSED_not_dropped_in_silence():
 
     Both shapes are exercised because both are reachable: an ARRAY
     (`jsonb`'s other collection form) and a bare SCALAR. ⛔ AND IN BOTH
-    SPELLINGS, because the two record drivers do not agree on one: asyncpg
-    hands `props` back as TEXT, psycopg as an already-decoded value — so a
-    refusal keyed on falsiness refused `'[]'` and projected `[]`, i.e. the same
-    corrupt row aborted one `record-restore` and not the other (#10867 review,
-    second pass). The ABSENT test is identity against `None`/`''`, never
-    truthiness.
+    SPELLINGS, because a row can carry the tail either as JSON TEXT (`'[]'` —
+    a `::text` cast, a pre-serialised tail, or a fixture) or already DECODED
+    (`[]` — what `psycopg2`'s `jsonb` typecaster answers) — so a refusal keyed
+    on falsiness refused `'[]'` and projected `[]`, i.e. the same corrupt row
+    aborted `record-restore` when it arrived as TEXT and projected cleanly when
+    it arrived decoded (#10867 review, second pass). The ABSENT test is identity
+    against `None`/`''`, never truthiness.
     """
     from tortoise.cache_projection import CacheProjectionError
 
@@ -833,9 +834,9 @@ def test_a_MALFORMED_props_tail_is_REFUSED_not_dropped_in_silence():
 
     # ⛔ THE DECLARED RESIDUAL, PINNED SO IT CANNOT BE READ AS PARITY (#10867
     # review, closing pass). PostgreSQL's `jsonb` maps JSON `null` and JSON `""`
-    # onto the SAME Python values as the two spellings of ABSENT, so a DECODING
-    # driver cannot tell `props='null'::jsonb` from an absent tail: it projects
-    # there while the identical row as TEXT is refused. Not closable at the
+    # onto the SAME Python values as the two spellings of ABSENT, so a DECODED
+    # tail cannot be told apart from an absent one: it projects while the
+    # identical row as TEXT is refused. Not closable at the
     # absence test — the decoded values ARE the lenient spellings — and it carries
     # NO content (neither has keys), so it is declared and pinned, not fixed.
     for text_form in ("null", '""'):
@@ -852,10 +853,11 @@ def test_the_row_predicate_ANSWERS_on_a_decoded_json_STRING_tail():
     `_decoded_tail` answers for EVERY shape a row can hold — that is its whole
     contract, because `_is_episodic_source_row` is called before anything decides
     whether to project. But it routed every `str` through `json.loads`, which is
-    right for the TEXT driver (a `jsonb` string arrives as its JSON SOURCE,
-    `'"hello"'`) and wrong for a DECODING one (psycopg hands back the decoded
-    `str` `'hello'`, which is not JSON text): the predicate raised
-    `JSONDecodeError` on one driver and answered on the other, for the same row.
+    right for a JSON-TEXT tail (a `jsonb` string arrives as its JSON SOURCE,
+    `'"hello"'`) and wrong for a DECODED one (a decoding read hands back the
+    Python `str` `'hello'`, which is not JSON text): the predicate raised
+    `JSONDecodeError` on the decoded shape and answered on the JSON-text one, for
+    the same row.
     It now answers `{}` — the DOCUMENT arm, this module's declared safe
     asymmetry. The WRITER path is untouched and stays LOUD, which the same test
     pins beside it so a later fix cannot quieten both.
@@ -887,6 +889,47 @@ def test_the_row_predicate_ANSWERS_on_a_decoded_json_STRING_tail():
     # decodes to a `str` payload, so the predicate answers too — parity where
     # parity is possible.
     assert _decoded_tail('"hello"') == {}
+
+
+def test_the_TAIL_SHAPE_prose_names_no_driver_this_repo_never_imports():
+    """The tail-shape attribution must be MEASURED, not assumed (#10867 P2).
+
+    The second-opinion review found `_tail_payload`'s docstring calling the
+    text-vs-decoded split an **asyncpg-vs-psycopg** divergence. Verified false on
+    this tree: nothing under `tortoise/` imports asyncpg, and the record layer
+    imports `psycopg2` ONLY (`record_writer._default_connect`), whose docs state
+    that `json`/`jsonb` "will be automatically converted to Python objects". The
+    split is a SHAPE split — JSON TEXT vs already-decoded — and naming a driver
+    no code reaches sends the next reader to preserve compatibility for a code
+    path that does not exist.
+
+    This leg is the anti-drift pin, and it is why the correction cannot rot back:
+    the claim is checkable (`git grep asyncpg -- tortoise/` answered the docstring
+    and nothing else), so a future edit that re-introduces the phantom driver
+    reds here instead of in a reviewer's read. ⛔ THE SCAN IS SOURCE-ONLY on
+    purpose — this file names the driver BECAUSE it refutes it, and that is not
+    the claim under test. If asyncpg ever really becomes a driving read here,
+    delete this leg in the same change that adds the import; the assertion says
+    so, so the failure cannot be mistaken for a typo.
+    """
+    from pathlib import Path
+
+    import tortoise
+
+    root = Path(tortoise.__file__).resolve().parent
+    offenders = sorted(
+        f"{path.relative_to(root)}:{lineno}"
+        for path in root.rglob("*.py")
+        for lineno, line in enumerate(
+            path.read_text(encoding="utf-8").splitlines(), 1)
+        if "asyncpg" in line
+    )
+    assert not offenders, (
+        "no module under `tortoise/` imports asyncpg, so prose that attributes "
+        "the tail-shape split to it names a driver no code reaches — describe "
+        "the SHAPE (JSON TEXT vs decoded) instead. If asyncpg is now really a "
+        f"read here, drop this leg with the import: {offenders}"
+    )
 
 
 def test_the_identity_view_NEVER_aliases_the_record_row():

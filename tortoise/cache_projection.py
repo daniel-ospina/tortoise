@@ -1379,18 +1379,19 @@ def _tail_payload(raw: Any) -> Any:
     loudly — and a `not raw` test defeated exactly the shapes it says it covers:
     a DECODED `[]`/`0`/`False` is FALSY, so it would have been coerced to `{}` and
     projected clean while the same row as TEXT (`'[]'`, `'0'`) was refused. That
-    split is decided by the driver's `jsonb` codec (asyncpg answers `str`,
-    psycopg answers a decoded list/int) and not by the row — the same corrupt
-    record aborting one `record-restore` as `RestoreUnavailable` and projecting
-    cleanly through the other. So the test is IDENTITY against the two absent
-    spellings, never truthiness.
+    split is decided by the SHAPE the tail arrives in — JSON TEXT or already
+    DECODED — never by the row, and BOTH shapes are reachable here: the record
+    layer reads through `psycopg2`, whose `jsonb` typecaster answers Python
+    objects, while JSON TEXT is what a `::text` cast, a pre-serialised tail or a
+    fixture hands over. So the test is IDENTITY against the two absent spellings,
+    never truthiness.
 
-    ⛔ DECLARED RESIDUAL — TWO DEGENERATE SCALARS STILL SPLIT ON THE DRIVER.
+    ⛔ DECLARED RESIDUAL — TWO DEGENERATE SCALARS STILL SPLIT ON THE TAIL'S SHAPE.
     PostgreSQL's `jsonb` maps JSON `null` and JSON `""` onto the SAME Python
     values as the absent spellings above (`null` → `None`, `""` → `''`), so a
-    DECODING driver cannot distinguish `props='null'::jsonb` from an absent tail
-    — those two project as absence there while the identical row as TEXT
-    (`'null'`, `'""'`) is refused below. That asymmetry is not closable at this
+    DECODED tail cannot be told apart from an absent one — those two project as
+    absence while the identical row as TEXT (`'null'`, `'""'`) is refused below.
+    That asymmetry is not closable at this
     operator: the decoded values ARE the mandated lenient spellings, and
     widening the lenient set to admit `'null'`/`'""'` as well would re-spell
     ABSENCE rather than detect it. It is declared rather than fixed because it
@@ -1416,13 +1417,14 @@ def _decoded_tail(raw: Any) -> Mapping[str, Any]:
 
     ⛔ IT MUST NOT RAISE, AND A DECODED JSON STRING IS NOT JSON TEXT (#10867
     review, closing pass). `_tail_payload` routes any `str` through `json.loads`,
-    which is right for the TEXT driver — where a `jsonb` string tail arrives as
-    its JSON SOURCE (`'"hello"'`). A DECODING driver (psycopg) hands the same
-    column back as the decoded Python `str` `'hello'`, which is not JSON text at
-    all: `json.loads` raised `JSONDecodeError` out of the ROW PREDICATE, so
-    `_is_episodic_source_row` — the function whose whole contract is to ANSWER
-    for every shape a row can hold — answered on one driver and raised on the
-    other. Unparseable non-objects answer `{}` here (the DOCUMENT arm, which is
+    which is right for a JSON-TEXT tail — where a `jsonb` string arrives as its
+    JSON SOURCE (`'"hello"'`). A DECODED tail (what `psycopg2`'s `jsonb`
+    typecaster answers) hands the same column back as the Python `str` `'hello'`,
+    which is not JSON text at all: `json.loads` raised `JSONDecodeError` out of
+    the ROW PREDICATE, so `_is_episodic_source_row` — the function whose whole
+    contract is to ANSWER for every shape a row can hold — answered for the
+    decoded shape and raised on the JSON-text one. Unparseable non-objects answer
+    `{}` here (the DOCUMENT arm, which is
     this module's declared safe asymmetry: a missed legacy session keeps its
     prose, a false positive strips a document's metadata). The WRITER path is
     untouched and stays LOUD — `_props_from_row` decodes through
@@ -1430,9 +1432,9 @@ def _decoded_tail(raw: Any) -> Mapping[str, Any]:
     try:
         tail = _tail_payload(raw)
     except (ValueError, TypeError):
-        # Unparseable, i.e. not JSON text — a decoded string tail as the driver
-        # spells it. NOT `CacheProjectionError` (a RuntimeError) and NOT the
-        # writer path, which must keep raising.
+        # Unparseable, i.e. not JSON text — a decoded string tail, which a
+        # decoding read spells as a bare `str`. NOT `CacheProjectionError` (a
+        # RuntimeError) and NOT the writer path, which must keep raising.
         return {}
     return tail if isinstance(tail, Mapping) else {}
 
