@@ -4305,6 +4305,21 @@ jobs:
   ci-introduced-failure:
     # `always()`: this must run when the legs FAILED — that is the only case it exists
     # for. Without it the default `success()` would skip it on exactly the red runs.
+    #
+    # ⛔ DO NOT "fix" this to `${{ !cancelled() }}` (#10911). It looks like the right
+    # fix and it is a FALSE PASS. MEASURED 2026-11-04T12:1xZ: `cancel-in-progress` above
+    # cancels a superseded PR run, GitHub RE-EVALUATES job `if` during cancellation, and
+    # `always()` is true there — so a cancelled run re-arms this job and (with the
+    # aggregate below) pins it `queued` for ever, blocking that PR's own newer run in the
+    # same concurrency group. `!cancelled()` does clear that wedge — but it makes the
+    # job SKIPPED instead, and a skipped REQUIRED check is not neutral: branch protection
+    # reads it as Success, and this repo's rail counts it as non-red
+    # (`admin-merge.sh` NON_RED_CONC = {success, neutral, skipped, cancelled, stale}),
+    # so the rail would merge a tree whose Python CI never completed.
+    #
+    # The wedge therefore has to be fixed where the VERDICT is consumed, not by making
+    # the gate skippable. Pinned by
+    # tests/test_ci_new_failure_gate.py::test_the_required_aggregate_must_not_be_skippable_on_a_cancelled_run.
     if: always()
     # EXACTLY the arms that produce a TEST failure set — the only class #9984 lets the
     # predicate excuse. The gate's own deferrable set is this same list (pinned by
@@ -4420,6 +4435,20 @@ jobs:
           fi
 
   python-ci-gate:
+    # ⛔ `always()`, and it MUST stay non-skippable (#10911). This is the REQUIRED
+    # context (`merge_conditions`), and the temptation — `${{ !cancelled() }}` — is a
+    # FALSE PASS: a skipped required check reads as Success to branch protection and is
+    # counted non-red by the rail (`admin-merge.sh` NON_RED_CONC includes `skipped`), so
+    # the aggregate being SKIPPED on a cancelled run would let the rail merge a tree
+    # whose Python CI never completed. A job that does not run posts no `success`
+    # conclusion, but `skipped` is not "no verdict" — it is a green one.
+    #
+    # The measured wedge this file DOES have (#10911) is that a cancelled run re-arms
+    # this job and pins it `queued` for ever, so it never posts at all. That fails
+    # SAFE (the rail refuses with BLOCKED-CI-UNTESTED) and must be fixed where the
+    # verdict is CONSUMED, not by making the gate skippable.
+    # Pinned by tests/test_ci_new_failure_gate.py
+    # ::test_the_required_aggregate_must_not_be_skippable_on_a_cancelled_run.
     if: always()
     needs: [changes, manifest-integrity, workflow-lint, test, test-slow, test-carve-out, test-concurrency-falkor, packs-compile, test-track-b, test-d14-hosted-api, test-record-postgres, surface-guard, ci-introduced-failure]
     runs-on: ubuntu-latest

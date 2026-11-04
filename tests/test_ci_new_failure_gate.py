@@ -971,9 +971,99 @@ def test_the_deferrable_arms_are_exactly_the_verdict_jobs_needs():
         "instead of failing it (#2656)")
     # A `cancelled` verdict certifies nothing; the aggregate must never treat it as a
     # pass (the harness in tests/test_ci_selection.py asserts the rendered behaviour).
-    assert verdict.get("if") == "always()", (
-        "the verdict job must be `if: always()`, or it is SKIPPED on exactly the red "
-        "runs it exists for")
+    # The guard that used to be asserted here was the literal string `always()`. The
+    # PROPERTY it protected (not skipped on a red run) is real, and #10911 showed the
+    # literal is load-bearing for a second reason — see
+    # `test_the_required_aggregate_must_not_be_skippable_on_a_cancelled_run`.
+    assert _condition_holds(verdict.get("if"), run_cancelled=False,
+                            legs_failed=True), (
+        "the verdict job must RUN on exactly the red runs it exists for, or the "
+        "predicate is never asked (default `success()` skips the red ones)")
+
+
+# --- #10911: the cancelled-run wedge, and why the obvious fix is a FALSE PASS ----
+
+def _condition_holds(expr, *, run_cancelled: bool, legs_failed: bool) -> bool:
+    """Evaluate a job-level `if:` over the two states this defect turns on.
+
+    A tiny evaluator over the vocabulary these jobs use (`always()`, `cancelled()`,
+    `success()`, `failure()`, `!`, and the `${{ }}` wrapper) rather than a string
+    comparison. A string match cannot tell `always()` from `!cancelled()` in
+    BEHAVIOUR, which is the only thing that matters here — and it is what let the
+    original `== "always()"` pin outlive the reason it was written for.
+
+    An expression using a function outside that vocabulary RAISES, so widening a
+    condition is a deliberate act rather than a silent pass.
+    """
+    text = str(expr or "success()").strip()
+    if text.startswith("${{"):
+        text = text[3:].strip()
+    if text.endswith("}}"):
+        text = text[:-2].strip()
+    # On a CANCELLED run GitHub resolves the needs as `cancelled`, so `failure()` is
+    # FALSE there — modelling it as `legs_failed` alone would report a correct
+    # `if: ${{ failure() }}` as "runs on a cancelled run".
+    state = {
+        "always()": True,
+        "cancelled()": run_cancelled,
+        "success()": (not legs_failed) and (not run_cancelled),
+        "failure()": legs_failed and (not run_cancelled),
+    }
+    text = text.strip()
+    negate = text.startswith("!")
+    if negate:
+        text = text[1:].strip()
+    if text not in state:
+        raise AssertionError(
+            f"unsupported job condition {text!r} — extend the evaluator deliberately "
+            "(see the #10911 note above it)")
+    value = state[text]
+    return (not value) if negate else value
+
+
+def test_the_required_aggregate_must_not_be_skippable_on_a_cancelled_run():
+    """#10911 — a skipped REQUIRED check is a green check, so the gate must not skip.
+
+    MEASURED 2026-11-04T12:1xZ: 112 runs listed `queued` (286 jobs actually queued), 3
+    running jobs repo-wide, 15 of 18 self-hosted runners IDLE, 0 merges in ~2 h. Six
+    runs were every-job-`cancelled` EXCEPT `ci-introduced-failure` sitting `queued`
+    (oldest ~2.2 h); twelve more had it as their only remaining queued job.
+
+    Mechanism: `concurrency:` cancels a superseded PR run, GitHub RE-EVALUATES job `if`
+    conditions during cancellation, and `always()` is true there — so the cancelled run
+    re-arms these jobs onto a run never scheduled again, and (per GitHub's own
+    troubleshooting docs) a stuck run keeps blocking later runs in the same concurrency
+    group. That is a real wedge and it fails SAFE: the required context never posts, so
+    the rail refuses with BLOCKED-CI-UNTESTED.
+
+    ⛔ The obvious fix — `${{ !cancelled() }}` — is a FALSE PASS and is refused here.
+    A job skipped by a conditional concludes `skipped`, which branch protection reports
+    as Success, and this repo's rail counts as non-red
+    (`agent-infra/scripts/admin-merge.sh` NON_RED_CONC = {success, neutral, skipped,
+    cancelled, stale}). Making the required aggregate skippable on a cancelled run would
+    therefore let the rail merge a tree whose Python CI never completed.
+
+    So the property pinned is: on a CANCELLED run the aggregate still runs. The wedge
+    must be fixed where the verdict is CONSUMED, not by making the gate skippable.
+    """
+    import yaml
+
+    workflow = yaml.safe_load((REPO / ".github" / "workflows" / "python-ci.yml")
+                              .read_text(encoding="utf-8"))
+    gate = workflow["jobs"]["python-ci-gate"]
+
+    assert _condition_holds(gate.get("if"), run_cancelled=True, legs_failed=True), (
+        f"the REQUIRED aggregate is skippable on a cancelled run (if: {gate.get('if')!r}). "
+        "A skipped required check reports Success to branch protection and is counted "
+        "non-red by `admin-merge.sh` NON_RED_CONC, so this is a false PASS on the merge "
+        "path, not a fix for the #10911 queue wedge.")
+
+    # ...and it must still run on a RED run and on an all-GREEN run — either omission
+    # means the required context never posts.
+    for legs_failed, label in ((True, "a red run"), (False, "an all-green run")):
+        assert _condition_holds(gate.get("if"), run_cancelled=False,
+                                legs_failed=legs_failed), (
+            f"the required aggregate must run on {label}, or its verdict never posts")
 
 
 def test_the_workflow_hands_the_predicate_the_red_legs():
