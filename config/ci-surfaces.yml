@@ -141,6 +141,18 @@ surfaces:
   # #10703 batch, NOT by CI — the gate could not see it because the file was unregistered.
   - test_cli_config_show.py
   - test_9583_openapi_read_only_claim.py
+  # #4282: the `api` arm of the #4860 key-limit failover guard. The file drives the
+  # hosted write door (`POST /v1/sessions` -> `hosted_api._capture_session_impl` ->
+  # `sdk._extract_session_v2` -> `RotatingModel`) and reads the response's
+  # `extraction_provider` / `extraction_mode`, so the file it actually guards IS
+  # `tortoise/hosted_api.py`. That module is an EXACT `api` SOURCE_PATTERN match, so a
+  # `hosted_api.py`-only diff selects `api` and REPLACES the `core` fallback in
+  # `select()` — without this row such a PR ships with every leg green and the only
+  # end-to-end #4860 proof never runs, invisibly (`--integrity` is green either way).
+  # The `core` row below is the OTHER half of the // #7968 / #3561 dual-registration
+  # idiom: it covers a `tortoise/model_adapters.py`-only diff (the rotation subject,
+  # which matches no SOURCE_PATTERN). BOTH are required.
+  - test_4860_capture_key_limit_failover.py
   # #9583: a served GET docstring IS the OpenAPI operation `description` a customer
   # reads, and `/v1/packs` advertised "read-only pack introspection" while its handler
   # calls `pack_state.get_tenant_packs`, whose self-heal `ensure_tenant_packs` MERGEs a
@@ -1366,6 +1378,18 @@ surfaces:
   - test_probe_reset_inflight_4608.py  # #4608: a probe reset/rebuild must not close a handle an in-flight probe still queries (hosted_api + selfhost)
   - test_provisioning_edge_function.py
   - test_quota.py
+  # #8906: the points gate must count the graph the request WRITES. Every pin
+  # lives in `tortoise/hosted_api.py` (`_check_org_limit`'s `sdk` threading + the
+  # five points doors that omitted it: /v1/points, /v1/objects, /v1/subjects,
+  # /v1/sessions/commit, /v1/demo) and `tortoise/quota.py` (`_count_resource`'s
+  # `sdk=None` fallback to the org DEFAULT graph) — both EXACT `api`
+  # SOURCE_PATTERNS matches that REPLACE the `core` fallback in `select()`. So an
+  # `api` arm is the ONLY one a hosted_api.py/quota.py-only diff reaches: a
+  # `core`-only entry would leave this regression guard unrun on the exact
+  # change it exists to guard (the #1349/#2938/#3154 silent-drop class, the same
+  # argument as the #4503 row below). DB-free embedded fixtures (temp redislite +
+  # real key rows), so it needs no carve-out registration.
+  - test_8906_points_gate_counts_write_graph.py
   # #4503: the EDGE class is outside every accounting surface. This
   # file pins the cap's invariance to edge-state growth, so it is
   # registered under `api` -- the surface `tortoise/quota.py`
@@ -1845,6 +1869,7 @@ surfaces:
   - test_10194_eval_suite_non_gating.py
   - test_10017_backfill_copy.py
   - test_2351_claim_class.py
+  - test_4860_capture_key_limit_failover.py
   - test_9555_narrative_cache_rebuild.py
   - test_9555_narrative_carrier.py
   - test_9567_record_capstone.py
@@ -9031,7 +9056,7 @@ durations:
   test_extractor_v4_doc_citations.py: 0.1  # #8498 review P2: one row + two module assertions; same no-DB shape as the step-list guard
   test_extractor_v4_citation_rot.py: 3.2  # #8506: doc-text scans + a handful of file reads; same no-DB shape as the two guards above — ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 0.1
   test_extractor_v4_s4_stage_claims.py: 3.0  # #8500: `ast` walks over two source files + doc-text scans, plus THREE in-process behavioural tests (`vet_gate.check_batch`/`apply_vet`, `kind_classifier`/`_apply_classify_kinds`) and a row-scoped read of §4.0; no DB. Measured 2026-10-18 with `--durations=0`: 3.96–6.97 s of call time over three runs (one `ast.parse` of the 9.5k-line `extractor_v2.py` is 0.44 s and the mutation fixtures reparse it), so the previous `0.1` under-declared ~50x (#8955 review, UNVERIFIED item) — ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 6.9
-  test_5095_s3_identity_policy.py: 2.0  # #5095: a file a PR ADDS can never carry a CI junit reading yet (the refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST: the `core` registration puts one more file in `fast_pool()` and `--integrity`'s duration-coverage floor is measured against that pool. What the weight covers: hermetic — a fake model, a stub `_fts_rows` and `sdk=None`, 57 cases (#5095: re-derived at PR #10633's head — the row said 53, the PR carried the file from 53 to 55 and its residual-1 split to 56, and round 7b's arm-3 shape pin to 57; a collected-count claim of this spelling is not read by `tests/test_ci_selection.py::test_no_durations_row_states_a_stale_case_count`, which requires the `grep -c '^def test_'` instrument this class-based file cannot use); no DB, no network, no real model. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
+  test_5095_s3_identity_policy.py: 2.0  # #5095: a file a PR ADDS can never carry a CI junit reading yet (the refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST: the `core` registration puts one more file in `fast_pool()` and `--integrity`'s duration-coverage floor is measured against that pool. What the weight covers: hermetic — a fake model, a stub `_fts_rows` and `sdk=None`, 58 cases (#5095: re-derived at PR #10633's head — the row said 53, the PR carried the file from 53 to 55 and its residual-1 split to 56, round 7b's arm-3 shape pin to 57, and review round 8's arm-3 guard pin to 58; a collected-count claim of this spelling is not read by `tests/test_ci_selection.py::test_no_durations_row_states_a_stale_case_count`, which requires the `grep -c '^def test_'` instrument this class-based file cannot use); no DB, no network, no real model. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
   test_extractor_v4_failure_policy.py: 0.1  # #8495: §4.4 doc-text scan + two module reads; same no-DB shape as the three guards above
   test_extractor_v4_redaction_reconciliation.py: 0.1  # #8496: one section read + a marker/idempotence check; the `tortoise.sdk` import (~0.12s) is the only cost — ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 0.3
   test_entity_attachment_brief_claims.py: 0.1  # #8639 review P1: doc-text scan + three regex block reads; same no-DB shape as the extractor-v4 guards above
