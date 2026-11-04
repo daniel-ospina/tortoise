@@ -50,20 +50,31 @@ def test_no_artifact_restates_the_refuted_capture_mechanism():
     this file's docstring, and `docs/client-server-split.md` §8a. A wrong
     mechanism is not cosmetic: it points the next reader at cache expiry (a
     re-expansion fix) instead of at the config NAME, which is the fix that
-    actually landed — every one of the three is pinned here so the plausible-but-
+    actually landed — every one of the four is pinned here so the plausible-but-
     wrong sentence cannot come back in a later tidy-up.
+
+    `client/README.md` is the FOURTH, added after review caught it: the row it
+    carries ships inside the wheel as the `tortoise-client` description, so it is
+    the one place a `pip install`-only user reads the mechanism, and it still said
+    the header "is expanded once at process start" while this PR's own §8a
+    measured the opposite. A guard that pins three artifacts and misses the one
+    that ships to users pins the copies, not the claim.
     """
     import tortoise.mcp_bridge as bridge_module
 
     artifacts = {
         "tortoise/mcp_bridge.py": bridge_module.__doc__ or "",
         "tests/test_mcp_bridge.py": __doc__ or "",
+        "client/README.md": (REPO_ROOT / "client" / "README.md").read_text(
+            encoding="utf-8"
+        ),
         "docs/client-server-split.md": (
             REPO_ROOT / "docs" / "client-server-split.md"
         ).read_text(encoding="utf-8"),
     }
     refuted = (
         "expanded once, when the harness",
+        "expanded once at process start",
         "replayed for the life of the process",
         "replays an empty-or-stale header forever",
     )
@@ -73,7 +84,8 @@ def test_no_artifact_restates_the_refuted_capture_mechanism():
                 f"{name} restates the REFUTED capture mechanism ({phrase!r}) — "
                 "the expansion re-runs at every connect; the frozen thing is "
                 "process.env and the per-connection resolution (#10605)")
-    for name in ("tortoise/mcp_bridge.py", "docs/client-server-split.md"):
+    for name in ("tortoise/mcp_bridge.py", "client/README.md",
+                 "docs/client-server-split.md"):
         assert "re-runs at every connect" in artifacts[name].lower(), (
             f"{name} must state the MEASURED mechanism (the expansion re-runs at "
             "every connect) rather than leaving the reader to infer it")
@@ -1186,6 +1198,56 @@ class TestFailureModes:
             f"state={state}")
         # ...and the silence for id 2 is still answered.
         assert [m["id"] for m in messages] == [1, 2], messages
+
+    def test_a_resolution_failure_on_the_FAULT_path_still_answers_the_frame(
+        self, monkeypatch, home, capsys,
+    ):
+        """The fault handler must not be able to fault (#10605 review).
+
+        RED before this fix, measured: the `except Exception` handler computed its
+        redaction keys by calling `resolve_connection()` — twice — so when
+        RESOLUTION was what failed, the handler raised and the exception escaped
+        `main()`. A bridge that dies with a traceback writes no JSON-RPC error, so
+        the harness waits forever for an answer that is never coming, and the exit
+        is indistinguishable from a crash loop. The handler now reads the live key
+        through `_live_key()`, which cannot raise.
+        """
+        import io
+
+        from tortoise import mcp_bridge
+
+        _write_credential(home, "tt_start_secret", "http://127.0.0.1:9")
+        monkeypatch.setenv("TORTOISE_MCP_URL", "http://127.0.0.1:9/mcp")
+
+        real = mcp_bridge.resolve_connection
+        calls = {"n": 0}
+
+        def _flaky():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return real()   # main()'s own start-up resolution succeeds
+            raise OSError("the credential store stopped being readable")
+
+        monkeypatch.setattr(mcp_bridge, "resolve_connection", _flaky)
+        monkeypatch.setattr(
+            mcp_bridge, "forward",
+            lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("boom")))
+
+        out = io.StringIO()
+        monkeypatch.setattr(
+            sys, "stdin",
+            io.StringIO('{"jsonrpc":"2.0","id":1,"method":"initialize"}\n'))
+        monkeypatch.setattr(sys, "stdout", out)
+
+        assert mcp_bridge.main([]) == 0, "main() propagated the handler's own fault"
+
+        emitted = out.getvalue()
+        assert "-32603" in emitted, f"the frame was not answered: {emitted}"
+        assert "tt_start_secret" not in emitted, emitted
+        assert calls["n"] >= 2, (
+            "the live-key lookup on the fault path was never attempted, so this "
+            "test is not exercising the hazard it names")
+        assert "tt_start_secret" not in capsys.readouterr().err
 
     def test_a_partially_answered_batch_does_not_leak_the_credential(self, home):
         """The answered message on the partial-batch path must be redacted too.

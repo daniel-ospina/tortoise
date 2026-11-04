@@ -667,6 +667,23 @@ def forward(client: httpx.Client, state: dict, payload: Any) -> list[Any]:
     return messages
 
 
+def _live_key() -> str | None:
+    """The credential that resolves RIGHT NOW, or `None` if resolution fails.
+
+    The FAULT path must not be able to fault. `resolve_connection()` is
+    never-raise by construction (its only fallible step, `_credential_paths()`,
+    swallows an unlocatable store), but a handler that calls it unguarded is one
+    future addition away from re-raising out of `main()` — and a bridge that dies
+    with a traceback writes no JSON-RPC error, so the harness waits forever for an
+    answer it will never get. Suppressing here costs a redaction key at worst; it
+    never costs the frame.
+    """
+    try:
+        return resolve_connection().key
+    except Exception:  # the fault path must not raise
+        return None
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the bridge until stdin closes. Returns a process exit code."""
     try:
@@ -710,16 +727,18 @@ def main(argv: list[str] | None = None) -> int:
                 # on a bad frame leaves the harness waiting with no diagnosis, and
                 # the exit is indistinguishable from a crash loop.
                 # The START key and the LIVE one: a rotation between the
-                # send and the fault means either could be in the text.
-                detail = _redact_any(repr(exc), connection.key,
-                                     resolve_connection().key)
+                # send and the fault means either could be in the text. The live
+                # one comes from `_live_key()`, never from a bare
+                # `resolve_connection()`: a fault handler that can itself fault
+                # re-raises out of `main()`, and the frame it was supposed to
+                # answer is answered with a traceback on stderr instead.
+                detail = _redact_any(repr(exc), connection.key, _live_key())
                 # REDACT FIRST, TRUNCATE SECOND — the sibling line below already
                 # does. Slicing the raw stdin line first cut a credential that
                 # straddled char 120 in half, and neither `redact` nor
                 # `_redact_any` can match a value it can no longer see whole, so
                 # up to `len(key) - 1` characters reached stderr.
-                quoted = _redact_any(line.strip(), connection.key,
-                                     resolve_connection().key)
+                quoted = _redact_any(line.strip(), connection.key, _live_key())
                 _log(f"internal failure forwarding {quoted[:120]!r}: "
                      f"{detail}")
                 messages = _errors_for(
