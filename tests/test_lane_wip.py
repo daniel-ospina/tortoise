@@ -2174,10 +2174,12 @@ def test_the_index_problem_branch_names_no_command_that_cannot_run(hub: Path) ->
 
     `_pin_index_tree` sets it only when `<pin>^2^{tree}` resolves to NOTHING (`_verify_opt`
     raises on a failed read, so `""` is a real "no such tree"), and BOTH `read-tree <pin>^2`
-    and `show <pin>^2:<path>` need exactly that object — measured rc 128 "failed to unpack
-    tree object" on both shapes that reach here. Naming a route that cannot run, on the
-    recovery path, is worse than naming none; the sibling branch above verifies its `salvage`
-    before printing it.
+    and `show <pin>^2:<path>` need exactly that object. Both exit 128, but with DIFFERENT
+    diagnostics — `read-tree` says `failed to unpack tree object <pin>^2`, `show` says
+    `path '<path>' does not exist in '<pin>^2'` — so do not quote one for both (see the
+    comment on the branch itself). Naming a route that cannot run, on the recovery path, is
+    worse than naming none; the sibling branch above verifies its `salvage` before printing
+    it.
     """
     wt = dirty_lane(hub, "wt-idxproblem")
     (wt / "only_in_index.py").write_text("staged work only in the index\n")
@@ -2334,6 +2336,28 @@ def test_recover_without_a_path_from_outside_any_repository_names_the_remedy(
     message = out.stdout + out.stderr
     assert "you are NOT inside a repository here" in message, message
     assert "surviving path in that repo" in message, message
+
+
+def test_list_of_a_dead_path_outside_any_repository_names_the_REPOSITORY(hub: Path) -> None:
+    """`list --path <gone>` without `--all` asserted a "this repo" the caller may not have.
+
+    Run from outside any repository, the message named one that does not exist and advised a
+    command (`list --all`) that then failed for the same reason, so the reader paid a
+    round-trip before the next message rescued them. The claim is now conditional on nothing.
+    """
+    gone = hub.parent / "gone-lane"
+    gone.mkdir()
+    gone.rmdir()
+    outside = hub.parent / "no-repo-listgone"
+    outside.mkdir()
+
+    out = run_tool("list", "--path", str(gone), cwd=outside)
+    assert out.returncode != 0, out.stdout + out.stderr
+    message = out.stdout + out.stderr
+    assert "reads the pins from this repo" not in message, (
+        f"the caller is in no repository, so there is no 'this repo': {message}"
+    )
+    assert "the repository you run it in" in message, message
 
 
 def test_pin_works_without_a_configured_git_identity(hub: Path) -> None:

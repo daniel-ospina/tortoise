@@ -1040,11 +1040,17 @@ def _callers_cwd() -> Path:
     try:
         return Path.cwd().resolve()
     except OSError as exc:
+        # ⛔ "PASS `--path <the lane's path>`" NAMED A PATH THIS BRANCH PROVES IS GONE. It is
+        # reached only when the caller's cwd no longer exists, so "the lane's path" is the
+        # removed directory and that command cannot show what the sentence promised (measured:
+        # `list --all --path <removed>` -> rc 2, "does not exist … you are NOT inside a
+        # repository here"). Name what survives instead.
         raise LaneWipError(
             f"the current directory no longer exists ({exc}) — this process is sitting in "
             "a lane whose directory was removed, which is the state `recipe` describes. Run "
-            "`tools/lane_wip.py list --all` from a surviving directory (or pass "
-            "`--path <the lane's path>`) to see what is still recoverable"
+            "`tools/lane_wip.py list --all` from a surviving directory of the repository that "
+            "held the lane (adding `--path <a surviving path there>` if you cannot `cd` "
+            "there) to see what is still recoverable"
         ) from exc
 
 
@@ -1351,10 +1357,18 @@ def cmd_list(args: argparse.Namespace) -> int:
     # `--all` (and a lane-scoped read) work without the directory.
     if not Path(root).is_dir():
         if not args.all:
+            # ⛔ "THIS REPO" DOES NOT ALWAYS EXIST. Run from outside any repository, this
+            # assertion named one that does not, and the command it advises (`list --all`)
+            # then failed too — so the reader paid a round trip before the next message
+            # rescued them (measured: from a non-repo cwd, `list --path <gone>` -> this text,
+            # then `list --all` -> "… is not a repository, and you are NOT inside a
+            # repository here"). Make the claim true whether or not the caller is in one.
             raise LaneWipError(
                 f"{root} does not exist — that worktree may have been removed. "
-                "`tools/lane_wip.py list --all` reads the pins from this repo instead, "
-                "and `tools/lane_wip.py recipe` says what is still recoverable"
+                "`tools/lane_wip.py list --all` reads the pins from the repository you run it "
+                "in — run it from a worktree of the repository that held this lane, or add "
+                "`--path <a surviving path there>` — and `tools/lane_wip.py recipe` says what "
+                "is still recoverable"
             )
         root = _repo_root_with_remedy(
             f"{root} does not exist",
