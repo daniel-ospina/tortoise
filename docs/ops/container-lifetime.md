@@ -160,7 +160,7 @@ enumerator would disable the timer, while editing the file that decides what get
 **deleted** would be invisible. The reaper re-hashes both and refuses to sweep on
 a mismatch (**exit 4**). Measured on cell `cmux`:
 
-```
+```text
 container_reaper: STALE COPY — TORTOISE_CONTAINER_REAPER_SHA256 pins 55b5c0e96177…
 but this file is 3c64e0b6ba22… Refusing to sweep with superseded policy;
 re-run the installer (tools/install-container-reaper-timer.sh).
