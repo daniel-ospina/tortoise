@@ -41,6 +41,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import hashlib
+import hmac
 import ipaddress
 import json
 import logging
@@ -2716,6 +2717,50 @@ def consent_app_origin() -> str | None:
     return None
 
 
+#: Domain separator for the FLOW-derived attempt key (#10487). The HMAC key is
+#: `CONSENT_TOKEN_SECRET`, so the label is what keeps this derivation from ever
+#: colliding with the token arm's own use of the same key — and what would let
+#: either side be rotated to a distinct secret later without a silent behaviour
+#: change on the other.
+CONSENT_ATTEMPT_KEY_DOMAIN = b"tortoise/consent-attempt-key/v1"
+
+
+def consent_attempt_key(state: str) -> str | None:
+    """The attempt key the FLOW identified by `state` carries — or ``None``.
+
+    ⛔ PER FLOW, NOT PER REQUEST (#10487). `/api/consent/start` is insert-only on
+    `attempt_key_hash`: the hash is written once and never rotated, and a caller
+    that presents a DIFFERENT key is answered `403 flow_not_yours`. So a key minted
+    afresh on every bounce poisoned the row for the flow's own next entry — the
+    back button, a refresh, and the bounce's own sign-in return all arrived with a
+    key nobody had stored. Deriving it from `state` (the row's KEY, so same row ⇒
+    same key) makes every re-entry present the value the row already holds.
+
+    ⛔ AND STILL UNPREDICTABLE FROM `state`. `state` is client-chosen and public, so
+    a bare `sha256(state)` would be a key anyone could compute — the ownership
+    proof would then prove nothing. The missing input is the server secret:
+    ``HMAC-SHA256(CONSENT_TOKEN_SECRET, label || state)``. It is a PRF, so the
+    derivation leaks nothing about the secret and one flow's key says nothing
+    about another's.
+
+    ``None`` when no key can be DERIVED — `state` absent (nothing to key the row
+    by), or the secret unprovisioned, in which case the whole consent-token arm
+    answers 503 and a deterministic key would have to be computable from public
+    input to exist at all. The caller falls back to a random per-request key
+    there; that is a declared residual, not the default path.
+    """
+    if not state:
+        return None
+    from tortoise.consent_token import consent_token_secret
+    secret = consent_token_secret()
+    if not secret:
+        return None
+    mac = hmac.new(secret.encode("utf-8"),
+                   CONSENT_ATTEMPT_KEY_DOMAIN + b"\x00" + state.encode("utf-8"),
+                   hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(mac).rstrip(b"=").decode("ascii")
+
+
 def consent_bounce_url(app_origin: str, raw_query: str) -> str:
     """The app-owned sign-in leg for an authorize request this server will not
     render: ``{app}/auth?next=/api/consent/start?{raw}``.
@@ -2748,12 +2793,21 @@ def consent_bounce_url(app_origin: str, raw_query: str) -> str:
       in on a DIFFERENT `/auth` entry for the same flow (the back button, a
       refresh, this bounce's own return target) came back without it and was
       refused with `403 flow_not_yours`: the row was already claimed by a key
-      nobody could present. Generating the key HERE makes it the property of the
-      flow rather than of one emitted URL — the bounce, the sign-in return, and
-      every re-entry carry the same value, so `start` ADOPTS it on the insert
-      and the insert-only row is never poisoned. It is `secrets`, not a
-      counter: it is the browser's only proof of ownership, so it must not be
-      predictable from the `state` (which is client-chosen and public).
+      nobody could present.
+    * ⛔ THE KEY IS THE FLOW'S, DERIVED — `consent_attempt_key(state)` — because
+      the bounce is re-entered, not visited once. A key minted per REQUEST is the
+      same dead end one hop later: bounce #2 presents a value the insert-only row
+      never stored, and the visitor is refused exactly as before (#10487's back
+      button is still a re-entry). `state` is the row's key, so deriving from it
+      is what makes "the bounce, the sign-in return, and every re-entry carry the
+      same value" TRUE. It stays unpredictable because the HMAC key is the
+      server's — see `consent_attempt_key`.
+    * ⚠️ Declared residual: when `CONSENT_TOKEN_SECRET` is unprovisioned no
+      derivation is possible and the key falls back to a fresh
+      `secrets.token_urlsafe(32)`, i.e. the one-URL-only behaviour. That
+      deployment's consent-token arm answers 503 on every mint, so the key is not
+      the thing standing between it and working; it must not be, however, a
+      PREDICTABLE value derived from public input.
     """
     inner = CONSENT_START_PATH + (("?" + raw_query) if raw_query else "")
     # ⛔ APPEND ONLY WHERE NONE EXISTS. There are two callers and they are NOT alike: the bounce
@@ -2767,8 +2821,17 @@ def consent_bounce_url(app_origin: str, raw_query: str) -> str:
     # (`if not key`), and start.ts reads `""` as no key at all.
     if not any(v.strip() for v in parse_qs(raw_query, keep_blank_values=True)
                .get(CONSENT_ATTEMPT_KEY_PARAM, [])):
+        presented = parse_qs(raw_query, keep_blank_values=True)
+        # The row is keyed by `state`, so the DERIVED key must be too: a re-entry
+        # whose other parameters differ (a retry that reorders `scope`, a client
+        # that adds a param) is still the same ROW, and a key derived from
+        # anything else would fail to match the hash it stores. Exactly one
+        # non-blank `state` is what `start` validates against; anything else is
+        # not a flow this server can key, and falls back to the residual below.
+        states = [s for s in presented.get("state", []) if s.strip()]
+        minted = consent_attempt_key(states[0]) if len(states) == 1 else None
         inner += ("&" if "?" in inner else "?") + urlencode(
-            {CONSENT_ATTEMPT_KEY_PARAM: secrets.token_urlsafe(32)})
+            {CONSENT_ATTEMPT_KEY_PARAM: minted or secrets.token_urlsafe(32)})
     return (app_origin.rstrip("/") + CONSENT_SIGNIN_PATH + "?"
             + urlencode({"next": inner}))
 

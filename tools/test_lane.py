@@ -383,7 +383,11 @@ NAME_PREFIX = "fdb-lane-"
 #: container qualifies for the one proof the ruling already authorises armed
 #: ("a `fdb-lane-*` container MAY be reaped when the worktree that owns it is
 #: gone") instead of falling into the INDETERMINATE bucket whose default the
-#: owner has not ruled on. Every default stays exactly as `origin/main` set it.
+#: owner has not ruled on. Every default stays exactly as `origin/main` set it
+#: — and this only promotes a container out of a REPORT-ONLY bucket, never out
+#: of a protected one: the owner-gone arm carries the same not-in-use proof the
+#: INDETERMINATE arm does (see its comment), so no default destroys anything it
+#: did not destroy before (#10841 review, P1).
 LABEL_OWNER = "tortoise.test-lane.worktree"
 LABEL_SLUG = "tortoise.test-lane.slug"
 LABEL_CREATED = "tortoise.test-lane.created"
@@ -2730,9 +2734,13 @@ def reap_orphans(own_name: str | None = None) -> list[str]:
         # owner has ruled on (`OWNER_INDETERMINATE_REAP_ENV`). The label stamped
         # at creation survives that teardown, so it upgrades the container from
         # INDETERMINATE to DETERMINED-AND-GONE, i.e. the ONE proof #8180
-        # authorises armed. It can only ever SPARE a container or move it out of
-        # the unruled bucket — it never widens an arm and never changes a
-        # default.
+        # authorises armed. It never widens WHAT is destroyed: the owner-gone arm
+        # still demands the second proof the INDETERMINATE bucket demands
+        # (docker's own TERMINAL state, or no attached client across
+        # `OWNER_GRACE_H`), so a container a live lane is still using is spared on
+        # BOTH paths — the label only decides which proof ladder applies (#10841
+        # review, P1: promoting a RUNNING container into a bare `rm -f` was the
+        # widening this comment used to deny).
         if owner is None:
             stamped = stamped_labels.get(name, {})
             trusted, why_not = _trusted_label_owner(
@@ -2781,9 +2789,53 @@ def reap_orphans(own_name: str | None = None) -> list[str]:
             # `start()` already refuses to append a report to `unknown`.
             prior = ("" if state not in _TERMINAL_STATES
                      else _termination_report(name, live=False))
+            # ⛔ THE OWNER BEING GONE IS NOT PROOF THE DATABASE IS UNUSED.
+            # #8180 authorises the reap "when the worktree that owns it is gone",
+            # and this block is that proof — but a lane container OUTLIVES its
+            # worktree by design, so "gone" is compatible with a pytest still
+            # running against the URI it exported. Before the ownership label a
+            # container whose worktree had been deregistered fell into the
+            # REPORT-ONLY INDETERMINATE bucket; the label moves it HERE, which
+            # would make this the one arm that destroys a RUNNING container with
+            # no client probe, no grace and no consent (#10841 review, P1). This
+            # module's own worst bug is "a clock can never fire on a live owner's
+            # database", so the removal needs the SECOND proof the INDETERMINATE
+            # arm already demands: docker's own state, OR no attached client
+            # across a full `OWNER_GRACE_H` gap. Terminal is proof on its own
+            # (`docker exec` into a stopped container cannot be a live client).
+            # Every unreadable answer is report-only, and the gap can only ever
+            # SPARE — the same ladder, one bucket over.
+            served = ""
+            if state not in _TERMINAL_STATES:
+                busy = _container_in_use(name)
+                if busy is None:
+                    out.append(f"reap: kept {name} — its owning worktree "
+                               f"{owner} is gone but it is {state} and could "
+                               f"not be asked whether a client is using it; "
+                               f"report only, fail-closed")
+                    continue
+                if busy:
+                    _touch_lease(name)   # observed use: the epoch follows it
+                    out.append(f"reap: kept {name} — its owning worktree "
+                               f"{owner} is gone but it HAS an active client, "
+                               f"so a live lane is still using it")
+                    continue
+                gap_h = _unused_gap(name)
+                if gap_h is None or gap_h < OWNER_GRACE_H:
+                    age_txt = ("first sighting" if gap_h is None
+                               else f"only {gap_h:.1f}h of the "
+                                    f"{OWNER_GRACE_H:g}h grace")
+                    out.append(f"reap: kept {name} — its owning worktree "
+                               f"{owner} is gone and no client is attached, "
+                               f"but it shows no OBSERVED use ({age_txt}); a "
+                               f"lane between steps looks exactly like this")
+                    continue
+                served = (f"; it is {state} and has served no client for "
+                          f"{gap_h:.1f}h > {OWNER_GRACE_H:g}h")
             rm = _docker("rm", "-f", name)
             out.append(f"reap: {'removed' if rm.returncode == 0 else 'FAILED to remove'} "
                        f"{name} — its owning worktree {owner} is gone"
+                       + served
                        + (f"; it was {prior}" if prior else ""))
             continue
         if owner is not None and state in _TERMINAL_STATES:

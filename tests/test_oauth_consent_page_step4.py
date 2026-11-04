@@ -37,6 +37,7 @@ here, each on the artefact rather than on a string this file also writes:
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -1263,22 +1264,29 @@ def test_the_bounce_does_not_append_a_SECOND_key_when_the_flow_already_has_one()
         f"a blank key suppressed the minted one, leaving the visitor keyless: {keys}")
 
 
-def test_the_bounce_carries_the_attempt_key_the_flow_is_bound_to(api_client) -> None:
-    """#10487: the AS mints the attempt key on the ONE leg where none exists yet.
+def test_the_bounce_carries_the_attempt_key_the_flow_is_bound_to(
+        api_client, monkeypatch) -> None:
+    """#10487: the AS supplies the attempt key on the ONE leg where none exists — and
+    it must be the FLOW's key, not the REQUEST's.
 
-    `/api/consent/start` binds a flow to a browser with an insert-only `attempt_key` and hands it
-    back inside the return target. On a cold start it had to INVENT that key, so the key lived only
-    in the URL it happened to emit — and a visitor who signed in on a different `/auth` entry for
-    the same flow (back button, refresh, this bounce's own return target) came back without it and
-    was refused `403 flow_not_yours`.
+    `/api/consent/start` binds a flow to a browser with an insert-only `attempt_key`
+    and hands it back inside the return target. On a cold start it had to INVENT that
+    key, so the key lived only in the URL it happened to emit — and a visitor who
+    signed in on a different `/auth` entry for the same flow (back button, refresh,
+    this bounce's own return target) came back without it and was refused
+    `403 flow_not_yours`.
 
-    Generating it here makes it the property of the FLOW: the bounce, the sign-in return, and every
-    re-entry carry the same value, and `start` adopts it instead of inventing one. The three
-    properties pinned below are what make that safe and useful: the key is carried at all, it is
-    UNPREDICTABLE and per-request (it is the browser's only proof of ownership, and `state` is
-    client-chosen and public), and the inner target is still the only allowlisted API path.
+    ⛔ A key minted PER REQUEST reproduces that dead end one hop later: the row keeps
+    the hash it stored on INSERT and never rotates it, so bounce #2 presents a value
+    nothing has stored and `start` refuses it exactly as before (#10841 review, P2 —
+    the back button IS a re-entry). Deriving the key from the flow is what makes the
+    promise true; the arms below pin each half of it, and the last one pins the
+    unprovisioned residual so it stays the DECLARED path rather than the default.
     """
     from urllib.parse import parse_qs, urlsplit
+
+    monkeypatch.setenv("CONSENT_TOKEN_SECRET",
+                       "consent-attempt-key-pin-secret-0123456789abcdef")
 
     tc, _supabase = api_client
     params = _authorize_params(tc, state="st-carriage")
@@ -1298,10 +1306,41 @@ def test_the_bounce_carries_the_attempt_key_the_flow_is_bound_to(api_client) -> 
     for name in ("client_id", "redirect_uri", "code_challenge", "state", "scope"):
         assert iq1[name][0] == params[name], (name, iq1[name][0], params[name])
 
-    # Per-request, not a constant: two bounces of the SAME flow never share a key.
+    # ⛔ THE WHOLE OF #10487: a RE-ENTRY of the same flow presents the same value, so
+    # the insert-only row recognises it. Mutation this arm exists for: minting
+    # `secrets.token_urlsafe(32)` at the call site, which made the two differ and
+    # left the second bounce answering `403 flow_not_yours`.
     _r2, q2, _raw2 = _bounce(tc, params)
     key2 = parse_qs(urlsplit(q2["next"]).query, keep_blank_values=True)["attempt_key"][0]
-    assert key1 != key2, "the attempt key is a constant — it would be guessable, and shared"
+    assert key1 == key2, (
+        "two bounces of the SAME flow minted DIFFERENT attempt keys — the row stores the "
+        "first and never rotates it, so the second entry is refused `403 flow_not_yours` "
+        f"(#10487): {key1!r} != {key2!r}")
+
+    # …and it is still not a constant, and not a function of PUBLIC input alone: a
+    # different flow gets a different key, and the value is not a bare digest of
+    # `state` that any visitor could compute for a flow they did not begin.
+    other = _authorize_params(tc, state="st-a-different-flow")
+    _r3, q3, _raw3 = _bounce(tc, other)
+    key3 = parse_qs(urlsplit(q3["next"]).query, keep_blank_values=True)["attempt_key"][0]
+    assert key3 != key1, "every flow shares ONE attempt key — it would prove nothing"
+    assert key1 != hashlib.sha256(params["state"].encode()).hexdigest(), (
+        "the attempt key is an UNKEYED digest of the client-chosen `state`, so anyone who "
+        "knows the flow's state can compute its ownership proof")
+
+    # ⚠️ DECLARED RESIDUAL: with no `CONSENT_TOKEN_SECRET` nothing can be derived (and
+    # that deployment's consent-token arm answers 503 on every mint), so the bounce
+    # falls back to a one-shot random key — the pre-fix behaviour, for that one
+    # configuration only.
+    monkeypatch.delenv("CONSENT_TOKEN_SECRET")
+    _r4, q4, _raw4 = _bounce(tc, params)
+    key4 = parse_qs(urlsplit(q4["next"]).query, keep_blank_values=True)["attempt_key"][0]
+    _r5, q5, _raw5 = _bounce(tc, params)
+    key5 = parse_qs(urlsplit(q5["next"]).query, keep_blank_values=True)["attempt_key"][0]
+    assert key4 != key5, (
+        "with no secret the key cannot be derived deterministically, and it must NOT fall "
+        "back to a value computed from the public `state` — a guessable ownership proof is "
+        "worse than a one-shot one")
 
 
 @pytest.mark.parametrize("issuer", [
