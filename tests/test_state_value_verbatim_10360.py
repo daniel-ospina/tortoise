@@ -2077,9 +2077,16 @@ def test_the_composition_reads_a_SIGNED_or_SPACED_prefix_as_the_same_value():
     # ⛔ the `_MAGNITUDE_TAIL` POSITIVE branch, pinned (#10360 review cycle 5,
     # P3): `20k k miles` already carries a prefix, so the standalone `k` must
     # NOT be consumed a second time. Forcing that guard to always fire yields
-    # `20kkiles` here instead of `20000k`, and nothing else in this file noticed.
+    # `20kkmiles` here instead of `20000k` — the consumed `k` lands as `20kk` and
+    # the unit branch's `factor is None` path glues `miles` back onto it — and
+    # nothing else in this file noticed. (#10801 review P3: an earlier revision
+    # of this comment said `20kkiles`, which that mutation cannot produce.)
     assert v2._value_bindings("the value was 20k k miles") == (
         ("value", "20000k"),), v2._value_bindings("the value was 20k k miles")
+    # …and the mutated OUTPUT the comment quotes is EXECUTED, not left as prose,
+    # so the rationale cannot drift to an unproducible string a third time: this
+    # is the exact composition the forced guard reaches (`20kk` + `miles`).
+    assert v2._compose_magnitude_and_unit("20kk", "miles") == "20kkmiles"
 
     # …and the WHOLE same-value spelling grid, which is how the 260 were found:
     # no spelling of one number may be refused against another. 9 fused unit

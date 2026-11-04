@@ -4294,8 +4294,8 @@ _MAGNITUDE_FACTORS = {"k": 1000}
 #: never arrives as a `value`) and is stated here because an earlier revision of
 #: this comment claimed that distinction, which the regex does not make (#10360
 #: review cycle 4, P3). ⛔ The POSITIVE branch is load-bearing and pinned: forcing
-#: this check to always fire changes `20k k miles` from `20000k` to `20kkiles`,
-#: so the grid test pins that shape instead of leaving the branch untested.
+#: this check to always fire changes `20k k miles` from `20000k` to `20kkmiles`,
+#: so the grid test pins that shape; `20kkiles` is not producible (#10801 P3).
 _MAGNITUDE_TAIL = re.compile(r"[A-Za-z]$")
 
 #: The decoration before a numeral (signs, currency/math symbols) — `Nd` digits in
