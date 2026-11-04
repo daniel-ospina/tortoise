@@ -171,6 +171,31 @@ def _evidence_defect(evidence: object, repo: str, pr: int) -> str:
             "it would quote another PR's artifact as this PR's proof"
         )
     return ""
+# A bare URL is MD034, and `operations/attest-census.md` is linted whole by the REQUIRED `docs` job
+# with NO baseline key for that path — so one URL in one record turns a regenerated artifact into a
+# red check the lane did not cause (#10687 cycle 22, measured). `_cell` wraps every match in an
+# autolink, which is not a bare URL. The lookbehind skips a value that already carries an autolink
+# (so a corrupt record cannot produce `<<…>>`); trailing sentence punctuation is peeled out of the
+# link by `_autolink` (see there), because a GREEDY URL match always absorbs it.
+_BARE_URL = re.compile(r"(?<!<)(?P<url>https?://[^\s<>]+)")
+
+
+def _autolink(text: str) -> str:
+    """Wrap each bare URL in `text` as a GFM autolink (`<url>`), leaving trailing punctuation out.
+
+    ⛔ The split is done in Python, not in the regex, and that is the point: a LAZY URL group stops at
+    the first position where the rest of the pattern can match, which produced `<https://g>` followed
+    by the rest of the URL verbatim (measured, cycle 22 — the first version of this function). A
+    GREEDY group is correct for the URL but then always absorbs a trailing `.`, so the punctuation is
+    peeled off by `rstrip` afterwards.
+    """
+
+    def _repl(match: re.Match[str]) -> str:
+        url = match.group("url")
+        stripped = url.rstrip(".,;:!?)]")
+        return f"<{stripped}>{url[len(stripped):]}"
+
+    return _BARE_URL.sub(_repl, text)
 
 RESTORE = "RESTORE"
 RE_REVIEW = "RE-REVIEW"
@@ -512,19 +537,35 @@ def _cell(value: object) -> str:
     this file's published `0`/`2`-never-`1` contract. `print(text)` afterwards raised on the same
     code point. `backslashreplace` keeps the evidence (`\ud800`) readable instead of dropping it.
     """
-    return (
+    text = (
         str(value)
         .replace("\\", "\\\\")
         .replace("|", "\\|")
         .replace("\r", " ")
         .replace("\n", " ")
+        # ⛔ A HARD TAB is MD010, measured (#10687 cycle 22) with the pinned linter on
+        # `evidence` = `"comment:1\tTAB"` → `MD010/no-hard-tabs [Column: 84]`. A record on disk is
+        # untrusted input, so a tab is not exotic — and the finding would land on
+        # `operations/attest-census.md`, for which `config/docs-lint-baseline.json` has NO key, so
+        # the regenerated census would red the REQUIRED `docs` check on a defect the lane did not
+        # write. Same class as the `|` and backslash escapes above.
+        .replace("\t", " ")
         .strip()
-        # LAST, so the escapes it introduces are not themselves doubled, and so it cannot
-        # reintroduce a live `|`. Every dynamic cell goes through here, which is why one
+        # LAST of the replacements, so the escapes it introduces are not themselves doubled, and so
+        # it cannot reintroduce a live `|`. Every dynamic cell goes through here, which is why one
         # sanitise point is enough for the table, the digest, the file write and the stdout.
         .encode("utf-8", "backslashreplace")
         .decode("utf-8")
     )
+    # ⛔ A BARE URL is MD034, measured (#10687 cycle 22) with the same pinned linter on the OTHER
+    # documented evidence shape: `_EVIDENCE_REF` (`:122-129`) accepts a `github.com` URL, and one of
+    # the live registry's 3,703 records uses exactly that form, so a row for such a PR rendered
+    # `MD034/no-bare-urls` and reddened `docs` the same way the tab did. An AUTOLINK (`<url>`) is not
+    # a bare URL, so wrapping it here keeps the value readable AND keeps the row linter-clean. The
+    # lookbehind/lookahead mean a value that already carries an autolink is not wrapped twice, and
+    # trailing sentence punctuation is left OUTSIDE the link (`<https://x.y>.` reads better than
+    # `<https://x.y.>` and links the same target).
+    return _autolink(text)
 
 
 # ── the document's own ACCIDENTAL-EDIT detector ──────────────────────────────
@@ -766,6 +807,51 @@ def _neutralise_stdout() -> None:
             os.close(devnull)
 
 
+def _neutralise_stderr() -> None:
+    """Point fd 2 at /dev/null — `flush_std_files()` flushes **stderr too**, not just stdout.
+
+    ⛔ `_neutralise_stdout` covers one of the two streams CPython flushes at shutdown.
+    `flush_std_files()` flushes `sys.stdout` AND `sys.stderr`, and a failure of EITHER sets
+    `status = -1`, which `Py_Exit` maps to **120** (`Python/pylifecycle.c` 3.12: `:1673-1708`,
+    `:1896`, `:3097-3104` — read for this review rather than assumed). So a guarded stdout plus an
+    UNGUARDED stderr print leaves exactly the hole the stdout guard was added to close.
+    """
+    with contextlib.suppress(OSError, ValueError, AttributeError):
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        try:
+            os.dup2(devnull, sys.stderr.fileno())
+        finally:
+            os.close(devnull)
+
+
+def _say(message: str) -> str:
+    """Write one courtesy line to STDERR; `""` on success, else the failure reason.
+
+    ⛔ Measured (#10687 cycle 22): `attest_census.py --out /tmp/x.md 2>/dev/full` printed a complete,
+    correct report, wrote the artifact, and exited **120** — because the unguarded
+    `_say(...)` here raised `OSError(ENOSPC)` out of `main`, and the interpreter's
+    shutdown flush then decided the code. The same shape with a closed stderr pipe raises
+    `BrokenPipeError`. So a census that had read every surface correctly published a code the file
+    says is impossible, and on the `--out` failure path the documented **2** became 120 —
+    indistinguishable from a crash, which is the one confusion the 0/2 contract exists to prevent.
+
+    The `flush()` inside the `try` is load-bearing for the same reason it is in `_emit_report`:
+    stderr is line-buffered, so a write can succeed while the real failure waits for shutdown.
+    `_neutralise_stderr()` afterwards makes that final flush a no-op, so it cannot overwrite the
+    code the caller is about to return.
+
+    ⛔ The exit code must be decided BEFORE this is called, never derived from it: a courtesy
+    message must not be able to change what the census says about its own read.
+    """
+    try:
+        print(message, file=sys.stderr)
+        sys.stderr.flush()
+        return ""
+    except (OSError, ValueError, AttributeError) as exc:
+        _neutralise_stderr()
+        return str(exc)
+
+
 def _emit_report(text: str) -> str:
     """Write the report to stdout; `""` on success, else the failure reason (caller returns 2).
 
@@ -824,7 +910,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         reviews_dir = Path(args.reviews_dir).expanduser()
     except RuntimeError as exc:  # `~nosuchuser` — expanduser raises, and that must not be rc 1
-        print(f"attest_census: cannot resolve --reviews-dir {args.reviews_dir!r}: {exc}", file=sys.stderr)
+        _say(f"attest_census: cannot resolve --reviews-dir {args.reviews_dir!r}: {exc}")
         return 2
     generated_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -834,10 +920,10 @@ def main(argv: list[str] | None = None) -> int:
              "--json", "number,headRefOid,headRefName,title"]
         )
     except RuntimeError as exc:
-        print(f"attest_census: could not list PRs: {exc}", file=sys.stderr)
+        _say(f"attest_census: could not list PRs: {exc}")
         return 2
     if not isinstance(prs, list) or not all(isinstance(p, dict) for p in prs):
-        print("attest_census: `gh pr list` returned an unexpected payload — refusing to census it", file=sys.stderr)
+        _say("attest_census: `gh pr list` returned an unexpected payload — refusing to census it")
         return 2
 
     # ⛔ Assert the REGISTRY is readable BEFORE classifying anything: an unlistable
@@ -846,7 +932,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         load_record(reviews_dir, owner, name, 0)
     except RegistryUnreadable as exc:
-        print(f"attest_census: {exc} — refusing to report absence from an unreadable registry", file=sys.stderr)
+        _say(f"attest_census: {exc} — refusing to report absence from an unreadable registry")
         return 2
 
     truncated = len(prs) > args.limit
@@ -857,13 +943,13 @@ def main(argv: list[str] | None = None) -> int:
     unreadable = 0
     for pr in prs:
         if not isinstance(pr.get("number"), int):
-            print(f"attest_census: `gh pr list` row has no integer number ({pr!r}) — refusing", file=sys.stderr)
+            _say(f"attest_census: `gh pr list` row has no integer number ({pr!r}) — refusing")
             return 2
         head = str(pr.get("headRefOid") or "")
         try:
             rec = load_record(reviews_dir, owner, name, int(pr["number"]))
         except RegistryUnreadable as exc:  # registry became unlistable mid-run (race)
-            print(f"attest_census: {exc} — refusing to report absence", file=sys.stderr)
+            _say(f"attest_census: {exc} — refusing to report absence")
             return 2
         row = Row(
             pr=int(pr["number"]),
@@ -945,7 +1031,7 @@ def main(argv: list[str] | None = None) -> int:
             ],
         }, indent=2))
         if reason:  # a closed pipe / unencodable char on the --json surface is rc 2, never 1
-            print(f"attest_census: could not write the report to stdout: {reason}", file=sys.stderr)
+            _say(f"attest_census: could not write the report to stdout: {reason}")
             return 2
         return 0 if unreadable == 0 else 2
 
@@ -957,12 +1043,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         text = render(rows, args.repo, generated_at, truncated=truncated, limit=args.limit)
     except ValueError as exc:  # an unrenderable character is rc 2, never a traceback
-        print(f"attest_census: could not render the report: {exc}", file=sys.stderr)
+        _say(f"attest_census: could not render the report: {exc}")
         return 2
     try:
         out = Path(args.out).expanduser()
     except RuntimeError as exc:  # symmetric with --reviews-dir: an unresolvable ~ is rc 2, not rc 1
-        print(f"attest_census: cannot resolve --out {args.out!r}: {exc}", file=sys.stderr)
+        _say(f"attest_census: cannot resolve --out {args.out!r}: {exc}")
         return 2
     try:
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -978,14 +1064,19 @@ def main(argv: list[str] | None = None) -> int:
         # fix — do not delete it, and do not describe it as the fix.
         out.write_text(text, encoding="utf-8")
     except (OSError, ValueError) as exc:  # unwritable/unencodable --out is not a finding
-        print(f"attest_census: could not write {out}: {exc}", file=sys.stderr)
+        _say(f"attest_census: could not write {out}: {exc}")
         return 2
     reason = _emit_report(text)
     if reason:
-        print(f"attest_census: could not write the report to stdout: {reason}", file=sys.stderr)
+        _say(f"attest_census: could not write the report to stdout: {reason}")
         return 2
-    print(f"attest_census: wrote {out}", file=sys.stderr)
-    return 0 if unreadable == 0 else 2
+    # ⛔ The code is DECIDED before any courtesy message is attempted (review cycle 22). `_say`
+    # cannot raise, so this ordering is not about the handler — it is about the rule the handler
+    # exists for: a message about the run must never be able to change what the run says. Keep the
+    # assignment above the call for that reason, not by accident of layout.
+    rc = 0 if unreadable == 0 else 2
+    _say(f"attest_census: wrote {out}")
+    return rc
 
 
 if __name__ == "__main__":
