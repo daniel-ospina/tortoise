@@ -859,6 +859,47 @@ def test_a_rename_between_our_read_and_our_write_is_not_certified_as_a_no_op(fak
     assert "does NOT claim a no-op" in res.stdout, res.stdout
 
 
+# ── the --comment-probe WRITE leg must be pinned, not just its target check ────
+
+
+def test_the_comment_probe_actually_posts_and_deletes_a_comment(fake_gh):
+    """#10945 review round 5, P2. The comment WRITE was unpinned.
+
+    The only arm driving `--comment-probe` was the `pr404` target-check arm, so the
+    `POST /issues/{pr}/comments` could be replaced by an immediate `return None` and
+    the suite stayed green — the tool then printing OK and "created and deleted a
+    comment" having issued no write for that leg. That is the "a read passing is not
+    evidence" false pass this suite exists to pin, left unpinned on the one branch
+    whose whole purpose is the rail's `--evidence` comment.
+    """
+    res = fake_gh("ok", "--comment-probe")
+    assert res.returncode == ghwp.EXIT_WRITABLE, res.stdout + res.stderr
+    posted = deleted = False
+    for argv in write_calls(fake_gh):
+        method = ""
+        path = ""
+        for i, a in enumerate(argv):
+            if a in ("-X", "--method") and i + 1 < len(argv):
+                method = argv[i + 1]
+            elif a.startswith("repos/"):
+                path = a
+        if method == "POST" and path == "repos/owner/repo/issues/4242/comments":
+            posted = True
+        if method == "DELETE" and path == "repos/owner/repo/issues/comments/999":
+            deleted = True
+    assert posted, "the comment probe never POSTed a comment"
+    assert deleted, "the comment probe never deleted the comment it created"
+    assert "created and deleted a comment on PR #4242" in res.stdout
+
+
+def test_a_comment_probe_on_a_read_only_token_is_refused_by_name(fake_gh):
+    """The other direction: a 2xx target read must not launder a refused write."""
+    res = fake_gh("readonly-pat", "--comment-probe")
+    assert res.returncode == ghwp.EXIT_UNAVAILABLE, res.stdout + res.stderr
+    assert "GH-WRITE-UNAVAILABLE(permission:pull_requests-write)" in res.stderr
+    assert "GH-WRITE-PREFLIGHT OK" not in res.stdout
+
+
 if __name__ == "__main__":
     # The carve-out is not optional: this file opens no graph, so without it the
     # session gate refuses every test with "default pytest requires
