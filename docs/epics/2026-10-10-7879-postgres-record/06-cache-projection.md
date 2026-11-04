@@ -187,13 +187,15 @@ to have none.
 
 ## §9.1/D1 at the projection door — an EPISODIC Source carries no turn prose (#10853)
 
-A **second declared narrowing** of the field set, in the opposite direction from
-`FOLD_ON_CREATE_DEFAULTS` and `DERIVED_FROM_RECORD`: `public.source.summary` and
-`public.source._search_text` are §9.1/D1 turn prose when the Source is a captured
-session, so `cache_projection._EPISODIC_SOURCE_PROSE_COLUMNS` declines to project
-them onto the node. The record keeps the values (the row is not mutated, and
-record-side search reads the COLUMN), and `topics` — the capture's word lexicon —
-still projects.
+**A declared narrowing** of the field set — the only one — in the opposite
+direction from the three widening exceptions the module names
+(`FOLD_ON_CREATE_DEFAULTS`, `DERIVED_FROM_RECORD`, `EVENT_STREAM_FOLDS`):
+`public.source.summary` and `public.source._search_text` are §9.1/D1 turn prose
+when the Source is a captured session, so
+`cache_projection._EPISODIC_SOURCE_PROSE_COLUMNS` declines to project them onto
+the node. The record keeps the values (the row is not mutated, and record-side
+search reads the COLUMN), and `topics` — the capture's word lexicon — still
+projects.
 
 Why it lives here rather than only in the capture: `tortoise record-restore` and
 `record_serve`'s `fetch-record` repair rebuild a node from the record row through
@@ -203,7 +205,33 @@ divergence #10853 measured. Sweeping the existing rows instead would decay: at
 this head the capture still writes the value, so the next capture of the same
 session writes it straight back.
 
-Three costs, named rather than implied:
+### Which rows are EPISODIC — two identity arms, and three flags that are NOT signals
+
+`_is_episodic_source_row` mirrors the repo's existing declaration of the same
+question (`sdk.py`'s document-source exclusion, with
+`session_source_migration._LEGACY_CANDIDATES` as the second arm's definition):
+
+* `url LIKE 'session:%'` — the capture's URL shape, and the prefix the stub
+  minter and `derive_session_source_url` both land on;
+* `source_kind='agentSession'` **on a separator-free bare-filename url** — the
+  pre-#4005 identity (`os.path.basename(ref.path)`, literally `session.md`).
+
+⛔ Three plausible terms are **not** signals, because each fires on real
+DOCUMENTS — this is measured, three times, by review on the change itself, and
+each has a NEGATIVE leg in the suite:
+
+| term | why it is not an identity |
+|---|---|
+| `session_id` | a legitimate DOCUMENT coordinate: `EventAPI.add_document` takes one, and `tortoise/ingest.py` passes a transcript's `sessionId` frontmatter into it |
+| `source_kind='agentSession'` alone | `file_indexer` classifies a transcript FILE and writes that kind on a per-FILE `corpus://` permalink (`CLASSIFIER_TO_SOURCE_KIND`, pinned §6.2/I26) |
+| `is_episodic=TRUE` | the capture commit stamps it on every EXTERNAL source of `payload.sources`, and `backfill_is_episodic.py` on every Source reachable from a session point |
+
+`sdk.py` records the same lesson and its cost: keying on the flags *"silently
+disabled this exclusion on the corpus #9914 targets"*. Here the cost is worse —
+the prose guard would strip a document's own frontmatter summary and its
+title-derived `_searchText`, silently un-indexing it in the cache.
+
+### Three costs, named rather than implied
 
 * the **journal fold** still projects the value until #10000's capture-side change
   lands, so the two rebuild paths disagree on that one column until then — in the
@@ -217,16 +245,12 @@ Three costs, named rather than implied:
   true statement — the two sides do disagree — and it is repaired by #10017's
   purge census, not by re-adding the projection.
 
-⛔ **`session_id` is not an episodic signal**, and must not become one. It is a
-legitimate DOCUMENT coordinate (`EventAPI.add_document` accepts one and
-`tortoise/ingest.py` passes a transcript's `sessionId` frontmatter into it), so a
-guard keyed on it drops a transcript document's own summary — the mirror of the
-defect this closes. Review P1 on the change caught it before landing; the
-transcript-document leg below is the pin.
+### The pin
 
-Pinned by `tests/test_10853_session_source_prose.py`: the drop, the narrowness of
-the drop, ONE LEG PER SIGNAL (so no branch of the predicate is unexercised), the
-transcript DOCUMENT that must keep both columns even though it carries a
-`session_id`, and the record row that must not be mutated. Mutation-checked: each
-of the three signal branches and the guard itself, removed one at a time, reds
-exactly the leg that names it.
+`tests/test_10853_session_source_prose.py`: the drop; the narrowness of the drop;
+ONE LEG PER ARM; the three NEGATIVE legs (a plain document, a transcript document
+carrying a `session_id`, a `corpus://` permalink stamped `agentSession`, a
+document stamped `is_episodic` — four rows, one per term that must not be a
+signal); and the record row that must not be mutated. Mutation-checked: each arm
+and the guard, removed one at a time, and each of the three flags, re-added one
+at a time, reds exactly the leg that names it.
