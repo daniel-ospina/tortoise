@@ -819,6 +819,58 @@ _TRANSPORT_WAIT_BOUND_MESSAGE = (
     "operation is safe."
 )
 
+#: The refusal for a WRITE that was never DISPATCHED — the transport refused
+#: before the seam scheduled any work (or the argument check had already been
+#: answered). Its own message, because it says the OPPOSITE of the
+#: dispatched-write one below about whether a write can be in flight: here
+#: nothing was sent, so nothing can complete, and re-sending is the safe action
+#: rather than a risk. Serving the dispatched-write prose on this arm told a
+#: caller to reconcile a write it never issued AND to withhold the safe re-send
+#: (#10849 review).
+_TRANSPORT_WAIT_BOUND_NOT_SENT_MESSAGE = (
+    "The server's wait budget for this request was exceeded before a response "
+    "was ready, and this request was refused BEFORE any work started — nothing "
+    "was sent, so nothing was written and there is nothing to reconcile. "
+    "Re-sending it is safe once the advertised delay has elapsed."
+)
+
+#: The refusal as a caller of a MUTATING tool must read it (#10849).
+#:
+#: ``_TRANSPORT_WAIT_BOUND_MESSAGE`` above is transport-neutral, so on the write
+#: surface it says something true but not actionable: "the work may still
+#: complete" is a fact a caller cannot branch on, and the two natural readings of
+#: a refusal are BOTH wrong for a write. Read as "nothing happened" it makes the
+#: caller skip a write that landed — the false negative #10849 reports the
+#: fleet's lanes recording on this signal. Read as "failed, so retry" it
+#: duplicates every non-idempotent write (``tortoise_create_operator`` has no
+#: dedup, and a duplicated IMPL/NAND double-counts the claim's EP weight —
+#: measured on #10849).
+#:
+#: This is a SEPARATE constant rather than an edit to ``_TRANSPORT_WAIT_BOUND_
+#: MESSAGE`` on purpose: the REST arm (``hosted_api.WaitBoundMiddleware``) never
+#: learns which tool was called, so it cannot claim anything about a mutation,
+#: and that body is read by identity from every caller (`tests/_verdict.py`
+#: compares against this same constant, and
+#: ``tests/test_transport_wait_bound.py`` asserts its shape: three substrings and
+#: digit-freeness). A rewrite that keeps that shape would pass every test — so it
+#: is the IDENTITY and the shape that are pinned, not the bytes. The write
+#: ambiguity belongs to the seam that DOES know the tool name —
+#: ``mcp_server._wait_bound_refusal_result``.
+#:
+#: Static and digit-free for the same reason as the messages above: the
+#: advertised delay has exactly one source (``_TRANSPORT_WAIT_RETRY_AFTER_S``).
+_TRANSPORT_WAIT_BOUND_WRITE_MESSAGE = (
+    "The server's wait budget for this request was exceeded before a response "
+    "was ready. This call targets a WRITE surface: unless it was a preview, the "
+    "write may still complete on the server, so this refusal is NOT a statement "
+    "that nothing was written. Read error.data.committed — or, on a tool with a "
+    "wrapped result, _meta.tortoise_error.data.committed — then follow its "
+    "retry_rule: that field — not this message, and not the tool's idempotency "
+    "hint — is what decides whether a repeat is safe for THIS call, because a "
+    "converging operation can still be called in a way that does not converge. "
+    "Wait for the advertised delay before retrying."
+)
+
 
 def _sanitize_for_log(value: str) -> str:
     """Escape the control characters that can forge a log line or an ANSI

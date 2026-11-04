@@ -331,16 +331,45 @@ class TestHintsCannotDrift:
                      if e.idempotent is not None}
         assert overrides == {
             # write tier, idempotent by operation (dedup on content/identity)
-            ("tortoise_approve_merge", True),
+            # ⛔ `tortoise_approve_merge` is NOT here: its dedup branch falls
+            # through to `_emit_event` with no already-reviewed guard, so a retry
+            # appends a second DedupeRecorded/DedupeRejected (#10849 review).
             ("tortoise_checkpoint", True),
-            ("tortoise_create_document", True),
-            ("tortoise_create_operator", True),
+            # ⛔ `tortoise_create_document` is NOT here: the door mints a fresh
+            # ulid per call and `_upsert_document` MERGEs on that id, so a retry
+            # writes a second Document Source (#10849 review). It carried
+            # `idempotent=True` until then — a false retry-safety claim.
+            # ⛔ `tortoise_create_operator` is NOT here: it has no adoption path
+            # (`_find_operator` is `ingest`-only), so a repeat writes a second
+            # edge and double-counts the claim's EP weight. It carried
+            # `idempotent=True` until #10849 — a false retry-safety claim that
+            # clients read as `idempotentHint`.
             ("tortoise_create_point", True),
             ("tortoise_create_source", True),
-            ("tortoise_ingest", True),
-            ("tortoise_onboarding_demo_create", True),
-            # destructive tier, idempotent by operation (same id → same row)
-            ("tortoise_mitigate_operator", True),
+            # ⛔ `tortoise_get_source_reliability` is pinned FALSE below, not omitted — it is a getter in
+            # the write tier, and an earlier revision of this PR declared it
+            # repeatable on "a repeat converges on the same value" — but the value
+            # is CLOCK-dependent (recency-decayed prior, `now` defaults to the wall
+            # clock), so a repeat past the cache interval re-stores a DIFFERENT
+            # float: 0.65087406 -> 0.65087345 at +1 h -> 0.65043060 at +30 d. Same
+            # property that keeps `compute_confidence` non-idempotent.
+            ("tortoise_get_source_reliability", False),
+            # ⛔ `tortoise_ingest` is pinned FALSE below, not omitted — three readings each looked
+            # convergent and each was falsified: its entities leg is append-only
+            # for document/event, a bundle may arrive as a JSON string parsed
+            # after the MCP seam, and a bundle's points splat `props` FLAT beside
+            # `kind` (so `is_operator` defeats the fold from outside `props`).
+            # The bundle's key space is open-ended → no finite predicate proves
+            # it (#10849 reviews).
+            ("tortoise_ingest", False),
+            # ⛔ `onboarding_demo_create` is pinned FALSE below: its SEED is
+            # sentinel-gated but its onboarding RECEIPT CAS-writes on every call.
+            ("tortoise_onboarding_demo_create", False),
+            # ⛔ `tortoise_mitigate_operator` is pinned FALSE below, not omitted — its own description
+            # says a re-assertion after withdrawal MINTS A NEW mitigation Point,
+            # so convergence is conditional on the mitigation's current STATE —
+            # which no argument predicate can see (#10849 review).
+            ("tortoise_mitigate_operator", False),
             # maintenance tier, NOT idempotent: a repeat call re-stores a
             # re-derived score (#4122 measurement: 0.693315 -> 0.693320)
             ("tortoise_compute_confidence", False),
