@@ -4944,6 +4944,35 @@ def test_attest_census_tool_change_fails_closed_to_full():
         assert "core" in r["surfaces"], (sibling, r)
 
 
+def test_gh_write_preflight_tool_change_fails_closed_to_full():
+    # #10930: tools/gh_write_preflight.py owns tests/test_gh_write_preflight.py — the arms that pin
+    # the only two properties that make the preflight worth running: it can never announce
+    # GH-WRITE-OK for a credential that cannot write a PR (a false PASS sends a landing lane to merge
+    # and then fail silently at the closure step), and it never charges a rate limit or a service
+    # fault to the token. Same #10687 / #3261 silent-drop class as the carve-outs above: `tools/` is a
+    # flat NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row matches this tool, so a tool-only
+    # change came back `surfaces: []`, `full: false` with `test_gh_write_preflight.py` ABSENT from
+    # `test_files` — select() took the docs-only early return, which BYPASSES the
+    # `if not matched: matched.add("core")` fallback. Measured on this very change: a lane improving
+    # the tool would have got a GREEN PR whose own 25 arms never ran. Registering
+    # tests/test_gh_write_preflight.py under `core` in ci-surfaces.yml does NOT cover this: it applies
+    # to edits of the TEST file, not of the tool (measured: `--changed-files -` with the tool path
+    # alone returned surfaces=[] full=False).
+    # Mutation check: removing the TOOL_CARVEOUTS entry filters the path out (docs-only early
+    # return), failing every assert below.
+    r = _sel(["tools/gh_write_preflight.py"])
+    assert r["full"] is True, r
+    assert r["test_files"] == "ALL", r
+    assert "core" in r["surfaces"], r
+    # NOT asserted here: that a renamed/split sibling (tools/gh_write_preflight_extra.py) is also
+    # carved out. A `.py` TOOL_CARVEOUTS entry is a STRING prefix, so it does not cover a sibling —
+    # `tools/ci_check_repair_extra.py` measures `full=False` for exactly that reason. The
+    # attest_census sibling arm passes only because a SOURCE_PATTERNS row happens to match it, which
+    # is that tool's property and not this one's; copying it here would assert an accident.
+    # A split into a sibling is caught by `--integrity` (an unclassified test file) and by the
+    # unknown-path branch, not by this pin.
+
+
 def test_session_schema_guard_runs_on_every_declared_writer_surface():
     # #3554: the declared :Session writer inventory SPANS surfaces —
     # tools/longmem_eval/ingest.py and ingest_v2.py select `eval`,
