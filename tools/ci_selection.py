@@ -1463,6 +1463,22 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # file's suite. (`integrity()` does NOT read CORE_ALSO — measured: it
              # returns `[]` with and without this entry — so it is not a pin.)
              "tools/batch_open.py",
+             # #10955: `tools/next_work.py` owns `tests/test_next_work.py`
+             # (registered `core`), and `tools/` is in NON_PYTHON_PREFIXES, so a
+             # next_work-only change was filtered out BEFORE the "not matched ->
+             # core" fallback and took the docs-only early return —
+             # `select(["tools/next_work.py"])` yielded NO surface, so the guard
+             # that pins the pick never ran on the file the pick is made by. That
+             # is the fail-OPEN direction for this tool in particular: its whole
+             # job is to decide which unit a lane may act on, so the diff most
+             # worth guarding is an edit to the deciding code. The entry makes
+             # `_selection_relevant()` keep the path so `core` — and this tool's
+             # own guard — is selected. Pinned by
+             # tests/test_next_work.py::test_a_next_work_only_change_selects_core_so_this_guard_actually_runs,
+             # which asserts `select(["tools/next_work.py"])` returns `core` AND
+             # this file's suite (the same #1349/#3332/#3616 silent-drop class as
+             # queue_resweep/batch_open above).
+             "tools/next_work.py",
              # #6388: `tools/seal_session_events.py` is the session-events seal
              # policy, guarded by tests/test_session_events_seal.py, which is
              # `core`-registered — but `tools/` is swallowed by
