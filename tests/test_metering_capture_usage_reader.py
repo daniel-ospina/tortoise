@@ -98,11 +98,18 @@ def _text_without_comments(text):
     names ``metering.get_capture_usage`` in prose to explain the gate's third
     read, and a raw substring scan counted that sentence as a call site (measured
     2026-11-04: PR #10935's ``test (e)`` redded on a comment in
-    ``hosted_api.py``). Documentation must not be able to fail this pin, or the
-    only safe way to describe the reader is to stop naming it.
+    ``hosted_api.py``). A ``#`` comment is prose ABOUT the code, so it must not
+    be able to fail this pin.
 
-    Only COMMENT tokens are removed: STRING tokens stay in scope, because
-    ``getattr(metering, "get_capture_usage")`` is still a wiring of the reader.
+    ⛔ The scope is exactly that narrow, and deliberately so — say it plainly
+    rather than claiming "documentation" generally: only COMMENT tokens are
+    removed. A STRING token still counts, INCLUDING a docstring, because the
+    pin's subject is a wired reference and
+    ``getattr(metering, "get_capture_usage")`` is one. A docstring that names
+    the reader can therefore still red this pin, and that residual is accepted:
+    no statement-context rule can separate a docstring that merely describes
+    the reader from one that is used to reach it, and the reference-shaped
+    false block it leaves is cheaper than a scan that stops seeing wirings.
     A module ``tokenize`` cannot parse is returned WHOLE (fail-closed) — an
     unreadable file must never read as a clean one, the same polarity as the
     floor in ``test_the_gate_is_the_readers_only_consumer``.

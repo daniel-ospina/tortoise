@@ -17529,11 +17529,12 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # the pool ITS OWN substrate lives in. (For `sessions` there is also a THIRD
     # read — the extractor's meter, riding INSIDE the count's graph submission.
     # It is latent and is the SECOND DECLARED RESIDUAL below, filed as #10949,
-    # so "two reads" is exact about this seam and not about the whole gate.) Submitted as one blob to the default
-    # executor, a control-plane stall occupied a slot that the commit lane
-    # needs, and it answered `500 "Quota check failed"` where the identical
-    # stall on `/v1/points` answers `503 control_plane_unavailable` — one
-    # fault, two bodies, across two gated doors of one seam. So this door uses
+    # so "two reads" is exact about this seam and not about the whole gate.)
+    # Submitted as one blob to the default executor, a control-plane stall
+    # occupied a slot that the commit lane needs, and it answered
+    # `500 "Quota check failed"` where the identical stall on `/v1/points`
+    # answers `503 control_plane_unavailable` — one fault, two bodies, across
+    # two gated doors of one seam. So this door uses
     # the SAME seam as the points doors (`_check_org_limit_off_loop`): carry on
     # `_cp_offload`/`_graph_offload` by substrate, then the count on the graph
     # pool. The CONTEXT story, stated exactly (review cycle 2 corrected an

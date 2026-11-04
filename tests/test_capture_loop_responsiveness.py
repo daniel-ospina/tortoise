@@ -337,9 +337,11 @@ def test_capture_sessions_gate_carry_rides_its_own_substrate_lane(
     # This lane runs registry/self-host mode, where the registry IS the graph
     # connection (#3718), so BOTH halves ride the graph pool — the pin is that
     # the door reaches the seam at all, in one submission per read, with the
-    # carry FIRST. In Supabase mode the same code sends the carry to `_cp_offload`
-    # (asserted by ``test_the_points_door_carries_the_allowance_on_the_control_plane_lane``,
-    # where the mode is patched without a whole route behind it).
+    # carry FIRST. In Supabase mode the same code sends the carry to `_cp_offload`,
+    # so the control-plane half is pinned at the seam instead of behind a whole
+    # route: ``test_the_points_door_carries_the_allowance_on_the_control_plane_lane``
+    # and ``test_the_sessions_door_carries_the_allowance_on_the_control_plane_lane``
+    # (both in ``tests/test_allowance_gate.py``, one per gated door, mode patched).
     relevant = [(pool, op) for (pool, op) in seen
                 if op.startswith("check_org_limit.sessions")]
     assert relevant == [("graph", "check_org_limit.sessions.allowance_carry"),
