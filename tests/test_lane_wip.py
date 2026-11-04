@@ -59,22 +59,30 @@ def git(*args: str, cwd: Path) -> subprocess.CompletedProcess:
     )
 
 
-def run_tool(*args: str, cwd: Path) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        [PYTHON, str(TOOL), *args],
-        cwd=str(cwd),
-        capture_output=True,
-        text=True,
-        errors="surrogateescape",
-        # ⛔ STRICT stdout ON PURPOSE. `PYTHONIOENCODING` is unset here, so Python picks
-        # `surrogateescape` for stdout under this box's C.UTF-8 locale and hides an
-        # `UnicodeEncodeError` that a lane on an `en_US.utf8` host hits on its PRIMARY verb
-        # (measured: `pin` exiting 1 after writing the ref; `recover` exiting 1 between
-        # `worktree add` and `read-tree`, leaving a clean, empty worktree). The tool makes
-        # its own output byte-safe, so every test runs under the strictest setting.
-        env={**os.environ, "PYTHONIOENCODING": "utf-8:strict"},
-        check=False,
-    )
+def run_tool(*args: str, cwd: Path, timeout: float | None = None) -> subprocess.CompletedProcess:
+    try:
+        return subprocess.run(
+            [PYTHON, str(TOOL), *args],
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            errors="surrogateescape",
+            # ⛔ STRICT stdout ON PURPOSE. `PYTHONIOENCODING` is unset here, so Python picks
+            # `surrogateescape` for stdout under this box's C.UTF-8 locale and hides an
+            # `UnicodeEncodeError` that a lane on an `en_US.utf8` host hits on its PRIMARY verb
+            # (measured: `pin` exiting 1 after writing the ref; `recover` exiting 1 between
+            # `worktree add` and `read-tree`, leaving a clean, empty worktree). The tool makes
+            # its own output byte-safe, so every test runs under the strictest setting.
+            env={**os.environ, "PYTHONIOENCODING": "utf-8:strict"},
+            check=False,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.fail(
+            f"`lane_wip.py {' '.join(args)}` did not finish within {timeout}s in {cwd} — a "
+            "blocked read writes NO ref and prints nothing, so a caller with a timeout "
+            "proceeds unpinned and the lane's readable work is destroyed"
+        )
 
 
 def pin_ref(stdout: str) -> str:
@@ -4388,6 +4396,15 @@ def test_ONE_unreadable_path_does_not_disable_the_completeness_check(
     blocked.write_text("an artifact the lane does not care about\n")
     blocked.chmod(0o000)
     try:
+        if os.access(blocked, os.R_OK):
+            # ⛔ THE PREMISE IS UNMAKEABLE AS ROOT: a mode-000 file is readable, `git add`
+            # indexes it, `unreadable` stays empty, so the OLD gate is active too and this
+            # test would take the `rc != 0` branch and PASS with the fix reverted. Skip
+            # rather than report a green that proves nothing.
+            pytest.skip(
+                "mode-000 is readable to this user (root), so the unreadable-path premise "
+                "cannot be established and reverting the gate would not fail this test"
+            )
         out = _run_tool_with_shim(
             git_shim, "LW_OLD_GIT_ADD", "pin", cwd=wt, also=("LW_OLD_GIT_ADD",)
         )
@@ -4402,6 +4419,66 @@ def test_ONE_unreadable_path_does_not_disable_the_completeness_check(
         assert "prune/b.txt" in out.stderr, out.stderr
     finally:
         blocked.chmod(0o600)
+
+
+def test_a_fifo_does_not_hang_the_pin(hub: Path) -> None:
+    """`open()` on a FIFO with no writer BLOCKS FOREVER, so `pin` must probe with `stat`.
+
+    `is_dir()`/`is_symlink()` are checked first, so a FIFO reached the readability probe and
+    `open()` never returned: measured, `pin` produced NO output and wrote NO ref until it was
+    killed, while the pre-fix head pinned the lane's real work and warned about the FIFO. A
+    hung `pin` is worse than a failed one — a caller with a timeout proceeds UNPINNED, so the
+    readable work is destroyed by the very path this tool exists to survive.
+    """
+    wt = clean_lane(hub, "wt-fifo")
+    (wt / "o.txt").write_text("the lane's real work\n")
+    # ⛔ THE FIFO MUST SIT AT A *TRACKED* PATH. An untracked FIFO never enters
+    # `git status --porcelain` at all (measured), so it would never reach the readability
+    # probe and the test would pass with the hang present. Replacing a tracked file with a
+    # FIFO reports ` M tracked.txt`, which is the shape that reached `open()`.
+    os.unlink(wt / "tracked.txt")
+    os.mkfifo(wt / "tracked.txt")
+
+    pinned = run_tool("pin", cwd=wt, timeout=60)
+    assert pinned.returncode == 0, pinned.stdout + pinned.stderr
+    ref = pin_ref(pinned.stdout)
+    # The FIFO itself has no blob to pin, but the REAL work must still be captured.
+    assert git("show", f"{ref}:o.txt", cwd=hub).stdout == "the lane's real work\n"
+
+
+def test_a_permission_denied_path_is_announced_by_name(hub: Path) -> None:
+    """`git add` reports a skipped path BARE (`d/f.txt: Permission denied`) and exits 0.
+
+    No `error:`/`warning:` prefix, so `_SKIP_MARKERS` matched nothing: `unreadable` stayed
+    empty, nothing warned, and the pin held HEAD's bytes for the lane's only copy at exit 0 —
+    the silent-HEAD shape this module forbids. Reproduced with `chmod 0644 d/` over a
+    modified `d/f.txt`: stderr was that one line and `pin` printed `pinned 2 file(s)` with no
+    warning at all.
+    """
+    (hub / "d").mkdir()
+    (hub / "d" / "f.txt").write_text("v1\n")
+    assert git("add", "-A", cwd=hub).returncode == 0
+    assert git("commit", "-qm", "d", cwd=hub).returncode == 0
+
+    wt = clean_lane(hub, "wt-permden")
+    (wt / "d" / "f.txt").write_text("THE LANE'S ONLY COPY\n")
+    (wt / "tracked.txt").write_text("another edit\n")  # keeps the pin off the clean path
+    (wt / "d").chmod(0o644)  # read, no EXECUTE: git cannot open the file and says so BARE
+    try:
+        if os.access(wt / "d" / "f.txt", os.R_OK):
+            pytest.skip(
+                "the path is readable to this user (root), so git would not skip it and "
+                "the bare-denial line under test never appears"
+            )
+        pinned = run_tool("pin", cwd=wt)
+    finally:
+        (wt / "d").chmod(0o755)
+
+    combined = pinned.stdout + pinned.stderr
+    assert "d/f.txt" in combined, (
+        f"a path git could not index must be ANNOUNCED by name, never pinned as HEAD: {combined!r}"
+    )
+    assert "WARNING" in combined or pinned.returncode != 0, combined
 
 
 def test_a_dangling_symlink_does_not_refuse_a_genuine_pin(hub: Path) -> None:

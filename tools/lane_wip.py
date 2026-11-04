@@ -100,6 +100,7 @@ import argparse
 import contextlib
 import os
 import shutil
+import stat
 import subprocess
 import tempfile
 from datetime import UTC, datetime
@@ -352,10 +353,28 @@ def _resolve_path(path: Path, *, what: str) -> Path:
         ) from exc
 
 
+def _is_bare_denied(line: str) -> bool:
+    """`git add`'s BARE ``<path>: Permission denied`` — no ``error:``/``warning:`` prefix.
+
+    ⛔ THIS FORM WAS UNMATCHED, so a path inside a directory without EXECUTE permission was
+    never counted as skipped: `git add -A --sparse --ignore-errors` writes
+    ``d/f.txt: Permission denied`` and EXITS 0, `_SKIP_MARKERS` matched none of it, so
+    `unreadable` stayed empty, nothing warned, and the pin held HEAD's bytes for the lane's
+    only copy — exactly the silent-HEAD shape this module forbids. Measured with `chmod 0644
+    d/` over a modified `d/f.txt`: stderr was that one line and `pin` printed `pinned 2
+    file(s)` with an empty warning.
+    """
+    return line.endswith(": Permission denied") and not line.startswith(
+        ("error:", "warning:", "fatal:", "hint:", "note:")
+    )
+
+
 def _skipped_paths(stderr: str) -> str:
     """The lines of ``stderr`` that prove content was NOT indexed (``""`` when none)."""
     lines = [ln for ln in (stderr or "").splitlines() if ln.strip()]
-    return "\n".join(ln for ln in lines if any(m in ln for m in _SKIP_MARKERS)).strip()
+    return "\n".join(
+        ln for ln in lines if any(m in ln for m in _SKIP_MARKERS) or _is_bare_denied(ln)
+    ).strip()
 
 
 def _worktree_root(path: Path) -> str:
@@ -923,6 +942,11 @@ def _worktree_blob(root: Path, rel: str) -> tuple[str | None, bool]:
     by name — refusing everything because of it breaks a lane over one artifact it does not
     care about. A `git` READ that failed is an UNKNOWN about work that may be perfectly
     readable, and that must fail closed. Only the second sets `read_failed`.
+    ⛔ IT MUST BE A `stat` PROBE, NEVER `open`. `open()` on a FIFO with no writer BLOCKS
+    FOREVER: `pin` then hangs, writes NO ref and prints nothing, so any caller with a timeout
+    proceeds unpinned and the lane's *readable* work is destroyed — the #10812 outcome, now
+    caused by one degraded path instead of surviving it (measured: the pre-delta head pinned
+    and warned, this one hung).
     ⛔ `hash-object <path>` FOLLOWS A SYMLINK, so it answers with the TARGET's bytes while the
     tree entry is mode 120000 holding the LINK TEXT — a symlink then reads as "the pin does
     not hold it" (a false refusal) or, for a dangling link, `fatal: could not open` and no
@@ -939,9 +963,17 @@ def _worktree_blob(root: Path, rel: str) -> tuple[str | None, bool]:
             return None, True
         return cp.stdout.strip() or None, False
     try:
-        with open(path, "rb"):
-            pass
+        mode = os.lstat(path).st_mode
     except OSError:
+        return None, True  # the STATE itself is unreadable: an UNKNOWN, never a pass
+    if not stat.S_ISREG(mode):
+        # A FIFO/socket/device has no blob to compare and git indexes none of them, so the
+        # pin cannot be missing their content. Announced by `git add`'s own skip diagnostic.
+        return None, False
+    if not os.access(path, os.R_OK):
+        # `os.access` uses REAL ids, exactly as `git add` does, so this agrees with what git
+        # could read (mode-000 under a normal user -> False; as root -> True, and git indexes
+        # it, so there is nothing degraded to report).
         return None, False  # the PIN SOURCE cannot read it: announced, never compared
     got = _git("hash-object", "--", rel, check=False, cwd=root)
     if got.returncode != 0:
