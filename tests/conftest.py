@@ -1277,7 +1277,18 @@ def _redislite_hygiene(_reclaim_session_tmpdirs):
                             # redding the leg with the reaper in _kill/probe).
                             deadline=deadline),
                         deadline,
-                        embedded_reaper.live_embedded_server_count,
+                        # #8599: the PID SET, not a count. The report's
+                        # `before`/`left` are `len()` of these two readings and
+                        # the vanished-before-discovery term is the difference
+                        # between the pid sets and what discovery examined — a
+                        # count alone cannot say which server left, so a server
+                        # that shut down before discovery used to make the CI
+                        # gate report "the sweep's own measurement is broken"
+                        # on a green run. One reading per seam: deriving the
+                        # counts from these same reads is what stops `before`
+                        # describing a different instant than the sets it is
+                        # reconciled against.
+                        embedded_reaper.live_embedded_server_pids,
                         own_probe=lambda: (
                             embedded_reaper.own_live_server_count(
                                 run_roots())),
