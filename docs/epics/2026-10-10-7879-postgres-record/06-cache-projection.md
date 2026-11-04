@@ -184,3 +184,34 @@ to have none.
 * **Normalising the ~9,700 legacy ids** (`#7955` §1.4, W1b).
 * **No migration-safety surface** (owner scope ruling, 2026-10-10).
 * **No public surface change.**
+
+## §9.1/D1 at the projection door — an EPISODIC Source carries no turn prose (#10853)
+
+A **second declared narrowing** of the field set, in the opposite direction from
+`FOLD_ON_CREATE_DEFAULTS` and `DERIVED_FROM_RECORD`: `public.source.summary` and
+`public.source._search_text` are §9.1/D1 turn prose when the Source is a captured
+session, so `cache_projection._EPISODIC_SOURCE_PROSE_COLUMNS` declines to project
+them onto the node. The record keeps the values (the row is not mutated, and
+record-side search reads the COLUMN), and `topics` — the capture's word lexicon —
+still projects.
+
+Why it lives here rather than only in the capture: `tortoise record-restore` and
+`record_serve`'s `fetch-record` repair rebuild a node from the record row through
+`cache_projection.node_from_row`, so a row written by a build that still placed
+the key re-creates the prose **whatever build is reading it** — the one-way
+divergence #10853 measured. Sweeping the existing rows instead would decay: at
+this head the capture still writes the value, so the next capture of the same
+session writes it straight back.
+
+Two costs, named rather than implied:
+
+* the **journal fold** still projects the value until #10000's capture-side change
+  lands, so the two rebuild paths disagree on that one column until then — in the
+  ruling's direction, and converging with it;
+* graph-side FTS over a session Source's own utterances goes with the prose. The
+  record remains searchable (the column is untouched), and #10000 replaces the
+  capture's summary with a topic lexicon.
+
+Pinned by `tests/test_10853_session_source_prose.py` (red-first: the four legs
+are the drop, the narrowness of the drop, the document Source that must keep
+both columns, and the record row that must not be mutated).
