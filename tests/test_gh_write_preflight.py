@@ -114,6 +114,17 @@ if argv[:1] == ["auth"]:
         print(os.environ.get("FAKE_GH_SECRET", "tok"))
         sys.exit(0)
     print("github.com")
+    if os.environ.get("FAKE_GH_ACCOUNT_ORDER") == "activefirst":
+        # The normal layout on a box whose env token wins: the ACTIVE account is
+        # printed FIRST. Pins the active-marker parse against "return the last
+        # account line", which passes only in the other ordering.
+        print("  \u2713 Logged in to github.com account probe-user (GH_TOKEN)")
+        print("  - Active account: true")
+        print("  - Token scopes: 'gist', 'read:org', 'repo', 'workflow'")
+        print("  \u2713 Logged in to github.com account probe-user (keyring)")
+        print("  - Active account: false")
+        print("  - Token scopes: 'gist', 'read:org', 'repo', 'workflow'")
+        sys.exit(0)
     print("  \u2713 Logged in to github.com account probe-user (keyring)")
     print("  - Active account: false")
     print("  - Token scopes: 'gist', 'read:org', 'repo', 'workflow'")
@@ -141,6 +152,7 @@ if argv[:2] == ["pr", "list"]:
 i = 1
 method = "GET"
 path = ""
+title_field = ""
 while i < len(argv):
     a = argv[i]
     if a in ("-X", "--method"):
@@ -153,6 +165,8 @@ while i < len(argv):
             sys.exit(0)
         i += 2; continue
     if a in ("-f", "--raw-field", "-F", "--field"):
+        if argv[i + 1].startswith("title="):
+            title_field = argv[i + 1].removeprefix("title=")
         i += 2; continue
     if not a.startswith("-"):
         path = a
@@ -176,16 +190,41 @@ if method == "GET" and "git/ref/heads/" in path:
     sys.exit(0)
 
 if method == "GET" and "/pulls/" in path:
+    # Count the reads of THIS PR so the re-read arms can differ from the first read.
+    counter = (os.environ.get("FAKE_GH_LOG", "/tmp/fakegh") + ".pullgets")
+    n = 0
+    try:
+        with open(counter) as fh:
+            n = int(fh.read().strip() or "0")
+    except Exception:
+        n = 0
+    with open(counter, "w") as fh:
+        fh.write(str(n + 1))
+    if MODE == "pr404":
+        emit(404, "Not Found", {"X-Ratelimit-Remaining": "2603"},
+             json.dumps({"message": "Not Found", "status": "404"}))
+        sys.exit(0)
+    if MODE == "reread403" and n >= 1:
+        emit(403, "Forbidden",
+             {"X-Accepted-Github-Permissions": "pull_requests=write",
+              "X-Ratelimit-Remaining": "2603"},
+             json.dumps({"message": "Resource not accessible by personal access token"}))
+        sys.exit(0)
+    title = "changed by another actor" if (MODE == "retitle" and n >= 1) else "an unchanged title"
     emit(200, "OK", {"X-Ratelimit-Remaining": "2603"},
-         json.dumps({"number": 4242, "title": "an unchanged title",
+         json.dumps({"number": 4242, "title": title,
                      "updated_at": "2026-11-04T18:19:01Z"}))
     sys.exit(0)
 
 # ── writes ────────────────────────────────────────────────────────────────────
 h = write_headers(path)
-if MODE in ("ok", "nopr"):
+if MODE in ("ok", "nopr", "pr404", "retitle", "reread403"):
     if method == "DELETE":
         emit(204, "No Content", h)
+    if method == "PATCH":
+        # The PATCH's own response is what OUR write stored — the race-free half of
+        # the no-op check.
+        emit(200, "OK", h, json.dumps({"number": 4242, "title": title_field}))
     emit(201 if method == "POST" else 200, "Created",
          h, json.dumps({"id": 999, "ref": "refs/heads/probe"}))
 elif MODE in ("readonly-pat", "readonly-nopr"):
@@ -228,13 +267,21 @@ def fake_gh(tmp_path):
     log = tmp_path / "gh.log"
 
     def run(
-        mode: str, *args: str, noise: bool = False, secret: str | None = None
+        mode: str,
+        *args: str,
+        noise: bool = False,
+        secret: str | None = None,
+        account_order: str | None = None,
     ) -> subprocess.CompletedProcess:
         env = dict(os.environ)
         env["PATH"] = f"{bindir}{os.pathsep}{env.get('PATH', '')}"
         env["FAKE_GH_MODE"] = mode
         env["FAKE_GH_LOG"] = str(log)
         env["FAKE_GH_SECRET"] = SECRET if secret is None else secret
+        if account_order:
+            env["FAKE_GH_ACCOUNT_ORDER"] = account_order
+        else:
+            env.pop("FAKE_GH_ACCOUNT_ORDER", None)
         if noise:
             env["FAKE_GH_NOISE"] = "1"
         else:
@@ -545,7 +592,9 @@ def test_a_404_on_the_pull_request_probe_never_claims_the_repo_is_invisible():
     A `--pr` given an ISSUE number is the plausible lane mistake; telling the
     operator to chase `--hostname` or their account sends them the wrong way.
     """
-    pr = ghwp.classify(ghwp.HttpResult(status=404), ghwp.PERM_PULL_REQUESTS, "pull_requests")
+    pr = ghwp.classify(
+        ghwp.HttpResult(status=404), ghwp.PERM_PULL_REQUESTS, "pull_requests", repo_read_ok=True
+    )
     repo = ghwp.classify(ghwp.HttpResult(status=404), ghwp.PERM_CONTENTS, "contents")
     assert pr is not None and pr.reason == "pr-not-visible"
     assert "not a pull request" in pr.detail
@@ -613,6 +662,83 @@ def test_the_noop_patch_is_re_read_and_its_title_claim_is_checked(fake_gh):
     assert any("GET" in argv and any("/pulls/" in a for a in argv) for argv in after), (
         "the PR was never re-read after the PATCH"
     )
+
+
+def test_a_non_pr_number_is_a_measured_refusal_not_an_unverifiable_one(fake_gh):
+    """#10945 review ROUND 2, P1. The read of the PR was never classified.
+
+    `--pr` given an ISSUE number produced a 404 on `GET /pulls/{n}`, which used to
+    collapse into `no-pr-title` (an UNVERIFIABLE reason), so the PATCH — and the
+    `X-Accepted-Github-Permissions` header GitHub sends — was never reached and a
+    provable permission defect exited 3 as "cannot measure". This arm drives the
+    whole probe, which the round-1 unit test did not.
+    """
+    res = fake_gh("pr404")
+    assert res.returncode == ghwp.EXIT_UNAVAILABLE, res.stdout + res.stderr
+    assert "GH-WRITE-UNAVAILABLE(pr-not-visible)" in res.stderr
+    assert "repo-not-visible" not in res.stderr
+    assert "no-pr-title" not in res.stderr
+
+
+def test_a_third_party_retitle_is_not_reported_as_our_residue(fake_gh):
+    """#10945 review round 2, P2. Blaming our write for someone else's edit.
+
+    The re-read can legitimately differ because a human edited the PR between our
+    PATCH and our GET. Telling an operator (or an automated lane) to "restore it"
+    would revert a deliberate edit and accuse the probe of an edit it did not make.
+    """
+    res = fake_gh("retitle")
+    assert res.returncode == ghwp.EXIT_WRITABLE, res.stdout + res.stderr
+    assert "changed AFTER the probe by another actor" in res.stdout, res.stdout
+    assert "restore the title" not in res.stdout
+    assert "title unchanged on re-read" not in res.stdout
+
+
+def test_a_failed_re_read_never_claims_the_title_was_verified(fake_gh):
+    """#10945 review round 2, P2. The clean wording was printed unconditionally.
+
+    It was reached on a 403, a 404 and an unparseable body alike — the tool
+    reporting a verification it had not performed, on the one property that
+    licenses running this probe before every landing.
+    """
+    res = fake_gh("reread403")
+    assert res.returncode == ghwp.EXIT_WRITABLE, res.stdout + res.stderr
+    assert "could not confirm" in res.stdout, res.stdout
+    assert "title unchanged on re-read" not in res.stdout
+
+
+def test_the_active_account_is_found_even_when_it_is_listed_FIRST(fake_gh):
+    """#10945 review round 2, P2. "Return the last account line" passed round 1.
+
+    The round-1 fixture put the active account SECOND, which is exactly the
+    ordering in which returning the LAST account line looks correct. With the
+    normal ordering (active first) that implementation names the credential that
+    is not in use.
+    """
+    res = fake_gh("ok", account_order="activefirst")
+    assert "source=GH_TOKEN" in res.stdout, res.stdout
+    assert "source=keyring" not in res.stdout
+
+
+def test_a_404_on_a_write_leg_after_a_successful_repo_read_is_not_the_identity(fake_gh):
+    """#10945 review round 2, P2. The repo IS visible, so do not chase the account."""
+    refusal = ghwp.classify(
+        ghwp.HttpResult(status=404), ghwp.PERM_CONTENTS, "contents", repo_read_ok=True
+    )
+    assert refusal is not None and refusal.reason == "resource-not-found"
+    assert "repo IS visible" in refusal.detail
+
+
+def test_the_noise_arm_also_pins_the_digest(fake_gh):
+    """#10945 review round 2, P2. The worst round-1 defect was unpinned here.
+
+    The noise arm asserted the repo and login but not the digest, so
+    `sha256((tok + err).strip())` — hashing stale stderr bytes — passed both that
+    arm and the digest arm (which runs with no stderr).
+    """
+    expected = f"token=sha256:{hashlib.sha256(SECRET.encode()).hexdigest()[:12]}"
+    res = fake_gh("ok", noise=True)
+    assert expected in res.stdout, res.stdout
 
 
 if __name__ == "__main__":

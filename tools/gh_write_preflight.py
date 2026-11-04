@@ -89,8 +89,10 @@ Named refusals — one code per cause, because each has a different repair
     repo-not-visible             404 on the repo read.
     pr-not-visible               404 on the PR probe: that number is not a PR this
                                  identity can see (often `--pr` given an issue
-                                 number) — never "the repo is not visible", because
-                                 the role read already succeeded.
+                                 number) — never "the repo is not visible" when the
+                                 repo read already succeeded.
+    resource-not-found           404 on a WRITE leg whose repo read succeeded, so the
+                                 resource is missing, not the identity.
     unexpected:<status>
 
 `GH-WRITE-UNVERIFIABLE(<what>)`, exit 3 — never 0: `gh` missing, the probe timed
@@ -222,7 +224,9 @@ def parse_http_output(raw: str) -> HttpResult:
     return HttpResult(status=status, headers=headers, body=body)
 
 
-def classify(res: HttpResult, perm: str, probe: str) -> Refusal | None:
+def classify(
+    res: HttpResult, perm: str, probe: str, *, repo_read_ok: bool = False
+) -> Refusal | None:
     """Decide what a probe's response means. `None` means the write was accepted.
 
     ⛔ THE ORDER IS THE CORRECTNESS. `rate-limited` is a statement about the shared
@@ -286,11 +290,20 @@ def classify(res: HttpResult, perm: str, probe: str) -> Refusal | None:
         )
 
     if res.status == 404:
-        # ⛔ SPLIT BY PROBE (#10945 review P2). The repo read has already succeeded
-        # by the time the `pull_requests` probe runs, so the repo is provably
-        # visible — telling the operator to chase a wrong `--hostname` or a
-        # different account sends them the wrong way when the real cause is a
-        # `--pr` that is an issue number, a deleted PR, or another repo's number.
+        # ⛔ "THE REPO IS NOT VISIBLE" IS ONLY TRUE BEFORE THE REPO WAS READ.
+        # The old arm keyed this on the probe NAME, so a 404 from the ref-create
+        # (which runs AFTER the role read succeeded) and a 404 from the PR read
+        # both told the operator to chase a wrong `--hostname` or account while
+        # the repo was provably readable (#10945 review round 2, P2s 4+1). The
+        # fact is carried in explicitly instead of inferred.
+        if not repo_read_ok:
+            return Refusal(
+                "repo-not-visible",
+                f"404 on the {probe} probe: the repo is not visible to this identity "
+                f"(a wrong `--hostname`, a different account, or a private repo the "
+                f"token cannot see). {_detail(res, '')}".strip(),
+                probe,
+            )
         if probe == "pull_requests":
             return Refusal(
                 "pr-not-visible",
@@ -301,10 +314,10 @@ def classify(res: HttpResult, perm: str, probe: str) -> Refusal | None:
                 probe,
             )
         return Refusal(
-            "repo-not-visible",
-            f"404 on the {probe} probe: the repo is not visible to this identity "
-            f"(a wrong `--hostname`, a different account, or a private repo the "
-            f"token cannot see). {_detail(res, '')}".strip(),
+            "resource-not-found",
+            f"404 on the {probe} probe, but the repo IS visible — so this is the "
+            f"resource, not the identity (a sha that is not on the remote, or a "
+            f"path this token may not address). {_detail(res, '')}".strip(),
             probe,
         )
 
@@ -526,7 +539,7 @@ def probe_contents(repo: str, timeout: float) -> tuple[Refusal | None, str]:
         )
     ref = f"refs/heads/{REF_PREFIX}-{secrets.token_hex(6)}"
     made = api("POST", f"repos/{repo}/git/refs", {"ref": ref, "sha": sha}, timeout)
-    verdict = classify(made, PERM_CONTENTS, "contents")
+    verdict = classify(made, PERM_CONTENTS, "contents", repo_read_ok=True)
     if verdict is not None:
         return verdict, f"create {ref} refused"
     # Cleanup is best effort and NEVER changes the verdict: the write already
@@ -571,7 +584,7 @@ def probe_pull_requests(
             {"body": f"{COMMENT_MARKER}: automated token preflight, deleted immediately"},
             timeout,
         )
-        verdict = classify(made, PERM_PULL_REQUESTS, "pull_requests")
+        verdict = classify(made, PERM_PULL_REQUESTS, "pull_requests", repo_read_ok=True)
         if verdict is not None:
             return verdict, f"comment on PR #{pr} refused"
         cid = None
@@ -585,41 +598,67 @@ def probe_pull_requests(
         return None, f"created and deleted a comment on PR #{pr}"
 
     current = api("GET", f"repos/{repo}/pulls/{pr}", None, timeout)
+    # ⛔ CLASSIFY THE READ (#10945 review round 2, P1). Every non-2xx used to
+    # collapse into `no-pr-title`, which is an UNVERIFIABLE reason — so a 404 on
+    # the PR read (a `--pr` given an issue number) and a 403 (this is the
+    # `X-Accepted-Github-Permissions` header GitHub would have sent) were both
+    # reported as "no title, cannot measure" with exit 3, and the PATCH was never
+    # attempted. That made a PROVABLE `permission:pull_requests-write` refusal —
+    # the exact #10930 shape — invisible on the one path that produces it.
+    if current.status is None or not (200 <= current.status < 300):
+        return (
+            classify(current, PERM_PULL_REQUESTS, "pull_requests", repo_read_ok=True),
+            f"read of PR #{pr} refused",
+        )
     title = None
-    if current.status and 200 <= current.status < 300:
-        with contextlib.suppress(ValueError, AttributeError):
-            title = json.loads(current.body).get("title")
+    with contextlib.suppress(ValueError, AttributeError):
+        title = json.loads(current.body).get("title")
     if not title:
         return (
             Refusal(
                 "no-pr-title",
-                f"could not read PR #{pr}'s title, and the no-op PATCH probe needs "
-                f"it (writing anything else would change the PR)",
+                f"PR #{pr} was readable but carried no title, and the no-op PATCH "
+                f"probe needs it (writing anything else would change the PR)",
                 "pull_requests",
             ),
             "no title",
         )
     res = api("PATCH", f"repos/{repo}/pulls/{pr}", {"title": title}, timeout)
-    verdict = classify(res, PERM_PULL_REQUESTS, "pull_requests")
+    verdict = classify(res, PERM_PULL_REQUESTS, "pull_requests", repo_read_ok=True)
     if verdict is not None:
         return verdict, f"no-op PATCH on PR #{pr} refused"
-    # ⛔ VERIFY THE NO-OP CLAIM INSTEAD OF ASSERTING IT (#10945 review P2). "No
-    # residue" is this probe's whole licence to run before every landing, and
-    # nothing above checks it — the tool sent the title it read and then trusted
-    # that GitHub stored it verbatim. If a future normalisation (or a `-f`
-    # encoding surprise) did change the PR, the probe would silently edit a real
-    # PR on every landing while reporting OK. One re-read pins it, and a mismatch
-    # is reported as residue with both values so an operator can restore it.
+    # ⛔ VERIFY THE NO-OP CLAIM INSTEAD OF ASSERTING IT (#10945 review P2s, rounds
+    # 1 and 2). "No residue" is this probe's whole licence to run before every
+    # landing and nothing else checks it. Three outcomes, and they must not be
+    # conflated: what OUR write stored (read off the PATCH's own response, which is
+    # race-free), what the PR says afterwards, and failing to read either.
+    stored = None
+    with contextlib.suppress(ValueError, AttributeError):
+        stored = json.loads(res.body).get("title")
+    if stored is not None and stored != title:
+        return None, (
+            f"no-op PATCH on PR #{pr} accepted, BUT our own write stored {stored!r} "
+            f"instead of {title!r} — residue: restore the title"
+        )
     after = api("GET", f"repos/{repo}/pulls/{pr}", None, timeout)
-    if after.status and 200 <= after.status < 300:
-        got = None
+    got = None
+    if after.status is not None and 200 <= after.status < 300:
         with contextlib.suppress(ValueError, AttributeError):
             got = json.loads(after.body).get("title")
-        if got is not None and got != title:
-            return None, (
-                f"no-op PATCH on PR #{pr} accepted, BUT the title changed — "
-                f"residue: was {title!r}, is now {got!r}; restore it"
-            )
+    if got is None:
+        # NOT the clean wording: the re-read failed, so the claim was never
+        # measured (it used to be printed for a 403, a 404 and garbage alike).
+        return None, (
+            f"no-op PATCH on PR #{pr} accepted, BUT the re-read could not confirm "
+            f"(HTTP {after.status}) — check that PR's title by hand: it should "
+            f"still be {title!r}"
+        )
+    if got != title:
+        return None, (
+            f"no-op PATCH on PR #{pr} accepted; the title was {title!r} when written "
+            f"and is {got!r} now — changed AFTER the probe by another actor, which "
+            f"is not this probe's residue. Do not restore it on our say-so."
+        )
     return None, f"no-op PATCH on PR #{pr} accepted (title unchanged on re-read)"
 
 
