@@ -2107,3 +2107,49 @@ def test_the_store_fault_residual_names_a_home_this_fold_does_not_close() -> Non
         "#10884 paragraph in this module docstring; if it was fixed, DELETE the "
         "paragraph instead of re-pointing it."
     )
+
+
+def test_the_whitespace_attempt_key_residual_names_a_home_this_fold_does_not_close() -> None:
+    """#10790 review (P2): the THIRD residual must point at an OPEN home too.
+
+    `presented_consent_attempt_key`'s docstring records a residual the AS hop does
+    not close: the page and `start.ts` do not strip, so a whitespace
+    `attempt_key` presented STRAIGHT to `/api/consent/start` — bypassing the AS —
+    is still adopted verbatim (`start.ts:255-256`,
+    `presentedKey || newAttemptKey()`). That residual was written down on #10487,
+    which this fold retires, so the docstring points a reader at #10884 instead.
+
+    A pointer is a CLAIM, and the previous review found it was one the artifact
+    did not support: #10884's body recorded the store-fault arm and the
+    keyless-re-entry hole, but not this one. The body now carries it (the
+    decision-relay rule: record the answer where the next lane reads it).
+
+    The assertion is a BICONDITIONAL, so the guard cannot rot into a tautology
+    either way: while `start.ts` still adopts a presented key unstripped, the
+    docstring must name the OPEN home; once the adoption strips (or refuses a
+    blank one), the note must be DELETED rather than re-pointed.
+    """
+    start_ts = (CONSENT_DIR / "start.ts").read_text(encoding="utf-8")
+    adopted_verbatim = (
+        'const presentedKey = url.searchParams.get(ATTEMPT_KEY_PARAM) ?? "";'
+        in start_ts
+        and "const attemptKey = presentedKey || newAttemptKey();" in start_ts
+    )
+
+    # Read the emitting predicate's own docstring, not the module: the pointer
+    # lives beside the predicate a reader lands on when they ask what "present"
+    # means on this hop.
+    source = (REPO / "tortoise" / "oauth.py").read_text(encoding="utf-8")
+    start = source.index("def presented_consent_attempt_key")
+    end = source.find("\ndef ", start + 1)
+    docstring = source[start:end if end != -1 else len(source)]
+    declared = "#10884" in docstring
+
+    assert adopted_verbatim == declared, (
+        "the whitespace-attempt-key residual and its declared home disagree "
+        f"(#10487 is retired; its open home is #10884): "
+        f"start_ts_adopts_a_presented_key_unstripped={adopted_verbatim}, "
+        f"docstring_names_the_open_home={declared}. If the residual is present, keep "
+        "#10884 in `presented_consent_attempt_key`'s docstring AND in #10884's body; "
+        "if it was fixed, DELETE the note instead of re-pointing it."
+    )
