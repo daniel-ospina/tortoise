@@ -493,9 +493,17 @@ def test_main_feeds_the_census_legs_into_e3_and_renders_them():
     tree = ast.parse(PROBE.read_text())
     main = next(node for node in tree.body
                 if isinstance(node, ast.FunctionDef) and node.name == "main")
-    call = next(node for node in ast.walk(main)
-                if isinstance(node, ast.Call)
-                and getattr(node.func, "id", None) == "e3_outcome")
+    # EXACTLY ONE call. `next(...)` bound only the first one, so a later
+    # `e3_result = e3_outcome(...)` without the legs silently replaced the pinned result and every
+    # assertion here stayed green (round 4 measured that mutation at 123 passed).
+    calls = [node for node in ast.walk(main)
+             if isinstance(node, ast.Call)
+             and getattr(node.func, "id", None) == "e3_outcome"]
+    assert len(calls) == 1, (
+        f"`main` calls e3_outcome {len(calls)} times — this pin binds the single call site, so a "
+        f"second call (a re-assignment of `e3_result`) can drop the empty-leg set while the pin "
+        f"stays green")
+    call = calls[0]
     kwargs = {kw.arg: kw.value for kw in call.keywords}
     assert "unmeasured_legs" in kwargs, (
         "main calls e3_outcome without unmeasured_legs — a registered class the run wrote zero of "
@@ -507,17 +515,33 @@ def test_main_feeds_the_census_legs_into_e3_and_renders_them():
     # the argument is the CENSUS, not a typed tuple: a hardcoded class list would be the very
     # narrowing this rule exists to refuse, and would re-stale with the class set.
     assert "census_data" in ast.dump(wired), ast.dump(wired)
-    # ...and the class set must not be NARROWED at the call site: `labels=("Document",)` would keep
-    # this AST pin green while a run that wrote no `Event` scored PASS over a narrower population —
-    # the same defect, one layer up from the pure rule. Neither spelling of the narrowing may pass:
-    # the keyword is refused here, and `labels` is KEYWORD-ONLY in the signature so a second
-    # positional argument cannot slip past it either (round 3 measured exactly that mutation green).
-    assert not [kw for kw in wired.keywords if kw.arg == "labels"], (
-        "main narrows e3_unmeasured_legs' class set at the call site — the registered set must come "
-        "from DERIVED_LABELS, or the wiring re-creates the hole the rule closes: " + ast.dump(wired))
-    assert not wired.args[1:], (
-        "main passes e3_unmeasured_legs a second POSITIONAL argument (a class tuple) — the registered "
-        "set must come from DERIVED_LABELS: " + ast.dump(wired))
+    # ── the class set must not be NARROWED at the call site ───────────────────────────────────
+    # A narrowed set keeps the pure rule green while a run that wrote no `Event` scores PASS over a
+    # narrower population — the same false green, one layer up. Rounds 3 and 4 each measured a
+    # spelling that survived a narrower check, so the shape is refused WHOLE rather than per
+    # spelling:
+    #   `labels=("Document",)`           keyword           → refused by `wired.keywords`
+    #   `**{"labels": (…)}`              unpacked keyword  → arrives as `kw.arg is None`
+    #   `(census, ("Document",))`        second positional → refused, and keyword-only in the sig
+    #   `*(census, ("Document",))`       star-unpack       → refused by the Starred check
+    #   `e3_unmeasured_legs = lambda …`  local rebinding   → refused by the rebinding check
+    # Each was measured green against the previous cut of this pin.
+    assert not wired.keywords, (
+        "main passes e3_unmeasured_legs a keyword at the call site (including `**{...}`, which "
+        "arrives with arg=None) — the registered set must come from DERIVED_LABELS: "
+        + ast.dump(wired))
+    assert len(wired.args) == 1 and not isinstance(wired.args[0], ast.Starred), (
+        "main passes e3_unmeasured_legs more than one argument, or star-unpacks them — a class "
+        "tuple that way narrows the registered set with every other assertion green (and a "
+        "star-unpack only fails in a real run, after the LLM spend): " + ast.dump(wired))
+    rebound = [node for node in ast.walk(main)
+               if isinstance(node, (ast.Assign, ast.AnnAssign))
+               and any(isinstance(t, ast.Name) and t.id == "e3_unmeasured_legs"
+                       for t in (node.targets if isinstance(node, ast.Assign)
+                                 else [node.target]))]
+    assert not rebound, (
+        "`main` rebinds the name `e3_unmeasured_legs` locally — `wired.func.id` then reads the same "
+        "while the call runs a narrowed lambda, and every other assertion here stays green")
     sig = next(node for node in tree.body
                if isinstance(node, ast.FunctionDef) and node.name == "e3_unmeasured_legs")
     names = [a.arg for a in sig.args.args]
