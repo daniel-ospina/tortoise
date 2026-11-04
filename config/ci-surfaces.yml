@@ -6764,6 +6764,14 @@ surfaces:
   # never reassigns a key, and the ingest counter shares the writer's
   # resolution. Hermetic (embedded store).
   - test_6110_key_identity.py
+  # #10368: `create_point(dedup=True)` must not fold onto a TERMINAL point —
+  # both write legs (the `update_point` props leg AND the authored-word
+  # baseline leg) are refused and the drop is reported as the
+  # `terminal_fold_refused` advisory. `sdk` owns it: the subject is
+  # `tortoise/sdk.py`'s dedup branch, and the file pins the SDK's own
+  # `create_point`/`update_point` contract plus the #7704 provenance fold.
+  # Hermetic (embedded store, `sdk_factory`).
+  - test_10368_terminal_create_fold.py
   - test_search_engine_recency.py
   - test_temporal_constraint.py
   - test_terminal_dedup_nullhash.py  # #2971: _find_terminal_dedup_hit A10 hash-less fallback (rebuild-durable terminal guard)
@@ -10002,6 +10010,7 @@ durations:
   test_5404_entity_type_guard.py: 0.1
   test_5407_index_label_parity.py: 0.1
   test_5412_empty_query_vector_leg_trace.py: 0.1
+  test_10368_terminal_create_fold.py: 2.0  # new in #10368 — a file a PR ADDS can never carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default: the `sdk` registration above puts one more file in `fast_pool()`, and `--integrity`'s `duration_coverage_issues` floor is measured against that pool's own size. What the weight covers: GRAPH-TOUCHING but not server-backed — every case takes `sdk_factory`, i.e. a throwaway embedded `redislite` FalkorDB per test under `tmp_path` (no Postgres, no docker container, no network, no model); the cost is SDK construction plus a handful of `create_point`/`retract_point`/`get_point` round-trips, so the flat weight UNDERSTATES it on a loaded host until the sweep re-bases it. ⛔ The CASE COUNT is deliberately not quoted: rounds on this file add pins, and `tools/ci_timing.py --refresh-durations` re-derives the row from junit, so the provenance names the reading and leaves the count to the file itself. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
   test_6110_key_identity.py: 4.7
   test_6239_promote_after_supersede.py: 5.7
   test_6597_window_closure_coverage.py: 19.0
