@@ -6454,6 +6454,98 @@ def test_reap_reports_the_candidate_pids_it_examined():
     )
 
 
+def test_run_sweep_reports_the_candidate_pids_the_report_builder_reads(monkeypatch):
+    """⛔ THE PRODUCER `build_end_sweep_report` READS, PINNED (#10757 review P2).
+
+    `reap()` sets `discovered_pids` on ITS own result — and `_run_sweep` builds a
+    SECOND `_ScanAwareList` around `acted` ("read before the wrap below, which
+    copies elements only") and sets its own, which is the object
+    `build_end_sweep_report` reads through `run_one()`. The test above asserts
+    `reap()`'s copy, so the PRODUCTION assignment had no pin at all: forcing
+    every `_run_sweep` result to the class default `None` — the exact state of a
+    deleted assignment — left 14 tests green (measured), i.e. the #8599 fix
+    could be removed from production with the suite still passing.
+
+    So this drives the real entry point and asserts the copy the builder reads.
+    """
+    from tortoise.embedded_reaper import _run_sweep
+
+    with _stale_dir_env() as (dbdir, sock):  # noqa: RUF059
+        monkeypatch.setenv("TORTOISE_INDEX_LOCK_DIR", str(dbdir.parent / "locks"))
+        monkeypatch.setattr(
+            "tortoise.embedded_reaper.discover",
+            lambda jobs=1, **kw: _scan_aware([
+                {"classification": "candidate", "pid": 99999990,
+                 "socket_path": "/tmp/nonexistent-8599-producer.sock"},
+                {"classification": "protected", "pid": 777,
+                 "socket_path": "/tmp/nonexistent-8599-producer-protected.sock"},
+                {"classification": "candidate", "pid": None,
+                 "socket_path": "/tmp/nonexistent-8599-producer-nopid.sock"},
+            ], complete=True))
+        # `phase1_probe` re-classifies by probing the SOCKET, and a fabricated
+        # path reads 'undetermined', so it is passed through: this test is about
+        # WHICH records `_run_sweep` publishes, not about that probe's own
+        # verdicts (pinned separately, #1383).
+        monkeypatch.setattr(
+            "tortoise.embedded_reaper.phase1_probe", lambda record: record)
+        acted = _run_sweep(dry_run=True, batch_size=None, only_safe=True,
+                           sweep_pid_files=False)
+    assert acted.discovered_pids == {99999990}, (
+        "`_run_sweep` must publish the candidate pids it examined — this is the "
+        "reading `build_end_sweep_report` folds the vanished term from, and `reap()`'s "
+        "identical copy is a DIFFERENT object it never sees"
+    )
+
+
+def test_run_sweep_reports_discovered_pids_unmeasured_when_the_scan_was_short(monkeypatch):
+    """A TRUNCATED discovery cannot say what it examined — it must read UNMEASURED.
+
+    ⛔ THIS IS A FAIL-OPEN, NOT TIDINESS (#10757 review P2).
+    `_vanished_before_discovery` can tell an ABSENT reading from a present one,
+    never a SHORT one from a complete one. So a partial candidate scan — a
+    bounded walk that hit `SOCKET_WALK_TIMEOUT`, or per-dir `_classify_dir`
+    failures swallowed by `continue` — hands it a SUBSET; the difference then
+    claims every live server the scan never reached as a natural exit, `exited`
+    absorbs the whole shortfall, and the gate's own "the sweep's measurement is
+    broken" red closes. Measured before the fix: the same physical facts read
+    `RC=1` from a complete census and `RC=0` from a short one, and `cleared=false`
+    cannot red it (#4989).
+
+    After the fix the reading is UNMEASURED, `exited` stays exactly as observed,
+    and the identity fails — which is the whole control.
+    """
+    from tortoise.embedded_reaper import _run_sweep, build_end_sweep_report
+
+    with _stale_dir_env() as (dbdir, sock):  # noqa: RUF059
+        monkeypatch.setenv("TORTOISE_INDEX_LOCK_DIR", str(dbdir.parent / "locks"))
+        monkeypatch.setattr(
+            "tortoise.embedded_reaper.discover",
+            lambda jobs=1, **kw: _scan_aware([
+                {"classification": "candidate", "pid": 99999991,
+                 "socket_path": "/tmp/nonexistent-8599-short.sock"},
+            ], complete=False))
+        acted = _run_sweep(dry_run=True, batch_size=None, only_safe=True,
+                           sweep_pid_files=False)
+    assert acted.discovered_pids is None, (
+        "a partial candidate scan must publish NO reading: a subset claims every "
+        "unexamined live server as a natural exit and retires the identity"
+    )
+    # …and the report leaves `exited` exactly as measured, so the gate's identity
+    # still fires on the shortfall instead of being closed by the term.
+    report = build_end_sweep_report(
+        lambda: acted, deadline=1030.0,
+        probe=iter([[1, 2, 3, 4, 5], [1, 2]]).__next__, clock=lambda: 1000.0)
+    assert report["exited"] == 0, (
+        "an unmeasured vanished term must not invent exits: the 3 servers missing "
+        "from a short scan were never examined, so they are not observed exits"
+    )
+    assert report["reaped"] + report["exited"] + report["left"] < report["before"], (
+        "the accounting identity must STILL FAIL here — that shortfall is the "
+        "gate's own broken-measurement red, and a term that closes it is a "
+        "fail-open"
+    )
+
+
 # ── #1005 (epic #1647 E2E-7): the ATTRIBUTED population ──────────────────
 # The CI orphan gate used to compare its own HOST-WIDE pgrep count with the
 # sweep's HOST-WIDE `left` and red when the counter read higher. Those are two

@@ -3672,7 +3672,26 @@ def _run_sweep(dry_run: bool, batch_size: int | None, only_safe: bool = False,
     # #8599: carried through the quarantine/pid-file passes too — the vanished
     # term is measured against what DISCOVERY examined, and those passes add
     # acted records that were never candidates.
-    out.discovered_pids = _candidate_pids(resolved)
+    #
+    # ⛔ BUT ONLY A COMPLETE DISCOVERY CAN SAY WHAT IT EXAMINED (review P2,
+    # #10757/#8599). `_vanished_before_discovery` can tell an ABSENT reading
+    # from a present one, never a SHORT one from a complete one, so a truncated
+    # discovery — a bounded scan that hit `SOCKET_WALK_TIMEOUT`, a per-dir
+    # `_classify_dir` failure swallowed by `continue`, a quarantine scan that
+    # came back partial — hands it a SUBSET. The difference then reads every
+    # live server the scan never reached as a natural exit, `exited` swallows
+    # the whole shortfall, and the identity `reaped + exited + left >= before`
+    # closes on a genuinely broken sweep: the complement form #6984 refused,
+    # re-entered through a measurement that still LOOKS like one. Measured: with
+    # this set from a short scan, the gate's own "the sweep's measurement is
+    # broken" case (`before=5, reaped=0, exited=0, left=2`) went RC=1 -> RC=0,
+    # and `cleared=false` is a diagnostic, not a red (#4989), so nothing else
+    # catches it. `records.complete` — the CANDIDATE scan's own flag, not the
+    # AND below (the quarantine/pid-file passes never shorten `resolved`) — is
+    # the one that decides; when it is False the reading is UNMEASURED (None,
+    # never an empty or partial set) and the report leaves `exited` exactly as
+    # observed, which keeps the gate as strict as before this term existed.
+    out.discovered_pids = _candidate_pids(resolved) if records.complete else None
     return out
 
 
