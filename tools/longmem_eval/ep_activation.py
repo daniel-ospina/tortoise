@@ -145,9 +145,27 @@ _PROMOTE_OPERATOR = (
 #: ``o.status IS NULL`` and re-promotes a status-less operator with an
 #: ``OperatorPromoted``. That arm belongs to capture's own minted-operator
 #: contract (#1088), not to the eval activation path: this module activates a
-#: whole GRAPH, where a status-less operator already carries the live read and
-#: flipping it would only add journal noise. Same reason the deleted incident
+#: whole GRAPH, where a status-less operator already carries the EP live read,
+#: so not re-promoting it removes no FACTOR. Same reason the deleted incident
 #: query's unset-status arm went with it.
+#:
+#: ⚠️ It is NOT journal-noise-only, and the difference is graph state, not
+#: bookkeeping: the STRICT grounding selector reads
+#: ``MATCH (n:Point {status: 'live'})`` (``projection/grounding.py:19``, and the
+#: ``IMPL``/``NAND`` edge read at ``:46``), so a status-less node is excluded
+#: from ``compute_grounding`` while an explicitly-live one is included —
+#: ``sdk.py:22350-22353`` records exactly this ("a status-less Point is admitted
+#: by EP factor extraction but excluded by the STRICT grounding selector …
+#: so the rebuild alone changed the operator's grounding participation"). So on
+#: a graph that carries status-less operators, the narrowing here also drops
+#: those operators and their ``IMPL``/``NAND`` edges out of the grounding
+#: matrix that ``activate_beliefs`` used to normalise into it. Unreachable from
+#: ``ingest_v2`` (it mints every operator with an explicit ``'draft'``), and
+#: this module never calls ``compute_grounding``, so the census is unaffected —
+#: but a caller that grounds AFTER activating does see different values.
+#: MEASURED on an embedded graph: one IMPL operator over two live claims yields
+#: 2 rows from that selector at ``status='live'`` and 0 after ``REMOVE o.status``
+#: — while ``ep._live_only('o.status')`` still admits the status-less node.
 _SELECT_DRAFT_OPERATOR_IDS = (
     "MATCH (o:Point) "
     "WHERE (o.is_operator = true OR o.op_type IS NOT NULL) "
@@ -762,7 +780,7 @@ def activate_beliefs(sdk, *, namespace: str | None = None,
     # reading each candidate's endpoints.
     #
     # The old incident query is DELETED rather than unioned, and the honest
-    # statement of what that changes is TWO-part — the naive "strict subset"
+    # statement of what that changes is THREE-part — the naive "strict subset"
     # argument is FALSE against main, because the deleted query also matched an
     # unset-status operator (``o.status IS NULL OR o.status = 'draft'``) while
     # the sweep is explicit-``draft`` only:
@@ -777,6 +795,16 @@ def activate_beliefs(sdk, *, namespace: str | None = None,
     #     narrowing ``_SELECT_DRAFT_OPERATOR_IDS``' docstring states (never
     #     re-promote a status-less operator into the event stream, exactly as
     #     ``sdk._promote_incident_operators`` does not).
+    #   * GROUNDING can move, and calling this "manifest + journal only" would
+    #     be wrong. The strict grounding selector reads
+    #     ``MATCH (n:Point {status: 'live'})`` (``projection/grounding.py:19``,
+    #     edges at ``:46``), so a status-less operator and its ``IMPL``/``NAND``
+    #     edges are INVISIBLE to ``compute_grounding`` while an explicitly-live
+    #     one is not (``sdk.py:22350-22353``). A status-less operator this pass
+    #     used to normalise now stays status-less, so a later grounding run sees
+    #     a different matrix. Not reachable from ``ingest_v2`` (explicit
+    #     ``'draft'``) and this module never grounds, so no census cell moves —
+    #     see the candidate query's block for the scope and the measurement.
     # So keeping the incident query would NOT have been a free no-op; it is
     # dropped because the behaviour it added is the behaviour being removed.
     #
