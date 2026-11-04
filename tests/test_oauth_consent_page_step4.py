@@ -1280,7 +1280,9 @@ def test_the_bounce_does_not_append_a_SECOND_key_when_the_flow_already_has_one()
 
     # ⛔ WHITESPACE IS **NOT** BLANK HERE (review P2, #10757). Both readers this hop reconciles
     # test TRUTHINESS, and `" "` is truthy in both: the AS gate renders the page for
-    # `attempt_key=+` (`hosted_api.py:44884`, `if not request.query_params.get(...)`), and
+    # `attempt_key=+` (`hosted_api.py`, `oauth_authorize`: `if not request.query_params.get(
+    # CONSENT_ATTEMPT_KEY_PARAM)` — cited by SYMBOL, not by line: a line number here was already
+    # dead twice), and
     # `start.ts:255-256`
     # (`presentedKey || newAttemptKey()`) ADOPTS `" "`. A `.strip()` predicate minted a second
     # key for a flow that already had one and put the page and its own sign-in link on different
@@ -1300,25 +1302,35 @@ def test_the_bounce_does_not_append_a_SECOND_key_when_the_flow_already_has_one()
     # left for the two readers to disagree about on the URL this hop emits. (The PAGE's own reader
     # still reads the caller's raw query, so the blank-FIRST arm stays a pre-existing dead end —
     # #10865, not closed here.)
-    for label, raw_dup in (
+    for label, raw_dup, expected in (
         ("blank FIRST then a real key",
          f"client_id=c1&state=s1&{CONSENT_ATTEMPT_KEY_PARAM}="
-         f"&{CONSENT_ATTEMPT_KEY_PARAM}=K2"),
+         f"&{CONSENT_ATTEMPT_KEY_PARAM}=K2", "K2"),
         ("real key FIRST then blank",
          f"client_id=c1&state=s1&{CONSENT_ATTEMPT_KEY_PARAM}=K2"
-         f"&{CONSENT_ATTEMPT_KEY_PARAM}="),
+         f"&{CONSENT_ATTEMPT_KEY_PARAM}=", "K2"),
         ("two different real keys",
          f"client_id=c1&state=s1&{CONSENT_ATTEMPT_KEY_PARAM}=K1"
-         f"&{CONSENT_ATTEMPT_KEY_PARAM}=K2"),
+         f"&{CONSENT_ATTEMPT_KEY_PARAM}=K2", "K1"),
     ):
         dup = consent_bounce_url(APP_ORIGIN, raw_dup)
         inner_dup = parse_qs(urlsplit(parse_qs(urlsplit(dup).query)["next"][0]).query,
                              keep_blank_values=True)
         dup_keys = inner_dup[CONSENT_ATTEMPT_KEY_PARAM]
-        assert len(dup_keys) == 1 and dup_keys[0].strip(), (
-            f"a duplicate pair ({label}) must collapse to EXACTLY ONE non-blank key: the app "
-            f"reads the first value and the AS gate reads the last, so {dup_keys} is a key the "
-            f"two hops never agree on and the mint is inert for that link")
+        # ⛔ THE VALUE, NOT JUST THE SHAPE (review P2, #10757). Asserting only
+        # `len(keys) == 1 and keys[0]` let an implementation that MINTED instead
+        # of ADOPTING a caller's real key pass every test — measured: replacing
+        # `chosen = next((v for v in values if v), "") or token_urlsafe(32)`
+        # with a bare mint left the suite green. That mutation is the documented
+        # dead end: `start.ts` would record the hash of the MINTED key while the
+        # page's own reader takes the FIRST value, so the two hops mint under
+        # different keys and the flow 403s after sign-in. "Whatever the page
+        # reads first" is therefore the assertion, not "something non-blank".
+        assert dup_keys == [expected], (
+            f"a duplicate pair ({label}) must collapse to exactly ONE key, and it must be the "
+            f"FIRST non-blank value the caller presented ({expected!r}): got {dup_keys}. The "
+            f"page reads the first value, so minting here instead of adopting puts the page and "
+            f"`start.ts` on different keys and restores `403 flow_not_yours` after sign-in")
     # Every OTHER segment survives byte-exact (state/redirect_uri are compared as bytes).
     blank_raw = (f"redirect_uri=https%3A%2F%2Fc.example%2Fcb%3Fa%3D1&state=s1"
                  f"&{CONSENT_ATTEMPT_KEY_PARAM}=")

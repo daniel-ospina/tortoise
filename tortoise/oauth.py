@@ -2839,8 +2839,9 @@ def consent_bounce_url(app_origin: str, raw_query: str) -> str:
     values = parse_qs(raw_query, keep_blank_values=True).get(CONSENT_ATTEMPT_KEY_PARAM, [])
     # ⛔ "ABSENT" MEANS THE EMPTY STRING, NOT `.strip()` (review P2, #10757). Both readers this
     # hop reconciles test the value's TRUTHINESS, and `" "` is truthy in BOTH: the AS gate
-    # (`hosted_api.py:44884`, `if not request.query_params.get(...)`) renders the page for
-    # `attempt_key=+`, and `start.ts:255-256`
+    # (`hosted_api.py`, `oauth_authorize`: `if not request.query_params.get(
+    # CONSENT_ATTEMPT_KEY_PARAM)`) renders the page for `attempt_key=+`, and
+    # `start.ts:255-256`
     # (`presentedKey || newAttemptKey()`) ADOPTS `" "` as the key. Treating whitespace as absent
     # here minted a second key for a flow that already had one, so the page minted with `" "`
     # while its own sign-in link carried the minted one — the two-readers-disagree defect this
