@@ -572,6 +572,32 @@ def test_a_failed_statement_names_the_column_the_value_type_and_the_sql():
         f"the cause's own text was discarded, which is defect 2 itself: {text}")
 
 
+def test_a_message_string_with_a_cause_degrades_instead_of_raising():
+    """The cause form admits a bare string, and must not raise from the reporter.
+
+    ⛔ WHY (#10648 review P3). `__init__` is annotated `statement: Statement |
+    str` and takes an optional `cause`, but the cause branch called
+    `statement.attribution()` unconditionally. A repair script or a backfill that
+    followed the signature — `RecordStatementError(f"row {i}", exc)` — got
+    `AttributeError: 'str' object has no attribute 'attribution'` raised FROM the
+    error reporter, replacing the driver's real cause with a traceback from the
+    report. That is the "lost row nobody can attribute" failure this class exists
+    to end, so the reporter is pinned to DEGRADE, not raise.
+
+    Non-vacuous: restore the unconditional `.attribution()` call and this test
+    reds with that `AttributeError`.
+    """
+    cause = ValueError("invalid input syntax for type json")
+    error = record_projection.RecordStatementError(
+        "backfill row 7", cause, index=6, total=9)
+    text = str(error)
+    assert "statement 7/9" in text, text
+    assert "ValueError: invalid input syntax for type json" in text, (
+        f"the driver's cause is the half the reporter must never replace: {text}")
+    assert "backfill row 7" in text, (
+        f"a bare message string must still name its subject: {text}")
+
+
 def test_the_pre_fix_binding_shape_is_still_readable_when_built_by_hand(
         monkeypatch):
     """`value_types()` is READABLE in all three shapes, incl. the map MISS.

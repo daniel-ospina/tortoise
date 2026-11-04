@@ -728,6 +728,14 @@ class RecordStatementError(RecordProjectionError):
       :func:`Statement.attribution` (``value_types()``, i.e. the Python type of
       every bound value and whether a `jsonb`-column string parses) plus the
       cause, so neither form can produce a report missing the fault clause.
+
+    ⛔ THE CAUSE FORM ALSO ADMITS A BARE STRING, because the signature does
+    (``statement: Statement | str``). A message string passed WITH a cause
+    degrades to its own text instead of raising: calling ``.attribution()`` on a
+    `str` would replace the driver's real cause with an ``AttributeError``
+    raised from the reporter itself — the "lost row nobody can attribute"
+    failure this class exists to end. Both arms keep the fault clause, so no
+    call shape is a trap.
     """
 
     def __init__(self, statement: Statement | str,
@@ -738,9 +746,10 @@ class RecordStatementError(RecordProjectionError):
             return
         where = (f"statement {index + 1}/{total}" if index >= 0 and total > 0
                  else "statement")
+        detail = (statement.attribution()
+                  if isinstance(statement, Statement) else str(statement))
         super().__init__(
-            f"{where} failed ({type(cause).__name__}: {cause}) — "
-            f"{statement.attribution()}"
+            f"{where} failed ({type(cause).__name__}: {cause}) — {detail}"
         )
 
 
