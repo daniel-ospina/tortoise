@@ -920,6 +920,62 @@ def test_the_unit_table_covers_every_unit_the_engine_can_fuse():
     assert set(v2._UNIT_WORDS) <= set(v2._UNIT_EQUIV)
 
 
+def test_the_unit_tables_carry_no_DUPLICATED_literal_row():
+    """A merge union can add a row TWICE and nothing at runtime notices.
+
+    `_UNIT_EQUIV` is a dict literal, so a duplicate key silently keeps the LAST
+    value: the two sides of a forward-merge can each add `"mile": "mi"` in a
+    disjoint hunk, git reports no conflict, and the tree reads as if it were
+    hand-written once. That is exactly what happened folding #10804 onto this
+    branch (the widen and the fold's `mile`/`miles` row), and a missing
+    re-derivation is invisible in every behavioural test because the duplicate
+    resolves to the same identity.
+
+    ⛔ This must read the SOURCE, not the runtime dict: by the time the literal
+    is evaluated the duplicate is gone. Non-vacuity — appending
+    `"mile": "mi",` to `_UNIT_EQUIV` in `tortoise/extractor_v2.py` reds this
+    with the key and both line numbers.
+    """
+    import ast
+    from pathlib import Path as _P
+
+    src = _P(v2.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    wanted = {"_UNIT_EQUIV", "_UNIT_WORDS"}
+    seen_nodes = 0
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+            continue
+        target = node.targets[0]
+        if not isinstance(target, ast.Name) or target.id not in wanted:
+            continue
+        value = node.value
+        if isinstance(value, ast.Call):        # frozenset({...})
+            value = value.args[0] if value.args else None
+        if isinstance(value, ast.Set):
+            literal = {(k.value, k.lineno) for k in value.elts
+                       if isinstance(k, ast.Constant)}
+        elif isinstance(value, ast.Dict):
+            literal = {(k.value, k.lineno) for k in value.keys
+                       if isinstance(k, ast.Constant)}
+        else:                                  # pragma: no cover - shape guard
+            raise AssertionError(
+                f"{target.id} is assigned a {type(value).__name__}, not a literal "
+                "— this pin reads the SOURCE, so its shape has to stay inspectable")
+        seen_nodes += 1
+        by_value: dict[object, list[int]] = {}
+        for val, lineno in literal:
+            by_value.setdefault(val, []).append(lineno)
+        dupes = {v: lines for v, lines in by_value.items() if len(lines) > 1}
+        assert not dupes, (
+            f"{target.id} declares the same key twice: {dupes} — a dict literal "
+            "keeps the last one silently, so this is a merge union that was never "
+            "de-duplicated, not a harmless repetition")
+    assert seen_nodes == 2, (
+        f"found {seen_nodes} of the two unit-table literals this pin covers — the "
+        "table was renamed or its shape changed, so this pin is now vacuous")
+
+
 def test_the_carve_outs_own_ADJACENT_time_units_are_judged():
     """Residual (d)'s ADJACENCY half, closed: a unit beside a value is judged.
 
@@ -1067,16 +1123,24 @@ def test_a_magnitude_prefix_beside_a_unit_word_is_COMPOSED_not_refused():
     assert v2._value_slot_divergence("the ride was 20kms", "the ride was 20000 ms") == ()
     # …while the colloquially-correct reading stays REFUSED at both heads.
     assert v2._value_slot_divergence("the ride was 20kms", "the ride was 20000 m")
-    # ⛔ THE SECOND new tolerance, and it comes from the WIDEN, not from the arm
-    # above (review P3, measured): a fused suffix outside `_UNIT_EQUIV`
-    # (`kseconds`) leaves the core UNSCALED at `5`, so it coincides with
-    # `5 minutes` and the unknown-unit tolerance fires. `the batch took 5k
-    # seconds`/`… 5 minutes` REFUSED at `origin/main` `525fde4a9` and TOLERATES
-    # here. That is a MISSED REWRITE — the fail-open direction this rule prefers
-    # to a false accusation — and the same mechanism already tolerated
-    # `3k minutes`/`3 hours` at the base. Pinned so it cannot widen unnoticed.
+    # ⛔ THE SECOND case changed SHAPE in the merge of #10804's widen with the
+    # fold's FUSION-TIME composition, and the change is a CORRECTION rather than a
+    # new tolerance: a fused suffix outside `_UNIT_EQUIV` (`kseconds`) used to
+    # leave the core UNSCALED at `5`, so it coincided with `5 minutes` and the
+    # unknown-unit tolerance fired — `the batch took 5k seconds`/`… 5 minutes`
+    # REFUSED at `origin/main` `525fde4a9` and TOLERATED with the widen alone.
+    # That was a MISSED REWRITE (5k seconds is 5000 s, not 5 min) sitting in the
+    # fail-open direction. With `_compose_magnitude_and_unit` in the fusion
+    # branch the prefix is multiplied, so the pair binds `5000s` against `5min`
+    # and is REFUSED — the truthful verdict. Pinned in BOTH directions so neither
+    # half can be narrowed silently.
     assert v2._value_slot_divergence(
-        "the batch took 5k seconds", "the batch took 5 minutes") == ()
+        "the batch took 5k seconds", "the batch took 5 minutes") == (
+            ("took", "5000s", "5min"),)
+    # …and the same value written two ways still AGREES (the composition is a
+    # reading, not a refusal): `5k seconds` is 5000 seconds.
+    assert v2._value_slot_divergence(
+        "the batch took 5k seconds", "the batch took 5000 seconds") == ()
     # …and the false accusation the SAME mechanism REPAIRS, which is why the
     # trade was taken: `3k minutes`/`3000 minutes` REFUSED at base.
     assert v2._value_slot_divergence(
@@ -2230,3 +2294,332 @@ def test_a_BARE_parenthetical_numeral_is_still_judged():
     assert result["payload"]["points"] == [], result["warnings"]
     assert any("REWRITES its own verbatim quote" in w
                for w in result["warnings"]), result["warnings"]
+
+
+# ── 23. the engine's own unit VOCABULARY, which was declared but not fused ──
+
+def test_a_declared_unit_WORD_is_fused_so_a_unit_rewrite_cannot_hide():
+    """Residual (d) of the registry row, CLOSED — and the row said how.
+
+    `config/v4-mechanisms.yml`'s `state_value_carve_out` row carried this as a
+    limit rather than a tolerance:
+
+    > (d) a unit WORD the engine's own `_UNIT_WORDS` vocabulary does not carry
+    > (`seconds`, `minute`, `hour`, `day`, `mile`, …) is never fused into the
+    > value token — apart or not — so a minutes→seconds rewrite is not judged:
+    > an ENGINE VOCABULARY limit, NOT a tolerance of this rule.
+
+    It was exactly that: `_UNIT_EQUIV` DECLARED those spellings while
+    `_UNIT_WORDS` — the set `_value_bindings` can actually FUSE — did not carry
+    them, so the value was emitted with NO unit, and a unit-less side reads as
+    "unit not stated" and FAILS OPEN. Measured on the shipped tree:
+
+        content "the TTL is 20 minutes"  quote "the TTL is 20 seconds"
+          bindings      c=('ttl', '20minutes')  q=('ttl', '20')
+          divergence    ()          <-- a minutes→seconds rewrite, unrefused
+
+    while the SAME class was already refused for `20 minutes`/`40 minutes`
+    (`('ttl', '20min', '40min')`). The verdict depended on the SPELLING of the
+    unit, which is the false-negative direction the carve-out exists to stop.
+
+    ⛔ The `True` rows are the re-opened class; the `False` rows are the
+    tolerance the completion must NOT buy its detection with — a unit spelled
+    differently is still FORM, not value, and refusing it is the
+    false-accusation direction this rule must never take.
+    """
+    # the rewrite class, previously fail-open for every row below
+    for content, quote in (
+        ("the TTL is 20 minutes", "the TTL is 20 seconds"),      # plural → plural
+        ("the timeout is 90 seconds", "the timeout is 90 minutes"),
+        ("the wait is 2 hour", "the wait is 2 second"),          # singular forms
+        ("the timeout is 800 ms", "the timeout is 800 s"),        # ABBREVIATION, APART
+        ("the drive is 20 miles", "the drive is 20 km"),          # mile → mi identity
+        ("the TTL is 20 milliseconds", "the TTL is 20 minutes"),
+    ):
+        assert v2._value_slot_divergence(content, quote), (content, quote)
+
+    # …and the tolerance bound is unchanged: same unit, different spelling
+    for content, quote in (
+        ("the TTL is 20 minutes", "the TTL is 20 min"),
+        ("the TTL is 20 minutes", "the TTL is 20 mins"),
+        ("the timeout is 800 ms", "the timeout is 800 msec"),
+        ("the timeout is 800 milliseconds", "the timeout is 800 msecs"),
+        ("the drive is 20 mile", "the drive is 20 miles"),
+        ("the drive is 20 miles", "the drive is 20 mi"),
+        ("the drop was 20 percent", "the drop was 20 pct"),
+        ("the drop was 20 percent", "the drop was 20 %"),
+        ("the wait is 2 hours", "the wait is 2 hrs"),
+        ("the wait is 2 hour", "the wait is 2hr"),
+    ):
+        assert v2._value_slot_divergence(content, quote) == (), (content, quote)
+
+    # …and the rewrite is REFUSED at the write boundary, not merely detectable
+    result = _write("the TTL is 20 minutes", "the TTL is 20 seconds")
+    assert result["payload"]["points"] == [], result["warnings"]
+    assert any("REWRITES its own verbatim quote" in w
+               for w in result["warnings"]), result["warnings"]
+
+
+def test_the_unit_vocabulary_is_complete_in_the_direction_that_matters():
+    """The MECHANICAL invariant that keeps residual (d) from re-opening.
+
+    `test_the_unit_table_covers_every_unit_the_engine_can_fuse` pins one
+    direction — a FUSED unit is never UNKNOWN. The direction that produced
+    #10360's gap is the other one: a unit the module KNOWS (a key of
+    `_UNIT_EQUIV`, which is what `_value_identity_matches` compares) but cannot
+    FUSE, so the pair is never judged at all. Nothing pinned that, which is why
+    the two tables could disagree for as long as they did.
+
+    `%`/`percent`/`pct` are the named exceptions, and they are not an escape
+    hatch — they are the ONE place a DECLARED identity is left unfused on
+    purpose, and the reason is measured (#10360 review cycles 3 and 6, P2).
+    `%` reaches a pair by two routes that disagree: `20 %` is merged onto its
+    numeral by the TOKENIZER, but `20k %` is not (`['20k', '%']`), and the
+    attached `20k%` tokenises to `['20k']`, dropping the symbol. Fusing
+    `percent` therefore composed one side and not the other and REFUSED a
+    truthful point. ⚠️ Leaving them unfused refuses nothing HEAD did not already
+    refuse across same-value percent pairs, and its cost is the missed detection
+    of a `20 percent`→`20 seconds` rewrite — the fail-OPEN direction. Both
+    halves are asserted below, so neither the exception nor its cost is implied.
+
+    ⛔ This reds the moment a lane adds a spelling to `_UNIT_EQUIV` and forgets
+    `_UNIT_WORDS` — the exact edit that would silently re-create residual (d).
+    """
+    assert set(v2._UNIT_WORDS) <= set(v2._UNIT_EQUIV)          # the other direction
+    assert set(v2._UNIT_EQUIV) - set(v2._UNIT_WORDS) == {
+        "%", "percent", "pct"}, sorted(
+        set(v2._UNIT_EQUIV) - set(v2._UNIT_WORDS))
+    # the two routes `%` arrives by, which is WHY it cannot be fused: a BARE
+    # numeral is merged by the tokenizer...
+    assert "20%" in v2._guard_token_seq(v2._canonicalise_clocks("the drop was 20 %"))
+    assert "20%" in v2._guard_token_seq(v2._canonicalise_clocks("the drop was 20\t%"))
+    assert v2._value_core("20 %") == ("", "20", "%")
+    assert v2._value_core("20%") == ("", "20", "%")
+    # ...but a PREFIXED one is NOT (the symbol stays a separate token, and the
+    # attached form is dropped entirely), so fusing `percent` would compose one
+    # side and not the other
+    assert v2._guard_token_seq(v2._canonicalise_clocks("the drop was 20k %")) == [
+        "the", "drop", "was", "20k", "%"]
+    assert v2._guard_token_seq(v2._canonicalise_clocks("the drop was 20k%")) == [
+        "the", "drop", "was", "20k"]
+    # the fail-OPEN consequence, pinned so it is a stated choice not an accident
+    for content, quote in (
+        ("the drop was 20 percent", "the drop was 20 seconds"),
+        ("the drop was 20k percent", "the drop was 20k %"),
+        ("the value was 20k%", "the value was 20000 percent"),
+    ):
+        assert v2._value_slot_divergence(content, quote) == (), (content, quote)
+    # positive control: the invariant's set is not trivially satisfiable by an
+    # inert table — the completions this issue added are all live
+    for word in ("minute", "second", "seconds", "hour", "millisecond",
+                 "milliseconds", "msec", "msecs", "mile", "miles", "ms"):
+        assert word in v2._UNIT_WORDS, word
+    # …and the three the row leaves UNFUSED on purpose are absent, so this pin
+    # cannot be satisfied by quietly fusing them again
+    for word in ("%", "percent", "pct"):
+        assert word not in v2._UNIT_WORDS, word
+
+
+def test_a_magnitude_prefix_COMPOSES_with_the_unit_word_that_follows_it():
+    """#10360 review cycle 1, P2 — the false accusation completing the table reached.
+
+    `_value_bindings` fuses a unit WORD that follows a value onto it. On a value
+    that already carried a magnitude prefix that produced `20k` + `miles` →
+    `20kmiles`, whose suffix maps to nothing: `_value_core` returned an UNKNOWN
+    unit, the `k` reading was lost, and the pair diverged on the numeric CORE
+    (20 vs 20000) — reaching the write boundary and withholding a truthful
+    point, which is the false-accusation direction this rule must never take.
+
+    Reproduce by reverting `_compose_magnitude_and_unit` in the fusion branch:
+    the first row below REFUSES and the write path drops the point.
+
+    ⚠️ The shape PRE-EXISTED for every already-fusable unit — `5k min` against
+    `5000 min` was refused on the pre-change tree — so this is a repair of that
+    class too, not only a hedge around the new vocabulary.
+    """
+    # a prefixed value and a plain one name the SAME number once composed
+    for content, quote in (
+        ("the fleet drove 20000 miles", "the fleet drove 20k miles"),
+        ("the wait was 5000 min", "the wait was 5k min"),
+        ("the wait was 20500 seconds", "the wait was 20.5k seconds"),
+        ("the timeout was 3000 ms", "the timeout was 3k ms"),
+        ("the retry took 2000 hours", "the retry took 2k hours"),
+    ):
+        assert v2._value_slot_divergence(content, quote) == (), (content, quote)
+
+    # …and the composition did not buy that by going blind: a DIFFERENT number
+    # behind the same prefix is still refused
+    for content, quote in (
+        ("the fleet drove 20000 miles", "the fleet drove 21k miles"),
+        ("the wait was 5000 min", "the wait was 6k min"),
+        ("we ran 20k", "we ran 21km"),
+        ("the delta is -20k", "the delta is 20km"),
+    ):
+        assert v2._value_slot_divergence(content, quote), (content, quote)
+
+    # the pre-existing FAIL-OPEN rows the composition must not disturb
+    for content, quote in (
+        ("we saw 5k QPS", "we saw 5000 QPS"),      # `QPS` is not a fused unit
+        ("the drive is 20k", "the drive is 20km"),  # `k` as a bare unit word
+        ("the value is 20kms", "the value is 20km"),  # ONE token: still kilometres
+    ):
+        assert v2._value_slot_divergence(content, quote) == (), (content, quote)
+
+    # end to end: the truthful point is WRITTEN, not withheld
+    result = _write("the fleet drove 20000 miles", "the fleet drove 20k miles")
+    assert result["payload"]["points"], result["warnings"]
+
+
+def test_the_composition_reads_a_SIGNED_or_SPACED_prefix_as_the_same_value():
+    """#10360 review cycles 2 and 3 — the shapes a private regex kept missing.
+
+    The first composition required a bare ``\\d+`` core, so spellings the module
+    ALREADY reads as one value fell to the raw glue and became an unknown unit
+    again — a truthful point withheld:
+
+    * **the sign** (`_reads_as_sign`): `-20k` + `miles` → `-20kmiles` → the `k`
+      reading is lost and the pair diverges on the CORE (-20 vs -20000);
+    * **the leading dot** (`_LEADING_DOT`: "``.5`` is a legitimate written form of
+      ``0.5``"): `.5k miles` → `.5kmiles`, same shape, against `500 miles`;
+    * **a SPACED prefix**: `k` is itself a `_UNIT_WORDS` member, so `20 k min`
+      fused `k` and STOPPED — the unit word after it was never reached, leaving
+      `('20k')` against `('20000min')`. The cycle-2 reviewer measured 260 refused
+      pairs of this single shape over its own spelling grid.
+
+    ⛔ And a THIRD revision still had it wrong (#10360 review cycle 3, P1): it
+    admitted only `-`/U+2212 while `_reads_as_sign` admits the whole `Pd` family
+    (en/em dash, hyphen, U+2011) and `_value_core` skips every `Sc`/`Sm`
+    decoration (`~ + > < $ ≈ ±`) — the sign/decoration reading now comes from
+    `_value_core` itself, so it cannot drift again.
+    """
+    # the sign, in every glyph family the module treats as one sign
+    for content, quote in (
+        ("the delta is -20000 miles", "the delta is -20k miles"),
+        ("the delta is \u221220000 miles", "the delta is \u221220k miles"),
+        ("the delta is \u201320000 miles", "the delta is \u201320k miles"),
+        ("the delta is \u201420000 miles", "the delta is \u201420k miles"),
+        ("the delta is \u201120000 miles", "the delta is \u201120k miles"),
+        ("the delta is -5000 min", "the delta is -5k min"),
+    ):
+        assert v2._value_slot_divergence(content, quote) == (), (content, quote)
+
+    # …and the decorations `_value_core` ignores are ignored here too
+    for content, quote in (
+        ("the fleet drove ~20000 miles", "the fleet drove ~20k miles"),
+        ("the fleet drove 20000 miles", "the fleet drove ~20000 miles"),
+        ("the fleet drove +20000 miles", "the fleet drove +20k miles"),
+        ("the fleet drove \u224820000 miles", "the fleet drove \u224820k miles"),
+        ("the fleet drove \u00b120000 miles", "the fleet drove \u00b120k miles"),
+    ):
+        assert v2._value_slot_divergence(content, quote) == (), (content, quote)
+
+    # the leading dot — the same value `_LEADING_DOT` already accepts
+    for content, quote in (
+        ("the drive was 500 miles", "the drive was .5k miles"),
+        ("the drive was 500 miles", "the drive was 0.5k miles"),
+    ):
+        assert v2._value_slot_divergence(content, quote) == (), (content, quote)
+
+    # a prefix written APART, and a prefix spelled as a number word
+    for content, quote in (
+        ("the wait was 20000 min", "the wait was 20 k min"),
+        ("the fleet drove 20000 miles", "the fleet drove 20 k miles"),
+        ("the wait was 20000 min", "the wait was twenty k min"),
+    ):
+        assert v2._value_slot_divergence(content, quote) == (), (content, quote)
+
+    # ⛔ a NON-ASCII decimal script is the same value (#10513 cycle 16 pins the
+    # fold; this pins that the composition reads through it — cycle 6, P2:
+    # an ASCII-only head class refused `２０k` and withheld the truthful point)
+    for content, quote in (
+        ("the fleet drove 20000 miles", "the fleet drove \uff12\uff10k miles"),
+        ("the fleet drove 20000 miles", "the fleet drove \u0662\u0660k miles"),
+    ):
+        assert v2._value_slot_divergence(content, quote) == (), (content, quote)
+
+    # ⛔ the `_MAGNITUDE_TAIL` POSITIVE branch, pinned (#10360 review cycle 5,
+    # P3): `20k k miles` already carries a prefix, so the standalone `k` must
+    # NOT be consumed a second time. Forcing that guard to always fire yields
+    # `20kkiles` here instead of `20000k`, and nothing else in this file noticed.
+    assert v2._value_bindings("the value was 20k k miles") == (
+        ("value", "20000k"),), v2._value_bindings("the value was 20k k miles")
+
+    # …and the WHOLE same-value spelling grid, which is how the 260 were found:
+    # no spelling of one number may be refused against another. 9 fused unit
+    # SPELLINGS (7 identities — `miles`/`mi` and `min`/`minutes` share one each)
+    # × 6 forms × 6 forms, 54 of them the trivial `a == b` diagonal.
+    for unit in ("miles", "mi", "km", "seconds", "min", "minutes", "ms",
+                 "hours", "kg"):
+        for a in ("20000", "20k", "20 k", "twenty k", "20K", "20.0k"):
+            for b in ("20000", "20k", "20 k", "twenty k", "20K", "20.0k"):
+                assert v2._value_slot_divergence(
+                    f"the value was {a} {unit}",
+                    f"the value was {b} {unit}") == (), (a, b, unit)
+
+    # the composition still is not blind: a different number behind the sign
+    for content, quote in (
+        ("the delta is -20000 miles", "the delta is -21k miles"),
+        ("the drive was 500 miles", "the drive was .6k miles"),
+    ):
+        assert v2._value_slot_divergence(content, quote), (content, quote)
+
+
+def test_the_composition_does_not_smuggle_the_SEPARATOR_decision_back_in():
+    """#10360 review cycle 3 — a crash and a recorded decision, both measured.
+
+    `_compose_magnitude_and_unit` reads the value through `_value_core`, which
+    returns `None` for a token it deliberately does NOT read: a SEPARATOR-bearing
+    numeral (`1,200`). Unguarded, the composition raised
+
+        TypeError: cannot unpack non-iterable NoneType object
+
+    on `latency was 1200 ms` against `latency was 1,200 ms` — a BATTERY row, so
+    the suite caught it. ⛔ The guard must also not REFUSE those pairs: deciding
+    that `1,200` is 1200 IS the locale question `tortoise/value_normalizer.py`
+    excludes by the owner's #2817 ruling ("No separator rule, at all"), and a
+    unit fused onto the numeral would smuggle that decision back in through the
+    unit. So a `None` identity leaves the token unchanged, and the pair stays
+    outside the judged set.
+    """
+    assert v2._value_core("1,200") is None
+    assert v2._value_core("1.234") is None
+    for content, quote in (
+        ("latency was 1200 ms", "latency was 1,200 ms"),
+        ("latency was 1200 minutes", "latency was 1,200 minutes"),
+        ("the p95 hit 4,2 seconds", "the p95 hit 4.2 seconds"),
+        ("the drive was 1.234 km", "the drive was 1234 km"),
+    ):
+        assert v2._value_slot_divergence(content, quote) == (), (content, quote)
+    # …while the SAME unit on an unseparated pair is still judged, so the guard
+    # did not simply disable the composition for anything with a unit
+    assert v2._value_slot_divergence("latency was 1200 ms", "latency was 1300 ms")
+
+
+def test_an_IDENTIFIER_shaped_token_is_not_read_as_a_quantity():
+    """#10360 review cycle 5, P3 — the composition multiplied an ARRAY INDEX.
+
+    `_value_core` reads the LAST numeric run of ANY token, so the
+    identifier-shaped `s4[k` also returns core `4` + suffix `k`. Composing it
+    with a following unit word turned an array index into 4000 — measured on this
+    repo's own docs corpus (`docs/plans/2026-08-27-1789-s4-delta-contract.md`),
+    which is `_value_core`'s own doctrine about never inventing a second
+    interpretation of one token (#2817). `_NUMERIC_HEAD` requires the token —
+    after its leading decoration — to START with a digit or a dot, so an
+    identifier keeps the pre-change reading.
+
+    ⛔ This test exists because the guard was UNPINNED when it landed: mutation
+    (`_NUMERIC_HEAD` replaced with an always-matching pattern) left the whole
+    file green (#10360 review cycle 6, P3).
+    """
+    # an identifier-shaped token keeps the OLD reading — no 4000-style core
+    ident = v2._value_bindings("any(_is_content_list(s4[k k")
+    assert ident == (("", "any(_is_content_list(s4[kk"),), ident
+    assert v2._value_core(v2._value_bindings("the see was x4k ms")[0][1])[1] == "4"
+    # …while every genuine quantity shape still composes (a decorated value and a
+    # leading-dot one), so the head guard did not simply disable the composition
+    assert v2._value_core(
+        v2._value_bindings("the value was $20k miles")[0][1]) == (
+            "", "20000", "mi")
+    assert v2._value_core(
+        v2._value_bindings("the value was .5k miles")[0][1]) == (
+            "", "500", "mi")
