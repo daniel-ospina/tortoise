@@ -448,6 +448,64 @@ def test_pin_writes_the_ref_into_the_path_repo_not_the_caller(hub: Path) -> None
     assert refs_there.stdout.strip().startswith("refs/pi-lane-wip/"), refs_there.stdout
 
 
+def test_the_remedy_for_a_cross_repo_pin_names_the_repository_that_holds_it(hub: Path) -> None:
+    """`pin --path <other repo>` lives in THAT repo, so the printed remedy must say so.
+
+    The ref is minted in the PINNED repo (see the test above), but the printed remedy named
+    neither that repo nor `--path` — so it assumed the CALLER's repo. Measured from the
+    caller: the printed command exited 2 "'<ref>' does not name a commit in this repository",
+    and the `list --all` it advises answered "no lane has any wip pin" at exit 0 while the
+    pin sat one ref away. That is the false "the work is gone" verdict this module documents
+    it must never give, produced by its own primary verb.
+    """
+    other_hub = hub.parent / "cross-hub"
+    other_hub.mkdir()
+    assert git("init", "-q", ".", cwd=other_hub).returncode == 0
+    git("config", "user.email", "t@example.com", cwd=other_hub)
+    git("config", "user.name", "t", cwd=other_hub)
+    (other_hub / "f.txt").write_text("base\n")
+    git("add", "-A", cwd=other_hub)
+    assert git("commit", "-qm", "base", cwd=other_hub).returncode == 0
+
+    lane = hub.parent / "cross-lane"
+    made = git("worktree", "add", "-q", str(lane), "-b", "cross-branch", cwd=other_hub)
+    assert made.returncode == 0, made.stderr
+    (lane / "big.py").write_text("the lane's work\n")
+
+    pinned = run_tool("pin", "--path", str(lane), cwd=hub)  # `hub` is a DIFFERENT repo
+    assert pinned.returncode == 0, pinned.stdout + pinned.stderr
+    ref = pin_ref(pinned.stdout)
+    remedy = next(ln for ln in pinned.stdout.splitlines() if "recover with:" in ln)
+    assert f"--path {lane}" in remedy, (
+        f"the remedy must name the repository that holds the pin: {remedy}"
+    )
+
+    assert destroy(other_hub, lane).returncode == 0
+
+    def restore(cwd: Path) -> subprocess.CompletedProcess:
+        return run_tool(
+            "recover",
+            ref,
+            "--path",
+            str(lane),
+            "--into",
+            str(lane),
+            "--branch",
+            "cross-branch",
+            cwd=cwd,
+        )
+
+    # From the CALLER's repo the ref is invisible — and it must SAY so, not answer "no pins".
+    wrong = restore(hub)
+    assert wrong.returncode != 0, wrong.stdout + wrong.stderr
+    assert "does not name a commit" in wrong.stdout + wrong.stderr, wrong.stdout + wrong.stderr
+
+    # From the repository the remedy names, it recovers the work.
+    out = restore(other_hub)
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert (lane / "big.py").read_text() == "the lane's work\n"
+
+
 def test_a_note_that_starts_with_the_trailer_words_survives(hub: Path) -> None:
     """The tool's own trailer must be stripped by POSITION, never by prefix.
 
@@ -850,6 +908,14 @@ case "$sub" in
     [ -n "$LW_FAIL_HASH_OBJECT" ] && {{ echo "shim: refusing hash-object" >&2; exit 128; }} ;;
   add)
     [ -n "$LW_FAIL_ADD" ] && {{ echo "shim: refusing add" >&2; exit 128; }}
+    if [ -n "$LW_FAIL_FORCE_ADD" ]; then
+      for a in "$@"; do
+        if [ "$a" = "-f" ]; then
+          echo "fatal: unable to write new index file" >&2
+          exit 128
+        fi
+      done
+    fi
     if [ -n "$LW_OLD_GIT_ADD" ]; then
       for a in "$@"; do
         if [ "$a" = "--sparse" ]; then
@@ -4102,4 +4168,90 @@ def test_recover_WARNS_that_a_nested_repo_came_back_empty(hub: Path) -> None:
     assert out.returncode == 0, out.stdout + out.stderr
     assert "nested repo" in out.stderr, (
         f"recover claimed an unqualified success over an empty nested repo: {out.stderr!r}"
+    )
+
+
+def test_a_sparse_lane_with_IN_CONE_WORK_too_still_refuses_the_partial_pin(
+    hub: Path, git_shim: Path
+) -> None:
+    """The cross-check must not be gated on the pin already LOOKING clean.
+
+    Measured on an old git (no `add --sparse`): a sparse lane with an in-cone edit AND its
+    only copy of an out-of-cone file pinned HEAD's bytes for that path with an EMPTY stderr,
+    printed `pinned 2 file(s)`, exited 0 — and `recover` restored HEAD over the work. The
+    check exists for exactly the case where `tree != head_tree`.
+    """
+    wt = _sparse_lane(hub, "wt-sparse-mixed-oldgit")
+    (wt / "keep" / "a.txt").write_text("keep v2 — the lane's work\n")
+    (wt / "prune").mkdir(exist_ok=True)
+    (wt / "prune" / "b.txt").write_text("THE LANE'S ONLY COPY\n")
+
+    out = _run_tool_with_shim(git_shim, "LW_OLD_GIT_ADD", "pin", cwd=wt, also=("LW_OLD_GIT_ADD",))
+    assert out.returncode != 0, f"a partial pin must not read as success: {out.stdout}"
+    assert "does NOT hold" in out.stderr, out.stderr
+    assert "prune/b.txt" in out.stderr, out.stderr
+    refs = git("for-each-ref", "--format=%(refname)", "refs/pi-lane-wip/", cwd=hub)
+    assert refs.stdout.strip() == "", f"a pin claiming completeness was minted: {refs.stdout}"
+
+
+def test_a_failed_force_add_is_a_refusal_not_a_capture(hub: Path, git_shim: Path) -> None:
+    """`git add -f`'s rc was read NOWHERE, so a missing `error:` line made it "captured".
+
+    Measured: an `AM` force-added ignored path whose v2 edit could not be indexed (a
+    marker-free `fatal: unable to write new index file`) pinned v1 only, printed
+    `pinned 2 file(s)` with an EMPTY stderr, and `recover` restored the file ABSENT.
+    """
+    wt = clean_lane(hub, "wt-forceadd-fail")
+    with (wt / ".gitignore").open("a") as fh:
+        fh.write("local/\n")
+    assert git("add", ".gitignore", cwd=wt).returncode == 0
+    assert git("commit", "-qm", "ignore", cwd=wt).returncode == 0
+    (wt / "local").mkdir()
+    secret = wt / "local" / "secret.conf"
+    secret.write_text("STAGED v1\n")
+    assert git("add", "-f", "local/secret.conf", cwd=wt).returncode == 0
+    secret.write_text("THE LANE'S ONLY COPY v2\n")
+
+    out = _run_tool_with_shim(git_shim, "LW_FAIL_FORCE_ADD", "pin", cwd=wt)
+    assert out.returncode != 0, f"a failed write must not read as success: {out.stdout}"
+    assert "index-only" in out.stderr, out.stderr
+    refs = git("for-each-ref", "--format=%(refname)", "refs/pi-lane-wip/", cwd=hub)
+    assert refs.stdout.strip() == "", f"a partial pin was minted: {refs.stdout}"
+
+
+def test_recover_from_a_SUBDIRECTORY_path_still_warns_about_a_nested_repo(hub: Path) -> None:
+    """`_warn_about_gitlinks` needs `--full-tree`, or a subdirectory `--path` silences it.
+
+    Measured with the same ref and repo: `--path <hub>` warned ("1 nested repository/ies …
+    vendored") while `--path <hub>/src` printed an unqualified `recovered N file(s)` and
+    `vendored/` came back EMPTY.
+    """
+    wt = hub.parent / "wt-gitlink-subdir"
+    made = git("worktree", "add", "-q", str(wt), "-b", "lane-gitlink-subdir", cwd=hub)
+    assert made.returncode == 0, made.stderr
+    vendored = wt / "vendored"
+    vendored.mkdir()
+    assert git("init", "-q", cwd=vendored).returncode == 0
+    (vendored / "inner.py").write_text("inner v1\n")
+    assert git("add", "inner.py", cwd=vendored).returncode == 0
+    assert git("commit", "-qm", "inner", cwd=vendored).returncode == 0
+    (wt / "src").mkdir(exist_ok=True)
+    (wt / "src" / "x.py").write_text("the lane's work\n")
+
+    pinned = run_tool("pin", cwd=wt)
+    assert pinned.returncode == 0, pinned.stdout + pinned.stderr
+    ref = pin_ref(pinned.stdout)
+    assert destroy(hub, wt).returncode == 0
+
+    # ⛔ THE `--path` MUST BE A SUBDIRECTORY THAT REALLY EXISTS IN THE HUB. `wt/src` vanishes
+    # with the worktree, and a MISSING `--path` falls back to `_repo_root()` — the one spelling
+    # where `--full-tree` is irrelevant, so the test passed for the wrong reason (measured:
+    # mutating `--full-tree` away kept it green).
+    (hub / "docs").mkdir(exist_ok=True)
+    (hub / "docs" / "two.md").write_text("hub docs\n")
+    target = hub.parent / "wt-gitlink-subdir-2"
+    out = run_tool("recover", ref, "--path", str(hub / "docs"), "--into", str(target), cwd=hub)
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert "nested repo" in out.stderr, (
+        f"a subdirectory --path silenced the gitlink warning: {out.stderr!r}"
     )

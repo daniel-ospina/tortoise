@@ -295,9 +295,15 @@ def lane_key(root: Path | None = None) -> str:
     # measured under `PYTHONCOERCECLOCALE=0 LC_ALL=C`; at THIS call site `resolve()` above
     # would raise first, so that is a property of the rejected input, not a separate crash
     # path — stated precisely rather than overclaimed.) Naming UTF-8 explicitly makes the
-    # digest independent of the box's locale: byte-identical to the pre-#10812
-    # `str(...).encode()` for every path that already had a key, and unable to raise for one
-    # that did not.
+    # digest independent of how the path STRING is re-encoded: byte-identical to the
+    # pre-#10812 `str(...).encode()` for every path that already had a key, and unable to
+    # raise for one that did not. It does NOT make the key locale-independent END TO END —
+    # the DECODE that produced this string still uses the filesystem encoding, so the same
+    # on-disk bytes yield a different string, and therefore a different key, on a box that
+    # decodes them differently (measured: `b'/tmp/caf\xc3\xa9'` -> `19f0d7cb` decoded UTF-8 vs
+    # `6c7aacb7` decoded latin-1). The key is stable across boxes that decode the path the
+    # same way, and no further — claiming more would be the same overclaim this file's own
+    # review rounds remove.
     digest = hashlib.sha1(str(root.resolve()).encode("utf-8", "surrogateescape")).hexdigest()[:8]
     return f"{slug}-{digest}"
 

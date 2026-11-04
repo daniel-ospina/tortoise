@@ -476,7 +476,12 @@ def _warn_about_gitlinks(tree: str, *, root: Path) -> None:
     "adding embedded git repository" and the tool dropped the warning, so `pin` and
     `recover` both reported success over content that could not come back.
     """
-    cp = _git("ls-tree", "-r", "-z", tree, check=False, cwd=root)
+    # ⛔ `--full-tree`, OR A cwd INSIDE A SUBDIRECTORY SILENTLY HIDES THE GITLINK. `ls-tree`
+    # uses the cwd as an implicit pathspec prefix, so `recover --path <repo>/src` emitted NO
+    # warning while the nested repo came back EMPTY — measured, the same ref and repo warning
+    # from the root and silent from `src/`. This is the `--describe`/`pin_files` fix, one call
+    # site further on.
+    cp = _git("ls-tree", "-r", "--full-tree", "-z", tree, check=False, cwd=root)
     if cp.returncode != 0:
         raise GitFailed(
             cp.returncode,
@@ -652,7 +657,21 @@ def snapshot(root: Path, *, branch: str, note: str = "") -> tuple[str, list[str]
             # force-added `.env.local` made `pin` exit 3 with NO ref written, over a lane
             # whose real work was perfectly readable.
             forced = _git_add(["-f", "--", *chunk], cwd=root, env=env)
-            skipped += _skipped_paths(forced.stderr or "")
+            forced_skips = _skipped_paths(forced.stderr or "")
+            # ⛔ rc IS A VERDICT HERE TOO. This call had its rc read NOWHERE, so a failure whose
+            # text is not a skip marker (`fatal: Unable to create '.../index.lock'`,
+            # `fatal: unable to write new index file`) was recorded as CAPTURED: measured, an
+            # `AM` force-added path whose v2 edit could not be indexed pinned v1 only, printed
+            # `pinned 2 file(s)` with an EMPTY stderr, and `recover` restored the file ABSENT.
+            # The sibling `add -A` rule eleven lines down exists for exactly this shape.
+            if forced.returncode != 0 and not forced_skips:
+                raise GitFailed(
+                    forced.returncode,
+                    "`git add -f` for the index-only paths failed, so this pin would hold "
+                    "less than the lane's work while looking complete: "
+                    f"{(forced.stderr or forced.stdout).strip() or 'no diagnostic'}",
+                )
+            skipped += forced_skips
         # PROVEN skips (git named the path) are what the CLEAN refusal may act on; an
         # UNVERIFIED index listing only earns a warning, because it proves nothing about
         # any individual path.
@@ -713,7 +732,13 @@ def snapshot(root: Path, *, branch: str, note: str = "") -> tuple[str, list[str]
             "pin would hold LESS than the lane's work while looking complete — fix the "
             "permissions and pin again"
         )
-    if worktree_clean:
+    # ⛔ NOT GATED ON `worktree_clean`. The check exists because two `add`-built views agree
+    # while an edit sits on disk — and that is just as true when the lane ALSO has a
+    # capturable edit: measured on an old git, a sparse lane with an in-cone edit AND its only
+    # copy of an out-of-cone file pinned HEAD's bytes with an EMPTY stderr and exited 0, and
+    # `recover` restored HEAD over the work. Gate on "the pin CLAIMS completeness" instead:
+    # nothing proven skipped, and an index half captured (so the split claim is meaningful).
+    if not unreadable and index_tree:
         dirty_paths = _pin_lacks_change(root, tree, _paths_git_calls_dirty(root))
         if dirty_paths:
             shown = ", ".join(dirty_paths[:5]) + (" …" if len(dirty_paths) > 5 else "")
@@ -882,6 +907,26 @@ def _git_add(flags: list[str], *, cwd: Path, env: dict[str, str]) -> subprocess.
     return cp
 
 
+def _worktree_blob(root: Path, rel: str) -> str | None:
+    """The blob git WOULD store for the worktree path, or None when it cannot be read.
+
+    ⛔ `hash-object <path>` FOLLOWS A SYMLINK, so it answers with the TARGET's bytes while the
+    tree entry is mode 120000 holding the LINK TEXT — a symlink then reads as "the pin does
+    not hold it" (a false refusal) or, for a dangling link, `fatal: could not open` and no
+    verdict at all.
+    """
+    path = root / rel
+    if path.is_symlink():
+        try:
+            target = os.readlink(os.fsencode(path))
+        except OSError:
+            return None
+        cp = _git("hash-object", "--stdin", check=False, cwd=root, stdin=target)
+        return cp.stdout.strip() or None if cp.returncode == 0 else None
+    got = _git("hash-object", "--", rel, check=False, cwd=root)
+    return got.stdout.strip() or None if got.returncode == 0 else None
+
+
 def _pin_lacks_change(root: Path, tree: str, dirty: list[str]) -> list[str]:
     """Dirty paths whose CONTENT the pin does not hold (compared blob-for-blob).
 
@@ -899,8 +944,8 @@ def _pin_lacks_change(root: Path, tree: str, dirty: list[str]) -> list[str]:
         # question with False, so one unreadable `hash-object`/`ls-tree` re-opened the same
         # false "clean — nothing to pin" at exit 0 (measured: no ref, the lane's bytes in no
         # object). Treat the path as unproven — i.e. as work the pin may lack.
-        got = _git("hash-object", "--", rel, check=False, cwd=root)
-        if got.returncode != 0:
+        blob = _worktree_blob(root, rel)
+        if blob is None:
             out.append(rel)
             continue
         want = _git("ls-tree", tree, "--", rel, check=False, cwd=root)
@@ -911,7 +956,7 @@ def _pin_lacks_change(root: Path, tree: str, dirty: list[str]) -> list[str]:
         if len(fields) < 3:
             out.append(rel)  # not in the pin at all
             continue
-        if fields[2] != got.stdout.strip():
+        if fields[2] != blob:
             out.append(rel)
     return out
 
@@ -1072,7 +1117,30 @@ def cmd_pin(args: argparse.Namespace) -> int:
     # is REFUSED as soon as the caller's HEAD moves (the stale guard compares the caller's
     # HEAD to the pin's parent), with advice that is wrong for this shape.
     handle = "" if branch == "HEAD" else f" --branch {branch}"
-    print(f"recover with: tools/lane_wip.py recover {ref} --into <path>{handle}")
+    # ⛔ THE REMEDY MUST NAME THE REPOSITORY THE PIN LIVES IN. `pin --path <a worktree in
+    # another repo>` is a supported, TESTED shape (`test_pin_writes_the_ref_into_the_path_repo_not_the_caller`)
+    # and it writes the ref into THAT repo — but the printed line named neither that repo nor
+    # `--path`, so the command it printed assumed the CALLER's repo. Measured (caller in
+    # repoA, pin taken into repoB's lane): `pin` rc 0, then the printed command run verbatim
+    # -> rc 2 "'<ref>' does not name a commit in this repository", and the `list --all` it
+    # advises answered "no lane has any wip pin" at rc 0 from repoA while the pin sat one ref
+    # away — the false "the work is gone" verdict this module documents it must never give,
+    # produced by its own primary verb.
+    try:
+        caller_root: Path | None = _repo_root()
+    except (LaneWipError, GitFailed):
+        caller_root = None  # outside a repo: certainly not the pin's repo
+    if caller_root is not None and caller_root == root:
+        print(f"recover with: tools/lane_wip.py recover {ref} --into <path>{handle}")
+    else:
+        # `--path <root>` makes `recover` read the ref from the repository that holds it,
+        # and the note says where to run it when `root` itself is the destroyed lane.
+        print(f"recover with: tools/lane_wip.py recover {ref} --path {root} --into <path>{handle}")
+        print(
+            f"  (this pin lives in {root} — the ref is readable from any worktree of THAT "
+            "repository, so run it there (`list --all` too); a bare `recover` from another "
+            "repository cannot see it)"
+        )
     return 0
 
 
@@ -2296,8 +2364,8 @@ def build_parser() -> argparse.ArgumentParser:
 def _make_output_byte_safe() -> None:
     """Never let a MESSAGE kill the verb, and never let it outrun the work.
 
-    ⛔ The INPUT side was fixed long ago (`surrogateescape` on every git read, `os.fsencode`
-    in the lane key), but the OUTPUT side was not: `print()` of a path holding a lone
+    ⛔ The INPUT side was fixed long ago (`surrogateescape` on every git read, and a
+    `surrogateescape`-capable lane key), but the OUTPUT side was not: `print()` of a path holding a lone
     surrogate raises `UnicodeEncodeError` under a `strict` stdout. That is the default under
     an ordinary `en_US.utf8` locale — this box's `C.UTF-8` hides it — so measured:
     `pin` printed nothing and exited 1 AFTER writing the ref, and `recover` exited 1 AFTER
