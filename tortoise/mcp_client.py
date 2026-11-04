@@ -237,8 +237,15 @@ class Connection:
     declared: bool = False
 
 
-def _credential_paths() -> tuple[Path, ...]:
+def _credential_paths() -> tuple[tuple[Path, bool], ...]:
     """The credential stores, in the recorded precedence (#1708 D4/D5).
+
+    Each candidate is `(path, repo_controlled)`. `repo_controlled` marks the
+    candidate a REPOSITORY can commit — the project-local `./.tortoise` — which is
+    the one `_git_tracks` vets before it is read. The global store is the user's
+    own; it is read unconditionally (and not paying a `git` spawn for it keeps the
+    per-request path cheap, and keeps a `$HOME` that happens to sit in a work tree
+    from losing a credential it never had a reason to distrust).
 
     PATH FUNCTIONS, never module constants: a `Path.home()` or `Path.cwd()`
     captured at import is the same capture-at-start bug this module exists to
@@ -261,11 +268,11 @@ def _credential_paths() -> tuple[Path, ...]:
     unguarded raise does not fail one probe — it breaks `status()`'s documented
     never-raise contract, and every `list_tools`/`call_tool`, on every call.
     """
-    candidates: list[Path] = []
+    candidates: list[tuple[Path, bool]] = []
     with contextlib.suppress(OSError):
-        candidates.append(Path.cwd() / ".tortoise")
+        candidates.append((Path.cwd() / ".tortoise", True))
     with contextlib.suppress(RuntimeError, OSError):
-        candidates.append(Path.home() / ".tortoise" / "credentials.json")
+        candidates.append((Path.home() / ".tortoise" / "credentials.json", False))
     return tuple(candidates)
 
 
@@ -309,6 +316,21 @@ def _git_tracks(path: Path) -> bool:
     So the fatal arm asks the mechanical question instead — is there a `.git`
     above the store? — and the same arm answers a git that cannot be run at all.
 
+    A store in NO repository cannot have been committed, so the fatal arm is right
+    for two opposite readings of `128`: "not a git repository" has no `.git` above
+    it (so the store is read), while "dubious ownership" / an unreadable index / a
+    corrupt `.git` does (so it is skipped).
+
+    THE AMBIENT ENVIRONMENT IS NOT AN INPUT. `git` would otherwise honour
+    `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE` and friends, which make it answer
+    about a DIFFERENT repository or index — and a committed harness `env` block is
+    exactly the channel #2369 D1.1 assumes is reachable (see
+    `tortoise/__main__.py::_resolve_transmit_config`). With `GIT_INDEX_FILE`
+    pointed at an empty index, a TRACKED store answers `1` and is read: the guard
+    fails OPEN on the shape it exists to stop. So the child gets a scrubbed
+    environment, no inherited stdin (in the bridge this process's stdin IS the
+    JSON-RPC pipe), and no interactive prompt.
+
     WHAT THIS GUARD IS, AND IS NOT: it stops the file that ARRIVES WITH A
     CHECKOUT, which is the case that needs no local code execution. It is not a
     general "repo-controlled file is never an identity" rule — a repo-run step
@@ -324,6 +346,13 @@ def _git_tracks(path: Path) -> bool:
             ["git", "-C", str(path.parent), "ls-files", "--error-unmatch", "--", path.name],
             capture_output=True,
             text=True,
+            stdin=subprocess.DEVNULL,
+            env={
+                # Nothing from the ambient environment may choose the repository
+                # or the index: that is what makes `1` an answer about THIS file.
+                key: value for key, value in os.environ.items()
+                if not key.startswith("GIT_")
+            } | {"GIT_TERMINAL_PROMPT": "0"},
             timeout=_GIT_QUERY_TIMEOUT_S,
             check=False,
         )
@@ -334,6 +363,22 @@ def _git_tracks(path: Path) -> bool:
     if completed.returncode == 1:
         return False  # git ANSWERED: this repository does not track it
     return _in_a_git_work_tree(path.parent)  # a fatal is not an answer
+
+
+def _warn(line: str) -> None:
+    """Write one operator warning to stderr, and NEVER raise doing it.
+
+    A diagnostic must not become a failure. `status()` documents "never raises"
+    and its callers skip cleanly on that basis (`integrations/crm/twenty/bridge.py`
+    catches only ImportError/ValueError), but a stderr write can raise: a closed
+    pipe (`cmd | head -1` -> BrokenPipeError), a full filesystem (`2>/dev/full` ->
+    ENOSPC), fd exhaustion, or a stderr that has been closed (ValueError). Those
+    are reached from `resolve_connection()`, which now runs on EVERY request, so
+    an unguarded `print` turns a cosmetic warning into exactly the crash the
+    never-raise contract exists to prevent.
+    """
+    with contextlib.suppress(OSError, ValueError):
+        print(line, file=sys.stderr)
 
 
 def _warn_if_store_is_git_tracked(path: Path) -> None:
@@ -353,13 +398,12 @@ def _warn_if_store_is_git_tracked(path: Path) -> None:
     if label in _WARNED_TRACKED_STORES:
         return
     _WARNED_TRACKED_STORES.add(label)
-    print(
+    _warn(
         f"⚠️  {label} is tracked by git, or sits in a git work tree git could not "
         f"read — either way a repository can commit that file, so it is NOT "
         f"trusted as a credential source and is IGNORED. Remove it from the "
         f"repository (`git rm --cached {path.name}`) and let `tortoise init "
-        f"--api-key` write a gitignored store, or set TORTOISE_API_KEY.",
-        file=sys.stderr,
+        f"--api-key` write a gitignored store, or set TORTOISE_API_KEY."
     )
 
 
@@ -382,8 +426,8 @@ def _warn_if_store_is_readable(path: Path) -> None:
     if label in _WARNED_READABLE_STORES:
         return
     _WARNED_READABLE_STORES.add(label)
-    print(f"⚠️  {path} is mode {mode:04o} — group/other can read the MCP "
-          f"credential stored in it. Fix: chmod 600 {path}", file=sys.stderr)
+    _warn(f"⚠️  {path} is mode {mode:04o} — group/other can read the MCP "
+          f"credential stored in it. Fix: chmod 600 {path}")
 
 
 def resolve_connection() -> Connection:
@@ -425,7 +469,7 @@ def resolve_connection() -> Connection:
                 declared=bool(env_url),
             )
 
-    for path in _credential_paths():
+    for path, repo_controlled in _credential_paths():
         label = str(path)
         sources.append(label)
         if not path.is_file():
@@ -434,12 +478,14 @@ def resolve_connection() -> Connection:
             # wins (#1708 D5). Reading it would raise IsADirectoryError and be
             # reported as a CORRUPT store.
             continue
-        if _git_tracks(path):
+        if repo_controlled and _git_tracks(path):
             # Checked BEFORE the read: the file is repo-controlled, so it must not
             # supply a key OR an `api_url`. Marked in `sources` so a later refusal
-            # reports the real state — ignored, not absent.
+            # reports the real state — ignored, not absent. The label says
+            # "repo-controlled", not "git-tracked": the fatal arm only proves a
+            # `.git` sits above the store, and asserting more would be a guess.
             _warn_if_store_is_git_tracked(path)
-            sources[-1] = f"{label} (git-tracked: ignored)"
+            sources[-1] = f"{label} (repo-controlled: ignored)"
             continue
         try:
             config = json.loads(path.read_text())

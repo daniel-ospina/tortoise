@@ -40,7 +40,11 @@ resolves the credential from the LIVE environment (`TORTOISE_API_KEY`, or the
 credentials — the PROJECT-LOCAL `./.tortoise` that `tortoise init --api-key`
 writes, then `~/.tortoise/credentials.json` (#1708 D5 order: the first key found
 wins) — on EVERY forwarded request, so a rotation, a refresh, or a key added
-after the session started takes effect on the next call.
+after the session started takes effect on the next call. ONE exception, and it is
+a trust boundary rather than a precedence rule: a project-local store git TRACKS
+is IGNORED, because both halves of the identity come from that one file
+(`api_key` and `api_url`), so a repository that commits it would choose the key
+AND the host — the shape `#3660` fails closed on.
 
 A blank resolution is never sent as an empty header. It sends nothing, and if
 the endpoint rejects the call the bridge answers with the named
@@ -61,9 +65,10 @@ started is not visible here. Re-reading buys two real things: a value this
 process sets mid-run, and (the case that matters for a long-lived session) the
 **credential FILE** (either store — `./.tortoise`, then
 `~/.tortoise/credentials.json`), which is re-read from disk on every request and
-is therefore the source that genuinely rotates. Rotating the GLOBAL file while a
-project-local store supplies the key changes nothing: the project-local one wins
-(#1708 D5), which is why both are named here.
+is therefore the source that genuinely rotates. Rotating the GLOBAL file while an
+UNTRACKED project-local store supplies the key changes nothing: the project-local
+one wins (#1708 D5) — unless that store is git-tracked, in which case it is
+ignored and the global one wins after all (see the trust boundary above).
 
 CO-SOURCE (#2369 D1.1): a key taken from the credential file resolves its
 endpoint from that SAME file (its `api_url`), never from a `TORTOISE_MCP_URL`

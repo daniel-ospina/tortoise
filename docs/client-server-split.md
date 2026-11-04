@@ -217,7 +217,7 @@ reported 401.
 So the server can only answer `Unauthorized: invalid or missing Bearer token`.
 That message is accurate and useless: it points at the credential's VALUE when
 the name, or the source, was never read again after the process started. The
-design consequence is a CONFIG-NAME fix, not a cache-expiry fix (#10605;#5200 is
+design consequence is a CONFIG-NAME fix, not a cache-expiry fix (#10605; #5200 is
 the same class reached by a variable-name mismatch).
 
 **The fix, in two layers.**
@@ -228,7 +228,7 @@ the same class reached by a variable-name mismatch).
    alias `TORTOISE_MCP_API_KEY`, then the stored credentials in the recorded
    #1708 D5 order: the PROJECT-LOCAL `./.tortoise` that `tortoise init --api-key`
    writes, then `~/.tortoise/credentials.json`. A project-local store that git
-   TRACKS is skipped rather than read (see the trust boundary above). A rotation
+   TRACKS is skipped rather than read (see the trust boundary below). A rotation
    therefore reaches the wire on the next call with no rebuild and no restart. A
    blank value is "no credential", never an `Authorization: Bearer` header with
    nothing after the scheme; if the endpoint then rejects the call, the client raises

@@ -277,6 +277,27 @@ def _serve(app) -> str:
         thread.join(timeout=10)
 
 
+@pytest.fixture(autouse=True)
+def _no_ambient_store(tmp_path, monkeypatch):
+    """No test in this module may read the CHECKOUT's own `./.tortoise`.
+
+    `factory` isolates the SUBPROCESS's cwd, but `forward()` is also driven
+    IN-PROCESS by several tests, and those call `resolve_connection()` in the
+    pytest process — whose cwd is the repository. The project-local store is read
+    first (#1708 D5) and the module under test is gitignored there by design
+    (`.gitignore`), so on a box that has run the documented
+    `tortoise init --api-key` the ambient store supplies the key and the endpoint
+    (#2369 D1.1) and every in-process assertion measures the wrong credential:
+    the redaction pins then go RED with no leak, on exactly the machines that hold
+    a real key. The sibling `tests/test_mcp_client.py` isolates for the same
+    reason; this is the same mechanism, for the half that runs in-process.
+    """
+    cwd = tmp_path / "pytest-cwd"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+    return cwd
+
+
 @pytest.fixture
 def upstream():
     """(url, stub)."""

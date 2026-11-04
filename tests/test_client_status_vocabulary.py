@@ -325,3 +325,19 @@ def test_the_artifacts_no_longer_call_the_driver_a_one_word_failure_reporter():
         "docs/client-server-split.md still says the MCP client uses `BearerAuth`, "
         "which CAPTURES the credential at construction — the #10605 defect. It "
         "supplies a per-request `httpx.Auth` provider (§8a)")
+
+    # `.env.example` is the ENV CONTRACT (`tests/test_9078_record_written_by_
+    # production_path.py` says so in as many words), and it was the fourth home of
+    # a claim this PR re-cut in three others: it named `_api_key` (deleted by this
+    # PR) and asserted that the alias "is then read by NOTHING", which the client's
+    # own `_ENV_KEY_NAMES` chain and the onboarding pin both refute.
+    env_example = (REPO_ROOT / ".env.example").read_text(encoding="utf-8")
+    assert "_api_key" not in env_example, (
+        ".env.example names `mcp_client.py::_api_key`, which #10605 deleted — the "
+        "reader is now the per-request provider over `_ENV_KEY_NAMES`")
+    assert "read by NOTHING" not in env_example, (
+        ".env.example still says TORTOISE_MCP_API_KEY is read by nothing; the MCP "
+        "HTTP client reads it (`_ENV_KEY_NAMES`, #10605)")
+    assert "TORTOISE_MCP_API_KEY" in env_example, (
+        ".env.example must DISCLOSE the alias it describes, or the contract and the "
+        "code disagree (#5153)")

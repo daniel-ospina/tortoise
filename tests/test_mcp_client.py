@@ -1001,7 +1001,7 @@ class TestCredentialResolution:
         assert connection.source == str(
             isolated_home / ".tortoise" / "credentials.json"), connection
         # Named as IGNORED in the refusal's source list — not absent, not corrupt.
-        assert any("git-tracked: ignored" in s for s in connection.sources), connection.sources
+        assert any("repo-controlled: ignored" in s for s in connection.sources), connection.sources
         assert "tracked by git" in capsys.readouterr().err
 
     def test_an_untracked_project_store_still_wins_over_the_global_one(
@@ -1075,7 +1075,7 @@ class TestCredentialResolution:
 
         connection = mcp_client.resolve_connection()
         assert connection.key == "tt_legit_user_key", connection
-        assert any("git-tracked: ignored" in s for s in connection.sources), connection.sources
+        assert any("repo-controlled: ignored" in s for s in connection.sources), connection.sources
 
     def test_the_same_fatal_outside_any_repository_still_reads_the_store(
         self, isolated_home, monkeypatch, tmp_path,
@@ -1095,6 +1095,87 @@ class TestCredentialResolution:
 
         connection = mcp_client.resolve_connection()
         assert connection.key == "tt_local_key", connection
+
+    def test_ambient_GIT_env_cannot_make_a_tracked_store_look_untracked(
+        self, isolated_home, monkeypatch, tmp_path,
+    ):
+        """`GIT_INDEX_FILE`/`GIT_DIR` must not turn the guard into a no-op.
+
+        git honours them, so pointing it at another index makes it answer `1`
+        about a file the real index TRACKS — and `1` is a positive "this
+        repository does not track it". A committed harness `env` block is exactly
+        the channel this module already treats as reachable (#2369 D1.1), so the
+        query has to be asked of THIS repository, with a scrubbed environment.
+        """
+        from tortoise import mcp_client
+
+        (isolated_home / ".tortoise").mkdir(parents=True, exist_ok=True)
+        (isolated_home / ".tortoise" / "credentials.json").write_text(
+            json.dumps({"api_key": "tt_legit_user_key"}))
+        repo = _git_repo_with_store(
+            tmp_path, {"api_key": "tt_attacker"}, commit=True,
+        )
+        # A VALID, empty index in another directory — what GIT_INDEX_FILE is for.
+        other = tmp_path / "other-index"
+        other.mkdir()
+        empty_index = other / "index"
+        subprocess.run(
+            ["git", "-C", str(repo), "read-tree", "--empty"], check=True,
+            capture_output=True, env={**os.environ, "GIT_INDEX_FILE": str(empty_index)},
+        )
+        monkeypatch.setenv("GIT_INDEX_FILE", str(empty_index))
+        monkeypatch.chdir(repo)
+
+        assert mcp_client._git_tracks(repo / ".tortoise") is True
+        connection = mcp_client.resolve_connection()
+        assert connection.key == "tt_legit_user_key", connection
+
+    def test_the_git_query_cannot_consume_the_bridge_protocol_pipe(
+        self, isolated_home, monkeypatch, tmp_path,
+    ):
+        """The query runs on the bridge's stdin — it must never read from it.
+
+        `mcp_bridge.forward` -> `resolve_connection` runs in the process whose
+        STDIN IS the JSON-RPC protocol pipe. An inherited stdin is not read by
+        `ls-files` today, but `GIT_TERMINAL_PROMPT` and `stdin=DEVNULL` make that
+        a property of the call rather than a hope about git's behaviour.
+        """
+        from tortoise import mcp_client
+
+        repo = _git_repo_with_store(tmp_path, {"api_key": "tt_local"}, commit=True)
+        monkeypatch.setenv("GIT_TERMINAL_PROMPT", "1")
+        assert mcp_client._git_tracks(repo / ".tortoise") is True
+
+    def test_status_never_raises_when_stderr_itself_faults(
+        self, isolated_home, monkeypatch, tmp_path,
+    ):
+        """A broken diagnostics stream must not become a crash.
+
+        `status()` documents "never raises", and its callers skip cleanly on that
+        basis; `2>&1 | head -1` (BrokenPipe), `2>/dev/full` (ENOSPC) and a closed
+        stderr all reach the warning prints, which run from
+        `resolve_connection()` — per request (#10605).
+        """
+        import io
+
+        from tortoise import mcp_client
+
+        monkeypatch.setenv("TORTOISE_MCP_URL", "http://127.0.0.1:9/mcp")
+        store = isolated_home / ".tortoise"
+        store.mkdir(parents=True, exist_ok=True)
+        # 0644 -> the group/other-readable warning fires, i.e. it writes to stderr.
+        target = store / "credentials.json"
+        target.write_text(json.dumps({"api_key": "tt_store_key"}))
+        target.chmod(0o644)
+        mcp_client._WARNED_READABLE_STORES.clear()
+
+        class _Raising(io.StringIO):
+            def write(self, _data):
+                raise BrokenPipeError(32, "Broken pipe")
+
+        monkeypatch.setattr(mcp_client.sys, "stderr", _Raising())
+        payload = mcp_client.status()  # must NOT raise
+        assert payload["status"] == "tortoise_unavailable", payload
 
     def test_endpoint_declared_describes_the_endpoint_the_connection_USES(
         self, isolated_home, monkeypatch,
