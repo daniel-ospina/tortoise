@@ -184,6 +184,7 @@ __all__ = [
     "declaration_for",
     "declaration_is_sound",
     "declared_key",
+    "episodic_source_declined_properties",
     "episodic_source_prose_properties",
     "is_episodic_source_node",
     "node_from_row",
@@ -1382,16 +1383,56 @@ def episodic_source_prose_properties() -> frozenset[str]:
                      for column in _EPISODIC_SOURCE_PROSE_COLUMNS)
 
 
+def episodic_source_declined_properties() -> frozenset[str]:
+    """EVERY spelling the declared decline covers — the one home for the set.
+
+    Two spellings of the same datum reach a cache node: the graph property name
+    (:func:`episodic_source_prose_properties`, ``summary`` / ``_searchText``)
+    and the raw COLUMN spelling (``_EPISODIC_SOURCE_PROSE_COLUMNS``:
+    ``_search_text``), which the ``props`` tail is an open set over — see
+    :func:`_props_from_row`'s open-set door, where the tail can carry the snake
+    spelling because ``_search_text`` IS a real column.
+
+    ⛔ ONE declaration, because the decline is read by THREE consumers and a
+    second list is how they drift: :func:`_props_from_row`'s tail door (what it
+    pops), `record_reconcile.scan_cache_view` (what it marks cache-owned), and
+    `record_serve.parity_difference` (what it EXPLAINS instead of reddening).
+    Before this function existed each consumer spelled the union itself, and the
+    third one did not spell it at all: the parity instrument reported a legacy
+    session node's own prose as an unexplained projection gap, i.e. a sanctioned
+    decline and a real gap were the same red.
+
+    Derived, cached, resolved at CALL time for the same reasons as
+    :func:`episodic_source_prose_properties`.
+    """
+    return episodic_source_prose_properties() | _EPISODIC_SOURCE_PROSE_COLUMNS
+
+
 def _props_from_row(table: str, row: Mapping[str, Any], *,
                     skip: frozenset[str] = frozenset()) -> dict[str, Any]:
     """Project a record row's columns + `props` tail into graph properties.
 
-    Three destinations, and no fourth:
+    FOUR destinations, and no fifth. The first three were the contract before
+    §9.1/D1; the fourth is #10853's declared NARROWING, and it is a destination
+    rather than an absence ON PURPOSE — a name it refuses must be nameable here,
+    or the next reader takes "no fourth destination" as proof that a property
+    cannot be lost on this door:
 
-    * a column the placement table spells → that property, under its name;
+    * a column the placement table spells → that property, under its name —
+      **unless** the row is an EPISODIC Source and the column is in
+      :data:`_EPISODIC_SOURCE_PROSE_COLUMNS`, which is the fourth destination
+      below (`episodic_source_declined_properties()` is its declared set);
     * a column the schema REFUSES (the EP carve-out, the projection caches) →
       dropped, by name — never stored as authority (S3's contract clause);
-    * the `props` tail → verbatim, unmapped (the open-set surface);
+    * the `props` tail → the open-set surface, unmapped. ⚠️ It is not written
+      "verbatim" any more, and the order matters: the tail is seeded **first**
+      and a column value **overwrites** it (the row-ordering collision resolved
+      once — see the seed comment below), and for an EPISODIC Source the
+      declined names are **popped** from the seeded tail afterwards, in both
+      spellings;
+    * an EPISODIC Source's §9.1/D1 turn prose (`summary`, `_search_text` /
+      `_searchText`) → **declined**, whatever build wrote the row, from the
+      column door AND from the tail door;
     * anything else → :class:`UnknownRecordColumn`, loudly.
     """
     placed = placement_columns().get(table, {})
@@ -1460,8 +1501,8 @@ def _props_from_row(table: str, row: Mapping[str, Any], *,
         # were one door and the mutation-check claim covered a branch that no
         # longer mattered. Scoped by `tail_keys`, each door is independently
         # exercised, which is the only way "each door is pinned" is true.
-        declared = episodic_source_prose_properties()
-        for name in tail_keys & (declared | _EPISODIC_SOURCE_PROSE_COLUMNS):
+        declared = episodic_source_declined_properties()
+        for name in tail_keys & declared:
             out.pop(name, None)
     return out
 
