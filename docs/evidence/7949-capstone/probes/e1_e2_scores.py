@@ -107,6 +107,12 @@ PREREG = Path("docs/evidence/7949-capstone/preregistration.json")
 # in a scored row.
 _ARM_VARS = ("TORTOISE_VET", "TORTOISE_CLASSIFY_LATER", "TORTOISE_VALUE_GATE",
              "TORTOISE_S2_DECISION_SEAM")
+# The four pin fields the shipped `e1_paired_arm.py` writes on every record it
+# produces. The two committed before arms predate them (README, "Which probe
+# revision produced each artifact"), which is why absence is DISCLOSED rather than
+# refused here — see `_before_corpus_provenance`.
+_BEFORE_PIN_FIELDS = ("head", "fixtures_hash", "object_floor",
+                      "min_before_share")
 #: The repo's declared env-truthiness vocabulary, mirrored rather than imported.
 #:
 #: `tortoise/env_truthy.py` is the ONE contract ("unset/blank/falsy/garbage -> False"),
@@ -710,8 +716,75 @@ def read_off_arms(repo: Path, floors: dict) -> list[dict]:
             "bare_definite": record.get("bare_definite"),
             "share": share,
             "arm": arm,
+            "corpus": _before_corpus_provenance(name, record, floors),
         })
     return arms
+
+
+def _before_corpus_provenance(name: str, record: dict, floors: dict) -> dict:
+    """WHICH CORPUS a before artifact was measured on — the operand no other
+    guard in this file reached (#10610 review P2, category A under *Product Over
+    Process*).
+
+    E1's verdict is a fraction of these two shares (`after <= 0.5 x before`), and
+    every number above is checked against the record that carries it — except
+    the one that decides what population the number is ABOUT. The ON arm's corpus
+    is re-verified against the frozen pin (`score()`, "a row citing a different
+    corpus than the pre-registration froze is the defect this record exists to
+    fix"); theirs was not, so the treatment side was pin-checked while the
+    control side, which the bar is computed over, was not. `#9076`'s own rule —
+    *a bar is a threshold AND its corpus* — forbids exactly that asymmetry.
+
+    ⛔ WHY THIS DISCLOSES AN ABSENT FIELD INSTEAD OF REFUSING IT (the sibling
+    guards DO refuse an absent `graph`/`arm`/`object_names`): the two committed
+    artifacts predate the four pin fields and CANNOT be re-recorded to acquire
+    them. Their graphs lived in a disposable `tools/test_lane.py` container that
+    has since been removed, and the README's own rule is that a re-run is a *new
+    LLM realization*, not these numbers — so a `required` field here would delete
+    the only before arm this bundle has, which is a worse trade than an honest
+    disclosure. What IS refused is the case that can lie: a before artifact that
+    NAMES a pin must name the FROZEN one. Absence is then carried into the record
+    (`before_arm_provenance`), so the limitation travels with the number instead
+    of living only in the README.
+    """
+    present = [field for field in _BEFORE_PIN_FIELDS if field in record]
+    absent = [field for field in _BEFORE_PIN_FIELDS if field not in record]
+    if "fixtures_hash" in present:
+        stated = str(record.get("fixtures_hash") or "")
+        if not stated.strip():
+            raise _refuse(
+                f"{name} carries an EMPTY `fixtures_hash`, which is not the same "
+                "as carrying none — a pin written blank is a claim that was "
+                "never made, and the corpus it measured is unrefutable either way")
+        if normalise_pin(stated) != normalise_pin(floors["fixtures_hash"]):
+            raise _refuse(
+                f"{name} was measured on corpus {normalise_pin(stated)}, not the "
+                f"frozen {normalise_pin(floors['fixtures_hash'])} — E1's bar is a "
+                "fraction of THIS share, so a before arm citing a corpus the "
+                "pre-registration did not freeze is the same defect as an after "
+                "arm citing one")
+    if "object_floor" in present and record["object_floor"] != floors["e1_objects"]:
+        raise _refuse(
+            f"{name} was recorded under an Object floor of "
+            f"{record['object_floor']!r}, not the frozen {floors['e1_objects']} — "
+            "a before arm measured against a different bar cannot be scored "
+            "against this one")
+    if ("min_before_share" in present
+            and record["min_before_share"] != floors["e1_min_before_share"]):
+        raise _refuse(
+            f"{name} was recorded under a min-before-share of "
+            f"{record['min_before_share']!r}, not the frozen "
+            f"{floors['e1_min_before_share']} — a before arm measured against a "
+            "different bar cannot be scored against this one")
+    return {
+        "artifact": f"{EVIDENCE / name}",
+        "graph": record.get("graph"),
+        "head": record.get("head"),
+        "fixtures_hash": record.get("fixtures_hash"),
+        "pin_fields_present": present,
+        "pin_fields_absent": absent,
+        "unpinned": "fixtures_hash" in absent,
+    }
 
 
 def read_on_arm(repo: Path) -> dict:
@@ -1320,9 +1393,51 @@ def score(repo: Path = _ROOT) -> dict:
     return {
         "schema": "e1-e2-scores/1",
         "corpus_sha256": floors["fixtures_hash"],
-        "corpus_pin_source": (f"{PREREG}#corpus.fixtures_hash — "
-                              "e1_paired_arm.py refuses to run unless the "
-                              "checkout's corpus matches this pin (G1)"),
+        "corpus_pin_source": (f"{PREREG}#corpus.fixtures_hash — re-verified "
+                              f"from {ON_ARM_LOG}'s own `# corpus:` line for the "
+                              "AFTER arm, and checked per run at PRODUCER time "
+                              "(e1_paired_arm.py refuses to start unless the "
+                              "checkout's corpus matches this pin, G1). The "
+                              "BEFORE arms cannot re-prove it: see "
+                              "`before_arm_provenance`"),
+        # ⛔ The one operand whose corpus nothing else in this record ties to the
+        # frozen pin (#10610 review P2). It travels WITH the numbers rather than
+        # living only in the README, because the first DECIDED E1 will be decided
+        # from these two shares — and a reader of the record, not of the bundle
+        # prose, is who has to know that.
+        "before_arm_provenance": {
+            "status": ("unpinned"
+                       if any(arm["corpus"]["unpinned"] for arm in before_arms)
+                       else "pin-checked"),
+            "pin_fields": list(_BEFORE_PIN_FIELDS),
+            "probe_revision": None,
+            "probe_revision_source": (f"{EVIDENCE / 'README.md'}"
+                                       "#which-probe-revision-produced-each-artifact"),
+            "arms": [arm["corpus"] for arm in before_arms],
+            "why": ("`e1_paired_arm.py` writes four pin fields (`head`, "
+                    "`fixtures_hash`, `object_floor`, `min_before_share`) and "
+                    "refuses to run on a corpus other than the pre-registration's; "
+                    "the committed before arms predate those fields, so which "
+                    "corpus they measured is a PRODUCER-time fact (G1) that "
+                    "nothing in the pair can re-prove. The producing revision is "
+                    "disclosed in the README section cited above."),
+            "limitation": (
+                "E1's bar is a FRACTION of these two shares, so their corpus is "
+                "part of the bar (#9076: a bar is a threshold AND its corpus). "
+                "The after arm's corpus is re-verified against the frozen pin; "
+                "theirs is not re-verifiable from the record — an asymmetry the "
+                "treatment side alone never shows. It is not material to the "
+                "shipped verdict (E1 is REFUSED at n=1, so nothing scores green "
+                "off these arms); it becomes material at the `n >= 2 per arm` "
+                "the README names as the next requirement, where the first "
+                "DECIDED E1 will be computed from before shares whose corpus "
+                "the record cannot show. Re-recording the pair at the shipped "
+                "probe closes it."
+                if any(arm["corpus"]["unpinned"] for arm in before_arms) else
+                "closed: every before arm carries the frozen `fixtures_hash` "
+                "and it matches, so the pair's corpus is re-verifiable from the "
+                "record exactly as the after arm's is"),
+        },
         "head": after["head"],
         "graph": after["graph"],
         # Both halves of the pair carry their arm readback, so the provenance of

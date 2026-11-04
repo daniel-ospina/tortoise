@@ -7918,6 +7918,154 @@ def test_a_before_arm_with_no_graph_is_refused(tmp_path, capsys):
     assert "SECOND realization" in err, err
 
 
+_BEFORE_PIN_CASES = (
+    # (label, field, wrong value the record CLAIMS, the class it is refused for)
+    ("corpus", "fixtures_hash", "sha256:" + "0" * 64, "another_corpus"),
+    ("object_floor", "object_floor", 29, "another_bar"),
+    ("min_before_share", "min_before_share", 0.10, "another_bar"),
+)
+
+
+def test_a_before_arm_that_names_another_pin_is_refused(tmp_path, capsys):
+    """#10610 review P2 (category A): E1's CONTROL arm may not name another corpus.
+
+    E1's bar is `after <= 0.5 x before`, so the two before shares are the
+    denominator of the only number E1 decides — and `read_off_arms` read `arm`,
+    `graph`, `objects`, `bare_definite`, `share`, `object_names`, `label_counts`
+    and NO corpus field at all. The ON arm's corpus is re-verified against the
+    frozen pin; the pair the bar is computed over was not. `#9076`'s rule (a bar
+    is a threshold **AND its corpus**) forbids that asymmetry, so a before
+    artifact that NAMES a pin must name the FROZEN one.
+
+    The absent case is disclosed rather than refused (the shipped pair predates
+    the four pin fields and cannot be re-recorded) — that is the sibling pin
+    below. This one is the case that can LIE.
+
+    Non-vacuity, MEASURED at the pre-fix head: the driver ignored unknown keys, so
+    this bundle SCORES (`e1.outcome == "REFUSED"`, exit 0) and the `pytest.raises`
+    arm reds without the fix.
+    """
+    for label, field, value, kind in _BEFORE_PIN_CASES:
+        repo = _bundle(tmp_path / label)
+        path = repo / "docs/evidence/9889/e1-paired-off-arm-1.json"
+        record = json.loads(path.read_text())
+        assert field not in record, (label, "the shipped arm predates the pin")
+        record[field] = value
+        path.write_text(json.dumps(record))
+        with pytest.raises(SystemExit) as refused:
+            scores_probe.score(repo)
+        assert refused.value.code == 2, (label, refused.value)
+        err = capsys.readouterr().err
+        assert "e1-paired-off-arm-1.json" in err, (label, err)
+        assert "not the frozen" in err, (label, err)
+        if kind == "another_corpus":
+            assert "corpus" in err, (label, err)
+            # …and the refusal names the frozen pin it contradicted.
+            assert scores_probe.normalise_pin(
+                scores_probe.frozen_denominators(repo)["fixtures_hash"]) in err, err
+        else:
+            assert "different bar" in err, (label, err)
+
+
+@pytest.mark.parametrize("blank", ["", "   ", None])
+def test_a_blank_before_corpus_pin_is_not_an_absent_one(blank, tmp_path, capsys):
+    """A pin written BLANK is a claim that was never made — not an absent field.
+
+    `fixtures_hash: null` (or `""`) is a present-and-unusable pin, and treating it
+    as "absent, therefore disclosed" would let an edited artifact inherit the
+    shipped pair's disclosed status while asserting a corpus it never measured.
+    The sibling guards separate absent from present-but-empty on the same rule
+    (`arm` block keys, `with_anchor`, `object_names`).
+
+    Non-vacuity: pre-fix the key is ignored entirely, so the bundle scores.
+    """
+    repo = _bundle(tmp_path / "blank")
+    path = repo / "docs/evidence/9889/e1-paired-off-arm-2.json"
+    record = json.loads(path.read_text())
+    record["fixtures_hash"] = blank
+    path.write_text(json.dumps(record))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    assert "EMPTY `fixtures_hash`" in capsys.readouterr().err
+
+
+def test_the_before_arms_corpus_is_disclosed_in_the_record(tmp_path):
+    """The limitation TRAVELS with the number, and does not live only in the README.
+
+    The shipped pair cannot be re-recorded (its graphs lived in a removed container
+    and a re-run is a new LLM realization), so the driver discloses instead: the
+    record names both before artifacts, the four pin fields they lack, and the
+    fact that the after arm's corpus IS re-verified while theirs is not. This is
+    the half that makes the asymmetry reachable by whoever reads
+    `e1-e2-scores.json` — which is the artifact the row builder consumes.
+
+    Non-vacuity: pre-fix the key does not exist, so this raises `KeyError`.
+    """
+    record = scores_probe.score(_bundle(tmp_path))
+    block = record["before_arm_provenance"]
+    assert block["status"] == "unpinned", block
+    assert block["pin_fields"] == list(scores_probe._BEFORE_PIN_FIELDS), block
+    assert [arm["artifact"] for arm in block["arms"]] == [
+        "docs/evidence/9889/e1-paired-off-arm-1.json",
+        "docs/evidence/9889/e1-paired-off-arm-2.json",
+    ], block["arms"]
+    for arm in block["arms"]:
+        assert arm["pin_fields_absent"] == list(scores_probe._BEFORE_PIN_FIELDS), arm
+        assert arm["pin_fields_present"] == [], arm
+        assert arm["fixtures_hash"] is None and arm["unpinned"] is True, arm
+        # The head is absent for the same reason, and is NOT compared here: a
+        # before arm's graph stamps its head, and that pair IS checked in `score()`.
+        assert arm["head"] is None, arm
+    # The producing revision is not derivable from the artifact, so the record
+    # cites the section that states it rather than inventing one.
+    assert block["probe_revision"] is None, block
+    readme = (_REPO / "docs/evidence/9889/README.md").read_text()
+    heading = block["probe_revision_source"].split("#", 1)[1]
+    assert heading.replace("-", " ") in readme.lower(), (
+        f"`probe_revision_source` cites a README section that does not exist: "
+        f"{heading!r}")
+    assert "n >= 2" in block["limitation"], block["limitation"]
+    # …and the OLD `corpus_pin_source` sentence is gone: it read as if G1 covered
+    # the measurement, when it covered each run at producer time and is not
+    # re-verifiable from the pair.
+    assert "BEFORE arms cannot re-prove it" in record["corpus_pin_source"], (
+        record["corpus_pin_source"])
+    assert "before_arm_provenance" in record["corpus_pin_source"]
+    # No number moves: the disclosed pair still scores REFUSED at n=1.
+    assert record["e1"]["outcome"] == "REFUSED", record["e1"]
+    assert record["e1"]["decidable"] is False, record["e1"]
+
+
+def test_a_before_arm_that_carries_the_frozen_pin_reads_pin_checked(tmp_path):
+    """…and the guard cannot be satisfied by refusing the whole form.
+
+    A re-recorded pair (what the shipped probe writes today) carries the frozen
+    `fixtures_hash`, and it must be ACCEPTED — with the record reporting
+    `pin-checked` and the limitation stating the asymmetry is closed, so the
+    disclosure cannot survive a fixed pair and read as a permanent excuse.
+
+    The two arms spell the pin differently on purpose: the producer writes
+    `sha256:<hex>` and a bare `<hex>` is the same pin — the comparison is
+    `normalise_pin`'s, exactly as the after arm's is.
+    """
+    repo = _bundle(tmp_path)
+    frozen = json.loads(PREREG.read_text())["corpus"]["fixtures_hash"]
+    for index, value in ((0, frozen), (1, scores_probe.normalise_pin(frozen))):
+        path = repo / f"docs/evidence/9889/e1-paired-off-arm-{index + 1}.json"
+        record = json.loads(path.read_text())
+        record["fixtures_hash"] = value
+        path.write_text(json.dumps(record))
+    scored = scores_probe.score(repo)
+    block = scored["before_arm_provenance"]
+    assert block["status"] == "pin-checked", block
+    for arm in block["arms"]:
+        assert arm["unpinned"] is False, arm
+        assert "fixtures_hash" in arm["pin_fields_present"], arm
+        assert arm["fixtures_hash"] is not None, arm
+    assert block["limitation"].startswith("closed:"), block["limitation"]
+
+
 def test_the_arm_key_sets_are_the_producers():
     """The driver's three key sets must BE the producer's, not restatements.
 
