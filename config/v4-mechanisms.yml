@@ -832,8 +832,15 @@ mechanisms:
       the magnitude side carries no MAPPED unit — either a spelling outside both
       tables (`5k millis`, `5k dys`) or NO unit word at all (`5k` alone) — the
       binding is a bare `5k`, so `_magnitude_agrees`' `_K_ABBREVIATES` gate
-      (`{"km", "kg"}`) refuses it against any KNOWN unit (`5000 ms`, `5000
-      days`, `5000 mos`, `5000 millisec`) and the truthful point is withheld.
+      (`{"km", "kg"}`) refuses it against any KNOWN unit it can FUSE (`5000 ms`,
+      `5000 days`, `5000 mos`, `5000 millisec`) and the truthful point is
+      withheld — with TWO exceptions the universal must not swallow: the gate's
+      own pair (`5k` IS 5 km/5 kg, so `km`/`kg` pass to the numeric comparison)
+      and a spaced `percent`/`pct`, which bind with NO unit because they are
+      deliberately absent from `_UNIT_WORDS` (next clause), so the tolerance
+      fires instead. Measured: 44 of the 48 `_UNIT_EQUIV` spellings refuse
+      `the batch took 5k` / `… 5000 <spelling>`; the 4 that do not are exactly
+      `km`, `kg`, `percent`, `pct`.
       PRE-EXISTING in mechanism (`5k
       millis` against `5000 hours` is refused at `origin/main` `525fde4a9` too);
       #10804's widen extended which right-hand units trigger it, and the fold's
