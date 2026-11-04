@@ -119,8 +119,8 @@ def test_an_authored_word_fold_does_not_touch_a_terminal_points_baseline(sdk):
     # ran, so the receipt keeps the FULL-drop text. A "fix" that made the
     # message vague everywhere would satisfy the raced pin while under-reporting
     # this one, and reds here.
-    _refusal = [a for a in again["advisories"]
-                if a.get("code") == "terminal_fold_refused"][0]
+    _refusal = next(a for a in again["advisories"]
+                    if a.get("code") == "terminal_fold_refused")
     assert "PROPS AND WORD were not applied" in _refusal["message"], (
         "the non-raced path really did drop BOTH legs — its receipt keeps the "
         f"full-drop text: {_refusal['message']}")
