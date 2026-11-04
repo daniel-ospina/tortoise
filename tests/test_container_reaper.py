@@ -482,6 +482,26 @@ def test_the_rendered_unit_pins_the_sha256_of_the_reaper_it_installs():
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="cells are Linux; macOS has no systemd")
+def test_the_rendered_units_COMMENTARY_keeps_the_directive_names_it_names():
+    """The unit heredoc is UNQUOTED and must stay so — it interpolates `$SHA`,
+    `$POLICY_SHA`, `$REPO`, `$PY` and `$SOURCE`. The cost is that a bare backtick
+    in a COMMENT is command substitution, not markup.
+
+    Measured before the fix, on the rendered unit: three directive names collapsed
+    to an empty pair — `# \\`DefaultEnvironment=\\` would arm a proof…` rendered as
+    `#  would arm a proof…` — so the deployed comment named not one of the three
+    directives it exists to warn about. Directives themselves were intact; the
+    loss was exactly the names a reader needs (#10697/#10799 review, P2-1).
+    """
+    r = _render()
+    assert r.returncode == 0, r.stderr
+    for name in ("`DefaultEnvironment=`", "`WorkingDirectory=`", "`ExecStart=`"):
+        assert name in r.stdout, (name, r.stdout)
+    # And no OTHER comment lost its content the same way.
+    assert "``" not in r.stdout, r.stdout
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="cells are Linux; macOS has no systemd")
 def test_the_installer_REFUSES_to_pin_a_lane_worktree_without_the_override(tmp_path):
     """A worktree is deleted when its lane lands; a unit pinned to one fails forever.
 
