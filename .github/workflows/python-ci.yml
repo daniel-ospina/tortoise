@@ -4446,12 +4446,13 @@ jobs:
     # a bypass.
     #
     # ⛔ `always()` MUST stay non-skippable. This IS the required context
-    # (`merge_conditions`), and the measured wedge (#10911) — a cancelled run re-arming
-    # `ci-introduced-failure` into a permanent `queued` state, so THIS job's `needs:`
-    # never resolve and it is never created, i.e. it never posts at all — fails SAFE:
+    # (`merge_conditions`), and the measured wedge (#10911) — a cancelled run leaves ONE
+    # of these two jobs permanently `queued` (the verdict job in the runs this lane
+    # sampled, this aggregate in others) — fails SAFE: the required context never posts
+    # a conclusion, and
     # the rail REFUSES BY NAME (`check-unresolved:<name>:<status>/<conclusion>`) at
-    # `ADMIN_MERGE_CHECK_UNRESOLVED_BOUND` (default 3600 s, read from
-    # `CHECK_UNRESOLVED_BOUND` in `admin-merge.sh`),
+    # `ADMIN_MERGE_CHECK_UNRESOLVED_BOUND` (default 3600 s; `admin-merge.sh` assigns
+    # `CHECK_UNRESOLVED_BOUND` from it),
     # which exists for precisely this shape — its own doc block says a run "queued
     # because the whole pool is saturated never stops moving, so no progress-based
     # clock can ever reach it". Making the gate skippable would replace that refusal

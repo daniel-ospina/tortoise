@@ -1050,8 +1050,9 @@ def test_both_jobs_stay_literal_always():
 def test_the_required_aggregate_must_not_be_skippable_on_a_cancelled_run():
     """#10911 — a skipped REQUIRED check is a green check, so the gate must not skip.
 
-    MEASURED 2026-11-04T12:1xZ: 112 runs listed `queued` (286 jobs actually queued), 3
-    running jobs repo-wide, 15 of 18 self-hosted runners IDLE, 0 merges in ~2 h. Six
+    MEASURED 2026-11-04T12:03-12:22Z: 112 runs listed `queued` (286 jobs actually
+    queued), 3 running jobs repo-wide, 15 of 18 self-hosted runners IDLE, 0 merges in
+    ~2 h. Six
     runs were every-job-`cancelled` EXCEPT `ci-introduced-failure` sitting `queued`
     (oldest ~2.2 h); twelve more had it as their only remaining queued job.
 
@@ -1059,17 +1060,17 @@ def test_the_required_aggregate_must_not_be_skippable_on_a_cancelled_run():
     conditions during cancellation, and `always()` is true there — so the cancelled run
     re-arms these jobs onto a run never scheduled again, and (per GitHub's own
     troubleshooting docs) a stuck run keeps blocking later runs in the same concurrency
-    group. MEASURED on this PR's own earlier head: `python-ci-gate` is never CREATED on
-    such a run (runs 41832355132, 41833765464, 41834751952, 41831607343 — the gate job is
-    absent from every one), because its `needs:` never resolve; only
-    `ci-introduced-failure` reaches `queued`. Either way the required context never
-    posts, so
+    group. In the runs THIS LANE sampled, the re-armed job sits `queued` while its
+    siblings are `cancelled`; the required context then never posts a conclusion. WHICH
+    job lands in `queued` varies by run, so this is stated as "never posts a conclusion"
+    rather than by job. Either way
     the rail REFUSES BY NAME (`check-unresolved:<name>:<status>/<conclusion>`) at
-    the bound `ADMIN_MERGE_CHECK_UNRESOLVED_BOUND` (default 3600 s, read from
-    `CHECK_UNRESOLVED_BOUND` in `admin-merge.sh` — cite the CONSTANT, never a rail line:
+    the bound `ADMIN_MERGE_CHECK_UNRESOLVED_BOUND` (default 3600 s; `admin-merge.sh`
+    assigns `CHECK_UNRESOLVED_BOUND` from it — cite the CONSTANT, never a rail line:
     `tests/fixtures/rail_surface_tokens.json`'s `_read_at_rail_lines` records how far
-    those drift between checkouts) — the bound written for exactly this shape, whose doc block notes a run "queued because the whole pool is saturated never
-    stops moving, so no progress-based clock can ever reach it".
+    those drift between checkouts) — the bound written for exactly this shape, whose
+    doc block notes a run "queued because the whole pool is saturated never stops
+    moving, so no progress-based clock can ever reach it".
 
     ⛔ The obvious fix — `${{ !cancelled() }}` — is a FALSE PASS and is refused here.
     A job skipped by a conditional concludes `skipped`, which branch protection reports
