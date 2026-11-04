@@ -710,8 +710,21 @@ def classify_queue(
     )
 
     ages = [age_seconds(run.created_at, now) for run in pr_queued_runs]
-    ages = [age for age in ages if age is not None]
-    oldest_pr_age = max(ages) if ages else None
+    # ⛔ THE UNREADABLE RUNS ARE COUNTED, NOT DROPPED. `oldest_pr_age` is a max over a
+    # FILTERED list, so a single unparseable timestamp disappears into the max — and
+    # in the MIXED shape (one readable queued PR run beside one unreadable) the
+    # filtered max still answers, so a witness derived from it certifies the queue
+    # clear while the run that was never read — possibly the oldest, i.e. the one the
+    # budget applies to — contributes nothing. `pr_wait_measured` is therefore
+    # derived from the whole set below, and `healthy()` refuses `OK` on the same
+    # count, exactly as its own docstring says ("where a wait DOES exist and cannot
+    # be read"). Measured on the pre-fix code: 12 `issues` runs + one readable PR run
+    # at 60 s + one PR run with `created_at="not-a-timestamp"` →
+    # `verdict=OK pr_queued=2 oldest=60.0 pr_wait_measured=True congests_pr=False`,
+    # which authorises the destructive cancel under a queue nobody fully read.
+    unreadable_pr_runs = sum(1 for age in ages if age is None)
+    readable_pr_ages = [age for age in ages if age is not None]
+    oldest_pr_age = max(readable_pr_ages) if readable_pr_ages else None
 
     # Is PR starvation WITNESSED, regardless of WHO holds the queue? This is asked
     # even when the offender clauses below refuse to fire, because a flood INFLATES
@@ -793,7 +806,10 @@ def classify_queue(
             # the destructive gate through here then carries the witness for its
             # `False`; the one `OK` that bypasses this (`no queued PR run`) is below,
             # explicitly unmeasured.
-            "pr_wait_measured": oldest_pr_age is not None,
+            # ⛔ OVER THE WHOLE SET, NOT THE FILTERED MAX: every queued PR-event run
+            # must have been READ. One unreadable sibling is enough to make this
+            # `False` — see `unreadable_pr_runs` above.
+            "pr_wait_measured": bool(pr_queued_runs) and not unreadable_pr_runs,
             "truncated": truncated,
             "reasons": tuple(reasons),
         }
@@ -818,12 +834,15 @@ def classify_queue(
         "no queued PR run" can also mean the run is in `pending`/`waiting`/`requested`
         and therefore unread. That clause therefore returns `pr_wait_measured=False`,
         and `congests_pr` answers `None` (refuse) rather than `False` (clear).
-        Where a wait DOES exist and cannot be read, this seam refuses `OK` and
-        returns `PR-UNWITNESSED` — an unmeasured wait is not a measured-healthy
-        one, which is the same refusal the truncated feed gets.
+        Where a wait DOES exist and cannot be read — including the MIXED shape, where
+        one queued PR run's timestamp parses and a sibling's does not — this seam
+        refuses `OK` and returns `PR-UNWITNESSED`; an unmeasured wait is not a
+        measured-healthy one, which is the same refusal the truncated feed gets. The
+        claim is about the whole set, not the filtered max: the run that did not parse
+        may be the OLDEST one, i.e. the only wait the budget applies to.
         """
         if backlogged_wait is None:
-            if pr_queued_runs and oldest_pr_age is None:
+            if pr_queued_runs and unreadable_pr_runs:
                 # THE BUDGET IS UNREADABLE, NOT ABSENT. This state's whole content
                 # is a duration; where the duration cannot be read at all, `OK`
                 # would be a clean bill of health for a wait nobody measured —
@@ -837,9 +856,10 @@ def classify_queue(
                         if pr_running
                         else "no PR-event run is executing and the "
                     )
-                    + "queued PR-event run(s) carry no readable timestamp, so the "
-                    "wait cannot be measured and the wait budget cannot be "
-                    "applied — not reported as OK"
+                    + (f"{unreadable_pr_runs} of the {len(pr_queued_runs)} queued "
+                       "PR-event run(s) carry no readable timestamp, so the "
+                       "wait cannot be measured and the wait budget cannot be "
+                       "applied — not reported as OK")
                 )
                 return health(PR_UNWITNESSED)
             return health(OK)
