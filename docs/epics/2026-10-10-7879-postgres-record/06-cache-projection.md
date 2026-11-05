@@ -344,10 +344,10 @@ follow-up obligation on #10853.
 enumerations** (#10867 review, ISSUE 2). An obligation that named only the
 projection's own names was a trap in both directions:
 
-* `episodic_source_declined_properties` (`cache_projection.py:1589`) is a
+* `episodic_source_declined_properties` (`cache_projection.py:1593`) is a
   **caller** of `episodic_source_prose_properties`, so deleting the latter alone
   leaves `NameError` on the `props` tail for every episodic row;
-* `record_serve.parity_difference` (`record_serve.py:1137-1151`) imports **both**
+* `record_serve.parity_difference` (`record_serve.py:1138-1144`) imports **both**
   `episodic_source_declined_properties` and `is_episodic_source_node` — the
   tree's SECOND record↔cache comparison instrument. A partial deletion is an
   `ImportError` on every `Source` comparison, loud today only because three legs
