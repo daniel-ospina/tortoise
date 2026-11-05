@@ -6393,13 +6393,20 @@ def test_the_workflow_matrix_is_derived_and_the_watchdog_is_per_shard():
 
 def test_every_matrix_bounds_its_fan_out_below_the_measured_pool():
     """#6744: each shard matrix declares `max-parallel`, and the three caps
-    together keep ONE PR below the measured runner pool.
+    together keep ONE PR's MATRIX fan-out below the measured runner pool.
 
     Unbounded, a single PR enqueues its whole shard set (17 jobs) at once. The
     measured consequence (9 `python-ci` runs, 2026-10-30T21:48Z..10-31T02:54Z,
     completed jobs only): per-PR peak simultaneous jobs p50 11 / max 18 against
     a 12-runner pool, and a single run held >=50% of all running jobs at 352 of
     the 367 sampled instants.
+
+    ⛔ SCOPE: this bounds the matrix fan-out — the part that was unbounded and
+    that made one PR own the pool. It is NOT a total-concurrency budget: this
+    workflow's 12 non-matrix jobs include 8 that are eligible concurrently with
+    the matrices (3 with no `needs:` at all, 5 needing only `changes`), so a
+    PR's real maximum is <=12 concurrent jobs. The invariants below hold the
+    three CAPS, and must never be read as "a PR holds 9 jobs".
 
     This pins the INVARIANTS, not the chosen number, so a re-tune from a fresh
     measurement passes and a silent removal does not:
@@ -6428,6 +6435,22 @@ def test_every_matrix_bounds_its_fan_out_below_the_measured_pool():
         "test-slow": slow_shard_count(load_manifest()),
         "test-carve-out": carve_shard_count(load_manifest()),
     }
+    # #6744 review (P2): the three ids above are HAND-WRITTEN, so a FOURTH
+    # matrix added later would never be asked to declare a cap — the very
+    # defect this test exists to catch, hidden behind a green run. Derive the
+    # matrix-bearing job ids from the workflow itself and require the set to be
+    # exactly the three, so an added matrix fails loudly here instead of
+    # shipping unbounded.
+    matrix_jobs = {
+        job_id
+        for job_id, job in wf["jobs"].items()
+        if isinstance(job.get("strategy"), dict) and "matrix" in job["strategy"]
+    }
+    assert matrix_jobs == set(counts), (
+        "the matrix-bearing jobs in python-ci.yml are "
+        f"{sorted(matrix_jobs)}, but this test only pins the caps on "
+        f"{sorted(counts)} — a new matrix must be added here (with its shard "
+        "count) so it cannot ship unbounded (#6744)")
     measured_pool = 12          # `gh api .../actions/runners` — 12 online
     reserved_for_others = 3     # three other PRs must always get a runner
     max_waves = 4               # measured stagger/wall ratio-implied ceiling

@@ -779,7 +779,10 @@ jobs:
       # ⛔ WHAT THIS DOES NOT DO, so it is never judged on the wrong clock:
       # `cancel-in-progress` is keyed per PR (`refs/pull/N/merge`), so a cap
       # protects OTHER PRs from this one. It does not make a capped PR finish
-      # sooner; the target is "no single PR holds more than 9 slots".
+      # sooner; the target is "no single PR holds more than 9 MATRIX slots
+      # (<=12 total observed)" — 8 of this workflow's 12 non-matrix jobs are
+      # eligible concurrently with the matrices (3 carry no `needs:` at all,
+      # 5 need only `changes`), so the cap bounds the FAN-OUT, not the total.
       # ⛔ AND WHAT IT CANNOT DO: `max-parallel` limits START order only. Every
       # bound in this job is measured from runner pickup (the in-step watchdog
       # is started INSIDE the job), so a start delayed by the cap can never

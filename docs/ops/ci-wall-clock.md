@@ -408,7 +408,16 @@ runners and fail invariant 2.
 ⛔ **The clock this is judged on.** `cancel-in-progress` is keyed per PR (`refs/pull/N/merge`,
 §3), so a cap protects **other** PRs from this one. It does **not** make the capped PR finish
 sooner, and a later reading that judges it that way is reading the wrong clock: the target is
-"no single PR holds more than 9 slots", not "each PR is faster".
+"no single PR holds more than 9 **matrix** slots (≤12 total observed)", not "each PR is faster".
+
+⛔ **What the cap does NOT bound: the total.** `max-parallel` limits matrix legs only. This
+workflow also has 12 non-matrix jobs, and **8 of them are eligible to run concurrently with the
+matrices**: `manifest-integrity`, `surface-guard` and `workflow-lint` carry no `needs:` at all,
+and `test-concurrency-falkor`, `packs-compile`, `test-track-b`, `test-d14-hosted-api` and
+`test-record-postgres` need only `changes` — the same trigger the three matrices wait on. So a
+PR's observed maximum is **≤12 concurrent jobs**, not 9. The cap is a fairness bound on the
+FAN-OUT (which is what was unbounded, and what made one PR own the pool); it is not a total
+concurrency budget, and reading 9 as one would understate the hold by up to a third.
 
 ⛔ **Why it cannot false-red a shard.** `max-parallel` limits start order only. Every bound in
 these jobs is measured from runner pickup — the in-step watchdog is started INSIDE the job — so a
@@ -423,4 +432,14 @@ cannot conclude before a shard it needs has run. Both halves are pinned by
 repos/<owner>/<repo>/actions/runners`), the per-shard wall and the start stagger with §2's
 command. If the pool grows, invariant 2 permits a larger cap; if a shard's wall grows past
 `4 × cap × wall` catching the carve-out, invariant 1 is the one that moves.
+
+⛔ **The re-derivation cannot use per-job queue wait to see the cost this creates.** Section 2
+measures a job's wait as `created_at → started_at`, but a job held back by `max-parallel` is
+**not created until a slot frees**: its `created_at` lands at the moment it is allowed to start,
+so its queue wait reads ~0 and the cap looks like pure relief. The clock for this change is the
+**matrix band** — the first leg's `started_at` to the last leg's `completed_at` within one matrix
+job — compared against the same band on an uncapped run. That is the quantity the simulation's
+`matrix-band end delta` column is expressing (+17.9 m p50 / +23.2 m max at cap 3), and the only
+number a later reading should judge the regression against. Judging the cap by per-job wait will
+always report an improvement, because the wait it removes was never visible to the job.
 
