@@ -476,20 +476,40 @@ _SEVERITY_COMPLETION_NEGATED_AFTER_RE = re.compile(
     r"(?:(?:findings?|issues?|items?|ones?|blockers?|fixes|fix|patches?|patch|changes?|change)"
     r"\s+)?"
     # the copula/auxiliary that carries the completion (`were`, `is`, `has been`, `being`)
-    r"(?:(?:is|are|was|were|has|have|had|being)\s+)?"
-    # ANY intervening adverbs, bounded to three words and confined to the same clause
-    r"(?:(?!\b(?:and|but|or|however|yet|so)\b)[^\W\d_]+\s+){0,3}"
+    r"(?:(?:is|are|was|were|has|have|had|being|be)\s+)?"
+    # ANY intervening adverbs/auxiliaries, bounded to FOUR words and confined to the same clause.
+    # ⛔ FOUR, and `yet` is NOT a coordinator here: a fresh review measured `No P1 is yet to be
+    # addressed.` and `None of the P1 findings have as of today been addressed.` clearing an open
+    # P1, because the slot was ONE word and `yet` sat in the blacklist. `yet` is contrastive in
+    # `was fixed, yet the fix is wrong` — but that spelling does not need this arm, which is only
+    # reachable behind a negation.
+    r"(?:(?!\b(?:and|but|or|however|so)\b)[^\W\d_]+\s+){0,4}"
     # THE COMPLETION ITSELF. Only a completion — never a liveness word.
     r"(?:closed|fixed|resolved|addressed|landed|gone|made)\b"
 )
 #: ⛔ AND `no/without/zero/none of` IS NOT THE ONLY WAY TO SAY IT (fold review, P1).
 #: `Not one P1 was fixed.` / `Not a single P1 was addressed.` / `Nothing about the P1 was fixed.`
 #: are the same negation in a form `_SEVERITY_NEGATED_BEFORE_RE` cannot reach, because it requires
-#: the negation to sit ADJACENT to the token. These absolutes tolerate a short intervening phrase
-#: (`nothing about the`, `not a single one of the`) and are still confined to one clause, so they
-#: cannot reach across a `;` or a sentence. Measured before this arm: all three cleared an open P1.
+#: the negation to sit ADJACENT to the token.
+#:
+#: ⛔ AND THE GAP ACCEPTS FUNCTION WORDS ONLY — a CONTENT word means the negation governs THAT
+#: noun, not the token. The first version of this arm allowed any 40 characters, and a fresh
+#: review measured the consequence: `Not a single test covers the P1.` and `Nothing was ever done
+#: about the P1.` both closed an open `[P1]` and printed `READY-FOR-OWNER` — a REGRESSION against
+#: both parents of the merge that introduced it, and the second time the file's own `:284-288`
+#: rule (`no test for the P1` is a LIVE finding) had to be re-learned one arm over.
 _SEVERITY_ABSOLUTE_NEGATION_BEFORE_RE = re.compile(
-    r"(?i)\b(?:not\s+one|not\s+a\s+single|nothing|none\s+of|not\s+any\s+of)\b[^.!?;\n]{0,40}\Z"
+    r"(?i)\b(?:not\s+one|not\s+a\s+single|nothing|none\s+of|not\s+any\s+of)\b"
+    r"(?:\s+(?:of|the|a|an|one|single|any|about|regarding|concerning|to|for|in|on))*\s*\Z"
+)
+#: ⛔ A UNIVERSAL-QUANTIFIER NEGATION IS NOT A CLEAR — IT SAYS AT LEAST ONE REMAINS.
+#: `Not all of the P1 findings were fixed.` and `Not every P1 was addressed.` are the OPPOSITE of
+#: a clear, and because the completion arm sees `findings were fixed` they used to clear an open P1
+#: (a fresh review measured `check_blocking_finding` PASS on both). Unlike every other arm here,
+#: this one is graded without requiring a completion: the sentence is decisive on its own, and a
+#: `not all` that reaches a severity token can only be reading it as a live finding.
+_SEVERITY_UNIVERSAL_NEGATION_BEFORE_RE = re.compile(
+    r"(?i)\bnot\s+(?:all|every|each)\b[^.!?;\n]{0,40}\Z"
 )
 #: ⛔ A VERDICT ATTRIBUTED TO ANOTHER ARTIFACT IS A CITATION. The preamble is graded to the
 #: START OF THE LINE — an arbitrary character cap bought nothing and cost a bypass: the same
@@ -591,6 +611,10 @@ def _retracted_from(text: str, end: int) -> bool:
         # re-learned four times), and only a COMPLETION verb counts: a liveness predicate after
         # the token (`remains`, `is open`, `needs work`) is itself negated by the `no`, so
         # `No P1 remains.` still clears.
+        # ⛔ A UNIVERSAL-QUANTIFIER NEGATION IS DECISIVE ON ITS OWN (see the regex note):
+        # `Not all of the P1 findings were fixed.` asserts at least one is still open.
+        if _SEVERITY_UNIVERSAL_NEGATION_BEFORE_RE.search(left):
+            return True
         if _SEVERITY_NEGATED_BEFORE_RE.search(left) or \
                 _SEVERITY_ABSOLUTE_NEGATION_BEFORE_RE.search(left):
             if _SEVERITY_COMPLETION_NEGATED_AFTER_RE.match(suffix, token.end()):

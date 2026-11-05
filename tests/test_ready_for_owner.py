@@ -2972,6 +2972,17 @@ def test_a_negation_that_reaches_a_completion_verb_does_not_clear_the_finding() 
         "**Verdict: CLEAN.** Not one P1 was fixed.",
         "**Verdict: CLEAN.** Not a single P1 was addressed.",
         "**Verdict: CLEAN.** Nothing about the P1 was fixed.",
+        # The THIRD review cycle's corpus, both of them REGRESSIONS this branch introduced:
+        # an absolute negation with a CONTENT noun between it and the token governs that noun,
+        # not the token (`Not a single test covers the P1` is the `no test for the P1` shape the
+        # file already rules LIVE), and a universal quantifier asserts at least one remains.
+        "**Verdict: CLEAN.** Not a single test covers the P1.",
+        "**Verdict: CLEAN.** Nothing was ever done about the P1.",
+        "**Verdict: CLEAN.** Not all of the P1 findings were fixed.",
+        "**Verdict: CLEAN.** Not every P1 was addressed.",
+        # …and the adverb slot's sibling: a multi-word auxiliary and `yet` as an adverb of time.
+        "**Verdict: CLEAN.** No P1 is yet to be addressed.",
+        "**Verdict: CLEAN.** None of the P1 findings have as of today been addressed.",
     ):
         assert rfo.asserts_a_clear(body) is False, body
 
@@ -2990,6 +3001,9 @@ _NEGATED_LIVENESS_CLEARS = (
     # …and the absolute-negation arm must not reach across a clause break: these are real clears.
     "**Verdict: CLEAN.** Nothing else changed; no P1 remains.",
     "**Verdict: CLEAN.** Nothing was broken, and no P1 remains.",
+    # The absolute arm must still exempt the ADJACENT absence form — that is the whole point of it.
+    "**Verdict: CLEAN.** Not a single P1 remains.",
+    "**Verdict: CLEAN.** Nothing about the P1 remains.",
     "**Verdict: CLEAN.**\n\nno other blockers",
 )
 
