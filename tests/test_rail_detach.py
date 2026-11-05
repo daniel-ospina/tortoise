@@ -885,8 +885,10 @@ def test_the_duplicate_rail_guard_keys_on_the_repo_not_its_spelling(tmp_path, mo
     while a third launch with the SAME spelling was correctly refused (the case
     above).
 
-    Non-vacuity: put `_slug` back to `repo.replace("/", "-")` and the second launch
-    spawns a second rail and RETURNS a `Launch` instead of raising.
+    Non-vacuity: the guard runs through TWO canonicalisation sites — `launch`'s
+    `repo = _repo_key(...)` (`tools/rail_detach.py:1585`) and `_slug` (`:284`) — so
+    reverting EITHER alone leaves this case green (measured). Revert BOTH and the
+    second launch spawns a second rail and RETURNS a `Launch` instead of raising.
 
     ⛔ EVERY SPELLING A CLONE URL CAN PRODUCE, because each one is a paste: `.git` is
     the suffix a clone URL always ends in and the SCP form glues the host to the owner
