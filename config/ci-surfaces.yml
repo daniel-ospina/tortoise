@@ -10533,7 +10533,9 @@ durations:
   # docker lane / carve-out split decides whether they run (the `skipif` on `TORTOISE_DB_URI`: class-level on
   # two of the classes, per-method on the rest — do not say "class-level" for the whole set).
   # The ungated arms are pure enum/entry-point assertions and run everywhere. Context for a human, NOT the
-  # weight, and NOT a per-file reading this file consumes: 11-17 s wall on ONE host in the private lane.
+  # weight, and NOT a per-file reading this file consumes: ~2 min wall on ONE host in the private lane —
+  # measured 2026-11-05, 143.9 s and 133.9 s on two runs — dominated by the full-ingest arms that reach
+  # S7 against the real embedding model (the #4387 retry path), not by the enum assertions.
   # ⛔ NO CASE COUNT and NO past-count anecdote — a hand-written count re-stales on every case a round adds,
   # and quoting one as history ("N against a quoted M") re-stales the same way one step removed. A VGATE
   # caught exactly that in this lane's own doc row, and a round-8 review caught this row repeating it.

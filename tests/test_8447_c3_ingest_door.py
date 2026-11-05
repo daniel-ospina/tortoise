@@ -40,13 +40,21 @@ finds nothing, and has to decide whether the pin was deleted:
 * ``TestAPartialExtractionIsNotDone`` — an extraction that failed sections is
   not a completed ingest, on all three arms (the sweep, ``--upgrade``, the
   full ingest).
+
+One further class, ``TestThisFilesEvidencePointersCannotGoStale``, is a
+file-level guard rather than a seventh door property: it pins that no docstring
+here cites a ``file:line`` coordinate, because a coordinate re-stales on the
+next rebase and an unfollowable evidence pointer invites the reader to delete
+the assertion it justified.
 """
 from __future__ import annotations
 
 import argparse
+import ast
 import contextlib
 import io
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -207,11 +215,12 @@ class TestTheExitContractIsOneMapping:
         `test_cli_turns_the_outcome_into_the_process_status` above.
 
         ⛔ Each arm asserts the guard's OWN message, not only the SIGN of the
-        status. `--db` is `required=True` (`ingest.py:1034`) and `parse_args`
-        (`:1099`) runs BEFORE both mode guards (`:1104`, `:1108`), so an arm
-        that omits `--db` is refused by ARGPARSE with exit 2 and its `!= 0`
-        assertion holds without either guard being reached — MEASURED before
-        this was fixed:
+        status. `--db` is `required=True` on `tortoise/ingest.py::main`'s own
+        parser, and `argparse.ArgumentParser.parse_args` runs BEFORE both mode
+        guards (the `--include-unstamped` and `--upgrade` `SystemExit`s that
+        follow it), so an arm that omits `--db` is refused by ARGPARSE with
+        exit 2 and its `!= 0` assertion holds without either guard being
+        reached — MEASURED before this was fixed:
 
             $ python -c 'from tortoise.ingest import cli; cli()' --include-unstamped
             error: the following arguments are required: --db   → exit 2
@@ -802,3 +811,81 @@ class TestAPartialExtractionIsNotDone:
         assert outcome.returncode == 1
         assert "points :" in out, out
         assert (tmp_path / "g.html").exists()
+
+
+#: A ``file:line`` coordinate in prose — a dotted path followed by ``:`` and digits
+#: (``ingest.py:<n>``), or the bare backticked continuation form (``:`<n>` ``).
+#: Deliberately NOT matching a URL's port (``localhost:6379``) — the path/backtick
+#: anchor is what makes it a citation.
+_COORDINATE = re.compile(r"\b[\w./-]+\.py:\d{1,4}\b|`:(\d{1,4})`")
+
+
+def _coordinate_citations(text: str) -> list[str]:
+    """Every ``file:line`` coordinate in `text`, in source order."""
+    return [m.group(0) for m in _COORDINATE.finditer(text)]
+
+
+def _docstrings_by_name() -> dict[str, str]:
+    """Every docstring in THIS module, keyed by symbol (``<module>`` for the head)."""
+    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    found: dict[str, str] = {}
+    module_doc = ast.get_docstring(tree)
+    if module_doc:
+        found["<module>"] = module_doc
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            doc = ast.get_docstring(node)
+            if doc:
+                found.setdefault(node.name, doc)
+    return found
+
+
+class TestThisFilesEvidencePointersCannotGoStale:
+    """No docstring here may point a reader at a ``file:line`` coordinate.
+
+    WHY THIS IS A PIN AND NOT TIDINESS. Four line numbers in
+    `test_the_installed_entry_point_exits_non_zero_on_a_refusal`'s docstring are
+    the *evidence* for why its arms assert the guard's message and not only the
+    sign of the status. A rebase inserted ten lines above `main`; none of the
+    four was re-measured, and every one of them came to point at prose — `main`'s
+    own docstring and three lines of `--include-unstamped` help text. The tidy
+    response to an evidence pointer that cannot be followed is to delete the
+    assertions it justifies, which reinstates precisely the vacuous arm that
+    docstring documents. A symbol (`tortoise/ingest.py::main`, `parse_args`, and
+    the two guards' own messages) survives the next rebase; a line number does
+    not. This is the rule that ``BOUNDED-OPERATION-CONTRACT.md`` §2's census
+    already adopted when it moved its evidence cells to ``module::name``.
+
+    The guard applies to its own docstring, so the pre-fix text it must catch
+    lives in a string literal below, never in prose here.
+    """
+
+    def test_no_docstring_in_this_file_cites_a_file_line_coordinate(self):
+        offenders = {
+            name: _coordinate_citations(doc)
+            for name, doc in _docstrings_by_name().items()
+            if _coordinate_citations(doc)
+        }
+        assert not offenders, (
+            "these docstrings cite a `file:line` coordinate instead of a symbol; "
+            "a coordinate re-stales on the next rebase, so cite "
+            f"`module::name` (or the guard's own message) instead: {offenders}")
+
+    def test_the_guard_reds_on_the_text_that_went_stale(self):
+        """Non-vacuity: the exact pre-fix sentences are what the predicate catches."""
+        pre_fix = (
+            "status. `--db` is `required=True` (`ingest.py:1034`) and "
+            "`parse_args`\n        (`:1099`) runs BEFORE both mode guards "
+            "(`:1104`, `:1108`), so an arm")
+        assert _coordinate_citations(pre_fix) == [
+            "ingest.py:1034", "`:1099`", "`:1104`", "`:1108`"], (
+            "the predicate must catch the pre-fix citations with the same "
+            "spelling they were written in, or this guard is green on the very "
+            "text it exists to ban")
+
+    def test_the_guard_does_not_red_on_a_host_port_or_a_symbol(self):
+        """The other direction: a URL port and a ``module::name`` cite stay green."""
+        assert _coordinate_citations("docker://:f@localhost:6379/x") == []
+        assert _coordinate_citations(
+            "`tortoise/ingest.py::main` and "
+            "`argparse.ArgumentParser.parse_args`") == []
