@@ -624,23 +624,30 @@ class CacheTest(unittest.TestCase):
         self.assertIn("dotcom", second.stdout)
 
     def test_every_documented_credential_spelling_is_a_distinct_account(self) -> None:
-        """gh documents FOUR token variables; reading three merged two real accounts.
+        """gh documents FOUR token variables IN TWO HOST-SCOPED PAIRS.
 
-        `GITHUB_ENTERPRISE_TOKEN` is the documented alias of `GH_ENTERPRISE_TOKEN`, and it was
-        absent from the digest - so on a GHES box using the second spelling every credential
-        collapsed into the EMPTY digest and account B was handed account A's remaining quota
-        with rc=0 and `fresh: true`.
+        Two defects met here. `GITHUB_ENTERPRISE_TOKEN` — the documented alias of
+        `GH_ENTERPRISE_TOKEN` — was missing from the digest, so on a GHES box using the second
+        spelling every credential collapsed into the EMPTY digest. And the digest joined all
+        four into one record, so *any* exported enterprise token labelled *every* host: gh
+        scopes `GH_TOKEN`/`GITHUB_TOKEN` to github.com (and `*.ghe.com`) and the
+        `*_ENTERPRISE_TOKEN` pair to a GH Enterprise Server host, and ignores the other family.
+        So each pair is asserted against the host it actually applies to.
         """
-        (self.stubdir / "body").write_text('{"resources": {"core": {"remaining": 4990}}}')
-        first = self.run_tool("get", "rate_limit", "--gh", str(self.stub), "--cache-dir", str(self.cachedir))
-        self.assertEqual(first.returncode, 0, first.stderr)
-
         (self.stubdir / "body").write_text('{"resources": {"core": {"remaining": 7}}}')
         clean = {k: v for k, v in os.environ.items() if k not in (
-            "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN")}
+            "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN",
+            "GH_HOST", "GH_CONFIG_DIR")}
         no_cfg = str(Path(self.tmp) / "no-config")
-        for var in ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"):
-            env = dict(clean, **{var: f"token-via-{var}", "GH_STUB_DIR": str(self.stubdir), "GH_CONFIG_DIR": no_cfg})
+        cases = (
+            ("GH_TOKEN", {}),
+            ("GITHUB_TOKEN", {}),
+            ("GH_ENTERPRISE_TOKEN", {"GH_HOST": "ghe.example.com"}),
+            ("GITHUB_ENTERPRISE_TOKEN", {"GH_HOST": "ghe.example.com"}),
+        )
+        for var, extra in cases:
+            env = dict(clean, **{var: f"token-via-{var}", "GH_STUB_DIR": str(self.stubdir),
+                                 "GH_CONFIG_DIR": no_cfg}, **extra)
             before = self.calls()
             results = []
             for _ in range(2):
@@ -659,6 +666,64 @@ class CacheTest(unittest.TestCase):
                 self.calls(), before + 1,
                 f"{var} must be a recognised credential: two identical reads, one call",
             )
+
+    def test_an_enterprise_token_does_not_key_a_dotcom_read(self) -> None:
+        """gh ignores the wrong family's variable; labelling every host was the same defect.
+
+        A box exporting `GH_ENTERPRISE_TOKEN` for its GHES instance keyed its `github.com`
+        reads by that token, so two real `github.com` accounts in one `hosts.yml` pooled onto
+        it — account B served account A's counters, rc=0 and `fresh: true`.
+        """
+        (self.stubdir / "body").write_text('{"resources": {"core": {"remaining": 4990}}}')
+        cfg = Path(self.tmp) / "dotcom-cfg"
+        cfg.mkdir()
+        (cfg / "hosts.yml").write_text("github.com:\n    oauth_token: DOTCOM-ACCOUNT-A\n")
+        base = {k: v for k, v in os.environ.items() if k not in (
+            "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "GH_HOST")}
+        env_a = dict(base, GH_ENTERPRISE_TOKEN="ghes-token", GH_CONFIG_DIR=str(cfg), GH_STUB_DIR=str(self.stubdir))
+        a = subprocess.run(
+            [sys.executable, str(TOOL), "get", "rate_limit", "--gh", str(self.stub), "--cache-dir", str(self.cachedir)],
+            capture_output=True, text=True, env=env_a,
+        )
+        self.assertEqual(a.returncode, 0, a.stderr)
+
+        (self.stubdir / "body").write_text('{"resources": {"core": {"remaining": 12}}}')
+        (cfg / "hosts.yml").write_text("github.com:\n    oauth_token: DOTCOM-ACCOUNT-B\n")
+        b = subprocess.run(
+            [sys.executable, str(TOOL), "get", "rate_limit", "--gh", str(self.stub), "--cache-dir", str(self.cachedir)],
+            capture_output=True, text=True, env=env_a,
+        )
+        self.assertEqual(b.returncode, 0, b.stderr)
+        self.assertEqual(self.calls(), 2, "a github.com credential change must be a MISS, not keyed by the GHES token")
+        self.assertIn("12", b.stdout)
+        self.assertNotIn("4990", b.stdout)
+
+    def test_xdg_config_home_is_honoured(self) -> None:
+        """gh's precedence is `GH_CONFIG_DIR`, then `$XDG_CONFIG_HOME/gh`, then `~/.config/gh`.
+
+        Skipping the middle step made the tool read a DIFFERENT `hosts.yml` from the one gh
+        uses, so on a box selecting its account with `XDG_CONFIG_HOME` the stale default
+        file's token became the digest for every lane — two live accounts pooled onto it.
+        """
+        (self.stubdir / "body").write_text('{"resources": {"core": {"remaining": 4990}}}')
+        clean = {k: v for k, v in os.environ.items() if k not in (
+            "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN",
+            "GH_HOST", "GH_CONFIG_DIR", "XDG_CONFIG_HOME")}
+        for name, token, remaining in (("a", "XDG-ACCOUNT-A", "4990"), ("b", "XDG-ACCOUNT-B", "5")):
+            xdg = Path(self.tmp) / f"xdg-{name}"
+            (xdg / "gh").mkdir(parents=True)
+            (xdg / "gh" / "hosts.yml").write_text(f"github.com:\n    oauth_token: {token}\n")
+            env = dict(clean, XDG_CONFIG_HOME=str(xdg), GH_STUB_DIR=str(self.stubdir))
+            before = self.calls()
+            (self.stubdir / "body").write_text(f'{{"resources": {{"core": {{"remaining": {remaining}}}}}}}')
+            r = subprocess.run(
+                [sys.executable, str(TOOL), "get", "rate_limit", "--gh", str(self.stub), "--cache-dir", str(self.cachedir)],
+                capture_output=True, text=True, env=env,
+            )
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn(remaining, r.stdout, "the XDG account's own answer")
+            if name == "b":
+                self.assertEqual(self.calls(), before + 1, "a second XDG account must be a MISS")
 
     def test_a_config_file_credential_is_an_account_too(self) -> None:
         """`gh auth login` puts the token in `hosts.yml`, NOT the environment.
@@ -809,6 +874,58 @@ class CacheTest(unittest.TestCase):
         sent = (self.stubdir / "argv.log").read_text()
         self.assertEqual(sent.count("--hostname"), 1, f"exactly one host must reach gh: {sent!r}")
         self.assertIn("--hostname=ghe.example.com", sent, "the caller's explicit choice must win")
+
+    def test_an_api_pass_through_never_gets_a_hosted_route(self) -> None:
+        """For an `api` route the host is `--hostname`; injecting it into `{repo}` corrupts it.
+
+        The porcelain rewrite (`{repo}` -> `host/owner/repo`) must be gated on the verb NOT
+        accepting `--hostname`. Without that gate an `api` pass-through with a host-prefixed
+        `--repo` sent `api repos/ghe.example.com/o/n ...` - a different route - and no test
+        noticed, because the doubling test only counted `--hostname` occurrences.
+        """
+        r = self.run_tool("get", "repo", "--repo", "ghe.example.com/o/n", "--gh", str(self.stub),
+                          "--cache-dir", str(self.cachedir), "--argv", "api", "repos/{repo}")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        sent = (self.stubdir / "argv.log").read_text()
+        self.assertIn("repos/o/n", sent, f"the route must carry the slug only: {sent!r}")
+        self.assertNotIn("repos/ghe.example.com", sent, f"the host must not be injected: {sent!r}")
+        self.assertEqual(sent.count("--hostname"), 1, f"exactly one host expression: {sent!r}")
+
+    def test_a_pass_through_without_repo_still_expresses_the_spelled_host(self) -> None:
+        """`--argv repo list --repo ghe.example.com/o/n` asked the DEFAULT instance.
+
+        `--repo` decides WHICH HOST is meant; whether the template formats `{repo}` decides
+        only whether the slug goes in. Conflating them made a spelled host vanish and the live
+        fetch hit the wrong server (nothing is cached on this path, so a wrong-server read
+        rather than a stale one).
+        """
+        r = self.run_tool("get", "repo", "--repo", "ghe.example.com/o/n", "--gh", str(self.stub),
+                          "--cache-dir", str(self.cachedir), "--argv", "repo", "list")
+        # A porcelain verb has no --hostname and this template has no {repo}, so there is
+        # nowhere to express the host: refuse (rc=2, nothing spent) instead of quietly asking
+        # the default instance. An actuator that cannot deliver is a defect, not a status.
+        self.assertEqual(r.returncode, 2, f"an inexpressible host must be usage error: rc={r.returncode} {r.stderr}")
+        self.assertEqual(self.calls(), 0, "nothing may be fetched from the wrong server")
+        self.assertIn("refusing", r.stderr)
+
+    def test_the_degraded_credential_path_refuses_an_empty_body(self) -> None:
+        """The unresolvable-credential branch must agree with the caching path on empty.
+
+        It emitted rc=0 with nothing on stdout - "success" and no value - where the caching
+        path fails closed with rc=4 for the same stub output.
+        """
+        empty_cfg = Path(self.tmp) / "empty-cfg-2"
+        empty_cfg.mkdir()
+        (self.stubdir / "body").write_text("")
+        env = {k: v for k, v in os.environ.items() if k not in (
+            "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN")}
+        env.update({"GH_STUB_DIR": str(self.stubdir), "GH_CONFIG_DIR": str(empty_cfg)})
+        r = subprocess.run(
+            [sys.executable, str(TOOL), "get", "rate_limit", "--gh", str(self.stub), "--cache-dir", str(self.cachedir)],
+            capture_output=True, text=True, env=env,
+        )
+        self.assertEqual(r.returncode, 4, f"an empty answer is not a value: rc={r.returncode} {r.stderr}")
+        self.assertEqual(r.stdout, "", "nothing may be emitted")
 
     def test_a_spelled_host_is_canonicalised_like_an_env_one(self) -> None:
         """`GHE.example.com/o/n` and `ghe.example.com/o/n` are one instance, so one entry."""
