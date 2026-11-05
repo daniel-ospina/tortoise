@@ -167,7 +167,7 @@ the PRIMARY key exactly. A `restore-keys` partial match does not: `restoreImpl.t
 matched archive into `~/.cache/pip`, and `saveImpl.ts:50` skips the save POST-step **only** on an
 exact primary-key match, so anything else falls through to `cache.saveCache(…)` and re-tars
 everything the restore just put there. This job — p50 1.62 m, the fastest of them — is the likely
-payer: its own `.[test,postgres]` downloads (`python-ci.yml:4253`; `[embeddings]`/torch
+payer: its own `.[test,postgres]` downloads (`python-ci.yml:4254`; `[embeddings]`/torch
 deliberately absent) are a rounding error beside the shared archive it restores and re-saves.
 
 **Re-derived by the arm-2 rule from THIS run, not from the estimate this note used to carry.** It
@@ -175,10 +175,21 @@ pre-computed `20 → 40` from an assumed ~9 m save; the measured save is **15.9 
 still in flight at the kill** — a CENSORED lower bound, since GitHub reported 79.8% sent — so the
 input, not the rule, was the thing that was wrong: **12 m in-step watchdog + ~1 m setup/provision +
 15.9 m save = 28.9 m × 1.5 = 43.4 → 50**. The censoring makes even that an underestimate, and the
-second reading agrees: at this runner's ~3.7 MB/s a completed 3.6 GB upload is ~20 m, which puts
-the SUM at ~33 m and 33 × 1.5 = 49.5 — still 50. Arm 2 rather than arm 1 for the reason it always
+second reading agrees: at this runner's ~3.7 MB/s a completed 3.6 GB save step (tar + transfer) is
+~20 m, which puts the SUM at ~33 m and 33 × 1.5 = 49.5 — still 50. The `~1 m setup` constant is
+understated too (this run's setup was 131 s: 07:40:25 → 07:42:36), making the SUM ~30.1 m and 45.2
+after the 1.5 — the same 50. Arm 2 rather than arm 1 for the reason it always
 was: the save this row pays on a key change is the SHARED archive, not its own downloads — so
 `2 × 15.43 = 30` is not the number.
+
+⚠ **What this measurement does NOT settle: the `~9 m` save term the other rows use.** That figure
+comes from the `test-d14-hosted-api` incident (#10182) and is not re-measured here; 15.9 m is a
+different runner on a different day, so it does not by itself falsify it — but it does show a
+3.6 GB save can cost TWICE that, and the rows derived from `~9 m` (`test-slow`'s 60 m, and the
+`test-carve-out` / `test-concurrency-falkor` / `test-d14-hosted-api` headroom statements below) are
+optimistic by up to ~7 m if the measured figure is the normal one. Re-deriving them is owed and is
+deliberately NOT done here: nothing has measured any of the four being cancelled, and this
+document's rule is to move a cap from a measurement, not from a comparison of two samples.
 
 ⚠ It is not a free move: **the cap IS the stale-head exposure** (#3239), and 50 m is the most this
 job may hold a per-PR concurrency slot when it genuinely wedges (p50 1.62 m, p95 14.61 m).
@@ -256,7 +267,7 @@ produces no runs — and because a warn-only step added to that workflow never e
   rounded to the nearest 5 minutes, floored at 15 m, for a job whose failure reds a required
   context (`docs` 20.5 → 20; `legal-e2e` 18.5 → 20; the rest floor at 15). ⚠ That predicate is
   deliberately narrower than "no cache step": `test-record-postgres` DOES mount `~/.cache/pip` on a
-  writable shared key (`python-ci.yml:4239-4247`) and is therefore NOT an arm-1 row — on a key
+  writable shared key (`python-ci.yml:4240-4248`) and is therefore NOT an arm-1 row — on a key
   change its save IS the archive, measured at 3.6 GB / 15.9 m on 2026-11-05 (see the note under the
   table, and the cap it moved to). Arm 1 applies to a job whose save is
   small because nothing restores an archive into its cache path, not because its `pip install`
@@ -274,7 +285,7 @@ in-step watchdog, #6135/#6142), and lowering them would re-open #798's death mod
 kill that loses the pass/fail summary. TWO caps have moved since, both on the post-step arm:
 `test-d14-hosted-api` 20 → 40 (#10182) and `test-record-postgres` 20 → 50 (2026-11-05, from the
 first measured false-kill — see the note under the table; its estimate-derived `40` was superseded
-by a ≥16 m censored save).
+by a 15.9 m censored save).
 
 `python-ci.yml` is now capped on **every** job, and `tests/test_ci_selection.py` asserts both
 that and the derived-required-context invariant, so the next added leg cannot silently inherit

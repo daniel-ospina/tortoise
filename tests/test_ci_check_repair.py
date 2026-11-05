@@ -1862,7 +1862,7 @@ def test_the_zero_job_floor_is_past_the_measured_queue_wait():
     run's FIRST job: p50 29.9 min, p95 77.0 min, max 81.9 min. The budget derivation
     this floor defers to is `tools/ci_queue_health.py:309`
     (`DEFAULT_MAX_PR_WAIT_SECONDS = 90 * 60.0`, "the first round number past" that max),
-    and `ci-wall-clock.md` §6 lines 368-370 records the same derivation in its own
+    and `ci-wall-clock.md` §6 lines 379-381 records the same derivation in its own
     words ("max first-job wait 81.9 min → 90 min, so it fires past the measured-normal
     population rather than on it"). The floor was
     1200 s, i.e. it selected the MEDIAN wait, and the repair for this class is

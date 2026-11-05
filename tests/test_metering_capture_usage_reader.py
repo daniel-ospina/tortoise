@@ -99,12 +99,14 @@ def _names_the_reader(path):
     door, and a text scan reads that prose as a second consumer — so the pin
     reds on the very file that explains the relationship it enforces (the
     ``#10675`` class: a pin that reads a file as TEXT also matches the prose
-    about it). An AST drops comments and docstrings by construction.
+    about it). Comments never reach the AST; a docstring does, and is excluded
+    here EXPLICITLY by an id-set rather than "by construction".
 
     The detection surface is every **direct syntactic** reference in the scanned
     package — an attribute, a bare name, an import alias (including a re-export
-    with no use site at all), or the reader's name as a string literal INSIDE a
-    call or subscript. Those last two arms are here because a first version of
+    with no use site at all), or the reader's name as a string literal ANYWHERE in
+    the module whose value IS the name or a dotted path ENDING in it (a docstring
+    excepted). Those last two arms are here because a first version of
     this helper matched only ``ast.Attribute``/``ast.Name`` and therefore read
     ``from … import get_capture_usage as gcu`` + ``gcu(o)`` as clean — a
     false-negative the old substring scan did not have, and house style in this
