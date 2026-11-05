@@ -9630,6 +9630,106 @@ exec {real} "$@"
         self.assertIn("VERDICT: INCOMPLETE", out)
         self.assertIn("lane-queue-unreadable", out)
 
+    # ── cycle-1 review findings: the arms a green suite did not see ──────────
+
+    def test_a_live_pi_with_an_unreadable_cwd_is_incomplete_never_clean(self):
+        """Review cycle 1, HIGH: cannot-look is not CLEAN.
+
+        A live `pi` candidate whose cwd cannot be read is a lane this surface
+        could not attribute, and that is the NORMAL shape where `lsof` is absent
+        or the process runs under another uid. Writing it into the prose note
+        only left the verdict CLEAN while the row said a lane could not be ruled
+        out. `777002` does not exist, so both `/proc/<pid>/cwd` and `lsof` fail.
+        """
+        table = self.tmp / "table-unreadable-cwd.txt"
+        table.write_text("1 0 /sbin/init\n777002 1 pi\n")
+        rc, out = self.run_tool(
+            env_extra={"COLLISION_PREFLIGHT_PROCESS_TABLE": str(table)})
+        self.assertEqual(rc, 2, out)
+        self.assertIn("VERDICT: INCOMPLETE", out)
+        self.assertIn("process-cwd-unreadable", out)
+        self.assertNotIn("9/9 surfaces queried", out)
+
+    def test_an_unreadable_queue_pid_is_incomplete_never_clean(self):
+        """Review cycle 1, MEDIUM: an unreadable `.pid` is UNDECIDABLE, not dead.
+
+        `pid=None` used to fall through `_pid_is_alive` as False — so the
+        write-then-flush window at dispatch time (the lane that was JUST started)
+        was rendered as a decided "not live".
+        """
+        queue = self.tmp / "lane-queue-unreadable-pid"
+        queue.mkdir(exist_ok=True)
+        (queue / "prd-test-owner-test-repo-3061.pid").write_text("")
+        rc, out = self.run_tool(
+            env_extra={"COLLISION_PREFLIGHT_LANE_QUEUE": str(queue)})
+        self.assertEqual(rc, 2, out)
+        self.assertIn("lane-queue-pid-unreadable", out)
+        self.assertNotIn("VERDICT: CLEAN", out)
+
+    def test_a_sibling_repo_queue_entry_does_not_block(self):
+        """Review cycle 1, MEDIUM: the queue prefix needs a BOUNDARY.
+
+        With slug `test-owner/test-repo`, a bare `startswith` matched
+        `prd-test-owner-test-repo-EXTRA-3061.pid` — a DIFFERENT repo whose name
+        extends this one with a hyphen — and blocked a legitimate dispatch while
+        naming a queue file that does not exist.
+        """
+        queue = self.tmp / "lane-queue-sibling"
+        queue.mkdir(exist_ok=True)
+        (queue / "prd-test-owner-test-repo-EXTRA-3061.pid").write_text(
+            str(self._live_non_ancestor_pid()))
+        rc, out = self.run_tool(
+            env_extra={"COLLISION_PREFLIGHT_LANE_QUEUE": str(queue)})
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertNotIn("lane:prd-", out)
+
+    def test_the_cwd_arm_sees_a_peer_in_a_sibling_worktree(self):
+        """Review cycle 1, HIGH: the cwd arm must be scoped to the MAIN worktree.
+
+        AGENTS.md prescribes `collision_preflight.py <N> --repo .` run FROM the
+        lane's own worktree — so scoping the cwd arm to `target.path` excluded
+        every peer in a sibling `<hub>/.worktrees/...` directory, and the arm went
+        inert under exactly the documented invocation while reporting a complete
+        scan. The real lane here is a `pi`-named process standing in a SIBLING
+        worktree of the same repo; the tool is asked from a second worktree.
+        """
+        # ⛔ THE WORKTREES MUST LIVE INSIDE THE REPO, like the fleet's own
+        # `<hub>/.worktrees/<lane>` — the helper puts them beside it, which is
+        # not the shape this finding is about.
+        worktrees = self.repo / ".worktrees"
+        worktrees.mkdir(exist_ok=True)
+        asked_from = worktrees / "asker-3061"
+        peer_wt = worktrees / "peer-3061"
+        for path, branch in ((asked_from, "fix/3061-asker"),
+                             (peer_wt, "fix/3061-peer")):
+            subprocess.run(["git", "worktree", "add", "-q", "--no-checkout",
+                            "-b", branch, str(path), "HEAD"],
+                           cwd=self.repo, check=True, capture_output=True, text=True)
+        pi = peer_wt.parent / "fakebin-pi"
+        pi.mkdir(exist_ok=True)
+        binary = pi / "pi"
+        if not binary.exists():
+            shutil.copy("/bin/sleep", binary)
+        proc = subprocess.Popen(
+            ["pi", "120"], cwd=str(peer_wt),
+            env={**os.environ, "PATH": f"{pi}:{os.environ.get('PATH', '')}"},
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            # The table SEAM declares the row (`pi` + this pid); its cwd comes
+            # from /proc for the REAL process, which is the point.
+            table = self.tmp / "table-sibling.txt"
+            table.write_text(f"1 0 /sbin/init\n{proc.pid} 1 pi\n")
+            rc, out = self.run_tool(
+                repo_arg=asked_from,
+                env_extra={"COLLISION_PREFLIGHT_PROCESS_TABLE": str(table)})
+        finally:
+            proc.terminate()
+            proc.wait(timeout=10)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertIn("working directory names #3061", out)
+
     def test_the_self_pid_exemption_covers_the_callers_own_queue_entry(self):
         """A lane's own live dispatch entry must not collide with it (#10684).
 

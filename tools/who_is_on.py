@@ -612,7 +612,17 @@ def who_holds(issue: int, repo_arg: str | None, gh_bin: str, git_bin: str,
     local_repo = target.path or os.getcwd()
     try:
         surfaces, title, _rc = cp.run_preflight(
-            issue, target, gh_bin, git_bin, timeout, identity=cp.Identity(login=None),
+            issue, target, gh_bin, git_bin, timeout,
+            # ⛔ THE VERB MUST CARRY THE CALLER'S OWN IDENTITY (review cycle 1).
+            # With a bare `Identity(login=None)` the live-lane surface could not
+            # apply the self exemption, so a lane asking "is anyone on my issue?"
+            # was told "1 holder(s)" — itself — i.e. #10684 reintroduced one verb
+            # over, and on a PR number it disagreed with the gate about the same
+            # input. Same ancestry set the gate auto-declares.
+            identity=cp.Identity(
+                login=None,
+                self_pids=frozenset(cp._ancestor_pids(git_bin, timeout)),
+            ),
         )
     except cp.NotAWorkItem as exc:
         # A DESIGNED refusal, not an unexpected failure: the gate refuses a

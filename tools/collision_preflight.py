@@ -1105,11 +1105,24 @@ class Identity:
     login: str | None = None
     self_branches: frozenset[str] = frozenset()
     self_worktrees: frozenset[str] = frozenset()
-    #: The caller's OWN process ids — this process and its ANCESTORS (#10684,
-    #: #9251). A board lane whose `session.pi_pid` is in this set is the caller
-    #: by construction, so it is reported as the caller's own work rather than a
-    #: competing claim. See `owns_pid` for why ancestry rather than a bare
-    #: `os.getpid()`.
+    #: The caller's OWN process ids (#10684, #9251). A board lane whose
+    #: `session.pi_pid` is in this set is reported as the caller's own work rather
+    #: than a competing claim.
+    #:
+    #: ⛔ TWO HALVES, TWO TRUST MODELS — do not run them together (review cycle 1).
+    #:   * AUTO-DECLARED (this process + its ANCESTORS) is the half the fix rests
+    #:     on: it is unfalsifiable, so it cannot hide a PEER. Ancestry rather than
+    #:     equality is load-bearing — a fleet lane is a three-deep chain
+    #:     (`bash -c <lane.sh>` -> `lane.sh` -> `pi`), so the pid the board records
+    #:     is the lane's `pi` while this pre-flight runs in a shell BELOW it.
+    #:   * `--self-pid` is a DECLARATION, exactly like `--self-branch` /
+    #:     `--self-worktree`: authoritative, never second-guessed, and — like them
+    #:     — it CAN name a pid that is not the caller's. That is the caller
+    #:     asserting ownership, not the tool granting a dismissal: the board
+    #:     publishes every lane's `session.pi_pid`, so a caller determined to hide
+    #:     a peer could always name it, and no automated check can tell that apart
+    #:     from a lane whose ancestry chain the tool could not read.
+    #: An UNDECLARED pid is fail-closed: it leaves the holder blocking.
     self_pids: frozenset[int] = frozenset()
 
     def __post_init__(self) -> None:
@@ -1162,36 +1175,6 @@ class Identity:
         if not path:
             return False
         return os.path.realpath(path) in self.self_worktrees
-
-    def owns_pid(self, pid: object) -> bool:
-        """True when `pid` is this process or one of its ANCESTORS (#10684/#9251).
-
-        ⛔ ANCESTRY, NOT EQUALITY, and the difference is the whole fix. A fleet
-        lane is a three-deep chain — `bash -c <lane.sh>` → `lane.sh` → `pi` — so
-        the pid the board records for the LANE (`session.pi_pid`) is the lane's
-        `pi`, while the shell that runs this pre-flight is a CHILD of it (or of
-        something above it). Comparing against `os.getpid()` alone would leave
-        the lane blocking itself, which is the measured defect: a lane whose
-        branch slug names its own issue reads COLLISION against the lane that
-        authorized it, and the remedy line then says "There is NO dismissal
-        switch".
-
-        The direction of error is the safe one: a WRONG self-pid can only hide
-        the CALLER's own lane, never a peer's — the same asymmetry `--self-branch`
-        and `--self-worktree` already accept (and the reason `self_worktrees` is
-        normalised at construction). An UNDECLARED pid is fail-closed: it leaves
-        the holder blocking.
-
-        `object` on purpose: the value comes from a board payload, and a
-        non-integer there (`None`, a string, a dict) must answer False rather
-        than raise inside the claim gate.
-        """
-        if not self.self_pids:
-            return False
-        if isinstance(pid, bool) or not isinstance(pid, int):
-            return False
-        return pid in self.self_pids
-
 
 @dataclass
 class RepoTarget:
@@ -5735,9 +5718,9 @@ HOLDER_UNMEASURED = "unmeasured"  # no pid reading at all          -> fail close
 HOLDER_AMBIGUOUS = "ambiguous"    # `resolve_sessions` refused     -> fail closed
 #: The holder IS the asking lane (#10684/#9251). Reported, never blocking —
 #: exactly how the branch and worktree surfaces already treat the caller's own
-#: ref (#3504 classes 1/4). This is NOT a dismissal switch: the exemption rests
-#: on the caller's own pid/ancestry, so a wrong declaration can only hide the
-#: caller's OWN lane, never a peer's.
+#: ref (#3504 classes 1/4). The AUTOMATIC half (pid ancestry) cannot hide a peer;
+#: the `--self-pid` half is a DECLARATION with the same trust model as
+#: `--self-branch` — see `Identity.self_pids`.
 HOLDER_SELF = "self"
 
 #: The ONLY non-empty states `fleet_state.workspace_terminal` emits. A terminal
@@ -6120,8 +6103,10 @@ def _holder_verdict(lane: dict, label: str, evidence: str,
     #
     # Ordering: pid ancestry outranks the ambiguity heuristic below, because it
     # is unfalsifiable evidence of identity while `guess_refused` is a guess that
-    # failed. A peer lane's pid cannot appear in the caller's ancestry chain, so
-    # this arm can never suppress a peer (the peer-blocking polarity is intact).
+    # failed. A peer lane's pid cannot appear in the caller's AUTOMATIC ancestry
+    # chain, so that half can never suppress a peer; an explicit `--self-pid`
+    # naming a peer is the caller declaring ownership, the same trust model
+    # `--self-branch` has always had (see `Identity.self_pids`).
     if self_pids and _lane_self_evidence(lane, session, self_pids):
         return Holder(
             label, evidence, HOLDER_SELF,
@@ -7273,7 +7258,7 @@ def _classify_issue_error(exc: SurfaceError) -> str:
 # record (#3504). `SURFACE_PROCESSES` itself is declared ONCE, with the other
 # surface names (`:691`) — a second literal here was a rebind that only invited
 # the two to drift.
-#: A FILE holding `ps -Ao pid=,ppid=,command=` output. The measurement seam (and
+#: A FILE holding `ps -ww -Ao pid=,ppid=,command=` output. The measurement seam (and
 #: the only way a test can be hermetic about a live process table).
 PROCESS_TABLE_ENV = "COLLISION_PREFLIGHT_PROCESS_TABLE"
 #: The `ps` binary. `--ps`-equivalent; mirrors `COLLISION_PREFLIGHT_GH`/`_GIT`.
@@ -7315,11 +7300,11 @@ def _process_rows(ps_bin: str, cwd: str, timeout: float
                           f"({type(exc).__name__})")
     else:
         rc, text, err, timed_out = _run(
-            [ps_bin, "-Ao", "pid=,ppid=,command="], cwd, timeout
+            [ps_bin, "-ww", "-Ao", "pid=,ppid=,command="], cwd, timeout
         )
         if rc != 0:
             why = "timeout" if timed_out else f"exit {rc}"
-            return None, f"`ps -Ao pid=,ppid=,command=` failed ({why}): {_one_line(err)}"
+            return None, f"`ps -ww -Ao pid=,ppid=,command=` failed ({why}): {_one_line(err)}"
     rows: list[tuple[int, int, str]] = []
     for line in text.splitlines():
         parts = line.split(None, 2)
@@ -7345,7 +7330,7 @@ def _ancestor_pids(ps_bin: str, timeout: float) -> frozenset[int]:
     Linux answers from `/proc/<pid>/stat` (one read per link, no subprocess);
     everything else walks `ps -o ppid=`. A failure returns the set it managed to
     build — an incomplete self set can only leave MORE holders blocking, which is
-    the fail-closed direction (`owns_pid`).
+    the fail-closed direction (`Identity.self_pids`).
     """
     pids: set[int] = {os.getpid()}
     pid = os.getpid()
@@ -7431,15 +7416,27 @@ def _lane_queue_entries(slug: str | None
         if not name.startswith(prefix) or not name.endswith(".pid"):
             continue
         stem = name[:-len(".pid")]
+        # ⛔ A BARE `startswith` MATCHES A SIBLING REPO (review cycle 1): with
+        # slug `test-owner/test-repo`, the entry
+        # `prd-test-owner-test-repo-EXTRA-3061.pid` (a DIFFERENT repo whose name
+        # extends this one with a hyphen) matched the prefix and blocked a
+        # legitimate dispatch — and the hit named a queue file that does not
+        # exist. The remainder after the prefix must be EXACTLY the PR number.
+        remainder = stem[len(prefix):]
         tail = stem.rsplit("-", 1)[-1]
-        if not tail.isdigit():
+        if not remainder.isdigit() or not tail.isdigit():
             continue
         try:
             with open(os.path.join(root, name), "r", encoding="utf-8",
                       errors="strict") as fh:
                 pid_txt = fh.read().strip()
-        except (OSError, ValueError):
-            entries.append({"pr": int(tail), "pid": None,
+        except (OSError, ValueError) as exc:
+            # ⛔ A `.pid` THAT CANNOT BE READ IS NOT A DEAD LANE (review cycle 1).
+            # `pid=None` used to fall through `_pid_is_alive` as False, so the
+            # write-then-flush window at dispatch time — the lane that was just
+            # started — was rendered as a decided "not live". It is undecidable,
+            # so the caller makes the row INCOMPLETE instead.
+            entries.append({"pr": int(tail), "pid": None, "unreadable": str(exc),
                             "path": os.path.join(root, stem + ".log")})
             continue
         try:
@@ -7551,11 +7548,26 @@ def scan_process_surface(
             f"#{issue}"
         )
         if unattributable:
+            # ⛔ CANNOT LOOK IS NOT CLEAN (review cycle 1, HIGH). A live `pi`
+            # whose cwd cannot be read is a lane this surface could not
+            # attribute — and this is the NORMAL shape where `lsof` is absent or
+            # the process runs under another uid (`/proc/<pid>/cwd` -> EACCES).
+            # Reporting it only in prose left the verdict CLEAN "9/9 surfaces
+            # queried" while the row said a lane could not be ruled out: the
+            # exact fail-open this surface exists to close.
             note += (
                 f"; ⚠ {unattributable} could not be attributed because its cwd "
                 "was unreadable — a lane among them cannot be ruled out "
                 f"({'; '.join(notes)})"
             )
+            surface.note = note
+            surface.incomplete(
+                f"process-cwd-unreadable: {unattributable} live `pi` process(es) "
+                "could not be attributed because their working directory could "
+                "not be read — a lane among them cannot be ruled out, so this is "
+                "NOT a clean scan (NOT clean)"
+            )
+            note = surface.note
         if pi_rows and not named:
             note += "; no live lane names this issue"
         if not pi_rows:
@@ -7566,15 +7578,17 @@ def scan_process_surface(
     entries, absent, qwhy = _lane_queue_entries(slug)
     root = _lane_queue_root()
     if entries is None:
-        combined = (surface.note + "; " if surface.note else "") + (
+        # ⛔ `combined` USED TO EMBED `surface.note` and then be prefixed with it
+        # again, printing the process-table reason twice (review cycle 1, LOW).
+        tail = (
             "lane-queue-unreadable: "
             f"{qwhy} — the background-lane queue could not be read, so a "
             "harness lane cannot be ruled out (NOT clean)"
         )
         if surface.status == STATUS_INCOMPLETE:
-            surface.note = f"{surface.note}; ALSO: {combined}"
+            surface.note = f"{surface.note}; ALSO: {tail}"
         else:
-            surface.incomplete(combined)
+            surface.incomplete(tail)
         return
     if absent:
         surface.note = (surface.note + "; " if surface.note else "") + (
@@ -7587,9 +7601,16 @@ def scan_process_surface(
     live_entries = 0
     attributed = 0
     own_entries = 0
+    undecidable = 0
     self_pids = identity.self_pids or frozenset()
     for entry in entries:
-        if entry.get("ended") or not _pid_is_alive(entry.get("pid")):
+        if entry.get("ended"):
+            continue
+        if entry.get("pid") is None:
+            # Live or finished cannot be decided from an unreadable `.pid`.
+            undecidable += 1
+            continue
+        if not _pid_is_alive(entry.get("pid")):
             continue
         if entry.get("pid") in self_pids:
             # ⛔ THE SAME SELF EXEMPTION AS THE PROCESS ARM (#10684). A lane that
@@ -7616,8 +7637,15 @@ def scan_process_surface(
         f"lane queue: {len(entries)} entr(ies) for this repo, {live_entries} "
         f"live, {attributed} for this issue"
         + (f", {own_entries} your own" if own_entries else "")
+        + (f", {undecidable} with an unreadable pid" if undecidable else "")
         + f" ({root})"
     )
+    if undecidable:
+        surface.incomplete(
+            f"lane-queue-pid-unreadable: {undecidable} queue entr(ies) for this "
+            "repo carry a `.pid` that could not be read, so whether those lanes "
+            "are RUNNING cannot be decided — NOT a clean scan (NOT clean)"
+        )
 
 
 def run_preflight(
@@ -8519,7 +8547,16 @@ def run_preflight(
         surfaces[SURFACE_PROCESSES], issue, identity,
         slug=slug, cwd=cwd, ps_bin=ps_bin, timeout=timeout,
         attributed_prs=frozenset(attributed_prs),
-        repo_root=target.path,
+        # ⛔ THE REPO ROOT IS THE MAIN WORKTREE, NOT `target.path` (review cycle
+        # 1, HIGH). AGENTS.md prescribes `collision_preflight.py <N> --repo .`
+        # run FROM the lane's own worktree, which makes `target.path` that
+        # worktree — so scoping the cwd arm to it excluded every PEER lane in a
+        # sibling `<hub>/.worktrees/...` directory and the arm went inert under
+        # exactly the documented invocation, while reporting a complete scan.
+        # `_main_worktree_root` is the same reader the repo already uses for
+        # sibling discovery; a failure there falls back to `target.path`.
+        repo_root=(_main_worktree_root(git_bin, target.path, timeout)
+                   or target.path) if target.path else None,
     )
 
     # 5. Issue surface (assignee + HOLDER). It is scanned LAST only because that
@@ -9559,13 +9596,15 @@ def main(argv: list[str] | None = None) -> int:
                         help="git binary (env COLLISION_PREFLIGHT_GIT)")
     parser.add_argument("--ps", default=os.environ.get(PS_ENV, "ps"),
                         help="ps binary for the live-lane surface, which reads "
-                             f"`ps -Ao pid=,ppid=,command=` (env {PS_ENV})")
+                             f"`ps -ww -Ao pid=,ppid=,command=` (env {PS_ENV})")
     parser.add_argument(
         "--self-pid", action="append", default=[], metavar="PID", type=int,
-        help="a process id this session OWNS (repeatable). A board lane whose "
-             "`session.pi_pid` is this process or one of its ANCESTORS is "
-             "reported as your own work and cannot block (#10684/#9251); the "
-             "caller's own pid and ancestry are added automatically.",
+        help="a process id this session OWNS (repeatable) — a DECLARATION with "
+             "the same trust model as --self-branch, so name only your own. A "
+             "board lane whose `session.pi_pid` is in the set is reported as "
+             "your own work and cannot block (#10684/#9251). The caller's own "
+             "pid and its ANCESTORS are added automatically and cannot hide a "
+             "peer lane.",
     )
     # Deliberately NO `type=` on --timeout / --pr-limit / --closed-pr-limit, and
     # each env default is passed through RAW. A bad value must be EXIT_USAGE, and
