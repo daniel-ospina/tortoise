@@ -1660,12 +1660,13 @@ def test_section_9_1b_counts_the_routes_it_actually_enumerates():
 # projection's own constant, the same one the R7 upsert writes through — not
 # restated here, so a move of that home reds in this pin instead of leaving two
 # paragraphs that agree with each other and with nothing else. Each half is
-# asserted INSIDE its own section (§9.4 by heading slice, §12.1b by its unique
-# footnote anchor): a whole-document `in` check would stay green while §9.4 itself
-# was reverted, as long as one copy of the correct sentence survived elsewhere in
-# 2,000 lines — the "presence-only pin certifies whichever text happens to be
-# there" failure the #10244 review measured on a frozen `§11.1`. The retired
-# phrasings are asserted ABSENT as well as the corrected pointer PRESENT.
+# asserted INSIDE its own section (§9.4 by heading slice, §12.1b by its footnote
+# anchor, whose UNIQUENESS is itself asserted): a whole-document `in` check would
+# stay green while §9.4 itself was reverted, as long as one copy of the correct
+# sentence survived elsewhere in 2,000 lines — the "presence-only pin certifies
+# whichever text happens to be there" failure the #10244 review measured on a
+# frozen `§11.1`. The retired phrasings are asserted ABSENT as well as the
+# corrected pointer PRESENT.
 _RETIRED_SUMMARY_BLUR = "We already write the summary — it is the S1 narrative"
 _RETIRED_VECTOR_FOOTNOTE = "would be **indexing an existing field**"
 _SOURCE_VECTOR_FOOTNOTE_ANCHOR = "Practical footnote for `:Source`"
@@ -1690,6 +1691,13 @@ def _source_vector_footnote(text: str) -> str:
         f"{_STORAGE_DOC.name} no longer carries §12.1b's `:Source` footnote "
         f"({_SOURCE_VECTOR_FOOTNOTE_ANCHOR!r}) — re-derive where §12.1b states "
         "what the source vector would index before freezing a pointer at it")
+    assert text.count(_SOURCE_VECTOR_FOOTNOTE_ANCHOR) == 1, (
+        f"{_STORAGE_DOC.name} carries "
+        f"{text.count(_SOURCE_VECTOR_FOOTNOTE_ANCHOR)} occurrences of "
+        f"{_SOURCE_VECTOR_FOOTNOTE_ANCHOR!r} — this pin binds to the FIRST, so "
+        "the anchor must name exactly one line; a second occurrence would "
+        "rebind all three §12.1b assertions to the wrong sentence while the "
+        "real footnote drifts back")
     start = text.rfind("\n", 0, at) + 1
     return text[start:].split("\n", 1)[0]
 
@@ -1704,14 +1712,15 @@ def _section(text: str, start_heading: str, end_heading: str) -> str:
         f"{_STORAGE_DOC.name} no longer carries the heading {end_heading!r} — "
         "the section this pin brackets has MOVED or been renamed")
     start = text.index(start_heading)
-    # `find`, not `index`: an ABSENT or REORDERED end heading must reach the
-    # assertion below with its diagnosis, not raise an anonymous ValueError
-    # naming a substring the reader never chose.
+    # `find`, not `index`: a REORDERED end heading (present in the document, but
+    # not after the start) reaches the assertion below with its diagnosis instead
+    # of raising an anonymous ValueError naming a substring nobody chose. An
+    # ABSENT end heading is caught by the guard above, which names it.
     end = text.find(end_heading, start)
     assert end > start, (
         f"{end_heading!r} does not follow {start_heading!r} in "
-        f"{_STORAGE_DOC.name} — the section order changed (or the end heading "
-        "was renamed or removed) and this pin is bracketing the wrong span")
+        f"{_STORAGE_DOC.name} — the section order changed and this pin is "
+        "bracketing the wrong span")
     return text[start:end]
 
 
@@ -1724,7 +1733,7 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
     strings are present, so §9.4 fails on `_RETIRED_SUMMARY_BLUR` and §12.1b's
     footnote fails on `_RETIRED_VECTOR_FOOTNOTE`. From `b748df7d0` (main,
     post-`#10978`) onward NEITHER is present — and neither was present at any
-    commit of THIS branch, whose origin `2cc7a95ea` already carried `#10980`'s
+    commit of THIS branch, whose origin `b748df7d0` already carried `#10978`'s
     correction. So on this branch both halves are that correction's REGRESSION
     GUARD, not its author: the pin reds if either section drifts back, which is
     the only thing that would catch it. "Measured on origin/main" would have
@@ -1733,10 +1742,8 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
     is scoped to its own section, and the home it must name is derived from the
     projection, not paraphrased here.
     """
-    from tortoise import record_projection
-
     # ── the premise: §9.1's narrative home, from the projection that writes it ──
-    home = f"public.{record_projection.NARRATIVE_TABLE}"
+    home = f"public.{rp.NARRATIVE_TABLE}"
     # Derived, not named: a hardcoded migration FILENAME makes this leg red on a
     # rename or a squash of a tree where the claim is still true — and it would
     # red with "the home MOVED", a false diagnosis. The module runs on every
@@ -1762,9 +1769,15 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
         f"§9.4 names `:Source.summary` {s94.count(':Source.summary')} times — "
         f"§9.4 is the paragraph that says which field the vector must NOT "
         f"read, and it must name that trap exactly once. An ADDED occurrence "
-        f"is how the retired \"we already write the summary\" reading comes "
-        f"back in ADDITIVE form: the correct pointer stays, and the forbidden "
-        f"instruction appears beside it — which a presence-only check misses")
+        f"is how the forbidden instruction comes back in ADDITIVE form: the "
+        f"correct pointer stays and the wrong one appears beside it, which a "
+        f"presence-only check misses. ⚠️ This counts the `:Source.summary` "
+        f"spelling ONLY — §9.4 legitimately names bare `summary` (\"a §4.6 "
+        f"`:Source` property\"), so a bare-`summary` additive form is NOT "
+        f"covered here; `_RETIRED_SUMMARY_BLUR` is the only arm over it. The "
+        f"exactness is deliberate and fails CLOSED: a future legitimate second "
+        f"`:Source.summary` mention reds every docs-only PR, which is the "
+        f"price of the trap, paid on purpose")
     assert "never from `:Source.summary`" in s94, (
         "§9.4 no longer states the NEGATION — naming `:Source.summary` beside "
         "the narrative's home without saying which one the vector must not "
