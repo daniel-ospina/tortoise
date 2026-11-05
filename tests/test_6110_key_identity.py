@@ -2249,6 +2249,35 @@ def test_a_preexisting_twin_pair_is_SURFACED_never_silently_merged(sdk):
         "twin-TWIN-PAD", "twin-TWIN-TRIM"]
 
 
+def test_a_NON_ASCII_pad_is_seekable_by_its_OWN_spelling(sdk):
+    """THE TRIM SET IS THE ENGINE'S, NOT PYTHON'S (#10481 review finding).
+
+    Measured on the embedded engine: the ``key`` index trims exactly
+    ``{space, tab, newline, vtab, formfeed, CR}``. A pad the engine does NOT
+    trim (NBSP here, and the same holds for em/ideographic space and ``\\x1f``)
+    is indexed VERBATIM, so its raw spelling must stay the seek term. Bare
+    ``str.strip()`` — Python's much wider ``str.isspace()`` class — rewrote it
+    to ``"PK3"`` and sent a term the index does not hold, which made a row that
+    was findable BEFORE the fix lose its findability and let two ``dedup=True``
+    writes mint a duplicate pair — the defect inverted, and worse.
+    """
+    nb = "\u00a0"
+    key = f"{nb}PK3{nb}"
+    a = sdk.create_point("statement", "NBSP-A", key=key, dedup=True)
+    assert sdk._find_points_by_key(key, pointKind="statement") == [a["id"]], (
+        "an NBSP-padded key lost the findability it had before the fix")
+    # …and it still FOLDS, so the guard cannot certify a duplicate.
+    b = sdk.create_point("statement", "NBSP-B", key=key, dedup=True)
+    assert b["id"] == a["id"], "an NBSP-padded re-run minted a second carrier"
+    holders, _terminal = sdk._key_holder_state("statement", key)
+    assert holders == [a["id"]], "the Phase-1 guard cannot see the NBSP holder"
+    # The stored value is still the caller's, pad and all.
+    stored = sdk._get_proj().g.query(
+        "MATCH (n:Point) WHERE n.id = $id RETURN n.key",
+        params={"id": a["id"]}).result_set
+    assert stored and stored[0][0] == key, stored
+
+
 def test_a_padded_key_never_REASSIGNS_the_stored_spelling(sdk):
     """THE FIRST-WRITER SPELLING STANDS (#10481 × #6110).
 

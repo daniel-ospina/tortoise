@@ -6906,9 +6906,14 @@ def _item_supplied_key(item: dict) -> object:
     return nested.get("key") if isinstance(nested, dict) else None
 
 
+#: The characters the engine's key INDEX trims — its own set, measured (#10481),
+#: NOT Python's ``str.isspace()`` class (see :func:`_key_seek_term`).
+_KEY_INDEX_TRIM_SET = " \t\n\v\f\r"
+
+
 def _key_seek_term(key: object) -> object:
     """The term the KEY-IDENTITY seek must send for ``key`` — the value the
-    engine's index actually holds, which is the STRIPPED term (#10481).
+    engine's index actually holds, which is the ASCII-TRIMMED term (#10481).
 
     ⛔ Why this exists, measured: ``key`` is index-backed
     (``projection._POINT_RANGE_INDEX_PROPS``, #8400) and FalkorDB stores the
@@ -6941,6 +6946,18 @@ def _key_seek_term(key: object) -> object:
     reserves (§Scope of the ruling). A non-string keeps its current shape and
     is refused downstream exactly as before.
 
+    ⛔ THE TRIM SET IS THE ENGINE'S, NOT PYTHON'S — ``\\t\\n\\v\\f\\r`` and a
+    space, exactly, never bare ``str.strip()``. Measured on the embedded engine
+    (review finding, #10481): the index trims those SIX ASCII characters and no
+    others, so for a pad the engine does NOT trim — ``"\\u00a0PK\\u00a0"``
+    (NBSP), ``\\u2003`` (em space), ``\\u3000`` (ideographic), ``\\x1f`` — the
+    seek matches the RAW term verbatim. ``str.strip()`` uses Python's much
+    wider ``str.isspace()`` class, so it would rewrite an NBSP pad to ``"PK"``
+    and send a term the index does not hold: a key that was findable by its own
+    spelling BEFORE this fix would lose it, and two ``dedup=True`` writes that
+    folded would mint a duplicate again — the defect inverted, and worse. The
+    ``test_a_NON_ASCII_pad_is_seekable_by_its_OWN_spelling`` case pins it.
+
     ⚠️ A whitespace-ONLY term answers ``""``, and that is safe only because
     every call site pre-gates on ``key.strip()`` truthiness
     (``_resolve_dedup_hit``, ``_key_holder_state``, ``_item_dedup_key``), so it
@@ -6951,7 +6968,7 @@ def _key_seek_term(key: object) -> object:
     be a silent MISS rather than a cross-key match — still wrong, and still
     not this function's to paper over.)
     """
-    return key.strip() if isinstance(key, str) else key
+    return key.strip(_KEY_INDEX_TRIM_SET) if isinstance(key, str) else key
 
 
 def _item_dedup_key(item: dict) -> str | None:
