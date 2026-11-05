@@ -4237,7 +4237,7 @@ def _session_source_metadata(transcript: str) -> tuple[str, list[str]]:
     # docstring. A pattern with ``{2,}`` here conflates "no lexicon" with "no
     # word tokens of 3+ characters", and that conflated case is a real, reachable
     # transcript (``"User: ok go"`` — a kept turn with no long word).
-    # ⛔ SCRIPT-FREE too: ``[^\\W\\d_]`` is a Unicode LETTER, so this is the same
+    # ⛔ SCRIPT-FREE too: ``[^\W\d_]`` is a Unicode LETTER, so this is the same
     # word class as ``[A-Za-z]`` for English and a correct one for every other
     # script — an ASCII class made a Cyrillic/CJK transcript wordless and wrote
     # it ``summary=''`` with no ``_searchText`` (#10852 review, P2).
