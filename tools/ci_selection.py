@@ -3248,10 +3248,28 @@ def _duplicate_key_loader():
 
         def construct_mapping(self, node, deep=False):
             if isinstance(node, yaml.MappingNode):
+                # #10790 review 2: count the pairs the DOCUMENT wrote BEFORE
+                # `flatten_mapping` prepends the merge-sourced ones. Only a
+                # document-written pair can be a duplicate: a `<<:` key that
+                # the document then overrides is the merge type's documented
+                # purpose (yaml.org/type/merge.html, "unless the key already
+                # exists in it", Example 1 `# Override`), and `yaml.safe_load`
+                # resolves it to the document's value — which is exactly what
+                # this loader must keep doing.
+                own_pairs = len(node.value)
                 self.flatten_mapping(node)
+                first_own = len(node.value) - own_pairs
+            else:  # pragma: no cover - SafeConstructor only maps MappingNodes
+                first_own = 0
             seen: dict[object, int] = {}
             mapping = {}
-            for key_node, value_node in node.value:
+            for index, (key_node, value_node) in enumerate(node.value):
+                if index < first_own:
+                    # Introduced by `<<:`: an inherited pair, never a repeat of
+                    # one this document wrote, so it cannot be data loss.
+                    mapping[self.construct_object(key_node, deep=deep)] = (
+                        self.construct_object(value_node, deep=deep))
+                    continue
                 key = self.construct_object(key_node, deep=deep)
                 line = key_node.start_mark.line + 1
                 if key in seen:

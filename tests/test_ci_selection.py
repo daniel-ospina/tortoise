@@ -5690,6 +5690,60 @@ def test_the_real_manifest_has_no_duplicate_mapping_key():
     assert manifest["durations"], "the durations map must not be empty"
 
 
+# A YAML merge key (`<<:`) makes a key appear TWICE in the node pyyaml hands the
+# constructor: `flatten_mapping` PREPENDS the merged pairs, so the document's own
+# pair and the inherited twin both sit in `node.value`. That is the SPEC's
+# documented override — yaml.org/type/merge.html: the pairs are inserted "unless
+# the key already exists in it", Example 1 is literally titled `# Override` —
+# and `yaml.safe_load` resolves it to the document's own value. Reporting it as a
+# duplicate reds a legal document in a REQUIRED check, with a diagnostic that
+# actively misleads ("usually a stale union-merge copy") for a shape that is by
+# construction not one.
+#
+# Only pairs the DOCUMENT itself wrote can be a duplicate. Measured on the
+# pre-fix loader: `parse_manifest_text` raised `duplicate mapping key 'weight':
+# line 7 repeats line 3` on the document below while `yaml.safe_load` and
+# `tools/registry_integrity.check_registry` (the sibling gate in the same
+# `manifest-integrity` job) both accepted it.
+MERGE_KEY_OVERRIDE_DOC = """\
+defaults: &defaults
+  weight: 2.0
+  note: carried
+fresh:
+  <<: *defaults
+  weight: 9.5
+"""
+
+
+def test_a_merge_key_override_is_NOT_a_duplicate():
+    """`<<:` overriding an inherited key is the spec's purpose, not data loss."""
+    from tools import ci_selection as cs
+
+    # The authority: what the library (and every plain reader) resolves this to.
+    expected = yaml.safe_load(MERGE_KEY_OVERRIDE_DOC)
+    assert expected["fresh"] == {"weight": 9.5, "note": "carried"}, expected
+
+    assert cs.parse_manifest_text(MERGE_KEY_OVERRIDE_DOC) == expected, (
+        "the strict loader must resolve a merge-key override exactly as "
+        "`yaml.safe_load` does — the document's own pair wins"
+    )
+
+
+def test_a_real_duplicate_beside_a_merge_key_is_still_refused():
+    """The merge-key carve-out must not blind the detector: own pairs still red."""
+    from tools import ci_selection as cs
+
+    doc = MERGE_KEY_OVERRIDE_DOC + "  weight: 10.0\n"
+    with pytest.raises(cs.DuplicateManifestKeyError) as excinfo:
+        cs.parse_manifest_text(doc)
+    issues = excinfo.value.issues
+    assert len(issues) == 1, issues
+    # The pair named is the DOCUMENT's two rows (7 and 6), never the inherited
+    # line 2 — a reader is pointed at the edit that created the duplicate.
+    assert "'weight'" in issues[0], issues[0]
+    assert "line 7 repeats line 6" in issues[0], issues[0]
+
+
 # ── #1266: matrix halves ↔ manifest consistency ──────────────────────────
 # The test (a)/(b) halves in python-ci.yml are a second source of truth next
 # to config/ci-surfaces.yml. The #1262 integrity gate only covers manifest
