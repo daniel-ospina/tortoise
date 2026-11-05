@@ -1655,17 +1655,21 @@ def test_section_9_1b_counts_the_routes_it_actually_enumerates():
 # vector, and nothing reds: both sentences are prose, and the graph stays green
 # while a designer embeds a word list and calls it a summary.
 #
-# ⛔ BOTH DIRECTIONS, BOTH SECTIONS SCOPED, and the PREMISE IS DERIVED. The
+# ⛔ BOTH DIRECTIONS, EACH HALF ANCHORED, and the PREMISE IS DERIVED. The
 # narrative's home is read from `record_projection.NARRATIVE_TABLE` — the
 # projection's own constant, the same one the R7 upsert writes through — not
 # restated here, so a move of that home reds in this pin instead of leaving two
-# paragraphs that agree with each other and with nothing else. Each half is
-# asserted INSIDE its own section (§9.4 by heading slice, §12.1b by its footnote
-# anchor, whose UNIQUENESS is itself asserted): a whole-document `in` check would
+# paragraphs that agree with each other and with nothing else. The POINTER,
+# NEGATION and COUNT assertions are asserted INSIDE their own section (§9.4 by
+# heading slice, §12.1b by its footnote anchor, whose UNIQUENESS is itself
+# asserted): a whole-document `in` check would
 # stay green while §9.4 itself was reverted, as long as one copy of the correct
 # sentence survived elsewhere in 2,000 lines — the "presence-only pin certifies
 # whichever text happens to be there" failure the #10244 review measured on a
-# frozen `§11.1`. The retired phrasings are asserted ABSENT as well as the
+# frozen `§11.1`. ⚠️ ONE check is deliberately NOT in-section: the retired-blur
+# absence is asserted over the WHOLE document, because that sentence is a claim
+# about the S1 narrative wherever it appears, and scoping it to §9.4 would let it
+# return in §10 unremarked. The retired phrasings are asserted ABSENT as well as the
 # corrected pointer PRESENT.
 _RETIRED_SUMMARY_BLUR = "We already write the summary — it is the S1 narrative"
 _RETIRED_VECTOR_FOOTNOTE = "would be **indexing an existing field**"
@@ -1714,20 +1718,29 @@ def _section(text: str, start_heading: str, end_heading: str) -> str:
     assert end_heading in text, (
         f"{_STORAGE_DOC.name} no longer carries the heading {end_heading!r} — "
         "the section this pin brackets has MOVED or been renamed")
-    # ⛔ The START heading's uniqueness is asserted, not assumed: `index` below binds
-    # to the FIRST match, so a duplicate heading placed ABOVE the real section
-    # silently WIDENS the slice — and every assertion inside it can then be
-    # satisfied by a surviving copy elsewhere, which is exactly the
-    # "presence-only pin certifies whichever text happens to be there" failure this
-    # module's header names. The END heading needs no such assert and must not get
-    # a reflexive one: a duplicate of it between the start and the real end
-    # TRUNCATES the slice, so its assertions red — it already fails CLOSED.
+    # ⛔ BOTH headings' uniqueness is asserted, not assumed, and the two hazards are
+    # OPPOSITE directions of one hole. `index` below binds to the FIRST start
+    # match, so a duplicate start heading placed ABOVE the real section WIDENS the
+    # slice, and every assertion inside it can then be satisfied by a surviving
+    # copy elsewhere. `find` binds to the FIRST end match AFTER the start, so a
+    # duplicate end heading placed just BEFORE a regression TRUNCATES the slice and
+    # the regression falls outside it — ⚠️ measured, not assumed: with an additive
+    # second `:Source.summary` line in §9.4 the count assertion reds (2), and
+    # adding a duplicate `### 9.5 ` heading ABOVE that line turns the same pin
+    # GREEN (1) over the same regression. That is fail-OPEN, which is why neither
+    # heading is exempt from this assert.
     assert text.count(start_heading) == 1, (
         f"{_STORAGE_DOC.name} carries {text.count(start_heading)} occurrences of "
         f"{start_heading!r} — this pin slices from the FIRST match, so that heading "
         "must appear exactly once; a duplicate placed above the real section "
         "widens the span and can leave every assertion inside it green on text "
         "the section does not own")
+    assert text.count(end_heading) == 1, (
+        f"{_STORAGE_DOC.name} carries {text.count(end_heading)} occurrences of "
+        f"{end_heading!r} — this pin ends at the FIRST match after the start, so "
+        "that heading must appear exactly once; a duplicate placed before a "
+        "regression TRUNCATES the span and silently moves the regression outside "
+        "the text the assertions read (measured fail-open, see above)")
     start = text.index(start_heading)
     # `find`, not `index`: a REORDERED end heading (present in the document, but
     # not after the start) reaches the assertion below with its diagnosis instead
@@ -1752,9 +1765,11 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
     the section), so the run stops there and the blur assertion after it is
     never reached. ⚠️ Naming the blur as the failing assertion would be an
     inference, not a measurement — BOTH retired strings ARE present at that
-    tree (1 each), and calling `_source_vector_footnote` on it reds on
-    `_RETIRED_VECTOR_FOOTNOTE`, but the §12.1b half is not executed by a plain
-    run at all. From `b748df7d0` (main, post-`#10978`) onward NEITHER retired
+    tree (1 each), and the §12.1b assertion over the footnote reds on
+    `_RETIRED_VECTOR_FOOTNOTE` (⚠️ the helper `_source_vector_footnote` asserts
+    only the anchor's presence and uniqueness and then RETURNS the line; the red
+    comes from the caller's assert on what it returns), but that half is not
+    executed by a plain run at all. From `b748df7d0` (main, post-`#10978`) onward NEITHER retired
     string is present — and neither was present at any commit of THIS branch,
     whose origin `b748df7d0` already carried `#10978`'s correction. So on this
     branch both halves are that correction's REGRESSION GUARD, not its author:
