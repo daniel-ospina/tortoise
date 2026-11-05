@@ -740,6 +740,37 @@ def test_a_non_object_check_run_entry_raises_a_verdict(monkeypatch):
     assert "non-object" in str(excinfo.value)
 
 
+def test_the_check_run_endpoint_pins_filter_all_per_page_and_head_sha(monkeypatch):
+    """`filter=all` is the ONE parameter that makes "every attempt" true.
+
+    The default filter is NOT all (the module records 26 of 40 on a real commit),
+    and `total_count` SHRINKS with the filter — so the truncation guard cannot fire
+    and a required context can simply vanish. That reads as `FAIL(missing)` (a
+    permanent block on a legitimate PR) or, if GitHub selects "latest" per
+    (app, name), drops a sibling workflow's red in favour of another workflow's
+    newer green — the fail-open the `workflow_id` grouping exists to prevent.
+
+    Every other test in this file either monkeypatches `_gh_api_json` for its
+    PAYLOAD or replaces `fetch_check_runs` outright, so NONE of them asserts the
+    endpoint string: mutating `filter=all` to `filter=latest` left all 83 tests
+    green. This is the test that reds it.
+    """
+    seen: list[str] = []
+
+    def _capture(endpoint: str) -> dict:
+        seen.append(endpoint)
+        return {"check_runs": [{"name": "docs"}], "total_count": 1}
+
+    monkeypatch.setattr(rfo, "_gh_api_json", _capture)
+    rfo.fetch_check_runs("o/r", "deadbeefcafe")
+
+    assert len(seen) == 1, seen
+    endpoint = seen[0]
+    assert "filter=all" in endpoint, endpoint
+    assert "per_page=100" in endpoint, endpoint
+    assert "/commits/deadbeefcafe/check-runs" in endpoint, endpoint
+
+
 def test_a_malformed_payload_reaches_condition_2_as_a_verdict(tmp_path, monkeypatch):
     tree = _write_tree(tmp_path, mergify=_mergify())
     monkeypatch.setattr(rfo, "_gh_api_json", lambda endpoint: {"check_runs": ["oops"]})
