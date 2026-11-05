@@ -112,6 +112,14 @@ def _endpoint(uri: str):
     when the URI names neither, which for this tool means measuring an instance the
     operator never named — the one thing a number an owner decides on must never do.
 
+    ⛔ THE DEFAULT IS APPLIED BY THE CANONICAL RULE ITSELF (``port=parsed.port or
+    16379``), so "did the operator name one?" cannot be answered before resolving —
+    ``0`` is a NAMED port, and it is falsy. Checking only ``port is None`` before the
+    call let ``docker://h:0/g`` through and then measured **16379** (the embedded
+    lane's default) while the operator had written a different instance. So the test
+    is made AFTER resolution, on the value that will actually be dialled: the port
+    the census connects to must be the port this URI wrote, or it is a refusal.
+
     ⚠️ PARSING IS SEPARATE FROM CONNECTING on purpose: a request that is going to be
     refused (a `--graph` that disagrees with the URI, a destructive flag, a graph that
     is not on the instance) must not open a socket first, or a typo reads back as a
@@ -129,7 +137,14 @@ def _endpoint(uri: str):
             f"cannot read a host:port/graph out of {uri!r} — expected "
             f"docker://[:user:password@]host:port/graph"
         )
-    return resolve_db_endpoint(uri)
+    endpoint = resolve_db_endpoint(uri)
+    if endpoint.port != declared.port:
+        raise ValueError(
+            f"{uri!r} names port {declared.port!r}, which the canonical derivation "
+            f"would dial as {endpoint.port!r} (it substitutes 16379 for a falsy "
+            f"port) — refusing to measure an instance nobody named"
+        )
+    return endpoint
 
 
 def _absent_graph_refusal(client, graph_name: str) -> str | None:

@@ -1552,7 +1552,8 @@ def test_both_clients_receive_the_username_and_tls_the_uri_named(monkeypatch):
 
 
 @pytest.mark.parametrize("uri", ["", "localhost", "localhost:6379",
-                                 "docker://:6379/g", "docker://h:not-a-port/g"])
+                                 "docker://:6379/g", "docker://h:not-a-port/g",
+                                 "docker://h:0/g"])
 def test_a_uri_that_names_no_host_and_port_is_refused(uri, capsys):
     """The ONE local rule kept beside the canonical derivation is a REFUSAL.
 
@@ -1562,6 +1563,48 @@ def test_a_uri_that_names_no_host_and_port_is_refused(uri, capsys):
     code = _cli().main(["--graph-uri", uri, "--graph", "g"])
 
     assert code == 1
+
+
+def test_a_uri_that_names_port_zero_refuses_instead_of_dialling_16379():
+    """`0` is a NAMED port, and the canonical rule substitutes its default for it.
+
+    ⛔ THE DEFAULT IS APPLIED INSIDE `resolve_db_endpoint` (`port=parsed.port or
+    16379`), so a "did the operator name a port?" test made BEFORE the call is the
+    wrong test: `0` is falsy, so `docker://h:0/g` passed the `port is None` guard and
+    then dialled **16379** — the embedded lane's default, where a graph server
+    genuinely listens (`AGENTS.md` / `tools/test_lane.py`). The operator named a
+    different instance and the census would have reported on that one, silently, with
+    a verdict indistinguishable from a correct reading. So the rule has to be checked
+    against the port that will ACTUALLY be dialled.
+    """
+    cli = _cli()
+
+    with pytest.raises(ValueError, match="16379"):
+        cli._endpoint("docker://h:0/g")
+
+    # Non-vacuity: the refusal is about the SUBSTITUTION, not about small ports —
+    # a port that is really written, including the default one itself, still resolves.
+    assert cli._endpoint("docker://h:6379/g").port == 6379
+    assert cli._endpoint("docker://h:16379/g").port == 16379
+
+
+def test_a_uri_that_names_port_zero_is_a_usage_error_before_any_socket(capsys,
+                                                                      monkeypatch):
+    """End-to-end: the refusal is exit 1 and touches no connection."""
+    cli = _cli()
+    monkeypatch.setattr(
+        cli, "_connection",
+        lambda endpoint: pytest.fail(
+            f"connected to {endpoint.host}:{endpoint.port} for a URI that named 0"),
+    )
+
+    code = cli.main(["--graph-uri", "docker://localhost:0/tortoise",
+                     "--graph", "tortoise"])
+    err = capsys.readouterr().err
+
+    assert code == 1, err
+    assert "16379" in err, err
+    assert "Traceback" not in err, err
 
 
 def test_an_unwritable_out_path_is_a_usage_error_not_a_traceback(tmp_path, capsys,
