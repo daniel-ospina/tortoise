@@ -142,6 +142,14 @@ def _env(stub_base: str, token: str | None) -> dict:
     # holding one, 2 failed / 22 passed.
     env.pop("XDG_CONFIG_HOME", None)
     env.pop("GH_CONFIG_DIR", None)
+    # ⛔ A PROXY INHERITED FROM THE HOST BREAKS THE PREMISE EVERY `seen` ASSERTION RESTS ON (review
+    # finding F1 at `a9007b139`). `_request` opens through `build_opener()`, which is proxy-aware, so
+    # with `http_proxy`/`https_proxy`/`all_proxy` exported (either case) the tool's probe goes to the
+    # proxy and the stub records NOTHING — MEASURED: the same probe-everything mutant left `seen == []`
+    # with a proxy set, i.e. an inert arm again, silently. This file's header promises "no network",
+    # and that promise is only true if the child cannot be pointed at one.
+    for key in [k for k in env if k.lower() in ("http_proxy", "https_proxy", "all_proxy")]:
+        env.pop(key, None)
     env["HOME"] = "/tmp/gh-preflight-no-home"          # keeps hosts.yml out of the picture
     env["GH_WRITE_PREFLIGHT_API"] = stub_base
     if token is not None:
@@ -516,6 +524,27 @@ def test_fully_writable_token_passes():
     assert s.base in out, f"the OK line does not name the endpoint that answered: {out}"
 
 
+def test_the_child_env_carries_no_proxy():
+    """A host proxy would send the tool's probe where no stub can see it (review F1 at `a9007b139`).
+
+    `_request` opens through `build_opener()`, which reads `http_proxy`/`https_proxy`/`all_proxy` from
+    the environment. MEASURED: with a proxy exported, the probe-everything mutant left `seen == []` —
+    the arm that is supposed to catch it went inert instead of red, silently. This file promises a
+    hermetic stub, so the child must not inherit a route off the box.
+    """
+    planted = {"http_proxy": "http://127.0.0.1:9", "HTTPS_PROXY": "http://127.0.0.1:9",
+               "all_proxy": "http://127.0.0.1:9"}
+    try:
+        os.environ.update(planted)
+        env = _env("http://127.0.0.1:9", "ghp_dummy")
+    finally:
+        for key in planted:
+            os.environ.pop(key, None)
+    leaked = [k for k in env if k.lower() in ("http_proxy", "https_proxy", "all_proxy")]
+    assert leaked == [], f"the child inherits a proxy, so its probes can bypass the stub: {leaked}"
+    assert env["GH_WRITE_PREFLIGHT_API"] == "http://127.0.0.1:9", env
+
+
 def test_non_loopback_api_base_is_refused_before_anything_is_contacted():
     """The blocking round-7 defect: an env-overridable base made `GH-WRITE-OK` a verdict about
     something that is not GitHub.
@@ -541,8 +570,11 @@ def test_non_loopback_api_base_is_refused_before_anything_is_contacted():
     probe sent before validation IS recorded and reddens here. Measured: a `0.0.0.0:<port>` request
     reaches an `HTTPServer` bound to `127.0.0.1:<port>`.
 
-    Both clauses discriminate: stub `_validate_api_base` out of `preflight()` and the run falls
-    through to the network and answers `transport`.
+    Both clauses discriminate, by DIFFERENT mechanisms — measured, and named per clause because one
+    sentence covering both was wrong: stub `_validate_api_base` out of `preflight()` and the HOST-NAME
+    clause answers `transport` (it reaches for a name that does not resolve), while the REACHABLE
+    clause answers `GH-WRITE-OK` with `rc 0` (the stub authorises all three writes) and records four
+    requests. Either way the assertion that reds names the defect.
     """
     rc, out, err = _run("http://api.github.example.com", token="ghp_NOT_A_REAL_CREDENTIAL")
     assert rc != 0, f"an unvetted endpoint produced a PASS: {out}"
@@ -557,6 +589,19 @@ def test_non_loopback_api_base_is_refused_before_anything_is_contacted():
     # ⛔ THE REACHABLE CLAUSE: same refusal, and now `seen == []` is an OBSERVATION about the order of
     # validation and contact rather than a tautology.
     with _Stub() as s:
+        # ⛔ PROVE THE PREMISE BEFORE ASSERTING AN EMPTINESS (review finding F1 at `a9007b139`). `seen ==
+        # []` discriminates only if a request to THIS base would have been recorded: a host that does
+        # not route `0.0.0.0` (Windows rejects it as a destination) would leave the assertion true
+        # while measuring nothing. A raw TCP connect uses no HTTP machinery and no proxy, so it asks
+        # exactly the question the clause depends on.
+        try:
+            with socket.create_connection(("0.0.0.0", s.port), timeout=10):
+                pass
+        except OSError as exc:
+            raise AssertionError(
+                f"this clause cannot measure anything on this host: TCP to 0.0.0.0:{s.port} failed "
+                f"({type(exc).__name__}) — a probe sent before validation would not have been recorded "
+                f"either, so `seen == []` would be a tautology here") from exc
         rc2, out2, _r = _run(f"http://0.0.0.0:{s.port}", token="ghp_NOT_A_REAL_CREDENTIAL")
         seen = list(s.seen)
     assert rc2 != 0, f"an unvetted endpoint produced a PASS: {out2}"
