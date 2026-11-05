@@ -109,7 +109,14 @@ class RequiredSetUnreadable(Exception):
 
 
 class RequiredSetConfigError(Exception):
-    """The config names a check in both lists — contract clause 1 violated."""
+    """The required set violates `.mergify.yml`'s clause 1 — one of THREE shapes.
+
+    Raised for (a) a check named in BOTH lists under ``mode=merge``, (b) a context the
+    committed record names and the config no longer derives, (c) a context the config
+    derives and the record does not confirm. (b) and (c) involve no overlap at all — they
+    are EQUALITY violations between the config and the record of the live read — so a
+    handler must not assume the both-lists shape from this class.
+    """
 
 
 # ── Required-set resolution (no credential) ─────────────────────────────────

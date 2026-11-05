@@ -66,11 +66,19 @@ rather than assumed:
   read as a pass"*. A queue entry gate weaker than the queue it gates is a false PASS.
 * The owner does not review. A required check that CONCLUDED WITHOUT EXERCISING CODE
   (``skipped``/``neutral``) or was CANCELLED measured nothing, so it is not evidence
-  that the tree is sound. Absence is not a pass — the fail-closed rule this file shares
-  with ``/v1``-style convergence (see ``docs``/``AGENTS.md`` check-run polarity).
+  that the tree is sound. Absence is not a pass **for an ENTRY context** — the
+  fail-closed rule this file shares with ``/v1``-style convergence (see ``docs``/
+  ``AGENTS.md`` check-run polarity). A ``merge_conditions`` name absent at the head is a
+  different case and is DEFERRED, not passed: see condition 2 above.
 
-The divergence is deliberate and it is the strict direction: this tool can only refuse
-a merge the queue would have allowed, never allow one the queue would refuse.
+The strict direction holds for a MEASURED result, and it is worth stating its edge
+precisely rather than absolutely: this tool never treats ``skipped``/``neutral``/
+``cancelled``/an unknown conclusion as a pass where ``.mergify.yml``'s ``check-success``
+would refuse, so it cannot allow a merge for a reason the queue would reject. What it does
+NOT claim is that the queue will accept the merge: a ``merge_conditions`` check that has
+not run on the author head is DEFERRED there and settled by Mergify on
+``mergify/merge-queue/<sha>``. READY therefore means *every ENTRY context passed here, and
+no merge-time check measured red here* — never *the queue will merge this*.
 
 Grouping is NOT re-derived here
 -------------------------------

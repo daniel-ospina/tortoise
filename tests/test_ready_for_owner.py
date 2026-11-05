@@ -2160,9 +2160,11 @@ def _gh_payloads(
             {"filename": "tortoise/sdk.py"},
             {"filename": "tools/ready_for_owner.py"},
         ],
-        "branches/main/protection": {
-            "required_status_checks": {"checks": [{"context": c} for c in REQUIRED]}
-        },
+        # ⛔ NO `branches/main/protection` PAYLOAD. The required set is DERIVED from
+        # `.mergify.yml` (`tools/required_set.py`) and this read is deliberately gone, so a
+        # canned response for it would be dead fixture data pointing at a call that no
+        # longer exists — and `_FakeGh` fails loudly on an unexpected endpoint, which is the
+        # signal that the derivation path was silently replaced by an API read again.
         "check-runs": {"total_count": len(crs), "check_runs": crs},
         "actions/runs": {
             "total_count": 1,
@@ -2995,7 +2997,7 @@ def _open_blocking_fixture() -> dict[str, Any]:
 
 
 def _unreadable_fixture() -> dict[str, Any]:
-    return {"required": None, "required_raw": "branches/main/protection: 404"}
+    return {"required": None, "required_raw": "required-set: .mergify.yml unreadable"}
 
 
 MUTATION_CASES = [
