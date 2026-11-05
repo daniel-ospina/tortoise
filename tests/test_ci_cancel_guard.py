@@ -352,11 +352,38 @@ def test_a_run_with_no_head_repository_is_fail_closed(fixture):
 
 
 def test_a_fork_head_never_decides_our_branch(fixture):
+    """Module clause 4, **PR-map** side: a fork's PR row is keyed under the fork, so it
+    cannot land on our branch key. (The RUN side is the next case — deleting
+    `ci_cancel_guard.py:293-294` leaves THIS case green, which is why both exist.)"""
     fixture.apply("run.json", _run_meta(sha=HEAD_OLD))
     fixture.apply("prs.json", pr(PR_HEAD_MOVED, repo="someone/tortoise-fork"))
     r = guard(fixture, "41840910128", "--apply")
     assert r.returncode == 3
     assert fixture.cancelled() == []
+
+
+def test_a_run_from_a_fork_head_is_refused_even_on_a_colliding_branch(fixture):
+    """Module clause 4, **RUN** side: `run.head_repository` is not ours → REFUSE.
+
+    A fork `pull_request` run executes in the BASE repo while `head_repository` names
+    the fork (docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows:
+    for a fork PR the event is delivered to the base repository, so the run belongs to
+    the base repo and `head_repository` is the source repo). That is why the guard reads
+    the field instead of trusting the branch name.
+
+    Without `ci_cancel_guard.py:293-294` such a run falls through to the PR map under
+    `(our repo, branch)`; a fork branch that COLLIDES with one of our open PRs (`fix/x`
+    is a common shape) then matches our row, the heads differ, and the guard POSTs a
+    cancel of a run whose head our evidence never looked at — a cancelled run can never
+    produce a completed verdict, which is the BLOCKED-CI-UNTESTED class #10753 closes.
+    """
+    fixture.apply("run.json", _run_meta(sha=HEAD_OLD, repo="someone/tortoise-fork"))
+    fixture.apply("prs.json", pr(PR_HEAD_MOVED))               # OUR PR, same branch, moved head
+    fixture.apply("jobs.json", {"total_count": 0, "jobs": []})
+    r = guard(fixture, "41840910128", "--apply")
+    assert r.returncode == 3, r.stdout + r.stderr
+    assert "foreign-head-repo" in r.stdout, r.stdout
+    assert fixture.cancelled() == [], "a run from a foreign fork head was cancelled"
 
 
 def test_unreadable_pr_surface_is_fail_closed(fixture):
