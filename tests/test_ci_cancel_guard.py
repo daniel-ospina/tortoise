@@ -304,6 +304,29 @@ def test_run_with_a_started_job_is_refused(fixture):
     assert fixture.cancelled() == []
 
 
+def test_a_STILL_QUEUED_job_that_has_STARTED_is_refused(fixture):
+    """The `started_at` disjunct of clause 2, which the status arm cannot cover.
+
+    A run can read `queued` while one of its jobs already carries a start stamp —
+    that is the ordinary shape while the queue is draining, and it is the exact
+    case the module docstring's clause 2 names. Asserting it with
+    `status: "in_progress"` (as `test_run_with_a_started_job_is_refused` does)
+    exercises the LOOKUP arm instead, so the `j.get("started_at")` half can be
+    deleted with the suite still green: the job then reads as "no work to
+    destroy", the verdict becomes PERMIT, and a real POST destroys running work.
+    Measured on this file: deleting that disjunct leaves 52 passed.
+    """
+    fixture.apply("run.json", _run_meta(sha=HEAD_OLD))
+    fixture.apply("prs.json", pr(PR_HEAD_MOVED))
+    fixture.apply("jobs.json", {"total_count": 1, "jobs": [
+        {"name": "test (a)", "status": "queued",
+         "started_at": "2026-11-04T13:44:52Z"}]})
+    r = guard(fixture, "41840910128", "--apply")
+    assert r.returncode == 3, r.stdout + r.stderr
+    assert "job" in r.stdout.lower()
+    assert fixture.cancelled() == [], "a job that had already started was cancelled"
+
+
 def test_no_open_pr_is_refused(fixture):
     fixture.apply("run.json", _run_meta(sha=HEAD_OLD, branch="release/2.0"))
     fixture.apply("prs.json", pr(PR_HEAD_MOVED, branch="surface-containers"))
@@ -516,6 +539,27 @@ def test_a_negative_total_count_is_fail_closed(fixture):
     r = guard(fixture, "41840910128", "--apply")
     assert r.returncode == 2, r.stdout + r.stderr
     assert fixture.cancelled() == []
+
+
+def test_a_partial_job_list_is_fail_closed(fixture):
+    """The `total > len(jobs)` half of the partial-list refusal.
+
+    `read_jobs` asks for `.../jobs?per_page=100` and does NOT paginate, so a
+    matrix run with more than 100 jobs answers `total_count: 150` with the first
+    100 rows. Every row can read `queued` while job 101 is `in_progress`, so
+    without this disjunct a partial read becomes the claim "no job started" →
+    PERMIT → a POST destroys work the caller never saw. Deleting it leaves 52
+    passed, so the 100-row read is unpinned; the non-integer arms never reach
+    this line and the negative arm pins only `total < 0`.
+    """
+    fixture.apply("run.json", _run_meta(sha=HEAD_OLD))
+    fixture.apply("prs.json", pr(PR_HEAD_MOVED))
+    fixture.apply("jobs.json", {"total_count": 2, "jobs": [
+        {"name": "test (a)", "status": "queued", "started_at": None}]})
+    r = guard(fixture, "41840910128", "--apply")
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "partial" in (r.stdout + r.stderr).lower()
+    assert fixture.cancelled() == [], "a partial job list was read as 'nothing started'"
 
 
 def test_an_undocumented_job_status_reads_as_started(fixture):
