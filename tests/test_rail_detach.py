@@ -883,10 +883,10 @@ def test_the_ghless_path_helper_is_reusable_on_one_tmp_path(tmp_path):
       both in place                           -> 1 passed
 
     ⛔ THE CALL SITES, NOT `pathlib.py` LINE NUMBERS (review, `#10777`). These cited
-    `:1313` / `:1388`, which resolve in NO version of this file — it has never
-    reached 1100 lines — and are `pathlib`'s own positions besides:
-    version-dependent, so they would rot at the next CPython. Naming the raising
-    call makes the measurement re-runnable against any interpreter.
+    `:1313` / `:1388` are `pathlib`'s own positions, not this branch's file: they are
+    the `os.mkdir()` inside `Path.mkdir` and the `os.symlink()` inside
+    `Path.symlink_to`, version-dependent, so they would rot at the next CPython.
+    Naming the raising call makes the measurement re-runnable against any interpreter.
     """
     first = _path_without_gh(tmp_path)
     second = _path_without_gh(tmp_path, "cat")
