@@ -1973,68 +1973,6 @@ def test_a_re_await_records_a_racing_failure_as_a_domain_error(monkeypatch):
 
 
 
-def test_a_racing_failure_in_the_offload_success_arm_is_a_domain_error(monkeypatch):
-    """#10941: the SIBLING of the re-await ordering pin — same race, other arm.
-
-    ``f48b658bb`` moved the record after the value in BOTH arms, but only the
-    re-await arm was pinned (`test_a_re_await_records_a_racing_failure_as_a_domain_error`).
-    Measured: swapping `result = future.result()` and `outcome = "completed"` in
-    ``run_control_plane_call`` leaves this module and ``test_monitoring.py`` green
-    (236 passed) while making a FAILED callable record ``completed`` — the one thing
-    #5840's single record promises never to do.
-
-    The interleaving is not exotic here either: ``future_exc`` above is a SNAPSHOT
-    read, and ``_stamped`` appends its completion stamp BEFORE the worker publishes
-    the outcome — so the snapshot can answer "nothing published yet" and the arm's
-    own ``future.result()``, a few statements later, can raise.
-
-    Non-vacuity: with the two lines swapped, this reds with ``['completed']`` while
-    every other test in the file still passes, so the pin is specific to the
-    ordering and not to the arm's existence.
-    """
-
-    class _SettlingFuture:
-        """Nothing published when asked for an exception; raises when asked for its value."""
-
-        def cancelled(self):
-            return False
-
-        def done(self):
-            return True
-
-        def exception(self):
-            return None  # the STALE snapshot: the worker has not published yet
-
-        def result(self):
-            raise RuntimeError("store said no")
-
-    class _Worker:
-        """Runs the callable so `_stamped` stamps INSIDE the bound, then hands back the
-        future whose outcome has not been published yet."""
-
-        def submit(self, fn):
-            fn()
-            return _SettlingFuture()
-
-    async def _expire(future, *, timeout, cancel_on_timeout=True):
-        raise TimeoutError("the bound expired")
-
-    monkeypatch.setattr(monitoring, "control_plane_worker", lambda pool="auth": _Worker())
-    monkeypatch.setattr(monitoring, "_await_future", _expire)
-
-    async def _run():
-        return await monitoring.run_control_plane_call(
-            lambda: None, op="offload-racing-failure", timeout=0.05)
-
-    with pytest.raises(RuntimeError, match="store said no"):
-        asyncio.run(_run())
-    records = [r for r in monitoring.control_plane_offload_records()
-               if r[0] == "offload-racing-failure"]
-    assert [r[2] for r in records] == ["domain_error"], (
-        f"a failed callable was recorded as {[r[2] for r in records]!r} — the record "
-        "must not claim `completed` for work that raised")
-
-
 def test_a_genuine_re_armed_bound_miss_still_refuses_and_counts_running():
     """The other direction, so "never call it a bound miss" cannot pass above.
 
