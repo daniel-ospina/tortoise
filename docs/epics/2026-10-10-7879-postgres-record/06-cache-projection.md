@@ -276,9 +276,14 @@ title-derived `_searchText`, silently un-indexing it in the cache.
   production caller sits behind the fresh-capture gate — **never runs** and the
   stale pair survives (pinned by
   `tests/test_10000_source_prose.py::test_a_re_capture_does_not_heal_a_pre_fix_node`).
-  The routes that DO clear it are a capture under a NEW `session_id`, a retry of
-  a prior FAILED capture, or a record-sourced re-projection for a node the
-  projection CREATES — see the next bullet;
+  The ONE route that DOES clear it is a retry of a prior FAILED capture — that
+  arm re-runs the mint for the SAME node (`url = session:<id>`), so the
+  capture's `SET`s overwrite the pair. Two routes that read like repairs are NOT
+  (`#10852` review, P3): a capture under a NEW `session_id` MERGEs a DIFFERENT
+  node and leaves the old one alone, and a record-sourced re-projection is a
+  **prevention** route, not a clearing one (see the next bullet). Clearing an
+  existing node's pair otherwise needs an explicit property clear — `#11070`'s
+  work, not a replay's;
 * `python -m tortoise record-reconcile` builds its RECORD side through the same
   projector, so its truth side HOLDS `_searchText` for a post-#10000 row — and
   the cache-owned partition keeps every name the record side holds, so a drifted
@@ -288,8 +293,10 @@ title-derived `_searchText`, silently un-indexing it in the cache.
   own `graph_only` bucket: visible, and not a divergence against a record that is
   correct. The graph side of a legacy node is repaired by a record-sourced
   re-projection (`record-restore` / `rebuild_from_record`) — **for a node the
-  projection CREATES**: the write is additive (`MERGE … SET n += $props`), so a
-  node that ALREADY carries the pair keeps it across a re-projection.
+  projection CREATES**: the write is additive (`MERGE … SET n += $props`), and
+  `summary` is declined on this door, so a node that ALREADY carries the pair
+  keeps it across a re-projection — the projection produces a prose-free node
+  only where none existed, which PREVENTS the defect rather than clearing it.
 
 ### The pin
 

@@ -505,9 +505,13 @@ def test_a_re_capture_does_not_heal_a_pre_fix_node(sdk):
     ⛔ WHAT THIS TEST IS. A PIN ON A RECORDED DECISION, not an endorsement of a
     leak. #2104/#1727 require a re-capture of an existing session to be a TRUE
     no-op (it must not re-SET the first capture's `capturedAt`/`contentHash`
-    either), so the repair for a legacy node is a NEW `session_id`, a retry of a
-    prior FAILED capture, or a record-sourced re-projection — never a replay
-    that writes. It therefore REDS in the good direction too: if someone
+    either), so the repair for a legacy node is a retry of a prior FAILED
+    capture — never a replay that writes. A capture under a NEW `session_id` and
+    a record-sourced re-projection are PREVENTION routes: they produce a
+    prose-free node where none existed and leave an existing one alone
+    (`#10852` review, P3: the earlier cut of this docstring named them as
+    repairs, which is the same misdirection the retraction removes). It
+    therefore REDS in the good direction too: if someone
     "fixes" the healing by re-SETting on the replay arm, this fails, and the
     replay invariant above is the argument to read first.
     """

@@ -12,10 +12,22 @@ and were corrected — the method docstring, the inline comment above the
 `docs/epics/2026-10-10-7879-postgres-record/06-cache-projection.md` told an
 operator the legacy population repairs itself *"until it is re-captured (the
 capture now overwrites the pair with the lexicon)"*. That is the actionable form
-of the false premise: a reader who believes it skips the three routes that DO
-clear the pair — a capture under a NEW `session_id`, a retry of a prior FAILED
-capture, or a record-sourced re-projection for a node the projection CREATES —
-and the legacy session stays un-indexed on the recovery door indefinitely.
+of the false premise: a reader who believes it skips the route that DOES clear
+it — a retry of a prior FAILED capture, which re-runs the mint for the SAME
+`url` — and the legacy session stays un-indexed on the recovery door
+indefinitely.
+
+A SECOND review round (`#10852` @ `3466bc1ce`, P3) found the correction itself
+carried the same defect in miniature: the list it published named THREE routes,
+and for the population under discussion — the node that already carries the
+pair — two of them clear nothing. A capture under a NEW `session_id` MERGEs a
+DIFFERENT node (`url = session:<id>`), so the old node keeps its pair; a
+record-sourced re-projection is a PREVENTION route (its write is additive,
+`MERGE … SET n += $props`, and `summary` is declined on that door), so it only
+ever produces a prose-free node where none existed. The guard below now pins
+the SINGLE clearing route and keeps the three-route claim out of both docs,
+because a repair list that is wrong for two of its three members is the same
+"this population sorts itself out" misdirection the retraction exists to remove.
 
 WHY ITS OWN FILE, REGISTERED IN `tier1`. The guarded artifact is under `docs/`,
 and a docs-only diff selects no surface and runs `tier1` only, so a pin placed in
@@ -29,9 +41,12 @@ docstring the doc is supposed to mirror, so the two cannot drift apart silently:
 
   (1) the retracted shapes are ABSENT from the "Costs, named rather than implied"
       section — the bullet list a reader consults for what the drop costs;
-  (2) the mechanism is PRESENT — the no-op replay, `#1727`, and all three routes
-      that actually clear the pair (deleting the bullet cannot pass this, which is
-      what stops the cheap green of an empty section);
+  (2) the mechanism is PRESENT — the no-op replay, `#1727`, the ONE route that
+      actually clears an existing pair (a retry of a prior FAILED capture) and
+      the two that only look like it (a NEW `session_id`, a re-projection), so
+      deleting the bullet cannot pass this, which is what stops the cheap green
+      of an empty section (the three-route list was itself corrected by the
+      `#10852` P3 round — see the module docstring above);
   (3) the doc's own "### The pin" list cites the `#10965` per-row legs it claims to
       state, and every `test_*` name it cites RESOLVES in the module it points at
       (`#7948`/`#10852`'s lesson: a hand-maintained prose reference rots and
@@ -71,15 +86,28 @@ RETRACTED_SHAPES = (
     "now overwrites the pair",
     "heals on re-capture",
     "HEALS on re-capture",
+    # `#10852` review P3: the three-route repair list was wrong for two of its
+    # three members. Both casings, because the doc and the module docstring
+    # spell the same sentence with different emphasis.
+    "The routes that DO clear it are a capture under a NEW",
+    "The routes that do clear it are a capture under a NEW",
 )
 
 #: The correction, as keywords rather than a sentence: a reworded but CORRECT
 #: statement passes, a correct-looking one that loses the mechanism does not.
 CORRECTION_KEYWORDS = ("does not repair", "no-op replay", "1727")
 
-#: All three routes that actually clear a legacy pair. A reader who is told only
-#: "a re-capture does not help" is still stuck; the doc has to say what does.
-CLEARING_ROUTES = ("NEW `session_id`", "FAILED capture", "projection CREATES")
+#: The ONE route that clears an EXISTING legacy node's pair: a retry of a prior
+#: FAILED capture re-runs the mint for the same `url`, so the capture's `SET`s
+#: overwrite the pair (`retry_failed_capture`, `#2335`). It is the only entry
+#: because `#10852`'s review measured the other two as prevention, not repair.
+CLEARING_ROUTES = ("retry of a prior FAILED capture",)
+
+#: The two routes the earlier cut published as clearing ones. They must still be
+#: NAMED — an operator who was told about them needs to learn they do not clear
+#: an existing node — while `RETRACTED_SHAPES` keeps the sentence that presented
+#: them as repairs out of both docs, so deleting the paragraph cannot pass.
+NOT_CLEARING_ROUTES = ("NEW `session_id`", "projection CREATES")
 
 #: The `#10965` per-row legs this PR added. They must be NAMED here, because the
 #: section's whole claim is that it states "the pin" — a list short by one arm
@@ -188,9 +216,16 @@ def test_the_doc_states_the_mechanism_and_the_routes_that_do_clear_the_pair():
     for route in CLEARING_ROUTES:
         assert route in costs, (
             f"`{DOC.name}`'s cost list omits the route {route!r} that DOES clear "
-            "a legacy pair. A reader told only that a re-capture does not help "
-            "has no way to repair the node — name the three routes the code "
+            "an existing legacy pair. A reader told only that a re-capture does "
+            "not help has no way to repair the node — name the route the code "
             f"names:\n\n{costs}")
+
+    for route in NOT_CLEARING_ROUTES:
+        assert route in costs, (
+            f"`{DOC.name}`'s cost list no longer mentions {route!r} at all. It "
+            "is not a clearing route, but it was published as one, so the "
+            "correction has to say what it IS — deleting the mention leaves the "
+            f"reader's earlier belief standing:\n\n{costs}")
 
 
 def test_the_pin_section_names_the_per_row_legs_and_they_resolve():

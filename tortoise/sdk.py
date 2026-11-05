@@ -16849,11 +16849,21 @@ class TortoiseSDK:
         with the pre-fix prose, re-capture the identical conversation and again
         with an extra turn — the pair is unchanged, only the counts move.
 
-        The routes that DO clear it: a capture under a NEW ``session_id``; a
-        retry of a prior FAILED capture (``retry_failed_capture``, #2335 — the
-        gate admits that arm); or a record-sourced re-projection for a node the
-        projection CREATES (``cache_projection``, additive — so it cannot clear
-        a node that ALREADY carries the pair). Everything else is a replay.
+        The routes that DO clear it are ONE: a retry of a prior FAILED capture
+        (``retry_failed_capture``, #2335 — the gate admits that arm, so the
+        mint re-runs for the SAME node and the SETs above overwrite the pair).
+        Two things that look like repairs are NOT, and a reader who acts on
+        them leaves the prose exactly where it is (#10852 review, P3): a
+        capture under a NEW ``session_id`` materialises a DIFFERENT node, since
+        the MERGE key is ``url = "session:<session_id>"`` — the old node keeps
+        its pair; and a record-sourced re-projection is a PREVENTION route, not
+        a clearing one — its write is additive
+        (``MERGE … SET n += $props``, ``cache_projection.node_statement``) and
+        ``summary`` is declined on that door, so a node that ALREADY carries
+        the pair keeps it, and the projection only ever produces a prose-free
+        node where none existed. Clearing an existing node's pair otherwise
+        needs an explicit property clear — #11070's work, not a replay's.
+        Everything else is a replay.
 
         ⛔ Do NOT make the healing true by re-SETting on the replay arm. A
         replay that writes is not a replay: #2104/#1727 require a re-capture of
