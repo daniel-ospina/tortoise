@@ -1738,22 +1738,24 @@ def _section(text: str, start_heading: str, end_heading: str) -> str:
     # ⚠️ The END count is scoped to the span the binding actually uses (`find`
     # starts at `start`), so a duplicate placed ABOVE the §9.4 start — which leaves
     # the slice byte-identical and is therefore harmless — does not red with a
-    # "TRUNCATES" diagnosis that did not happen. The `end > start` guard below
-    # covers the one case this narrowing must not lose: a sole end heading that
-    # sits above the start.
+    # "TRUNCATES" diagnosis that did not happen. A REORDERED end heading (sole
+    # occurrence above the start) still reds, as a count of 0, with a diagnosis
+    # that says so.
     _end_from = text.index(start_heading)
     assert text.count(end_heading, _end_from) == 1, (
         f"{_STORAGE_DOC.name} carries {text.count(end_heading, _end_from)} "
         f"occurrences of {end_heading!r} AFTER {start_heading!r} — this pin ends "
         "at the FIRST match after the start, so that heading must appear exactly "
-        "once there; ANY such duplicate reds this count, though only one placed "
-        "just BEFORE a regression truncates the span and moves that regression "
-        "outside the text the assertions read (measured fail-open, see above)")
+        "once there (0 means it now PRECEDES the start); ANY such duplicate reds "
+        "this count, though only one placed just BEFORE a regression truncates "
+        "the span and moves that regression outside the text the assertions read "
+        "(measured fail-open, see above)")
     start = text.index(start_heading)
-    # `find`, not `index`: a REORDERED end heading (present in the document, but
-    # not after the start) reaches the assertion below with its diagnosis instead
-    # of raising an anonymous ValueError naming a substring nobody chose. An
-    # ABSENT end heading is caught by the guard above, which names it.
+    # `find` + `assert`, not a bare `index`: the failure carries its own diagnosis
+    # instead of an anonymous ValueError naming a substring nobody chose. This is
+    # a BACKSTOP — with the scoped count assert above at 1, `find` cannot fall at
+    # or before `start`, so the asserts above are what actually catch every case
+    # this line would otherwise report.
     end = text.find(end_heading, start)
     assert end > start, (
         f"{end_heading!r} does not follow {start_heading!r} in "
