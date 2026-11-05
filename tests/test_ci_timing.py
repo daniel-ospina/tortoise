@@ -3816,10 +3816,13 @@ def test_integrity_problems_catches_a_duplicate_durations_key() -> None:
     the whole point is the document that has not been written yet: the path
     form would grade the file the refresh is about to replace.
 
-    ⛔ THE PLANTED ROW CARRIES A DIFFERENT VALUE (0.9 vs the real 0.1), which is
-    load-bearing (#10648 review P3): with the SAME value this assertion would
-    hold under EITHER resolution order and pin only "the key parses". With 0.9
-    planted ahead of the real 0.1 row, `safe_load` returning 0.1 IS last-wins.
+    ⛔ THE PLANTED ROW CARRIES A DIFFERENT VALUE (0.9 vs the row it shadows),
+    which is load-bearing (#10648 review P3) — but only because the resolution
+    is ASSERTED below rather than stated here: with the SAME value the planted
+    row would be indistinguishable from the one it precedes, so "last-wins"
+    would be unfalsifiable. First-wins would surface the planted 0.9 to every
+    reader of the map; last-wins surfaces the real weight, which is exactly why
+    a persisted duplicate is silent rather than loud.
     """
     import ci_selection as cs
 
@@ -3834,7 +3837,18 @@ def test_integrity_problems_catches_a_duplicate_durations_key() -> None:
     # The loader the shard packer uses cannot see it …
     assert sum(1 for line in planted.splitlines()
                if line.startswith(anchor)) == 2
-    # … but the refresh's pre-write gate does, by name.
+    # … and it resolves LAST-wins, which is the mechanism that makes a persisted
+    # duplicate inert: `render_refreshed_manifest` rewrites the FIRST row in the
+    # TEXT while every reader of the map loads the LAST, so the refresh would
+    # report a weight the shard packer never reads. Pinned, not assumed.
+    key = "test_7818_plan_record_5362.py"
+    real_value = yaml.safe_load(real)["durations"][key]
+    assert yaml.safe_load(planted)["durations"][key] == real_value
+    assert real_value != 0.9, (
+        "the planted value must differ from the row it shadows, otherwise "
+        "last-wins and first-wins are indistinguishable here and the "
+        "assertion above proves nothing")
+    # … and the refresh's pre-write gate SEES it, by name.
     problems = ci_timing.integrity_problems(planted)
     assert any("duplicate mapping key 'test_7818_plan_record_5362.py'" in p
                for p in problems), (
