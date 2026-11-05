@@ -1965,3 +1965,36 @@ the before/after narration `#8542` moved out of the three design documents. The 
 half of the rule stated at the top of this file: the design document states the design and the
 measurement; this file keeps the record of how it got there. Measured at the PR head: 0 `_CHANGE_NARRATION`
 hits in `STORAGE-ARCHITECTURE.md` after the move, against 2 before it (lines 1090 and 1518).
+
+## The rest of the register still cited the retracted figures — each now carries the date of the reading it belongs to (`#5090`, 2026-11-05)
+
+The entry above recorded the two corrected rows and dated §12.1c. Correcting those left the rest of the
+register asserting the **retracted** figures as its current basis, so one document still read 45 MB of
+indices on 141 MB in §12.1c's neighbourhood while §14.3's V1 row read 93 MB on 195 MB — a 2× disagreement
+on the index quantity and 2.6× on the payload, inside one register, in the section a lane reads to make
+the decision. This entry records the second pass that closed it, and why each figure was stale in the
+place it stood.
+
+**The figures, and what was wrong with them.** The ≈50 MB payload was an additive estimate:
+`Point` ~31 MB + `Object` ~11.8 MB + `Event` ~7.2 MB, at 1.5 KB each. It attributed vectors to two labels
+that carry no vector index and therefore no vector DDL — only `Point` does — so two of its three legs do
+not exist. It also read §12.1b's `Point` line as *vector* bytes when that line is ALL `Point` attributes.
+The 2026-11-04 reading of `live-v4` (`#10976`) is **12,657 vectors × 1,536 B = 19.4 MB** with
+`indices_sz_mb` **93** on a **195 MB** graph.
+
+**The places that still cited it, all now dated.** §0's bill summary; §12.1's *"45 MB of indices +
+51.6 MB of embeddings + 16 MB of text"*; §12.1b's derived *"Stored vector properties ≈ 50 MB"* sentence
+(now stating the 19.4 MB reading and naming why the additive estimate overcounts); §12.1d's per-node
+ratio; §12.3's *"≈50 MB … against 141 MB"*; §13's attribute-byte sentence; and two cross-references that
+would otherwise have gone stale in the other direction — §0's *"§2 and §12 state 141 MB and 45 MB"* (now
+`§12.1b's 2026-09-24 table`) and the cost model's *"on a ~141 MB graph"* (kept as that date's reading,
+with the 2026-11-04 reading named beside it).
+
+**What was deliberately NOT done: no per-node ratio from the new reading.** The 2026-09-24 ratio,
+1.34 embeddings per node, is over **capped** nodes (~25,000). The 2026-11-04 reading's node base is
+68,526 **resident** nodes, a different denominator, and §0's own rule is that a per-node figure is never
+quoted without its base — deriving 0.18/ node from it would have repeated the exact error class the
+section exists to warn about. The ratio stays attached to the reading it was measured on.
+
+**No decision moved.** V1 remains `OPEN` and owner-owned, `#4333` remains its architecture home, and the
+correction changes the size of the question, not its answer.

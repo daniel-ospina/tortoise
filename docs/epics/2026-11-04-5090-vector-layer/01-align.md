@@ -90,8 +90,7 @@ unfiled gap. Both are in scope; nothing else is.
 
 **Placement: Important / Not Urgent → Schedule.**
 
-⚠️ **`#10976` and `#10000` sit in Important/Urgent, not here:** both are `P0-blocker` and launch-gating, and importance is not inferred from ownership —
-importance from **ownership** (*"other owners"*), which is not one of the two axes. A `P0-blocker` that
+⚠️ **`#10976` and `#10000` sit in Important/Urgent, not here:** both are `P0-blocker` and launch-gating, and importance is read off launch impact, not off ownership (*"other owners"*) — ownership is not one of the two axes. A `P0-blocker` that
 gates launch is **Important** by definition. They are also *more* urgent than this epic, which is part of
 why this epic does not hold the critical path.
 
