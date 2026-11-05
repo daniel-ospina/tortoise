@@ -197,7 +197,7 @@ Three fresh-context rounds, and what was done with each finding. **A finding is 
 | finding | measured | consequence for the row |
 |---|---|---|
 | **32 of 36 relations are `writable`** | 4 are `predicate-not-in-allowlist`, **all four in `packs/project-management`** (`blocks`, `partOfSprint`, `assignedTo`, `onBoard` — legacy `from`/`to` shape, no `mechanism`) | a pack's business logic can be **declared and unwritable at once**; a per-pack row shows it, a total hides it |
-| **4 packs declare a RETIRED semantics value** (ONTOLOGY §8 / `#7852`): `opposes`, `funds`, `produces`, `holds` | warn-not-block, so they survive load | alignment to the core vocabulary is part of "proper logic" |
+| **2 packs declare a RETIRED semantics value** (4 declarations — ONTOLOGY §8 / `#7852`): `opposes`, `funds`, `produces`, `holds` | warn-not-block, so they survive load | alignment to the core vocabulary is part of "proper logic" |
 | **No declared relation starts from a Subject** — companies/people are only *targets* (`venture:holds → Subject`) | verified across every relation | the graph can hold a company and **cannot reach from it to its goals or work** |
 | **`goal` is a core kind with no edges** — **0 of 36** declared relations names `core:goal` as an endpoint; and **`initiative` is a synonym** of `dev:theme` (`packs/dev/manifest.yaml:61`) and of `venture:program` (`:134`), with no kind behind it | verified across all 7 manifests | the layer exists and is **unreachable** — so the fix is *declarations*, not ontology edits: **`#11000`** declares `dev:initiative` (a **pack** kind; **no `ONTOLOGY §5` change and no approval needed**), **`#11001`** materialises the four-level path and the three goal connections, and **`#11083`** measures them |
 
