@@ -6409,10 +6409,11 @@ def test_every_matrix_bounds_its_fan_out_below_the_measured_pool():
     `changes`), so on a full selection a PR requests 28 jobs (17 matrix legs +
     11 non-matrix; `canary-streak` is push-gated), at most 17 of them in flight
     at once. The POOL does not bound that — it bounds only the subset that lands
-    on it (`test`/`test-carve-out` ask for `ubuntu-latest`, which the runner gate
-    attaches to the pool as a fallback; `test-slow` pins hosted-only
-    `ubuntu-24.04`), which is how one run measured 18 simultaneous jobs over a
-    12-runner pool. The invariants below
+    on it (`test`/`test-carve-out` ask for `ubuntu-latest` and `test-slow` pins
+    `ubuntu-24.04`; on this repo BOTH labels can be answered by the pool while
+    their mitigations are engaged, so all three matrices are pool-eligible, and a
+    hosted runner answers those labels too — that is how one run measured 18
+    simultaneous jobs over a 12-runner pool). The invariants below
     hold the three CAPS, and must never be read as "a PR holds 9 jobs".
 
     This pins the INVARIANTS, not the chosen number, so a re-tune from a fresh
@@ -6461,7 +6462,9 @@ def test_every_matrix_bounds_its_fan_out_below_the_measured_pool():
         f"{sorted(counts)} — a new matrix must be added here (with its shard "
         "count) so it cannot ship unbounded (#6744)")
     measured_pool = 12          # `gh api .../actions/runners` — 12 online
-    reserved_for_others = 3     # three other PRs must always get a runner
+    reserved_for_others = 3     # MATRIX headroom kept free, not a total guarantee:
+    # a PR's eligible non-matrix jobs can still take these runners (see the
+    # SCOPE note above and `docs/ops/ci-wall-clock.md` §7).
     max_waves = 4               # measured stagger/wall ratio-implied ceiling
 
     caps = {}

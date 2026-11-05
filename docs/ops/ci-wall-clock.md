@@ -424,7 +424,7 @@ the fast band under the same cap (~31.5 m), so it does not become the run's wide
 matrix's band is pinned at `ceil(9/3)` = 3 waves — inside the 2–4 wave band invariant 1 protects,
 but on the runs where the pool delivered those 9 shards in 2, the third wave is new wall. No saving
 is claimed on the runs where it took 4. The pair is what the simulation's **matrix-band end delta
-of +17.9 m p50 / +23.2 m max** (table above) records, and that — not the slow matrix's ~5 m in
+of +17.9 m p50 / +23.2 m max** (table above) records, and that — not the slow matrix's ~9 m in
 isolation — is the figure a keep-vs-rollback reading must use (see "The re-derivation cannot use
 per-job queue wait", below). Capping slow at
 5 to keep its single wave would put a PR's maximum **matrix** hold at 11 of 12 runners and fail
@@ -445,11 +445,14 @@ matrices wait on it, so it cannot overlap them.) On a full selection a PR theref
 jobs** (17 matrix legs + 11 non-matrix — the 12th, `canary-streak`, is `push`-gated), of which at
 most **17 can be in flight at once** (9 capped matrix slots + the 8 eligible non-matrix). **The
 pool does not bound that** — it bounds only the subset that lands on it. `test` and
-`test-carve-out` ask for `ubuntu-latest`, which is NOT a hosted-only label on this repo
-(`scripts/ci_runner_gate.sh` attaches it to the self-hosted pool as a fallback, so those legs can
-be answered by the pool), while `test-slow` pins `ubuntu-24.04`, which is hosted-only. That is how
-a run was measured at **18 simultaneous jobs against a 12-runner pool** (table above): the overflow
-is answered outside the pool. The cap is a fairness bound on the FAN-OUT (which is
+`test-carve-out` ask for `ubuntu-latest`, and `test-slow` pins `ubuntu-24.04` — but on this repo
+**both** labels can be answered by the self-hosted pool while their mitigations are engaged
+(`docs/ops/ci-runner-x64.md`, "the label contract": `ubuntu-24.04` is "GitHub-hosted, plus — as a
+temporary mitigation since 2026-10-29 — the self-hosted pool"), so all three matrices are
+pool-eligible. What stops the pool being a hard ceiling is the other half of label matching: a
+hosted runner answers those same labels too, so a leg that cannot get a pool slot is served
+outside it. That is how a run was measured at **18 simultaneous jobs against a 12-runner pool**
+(table above): the overflow is answered outside the pool. The cap is a fairness bound on the FAN-OUT (which is
 what was unbounded, and what made one PR own the pool); it is not a total concurrency budget, and
 reading 9 as one would understate the hold by nearly half (it is 9 of 17).
 
@@ -469,8 +472,12 @@ pins rather than two — the caps are a different property from the two false-re
   `::test_every_matrix_bounds_its_fan_out_below_the_measured_pool`.
 
 **Re-derive before moving any of the three numbers**: re-read the pool (`gh api
-repos/<owner>/<repo>/actions/runners`), the per-shard wall and the start stagger with §2's
-command. If the pool grows, invariant 2 permits a larger cap — and that move is not free: the
+repos/<owner>/<repo>/actions/runners`), and re-measure the per-shard wall with §2's command — but
+NOTE that §2's command keys on `.steps[].started_at|completed_at`, so it yields EXECUTED WALL and
+not the within-run start stagger; the stagger (4.0–23.9 m, the 2–4 wave claim invariant 1 rests
+on) needs the JOB-level `started_at` of one run's legs (`…/runs/<id>/jobs`), which §2 never reads.
+
+If the pool grows, invariant 2 permits a larger cap — and that move is not free: the
 `measured_pool` literal in the test is the one input that must be edited with the caps (below). If
 a shard's wall grows, the accepted regression grows with it, because each added wave costs one
 shard wall: recompute `waves × wall` for each capped matrix (at cap 3: fast `3 × 10.5 m ≈ 31.5 m`,
