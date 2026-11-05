@@ -94,13 +94,23 @@ Safety
 
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/gh_write_preflight.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/gh_write_preflight.py`"
+    )
+
 import argparse
 import json
 import os
 import re
 import secrets
 import subprocess
-import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
