@@ -101,6 +101,7 @@ import re
 import string
 import subprocess
 import sys
+from collections.abc import Callable
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -158,7 +159,29 @@ def redact(text: str) -> str:
     out = text
     for pat, repl in _REDACT_PATTERNS:
         out = pat.sub(repl, out)
-    return out
+    return _redact_scp_userinfo(out)
+
+
+# The scp-like userinfo shape (`user:secret@host:path` / `token@host:path`). `_url_has_credential`
+# recognises it, so `redact()` MUST cover it too — otherwise the tool detects a credential and then
+# prints it, which is the one asymmetry that matters: detection without redaction is a leak.
+# The userinfo is the text before the FIRST `@` and can never contain `/`, which is what separates a
+# credential from a local path that merely contains an `@`.
+_SCP_LIKE_USERINFO = re.compile(
+    r"(?<![\w@./-])([A-Za-z0-9._%+~-]+)(?::([^@\s/]+))?@([A-Za-z0-9.-]+):"
+)
+
+
+def _redact_scp_userinfo(text: str) -> str:
+    def _sub(m: re.Match[str]) -> str:
+        user, pw, host = m.group(1), m.group(2), m.group(3)
+        # `git@host:` / `ssh@host:` carry no secret — redacting them would destroy ordinary
+        # diagnostics and is not required by anything.
+        if pw is None and user.lower() in _NON_SECRET_USERINFO:
+            return m.group(0)
+        return f"<userinfo-redacted>@{host}:"
+
+    return _SCP_LIKE_USERINFO.sub(_sub, text)
 
 
 @dataclass
@@ -367,6 +390,13 @@ def _url_has_credential(url: str) -> bool:
     userinfo = url.split("@", 1)[0]
     if "@" in url and "/" not in userinfo and ":" in userinfo:
         return True
+    # A LONE userinfo with no scheme (`token@host:path`) is the SAME credential as
+    # `https://token@host/…` — it must not be treated as data just because `urlsplit` sees no
+    # scheme. `git@host:path` and a bare local path stay non-secrets (the exemption list, and the
+    # `"/" not in userinfo` test above).
+    if "@" in url and "/" not in userinfo and ":" not in userinfo:
+        if userinfo and userinfo.lower() not in _NON_SECRET_USERINFO:
+            return True
     # ⛔ A LONE userinfo is a credential too: `https://mytoken123@host/p.git` is a form GitHub
     # documents, carries no `ghp_`/`github_pat_` prefix, and has no password field — so every check
     # above misses it while `redact()` hides it in the display, and the raw token lands on argv
@@ -490,6 +520,34 @@ def _ref_state(
     return "present" if proc.out.strip() else "absent"
 
 
+def _ref_reads(
+    runner: Runner,
+    root: str,
+    urls: list[str],
+    ref: str,
+    env_extra: dict[str, str] | None = None,
+) -> list[tuple[str, str, str]]:
+    """Per-target (url, state, sha). ONE read per target, so no caller re-reads and disagrees.
+
+    The sha is what distinguishes "a ref exists" from "OUR write landed". Returning both from the
+    same read is deliberate: a second, separate read of the first target (as an earlier revision
+    did) can fail transiently and turn a proven write into `verify-mismatch` while the multi-read
+    says `present` — a false block on exactly the multi-pushurl configs this must get right.
+    """
+    reads: list[tuple[str, str, str]] = []
+    for u in urls:
+        proc = runner.run(
+            ["git", "ls-remote", u, f"refs/heads/{ref}"], cwd=root, env_extra=env_extra
+        )
+        if proc.rc != 0:
+            reads.append((u, "unverifiable", ""))
+        elif proc.out.strip():
+            reads.append((u, "present", proc.out.split()[0]))
+        else:
+            reads.append((u, "absent", ""))
+    return reads
+
+
 def _ref_state_multi(runner: Runner, root: str, urls: list[str], ref: str,
                      env_extra: dict[str, str] | None = None) -> str:
     """Is `ref` on ANY of `urls`?
@@ -503,16 +561,146 @@ def _ref_state_multi(runner: Runner, root: str, urls: list[str], ref: str,
     An EMPTY list is `unverifiable`, never `absent` — a vacuous truth here would report a verified
     clean from zero reads.
     """
-    if not urls:
+    reads = _ref_reads(runner, root, urls, ref, env_extra=env_extra)
+    if not reads:
         return "unverifiable"
-    states = [
-        _ref_state(runner, root, u, ref, env_extra=env_extra) for u in urls
-    ]
+    states = [state for _u, state, _sha in reads]
     if "present" in states:
         return "present"
     if "unverifiable" in states:
         return "unverifiable"
     return "absent"
+
+
+def _push_verify_cleanup(
+    runner: Runner,
+    root: str,
+    remote: str,
+    read_targets: list[str],
+    read_env: dict[str, str],
+    verdict: Verdict,
+    head: str,
+    keep_ref: bool,
+    step: Callable[[str, Proc], bool],
+) -> None:
+    """Push the probe ref, verify it, delete it, verify the delete.
+
+    Mutates `verdict`; returns nothing (a value would invite a `return` inside the `finally`
+    that guards it, which would swallow an in-flight exception).
+    """
+    push_proc = runner.run(
+        [
+            "git", "push", "--porcelain", "--no-verify", remote,
+            f"HEAD:refs/heads/{verdict.probe_ref}",
+        ],
+        cwd=root,
+    )
+    push_ok = step("push", push_proc)
+    # ⛔ Parse the write flag from the RAW stdout — NEVER from `steps[-1]["detail"]`, which `step()`
+    # has already truncated to its last 800 chars and redacted. A remote that prints >800 chars of
+    # advisory output while ACCEPTING the push pushes the porcelain line out of that window, turning
+    # a real write into `push-refused` (a false block: the lane parks deliverable work). MEASURED
+    # against real git: a bare remote whose `pre-receive` prints 40 advisory lines and exits 0.
+    wrote = False
+    for line in push_proc.out.splitlines():
+        parts = line.split("\t")
+        if len(parts) >= 2 and parts[0].strip() in ("*", "+"):
+            wrote = True
+            break
+
+    if push_ok and wrote:
+        # (7) Confirm on the REMOTE(S) WE PUSHED TO, not from push's own word. ONE read per target,
+        # carrying the sha — a separate second read of the first target can fail transiently and
+        # flip a proven write into `verify-mismatch` (a false block) while this read says present.
+        reads = _ref_reads(runner, root, read_targets, verdict.probe_ref, env_extra=read_env)
+        verdict.steps.append(
+            {
+                "step": "ls-remote-verify",
+                "rc": 0 if all(st != "unverifiable" for _u, st, _h in reads) else 1,
+                "detail": redact(
+                    "; ".join(f"{u.split('@')[-1]}={st}:{sha[:12] or '-'}" for u, st, sha in reads)
+                ),
+            }
+        )
+        # ⛔ EVERY target must be present AT OUR SHA. A ref that exists at another sha is not our
+        # write; a target that cannot be read is not proven.
+        bad = [(u, st, sha) for u, st, sha in reads if not (st == "present" and sha == head)]
+        if not bad:
+            verdict.writable = True
+        else:
+            verdict.reason = "verify-mismatch"
+            verdict.detail = redact(
+                "push reported success but ls-remote does not confirm "
+                f"refs/heads/{verdict.probe_ref} at {head[:12]}: "
+                + "; ".join(f"{u.split('@')[-1]}={st}:{sha[:12] or '<nothing>'}" for u, st, sha in bad)
+            )
+    elif push_ok:
+        # No line claimed a write -> "up to date": nothing was created, so nothing is proven.
+        # ⛔ Do NOT `return` here and do NOT claim cleanup: a pre-existing probe ref (or a remote
+        # that accepted the update but reported it differently) still has to be DELETED and the
+        # deletion CONFIRMED below. Returning early here reported `cleaned_up=True` with no read at
+        # all — abandoning the litter it was claiming not to have left.
+        verdict.reason = "push-refused"
+        verdict.detail = (
+            "push exited 0 but reported NO ref update (Everything up-to-date) — nothing was "
+            "written, so write capability is not proven"
+        )
+    else:
+        # The defect this tool exists to catch: a read-only credential fails HERE. Do NOT conclude
+        # the ref is absent — a transport error can arrive AFTER the remote applied the update, so
+        # cleanup below still runs and is CONFIRMED by ls-remote.
+        verdict.reason = "push-refused"
+        verdict.detail = verdict.steps[-1]["detail"]
+
+    # (8) CLEANUP — one place, no `return` (a `return` inside `finally` would swallow an in-flight
+    # exception and emit `GH-WRITE-UNAVAILABLE(None)`).
+    if keep_ref:
+        verdict.kept_ref = True
+        verdict.cleaned_up = False
+        return verdict
+
+    dp = runner.run(
+        # `--` so a ref that begins with `-` can never be parsed as an option by `git push`
+        # (a `--probe-ref-prefix=-f` renders `-f/<stamp>`, which without this makes the delete
+        # exit 129 and leaves the ref behind while reporting the credential unwritable).
+        ["git", "push", "--no-verify", remote, "--delete", "--", verdict.probe_ref],
+        cwd=root,
+    )
+    step("delete", dp)
+
+    # CONFIRM ON THE REMOTE(S) WE PUSHED TO, not from the delete's own exit code — the same rule
+    # the push path follows. `cleaned_up=True` only on a positive "ref absent" read of EVERY push
+    # url; an unreadable answer is `None` (unconfirmed), never "clean".
+    state = _ref_state_multi(
+        runner, root, read_targets, verdict.probe_ref, env_extra=read_env
+    )
+    if state == "absent":
+        verdict.cleaned_up = True
+    elif state == "present":
+        verdict.cleaned_up = False
+        verdict.leftover_ref = True
+        # A surviving ref is NOT a pass: the tool must not report writable while it has left
+        # garbage on a shared remote.
+        verdict.writable = False
+        if verdict.reason is None:
+            verdict.reason = "delete-failed"
+        note = (
+            f"PROBE REF SURVIVED on {remote}: refs/heads/{verdict.probe_ref} "
+            f"({verdict.steps[-1]['detail']})"
+        )
+        verdict.detail = f"{verdict.detail} | {note}" if verdict.detail else note
+    else:
+        verdict.cleaned_up = None
+        verdict.leftover_ref = False
+        # Do NOT assert that the delete failed — it may have SUCCEEDED and only the confirming
+        # read failed (a rate limit, a transient error). Report what is actually known.
+        note = (
+            f"cleanup UNCONFIRMED — the delete's outcome could not be confirmed "
+            f"(delete rc={dp.rc}) and ls-remote could not be read for "
+            f"refs/heads/{verdict.probe_ref}; check the remote before assuming it is clean"
+        )
+        verdict.detail = f"{verdict.detail} | {note}" if verdict.detail else note
+
 
 
 def check_writable(
@@ -528,6 +716,22 @@ def check_writable(
     without a `REASONS` token.
     """
     runner = runner or Runner()
+    # ⛔ VALIDATE THE PREFIX AT THE API SEAM TOO. `main()` refuses a bad prefix with exit 2, but a
+    # programmatic caller goes straight to `check_writable`, where an unrenderable refspec previously
+    # surfaced as `GH-WRITE-UNAVAILABLE(push-refused)` — blaming the CREDENTIAL for a usage
+    # mistake, on a remote that writes fine. Raises (rather than returning a verdict) because no
+    # credential verdict exists to return: nothing was probed.
+    if probe_ref_prefix is not None:
+        if not _valid_prefix(probe_ref_prefix):
+            raise ValueError(
+                f"invalid probe_ref_prefix {probe_ref_prefix!r}: it must be a ref-shaped path "
+                f"segment (no empty components, no '..', no leading '-')"
+            )
+        if not _prefix_ok(probe_ref_prefix, runner):
+            raise ValueError(
+                f"invalid probe_ref_prefix {probe_ref_prefix!r}: git check-ref-format rejects "
+                f"the ref name it would produce"
+            )
     try:
         return _check_writable(repo, remote, runner, keep_ref, probe_ref_prefix)
     except Exception as exc:  # noqa: BLE001, RUF100 — the contract is "no exit 1 without a marker"
@@ -647,114 +851,25 @@ def _check_writable(
     # `--porcelain` is REQUIRED: a push that is "Everything up-to-date" exits 0 having written
     # NOTHING, so an exit code alone does not prove a write happened. The ref flag must be `*`
     # (new) or `+` (updated).
-    push_proc = runner.run(
-        [
-            "git", "push", "--porcelain", "--no-verify", remote,
-            f"HEAD:refs/heads/{verdict.probe_ref}",
-        ],
-        cwd=root,
-    )
-    push_ok = step("push", push_proc)
-    # ⛔ Parse the write flag from the RAW stdout — NEVER from `steps[-1]["detail"]`, which `step()`
-    # has already truncated to its last 800 chars and redacted. A remote that prints >800 chars of
-    # advisory output while ACCEPTING the push pushes the porcelain line out of that window, turning
-    # a real write into `push-refused` (a false block: the lane parks deliverable work). MEASURED
-    # against real git: a bare remote whose `pre-receive` prints 40 advisory lines and exits 0.
-    wrote = False
-    for line in push_proc.out.splitlines():
-        parts = line.split("\t")
-        if len(parts) >= 2 and parts[0].strip() in ("*", "+"):
-            wrote = True
-            break
-
-    if push_ok and wrote:
-        # (7) Confirm on the REMOTE(S) WE PUSHED TO, not from push's own word. stdout only.
-        state = _ref_state_multi(
-            runner, root, read_targets, verdict.probe_ref, env_extra=read_env
+    # ⛔ CLEANUP RUNS ON EVERY PATH. Steps (6)-(8) live in a helper so the caller can wrap them
+    # in try/finally: a Ctrl-C, a fleet SIGTERM or any exception AFTER the push has landed would
+    # otherwise leave the probe ref on a REMOTE every lane shares. The module promises the ref is
+    # always cleaned up, and a `finally` is what makes that true rather than aspirational.
+    try:
+        _push_verify_cleanup(
+            runner, root, remote, read_targets, read_env, verdict, head, keep_ref, step
         )
-        vp = runner.run(
-            ["git", "ls-remote", read_targets[0], f"refs/heads/{verdict.probe_ref}"],
-            cwd=root,
-            env_extra=read_env,
-        )
-        step("ls-remote-verify", vp)
-        seen = vp.out.split()[0] if vp.out.strip() else ""
-        # ⛔ The CONTENT check is the difference between "a ref exists" and "OUR write landed":
-        # a pre-existing ref at another sha would otherwise pass as a proven write.
-        if state == "present" and seen == head:
-            verdict.writable = True
-        else:
-            verdict.reason = "verify-mismatch"
-            verdict.detail = (
-                f"push reported success but ls-remote returned {seen or '<nothing>'} "
-                f"for refs/heads/{verdict.probe_ref} (expected {head})"
-            )
-    elif push_ok:
-        # No line claimed a write -> "up to date": nothing was created, so nothing is proven.
-        # ⛔ Do NOT `return` here and do NOT claim cleanup: a pre-existing probe ref (or a remote
-        # that accepted the update but reported it differently) still has to be DELETED and the
-        # deletion CONFIRMED below. Returning early here reported `cleaned_up=True` with no read at
-        # all — abandoning the litter it was claiming not to have left.
-        verdict.reason = "push-refused"
-        verdict.detail = (
-            "push exited 0 but reported NO ref update (Everything up-to-date) — nothing was "
-            "written, so write capability is not proven"
-        )
-    else:
-        # The defect this tool exists to catch: a read-only credential fails HERE. Do NOT conclude
-        # the ref is absent — a transport error can arrive AFTER the remote applied the update, so
-        # cleanup below still runs and is CONFIRMED by ls-remote.
-        verdict.reason = "push-refused"
-        verdict.detail = verdict.steps[-1]["detail"]
-
-    # (8) CLEANUP — one place, no `return` (a `return` inside `finally` would swallow an in-flight
-    # exception and emit `GH-WRITE-UNAVAILABLE(None)`).
-    if keep_ref:
-        verdict.kept_ref = True
-        verdict.cleaned_up = False
-        return verdict
-
-    dp = runner.run(
-        # `--` so a ref that begins with `-` can never be parsed as an option by `git push`
-        # (a `--probe-ref-prefix=-f` renders `-f/<stamp>`, which without this makes the delete
-        # exit 129 and leaves the ref behind while reporting the credential unwritable).
-        ["git", "push", "--no-verify", remote, "--delete", "--", verdict.probe_ref],
-        cwd=root,
-    )
-    step("delete", dp)
-
-    # CONFIRM ON THE REMOTE(S) WE PUSHED TO, not from the delete's own exit code — the same rule
-    # the push path follows. `cleaned_up=True` only on a positive "ref absent" read of EVERY push
-    # url; an unreadable answer is `None` (unconfirmed), never "clean".
-    state = _ref_state_multi(
-        runner, root, read_targets, verdict.probe_ref, env_extra=read_env
-    )
-    if state == "absent":
-        verdict.cleaned_up = True
-    elif state == "present":
-        verdict.cleaned_up = False
-        verdict.leftover_ref = True
-        # A surviving ref is NOT a pass: the tool must not report writable while it has left
-        # garbage on a shared remote.
-        verdict.writable = False
-        if verdict.reason is None:
-            verdict.reason = "delete-failed"
-        note = (
-            f"PROBE REF SURVIVED on {remote}: refs/heads/{verdict.probe_ref} "
-            f"({verdict.steps[-1]['detail']})"
-        )
-        verdict.detail = f"{verdict.detail} | {note}" if verdict.detail else note
-    else:
-        verdict.cleaned_up = None
-        verdict.leftover_ref = False
-        # Do NOT assert that the delete failed — it may have SUCCEEDED and only the confirming
-        # read failed (a rate limit, a transient error). Report what is actually known.
-        note = (
-            f"cleanup UNCONFIRMED — the delete's outcome could not be confirmed "
-            f"(delete rc={dp.rc}) and ls-remote could not be read for "
-            f"refs/heads/{verdict.probe_ref}; check the remote before assuming it is clean"
-        )
-        verdict.detail = f"{verdict.detail} | {note}" if verdict.detail else note
+    finally:
+        if not keep_ref and not verdict.cleaned_up:
+            # Best effort: if the in-flight exception was a kill of the delete itself, try once
+            # more. Never let a failure here replace the original exception.
+            try:
+                runner.run(
+                    ["git", "push", "--no-verify", remote, "--delete", "--", verdict.probe_ref],
+                    cwd=root,
+                )
+            except Exception:  # noqa: BLE001 — must not mask the original failure
+                pass
 
     return verdict
 

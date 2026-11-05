@@ -1513,3 +1513,143 @@ def test_noisy_ACCEPTING_remote_proves_the_write_against_real_git(tmp_path: Path
     assert verdict.cleaned_up is True, "the probe ref must be deleted and the deletion confirmed"
     assert verdict.leftover_ref is False
     assert "gh-write-preflight" not in _remote_refs(remote), "the probe ref was left on the remote"
+
+
+# ══ (9) cycle-9 findings, each pinned by the mutation that proves it ═══════════════════════════
+def test_scp_like_userinfo_is_REDACTED_in_output(tmp_path: Path, capsys):
+    """Detection without redaction is a leak — this tool detected the shape and then printed it.
+
+    `_url_has_credential` was fixed to recognise `user:secret@host:path`, but `redact()` still only
+    covered `scheme://userinfo@`, so both render paths printed the secret in cleartext. Measured
+    before the fix: a `--json` run carried it in BOTH remote_url and push_url.
+    """
+    work, _remote = _make_pair(tmp_path)
+    secret_url = "user:hunter2@example.invalid:repo.git"
+    _git("remote", "set-url", "origin", secret_url, cwd=work)
+
+    assert _url_has_credential(secret_url) is True
+    assert "hunter2" not in redact(secret_url), "redact() must cover what the detector calls a secret"
+
+    rc = main(["--repo", str(work)])
+    out = capsys.readouterr().out
+    assert rc in (EXIT_WRITABLE, EXIT_UNAVAILABLE)
+    assert "hunter2" not in out, f"the credential was printed: {out}"
+
+    main(["--repo", str(work), "--json"])
+    payload = capsys.readouterr().out
+    assert "hunter2" not in payload, f"the credential reached the JSON payload: {payload}"
+
+
+def test_scp_like_lone_userinfo_is_redacted_but_git_user_is_not():
+    """The scp exemption is by USER, not by shape: `git@host:` must survive intact."""
+    assert "hunter2" not in redact("1b2c3d4e5f@example.invalid:repo.git")
+    assert redact("git@github.com:o/r.git") == "git@github.com:o/r.git"
+    assert "git@" not in redact("ssh://git@example.invalid/x.git")
+
+
+def test_scp_form_lone_userinfo_is_detected_as_a_credential():
+    """Same token, no scheme: `token@host:path` is the same credential as `https://token@host/…`.
+
+    Measured before: `_url_has_credential("mytoken123@example.invalid:p.git")` was False, so
+    `_read_targets` handed the raw string to git on argv (0444 on a shared cell).
+    """
+    assert _url_has_credential("mytoken123@example.invalid:p.git") is True
+    assert _url_has_credential("git@example.invalid:repo.git") is False
+    assert _url_has_credential("/tmp/bare/remote@1.git") is False
+
+
+def test_a_transient_extra_read_does_not_false_block(tmp_path: Path):
+    """ONE read per target: the sha comes from the read that establishes presence.
+
+    Measured before (real push to two pushurls, the separate verify re-read returning 128 while the
+    multi-read said present): `writable=False reason=verify-mismatch` on a credential that writes.
+    """
+    work, primary = _make_pair(tmp_path)
+    second = tmp_path / "second.git"
+    _git("init", "--bare", "-q", str(second), cwd=tmp_path)
+    # TWO pushurls explicitly: `set-url --push` pins the first, `--add --push` appends the second
+    # (`--add` alone leaves a single pushurl, which would make this test exercise one target).
+    _git("remote", "set-url", "--push", "origin", str(primary), cwd=work)
+    _git("remote", "set-url", "--add", "--push", "origin", str(second), cwd=work)
+    pushurls = _git("remote", "get-url", "--push", "--all", "origin", cwd=work).stdout.split()
+    assert len(pushurls) == 2, f"the fixture must define two pushurls, got {pushurls}"
+    head = _git("rev-parse", "HEAD", cwd=work).stdout.strip()
+
+    class TwoTargets(Runner):
+        def __init__(self):
+            self.reads = 0
+            self.deleted = False
+
+        def run(self, argv, cwd=None, timeout=120, env_extra=None):
+            if argv[1] == "ls-remote" and "refs/heads/" in " ".join(argv):
+                self.reads += 1
+                # Budget: exactly one verify read PER pushurl (2), then 2 cleanup reads after the
+                # delete. A pre-delete read beyond that can only be a redundant standalone re-read
+                # of a single target — and that read, not the per-target reads, is what must not
+                # decide the verdict, so it is the one that fails.
+                if self.reads > 2 and not self.deleted:
+                    return Proc(128, err="stub: transient")
+                if self.deleted:
+                    return Proc(0, out="")
+                return Proc(0, out=f"{head}\trefs/heads/gh-write-preflight/x\n")
+            if argv[1] == "ls-remote":
+                return Proc(0, out="")
+            if argv[1] == "push" and "--delete" in argv:
+                self.deleted = True
+                return Proc(0, out="")
+            if argv[1] == "push":
+                return Proc(0, out="*\tHEAD:refs/heads/gh-write-preflight/x\t[new branch]\n")
+            return super().run(argv, cwd=cwd, timeout=timeout, env_extra=env_extra)
+
+    verdict = check_writable(work, runner=TwoTargets())
+    assert verdict.writable is True, (
+        f"a proven write must not be refused for a redundant re-read: {verdict.reason!r}"
+    )
+
+
+def test_bad_prefix_at_the_API_seam_is_a_usage_error_not_a_credential_verdict(tmp_path: Path):
+    """`main()` refuses a bad prefix with exit 2; the programmatic seam must not blame the credential.
+
+    Measured before: `check_writable(w, probe_ref_prefix="a b")` returned
+    `GH-WRITE-UNAVAILABLE(push-refused)` on a fully writable remote.
+    """
+    work, _remote = _make_pair(tmp_path)
+    for bad in ("a b", "x*", "-f"):
+        try:
+            check_writable(work, probe_ref_prefix=bad)
+        except ValueError:
+            continue
+        raise AssertionError(f"prefix {bad!r} must raise, not return a verdict")
+
+
+def test_an_exception_after_the_push_still_deletes_the_probe_ref(tmp_path: Path):
+    """A Ctrl-C / SIGTERM after the push has landed must not leave the ref on a shared remote.
+
+    Measured before: `KeyboardInterrupt` raised on the verify read escaped `check_writable` and the
+    remote still held `refs/heads/gh-write-preflight/…`, while the module promises it is always
+    cleaned up.
+    """
+    work, remote = _make_pair(tmp_path)
+    deleted = []
+
+    class Interrupted(Runner):
+        def __init__(self):
+            self.pushed = False
+
+        def run(self, argv, cwd=None, timeout=120, env_extra=None):
+            if argv[1] == "push" and "--delete" not in argv:
+                self.pushed = True
+                return Proc(0, out="*\tHEAD:refs/heads/gh-write-preflight/x\t[new branch]\n")
+            if argv[1] == "push" and "--delete" in argv:
+                deleted.append(argv[-1])
+                return Proc(0, out="")
+            if self.pushed and argv[1] == "ls-remote":
+                raise KeyboardInterrupt
+            return super().run(argv, cwd=cwd, timeout=timeout, env_extra=env_extra)
+
+    try:
+        check_writable(work, runner=Interrupted())
+    except KeyboardInterrupt:
+        pass
+    assert deleted, "the probe ref was NOT deleted after an interrupt"
+    assert "gh-write-preflight" not in _remote_refs(remote)
