@@ -83,7 +83,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from tools.mergify_config_guard import (  # noqa: E402
+from tools.mergify_config_guard import (
     KNOWN_INJECTION_MODES,
     MERGIFY_REL,
     RECORD_REL,
@@ -803,7 +803,7 @@ def _evaluate_at_head(name: str, attempts: list[dict], all_runs: list[dict]) -> 
     # `skipped`, `timed_out`, `action_required`, `stale`, an undocumented
     # conclusion and a completed run whose conclusion is null.
     reds = [
-        (s, c) for s, c in zip(statuses, conclusions)
+        (s, c) for s, c in zip(statuses, conclusions, strict=True)
         if s == "completed" and (c not in GREEN_CONCLUSIONS)
     ]
     if reds:
@@ -870,7 +870,7 @@ def _with_note(required: RequiredSet, note: str) -> RequiredSet:
         queue_names=required.queue_names,
         merge_names=required.merge_names,
         snapshot_agrees=required.snapshot_agrees,
-        notes=required.notes + (note,),
+        notes=(*required.notes, note),
         entry_merge_split=required.entry_merge_split,
         mode=required.mode,
     )
@@ -947,7 +947,7 @@ def main(argv: list[str] | None = None) -> int:
     root = Path(args.root).resolve()
 
     if args.required_set:
-        def _json_set(rs: "RequiredSet | None", *, verdict: str, error: str | None) -> None:
+        def _json_set(rs: RequiredSet | None, *, verdict: str, error: str | None) -> None:
             """`--json` must be JSON on EVERY path, including the failures."""
             print(json.dumps({
                 "names": list(rs.names) if rs else [],

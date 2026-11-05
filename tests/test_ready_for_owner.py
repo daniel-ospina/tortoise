@@ -38,7 +38,6 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from tools import ready_for_owner as rfo  # noqa: E402
 
-
 # ── Fixtures ────────────────────────────────────────────────────────────────
 
 MERGIFY_TEMPLATE = """\
@@ -348,7 +347,7 @@ def test_fully_green_is_PASS(tmp_path):
 
 
 def test_extra_non_required_checks_do_not_affect_the_verdict(tmp_path):
-    runs = all_green() + [run("some-unrelated-job", conclusion="failure", run_id=9999)]
+    runs = [*all_green(), run("some-unrelated-job", conclusion="failure", run_id=9999)]
     assert evaluate(_write_tree(tmp_path, mergify=_mergify()), runs).verdict == rfo.PASS
 
 
@@ -414,9 +413,12 @@ def test_a_rerun_to_success_clears_the_earlier_cancelled_attempt(tmp_path):
     OLDEST red win — measured on #10895 (`cancelled` run 41895779449, then
     `success` run 41898449197), a merged and fully-green PR read as FAIL(red).
     """
-    runs = all_green(
-        ai=_replacement("ai-review-gate", conclusion="cancelled", run_id=100),
-    ) + [_replacement("ai-review-gate", run_id=200, conclusion="success")]
+    runs = [
+        *all_green(
+            ai=_replacement("ai-review-gate", conclusion="cancelled", run_id=100),
+        ),
+        _replacement("ai-review-gate", run_id=200, conclusion="success"),
+    ]
     # Both attempts belong to the SAME workflow (a re-run), which is what makes
     # them one check. Without the map the fallback is run-id keying (strict).
     result = evaluate(_write_tree(tmp_path, mergify=_mergify()), runs, {100: 1, 200: 1})
@@ -427,9 +429,12 @@ def test_a_rerun_to_success_clears_the_earlier_cancelled_attempt(tmp_path):
 
 def test_a_later_failure_still_reds_after_an_earlier_success(tmp_path):
     """The inverse of the carry rule: the NEWEST attempt decides, both ways."""
-    runs = all_green(
-        ai=_replacement("ai-review-gate", conclusion="success", run_id=100),
-    ) + [_replacement("ai-review-gate", run_id=200, conclusion="cancelled")]
+    runs = [
+        *all_green(
+            ai=_replacement("ai-review-gate", conclusion="success", run_id=100),
+        ),
+        _replacement("ai-review-gate", run_id=200, conclusion="cancelled"),
+    ]
     result = evaluate(_write_tree(tmp_path, mergify=_mergify()), runs, {100: 1, 200: 1})
     assert result.verdict == rfo.FAIL_RED
 
