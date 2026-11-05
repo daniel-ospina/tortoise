@@ -586,12 +586,17 @@ and **no** `Issues: write` passes that probe and then fails at its first issue c
 independent, and the token measured on #10930 is the mirror of that shape. This gate
 proves one of the three. If your lane LANDS — comments the evidence on the PR, closes constituents,
 closes delivered issues — `exit 0` proves none of that, so prove those two surfaces by the operation
-itself before you start: read → `PATCH` the title back unchanged → re-read, once with
-`PATCH /repos/{o}/{r}/issues/{n}` and once with `PATCH /repos/{o}/{r}/pulls/{n}` — the ROUTE names the
-grant (`PATCH /issues/{n}` is charged to `Issues`, `PATCH /pulls/{n}` to `Pull requests`), so a 403
-on the wrong route does not mean the wrong permission is missing. #10930 measured the no-op `PATCH`
-residue-free on a PR number; the issue arm is the same shape, not measured. Or escalate rather than
-build. It also
+itself before you start. ⛔ **The route selects the grant, but not always uniquely** — which is why a
+naive two-route proof false-PASSes the exact token #10930 records:
+  - `PATCH /repos/{o}/{r}/pulls/{n}` (no-op title) needs `Pull requests` write and nothing else, so it
+    is a valid leg. #10930 measured it **residue-free** on a PR number.
+  - `PATCH /repos/{o}/{r}/issues/{n}` is documented as **at least one of** `Issues` **or** `Pull
+    requests` write — so it CANNOT prove `Issues: write`: a token holding `Pull requests` and no
+    `Issues` passes it, which is #10945's two-leg shape exactly.
+  - The Issues leg needs an endpoint whose permission set is Issues-only. `POST /repos/{o}/{r}/issues`
+    is, but it creates a real issue — close it, or record the residue rather than leaving it.
+  If neither leg can be proven without residue, **escalate rather than build**; do not record a surface
+  as proven because a proxy for it passed. It also
 proves the credential **`git`** resolves for this checkout's push URL (normally the same token `gh`
 resolves, because the helper is `!gh auth git-credential`; a box whose helper is something else is the
 exception — and even for one token the grant is **per resource kind**, which is why the surfaces above
