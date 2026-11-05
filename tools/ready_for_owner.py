@@ -450,7 +450,11 @@ def fetch_check_runs(repo: str, sha: str) -> list[dict]:
     # disappears and a check reads green, and a short-but-valid body would sail
     # straight through as a PASS.
     total = doc.get("total_count")
-    if not isinstance(total, int):
+    # `isinstance(True, int)` is TRUE and `True == 1`, so a boolean `total_count`
+    # passes the int check and makes `len(runs) < total` false for a ONE-element
+    # set — a JSON `{"total_count": true}` would then return a 1-of-5 set as
+    # complete. Excluded explicitly: a bool is not a count.
+    if not isinstance(total, int) or isinstance(total, bool):
         # A guard that silently disables itself when its input is missing is
         # fail-open: an absent/rewritten `total_count` must not turn the ONLY
         # truncation defence off.

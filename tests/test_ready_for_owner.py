@@ -875,6 +875,23 @@ def test_short_check_runs_are_unreadable_when_total_count_is_missing(monkeypatch
     assert "total_count" in str(excinfo.value)
 
 
+@pytest.mark.parametrize("total", [True, False])
+def test_a_boolean_total_count_is_not_a_count(monkeypatch, total):
+    """`isinstance(True, int)` is True and `True == 1`, so a bool slips the guard.
+
+    With `total_count: true` a ONE-element set satisfies `len(runs) < total` and the
+    truncation defence never fires — a 1-of-5 set would be returned as complete,
+    which is how a dropped red attempt becomes a PASS.
+    """
+    monkeypatch.setattr(
+        rfo, "_gh_api_json",
+        lambda endpoint: {"total_count": total, "check_runs": [{"name": "docs"}]},
+    )
+    with pytest.raises(rfo.RequiredSetUnreadable) as excinfo:
+        rfo.fetch_check_runs("o/r", "deadbeef")
+    assert "total_count" in str(excinfo.value)
+
+
 def test_a_non_string_details_url_does_not_traceback(monkeypatch):
     runs = [{"name": "docs", "status": "completed", "conclusion": "success",
              "id": 1, "details_url": 12345}]
