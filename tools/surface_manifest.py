@@ -316,8 +316,12 @@ CUT_UNPROVABLE = "unprovable"
 #: asked for an object and answered that it does not have it. That is a DISPROOF, not a
 #: fetch failure: the remote replied. Without this arm a partial clone — which is most
 #: of the fleet's checkouts — could only ever answer UNPROVABLE.
+#: ⛔ Deliberately ONLY the two messages in which the REMOTE states it has no such ref.
+#: git also says "could not read <sha>" for an object missing from a promisor clone's
+#: LOCAL store, which proves nothing about whether the commit exists — treating it as a
+#: disproof would red a healthy tree, which is the failure mode this arm exists to avoid.
 _REMOTE_HAS_NO_SUCH_OBJECT = re.compile(
-    r"not our ref|couldn't find remote ref|could not read [0-9a-f]{40}", re.IGNORECASE)
+    r"not our ref|couldn't find remote ref", re.IGNORECASE)
 
 
 def _git(*args: str) -> tuple[int, str, str]:
