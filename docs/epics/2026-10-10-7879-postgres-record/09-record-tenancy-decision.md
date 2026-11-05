@@ -108,12 +108,23 @@ Operator steps: `docs/infra-runbook.md` → "The record's connecting role".
 
 - **R1's DSN must name the app role**, not `postgres`:
   `postgresql://tortoise_record_app.<project-ref>:<password>@aws-0-<region>.pooler.supabase.com:5432/postgres?sslmode=require`.
-  R1 is not armed: the arming SURFACES landed in #9548 — `deploy-hosted.yml` binds, probes and
-  stages it from the GitHub secret of the same name, `.github/scripts/fly-managed-secrets.txt`
-  declares it `gh-secret:`, and `fly.toml` + the runbook's Secrets Matrix document it — but the
-  *value* is the operator's act (it does not exist, so the guarded staging is a no-op) and the
-  connecting role ships `NOLOGIN` until it is given a credential. Declared is not provisioned:
-  the seam still reads `NOT_ARMED`. So this is a correction to a plan, not a migration.
+  ⚠️ **SUPERSEDED — R1 IS ARMED AS OF 2026-10-26.** The paragraph below says R1 is not armed and that
+  the value "does not exist"; that was true at this decision's head and is **false now**, so it is kept
+  only as the record of what this decision corrected. Measured instead: the app has reported
+  `armed: true` since at least **2026-10-26** (`#9548` comment `6407834085`, where the lane connected
+  **as** the role to verify the boundary), and `GET /health` re-measured **2026-11-05T13:11:13Z**
+  reports `"record":{"armed":true,…,"record_write_failures":{}}`. The 2026-11-01 owner postponement
+  that made provisioning forbidden is **itself superseded** by the owner's **2026-11-03** decision
+  (`#9548` comment `6612968196`) — so the DSN is not a pending operator act; the live blocker is the
+  missing **backup** credential (`TORTOISE_RECORD_BACKUP_DSN`), which the decision's backup-first step
+  requires. What this bullet still settles is the **shape**: R1's DSN names the app role, never
+  `postgres`. *The superseded text, as it stood:* R1 is not armed: the arming SURFACES landed in #9548
+  — `deploy-hosted.yml` binds, probes and stages it from the GitHub secret of the same name,
+  `.github/scripts/fly-managed-secrets.txt` declares it `gh-secret:`, and `fly.toml` + the runbook's
+  Secrets Matrix document it — but the *value* is the operator's act (it does not exist, so the
+  guarded staging is a no-op) and the connecting role ships `NOLOGIN` until it is given a credential.
+  Declared is not provisioned: the seam still reads `NOT_ARMED`. So this is a correction to a plan,
+  not a migration.
 - **R7 (#9555) inherits the posture**: its new table ships the same three policies (read-org,
   `service_role`, app-tenant) or it is a table whose RLS state this decision does not explain.
   `tests/test_record_tenancy_guc.py::test_the_migration_covers_every_record_table` reddens until it
@@ -183,7 +194,18 @@ Operator steps: `docs/infra-runbook.md` → "The record's connecting role".
   it, the remedy is one statement — create the role first — not a design change.
 - Whether Supavisor resets session state on connection release (the research brief's own open item 1).
   Immaterial to this decision: the GUC is transaction-local, so it is never the pooler's state.
-- **This decision does not arm anything.** `TORTOISE_RECORD_DSN` remains unset (R1), so the posture
+- **This decision does not arm anything itself — but the arming has since happened.** ⚠️ **SUPERSEDED
+  in part:** the sentence below said `TORTOISE_RECORD_DSN` "remains unset"; measured, it has been set
+  and `armed` since at least **2026-10-26** (`/health` re-measured 2026-11-05T13:11:13Z:
+  `"record":{"armed":true,…}`), provisioned by the operator **as the app role** — which the 302
+  `22P02` `record_write_failures` themselves prove, since those writes required a successful login as
+  `tortoise_record_app` and would have been refused outright by the RLS-bound role had it bypassed or
+  lacked the grants. The owner's **2026-11-03** decision superseded the 2026-11-01 postponement that
+  had forbidden the provisioning (`#9548` comment `6612968196`). So the posture is in force on
+  production writes, not merely proven by the PGlite suite — while the *verified* proof of the
+  boundary remains the suite plus the PGlite SQL, because an armed seam with an empty
+  `record_write_failures` is not evidence that a row was written. *The superseded text, as it stood:*
+  **This decision does not arm anything.** `TORTOISE_RECORD_DSN` remains unset (R1), so the posture
   is enforced from the moment R1 arms the DSN with the app role — and, until then, is proven by the
   PGlite suite rather than by production traffic.
 
