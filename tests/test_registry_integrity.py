@@ -228,9 +228,9 @@ def test_the_integrity_entry_point_names_a_duplicate_durations_key(tmp_path, mon
 
     The planted value is DERIVED from the real one instead of hard-coded, the
     shape `tests/test_ci_timing.py` uses for the same property (#10726 review
-    P3). The row this test shadows is an ADOPTED CI reading — its note ends
-    "ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 2.0" — so
-    the next `--refresh-durations` sweep may rewrite its weight, and a
+    P3). The row this test shadows is an ADOPTED CI reading — its note says
+    "MEASURED by the 2026-10-26 sweep (run 40259128208)" and ends "Was 2.0."
+    — so the next `--refresh-durations` sweep may rewrite its weight, and a
     hard-coded figure would then red here as a complaint about this FIXTURE
     rather than about the duplicate the test exists to catch.
     """

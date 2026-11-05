@@ -3869,8 +3869,11 @@ def test_integrity_problems_catches_a_duplicate_durations_key() -> None:
     # SECOND ARM — the shape that actually REACHES the writer (#10726 review).
     # A duplicated `.durations:` ROW cannot get there: `_locate_durations_block`
     # refuses it, raising `DurationsBridgeError` ("duplicate `durations:` key
-    # 'test_7818_plan_record_5362.py' on lines 8566 and 8567") before anything is
-    # rendered. What DOES reach it is a duplicated TOP-LEVEL `durations:` key:
+    # 'test_7818_plan_record_5362.py' on lines <n> and <n+1>") before anything is
+    # rendered — the figures are deliberately not quoted, because they move with
+    # every union merge above the row (they were 8566/8567 when this arm was
+    # written and 8586/8587 at `59692c8c6`). What DOES reach it is a duplicated
+    # TOP-LEVEL `durations:` key:
     # that locator `break`s at the first block's end, so the renderer never sees
     # the second — measured, it emits TWO `durations:` blocks and
     # `validate_refreshed_manifest` reports nothing. Without this arm the pin
