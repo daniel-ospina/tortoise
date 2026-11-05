@@ -620,8 +620,11 @@ def test_api_base_refusals_never_echo_a_credential_in_any_shape():
     # on the shapes where one exists, or a lane cannot tell which endpoint was refused.
     assert "host" in mod._validate_api_base("user:hunter2@host")
     assert "127.0.0.1" in mod._validate_api_base("http://user:hunter2@127.0.0.1:9?x=1")
-    # …while an uncredentialed base is still echoed verbatim (no over-redaction to hide behind).
-    assert "http://127.0.0.1:9?x=1" in mod._validate_api_base("http://127.0.0.1:9?x=1")
+    # ⛔ HOST ONLY, EVEN FOR AN UNCREDENTIALED BASE (review cycle 19). This line used to assert the WHOLE
+    # base was echoed — and that is exactly how a credential in the query, the fragment or the `@`-tail
+    # reached output when nothing resolved to scrub it by value. The endpoint's identity is the host.
+    _msg = mod._validate_api_base("http://127.0.0.1:9?x=1")
+    assert "127.0.0.1" in _msg and "?x=1" not in _msg, _msg
 
 
 def test_json_verdict_never_echoes_a_credentialed_base_bearing_a_query():

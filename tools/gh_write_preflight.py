@@ -277,41 +277,23 @@ def _validate_api_base(api_base: str) -> str:
 
 
 def _printable_base(api_base: str) -> str:
-    """`api_base` as it may be PUT IN A VERDICT — any `user:pass@` userinfo is redacted.
+    """`api_base` as it may be PUT IN A VERDICT: scheme + host[:port] ONLY.
 
-    ⛔ THE REFUSAL IS NOT THE ONLY PATH THAT PRINTS THE BASE. `api_base` is a key in the result dict,
-    and `--json` serialises the WHOLE dict — so a credentialed base refused for carrying credentials
-    was still echoed verbatim into the machine-readable artifact. MEASURED on the round-7 fix:
-
-        --api-base http://user:hunter2@127.0.0.1:9 --json
-        → "api_base": "http://user:hunter2@127.0.0.1:9"      ← the secret, in stdout
-
-    which is credential hygiene (`R3`) failing in the artifact a lane pastes into a PR or a comment.
-    The host and path are kept so the verdict still names what was refused; only the userinfo goes.
+    ⛔ THIS FUNCTION MUST NOT BE ABLE TO RETURN CALLER-SUPPLIED TEXT (review cycles 17-19). Every earlier
+    version returned *some* part of the base — the whole string on the no-path branch, the path, the
+    `@`-tail — and each one leaked a credential when nothing resolved to scrub it by value (`--api-base`
+    is a caller input, and `GH_WRITE_PREFLIGHT_API` is the documented seam). A verdict needs the
+    ENDPOINT'S IDENTITY ("was this measured against GitHub?"), which is scheme + netloc. Anything else a
+    reader might want is available from their own command line.
     """
     try:
         parts = urllib.parse.urlsplit(api_base)
     except ValueError:
         return "[unparseable --api-base, not echoed]"
-    # ⛔ HOST ONLY — THE PATH IS NEVER ECHOED (review cycle 18). The path is caller-supplied text, and when
-    # NO credential resolves there is nothing to scrub it by value, so a `--api-base` carrying a legacy
-    # 40-hex secret in its path printed it on the human line and in `--json`. The endpoint is identified by
-    # its host, which is all a verdict needs ("was this measured against GitHub?").
-    _safe_path = "/<path not echoed>" if parts.path and parts.path != "/" else ""
-    if parts.username is not None or parts.password is not None:
-        return urllib.parse.urlunsplit(
-            (parts.scheme, parts.netloc.rsplit("@", 1)[-1], _safe_path, "", ""))
-    if _safe_path:
-        return urllib.parse.urlunsplit(
-            (parts.scheme, parts.netloc, _safe_path, "", ""))
-    # ⛔ `urlsplit` IS BLIND TO USERINFO IN A VALUE IT CANNOT PARSE AS A URL AT ALL. `user:hunter2@host`
-    # (no scheme) comes back as scheme='user', netloc='', path='hunter2@host', username=None,
-    # password=None — so the branch above returns it VERBATIM and a schemeless credentialed base leaks
-    # exactly as the query-bearing one did. Any '@' surviving both branches is userinfo-shaped, so the
-    # prefix is redacted and the tail (the host) kept for attributability.
-    if "@" in api_base:
-        return "[redacted userinfo]@" + api_base.rsplit("@", 1)[-1]
-    return api_base
+    if not parts.scheme or not parts.netloc:
+        return "[unparseable --api-base, not echoed]"
+    # userinfo is dropped by construction: netloc starts at the LAST '@', so `user:pass@` cannot survive.
+    return urllib.parse.urlunsplit((parts.scheme, parts.netloc.rsplit("@", 1)[-1], "", "", ""))
 
 
 def _scrub(text: str, secret: str = "") -> str:
