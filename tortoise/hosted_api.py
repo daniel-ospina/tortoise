@@ -35298,9 +35298,17 @@ _REGISTRY_PROBE_PATH: str | None = None
 #: exists to prevent, on the auth path.
 #: Publishing `(identity, sdk)` as one tuple makes the switch atomic: a reader
 #: reads it once and either matches the identity it holds or misses and builds.
-#: The three scalars are kept as MIRRORS (written under the lock, read under it
-#: and by tests) so nothing that introspects them breaks; the fast path reads
-#: ONLY this tuple, never them.
+#: ⛔ THE SAME RULE APPLIES TO CLEARING IT, IN THE OPPOSITE DIRECTION:
+#: `_reset_registry_probe_sdk` drops the tuple **first**, before the mirrors and
+#: before the close, so a lock-free reader stops being served the handle that
+#: call is about to close (a reader that already took the tuple before the clear
+#: can still race the close — that residue needs refcounting and is not load-
+#: bearing: reset is a teardown/isolation hook, not a request path).
+#: The three scalars are kept as MIRRORS so nothing that introspects them breaks.
+#: They are written under the lock; the fast path never reads them, and the only
+#: lock-free reads of them are the reset's gate and the retire target, where they
+#: can never SERVE a handle — a stale read there only decides whether there is
+#: something to close, so it falls through to a close, never to a wrong handle.
 _REGISTRY_PROBE_CACHE: tuple[tuple[str, str], TortoiseSDK] | None = None
 
 #: How many times `_registry_probe_sdk` will rebuild a handle whose identity did
@@ -35332,13 +35340,21 @@ def _reset_registry_probe_sdk() -> None:
     cannot block a concurrent construction (the #2172 lock discipline)."""
     global _REGISTRY_PROBE_SDK, _REGISTRY_PROBE_URI, _REGISTRY_PROBE_PATH
     global _REGISTRY_PROBE_CACHE
-    if _REGISTRY_PROBE_SDK is None:
+    if _REGISTRY_PROBE_CACHE is None and _REGISTRY_PROBE_SDK is None:
         return
     with _KEEPALIVE_LOCK:
-        sdk, _REGISTRY_PROBE_SDK = _REGISTRY_PROBE_SDK, None
+        # ⛔ CLEAR THE TUPLE **FIRST** — the mirror of the install rule. The
+        # fast path reads ONLY the tuple and holds no lock, so if the tuple were
+        # cleared last (behind the three scalar stores) a reader would keep
+        # being served the very handle this call is about to CLOSE: the same
+        # torn-publication window as the install path, pointing the other way
+        # and ending in a use-after-close instead of a wrong-graph pairing
+        # (#11001 review, round 8).
+        entry, _REGISTRY_PROBE_CACHE = _REGISTRY_PROBE_CACHE, None
+        sdk = entry[1] if entry is not None else _REGISTRY_PROBE_SDK
+        _REGISTRY_PROBE_SDK = None
         _REGISTRY_PROBE_URI = None
         _REGISTRY_PROBE_PATH = None
-        _REGISTRY_PROBE_CACHE = None
     try:  # noqa: SIM105
         sdk.close()
     except Exception:
@@ -35456,7 +35472,7 @@ def _registry_probe_sdk() -> TortoiseSDK:
                 # anchor evicts on drift the same way, #1502). Drop the handle:
                 # reusing it would probe a graph this process no longer
                 # resolves to.
-                retired = _REGISTRY_PROBE_SDK
+                retired = cached_entry[1] if cached_entry is not None else _REGISTRY_PROBE_SDK
                 _REGISTRY_PROBE_SDK = sdk
                 _REGISTRY_PROBE_URI, _REGISTRY_PROBE_PATH = identity
                 # The atomic publication — LAST, so a lock-free reader that
