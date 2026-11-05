@@ -316,11 +316,20 @@ class CacheTest(unittest.TestCase):
             ("api", "graphql", "-f", "query={viewer{login}}"),
             ("api", "-f", "query={viewer{login}}", "graphql"),
             ("api", "graphql?query={viewer{login}}"),
-            # the normalisations gh performs for us, each measured as a SERVED read first.
+            # the spellings normalised before matching. ⛔ NOT all of them are reads `gh`
+            # could have served: `graph%71l` is forwarded verbatim and 404s at the API, so
+            # refusing it is deliberate OVER-refusal — and the route-level `unquote` is what
+            # does it, which the flagged spelling below is what pins.
             ("api", "/graphql"),
             ("api", "//graphql"),
             ("api", "graph%71l"),
+            ("api", "--paginate", "graph%71l"),
             ("api", "GRAPHQL"),
+            # ⛔ A DOT-SEGMENT PREFIX IS A ROUTE. The edge collapses the literal `repos/..`
+            # to the API root (`/repos/../rate_limit` → 200, `/foo/../rate_limit` → 404), so
+            # `repos/../graphql` was a live graphql read that came back rc=0.
+            ("api", "repos/../graphql"),
+            ("api", "--paginate", "repos/../graphql"),
             # ⛔ AN ABSOLUTE URL IS A ROUTE gh FORWARDS VERBATIM. Every declared mutable
             # route was served when spelled this way: `_route_candidates` only ever built
             # `api <path>` from `repos/`-shaped tokens, so a full URL matched nothing.
