@@ -7138,12 +7138,11 @@ def test_a_file_the_fold_added_carries_the_flat_default_not_a_local_reading():
     """#10726 review P1: `test_9548_record_search_keys_shape.py` shipped `4.0`.
 
     That 4.0 was this host's local clock — the row's note at the time quoted "11 passed,
-    1 skipped in 3.45s", and a later commit removed that count precisely because a
-    hand-written figure re-stales — while the other eight files in
-    `ROWED_BY_THIS_FOLD` all carry 2.0. That set is NOT "the files this fold added"
-    (only one of the nine is; the set's own block above says which and why it is kept
-    whole) — it is the row-set this pin guards.
-    The existence pin above stayed green through it, because a local reading is a
+    1 skipped in 3.45s", a count a later commit removed because a hand-written figure
+    re-stales — while the other eight files in `ROWED_BY_THIS_FOLD` all took 2.0.
+    (Only ONE of the nine is a file this fold ADDED — the `ROWED_BY_THIS_FOLD` block
+    above is the authority on what the set actually is, #2148 review P3 — but the whole
+    set is the row-set this pin guards.)    The existence pin above stayed green through it, because a local reading is a
     row like any other; the coverage floor could not see it either (it is a RATIO
     with ~70 files of headroom). Nothing reds on a hand-picked shard weight, which
     is precisely why it needs its own pin — `test_state_value_verbatim_10360.py` is
