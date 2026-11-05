@@ -1634,6 +1634,20 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # Pinned by
              # tests/test_ci_selection.py::test_worktree_report_tool_change_selects_core_not_tier1.
              "tools/worktree_report.py",
+             # #11026: tools/gh_write_preflight.py owns tests/test_gh_write_preflight.py
+             # (registered `core`), and it hit the SAME silent drop: `tools/` is swallowed by
+             # NON_PYTHON_PREFIXES and no SOURCE_PATTERNS row matches the tool, so a TOOL-ONLY
+             # change selected NO surface, took the docs-only early return and landed on tier-1
+             # smoke, where that file is not registered. The PR that weakens the write proof —
+             # the check that exists because a read-only GH_TOKEN let a 17-lane wave deliver
+             # NOTHING — would then be the one that never ran the cases pinning it.
+             # MEASURED before this entry: `select(["tools/gh_write_preflight.py"],
+             # "pull_request", load_manifest())` -> surfaces=[], full=False, test file ABSENT;
+             # after -> surfaces=['core'], present. Same #1349/#3332/#3616 class as above.
+             # ⚠️ n is a SNAPSHOT — re-measure, do not trust a count.
+             # Pinned by
+             # tests/test_ci_selection.py::test_gh_write_preflight_tool_change_selects_core_not_tier1.
+             "tools/gh_write_preflight.py",
              # #7814 review P2: the queue-reconcile schedule installer owns
              # tests/test_install_queue_reconcile_schedule.py, registered
              # `core`, but `tools/` is swallowed by NON_PYTHON_PREFIXES and no
@@ -2741,6 +2755,28 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # lives. Pinned by
              # tests/test_ci_selection.py::test_rail_pin_runs_on_a_tools_only_change.
              "tools/rail_detach.py",
+             # #10976: the egress census CLI. `tools/` is a flat
+             # NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row matches
+             # `tools/cache_eviction_census.py`, so a TOOL-ONLY change filtered to
+             # `changed == []` and took the docs-only early return — the suite that
+             # pins the census (registered `core`, beside this entry) would never run
+             # on the very file that decides whether a population may be SWEPT. The
+             # CLI is where the refusals live (the LICENCE exit split, the
+             # destructive-flag guard, `--graph`/`--parity-graph` disagreement), so a
+             # weakened refusal there would merge with every pin green-by-omission.
+             # MEASURED before this entry: `select(["tools/cache_eviction_census.py"],
+             # "pull_request", load_manifest())` -> surfaces=[], full=False, 72 files,
+             # `test_cache_eviction_census.py` ABSENT; after -> surfaces=['core'],
+             # present. ⚠️ The file count is a SNAPSHOT taken at the head that measured
+             # it — re-measure, do not trust the count. Same #1349/#3332/#3616
+             # silent-drop class as the entries above. CORE_ALSO (not
+             # TOOL_CARVEOUTS) because the suite is hermetic (a statement-recording
+             # `_FakeGraph`, temp-dir report files) and `core` is where it lives.
+             # `tortoise/cache_eviction.py` needs no entry: it matches no
+             # SOURCE_PATTERN, so a module-only change already falls through to
+             # `core`. Pinned by
+             # tests/test_ci_selection.py::test_cache_eviction_census_runs_on_the_diffs_that_can_weaken_it.
+             "tools/cache_eviction_census.py",
              # #10920: the CI runner-label coverage gate. `tools/` is a flat
              # NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row matches
              # `tools/ci_runner_labels.py`, so a TOOL-ONLY change filtered to
