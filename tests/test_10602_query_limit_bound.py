@@ -311,6 +311,43 @@ def test_the_tag_arm_honours_a_lone_limit_like_the_structural_arm(stub_factory):
     assert paged["total"] == 5 and paged["hasMore"] is True
 
 
+def test_the_tag_arms_unbounded_read_and_non_total_order_are_censused():
+    """Review round 4 (P2-2, second half) — the residue this PR cannot fix is RECORDED.
+
+    The bound reached the structural arm's accessor. It could not reach the
+    `tag=` arm's: `query_points_by_tag` accepts no `skip`/`limit`, so the handler
+    still reads the whole tagged population and slices it — the bound is on the
+    RESPONSE, not the READ. Bounding that accessor is a public SDK signature
+    change and needs the owner's approval (`AGENTS.md` → *MCP/SDK Surface
+    Approval*), so the contract's census is where a lane auditing #8447 must be
+    able to find it. Two facts have to survive: the READ is unbounded, and the
+    order the page walk depends on is not total (#5346's defect, on an accessor
+    that suite does not pin).
+
+    Non-vacuous: the census carried no `tag=` row at all before this pin, so it
+    reds on the pre-fix doc rather than passing over a row it never checked.
+    """
+    from pathlib import Path
+    doc = (Path(__file__).resolve().parent.parent / "docs" / "architecture"
+           / "BOUNDED-OPERATION-CONTRACT.md").read_text(encoding="utf-8")
+    rows = [ln for ln in doc.splitlines()
+            if ln.startswith("| `tortoise_query(tag=…)`")]
+    assert len(rows) == 1, (
+        f"expected exactly ONE `tortoise_query(tag=…)` census row, found "
+        f"{len(rows)} — the arm whose READ the bound never reached is not "
+        "recorded, so a lane reads the tool as fixed")
+    row = rows[0]
+    # The READ/response distinction is the whole point of the row.
+    assert "query_points_by_tag" in row, f"the row names no accessor: {row}"
+    assert "**no** bound on the READ" in row, (
+        f"the row does not say the read is unbounded — a lane would re-derive "
+        f"the handler-side slice as a fix: {row}")
+    # …and the walk it advertises is only lossless on a TOTAL order.
+    assert "id(n)" in row and "#5346" in row, (
+        f"the row does not record the non-total order the page walk depends "
+        f"on: {row}")
+    # The residue has a home, not just a complaint.
+    assert "#11062" in row, f"the row cites no follow-up: {row}"
 def test_every_editable_served_skill_that_reads_a_population_discloses_the_bound():
     """Review round 5 (findings P2-1 / F2) — the SHIPPED consumers, not only the tool text.
 

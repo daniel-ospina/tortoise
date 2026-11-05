@@ -76,6 +76,7 @@ a reader who finds the number has drifted should search the quoted fragment: tha
 | `TortoiseSDK.list_batches` (MCP: `tortoise_list_batches`) | `limit=20` | **SILENT** | `tortoise/sdk.py::list_batches` — `return items[:limit]`; the method's contract is `-> list[dict]` (declared on the same `def`), so there is no field in which to say "there are more" |
 | `TortoiseSDK.suggest_entry_points` (MCP: `tortoise_suggest_entry_points`) | `limit=5` | **SILENT** | `tortoise/sdk.py::suggest_entry_points` — `results = results[:limit]` on a plain `[:limit]` cut with no offset and no cursor; declared `-> list[dict]` on the same `def` |
 | `tortoise_query(text=…)` (MCP, `tortoise/tool_registry.py::TOOL_REGISTRY`; the `text=` arm only) | `limit` (100 on that arm) | **SILENT** | `tortoise/mcp_server.py::tortoise_query` calls `tortoise_fts_query(…, limit=eff_limit)` **without** the private marker sink, and the SDK method (`tortoise/sdk.py::tortoise_fts_query`) is declared `-> list[dict]` — so even though it CAN compute the marker (its `_truncation_out` sink), a bare list has nowhere to carry it. Its structural arm (`text=None`) is a different surface, and not all of its branches are marked, see ⚠️ below |
+| `tortoise_query(tag=…)` (MCP, `tortoise/tool_registry.py::TOOL_REGISTRY`; the `tag=` arm) | `limit` on the **response** (`eff_limit`); **no** bound on the READ | **SILENT** un-paginated, **MARKS** paged — and the walk is not lossless | `tortoise/mcp_server.py::tortoise_query` slices `rows[:eff_limit]` in the HANDLER, because `tortoise/sdk.py::query_points_by_tag` accepts no `skip`/`limit` and its own docstring says it *"returns the WHOLE tag population"* — so the RESPONSE is bounded and the READ is not, which is the shape the structural arm's fix rejects 60 lines away. The paged form returns `{results,total,hasMore}`, but that accessor orders `ORDER BY p.createdAt DESC` with **no `id(n)` tiebreak**: `createdAt` is not unique, so consecutive `offset=` windows are not adjacent ranges of ONE order (the #5346 defect) and a walk drops and repeats rows while `hasMore` — computed from that one call's own list — cannot see the loss. `tests/test_5346_paged_read_total_order.py` pins `paginated_query`, not this accessor. **Not bounded here: adding `skip`/`limit` to the public accessor is an MCP/SDK surface change and needs the owner's approval.** Follow-up and census owner: #11062 |
 | `GET /v1/points` (hosted, `tortoise/hosted_api.py::list_points`) | `limit=50` (`Query(50, ge=1, le=1000)`) | **MARKS** | the same function asks the store for `limit+1` (an internal probe row, dropped before delivery) and its own `mark_truncation`/`truncation_field` calls (`tortoise/truncation.py::truncation_field`) publish `truncated`; `total_available` is deliberately WITHHELD (`exact=False` — a probe proves *more exist*, not *how many*), so a truncated page takes the third state. `count` is still rows **delivered**, and the cap VALUES are unchanged |
 | `GET /points` (selfhost, `tortoise/selfhost_api.py::list_points`) | `limit=50` | **SILENT** | `response_model=list[PointResponse]` — a bare list on the route |
 | `GET /v1/events` (hosted, `tortoise/hosted_api.py::events_poll`) | `limit=100` (`le=_MAX_EVENT_PAGE`) | **REFUSES at the edge** | `limit: int = Query(100, ge=1, le=_MAX_EVENT_PAGE)` in `events_poll` refuses 0 at the route; the seam below it (`tortoise/event_store.py::read_after`) refuses both ends — see §3 |
@@ -126,6 +127,16 @@ tool description (`tortoise/tool_registry.py` — the text a model reads, not th
 and that a paged read is advertised as the way to walk the population. Making the truncation visible
 on the wire — returning the `hasMore`/`total` dict when `total > len(results)` — is a return-shape
 change and is deliberately NOT done here.
+
+⚠️ **The `tag=` arm is a third surface on the same tool, and it is the one the bound never reached.**
+#10602 bounded the structural READ at the accessor; on `tag=` only the RESPONSE is bounded, in the
+handler, because `tortoise/sdk.py::query_points_by_tag` has no `skip`/`limit` to push the bound into.
+The read volume that produced the outage is therefore unchanged on that arm: a large tagged population
+still costs the whole read and can still blow `mcp_auth._TRANSPORT_WAIT_BOUND_S` and return `-32009`,
+while the served description now says the *response* is bounded (which is true, and is why the served
+text names the distinction rather than calling the arm cheap). Its census row is in the table above;
+the accessor bound, and the total order a lossless walk needs, are #11062 — both are one approval and
+one signature away, and neither is a rider on #10602.
 
 ⚠️ **The census is a population, and this table is the part of it that has been measured** — it is
 NOT yet exhaustive. §1 also names *body/log caps* and *ingest chunking*, and no row here covers
