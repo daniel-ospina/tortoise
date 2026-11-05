@@ -363,8 +363,11 @@ two pairings give different verdicts. At n=1 per arm the verdict would depend on
 which before run is chosen, so the aggregate is `REFUSED` with both pairings
 printed. The next requirement is **n >= 2 per arm** — and the two realizations
 have to BE two runs: the driver refuses a before pair taken on the same graph,
-because two copies of one OFF record pair identically, which would turn this
-refusal into a decided `FAIL` off a single realization.
+because two copies of one OFF record pair identically, which makes the row
+decidable off a single realization — a decided `FAIL` when the duplicated arm is
+the 0.3590 one, and a decided `PASS` when it is the 0.5652 one. The `PASS` is the
+direction that matters: it is the one this guard exists to stop, and the one
+`e1_e2_scores.py`'s own reproduction measured.
 
 **The counts reach the rows.** The capstone's E2 row now carries E2a's count over
 the FROZEN 14 (`8 of 14` today; the bar is `>= 13 of 14`), and E1's carries the

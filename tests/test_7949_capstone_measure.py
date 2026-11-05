@@ -5169,12 +5169,12 @@ _RETRACTED_E2_RENDER_ABSENCE = (
 )
 
 
-#: The BOLD verdict token the `#9080` row states E2 under. A selector keyed on one
-#: literal word (`BLOCKED`) went stale the moment #10610 review issue 1 moved the
-#: row to `E2 RED` — and it stayed green, because the same line still carries E1's
-#: `BLOCKED`. Reading the token rather than the word keeps the leg's subject alive
-#: across a verdict change (a verdict moves by re-running the probe, not by editing
-#: this regex).
+#: The BOLD verdict token the `#9080` row states E2 under. The WORD is
+#: artifact-owned — a verdict moves by re-running the probe, not by editing this
+#: regex — so a selector keyed on one literal (`BLOCKED`) drops the row out of its
+#: own leg's subject the moment the re-run moves it, and the leg stayed green
+#: because the same line still carries E1's `BLOCKED`. Reading the token rather than
+#: the word keeps the leg's subject alive across a verdict change.
 _E2_VERDICT_ROW = re.compile(r"\*\*E2 (?:BLOCKED|RED|GREEN)\*\*")
 
 
@@ -5236,10 +5236,11 @@ def test_the_bundle_names_the_live_e2_blocker_and_no_closed_render_absence():
     #    that states E2's verdict must name the live blocker and must not name the
     #    closed one, whichever words it uses to do it — AND whichever verdict word
     #    it uses. The selector below reads the BOLD verdict token (`**E2 <WORD>**`),
-    #    not one literal: #10610 review issue 1 moved this row from `E2 BLOCKED`
-    #    to `E2 RED` (the `#9889` record scores the row), and a selector keyed on
-    #    `BLOCKED` would have dropped the row out of this leg's subject while the
-    #    leg went on passing on E1's own verdict word in the same line.
+    #    not one literal: the word is artifact-owned (`**E2 BLOCKED**` at this head,
+    #    and the `#9889` record scores the row, so a re-run may move it), and a
+    #    selector keyed on `BLOCKED` would drop the row out of this leg's subject the
+    #    moment it moved while the leg went on passing on E1's own verdict word in the
+    #    same line.
     e2_verdict_rows = [line for line in index.splitlines()
                        if _E2_VERDICT_ROW.search(line)]
     assert e2_verdict_rows, (
@@ -5350,15 +5351,15 @@ def test_the_three_routes_to_the_e1_e2_verdict_state_the_records_verdict():
     """A document that routes a reader to E1/E2 must state the verdict the record gives.
 
     #10610 review issue 1 (P2): the change re-pointed both rows at
-    `docs/evidence/9889/e1-e2-scores.json` and moved E2 from BLOCKED to RED, and the two
-    documents a reader is routed to kept asserting the superseded reading IN THE PRESENT
-    TENSE — `docs/00_index.md`'s `#9080` row (`3 RED + 2 BLOCKED`, "E1 … its only artifact
-    is 25 Objects … with no before arm", "E2 … carried by no committed artifact") and
-    `E1-E5-PROOFS.md`'s E2a/E2b rows ("the bundle's README marks the row BLOCKED because
-    the frozen 14-unit denominator is carried by no committed artifact"), whose
-    `README.md:69` pointer now lands on a row reading `RED (8 of 14)`. Nothing read that
-    prose, so the suite stayed green while the bundle's own entry point told a reader the
-    opposite of the table beside it.
+    `docs/evidence/9889/e1-e2-scores.json`, and the two documents a reader is routed to kept
+    asserting the superseded reading IN THE PRESENT TENSE — `docs/00_index.md`'s `#9080` row
+    (`3 RED + 2 BLOCKED`, "E1 … its only artifact is 25 Objects … with no before arm", "E2 …
+    carried by no committed artifact") and `E1-E5-PROOFS.md`'s E2a/E2b rows ("the bundle's
+    README marks the row BLOCKED because the frozen 14-unit denominator is carried by no
+    committed artifact"), whose `README.md:69` pointer now lands on a row that NAMES the
+    re-run reading (`RED 8/14`) while its committed verdict cell still reads
+    `⛔ **BLOCKED** (#10360)`. Nothing read that prose, so the suite stayed green while the
+    bundle's own entry point told a reader the opposite of the table beside it.
 
     Every leg is DERIVED, and each document is held to the ARTIFACT IT DESCRIBES — which
     after the 2026-11-02 re-measure is two different artifacts, deliberately:
