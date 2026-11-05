@@ -296,12 +296,12 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         id="surface.query",
         description="Query points by pointKind and/or property filters — structural exact-match "
                     "retrieval for known shapes (Epic #888: paginated_query + query_points_by_tag "
-                    "merged in). The structural read returns at most `limit` rows (default 100) "
-                    "— it is BOUNDED, not a full-population scan, so a truncated answer is not "
-                    "distinguishable from a complete one; walk offset=/limit= (or 1-based page=) "
-                    "until hasMore is false when you need every row. ⚠️ The `tag=` arm is NOT "
-                    "capped the same way — it returns every tagged Point unless you pass "
-                    "offset=/limit= with it. include_retracted=True surfaces tombstones. For "
+                    "merged in). BOTH the structural read and the `tag=` arm return at most `limit` "
+                    "rows (default 100) — they are BOUNDED, not a full-population scan, so a "
+                    "truncated answer is not distinguishable from a complete one; walk "
+                    "offset=/limit= (or 1-based page=) until hasMore is false when you need every "
+                    "row (a bare `limit=` bounds the answer but gives you no hasMore/total). "
+                    "include_retracted=True surfaces tombstones. For "
                     "semantic relevance use tortoise_search; for a single known ID use "
                     "tortoise_get_point.",
         risk="read",

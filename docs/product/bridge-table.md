@@ -460,13 +460,13 @@ construction, so it cannot be a truncation of what the doc says):
   > | 17 | `revise_knowledge` | update, update_point, update_entity, supersede, invalidate, retract_point, promote_point, set_point_baseline — the beta target **splits this into `update_knowledge` + `supersede_knowledge`**; promote/baseline become **fields on `update_knowledge`** |
 - **`tortoise_mitigate_operator`** — `mitigate_operator` is absorbed by `adjust_relationship`:
   > | 21 | `adjust_relationship` | operator_action, annotate_operator, mitigate_operator |
-- **`tortoise_paginated_query`** — `paginated_query` is absorbed by `list_knowledge`:
+- **`tortoise_paginated_query`** — `query` (SDK `paginated_query`) is absorbed by `list_knowledge`:
   > | 2 | `list_knowledge` | query |
 - **`tortoise_provenance`** — `provenance` is absorbed by `recall_beliefs`:
   > | 3 | `recall_beliefs` | recall, belief_timeline, provenance, session_context, get_confidence, calibrate_summary |
 - **`tortoise_query`** — `query` (SDK `paginated_query`) is absorbed by `list_knowledge`:
   > | 2 | `list_knowledge` | query |
-- **`tortoise_query_points_by_tag`** — `query_points_by_tag` is absorbed by `list_knowledge`:
+- **`tortoise_query_points_by_tag`** — `query` (SDK `query_points_by_tag`) is absorbed by `list_knowledge`:
   > | 2 | `list_knowledge` | query |
 - **`tortoise_session_context`** — `session_context` is absorbed by `recall_beliefs`:
   > | 3 | `recall_beliefs` | recall, belief_timeline, provenance, session_context, get_confidence, calibrate_summary |

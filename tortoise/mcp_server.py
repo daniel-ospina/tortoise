@@ -3749,8 +3749,14 @@ def tortoise_query(kind: str | None = None,
         if not include_retracted:
             rows = [r for r in rows if r.get("status") != "retracted"]
         if not paginated:
-            _ledger_record_page("Point", rows)  # #7983: the served population
-            return rows
+            # #10602 review 3: a lone `limit=` used to be ignored HERE too, so a caller
+            # asking for 2 rows of a large tag got the whole tagged population back —
+            # the served description then told them that was capped. Bound the RESPONSE
+            # to `eff_limit` (the same number the structural arm uses); `offset=`/`page=`
+            # remain what switches on `{results,total,hasMore}`.
+            page_rows = rows[:eff_limit]
+            _ledger_record_page("Point", page_rows)  # #7983: the served page
+            return page_rows
         eff_offset = offset if offset is not None else 0
         if page is not None:
             eff_offset = (page - 1) * eff_limit
@@ -3816,7 +3822,8 @@ def tortoise_query(kind: str | None = None,
     # in 1,362 ms with `total=15708`. So the bound is pushed to the ACCESSOR —
     # `paginated_query` is the SDK method that applies LIMIT — rather than
     # slicing the full list here, which would still pay the unbounded read.
-    _filters = _public_filters(filters)
+    # (`_filters` was computed once, above the paginated branch — this path does
+    # not recompute it; one dict, one meaning.)
     bounded = _safe(_get_org_sdk().paginated_query, kind, skip=0, limit=eff_limit,
                     include_retracted=include_retracted,
                     **_filters)

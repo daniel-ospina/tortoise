@@ -1332,6 +1332,9 @@ def _approved_readings(
                         # the SDK method `invalidate_point`, and the evidence line quotes
                         # the row — so it must name the token that row actually contains.
                         "matched": sorted(aliases & menu[h]["members"]),
+                        # The row's own tokens, for the case where NO alias is one of
+                        # them: the line still needs a name the QUOTE contains.
+                        "members": sorted(menu[h]["members"]),
                     }
                     for h in homes
                 ],
@@ -1375,20 +1378,37 @@ def _approved_evidence_lines(approved: list[dict]) -> list[str]:
             continue
         matched = a["homes_detail"][0]["matched"]
         quote = a["homes_detail"][0]["quote"]
-        # #10602: the line must name a token the QUOTE contains — that is what makes the
-        # claim checkable against the evidence printed directly beneath it. `matched` is
-        # `aliases & members`, and `aliases` is {SDK method} ∪ {tool name minus its
-        # `tortoise_` prefix}; those coincide only while the binding equals the name (the
-        # old `sdk_method: query` on `tortoise_query`). Once the binding differs
-        # (`paginated_query`), BOTH tokens can match the same approved row and the line
-        # would name a token its own quote never states — `tests/test_bridge_table.py::
-        # test_d4_evidence_line_names_a_token_its_quoted_row_contains` caught exactly
-        # that. Tokens absent from the quote move to the `(SDK …)` slot, which is where
-        # the docstring above already puts a method the doc does not name.
-        named_tokens = [m for m in matched if m in quote] or matched
+        # #10602: the line must name a token its own QUOTE contains — that is what makes
+        # the claim checkable against the evidence printed directly beneath it.
+        #
+        # Two defects are closed here, both measured by review round 3:
+        #  (1) `m in quote` is a SUBSTRING test, so `query` was "found" in a quote whose
+        #      only occurrence is `paginated_query`. The test is token-bounded now.
+        #  (2) `... or matched` reproduced the old behaviour whenever NO alias was in the
+        #      quote — e.g. `tortoise_paginated_query`, whose matched token is
+        #      `paginated_query` over a quote reading `| 2 | list_knowledge | query |`. It
+        #      now falls back to a token the QUOTE carries (the row's own member) and lets
+        #      the `(SDK …)` slot carry the method, so the line is never a token the quote
+        #      lacks.
+        qtok = set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", quote))
+        named_tokens = [m for m in matched if m in qtok]
+        if not named_tokens:
+            row_members = a["homes_detail"][0].get("members") or []
+            # …excluding the home's OWN name, or the line degenerates into
+            # "`list_knowledge` is absorbed by `list_knowledge`".
+            named_tokens = [m for m in sorted(row_members)
+                            if m in qtok and m != a["home"]][:1]
         named = ", ".join(f"`{m}`" for m in named_tokens)
         sdk = (f" (SDK `{a['method']}`)"
                if a["method"] and a["method"] not in named_tokens else "")
+        if not named:
+            # No token the quote carries could be named — say so rather than asserting a
+            # claim the quoted row cannot support.
+            out.append(f"- **`{a['tool']}`** — the approved row quoted below names no token "
+                       f"this tool carries; SDK `{a['method'] or a['tool']}` is absorbed by "
+                       f"`{a['home']}`:")
+            out.append(f"  > {a['quote']}")
+            continue
         out.append(f"- **`{a['tool']}`** — {named}{sdk} is absorbed by `{a['home']}`:")
         out.append(f"  > {a['quote']}")
     return out

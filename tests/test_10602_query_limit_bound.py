@@ -47,9 +47,10 @@ class _StubSDK:
     the unbounded read, so the assertion is on what the ACCESSOR was asked for.
     """
 
-    def __init__(self, n_points=5, *, raises=None):
+    def __init__(self, n_points=5, *, raises=None, n_tag_points=5):
         self.calls = []
         self.points = [{"id": f"p{i}"} for i in range(n_points)]
+        self.n_tag_points = n_tag_points
         self.raises = raises
 
     def query(self, kind=None, **kwargs):
@@ -66,7 +67,7 @@ class _StubSDK:
 
     def query_points_by_tag(self, tag, *, _record_reads=True):
         self.calls.append(("query_points_by_tag", tag, _record_reads))
-        return []
+        return [{"id": f"tag{i}"} for i in range(self.n_tag_points)]
 
 
 @pytest.fixture(autouse=True)
@@ -95,8 +96,8 @@ def _http_transport():
 def stub_factory(monkeypatch):
     from tortoise import mcp_server
 
-    def make(n_points=5, *, raises=None):
-        stub = _StubSDK(n_points, raises=raises)
+    def make(n_points=5, *, raises=None, n_tag_points=5):
+        stub = _StubSDK(n_points, raises=raises, n_tag_points=n_tag_points)
         monkeypatch.setattr(mcp_server, "_get_org_sdk", lambda: stub)
         return stub
 
@@ -254,6 +255,29 @@ def test_the_served_description_discloses_the_bound():
     # the way to see the rest — `hasMore` is the signal a walk terminates on
     assert "hasmore" in low, f"no terminating signal named: {desc}"
     assert "offset" in low, f"no way to page the population: {desc}"
-    # the `tag=` arm is NOT capped — over-claiming there is its own defect
-    assert "tag=" in low and "not capped" in low, (
-        f"the tag= arm's different behaviour is not disclosed: {desc}")
+    # BOTH arms are bounded (review round 3: the `tag=` clause round 2 added said it
+    # was "NOT capped … unless you pass offset=/limit=", but a lone `limit=` was ignored
+    # on that arm — so following the disclosure produced the unbounded read). The text
+    # may no longer split the arms apart.
+    assert "tag=" in low, f"the tag= arm is not addressed at all: {desc}"
+    assert "not capped" not in low, (
+        f"the description still claims one arm is uncapped: {desc}")
+
+
+def test_the_tag_arm_honours_a_lone_limit_like_the_structural_arm(stub_factory):
+    """Review round 3, finding 1 — the disclosure must MATCH the branch.
+
+    The round-2 wording said the `tag=` arm was uncapped "unless you pass
+    offset=/limit=", but `limit` alone did not cap it (`paginated` keys on
+    offset/page), so a caller doing exactly what the disclosure said got the
+    whole tagged population — #10602's own failure class. This pins the branch
+    the text now describes: 5 tagged rows, `limit=2` -> 2.
+    """
+    from tortoise.mcp_server import tortoise_query
+    stub_factory(n_points=5, n_tag_points=5)
+    result = tortoise_query(tag="pricing", limit=2)
+    assert isinstance(result, list), "a lone limit= keeps the plain-list shape"
+    assert len(result) == 2, f"tag arm ignored limit=: got {len(result)} of 5"
+    # …and the paged form still reports the population
+    paged = tortoise_query(tag="pricing", offset=0, limit=2)
+    assert paged["total"] == 5 and paged["hasMore"] is True
