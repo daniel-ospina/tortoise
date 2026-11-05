@@ -2416,3 +2416,65 @@ def test_read_surface_is_a_param_not_a_new_tool():
         TortoiseSDK.tortoise_fts_query).parameters
     assert "claim_class" in inspect.signature(
         TortoiseSDK.create_point).parameters
+
+
+def test_supersede_operator_slot_survives_a_unhashable_OPERATOR_direction(lane):
+    """#10559 — the operator-slot pre-flight must not crash on a junk direction.
+
+    `supersede_point`'s #10195 operator-slot pre-flight builds a SET of the
+    operator's STORED `direction` values (`{_d for _, _d in _meta_rows}`). A
+    raw-written non-scalar `direction` on the OPERATOR node is unhashable, so the
+    set comprehension raises before any verdict — aborting EVERY supersede that
+    touches that operator, not only override-shaped ones.
+
+    The reading mirrors the one #10552 installed on the 2a-DIRECT arm: a PRESENT
+    non-string is judged BOTH ways (fail-closed), while ABSENT keeps the edge
+    type's default. `_canonical_direction(op_type, '<->')` returns `'<->'`
+    verbatim, so the stand-in flows through the existing predicate unchanged.
+    """
+    old = lane.create_point("statement", "operator-slot v1",
+                            claim_class="derived")["id"]
+    new = lane.create_point("statement", "operator-slot v2",
+                            claim_class="derived")["id"]
+    t = lane.create_point("statement", "operator-slot peer",
+                          claim_class="derived")["id"]
+    op = lane.create_operator("IMPL", old, [t], direction="->")
+    lane._get_proj().g.query(
+        "MATCH (o:Point {id:$id}) SET o.direction = ['sideways']",
+        params={"id": op["id"]},
+    )
+
+    lane.supersede_point(old, new)  # must not raise
+
+    assert _props(lane, new).get("status") == "live"
+
+
+def test_supersede_operator_slot_reads_a_junk_OPERATOR_direction_as_both_ways(lane):
+    """#10559 — the VERDICT half, not only the no-crash half.
+
+    The sibling pin above proves the pre-flight does not abort, but its fixture is
+    all-derived, so a stand-in of the edge type's DEFAULT (``unidirectional`` for
+    NAND) would leave it green while judging only the FORWARD leg — the exact
+    fail-open the 2a-DIRECT arm closed in #10552. A present junk direction is read
+    as BOTH ways by every reader, so the stand-in must be ``<->`` and the
+    backward-leg override must be REFUSED.
+
+    This is the operator-slot twin of
+    `test_supersede_repoint_reads_a_junk_direction_as_both_ways` (2a-DIRECT): the
+    two arms of the same door must not drift, and both halves are pinned on each.
+    """
+    old = lane.create_point("statement", "operator-slot v1",
+                            claim_class="derived")["id"]
+    new = lane.create_point("statement", "operator-slot asserted v2")["id"]
+    t = lane.create_point("statement", "operator-slot peer",
+                          claim_class="derived")["id"]
+    op = lane.create_operator("NAND", old, [t], direction="->")
+    lane._get_proj().g.query(
+        "MATCH (o:Point {id:$id}) SET o.direction = ['sideways']",
+        params={"id": op["id"]},
+    )
+
+    with pytest.raises(ValueError, match="re-pointing the OPERATOR"):
+        lane.supersede_point(old, new)
+
+    assert _props(lane, new).get("status") == "live"
