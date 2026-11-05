@@ -1756,10 +1756,10 @@ def _source_vector_section_94_line(text: str) -> str:
     that survives *somewhere* in §9.4 is not a pointer in the sentence that
     chooses the vector's input. Measured — moving
     ``read from `public.session_narrative` `` out of this line and adding it as a
-    fresh line under the `### 9.4 ` heading leaves the SECTION-scoped assertion
-    GREEN (the section still contains the string) while this one REDs. Without
-    it the pin certifies that exact regression (#10980's landing had this scoping
-    and this branch's first union pass widened it away).
+    fresh line under the `### 9.4 ` heading leaves `assert deciding in s94` GREEN
+    (the sentence is still in the section) while the pointer assert on this line
+    REDs. Without this helper the pin certifies that exact regression (#10980's
+    landing had this scoping; this branch's first union pass widened it away).
     """
     return _anchored_line(text, _SOURCE_VECTOR_SECTION_94_ANCHOR,
                           "§9.4's `:Source`-vector deciding sentence",
@@ -1857,8 +1857,10 @@ def _ontology_section_of(field: str) -> str:
             return section
     raise AssertionError(
         f"`docs/ONTOLOGY.md` has no `| `{field}` |` property row under a "
-        f"numbered section heading — the ontology moved, so §12.1b's pointer at "
-        f"it must be re-derived rather than kept")
+        f"numbered section heading — the ontology moved, so EVERY consumer of "
+        f"this derived value must re-derive it: §9.4's deciding sentence and "
+        f"§12.1b's footnote both assert it, and fixing only the one this message "
+        f"names would leave the other pointing at a different type")
 
 
 def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
@@ -1875,7 +1877,7 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
     tree (1 each), and the §12.1b half's assertion reds on
     `_RETIRED_VECTOR_FOOTNOTE` asserted ABSENT over the WHOLE document (⚠️ the
     helper `_source_vector_footnote` asserts only the anchor's presence and
-    uniqueness and then RETURNS the line for the three POSITIVE asserts; the
+    uniqueness and then RETURNS the line for the POSITIVE asserts; the
     absence assert deliberately does not read that one line, so a re-add in the
     paragraph above it is caught too), but that half is not executed by a plain
     run at all. From `b748df7d0` (the base before the rebase,
@@ -2014,7 +2016,8 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
     # copy in, say, §12.2. Measured before this binding existed: moving the footnote
     # into §12.2 left the whole pin GREEN.
     footnote = _source_vector_footnote(text)
-    assert footnote in _section(text, _S121B_HEADING, _S121C_HEADING, "§12.1b"), (
+    s121b = _section(text, _S121B_HEADING, _S121C_HEADING, "§12.1b")
+    assert footnote in s121b, (
         f"§12.1b's `:Source` footnote ({_SOURCE_VECTOR_FOOTNOTE_ANCHOR!r}) is NOT "
         f"inside §12.1b — `_anchored_line` finds the anchor anywhere in the "
         f"document, so a copy moved into another section satisfies every §12.1b "
@@ -2030,7 +2033,7 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
     # re-adding the phrase there left this pin GREEN. Measured by replay: with the
     # phrase transplanted into the paragraph above the footnote, the line-scoped
     # assert passed and nothing else in the file looks at the string (0
-    # occurrences document-wide today, so the wider scope is free). The three
+    # occurrences document-wide today, so the wider scope is free). The
     # POSITIVE asserts below stay line-scoped on purpose: that sentence is the
     # contract, and widening THEIR scope would let a copy elsewhere satisfy them
     # while the footnote itself was reverted.
@@ -2067,21 +2070,22 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
         "and §9.4 asserts the same negation on its own sentence; dropping it "
         "here leaves the *\"embed the summary already there\"* reading open in "
         "the section a designer lands on when placing a vector")
-    assert footnote.count(":Source.summary") == 0, (
-        f"§12.1b's `:Source` footnote now names `:Source.summary` "
-        f"{footnote.count(':Source.summary')} time(s). It did not before, and it "
-        f"does not need to: the footnote calls the field \"a session's "
-        f"`summary`\" and §9.4 is where the forbidden spelling lives. A mention "
-        f"ADDED here is how the forbidden instruction returns in additive form "
-        f"— the correct sentence stays and an \"embed `:Source.summary`\" "
-        f"clause appears beside it, which every presence check above misses "
-        f"(measured). Fails CLOSED on purpose, like §9.4's count: a future "
-        f"legitimate use of this spelling here reds every docs-only PR, and the "
-        f"message tells the next lane to widen the assert deliberately")
-    assert home in footnote, (
-        f"§12.1b's `:Source` footnote does not name `{home}` — the section that "
-        f"decides where vectors live must point at the narrative's real home, "
-        f"or it leaves the *\"embed the summary already there\"* reading open")
+    assert s121b.count(":Source.summary") == 0, (
+        f"§12.1b (the SECTION, not just the footnote line) now names "
+        f"`:Source.summary` {s121b.count(':Source.summary')} time(s). It named it "
+        f"nowhere before, and it does not need to: the footnote calls the field "
+        f"\"a session's `summary`\" and §9.4 is where the forbidden spelling "
+        f"lives. ⚠️ SECTION-scoped, mirroring §9.4's count — a LINE-scoped version "
+        f"of this assert left the additive form GREEN when the mention was added "
+        f"to §12.1b's BODY instead of the footnote line (measured), and the body "
+        f"is precisely where a designer reads the same instruction. Fails CLOSED "
+        f"on purpose: a future legitimate use of this spelling here reds every "
+        f"docs-only PR, and this message tells the next lane to widen the assert "
+        f"deliberately")
+    # (No `home in footnote` assert here: `read from `{home}`` above CONTAINS
+    # `home`, so it would be implied by an assert that already ran — a check that
+    # can never fire. The same argument deleted the §9.4 section-wide negation
+    # earlier; see the note there.)
     #: §9.4 ③'s identity rule is the OTHER half of this footnote and is still
     #: implemented; a rewrite that drops it would silently un-decide identity.
     assert "identity is URL + content hash" in footnote, (
