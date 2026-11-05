@@ -639,9 +639,11 @@ def test_a_column_value_wins_the_tail_on_a_real_SELECT_star_row():
     MAPPING ORDER. `props` is declared LAST in the record DDL, so on a real row
     the TAIL won while the row predicate read the COLUMN: the node carried
     `sourceKind='agentSession'` — `is_episodic_source_node` calls that a session
-    — WITH the turn prose on it, so R1 (*"from any row shape"*) failed open and
-    `scan_cache_view` then subtracted the pair from `placed`, reporting a real
-    divergence as `graph_only`.
+    — WITH the turn prose on it. R1 ("from any row shape") failed open, and
+    NOTHING reported it: the record side is built through this same projector, so
+    it carried the prose too, and `keep` includes ``record_props``
+    (`record_reconcile.py:540`) — so the pair compared EQUAL, landing in neither
+    `field_mismatches` nor `graph_only`.
 
     The three existing agreement legs could not see it: they build `_source_row`,
     whose `sorted()` keys put `props` first, i.e. the one ordering in which the
@@ -674,8 +676,9 @@ def test_a_column_value_wins_the_tail_on_a_real_SELECT_star_row():
     assert (cp.is_episodic_source_node(node.props)
             == cp._is_episodic_source_row(row)), (
         "the row predicate and the node predicate answered differently about "
-        "the SAME row — that disagreement is what let the prose through while "
-        "the reconciler suppressed the divergence"
+        "the SAME row — that disagreement is what let the prose through, and "
+        "nothing downstream caught it, because both sides carried the prose and "
+        "compared equal"
     )
     # The AMBIGUOUS row is read as a DOCUMENT (the declared asymmetry), so it
     # keeps its prose. Pinned so a future change cannot "fix" the collision the
@@ -813,8 +816,12 @@ def test_a_MALFORMED_props_tail_is_REFUSED_not_dropped_in_silence():
     WRITER path must not: `_decoded_tail` answers `{}` for a non-mapping, and
     seeding `out` from that dropped the tail's whole content with no signal —
     the silent loss this module refuses by name everywhere else. Before the tail
-    was seeded, the identical row raised `TypeError` out of `dict(tail)`; this
-    leg pins the loudness, in the module's own error type.
+    was seeded the block was gated on `if tail:`, so the class split by
+    TRUTHINESS: a TRUTHY non-object still raised `TypeError` out of the tail
+    block (`set(tail)` for a non-iterable scalar, `dict(tail)` for an array of
+    the wrong shape), while a FALSY one was skipped and projected CLEAN. This
+    leg pins the loudness — NEW for the falsy half — in the module's own error
+    type.
 
     Both shapes are exercised because both are reachable: an ARRAY
     (`jsonb`'s other collection form) and a bare SCALAR. ⛔ AND IN BOTH

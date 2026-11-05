@@ -1443,8 +1443,11 @@ def _row_identity_view(row: Mapping[str, Any],
                        tail: Mapping[str, Any]) -> Mapping[str, Any]:
     """The row's identity AS THE NODE WILL CARRY IT: the columns + `props` tail.
 
-    ⛔ THE TAIL CARRIES IDENTITY, NOT ONLY PROSE (#10867 review). `props` is
-    written to the node VERBATIM, so a row whose `source_kind` column is NULL
+    ⛔ THE TAIL CARRIES IDENTITY, NOT ONLY PROSE (#10867 review). The tail's
+    property names reach the node UNMAPPED — they are not routed through the
+    placement table — although a column value overwrites the same coordinate and
+    an EPISODIC Source's declined names are popped (see :func:`_props_from_row`,
+    which applies the whole rule). So a row whose `source_kind` column is NULL
     while the tail carries `sourceKind='agentSession'` produces an EPISODIC
     node — `is_episodic_source_node` says so, because it reads the MERGED map.
     A predicate that read the COLUMNS alone therefore answered "document" for a
@@ -1649,8 +1652,10 @@ def _props_from_row(table: str, row: Mapping[str, Any], *,
     # content with no signal — the silent loss this module refuses by name
     # everywhere else. The pre-#10867 block this replaces was gated on `if tail:`,
     # so the class split by TRUTHINESS rather than by shape: a TRUTHY non-object
-    # (`[1, 2]`, `7`) raised `TypeError` out of `dict(tail)` — loud, and kept loud
-    # here in this module's own error type — while a FALSY one (`[]`, `0`,
+    # still raised `TypeError` out of the tail block — `set(tail)` for a
+    # non-iterable scalar (`7`, `3.5`, `True`), `dict(tail)` for an iterable of
+    # the wrong shape (`[1, 2]`) — loud, and kept loud here in this module's own
+    # error type, while a FALSY one (`[]`, `0`,
     # `False`, and the text/decoded spelling of each) was skipped entirely and
     # projected CLEAN. Both are refused now, so for the falsy half this is NEW
     # loudness, not preserved loudness.
