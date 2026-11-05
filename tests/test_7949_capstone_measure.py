@@ -5389,9 +5389,10 @@ def test_the_three_routes_to_the_e1_e2_verdict_state_the_records_verdict():
     is 25 Objects … with no before arm", "E2 … carried by no committed artifact") and
     `E1-E5-PROOFS.md`'s E2a/E2b rows ("the bundle's README marks the row BLOCKED because
     the frozen 14-unit denominator is carried by no committed artifact"), whose
-    `README.md:65` pointer now lands on a row reading `RED (8 of 14)`. Nothing read that
-    prose, so the suite stayed green while the bundle's own entry point told a reader the
-    opposite of the table beside it.
+    `README.md:69` pointer now lands on a row that NAMES the re-run reading
+    (`RED 8/14`) while its committed verdict cell still reads
+    `⛔ **BLOCKED** (#10360)`. Nothing read that prose, so the suite stayed green while the
+    bundle's own entry point told a reader the opposite of the table beside it.
 
     Every leg is DERIVED, and each document is held to the ARTIFACT IT DESCRIBES — which
     after the 2026-11-02 re-measure is two different artifacts, deliberately:
