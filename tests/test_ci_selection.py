@@ -5029,7 +5029,8 @@ def test_ready_for_owner_tool_change_fails_closed_to_full():
     # `tools/` is a flat NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row matches this tool, so
     # the path was filtered out BEFORE the `if not matched: matched.add("core")` fallback and
     # select() took the docs-only early return. A PR improving the merge gate would therefore have
-    # got a GREEN run in which ~232 of the gate's own tests never ran.
+    # got a GREEN run in which essentially none of the gate's own tests ran. (Deliberately no
+    # count: it is the size of `test_ready_for_owner.py` and drifts with every test added.)
     #
     # It propagates into the tool as well: `ready_for_owner.py::_read_coverage` counts this shape as
     # `core-smoke-only` and therefore COVERED, so the gate would certify its own untested edit as

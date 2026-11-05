@@ -3192,7 +3192,7 @@ TOOL_CARVEOUTS = (
     # `if not matched: matched.add("core")` fallback). MEASURED on this change: a lane improving the
     # tool (e.g. dropping the `_NoRedirect` handler) would have got a GREEN PR whose own arms never
     # ran, degrading the gate to the very false PASS it exists to prevent. (Deliberately no count:
-    # this file grew 20 → 38 arms, and a number here goes stale on the next test added.)
+    # this file grows every round, and a number here goes stale on the next test added.)
     # Registering the TEST file under `core` in ci-surfaces.yml does NOT cover this: that applies to
     # edits of the test file, not of the tool.
     # Pinned by test_ci_selection.test_gh_write_preflight_tool_change_fails_closed_to_full.

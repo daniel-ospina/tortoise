@@ -24,8 +24,9 @@ Run:
 
 The carve-out is required: this file is stdlib-only and needs NO database, but the repo's default
 pytest session refuses to start without `TORTOISE_DB_URI` (epic #1647 P4) unless the carve-out is
-set — so `uv run pytest tests/test_gh_write_preflight.py` alone errors 24 times for a reason that has
-nothing to do with these tests.
+set — so `uv run pytest tests/test_gh_write_preflight.py` alone errors once per collected test, for a
+reason that has nothing to do with these tests. (Deliberately no count: it is the size of this file
+and drifts with every test added.)
 """
 
 from __future__ import annotations

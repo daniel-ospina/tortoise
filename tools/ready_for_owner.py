@@ -825,9 +825,14 @@ def check_coverage(probe: Probe) -> Check:
        ``select()`` returns no surface, ``full is False`` and an EMPTY ``test_files``. An
        unfamiliar path is not this: ``select()`` fails closed to FULL for unknown paths,
        and a path the manifest maps to no surface still runs the always-on core smoke set
-       (measured: ``select(["tools/ready_for_owner.py"])`` → ``surfaces=[]``,
-       ``full=False``, **72 tests**). Only a genuinely empty leg means nothing ran, and
-       that is what fails here.
+       (measured: ``select(["docs/ontology/NOTES.md"])`` → ``surfaces=[]``,
+       ``full=False``, with the tier-1 smoke files as ``test_files``). Only a genuinely
+       empty leg means nothing ran, and that is what fails here. ⛔ The example is a docs
+       path on purpose: it used to be ``tools/ready_for_owner.py``, but #10975 put that
+       tool in ``ci_selection.TOOL_CARVEOUTS`` so a tool-only diff fails closed to the
+       FULL matrix — the example now measures ``full=True``, which is exactly the
+       "a restated measurement goes stale the moment the thing it measures is fixed"
+       trap this module warns about elsewhere.
 
     A PR with no declared union is covered by its own diff — that is the declared set,
     not a hand-picked one.

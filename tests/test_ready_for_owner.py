@@ -618,7 +618,10 @@ def test_unreadable_declared_union_is_unreadable_not_no_union() -> None:
 def test_core_smoke_only_file_is_covered() -> None:
     """`tools/*.py` has no surface of its own but the always-on core smoke still runs.
 
-    Measured: `select(["tools/ready_for_owner.py"])` → surfaces=[], full=False, 72 tests.
+    ⛔ A docs-only path is the example, not `tools/ready_for_owner.py`: #10975 put that tool in
+    `ci_selection.TOOL_CARVEOUTS`, so `select(["tools/ready_for_owner.py"])` now returns the
+    FULL matrix and no longer illustrates this shape. Measured:
+    `select(["docs/ontology/NOTES.md"])` -> surfaces=[], full=False, tier-1 smoke only.
     An earlier version failed that shape, so the tool could not certify this very PR.
     """
     check = _check(
@@ -1809,12 +1812,23 @@ def test_read_tree_unfetchable_pr_is_unreadable(monkeypatch: pytest.MonkeyPatch)
 
 
 def test_read_coverage_on_real_paths_does_not_call_a_core_smoke_file_uncovered() -> None:
-    """ROUND-1 P2, at the layer where it lived. Measured: `select([<tools/*.py>])` yields
-    surfaces=[] and full=False but 72 tests — so it IS covered and must not fail."""
-    uncovered, raw = rfo._read_coverage(
-        ("tools/ready_for_owner.py", "tests/test_ready_for_owner.py")
-    )
+    """ROUND-1 P2, at the layer where it lived: a file with no surface of its own but the
+    always-on core smoke set still runs is COVERED and must not fail.
+
+    ⛔ The touched path must be one whose whole-set selection is NOT `full` —
+    `_read_coverage` only enters its per-path loop under `if not full:`. This test used
+    `tools/ready_for_owner.py`, which #10975 gave a `ci_selection.TOOL_CARVEOUTS` entry
+    (fail-closed to the FULL matrix): measured, that call is now
+    `full=true … core-smoke-only=0`, so `uncovered == ()` came from the full-matrix
+    short-circuit and the `has_leg`/`tier1_only` branch this test is named for was never
+    reached. Reverting `tier1_only.append(path)` to `uncovered.append(path)` left the whole
+    file green, i.e. the pin had been silently lost. A docs-only path is the shape that
+    still reaches it (`files=1 full=false surfaces=[] core-smoke-only=1 no-leg=0`), and
+    `core-smoke-only=1` is asserted so the branch cannot become unreachable again unnoticed.
+    """
+    uncovered, raw = rfo._read_coverage(("docs/ontology/NOTES.md",))
     assert uncovered == (), f"{uncovered} reported uncovered — got raw {raw}"
+    assert "core-smoke-only=1" in raw, f"the core-smoke branch was not reached: {raw}"
     assert "no-leg=0" in raw
 
 
