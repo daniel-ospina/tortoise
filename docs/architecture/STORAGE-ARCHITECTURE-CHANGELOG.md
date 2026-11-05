@@ -1934,7 +1934,15 @@ Two register corrections landed in the design document. Both **figures** are rig
 did not belong there was the narration of what each passage used to say, which is this file's job.
 
 **§12.1c — the per-label index count.** The section read that indexing the objects means *"a SECOND … and
-a THIRD"* resident HNSW index. That count predates the served set reaching five labels.
+a THIRD"* resident HNSW index. That count is not an artifact of a widening served set: it was reasoned
+from the two labels the 2026-09-24 measurement actually found vectors on — the pre-edit sentence named
+*"a SECOND HNSW index for `:Object` and a THIRD for `:Event`"* — while the vector leg already addressed
+**six** distinct labels on that date (`Point` via `operator`, plus `Event`, `Subject`, `Document`,
+`Object`, `Source`: `tortoise/security.py`'s `VALID_ENTITY_TYPES` at `e083c972`, and
+`search_engine.py:860`'s `label = "Point" if entity_type == "operator" else entity_type.capitalize()`).
+The five-label set below is that six with `Document` folded into `Source`, so the served set NARROWED to
+five rather than later "reaching" it — the count was wrong on its own date, which is what
+`01-align.md:53-54` already says.
 `tortoise/security.py` `ENTITY_TYPE_LABELS` maps seven entity types onto five labels, and
 `_record_vector_index_inventory` serves exactly `{Point, Event, Object, Source, Subject}`; only `Point`
 carries a vector DDL/index (`tortoise/projection/__init__.py`, both the procedure and the Cypher form).
