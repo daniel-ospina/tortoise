@@ -7138,7 +7138,9 @@ def test_a_file_the_fold_added_carries_the_flat_default_not_a_local_reading():
     """#10726 review P1: `test_9548_record_search_keys_shape.py` shipped `4.0`.
 
     That 4.0 was this host's local clock — the row's own note quoted "11 passed, 1
-    skipped in 3.45s" — while the eight other files this fold added all took 2.0.
+    skipped in 3.45s" — while the other eight files in `ROWED_BY_THIS_FOLD` all
+    took 2.0. (Only ONE of the nine is a file this fold ADDED — the `ROWED_BY_THIS_FOLD`
+    block above is the authority on what the set actually is, #2148 review P3.)
     The existence pin above stayed green through it, because a local reading is a
     row like any other; the coverage floor could not see it either (it is a RATIO
     with ~70 files of headroom). Nothing reds on a hand-picked shard weight, which
