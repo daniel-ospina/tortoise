@@ -887,7 +887,9 @@ def test_the_duplicate_rail_guard_keys_on_the_repo_not_its_spelling(tmp_path, mo
     above).
 
     Non-vacuity: the guard runs through TWO canonicalisation sites — `launch`'s
-    `repo = _repo_key(...)` (`tools/rail_detach.py:1585`) and `_slug` (`:284`) — so
+    `repo = _repo_key(...)` and `_slug`'s `return _repo_key(repo).replace("/", "-")`
+    (both in `tools/rail_detach.py`; cited by SYMBOL, not line — this docstring
+    carried pre-merge line numbers and the forward-merge shifted them) — so
     reverting EITHER alone leaves this case green (measured). Revert BOTH and the
     second launch spawns a second rail and RETURNS a `Launch` instead of raising.
 

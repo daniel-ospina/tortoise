@@ -879,7 +879,8 @@ def test_schema_ddl_survives_the_armed_guard(armed_sdk, enforced):
     # so a quiescence-only wait returns it on its FIRST read and the guards below
     # refuse a good fixture: the same false red as `test (g)`, just narrower. The
     # caller's own preconditions are what make that read WAIT, which is what the
-    # sibling at `tests/test_search_engine.py:720` already does.
+    # sibling `index_rows_after_settle` call in `tests/test_search_engine.py`
+    # already does (cited by SYMBOL — the line number this carried rotted).
     #
     # `point_index_drops_visible` states those preconditions ONCE, in the module
     # that owns the wait — the same module rule that keeps the wait itself single:

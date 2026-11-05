@@ -62,7 +62,9 @@ Usage:
   --apply        issue the cancel (default is a DRY RUN that only decides)
   --repo         owner/name (default: this repo)
   --max-age S    the comparison window in seconds (default 60; do not raise it
-                 to make a slow read pass — re-measure instead)
+                 to make a slow read pass — re-measure instead). A value above
+                 60 is REFUSED (64): the window is the only gate between a
+                 verdict and the POST, so it is not caller-widenable.
   --self-test    run tests/test_ci_cancel_guard.py
 
 Exit: 0 = permitted (and, with --apply, the cancel landed)
@@ -564,6 +566,19 @@ def main(argv: list[str] | None = None) -> int:
               "this tool measures. Run the seam without --apply (dry run), or "
               "drop the seam and let the tool measure.", file=sys.stderr)
         return 64
+    if args.fake_elapsed is not None:
+        # ⛔ A TYPO'D SEAM IS A USAGE ERROR (64), NOT AN UNREADABLE SURFACE (2).
+        # `_elapsed_override` raises `Unreadable`, and the only catch around it is the
+        # one below — which reports the GITHUB SURFACE as unreadable when the argv is
+        # what is wrong, contradicting this tool's own exit table (`2` = a surface could
+        # not be read) and `--max-age`'s identical typo, which already exits 64
+        # (review of #10963, P2). Validated HERE, before any read, for the same reason.
+        try:
+            _elapsed_override(args.fake_elapsed)
+        except Unreadable as exc:
+            print(f"ci_cancel_guard: {exc} — the argv is wrong, so nothing was read "
+                  "and NOTHING was cancelled", file=sys.stderr)
+            return 64
     try:
         max_age = int(args.max_age)
     except ValueError:
@@ -572,6 +587,17 @@ def main(argv: list[str] | None = None) -> int:
         return 64
     if max_age <= 0:
         print("--max-age must be positive", file=sys.stderr)
+        return 64
+    if max_age > MAX_COMPARISON_AGE_S:
+        # ⛔ THE WINDOW IS THE ONLY GATE BETWEEN A VERDICT AND THE POST, so a
+        # caller-supplied window may no more widen it than a caller-supplied age may
+        # satisfy it. Pre-fix, `--apply --max-age 100000` issued the POST on a reading
+        # of ANY age — clause 6 (the anti-TOCTOU property this tool exists for) was one
+        # flag away from being unbounded, while `--fake-elapsed` was refused for exactly
+        # that reason (review of #10963, P2). Lower it, or let the tool RE-MEASURE.
+        print(f"--max-age {max_age}s is wider than the {MAX_COMPARISON_AGE_S}s this "
+              "guard is built on. A caller-supplied window may not widen the staleness "
+              "check — lower it, or re-run and let the tool measure.", file=sys.stderr)
         return 64
     run_id = int(args.run_id)
     try:
@@ -596,8 +622,14 @@ def main(argv: list[str] | None = None) -> int:
 
     text = render(run_id, verdict, detail, elapsed, args.apply, post_rc, post_detail,
                   max_age, measured)
-    print(text)
     if args.json:
+        # ⛔ ONE JSON DOCUMENT ON STDOUT, EVERY HUMAN LINE ON STDERR. `--json` exists to
+        # be consumed by a program, and the human report was printed to stdout first, so
+        # `json.loads(stdout)` failed on the prose ahead of the document and every
+        # consumer had to scan for the last `{`-prefixed line (review of #10963, P2).
+        # The repo states this convention explicitly: `tools/served_skills_parity.py`
+        # ("ONE JSON document on stdout, every human line on stderr").
+        print(text, file=sys.stderr)
         print(json.dumps({"run": run_id, "verdict": verdict,
                           # `applied` means the cancel LANDED, not that --apply was passed.
                           "applied": post_rc == 0,
@@ -605,6 +637,8 @@ def main(argv: list[str] | None = None) -> int:
                           # never attest an age the tool did not measure
                           "elapsed_s": round(elapsed, 3) if measured else None,
                           **detail}))
+    else:
+        print(text)
 
     if post_rc is not None:
         return post_rc

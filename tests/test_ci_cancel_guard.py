@@ -443,13 +443,17 @@ def test_the_real_measurement_path_refuses_a_stale_comparison(fixture):
 
 def test_a_nan_or_negative_fake_age_is_refused(fixture):
     """Review cycle 1, R1: `nan >= 60` is False, so an unvalidated seam permitted and
-    POSTed while printing `comparison age: nans`."""
+    POSTed while printing `comparison age: nans`.
+
+    ⛔ 64, not 2 — a bad seam value is a USAGE error and the GitHub surface was never
+    read (#10963 review, P2; see `test_a_non_numeric_seam_value_is_refused_not_ignored`).
+    """
     fixture.apply("run.json", _run_meta(sha=HEAD_OLD))
     fixture.apply("prs.json", pr(PR_HEAD_MOVED))
     fixture.apply("jobs.json", {"total_count": 0, "jobs": []})
     for bad in ("nan", "-5", "inf"):
         r = guard(fixture, "41840910128", "--fake-elapsed", bad)
-        assert r.returncode == 2, bad + ": " + r.stdout + r.stderr
+        assert r.returncode == 64, bad + ": " + r.stdout + r.stderr
     assert fixture.cancelled() == []
 
 
@@ -532,8 +536,11 @@ def test_json_does_not_attest_an_unmeasured_age_or_a_false_applied(fixture):
     fixture.apply("prs.json", pr(PR_HEAD_MOVED))
     fixture.apply("jobs.json", {"total_count": 0, "jobs": []})
     r = guard(fixture, "41840910128", "--json", "--fake-elapsed", "5")
-    payload = [line for line in r.stdout.splitlines() if line.startswith("{")][-1]
-    rec = json.loads(payload)
+    # ⛔ ONE JSON DOCUMENT ON STDOUT, NOTHING ELSE (review of #10963, P2). The human
+    # report used to precede it, so every consumer scanned for the last `{` line;
+    # `json.loads(stdout)` failing is what makes that regression visible.
+    assert json.loads(r.stdout) is not None, r.stdout
+    rec = json.loads(r.stdout)
     assert rec["elapsed_s"] is None
     assert rec["applied"] is False
 
@@ -560,20 +567,46 @@ def test_a_placeholder_pr_head_is_not_a_comparison(fixture):
 
 
 def test_a_non_numeric_seam_value_is_refused_not_ignored(fixture):
-    """Round-3 finding 3a, round-4 correction, round-4 F2: the refusal is reached for REAL.
+    """Round-3 finding 3a, round-4 correction, round-4 F2, #10963 review: a USAGE error.
 
     `--fake-elapsed` used to be `type=float`, so argparse rejected `abc` with SystemExit(2)
     before any tool code ran and this case still passed with the guard's own refusal
-    deleted. The seam is now parsed and validated by `_elapsed_override` from the raw
-    string, so the refusal is the tool's — delete `except ValueError:` and this fails.
+    deleted. The seam is parsed and validated by `_elapsed_override` from the raw
+    string, so the refusal is the TOOL's — delete the `except Unreadable:` arm in
+    `main` and this exits 1 on a traceback instead of 64.
+
+    ⛔ 64, NOT 2: the argv is wrong, the GitHub surface was never read. `2` is this
+    tool's FAIL-CLOSED code for an unreadable surface, and reporting a typo as one
+    contradicts the tool's own exit table — and `--max-age`'s identical typo already
+    exits 64.
     """
     fixture.apply("run.json", _run_meta(sha=HEAD_OLD))
     fixture.apply("prs.json", pr(PR_HEAD_MOVED))
     fixture.apply("jobs.json", {"total_count": 0, "jobs": []})
     r = guard(fixture, "41840910128", "--fake-elapsed", "abc")
-    assert r.returncode == 2, r.stdout + r.stderr
+    assert r.returncode == 64, r.stdout + r.stderr
     assert "not a number" in r.stderr, r.stderr
-    assert "FAIL-CLOSED" in r.stderr, r.stderr
+    assert "FAIL-CLOSED" not in r.stderr, r.stderr
+    assert "Traceback" not in r.stderr, r.stderr
+    assert fixture.cancelled() == []
+
+
+def test_a_widened_comparison_window_may_not_authorise_a_post(fixture):
+    """#10963 review, P2: the window is the ONLY gate before the POST, so it is not
+    caller-widenable.
+
+    `--fake-elapsed` is refused together with `--apply` because a caller-supplied value
+    may not satisfy the staleness check — but `--max-age` IS that check's bound, and it
+    was only lower-bounded. Pre-fix, `--apply --max-age 100000` on this PERMIT fixture
+    issued the POST and exited 0: clause 6 (the anti-TOCTOU property this tool exists
+    for) was one flag away from being unbounded. Delete the ceiling arm and this POSTs.
+    """
+    fixture.apply("run.json", _run_meta(sha=HEAD_OLD))
+    fixture.apply("prs.json", pr(PR_HEAD_MOVED))
+    fixture.apply("jobs.json", {"total_count": 0, "jobs": []})
+    r = guard(fixture, "41840910128", "--apply", "--max-age", "100000")
+    assert r.returncode == 64, r.stdout + r.stderr
+    assert "max-age" in r.stderr, r.stderr
     assert fixture.cancelled() == []
 
 
@@ -610,7 +643,8 @@ def test_a_landed_cancel_is_attested_as_applied(fixture):
     fixture.apply("jobs.json", {"total_count": 0, "jobs": []})
     r = guard(fixture, "41840910128", "--json", "--apply")
     assert r.returncode == 0, r.stdout + r.stderr
-    rec = json.loads([line for line in r.stdout.splitlines() if line.startswith("{")][-1])
+    # One JSON document on stdout — see the sibling `--json` case above.
+    rec = json.loads(r.stdout)
     assert rec["applied"] is True
     assert rec["post_rc"] == 0
     assert rec["elapsed_s"] is not None
