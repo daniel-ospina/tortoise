@@ -23,12 +23,14 @@ Nothing here needs a database, and nothing here touches the network: the `gh` se
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 import yaml
+from markdown_it import MarkdownIt
 
 ROOT = Path(__file__).resolve().parent.parent
 TOOL = ROOT / "tools" / "issue_process_lint.py"
@@ -115,6 +117,72 @@ def test_an_unterminated_fence_is_reported_not_silently_swallowed(tmp_path):
     r = subprocess.run([sys.executable, str(TOOL), "--body-file", str(body)],
                        capture_output=True, text=True)
     assert "unterminated fence" in r.stdout
+
+
+# --- the fence grammar belongs to closes_landing, not to a weaker copy here (review P2) ---
+#
+# The first version recognised a fence only when the first NON-SPACE character of the line was a
+# backtick/tilde, so a quoted example written as `- ```markdown` (the fence sitting ON the
+# list-marker line) or `> ```markdown` (inside a blockquote) never opened one: every line of the
+# block was appended as PROSE, and a `Refs #N` the author QUOTED became a claim. That is the exact
+# false-positive direction this module's docstring says was already paid for, in the tool it cites.
+# The mature copy is `tools/closes_landing.py::strip_code` — the one a real CommonMark renderer is
+# checked against (`tests/test_closes_landing.py`) — so this module imports it instead of carrying
+# a third grammar. Each shape below is asserted from BOTH sides, so the two cannot drift apart.
+_CODE_BLOCK_RE = re.compile(r"<pre><code\b.*?</code></pre>|<code\b.*?</code>", re.S)
+_FIRST_REF_RE = re.compile(r"#(\d+)")
+
+_CONTAINER_FENCE_SHAPES = [
+    ("- ```markdown\n  Refs #1234\n  ```\n\nNo claim here.\n", "a fence ON the list-marker line"),
+    ("1. ```markdown\n   Refs #1234\n   ```\n", "an ORDERED-list marker-line fence"),
+    ("> ```markdown\n> Refs #1234\n> ```\n\nNo claim here.\n", "a fence inside a blockquote"),
+    ("> - ```markdown\n>   Refs #1234\n>   ```\n\nNo claim.\n", "a marker-line fence inside a quote"),
+]
+
+
+@pytest.mark.parametrize("body,why", _CONTAINER_FENCE_SHAPES)
+def test_a_quoted_example_in_any_container_is_code_not_a_claim(body, why):
+    html = MarkdownIt("commonmark").render(body)
+    prose = _CODE_BLOCK_RE.sub("", html)
+    n = int(_FIRST_REF_RE.search(body).group(1))
+    assert f"#{n}" not in prose, (why, html)   # the oracle: a renderer calls this CODE
+    assert L.classify_pr(body, 1) == [], why    # …so the lint must not flag what it quoted
+
+
+def test_a_fence_inside_a_quote_ends_when_the_quote_ends():
+    """The OTHER direction — and the reason this is an import rather than a `>`-stripping fix.
+
+    A blanket "consume any blockquote markers, then look for a fence run" would keep this block
+    open to EOF and silently swallow the REAL claim after it. CommonMark ends a block with its
+    CONTAINER, so `Refs #9999` below is prose — and losing it is the silent direction.
+
+    This case passes on the PRE-FIX code too (a fence the old scan never opened hid nothing), so it
+    is not the non-vacuity pin for the fix: it is the control that CONSTRAINS it. `> Refs #9999` as
+    plain quoted prose must stay a claim — GitHub acts on a keyword in a quoted paragraph — which is
+    what `closes_landing`'s depth comparison gets right and a prefix-stripping shortcut does not.
+    """
+    body = "> ```markdown\n> quoted\nRefs #9999\n"
+    assert "#9999" in _CODE_BLOCK_RE.sub("", MarkdownIt("commonmark").render(body))
+    assert [f.evidence["unresolved"] for f in L.classify_pr(body, 1)] == [[9999]]
+
+
+def test_the_hidden_line_count_is_the_UNTERMINATED_fence_only():
+    """The note is only honest if a block that CLOSES hides nothing."""
+    assert L.strip_code("- ```markdown\n  Refs #1\n")[1] == 1
+    assert L.strip_code("- ```markdown\n  Refs #1\n  ```\n")[1] == 0
+
+
+def test_the_unterminated_fence_note_survives_a_sweep(monkeypatch, capsys):
+    """Only the two OFFLINE branches collected the note; `--sweep` — the one mode that reads a
+    POPULATION — silently swallowed the one thing that says the scan could not see a whole body."""
+    monkeypatch.setattr(L, "resolve_repo", lambda repo: "daniel-ospina/tortoise")
+    monkeypatch.setattr(L, "sweep_prs", lambda repo, limit: [
+        (7, "Refs #1\n\n```markdown\nRefs #2\n", []),
+    ])
+    assert L.main(["--sweep"]) == L.RC_FINDINGS
+    out = capsys.readouterr().out
+    assert "unterminated fence" in out
+    assert "#7" in out
 
 
 # --- arm 2: an issue with WIP and no `## Satisfies` checklist -----------------------------
@@ -226,6 +294,31 @@ def test_cli_reads_the_issue_body_file_not_only_the_comments(tmp_path):
     # and the same body carrying the checklist clears it
     body.write_text(IN_FLIGHT + "\n\n" + SATISFIES, encoding="utf-8")
     assert _run("--issue-body-file", str(body), "--comments-file", str(comments)).returncode == L.RC_CLEAN
+
+
+def test_the_live_issue_path_reads_the_body_not_only_the_comments(monkeypatch):
+    """`--issue` DISCARDED `fetch_issue`'s body while the offline sibling included it, so identical
+    content got two different verdicts depending on whether it came from gh or from a file —
+    *WIP with no checklist* on the live path, *clean* offline (review P2)."""
+    monkeypatch.setattr(L, "resolve_repo", lambda repo: "daniel-ospina/tortoise")
+    monkeypatch.setattr(L, "fetch_issue", lambda number, repo: (IN_FLIGHT + "\n", []))
+    assert L.main(["--issue", "4282"]) == L.RC_FINDINGS
+    # …and the checklist in that same body still clears it (the pair, not just the flag)
+    monkeypatch.setattr(L, "fetch_issue",
+                        lambda number, repo: (IN_FLIGHT + "\n\n" + SATISFIES, []))
+    assert L.main(["--issue", "4282"]) == L.RC_CLEAN
+
+
+def test_the_issue_sweep_reads_the_body_too(monkeypatch):
+    """`--sweep-issues` discarded it the same way, so the whole population was measured smaller
+    than the offline path measures one issue."""
+    def fake_gh(args, timeout=60):
+        if args[:2] == ["issue", "list"]:
+            return json.dumps([{"number": 7}])
+        return json.dumps({"body": IN_FLIGHT, "comments": [{"body": "a comment"}]})
+
+    monkeypatch.setattr(L, "_gh", fake_gh)
+    assert L.sweep_issues(None, 10, None) == [(7, [IN_FLIGHT, "a comment"])]
 
 
 def test_cli_refuses_an_injected_verdict_for_a_population():
