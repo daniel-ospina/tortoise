@@ -30,6 +30,7 @@ caller's to set, and a lane container works too
 
 from __future__ import annotations
 
+import ast
 import contextlib
 import json
 import os
@@ -1104,7 +1105,7 @@ def test_scp_like_password_never_reaches_argv():
 def test_an_unparseable_url_is_credited_with_a_secret_and_never_handed_raw():
     """`urlsplit` RAISES on an unmatched `[`, so that arm must not answer "no credential".
 
-    Measured on the pre-fix head, one arm produced both failure modes at once:
+    Measured on the pre-fix head:
 
         urlsplit("https://user:pa[ssw0rd@example.invalid/r.git")
             -> ValueError: Invalid IPv6 URL
@@ -1114,10 +1115,14 @@ def test_an_unparseable_url_is_credited_with_a_secret_and_never_handed_raw():
 
     So the password `pa[ssw0rd` went to `git ls-remote` as an argument — argv is mode 0444
     (`/proc/<pid>/cmdline`), readable by every process on a cell lanes share — while `redact()`
-    masked the very same string in the display. And because git cannot parse that URL either, a
-    credential that CAN write was reported `remote-unreachable`: the false block this tool must
-    never add. Erring toward True here costs nothing, because the target is then reached through
-    the `insteadOf` alias, which git resolves to this same URL.
+    masked the very same string in the display.
+
+    ⚠️ The defect is the argv copy, NOT reachability: `urlsplit`'s refusal is urllib's rule, not
+    git's. Measured, `git ls-remote --heads 'https://user:pa[ss@example.invalid/r.git'` strips the
+    userinfo and proceeds to DNS/connect exactly like the bracket-free control, so this arm never
+    produced a `remote-unreachable`. Erring toward True costs nothing for the same reason it fixes
+    the leak: the target is reached through the `insteadOf` alias, which git rewrites to this same
+    URL string — it moves where the secret lives (0400 env), not what git does.
     """
     from urllib.parse import urlsplit
 
@@ -2214,20 +2219,53 @@ def test_keep_ref_json_never_advertises_cleanup(tmp_path: Path, capsys):
 
 
 def test_the_carve_out_guard_is_the_LAST_block_in_this_file():
-    """No test may live below the `__main__` block that supplies the carve-out.
+    """Nothing collectable may live below the `__main__` block that supplies the carve-out.
 
     Measured at the pre-fix head: 26 cases sat below it. `pytest` re-imports the module, so they
     were still collected and nothing was red — which is exactly why the drift is invisible: the
     guard stops being "the one block" (the shape that silently defeated
     `tests/test_closes_landing.py`'s carve-out with a second mid-file copy) while every check stays
-    green. Asserted structurally so the next append cannot re-create it.
+    green.
+
+    ⛔ PARSED, NOT GREPPED. The first version of this pin asserted `"\\ndef test_" not in below`,
+    and MEASURED green on both evasions a repo actually grows: a `class TestX:` (its methods are
+    indented) and a module-level `test_x = lambda: ...`. Both are collected by pytest, both sit
+    below the guard, and both left the pin passing — a false PASS in the gate that exists to stop
+    one. `ast` is what closes it: the walk is over real definitions, not over text shapes.
     """
-    source = Path(__file__).read_text()
-    guard = source.index('if __name__ == "__main__":')
-    below = source[guard:]
-    assert "\ndef test_" not in below, (
-        "a test was appended below the `__main__` carve-out guard — move it above so the guard "
-        "stays the only, last block"
+    tree = ast.parse(Path(__file__).read_text())
+    guards = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.If) and "__main__" in ast.unparse(node.test)
+    ]
+    assert len(guards) == 1, f"expected exactly one `__main__` block, found {len(guards)}"
+    below = guards[0].lineno
+
+    def _named(node: ast.AST) -> bool:
+        return isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and (
+            node.name.startswith("test")
+        )
+
+    late = []
+    for node in ast.walk(tree):
+        if getattr(node, "lineno", 0) <= below:
+            continue
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            # a class below the guard is a problem even if its NAME is not `Test*` — pytest
+            # collects `Test*` classes, and a later rename would silently make it collectable.
+            if node.name.startswith("test") or any(
+                _named(child) for child in ast.walk(node) if child is not node
+            ):
+                late.append(f"{type(node).__name__} {node.name} (line {node.lineno})")
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                if isinstance(target, ast.Name) and target.id.startswith("test"):
+                    late.append(f"{target.id} = ... (line {node.lineno})")
+    assert not late, (
+        "collectable code below the `__main__` carve-out guard — move it above so the guard stays "
+        f"the only, last block: {late}"
     )
 
 

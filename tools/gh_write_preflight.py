@@ -432,14 +432,20 @@ def _url_has_credential(url: str) -> bool:
     try:
         parts = urlsplit(url)
     except ValueError:
-        # ⛔ AN UNPARSEABLE URL IS TREATED AS CARRYING A CREDENTIAL, never as data. `urlsplit`
-        # raises `ValueError("Invalid IPv6 URL")` for a netloc holding an unmatched `[`, so a
+        # ⛔ AN UNPARSEABLE-FOR-URLLIB URL IS TREATED AS CARRYING A CREDENTIAL, never as data.
+        # `urlsplit` raises `ValueError("Invalid IPv6 URL")` for a netloc holding an unmatched
+        # `[` (and for netloc chars that NFKC-decompose into `/`, `?`, `#`, `@`, `:`), so a
         # pushurl like `https://user:pa[ss@host/r.git` fell through this arm as "no credential"
-        # while `redact()` masked the same string: the raw password went to `git ls-remote` on
-        # argv (0444 on a shared cell) AND git could not resolve it, so a writable credential was
-        # reported `remote-unreachable` — a leak and a false block from one arm. Returning True
-        # costs nothing: the target is reached through the `insteadOf` alias, which git resolves
-        # to this same URL (measured), and a URL git cannot parse fails the read either way.
+        # while `redact()` masked the same string — and the raw password went to `git ls-remote`
+        # on argv (0444 on a shared cell) for the reachability and confirmation reads.
+        #
+        # ⚠️ THE DEFECT IS THE ARGV COPY AND ONLY THAT — do not restate it as a false block.
+        # Measured with real git: `git ls-remote --heads 'https://user:pa[ss@example.invalid/r.git'`
+        # strips the userinfo and proceeds to DNS/connect, exactly like the bracket-free control,
+        # so `urlsplit`'s refusal is urllib's rule and NOT git's — the read never became
+        # `remote-unreachable` because of this arm. Returning True costs nothing either way: the
+        # target is then reached through the `insteadOf` alias, which git rewrites to this same
+        # URL string (measured); it changes WHERE the string lives (0400 env), not what git does.
         return True
     if parts.password:
         return True
