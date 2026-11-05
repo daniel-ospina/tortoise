@@ -1911,7 +1911,6 @@ def launch(pr: int, *, cwd: Path, state_dir: Path, repo: str | None = None,
                     "here would truncate that rail's output, including any merge "
                     "evidence it holds. Use a separate --state-dir for this repo."
                 )
-        prior = collect(state_dir, repo, pr)
         # ⛔ AND THE GUARD ASKS A LIVENESS QUESTION, NOT A VERDICT ONE. `collect`
         # answers with the MERGED record when a merged one coexists with a live one
         # (correct: a merge is monotone), and reading that as "not WAITING ⇒ free"
