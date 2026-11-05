@@ -709,8 +709,18 @@ def test_rebuild_equals_record_no_extra_node_and_no_extra_field():
     `tests/test_10853_session_source_prose.py::test_the_DROP_SET_itself_is_exactly_the_declared_pair`
     (and its widening mutation).
 
-    What this assertion DOES pin is the class in NONE of those four tables: a
-    plain column the projection drops, or a property it invents.
+    ⛔ AND THE BLINDNESS IS NOT LIMITED TO THOSE FOUR — it is the whole of
+    `node_from_row`, because that is what BUILDS `node.props`: the schema
+    REFUSAL set (a column dropped by name, `if column in refused: continue`) is
+    equally invisible here, and so is any column the projection stops placing.
+    Listing only the four above would close the question too early; they are
+    listed because each has a named pin, not because they are the whole bound.
+
+    What this assertion DOES pin is the STATEMENT layer: `node_statement` must
+    write exactly the props the plan's model carries. A field IT drops or invents
+    reds here (that mutation is why this leg compares statements and not
+    `node.props`). Anything decided upstream, in `node_from_row`, cannot — both
+    sides are built there, so a drop and an identical drop cancel.
 
     This is S3's contract clause at the STATEMENT level: a superset would be the
     cache carrying state the record does not hold, i.e. the cache becoming a
