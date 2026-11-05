@@ -4119,8 +4119,8 @@ _SESSION_SOURCE_SUMMARY_PREFIX = "session capture topics: "
 #: the need in the CONTENT arm — but not in the fallback, which reads the token
 #: list itself, and not at all for ``system``/``tool``, which no stopword list
 #: carries. So do not read this set as partly redundant: before it existed the
-#: fallback admitted ``user``/``assistant`` as the WHOLE lexicon of every
-#: acknowledgement-only session — a constant token pair in the Source FTS index,
+#: fallback admitted ``user``/``assistant`` into every acknowledgement-only
+#: session's lexicon — the whole lexicon of a labels-only one — a constant pair,
 #: i.e. the same measurable defect ``_SESSION_SOURCE_SUMMARY_PREFIX`` is kept out
 #: of ``_searchText`` to avoid (under the OR-union every such session would match
 #: a one-word source query for "user"). ``system``/``tool`` are reachable roles
