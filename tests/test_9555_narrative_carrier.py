@@ -1744,18 +1744,25 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
 
     *What value makes this test fail?* Measured per tree, because the answer
     MOVED and the sha is named for that reason — `origin/main` is not a stable
-    referent: at `71832318b` (the base before `#10978` merged) BOTH retired
-    strings are present, so §9.4 fails on `_RETIRED_SUMMARY_BLUR` and §12.1b's
-    footnote fails on `_RETIRED_VECTOR_FOOTNOTE`. From `b748df7d0` (main,
-    post-`#10978`) onward NEITHER is present — and neither was present at any
-    commit of THIS branch, whose origin `b748df7d0` already carried `#10978`'s
-    correction. So on this branch both halves are that correction's REGRESSION
-    GUARD, not its author: the pin reds if either section drifts back, which is
-    the only thing that would catch it. "Measured on origin/main" would have
-    been FALSE within the hour, which is why the sha is named.
+    referent. At `71832318b` (the base before `#10978` merged) the §9.4 half
+    REDS, on its POINTER assertion: that tree's §9.4 does not contain
+    "read from `public.session_narrative`" at all (measured: 0 occurrences in
+    the section), so the run stops there and the blur assertion after it is
+    never reached. ⚠️ Naming the blur as the failing assertion would be an
+    inference, not a measurement — BOTH retired strings ARE present at that
+    tree (1 each), and calling `_source_vector_footnote` on it reds on
+    `_RETIRED_VECTOR_FOOTNOTE`, but the §12.1b half is not executed by a plain
+    run at all. From `b748df7d0` (main, post-`#10978`) onward NEITHER retired
+    string is present — and neither was present at any commit of THIS branch,
+    whose origin `b748df7d0` already carried `#10978`'s correction. So on this
+    branch both halves are that correction's REGRESSION GUARD, not its author:
+    the pin reds if either section drifts back, which is the only thing that
+    would catch it. "Measured on origin/main" would have been FALSE within the
+    hour, which is why the sha is named.
     *Does the test reach it?* Yes — the document is read from the tree, each half
-    is scoped to its own section, and the home it must name is derived from the
-    projection, not paraphrased here.
+    is scoped to its own section (with the retired-blur check deliberately
+    document-wide), and the home it must name is derived from the projection,
+    not paraphrased here.
     """
     # ── the premise: §9.1's narrative home, from the projection that writes it ──
     home = f"public.{rp.NARRATIVE_TABLE}"
@@ -1774,7 +1781,12 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
 
     text = _storage_doc_text()
 
-    # ── §9.4, SCOPED TO §9.4: the pointer PRESENT, the blur GONE ──
+    # ── §9.4: the pointer PRESENT, the blur GONE ──
+    # ⚠️ The pointer/negation/count assertions below are SCOPED to §9.4; the
+    # retired-blur one is deliberately NOT — it is asserted over the WHOLE
+    # document, because the sentence it retires is a claim about the S1
+    # narrative wherever it appears, and scoping it would let the same blur
+    # return in §10 unremarked. Its failure message says so.
     s94 = _section(text, _S94_HEADING, _S95_HEADING)
     assert f"read from `{home}`" in s94, (
         f"§9.4 no longer states that the source vector's text is read from "
@@ -1800,9 +1812,12 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
         "the narrative's home without saying which one the vector must not "
         "read leaves the *\"embed the summary already there\"* reading open")
     assert _RETIRED_SUMMARY_BLUR not in text, (
-        f"§9.4 is back to *\"{_RETIRED_SUMMARY_BLUR}\"* — it conflates the "
-        f"summary ON THE NODE with the narrative IN THE RECORD, and a design "
-        f"reading it embeds `:Source.summary` and calls a bag of words a summary")
+        f"the document is back to *\"{_RETIRED_SUMMARY_BLUR}\"* — it conflates "
+        f"the summary ON THE NODE with the narrative IN THE RECORD, and a design "
+        f"reading it embeds `:Source.summary` and calls a bag of words a summary"
+        f" (asserted over the WHOLE document, not just §9.4: the sentence is "
+        f"false wherever it appears, and scoping it would let it return in §10 "
+        f"unremarked)")
 
     # ── §12.1b: the section that decides WHERE vectors live may not order the
     #    design §9.4 forbids ──
