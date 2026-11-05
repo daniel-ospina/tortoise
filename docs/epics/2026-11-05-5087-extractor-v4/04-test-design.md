@@ -12,7 +12,7 @@ aboutObjects: "#5087, #10994, #10995-#11002, #11021, #7949"
 # 04 · Integration surface map — #5087
 
 **Gate artifact** for the Test-Design Gate (Scope → Plan). Issue: **#10994**. Derived from `03-scope.md`'s Customer Value Map.
-⚠️ **Namespace:** surfaces are **`SF<n>`**. The epic's steps are S0–S6 and the capstone's rows are E1–E5 — a third `S` namespace is what forced a crosswalk in `#7967`, and it is avoided here by fiat.
+⚠️ **Namespace:** surfaces are **`SF<n>`**. The epic's steps are S0–S6 and the capstone's rows are E1–**E6** (E6 is the owner-ruled pack-logic row, `#7949` comment `6664402530`) — a third `S` namespace is what forced a crosswalk in `#7967`, and it is avoided here by fiat.
 
 **The load-bearing ambiguity, named once: `absent` vs `unresolved` vs `held`.** Every surface where a caller cannot distinguish those three is a defect row (`docs/architecture/BOUNDED-OPERATION-CONTRACT.md` §1; `EXTRACTOR-V4-ARCHITECTURE.md` §4.4 I1/I2). This epic's whole failure mode is one of those three collapsing into "no such thing".
 
@@ -35,7 +35,7 @@ Doors: **D1** hosted `POST /v1/sessions` · **D2** SDK `capture_session` · **D3
 | **SF11** | D5 × S6 | direct `create_point`/`create_entity` → graph | contract | **no selection at all on this door** — a residual, by design: the primitives are the generic surface |
 | **SF12** | all × the census | what each door wrote, per step | contract | a door nobody measured reading `0` instead of `UNMEASURED` |
 | **SF13** | the pack declaration → the writer | `relations`/`chains`/`hierarchies` → edges | integration | an edge class with no replay route (`live != rebuild`); `hierarchies` read as an edge declaration when it is a UI slot |
-| **SF14** | S6 → the capstone probe | committed rows + receipt → E1–E5 rows | integration | a row scored on an arm whose environment was not read back; a metric quoted from a page rather than the holdings |
+| **SF14** | S6 → the capstone probe | committed rows + receipt → E1–**E6** rows | integration | a row scored on an arm whose environment was not read back; a metric quoted from a page rather than the holdings |
 | **SF15** | the packs' declarations → the writer | `relations` **and** `hierarchies` → declared / writable / written, per pack | integration | a declared connection that binds no write path reported as a count rather than named; a meaning that runs the wrong way (direction unread); a relation duplicating a `hierarchies` path |
 
 ## Surfaces this epic deliberately does NOT test, and why
@@ -72,7 +72,8 @@ Doors: **D1** hosted `POST /v1/sessions` · **D2** SDK `capture_session` · **D3
 | layer | what lives there | runs when | needs | budget |
 |---|---|---|---|---|
 | **L-gate-hermetic** | every reference to the **behaviour**: contract schemas, `expand_kind`, the re-narrate counter, the no-mint invariant, the undeclared-pair refusal, the DISCARD record, the consolidation prune | **every** PR that touches the named source files (selection by `ci-surfaces.yml`) | **scripted model, `sdk=None`, no network, no DB** | unit-file speed: **< 5 s per file**, no test above **1 s** |
-| **L-gate-db** | the graph-shape assertions that genuinely need a store: attach-not-mint, held-not-committed, edge-exists, the **theme → initiative → epic → issue** walk, rebuild parity | PRs touching the extractor/writer files | a lane container (`tools/test_lane.py`), a **scripted** model | **< 30 s per test**, one file per concern |
+| **L-gate-db** | the graph-shape assertions that genuinely need a **graph** store: attach-not-mint, edge-exists, the **theme → initiative → epic → issue** walk, rebuild parity | PRs touching the extractor/writer files (diff-selected) | a lane container (`tools/test_lane.py`), a **scripted** model | **< 30 s per test**, one file per concern |
+| **L-gate-record-db** | the assertions that need the **record** store: held-not-committed, count-to-zero drained-then-committed | **every PR** — the `test-record-postgres` job carries no diff gate and adding one is new machinery | Postgres, `TEST_RECORD_DB_URI` armed by `.github/actions/postgres-provision`, a **scripted** model | **< 30 s per test**, one file |
 | **L-eval** | anything over the **frozen corpus with a real model**: the census artifact's re-derivation, E1's share, E4's planted edges | **dispatch only** — never on a PR (`tests/eval/**` is the on-demand lane) | a model key + a lane container | minutes; not gating |
 | **L-none** | a test that needs neither | — | — | — |
 
@@ -83,4 +84,4 @@ Doors: **D1** hosted `POST /v1/sessions` · **D2** SDK `capture_session` · **D3
 3. **Never the corpus in `L-gate`.** The frozen corpus (7 sessions, real LLM) stays in `tests/eval/`. Its *fixtures* may be read by a hermetic test; its *runs* may not.
 4. **No test asserts a wall-clock or a token count.** Those are measurements (`docs/ops/extraction-cost-metrics.md`), and a gating assertion on them makes the suite a performance benchmark that fails on a busy box.
 
-**The cost this epic adds to the gating path, stated so it can be held to:** **8 hermetic tests in 3 files (≤ 15 s total) and 6 DB tests in 2 files (≤ 3 min on the lane — 6 × 30 s plus container start, selected only on extractor/writer diffs).** Nothing on every PR. The test→file mapping is in `05-plan.md` §7.1, so a new file cannot appear without a `ci-surfaces.yml` row. If a reviewer finds a needed observation that does not fit those bounds, the answer is a **seam** (make the behaviour assertable without the model), not a longer gate.
+**The cost this epic adds to the gating path, stated so it can be held to:** **8 hermetic tests in 3 files (≤ 15 s total, diff-selected); 4 graph tests in 2 files (diff-selected); 3 record-DB tests in 1 file that join the always-run `test-record-postgres` job (a parallel job, no diff gate — adding one there would be new machinery, and that cost is stated rather than hidden).** The test→file mapping is in `05-plan.md` §7.1, so a new file cannot appear without a `ci-surfaces.yml` row. If a reviewer finds a needed observation that does not fit those bounds, the answer is a **seam** (make the behaviour assertable without the model), not a longer gate.

@@ -206,3 +206,18 @@ venture           Investment → Program, Program → Asset              (hasPar
 
 9 declared hierarchy paths across 4 packs (the other 3 declare none). **A census that reads only `relations` would under-count the declared business logic by a third** — and `producedBy` above is precisely a relation duplicating a hierarchy path, which is the drift the census exists to expose. `#11083`'s scope is corrected accordingly.
 
+---
+
+# Round 3 — what the plan review found *behind* the rulings
+
+**`funds` and `produces` are not missing from the vocabulary — they are RETIRED from it.** `tortoise/pack_registry.py`'s `SEMANTICS_TRANSITION` maps `funds → transacts` and `produces → causes`, and `sdk.py` applies the rename **before** resolving direction, so a write declaring `funds` lands as `transacts` (direction `-`, no mechanism), and `produces` lands as `causes` (`->`). Both shipped declarations are therefore *currently warned as retired* on every load.
+
+**That changes what "the ruling" costs, and it is why this is recorded rather than absorbed:**
+
+- **`funds` is safe to restore** — it needs an entry in `SEMANTICS_VALUES` (`->`) and `SEMANTICS_MECHANISMS` (`IMPL`), and its removal from the transition map.
+- **`produces` needs a direction the table has never produced.** `<-` is valid per edge (`live.py`'s `DIRECTION_VALUES`) but no `SEMANTICS_VALUES` member yields it; the owner's own words were that this is production, not causation, and the declared edge runs product→producer. So the table gains a `<-` value.
+- **Both removals reverse a recorded decision** (`#7848`'s alignment), so they carry an **`OVERRIDES:` line on that issue** (comment `6668793463`) and the owner's approval, cited by the implementing lane. A lane that "aligns to the core vocabulary" by find-and-replace would otherwise delete the ruling it is implementing.
+- ⚠️ **`ownedBy` + `IMPL` and `transacts` + `IMPL` are NOT errors.** **ONTOLOGY §8's mechanism column** gives those four values (`related`, `transacts`, `ownedBy`, `managedBy`) **no** mechanism (`—`), so *either* spelling is permitted over them — `SEMANTICS_MECHANISMS` omits them by design — and the registry **compares and warns, never gates** (#1934). A census that flagged them would red on correct behaviour. The genuine inversion is `IMPL` over `refutes` or `NAND` over `addresses` (#9963).
+
+**Not affected:** `#1026`'s "no name patterns" ruling. That one is about manifest filter keys, and nothing here touches it.
+
