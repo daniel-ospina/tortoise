@@ -47,13 +47,14 @@ assertion:
 | `#8419` | OPEN, parented by neither | **not re-filed.** Root is the D10 fold (`#5088`); named in §4, not claimed. |
 | `#10465` | CLOSED | **not re-filed.** Its instrument is re-runnable and is cited in C6. |
 | `#10541` | CLOSED COMPLETED 2026-11-04 | **not re-filed.** Delivered the census; **C2** is the narrower, different residual — the exemption authority has no production home. |
-| _"state the rule for what earns an embedding"_ | **deliberately not filed 2026-10-31** | **still not filed.** Duplicates `#5008` (CLOSED). This lane reaches the same conclusion independently. |
+| *"state the rule for what earns an embedding"* | **deliberately not filed 2026-10-31** | **still not filed.** Duplicates `#5008` (CLOSED). This lane reaches the same conclusion independently. |
 
 ---
 
 ## 2. The children
 
 ### C1 — **#11084** `test-design: the vector layer — integration-surface map`
+
 - **O:** produce the surface map `epic-workflow`'s Test-Design Gate requires — every integration surface this
   epic touches, the test layer assigned to each, and the failure mode each guards.
 - **I:** surfaces enumerated from `04-plan.md` §5–§6 (the gate default, the consult point, the register leaf,
@@ -63,6 +64,7 @@ assertion:
 - **Complexity:** standard · **Blocked by:** none · **Blocks:** C6.
 
 ### C2 — **#11085** `the embedding exemption register gets a production home; DoD rows 1–2 re-scored`
+
 - **O:** move the authority for *"this writer is legitimately exempt"* out of a read-only measurement script
   and into the product, so "no silent bypass" is a property of the system rather than of a report.
 - **I:** a runtime-resolvable register in `tortoise/` keyed `module::symbol`; **three** writers that today
@@ -77,6 +79,7 @@ assertion:
   what earns a vector.
 
 ### C3 — **#11086** `arm the EMBED gate by default and record the measured write-rate effect`
+
 - **O:** make "what earns an embedding" the write path's operative rule rather than an opt-in flag.
 - **I:** `TORTOISE_EMBED_GATE` set in each shipped config surface that exists (`.env.example`,
   `docker-compose.yml`, `config/`, CI workflows); the **measured** change in the embedding write rate
@@ -89,6 +92,7 @@ assertion:
   trusted."*
 
 ### C4 — **#11087** `report the vector contract positively — the serves/indexes pair for every label`
+
 - **O:** make which labels the vector leg searches and which the store indexes a fact the system states,
   instead of one reconstructed by hand.
 - **I:** `_record_vector_index_inventory` (`projection/__init__.py:18491`) emits the pair for **every** served
@@ -102,6 +106,7 @@ assertion:
 - ⚠️ **Corrected premise, and it changes the size of this child.** `_vector_indexed_labels` is assigned **unconditionally** (`:18570`); `if gap:` (`:18577`) gates only the **`log.warning`**, and `tests/test_4997_vector_index_parity.py:415` already asserts the attribute for a no-gap store. **What is missing is the SERVED set** — it is never retained — so this needs **new state**, not one un-gated emit. It is still **not** a second inventory: it extends the one function that already reads the catalogue.
 
 ### C5 — **#11088** `census the unretrievable vectors, and carry the surface call for removing them`
+
 - **O:** quantify the stored vectors that no index and no efficient query path can serve, and put the
   consequence of removing them in front of the owner — because removal is a **surface change**.
 - **I:** a **read-only** dry-run census naming every label whose stored vectors have no vector index, with
@@ -121,6 +126,7 @@ assertion:
   both currently read V1 as answered while §12.1c says `NOT DECIDED — owner's call`.
 
 ### C6 — **#11089** `capstone: clickthrough verification for the vector layer`
+
 - **O:** the final end-to-end gate `epic-workflow`'s Capstone Gate requires — the epic cannot be marked
   complete without it passing.
 - **I:** a checklist = the epic's E2E cases **+** every integration surface from C1, each verified through
@@ -132,7 +138,7 @@ assertion:
 
 ## 3. Dependency order
 
-```
+```text
   C1  test-design map ──────────────────────────────▶ C6 capstone
   C4  report the contract        (independent, smallest)
 
@@ -187,6 +193,7 @@ could, behind the mandated approval.
 ## 6. Verification plan (stage 6 hand-off)
 
 The epic is **not** complete when these six merge. It is complete when:
+
 1. every DoD row is `MET`, or names an issue **OPEN at the closing head** owning its remainder;
 2. the capstone (C6) passes against a running system;
 3. the surface map (C1) covers every capability, and each surface was verified through its assigned layer.

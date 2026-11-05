@@ -78,7 +78,7 @@ is handed on, not taken.
 
 ## 3. Prototype — a state diagram (non-GUI)
 
-```
+```text
                         ┌──────────────────────────────────────────────┐
   write a row ─────────▶│ gate enabled?  (S1 — becomes yes by default) │
                         └───────────────┬──────────────────────────────┘

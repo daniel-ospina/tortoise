@@ -148,30 +148,35 @@ where it will be used.
 Behavioural, executable, each tracing to exactly one scope item.
 
 ### E2E-1: The rule is operative with no environment variable — *S1*
+
 **Given** a deployment built from the shipped configuration
 **When** a row whose text is only an identifier (a UUID, a content hash, a file path) is written **with no `TORTOISE_EMBED_GATE` set by the operator**
 **Then** it is stored **without** an embedding
 **And** the write records *why* it has none
 
 ### E2E-2: A prose row is still embedded — *S1*
+
 **Given** the gate operative per E2E-1
 **When** a row carrying prose is written
 **Then** it **is** embedded
 **And** the two rows are distinguishable in the store (`embedding IS NULL` vs not)
 
 ### E2E-3: Every embedding writer is gated or has a production exemption — *S2*
+
 **Given** the exemption register resolvable at runtime in `tortoise/`
 **When** the writer population is enumerated at the closing head
 **Then** each writer is `gated` or names a **production** exemption (runtime-resolvable, not a code comment)
 **And** no writer is `bypass`
 
 ### E2E-4: The store states its served and indexed label sets — *S4*
+
 **Given** any store at setup
 **When** `_record_vector_index_inventory` runs
 **Then** it reports the serves/indexes pair for **every** served label, **including when there is no gap**
 **And** a store with a gap still reports the gap
 
 ### E2E-5: An unretrievable vector is named before it is removed — *S3*
+
 **Given** vectors stored on a label with no vector index
 **When** the dry-run census runs
 **Then** it names every such label with its vector count and bytes
@@ -179,12 +184,14 @@ Behavioural, executable, each tracing to exactly one scope item.
 **And** it writes nothing
 
 ### E2E-6: A degraded search says so — *S4*
+
 **Given** a vector query for a label with no index
 **When** the query runs
 **Then** the leg trace names `scan_fallback`
 **And** the caller can distinguish it from an index hit without reading the source
 
 ### E2E-7: The epic's claim is checkable at its closing head — *S5*
+
 **Given** the four DoD rows and the integration-surface map
 **When** `tools/dod_5090_probe.py` runs at the closing head **and** the capstone walks the surface map
 **Then** every DoD row is `MET`, or names an issue that is **OPEN at that head** owning its remainder
@@ -228,19 +235,24 @@ Ontology low · Accessibility low · Library-deps none.
 ## 7. Review gates
 
 ### 7.1 Stage 1 — align (`01-align.md`)
+
 **Cycle 1** — fresh context, `epic-align` prompt + 8 independent fact-checks with commands. **1 P0, 4 P1, 3 P2, 1 P3.** Incorporated: the `#9548` authorisation wording; the setup-time (not per-search) warning; `1 of 4` MET not 3-of-4; DoD row 2's omitted remainder; the `P0-blocker`s' matrix placement; A1's reasons; the profit recomputation; the four-vs-three label count; the `§14.3` register row; the 4-exist/6-walked surfaces.
 **Cycle 2** — corrections-only pass. **2 P1, 1 P3.** Incorporated: A1's sole surviving reason **falsified** (the doc row at `:1520` and the runtime warning both state the deferral) → **A1 re-argued on actionability and the decision changed from PROCEED to REPOINT**; the `§14.3` register correction **delivered for real** rather than pointed at a non-existent section; the `§0-preamble` mis-citation.
 
 ### 7.2 Stage 2 — research (`02-research.md`)
+
 **Cycle 1** — **2 P1, 2 P2, 2 P3.** Incorporated: `iterative_scan`'s **documented failure at correlated, low-selectivity filters** added (0 rows in 683 ms at 0.1 % against a btree's 3.6 ms — our filters are correlated); the case **against** a cross-store move added at equal force (37 call sites / 8 modules, two-hop latency, two-boundary erasure, silent divergence) so the burden of proof is symmetric; K3's polarity fixed; the benchmark's dataset named and **the dimension corrected to 384** (1,536 is the byte width); heading contract fixed; GiB units corrected.
 
 ### 7.3 Stage 3 — scope (`03-scope.md`, **first revision**)
+
 **Scope reviewer** — fresh context. **2 P0, 7 P1, 3 P2, 1 P3.** Incorporated: S1's closure predicate no longer accepts a **closed** issue; the approval block no longer asks the owner to decide on undefined terms; a named E2E now tests S1's actual headline (the flag on by default) instead of presupposing it; E2E-4/6 cite a **declared** budget; E2E-6's orphan and E2E-9's circularity fixed; S2 re-framed as evidence; S5 labelled a workflow mandate; Architecture and Library-deps branch-qualified symmetrically; the *"changes 9 write paths"* error corrected.
 **Duplication-architecture reviewer** (advisory, outside the fix-loop) — **5 findings (3 P0, 2 P1)**, verdicts `unify` ×3 / `unify-contract-keep-drivers` ×2. Incorporated: S4 was duplicating `_record_vector_index_inventory`; S1 was re-filing `#10541`'s resolved census (the real gap is the **exemption authority** having no production home); **V1's state is recorded oppositely in three artifacts**; `M1–M4` denotes two disjoint sets across two live docs; §15 already carries **M5**.
 **⚠️ Degraded source, declared:** Tortoise MCP was reachable-but-unauthorized (`-32001`) during the duplication check, so the registry-axis cross-check was **not** performed — recorded as `DEGRADED`, not as clean.
 
 ### 7.4 Stage 3 — scope (**second revision**, this artifact)
+
 Rewritten after the prior-answer audit (`01-align.md` §8). Changes: V1 removed from scope (its home is §14.3, its architecture owner `#4333`); self-hosting removed (owner, 2026-11-05); quantization removed (§15's do-not-re-invent list); the filtered-ANN measurement **parked with V1** rather than scoped; Architecture re-rated **low** with the reason stated. Reviewed in the PR cycle (§7.5).
 
 ### 7.5 Stages 4–5 and the PR review
+
 `04-plan.md` and `05-decompose.md` carry their own gates in §8 of each. The PR review at head `9f5a419` returned **2 P1 + 8 P2** — all incorporated in this revision: acceptance item 3 restated (it still read "V1 decided and implemented", the reversal the rewrite exists to prevent); **this gate log, which the rewrite had dropped**; the **384-dim** correction; **S4's premise corrected** (the attribute is assigned unconditionally; only the warning is gated; the served set is never retained); the withdrawn profit chain removed from §3/§5; the dangling `§3.2` pointer; the plan's false J2↔D6 claim and the dropped `scan_fallback` case; **C2's target replaced** ("zero unclassified" is already true at HEAD, so it could not distinguish completion from a no-op); and the **reconciliation against the 2026-10-31 child set**.

@@ -102,8 +102,7 @@ why this epic does not hold the critical path.
   they are elsewhere). The earlier *second* leg — *"the owner postponed arming, a deliberate scheduling
   signal"* — is **withdrawn**: the owner authorised arming on 2026-11-03 and the block is a
   credential/environment wall. That weakens "Not Urgent" and is stated rather than quietly dropped.
-- **The one genuinely urgent item is cheap and is not the epic's build:** V1's evidence, which is **parked with V1** (`03-scope.md` §1 row 4) because no move is planned and it would therefore have no consumer.
-  item 3) unblocks the decision and touches no production store.
+- **The one genuinely urgent item is cheap and is not the epic's build:** V1's evidence, which is **parked with V1** (`03-scope.md` §1 row 4) because no move is planned and it would therefore have no consumer. That work unblocks the decision and touches no production store.
 
 ---
 

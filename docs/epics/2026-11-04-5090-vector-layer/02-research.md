@@ -24,7 +24,7 @@ aboutObjects: "epic #5090, decision V1, filtered ANN, pgvector, FalkorDB HNSW, e
 
 ---
 
-### Strategy Context
+## Strategy Context
 
 - **Position in the substrate rebuild.** `#5086` maps five epics; this is E4. The governing ruling
   (`STORAGE-ARCHITECTURE.md` §2.0, owner 2026-10-08, canonical via PR #7872/`929228d09`) makes **Postgres
@@ -44,7 +44,7 @@ aboutObjects: "epic #5090, decision V1, filtered ANN, pgvector, FalkorDB HNSW, e
   exceeding the allowance is **purchased overage, not refusal**. So the epic's value is not "avoid a wall"
   — it is "stop charging the customer for bytes that do no work".
 
-### UX Pattern Research
+## UX Pattern Research
 
 - **No GUI surface.** The "users" are two: the **agent** (retrieval precision and whether a degraded leg is
   visible) and the **operator** (cost, cold-reload time, and whether the store states its own contract).
@@ -58,7 +58,7 @@ aboutObjects: "epic #5090, decision V1, filtered ANN, pgvector, FalkorDB HNSW, e
   functions. The pattern conclusion — *"if the system holds the fact, the system should state it"* — is
   why scope item 4 is a closing-out item rather than new work.
 
-### Workflow Pattern Research
+## Workflow Pattern Research
 
 - **Write path.** S0→S6 extractor (`EXTRACTOR-V4-ARCHITECTURE.md`). The EMBED gate sits at
   `embeddings.encode_for_row`, reached by the embedding write paths; the predicate is
@@ -77,7 +77,7 @@ aboutObjects: "epic #5090, decision V1, filtered ANN, pgvector, FalkorDB HNSW, e
 - **Operator workflow.** `_ensure_indexes` runs from `Projection.__init__` **unguarded**; ~28 sequential round trips (`monitoring.py:65`, `selfhost.py:392`). Any new read there **must be fail-open** or it breaks
   store construction.
 
-### Tech Stack Research
+## Tech Stack Research
 
 **Two engines, two index rules — and applying one to the other is the documented cause of the false
 "7 TB" scare.**
@@ -123,7 +123,7 @@ comparables now say what that measurement will probably show, and how to run it:
    we currently cannot do**, paying tail latency for it. ⚠️ This is an argument *for* branch 2 that the
    record did not carry, and it must be in front of the owner when V1 is decided.
 
-### Assumptions Register
+## Assumptions Register
 
 | Assumption | Confidence | Source | Validation plan |
 |---|---|---|---|
@@ -201,11 +201,13 @@ proof.** The anti-moving case, now stated with equal force and at equal weight:
 favour either branch.**
 
 ### P2-a — K3's polarity was inverted in the Assumptions Register
+
 Fixed above: the register now states the align-doc assumption (*"preserves recall"*) and marks the
 evidence as against it. A low-confidence assumption cannot be *"confirmed"* by evidence that the risk is
 real.
 
 ### P2-b — the benchmark's dataset was unnamed
+
 It is **SIFT-128-euclidean** (ann-benchmarks), **128-dim**. **Our embeddings are 384-dim** (`tortoise/embeddings.py` `EMBEDDING_DIM = 384`); **1,536 is the stored BYTE width** (384 × float32), not the dimension — so the dimensional gap is **3×**, not 12×, and the distinction matters because HNSW's recall and build cost are functions of dimension, not of stored bytes. The
 benchmark's own caveat is dimensional (*"do not substitute random vectors … in 128 dimensions"*), so its
 distances must not be read as ours — and at 384 dims HNSW behaves differently in both recall and build
@@ -213,7 +215,7 @@ cost. Also noted: the *AI Engineering Playbook* row is the only citation that is
 repo artefact.
 
 ### P3-a / P3-b — heading contract and units
+
 `### Raw Notes` → `## Raw Notes` (the contract names H2), and the extra section demoted to an H2 so a
 reader walking headings gets the promised tree. **Units corrected: `$1.32/month`, not `$1.38`** — the
-the corrected figure is **$1.32/month** (19,441,152 B = 0.0181 GiB × $73). ⚠️ **And the chain itself is withdrawn — `01-align.md` §8.2:** the bill is provisioned RAM and retained bytes are revenue, so this figure's only surviving use is as the refutation.
-
+corrected figure is **$1.32/month** (19,441,152 B = 0.0181 GiB × $73). ⚠️ **And the chain itself is withdrawn — `01-align.md` §8.2:** the bill is provisioned RAM and retained bytes are revenue, so this figure's only surviving use is as the refutation.
