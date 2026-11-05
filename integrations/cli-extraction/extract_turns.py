@@ -980,7 +980,7 @@ def _created_by_other_source(p):
     # naming another source or an ARRAY (a survivor born from a ref sequence);
     # a mint of THIS writer always carries the scalar it passed. Only the first
     # two shapes are somebody else's point, and only they are excused from the
-    # domain assertion above. None (no ref at all) is NOT excused.
+    # domain assertion below. None (no ref at all) is NOT excused.
     _ref = p.get('extractedFrom')
     return _ref is not None and _ref != source
 
