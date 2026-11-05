@@ -116,6 +116,7 @@ def _fixture(**overrides: Any) -> dict[str, Any]:
         "required_raw": f"required={len(REQUIRED)} {list(REQUIRED)}",
         "review_token": "head",
         "review_exit": 0,
+        "review_verdict": "clean",
         "review_raw": "token=head exit=0 record=- live=-",
         "touched": ["tortoise/sdk.py", "tools/ready_for_owner.py"],
         "touched_raw": "files=2",
@@ -888,6 +889,19 @@ def test_an_unwitnessable_closing_head_re_read_is_unreadable() -> None:
     assert check.unreadable is True
 
 
+def test_a_fixture_without_a_full_head_is_refused(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ROUND-11 P3: `{"head": ""}` printed `READY-FOR-OWNER(1, )`, breaking the documented
+    `(<PR>, <full head sha>)` contract, and nothing marked a fixture as fixture-derived."""
+    bad = tmp_path / "nohashes.json"
+    bad.write_text(json.dumps(_fixture(head="")))
+    assert rfo.main(["--fixture", str(bad)]) == 1
+    captured = capsys.readouterr()
+    assert "FIXTURE-MODE(" in captured.err
+    assert captured.out.strip().startswith("NOT-READY(")
+
+
 def test_the_probe_dataclass_defaults_a_read_dependent_flag_to_unreadable() -> None:
     """ROUND-8 P3: `is_draft` defaulted to the PASSING side on the dataclass itself, so a
     future edit restoring `bool = False` would silently turn an unread PR payload into
@@ -924,6 +938,82 @@ ROUND9_CORPUS: tuple[tuple[str, bool], ...] = (
     ("NO ISSUES FOUND — verified the severity: P1 finding from round 3 is now closed.", False),
     ("**Outcome: 2 findings (2 × P3).**", False),
     ("**OUTCOME: 2 issues found (both P3), no blocking defect.**", False),
+    # ROUND-10: the verdict-header shapes harvested from LIVE bodies (#10956, #10929,
+    # #10920, #10938, #10945). Each read NEUTRAL and, as a PR's last artifact, printed
+    # READY-FOR-OWNER.
+    ("**Outcome: ISSUES 3** — 1 code defect (security), 2 false statements", True),
+    ("## Code review — ISSUES FOUND (1 × P1, 1 × P2)", True),
+    ("## Code review — ISSUES FOUND (1 × P2)", True),
+    ("### ⛔ P1, verified by reproduction — `pin` refuses in two shapes", True),
+    ("⛔ **Do not land this PR as it stands — it carries a known P1**", True),
+    # …and the two CLEAN shapes that were over-blocked: a severity TALLY is not a finding.
+    ("**Outcome: CLEAN.**\n\nP1: 0, P2: 0, P3: 2 (nits filed as follow-ups).", False),
+    ("**Outcome: 3 findings (0 blocking).**\n\n- P1: 0\n- P2: 0\n- P3: 3", False),
+    # ROUND-11: the dominant shapes in the FOLD PRs (#10902/#10909/#10920/#10906/#10867).
+    ("4 × `P2`, `check_type: bug`, `origin: diff` — `tools/batch_open.py:560`", True),
+    ("P2: `tools/batch_open.py:106-107` — the cue", True),
+    ("**Verdict: 2 P2 issues, no P0/P1.**\n\n1. [P2] tortoise/sdk.py:12 — x", True),
+    ("- P1: 0, P2: 2", True),
+    ("| P2 | `tools/x.py:9` | a table cell |", True),
+    # …and the phrase that must NOT block now that `Outcome: clean` suppresses it.
+    ("**Outcome: CLEAN.** No new issues found — the round-2 P2 is fixed.", False),
+    # ROUND-12: parity with `scripts/review-pr.sh`'s own cue list — the label-noun-in-front
+    # cue and the table-row cue. Ten live shapes that declare a blocking finding read
+    # NEUTRAL before these, each measured on a real body.
+    ("**Verdict: 2 real issues — 1 P1 (red core check), 1 P2 (unmeasured write leg).**", True),
+    ("**Verdict: ISSUES — 1 blocking (P1), 1 non-blocking (P2).**", True),
+    ("**Finding [P1]**: the guard returns 0 without holding the lock.", True),
+    ("**Verdict: P1 — the guard returns 0 without a lock.**", True),
+    ("There is a **P1** in the guard", True),
+    ("**1 blocking (P1)**: a real defect", True),
+    ("Blocking finding: P1 in the guard", True),
+    ("Requires a fix: P1 in the guard", True),
+    ("| **P1** | the guard returns 0 without a lock |", True),
+    ("2 [P1] open blocking defects remain", True),
+    ("**Outcome: 2 findings (1 × P1, 1 × P2). No blocking defect.**", True),
+    # …and the zero counts, in every spelling review-pr.sh exempts.
+    ("**P1**: none.", False),
+    ("**Outcome: CLEAN.**\n\n**P1**: none.", False),
+    # ROUND-13: the three cues `review-pr.sh` has and this module did not — the parenthesised
+    # label, the count WRITTEN BEFORE the token / spelled numeral, and the slot separator.
+    ("**Finding (P1)**: the guard returns 0 on a failed read", True),
+    ("Found a P1: the guard returns 0 on a failed read", True),
+    ("One P1 — the guard returns 0 on a failed read", True),
+    ("CLEAN — 2 P1 findings.", True),
+    ("CLEAN — one blocking finding remains, in a file outside this diff.", True),
+    ("- **F1 (P2)** — a claim mismatch\n- **F2 (P1)** — the guard returns 0", True),
+    # …and the two over-blocks that came with parity: a heading naming a FIXED severity in a
+    # clean-declaring body, and a reviewer's own severity TALLY table.
+    ("**Outcome: CLEAN.**\n### The P1 is fixed, and the fix is load-bearing", False),
+    ("**Outcome: CLEAN.**\n| 0 | 0 | 2 |", False),
+    ("| **P1** | 0 |", False),
+    ("| P0 | P1 | P2 |", False),
+    # ROUND-14: a cue is a SHAPE, not an enumerated neighbourhood. A count crosses up to three
+    # words and a location may be words away; pinning the immediate neighbour re-created the
+    # ratchet one word away (review-pr.sh records both as its own measured fail-opens).
+    ("CLEAN — 2 open P1 findings remain.", True),
+    ("CLEAN — 2 remaining P1 defects", True),
+    ("CLEAN — 2 unresolved P1", True),
+    ("2 new P1", True),
+    ("Found one P1 in tools/x.py:12", True),
+    ("there is a P1 in `tools/x.py:12`", True),
+    ("P1 in scripts/x.sh:12", True),
+    ("| P1 | the guard returns 0 |", True),
+    ("| P1 | 2 |", True),
+    # ROUND-15: the three SHARED CLASSES review-pr.sh keys on — a numeral class (digits AND
+    # spelled), a finding-noun class, and `P<n>s?`. Enumerating a neighbourhood is the ratchet
+    # that made `2 remaining P1` block and `Three remaining P1` not.
+    ("CLEAN — Three remaining P1.", True),
+    ("Two new P1", True),
+    ("CLEAN — several open P2", True),
+    ("CLEAN — 4 defects remain unresolved.", True),
+    ("CLEAN — 5 errors remain unfixed.", True),
+    ("CLEAN — 2 regressions remain.", True),
+    ("CLEAN — 3 issues outstanding.", True),
+    ("CLEAN — several problems remain.", True),
+    ("CLEAN — the guard returns 0 (2 defects remain).", True),
+    ("CLEAN — 3 unresolved P1s.", True),
+    ("CLEAN — 2 open P2s remain.", True),
 )
 
 
@@ -934,6 +1024,28 @@ def test_the_round_9_corpus_grades_exactly_as_measured(body: str, blocks: bool) 
     trusted while a per-round history is graded on the severities it declares."""
     got = rfo._grades_as_blocking(body, {})
     assert got is blocks, f"{body!r} -> {got}, expected {blocks}"
+
+
+def test_a_not_clean_record_fails_condition_three() -> None:
+    """ROUND-11 P1: `record-review.sh --check-carry` returns `head`/`carry` at exit 0 for a
+    `not-clean` record too (it reports that verdict on stderr and leaves the exit code
+    alone, agent-infra#3400), so keying on the token CERTIFIED the fleet's own strongest
+    statement that the PR is not ready. Measured: 5 `verdict: not-clean` records exist on
+    this box (`tortoise` 10902/10909/10920 with 4/4/2 open findings)."""
+    check = _assert_fails("review", "record-not-clean:not-clean", review_verdict="not-clean")
+    assert "record-verdict=not-clean" in check.raw
+
+
+@pytest.mark.parametrize("verdict", ["clean", "clean-micro", "clean-low"])
+def test_every_clean_record_verdict_passes(verdict: str) -> None:
+    assert _check("review", review_verdict=verdict).passed is True
+
+
+def test_an_unreadable_record_verdict_fails_closed() -> None:
+    check = _check("review", review_verdict=None)
+    assert check.passed is False
+    assert check.unreadable is True
+    assert check.reason == "record-verdict-unreadable"
 
 
 @pytest.mark.parametrize("field", ["is_draft", "merged"])
@@ -1182,7 +1294,7 @@ def test_norecord_exit_code_is_mapped_to_norecord_not_unreadable(
     # Exit 0 with no stdout is still NOT a verdict — it must not read as a pass.
     assert rfo._read_review(1, REPO, REPO_ROOT)[0] == "unreadable"
     recorder.state["rc"] = 4
-    token, rc, _raw = rfo._read_review(1, REPO, REPO_ROOT)
+    token, rc, _raw, _verdict = rfo._read_review(1, REPO, REPO_ROOT)
     assert (token, rc) == ("norecord", 4)
     recorder.state["rc"] = 1
     assert rfo._read_review(1, REPO, REPO_ROOT)[0] == "fresh"
@@ -1193,7 +1305,7 @@ def test_norecord_exit_code_is_mapped_to_norecord_not_unreadable(
 def test_a_parsed_stale_token_fails_even_at_exit_0(monkeypatch: pytest.MonkeyPatch) -> None:
     recorder = _FakeRecorder(monkeypatch)
     recorder.state.update(rc=0, stdout="fresh\tabc\tdef\n")
-    token, rc, _raw = rfo._read_review(1, REPO, REPO_ROOT)
+    token, rc, _raw, _verdict = rfo._read_review(1, REPO, REPO_ROOT)
     assert (token, rc) == ("fresh", 0)
     assert (
         rfo.check_review(rfo.probe_from_dict(_fixture(review_token=token, review_exit=rc))).passed
@@ -1209,21 +1321,26 @@ def test_absent_scripts_pointer_is_unreadable_not_a_pass(monkeypatch: pytest.Mon
     assert "absent" in raw
 
 
-def test_recorded_diff_is_passed_through_to_the_recorder(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Cross-box reviews: the pair must reach `record-review.sh`'s own `--recorded-diff`."""
+def test_a_caller_supplied_record_pair_cannot_self_attest(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ROUND-10 P1: forwarding `--recorded-diff/--recorded-head` to the recorder made this
+    arm a SELF-ATTESTATION — its supplied-pair path short-circuits the record lookup, the
+    digest is computable from the public diff, and `--recorded-diff aaa…a --recorded-head
+    <live head>` made condition 3 PASS on a PR with no review at all. The flags are gone;
+    the CLI must not accept them, and the argv must never carry them."""
     seen: list[list[str]] = []
 
     def fake_run(cmd, timeout, cwd=None):
         seen.append(list(cmd))
-        return subprocess.CompletedProcess(cmd, 0, "carry\tabc\tabc\n", "")
+        return subprocess.CompletedProcess(cmd, 4, "norecord\t-\t-\n", "")
 
     monkeypatch.setattr(rfo, "_review_script", lambda workdir: Path("/fake/record-review.sh"))
     monkeypatch.setattr(rfo, "_run", fake_run)
-    token, rc, _raw = rfo._read_review(
-        7, REPO, REPO_ROOT, recorded_diff="a" * 64, recorded_head="b" * 40
-    )
-    assert (token, rc) == ("carry", 0)
-    assert seen and seen[0][-4:] == ["--recorded-diff", "a" * 64, "--recorded-head", "b" * 40]
+    token, rc, _raw, _verdict = rfo._read_review(7, REPO, REPO_ROOT)
+    assert (token, rc) == ("norecord", 4)
+    assert seen and "--recorded-diff" not in seen[0]
+    # …and the CLI surface refuses it outright rather than silently ignoring a caller.
+    with pytest.raises(SystemExit):
+        rfo.build_parser().parse_args(["7", "--recorded-diff", "a" * 64])
 
 
 # ── the READ LAYER: both round-1 defects lived here, and neither had a test ──
@@ -1318,7 +1435,9 @@ def _collect(monkeypatch: pytest.MonkeyPatch, payloads: dict[str, Any], fail: st
     fake = _FakeGh(payloads, fail=fail)
     monkeypatch.setattr(rfo, "Gh", lambda repo, **kw: fake)
     monkeypatch.setattr(rfo, "_read_tree", lambda gh, pr, head, workdir: (True, "merge-tree ok"))
-    monkeypatch.setattr(rfo, "_read_review", lambda *a, **kw: ("head", 0, "token=head exit=0"))
+    monkeypatch.setattr(
+        rfo, "_read_review", lambda *a, **kw: ("head", 0, "token=head exit=0", "clean")
+    )
     return rfo.collect_probe(10999, REPO, REPO_ROOT, now=NOW), fake
 
 

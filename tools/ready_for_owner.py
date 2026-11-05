@@ -86,9 +86,10 @@ than a second grouping here.
 ``record-review.sh --check-carry``, and the review RECORD is per-machine
 (``$HOME/.pi/agent/reviews``). A review minted on another box is therefore invisible to
 the default read, so such a PR reads ``NOT-READY(review)`` — the safe direction, but it can
-cost a re-review the fleet already paid for. ``--recorded-diff``/``--recorded-head`` pass a
-known pair straight through to the recorder's own ``--recorded-diff`` seam (#3315); this
-tool deliberately does NOT parse the signed marker itself.
+cost a re-review the fleet already paid for. The caller-supplied pair (``--recorded-diff``/``--recorded-head``) is NOT forwarded: the
+recorder's supplied-pair arm short-circuits its record lookup, so forwarding it made this
+arm a self-attestation (measured on #10974). The gate asks the box and FAILS when the box
+has nothing.
 
 Read-only against other PRs. It writes nothing but its own stdout: no PR comment, no
 label, no merge. (A lane that cannot write to PRs — #10930 — can still run it.)
@@ -166,7 +167,24 @@ QUEUE_BLOCKING_LABELS = frozenset({"superseded-by-fold"})
 #: ⛔ QUOTING A FINDING (`> [P1] …`) MUST STILL BLOCK — answering a finding by quoting
 #: it is normal review behaviour, and a `>` prefix read NEUTRAL (round 9). So do nested
 #: bullets and bold brackets.
-BLOCKING_RE = re.compile(r"^\s*(?:[-*>]+\s*)*\**\[?(P0|P1|P2)\]?\**\s*(?=\S|$)", re.MULTILINE)
+#: ⛔ THE THREE SHARED CLASSES `scripts/review-pr.sh` keys on. Every arm below composes
+#: THESE, instead of enumerating a neighbourhood: that enumeration is the ratchet that made
+#: `2 remaining P1` block while `Three remaining P1` did not, and made `2 open P1 findings
+#: remain` block while `4 defects remain unresolved` did not.
+NUMERAL = r"(?:[0-9]+|one|two|three|four|five|six|seven|eight|nine|ten|several|multiple)"
+FINDING_NOUN = (
+    r"(?:findings?|blockers?|issues?|defects?|bugs?|failures?|errors?|regressions?"
+    r"|vulnerabilit(?:y|ies)|violations?|problems?)"
+)
+#: A severity token, `s`-PLURAL INCLUDED — `P1s: 2` recorded a signed clean record in
+#: `review-pr.sh`'s own history because neither reader knew the plural form.
+SEV = r"P[0-2]s?"
+
+#: `[P1]` OR `(P1)` — `scripts/review-pr.sh:1363` (`[\[(][Pp][0-2][\])]`) treats a
+#: parenthesised label as decorated, and a live body (#10902) writes `- **F1 (P2)**`.
+BLOCKING_RE = re.compile(
+    r"(?m)^\s*(?:[-*>]+\s*|[0-9]+[.)]\s*)*\**`?(?:\[|\()?(P0|P1|P2)s?(?:\]|\))?\**`?\s*(?=\S|$)"
+)
 ISSUES_RE = re.compile(r"^\s*ISSUES\s+(\d+)\b", re.MULTILINE)
 #: A CLEAN outcome. ⛔ THE POSITIVE VOCABULARY IS THE RECORDER'S TOO: `Outcome: clean` is
 #: the declaration `scripts/record-review.sh` reads (its own suppress arm keys on it), and
@@ -221,6 +239,7 @@ EXPLICIT_CLEAN_OUTCOME_RE = re.compile(r"(?i)(?:^|[*\s])outcome:[ \t]*[*\s]*clea
 FINDINGS_DECLARED_RE = re.compile(
     r"(?i)(?:\bseverity\b\**\s*:?\s*\**\s*(P0|P1|P2)\b"
     r"|\boutcome\s*:\s*\**\s*([0-9]+)\s+(?:issues?|findings?)\b"
+    r"|\bverdict\s*:\s*\**\s*([0-9]+)\s+(?:P[0-3]\s+)?(?:issues?|findings?)\b"
     r"|\bverdict\s*:\s*\**\s*ISSUES\s+([0-9]+)\b)"
 )
 
@@ -229,10 +248,13 @@ FINDINGS_DECLARED_RE = re.compile(
 #: defect` are CLEAN reviews of a P3-only round, and reading the count alone blocked four
 #: such bodies measured across ten PRs — a permanent false NOT-READY, and a contradiction of
 #: this gate's own rule that a `[P3]` note does not block.
-ANY_SEVERITY_TOKEN_RE = re.compile(r"(?i)\bP([0-3])\b")
+ANY_SEVERITY_TOKEN_RE = re.compile(r"(?i)\bP([0-3])s?\b")
 #: ⛔ `no blocking` only counts as a DECLARATION when it ENDS there — "No blocking other
 #: than the P1" is the opposite claim, and matching it was the round-7→8 false PASS.
-ZERO_BLOCKING_RE = re.compile(r"(?i)\b0\s+blocking\b|\bno\s+blocking\b(?=\s*(?:[.,;:!)\]]|$))")
+ZERO_BLOCKING_RE = re.compile(
+    r"(?i)\b0\s+blocking\b"
+    r"|\bno\s+blocking\b(?=\s*(?:[.,;:!)\]]|$|\s+(?:findings?|defects?|issues?|problems?)\b))"
+)
 #: The ISSUE block's SIBLING fields. A real finding always carries at least one of these
 #: next to its severity; bare prose that happens to say "severity: P1" does not. Used to
 #: tell a DECLARATION from a sentence ABOUT a past finding — round 8 measured 5 of 6 natural
@@ -252,6 +274,126 @@ SIBLING_FIELD_RE = re.compile(
 #: `severity: P1`), optionally bulleted, bolded, quoted or backticked.
 SEVERITY_LINE_START_RE = re.compile(
     r"(?im)^\s*(?:[-*>]\s*)*\W{0,2}`?severity`?\s*\**\s*:?\s*\**\s*P[0-2]\b"
+)
+
+#: ⛔ THE VERDICT-HEADER SHAPES AN EARLIER ROUND STILL MISSED — all measured on live bodies:
+#: `**Outcome: ISSUES 3** — 1 code defect (security), 2 false statements` (#10956), `##
+#: Code review — ISSUES FOUND (1 × P1, 1 × P2)` (#10929), `## Code review — ISSUES FOUND (1 ×
+#: P2)` (#10920), `### ⛔ P1, verified by reproduction` (#10938), `Do not land this PR as it
+#: stands — it carries a known P1` (#10945). Each read NEUTRAL, and each as a PR's LAST
+#: artifact printed READY-FOR-OWNER.
+ISSUES_FOUND_RE = re.compile(r"(?i)(?<!no )\bissues?\s+found\b|\bISSUES\s+\d+\b")
+#: ⛔ A severity TOKEN is a finding by POSITION too, not only by decoration. Live shapes
+#: that still read NEUTRAL one round after the header fix: `P2:` followed by a
+#: `` `path:line` `` (the `${review-pr.sh}` USE cue), and a tally that counts a NON-ZERO
+#: blocking severity (`- P1: 0, P2: 2`). A finding NAMES A LOCATION.
+SEVERITY_LOCATED_RE = re.compile(r"(?i)\b" + SEV + r"\b[^.\n]{0,60}?`?[\w./-]*\.\w+:\d+")
+TALLY_NONZERO_RE = re.compile(r"(?i)\bP([0-2])s?\s*:\s*([1-9]\d*)\b")
+#: ⛔ PARITY WITH `scripts/review-pr.sh`'s OWN CUE LIST — the *label-noun-in-front* cue and
+#: the *table-row* cue, which this module did not have. Round 12 measured ten live shapes
+#: that declare a blocking finding and read NEUTRAL because every arm needed a line-lead, a
+#: `path.ext:12`, a sibling field, a heading or a tally: `**Verdict: P1 — …**`,
+#: `**Finding [P1]**: …`, `**Verdict: ISSUES — 1 blocking (P1), 1 non-blocking (P2).**`,
+#: `There is a **P1** in the guard`, `**1 blocking (P1)**: …`, `Blocking finding: P1 …`,
+#: `Requires a fix: P1 …`, `| **P1** | the guard … |` (no location), and
+#: `2 [P1] open blocking defects remain`. `review-pr.sh:1204/1221/1840` are those cues.
+#: The label-noun cue is TIGHT on purpose: the noun must be a KEY (followed by a colon) and
+#: the severity must follow within 30 characters, with no `clean` in between — otherwise
+#: ordinary CLEAN prose ("No blocking findings. The severity: P2 bar …") would block, which
+#: is the false-BLOCK direction 5 of 6 natural phrasings fell into in round 8.
+LABEL_NOUN_RE = re.compile(
+    r"(?i)(?:"
+    r"\b(?:verdict|outcome|finding|findings|issue|issues|defect|defects|blocker|blockers)"
+    # The gap must not cross a closing bracket or a sentence end: a count declaration's
+    # own "(0 blocking)." must not carry its severity into the NEXT sentence.
+    r"\s*\**\s*:(?:(?!clean)[^.\n)]){0,30}?\bP[0-2]\b"
+    r"|\b(?:finding|issue|defect)s?\s*[\[(]P[0-2][\])]"
+    # ⛔ THE SLOT-SEPARATOR CUE (`review-pr.sh` arm (b2), added there as a MEASURED P1):
+    # a bare severity token followed by a separator and a clause — `Found a P1: the guard
+    # returns 0`, `One P1 — the guard …`. A plain-English blocker with no location is the
+    # commonest shape a lane posts as a follow-up comment.
+    r"|\bP[0-2]\b\s*(?:[:\u2014\u2013]\s+(?!(?:0|none|nil|zero)\b)\S"
+    r"|\s+[\u2014\u2013]\s+(?!(?:0|none|nil|zero)\b)\S)"
+    r"|\bblocking\s+(?:finding|issue|defect)s?\s*:\s*P[0-2]\b"
+    # A BOLD severity token used as a noun mid-sentence (`There is a **P1** in the guard`),
+    # unless it is a zero count (`**P1: 0**`, `**P1**: none.`).
+    r"|\*\*P[0-2]\*\*(?!\s*[:|]?\s*(?:0|none|nil|zero)\b)"
+    # A LABEL followed by a parenthesised severity — `- **F1 (P2)**`, `Finding (P1)`.
+    r"|\b[A-Za-z]\w{0,10}\s*\((P0|P1|P2)\)"
+    # `Requires a fix: P1 …` / `Needs a P2 …`
+    r"|\b(?:requires?|needs?)\b[^\n]{0,25}?\bP[0-2]\b"
+    r")"
+)
+#: `1 blocking (P1)` / `2 blocking findings` — a stated NON-ZERO blocking count.
+BLOCKING_COUNT_RE = re.compile(r"(?i)(?<!no )\b[1-9]\d*[ \t]+blocking\b")
+#: ⛔ A COUNT WRITTEN BEFORE THE TOKEN, or spelled as a numeral — `review-pr.sh`'s
+#: `COUNT_SCAN_AWK` (:1761-1929) and arm (b4) flag both, and both are recorded there as
+#: MEASURED fail-opens ("`CLEAN — 2 P1 findings.` produced NO blocking line and a `clean`
+#: record"). `CLEAN — 2 P1 findings.` matches CLEAR_RE, so without this the body reads CLEAR.
+#: `<numeral> [≤3 words] <finding noun>` — `review-pr.sh`'s `COUNT_SCAN_AWK` forward shape.
+#: `4 defects remain unresolved`, `5 errors remain unfixed`, `3 issues outstanding` all read
+#: NEUTRAL without it, one noun substitution away from the `2 P1 findings` form that was fixed.
+COUNTED_FINDING_RE = re.compile(
+    r"(?i)(?<![\w-])(?!"
+    + NUMERAL
+    + r"0\b)"
+    + NUMERAL
+    + r"(?:\s+\w+){0,3}\s+"
+    + FINDING_NOUN
+    + r"\b"
+)
+COUNT_BEFORE_TOKEN_RE = re.compile(
+    # DIGITS only for the count-before-token arm: a spelled numeral is an ARTICLE as often
+    # as a count ("One P2 was fixed" is not a finding), and the spelled form that DOES
+    # count is `one blocking finding`, covered below.
+    r"(?i)(?<![\w-])(?!"
+    + NUMERAL
+    + r"0\b)"
+    + r"(?:[2-9]|[1-9][0-9]+|two|three|four|five|six|seven|eight|nine|ten|several|multiple)"
+    + r"(?:\s+\w+){0,3}\s+"
+    + SEV
+    + r"\b"
+    r"|\b" + NUMERAL + r"\s+blocking\s+" + FINDING_NOUN + r"\b"
+)
+#: A bracketed severity token used as a NOUN in running text (`2 [P1] open blocking defects`).
+BRACKET_SEVERITY_RE = re.compile(
+    r"(?i)\[P[0-2]\]\s*(?:open|blocking|defects?|issues?|findings?|remain|unresolved)"
+)
+#: A TABLE ROW whose severity cell is the token (`| **P1** | the guard returns 0 |`).
+#: A table row blocks only when it carries a DESCRIPTION cell — `review-pr.sh`'s
+#: table-scaffold rule (:1565): `| **P1** | 0 |`, `| P0 | P1 | P2 |` and `| 0 | 0 | 2 |` are a
+#: reviewer's own tally and must not block.
+TABLE_SEVERITY_ROW_RE = re.compile(r"(?im)^\s*\|\s*\**" + SEV + r"\**\s*\|\s*([^|\n]*)\|")
+
+
+def _table_finding(text: str) -> bool:
+    """A table row whose severity cell is followed by a DESCRIPTION or a NON-ZERO count.
+
+    A two-column row (`| P1 | the guard returns 0 |`, `| P1 | 2 |`) is the commonest shape;
+    `| **P1** | 0 |` and `| 0 | 0 | 2 |` are a reviewer's own tally and are not findings.
+    Done in code rather than in one regex: a negation lookahead after whitespace is fragile
+    enough that it silently matched the tally rows it was written to exempt.
+    """
+    for match in TABLE_SEVERITY_ROW_RE.finditer(text):
+        cell = match.group(1).strip()
+        if re.fullmatch(r"(?i)(?:0|none|nil|zero)", cell):
+            continue
+        # `| P0 | P1 | P2 |` — every cell is a bare severity token: a tally, not a finding.
+        if re.fullmatch(r"(?i)\**P[0-3]\**", cell):
+            continue
+        return True
+    return False
+
+
+#: A severity COUNT of zero in any spelling — `P1: 0`, `**P1**: none.`, `P1: nil`, `P1: zero`.
+#: `review-pr.sh:1221-1224` exempts exactly these ("`**P0**: none.` is a count").
+ZERO_SEVERITY_COUNT_RE = re.compile(r"(?i)\b" + SEV + r"\b\**\s*:\s*\**\s*(?:0|none|nil|zero)\b")
+
+#: A severity named in a HEADING, or a plain "do not land / known P1" verdict.
+SEVERITY_HEADING_RE = re.compile(
+    r"(?im)(?:^\s*#{1,6}[^\n]*\bP[0-2]\b"
+    r"|\bdo\s+not\s+land\b"
+    r"|\bknown\s+P[0-2]\b)"
 )
 
 #: A FORMAL change request is a blocking record even when the review body is empty — the
@@ -282,6 +424,10 @@ UNION_RE = re.compile(r"(?im)^\s*(?:[-*]\s*)?\**READY-GATE UNION\**\s*:[ \t]*(.*
 PR_REF_RE = re.compile(r"^#?(\d+)$")
 
 REVIEW_OK_TOKENS = frozenset({"head", "carry"})
+#: The verdicts `record-review.sh` will mint (its own guard, `:1303`). A record carrying
+#: anything else — `not-clean` above all — is an explicit statement that the PR is NOT
+#: ready, however the `--check-carry` token reads.
+CLEAN_REVIEW_VERDICTS = frozenset({"clean", "clean-micro", "clean-low"})
 
 GH_TIMEOUT = int(os.environ.get("READY_GATE_GH_TIMEOUT", "60"))
 GIT_TIMEOUT = int(os.environ.get("READY_GATE_GIT_TIMEOUT", "180"))
@@ -395,6 +541,9 @@ class Probe:
     review_token: str | None = None
     review_exit: int | None = None
     review_raw: str = ""
+    #: The RECORD's own `verdict` field (``clean`` / ``clean-micro`` / ``clean-low`` /
+    #: ``not-clean`` …). ``None`` = could not be read.
+    review_verdict: str | None = None
     #: The PR's changed files — ``None`` = unreadable.
     touched: tuple[str, ...] | None = None
     touched_raw: str = ""
@@ -570,9 +719,26 @@ def check_review(probe: Probe) -> Check:
     ============ ===== ==========================================================
     """
     raw = probe.review_raw or f"token={probe.review_token or '-'} exit={probe.review_exit}"
+    raw += f" record-verdict={probe.review_verdict or '-'}"
     if probe.review_token is None:
         return Check("review", False, raw, "unreadable", unreadable=True)
     if probe.review_token in REVIEW_OK_TOKENS and probe.review_exit == 0:
+        # ⛔ `record-review.sh --check-carry` returns `head`/`carry` at exit 0 for a
+        # `not-clean` record too — it reports that verdict on stderr and deliberately leaves
+        # the exit code alone (agent-infra#3400). Keying on the token alone therefore
+        # CERTIFIED a record whose own verdict is "not clean", the strongest available
+        # statement that the PR is not ready. The record's `verdict` field is the
+        # structured form of that statement, and it outranks the token.
+        if probe.review_verdict is None:
+            return Check(
+                "review",
+                False,
+                raw,
+                "record-verdict-unreadable",
+                unreadable=True,
+            )
+        if probe.review_verdict.strip().lower() not in CLEAN_REVIEW_VERDICTS:
+            return Check("review", False, raw, f"record-not-clean:{probe.review_verdict}")
         return Check("review", True, raw)
     if probe.review_token == "unreadable":
         return Check("review", False, raw, "diff-unreadable-retry", unreadable=True)
@@ -789,6 +955,22 @@ def _parse_instant(value: str) -> datetime | None:
 # ── condition 6 — no OPEN blocking finding ──────────────────────────────────
 
 
+def _line_finding(text: str) -> bool:
+    """A line-leading (or quoted) `[P1] file:line — …` finding — but NOT a severity TALLY.
+
+    `P1: 0, P2: 0, P3: 2` inside an `**Outcome: CLEAN.**` body is a REVIEW OF A CLEAN ROUND,
+    and matching it as a finding made a P3-only PR permanently uncertifiable (round 10).
+    A finding names a LOCATION; a tally names a count.
+    """
+    for match in BLOCKING_RE.finditer(text):
+        tail = text[match.end() : match.end() + 12]
+        # `P1: 0` / `**P1**: none.` / `P1: nil` / `P1: zero` is a COUNT, not a finding.
+        if re.match(r"\s*:?\s*(?:0|none|nil|zero)\b", tail):
+            continue
+        return True
+    return False  # a zero count is never a finding
+
+
 def _grades_as_blocking(text: str, item: Mapping[str, Any]) -> bool:
     """Does this review artifact record a blocker? Every arm is independent; any one blocks.
 
@@ -807,10 +989,30 @@ def _grades_as_blocking(text: str, item: Mapping[str, Any]) -> bool:
         severity is not None and bool(SIBLING_FIELD_RE.search(text))
     )
     zero_blocking = bool(ZERO_BLOCKING_RE.search(text))
+    # A body that DECLARES it named nothing blocking, and names no P0/P1/P2 token anywhere,
+    # may still say "issues found" — `**OUTCOME: 2 issues found (both P3), no blocking
+    # defect.**` is a P3-only summary, not an open finding.
+    p3_only_declared = zero_blocking and not (severities & {"0", "1", "2"})
 
     hard = bool(
-        BLOCKING_RE.search(text)
+        _line_finding(text)
         or (issues and int(issues.group(1)) > 0)
+        or (
+            ISSUES_FOUND_RE.search(text)
+            and not p3_only_declared
+            and not EXPLICIT_CLEAN_OUTCOME_RE.search(text)
+        )
+        or SEVERITY_LOCATED_RE.search(text)
+        or TALLY_NONZERO_RE.search(text)
+        or BRACKET_SEVERITY_RE.search(text)
+        or _table_finding(text)
+        or BLOCKING_COUNT_RE.search(text)
+        or COUNT_BEFORE_TOKEN_RE.search(text)
+        # A severity token beside an ISSUE-block SIBLING is a finding even when the body
+        # never uses the word "severity" — `4 × `P2`, `check_type: bug`, `origin: diff``
+        # is the dominant shape in the fold PRs (#10902/#10909/#10920).
+        or (bool(SIBLING_FIELD_RE.search(text)) and bool(severities & {"0", "1", "2"}))
+        or (SEVERITY_HEADING_RE.search(text) and not EXPLICIT_CLEAN_OUTCOME_RE.search(text))
         # The recorder's own unconditional arms (1) and (1b).
         or NON_CLEAN_RE.search(text)
         # Its arm (2): loose `not…clean`, suppressed by an explicit `Outcome: clean`.
@@ -823,6 +1025,15 @@ def _grades_as_blocking(text: str, item: Mapping[str, Any]) -> bool:
         return True
     # ⛔ `zero_blocking` is checked AFTER the multi-declaration case, not before: one round's
     # "0 blocking" must not short-circuit a P1 declared on another round (round-9 P1).
+    if not (p3_only_declared or EXPLICIT_CLEAN_OUTCOME_RE.search(text)) and LABEL_NOUN_RE.search(
+        text
+    ):
+        return True
+    # A COUNTED FINDING (`4 defects remain unresolved`) is a SOFT arm: a body that declares
+    # it named nothing blocking is exempt, the same rule a declared count gets.
+    all_p3 = bool(severities) and severities <= {"3"}
+    if not (zero_blocking or all_p3) and COUNTED_FINDING_RE.search(text):
+        return True
     counts = _declared_counts(text)
     if not counts:
         return False
@@ -831,12 +1042,23 @@ def _grades_as_blocking(text: str, item: Mapping[str, Any]) -> bool:
         # cancel a P1 declared on another. Only an explicit blocking severity on ANY round
         # blocks, so an all-P3 history stays certifiable.
         return bool(severities & {"0", "1", "2"})
+    # ⛔ A P0/P1/P2 NAMED INSIDE THE COUNT DECLARATION ITSELF outranks a `no blocking`
+    # phrase in the same body — `**Outcome: 2 findings (1 × P1, 1 × P2). No blocking
+    # defect.**` must block (round 12). A severity merely MENTIONED elsewhere (the P2 a
+    # previous round fixed) must not, or a clean round can never be certified.
+    declared_text = "".join(
+        match.group(0)
+        for match in FINDINGS_DECLARED_RE.finditer(text)
+        if match.group(2) or match.group(3)
+    )
+    if set(ANY_SEVERITY_TOKEN_RE.findall(declared_text)) & {"0", "1", "2"}:
+        return True
+    if severities & {"0", "1", "2"} and not zero_blocking:
+        return True
     if zero_blocking:
         # ONE declaration that says it named nothing blocking — e.g. a P3-only round that
         # MENTIONS the P2 it just fixed. Trust the declaration.
         return False
-    if severities & {"0", "1", "2"}:
-        return True
     return any(c > 0 for c in counts) and not (severities and severities <= {"3"})
 
 
@@ -1237,6 +1459,37 @@ def _first_line(text: str | None) -> str:
     return ""
 
 
+def _record_verdict(pr: int, repo: str) -> str | None:
+    """The RECORD's own ``verdict`` field, or ``None`` when it cannot be read.
+
+    Follows the recorder's own file convention and its collision rule: the repo-qualified
+    name first, then the legacy ``<pr>.json`` only when that record names no repo or THIS
+    repo (the #426 rule the local gate and the rail both apply).
+    """
+    reviews = Path(os.environ.get("HOME") or "~").expanduser() / ".pi" / "agent" / "reviews"
+    candidates: list[Path] = []
+    if "/" in repo:
+        owner, name = repo.split("/", 1)
+        candidates.append(reviews / f"{owner}-{name}-{pr}.json")
+    candidates.append(reviews / f"{pr}.json")
+    for path in candidates:
+        if not path.is_file():
+            continue
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, ValueError):
+            return None
+        if not isinstance(data, Mapping):
+            return None
+        embedded = str(data.get("repo") or "")
+        if embedded and embedded != repo:
+            continue
+        verdict = data.get("verdict")
+        if isinstance(verdict, str) and verdict.strip():
+            return verdict.strip()
+    return None
+
+
 def _review_script(workdir: Path) -> Path | None:
     """The recorder, or ``None`` when the machine-local ``scripts/`` pointer is absent.
 
@@ -1250,25 +1503,26 @@ def _review_script(workdir: Path) -> Path | None:
 
 
 def _read_review(
-    pr: int,
-    repo: str,
-    workdir: Path,
-    recorded_diff: str | None = None,
-    recorded_head: str | None = None,
-) -> tuple[str | None, int | None, str]:
+    pr: int, repo: str, workdir: Path
+) -> tuple[str | None, int | None, str, str | None]:
     """Ask the gate's OWN predicate: ``record-review.sh --check-carry``.
 
     The script is the single reader of "does this record cover what would merge", so it
     is invoked rather than re-implemented. Its first stdout field is the verdict token.
 
     ⛔ THE RECORD FILE IS PER-MACHINE (``$HOME/.pi/agent/reviews``), so a review minted on
-    ANOTHER box is invisible to the default read — ``record-review.sh``'s own header
-    measures that population ("of 45 open PRs, 12 had a marker whose ``diff=`` equals the
-    PR's live diff and no record file here"). ``--recorded-diff``/``--recorded-head`` is
-    the recorder's seam for exactly that reader (#3315); this tool passes them through
-    rather than parsing the signed marker itself, because a second marker parser is a
-    second definition. Without them a cross-box review reads ``norecord`` — which FAILS,
-    so the direction is safe, but it costs a re-review the fleet already paid for.
+    ANOTHER box is invisible here and reads ``norecord`` — which FAILS. That is a FALSE
+    BLOCK, the acceptable direction, and it is documented as a limitation.
+
+    ⛔ AND THE CALLER-SUPPLIED PAIR IS DELIBERATELY *NOT* PASSED THROUGH. Round 10 measured
+    that forwarding ``record-review.sh --recorded-diff/--recorded-head`` turns this arm into
+    a self-attestation: the recorder's supplied-pair arm short-circuits its record lookup,
+    the diff digest is computable by anyone from the public diff
+    (``record-review.sh --print-diff-hash <PR>``), and ``--recorded-diff aaa…a
+    --recorded-head <live head>`` made condition 3 PASS on a PR with no review at all. The
+    gate cannot distinguish a caller asserting a review from a caller forwarding one it
+    holds, so it asks the box — and FAILS when the box has nothing. That is the only
+    version of this arm that cannot be talked into a PASS.
     """
     script = _review_script(workdir)
     if script is None:
@@ -1278,12 +1532,10 @@ def _read_review(
             f"{workdir / 'scripts' / 'record-review.sh'} is absent "
             "(the scripts/ pointer is not materialised)",
         )
-    cmd = ["bash", str(script), "--check-carry", str(pr), repo]
-    if recorded_diff:
-        cmd += ["--recorded-diff", recorded_diff]
-        if recorded_head:
-            cmd += ["--recorded-head", recorded_head]
-    proc = _run(cmd, GIT_TIMEOUT, cwd=workdir)
+    proc = _run(["bash", str(script), "--check-carry", str(pr), repo], GIT_TIMEOUT, cwd=workdir)
+    verdict = _record_verdict(pr, repo)
+    if verdict is None and "NOT CLEAN" in (proc.stderr or "").upper():
+        verdict = "not-clean"
     token = ""
     for line in (proc.stdout or "").splitlines():
         fields = line.split("\t")
@@ -1300,8 +1552,13 @@ def _read_review(
         # `fresh` is 1. An earlier version mapped rc==1 to `norecord`, which told a lane
         # to RE-RECORD a diff that had changed and told it to RETRY a PR with no record
         # at all — both still FAIL, so no false READY, but both sent the lane the wrong way.
-        return {1: "fresh", 4: "norecord"}.get(proc.returncode, "unreadable"), proc.returncode, raw
-    return token, proc.returncode, raw
+        return (
+            {1: "fresh", 4: "norecord"}.get(proc.returncode, "unreadable"),
+            proc.returncode,
+            raw,
+            verdict,
+        )
+    return token, proc.returncode, raw, verdict
 
 
 def _field(stdout: str, index: int) -> str:
@@ -1494,8 +1751,6 @@ def collect_probe(
     repo: str = DEFAULT_REPO,
     workdir: Path | None = None,
     now: datetime | None = None,
-    recorded_diff: str | None = None,
-    recorded_head: str | None = None,
 ) -> Probe:
     """Read the live world into a Probe. Every unreadable input is recorded, not raised.
 
@@ -1558,9 +1813,12 @@ def collect_probe(
         gh, lambda g: _read_check_groups(g, head, repo), surface="check-runs"
     )
     probe.tree, probe.tree_raw = _try_tree(gh, pr, head, workdir)
-    probe.review_token, probe.review_exit, probe.review_raw = _try_review(
-        pr, repo, workdir, recorded_diff, recorded_head
-    )
+    (
+        probe.review_token,
+        probe.review_exit,
+        probe.review_raw,
+        probe.review_verdict,
+    ) = _try_review(pr, repo, workdir)
     probe.touched, probe.touched_raw = _try(gh, lambda g: _read_touched(g, pr))
     if probe.body:
         entries, _union_raw = declared_union(probe.body)
@@ -1626,16 +1884,12 @@ def _try_tree(gh: Gh, pr: int, head: str, workdir: Path) -> tuple[bool | None, s
 
 
 def _try_review(
-    pr: int,
-    repo: str,
-    workdir: Path,
-    recorded_diff: str | None = None,
-    recorded_head: str | None = None,
-) -> tuple[str | None, int | None, str]:
+    pr: int, repo: str, workdir: Path
+) -> tuple[str | None, int | None, str, str | None]:
     try:
-        return _read_review(pr, repo, workdir, recorded_diff, recorded_head)
+        return _read_review(pr, repo, workdir)
     except ReadError as exc:
-        return None, None, str(exc)
+        return None, None, str(exc), None
 
 
 # ── CLI ─────────────────────────────────────────────────────────────────────
@@ -1668,21 +1922,6 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="evaluate a Probe JSON fixture instead of reading the live world (tests)",
     )
-    parser.add_argument(
-        "--recorded-diff",
-        default=None,
-        help=(
-            "the 64-hex diff_sha256 a review record carries, when the record FILE is not on "
-            "this box (a review minted elsewhere). Passed straight through to "
-            "`record-review.sh --check-carry` — this tool does not parse the signed marker "
-            "itself, because a second marker parser is a second definition."
-        ),
-    )
-    parser.add_argument(
-        "--recorded-head",
-        default=None,
-        help="the 40-hex head that record was minted at (only with --recorded-diff)",
-    )
     return parser
 
 
@@ -1694,15 +1933,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     workdir = Path(args.workdir).resolve()
     try:
         if args.fixture:
+            # ⛔ A FIXTURE IS NOT A LIVE READ. It is marked on stderr (so a caller can always
+            # tell provenance) and it must carry a full 40-hex head, because the canonical
+            # line claims `(<PR>, <full head sha>)` and `{"head": ""}` used to print
+            # `READY-FOR-OWNER(1, )`.
+            print(f"FIXTURE-MODE({args.fixture})", file=sys.stderr)
             probe = probe_from_dict(json.loads(Path(args.fixture).read_text()))
+            if not re.fullmatch(r"[0-9a-f]{40}", probe.head or ""):
+                raise ReadError(
+                    f"a --fixture probe must carry a full 40-hex head; got {probe.head!r}"
+                )
         else:
-            probe = collect_probe(
-                args.pr,
-                args.repo,
-                workdir,
-                recorded_diff=args.recorded_diff,
-                recorded_head=args.recorded_head,
-            )
+            probe = collect_probe(args.pr, args.repo, workdir)
         # ⛔ INSIDE the try: `evaluate()`, `render()` and `json.dumps` were OUTSIDE it, so a
         # crash in a condition (or in a `--fixture` payload whose comment `id` is not an int)
         # still printed a traceback and NO verdict line — the very shape the handler exists to
@@ -1806,6 +2048,7 @@ def probe_from_dict(data: Mapping[str, Any]) -> Probe:
         review_token=data.get("review_token"),
         review_exit=data.get("review_exit"),
         review_raw=str(data.get("review_raw", "")),
+        review_verdict=data.get("review_verdict"),
         touched=None if data.get("touched") is None else tuple(data["touched"]),
         touched_raw=str(data.get("touched_raw", "")),
         union=None if data.get("union") is None else tuple(data["union"]),
