@@ -708,11 +708,30 @@ def _api_route(argv: tuple[str, ...]) -> str | None:
     # --description graphql` has an ARGUMENT named `api`; treating it as the verb made the
     # description the route and refused a live read. Leading flags and their values are
     # skipped; the first token after them must BE `api`, or this is not an `api` command.
+    #
+    # ⛔ AND AN EMPTY TOKEN IS SKIPPED, BECAUSE gh SKIPS IT. `_verb_positions` states the rule
+    # and corroborates it (`gh "" pr view` RUNS `pr view`; measured), but this walk used to
+    # `return None` on `""` — so `_accepts_hostname(('', 'api', <route>))` said PORCELAIN while
+    # `_verb_positions` said the verb sits at index 1. The two halves of the module then
+    # disagreed about the same command, which is the whole defect `_accepts_hostname` now
+    # delegates here to avoid: `--argv "" api repos/{repo}` had the slug substituted INTO THE
+    # ROUTE (`api repos/ghe.example.com/o/n`, no `--hostname`) and `--argv "" api rate_limit`
+    # was refused rc=2 with "only `gh api` has one". A quoted unset variable (`--argv "$X" api
+    # …`) produces exactly this spelling.
+    #
+    # ⛔ ONLY THE LEADING WALK. The route scan below is deliberately NOT changed: whether gh
+    # drops an empty token from the leaf's own positional list (`api "" graphql`) was not
+    # measured, and a guess there would move the refusal contract. `--argv` stores nothing, so
+    # that residual cannot serve a stale body — it can only lose a refusal, and it is recorded
+    # as such rather than assumed closed.
     start = 0
     while start < len(argv):
         tok = argv[start]
         if tok == "api":
             break
+        if tok == "":
+            start += 1
+            continue
         if tok.startswith("-"):
             start += 2 if tok in _API_VALUE_FLAGS else 1
             continue
@@ -1162,6 +1181,20 @@ def cmd_get(args: argparse.Namespace) -> int:
         body, ok = fetch(pass_argv, args.gh, host)
         if not ok:
             sys.stderr.write("gh_read_cache: --argv pass-through fetch failed — no value emitted\n")
+            return 4
+        if not body.strip():
+            # ⛔ THE THIRD BRANCH, AND IT WAS THE ONE THAT DID NOT AGREE. The caching path
+            # (:1230) and the degraded-credential path (:1187) both fail closed on an empty
+            # body; this pass-through emitted `rc=0` with ZERO bytes on stdout — "success" and
+            # no value — while the docstring's contract (:165-176) says `0` means "a value was
+            # emitted". Reachable without a stub: the tool's own invariants use `--jq`, so a
+            # caller copying that pattern onto `--argv` can get no output (`--jq` yielding
+            # nothing, `--silent`, a 204), and a caller keying on the exit code then proceeds
+            # with an empty value. An empty answer is not a value, on every branch.
+            sys.stderr.write(
+                "gh_read_cache: --argv pass-through: gh succeeded but returned an empty "
+                "body; an empty answer is not a value\n"
+            )
             return 4
         sys.stdout.write(body)
         return 0

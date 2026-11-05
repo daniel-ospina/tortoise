@@ -1374,6 +1374,51 @@ class CacheTest(unittest.TestCase):
         self.assertIn("api rate_limit", sent, f"the route must reach gh verbatim: {sent!r}")
         self.assertIn("--hostname ghe.example.com", sent, f"the spelled host must be expressed: {sent!r}")
 
+    def test_an_empty_leading_token_is_still_an_api_command(self) -> None:
+        """⛔ `gh` SKIPS AN EMPTY ARGUMENT, so the verb walk must not stop on one.
+
+        `gh "" pr view` RUNS `pr view` (measured), which is why `_verb_positions` accepts an
+        empty token (`argv[k] == ""`) — the rule is documented there and pinned in the refusal
+        table. `_api_route`'s LEADING walk did the opposite and returned None on `""`, so the
+        two halves of the module disagreed about the same command one empty token to the left:
+        `--argv "" api repos/{repo}` was classified PORCELAIN and the slug was substituted INTO
+        THE ROUTE (`api repos/ghe.example.com/o/n`, no `--hostname`, so still github.com), and
+        `--argv "" api rate_limit` was refused rc=2 with "only `gh api` has one". Reachable
+        without anything exotic: a quoted unset variable (`--argv "$X" api …`) produces it.
+
+        Dies if the leading walk stops skipping empty tokens: rc=2 here, mangled route above.
+        """
+        r = self.run_tool("get", "repo", "--repo", "ghe.example.com/o/n", "--gh", str(self.stub),
+                          "--cache-dir", str(self.cachedir), "--argv", "", "api", "repos/{repo}")
+        self.assertEqual(r.returncode, 0, f"an empty leading token is skipped by gh: {r.stderr}")
+        sent = (self.stubdir / "argv.log").read_text()
+        self.assertIn("repos/o/n", sent, f"the route must carry the slug only: {sent!r}")
+        self.assertNotIn("repos/ghe.example.com", sent, f"the host must not be injected: {sent!r}")
+        self.assertIn("--hostname ghe.example.com", sent, f"the spelled host must be expressed: {sent!r}")
+
+        hit = self.run_tool("get", "repo", "--repo", "ghe.example.com/o/n", "--gh", str(self.stub),
+                            "--cache-dir", str(self.cachedir), "--argv", "", "api", "rate_limit")
+        self.assertEqual(hit.returncode, 0, f"an `api` verb takes --hostname: rc={hit.returncode} {hit.stderr}")
+        self.assertIn("--hostname ghe.example.com", (self.stubdir / "argv.log").read_text(),
+                      "the spelled host must be expressed for rate_limit too")
+
+    def test_a_pass_through_that_fetched_nothing_is_not_a_value(self) -> None:
+        """⛔ THE PASS-THROUGH BRANCH WAS THE ONE BRANCH THAT EMITTED rc=0 WITH NO VALUE.
+
+        The caching path and the degraded-credential path both fail closed on an empty body;
+        the `--argv` pass-through wrote it and returned 0 — "success" and no value — while the
+        exit-code contract says `0` means a value WAS emitted. Reachable without a stub: the
+        tool's own invariants use `--jq`, so a caller copying that pattern onto `--argv` can get
+        nothing back (`--jq` yielding no output, `--silent`, a 204), and a caller keying on the
+        exit code proceeds with an empty value.
+        """
+        (self.stubdir / "body").write_text("   ")
+        r = self.run_tool("get", "repo", "--repo", "o/n", "--gh", str(self.stub),
+                          "--cache-dir", str(self.cachedir), "--argv", "api", "repos/{repo}")
+        self.assertEqual(r.returncode, 4, f"an empty answer is not a value: rc={r.returncode} {r.stderr}")
+        self.assertEqual(r.stdout, "", "nothing may be emitted")
+        self.assertEqual(self.calls(), 1, "the call was spent; only the emission is refused")
+
     def test_a_pass_through_without_repo_still_expresses_the_spelled_host(self) -> None:
         """`--argv repo list --repo ghe.example.com/o/n` asked the DEFAULT instance.
 
