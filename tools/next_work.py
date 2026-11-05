@@ -46,9 +46,10 @@ WHAT IT EMITS, AND WHY THAT IS THE POINT
 ----------------------------------------
 A ranked list is a REPORT. This tool prints, for the top row, the exact command
 a runner would execute — which rail, which PR, which issue — or, when the top row
-needs a human decision (a review), is waiting on a runner, has an UNMEASURED merge
-tree, or is a DRAFT, the ACTION and then the first lower-ranked unit that DOES have
-a command. That is the difference
+needs a HUMAN (a review, or a gate refusal: another base, a missing required label,
+an unreadable base), is waiting on a runner, has an UNMEASURED merge tree, or is a
+DRAFT, the ACTION and then the first lower-ranked unit that DOES have a command.
+That is the difference
 between a consumer and an actuator, and it is why the output has a
 ``NEXT ACTION`` block rather than a table alone.
 
@@ -112,13 +113,20 @@ Exit codes
        constituent, is a duplicate of a row already offered (a blocked row owns its
        action target, so a duplicate can be the rank leader), or the queue is
        empty. The block prints ``NONE`` and that is an answer, not an error
-    2  INCOMPLETE: a surface the decision depends on could not be read — the
-       queue gate (``.mergify.yml``, at collection OR missing from a replayed
-       snapshot), the claim registry (``claims.sh`` absent, its snapshot header
-       failed, or ANY key answering ``claim-unreadable`` — a per-key abstention
-       is INCOMPLETE, not a note beside a pick), the attestation TOOL (``record-review.sh`` absent — not
-       a per-PR ``norecord``/``unreadable`` verdict, which is a real answer and
-       lands the row at ``NEEDS-REVIEW``), the issue search, or the PR list.
+    2  INCOMPLETE — one of the things the decision depends on could not be read,
+       OR the input contradicts itself:
+         · a surface — the queue gate (``.mergify.yml``, at collection or missing
+           from a replayed snapshot), the claim registry (``claims.sh`` absent, its
+           snapshot header failed, or ANY key answering ``claim-unreadable`` — a
+           per-key abstention, not a note beside a pick), the attestation TOOL
+           (``record-review.sh`` absent — not a per-PR ``norecord``/``unreadable``
+           verdict, which is a real answer and lands the row at ``NEEDS-REVIEW``),
+           the issue search, or the PR list;
+         · a SHAPE the door refuses — a decision input, a pull field, an issue
+           element, an element of a list, or a value that is the wrong type for
+           what it states (see ``_normalise_shapes``);
+         · a contradicted TARGET — a replayed snapshot whose ``repo`` disagrees
+           with ``--repo``, or no target repo at all.
        "Could not check" is never reported as "free" — the same posture
        ``collision_preflight.py`` (exit 2) and ``who-is-on`` (exit 2) take.
 """
@@ -296,7 +304,11 @@ class Snapshot:
         }
 
     def normalize(self) -> Snapshot:
-        """Fold every abstention into `unreadable`, so ONE field decides refusal.
+        """Fold the CLAIM-MAP abstentions into `unreadable`, so one field decides refusal.
+
+        Scope: claim-map abstentions only. An unmeasured merge tree and an unreadable
+        attestation are POSITIONS (NEEDS-TEST / NEEDS-REVIEW at exit 0/1) by the
+        Exit-codes contract, not run-level refusals.
 
         ⛔ A SNAPSHOT CAN CARRY THE ABSTENTION WITHOUT THE SENTENCE. `refused` was
         derived only from `unreadable`, and `_claim_verdicts` is what appends the
@@ -325,14 +337,19 @@ class Snapshot:
             "unreadable",
         }
         snap = cls(**{k: v for k, v in raw.items() if k in known})
+        # ⛔ THE SHAPE CHECK RUNS FIRST — INCLUDING FOR `claim_ns`. It was coerced
+        # here first (`str(raw.get(...) or "refs/claims")`), so a falsy WRONG type
+        # (`[]`, `{}`, `0`, `false`) was erased to the default before the door could
+        # judge it: measured, `claim_ns: []` exited 0 with a runnable merge command.
+        # `_normalise_shapes` now owns that field too. The key-coercions below used
+        # `(x or {}).items()`, which silently turned a falsy WRONG type (`[]`, `""`)
+        # into `{}` — erasing the very evidence the check needs. Measured: with the
+        # check after them, `attestation: []` and `merge_tree: []` exited 0.
+        _normalise_shapes(raw, snap)
         # JSON object keys are strings; the decision code looks PRs up by str(pr)
         # anyway, but normalise so a hand-written snapshot behaves identically.
-        snap.attestation = {str(k): v for k, v in (snap.attestation or {}).items()}
-        snap.merge_tree = {str(k): v for k, v in (snap.merge_tree or {}).items()}
-        # A snapshot from before this field existed carries its keys under the
-        # registry's own default; reading `CLAIM_NS` from the environment here
-        # would re-open the seam that made a held unit look free on replay.
-        snap.claim_ns = str(raw.get("claim_ns") or "refs/claims")
+        snap.attestation = {str(k): v for k, v in snap.attestation.items()}
+        snap.merge_tree = {str(k): v for k, v in snap.merge_tree.items()}
         # Labels arrive as `[{"name": "x"}]` from GitHub and as `["x"]` from a hand
         # written snapshot. The imported gate (`queue_resweep.unmet_conditions`)
         # reads `.get("name")`, so the coercion has to happen HERE, at the one point
@@ -428,6 +445,235 @@ class Unit:
             and not self.draft
             and self.position in ("READY-TO-LAND", "NEEDS-FIX", "NO-PR")
         )
+
+
+
+#: Every decision input that must be a list, and what it means when it is not.
+_LIST_FIELDS = ("unreadable", "issues", "pulls")
+#: …and every one that must be a map. `gate` is allowed to be None (the collector
+#: writes None precisely when it could not read the gate) — see the special case.
+_MAP_FIELDS = ("claims", "attestation", "merge_tree", "check_runs", "local_holders")
+
+
+def _normalise_shapes(raw: dict[str, Any], snap: Snapshot) -> None:
+    """Reject a wrong-typed decision input ONCE, for every field, at the one door.
+
+    ⛔ ONE TABLE, NOT A GUARD PER FIELD. Every TOP-LEVEL input and every PULL field
+    is answered by `(x or {})` or `(x or [])` somewhere, so a PRESENT-but-wrong-typed
+    value that is FALSY (`[]`, `""`, `0`, `null`) is swallowed and the surface reads
+    as EMPTY — "nothing is held", "the queue is empty", "nothing was unreadable".
+    Six of them were found one review round at a time (`claims`, `unreadable`,
+    `pulls`, `issues`, `claim_ns`, then the pull fields and their elements), each
+    measured as exit 0 WITH a runnable command from an input on which that surface
+    was never consulted. A per-field guard is how that repeats; this is the single
+    place those shapes are judged, and a wrong type is INCOMPLETE — "could not check"
+    is never "free".
+
+    SCOPE, stated so the claim is exact. Judged here, with a refusal that NAMES the
+    field: the fields in `_LIST_FIELDS` / `_MAP_FIELDS`; `gate`; the ENTRY VALUES of
+    `local_holders`; `claim_ns`; `repo`/`base`/`config_source`/`collected_at`; each
+    pull's `number`, `labels`, `closing_issues`, `refs_issues`, `draft`, `base`,
+    `head`, `head_ref`, `title`, `fold_line`; the ELEMENTS of a pull's three list
+    fields; and each ISSUE element — its `number` (a non-bool positive int),
+    `priority` and `title`. Judged by their READERS instead: `gate_text`, and the
+    entry VALUES of `attestation`/`merge_tree`/`check_runs` — one that reads as an
+    abstention becomes a POSITION (NEEDS-REVIEW / NEEDS-TEST at exit 0/1, never a
+    command), and one the reader cannot handle at all exits 2 through the outer frame
+    without naming the field.
+
+    A value of the RIGHT type is left exactly as it was: an empty list or map is a
+    legitimate measurement ("read, and it held nothing"). ABSENT is tolerated for a
+    pull's optional fields (a hand-written snapshot need not carry them) with ONE
+    exception: a pull with no usable `number` is refused, because nothing can address
+    it. Elements are judged too — a judged container is not a judged element.
+    """
+    # ⛔ ONE LEVEL DOWN, THE SAME ERASURE. Each pull's own fields are read through
+    # `(pr.get(k) or …)`, so a falsy WRONG type is swallowed just like the
+    # top-level ones: measured, `labels: 0` on a PR that holds
+    # `superseded-by-fold` read as no labels and handed out `merge-one.sh` (#10902);
+    # `closing_issues: 0` read as none and produced a NO-PR `dispatch-merge.sh` for
+    # work an existing PR carries; `draft: 0` read as not-a-draft; `base: ""`
+    # produced a fixer. ABSENT is a legitimate omission (a hand-written snapshot
+    # may not carry a field) — PRESENT-and-wrong-typed is not.
+    bad_pull_fields: list[str] = []
+
+    def _is_int(value: object) -> bool:
+        # ⛔ A BOOLEAN IS AN int IN PYTHON. `isinstance(True, int)` is True, so
+        # `number: true` passed the door and the row addressed PR **#1001** while the
+        # command merged **#1** — a runnable command aimed at the wrong artifact.
+        return isinstance(value, int) and not isinstance(value, bool)
+
+    # The refusal channel first: if IT is not a list the run cannot report anything
+    # else, and the falsy cases would silence every refusal appended afterwards.
+    if not isinstance(snap.unreadable, list):
+        snap.unreadable = [
+            f"unreadable: the snapshot's refusal list is {type(snap.unreadable).__name__}, "
+            "not a list — nothing it carries can be trusted"
+        ]
+
+    # ⛔ THE ISSUE LIST HAS THE SAME ELEMENT RULE. `_is_int` guards a pull's number,
+    # but an issue's was delegated to "the outer frame" — and the outer frame raises
+    # NOTHING for `true` or `100.9`: `int(True) == 1` and `int(100.9) == 100` both
+    # succeed, so `issues=[{"number": true, …}]` produced `dispatch-merge.sh … 1` at
+    # exit 0 for an issue the snapshot never named. Same class, one level over.
+    kept_issues: list[dict[str, Any]] = []
+    bad_issue_fields: list[str] = []
+    for row in snap.issues:
+        if not isinstance(row, dict):
+            bad_issue_fields.append(f"issue element {row!r}")
+            continue
+        number = row.get("number")
+        if not isinstance(number, int) or isinstance(number, bool) or number <= 0:
+            bad_issue_fields.append(f"issue number {number!r}")
+            continue
+        if not isinstance(row.get("priority"), str):
+            bad_issue_fields.append(f"#{number}.priority")
+            row["priority"] = ""
+        if not isinstance(row.get("title"), str):
+            bad_issue_fields.append(f"#{number}.title")
+            row["title"] = ""
+        kept_issues.append(row)
+    if bad_issue_fields:
+        snap.unreadable.append(
+            f"issues: {len(bad_issue_fields)} field(s) are not the type this reader needs "
+            f"({', '.join(bad_issue_fields[:4])}) — an element that cannot be read is not absent"
+        )
+        snap.issues = kept_issues
+    dropped_pulls: list[Any] = []
+    for pr in snap.pulls:
+        if not isinstance(pr, dict):
+            # ⛔ AN ELEMENT THAT IS NOT A PULL IS DROPPED AND NAMED, not left to the
+            # outer frame: it would raise in `build_units` before `render`, so the
+            # refusal never printed.
+            bad_pull_fields.append(f"pull element {pr!r}")
+            dropped_pulls.append(pr)
+            continue
+        tag = pr.get("number", "?")
+        # ADDRESSABILITY IS NOT OPTIONAL: a pull with no usable number cannot be
+        # operated on, so ABSENT is refused here (the one exception to "absent is a
+        # legitimate omission") — otherwise it surfaced as a KeyError traceback
+        # through the outer frame instead of a refusal.
+        if not _is_int(pr.get("number")) or pr.get("number") <= 0:
+            bad_pull_fields.append(f"pull number {pr.get('number')!r}")
+            # ⛔ AND IT MUST LEAVE THE POPULATION. Appending the refusal is not
+            # enough: `build_units` does `int(pr["number"])` and raised BEFORE
+            # `render`, so the field-named message was discarded and the operator got
+            # a KeyError/TypeError from the outer frame instead — the exact outcome
+            # the door exists to prevent.
+            dropped_pulls.append(pr)
+        for key in ("labels", "closing_issues", "refs_issues"):
+            if key in pr and not isinstance(pr[key], list):
+                bad_pull_fields.append(f"#{tag}.{key}")
+                pr[key] = []
+            # …and its ELEMENTS. A judged container is not a judged element: a
+            # boolean in `closing_issues` coerces to 1 and silently re-points the
+            # link, and `closing_issues: [true]` reproduced the NO-PR dispatch for
+            # work an existing PR carries.
+            elif key in pr:
+                ok_el = (
+                    (lambda v: isinstance(v, (str, dict)))
+                    if key == "labels"
+                    else _is_int
+                )
+                if not all(ok_el(v) for v in pr[key]):
+                    bad_pull_fields.append(f"#{tag}.{key} elements")
+                    pr[key] = []
+        for key in ("draft",):
+            if key in pr and not isinstance(pr[key], bool):
+                bad_pull_fields.append(f"#{tag}.{key}")
+                pr[key] = False
+        if "base" in pr and not isinstance(pr["base"], dict):
+            bad_pull_fields.append(f"#{tag}.base")
+            pr["base"] = {}
+        for key in ("head", "head_ref", "title", "fold_line"):
+            if key in pr and not isinstance(pr[key], str):
+                bad_pull_fields.append(f"#{tag}.{key}")
+                pr[key] = ""
+    if dropped_pulls:
+        snap.pulls = [pr for pr in snap.pulls if pr not in dropped_pulls]
+    if bad_pull_fields:
+        snap.unreadable.append(
+            f"pulls: {len(bad_pull_fields)} field(s) are not the type this reader needs "
+            f"({', '.join(bad_pull_fields[:4])}) — a field that cannot be read is not absent"
+        )
+    # `repo` reaches every emitted command; `base`/`config_source` the header.
+    # ⛔ `if value is not None` EXEMPTED A PRESENT `null` — the exact
+    # present-but-wrong-typed case this door exists for, and the same class as
+    # F1's `number: true`. ABSENT needs no exemption: the dataclass defaults are
+    # already strings, so an omitted field arrives here as one.
+    for key in ("repo", "base", "config_source"):
+        value = getattr(snap, key)
+        if not isinstance(value, str):
+            snap.unreadable.append(
+                f"{key}: the snapshot's {key} is {type(value).__name__}, not a string"
+            )
+            setattr(snap, key, "")
+    # Provenance only — but the sentence says EVERY field, so it is judged too.
+    if not isinstance(snap.collected_at, int) or isinstance(snap.collected_at, bool):
+        snap.unreadable.append(
+            f"collected_at: the snapshot's collected_at is "
+            f"{type(snap.collected_at).__name__}, not an int"
+        )
+        snap.collected_at = 0
+    # `claim_ns` is a decision input like any other: a snapshot from before it
+    # existed carries its keys under the registry's own default, but a PRESENT value
+    # that is not a string is a surface this reader cannot address keys with.
+    if "claim_ns" in raw and not isinstance(raw.get("claim_ns"), str):
+        snap.unreadable.append(
+            f"claim_ns: the snapshot's namespace is {type(raw.get('claim_ns')).__name__}, "
+            "not a string — the claim keys cannot be addressed"
+        )
+    snap.claim_ns = str(raw.get("claim_ns") or "refs/claims")
+    for name in _LIST_FIELDS[1:]:
+        value = getattr(snap, name)
+        if not isinstance(value, list):
+            snap.unreadable.append(
+                f"{name}: the snapshot's {name} is {type(value).__name__}, not a list "
+                "— that surface was never read"
+            )
+            setattr(snap, name, [])
+    for name in _MAP_FIELDS:
+        value = getattr(snap, name)
+        if not isinstance(value, dict):
+            snap.unreadable.append(
+                f"{name}: the snapshot's {name} is {type(value).__name__}, not a map "
+                "— that surface was never read"
+            )
+            setattr(snap, name, {})
+    # ⛔ A JUDGED CONTAINER IS NOT A JUDGED ELEMENT. `local_holders` is a map of
+    # lists; a falsy wrong VALUE (`{"issue:101": ""}`) iterates empty in
+    # `_claim_of`, so the unit reads FREE and gets a runnable command at exit 0 for
+    # work the snapshot's own key says is held. Same erasure, one level in.
+    if isinstance(snap.local_holders, dict):
+        bad_values = [k for k, v in snap.local_holders.items() if not isinstance(v, list)]
+        if bad_values:
+            snap.unreadable.append(
+                f"local_holders: {len(bad_values)} entr(y/ies) are not lists "
+                f"(e.g. {bad_values[0]!r}) — a holder that cannot be read is not nobody"
+            )
+            snap.local_holders = {
+                k: v for k, v in snap.local_holders.items() if isinstance(v, list)
+            }
+    if "claims" not in raw:
+        # ABSENT is not the same as EMPTY: `_claim_of`'s `ref not in snap.claims`
+        # branch is documented as "the registry was read and does not hold this key".
+        snap.unreadable.append("claims: the snapshot carries no claim map — freedom is not provable")
+    elif isinstance(snap.claims, dict) and snap.claims:
+        # The namespace travels with the data (see `claim_ns`), so a map whose keys
+        # do not sit under it was built for a different registry — a held claim would
+        # simply not be found.
+        prefix = f"{snap.claim_ns}/"
+        if not all(isinstance(k, str) and k.startswith(prefix) for k in snap.claims):
+            snap.unreadable.append(
+                f"claims: the snapshot's keys are not under claim_ns={snap.claim_ns!r} — "
+                "the registry they were read from is not the one this replay would consult"
+            )
+    if snap.gate is not None and not isinstance(snap.gate, dict):
+        snap.unreadable.append(
+            f"gate: the snapshot's gate is {type(snap.gate).__name__}, not a map — "
+            "no position is provable"
+        )
+        snap.gate = None
 
 
 def _labels(pr: dict[str, Any]) -> set[str]:
@@ -619,6 +865,29 @@ def _claim_of(
     return (None, readable)
 
 
+def _gate_refusal_edit(conditions: list[str]) -> str:
+    """The edit each gate refusal actually needs — they are NOT all the same.
+
+    The first version emitted "a human retargets the base or adds the label" for
+    EVERY structural condition, which is the wrong prescription for a DRAFT (the
+    author undrafts it) and for `base=main (actual unknown)` (the base may be
+    correct — it could not be READ).
+    """
+    tips: list[str] = []
+    for cond in conditions:
+        if cond.startswith("draft"):
+            tips.append("the author must undraft it")
+        elif "actual unknown" in cond:
+            tips.append("the PR's base could not be READ — re-read the PR")
+        elif cond.startswith("base="):
+            tips.append(f"retarget the PR ({cond})")
+        elif cond.startswith("label="):
+            tips.append(f"add the required label {cond.split(':', 1)[0].split('=', 1)[-1]}")
+        else:
+            tips.append(cond)
+    return "; ".join(dict.fromkeys(tips))
+
+
 def _position_for_pr(
     snap: Snapshot,
     cfg: QueueConfig | None,
@@ -666,19 +935,39 @@ def _position_for_pr(
     att = snap.attestation.get(str(pr["number"])) or {}
     verdict = str(att.get("verdict") or "")
 
-    if other_fails or structural:
+    if other_fails:
         pos = "NEEDS-FIX"
+    elif structural:
+        # ⛔ A BASE MISMATCH OR A MISSING REQUIRED LABEL IS NOT A CODE FIX. These
+        # landed on NEEDS-FIX, whose rail is `fix-one.sh` — a fixer dispatched at a
+        # PR whose only defect is that it targets another branch or lacks a label
+        # finds no findings, pushes nothing, and re-fails the chain. Same conflation
+        # round 14 fixed for the review gate; a human retargets or relabels.
+        pos = "NEEDS-REVIEW"
+        detail.append(
+            f"gate-refusal: {'; '.join(structural)} — no code change and no rail fixes this; "
+            f"{_gate_refusal_edit(structural)}"
+        )
     elif review_red and verdict not in ("head", "carry"):
         # Red by design: the record does not bind this head. The attestation block
         # below decides whether a review or a re-record is owed.
         pos = "NEEDS-REVIEW"
     elif review_red:
-        # The record DOES bind the head, so a red review gate is a real failure.
-        pos = "NEEDS-FIX"
-        detail.append(
-            "review gate red while a head-bound record exists — that is a real failure, "
-            "not a review debt"
+        # The record binds the head yet the gate is red. That is NOT simply "a real
+        # failure": `record-review.sh`'s own header (#10677) documents the case where
+        # a record's SIGNED body marker never reached the PR, so the gate correctly
+        # reports "No AI review evidence found" and a properly reviewed PR is blocked
+        # by a BOOKKEEPING failure — remedy `--flush-pending`, not a code change. The
+        # tool cannot tell the two apart, so it asks a human rather than dispatching a
+        # fixer at code a reviewer already approved.
+        pos = "NEEDS-REVIEW"
+        manual = (
+            "review-gate-red: a head-bound record exists yet the review gate is red — either "
+            "the record's "
+            "evidence never reached the PR (record-review.sh --flush-pending) or the check is "
+            "genuinely failing. A human decides; do not dispatch a fixer at approved code"
         )
+        detail.append(manual)
     elif in_flight:
         pos = "NEEDS-TEST"
     else:
@@ -989,9 +1278,15 @@ def next_command(unit: Unit, repo: str) -> str | None:
     if unit.kind == "fold":
         return None
     if unit.position == "NO-PR":
+        # ⛔ `lane.sh` DOES NOT PROVISION. Its own header: "Runs ONE lane's pi inside
+        # its own worktree (cwd must already be the worktree)", it sets LANE_WT="$PWD"
+        # and REFUSES unless refs/heads/<branch> exists AND $PWD is checked out on it
+        # — measured: `lane.sh --repo … 10955 lane/10955` → exit 72,
+        # `reason=branch-missing`. `lane/<N>` is also a branch no fleet tool creates
+        # (the real dispatch uses `feat/<N>-tm`). The rail that creates the worktree
+        # and then calls lane.sh FROM it is `dispatch-merge.sh`.
         return (
-            f"bash scripts/orchestrator-harness/lane.sh --repo {qrepo} {unit.issue} "
-            f"lane/{unit.issue}"
+            f"bash scripts/orchestrator-harness/dispatch-merge.sh . {qrepo} {unit.issue}"
         )
     if unit.position == "READY-TO-LAND":
         return f"bash scripts/orchestrator-harness/merge-one.sh . {qrepo} {unit.pr} {branch_shell}"
@@ -1012,14 +1307,31 @@ def next_action(unit: Unit, repo: str) -> str | None:
     target = f"#{unit.issue}" if unit.kind == "issue" else f"fold PR #{unit.fold_pr}"
     if unit.draft:
         return (
-            f"none — {target} is a DRAFT, so the queue will not take it and a fixer must not "
-            "be dispatched at the author's branch"
+            f"the author must UNDRAFT {target} — the queue will not take it and a fixer must "
+            "not be dispatched at the author's branch"
+        )
+    if any(d.startswith("gate-refusal:") for d in unit.detail):
+        # ⛔ BEFORE `nodigest`: a gate refusal keeps the PR out of the queue whatever
+        # the record says, so it must be the line a lane reads. Measured: a PR with a
+        # wrong base AND `nodigest` got "re-record … needs NO new review" as its only
+        # ACTION, and the base mismatch appeared nowhere but the row detail.
+        why = next(d.split(":", 1)[1].strip() for d in unit.detail if d.startswith("gate-refusal:"))
+        return (
+            f"a HUMAN fixes the gate refusal on {target}: {why}. No code change and no rail does "
+            "this, so nothing is dispatched"
         )
     if unit.position == "NEEDS-REVIEW" and any("nodigest" in d for d in unit.detail):
         # The record carries no usable digest: re-mint at the head, no review owed.
         return (
             f"re-record {target} at head {unit.head} — the record has no usable digest, so "
-            f"record-review.sh {unit.pr} <current-head> clean {repo} needs NO new review"
+            f"record-review.sh {unit.pr} <current-head> clean {shlex.quote(repo)} needs NO new "
+            "review"
+        )
+    if any(d.startswith("review-gate-red:") for d in unit.detail):
+        return (
+            f"a HUMAN decides for {target}: a head-bound record exists yet the review gate is "
+            "red — either its evidence never reached the PR (record-review.sh --flush-pending) "
+            "or the check is genuinely failing. Do NOT dispatch a fixer at approved code"
         )
     if unit.position == "NEEDS-REVIEW" and any("UNREADABLE" in d for d in unit.detail):
         # `--check-carry` exit 3: "the live diff could not be READ — RETRY, do NOT
@@ -1027,8 +1339,8 @@ def next_action(unit: Unit, repo: str) -> str | None:
         # asked for a review; a retry is what is owed.
         return (
             f"retry the attestation read for {target} at head {unit.head} "
-            f"(record-review.sh --check-carry {unit.pr} {repo}) — an UNREADABLE diff is a "
-            "RETRY, not a review"
+            f"(record-review.sh --check-carry {unit.pr} {shlex.quote(repo)}) — an UNREADABLE diff "
+            "is a RETRY, not a review"
         )
     if unit.position == "NEEDS-REVIEW" and any("carry-patch" in d for d in unit.detail):
         # ⛔ `carry-patch` IS NOT A REVIEW CYCLE. `record-review.sh` exit 6 says
@@ -1038,12 +1350,15 @@ def next_action(unit: Unit, repo: str) -> str | None:
         # nudged toward the fabricated-evidence shape the recorder warns about.
         return (
             f"re-record at {target} head {unit.head} — the reviewed PATCH is unchanged, so "
-            f"record-review.sh {unit.pr} <current-head> clean {repo} needs NO new review"
+            f"record-review.sh {unit.pr} <current-head> clean {shlex.quote(repo)} needs NO new "
+            "review"
         )
     if unit.position == "NEEDS-REVIEW":
         return (
-            f"dispatch a reviewer at {target} head {unit.head} ({repo}), then record it with "
-            f"record-review.sh {unit.pr} <current-head> clean {repo} --evidence comment:<id>"
+            f"dispatch a reviewer at {target} head {unit.head} ({shlex.quote(repo)}), then "
+            "record it with "
+            f"record-review.sh {unit.pr} <current-head> clean {shlex.quote(repo)} "
+            "--evidence comment:<id>"
         )
     if unit.position == "NEEDS-TEST" and any("merge-tree: UNMEASURED" in d for d in unit.detail):
         # Nothing is in a runner queue here; the tree could not be measured (head
@@ -1507,7 +1822,7 @@ def _merge_tree(repo_root: Path, base: str, pr: dict[str, Any], snap: Snapshot) 
                     cwd=repo_root,
                 )
                 got = (tip.stdout or "").strip()
-                if got and got != head:
+                if got != head:  # an EMPTY rev-parse is a mismatch, not a match
                     snap.merge_tree[str(number)] = {
                         "clean": None,
                         "why": (
@@ -1711,7 +2026,10 @@ def render(
     top: int,
 ) -> tuple[str, Unit | None]:
     out: list[str] = []
-    out.append(f"next-work — repo {repo} · base {snap.base} · gate {snap.config_source or 'UNREADABLE'}")
+    gate_label = snap.config_source or (
+        "(parsed, source unnamed)" if cfg is not None else "UNREADABLE"
+    )
+    out.append(f"next-work — repo {repo} · base {snap.base} · gate {gate_label}")
     out.append(
         f"read: {len(snap.issues)} open P0/P1 issue(s) · {len(snap.pulls)} open PR(s) · "
         f"{len(snap.check_runs)} head(s) with check-runs · {len(snap.claims)} claim key(s)"
@@ -1745,8 +2063,9 @@ def render(
         )
     elif pick is None:
         out.append(
-            "  NONE — every measured unit is held, superseded, or a duplicate of a row "
-            "already offered. That is an answer, not an error."
+            "  NONE — no unit is pickable: every measured one is held, superseded, or a "
+            "duplicate of a row already offered (or the queue is empty). That is an "
+            "answer, not an error."
         )
     else:
         out.append(f"  TOP       {_label(pick)}  ({pick.priority}, {pick.reason}, position {pick.position})")
@@ -1762,7 +2081,13 @@ def render(
             # "runner" for EVERY top row without a command — so a NEEDS-REVIEW top
             # row printed "dispatch a reviewer at #N" and, one line later, told the
             # operator to wait for a runner that would never move it.
-            if pick.position == "NEEDS-REVIEW":
+            if pick.draft:
+                why = "the rank leader is a DRAFT — the author's, see ACTION"
+            elif any(d.startswith("gate-refusal:") for d in pick.detail):
+                why = "the rank leader is GATE-REFUSED (see ACTION) — a human edits the PR"
+            elif any(d.startswith("review-gate-red:") for d in pick.detail):
+                why = "the rank leader's review gate is RED with a bound record — a human decides"
+            elif pick.position == "NEEDS-REVIEW":
                 why = "the rank leader needs a REVIEW (see ACTION), so nothing runs until it has one"
             elif pick.position == "NEEDS-TEST" and any(
                 "merge-tree: UNMEASURED" in d for d in pick.detail
@@ -1838,10 +2163,15 @@ def render(
         out.append("")
     pickable = [u for u in units if u.pickable]
     shown = pickable[: max(top, 0)]
-    out.append(
-        f"TOP {len(shown)} PICKABLE of {len(units)} unit(s) "
-        "(rank order; held, superseded and duplicate rows excluded)"
-    )
+    if snap.unreadable:
+        # ⛔ NOTHING IS "PICKABLE" ON A REFUSED RUN — `--json` already says
+        # `pickable: false` for every row, and the footer contradicted it.
+        out.append(f"TOP 0 PICKABLE of {len(units)} unit(s) — this run is REFUSED")
+    else:
+        out.append(
+            f"TOP {len(shown)} PICKABLE of {len(units)} unit(s) "
+            "(rank order; held, superseded and duplicate rows excluded)"
+        )
     # ⛔ A REFUSED RUN DELIVERS NO COMMAND IN EITHER FORMAT. The `--json` path
     # nulled every `next_command` while this footer still printed them, so a text
     # consumer grepping for a command could find one on a run the tool itself
@@ -1920,8 +2250,9 @@ def _main(argv: Sequence[str] | None = None) -> int:
             "that just finished, a human. Deliberately NOT a timer: cmux authorises by ancestry, so "
             "a launchd job cannot act on a pane, and an actuator that cannot deliver is the defect "
             "this fleet keeps re-learning. The 'NEXT ACTION' block is the actuator half: the exact "
-            "command for the top row — or, when the top row needs a review, is waiting on a "
-            "runner, has an UNMEASURED merge tree, or is a DRAFT, the ACTION for it plus the "
+            "command for the top row — or, when the top row needs a HUMAN (a review, or a gate "
+            "refusal: another base, a missing required label, an unreadable base), is waiting on "
+            "a runner, has an UNMEASURED merge tree, or is a DRAFT, the ACTION for it plus the "
             "first unit below it that DOES have a command.\n\n"
             "IDEMPOTENT BY CONSTRUCTION: the ordering key is total — (priority, position, "
             "(kind, number)), where an issue is (0, n) and a fold is (1, pr) — "
@@ -2019,7 +2350,27 @@ def _main(argv: Sequence[str] | None = None) -> int:
                 )
             if cfg is not None:
                 snap.config_source = f"{snap.config_source} (from snapshot)"
+        # ⛔ THE TARGET REPO TRAVELS WITH THE DATA. `repo = args.repo or snap.repo`
+        # let a replay of a snapshot collected for repo A emit
+        # `merge-one.sh . <repo B> 1001 …` at exit 0 — every row, head, attestation
+        # and claim read from A, the command naming B, and `merge-one.sh` does not
+        # re-assert the slug against the checkout's origin. This is the same hazard
+        # `claim_ns` already closes ("the namespace travels with the data"), and the
+        # one `dispatch-merge.sh` exists to stop (a lane built for the wrong repo).
+        if snap.repo and args.repo and args.repo.strip() != snap.repo.strip():
+            print(
+                f"next_work: INCOMPLETE — the snapshot was collected for {snap.repo!r} but "
+                f"--repo says {args.repo!r}. A command aimed at the other repo is a wrong-repo "
+                "dispatch, so nothing is emitted.",
+                file=sys.stderr,
+            )
+            return 2
         repo = args.repo or snap.repo
+        if not repo:
+            # No slug = no addressable command, and every emit site depends on it.
+            snap.unreadable.append(
+                "repo: no target repo could be resolved — every emitted command needs one"
+            )
     else:
         repo = _repo_slug(args.repo, repo_root)
         snap, cfg, _ = collect(repo, repo_root, base="main")
