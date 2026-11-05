@@ -323,6 +323,15 @@ def _scrub(text: str, secret: str = "") -> str:
     out = text or ""
     if secret:
         out = out.replace(secret, "<redacted-token>")
+        # ⛔ TRUNCATED AND FOLDED COPIES ARE THE TYPICAL ECHO (review cycle 8). A proxy/WAF that returns an
+        # excerpt of the blocked request — or a responder that folds a long header — prints a PREFIX or a
+        # SUFFIX of the credential, not the whole value, so the exact replace above cannot see it and the
+        # prefix regex cannot help a value with no documented shape. Descending length so the longest
+        # match wins; the suffix half is required, because a fold can put the tail on its own line.
+        if len(secret) >= 8:
+            for _n in range(len(secret) - 1, 7, -1):
+                out = out.replace(secret[:_n], "<redacted-token>")
+                out = out.replace(secret[-_n:], "<redacted-token>")
     return re.sub(r"(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]+", "<redacted-token>", out)
 
 

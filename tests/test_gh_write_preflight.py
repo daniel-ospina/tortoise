@@ -966,6 +966,30 @@ def test_a_long_prefixless_credential_is_not_leaked_even_TRUNCATED():
     assert_clean(p.returncode, p.stdout + p.stderr, long_secret)
 
 
+def test_a_TRUNCATED_echo_of_the_credential_is_redacted_too():
+    """A responder echoing an EXCERPT — not the whole value — must not leak it (review cycle 8).
+
+    Truncation is the typical form of the echo: a proxy that returns the first N characters of the
+    blocked request, or a folded header. The exact-value replace cannot see a fragment, and a
+    prefix-less credential defeats the shape regex, so the fragment redactor must cover prefixes AND
+    suffixes."""
+    secret = "0123456789abcdef" * 6 + "0123"          # 100 chars, no documented prefix
+    arms = [
+        (403, {"retry-after": secret[:20]}, '{"message":"Resource not accessible"}', []),
+        (403, {"x-oauth-scopes": f"repo, {secret[:30]}"}, '{"default_branch":"main"}', []),
+        (400, {}, '{"error":"blocked","request":"Authorization: Bearer ' + secret[:61] + '"}', []),
+        (200, {"x-oauth-scopes": f"repo, {secret[24:]}"}, '{"default_branch":"main"}', []),   # SUFFIX
+    ]
+    for read, args in [(a[0:3], a[3]) for a in arms]:
+        with _Stub(read=read) as s:
+            env = _env(s.base, secret)
+            p = subprocess.run([sys.executable, str(TOOL), "--repo", "daniel-ospina/tortoise", "--json"],
+                               capture_output=True, text=True, env=env, timeout=120)
+        blob = p.stdout + p.stderr
+        assert secret[:8] not in blob, f"a truncated echo leaked the credential PREFIX: {blob!r}"
+        assert secret[-8:] not in blob, f"a folded echo leaked the credential SUFFIX: {blob!r}"
+
+
 if __name__ == "__main__":
     fns = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]
     failed = 0
