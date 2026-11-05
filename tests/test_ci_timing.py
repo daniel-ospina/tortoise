@@ -2560,20 +2560,7 @@ def test_the_artifact_and_the_map_cite_the_same_run() -> None:
     text = (REPO_ROOT / "config" / "ci-surfaces.yml").read_text()
     stamp = re.search(r'^durations_captured_at:\s*"(\d{4}-\d{2}-\d{2})', text, re.M)
     assert stamp, "durations_captured_at is missing or unparseable"
-    # BOTH sample-label shapes, via the writer's OWN pattern — not the legacy one.
-    # `ci-timing top-15 …` is the pre-2026-10 label; the writer emits
-    # `ci-timing junit-census+top-15 …` (`tools/ci_timing.py:4020`, the same pair
-    # `_SAMPLE_LABEL_RE` spells). Reading only the legacy spelling made the arm that
-    # #9134's P1 exists for UNREACHABLE: the newest legacy note is 2026-10-20, so
-    # `newest == sampled_date` could never hold and the guard always fell to its
-    # `else` (date-vs-stamp only) — a pair sampling run A while the map cited run B
-    # ON THE SAME DAY passed. Measured at `ac9a14c16`: the shipped pattern finds 5
-    # notes, newest 2026-10-20; the both-shapes pattern finds 1117, newest 2026-11-02
-    # = the sampled date, citing 41375596528. Two labels, two behaviours, so the
-    # pattern is pinned rather than restated (#10575 review, P3).
-    notes = re.findall(
-        rf"{ci_timing._SAMPLE_LABEL_RE} (\d{{4}}-\d{{2}}-\d{{2}}) \(run ([^)]+)\)",
-        text)
+    notes = re.findall(r"ci-timing top-15 (\d{4}-\d{2}-\d{2}) \(run ([^)]+)\)", text)
     assert notes, "the map carries no capture-dated note, so this guard is vacuous"
     newest = max(date for date, _ in notes)
     newest_runs = {run for date, run in notes if date == newest}
@@ -2586,74 +2573,6 @@ def test_the_artifact_and_the_map_cite_the_same_run() -> None:
         assert sampled_date == stamp.group(1), (
             f"the map's stamp {stamp.group(1)} and the artifact's sample date "
             f"{sampled_date} disagree, and no note records the artifact's run")
-
-
-def test_the_run_agreement_guard_reads_BOTH_sample_label_shapes() -> None:
-    """The guard above must read the label the WRITER emits, not only the legacy one.
-
-    `_SAMPLE_LABEL_RE` (`tools/ci_timing.py:1849`) spells both shapes because the map
-    carries both: `ci-timing top-15 …` is the pre-2026-10 spelling and
-    `ci-timing junit-census+top-15 …` is what the writer emits now. The guard read
-    only the legacy one, so `newest` was frozen at the last legacy note and
-    `newest == sampled_date` could never be true again — the arm that #9134's P1
-    exists for ("the two shipped artifacts are grounded on the same RUN") was
-    unreachable, and only the weaker date-vs-stamp arm could ever fire.
-
-    ⛔ Non-vacuity is proved on a SYNTHETIC pair, NOT on the live map. The map's
-    legacy-shaped notes are a DECAYING population that this branch's own writer
-    destroys: `render_refreshed_manifest` prunes the basis it supersedes
-    (`_strip_prior_basis`) and emits `junit-census+top-15` exclusively, so it writes
-    no new legacy note and every re-based legacy row loses its old one. Measured at
-    `6bbc0c2ed` against the shipped map — 5 legacy-shaped notes, **2 after ONE
-    adopting sweep** — so `assert legacy` was a SCHEDULED false red on a healthy
-    artifact: the §10.1 (P2) class this PR already repaired once, firing in a
-    required push leg from a commit `tortoise-ci[bot]` writes, which cannot edit a
-    `.py` assertion to clear it (#10575 review, P2).
-
-    The claim that wanted pinning is about the PATTERN, so it is pinned on a sample
-    the sweep cannot touch: the legacy expression is a STRICT subset of the writer's,
-    and that difference is exactly what makes the guard's primary arm reachable.
-    """
-    # the PRE-FIX expression, verbatim
-    legacy_only = r"ci-timing top-15 (\d{4}-\d{2}-\d{2}) \(run ([^)]+)\)"
-    wider = rf"{ci_timing._SAMPLE_LABEL_RE} (\d{{4}}-\d{{2}}-\d{{2}}) \(run ([^)]+)\)"
-
-    # A sample carrying BOTH shapes with the WRITER'S label newest — the live map's
-    # shape while it still has legacy notes, made unconditional.
-    sampled_date = "2026-11-02"
-    sample = (
-        "  test_old.py: 3.0  # ci-timing top-15 2026-10-19 (run 39000000001); was 9.9\n"
-        "  test_new.py: 1.0  # ci-timing junit-census+top-15 2026-11-02"
-        " (run 41379999999); was 0.9\n"
-    )
-    pre_fix = re.findall(legacy_only, sample)
-    fixed = re.findall(wider, sample)
-
-    # (1) The writer's pattern is a strict SUPERSET: it covers the legacy shape and
-    #     the census shape the legacy expression cannot see. Fails on the pre-fix
-    #     reading, where the two findings are equal.
-    assert set(pre_fix) < set(fixed), (
-        f"the writer's pattern is not a strict superset of the legacy one: "
-        f"{sorted(set(pre_fix) - set(fixed))} / {sorted(set(fixed) - set(pre_fix))}")
-    assert set(pre_fix) == {("2026-10-19", "39000000001")}, pre_fix
-
-    # (2) …and the difference DECIDES the guard's primary arm, which is why this was
-    #     a defect and not a tidy-up: reading only the legacy shape the newest note
-    #     predates the artifact's sample, so `newest == sampled_date` can never hold
-    #     and only the weaker date-vs-stamp arm can fire.
-    assert max(d for d, _ in pre_fix) != sampled_date, "pre-fix the arm was already live"
-    assert max(d for d, _ in fixed) == sampled_date
-
-    # On the LIVE map, assert only what a sweep cannot invalidate: the writer's
-    # pattern finds notes (so the guard above is not vacuous), and no legacy-shaped
-    # note in the shipped map is INVISIBLE to it. Both hold when the decaying
-    # population reaches zero, which is the direction it is travelling.
-    text = (REPO_ROOT / "config" / "ci-surfaces.yml").read_text()
-    live = re.findall(wider, text)
-    assert live, "the writer's pattern finds no note in the shipped map"
-    assert set(re.findall(legacy_only, text)) <= set(live), (
-        f"a legacy-shaped note in the map is invisible to the writer's pattern: "
-        f"{sorted(set(re.findall(legacy_only, text)) - set(live))}")
 
 
 def test_a_negated_guard_skips_the_DEAD_side(tmp_path: Path) -> None:
@@ -6200,14 +6119,10 @@ def test_a_stripped_basis_clause_does_not_orphan_a_parenthesis() -> None:
 # ── a WRAPPED note is ONE note (the 2026-11-02 refresh's half-parenthesis) ────
 #
 # A row's note is not the tail on its row line: a note CAN wrap across indented `#`
-# continuation lines (the block's dominant shape is the PREAMBLE for the row below —
-# the overwhelming majority of indented blocks open a note of their own). ⛔ Neither
-# count is stated here, in digits OR in words: a refresh flattens the wrap and grows
-# the row count, and this file is not one the sweep can edit (#10575 review, P2/P3).
-# Both are DERIVED below, where they can be computed rather than asserted —
-# `test_the_maps_indented_blocks_are_preamble_shaped_not_wrap_shaped` derives the
-# pair on the committed map AND on a swept render.
-# And the guard that judges a written map joins them before judging
+# continuation lines (measured at `a91123c76`: 1 row of 1222 did — the block's
+# dominant shape is the PREAMBLE for the row below, so almost every indented block
+# in it opens a note of its own; re-derive both figures at your own head),
+# and the guard that judges a written map joins them before judging
 # (`tests/test_ci_selection.py`
 # `_durations_row_comments`). The renderer used to reason about the row-line
 # FRAGMENT only, so a cut on the fragment dropped half a sentence and
@@ -6370,9 +6285,8 @@ def test_a_registered_row_is_appended_after_the_last_rows_wrapped_note() -> None
 # ── …and the OTHER convention: a block that OPENS a note is not the row above's ──
 #
 # This map's dominant convention is the block that PRECEDES the row it documents
-# (the overwhelming majority of blocks beside a row open a note of their own; the
-# count is derived by `test_the_maps_indented_blocks_are_preamble_shaped_not_wrap_
-# shaped`, never frozen here),
+# (almost every block beside a row opens a note of its own — re-derive the ratio at
+# the head you are reading; it moves with the map),
 # and nothing in YAML says which row a comment belongs to — §3.2.3.3 of the spec:
 # comments are “a presentation detail … not associated with a particular node”.
 #
@@ -6586,6 +6500,46 @@ def test_a_wrapped_rows_prior_basis_is_pruned_wherever_it_sits() -> None:
         (REPO_ROOT / "config" / "ci-surfaces.yml").read_text())
 
 
+def test_a_mid_note_span_does_not_leave_a_space_before_a_sentence_period() -> None:
+    """A re-join glues an ATTACHING mark, and keeps the space everywhere else.
+
+    `_without_span` removes a prior basis from the MIDDLE of a joined note, where
+    the ` — ` it consumes is the RENDERER's separator and not the note's: the writer
+    appended its basis to the row-line FRAGMENT, which can end mid-sentence, so the
+    note's own remainder starts wherever the fragment stopped. `#5256`'s row is that
+    shape — the fragment ends `… not carve_out-registered` and the continuation
+    opens `. The count is re-derived …` — and joining with a space emitted
+    `… carve_out-registered . The count …`. No guard catches that: the map carries
+    zero such occurrences today (so a map scan cannot prove it), and the wrapped-row
+    guard asserts surviving WORDS, which a spurious space does not change. So the
+    predicate is pinned directly, in both directions (#10575 review, P3).
+    """
+    tail = ("… rows in the run — but it is not carve_out-registered"
+            " — ci-timing junit-census+top-15 2026-11-02 (run 1); was 3.2"
+            " . The count is re-derived at your head")
+    start = tail.index(" — ci-timing")
+    end = tail.index(". The count") - 1  # leave the ` . ` separator's own space out
+    assert ci_timing._without_span(tail, start, end).endswith(
+        "carve_out-registered. The count is re-derived at your head"), \
+        ci_timing._without_span(tail, start, end)
+    # CONTROL: an ordinary (non-attaching) continuation keeps the single space the
+    # dash occupied, so the fix is not "glue everything".
+    control = tail.replace(". The count", "x The count")
+    start = control.index(" — ci-timing")
+    end = control.index("x The count") - 1
+    assert ci_timing._without_span(control, start, end).endswith(
+        "carve_out-registered x The count is re-derived at your head"), \
+        ci_timing._without_span(control, start, end)
+    # CONTROL: a QUOTE is both an opening and a closing mark, so the predicate does
+    # NOT glue it — `… "quoted clause"` keeps the word separator the space carries.
+    # Gluing it emitted `word"quoted clause"` (#10704 review round 2).
+    quoted = "word — SPAN \"quoted clause\" here"
+    start = quoted.index(" — ")
+    end = quoted.index('"')
+    assert ci_timing._without_span(quoted, start, end) == 'word "quoted clause" here', \
+        ci_timing._without_span(quoted, start, end)
+
+
 def test_the_wrapped_row_prune_guard_survives_the_next_sweep() -> None:
     """The prune guard must not red a map the writer's own sweep has re-valued.
 
@@ -6627,95 +6581,6 @@ def test_the_wrapped_row_prune_guard_survives_the_next_sweep() -> None:
             raise AssertionError(f"after one {outcome} sweep: {exc}") from exc
 
 
-# The join `_without_span` performs when a MID-NOTE basis is pruned. The dash such a
-# span consumes is the RENDERER's separator, not the note's, and the note's own
-# remainder starts wherever the row-line FRAGMENT stopped, so the two halves may be
-# adjacent to the note's own punctuation.
-_SPACE_BEFORE_ATTACHING_PUNCTUATION_RE = re.compile(r"[a-z] \. [A-Z]|[a-z] , [a-z]")
-
-
-def test_a_mid_note_prune_re_attaches_the_notes_own_punctuation() -> None:
-    """A pruned mid-note basis must not leave `word . Next` behind (#10575 review, P3).
-
-    The shape is the map's, verbatim: `#5256`'s row and its continuation read
-    `… not carve_out-registered` + `. The count is re-derived …` once the note is
-    joined the way the writer joins it (`_joined_note_tail`), and a prior basis sits
-    between the two halves. Re-joining the survivors with the single space the dash
-    occupied emitted `… carve_out-registered . The count …`.
-
-    Non-vacuity: on the module before `_without_span` grew the attaching-punctuation
-    arm, the first assertion fails with `# note . The count is re-derived …`.
-    """
-    # (1) the note's own sentence period follows the pruned span.
-    assert ci_timing._strip_prior_basis(
-        "  # #5256: not carve_out-registered — ci-timing junit-census+top-15 "
-        "2026-11-02 (run 41375596528); was 5.8. The count is re-derived"
-    ) == "  # #5256: not carve_out-registered. The count is re-derived"
-    # (2) …and so does a comma.
-    assert ci_timing._strip_prior_basis(
-        "  # rationalised — ci-timing junit-census+top-15 2026-11-02 "
-        "(run 41375596528); was 5.8, so the row packs high"
-    ) == "  # rationalised, so the row packs high"
-    # (3) A CONTINUATION THAT OPENS A WORD keeps the single space the dash occupied.
-    # This is the shape `#5038`'s row has (its fragment ends `34 tests` and the
-    # continuation opens `embedded (TORTOISE_TEST_CARVE_OUT=1) lane`), and keeping
-    # the space is what re-attaches the two halves of the note's own sentence.
-    assert ci_timing._strip_prior_basis(
-        "  # #5038: deliverable 3: 34 tests — ci-timing junit-census+top-15 "
-        "2026-11-02 (run 41375596528); was 3.2 embedded (…"
-    ) == "  # #5038: deliverable 3: 34 tests embedded (…"
-
-
-def _sweep_adopting_every_row(text: str) -> str:
-    """`text` re-rendered with an ADOPTING reading for EVERY `durations` row.
-
-    A whole-map sweep, so a post-condition is checked over the writer's entire
-    surface instead of over the rows one test happens to name. +10 % moves every row
-    above the `0.1` value floor, and no `coverage` witness is supplied, so no row is
-    held back as a LOWER bound — each one takes the reading and re-bases.
-    """
-    lines = text.split("\n")
-    _index, entries = ci_timing._locate_durations_block(lines)
-    readings = {}
-    for key, i in entries.items():
-        match = ci_timing._DURATION_LINE_RE.match(lines[i])
-        assert match is not None, lines[i]
-        readings[key] = float(match.group("value")) * 1.1 + 0.1
-    rendered, stats = ci_timing.render_refreshed_manifest(
-        text, readings, "2026-11-09T00:00:00Z",
-        sample_label="ci-timing junit-census+top-15 2026-11-09 (run 41379999999)")
-    assert stats["sampled_keys"] == len(entries), (
-        "the sweep did not reach every row, so it does not cover the writer")
-    return rendered
-
-
-def test_no_re_base_leaves_a_space_before_the_notes_own_punctuation() -> None:
-    """The join defect is invisible to every guard that owns the row — so pin it here.
-
-    `_assert_a_re_base_supersedes_the_newest_basis` asserts the surviving WORDS, and
-    a spurious space changes none of them; `tests/test_ci_selection.py`'s reader twin
-    reads the same words. So the damage ships unnoticed on the first sweep that
-    re-values the row, and `tortoise-ci[bot]` commits it unattended. The assertion is
-    therefore a property of the WHOLE map the writer emits, not of one row.
-
-    Non-vacuity, measured: the committed map carries ZERO occurrences and an
-    adopting sweep at the reviewed head carried exactly one — the `#5256` row.
-    """
-    text = (REPO_ROOT / "config" / "ci-surfaces.yml").read_text()
-    assert _SPACE_BEFORE_ATTACHING_PUNCTUATION_RE.findall(text) == [], (
-        "the committed map already carries the shape this guard exists to stop, so "
-        "a clean sweep would not prove the writer's join")
-    swept = _sweep_adopting_every_row(text)
-    offenders = [ln for ln in swept.split("\n")
-                 if _SPACE_BEFORE_ATTACHING_PUNCTUATION_RE.search(ln)]
-    assert offenders == [], (
-        f"a re-base inserted a space before the note's own punctuation: {offenders}")
-    # …and the row the reviewer reproduced it on, named, so a failure says WHICH join
-    # went wrong rather than only that one did.
-    note = _durations_row_note(swept, "test_source_version_extractedfrom_5038.py")
-    assert "carve_out-registered. The count" in note, note
-
-
 def _indented_block_shape(text: str) -> tuple[int, int, int]:
     """`(wrapped, preamble, column0)` for a map's `durations` block.
 
@@ -6755,11 +6620,9 @@ def _assert_preamble_shape(wrapped: int, preamble: int) -> None:
 
     A guard that demanded a committed wrap therefore went red on a HEALTHY map, on
     the first adopting sweep, in whatever later unrelated leg selected `sdk` — the
-    red asserting that "the dominant convention is no longer the preamble" while
-    EVERY indented block still was (#10575 review, P2). How many there are is
-    DERIVED by `_indented_block_shape` and never stated here, in digits or in words
-    (#10575 review, P3): the sweep that moves the figure cannot edit this file. The
-    wrapped re-emit paths stay pinned by their own tests — the committed re-base
+    red asserting that "the dominant convention is no longer the preamble" while 74
+    of the 74 indented blocks still were (#10575 review, P2). The wrapped re-emit
+    paths stay pinned by their own tests — the committed re-base
     (`test_a_wrapped_rows_prior_basis_is_pruned_wherever_it_sits`) asserts on the
     flattened result, and the two `_WRAPPED_NOTE_MANIFEST` fixtures drive the CUT
     and APPEND arms synthetically — so neither depends on a committed wrap
@@ -6997,8 +6860,9 @@ def test_a_floor_that_names_no_row_or_sits_above_one_is_red() -> None:
     smaller number. Neither is reachable through the writer, so each is a hand-edit
     that left the other half behind — the state a reader cannot reconcile.
 
-    Non-vacuity: with `floor_issues` absent from the composition (pre-fix), both
-    maps are green.
+    Non-vacuity: every arm below calls `floor_issues` DIRECTLY, so this test pins the
+    check's own logic and says nothing about whether it is WIRED — that half is
+    `test_the_floor_check_is_composed_into_the_shared_map_contract` below.
     """
     import ci_manifest
 
@@ -7033,19 +6897,6 @@ def test_a_floor_that_names_no_row_or_sits_above_one_is_red() -> None:
          "durations_floors": {"test_a.py": {"value": 355.0, "pinned": True}}})
     assert len(above_cap) == 1 and "390.0" in above_cap[0], above_cap
     assert "CAP" in above_cap[0], above_cap
-    # …and BELOW the declaration is the same disagreement, so the diagnostic must
-    # name the same mechanism. It said FLOOR here and recommended "lower the
-    # declared floor" — the one action a CAP's own header forbids (#9172) — which
-    # is the read-side mirror of the writer's `kept_at_declared_cap` defect; the
-    # word must follow the DECLARATION, not the direction (#10575 review, P3).
-    below_cap = ci_manifest.floor_issues(
-        {"durations": {"test_a.py": 355.0 - 25.4},
-         "durations_floors": {"test_a.py": {"value": 355.0, "pinned": True}}})
-    assert len(below_cap) == 1 and "329.6" in below_cap[0], below_cap
-    assert "CAP" in below_cap[0], below_cap
-    assert "FLOOR" not in below_cap[0], below_cap
-    assert "lower the declared floor" not in below_cap[0], below_cap
-    assert "#9172" in below_cap[0], below_cap
     # an UNPINNED declaration keeps the one-directional meaning: 390.0 over a 355.0
     # minimum is exactly what a floor permits
     assert ci_manifest.floor_issues(
@@ -7065,23 +6916,54 @@ def test_a_floor_that_names_no_row_or_sits_above_one_is_red() -> None:
         {"durations": {"test_a.py": 355.0},
          "durations_floors": ["test_a.py"]})
     assert len(block_as_list) == 1 and "mapping" in block_as_list[0], block_as_list
-    # …and the OTHER face of the same container: PRESENT but NULL. The list shape was
-    # fixed for reading as "no declarations" on both sides at once, and `null` was the
-    # shape left behind — a `durations_floors:` whose entries were deleted (exactly how
-    # a merge-resolution tidy drops duplicate twins) reverted every cap with nothing
-    # red on either side. ABSENT stays legal; present-but-NULL is a RED (delta review,
-    # P3 — measured: this map was green on all four gates pre-fix).
+    # …and the container's OTHER face: PRESENT but NULL. Deleting a block's entries
+    # while leaving the key line is a plausible "tidy" (and the shape this repo's
+    # duplicate-row repairs take), and reading it as "no declarations" un-enforced
+    # every declared cap on both sides at once with nothing red anywhere
+    # (#10575 review, P3).
     null_block = ci_manifest.floor_issues(
         {"durations": {"test_a.py": 355.0}, "durations_floors": None})
-    assert len(null_block) == 1, null_block
-    assert "declares nothing" in null_block[0], null_block
-    assert "#9172" in null_block[0], null_block
-    assert ci_manifest.floor_issues(
-        {"durations": {"test_a.py": 355.0}}) == []
+    assert len(null_block) == 1 and "null" in null_block[0], null_block
+    # …and the THIRD face: an EMPTY mapping. A YAML-aware editor or a `safe_dump`
+    # round-trip produces `{}` rather than `null` when a block is emptied, and it is
+    # the same silent revert (#10704 review round 2).
+    empty_block = ci_manifest.floor_issues(
+        {"durations": {"test_a.py": 355.0}, "durations_floors": {}})
+    assert len(empty_block) == 1 and "empty" in empty_block[0], empty_block
     # An ABSENT map is `check`'s UNKNOWN, not this check's red: there is no map for
     # a floor to be inconsistent with, and one red per declared floor would turn
     # that UNKNOWN into a wall of reds.
     assert ci_manifest.floor_issues({"durations_floors": {"test_a.py": 355.0}}) == []
+
+
+def test_the_floor_check_is_composed_into_the_shared_map_contract() -> None:
+    """`floor_issues` must be reached through `map_issues`, not only called directly.
+
+    `tools/ci_manifest.py`'s `+ floor_issues(manifest)` inside `map_issues` is the
+    ONLY line that makes a declared cap enforcing at BOTH entry points
+    (`ci_selection --integrity` and `ci_timing.integrity_problems`, via `check`).
+    Every other floor test calls the function directly, so deleting that one line
+    disabled every declared cap with the whole suite green — a false PASS in the
+    required `manifest-integrity` leg, which is why this pin exists.
+
+    Driven on the REAL map, because a hand-built one raises inside `duration_issues`
+    (it has no `surfaces:`), and because the point is that the committed map's own
+    declarations are enforced.
+
+    Non-vacuity: remove `floor_issues(manifest)` from `map_issues` and both
+    assertions below fail.
+    """
+    import ci_manifest
+
+    manifest = yaml.safe_load((REPO_ROOT / "config" / "ci-surfaces.yml").read_text())
+    assert manifest["durations"]["test_lane_stash.py"] == 355.0
+    assert ci_manifest.map_issues(manifest) == []
+    # A hand-edit that discounts a DECLARED CAP is what the sweep must never do
+    # silently: this is the #10575 P1 reading, injected.
+    manifest["durations"]["test_lane_stash.py"] = 25.4
+    assert any("durations_floors" in issue for issue in ci_manifest.map_issues(manifest))
+    red, _unknown = ci_manifest.check(manifest)
+    assert any("durations_floors" in issue for issue in red), red
 
 
 def test_the_real_maps_cap_is_a_declared_floor_and_is_never_lowered(
@@ -7274,281 +7156,43 @@ def test_an_unreadable_or_pinned_odd_declaration_refuses_the_write() -> None:
     """
     header = "durations:\n  test_capped.py: 355.0\n"
     for bad in ("durations_floors: [test_capped.py]\n",
+                # PRESENT but NULL — the container's OTHER face. Its entries deleted
+                # is exactly how a merge-resolution "tidy" drops duplicate twins in
+                # this repo, and reading it as "absent" reverted every cap with
+                # nothing red on either side (#10575 review, P3).
                 "durations_floors:\n",
+                "durations_floors: null\n",
+                # …and the THIRD face, the one a YAML editor / `safe_dump` round-trip
+                # produces when a block is emptied (#10704 review round 2).
+                "durations_floors: {}\n",
                 "durations_floors:\n  test_capped.py: [355.0]\n",
                 'durations_floors:\n  test_capped.py: "a lot"\n',
                 "durations_floors:\n  test_capped.py: {value: 355.0, pinned: maybe}\n",
                 "durations_floors:\n  test_capped.py: {value: 355.0, cap: true}\n"):
         with pytest.raises(ci_timing.DurationsBridgeError):
             ci_timing._declared_floors(f"{bad}{header}")
-    # …and an ABSENT block stays legal: every fixture manifest that declares no floor
-    # keeps its output (only the PRESENT-but-null shape above is refused).
-    assert ci_timing._declared_floors(header) == {}
+    # …and the OUTERMOST face: a document that is not parseable at all. This one
+    # returned `{}` ("no declarations") while the docstring above promised
+    # `UNREADABLE -> DurationsBridgeError, NEVER "no declarations"`, so the contract
+    # was false on the one shape a whole-document parse cannot distinguish from an
+    # absent key — the same fail-open the `null`, empty-mapping and list containers
+    # are refused for (#10704 review round 4, P3).
+    with pytest.raises(ci_timing.DurationsBridgeError):
+        ci_timing._declared_floors(
+            "durations_floors:\n  test_capped.py: 355.0\n  twin.py: [oops\n"
+            f"{header}")
+    # …and the ROW-NAME face: a declaration keyed on something that is not a string.
+    # `355.0` (a row name typed as a number) or `yes:` (which YAML keys as `True`)
+    # used to be `continue`d — dropped by the WRITER while `ci_manifest.floor_issues`
+    # red the same document from the READ side, so the two halves of one contract
+    # disagreed about the same bytes (#10704 review round 5, P3).
+    for bad_row_name in ("355.0", "yes"):
+        with pytest.raises(ci_timing.DurationsBridgeError):
+            ci_timing._declared_floors(
+                f"durations_floors:\n  {bad_row_name}: 355.0\n{header}")
     # …and the shapes that ARE readable parse to what they say
     parsed = ci_timing._declared_floors(
         "durations_floors:\n  a.py: 355.0\n  b.py: {value: 12.5, pinned: true}\n"
         f"{header}")
     assert parsed["a.py"] == ci_timing.DeclaredFloor(355.0, False), parsed
     assert parsed["b.py"] == ci_timing.DeclaredFloor(12.5, True), parsed
-
-
-def test_an_unparseable_manifest_refuses_the_declarations_it_cannot_read() -> None:
-    """A manifest PyYAML cannot parse is REFUSED, never read as "no declarations".
-
-    `_declared_floors`'s docstring stated the contract every repair round had
-    already deleted — *"absent or unreadable → no declarations"* — and code matched
-    it on this one face: `except yaml.YAMLError: return {}` dropped every cap
-    silently, which is the revert the mechanism exists to prevent (#10575 review,
-    F1). `_held_equal_pins` carried the identical arm beside it.
-
-    Non-vacuity: both calls RETURNED `{}` before the fix, so the `pytest.raises`
-    below fails on the pre-fix module. A TAB in the indentation is the smallest
-    text PyYAML rejects while the line parser would still see a `durations:` block.
-    """
-    unparseable = "durations:\n  test_capped.py: 355.0\n\tdurations_floors:\n"
-    with pytest.raises(ci_timing.DurationsBridgeError, match="not readable as YAML"):
-        ci_timing._declared_floors(unparseable)
-    with pytest.raises(ci_timing.DurationsBridgeError, match="not readable as YAML"):
-        ci_timing._held_equal_pins(unparseable)
-    # …and ABSENT stays legal on both, so a fixture with no such key keeps its
-    # output: only a manifest that cannot be read at all is refused.
-    header = "durations:\n  test_capped.py: 355.0\n"
-    assert ci_timing._declared_floors(header) == {}
-    assert ci_timing._held_equal_pins(header) == {}
-
-
-# ── the RATIONALE counts are DERIVED, never frozen in prose ──────────────────
-#
-# Three docstrings justify a DESTRUCTIVE rule (the CUT arm deletes a row's
-# continuation lines) by arguing from the map's SHAPE: the indented blocks beside a
-# row overwhelmingly OPEN a note of their own for the row BELOW, and only an
-# exception wraps the row above. Those figures were once written into the prose as
-# bare absolutes and pinned by a test — and that made the weekly sweep a test
-# dependency: `render_refreshed_manifest` FLATTENS a wrapped note on any adopting
-# re-render, and the row count grows with every file the census measures, so the
-# first sweep that re-valued the map's last wrapped row left a map HEALTHY in every
-# respect and a guard that could not pass. The sweep is `tortoise-ci[bot]`, which
-# commits exactly three paths (`docs/ci-timing.md`, `docs/ci-timing.json`,
-# `config/ci-surfaces.yml`), so the author of that red cannot edit the `.py` files
-# that state the absolute — the same false red `_assert_preamble_shape` had already
-# removed once (#10575 review, P2).
-#
-# So the SHAPE is pinned where it can be DERIVED (`_indented_block_shape` +
-# `_assert_preamble_shape`, run on the committed map AND on a swept render, by
-# `test_the_maps_indented_blocks_are_preamble_shaped_not_wrap_shaped`), and this
-# guard pins the other direction: the prose must not freeze a count the sweep
-# moves. Both halves are needed, or deleting the rationale would be a way to pass.
-#: A count of the map's WRAPPED rows or of its indented blocks, in DIGITS **or in
-#: WORDS**. The word forms are not decoration: after `0124b592a` removed the digit
-#: form from these very sites the claim came straight back spelled out and bound to
-#: `this head` — a moving referent, so still a figure the weekly sweep invalidates
-#: without touching any of these files (#10575 review, P3). A digit-shaped guard
-#: read that as clean, which is the whole reason both forms are pinned here.
-_COUNT_WORD = r"(?:one|two|three|four|five|six|seven|eight|nine|ten|\d+)"
-_FROZEN_MAP_COUNT_RE = re.compile(
-    r"\b1 row of \d+\b"
-    r"|\b\d+ of (?:its|the) \d+ (?:indented |such )?blocks?\b"
-    rf"|\b{_COUNT_WORD} rows?\s+wraps?\b"
-    rf"|\bexactly\s+{_COUNT_WORD}\s+rows?\s+does\b"
-    rf"|\ball but the\s+{_COUNT_WORD}\s+wraps?\b")
-_RATIONALE_SITES = ("tools/ci_timing.py", "tests/test_ci_timing.py",
-                    "tests/test_ci_selection.py")
-_SHAPE_CLAIM = "open a new note"
-
-
-def _prose_paragraphs(text: str) -> list[str]:
-    """Every comment run / docstring body in `text` as ONE joined paragraph.
-
-    ⛔ The guard used to `findall` the RAW file text, i.e. it read LINES — and a
-    claim about the map is a SENTENCE, which this tree reflows. `tools/ci_timing.py`
-    carried `… on the committed map exactly one` / `# row does …`: a bare newline
-    was always fine (`\\s+` matches it), but the CONTINUATION line's `#` landed
-    between `one` and `row`, so the line-wise read reported the tree CLEAN while the
-    claim sat one marker away from the pattern meant to forbid it (#10575 review,
-    P3). A span is not a line.
-
-    Both prose carriers are joined, because both have carried these claims: `#`
-    runs (the rationale comments here) and triple-quoted bodies (the docstrings that
-    stated the first, digit-shaped form). A bare `#` — this tree's paragraph break —
-    and a blank line END a paragraph, so two unrelated paragraphs are never glued
-    into a claim that no author wrote.
-    """
-    paragraphs: list[str] = []
-    current: list[str] = []
-    quote: str | None = None
-
-    def flush() -> None:
-        if current:
-            paragraphs.append(" ".join(current))
-            current.clear()
-
-    for line in text.splitlines():
-        stripped = line.strip()
-        if quote is not None:
-            if quote in stripped:         # the docstring closes on this line
-                head, _, _ = stripped.partition(quote)
-                if head.strip():
-                    current.append(head.strip())
-                flush()
-                quote = None
-            elif not stripped:            # a blank line inside a docstring breaks it
-                flush()
-            else:
-                current.append(stripped)
-            continue
-        if not stripped:
-            flush()
-            continue
-        if stripped.startswith("#"):
-            body = stripped.lstrip("#").strip()
-            if not body:                  # a bare `#` is this tree's paragraph break
-                flush()
-                continue
-            current.append(body)
-            continue
-        opened = next((q for q in ('"""', "'''") if q in stripped), None)
-        if opened is None:                # a code line ends any paragraph in progress
-            flush()
-            continue
-        head, _, tail = stripped.partition(opened)
-        if head.strip():
-            flush()                       # code in front of the opener is not prose
-        if opened in tail:                # one-line docstring: a paragraph of its own
-            paragraphs.append(tail.partition(opened)[0].strip())
-            continue
-        current.append(tail.strip())
-        quote = opened
-    flush()
-    return [para for para in paragraphs if para.strip()]
-
-
-def _frozen_map_count_hits(text: str) -> list[str]:
-    """Every frozen-map-count claim in `text`, read LINE-wise AND PARAGRAPH-wise.
-
-    The joined read is a SUPERSET of the line-wise one (a single-line claim is a
-    one-line paragraph), so both are kept: the line-wise pass still sees claims in
-    code, and the paragraph pass sees the ones a reflow split.
-    """
-    hits = list(_FROZEN_MAP_COUNT_RE.findall(text))
-    hits += [hit for para in _prose_paragraphs(text)
-             for hit in _FROZEN_MAP_COUNT_RE.findall(para)]
-    return hits
-
-
-def test_the_rationales_map_counts_stay_DERIVED_not_frozen_in_prose() -> None:
-    """A rationale may argue from the map's shape — never from a frozen count.
-
-    ⛔ Both figures move WITHOUT anyone touching these files: the sweep flattens a
-    wrapped note (one adopting render takes the committed wrap to zero) and the
-    `durations:` block grows with each newly measured file. State the shape, point
-    at the guard that computes it, and re-derive rather than restate.
-
-    Non-vacuity: on the pre-fix tree every site below reds — the two `.py` sites
-    stated the row count as an absolute after `1 row of`, and all three stated the
-    opener/blocks pair as `N of its M indented blocks` / `N of the M such blocks`.
-    """
-    root = Path(__file__).resolve().parent.parent
-    frozen = {rel: _frozen_map_count_hits((root / rel).read_text())
-              for rel in _RATIONALE_SITES}
-    assert {rel: hits for rel, hits in frozen.items() if hits} == {}, (
-        "a rationale states a MAP COUNT as an absolute; the weekly sweep moves "
-        "both figures and cannot edit these files — state the shape and point at "
-        f"the guard that derives it: {frozen}")
-    # …and the shape itself must still be argued for: deleting the rationale is not
-    # a way to satisfy the assertion above.
-    silent = [rel for rel in _RATIONALE_SITES
-              if _SHAPE_CLAIM not in (root / rel).read_text()]
-    assert silent == [], (
-        f"the rationale no longer states the dominant convention ({_SHAPE_CLAIM!r}) "
-        f"for: {silent} — the CUT arm is destructive, and the shape IS its justification")
-
-
-def test_the_count_guard_sees_the_WORD_form_of_the_same_figure() -> None:
-    """Non-vacuity for the word-form nodes, plus quiet on the TRUE historical pins.
-
-    Removing the digits from a rationale does not remove the claim: `3b1821394`
-    cleared the digit form off the three sites above and put the same figure back
-    spelled out, each one bound to `this head` — and the digit-only pattern read the
-    tree as clean (#10575 review, P3). Every sample below is that shipped shape.
-
-    They are ASSEMBLED from fragments on purpose: this file is itself one of
-    `_RATIONALE_SITES`, so writing the claim out in one piece would make the guard
-    above red on the test that proves the guard works.
-    """
-    frozen = [
-        " ".join(("At this head", "one", "row", "wraps", "(`test_x.py`);")),
-        " ".join(("(all but the", "one", "wrap", "noted above, at this head)")),
-        " ".join(("(at this head", "exactly", "one", "row", "does, and the")),
-        " 1 row of ".join(("", "1227")),
-        " ".join(("73 of the", "74", "such blocks", "open a new note")),
-    ]
-    missed = [s for s in frozen if not _frozen_map_count_hits(s)]
-    assert missed == [], (
-        f"the prose guard no longer sees a frozen map count in these shapes: {missed}")
-    # …and it stays QUIET on the statements that are true as written: a measurement
-    # pinned to a fixed sha is historical, not a claim about the live tree, and the
-    # dominant-convention sentence carries no count at all. Reddening either would be
-    # the false red this guard exists to avoid committing in the other direction.
-    quiet = [
-        "committed (wrapped=1, preamble=74) → after one adopting render (0, 73)",
-        "the overwhelming majority of such blocks open a new note at this head",
-    ]
-    noisy = {s: _frozen_map_count_hits(s) for s in quiet}
-    assert {s: hits for s, hits in noisy.items() if hits} == {}, (
-        f"the prose guard reds a TRUE statement: {noisy}")
-
-
-def test_the_count_guard_reads_the_SPAN_not_the_line_a_marker_split() -> None:
-    """Non-vacuity for the paragraph read: a reflowed claim is still a claim.
-
-    `tools/ci_timing.py:1858` stated, two lines above the rule forbidding it, that
-    the committed map carried the claim in words — with the continuation line's `#`
-    sitting between `one` and `row`. The line-wise read (the guard as it stood)
-    returned `[]` on exactly that span, which is the false green the review found
-    (#10575 review, P3); the paragraph read returns the claim. The docstring sample
-    is here for the opposite reason: a docstring wrap carries no marker, so it was
-    never blind, and the paragraph read must not drop that coverage either.
-
-    The samples are ASSEMBLED from fragments for the reason given above: this file
-    is itself a guarded site, so writing a claim out in one piece would make the
-    guard above red on the test that proves the guard works.
-    """
-    split_comment = "\n".join((
-        "# prior basis can sit mid-text — on the committed map "
-        + " ".join(("exactly", "one")),
-        "# " + " ".join(("row", "does, and it is one refresh away")),
-    ))
-    split_docstring = "\n".join((
-        '"""The CUT arm is justified by the map\'s shape:',
-        " ".join(("all", "but", "the")),
-        " ".join(("one", "wrap", "opens a new note of its own for the row below.")),
-        '"""',
-    ))
-    # the pre-fix reading — raw text, i.e. LINE-wise — is blind to the COMMENT
-    # shape, because the continuation line's `#` sits inside the claim. A bare
-    # newline was always fine (`\s+` matches it), which is why the docstring sample
-    # below could never carry the defect and is asserted the other way round: the
-    # paragraph read must not LOSE it.
-    assert _FROZEN_MAP_COUNT_RE.findall(split_comment) == [], split_comment
-    # …and the span reading sees the claim the author actually wrote, in both
-    # carriers
-    assert _frozen_map_count_hits(split_comment) == [
-        " ".join(("exactly", "one", "row", "does"))], split_comment
-    assert " ".join(("all but the", "one", "wrap")) in _frozen_map_count_hits(
-        split_docstring), split_docstring
-    # The join must not INVENT claims: a bare `#` (this tree's paragraph break) and a
-    # blank line both end a paragraph, so the halves of an innocent note are never
-    # glued into a figure nobody wrote — that would be the false red this guard
-    # exists to avoid committing in the other direction.
-    separated = [
-        "\n".join(("# on the committed map", "#", "# row does, and the")),
-        "\n".join((
-            "# the census reads the leg's own junit; CI is the source,",
-            "# and by CI timings this file is trivial.")),
-        "\n".join((
-            '# the note is joined for one reason:',
-            '# a re-emitted note is one paragraph.')),
-    ]
-    noisy = {s: _frozen_map_count_hits(s) for s in separated}
-    assert {s: hits for s, hits in noisy.items() if hits} == {}, (
-        f"the span read glues unrelated paragraphs into a frozen count: {noisy}")
