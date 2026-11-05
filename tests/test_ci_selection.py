@@ -7900,6 +7900,80 @@ def _durations_rows_whose_chain_disagrees_with_its_citation(text: str):
     return out
 
 
+# ── a row may not state ZERO cases beside a passing reading (#10726 ISSUE 1) ──
+# `02133e21b` (the fold's auto-merge) re-derived 41 `durations:` counts with
+# `grep -c '^def test_'` — a FLOOR, and `0` for every class-based file — and
+# wrote those floors into notes that quote a DIFFERENT, really-measured number.
+# The result was a row that contradicts itself in one sentence:
+#
+#   test_5509…: … pytest session total, **0 tests**, "16 passed in 138.63s"
+#   test_8864…: … (embedded carve-out lane, **0 tests**): "8 passed in 5.82s"
+#
+# `ac129dec7` repaired both by restoring the count each note's OWN reading
+# quotes — `16 tests` and `8 tests` at this head — so the MAP IS CLEAN HERE and
+# this pin is a REGRESSION GUARD, not the report of a live defect: the map arm
+# below asserts the offender list is EMPTY, which is the state a future fold has
+# to keep true, and `test_the_zero_case_guard_is_not_vacuous` supplies the
+# discrimination the clean map cannot.
+#
+# Nothing else caught it: the citation guard above only judges rows that NAME the
+# instrument (these do not), and the chain guard only judges rows that carry a
+# chain. This is the arithmetic invariant underneath both — a sentence cannot
+# report zero cases and more than zero passing — scoped to ONE sentence so the
+# map's legitimate history (`"33 passed" … (31 tests / 2.77 s BEFORE this
+# review)`, and `at 35 tests on an [earlier] idle host`) is not judged. A
+# same-sentence `0 … N>0` needs no history exemption: no correct note can say it.
+_ZERO_CASE_CLAIM_RE = re.compile(r"\b0\s+(?:tests|cases)\b")
+_PASSED_READING_RE = re.compile(r'"(\d+)\s+passed')
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.;:])\s+")
+
+
+def _durations_rows_stating_zero_cases_beside_a_passing_reading(text: str):
+    """`(key, passed, sentence)` for rows that contradict themselves in one sentence."""
+    out = []
+    for key, note in _durations_row_comments(text):
+        for sentence in _SENTENCE_SPLIT_RE.split(note):
+            if not _ZERO_CASE_CLAIM_RE.search(sentence):
+                continue
+            passed = _PASSED_READING_RE.search(sentence)
+            if passed is not None and int(passed.group(1)) > 0:
+                out.append((key, int(passed.group(1)), sentence.strip()[:120]))
+    return out
+
+
+def test_no_durations_row_states_zero_cases_beside_a_passing_reading():
+    """#10726 review ISSUE 1: a count of 0 is the FLOOR instrument, never a reading.
+
+    Green on this head by construction — `ac129dec7` restored the two counts —
+    which is the point: this is the guard that keeps the next fold from
+    re-deriving a cited READING with a current instrument.
+    """
+    offenders = _durations_rows_stating_zero_cases_beside_a_passing_reading(
+        cs.MANIFEST.read_text(encoding="utf-8"))
+    assert offenders == [], (
+        "a durations row states its file collected 0 cases in the same sentence "
+        "that quotes a passing count — `grep -c '^def test_'` reads 0 for every "
+        "class-based file, so 0 is the instrument's floor, never a measurement of "
+        f"a file that passed tests — (key, passed, sentence): {offenders}. "
+        "Restore the count this note's own measurement quotes; do not re-derive a "
+        "cited READING with a current instrument.")
+
+
+def test_the_zero_case_guard_is_not_vacuous():
+    """Bites on the self-contradiction, stays quiet on history and on real zeros."""
+    text = (
+        "durations:\n"
+        "  test_contradiction.py: 1.0  # measured: pytest session total, 0 tests, "
+        "\"16 passed in 138.63s\".\n"
+        "  test_history.py: 2.0  # measured: \"33 passed in 3.14s\" (31 tests / "
+        "2.77 s before this review added the two arms).\n"
+        "  test_no_reading.py: 3.0  # What the weight covers: 0 cases — none of the "
+        "arms reads a graph.\n"
+        "surfaces: []\n")
+    offenders = _durations_rows_stating_zero_cases_beside_a_passing_reading(text)
+    assert [k for k, _, _ in offenders] == ["test_contradiction.py"], offenders
+
+
 def test_no_durations_row_staleness_chain_ends_on_a_count_it_denies():
     """#10726 review ISSUE 1: the chain must terminate on the count the row cites.
 
