@@ -124,8 +124,18 @@ class Verdict:
 
 
 def _run(argv: list[str], *, cwd: Path, timeout: int = DEFAULT_TIMEOUT_S) -> subprocess.CompletedProcess:
+    # ⛔ errors="replace": ONE undecodable byte in git's output (a hook printing Latin-1, a non-UTF-8
+    # ref name) raised `UnicodeDecodeError` — a ValueError, which no except clause in this file holds —
+    # so the tool crashed with exit 1 (the MEASURED-REFUSAL bucket), printed no verdict, and left the
+    # probe ref on the remote after a push that had landed (measured round 21).
     return subprocess.run(
-        argv, cwd=str(cwd), capture_output=True, text=True, timeout=timeout, check=False
+        argv,
+        cwd=str(cwd),
+        capture_output=True,
+        text=True,
+        errors="replace",
+        timeout=timeout,
+        check=False,
     )
 
 
@@ -145,15 +155,57 @@ def _git(cwd: Path, *args: str, timeout: int = DEFAULT_TIMEOUT_S) -> subprocess.
 #   3. the belt: ANY remaining `…@…` token keeps only the part after the LAST `@`. That is the only
 #      construction that cannot be defeated by a password containing `/` and no scheme, and it can
 #      never remove a secret (a userinfo secret is always BEFORE the last `@`).
-_USERINFO = re.compile(r"(?<=://)[^@\s]+@")
+# ⛔ a PASSWORD is a secret; a password-less USER is not. `ssh://git@host/...` and the scp form are
+# ordinary remotes, and stripping their user names a DIFFERENT ssh user in the one actionable string
+# of a failure message. A secret WITHOUT a colon is real too (GitHub accepts a token as the user), so
+# token-shaped / long segments are still redacted.
+_USERINFO = re.compile(
+    r"(?<=://)(?:[^@\s/]+:[^@\s]*|[A-Za-z0-9_]{16,}|[A-Za-z0-9_-]*(?:gh[pousr]_|github_pat_)[^@\s]*)@"
+)
 _SCHEMELESS_USERINFO = re.compile(r"[^\s/@:]+:[^\s/@]*@")
 _TOKEN_SHAPED = re.compile(r"(gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})")
 
 
+def _userinfo_is_secret(segment: str) -> bool:
+    """Is this `user[:password]` segment worth REDACTING?
+
+    ⛔ A PASSWORD IS OBVIOUS (`user:pass@`); A PASSWORD-LESS USER IS NOT A SECRET. `git@`, `ubuntu@` and
+    `ssh://git@host/...` are ordinary remotes, and stripping them names a DIFFERENT ssh user in the one
+    actionable string of a failure message (`git ls-remote --heads <that>`) — measured twice: for the
+    scp form (round 21) and for the `ssh://` spelling (round 22). A secret WITHOUT a colon is real too
+    (GitHub accepts a token as the user), so a segment that is token-shaped, or long enough that no
+    sane user name looks like it, is redacted.
+    """
+    seg = segment.strip()
+    if not seg:
+        return False
+    if ":" in seg:  # user:password
+        return True
+    if _TOKEN_SHAPED.search(seg):
+        return True
+    # ⛔ LENGTH ALONE IS THE WRONG TEST: `deploy-automation-user` and `firstname.lastname` are ordinary
+    # enterprise users, and stripping them named a different ssh user — the harm this function exists to
+    # prevent. An opaque secret segment is alphanumeric/underscore ONLY, so a segment carrying a `.` or
+    # `-` is kept and an opaque long run is redacted. Documented as a tradeoff: a 16+ char opaque USER
+    # is redacted (it is indistinguishable from a token), and a password containing a space or an `@`
+    # cannot be told from a target, so such URLs are documented rather than guessed at.
+    return len(seg) >= 16 and set(seg) <= set(
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"
+    )
+
+
 def _strip_residual_userinfo(token: str) -> str:
+    """Keep only what follows a REAL userinfo segment — `user:password@host` — never an `@` alone.
+
+    ⛔ The scp form `git@github.com:owner/repo.git` has a user but no secret, and its colon is in the
+    TAIL. Stripping on the mere presence of `@` turned the fleet's default remote into
+    `github.com:owner/repo.git`, which git resolves to a DIFFERENT ssh user — and that string is the one
+    actionable text in a failure message (`git ls-remote --heads <that>`). Measured round 21.
+    """
     if "@" not in token:
         return token
-    return token.rsplit("@", 1)[-1]
+    head, _, tail = token.rpartition("@")
+    return tail if _userinfo_is_secret(head.split("//")[-1]) else token
 
 
 def _scrub(text: str) -> str:
@@ -908,4 +960,18 @@ def _emit(verdict: Verdict, *, json_out: bool, quiet: bool, cannot_verify: bool 
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # ⛔ LAST RESORT: an exception escaping a bucket-specific handler must still answer in the tool's
+    # vocabulary. Exit 1 means "measured refusal, do not start"; a crash measures nothing.
+    try:
+        sys.exit(main())
+    except SystemExit:
+        raise
+    except BaseException as exc:
+        print(
+            f"GH-WRITE-UNAVAILABLE(cannot-verify:probe-error) — the preflight itself failed: "
+            f"{type(exc).__name__}: {_scrub(str(exc))}\n"
+            f"  this is NOT a credential verdict — nothing about the credential was measured. "
+            f"Re-run; if it repeats, the fault is in the tool, not the token.",
+            file=sys.stderr,
+        )
+        sys.exit(2)

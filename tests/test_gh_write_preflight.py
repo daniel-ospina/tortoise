@@ -1583,6 +1583,92 @@ exec {GIT} "$@"
     assert "ls-remote-mismatch" in combined, combined
 
 
+def test_the_scp_form_remote_survives_the_scrubber(tmp_path: Path) -> None:
+    """\u26d4 MEASURED ROUND 21. The residual belt kept only the text after the last `@`, so the fleet's
+    default remote `git@github.com:owner/repo.git` was echoed as `github.com:owner/repo.git` \u2014 which
+    git resolves to a DIFFERENT ssh user, in the one actionable string of a failure message
+    (`git ls-remote --heads <that>`). `git` is a user, not a secret; userinfo is `user:password@`.
+    """
+    mod = _load_tool()
+    scp = "git@github.com:daniel-ospina/tortoise.git"
+    assert mod._strip_residual_userinfo(scp) == scp, mod._strip_residual_userinfo(scp)
+    assert mod._scrub(f"could not list refs on {scp}") == f"could not list refs on {scp}"
+    secret = "S3CRETVALUE" + "z" * 20
+    for spelling in (
+        f"https://x-access-token:{secret}@github.com/o/n.git",
+        f"user:{secret}@github.com:o/n.git",
+    ):
+        assert secret not in mod._scrub(spelling), spelling
+
+
+def test_undecodable_git_output_is_not_a_crash(tmp_path: Path) -> None:
+    """\u26d4 MEASURED ROUND 21: one undecodable byte in git's output raised `UnicodeDecodeError` \u2014 a
+    ValueError, held by no except clause here \u2014 so the tool crashed with exit 1 (the
+    MEASURED-REFUSAL bucket), printing no verdict at all. A decode artefact may never answer "the
+    credential cannot write".
+
+    The bad byte is injected through the push's STDERR (a stub), which is what the tool captures and
+    classifies \u2014 a hook's own stdout is not read by the client, so a hook-based fixture passes for
+    the wrong reason (measured: the mutant that removes `errors="replace"` survived it).
+    """
+    clone = _make_remote_and_clone(tmp_path)
+    bindir = _stub_bin(
+        tmp_path,
+        f"""#!/bin/sh
+do_push=0; for a in "$@"; do [ "$a" = "push" ] && do_push=1; done
+case "$*" in *--delete*) do_push=0 ;; esac
+if [ "$do_push" = 1 ]; then
+  # \u26d4 LAND THE PUSH FIRST. A stub that exits without pushing makes the "no leftover ref" assertion
+  # vacuous \u2014 the assertion cannot fail, so removing `errors="replace"` survived it (measured
+  # round 23). With the real push performed, the shipped tool exits 0 and leaves nothing, while the
+  # mutant lands the ref and dies in the last-resort handler.
+  {GIT} "$@"
+  printf 'remote: d\\351p\\364t re\\347u\\n' >&2
+  exit 0
+fi
+exec {GIT} "$@"
+""",
+    )
+    res = _run_with_path(clone, bindir)
+    combined = res.stdout + res.stderr
+    assert "Traceback" not in combined, f"a decode artefact crashed the tool: {combined}"
+    # shipped behaviour: the bad bytes are replaced, the probe succeeds, and NOTHING is left behind.
+    # A mutant that decodes strictly lands the ref and dies in the last-resort handler \u2014 so this
+    # pair of assertions is what discriminates (measured: exit 0 + no leftover here, exit 2 + a
+    # leftover under the mutant).
+    assert res.returncode == 0, combined
+    assert "GH-WRITE-OK" in combined, f"it must still print a verdict: {combined}"
+    assert "gh-write-preflight" not in _git("ls-remote", "--heads", "origin", cwd=clone).stdout
+
+
+def test_a_password_less_ssh_user_survives_and_a_secret_does_not(tmp_path: Path) -> None:
+    """\u26d4 ROUND 22. `ssh://git@host/o/n.git` is a supported credential target, and the user is NOT a
+    secret \u2014 stripping it names a DIFFERENT ssh user in the one actionable string of a failure
+    message (`git ls-remote --heads <that>`), the round-21 harm on the second spelling. A token-as-user
+    (`https://<token>@host`) IS a secret and must still go.
+    """
+    mod = _load_tool()
+    keep = [
+        "ssh://git@github.com/daniel-ospina/tortoise.git",
+        "git+ssh://git@github.com/daniel-ospina/tortoise.git",
+        "git@github.com:daniel-ospina/tortoise.git",
+        "https://github.com/daniel-ospina/tortoise.git",
+    ]
+    for url in keep:
+        assert mod._scrub(f"could not list refs on {url}") == f"could not list refs on {url}", url
+
+    secret = "ghp_" + "A" * 36
+    opaque = "S3CRETOPAQUEVALUE" + "b" * 10
+    for url in (
+        f"https://x-access-token:{secret}@github.com/o/n.git",
+        f"https://{secret}@github.com/o/n.git",
+        f"https://{opaque}@github.com/o/n.git",
+        "user:pa/ss@github.com:o/n.git",
+    ):
+        out = mod._scrub(url)
+        assert secret not in out and opaque not in out, f"{url} leaked: {out}"
+
+
 if __name__ == "__main__":
     import inspect
     import tempfile
