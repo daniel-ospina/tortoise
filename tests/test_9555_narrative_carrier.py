@@ -2502,6 +2502,16 @@ _NARRATIVE_NEGATION_INVERSIONS: list[tuple[str, str]] = [
      "narrative"),
     ("the negation in a neighbouring clause",
      "the narrative is not on the node; `summary` is §4.6 metadata"),
+    #: ⚠️ THE CLAUSE STOP, for THIS object's trailing direction — the shape the
+    #: three cases above do not reach. The cue is DASH-separated from the object
+    #: and negates something else (*the summary*); it is refused because the SPAN
+    #: stops at `_NEG_CLAUSE_SAFE`'s `—`, not because of what follows the cue —
+    #: the half of the binding cycles 17–18 spent two rounds getting right on
+    #: `_negates_the_home`. Green under the literal this guard replaced too,
+    #: deliberately: it is a control on the BINDING, not a non-vacuity case for
+    #: the fix.
+    ("the cue across a clause boundary from the object",
+     "the narrative — not the summary"),
 ]
 
 
@@ -2539,14 +2549,16 @@ def test_the_narrative_negation_ACCEPTS_a_correct_rewording(
 @pytest.mark.parametrize(
     "why,clause", _NARRATIVE_NEGATION_INVERSIONS,
     ids=["negation-dropped", "negates-another-name",
-         "negation-in-other-clause"])
+         "negation-in-other-clause", "cue-across-a-clause-boundary"])
 def test_the_narrative_negation_REFUSES_a_line_that_only_NAMES_the_narrative(
         why: str, clause: str):
     """*What value makes this test fail?* Deleting the guard instead of binding it.
 
     Each line names the narrative with no cue bound to it, binds the cue to a
-    DIFFERENT name, or puts the cue in a neighbouring clause. If the guard is
-    dropped — or widened to a bare `"narrative" in line` presence check — these
+    DIFFERENT name, puts the cue in a neighbouring clause, or separates object and
+    cue with a CLAUSE BOUNDARY (*—*). If the guard is
+    dropped — or widened to a bare `"narrative" in line` presence check, or its
+    span loosened past `_NEG_CLAUSE_SAFE` — these
     pass, and the footnote's whole point (the summary is NOT what gets embedded)
     goes unpinned in the section a designer lands on when placing a vector.
     """
