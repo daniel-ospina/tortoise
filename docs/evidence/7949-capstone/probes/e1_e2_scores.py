@@ -256,7 +256,11 @@ def _consistent_share(where: str, share, bare, objects) -> None:
         bare_n = float(bare)
         objects_n = float(objects)
         declared = float(share)
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, OverflowError) as exc:
+        # ⛔ `OverflowError` IS THE THIRD ARM (#10610 review at `fe77fb13f`, P2): an
+        # unbounded JSON integer (`10**400`) converts to no float, and only
+        # `TypeError`/`ValueError` were caught — so the guard raised a traceback
+        # (exit 1) on the one input it exists to refuse.
         raise _refuse(f"{where} carries bare_definite={bare!r} / "
                       f"objects={objects!r} / share={share!r}, which is not a "
                       f"share: {exc}") from exc
@@ -333,10 +337,13 @@ def _object_block(where: str, field: str, value: dict) -> dict:
     caller unchanged and the next `.get(...)` raised `AttributeError` — exit **1**
     with a traceback instead of the exit-**2** refusal, the same class
     `_unit_id_members`, `_count`, `_float_token` and `_consistent_share` already
-    convert-and-refuse. Measured on a copy of the shipped bundle:
-    `"with_anchor": "none"` and `"as_written": "none"` both exited 1 at
-    `with_anchor.get("injected_anchor")` / `as_written.get("value_units")` before
-    this guard, because the only test applied to them was truthiness.
+    convert-and-refuse. Measured at `73382c7e6` on copies of the shipped bundle:
+    `"with_anchor": "none"` and `"as_written": "none"` both exited 1 with
+    `AttributeError: 'str' object has no attribute 'get'` — at
+    `(record.get("with_anchor") or {}).get("graph")`, the graph-identity loop that
+    runs BEFORE the scored-block arms (which is why the first attempt at this fix,
+    applied only to those arms, left the escape reachable; #10610 review at
+    `858675ade` measured it there).
 
     The empty case is the CALLER's, not this helper's: `{}` is a well-formed block
     that wrote nothing, and each site refuses it with its own message ("present but
@@ -388,7 +395,19 @@ def _count(where: str, field: str, value, ceiling: int | None = None) -> int:
         raise _refuse(f"{where} carries {field}={value!r}, which is not a number "
                       f"— a count is numeric, so this is an edited record or "
                       f"another producer's shape")
-    if not math.isfinite(value):
+    try:
+        finite = math.isfinite(value)
+    except OverflowError as exc:
+        # ⛔ AN ARBITRARY-PRECISION INTEGER IS THE INTEGER SIBLING OF `Infinity`
+        # (#10610 review at `fe77fb13f`, P2). `json.loads` returns an unbounded
+        # Python int for any integer literal, and `math.isfinite(10**400)` — like
+        # `float(10**400)` — raises `OverflowError: int too large to convert to
+        # float`, which is exit **1** with a traceback out of the guard whose whole
+        # job is to refuse rather than crash.
+        raise _refuse(f"{where} carries {field} at a magnitude no float can "
+                      f"hold ({len(str(abs(value)))} digits) — a count of a real "
+                      f"population, so this is an edited record: {exc}") from exc
+    if not finite:
         raise _refuse(f"{where} carries {field}={value!r}, which is not a finite "
                       f"number — a count of a real population cannot be nan or "
                       f"inf")
