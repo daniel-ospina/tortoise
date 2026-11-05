@@ -35,7 +35,8 @@ counts reconcile (5 items → 6 children, +1 because S5 is two artifacts).**
 **No overlap:** no child touches more than one S-item's surface. **No gap:** no S-item is unowned.
 
 ⚠️ **Reconciled against the PRIOR decomposition, not just the issue tracker.** `#5090` carries a
-**2026-10-31** decomposition comment (pointer: `#5087` · `issuecomment-6550250938`) whose child set was
+**2026-10-31** decomposition comment (`#5090` · `issuecomment-6550250938`; its own census pointer is
+`#5087` · `issuecomment-6550245534`) whose child set was
 **six** existing children — `#4997` · `#4999` · `#5096` · `#5407` · `#4333` · `#8419` — **plus one newly
 filed** (`#10465`), which is why its own list carries seven ids. Per-child disposition, so "MECE" is a
 claim and not an assertion:
@@ -44,7 +45,7 @@ claim and not an assertion:
 |---|---|---|
 | `#4997` | CLOSED (PR #5434) | **not re-filed.** Landed the measurement half only; its residual is C4 (**corrected**: the served set is never retained) and its population question is C5. |
 | `#4999` | CLOSED (PR #5159) | **not re-filed.** `scan_fallback` is MET; D13 is a regression pin only. |
-| `#4333` | OPEN, native child | **not re-filed.** Owns the storage architecture; cited 6× as the home of what this epic excludes. |
+| `#4333` | OPEN, native child | **not re-filed.** Owns the storage architecture; cited as the home of what this epic excludes. |
 | `#8419` | OPEN, parented by neither | **not re-filed.** Root is the D10 fold (`#5088`); named in §4, not claimed. |
 | `#5096` | CLOSED COMPLETED | **not re-filed.** Its **query** leg is exercised by D13 (`scan_fallback`); **no** D-case issues a traversal-leg query, and the epic adds no new leg. |
 | `#5407` | CLOSED COMPLETED | **not re-filed.** The three label sets now agree — the premise D8 asserts (*one declaration, not a second*). |

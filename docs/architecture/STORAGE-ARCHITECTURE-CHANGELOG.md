@@ -1944,7 +1944,7 @@ four-versus-one conclusion with no reference to the passage's previous wording.
 
 **§14.3 — V1's numbers.** The V1 row gave the vector question's weight as *"≈50 MB of stored vectors + a
 45 MB index total, on 141 MB"*. Two independent problems: the 141/45 MB pair is the dated 2026-09-24
-reading taken on a **capped** base (24,978 quota-counted, against 89,701 resident), so it is not a growth baseline — the current reading's `MATCH (n)` count is 68,526, *lower* than that 89,701, while bytes went 141 MB → 195 MB and indices 45 → 93 MB, i.e. the growth is in the index, not the node count; and the ≈50 MB payload is that same dated measurement's
+reading taken on a **capped** base (the 2026-09-25 block: 24,978 quota-counted against 89,701 resident — a different reading again), so it is not a growth baseline — the current reading's `MATCH (n)` count is 68,526, *lower* than that 89,701, while bytes went 141 MB → 195 MB and indices 45 → 93 MB, i.e. the growth is in the index, not the node count; and the ≈50 MB payload is that same dated measurement's
 additive estimate over three labels — it was never a current payload reading either. The row now carries
 the **2026-11-04 graph reading** from `live-v4` (`#10976`): **93 MB of index total on a 195 MB graph**,
 with the 93 MB named as the TOTAL index size of which only part is HNSW; and it names the payload axis as
