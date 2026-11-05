@@ -1299,15 +1299,21 @@ def test_supersede_repoint_survives_a_far_endpoint_with_no_id(lane):
 def test_supersede_repoint_survives_a_unhashable_stored_direction(lane):
     """A raw-written NON-SCALAR ``direction`` must not abort the supersede.
 
-    ``live.direction_flows`` tests membership in a frozenset, so an unhashable
-    property value (a list/map) raises ``TypeError`` — a traceback aborting a
-    supersede the guard is not about. ⛔ The value is judged BOTH ways, NOT as
-    the edge type's default: a HASHABLE unknown token is read as both ways by
-    ``live.direction_flows`` (an UNHASHABLE one raises ``TypeError`` there, so
-    both ways is the fail-closed stand-in), i.e. a present junk value is a
-    two-leg wiring, and judging NAND's ``unidirectional`` would judge one leg of
-    it (see ``test_supersede_repoint_reads_a_junk_direction_as_both_ways``).
-    This test pins only the no-``TypeError`` half, on a same-class fixture.
+    ⛔ What protects it is the ONE read-side normalizer, NOT a guard at this
+    door: ``live.canonical_direction`` returns ``None`` for any non-``str``
+    (#10520) and ``direction_flows(None) == (True, True)``. The three-branch
+    ``isinstance`` filter ``supersede_point`` used to carry was DELETED in the
+    same lane (#10520 A4, "so the two cannot drift"), so this test is now also
+    the evidence that the deletion is safe: it stays green with the door's own
+    filter gone, and it goes RED if the SHARED guard is reverted
+    (``TypeError: unhashable type: 'list'``).
+
+    ⛔ The value is read as BOTH ways, NOT as the edge type's default: a present
+    unknown token — hashable or not — is read as both ways by
+    ``live.direction_flows``, so judging NAND's ``unidirectional`` here would
+    judge ONE leg of a two-leg wiring (see
+    ``test_supersede_repoint_reads_a_junk_direction_as_both_ways``). This test
+    pins only the no-``TypeError`` half, on a same-class fixture.
     """
     old = lane.create_point("statement", "computed v1",
                             claim_class="derived")["id"]
@@ -1422,8 +1428,14 @@ def test_supersede_repoint_and_create_direct_edge_agree_on_a_directionless_NAND(
         "MATCH (a:Point {id:$a}), (b:Point {id:$b}) MERGE (a)-[r:NAND]->(b)",
         params={"a": c_old, "b": c_t})  # NO direction property on disk
     assert _direct_rows(lane, c_old)[0][2] == ""
-    with pytest.raises(ValueError, match="re-pointing the NAND edge"):
+    with pytest.raises(ValueError, match="re-pointing the NAND edge") as _aexc:
         lane.supersede_point(c_old, c_new)
+    # The ABSENT arm is the ONE place the refusal still renders a ``judged``
+    # token (a present value is returned verbatim, so the parenthetical would
+    # only duplicate it). Without this assertion the branch is unpinned: an
+    # unconditional ``_judged = ""`` keeps every other test green.
+    assert "direction None (judged 'unidirectional')" in str(_aexc.value), (
+        str(_aexc.value))
     assert _direct_rows(lane, c_new) == []
     assert _direct_rows(lane, c_old)[0][2] == ""
 
@@ -1515,12 +1527,13 @@ def test_supersede_repoint_judges_a_non_string_id_far_endpoint(lane):
 def test_supersede_repoint_reads_a_junk_direction_as_both_ways(lane):
     """A PRESENT non-string ``direction`` is judged as BOTH ways (fail-closed).
 
-    ⛔ It is NOT the edge type's default. A HASHABLE unknown token (``3``,
-    ``True``) is read as both ways by ``live.direction_flows`` and ``ep.py``;
-    an UNHASHABLE one (this fixture's list) makes ``direction_flows`` raise
-    ``TypeError``, so both ways is the fail-closed stand-in there — either way
-    judging NAND's ``unidirectional`` here would judge ONE leg of a two-leg
-    wiring and let a supersede write ``asserted -[NAND {junk}]-> derived``, whose backward
+    ⛔ It is NOT the edge type's default. A present unknown token — hashable
+    (``3``, ``True``) or UNHASHABLE (this fixture's list) — is read as both ways
+    by ``live.direction_flows`` and ``ep.py``: ``canonical_direction`` maps any
+    non-``str`` to ``None`` (junk is ABSENT, #10520) and the absent token is the
+    runtime's mutual default. Judging NAND's ``unidirectional`` here would judge
+    ONE leg of a two-leg wiring and let a supersede write
+    ``asserted -[NAND {junk}]-> derived``, whose backward
     leg is the override ``create_direct_edge(NAND, …, 'bidirectional')``
     refuses (measured: the pre-fix door transferred exactly that). The
     same-class shape below still transfers, so "junk must not abort a supersede
@@ -1573,6 +1586,83 @@ def test_supersede_repoint_reads_a_junk_direction_as_both_ways(lane):
     lane.supersede_point(same_old, same_new)  # must not raise
     _rows = _direct_rows(lane, same_new)
     assert _rows and _rows[0][0] == same_new, _rows
+
+
+def test_supersede_repoint_judges_a_junk_direction_through_the_ONE_normalizer(
+        lane):
+    """#10520 (A4) — the re-point door reports the ONE normalizer's reading.
+
+    ``supersede_point`` carried a door-local copy of the direction policy: an
+    ``isinstance(_raw_dir, str)`` / ``elif _raw_dir is None`` / ``else
+    "bidirectional"`` filter around ``_canonical_direction``. #10520's own
+    instruction is that it be DELETED ("so the two cannot drift"), and after the
+    shared normalizer reads a non-scalar as ABSENT the filter adds nothing to the
+    verdict: ``_canonical_direction`` returns a present value VERBATIM, so the
+    plain call hands ``direction_blocks_create`` the stored value ITSELF — not
+    what the shared READER returns, which is ABSENT for a non-``str``
+    (``live.canonical_direction``) — and it is ``direction_flows`` that maps both
+    the raw junk and the ``else`` branch's hardcoded mutual default to the same
+    both-ways verdict. The VERDICT is what coincides; the VALUE does not.
+    Leaving the filter is a second source of truth for "what does this token
+    mean" — #10520's whole point.
+
+    Its one EXTERNALLY VISIBLE effect is the refusal message, which is where the
+    door publishes its reasoning: the pre-fix message reads
+    ``direction ['sideways'] (judged 'bidirectional')`` — the stored value, then
+    a token it does not carry, invented by the door. That is the drift made
+    observable, so it is what this pins: the message must name the stored value
+    and must NOT publish a second, door-local token beside it. ⛔ The VERDICT is
+    pinned unchanged by ``test_supersede_repoint_reads_a_junk_direction_as_both
+    _ways`` (junk = both ways = REFUSED on the backward leg), which is why the
+    deletion is behaviour-preserving except here.
+    """
+    old = lane.create_point("statement", "computed v1",
+                            claim_class="derived")["id"]
+    new = lane.create_point("statement", "authored v2")["id"]  # asserted
+    t = lane.create_point("statement", "computed peer",
+                          claim_class="derived")["id"]
+    lane.create_direct_edge("NAND", old, t, direction="->")
+    lane._get_proj().g.query(
+        "MATCH (a:Point {id:$a})-[r:NAND]->(b:Point {id:$b}) "
+        "SET r.direction = ['sideways']",
+        params={"a": old, "b": t})
+
+    with pytest.raises(ValueError, match="re-pointing the NAND edge") as _exc:
+        lane.supersede_point(old, new)
+    _msg = str(_exc.value)
+    assert "direction ['sideways']" in _msg, _msg
+    assert "judged ['sideways']" not in _msg, (
+        "the door re-published the stored value as its own `judged` token — "
+        f"the parenthetical now duplicates `direction` verbatim ({_msg})")
+    assert "judged 'bidirectional'" not in _msg, (
+        "the door substituted its OWN token for the stored value — a second "
+        f"copy of the direction policy ({_msg})")
+    # The refusal landed before every mutation, as it must: the PREDECESSOR is
+    # the only node ``supersede_point`` writes a status on (and it re-points
+    # edges off it), so a successor-status assertion would pass either way.
+    assert _props(lane, old).get("status") == "live"
+    assert _direct_rows(lane, old)[0][0] == old
+
+    # …and the HASHABLE half of the same rule, so the pin is not keyed on
+    # "unhashable": ``3`` is read as both ways by ``direction_flows``, and the
+    # message must name the stored value rather than substituting the
+    # mutual-default token for it.
+    h_old = lane.create_point("statement", "computed h1",
+                              claim_class="derived")["id"]
+    h_new = lane.create_point("statement", "authored h2")["id"]
+    h_t = lane.create_point("statement", "computed h peer",
+                            claim_class="derived")["id"]
+    lane.create_direct_edge("NAND", h_old, h_t, direction="->")
+    lane._get_proj().g.query(
+        "MATCH (a:Point {id:$a})-[r:NAND]->(b:Point {id:$b}) "
+        "SET r.direction = 3",
+        params={"a": h_old, "b": h_t})
+    with pytest.raises(ValueError, match="re-pointing the NAND edge") as _hexc:
+        lane.supersede_point(h_old, h_new)
+    _hmsg = str(_hexc.value)
+    assert "direction 3" in _hmsg, _hmsg
+    assert "judged 3" not in _hmsg, _hmsg
+    assert "judged 'bidirectional'" not in _hmsg, _hmsg
 
 
 def test_supersede_repoint_reads_a_non_string_id_endpoints_own_marker(lane):
