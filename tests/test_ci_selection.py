@@ -10573,6 +10573,18 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
         "the `test` job's pip cache reader must be exactly one "
         f"`actions/cache/restore@v4` (found {len(pip_restores)} of {len(pip_steps)})")
     pip_restore = pip_restores[0]
+    # ⛔ PATH IDENTITY, the other half of the same contract (#11065 cycle 5,
+    # finding 2). `path` is part of the cache's VERSION, so a restore pointed one
+    # directory off can never match the entry the writers produced — a permanent
+    # MISS with the step green. Applying this to `~/.cache/uv` only left the two
+    # BIGGEST payloads (3,616,385,308 B of torch wheels, and the 78 MB embedder
+    # whose transfer died in the filed incident) guarded by a substring.
+    assert _path_of(pip_restore).strip() == "~/.cache/pip", (
+        f"the pip restore reads {_path_of(pip_restore).strip()!r}, not "
+        "`~/.cache/pip`. `path` is part of the cache's VERSION, so the entry the "
+        "four writer jobs produce can never match it — a permanent MISS with the "
+        "step green, which is a cold 3.6 GB torch download on every shard "
+        "(#7612 reverted, #11063 cycle 5 finding 2).")
     assert pip_restore.get("continue-on-error") is True, (
         "the pip restore must be `continue-on-error: true` — a cache-SERVICE error "
         "(transport/503) must never red the leg; a miss is the fail-open case and "
@@ -10739,6 +10751,17 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
         "vendor's `--ci` variant, which deletes the pre-built wheels that ARE "
         "#7612's payload.")
     prune = pruners[0]
+    # ⛔ The `OVERRIDES:` departure is PLAIN `prune`, and an unguarded substring
+    # let the vendor's `--ci` variant read green (#11065 cycle 5, finding 4) —
+    # which deletes the pre-built wheels that ARE #7612's payload, i.e. the exact
+    # tidy-up the marker exists to prevent.
+    assert "--ci" not in str(prune.get("run") or ""), (
+        "the uv prune was switched to `uv cache prune --ci`, which `uv`'s own "
+        "docs say \"removes all pre-built wheels and unzipped source "
+        "distributions\" — the torch wheel set this cache exists to keep. The "
+        "`OVERRIDES:` line at .github/workflows/python-ci.yml:954-962 records "
+        "why this job departs from the vendor's CI recommendation; use plain "
+        "`uv cache prune`.")
     assert prune.get("continue-on-error") is True, (
         "the uv prune must be `continue-on-error: true` — a prune that cannot run "
         "only leaves a bigger archive for a save that is bounded on its own")
@@ -10747,6 +10770,29 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
         f"the uv prune's `timeout-minutes` is {prune_bound!r}; it must be a "
         "positive integer <= 4 — an unbounded prune is the same defect class as "
         "the unbounded save (#11063/#10182)")
+
+    # ⛔ A STEP BOUND ABOVE THE STEP'S OWN BLOCKING WAIT IS AN INERT ENFORCER
+    # (#11065 cycle 5, finding 5). `uv` waits `UV_LOCK_TIMEOUT` (default 300 s)
+    # for the cache lock another uv process may hold, and on a shared pool host
+    # several shards of the same run install concurrently — so a 1 m step bound
+    # with the 5 m default kills the prune having pruned NOTHING, every time,
+    # and the save then uploads the accumulation the prune exists to drop. The
+    # step must bound the LOCK WAIT below its own `timeout-minutes`; it does so
+    # inline (`UV_LOCK_TIMEOUT=10 uv cache prune`) to keep the workflow's line
+    # count — and therefore every `python-ci.yml:NNNN` citation this PR re-anchors
+    # — byte-for-byte unchanged.
+    lock = re.search(r"UV_LOCK_TIMEOUT=(\d+)", str(prune.get("run") or ""))
+    assert lock, (
+        "the prune step does not bound `UV_LOCK_TIMEOUT`. `uv`'s default cache-lock "
+        "wait is 300 s — longer than this step's 1 m bound — so on any host where "
+        "another uv process holds the cache (the normal case on a shared pool) "
+        "the step is killed mid-wait, pruning nothing while the bound reads as if "
+        "it held. Set it inline, below the step bound.")
+    assert int(lock.group(1)) < prune_bound * 60, (
+        f"the prune step's `UV_LOCK_TIMEOUT` is {lock.group(1)}s against a "
+        f"`timeout-minutes: {prune_bound}` ({prune_bound * 60}s) — the wait must be "
+        "decided INSIDE the step bound, or the bound cannot fire before the "
+        "wait does.")
     assert order[id(prune)] < order[id(uv_save)], (
         "`uv cache prune` must run BEFORE the save, or it bounds nothing")
 
@@ -10797,6 +10843,13 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
     assert len(hf_restores) == 1 and hf_restores[0].get("continue-on-error") is True, (
         "the HF restore must be exactly one `actions/cache/restore@v4` with "
         "`continue-on-error: true`")
+    assert _path_of(hf_restores[0]).strip() == "~/.cache/huggingface", (
+        f"the HF restore reads {_path_of(hf_restores[0]).strip()!r}, not "
+        "`~/.cache/huggingface`. `path` is part of the cache's VERSION, so this "
+        "is a permanent MISS on an entry three sibling jobs keep warm — the "
+        "dense leg then re-downloads the embedder from huggingface.co on every "
+        "run, which is the transfer that died in the filed incident "
+        "(#11063 cycle 5 finding 2).")
     hf_key = _key_of(hf_restores[0])
     hf_writers = [jid for jid, jd in wf["jobs"].items() if jid != "test"
                   for s in (jd.get("steps") or [])
