@@ -1494,10 +1494,15 @@ def _props_from_row(table: str, row: Mapping[str, Any], *,
     # ⛔ PROVENANCE, PER ROW (#10965) — never the column's NAME. On a post-#10000
     # row `_search_text` is the topic lexicon (exactly `", ".join(topics)`), not
     # prose, and it is the ONLY field the Source FTS index is declared on, so
-    # dropping it un-indexes a restored session. `summary` is NOT relaxed: the
-    # display prefix it carries is not re-derivable in this module, so the
-    # descriptor stays indistinguishable from a prose sentence here (the table
-    # above states that residual).
+    # dropping it un-indexes a restored session. The proof is TWO-TERM (#10852
+    # review, P2): the join equality AND a `summary` that is that same join behind
+    # `SESSION_SOURCE_SUMMARY_PREFIX`, because a legacy PROSE value can itself BE
+    # the join (a list-shaped utterance) while a legacy row's two columns are
+    # literally equal. `summary` is NOT relaxed: the door READS it as the WITNESS
+    # and never projects it — it now classifies the descriptor exactly, and still
+    # declines it, because restoring a display label gains no retrieval (the index
+    # reads `_searchText`) and widening the projected field set is its own
+    # decision. The table above states that residual and its cost.
     prose_columns = _EPISODIC_SOURCE_PROSE_COLUMNS
     if episodic_source and _episodic_source_search_text_is_the_lexicon(row):
         prose_columns = prose_columns - {"_search_text"}

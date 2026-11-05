@@ -3,19 +3,23 @@
 THE RULE. `docs/architecture/STORAGE-ARCHITECTURE.md` §9.1 (D1, owner ruling
 2026-09-23) puts the transcript in the RECORD: *"not in the graph, not a
 `Document` node, not a `Point`"*. #10000's item 2 measured the route that was
-STILL OPEN AT THAT STAMP — `:Source.summary` HELD the session's first
-substantive utterance, i.e. raw turn text, written by
-`sdk._session_source_metadata` — and recorded it as *"the second prose
-passthrough onto a node"* (capstone artifact
+still open AT THAT STAMP — `:Source.summary` HELD the session's first substantive
+utterance, i.e. raw turn text, written by `sdk._session_source_metadata` — and
+recorded it as *"the second prose passthrough onto a node"* (capstone artifact
 `docs/verify/2026-10-31-record-capstone.md` §4 item 2, and the same reading in
-`docs/verify/2026-10-26-record-capstone.md`). This file is the guard that closed
-it.
+`docs/verify/2026-10-26-record-capstone.md`). ⛔ PAST TENSE ON PURPOSE: on today's
+tree that builder returns a topic-lexicon DESCRIPTOR behind
+`_SESSION_SOURCE_SUMMARY_PREFIX` and the indexed text is the bare join, so a
+present-tense reading of this paragraph would re-arm the premise the change
+removed (#10852 review, P3).
 
-WHY IT WAS WORTH A TEST RATHER THAN A NOTE. That same string WAS the Source's
-`_searchText` (#3518), so the leak was on a field the FTS index is declared on:
+WHY IT WAS WORTH A TEST RATHER THAN A NOTE. The same string WAS the Source's
+`_searchText` (#3518), so the leak sat on a field the FTS index is declared on:
 a session's own words were duplicated into the graph AND into the index that
 serves `tortoise_fts_query(entity_type='source')`. Redaction (#4911) did not
-close it — a scrubbed sentence is still the session's sentence.
+close it — a scrubbed sentence is still the session's sentence. The legs below
+stay armed against a REINTRODUCTION of either shape, which is why they are
+stated as a rule rather than as a historical note.
 
 THE ASSERTION IS A GRAPH-WIDE SCAN, not a property read: the defect is "this
 text is on a node", and a scan over every node's string properties is the only

@@ -205,21 +205,27 @@ from the SAME list in one statement. So on a post-#10000 row `_search_text` is n
 prose — it is the lexicon, and it is the only field the Source FTS index is
 declared on, which makes dropping it an UN-INDEXING of every restored session on
 the recovery door rather than a §9.1/D1 measurement. `_search_text` is therefore
-projected when the row proves the derivation — exact equality with
-`", ".join(topics)` **and** the post-#10000 display prefix on `summary`, never a
-shape test — and declined otherwise. ⛔ The join ALONE is not proof: the
-pre-#10000 capture wrote `summary` from the transcript's first substantive line
-and `topics` from the same words in first-encounter order, so a session whose
-first line was a comma-space list (`"milk, eggs, bread, cheese, apples,
-oranges"`) satisfies the join exactly, and a join-only predicate re-indexes the
-session's own sentence. The second term is what separates the two derivations.
-`summary` itself stays declined on every row: it is the same lexicon behind
-`SESSION_SOURCE_SUMMARY_PREFIX`, and re-materialising the display carrier is a
-change with its own decision — a stated residual, not an oversight. (The prefix
-is no longer out of reach: it lives in the dependency-free leaf module
-`tortoise/session_source_display.py`, imported by both the capture and this
-door — it is READ AS THE WITNESS and never projected, so the residual is a SCOPE
-choice rather than the layering impossibility it used to be.)
+projected when the row proves the derivation, and declined otherwise — and the
+proof is TWO terms, never a shape test and never the join alone: the stored text
+IS `", ".join(topics)`, **and** `summary` is that same join behind
+`SESSION_SOURCE_SUMMARY_PREFIX`. ⛔ The join by itself is not enough, and this is
+measured rather than reasoned: a pre-#10000 capture wrote `summary` = the
+transcript's first substantive utterance and derived `_searchText` FROM it, so on
+a transcript whose utterance is itself a comma-space list (`"milk, eggs, bread,
+cheese, apples, oranges"`) the legacy row matches the join word for word, and a
+join-only test re-indexed its prose with nothing red (#10852 review, P2). The
+display column is the WITNESS that the derivation is the post-#10000 one; it is
+READ and never projected. Every row that cannot prove both terms — including one
+whose `summary` is absent, empty, or unprefixed — is declined (fail-closed: a
+session that stays un-indexed on this door until one of the clearing routes below
+re-derives it — visible and named here, against prose on a node, which nothing
+reds). The prefix has ONE home,
+`tortoise/session_source_display.py` (a leaf module that imports nothing): the
+projection may not import the capture to obtain it, and a second literal is how
+two doors come to disagree about what a derived row looks like. `summary` itself
+stays declined on every row: restoring it would put the whole descriptor on the
+node for no retrieval gain, since the Source FTS index is declared on
+`_searchText` — a stated residual, not an oversight.
 
 Why it lives here rather than only in the capture: every record-sourced read and
 rebuild goes through `cache_projection.node_from_row` — `tortoise record-restore`
@@ -301,18 +307,19 @@ other), the label gate, the call-time resolution of the placement spellings, and
 each of the three flags re-added — every one reds at least the leg that names it,
 plus the row/node agreement shape that exists to catch exactly that drift.
 
-and, in the same file, the SIX `#10965` arms of the per-row decision:
+and, in the same file, the SIX `#10965`/`#10852` arms of the per-row decision:
 `test_a_post_10000_session_row_keeps_the_field_its_fts_index_is_declared_on` (the
 restored `_searchText` is the lexicon, and the index really is declared on it);
 `test_the_drop_is_decided_by_the_rows_own_provenance_not_by_the_column_name`
 (four near-miss shapes that only LOOK like the derivation are still dropped, plus
 the legacy control); `test_a_list_shaped_legacy_utterance_is_not_mistaken_for_the_lexicon`
-(the join is NECESSARY and not sufficient — a pre-#10000 row whose first utterance
-was a comma-space list satisfies it word for word, so the display column is the
-WITNESS); `test_the_witness_fails_closed_on_every_unprovable_summary` (a
-`summary` that is absent, empty or unprefixed declines, so the witness term is
-load-bearing rather than decorative); `test_the_display_summary_stays_declined_and_the_residual_is_named`
-(the stated residual, pinned so recognition never becomes a projection); and
+(the JOIN ALONE is not the derivation — a legacy utterance that is itself a
+comma-space list satisfies it word for word, and only the display prefix tells the
+two apart; it reds with the witness removed, while every other legacy leg stays
+green); `test_the_witness_fails_closed_on_every_unprovable_summary` (absent,
+empty, unprefixed, prefixed-plus-more → all declined, with the live derivation's
+own row kept as the control); `test_the_display_summary_stays_declined_and_the_residual_is_named`
+(the stated residual, pinned so it cannot become an accident); and
 `test_the_reconciler_compares_the_restored_lexicon_on_a_post_10000_row` (a restored
 `_searchText` that drifts from the record REDS instead of hiding in `graph_only`).
 
