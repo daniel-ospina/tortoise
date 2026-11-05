@@ -14,7 +14,8 @@ therefore about the FAILURE directions, not the happy path.
 ⛔ MUTATION-VERIFIED, AND HONEST ABOUT WHAT IS NOT. Two earlier rounds found fences that could not
 fail for the bug they named — a green suite proving nothing. 64 mutation rows have now been run
 (**61 distinct** — M1≡M31, M24≡M44, M26≡M43 were re-run in later rounds rather than
-re-labelled). **63 are KILLED**; M49 survives ALONE by the documented layering:
+re-labelled), plus M64-M65 from cycle 15 (**63 distinct** in total). **65 are KILLED**; M49 survives
+ALONE by the documented layering:
 
     M1  reader returns the unprojected body ............ KILLED   M12 decode_pages first doc only .... KILLED
     M2  _load ignores freshness ........................ KILLED   M13 envelope scope check removed ... KILLED
@@ -28,7 +29,9 @@ re-labelled). **63 are KILLED**; M49 survives ALONE by the documented layering:
     M10 projection dropped from the FILENAME only ...... KILLED    M21 non-dict page accepted ....... KILLED
     M11 projection dropped from the ENVELOPE only ...... KILLED   M22 error-document marker gone .... KILLED
 
-Cycle-9/10/11 added M47-M52, cycle-12 added M53-M56, cycle-13 added M57-M60, cycle-14 added M61-M63 (all KILLED):
+Cycle-9/10/11 added M47-M52, cycle-12 added M53-M56, cycle-13 added M57-M60, cycle-14 added M61-M63 (all KILLED).
+Cycle-15 added M64-M65, each re-run individually at this head rather than inferred (both KILLED):
+  M64 `_warn_write_failed` print unguarded .... KILLED   M65 `_mutable_words_in` forks the vocabulary .... KILLED
 
   M52 runner `labels` ABSENT read as empty ..... KILLED   M51 `visibility` cached again ......... KILLED
 

@@ -15329,3 +15329,40 @@ def test_pin_reference_scan_sees_the_colon_then_newline_citation_shape():
     )
     assert refs_bare == 1, refs_bare
     assert violations_bare, "a bare `file::` citation is silently skipped"
+
+
+def test_gh_read_cache_guard_runs_on_a_tools_only_change():
+    # #11047: `tests/test_gh_read_cache.py` (registered `core`) pins
+    # `tools/gh_read_cache.py`'s FAIL-CLOSED contract — scope in the filename AND
+    # the envelope, `0 <= age < ttl` as ONE comparison, the projection in the
+    # cache identity, `decode_pages`, and a failed cache WRITE never failing a
+    # successful read. `tools/` is a flat NON_PYTHON_PREFIXES entry and
+    # `tools/gh_read_cache.py` matches no SOURCE_PATTERNS row, so before the
+    # CORE_ALSO entry a tool-only diff was filtered out BEFORE the
+    # "not matched -> core" fallback: a maintenance edit to a `_project_*`
+    # helper (which the module's own `-v2` id-bump rule says must be paired with
+    # a bump) would have run `python-ci-gate` GREEN with none of the fail-closed
+    # pins executing (the #1349/#3332/#3616 silent-drop class, the same shape as
+    # the `rail_detach.py` arm above). Mutation check: removing the CORE_ALSO
+    # entry fails the arms below (surfaces == [] and the guard absent).
+    r = _sel(["tools/gh_read_cache.py"])
+    assert r["full"] is False, r
+    assert r["surfaces"] == ["core"], r
+    assert "test_gh_read_cache.py" in r["test_files"], r
+
+
+def test_gh_read_cache_guard_is_REGISTERED_so_the_required_gate_can_see_it():
+    # #11047: the surface row is what `--integrity` reads. Without it the file was
+    # in NO surface, so the REQUIRED `manifest-integrity` leg redded on every run
+    # (measured at 695c2277f: `manifest drift: ['test_gh_read_cache.py']`) AND no
+    # leg selected the suite — the two harms have one root and one fix.
+    m = load_manifest()
+    assert "test_gh_read_cache.py" in m["surfaces"]["core"], (
+        "the file must be a `core` member or `--integrity` reds the required gate"
+    )
+    assert integrity(m) == [], integrity(m)
+    # A PR-added fast-pool file needs a `durations` row at all (the #3400/#4348
+    # trap); the VALUE is the flat default only until junit measures it.
+    assert "test_gh_read_cache.py" in m.get("durations", {}), (
+        "an absent row packs the file at the flat default AND trips the coverage floor"
+    )
