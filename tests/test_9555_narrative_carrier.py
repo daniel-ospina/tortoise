@@ -2468,8 +2468,8 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
         "Asserted on the sentence, not the section: a negation that survives "
         "elsewhere in §9.4 is not the instruction a reader of this sentence "
         "receives")
-    assert s94.count(":Source.summary") == 1, (
-        f"§9.4 names `:Source.summary` {s94.count(':Source.summary')} times — "
+    assert s94.count(_SUMMARY_OBJECT) == 1, (
+        f"§9.4 names `{_SUMMARY_OBJECT}` {s94.count(_SUMMARY_OBJECT)} times — "
         f"§9.4 is the paragraph that says which field the vector must NOT "
         f"read, and it must name that trap exactly once. An ADDED occurrence "
         f"is how the forbidden instruction comes back in ADDITIVE form: the "
@@ -2571,9 +2571,9 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
         "and §9.4 asserts the same negation on its own sentence; dropping it "
         "here leaves the *\"embed the summary already there\"* reading open in "
         "the section a designer lands on when placing a vector")
-    assert s121b.count(":Source.summary") == 0, (
+    assert s121b.count(_SUMMARY_OBJECT) == 0, (
         f"§12.1b (the SECTION, not just the footnote line) now names "
-        f"`:Source.summary` {s121b.count(':Source.summary')} time(s). It named it "
+        f"`{_SUMMARY_OBJECT}` {s121b.count(_SUMMARY_OBJECT)} time(s). It named it "
         f"nowhere before, and it does not need to: the footnote calls the field "
         f"\"a session's `summary`\" and §9.4 is where the forbidden spelling "
         f"lives. ⚠️ SECTION-scoped, mirroring §9.4's count — a LINE-scoped version "
