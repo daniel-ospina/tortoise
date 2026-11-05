@@ -10563,7 +10563,7 @@ durations:
   # only moved it to the next arm that needed the model. The pin that holds is FILE-WIDE: the module-level
   # autouse fixture `_no_embedder` requests `tests/conftest.py::force_sparse_tfidf` (#2573/#2772 — the
   # documented "no embedder" pin) for every arm, so the file runs in SECONDS again. That is what makes `6.0`
-  # a safe flat weight rather than a two-minute flake on every PR's required lane. ⛔ Do not de-duplicate it
+  # a safe flat weight rather than a model-load flake on every PR's required lane. ⛔ Do not de-duplicate it
   # against the arm-level request: the arm-level one alone does not cover the other full-ingest arms.
   # ⛔ NO WALL-CLOCK FIGURE and NO CASE COUNT — both re-stale (a count on every case a round adds; a figure
   # on every host, and on every arm that gains a model call — this row has now been wrong twice that way).
