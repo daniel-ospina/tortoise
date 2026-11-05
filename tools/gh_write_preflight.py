@@ -95,7 +95,7 @@ WHAT IT PROBES, AND WHY EACH CHOICE IS THE ONE IT IS
 
 ⛔ WHAT THE VERDICT DOES NOT COVER — the credential **`git`** uses
 ───────────────────────────────────────────────────────────────────────
-The six probes above prove the capability of the credential **`gh` resolves**: the same
+The probes above prove the capability of the credential **`gh` resolves**: the same
 `GH_TOKEN` → `GITHUB_TOKEN` → `GH_CONFIG_DIR`/hosts.yml chain as `objective.py::_gh_token` and
 `pr-doctor.py::_gh_token`, so the three tools cannot disagree about who the lane is.
 
