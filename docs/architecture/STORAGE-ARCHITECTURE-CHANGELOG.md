@@ -1927,3 +1927,41 @@ a correct line from a wrong one. §9.1(b) now names a symbol per route
 pins both directions, each measured on the pre-fix text: a `file.py:NNNN` in the section reds (all
 four converted citations named), and a symbol that no longer resolves reds (measured by renaming
 `_upsert_document`).
+
+## §12.1c's label count and §14.3's V1 row numbers — the corrected figures stayed, the change narration left (`#5090`, 2026-11-04)
+
+Two register corrections landed in the design document. Both **figures** are right and stay there; what
+did not belong there was the narration of what each passage used to say, which is this file's job.
+
+**§12.1c — the per-label index count.** The section read that indexing the objects means *"a SECOND … and
+a THIRD"* resident HNSW index. That count predates the served set reaching five labels.
+`tortoise/security.py` `ENTITY_TYPE_LABELS` maps seven entity types onto five labels, and
+`_record_vector_index_inventory` serves exactly `{Point, Event, Object, Source, Subject}`; only `Point`
+carries a vector DDL/index (`tortoise/projection/__init__.py`, both the procedure and the Cypher form).
+So **four** served labels are unindexed today — `Event`, `Object`, `Source`, `Subject` — and the argument
+is correspondingly stronger than it read. The design document now states the four-label count and the
+four-versus-one conclusion with no reference to the passage's previous wording.
+
+**§14.3 — V1's numbers.** The V1 row gave the vector question's weight as *"≈50 MB of stored vectors + a
+45 MB index total, on 141 MB"*. Two independent problems: the ≈50 MB figure double-counted the one leg
+that IS indexed (retracted by `#5090`'s own 2026-10-08 comment), and the 141/45 MB pair is the dated
+2026-09-24 reading of a graph that has since grown 2.7× to 68,526 nodes. The row now carries the
+2026-11-04 reading of graph `live-v4` (`#10976`): **19.4 MB of stored vector payload (12,657 × 1,536 B),
+plus a 93 MB index total, on 195 MB**, with the 93 MB named as the TOTAL index size of which only part is
+HNSW. **No decision changed: V1 remains OPEN and the row says so.**
+
+**And §12.1c no longer contradicts §14.3.** Before this correction the two disagreed *inside one
+register* — §12.1c's context line and its option table quoted 50 MB / 45 MB / 141 MB while the row this
+change rewrote said 19.4 MB / 93 MB / 195 MB, a 2× disagreement on the index quantity and 2.6× on the
+payload, in the exact section a lane reads to make the decision. The 2026-09-24 figures are **dated and
+kept** (they are a real measurement of a smaller graph, and deleting them would erase the evidence the
+$73/GiB cost argument rests on), with the superseding 2026-11-04 reading named beside them so the two
+sections can no longer be read as disagreeing about one graph.
+
+**Why the narration moved here.** The first draft wrote *"⚠️ Corrected 2026-11-04: this paragraph
+previously read …"* into both places. `tests/test_extractor_v4_citation_rot.py::test_the_design_documents_carry_no_issue_state_or_change_narration`
+reds on that shape — its `_CHANGE_NARRATION` dated-stamp arm matches `CORRECTED 20xx-`, which is exactly
+the before/after narration `#8542` moved out of the three design documents. The guard is the executable
+half of the rule stated at the top of this file: the design document states the design and the
+measurement; this file keeps the record of how it got there. Measured at the PR head: 0 `_CHANGE_NARRATION`
+hits in `STORAGE-ARCHITECTURE.md` after the move, against 2 before it (lines 1090 and 1518).
