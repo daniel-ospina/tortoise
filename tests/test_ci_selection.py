@@ -7422,15 +7422,14 @@ def test_the_paren_guard_reads_only_a_rows_OWN_note():
 # provenance for a WEIGHT ("the module held **30** at the #9352 head, **31** after
 # #9358") — history that must NOT be re-derived, and a guard that read those would
 # red on correct notes.
-#
-# ⛔ THE CONNECTOR IS NOT PART OF THE CLAIM (#10610 review at `7c03efc1d`). The first
-# version read only `->`/`→`, and the `test_7949_capstone_measure.py` row cites the
-# SAME instrument with `=` — so measured at that head the row stated `191 cases` in its
-# leading clause and a 190 reading beside it, and this guard returned `[]` while the
-# row's leading-count pin read the first `N cases`, matched the file, and stayed green:
-# two halves of one sentence disagreeing with nothing red. A spelling the guard cannot
-# see is a FALSE PASS, not a wording preference — the row is told to be re-derived with
-# this instrument, so every connector it can be spelled with must be read.
+# ⛔ The JOINER is free-form: the row's ENTRY RULE tells a reader to re-derive the
+# count with `grep -c '^def test_'` and never prescribes how the note spells the
+# relation. Matching `->`/`→` ALONE left the `=` spelling unpoliced, and measured at
+# the #10610 review head the `test_7949_capstone_measure.py` row stated BOTH `191
+# cases` and `` `grep -c '^def test_'` = 190 `` in one sentence with this guard green
+# (`_durations_rows_with_a_stale_case_count` returned `[]`), so the row's own
+# re-derivation instruction handed a maintainer 191 against a note saying 190 — the
+# edit that re-installs the false count this guard exists to catch.
 _CASE_COUNT_CLAIM_RE = re.compile(
     r"`grep -c '\^def test_'`\s*(?:->|\u2192|=)\s*(?P<n>\d+)")
 
@@ -7485,14 +7484,8 @@ def test_the_stale_case_count_guard_is_not_vacuous(tmp_path):
         "  test_two.py: 3.0  # #5086: 2 cases (`grep -c '^def test_'` \u2192 2; pytest "
         "collects 2).\n"
         "surfaces: []\n")
-    # The SAME claim spelled with `=`, which the first version of this guard could not
-    # see — the spelling the `test_7949_capstone_measure.py` row actually uses (#10610
-    # review at `7c03efc1d`: the row stated 191 leading and 190 cited, green both ways).
-    stale_equals = (
-        "durations:\n"
-        "  test_two.py: 3.0  # #5086: 3 cases (`grep -c '^def test_'` = 3; pytest "
-        "collects 3).\n"
-        "surfaces: []\n")
+    # The SAME claim spelled with `=` — a CORRECT one must stay quiet (#10610 review
+    # at `7c03efc1d`), or the widened branch would red notes it was widened for.
     fresh_equals = (
         "durations:\n"
         "  test_two.py: 3.0  # #5086: 2 cases (`grep -c '^def test_'` = 2; pytest "
@@ -7508,10 +7501,20 @@ def test_the_stale_case_count_guard_is_not_vacuous(tmp_path):
     assert _durations_rows_with_a_stale_case_count(stale, tmp_path) == [
         ("test_two.py", 3, 2)]
     assert _durations_rows_with_a_stale_case_count(fresh, tmp_path) == []
-    assert _durations_rows_with_a_stale_case_count(stale_equals, tmp_path) == [
-        ("test_two.py", 3, 2)], (
-        "the `=` spelling states the same claim as `->` and must be judged the same "
-        "way — reading only the arrow form is a false pass over the row that uses `=`")
+    # ⛔ The `=` spelling. Measured at the #10610 review head, a row carried BOTH a
+    # corrected leading count and `` `grep -c '^def test_'` = <old> `` beside it, and
+    # the pre-fix regex (`->`/`→` only) returned `[]` for it — a required leg green
+    # over the claim its own ENTRY RULE tells the reader to re-derive. This arm reds
+    # on that regex and passes on the widened one; the note's joiner is not the claim.
+    equals = (
+        "durations:\n"
+        "  test_two.py: 3.0  # #5086: 2 cases (`grep -c '^def test_'` = 3).\n"
+        "surfaces: []\n")
+    assert _durations_rows_with_a_stale_case_count(equals, tmp_path) == [
+        ("test_two.py", 3, 2)]
+    # …and the guard must stay QUIET on a CORRECT `=` claim: reading the
+    # new branch as a citation is only safe if it still clears the spelling
+    # it was widened for (an over-matching guard would red correct notes).
     assert _durations_rows_with_a_stale_case_count(fresh_equals, tmp_path) == []
     assert _durations_rows_with_a_stale_case_count(historical, tmp_path) == []
     gone = (

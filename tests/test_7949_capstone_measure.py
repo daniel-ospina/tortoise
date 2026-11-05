@@ -5383,18 +5383,20 @@ def test_the_three_routes_to_the_e1_e2_verdict_state_the_records_verdict():
     """A document that routes a reader to E1/E2 must state the verdict the record gives.
 
     #10610 review issue 1 (P2): the change re-pointed both rows at
-    `docs/evidence/9889/e1-e2-scores.json`, and the two documents a reader is routed to kept
-    asserting the superseded reading IN THE PRESENT TENSE — `docs/00_index.md`'s `#9080` row
-    (`3 RED + 2 BLOCKED`, "E1 … its only artifact is 25 Objects … with no before arm", "E2 …
-    carried by no committed artifact") and `E1-E5-PROOFS.md`'s E2a/E2b rows ("the bundle's
-    README marks the row BLOCKED because the frozen 14-unit denominator is carried by no
-    committed artifact"), whose `README.md:69` pointer now lands on a row that NAMES the
-    re-run reading (`RED 8/14`) while its committed verdict cell still reads
+    `docs/evidence/9889/e1-e2-scores.json` and moved E2 from BLOCKED to RED, and the two
+    documents a reader is routed to kept asserting the superseded reading IN THE PRESENT
+    TENSE — `docs/00_index.md`'s `#9080` row (`3 RED + 2 BLOCKED`, "E1 … its only artifact
+    is 25 Objects … with no before arm", "E2 … carried by no committed artifact") and
+    `E1-E5-PROOFS.md`'s E2a/E2b rows ("the bundle's README marks the row BLOCKED because
+    the frozen 14-unit denominator is carried by no committed artifact"), whose
+    `README.md:69` pointer now lands on a row that NAMES the re-run reading
+    (`RED 8/14`) while its committed verdict cell still reads
     `⛔ **BLOCKED** (#10360)`. Nothing read that prose, so the suite stayed green while the
-    bundle's own entry point told a reader the opposite of the table beside it. The cite
-    itself is now held by `test_the_e2_routing_claim_cites_the_row_it_describes` below
-    (review at `7c03efc1d`: the previous revision had re-pointed it at `README.md:65`, a
-    table-header line, while quoting a reading that appears in neither bundle README).
+    bundle's own entry point told a reader the opposite of the table beside it.
+    The cite is now held by `test_the_e2_routing_claim_cites_the_row_it_describes`
+    below, which takes the LINE NUMBER from this docstring: review at `7c03efc1d`
+    found the previous revision had re-pointed it at `README.md:65`, a table-header
+    line, while quoting a reading that appears in neither bundle README.
 
     Every leg is DERIVED, and each document is held to the ARTIFACT IT DESCRIBES — which
     after the 2026-11-02 re-measure is two different artifacts, deliberately:
