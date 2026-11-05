@@ -1634,6 +1634,20 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # Pinned by
              # tests/test_ci_selection.py::test_worktree_report_tool_change_selects_core_not_tier1.
              "tools/worktree_report.py",
+             # #11026: tools/gh_write_preflight.py owns tests/test_gh_write_preflight.py
+             # (registered `core`), and it hit the SAME silent drop: `tools/` is swallowed by
+             # NON_PYTHON_PREFIXES and no SOURCE_PATTERNS row matches the tool, so a TOOL-ONLY
+             # change selected NO surface, took the docs-only early return and landed on tier-1
+             # smoke, where that file is not registered. The PR that weakens the write proof —
+             # the check that exists because a read-only GH_TOKEN let a 17-lane wave deliver
+             # NOTHING — would then be the one that never ran the cases pinning it.
+             # MEASURED before this entry: `select(["tools/gh_write_preflight.py"],
+             # "pull_request", load_manifest())` -> surfaces=[], full=False, test file ABSENT;
+             # after -> surfaces=['core'], present. Same #1349/#3332/#3616 class as above.
+             # ⚠️ n is a SNAPSHOT — re-measure, do not trust a count.
+             # Pinned by
+             # tests/test_ci_selection.py::test_gh_write_preflight_tool_change_selects_core_not_tier1.
+             "tools/gh_write_preflight.py",
              # #7814 review P2: the queue-reconcile schedule installer owns
              # tests/test_install_queue_reconcile_schedule.py, registered
              # `core`, but `tools/` is swallowed by NON_PYTHON_PREFIXES and no

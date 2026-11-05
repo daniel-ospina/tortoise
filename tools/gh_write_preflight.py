@@ -104,6 +104,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlsplit
 
 # Exit codes. 0/1 are the verdict; 2 is argparse's usage code.
 EXIT_WRITABLE = 0
@@ -250,7 +251,7 @@ _GIT_REDIRECT_ENV = (
 _GIT_TRACE_PREFIX = "GIT_TRACE"
 
 
-def _child_env() -> dict[str, str]:
+def _child_env(env_extra: dict[str, str] | None = None) -> dict[str, str]:
     """The env the probe runs under.
 
     Strips only what can REDIRECT the repository or TRACE traffic. Credential-carrying config
@@ -269,7 +270,94 @@ def _child_env() -> dict[str, str]:
     # helper keeps it (see above).
     env["GIT_TERMINAL_PROMPT"] = "0"
     env.setdefault("GIT_ASKPASS", "true")
+    if env_extra:
+        env.update(env_extra)
     return env
+
+
+def _insteadof_env(url: str, alias: str) -> dict[str, str]:
+    """Env that makes git rewrite the inert `alias:` to `url`, keeping the secret OUT of argv.
+
+    `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n` (kept by `_child_env`) define the
+    rewrite inside the PROCESS ENV — which is mode 0400 — instead of on the command line, which is
+    mode 0444 and readable by every process on a shared cell.
+    """
+    base = int(os.environ.get("GIT_CONFIG_COUNT") or 0)
+    n = base
+    env = {
+        f"GIT_CONFIG_KEY_{n}": f"url.{url}.insteadOf",
+        f"GIT_CONFIG_VALUE_{n}": alias,
+        "GIT_CONFIG_COUNT": str(base + 1),
+    }
+    return env
+
+
+def _read_spec(
+    remote: str, url_raw: str, push_urls_raw: list[str]
+) -> tuple[str, dict[str, str]]:
+    """What to hand `git ls-remote`, and any env it needs.
+
+    * push urls identical to the fetch url (the common case) -> address the remote BY NAME. No URL
+      on argv at all, which is both correct (git resolves it itself) and exposure-free.
+    * a distinct push url with NO credential (`/path`, `ssh://git@host`) -> the raw url is safe on
+      argv and is the only way to reach a push-only target.
+    * a distinct push url WITH a credential -> an `insteadOf` alias, so the secret lives in the
+      environment and never in the world-readable process table.
+    """
+    if push_urls_raw == [url_raw]:
+        return remote, {}
+    target = push_urls_raw[0]
+    if not _url_has_credential(target):
+        return target, {}
+    alias = "gh-write-preflight-push:"
+    return f"{alias}{target.split('://', 1)[-1] if '://' in target else target}", {}
+
+
+def _read_targets(remote: str, url_raw: str, push_urls_raw: list[str]) -> list[str]:
+    """The argv values to read for EVERY push target (see `_read_spec`)."""
+    if push_urls_raw == [url_raw]:
+        return [remote]
+    out = []
+    for idx, u in enumerate(push_urls_raw):
+        if _url_has_credential(u):
+            out.append(f"gh-write-preflight-push{idx}:")
+        else:
+            out.append(u)
+    return out
+
+
+def _read_env(remote: str, url_raw: str, push_urls_raw: list[str]) -> dict[str, str]:
+    """The env that makes `_read_targets` resolve (empty when reading by name)."""
+    if push_urls_raw == [url_raw]:
+        return {}
+    env: dict[str, str] = {}
+    for idx, u in enumerate(push_urls_raw):
+        if _url_has_credential(u):
+            env.update(_insteadof_env(u, f"gh-write-preflight-push{idx}:"))
+    return env
+
+
+def _url_has_credential(url: str) -> bool:
+    """Does this URL carry a secret in its userinfo (or a token anywhere)?
+
+    argv is world-readable (`/proc/<pid>/cmdline` is 0444) and lanes share a cell, so a URL that
+    embeds a credential must NEVER be handed to git as an argument. `git@host` (an SSH user, no
+    password) does NOT count — it carries no secret, and refusing it would be a false block.
+    """
+    if any(p.search(url) for p, _ in _REDACT_PATTERNS[3:]):   # bare token shapes
+        return True
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return False
+    if parts.password:
+        return True
+    # A userinfo with no scheme (scp-like `user:pass@host:path`) — treat a colon as a secret.
+    if not parts.scheme and "@" in url:
+        userinfo = url.rsplit("@", 1)[0]
+        if ":" in userinfo:
+            return True
+    return False
 
 
 class Runner:
@@ -279,7 +367,13 @@ class Runner:
     is the only thing that ever runs git for real.
     """
 
-    def run(self, argv: list[str], cwd: str | None = None, timeout: int = 120) -> Proc:
+    def run(
+        self,
+        argv: list[str],
+        cwd: str | None = None,
+        timeout: int = 120,
+        env_extra: dict[str, str] | None = None,
+    ) -> Proc:
         try:
             proc = subprocess.run(
                 argv,
@@ -296,7 +390,7 @@ class Runner:
                 # reads stdin would all inherit the lane's terminal — a 120 s stall plus possible
                 # keystroke theft.
                 stdin=subprocess.DEVNULL,
-                env=_child_env(),
+                env=_child_env(env_extra),
             )
         except FileNotFoundError:
             # Covers a missing binary AND a missing `cwd`; check_writable's is_dir() guard means
@@ -359,18 +453,27 @@ def _prefix_ok(prefix: str, runner: "Runner") -> bool:
     return True
 
 
-def _ref_state(runner: Runner, root: str, remote: str, ref: str) -> str:
+def _ref_state(
+    runner: Runner,
+    root: str,
+    remote: str,
+    ref: str,
+    env_extra: dict[str, str] | None = None,
+) -> str:
     """Is `ref` on `remote`? Tri-state, because "could not check" is not "absent".
 
     Returns ``present`` / ``absent`` / ``unverifiable``.
     """
-    proc = runner.run(["git", "ls-remote", remote, f"refs/heads/{ref}"], cwd=root)
+    proc = runner.run(
+        ["git", "ls-remote", remote, f"refs/heads/{ref}"], cwd=root, env_extra=env_extra
+    )
     if proc.rc != 0:
         return "unverifiable"
     return "present" if proc.out.strip() else "absent"
 
 
-def _ref_state_multi(runner: Runner, root: str, urls: list[str], ref: str) -> str:
+def _ref_state_multi(runner: Runner, root: str, urls: list[str], ref: str,
+                     env_extra: dict[str, str] | None = None) -> str:
     """Is `ref` on ANY of `urls`?
 
     ⛔ A remote may define SEVERAL pushurls, and `git push` writes to ALL of them while
@@ -378,8 +481,15 @@ def _ref_state_multi(runner: Runner, root: str, urls: list[str], ref: str) -> st
     first alone reports `cleaned_up=True` while the ref survives on another — a false verified
     claim and litter on a shared remote. So: present if ANY says present; unverifiable if none
     says present and ANY could not be read; absent only when every read positively says absent.
+
+    An EMPTY list is `unverifiable`, never `absent` — a vacuous truth here would report a verified
+    clean from zero reads.
     """
-    states = [_ref_state(runner, root, u, ref) for u in urls]
+    if not urls:
+        return "unverifiable"
+    states = [
+        _ref_state(runner, root, u, ref, env_extra=env_extra) for u in urls
+    ]
     if "present" in states:
         return "present"
     if "unverifiable" in states:
@@ -489,8 +599,12 @@ def _check_writable(
         head_sha=head,
         probe_ref=_probe_ref(probe_ref_prefix or "gh-write-preflight"),
     )
-    # argv uses the RAW urls; only the Verdict carries the redacted display values.
-    verdict._push_urls_raw = push_urls_raw  # type: ignore[attr-defined]
+    # Confirmation reads address the PUSH target(s). When the push url differs from the fetch url we
+    # must name a URL rather than the remote; a credential-bearing URL goes through an `insteadOf`
+    # alias so the secret stays in the env (0400), never on argv (0444, world-readable on a shared
+    # cell).
+    read_targets = _read_targets(remote, url_raw, push_urls_raw)
+    read_env = _read_env(remote, url_raw, push_urls_raw)
 
     def step(name: str, proc: Proc) -> bool:
         # REDACT AT INGESTION. Nothing downstream has to remember.
@@ -499,26 +613,59 @@ def _check_writable(
         )
         return proc.rc == 0
 
-    # (5) reachability. A remote we cannot even read is not a write verdict — say so distinctly,
-    # because "network is down" and "credential is read-only" need different fixes.
-    if not step("ls-remote", runner.run(["git", "ls-remote", "--heads", remote], cwd=root)):
+    # (5) Reachability of the target we will actually push to. ⛔ It MUST be the PUSH target: the
+    # fetch url would refuse a writable push target whose upstream is retired (a fork config) and
+    # then report the refusal against a remote that was never measured.
+    if not step(
+        "ls-remote",
+        runner.run(
+            ["git", "ls-remote", "--heads", read_targets[0]], cwd=root, env_extra=read_env
+        ),
+    ):
         verdict.reason, verdict.detail = "remote-unreachable", verdict.steps[-1]["detail"]
         return verdict
 
     # (6) THE REAL WRITE. Push the commit already at HEAD onto a namespaced throwaway ref.
+    # `--porcelain` is REQUIRED: a push that is "Everything up-to-date" exits 0 having written
+    # NOTHING, so an exit code alone does not prove a write happened. The ref flag must be `*`
+    # (new) or `+` (updated).
     push_ok = step(
         "push",
         runner.run(
-            ["git", "push", "--no-verify", remote, f"HEAD:refs/heads/{verdict.probe_ref}"],
+            [
+                "git", "push", "--porcelain", "--no-verify", remote,
+                f"HEAD:refs/heads/{verdict.probe_ref}",
+            ],
             cwd=root,
         ),
     )
+    wrote = False
+    if push_ok:
+        for line in verdict.steps[-1]["detail"].splitlines():
+            parts = line.split("\t")
+            if len(parts) >= 2 and parts[0].strip() in ("*", "+"):
+                wrote = True
+                break
+
+    if push_ok and not wrote:
+        # No line claimed a write -> "up to date": nothing was created, so nothing is proven.
+        verdict.reason = "push-refused"
+        verdict.detail = (
+            "push exited 0 but reported NO ref update (Everything up-to-date) — nothing was "
+            "written, so write capability is not proven"
+        )
+        verdict.cleaned_up = True
+        return verdict
 
     if push_ok:
         # (7) Confirm on the REMOTE(S) WE PUSHED TO, not from push's own word. stdout only.
-        state = _ref_state_multi(runner, root, push_urls_raw, verdict.probe_ref)
+        state = _ref_state_multi(
+            runner, root, read_targets, verdict.probe_ref, env_extra=read_env
+        )
         vp = runner.run(
-            ["git", "ls-remote", push_urls_raw[0], f"refs/heads/{verdict.probe_ref}"], cwd=root
+            ["git", "ls-remote", read_targets[0], f"refs/heads/{verdict.probe_ref}"],
+            cwd=root,
+            env_extra=read_env,
         )
         step("ls-remote-verify", vp)
         seen = vp.out.split()[0] if vp.out.strip() else ""
@@ -556,7 +703,9 @@ def _check_writable(
     # CONFIRM ON THE REMOTE(S) WE PUSHED TO, not from the delete's own exit code — the same rule
     # the push path follows. `cleaned_up=True` only on a positive "ref absent" read of EVERY push
     # url; an unreadable answer is `None` (unconfirmed), never "clean".
-    state = _ref_state_multi(runner, root, push_urls_raw, verdict.probe_ref)
+    state = _ref_state_multi(
+        runner, root, read_targets, verdict.probe_ref, env_extra=read_env
+    )
     if state == "absent":
         verdict.cleaned_up = True
     elif state == "present":

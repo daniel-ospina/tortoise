@@ -2902,6 +2902,30 @@ def test_inbound_relay_sweep_tool_change_selects_core_not_tier1():
     assert r["full"] is False, r
 
 
+def test_gh_write_preflight_tool_change_selects_core_not_tier1():
+    """A change to the credential write preflight must run the cases pinning it (#11026).
+
+    `tests/test_gh_write_preflight.py` is registered on `core` and owns the write-proof's
+    guarantees: a read-only credential is REFUSED, the probe ref is created and confirmed and
+    deleted, cleanup is verified on the PUSH target, and no credential reaches argv or output. That
+    registration is INERT for a tool-only diff — `tools/` is a flat NON_PYTHON_PREFIXES entry and
+    no SOURCE_PATTERNS row matches `tools/gh_write_preflight.py`, so `select()` returns NO surface,
+    takes the docs-only early return and falls back to the tier-1 smoke set, which does not contain
+    the file. The PR that weakens the proof would then be the one that never ran the cases pinning
+    it — the same silent-drop class as #10220's report, and worse here, because this tool exists
+    precisely to stop a silent pass (a 17-lane wave delivered nothing while every lane reported
+    "built, parked").
+
+    Mutation check: removing the CORE_ALSO entry fails the FIRST assert
+    (`"core" in r["surfaces"]`); the docs-only early return then yields `full: False` with no pin,
+    so the later asserts pass unexercised.
+    """
+    r = _sel(["tools/gh_write_preflight.py"])
+    assert "core" in r["surfaces"], r
+    assert "test_gh_write_preflight.py" in r["test_files"], r
+    assert r["full"] is False, r
+
+
 def test_worktree_report_tool_change_selects_core_not_tier1():
     """A change to the lane report must run the rules it pins (#10220).
 

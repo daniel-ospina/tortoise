@@ -314,10 +314,10 @@ def test_git_absent_is_named(tmp_path: Path):
     work, _remote = _make_pair(tmp_path)
 
     class NoGit(Runner):
-        def run(self, argv, cwd=None, timeout=120):
+        def run(self, argv, cwd=None, timeout=120, env_extra=None):
             if argv[0] == "git" and argv[1] == "--version":
                 return Proc(127, err="git: not found")
-            return super().run(argv, cwd=cwd, timeout=timeout)
+            return super().run(argv, cwd=cwd, timeout=timeout, env_extra=env_extra)
 
     verdict = check_writable(work, runner=NoGit())
 
@@ -332,11 +332,11 @@ def test_unexpected_exception_becomes_internal_error_not_none(tmp_path: Path, ca
     boom = {"fired": False}
 
     class Boom(Runner):
-        def run(self, argv, cwd=None, timeout=120):
+        def run(self, argv, cwd=None, timeout=120, env_extra=None):
             if argv[1] == "push" and "--delete" not in argv:
                 boom["fired"] = True
                 raise RuntimeError("simulated crash")
-            return super().run(argv, cwd=cwd, timeout=timeout)
+            return super().run(argv, cwd=cwd, timeout=timeout, env_extra=env_extra)
 
     verdict = check_writable(work, runner=Boom(), keep_ref=True)
 
@@ -521,6 +521,87 @@ def test_read_only_pushurl_is_refused_even_when_fetch_url_is_writable(tmp_path: 
     assert verdict.reason == "push-refused"
 
 
+def test_split_pushurl_shows_the_measured_remote_and_its_source(tmp_path: Path, capsys):
+    """The answer must NAME the remote it measured, and say how it resolved it.
+
+    On a fork config the `remote:` line names the FETCH url, which is not where the probe pushed —
+    so a `push:` line and a `push_url_source` field are the only way a lane can tell which remote
+    the verdict is about.
+    """
+    work, fetch_remote = _make_pair(tmp_path)
+    push_remote = tmp_path / "push.git"
+    _git("init", "--bare", "-q", str(push_remote), cwd=tmp_path)
+    _git("remote", "set-url", "--push", "origin", str(push_remote), cwd=work)
+
+    rc = main(["--repo", str(work), "--json"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc == EXIT_WRITABLE
+    assert payload["push_url_source"] == "configured"
+    assert "push.git" in payload["push_url"]
+    assert "fetch" not in (payload["push_url"] or "")
+
+    rc2 = main(["--repo", str(work)])
+    out = capsys.readouterr().out
+    assert rc2 == EXIT_WRITABLE
+    assert "push:" in out, f"the render must name the measured remote: {out}"
+
+
+def test_push_url_source_fellback_is_visible(tmp_path: Path, capsys):
+    """When `get-url --push` cannot answer, the fallback must be VISIBLE, not silent."""
+
+    class NoPushUrl(Runner):
+        def run(self, argv, cwd=None, timeout=120, env_extra=None):
+            if argv[1] == "remote" and "--push" in argv:
+                return Proc(129, err="error: unknown option `push'")
+            return super().run(argv, cwd=cwd, timeout=timeout, env_extra=env_extra)
+
+    work, _remote = _make_pair(tmp_path)
+    verdict = check_writable(work, runner=NoPushUrl())
+
+    assert verdict.push_url_source == "fellback"
+
+
+def test_prefix_ok_rejects_gits_own_invalid_verdict():
+    """The authoritative arm must be REACHABLE and refuse on git's rc==1.
+
+    Without this, `_prefix_ok`'s git call could be deleted with a green suite (the belt already
+    covers every shape the tests use).
+    """
+    class Invalid(Runner):
+        def run(self, argv, cwd=None, timeout=120, env_extra=None):
+            if argv[1] == "check-ref-format":
+                return Proc(1, err="")
+            return super().run(argv, cwd=cwd, timeout=timeout, env_extra=env_extra)
+
+    class CannotRun(Runner):
+        def run(self, argv, cwd=None, timeout=120, env_extra=None):
+            if argv[1] == "check-ref-format":
+                return Proc(124, err="timed out")
+            return super().run(argv, cwd=cwd, timeout=timeout, env_extra=env_extra)
+
+    from tools.gh_write_preflight import _prefix_ok
+
+    assert _prefix_ok("fix/ok", Invalid()) is False, "git's rc==1 must be a refusal"
+    assert _prefix_ok("fix/ok", CannotRun()) is True, (
+        "an unrunnable check must not be rendered as 'git rejects this refname'"
+    )
+    assert _prefix_ok("-bad", CannotRun()) is False, "the belt still refuses a leading dash"
+
+
+def test_no_head_still_reports_the_push_url(tmp_path: Path):
+    """`push_url` must not be dropped on the `no-head` path, where it is already resolved."""
+    work = tmp_path / "empty"
+    _git("init", "-q", str(work), cwd=tmp_path)
+    _git("remote", "add", "origin", str(tmp_path / "nowhere.git"), cwd=work)
+
+    verdict = check_writable(work)
+
+    assert verdict.reason == "no-head"
+    assert verdict.push_url, "push_url was resolved and then dropped"
+    assert verdict.push_url_source in ("configured", "fellback")
+
+
 def test_cleanup_reads_the_PUSH_remote_not_the_fetch_remote(tmp_path: Path):
     """The fail-open half of the wrong-remote bug: cleanup must confirm on the push target.
 
@@ -537,7 +618,7 @@ def test_cleanup_reads_the_PUSH_remote_not_the_fetch_remote(tmp_path: Path):
     class PushSurvives(Runner):
         """The ref is created on the push remote and its delete never takes effect there."""
 
-        def run(self, argv, cwd=None, timeout=120):
+        def run(self, argv, cwd=None, timeout=120, env_extra=None):
             joined = " ".join(argv)
             if argv[1] == "ls-remote" and _PROBE in joined:
                 ref = joined.split()[-1]
@@ -548,7 +629,7 @@ def test_cleanup_reads_the_PUSH_remote_not_the_fetch_remote(tmp_path: Path):
                 return Proc(0, out="deadbeef\trefs/heads/main\n")
             if argv[1] == "push" and "--delete" in argv:
                 return Proc(0, out="deleted")
-            return super().run(argv, cwd=cwd, timeout=timeout)
+            return super().run(argv, cwd=cwd, timeout=timeout, env_extra=env_extra)
 
     verdict = check_writable(work, runner=PushSurvives())
 
@@ -568,7 +649,7 @@ def test_multiple_pushurls_all_must_be_clean(tmp_path: Path):
     _git("remote", "set-url", "--push", "--add", "origin", str(push_b), cwd=work)
 
     class SurvivesOnB(Runner):
-        def run(self, argv, cwd=None, timeout=120):
+        def run(self, argv, cwd=None, timeout=120, env_extra=None):
             joined = " ".join(argv)
             if argv[1] == "ls-remote" and _PROBE in joined:
                 ref = joined.split()[-1]
@@ -579,7 +660,7 @@ def test_multiple_pushurls_all_must_be_clean(tmp_path: Path):
                 return Proc(0, out="deadbeef\trefs/heads/main\n")
             if argv[1] == "push" and "--delete" in argv:
                 return Proc(0, out="deleted")
-            return super().run(argv, cwd=cwd, timeout=timeout)
+            return super().run(argv, cwd=cwd, timeout=timeout, env_extra=env_extra)
 
     verdict = check_writable(work, runner=SurvivesOnB())
 
@@ -587,11 +668,13 @@ def test_multiple_pushurls_all_must_be_clean(tmp_path: Path):
     assert verdict.leftover_ref is True
 
 
-def test_argv_gets_the_raw_url_not_the_redacted_display_value(tmp_path: Path):
-    """`redact()` rewrites userinfo, so the display value MUST NOT be handed to git.
+def test_argv_never_carries_the_display_value_or_a_credential(tmp_path: Path):
+    """argv is world-readable (/proc/<pid>/cmdline is 0444) and lanes share a cell.
 
-    `ssh://git@host/…` carries no secret at all; passing the redacted form would ask git to
-    contact `ssh://<userinfo-redacted>@host/…` and refuse a credential that can write.
+    Two rules, both pinned here:
+      * the REDACTED display value must never be handed to git as data (`redact()` rewrites
+        userinfo, so git would contact a URL the config never named — a false block);
+      * the common case reads the remote BY NAME, so no URL appears on argv at all.
     """
     work, _remote = _make_pair(tmp_path)
     raw = "ssh://git@example.invalid/x.git"
@@ -600,36 +683,58 @@ def test_argv_gets_the_raw_url_not_the_redacted_display_value(tmp_path: Path):
     seen = []
 
     class Recording(Runner):
-        def run(self, argv, cwd=None, timeout=120):
-            seen.append(list(argv))
-            joined = " ".join(argv)
-            # Reachability succeeds (no network needed); the push is refused, which sends us into
-            # cleanup — and cleanup is the step that addresses a URL.
-            if argv[1] == "ls-remote" and "--heads" in argv:
-                return Proc(0, out="")
+        def run(self, argv, cwd=None, timeout=120, env_extra=None):
+            seen.append((list(argv), dict(env_extra or {})))
             if argv[1] == "ls-remote":
-                return Proc(0, out="")
-            if argv[1] == "push":
-                return Proc(1, err="stub: refused")
-            return super().run(argv, cwd=cwd, timeout=timeout)
+                return Proc(128, err="stub: unreachable")
+            return super().run(argv, cwd=cwd, timeout=timeout, env_extra=env_extra)
 
     verdict = check_writable(work, runner=Recording())
 
-    ls_calls = [a for a in seen if a[1] == "ls-remote"]
-    assert ls_calls, "reads must have run"
-    # No read may ever be handed the redacted display value.
-    for call in ls_calls:
-        assert "<userinfo-redacted>" not in " ".join(call), f"redacted URL reached argv: {call}"
-    # The confirmation read addresses a URL — it must get the RAW configured value.
-    url_calls = [a for a in ls_calls if any(raw in x for x in a)]
-    assert url_calls, f"a URL-bearing read must carry the configured URL; saw {ls_calls}"
-    # ...while the DISPLAY value stored on the verdict is still redacted.
+    for call, _env in seen:
+        joined = " ".join(call)
+        assert "<userinfo-redacted>" not in joined, f"display value reached argv: {call}"
+        assert raw not in joined, f"a URL was put on argv when the remote name would do: {call}"
+    assert any("origin" in c for c, _e in seen), f"expected a read by remote name; saw {seen}"
+    # ...while the DISPLAY value stored on the verdict is redacted.
     assert "<userinfo-redacted>" in (verdict.remote_url or "")
     assert "<userinfo-redacted>" in (verdict.push_url or "")
-    # ...while the DISPLAY value (and the JSON) is still redacted.
-    assert "git@" not in (verdict.remote_url or "") or "<userinfo-redacted>" in (
-        verdict.remote_url or ""
-    )
+
+
+def test_credential_bearing_pushurl_never_reaches_argv(tmp_path: Path):
+    """A push url embedding a token must reach git via an env `insteadOf`, never as an argument.
+
+    Measured after the cycle-6 fix: the raw token appeared in the process table for every read.
+    """
+    work, _fetch = _make_pair(tmp_path)
+    push_remote = tmp_path / "push.git"
+    _git("init", "--bare", "-q", str(push_remote), cwd=tmp_path)
+    secret_url = "https://x-access-token:ghp_SUPERSECRETTOKEN123@example.invalid/push.git"
+    _git("remote", "set-url", "--push", "origin", secret_url, cwd=work)
+
+    seen = []
+
+    class Recording(Runner):
+        def run(self, argv, cwd=None, timeout=120, env_extra=None):
+            seen.append((list(argv), dict(env_extra or {})))
+            if argv[1] == "ls-remote":
+                return Proc(128, err="stub: unreachable")
+            return super().run(argv, cwd=cwd, timeout=timeout, env_extra=env_extra)
+
+    check_writable(work, runner=Recording())
+
+    for call, _env in seen:
+        assert "ghp_SUPERSECRETTOKEN123" not in " ".join(call), (
+            f"a credential reached the process argv: {call}"
+        )
+    # The rewrite carries the url in the env (0400): `url.<raw url>.insteadOf = <alias>:`, so the
+    # secret may sit in the KEY as well as the value — scan both.
+    assert any(
+        "ghp_SUPERSECRETTOKEN123" in f"{k}={v}"
+        for _c, env in seen
+        for k, v in env.items()
+        if k.startswith("GIT_CONFIG_")
+    ), f"the insteadOf rewrite never carried the push url; envs: {[e for _c, e in seen]}"
 
 
 def test_delete_success_but_ref_still_present_is_leftover(tmp_path: Path):
@@ -642,14 +747,14 @@ def test_delete_success_but_ref_still_present_is_leftover(tmp_path: Path):
     head = {"sha": None}
 
     class LyingDelete(Runner):
-        def run(self, argv, cwd=None, timeout=120):
+        def run(self, argv, cwd=None, timeout=120, env_extra=None):
             joined = " ".join(argv)
             if argv[1] == "ls-remote" and _PROBE in joined:
                 ref = joined.split()[-1]
                 # present on BOTH the verify and the cleanup read
                 return Proc(0, out=f"{head['sha']}\t{ref}\n")
             if argv[1] == "rev-parse":
-                p = super().run(argv, cwd=cwd, timeout=timeout)
+                p = super().run(argv, cwd=cwd, timeout=timeout, env_extra=env_extra)
                 if p.rc == 0 and p.out.strip():
                     head["sha"] = p.out.strip().splitlines()[-1]
                 return p
@@ -658,8 +763,8 @@ def test_delete_success_but_ref_still_present_is_leftover(tmp_path: Path):
             if argv[1] == "push" and "--delete" in argv:
                 return Proc(0, out="deleted")        # LIES: ref is still there
             if argv[1] == "push":
-                return Proc(0, out="pushed")
-            return super().run(argv, cwd=cwd, timeout=timeout)
+                return Proc(0, out="*\tHEAD:refs/heads/gh-write-preflight/x\t[new branch]")
+            return super().run(argv, cwd=cwd, timeout=timeout, env_extra=env_extra)
 
     work, _remote = _make_pair(tmp_path)
     verdict = check_writable(work, runner=LyingDelete())
@@ -674,9 +779,9 @@ def test_delete_uses_a_double_dash_guard(tmp_path: Path):
     seen = []
 
     class Recording(Runner):
-        def run(self, argv, cwd=None, timeout=120):
+        def run(self, argv, cwd=None, timeout=120, env_extra=None):
             seen.append(list(argv))
-            return super().run(argv, cwd=cwd, timeout=timeout)
+            return super().run(argv, cwd=cwd, timeout=timeout, env_extra=env_extra)
 
     work, _remote = _make_pair(tmp_path)
     check_writable(work, runner=Recording())
@@ -786,7 +891,7 @@ def test_push_refused_but_remote_accepted_reports_leftover_without_erasing_the_c
     state = {"ref_exists": False, "delete_attempted": False}
 
     class TransportLie(Runner):
-        def run(self, argv, cwd=None, timeout=120):
+        def run(self, argv, cwd=None, timeout=120, env_extra=None):
             joined = " ".join(argv)
             is_probe_query = argv[1] == "ls-remote" and _PROBE in joined
             if is_probe_query:
@@ -800,7 +905,7 @@ def test_push_refused_but_remote_accepted_reports_leftover_without_erasing_the_c
             if argv[1] == "push":
                 state["ref_exists"] = True        # applied, then the transport died
                 return Proc(1, err="fatal: the remote end hung up unexpectedly")
-            return super().run(argv, cwd=cwd, timeout=timeout)
+            return super().run(argv, cwd=cwd, timeout=timeout, env_extra=env_extra)
 
     work, _remote = _make_pair(tmp_path)
     verdict = check_writable(work, runner=TransportLie())
@@ -815,7 +920,7 @@ def test_push_refused_but_remote_accepted_reports_leftover_without_erasing_the_c
 def test_push_failed_and_nothing_created_is_clean_not_leftover(tmp_path: Path):
     """The common case: push refused, no ref exists, so cleanup is genuinely clean."""
     class RefusedClean(Runner):
-        def run(self, argv, cwd=None, timeout=120):
+        def run(self, argv, cwd=None, timeout=120, env_extra=None):
             joined = " ".join(argv)
             if argv[1] == "ls-remote" and _PROBE in joined:
                 return Proc(0, out="")
@@ -823,7 +928,7 @@ def test_push_failed_and_nothing_created_is_clean_not_leftover(tmp_path: Path):
                 return Proc(0, out="deadbeef\trefs/heads/main\n")
             if argv[1] == "push":
                 return Proc(1, err="remote: denied")
-            return super().run(argv, cwd=cwd, timeout=timeout)
+            return super().run(argv, cwd=cwd, timeout=timeout, env_extra=env_extra)
 
     work, _remote = _make_pair(tmp_path)
     verdict = check_writable(work, runner=RefusedClean())
@@ -840,7 +945,7 @@ def test_unverifiable_cleanup_is_none_not_true(tmp_path: Path):
     from an absence of evidence — the exact property the tool claims to verify.
     """
     class Unreadable(Runner):
-        def run(self, argv, cwd=None, timeout=120):
+        def run(self, argv, cwd=None, timeout=120, env_extra=None):
             joined = " ".join(argv)
             if argv[1] == "ls-remote" and _PROBE in joined:
                 return Proc(128, err="fatal: could not read from remote")
@@ -849,8 +954,8 @@ def test_unverifiable_cleanup_is_none_not_true(tmp_path: Path):
             if argv[1] == "push" and "--delete" in argv:
                 return Proc(1, err="deletion denied")
             if argv[1] == "push":
-                return Proc(0, out="pushed")
-            return super().run(argv, cwd=cwd, timeout=timeout)
+                return Proc(0, out="*\tHEAD:refs/heads/gh-write-preflight/x\t[new branch]")
+            return super().run(argv, cwd=cwd, timeout=timeout, env_extra=env_extra)
 
     work, _remote = _make_pair(tmp_path)
     verdict = check_writable(work, runner=Unreadable())
@@ -865,7 +970,7 @@ def test_ref_state_is_tristate(tmp_path: Path):
         def __init__(self, rc, out):
             self._rc, self._out = rc, out
 
-        def run(self, argv, cwd=None, timeout=120):
+        def run(self, argv, cwd=None, timeout=120, env_extra=None):
             return Proc(self._rc, out=self._out)
 
     assert _ref_state(R(0, "abc\trefs/heads/x\n"), ".", "origin", "x") == "present"
@@ -878,7 +983,7 @@ def test_verify_mismatch_still_attempts_cleanup(tmp_path: Path):
     state = {"delete_attempted": False}
 
     class LyingPush(Runner):
-        def run(self, argv, cwd=None, timeout=120):
+        def run(self, argv, cwd=None, timeout=120, env_extra=None):
             joined = " ".join(argv)
             if argv[1] == "ls-remote" and _PROBE in joined:
                 return Proc(0, out="")            # nothing visible -> verify-mismatch
@@ -888,8 +993,8 @@ def test_verify_mismatch_still_attempts_cleanup(tmp_path: Path):
                 state["delete_attempted"] = True
                 return Proc(0, out="deleted")
             if argv[1] == "push":
-                return Proc(0, out="pushed")
-            return super().run(argv, cwd=cwd, timeout=timeout)
+                return Proc(0, out="*\tHEAD:refs/heads/gh-write-preflight/x\t[new branch]")
+            return super().run(argv, cwd=cwd, timeout=timeout, env_extra=env_extra)
 
     work, _remote = _make_pair(tmp_path)
     verdict = check_writable(work, runner=LyingPush())
@@ -918,8 +1023,8 @@ def test_stderr_warning_does_not_become_the_repo_path(tmp_path: Path):
     work, _remote = _make_pair(tmp_path)
 
     class WarningOnStderr(Runner):
-        def run(self, argv, cwd=None, timeout=120):
-            p = super().run(argv, cwd=cwd, timeout=timeout)
+        def run(self, argv, cwd=None, timeout=120, env_extra=None):
+            p = super().run(argv, cwd=cwd, timeout=timeout, env_extra=env_extra)
             if argv[1] == "rev-parse" and "--show-toplevel" in argv:
                 return Proc(p.rc, out=p.out, err="warning: unrelated advisory\n")
             return p
