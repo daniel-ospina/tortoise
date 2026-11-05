@@ -217,8 +217,9 @@ session's own sentence. The second term is what separates the two derivations.
 `SESSION_SOURCE_SUMMARY_PREFIX`, and re-materialising the display carrier is a
 change with its own decision — a stated residual, not an oversight. (The prefix
 is no longer out of reach: it lives in the dependency-free leaf module
-`session_projection`, imported by both the capture and this door, so the residual
-is a SCOPE choice rather than the layering impossibility it used to be.)
+`tortoise/session_source_display.py`, imported by both the capture and this
+door — it is READ AS THE WITNESS and never projected, so the residual is a SCOPE
+choice rather than the layering impossibility it used to be.)
 
 Why it lives here rather than only in the capture: every record-sourced read and
 rebuild goes through `cache_projection.node_from_row` — `tortoise record-restore`
@@ -305,14 +306,13 @@ and, in the same file, the SIX `#10965` arms of the per-row decision:
 restored `_searchText` is the lexicon, and the index really is declared on it);
 `test_the_drop_is_decided_by_the_rows_own_provenance_not_by_the_column_name`
 (four near-miss shapes that only LOOK like the derivation are still dropped, plus
-the legacy control); `test_a_list_shaped_legacy_row_is_not_mistaken_for_the_lexicon`
-(the join is NECESSARY and not sufficient — a pre-#10000 row whose first line was
-a comma-space list satisfies it exactly, so the display prefix is the second
-term); `test_the_prefix_is_the_second_term_of_the_provenance_test` (the prefix
-term is load-bearing: the bare join, the prefix alone, a prose sentence beside
-the lexicon and an absent `summary` all stay declined, and the two-term control
-still projects); `test_the_display_summary_stays_declined_and_the_residual_is_named`
-(the stated residual, pinned so recognisability never becomes a projection); and
+the legacy control); `test_a_list_shaped_legacy_utterance_is_not_mistaken_for_the_lexicon`
+(the join is NECESSARY and not sufficient — a pre-#10000 row whose first utterance
+was a comma-space list satisfies it word for word, so the display column is the
+WITNESS); `test_the_witness_fails_closed_on_every_unprovable_summary` (a
+`summary` that is absent, empty or unprefixed declines, so the witness term is
+load-bearing rather than decorative); `test_the_display_summary_stays_declined_and_the_residual_is_named`
+(the stated residual, pinned so recognition never becomes a projection); and
 `test_the_reconciler_compares_the_restored_lexicon_on_a_post_10000_row` (a restored
 `_searchText` that drifts from the record REDS instead of hiding in `graph_only`).
 

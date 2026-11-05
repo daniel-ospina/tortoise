@@ -113,11 +113,6 @@ from .session_projection import SESSION_READ_FIELDS  # noqa: F401
 # module as the projection it is a field of, so the SDK read and the hosted
 # reads cannot disagree about one session's status.
 from .session_projection import session_extraction_status
-# #10852 P2: `_SESSION_SOURCE_SUMMARY_PREFIX` (the session `:Source` display
-# prefix) is IMPORTED, not declared here: the record→cache door reads the same
-# spelling and may not import this module, so it lives in the dependency-free
-# leaf module both sides may import (`session_projection`).
-from .session_projection import SESSION_SOURCE_SUMMARY_PREFIX as _SESSION_SOURCE_SUMMARY_PREFIX
 from .retrieval import (DEFAULT_POOL_SIZE, _safe_session_tag,
                         is_turn_echo_row, resolve_pool_size)
 from . import monitoring
@@ -208,6 +203,9 @@ from .quota import (
 from .canonical import derive_batch_id
 # #4911: the ONE credential scrubber for stored turn text. Stdlib-only module
 # (no `tortoise` imports), so this adds no import-cycle risk to this hot module.
+from .session_source_display import (
+    SESSION_SOURCE_SUMMARY_PREFIX as _SESSION_SOURCE_SUMMARY_PREFIX,
+)
 from .security import redact_secrets
 import threading
 from datetime import UTC
@@ -4102,22 +4100,12 @@ _SESSION_SOURCE_STOPWORDS = frozenset({
 })
 
 
-#: #10000: the DISPLAY prefix on a session Source's ``summary``. It is a LABEL,
-#: not vocabulary, so ``_source_search_text`` keeps it OUT of ``_searchText``.
-#: The Source retrieval leg OR-unions query terms (``search_engine`` →
-#: ``sparse.build_or_query``), so a constant prefix in the index makes EVERY
-#: captured session match any source query containing "session", "capture" or
-#: "topics" — and none of the three is a RediSearch stopword (its default list
-#: is function words) or a member of ``_SESSION_SOURCE_STOPWORDS``. Measured on a
-#: two-session graph (one about a migration plan, one about a fencing budget):
-#: the query "session capture topics" returned BOTH, on the prefix alone.
-#:
-#: ⛔ THE VALUE IS DECLARED ELSEWHERE (#10852 P2). `session_projection.
-#: SESSION_SOURCE_SUMMARY_PREFIX` holds it, because the record→cache door
-#: (`cache_projection`) must read the same spelling and may not import this
-#: module — see that constant for the whole rule. This name stays as the
-#: capture's own binding of it (and as the name the tests and the comments here
-#: use), never a second literal.
+#: #10000: the DISPLAY prefix on a session Source's ``summary`` — imported, not
+#: defined here. It has ONE home (`tortoise/session_source_display.py`) because
+#: the CACHE PROJECTION reads the same value as the WITNESS that tells a
+#: post-#10000 row's lexicon ``_searchText`` from a pre-#10000 row's prose, and it
+#: may not import the capture to get it (#10965 / #10852 review P2).
+
 
 #: #10000: the transcript's own FRAMING labels — the ``Speaker: text`` prefix
 #: ``_session_llm_transcript`` writes for every turn. They are not vocabulary the
@@ -4125,12 +4113,12 @@ _SESSION_SOURCE_STOPWORDS = frozenset({
 #: that stops them: ``_session_source_metadata`` applies it to the token list
 #: BEFORE both the content filter and the stopword-only fallback, so neither arm
 #: can re-admit a label. Three of the five (``user``/``assistant``/``speaker``)
-#: are coincidentally also members of ``_SESSION_SOURCE_STOPWORDS``, which hides
-#: the need in the CONTENT arm — but not in the fallback, which reads the token
-#: list itself, and not at all for ``system``/``tool``, which no stopword list
-#: carries. So do not read this set as partly redundant: before it existed the
-#: fallback admitted ``user``/``assistant`` into every acknowledgement-only
-#: session's lexicon — the whole lexicon of a labels-only one — a constant pair,
+#: are coincidentally also members of ``_SESSION_SOURCE_STOPWORDS``, which drops
+#: them from the CONTENT arm's counts — the whole extent of the coincidence. The
+#: fallback applies NO stopword filter and reads the token list directly, and
+#: ``system``/``tool`` are on no stopword list at all. Before this set existed
+#: the fallback admitted ``user``/``assistant`` into every ack-only session's
+#: lexicon — its WHOLE lexicon for a labels-only one — a constant pair,
 #: i.e. the same measurable defect ``_SESSION_SOURCE_SUMMARY_PREFIX`` is kept out
 #: of ``_searchText`` to avoid (under the OR-union every such session would match
 #: a one-word source query for "user"). ``system``/``tool`` are reachable roles
@@ -4196,8 +4184,10 @@ def _session_source_metadata(transcript: str) -> tuple[str, list[str]]:
     prefix, not words the session used, and indexing them put a constant
     ``user, assistant`` pair on every acknowledgement-only session.
 
-    ⛔ That fallback is reached by TWO transcript shapes, and the presence test
-    must not exclude either. The 3-character CONTENT floor is a RANKING
+    ⛔ That fallback is reached by THREE transcript shapes, and the presence test
+    must not exclude any of them: stopword-only ("ok" / "yes"), short-word-only
+    ("ok go"), and DIGIT-only ("42" — the SCRIPT/DIGIT notes below). The
+    3-character CONTENT floor is a RANKING
     preference (a two-letter token discriminates poorly), so it is applied only
     where the content counts are built — never to decide whether the transcript
     has word tokens at all. Running it inside the presence test made a
@@ -4213,10 +4203,11 @@ def _session_source_metadata(transcript: str) -> tuple[str, list[str]]:
     a Cyrillic, Greek, Hebrew, Arabic, Devanagari, Thai or CJK transcript had NO
     word tokens as far as this function could see and took the ``("", [])``
     arm: ``summary=''`` and no ``_searchText`` — the #3518 unfindability, for a
-    whole class of languages (#10852 review, P2). The pattern is now
+    whole class of languages (#10852 review, P2). The letter class became
     ``[^\\W\\d_][\\w-]*`` (a Unicode LETTER, then word characters), which is the
     same shape as before for ASCII and correct for every script Python's ``re``
-    knows. The stopword and framing sets stay ASCII — that is only a PRECISION
+    knows — and it is what the CONTENT arm still uses. The stopword and framing
+    sets stay ASCII — that is only a PRECISION
     filter (``.lower()`` still folds Latin), never a presence decision.
 
     ⛔ DIGIT-ONLY is the third dimension of the same hole (#10852 review), and

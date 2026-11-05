@@ -1999,7 +1999,7 @@ def test_the_readmes_line_citations_resolve_to_the_symbols_they_name():
     """A cite that says it was re-derived at the head must BE the head's line.
 
     #9089 review finding 2: the README printed
-    `` `sdk._extract_session_v2` (`sdk.py:10341`; called at `:9358`) `` in the
+    `` `sdk._extract_session_v2` (`sdk.py:10384`; called at `:9358`) `` in the
     same paragraph that claimed the numbers were "re-derived at the head" — the
     def is at 10422 and the call site at 9439 at this head, so BOTH were 22
     lines stale (they named a comment inside the function and an unrelated
@@ -2008,7 +2008,7 @@ def test_the_readmes_line_citations_resolve_to_the_symbols_they_name():
     is pinned. `main` moved `sdk.py` under the cites again while this branch
     was open, which is exactly the drift this test exists to catch.
 
-    Non-vacuity: at the pre-fix head `sdk.py:10341` is a comment line inside
+    Non-vacuity: at the pre-fix head `sdk.py:10384` is a comment line inside
     `_extract_session_v2`, so the `startswith("def …")` assertion reds, and
     `:9358` carries no call to it, so the call-site assertion reds too.
     """
@@ -2855,7 +2855,7 @@ def test_the_probes_line_citations_resolve_too():
 
     Non-vacuity: at the pre-fix head every one of the eight cited +88 lines is unrelated code
     (`:8507` is `extract_session_v2`'s docstring prose, `:8646` is a blank line, `:8845` a comment
-    about `aboutObject`), so all eight assertions red; `sdk.py:11611` is a comment inside an
+    about `aboutObject`), so all eight assertions red; `sdk.py:11654` is a comment inside an
     unrelated M2 paragraph, so the call-site assertion reds as well.
 
     #10214 review (blocking): the cites were previously carried as a PAIR —
