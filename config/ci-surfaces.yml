@@ -2071,6 +2071,10 @@ surfaces:
   # fails closed to the FULL matrix), so this line makes the ownership explicit for
   # the file-level selection rather than relying on that fallback.
   - test_attest_census.py
+  # `test_gh_write_preflight.py` is registered ONCE, on `core`, further down this block (#11026's
+  # own row). #10930's registration of it here was superseded when #11026 landed the tool on `main`;
+  # a second `- test_gh_write_preflight.py` line in the same surface is an append-only-registry
+  # duplicate that `tools/registry_integrity.py` exists to refuse.
   # #9964: the kind↔layer partition — `tortoise/kind_layers.py` is the ONE
   # authority (a new module: no SOURCE_PATTERNS entry, so a diff touching only it
   # falls through to `core`), `tortoise/sdk.py` is a SHARED_MODULE (full matrix,
@@ -2986,6 +2990,16 @@ surfaces:
   - test_bridge_table.py
   - test_entity_identity.py
   - test_ci_verdict.py
+  # #10962/#10968: the owner-facing merge-readiness gate — six conditions over the tree, the
+  # required checks, the review record, coverage, the declared exclusions and open blocking
+  # findings. Registered under `core` beside its sibling instruments `test_ci_verdict.py`
+  # (whose grouping it consumes) and `test_worktree_report.py`: the suite is pure/offline
+  # (`Probe` fixtures, no DB, no network, no gh), so `core` is the correct surface and the
+  # fast band is where it belongs. The registration is LOAD-BEARING, not cosmetic: without
+  # it `ci_selection --integrity` reds `manifest-integrity` (which `python-ci-gate` needs,
+  # so the aggregate reds), and no leg selects the tests at all — measured
+  # `❌ manifest drift: ['test_ready_for_owner.py']` before this line.
+  - test_ready_for_owner.py
   # #10131: the catch-history measurement (which pre-merge `slow_files` have ever gone red
   # on a PR head). Registered under `core` beside its sibling instrument `test_ci_verdict.py`
   # — the module is pure/offline (an archived `runs.json` + `jobs/<run_id>.json` + artifact zips,
@@ -3914,6 +3928,20 @@ surfaces:
   # pool (this fleet registers no such label; `runs-on` is the selector's alone).
   # Hermetic: no DB, no network, no `gh`; every git/gh surface is injected.
   - test_batch_gate.py
+  # #10955: the queue consumer's own guard (`tools/next_work.py`) — the pick is
+  # DECIDED from records that already exist (`.mergify.yml`, the claim registry,
+  # the attestation, the merge tree) and the row names the command a lane would
+  # run, so this file pins the fail-closed half of that: a held/superseded/
+  # duplicate unit never carries a command, an unreadable surface is INCOMPLETE
+  # (exit 2), the order never lets readiness reorder priority, and the decision is
+  # a pure function of the snapshot (no clock, no config re-read, no cwd).
+  # Registered under `core`: `tools/` is a flat NON_PYTHON_PREFIXES entry, so the
+  # registration alone does not make a `tools/next_work.py`-only change select
+  # `core` — `tools/ci_selection.py::CORE_ALSO` carries that entry, and
+  # `test_a_next_work_only_change_selects_core_so_this_guard_actually_runs` in this
+  # file pins it. Hermetic: no DB, no network, no `gh`; every surface is a fake or
+  # a replayed snapshot.
+  - test_next_work.py
   # #6884: pins the `uri_requiring` declaration (re-derived BEHAVIOURALLY — it
   # runs the failing `pytest --collect-only` with an EMPTY TORTOISE_DB_URI and
   # compares) and
@@ -9981,6 +10009,17 @@ durations:
   test_ci_last_failed.py: 2.8  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 2.0
   test_ci_manifest.py: 21.3  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 12.5
   test_ci_verdict.py: 0.1  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 0.2
+  test_ready_for_owner.py: 2.0  # #10962/#10968: a NEW file has no CI junit measurement (a file that
+  # never ran cannot appear in an artifact), so this is `DEFAULT_FAST_WEIGHT`, NOT a local
+  # reading — a local wall is forbidden as a shard-layout input (#2818/#3419/#9003). The
+  # local private-lane wall at this PR's head was ~18 s, stated only so the next sweep can
+  # compare. ⛔ The CASE COUNT is deliberately NOT quoted here: a hand-written count re-stales
+  # on every case a later round adds, which is why the rows above state the same rule and why
+  # this PR's own review cycle 1 removed a restated `25 arms` from `tools/ci_selection.py`.
+  # (A row that DOES quote a count — `test_ci_catch_history.py` below — pairs it with a test
+  # that re-derives it; this row has no such pin, so it quotes none.)
+  # `tools/ci_timing.py --refresh-durations` replaces this row from junit once a push-to-main
+  # run includes it.
   test_ci_catch_history.py: 3.1  # #10131: the offline tests, 69 of them — `grep -c '^def test_'`, re-run by `test_the_durations_note_counts_the_tests_this_file_actually_has` so the count cannot go stale silently — 9.0-28 s at the #10359 fix head (box-load dependent; the eleven tests added across the fix rounds are sub-second), `-q -p no:cacheprovider`. Every test is pure: an archived runs.json/jobs fixture plus in-memory JUnit zips, no DB and no network. Refresh it from the first post-merge run that includes the file — ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 9.5
   test_compute_attribution.py: 0.6  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 1.2
   test_connector_scope.py: 1.1  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 0.9
