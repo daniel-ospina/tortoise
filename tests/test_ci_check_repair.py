@@ -1907,17 +1907,26 @@ def test_the_floor_citations_RESOLVE_to_what_they_claim_at_this_head():
     - **every** `ci_queue_health.py:<line>` cited by EITHER file must BE the assignment;
     - the sibling's `§6 lines A-B` citation must be found EXACTLY once (as the liveness
       anchor, so the checked set cannot silently shrink) and must name the pin's span;
-    - **every line of this FILE** whose prose cites the derivation — `§6`, `derivation`,
-      `citation` or `re-cut` — and carries an `A-B` span must name that same span,
-      whatever the wording around it. Two narrow, stated exclusions: lines containing
-      the literal `[0-9]` (they are this pin's own regex sources — the one way a stale
-      span can still hide, and only behind a line that would itself look like a
-      character class), and date-shaped spans such as `2026-11` (`MEASURED 2026-11-03`
-      is this file's own house style, and a date is not a line citation).
+    - every line of this file containing one of the CITATION tokens below **and** an
+      `A-B` span must name that same span. ⛔ THE TOKEN LIST IS THE DEFINITION, not an
+      illustrative sample (round 16's blocking P2: an earlier sentence promised
+      "whatever the wording around it", which the implementation never did, so a citation
+      phrased in words this file uses constantly — "cited at", "quoted at" — stayed
+      green while naming a stale span). The tokens are `§ 6` (with or without the space),
+      `derivation`, `cite`/`cited`/`cites`/`citing`/`citation`, `re-cut` (either
+      spelling) and `quote`/`quoted`; a span may use a hyphen, en dash or em dash.
 
-    Discriminating: shift a cited span anywhere, reword the sibling's phrasing away, or
-    state a different span next to any of those four words anywhere in this file, and
-    it reddens.
+      THREE STATED EXCLUSIONS, listed because each is a place a stale span can still sit
+      — declaring them is the point, not hiding them: (1) lines containing the literal
+      `[0-9]` (this pin's own regex sources); (2) date-shaped spans such as `2026-11`
+      (`MEASURED 2026-11-03` is this file's house style, and a date is not a citation);
+      (3) a citation phrased WITHOUT one of those tokens — e.g. "see `ci-wall-clock.md`
+      lines 111-222" — which no lexical arm can see. That residual is why the sibling
+      citation stays the liveness anchor: the canonical citation of this span is
+      always token-bearing and always present.
+
+    Discriminating: shift a cited span, reword the sibling's phrasing away, or state a
+    different span on any token-bearing line of this file, and it reddens.
     """
     root = Path(__file__).resolve().parents[1]
     src = (root / "tools" / "ci_check_repair.py").read_text()
@@ -1927,9 +1936,9 @@ def test_the_floor_citations_RESOLVE_to_what_they_claim_at_this_head():
     #    BE the derived-value assignment. The test file's own coordinates were unchecked
     #    until round 14, which is how a bare "one line below, at `:NNN`" describing the
     #    wrong line survived three rounds while being wrong at every head. The BARE
-    #    `:NNN` form is deliberately not matched here: `:4232` in this file names a
-    #    `python-ci.yml` line, and widening the arm would resolve it against the wrong
-    #    file (round 15's non-blocking P3, recorded rather than papered over).
+    #    `:NNN` form is deliberately not matched here: a bare coordinate in this file may
+    #    name a line in some OTHER file, and widening the arm would resolve it against
+    #    `ci_queue_health.py` and red falsely (round 15's non-blocking P3).
     cited = sorted(set(re.findall(r"ci_queue_health\.py:(\d+)", src)))
     cited += sorted(set(re.findall(r"ci_queue_health\.py:(\d+)", own_src)))
     assert cited, "the citation block no longer cites ci_queue_health.py by line"
@@ -1983,12 +1992,13 @@ def test_the_floor_citations_RESOLVE_to_what_they_claim_at_this_head():
     # 4. PHRASING-AGNOSTIC backstop over the WHOLE FILE (round 14's P2, widened in
     #    round 15 after its P2: the first version read one function, so a new citation
     #    appended to the SIBLING docstring — the very site that drifted in round 11 —
-    #    stayed green). Keyed on the citation vocabulary rather than the location, so
-    #    any wording lands in scope. Excluded, both stated: the pin's own regex sources
-    #    (a line containing `[0-9]`) and date-shaped spans, which are this file's house
-    #    style (`MEASURED 2026-11-03`), not line citations.
-    CITATION_WORDS = re.compile(r"§6|derivation|citation|re-cut")
-    ANY_SPAN = re.compile(r"(?<!\d)([0-9]{1,4})-([0-9]{1,4})(?!\d)")
+    #    stayed green). Keyed on the CITATION token list defined in this function's
+    #    docstring — that list is the DEFINITION of the scope, and the residual it cannot
+    #    reach is declared there rather than claimed away (round 16's blocking P2).
+    #    Spans accept a hyphen, en dash or em dash, because prose uses all three.
+    CITATION_WORDS = re.compile(
+        r"§\s*6|derivation|cit(?:e|ed|es|ing|ation)|re-?cut|quot(?:e|ed)")
+    ANY_SPAN = re.compile(r"(?<!\d)([0-9]{1,4})[-\u2013\u2014]([0-9]{1,4})(?!\d)")
 
     def _is_date(start: str, end: str) -> bool:
         return len(start) == 4 and start.startswith(("19", "20")) and len(end) <= 2
@@ -2002,10 +2012,11 @@ def test_the_floor_citations_RESOLVE_to_what_they_claim_at_this_head():
     ]
     for found in prose_spans:
         assert found == (str(first), str(last)), (
-            f"a line of this file citing the derivation states the span "
-            f"{found[0]}-{found[1]} while the pinned span is {first}-{last} — a "
-            "coordinate that has moved is stale here whatever its phrasing, and a "
-            "reworded citation must not be able to escape the pin")
+            f"a line of this file naming the citation (one of the tokens listed in this "
+            f"function's docstring) states the span {found[0]}-{found[1]} while the "
+            f"pinned span is {first}-{last} — a coordinate that has moved is stale "
+            "here, and the token list is broad on purpose so a reworded citation "
+            "cannot re-enter through a synonym")
 
 
 def test_a_run_at_the_measured_median_queue_wait_is_not_cancelled():
