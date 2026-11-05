@@ -35,9 +35,18 @@ THE FIX — derive the set from the REPO, never the API
       2. `docs/ci/required-contexts.json`     (committed snapshot — see below)
       3. FAIL(unreadable)
 
-    Both live in the tree, so condition 2 needs **no credential at all**. The
-    protection API is never called here — calling it would reintroduce the exact
-    failure this file exists to remove.
+    Both live in the tree, so DERIVING the required set needs **no credential at
+    all** — in particular no admin scope, which is the 403 this file exists to
+    remove. The protection API is never called here — calling it would
+    reintroduce the exact failure this file exists to remove.
+
+    ⚠️ The HEAD reads are a different matter, and this is not a credential-free
+    tool end to end: `fetch_check_runs` / `fetch_workflow_ids` DO issue
+    authenticated `gh api` calls (the plain `repo` read scope — never
+    `Administration`). A missing or under-scoped token therefore degrades honestly
+    to `FAIL(unreadable)` carrying gh's stderr in the detail — never to a guessed
+    verdict and never to a pass — but a credential-less context must not read that
+    refusal as "a required check is red".
 
     ⚠️ The snapshot is used to REPORT the set, never to decide condition 2: it is
     a flat `required_contexts` list with no entry/merge split, so it cannot say
@@ -76,19 +85,23 @@ from __future__ import annotations
 
 import sys
 
-# #5128: refuse a <3.12 interpreter before the imports below — a module-level
-# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
-# The guard cannot move ABOVE the `__future__` statement: a future import may be
-# preceded only by the docstring, comments, blank lines and other future imports
-# (PEP 236), so `import sys` + this guard immediately after it is the earliest
-# legal position — and the position `tests/test_entry_point_python_guard.py`
-# pins, so no other import can run ahead of the refusal.
+# #5128 shape: refuse a <3.12 interpreter BEFORE the imports below. The documented
+# invocation is a bare `uv run python tools/ready_for_owner.py`, and the module-level
+# imports reach into a 3.12-era tree, so on an older interpreter the tool would otherwise
+# die with an unattributed ImportError before any of its own messaging ran. The gate that
+# enforces this shape is tests/test_entry_point_python_guard.py.
 if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
-    raise SystemExit(
+    # Exit code 2, not `SystemExit(<str>)`'s 1: this file reports condition 2 as
+    # `0` PASS / `1` FAIL(red) / `2` FAIL(unreadable), so a refusal through 1 would be
+    # indistinguishable, by exit code, from "a required check is red" — and an old
+    # interpreter is an environment error, i.e. the same class as unreadable.
+    print(
         f"tools/ready_for_owner.py requires Python >= 3.12 (got "
         f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
-        f"`uv run python tools/ready_for_owner.py`"
+        f"`uv run python tools/ready_for_owner.py`",
+        file=sys.stderr,
     )
+    raise SystemExit(2)
 
 import argparse
 import json

@@ -925,8 +925,9 @@ def test_the_check_run_endpoint_pins_filter_all_per_page_and_head_sha(monkeypatc
 
     Every other test in this file either monkeypatches `_gh_api_json` for its
     PAYLOAD or replaces `fetch_check_runs` outright, so NONE of them asserts the
-    endpoint string: mutating `filter=all` to `filter=latest` left all 83 tests
-    green. This is the test that reds it.
+    endpoint string: mutating `filter=all` to `filter=latest` left the whole suite
+    green at the time this test was added (83 tests then; the figure is not
+    maintained, the mutation is). This is the test that reds it.
     """
     seen: list[str] = []
 
