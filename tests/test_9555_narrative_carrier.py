@@ -1724,11 +1724,13 @@ def _section(text: str, start_heading: str, end_heading: str) -> str:
     # slice, and every assertion inside it can then be satisfied by a surviving
     # copy elsewhere. `find` binds to the FIRST end match AFTER the start, so a
     # duplicate end heading placed just BEFORE a regression TRUNCATES the slice and
-    # the regression falls outside it — ⚠️ measured, not assumed: with an additive
-    # second `:Source.summary` line in §9.4 the count assertion reds (2), and
-    # adding a duplicate `### 9.5 ` heading ABOVE that line turns the same pin
-    # GREEN (1) over the same regression. That is fail-OPEN, which is why neither
-    # heading is exempt from this assert.
+    # the regression falls outside it. ⚠️ Both halves are REPLAYED, not assumed:
+    # with an additive second `:Source.summary` line inside §9.4 the count
+    # assertion reds (2); and adding a duplicate `### 9.5 ` heading ABOVE that line
+    # USED TO turn the pin GREEN (1) over the same regression — fail-OPEN — which
+    # is what the scoped end count below was added to close. Measured at this
+    # head, that same mutation now reds on the end count (2), so the hole is shut
+    # by an assert rather than only described by this comment.
     assert text.count(start_heading) == 1, (
         f"{_STORAGE_DOC.name} carries {text.count(start_heading)} occurrences of "
         f"{start_heading!r} — this pin slices from the FIRST match, so that heading "
@@ -1749,20 +1751,24 @@ def _section(text: str, start_heading: str, end_heading: str) -> str:
         "once there (0 means it now PRECEDES the start); ANY such duplicate reds "
         "this count, though only one placed just BEFORE a regression truncates "
         "the span and moves that regression outside the text the assertions read "
-        "(measured fail-open, see above)")
+        "(the fail-OPEN this assert closes is replayed in the comment above)")
     start = text.index(start_heading)
     # `find` + `assert`, not a bare `index`: the failure carries its own diagnosis
     # instead of an anonymous ValueError naming a substring nobody chose. This is
-    # a BACKSTOP — with the scoped count assert above at 1, `find` cannot fall at
-    # or before `start`, because neither heading is a prefix of the other here
-    # (`### 9.4 ` and `### 9.5 ` differ at index 6); a PREFIX pair would make
-    # `end == start` reachable with the count still at 1, which is the one case
-    # this line alone catches.
+    # a BACKSTOP and is UNREACHABLE with today's heading constants — with the
+    # scoped count above at 1, `find` cannot return -1, and neither heading is a
+    # prefix of the other (`### 9.4 ` and `### 9.5 ` differ at index 6), so
+    # `end == start` cannot happen either. The ONE case it alone catches is a
+    # future PREFIX pair, where `end == start` becomes reachable with the count
+    # still at 1. ⚠️ The message therefore names that case and NOT a reordered
+    # section: a reordered end heading (sole occurrence before the start) is
+    # caught by the count above, as a 0, with its own diagnosis.
     end = text.find(end_heading, start)
     assert end > start, (
-        f"{end_heading!r} does not follow {start_heading!r} in "
-        f"{_STORAGE_DOC.name} — the section order changed and this pin is "
-        "bracketing the wrong span")
+        f"{end_heading!r} matches at the START of {start_heading!r} in "
+        f"{_STORAGE_DOC.name} — one heading constant is a PREFIX of the other, so "
+        "the slice this pin brackets would be EMPTY and every assertion inside "
+        "it would read no text at all; check the two heading constants")
     return text[start:end]
 
 
