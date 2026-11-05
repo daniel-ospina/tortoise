@@ -1900,12 +1900,24 @@ def test_the_floor_citations_RESOLVE_to_what_they_claim_at_this_head():
     back out of the docstrings and resolved against the files they cite, and the pin is
     PHRASING-AGNOSTIC (round 14's P2: pinning one literal phrasing left this file's own
     previous wording — and every new one — uncovered, so a re-introduced coordinate
-    stayed green). Three arms: every `ci_queue_health.py:<line>` cited by EITHER file
-    must BE the assignment; the sibling's `§6 lines A-B` citation must be found exactly
-    once and name the span step 2 resolves; and any line in this file that discusses
-    the derivation or the citation while carrying an `A-B` span must name that same
-    span. Discriminating: shift a cited span anywhere, reword the sibling's phrasing
-    away, or state a different span near the word "derivation", and it reddens.
+    stayed green). Three arms, each with its scope stated so the claim matches the code
+    (round 15's P2 caught an earlier sentence claiming file-wide reach while arm 3 read
+    only one function):
+
+    - **every** `ci_queue_health.py:<line>` cited by EITHER file must BE the assignment;
+    - the sibling's `§6 lines A-B` citation must be found EXACTLY once (as the liveness
+      anchor, so the checked set cannot silently shrink) and must name the pin's span;
+    - **every line of this FILE** whose prose cites the derivation — `§6`, `derivation`,
+      `citation` or `re-cut` — and carries an `A-B` span must name that same span,
+      whatever the wording around it. Two narrow, stated exclusions: lines containing
+      the literal `[0-9]` (they are this pin's own regex sources — the one way a stale
+      span can still hide, and only behind a line that would itself look like a
+      character class), and date-shaped spans such as `2026-11` (`MEASURED 2026-11-03`
+      is this file's own house style, and a date is not a line citation).
+
+    Discriminating: shift a cited span anywhere, reword the sibling's phrasing away, or
+    state a different span next to any of those four words anywhere in this file, and
+    it reddens.
     """
     root = Path(__file__).resolve().parents[1]
     src = (root / "tools" / "ci_check_repair.py").read_text()
@@ -1913,8 +1925,11 @@ def test_the_floor_citations_RESOLVE_to_what_they_claim_at_this_head():
 
     # 1. Every `ci_queue_health.py:<line>` cited — in the tool AND in this file — must
     #    BE the derived-value assignment. The test file's own coordinates were unchecked
-    #    until round 14, which is how one describing "the trailing comment … one line
-    #    below, at `:305`" survived three rounds while being wrong at every head.
+    #    until round 14, which is how a bare "one line below, at `:NNN`" describing the
+    #    wrong line survived three rounds while being wrong at every head. The BARE
+    #    `:NNN` form is deliberately not matched here: `:4232` in this file names a
+    #    `python-ci.yml` line, and widening the arm would resolve it against the wrong
+    #    file (round 15's non-blocking P3, recorded rather than papered over).
     cited = sorted(set(re.findall(r"ci_queue_health\.py:(\d+)", src)))
     cited += sorted(set(re.findall(r"ci_queue_health\.py:(\d+)", own_src)))
     assert cited, "the citation block no longer cites ci_queue_health.py by line"
@@ -1965,32 +1980,32 @@ def test_the_floor_citations_RESOLVE_to_what_they_claim_at_this_head():
             f"{first}-{last} — a stale coordinate sends the next lane to the "
             "misreading the paragraph exists to prevent")
 
-    # 4. PHRASING-AGNOSTIC backstop inside THIS function (round 14's P2). An earlier
-    #    arm matched one literal wording, so the file's own PREVIOUS wording — and any
-    #    new one — could state a stale span and stay green. This arm drops the keyword
-    #    filter entirely and instead forbids ANY `A-B` span in this function's source
-    #    that is not the pinned one: the region is small and fully under this pin's
-    #    control, so "no other span appears here" is a cheap invariant, and a
-    #    re-introduced coordinate cannot choose its own phrasing to escape it. Lines
-    #    carrying `[0-9]` are the regex sources above, not prose, and are excluded.
-    fn_start = own_src.index(
-        "def test_the_floor_citations_RESOLVE_to_what_they_claim_at_this_head")
-    fn_end = own_src.find("\ndef ", fn_start + 1)
-    fn_src = own_src[fn_start:fn_end if fn_end != -1 else len(own_src)]
+    # 4. PHRASING-AGNOSTIC backstop over the WHOLE FILE (round 14's P2, widened in
+    #    round 15 after its P2: the first version read one function, so a new citation
+    #    appended to the SIBLING docstring — the very site that drifted in round 11 —
+    #    stayed green). Keyed on the citation vocabulary rather than the location, so
+    #    any wording lands in scope. Excluded, both stated: the pin's own regex sources
+    #    (a line containing `[0-9]`) and date-shaped spans, which are this file's house
+    #    style (`MEASURED 2026-11-03`), not line citations.
+    CITATION_WORDS = re.compile(r"§6|derivation|citation|re-cut")
+    ANY_SPAN = re.compile(r"(?<!\d)([0-9]{1,4})-([0-9]{1,4})(?!\d)")
+
+    def _is_date(start: str, end: str) -> bool:
+        return len(start) == 4 and start.startswith(("19", "20")) and len(end) <= 2
+
     prose_spans = [
         match
-        for line in fn_src.splitlines()
-        if "[0-9]" not in line
-        for match in re.findall(r"(?<![\d.])([0-9]{1,4})-([0-9]{1,4})(?![\d.])", line)
+        for line in own_src.splitlines()
+        if "[0-9]" not in line and CITATION_WORDS.search(line)
+        for match in ANY_SPAN.findall(line)
+        if not _is_date(*match)
     ]
-    assert prose_spans, (
-        "no prose span cites the derivation any more — this backstop would be vacuous, "
-        "so the anchor citation above must be restored or this arm rewritten")
     for found in prose_spans:
         assert found == (str(first), str(last)), (
-            f"this function states the span {found[0]}-{found[1]} while the pinned span "
-            f"is {first}-{last} — a coordinate that has moved is stale here whatever "
-            "its phrasing, and a reworded citation must not be able to escape the pin")
+            f"a line of this file citing the derivation states the span "
+            f"{found[0]}-{found[1]} while the pinned span is {first}-{last} — a "
+            "coordinate that has moved is stale here whatever its phrasing, and a "
+            "reworded citation must not be able to escape the pin")
 
 
 def test_a_run_at_the_measured_median_queue_wait_is_not_cancelled():
