@@ -509,10 +509,20 @@ failure paths belong to the caller, and they must be **measured and pinned, not 
   - **environment** — `usage`, `wrong-host`, `repo-not-visible`, `sso-unauthorized`: the invocation or the
     access is wrong. ⛔ **Do NOT re-mint the token** — fix the `--repo`/`$OR` value (the documented command
     reads `$OR`, so an unset one answers `usage`), the host, the repo access, or the SSO authorisation.
-  - **transient** — `rate-limited`, `server-error`, `transport`, `forbidden`: GitHub, or the path to it,
-    failed. **Re-run; do not re-mint the token and do not park the work.** The tool orders the rate-limit
+  - **transient** — `rate-limited`, `server-error`, `transport`: GitHub, or the path to it, failed.
+    **Re-run; do not re-mint the token and do not park the work.** The tool orders the rate-limit
     check ahead of every permission verdict precisely so a shared-account limit is not charged to the
     credential.
+  - **unclassified** — `forbidden`: a `403` carrying no signal this tool can classify (no rate-limit
+    wording, no exhausted quota or `retry-after`, no SSO/SAML, no "Resource not accessible"). **Re-run
+    ONCE; do not re-mint the token** — and if it repeats, report the reason and the `surfaces` map
+    instead of looping.
+  - **structural** — `unusable-response`: the answer was not one this gate can read — a `2xx` on a
+    payload GitHub must reject (a proxy, WAF, captive portal or redirect rewrote the request), or an
+    unexpected status on either probe (`410` Issues disabled on the repo, `451`, a proxy `400`).
+    ⛔ **Nothing failed and nothing is wrong with the credential: do NOT re-mint the token and do NOT
+    re-run** — re-running loops on a condition that cannot change until the path or the repo setting
+    is fixed. Report the reason, the status and the `surfaces` map.
 
 **Why it is a gate and not a courtesy call.** `gh` resolves `GH_TOKEN` → `GITHUB_TOKEN` →
 `$HOME/.config/gh/hosts.yml`, so a box with two credentials resolves whichever the environment happens to
