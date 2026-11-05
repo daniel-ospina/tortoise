@@ -442,4 +442,3 @@ job — compared against the same band on an uncapped run. That is the quantity 
 `matrix-band end delta` column is expressing (+17.9 m p50 / +23.2 m max at cap 3), and the only
 number a later reading should judge the regression against. Judging the cap by per-job wait will
 always report an improvement, because the wait it removes was never visible to the job.
-
