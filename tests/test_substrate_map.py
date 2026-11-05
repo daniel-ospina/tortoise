@@ -1546,14 +1546,27 @@ def test_the_document_label_prose_count_is_the_LINE_count() -> None:
     Reachable — and it WAS the shipped state: §5 read *":Document occurs on **17**
     lines under `tortoise/` at `4f68a2aa7`"*, but 17 is `git grep -l`'s FILE count;
     `git grep -n` (`git grep -c` too — "the number of matching lines", per the
-    git-grep manual) counts **55** LINES at exactly that commit, which is also 55
-    at this head. The number is load-bearing: it is the evidence §5 records for
-    the decision NOT to regex-check the label, so it is the number a reader
-    re-examining that decision quotes — and it was wrong by 3x.
+    git-grep manual) counts **55** LINES at exactly that commit. The number is
+    load-bearing: it is the evidence §5 records for the decision NOT to
+    regex-check the label, so it is the number a reader re-examining that
+    decision quotes — and it was wrong by 3x.
+
+    The figure is pinned to the TREE, not to `4f68a2aa7`, because that is what §5
+    claims it is: population = every tracked file under `tortoise/`. It has since
+    moved to **56** lines across **18** files — `cache_eviction.py:611` (the #10976
+    census's note on why labels do not partition the node set) is one more piece of
+    prose naming the retired label. That move is the mechanism working: the census
+    landed, this check reddened, and §5 was re-measured instead of the number being
+    quietly widened or the guard loosened.
 
     §5's second number is pinned with it: the narrow `\\(\\w*:Document` pattern
-    still matching exactly **two** RST literals is what makes *"a guard would have
-    needed a hand-maintained allowlist"* a measurement rather than an assertion.
+    matching **three** lines now — the two RST literals in `migrate_kinds.py:63,170`
+    plus that same `cache_eviction.py:611` comment — is what makes *"a guard would
+    have needed a hand-maintained allowlist"* a measurement rather than an assertion,
+    and it moved 2 → 3 with the line count. The pin is exact for the same reason the
+    first one is: a narrow pattern that starts matching most of the prose is the day
+    §5's exclusion argument stops being true, and the honest response is to re-measure
+    it, never to widen the assertion.
     """
     doc = _doc()
     match = _LABEL_CLAIM.search(doc)
@@ -1573,9 +1586,10 @@ def test_the_document_label_prose_count_is_the_LINE_count() -> None:
         f"§5 claims {claimed_lines} lines across {claimed_files} files; the tree has "
         f"{lines} lines across {files} files — re-measure the claim (§5)"
     )
-    assert narrow == 2, (
-        f"the narrow `\\(\\w*:Document` pattern now matches {narrow} lines, not the 2 "
-        "RST literals §5 records — the exclusion argument needs re-measuring"
+    assert narrow == 3, (
+        f"the narrow `\\(\\w*:Document` pattern now matches {narrow} lines, not the 3 "
+        "§5 records (2 RST literals in `migrate_kinds.py` + the `cache_eviction.py` "
+        "comment) — the exclusion argument needs re-measuring"
     )
 
 
