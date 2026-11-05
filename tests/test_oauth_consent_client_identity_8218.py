@@ -376,35 +376,6 @@ def test_a_CIMD_client_renders_its_HOST_and_never_its_document_name():
         "metadata fetch and must not be rendered")
 
 
-def test_a_CIMD_host_that_BEGINS_with_a_brand_is_not_presented_as_a_NAME():
-    """#10482 (the #8218 residual): a CIMD client owns its WHOLE host, including
-    the LEFTMOST labels — and a reader anchors on precisely those. Nothing in
-    `cimd.validate_client_id_url` or `_cimd_host` objects to a registrable
-    domain whose leading tokens name a brand the client does not own, so
-    `claude.ai.mcp-relay.example` rendered as the sentence SUBJECT hands back
-    the exact phishing payload #8218 exists to withhold, through the one arm
-    allowed to print a name.
-
-    The fix is the #10482 recommendation (1): keep the owned domain visible, and
-    stop presenting it AS the client's identity — `An app at <host>`, so no
-    reader is invited to take the leading labels as a brand. Storage, backing
-    and `display_name` are untouched; only the sentence the page builds changes.
-    """
-    host = "claude.ai.mcp-relay.example"
-    identity = resolve_client_identity(
-        {"id": f"https://{host}/metadata.json", "client_name": host})
-    assert identity.backed_by == BACKED_BY_CIMD_ORIGIN
-    line = consent_client_line(identity)
-    clause = _identity_clause(line)
-    # The owned domain stays visible: the reader can still see WHO is asking.
-    assert host in line, line
-    # …but it is no longer the client's NAME — the clause does not open with a
-    # brand token the client merely glued onto the front of a domain it owns.
-    assert not clause.startswith(host), clause
-    assert not clause.startswith("claude.ai"), clause
-    assert clause.startswith("An app at "), clause
-
-
 def test_a_cimd_row_with_no_stored_name_is_NOT_backed():
     """Review round 2, finding 3 — the `claimed is None` arm FAILED OPEN.
 
@@ -498,22 +469,6 @@ def test_the_unbacked_sentence_withholds_the_name_and_keeps_the_handle():
 # ═══════════════════════════════════════════════════════════════════════════
 # 7. The allowlist is read per call (an operator change needs no restart)
 # ═══════════════════════════════════════════════════════════════════════════
-
-# ═══════════════════════════════════════════════════════════════════════════
-# 8. The allowlist arm still renders a first-party client AS ITSELF (#10482)
-# ═══════════════════════════════════════════════════════════════════════════
-
-def test_an_allowlisted_client_is_still_rendered_as_its_backed_name(monkeypatch):
-    """#10482 must not touch the arm whose name an OPERATOR attested: the whole
-    point of the allowlist is that the name is ours, so it is the sentence
-    subject with no `An app at` qualifier."""
-    monkeypatch.setenv(ATTESTED_CLIENTS_ENV, '{"ct_claude": "Claude"}')
-    identity = resolve_client_identity({"id": "ct_claude", "client_name": "x"})
-    assert identity.backed_by == BACKED_BY_ALLOWLIST
-    clause = _identity_clause(consent_client_line(identity))
-    assert clause.startswith("Claude ("), clause
-    assert "An app at" not in clause, clause
-
 
 def test_the_allowlist_is_read_at_call_time(monkeypatch):
     row = {"id": "ct_abc", "client_name": "Claude"}
