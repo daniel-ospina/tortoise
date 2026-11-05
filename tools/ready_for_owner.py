@@ -74,6 +74,14 @@ Live use::
     python tools/ready_for_owner.py 10962 --json
     python tools/ready_for_owner.py 10962 --repo daniel-ospina/tortoise
 
+⛔ ONE RESIDUAL IN THE GATE READ, NAMED RATHER THAN HIDDEN: the required-context read
+keeps each `checks[].context` NAME and drops its `app_id`, and `ci_verdict`'s
+``GroupVerdict`` carries the app SLUG (not its numeric id), so a context that protection
+scopes to one app is satisfied by a same-named ``success`` from another. Inert in this repo
+— GitHub Actions is the only publisher of all seven contexts — and closing it needs an
+``app.id`` on ``GroupVerdict``, i.e. a change to the ONE check-run reading (#5042) rather
+than a second grouping here.
+
 ⛔ ONE KNOWN LIMITATION, NAMED RATHER THAN HIDDEN: condition 3 asks
 ``record-review.sh --check-carry``, and the review RECORD is per-machine
 (``$HOME/.pi/agent/reviews``). A review minted on another box is therefore invisible to
@@ -155,7 +163,10 @@ QUEUE_BLOCKING_LABELS = frozenset({"superseded-by-fold"})
 #: ``code-review`` converges on: a line that LEADS with ``[P0]``/``[P1]``/``[P2]``
 #: (``[P1] tortoise/sdk.py:12 — …``). The token must be the line's FIRST word, which is
 #: what makes this a finding rather than prose that happens to mention a severity.
-BLOCKING_RE = re.compile(r"^\s*(?:[-*]\s*)?\**\[?(P0|P1|P2)\]?\**\s*(?=\S|$)", re.MULTILINE)
+#: ⛔ QUOTING A FINDING (`> [P1] …`) MUST STILL BLOCK — answering a finding by quoting
+#: it is normal review behaviour, and a `>` prefix read NEUTRAL (round 9). So do nested
+#: bullets and bold brackets.
+BLOCKING_RE = re.compile(r"^\s*(?:[-*>]+\s*)*\**\[?(P0|P1|P2)\]?\**\s*(?=\S|$)", re.MULTILINE)
 ISSUES_RE = re.compile(r"^\s*ISSUES\s+(\d+)\b", re.MULTILINE)
 #: A CLEAN outcome. ⛔ THE POSITIVE VOCABULARY IS THE RECORDER'S TOO: `Outcome: clean` is
 #: the declaration `scripts/record-review.sh` reads (its own suppress arm keys on it), and
@@ -168,21 +179,9 @@ CLEAR_RE = re.compile(
 #: A CAPPED / ABORTED / DECLARED-NEGATIVE review exit. ⛔ THE VOCABULARY IS COPIED FROM
 #: `scripts/record-review.sh`, NOT INVENTED HERE: it is that script's arms (1) and (1b) —
 #: the two it applies UNCONDITIONALLY when deciding whether a review artifact is evidence
-#: of a clean outcome (`grep -qiE 'auto-fix +(stalled|failed|reached|aborted|converged|stuck)|…'`
-#: and the `Outcome: not clean` / `Review — NOT CLEAN` declarations). Adopting its own list
-#: keeps ONE definition of "not clean" instead of growing a second, weaker one.
-#:
-#: ⛔ ARM (2) OF THAT SCRIPT IS DELIBERATELY *NOT* IMPORTED — the loose `not[ _-]*clean`
-#: substring search. It is prose-tolerant there for a measured reason (#1964 / tortoise#8866:
-#: a genuine CLEAN review was refused because a later sentence contained the phrase), and
-#: importing it would reproduce that false block on good PRs. Arms (1) and (1b) veto only
-#: DECLARATIONS and STRUCTURAL EXIT PREFIXES, which is the fail-closed half with no such
-#: history.
-#:
-#: Residual, stated rather than hidden: a reviewer who writes a brand-new negative phrasing
-#: outside this vocabulary reads as NEUTRAL here. The bound on that is condition 3 — the
-#: recorder refuses to mint a clean record over a `[P0]/[P1]/[P2]` finding, so the documented
-#: finding shape cannot slip through this arm, only an undocumented one.
+#: of a clean outcome — and arm (2), its loose `not[ _-]*clean` search WITH that script's
+#: own `Outcome: clean` suppression. All three are applied here in the same order, so there
+#: is ONE definition of "not clean" on this box, not a second weaker one.
 NON_CLEAN_RE = re.compile(
     r"(?i)(?:auto-fix[ \t]+(?:stalled|failed|reached|aborted|converged|stuck)"
     r"|require[s]?[ \t]+human[ \t]+(?:attention|input|review)"
@@ -193,6 +192,66 @@ NON_CLEAN_RE = re.compile(
     r"|\[NO-LOOP-BUDGET\]"
     r"|(?:^|[*\s])outcome:[ \t]*[*\s]*(?:not|non|no)[ \t_-]*clean"
     r"|(?:^|[\s>*-])review[ \t]*[\u2014\u2013-][ \t]*not[ \t_-]*clean)"
+)
+
+#: The recorder's ARM (2) — the loose `not…clean` substring — and the SUPPRESSION that makes
+#: it safe there: it does not fire when the artifact states an explicit `Outcome: clean`
+#: (measured false refusal, #1964 / tortoise#8866: a genuine CLEAN review whose body used the
+#: phrase later in a sentence was refused). Applied as a PAIR, exactly as the recorder does.
+LOOSE_NEGATIVE_RE = re.compile(r"(?i)not[ \t_-]*clean")
+EXPLICIT_CLEAN_OUTCOME_RE = re.compile(r"(?i)(?:^|[*\s])outcome:[ \t]*[*\s]*clean\b")
+
+#: ⛔ A REVIEWER'S FINDING IN THE FLEET'S REAL SHAPE. The `[P1] file:line —` form above is
+#: only one of three shapes actually posted, and the OTHER TWO WERE INVISIBLE, which made
+#: this condition report PASS on PRs with an open P1/P2 (measured on #10726: two records
+#: declaring an open P2 after the last clear; 25 of 203 real review bodies across five PRs
+#: graded NEUTRAL). The shapes, each anchored to a source rather than guessed:
+#:
+#: * `severity: P1` — the `ISSUE:` block field, defined by
+#:   `skills/code-review/SKILL.md` §"ISSUE: block" (its `severity:` line IS the finding's
+#:   declared severity, indented two spaces under `ISSUE:`).
+#: * `Outcome: 2 findings (1 × P1, 1 × P2)` / `Outcome: 3 issues — 2 blocking …` — the
+#:   reviewer's own verdict HEADER, which is how a merged review states its count.
+#: * `Verdict: ISSUES 1` — the same verdict stated mid-line rather than at column 0.
+#:
+#: ⛔ THE `severity` ALTERNATIVE IS UNANCHORED, like its two siblings. It was line-anchored,
+#: and the COMPOSED forms reviewers actually post in this repo (`**severity: P3 ·
+#: check_type: … · origin: diff**`, `- severity: P1`, `**Severity:** P1`, `> severity: P2`)
+#: then read NEUTRAL — a false PASS, the #10726 class this whole arm exists to close.
+FINDINGS_DECLARED_RE = re.compile(
+    r"(?i)(?:\bseverity\b\**\s*:?\s*\**\s*(P0|P1|P2)\b"
+    r"|\boutcome\s*:\s*\**\s*([0-9]+)\s+(?:issues?|findings?)\b"
+    r"|\bverdict\s*:\s*\**\s*ISSUES\s+([0-9]+)\b)"
+)
+
+#: A body that declares a COUNT must also declare a BLOCKING severity for the count to
+#: block: `**Outcome: 3 issues (0 blocking).**` and `2 findings (both P3), no blocking
+#: defect` are CLEAN reviews of a P3-only round, and reading the count alone blocked four
+#: such bodies measured across ten PRs — a permanent false NOT-READY, and a contradiction of
+#: this gate's own rule that a `[P3]` note does not block.
+ANY_SEVERITY_TOKEN_RE = re.compile(r"(?i)\bP([0-3])\b")
+#: ⛔ `no blocking` only counts as a DECLARATION when it ENDS there — "No blocking other
+#: than the P1" is the opposite claim, and matching it was the round-7→8 false PASS.
+ZERO_BLOCKING_RE = re.compile(r"(?i)\b0\s+blocking\b|\bno\s+blocking\b(?=\s*(?:[.,;:!)\]]|$))")
+#: The ISSUE block's SIBLING fields. A real finding always carries at least one of these
+#: next to its severity; bare prose that happens to say "severity: P1" does not. Used to
+#: tell a DECLARATION from a sentence ABOUT a past finding — round 8 measured 5 of 6 natural
+#: CLEAN phrasings blocking without this discriminator.
+#:
+#: ⛔ `outcome:` is NOT a sibling: it is the VERDICT header, so treating it as one made
+#: `**Outcome: CLEAN.** The one severity: P2 note from round 2 is fixed` block. The ISSUE
+#: block's own `outcome:` field is covered by the line-start arm, because the block's
+#: `severity:` is on its own line.
+SIBLING_FIELD_RE = re.compile(
+    r"(?i)(?:\bcheck_type\s*:"
+    r"|\borigin\s*:\s*(?:diff|history|context|base|design)\b"
+    r"|\b(?:location|file)\s*:\s*\S"
+    r"|\b(?:description|suggestion)\s*:)"
+)
+#: A severity declaration in FIELD position: its own line (the `ISSUE:` block's indented
+#: `severity: P1`), optionally bulleted, bolded, quoted or backticked.
+SEVERITY_LINE_START_RE = re.compile(
+    r"(?im)^\s*(?:[-*>]\s*)*\W{0,2}`?severity`?\s*\**\s*:?\s*\**\s*P[0-2]\b"
 )
 
 #: A FORMAL change request is a blocking record even when the review body is empty — the
@@ -318,7 +377,7 @@ class Probe:
     repo: str = DEFAULT_REPO
     head: str = ""
     base: str = "main"
-    is_draft: bool = False
+    is_draft: bool | None = None
     mergeable: str = "UNKNOWN"
     merge_state: str = ""
     head_committed_at: str = ""
@@ -356,7 +415,10 @@ class Probe:
     labels_raw: str = ""
     #: ``open``/``closed`` as GitHub states it, and whether it already merged.
     pr_state: str = "open"
-    merged: bool = False
+    merged: bool | None = None
+    #: Re-read AFTER every other read: ``True`` still the same head, ``False`` it moved
+    #: mid-read, ``None`` the re-read was unreadable.
+    head_stable: bool | None = None
     #: Set by tests/callers that need a fixed clock; default = now (UTC).
     now: datetime = field(default_factory=lambda: datetime.now(UTC))
 
@@ -406,6 +468,11 @@ def _gate_token(group: ci_verdict.GroupVerdict) -> str:
     if group.state == ci_verdict.GROUP_ABSENT:
         # cancelled / stale: measured NOTHING. Absence is not a pass.
         return f"absent:{conclusion}"
+    if group.state != ci_verdict.GROUP_GREEN:
+        # ⛔ WHITELIST, not a fall-through. A state this module has not seen used to reach
+        # the conclusion check below and PASS on `conclusion=success` — the same
+        # unrecognised-value-falls-through-the-gap defect the polarity rule forbids.
+        return f"state:{group.state}"
     if conclusion != REQUIRED_CONCLUSION:
         # green for GitHub, not for us: skipped/neutral exercised no code.
         return f"non-measuring:{conclusion}"
@@ -613,6 +680,25 @@ def check_exclusions(probe: Probe) -> Check:
             "unreadable",
             unreadable=True,
         )
+    if probe.head_stable is None:
+        return Check(
+            "exclusions",
+            False,
+            "the closing head re-read was unreadable",
+            "unreadable",
+            unreadable=True,
+        )
+    if probe.head_stable is False:
+        reasons.append("head-moved-mid-read")
+        parts.append("the PR head moved during the read")
+    if probe.merged is None:
+        return Check(
+            "exclusions",
+            False,
+            "the PR payload carried no `merged` field",
+            "unreadable",
+            unreadable=True,
+        )
     if probe.merged or probe.pr_state.lower() != "open":
         reasons.append(f"not-open:{probe.pr_state}{'-merged' if probe.merged else ''}")
         parts.append(f"state={probe.pr_state} merged={str(probe.merged).lower()}")
@@ -651,6 +737,14 @@ def check_exclusions(probe: Probe) -> Check:
     elif flag == "CONFLICTING":
         parts.append(f"mergeable={probe.mergeable} (flag IGNORED: merge-tree is clean)")
 
+    if probe.is_draft is None:
+        return Check(
+            "exclusions",
+            False,
+            "the PR payload carried no `draft`/`isDraft` field",
+            "unreadable",
+            unreadable=True,
+        )
     if probe.is_draft:
         reasons.append("draft")
         parts.append("isDraft=true")
@@ -695,6 +789,74 @@ def _parse_instant(value: str) -> datetime | None:
 # ── condition 6 — no OPEN blocking finding ──────────────────────────────────
 
 
+def _grades_as_blocking(text: str, item: Mapping[str, Any]) -> bool:
+    """Does this review artifact record a blocker? Every arm is independent; any one blocks.
+
+    HARD arms always block. SOFT arms (a declared COUNT, and a severity named anywhere) are
+    suppressed by an explicit ``0 blocking`` / ``no blocking <thing>.`` — a P3-only round
+    that MENTIONS the P2 it fixed must stay certifiable, or a clean PR can never open the
+    owner's tab again. A blocking severity in FIELD position is hard, so a "0 blocking"
+    phrase can never cancel a real finding.
+    """
+    issues = ISSUES_RE.search(text)
+    severity = _declared_severity(text)
+    severities = set(ANY_SEVERITY_TOKEN_RE.findall(text))
+    # A declaration only counts in FIELD position (its own line, as in the `ISSUE:` block,
+    # or beside an ISSUE-block sibling field) — prose ABOUT a past finding is not a finding.
+    severity_is_field = bool(SEVERITY_LINE_START_RE.search(text)) or (
+        severity is not None and bool(SIBLING_FIELD_RE.search(text))
+    )
+    zero_blocking = bool(ZERO_BLOCKING_RE.search(text))
+
+    hard = bool(
+        BLOCKING_RE.search(text)
+        or (issues and int(issues.group(1)) > 0)
+        # The recorder's own unconditional arms (1) and (1b).
+        or NON_CLEAN_RE.search(text)
+        # Its arm (2): loose `not…clean`, suppressed by an explicit `Outcome: clean`.
+        or (LOOSE_NEGATIVE_RE.search(text) and not EXPLICIT_CLEAN_OUTCOME_RE.search(text))
+        # ⛔ A formal unresolved change request is a blocking record whatever its body says.
+        or str(item.get("state") or "").upper() == CHANGES_REQUESTED
+        or severity_is_field
+    )
+    if hard:
+        return True
+    # ⛔ `zero_blocking` is checked AFTER the multi-declaration case, not before: one round's
+    # "0 blocking" must not short-circuit a P1 declared on another round (round-9 P1).
+    counts = _declared_counts(text)
+    if not counts:
+        return False
+    if len(counts) > 1:
+        # SEVERAL declarations (a per-round history): a `0 blocking` on one round must not
+        # cancel a P1 declared on another. Only an explicit blocking severity on ANY round
+        # blocks, so an all-P3 history stays certifiable.
+        return bool(severities & {"0", "1", "2"})
+    if zero_blocking:
+        # ONE declaration that says it named nothing blocking — e.g. a P3-only round that
+        # MENTIONS the P2 it just fixed. Trust the declaration.
+        return False
+    if severities & {"0", "1", "2"}:
+        return True
+    return any(c > 0 for c in counts) and not (severities and severities <= {"3"})
+
+
+def _declared_severity(text: str) -> str | None:
+    match = FINDINGS_DECLARED_RE.search(text)
+    if not match:
+        return None
+    return (match.group(1) or "").upper() or None
+
+
+def _declared_counts(text: str) -> list[int]:
+    """Every count this body declares, in order (a per-round history declares several)."""
+    out: list[int] = []
+    for match in FINDINGS_DECLARED_RE.finditer(text):
+        value = _int_or_none(match.group(2) or match.group(3))
+        if value is not None:
+            out.append(value)
+    return out
+
+
 def check_blocking_finding(probe: Probe) -> Check:
     """No P0/P1/P2 finding may still be open — the last word must be a clean verdict.
 
@@ -718,13 +880,14 @@ def check_blocking_finding(probe: Probe) -> Check:
         probe.comments, key=lambda c: (str(c.get("created_at") or ""), int(c.get("id") or 0))
     ):
         text = str(item.get("body") or "")
-        issues = ISSUES_RE.search(text)
-        blocking = (
-            BLOCKING_RE.search(text)
-            or (issues and int(issues.group(1)) > 0)
-            or NON_CLEAN_RE.search(text)
-            or str(item.get("state") or "").upper() == CHANGES_REQUESTED
-        )
+        # ⛔ EVERY ARM IS EVALUATED INDEPENDENTLY AND THEY ARE OR'ED. Making the declaration
+        # arm EXCLUSIVE (an `if/elif/else` chain) let ONE prose severity token mask the
+        # recorder's own unconditional abort markers and the reviewer's `[P1]`/`ISSUES n`
+        # verdicts — measured at the previous head: `Auto-fix stalled … see the severity: P2
+        # note.`, `ISSUES 2` + `I addressed the severity: P2 comment`, and a `[P1] … still
+        # open` line all read NEUTRAL. That is the same masking class as the round-7→8
+        # regression, so the arms no longer compete.
+        blocking = _grades_as_blocking(text, item)
         if blocking:
             blocking_seen += 1
             open_finding = item
@@ -859,6 +1022,11 @@ class Gh:
         pages = self.pages(endpoint)
         return pages[0] if len(pages) == 1 else pages
 
+    def api_fresh(self, endpoint: str) -> Any:
+        """Read again, bypassing this run's cache — for the closing head witness."""
+        self._cache.pop("pages:" + endpoint, None)
+        return self.api(endpoint)
+
     def pr(self, number: int) -> Mapping[str, Any]:
         raw = self.api(f"pulls/{number}")
         if not isinstance(raw, Mapping):
@@ -913,6 +1081,25 @@ def _run(cmd: Sequence[str], timeout: int, cwd: Path | None = None) -> subproces
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise ReadError(f"{' '.join(cmd)}: {exc}") from exc
+
+
+def _int_or_none(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _tri_state(payload: Mapping[str, Any], *keys: str) -> bool | None:
+    """``True``/``False`` from the first PRESENT key, ``None`` when none of them is there.
+
+    The point is the third value: an ABSENT boolean is not ``False``, and defaulting it to
+    ``False`` puts the passing side on a field the gate exists to check.
+    """
+    for key in keys:
+        if key in payload:
+            return payload[key] is True
+    return None
 
 
 def _mergeable_flag(value: Any) -> str:
@@ -1133,7 +1320,26 @@ def _read_touched(gh: Gh, pr: int) -> tuple[tuple[str, ...], str]:
             names.append(str(entry["filename"]))
     if not names:
         raise ReadError(f"pulls/{pr}/files returned no filenames")
-    return tuple(names), f"files={len(names)}"
+    # ⛔ COMPLETENESS IS WITNESSED, not assumed: the PR payload states `changed_files`, so a
+    # truncated listing is caught instead of silently shrinking the coverage read while the
+    # raw line still says `files=N`. (The same rule `ci_verdict.collect_items` applies to
+    # the check-run surface.)
+    _pull = gh.api(f"pulls/{pr}")
+    expected = _int_or_none(_pull.get("changed_files")) if isinstance(_pull, Mapping) else None
+    if expected is None:
+        # ⛔ An ABSENT `changed_files` is not "nothing to compare": the truncation witness
+        # cannot run, so the listing is UNWITNESSED. Same doctrine as
+        # `draft`/`merged`/`labels`/`state` — an absent field is never the passing side.
+        raise ReadError(
+            f"pulls/{pr}: the payload carries no `changed_files`, so the file listing's "
+            "completeness cannot be witnessed"
+        )
+    if len(names) < expected:
+        raise ReadError(
+            f"pulls/{pr}/files: read {len(names)} of {expected} changed files — "
+            "the listing is TRUNCATED"
+        )
+    return tuple(names), f"files={len(names)}/{expected}"
 
 
 def declared_union(body: str) -> tuple[tuple[str, ...] | None, str]:
@@ -1239,6 +1445,13 @@ def _read_comments(gh: Gh, pr: int) -> tuple[tuple[Mapping[str, Any], ...], str]
     comments = _flatten(gh.api(f"issues/{pr}/comments?per_page=100"))
     reviews = _flatten(gh.api(f"pulls/{pr}/reviews?per_page=100"))
     inline = _flatten(gh.api(f"pulls/{pr}/comments?per_page=100"))
+    # A dismissed review's INLINE comments are as dismissed as its body. Keeping them made
+    # a dismissed review's `[P1]` block forever — asymmetric with dropping the body.
+    dismissed_review_ids = {
+        item.get("id")
+        for item in reviews
+        if isinstance(item, Mapping) and str(item.get("state") or "").upper() == DISMISSED
+    }
     out: list[Mapping[str, Any]] = []
     for kind, items in (("comment", comments), ("review", reviews), ("inline", inline)):
         for item in items:
@@ -1250,6 +1463,8 @@ def _read_comments(gh: Gh, pr: int) -> tuple[tuple[Mapping[str, Any], ...], str]
             # its findings no longer stand. Keeping a non-empty dismissed body graded its
             # `[P0]/[P1]/[P2]` lines as open forever.
             if state == DISMISSED:
+                continue
+            if kind == "inline" and item.get("pull_request_review_id") in dismissed_review_ids:
                 continue
             # A BARE GitHub-UI review (empty body) still carries a STATE, and that state
             # is the verdict: an empty-bodied APPROVED is the commonest approval shape, and
@@ -1302,15 +1517,21 @@ def collect_probe(
     head = str((pull.get("head") or {}).get("sha") or "")
     probe.head = head
     probe.base = str((pull.get("base") or {}).get("ref") or "")
-    # An OMITTED `draft` is not "not a draft": read the key, do not assume it.
-    probe.is_draft = pull.get("draft") is True
+    # An OMITTED `draft` is not "not a draft": read the key, do not assume it. Both
+    # spellings are read — REST and the GitHub UI payload say `draft`, GraphQL says
+    # `isDraft` — and `None` means "not read", which `check_exclusions` turns into
+    # FAIL(unreadable). A GraphQL-shaped payload read only for `draft` would silently
+    # UN-draft a draft PR.
+    probe.is_draft = _tri_state(pull, "draft", "isDraft")
     probe.mergeable = _mergeable_flag(pull.get("mergeable"))
     # REST spells it `mergeable_state`; GraphQL (`gh pr view --json`) spells it
     # `mergeStateStatus`. Read both, so the reported value is the same either way.
     probe.merge_state = str(pull.get("mergeable_state") or pull.get("mergeStateStatus") or "")
     probe.body = str(pull.get("body") or "")
     probe.pr_state = str(pull.get("state") or "")
-    probe.merged = bool(pull.get("merged") is True or pull.get("merged_at"))
+    probe.merged = _tri_state(pull, "merged")
+    if probe.merged is None and pull.get("merged_at"):
+        probe.merged = True
     labels = pull.get("labels")
     if isinstance(labels, list):
         probe.labels = tuple(
@@ -1363,7 +1584,27 @@ def collect_probe(
     else:
         probe.coverage_raw = probe.touched_raw
     probe.comments, probe.comments_raw = _try(gh, lambda g: _read_comments(g, pr))
+    # ⛔ THE HEAD IS RE-WITNESSED LAST. Conditions 1-2 measured `probe.head`, while condition
+    # 3's recorder evaluates the LIVE head — so a push landing in between would let
+    # `READY-FOR-OWNER(<old head>)` describe a merge target whose gates were never measured.
+    probe.head_stable = _witness_head(gh, pr, head)
     return probe
+
+
+def _witness_head(gh: Gh, pr: int, head: str) -> bool | None:
+    """Is the PR's head STILL ``head`` after everything else was read?"""
+    try:
+        fresh = gh.api_fresh(f"pulls/{pr}")
+    except RateLimited:
+        raise
+    except ReadError:
+        return None
+    if not isinstance(fresh, Mapping):
+        return None
+    live = str((fresh.get("head") or {}).get("sha") or "")
+    if len(live) != 40:
+        return None
+    return live == head
 
 
 def _try(gh: Gh, fn, surface: str = "") -> tuple[Any, str]:
@@ -1462,20 +1703,55 @@ def main(argv: Sequence[str] | None = None) -> int:
                 recorded_diff=args.recorded_diff,
                 recorded_head=args.recorded_head,
             )
+        # ⛔ INSIDE the try: `evaluate()`, `render()` and `json.dumps` were OUTSIDE it, so a
+        # crash in a condition (or in a `--fixture` payload whose comment `id` is not an int)
+        # still printed a traceback and NO verdict line — the very shape the handler exists to
+        # make impossible.
+        verdict = evaluate(probe)
+        if args.json:
+            payload = json.dumps(verdict.to_dict(), indent=2, sort_keys=True)
+        else:
+            payload = render(verdict)
     except RateLimited as exc:
         # ⛔ The contract is "exactly one of READY-FOR-OWNER / NOT-READY", and a rate limit
         # used to print an EMPTY stdout — a third shape a caller grepping the line could not
         # parse. Every condition is unread, so every condition failed.
         print(f"GH-RATE-LIMITED({exc.endpoint})", file=sys.stderr)
-        pr = args.pr if args.pr is not None else 0
-        print(f"NOT-READY({pr}, failed={','.join(CONDITIONS)})")
+        print(_failure_output(args, "gh-rate-limited"))
         return 1
-    verdict = evaluate(probe)
-    if args.json:
-        print(json.dumps(verdict.to_dict(), indent=2, sort_keys=True))
-    else:
-        print(render(verdict))
+    except Exception as exc:  # the OUTPUT CONTRACT outranks the exception
+        # ⛔ A read that is not a verdict must never become a traceback with NO line. Every
+        # reader is meant to convert its own failure, but this is the backstop that makes
+        # "exactly one of READY-FOR-OWNER / NOT-READY" true even for a case nobody foresaw
+        # (a payload whose `head` is a string rather than an object, a vendor schema change).
+        print(f"READY-GATE-ERROR({type(exc).__name__}: {exc})", file=sys.stderr)
+        print(_failure_output(args, f"error:{type(exc).__name__}"))
+        return 1
+    print(payload)
     return 0 if verdict.ready else 1
+
+
+def _failure_output(args: argparse.Namespace, reason: str) -> str:
+    """The SAME output shape the caller asked for, on the failure path.
+
+    A `--json` caller used to receive a bare text line here, which is a parse error rather
+    than a verdict — the third-shape problem in its last hiding place.
+    """
+    pr = args.pr if args.pr is not None else 0
+    if getattr(args, "json", False):
+        return json.dumps(
+            {
+                "pr": pr,
+                "head": "",
+                "ready": False,
+                "failed": list(CONDITIONS),
+                "line": f"NOT-READY({pr}, failed={','.join(CONDITIONS)})",
+                "error": reason,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    return f"NOT-READY({pr}, failed={','.join(CONDITIONS)})"
 
 
 def probe_from_dict(data: Mapping[str, Any]) -> Probe:
@@ -1505,7 +1781,9 @@ def probe_from_dict(data: Mapping[str, Any]) -> Probe:
         repo=str(data.get("repo", DEFAULT_REPO)),
         head=str(data.get("head", "")),
         base=str(data.get("base", "main")),
-        is_draft=bool(data.get("is_draft", False)),
+        # None (absent or explicit null) is "not read" — the fail-closed default — so a
+        # fixture that omits `is_draft`/`merged` cannot accidentally read as not-a-draft.
+        is_draft=None if data.get("is_draft") is None else bool(data["is_draft"]),
         mergeable=str(data.get("mergeable", "UNKNOWN")),
         merge_state=str(data.get("merge_state", "")),
         head_committed_at=str(data.get("head_committed_at", "")),
@@ -1517,7 +1795,8 @@ def probe_from_dict(data: Mapping[str, Any]) -> Probe:
         ),
         labels_raw=str(data.get("labels_raw", "")),
         pr_state=str(data.get("pr_state", "open")),
-        merged=bool(data.get("merged", False)),
+        merged=None if data.get("merged") is None else bool(data["merged"]),
+        head_stable=None if data.get("head_stable") is None else bool(data["head_stable"]),
         tree=data.get("tree"),
         tree_raw=str(data.get("tree_raw", "")),
         groups=parsed_groups,
