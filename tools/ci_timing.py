@@ -3818,12 +3818,12 @@ def paid_vs_selected_cli(args) -> int:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import ci_selection  # lazy by design
 
-    # `_manifest_of` is this module's existing seam for exactly this — it wraps
-    # `ci_selection.parse_manifest_text(text)` + `_normalize_surfaces(...)`,
-    # which is what `load_manifest()` does for every other consumer (it used to
-    # wrap a bare `yaml.safe_load(text)`; #10790 review 1 caught the stale
-    # sentence). Feeding the raw YAML straight to `fast_pool` would iterate a
-    # scalar surface character-by-character and raise on a None one.
+    # `_manifest_of` is this module's existing seam for exactly this — it parses
+    # through `ci_selection.parse_manifest_text` (which refuses a duplicate
+    # mapping key, #10790) and normalizes with
+    # `ci_selection._normalize_surfaces`, i.e. what `load_manifest()` does for
+    # every other consumer. Feeding the raw YAML straight to `fast_pool` would
+    # iterate a scalar surface character-by-character and raise on a None one.
     try:
         manifest = _manifest_of(Path(args.manifest).read_text())
     except (DurationsBridgeError, OSError) as exc:
