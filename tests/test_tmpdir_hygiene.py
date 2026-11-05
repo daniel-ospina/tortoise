@@ -420,9 +420,18 @@ def test_sweep_reclaims_a_dead_marked_root_and_keeps_a_live_one():
         # reclaim we did not perform is attributed rather than required.
         # The relaxation is not vacuous: a sweep that never fires leaves
         # `dead` on disk, so the assertion below still reds.
-        assert dead in reclaimed or not os.path.exists(dead), (
-            f"a dead-marked root survived: neither reclaimed nor gone: {dead}")
-        assert not os.path.exists(dead)
+        #
+        # ⛔ ONE assertion, not two (#10610 review at `6a7546064`, note on this
+        # line). The pre-fix shape was `assert dead in reclaimed or not
+        # os.path.exists(dead)` FOLLOWED by `assert not os.path.exists(dead)`;
+        # the second line makes the first reduce to itself, so the `reclaimed`
+        # disjunct could not add coverage and read as if this call's return were
+        # still pinned. The OUTCOME is what is pinned — the call's own
+        # attribution is not, by design (`reclaimed` is kept in the failure
+        # message so a red still says whether this call named the root).
+        assert not os.path.exists(dead), (
+            f"a dead-marked root survived the sweep: {dead} "
+            f"(this call reclaimed {reclaimed!r})")
         assert os.path.exists(live), "a live suite's root must not be reclaimed"
     finally:
         shutil.rmtree(dead, ignore_errors=True)

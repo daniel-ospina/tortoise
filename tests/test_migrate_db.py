@@ -182,10 +182,20 @@ def test_the_subprocess_bound_clears_one_cold_embedder_load():
     """
     import inspect
 
-    assert _MIGRATE_TIMEOUT_S >= 240, (
+    # ⛔ DERIVED from the budget conftest pins, never re-typed (review at
+    # `6a7546064`, P2). The pre-fix bar was a `240` literal that sat BELOW the
+    # 270 s budget this file budgets against (`_embedder_load_budget_s()`,
+    # `tests/conftest.py:280`), so `_MIGRATE_TIMEOUT_S = 250` passed every pin in
+    # this module while killing a legitimate 270 s cold load — the #10610
+    # carve-out false red, reinstated with the guard green.
+    load = _embedder_load_budget_s()
+    assert load <= _MIGRATE_TIMEOUT_S, (
         f"the migrate-db subprocess bound is {_MIGRATE_TIMEOUT_S}s, below the "
-        "204.64 s worst cold embedder load tests/conftest.py records (#10010) — "
-        "a bound this tight re-introduces the #10610 carve-out flake"
+        f"{load}s cold-load budget tests/conftest.py pins for the embedder "
+        "(#10010: the worst cold load OBSERVED is 204.64 s, and the suite waits "
+        f"up to {load}s for one). A bound under the load budget kills a "
+        "legitimate invocation — the #10610 carve-out flake this constant "
+        "exists to stop"
     )
     default = inspect.signature(_run_migrate).parameters["timeout"].default
     assert default == _MIGRATE_TIMEOUT_S, (
@@ -214,6 +224,42 @@ def _subprocess_invocations(fn) -> int:
     )
 
 
+def _effective_item_budget_s(pytestconfig) -> float:
+    """The GLOBAL item budget in force, resolved the way pytest-timeout does.
+
+    `pytest_timeout.get_env_settings()`
+    (`site-packages/pytest_timeout.py:356-365`, v2.4.0) resolves
+    `--timeout` (CLI, `getvalue("timeout")`) → `PYTEST_TIMEOUT` (env) → the
+    `timeout` ini key, in THAT order; an item's own `@pytest.mark.timeout(N)`
+    then overrides the result (which is why the marker is read first here).
+    Reading `getini("timeout")` alone — the pre-fix spelling — grades the run
+    against the key both other sources override, in both directions:
+
+    * a leg passing a TIGHTER `--timeout` is graded against a looser ini, so the
+      reachability arm stays green over an inert bound — the defect it exists to
+      catch;
+    * a leg passing a LOOSER `--timeout` is graded against the tighter ini and
+      reds spuriously (`perf-lane.yml:163` passes `--timeout=900`).
+
+    No budget in force at all (plugin not loaded, or 0) is `inf`: there is no
+    item alarm for the subprocess bound to be unreachable behind.
+    """
+    cli = pytestconfig.getoption("timeout", default=None)
+    if cli is not None:
+        return float(cli)
+    env = os.environ.get("PYTEST_TIMEOUT")
+    if env is not None and env != "":
+        return float(env)  # a non-numeric value raises, as the plugin does
+    try:
+        ini = pytestconfig.getini("timeout")
+    except (KeyError, ValueError):  # pragma: no cover - plugin not loaded
+        return float("inf")
+    if ini:
+        value = float(ini)
+        return value if value > 0 else float("inf")
+    return float("inf")
+
+
 def _embedder_load_budget_s() -> float:
     """The embedder's own cold-load budget, read from the pin that owns it.
 
@@ -225,6 +271,50 @@ def _embedder_load_budget_s() -> float:
     from tortoise.embeddings import EmbeddingModel
 
     return float(EmbeddingModel._LOAD_TIMEOUT_S)
+
+
+def test_the_item_budget_is_the_one_in_force_not_the_ini_value(monkeypatch):
+    """#10610 review at `6a7546064`, P3: the global budget is resolved, not read.
+
+    The pre-fix spelling was `int(pytestconfig.getini("timeout"))` — the INI
+    value only, which is the key `pytest_timeout` reads LAST
+    (`pytest_timeout.py:356-365`). Non-vacuity, measured: re-spelling
+    `_effective_item_budget_s` as `float(config.getini("timeout"))` — the
+    pre-fix behaviour — reds here on `900 != 300` and `120 != 300`.
+    """
+
+    class _Config:
+        def __init__(self, cli=None, ini="300"):
+            self._cli, self._ini = cli, ini
+
+        def getoption(self, name, default=None):
+            assert name == "timeout", name
+            return default if self._cli is None else self._cli
+
+        def getini(self, name):
+            assert name == "timeout", name
+            return self._ini
+
+    monkeypatch.delenv("PYTEST_TIMEOUT", raising=False)
+
+    assert _effective_item_budget_s(_Config()) == 300.0, "ini is the last resort"
+    assert _effective_item_budget_s(_Config(cli=900)) == 900.0, (
+        "`--timeout=900` must win over the ini's 300 (perf-lane.yml:163) — the "
+        "pre-fix ini-only read graded a looser leg against the tighter ini"
+    )
+    monkeypatch.setenv("PYTEST_TIMEOUT", "120")
+    assert _effective_item_budget_s(_Config()) == 120.0, (
+        "`PYTEST_TIMEOUT=120` must win over the ini's 300 — the pre-fix ini-only "
+        "read stayed green over a bound that could no longer fire"
+    )
+    assert _effective_item_budget_s(_Config(cli=900)) == 900.0, (
+        "the CLI is the highest-precedence source"
+    )
+    monkeypatch.delenv("PYTEST_TIMEOUT")
+    assert _effective_item_budget_s(_Config(ini="")) == float("inf"), (
+        "with nothing in force there is no item alarm for the bound to be "
+        "unreachable behind"
+    )
 
 
 def test_the_subprocess_bound_can_fire_before_the_item_budget(pytestconfig):
@@ -240,25 +330,45 @@ def test_the_subprocess_bound_can_fire_before_the_item_budget(pytestconfig):
     one level up. `tests/conftest.py` records the same defect for its own budget
     ("300 == 300 was the original defect"), which is why it is 270.0 there.
 
-    Two arms, both DERIVED from the tree rather than typed in:
+    Three arms, all DERIVED from the tree rather than typed in:
 
     * **reachable** — under the worst case where every PRECEDING invocation spent
       its whole bound, the LAST invocation's bound still fires before the item
       alarm: `n * _MIGRATE_TIMEOUT_S < budget`;
-    * **no false red** — a legitimately slow item still fits: `n * load < budget`,
-      where `load` is the embedder budget conftest pins.
+    * **one load fits one invocation** — `load <= _MIGRATE_TIMEOUT_S`, the
+      relation that actually prevents the false red (review at `6a7546064`, P2).
+      Without it the aggregate arm below is strictly implied by the reachability
+      arm (`load <= _MIGRATE_TIMEOUT_S` + `n*_MIGRATE_TIMEOUT_S < budget` ⟹
+      `n*load < budget`), so the leg named "no false red" could never fire on
+      its own — inert in exactly the sense this change closed one level up;
+    * **no false red (aggregate)** — a legitimately slow item still fits:
+      `n * load < budget`, where `load` is the embedder budget conftest pins.
+
+    `budget` is the marker when the item declares one, else the global resolved
+    the way `pytest_timeout` resolves it (CLI → `PYTEST_TIMEOUT` → ini, see
+    `_effective_item_budget_s`) — reading the ini alone grades a leg against the
+    key the CLI overrides (review at `6a7546064`, P3).
 
     Non-vacuity, measured at the pre-fix head `6cfd4e3d5`: no test in this module
-    carried a `timeout` marker, so every `budget` resolved to the ini's 300 and
+    carried a `timeout` marker, so every `budget` resolved to the global 300 and
     the FIRST arm redded on every subprocess test (`1 * 300 < 300` is false) —
     including `test_migrate_idempotent`, whose two invocations reach 409 s of
     legitimate cold load against that same 300.
     """
     import inspect
 
-    ini_budget = int(pytestconfig.getini("timeout"))
+    global_budget = _effective_item_budget_s(pytestconfig)
     load = _embedder_load_budget_s()
     checked = []
+
+    assert load <= _MIGRATE_TIMEOUT_S, (
+        f"one cold embedder load ({load}s, the budget tests/conftest.py pins) "
+        f"does not fit inside ONE `_run_migrate` bound "
+        f"({_MIGRATE_TIMEOUT_S}s) — a healthy invocation is killed by the "
+        "subprocess bound, which IS the #10610 carve-out false red. This is the "
+        "per-invocation half; with it unasserted the aggregate arm below is "
+        "implied by the reachability arm alone and can never fire on its own"
+    )
 
     for name, fn in sorted(vars(sys.modules[__name__]).items()):
         if not name.startswith("test_") or not inspect.isfunction(fn):
@@ -271,7 +381,7 @@ def test_the_subprocess_bound_can_fire_before_the_item_budget(pytestconfig):
             for mark in getattr(fn, "pytestmark", [])
             if mark.name == "timeout" and mark.args
         ]
-        budget = declared[0] if declared else ini_budget
+        budget = declared[0] if declared else global_budget
         assert invocations * _MIGRATE_TIMEOUT_S < budget, (
             f"{name} makes {invocations} subprocess call(s) bounded at "
             f"{_MIGRATE_TIMEOUT_S}s inside an item budget of {budget}s — the "

@@ -1963,7 +1963,7 @@ def test_the_committed_score_record_is_what_the_probe_produces(tmp_path):
     renumbered-key hand edit passed the value pin while a maintainer reading the
     note believed the bytes had been checked (#10610 review at `48187660a`). The
     producer writes `json.dumps(record, indent=1) + "\n"`
-    (`probes/e1_e2_scores.py:1524`), so the byte property is exactly that
+    (`probes/e1_e2_scores.py:1525`), so the byte property is exactly that
     expression.
 
     The comparison is over BYTES, not `read_text()`: universal-newline
