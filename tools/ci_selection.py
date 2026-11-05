@@ -1657,19 +1657,27 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # so a bare `::<name>` is INVISIBLE to it — such a citation would silently survive a
              # rename or deletion of the very case that pins this line.
              # #11027: PREFIX, not the exact path (the #9487 P2 lesson applied to this entry).
-             # NOTE THE TUPLE: this entry is in `CORE_ALSO` (matched by `_selection_relevant`'s
-             # `path.startswith(CORE_ALSO)`), not in `TOOL_CARVEOUTS`. What decides the matrix is
-             # NOT membership in either tuple — it is whether a `SOURCE_PATTERNS` row matches the
-             # kept path. A carved-out path that no row matches fails closed to the FULL matrix
-             # (`tools/work_claim.py` -> all eight surfaces, full=True); one that a row DOES match
-             # selects just that surface (`tools/longmem_eval/x.py` -> `eval`, full=False). This
-             # one deliberately yields `core` only, and it is `CORE_ALSO` membership that forces
-             # `core` to be present. The mechanism here is the same `startswith`, so an EXACT path
-             # claims only the spelling that exists
-             # today and silently re-opens this very drop for a split-out sibling
-             # (`gh_write_preflight_<something>.py`): the gate would again be a diff that runs none
-             # of its own arms. Over-matching costs extra CI on a file that is not the tool;
-             # under-matching ships the write proof nobody runs.
+             # NOTE THE TUPLE — which tuple holds a `tools/` path is what decides its fate, and
+             # that is why this entry is in `CORE_ALSO` rather than `TOOL_CARVEOUTS`:
+             #   * `CORE_ALSO` membership KEEPS the path (`_selection_relevant`) AND CLAIMS it, so
+             #     `core` is forced into the selection (`:3518`, `matched.add("core")`) -> this
+             #     entry yields `core` only, `full=False`.
+             #   * `TOOL_CARVEOUTS` membership only KEEPS the path (`_keep_changed`); it claims no
+             #     surface, so a kept path that no `SOURCE_PATTERNS` row matches stays unknown and
+             #     fails closed to the FULL matrix — `tools/work_claim.py` -> all eight surfaces,
+             #     `full=True`. Measured by moving THIS entry there: `full=True`, every surface.
+             #   * a KEPT path's surface is `SOURCE_PATTERNS`' job (`tools/longmem_eval/x.py` ->
+             #     `eval`, `full=False`).
+             #   * in NEITHER tuple the path is not kept at all: `surfaces=[]`, `full=False` — the
+             #     tier-1 smoke set, which does not carry this suite. That is the silent drop below.
+             # ⚠️ Both of the first two are measured against paths that NO `SOURCE_PATTERNS` row
+             # matches, so the tuple alone is the variable that differs between them — do not
+             # restate this as "the row decides", which was wrong in the opposite direction.
+             # The mechanism here is the same `startswith`, so an EXACT path claims only the
+             # spelling that exists today and silently re-opens this very drop for a split-out
+             # sibling (`gh_write_preflight_<something>.py`): the gate would again be a diff that
+             # runs none of its own arms. Over-matching costs extra CI on a file that is not the
+             # tool; under-matching ships the write proof nobody runs.
              # ⛔ The prefix does NOT buy RENAME survival — a renamed `tools/write_preflight.py` no
              # longer carries the stem, and nothing here claims it. Said explicitly because this
              # sentence previously read as if both shapes were covered, which is the "a pin that

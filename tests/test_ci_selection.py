@@ -2968,10 +2968,24 @@ def test_gh_write_preflight_carveout_is_a_PREFIX_so_a_sibling_cannot_be_dropped(
 
     `_selection_relevant` claims a changed path with `path.startswith(CORE_ALSO)` — this entry's
     tuple, NOT `TOOL_CARVEOUTS` — and `CORE_ALSO` membership is what forces `core` into the
-    selection (`tools/ci_selection.py:3510`). What decides full-vs-`core` is not which tuple holds
-    the path but whether a `SOURCE_PATTERNS` row matches it: a carved-out path that no row matches
-    fails closed to the FULL matrix (`tools/work_claim.py`), while one a row DOES match selects just
-    that surface (`tools/longmem_eval/x.py` -> `eval`, `full=False`). This entry yields `core` only.
+    selection (`tools/ci_selection.py:3518`, `matched.add("core")`).
+
+    Which tuple holds a `tools/` path is what decides its fate, and the two carve-out tuples do
+    different jobs:
+
+      * `CORE_ALSO` KEEPS the path (`_selection_relevant`) **and CLAIMS it** — `core` is forced in,
+        so this tool yields `core` only, `full=False`.
+      * `TOOL_CARVEOUTS` only KEEPS the path (`_keep_changed`) and claims no surface, so a kept
+        path that no `SOURCE_PATTERNS` row matches stays unknown and fails closed to the FULL
+        matrix — `tools/work_claim.py` -> all eight surfaces, `full=True`.
+      * a KEPT path's surface is `SOURCE_PATTERNS`' job (`tools/longmem_eval/x.py` -> `eval`,
+        `full=False`).
+      * in NEITHER tuple the path is not kept at all -> `surfaces=[]`, `full=False`, the tier-1
+        smoke set, which does not carry this suite.
+
+    Both of the first two are measured against paths that NO `SOURCE_PATTERNS` row matches, so the
+    tuple alone is what differs between them. Do not restate this as "the row decides" — that is
+    the mirror-image error and it sends a maintainer to the wrong lever.
 
     Because the matcher is `startswith`, an entry naming `tools/gh_write_preflight.py` EXACTLY
     claims only that spelling. One ordinary refactor then re-opens the silent drop the entry exists
