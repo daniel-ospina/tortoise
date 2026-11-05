@@ -178,16 +178,20 @@ read the cap against the SUM of the job's caps, not against its median.
 Every other row was checked against that rule. The discriminating fact is **not** that the
 remaining cold saves are small — most of these jobs install the same torch/embeddings wheels and
 write the same 3.6 GB archive on a cold key — it is whether the shipped cap already clears its own
-SUM. `test` clears it with room to spare (10 m last-failed pre-phase + the emitted 27 m per-shard
+SUM. `test` clears it with room to spare (10 m last-failed pre-phase + the emitted 26 m per-shard
 watchdog + 6 m embedder + **~6.7 m of MEASURED startup, not the ~1 m an earlier revision restated**
 (`Set up job` 3 m 03 s, 10:21:30 → 10:24:32, plus 3 m 36 s of uncapped setup steps to the suite's
-first line, 10:24:32.98 → 10:28:58.91 minus the embedder's own 50 s — run 42000057137, job
-`test (d)`) + **no cache-write term at all** — #11063 removed this job's uv+pip save instead of
-bounding it, because the pool's own measured upload (0.9 MB/s sustained, 3,019,898,880 B in
-3,412 s, cancelled at 77.8% of a 3,882,423,064 B payload) needs ~72 min, more headroom than this cap
-has; a bounded save could only burn its bound and never write the key, and
-`tests/test_ci_selection.py::test_the_test_job_carries_no_unbounded_cache_post_step` now pins the
-ABSENCE of a writer + ~0.4 m last-failed save = 49 m against 90, x 1.5 = 73.5) — and that watchdog
+first line, 10:24:32.98 → 10:28:58.91 minus the embedder's own measured time — run 42000057137, job
+`test (d)`) + **an 8 m cache-write term (1 m prune + 7 m save)** — #11063 split this job's cache by
+payload: `~/.cache/pip` (3,616,385,308 B in a PR scope, the torch wheel set, 93% of the 3.88 GB
+payload the defect uploaded) is now read from the shared `pip-<os>-<hash uv.lock>` key that FOUR
+other jobs write, while `~/.cache/uv` keeps exactly one writer here, bounded in size (`uv cache
+prune`) and in time (`timeout-minutes: 7`, `continue-on-error`, fail-open to a MISS). A SINGLE 3.88 GB
+write still does not fit: the pool's own measured upload was 0.9 MB/s sustained (3,019,898,880 B in
+3,412 s, cancelled at 77.8% of the payload), so splitting the payload is what makes the term fit at
+all. `tests/test_ci_selection.py::test_the_test_job_carries_no_unbounded_cache_post_step` pins that
+shape (one bounded writer, no implicit post step) + ~0.4 m last-failed save = 57 m against 90,
+x 1.5 = 85.5) — and that watchdog
 comes from
 `uv run python tools/ci_selection.py --emit-push-matrix`, never from `WATCHDOG_FLOOR_MIN`: 19 is the
 clamp the carve-out shards land on, not the fast shards' budget, and restating a clamp as a budget
