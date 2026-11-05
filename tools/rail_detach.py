@@ -164,10 +164,12 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     raise SystemExit(2)
 
 import argparse
+import errno
 import fcntl
 import json
 import os
 import re
+import shutil
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -1633,75 +1635,205 @@ class Refused(Exception):
     """A precondition the launcher itself enforces (never a rail verdict)."""
 
 
+class _GhRun:
+    """The fields the `gh` call sites read, from one ALWAYS-RETURNING read.
+
+    ⛔ A MISSING `gh` BINARY IS AN UNREADABLE ANSWER, NOT A CRASH, and it was
+    measured on TWO pool boxes before anyone believed it. `subprocess.run(["gh",
+    …])` raises `FileNotFoundError` when the executable is not on `PATH`, and
+    neither call site caught it — so the launcher died instead of stamping its
+    artifact, and every arm of `tests/test_rail_detach.py` read as a failure on
+    a runner that has no `gh`. Both measurements are kept here because they are
+    the provenance of the same root and neither alone was believed:
+
+    * `test (d)` on the #9018 fallback pool (`pi-runner-vm-2`, 2026-11-03):
+      `FileNotFoundError: 'gh'` on a PR whose diff touches neither this tool nor
+      its test — a bare `ubuntu-latest` runner with a minimal non-login PATH has
+      no `gh`. ⚠️ The two sides recorded this one differently (this branch:
+      shard `test (d)`, 21 arms; main/#10622: shard `test (a)`, 20 arms) and
+      neither job log is retrievable here, so the ROOT is what is asserted — a
+      bare runner with no `gh` — and not the integer.
+    * `test (h)` on `pi-runner-vm-6`/Linux-ARM64, run `41732583553` (kept from
+      the other side of the #10622 merge): all 20 cases in
+      `tests/test_rail_detach.py` killed at this call.
+
+    The intent was already written into `_head_sha` (`else "unreadable"`) and
+    into `_resolve_repo`'s `Refused`; only the spawn itself was unguarded. The
+    `-> _GhRun` annotation is a CONTRACT, not a hint: this function NEVER
+    returns `None` (every spawn failure fabricates a run with a non-zero
+    `returncode`), so neither caller may carry an `out is not None` guard. A
+    guard that cannot fire is not defence in depth, it is a second, wrong
+    description of what this function returns.
+    """
+
+    def __init__(self, returncode: int, stdout: str = "", cause: str = "",
+                 stderr: str = "", remedy: str = "") -> None:
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+        self.cause = cause
+        #: What the OPERATOR should do about it. Carried on the run rather than
+        #: hard-coded at the call site, because the remedy differs per cause: a
+        #: missing binary is "install it", a missing CWD is "run from a live
+        #: checkout", and a 126 for a broken shebang is "repair the install".
+        #: One message for three causes tells two of them to fix the wrong thing.
+        self.remedy = remedy
+
+
+def _oserror_remedy(exc: OSError) -> str:
+    """What to do about a spawn failure that is NOT a missing binary.
+
+    ⛔ ONE REMEDY FOR EVERY CAUSE TELLS MOST CAUSES TO FIX THE WRONG THING (review,
+    `#10777`). The cause is already printed; the remedy has to match it, or the
+    operator is walked to the wrong repair — `chmod` for a worktree that no longer
+    exists, "reinstall `gh`" for a box that is simply out of process slots.
+
+    ⛔ AND THE ERRNO ALONE IS NOT THE CAUSE EITHER (review, `#10777`): `EACCES`
+    says *something* was not permitted, and the object is only PARTLY recoverable —
+    `filename` is the CWD for a `chdir` failure and `argv[0]` (the bare name) for
+    an exec failure, so the CWD can be blamed when `filename` is not the binary AND
+    the errno is one a `chdir` can raise. On the exec side the object is NOT
+    recoverable at all (an untraversable `PATH` directory and a non-executable
+    file both give `PermissionError(errno=13, filename='gh')`), so that remedy has
+    to name both possibilities. Each half is pinned, because each one alone was
+    wrong in a different direction: errno-only told an unreadable WORKING DIRECTORY
+    to `chmod +x` a `gh` that was fine, and blaming on `filename` alone blamed the
+    CWD for a `PATH` entry that is a regular file (`ENOTDIR`, `filename='gh'`).
+
+    ⛔ `ENOENT` IS DELIBERATELY ABSENT FROM THE CWD-SIDE ERRNOS (review, `#10777`).
+    Python maps `OSError(ENOENT)` onto `FileNotFoundError`, which `_gh` catches
+    BEFORE `except OSError` — so a `chdir` into a directory that is GONE never
+    reaches this helper, and an `errno.ENOENT` arm here could not fire from any
+    production path (measured: deleting it left the suite green, which is how it
+    was found). Its remedy lives on that earlier arm instead. The errnos this
+    helper answers for are the ones a `chdir` really delivers, and NONE of them is
+    a `FileNotFoundError`: `EACCES`/`EPERM` arrive as `PermissionError`, and
+    `ENOTDIR` (its own arm, above) as `NotADirectoryError`.
+    """
+    target = getattr(exc, "filename", None)
+    cwd_side = target not in (None, "", "gh")
+    if cwd_side and exc.errno == errno.ENOTDIR:
+        return ("the working directory is not a directory — run from a live "
+                "checkout, or pass --repo")
+    if cwd_side and exc.errno in (errno.EACCES, errno.EPERM):
+        return ("the working directory could not be used — run from a live "
+                "checkout, or pass --repo")
+    if exc.errno in (errno.EACCES, errno.EPERM):
+        # ⚠️ `filename` is `argv[0]` here, so it does NOT say which object was
+        # denied: an untraversable `PATH` directory and a non-executable file give
+        # the same `PermissionError(errno=13, filename='gh')` (measured 2026-11-04).
+        # Both remedies are therefore named — `chmod +x` alone is wrong advice for
+        # an untraversable directory, and the tool cannot tell the two apart.
+        return ("make `gh` executable, and each `PATH` directory it sits in "
+                "traversable (`chmod +x`), or pass --repo")
+    if exc.errno in (errno.EAGAIN, errno.ENOMEM):
+        return ("the box could not spawn a process — retry when it is not loaded, "
+                "or pass --repo")
+    return "check the working directory and the `gh` install, or pass --repo"
+
+
 def _gh(argv: list[str], cwd: Path,
-        timeout: float | None = None) -> subprocess.CompletedProcess:
-    """Run `gh`; a MISSING BINARY is a failed query, never a crash.
+        timeout: float | None = None) -> _GhRun:
+    """Run `gh` and NEVER raise for a missing binary or an unspawnable argv.
 
-    Both callers below are best-effort (`_head_sha` already answers `unreadable`
-    on a non-zero exit, `_resolve_repo` refuses), but an absent `gh` raised
-    `FileNotFoundError` OUT of `launch()` — so the launcher died instead of
-    stamping its artifact, and every arm of `tests/test_rail_detach.py` read as
-    a failure on the #9018 fallback pool, whose `ubuntu-latest` is a bare runner
-    with a minimal non-login PATH and no `gh` (measured 2026-11-03: 20 red arms
-    on `pi-runner-vm-2`, `gh: No such file or directory`, on a PR whose diff
-    touches neither this tool nor its test). rc=127 is what a shell reports for
-    a missing command, so the callers' `returncode != 0` arms handle it — the
-    same shape `tools/who_is_on.py` already uses for `git`
+    ⛔ THE BOUND IS PART OF THIS CALL, NOT A CALLER'S ADD-ON (`#10691`'s
+    `GH_PROBE_TIMEOUT_S`). Both call sites run on `start`'s path while the
+    duplicate-rail flock is HELD, so a `gh` stalled on a saturating cell would
+    otherwise delay every later `start` for that PR — turning the #3061 guard into
+    the thing that makes the PR unrailable. The bound therefore reaches THIS
+    function and answers as a fabricated run (`rc=124`, the shell's own timeout
+    code) instead of raising: a caller that needs the bound must not fall back to
+    a raw `subprocess.run` and lose the `127`.
+
+    ⛔ TWO SPAWN FAILURES, TWO ANSWERS — never one catch-all (review, `#10777`).
+    The caller's remedy for a missing binary is "install the GitHub CLI", which is
+    wrong advice — and sends the operator looking in the wrong place — when `gh`
+    is installed but not executable (`PermissionError`), when the spawn failed for
+    want of resources (an `EAGAIN`/`ENOMEM` from `fork` under cell load), or when
+    the CWD is gone. Those return `126` (the shell's "found but could not execute")
+    with the real cause, and `127` is reserved for the command genuinely not being
+    found.
+
+    ⚠️ `filename == "gh"` earns NONE of that on its own: it separates *exec
+    failed* from *`chdir` failed*, and no more. CPython passes the literal argv[0]
+    for any exec failure of a bare name, so "is on `PATH` with a dead shebang"
+    arrives looking exactly like "is not on `PATH`" — which is why the second
+    question is asked separately, of `shutil.which`, before any message says
+    "not on PATH" (measured 2026-11-04, sole candidate).
+
+    A failed `chdir` also raises `FileNotFoundError`, but its `filename` is the
+    CWD, not `"gh"` — so it lands on the 126 arm and reports the cwd.
+
+    `returncode=127` is the shell's own "command not found", so every existing
+    `returncode != 0` branch keeps its meaning and the missing binary cannot be
+    mistaken for a successful read — the same shape `tools/who_is_on.py`
+    already uses for `git`
     (`except FileNotFoundError: return 127, "", "<bin>: command not found"`).
-
-    `timeout` is threaded through for the callers that must stay BOUNDED (the
-    merge of #10691's `GH_PROBE_TIMEOUT_S` bound onto main's helper): the bound
-    and the absent-binary answer are two halves of one call, so a caller that
-    needs the bound must not fall back to a raw `subprocess.run` and lose the
-    127.
-
-    ⛔ A SECOND, INDEPENDENT MEASUREMENT OF THE SAME DEFECT, kept from the other
-    side of this merge (#10622): `test (h)` on `pi-runner-vm-6`/Linux-ARM64, run
-    41732583553, killed all 20 cases in `tests/test_rail_detach.py` at this
-    call. Two pool boxes, one root — the missing binary, not a rail defect.
-
-    The `-> subprocess.CompletedProcess` annotation above is a CONTRACT, not a
-    hint: this function NEVER returns `None` (the `except` arm fabricates a
-    process with rc=127), so neither caller may carry an `out is not None`
-    guard. Two of them did for a while — inherited from the branch side of the
-    #10622 merge, where `_gh` was allowed to return `None` — and they were
-    unreachable branches contradicting their own annotation. Dropped rather
-    than kept: a guard that cannot fire is not defence in depth, it is a
-    second, wrong description of what this function returns.
     """
     try:
-        return subprocess.run(argv, cwd=str(cwd), capture_output=True, text=True,
-                              timeout=timeout)
-    except FileNotFoundError:
-        return subprocess.CompletedProcess(argv, 127, "",
-                                           "gh: command not found")
+        out = subprocess.run(
+            ["gh", *argv], cwd=str(cwd), capture_output=True, text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        # rc=124 is the shell's own `timeout` code, so it can never be confused
+        # with the 126/127 spawn answers below — and it carries a `cause` like
+        # they do, which is what tells `_resolve_repo` this is a BOUND that fired
+        # rather than a real process that exited 124.
+        return _GhRun(
+            124, cause=f"`gh` did not answer within {timeout}s: {exc}",
+            remedy="the call is BOUNDED so a stalled `gh` cannot hold the rail's "
+                   "lock — retry when the box is not loaded, or name the target "
+                   "yourself with --repo",
+        )
+    except FileNotFoundError as exc:
+        if getattr(exc, "filename", "gh") != "gh":
+            # A failed `chdir` raises the SAME exception type, but its `filename`
+            # is the CWD. The remedy is a live checkout — never "install the CLI".
+            return _GhRun(
+                126, cause=f"could not run `gh` in {cwd}: {exc}",
+                remedy="the working directory is gone — run from a live checkout, "
+                       "or pass --repo",
+            )
+        # ⛔ `filename == "gh"` CANNOT DISTINGUISH "absent" FROM "not executable":
+        # CPython passes the literal argv[0] for ANY exec failure of a bare name, so
+        # a `gh` that IS on PATH but whose shebang interpreter is gone arrives here
+        # identically (measured 2026-11-04, sole candidate: `shutil.which("gh")`
+        # resolves it, `subprocess` does not run it — and CPython's own `PATH` walk
+        # only hides the case when a WORKING `gh` sits later on the list, which is
+        # `executable_list` built from `os.get_exec_path` at `subprocess.py:1880-1882`).
+        # Ask the question
+        # separately, so "install the GitHub CLI" is never printed at a binary the
+        # operator already has.
+        found = shutil.which("gh")
+        if found:
+            return _GhRun(
+                126, cause=f"`gh` is on PATH ({found}) but could not be executed",
+                remedy="repair the `gh` install, or pass --repo",
+            )
+        return _GhRun(127, cause="`gh` is not on PATH",
+                      stderr="gh: command not found",
+                      remedy="install the GitHub CLI, or pass --repo")
+    except OSError as exc:
+        return _GhRun(126, cause=f"could not run `gh`: {exc}",
+                      remedy=_oserror_remedy(exc))
+    return _GhRun(out.returncode, out.stdout or "", stderr=out.stderr or "")
 
 
 def _resolve_repo(cwd: Path) -> str:
     env_repo = os.environ.get("GH_REPO", "")
-    try:
-        out = _gh(
-            ["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
-            Path(cwd),
-            timeout=GH_PROBE_TIMEOUT_S,
-        )
-    except subprocess.TimeoutExpired:
-        raise Refused(
-            f"`gh repo view` did not answer within {GH_PROBE_TIMEOUT_S}s — refusing to "
-            "detach a rail at a target this launch could not name"
-        ) from None
-    except (OSError, subprocess.SubprocessError) as e:
-        # ⛔ `gh` ABSENT is not a traceback. This call is on `start`'s own path, so
-        # an uncaught `FileNotFoundError` escaped `main()` and exited 1 — the code
-        # this tool reserves for `collect --assert-merged` "not merged" — while
-        # the docstring promises "2 = environment error" (a minimal-PATH runner
-        # has already produced `exit code 127` on `gh` elsewhere in this repo,
-        # #9018). `_ps` two functions away already treats an unrunnable probe as a
-        # distinct answer; this does the same.
-        raise Refused(
-            f"could not run `gh` to name the repo ({type(e).__name__}: {e}) — refusing "
-            "to detach a rail at a target this launch could not name"
-        ) from None
+    # ⛔ NO `try/except` HERE ANY MORE, AND THAT IS NOT A GATE BEING RELAXED.
+    # `_gh`'s `-> _GhRun` contract is that it ALWAYS returns — a missing binary,
+    # an unspawnable argv AND a bound that fired each come back as a fabricated
+    # run carrying a `cause`. So the two clauses main carried here (`OSError` →
+    # "could not run `gh`", `TimeoutExpired` → "did not answer within") are
+    # unreachable now, and a guard that cannot fire is a second, wrong
+    # description of the function (the same reasoning that removed the
+    # `out is not None` guards in the #10622 merge). Their INTENT is preserved
+    # one arm down: rc=124 answers "did not answer within", and rc=126/127 with
+    # a `cause` answer "could not run `gh`", both naming what to fix.
+    out = _gh(["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
+              Path(cwd), timeout=GH_PROBE_TIMEOUT_S)
     if out.returncode == 0 and out.stdout.strip():
         repo = out.stdout.strip()
         if env_repo and env_repo != repo:
@@ -1712,11 +1844,99 @@ def _resolve_repo(cwd: Path) -> str:
                 "unset GH_REPO rather than detaching a rail at an unknown target"
             )
         return repo
+    if out.returncode == 124 and out.cause:
+        # ⛔ THE BOUND FIRED (main's `#10691` `GH_PROBE_TIMEOUT_S`, kept here).
+        # An unnamed target is exactly what the GH_REPO check exists to prevent,
+        # so a stalled `gh` must REFUSE rather than detach a rail at a target
+        # this launch could not name. Gated on `cause` like every fabricated
+        # arm: a REAL `gh` that exited 124 is not a bound, it is the process's
+        # own answer, and it falls through to the stderr arm below.
+        raise Refused(
+            f"`gh repo view` did not answer within {GH_PROBE_TIMEOUT_S}s — refusing to "
+            "detach a rail at a target this launch could not name"
+        )
+    # ⛔ THE FOURTH SIBLING (review cycle 5, finding 2). `cause` is empty for a REAL process,
+    # so a real `gh` exiting 124 skipped the arm above and fell through to the generic
+    # "is `gh` installed and authenticated? … or install the `gh` CLI" — telling an operator
+    # whose binary demonstrably RAN to install it. Exactly the misdiagnosis the 126/127 real
+    # arms below exist to prevent, one code over.
+    if out.returncode == 124:
+        detail = (out.stderr or "").strip().splitlines()
+        raise Refused(
+            "could not resolve the repo from this checkout (`gh repo view` exited 124"
+            + (f": {detail[-1]}" if detail else "")
+            + ") — the `gh` on PATH ran and hit its own timeout; pass --repo, or retry "
+            "when the API is answering"
+        )
+    if out.returncode == 127 and out.cause:
+        # cause is set ONLY by the arm that FABRICATED this run, so the binary
+        # really is not on `PATH`. Names the failing COMMAND, the CAUSE and the
+        # REMEDY: a lane reading this must not have to guess which is wrong.
+        # ⛔ `installed` is main's word and `not on PATH` is this branch's — the
+        # union is asserted by BOTH sides' arms, so dropping either reds a test.
+        raise Refused(
+            "could not resolve the repo from this checkout (`gh repo view` failed)"
+            " — `gh` is not on PATH "
+            f"({(out.stderr or 'gh: command not found').strip()}): is the GitHub CLI "
+            "installed? pass --repo, or install it"
+        )
+    if out.returncode == 127:
+        # ⛔ A REAL `gh` THAT RAN AND EXITED 127 IS NOT A MISSING BINARY (review,
+        # `#10777`). A fabricated run always carries a `cause`; a real one never
+        # does — so this arm is the only place a process's own 127 can land. The
+        # fleet's own `gh` shim exits 127 with a printed repair (`gh-shim: REFUSING
+        # to exec … — unset AGENT_GH_REAL`), and telling that operator "not on PATH —
+        # install the GitHub CLI" is a false diagnosis of a binary the same message
+        # proves was found and run.
+        detail = (out.stderr or "").strip().splitlines()
+        raise Refused(
+            "could not resolve the repo from this checkout (`gh repo view` exited 127"
+            + (f": {detail[-1]}" if detail else "")
+            + ") — the `gh` on PATH ran and refused; pass --repo, or repair that `gh`"
+        )
+    if out.returncode == 126 and out.cause:
+        # Found but not runnable — a DIFFERENT remedy from "install the CLI", and
+        # the remedy travels on the run because a missing CWD is a third one.
+        # ⛔ GATED ON `cause`, for the same reason as the 127 pair above: only a
+        # FABRICATED run carries one, so a REAL process that exited 126 must not
+        # be told it "could not be executed" — it demonstrably ran (review, #10777).
+        raise Refused(
+            "could not resolve the repo from this checkout — "
+            f"{out.cause} "
+            f"({out.remedy or 'pass --repo, or fix the `gh` install'})"
+        )
+    if out.returncode == 126:
+        # ⛔ A REAL `gh` THAT RAN AND EXITED 126 IS NOT "UNEXECUTABLE" (review,
+        # #10777). Same shape as the real-127 arm above: a fabricated run always
+        # carries a `cause`, a real one never does. The binary ran — that is what
+        # proves it is executable — so the only useful thing to print is what IT
+        # said, which is the same stderr the generic arm below would surface.
+        detail = (out.stderr or "").strip().splitlines()
+        raise Refused(
+            "could not resolve the repo from this checkout (`gh repo view` exited 126"
+            + (f": {detail[-1]}" if detail else "")
+            + ") — the `gh` on PATH ran and failed; pass --repo, or repair that `gh`"
+        )
+    if out.returncode == 0:
+        # ⛔ rc=0 IS NOT A SUCCESS HERE (review, `#10777`). The success guard above
+        # ALSO requires a non-empty repo, so a `gh` that exited 0 and printed
+        # nothing lands here — and it RAN, which is what proves it is installed.
+        # The generic arm below asks "is `gh` installed and authenticated?" and
+        # offers "install the `gh` CLI", the same message-vs-exit-code dishonesty
+        # this PR removes one branch above.
+        raise Refused(
+            "could not resolve the repo from this checkout (`gh repo view` exited 0 "
+            "but printed no repository) — the `gh` on PATH ran, so this is not an "
+            "install problem; pass `--repo owner/name` to name the artifact yourself"
+        )
+    # Every other NON-ZERO exit keeps main's stderr detail: the last line is the
+    # only thing that says WHY `gh repo view` failed (auth, network, no remote).
+    # (rc=0 is handled above, so "non-zero" is a precondition this arm now
+    # actually has, not just a comment.)
     detail = (out.stderr or "").strip().splitlines()
-    # ⛔ BOTH SIDES' WORDING (#10622 merge): this branch's test asserts the message
-    # says WHAT to fix ("installed", `test_a_missing_gh_is_a_REFUSAL_not_a_traceback`),
-    # and main's carries the stderr detail plus the two remedies. Taking either side
-    # alone fails the other's assertion or drops the operator's remedy.
+    # ⛔ BOTH SIDES' WORDING (#10622 merge): the branch side asserts the message
+    # says WHAT to fix ("installed"), main's carries the stderr detail plus the
+    # two remedies. Taking either side alone drops the operator's remedy.
     raise Refused(
         "could not resolve the repo from this checkout (`gh repo view` failed"
         + (f": {detail[-1]}" if detail else "")
@@ -1726,22 +1946,37 @@ def _resolve_repo(cwd: Path) -> str:
 
 
 def _head_sha(cwd: Path, repo: str, pr: int) -> str:
-    """The head sha for the artifact, or `unreadable`. INFORMATIONAL ONLY —
-    nothing gates on it — and BOUNDED, because this call is made while the
-    duplicate-rail flock is held (see GH_PROBE_TIMEOUT_S)."""
-    try:
-        out = _gh(
-            ["gh", "pr", "view", str(pr), "--repo", repo, "--json", "headRefOid",
-             "-q", ".headRefOid"],
-            Path(cwd),
-            timeout=GH_PROBE_TIMEOUT_S,
-        )
-    except (subprocess.TimeoutExpired, OSError, subprocess.SubprocessError):
-        # Same reason as `_resolve_repo`: the declared contract is "the sha *or*
-        # `unreadable`", so a `gh` that cannot run has to answer `unreadable`
-        # rather than escape. `HEAD` gates nothing.
-        return "unreadable"
-    return out.stdout.strip() if out.returncode == 0 else "unreadable"
+    """The PR's head, or the literal `unreadable` — NEVER an empty string.
+
+    INFORMATIONAL ONLY: `HEAD` gates nothing — and BOUNDED, because this call is
+    made while the duplicate-rail flock is held (see `GH_PROBE_TIMEOUT_S`). A
+    `gh` stalled on a saturating cell would otherwise delay every later `start`
+    for that PR, turning the #3061 guard into the thing that makes the PR
+    unrailable.
+
+    ⛔ THE EMPTY-STRING HOLE IS THE SIBLING OF `_resolve_repo`'S (review,
+    `#10777`). A `gh` that exits 0 and prints nothing passes a bare
+    `returncode == 0` guard, so this function answered `""` — which is not a
+    named degraded state, it is silence: `launch()` then stamps `HEAD=` (blank)
+    into the artifact and `collect` reports nothing for it, so a reader cannot
+    tell "the head could not be read" from "the field was never written". The
+    sibling call site refuses by name for the same condition, so the two halves
+    of one seam disagreed about what the same silence means. Measured with a
+    stub `gh` that exits 0 silently: this returned `""` while `_resolve_repo`
+    raised `Refused` ("exited 0 but printed no repository").
+
+    ⛔ NO `try/except` HERE EITHER, for the same contract reason as
+    `_resolve_repo`: `_gh` ALWAYS returns, so a spawn failure, an unspawnable
+    argv and a fired bound are already non-zero runs — each of which lands on
+    `unreadable` below. The escaped-`PermissionError` and `TimeoutExpired`
+    clauses main carried are unreachable once the whole spawn is answered, and
+    their INTENT (never crash `launch()` over an informational read) is what the
+    `else "unreadable"` arm already delivers.
+    """
+    out = _gh(["pr", "view", str(pr), "--repo", repo, "--json", "headRefOid",
+               "-q", ".headRefOid"], Path(cwd), timeout=GH_PROBE_TIMEOUT_S)
+    return out.stdout.strip() if out.returncode == 0 and out.stdout.strip() \
+        else "unreadable"
 
 
 def _shquote(value: object) -> str:
