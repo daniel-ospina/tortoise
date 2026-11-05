@@ -3899,12 +3899,15 @@ jobs:
       - name: Install
         run: pip install -e .
       # ── THE RECORDED CUT COMMIT MUST RESOLVE AND SURVIVE (#11057) ───────────────
-      # ⛔ ORDER IS LOAD-BEARING: this runs BEFORE the pin step, because that step's
-      # `git fetch --depth=1 origin <base>` MARKS THE CLONE SHALLOW (`git rev-parse
-      # --is-shallow-repository` flips to `true`) while the objects it already fetched
-      # stay. Run after the pin, the strict arm would red for "cannot answer" on a
-      # checkout that had just held the answer. Verified on a 3-commit scratch clone:
-      # full clone → `false`, then `--depth=1` fetch → `true`, first commit still present.
+      # ⛔ IT RUNS BEFORE THE PIN, and the reason is the STRICT ARM: this is the only
+      # arm that fails CLOSED when the checkout cannot answer, so it runs while the clone
+      # is certainly full. The pin below used to fetch its base ref with `--depth=1`,
+      # which sets the REPO-LEVEL shallow flag while keeping the objects it had already
+      # fetched (measured on a 3-commit scratch clone: full clone → `false`, then a
+      # `--depth=1` fetch → `true`, first commit still present) — so any LATER answer was
+      # "unprovable", and the strict arm would have red for the wrong reason. The pin no
+      # longer passes a depth at all (see its own note), so this ordering is defence in
+      # depth rather than the only thing between the check and a false red.
       # `--provenance-strict` turns "this checkout cannot answer" into a RED rather than a
       # notice, so dropping `fetch-depth: 0` above reds here instead of silently
       # weakening the gate to a log line.

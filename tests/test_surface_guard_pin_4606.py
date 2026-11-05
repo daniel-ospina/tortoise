@@ -225,23 +225,20 @@ def test_the_provenance_step_can_resolve_the_recorded_commit() -> None:
     assert "--provenance-strict" in provenance["run"], provenance["run"]
 
 
-def test_the_provenance_step_runs_before_the_pin_marks_the_clone_shallow() -> None:
-    """The strict arm must answer the question, and a `--depth=1` fetch would stop it.
+def test_the_provenance_step_runs_before_the_pin() -> None:
+    """The strict arm must answer, and it is the only arm that reds when it cannot.
 
-    Verified on a 3-commit scratch clone: full clone reports `false`, a `--depth=1` fetch
-    then reports `true`, and the first commit's objects are STILL PRESENT. So the strict
-    arm run after such a fetch would red "this checkout cannot answer" on a checkout that
-    holds the answer — a false red for the next lane, in the least debuggable direction.
-
-    #11057 review F2 removed that fetch's `--depth=1` (asserted below), so this ordering is
-    no longer the only thing standing between the check and a false red — it is kept
-    because the strict step is the ONLY arm that reds an unprovable checkout, and it must
-    run while the clone can still answer.
+    This step is what fails CLOSED if someone drops `fetch-depth: 0`; the pinned guard's
+    default arm only reds on a PROVEN defect (a shallow local run must not be a false
+    red), so the strict arm has to run while the clone is certainly full. The pin's fetch
+    used to set the repo-level shallow flag (`--depth=1` keeps the objects and flips
+    `--is-shallow-repository` to `true` — measured on a 3-commit scratch clone), which
+    would have made the strict arm red for the wrong reason; #11057 review F2 removed that
+    depth (asserted below), so this ordering is now defence in depth.
     """
     assert _index_of(PROVENANCE_STEP) < _index_of(PIN_PREFIX), (
-        "the provenance step runs after the pin step; the pin exists to run the gate from "
-        "the BASE REF, and the strict arm's own checkout must still answer — move the "
-        "strict step above the pin"
+        "the strict provenance step runs after the pin step — it is the arm that fails "
+        "closed on an unprovable checkout, so it must run while the clone can answer"
     )
 
 
