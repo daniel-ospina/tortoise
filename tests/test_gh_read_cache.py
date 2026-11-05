@@ -39,6 +39,20 @@ M66-M71 rather than left colliding with M64-M65; a mutation id must name exactly
   M70 OverflowError dropped from ttl coercion ........ KILLED   M71 OverflowError dropped from now coercion .. KILLED
   M72 runner/label EMPTY string allowed .............. KILLED   M73 endpoint check removed from the door ..... KILLED
   M74 decode denylist restored ....................... KILLED   M75 empty-repo scope "@main" accepted ....... KILLED
+  M76 the endpoint door is a DENY-LIST again .......... KILLED   M77 argv SHAPE check removed (-X POST) ...... KILLED
+  M78 `scope_for` skips the empty repo/branch check ... KILLED
+⛔ M73's LEDGER ROW OVERSTATED ITS COVERAGE AND THAT IS NOW FIXED, not re-labelled. The old
+parametrization had 5 arms, two of which (`/commits/main/status`, `/commits/abc/check-runs`) were
+satisfied by the EARLIER `/commits` marker, and six of the ten deny-list markers had no arm at all —
+so deleting `/status`, `/check-runs`, `/comments`, `/releases`, `/tags`, `/merges` left the suite
+green (M73 SURVIVED at `a9321ddc6`; 290 passed). There is now ONE ARM PER FAMILY, each carrying
+only itself, plus the families the deny-list never named (`/git/refs/…`, `/branches`,
+`/deployments`, `/rulesets`, `notifications`, `graphql`) and five non-GET shapes.
+  Measured M76 (the allow-list membership check disabled → the old accept-anything door): **27
+  failed, 293 passed**. M77 (the argv shape loop disabled → `-X POST` and two-operand argvs
+  accepted): **10 failed, 310 passed**. M78 (both `scope_for` empty-input refusals disabled):
+  **6 failed, 314 passed** — including both `--no-cache` CLI arms, which is the non-vacuity the
+  P3 asked for: the pre-fix CLI really did spend the call.
 ⛔ M67 SURVIVED on its first test, which passed a DICT page where a LIST page is required — the
 SHAPE guard satisfied it and the empty-name check was unreachable. Fixed, then KILLED.
 ⛔ M67's EMPTY-STRING sibling (M72, cycle-16 review) reached the same blocker from the other side:
@@ -103,6 +117,14 @@ sys.path.insert(0, str(ROOT))
 from tools import gh_read_cache as C  # noqa: E402
 
 SCOPE = "daniel-ospina/tortoise@main"
+
+#: ⛔ A VALID argv for a probe key. The door is an ALLOW-LIST of endpoints (exact tuple equality on
+#: the `/`-separated segments), so a probe must declare an endpoint the registry already establishes
+#: as invariant — `("api", "x")`, used by 13 declarations while the door was a deny-list, is now
+#: REFUSED. Migrating them is part of the fix, not a test detail: the first attempt at this rewrite
+#: was reverted half-way because those 13 spellings reddened, which left a documented hole
+#: (`repo.identity` over `repos/{repo}/git/refs/heads/main`) shipped instead of closed.
+OK_ARGV = ("api", "repos/{repo}")
 
 
 # ── helpers ────────────────────────────────────────────────────────────────────────────────────
@@ -612,7 +634,7 @@ def test_declare_invariant_cannot_widen_an_existing_ceiling() -> None:
         C.declare_invariant(
             "repo.metadata",
             ttl_s=before * 4,
-            argv=("api", "x"),
+            argv=OK_ARGV,
             projection="p",
             project=lambda d: d,
         )
@@ -622,8 +644,8 @@ def test_declare_invariant_cannot_widen_an_existing_ceiling() -> None:
 
 def test_declare_invariant_may_tighten() -> None:
     key = "repo.tightenable"
-    C.declare_invariant(key, ttl_s=600, argv=("api", "x"), projection="p1", project=lambda d: d)
-    C.declare_invariant(key, ttl_s=60, argv=("api", "x"), projection="p1", project=lambda d: d)
+    C.declare_invariant(key, ttl_s=600, argv=OK_ARGV, projection="p1", project=lambda d: d)
+    C.declare_invariant(key, ttl_s=60, argv=OK_ARGV, projection="p1", project=lambda d: d)
     assert C.ttl_for(key) == 60
     C.INVARIANTS.pop(key, None)
 
@@ -972,7 +994,7 @@ def test_gh_reader_surfaces_a_projection_failure_as_unreadable(
     def boom(docs):
         raise KeyError("missing field")
 
-    C.declare_invariant(key, ttl_s=600, argv=("api", "x"), projection="boom", project=boom)
+    C.declare_invariant(key, ttl_s=600, argv=OK_ARGV, projection="boom", project=boom)
     try:
 
         class Proc:
@@ -996,9 +1018,7 @@ def test_changing_a_projection_invalidates_the_cached_entry(tmp_path: Path) -> N
     `repo.metadata` holds 6 h, so otherwise a newly-added field would be missing for six hours.
     """
     key = "repo.projection_probe"
-    C.declare_invariant(
-        key, ttl_s=600, argv=("api", "x"), projection="v1", project=lambda d: {"id": 1}
-    )
+    C.declare_invariant(key, ttl_s=600, argv=OK_ARGV, projection="v1", project=lambda d: {"id": 1})
     try:
         r1 = Counter()
         _read(key, now=1000.0, reader=r1, cache_dir=tmp_path)
@@ -1006,7 +1026,7 @@ def test_changing_a_projection_invalidates_the_cached_entry(tmp_path: Path) -> N
 
         C.INVARIANTS[key] = C.Invariant(
             ttl_s=600,
-            argv=("api", "x"),
+            argv=OK_ARGV,
             projection="v2",
             project=lambda d: {"id": 1, "default_branch": "main"},
         )
@@ -1531,12 +1551,10 @@ def test_two_projection_revisions_do_not_thrash_one_cache_file(tmp_path: Path) -
     def v2(docs):
         return {"id": 1, "extra": True}
 
-    C.declare_invariant(key, ttl_s=600, argv=("api", "x"), projection="same-id", project=v1)
+    C.declare_invariant(key, ttl_s=600, argv=OK_ARGV, projection="same-id", project=v1)
     try:
         p1 = C._cache_path(key, SCOPE, ttl_s=600).name
-        C.INVARIANTS[key] = C.Invariant(
-            ttl_s=600, argv=("api", "x"), projection="same-id", project=v2
-        )
+        C.INVARIANTS[key] = C.Invariant(ttl_s=600, argv=OK_ARGV, projection="same-id", project=v2)
         p2 = C._cache_path(key, SCOPE, ttl_s=600).name
         assert p1 != p2, (
             "two revisions of the same projection share one filename, so each overwrites the "
@@ -1783,7 +1801,10 @@ def test_changing_a_keys_endpoint_invalidates_the_cached_entry(tmp_path: Path) -
     _read(key, now=1000.0, reader=r, cache_dir=tmp_path)
     assert r.n == 1
 
-    monkeypatch_argv = ("api", "repos/{repo}/somewhere-else")
+    # ⛔ A DIFFERENT ALLOWLISTED ENDPOINT, not an invented one: the door refuses a path outside the
+    # allow-list, so `repos/{repo}/somewhere-else` would be refused before the identity check ran
+    # and this test would pass without ever exercising the argv digest.
+    monkeypatch_argv = ("api", "repos/{repo}/labels")
     C.INVARIANTS[key] = dataclasses.replace(C.INVARIANTS[key], argv=monkeypatch_argv)
     try:
         r2 = Counter()
@@ -1802,7 +1823,7 @@ def test_the_envelope_records_the_argv(tmp_path: Path) -> None:
     _read("repo.metadata", now=1000.0, reader=r, cache_dir=tmp_path)
     p = _entry(tmp_path)
     env = json.loads(p.read_text())
-    env["argv"] = ["api", "repos/{repo}/somewhere-else"]
+    env["argv"] = ["api", "repos/{repo}/labels"]
     p.write_text(json.dumps(env))
     _read("repo.metadata", now=1000.0, reader=r, cache_dir=tmp_path)
     assert r.n == 2
@@ -2177,19 +2198,52 @@ def test_a_non_finite_clock_is_a_MISS_not_a_refusal(nonfinite, tmp_path: Path) -
 
 
 # ══════════════════════════════════════════════════════════════════════════════════════════════
-# CYCLE-16 — the DOOR checks the ENDPOINT; the decode denylist is a latch; empty inputs
+# CYCLE-16/17 — the DOOR is an ALLOW-LIST of endpoints; the decode denylist is a latch; empty inputs
 # ══════════════════════════════════════════════════════════════════════════════════════════════
 @pytest.mark.parametrize(
     "argv",
     [
+        # ── ONE ARM PER FAMILY the retired deny-list enumerated. Each arm carries ONLY that family:
+        #    the two `/commits/...` arms that used to be here were BOTH refused by `/commits`, so
+        #    `/status` and `/check-runs` were never the marker that fired — deleting them from the
+        #    deny-list left all 290 tests green (measured at `a9321ddc6`). That is the shape this
+        #    suite has fixed twice already (M67 unreachable, M72's missing `labels` key): a pin that
+        #    cannot fail for the bug it names.
         ("api", "repos/{repo}/pulls/9"),
         ("api", "repos/{repo}/issues/9"),
         ("api", "repos/{repo}/actions/runs"),
-        ("api", "repos/{repo}/commits/main/status"),
+        ("api", "repos/{repo}/commits"),
         ("api", "repos/{repo}/commits/abc/check-runs"),
+        ("api", "repos/{repo}/commits/abc/status"),
+        ("api", "repos/{repo}/issues/9/comments"),
+        ("api", "repos/{repo}/releases"),
+        ("api", "repos/{repo}/tags"),
+        ("api", "repos/{repo}/merges"),
+        # ── the families the deny-list NEVER named, which is why a deny-list could not hold:
+        (
+            "api",
+            "repos/{repo}/git/refs/heads/main",
+        ),  # a MOVING REF (measured: served an hour stale)
+        ("api", "repos/{repo}/branches"),
+        ("api", "repos/{repo}/deployments"),
+        ("api", "repos/{repo}/rulesets"),
+        ("api", "notifications"),
+        ("api", "graphql"),
+        # ── NON-GET argv — the second half of the same door. The mutation ran ONCE and every later
+        #    caller inside the TTL was handed its response without the mutation running at all.
+        ("api", "repos/{repo}", "-X", "POST"),
+        ("api", "repos/{repo}", "--method", "DELETE"),
+        ("api", "repos/{repo}", "-f", "name=x"),
+        ("api", "repos/{repo}", "-F", "field=@payload.json"),
+        ("api", "repos/{repo}", "--input", "payload.json"),
+        # ── ARGV SHAPE: a second operand, no operand, an empty segment, a non-placeholder repo
+        ("api", "repos/{repo}", "labels"),
+        ("api",),
+        ("api", "repos//labels"),
+        ("api", "repos/o/r/labels"),
     ],
 )
-def test_declare_invariant_REFUSES_a_mutable_ENDPOINT(argv) -> None:
+def test_declare_invariant_REFUSES_an_endpoint_outside_the_ALLOWLIST(argv) -> None:
     """⛔ `_is_mutable_name` reads the KEY. `declare_invariant("repo.identity",
     argv=("api","repos/{repo}/pulls/9"))` was ACCEPTED — an invariant-sounding name over a mutable
     endpoint — and cached a PR's `state` for an hour, served as a fresh hit after it closed. An
@@ -2203,6 +2257,51 @@ def test_declare_invariant_REFUSES_a_mutable_ENDPOINT(argv) -> None:
             project=lambda d: {"state": d[-1]["state"]},
         )
     assert "repo.identity" not in C.INVARIANTS
+
+
+def test_a_moving_ref_cannot_be_READ_even_when_injected_past_the_door(tmp_path: Path) -> None:
+    """⛔ THE MEASURED FAILURE, as a test. At `a9321ddc6` the door was a substring deny-list that
+    never named `/git/refs`, so an invariant-sounding key over a MOVING REF was accepted:
+    `{"sha":"AAAA"}` was cached at t=1000, the ref moved to `BBBB` by t=4500, and the read at
+    t=4500 returned `AAAA` with ZERO reader calls — a moving ref served as a provably-fresh hit for
+    the whole hour.
+
+    The spec is injected STRAIGHT INTO ``INVARIANTS`` here (bypassing ``declare_invariant``) so the
+    refusal is pinned on the READ path too, not only at the declaration door.
+    """
+    key = "repo.identity"
+    C.INVARIANTS[key] = C.Invariant(
+        ttl_s=3600,
+        argv=("api", "repos/{repo}/git/refs/heads/main"),
+        projection="moving-ref-v1",
+        project=lambda d: {"sha": d[-1]["sha"]},
+    )
+    try:
+        r = Counter()
+        with pytest.raises(C.MutableReadRefused):
+            _read(key, now=1000.0, reader=r, cache_dir=tmp_path)
+        assert r.n == 0, "a mutable endpoint reached the reader"
+        assert not list(tmp_path.iterdir()), "a refused read must not create an entry"
+    finally:
+        C.INVARIANTS.pop(key, None)
+
+
+def test_the_door_is_EXACT_membership_not_a_prefix() -> None:
+    """A prefix match on `repos/{repo}` would re-admit `repos/{repo}/pulls` — the hole the
+    allow-list replaces. And `{repo}`/`{branch}` must be PLACEHOLDERS: a concrete repo in a declared
+    argv would read ONE fixed repo for every scope (guard 1's failure, with the wrong subject)."""
+    assert C._endpoint_refusal(OK_ARGV) is None
+    assert C._endpoint_refusal(("api", "repos/{repo}/labels", "--paginate")) is None
+    assert C._endpoint_refusal(("api", "user")) is None
+    for refused in (
+        ("api", "repos/{repo}/pulls"),
+        ("api", "repos/o/r/labels"),
+        ("api", "repos/{repo}/labels/"),
+        ("api", "repos/{repo}/labels", "--method", "GET"),
+    ):
+        reason = C._endpoint_refusal(refused)
+        assert reason is not None, f"{refused!r} was accepted by the door"
+        assert isinstance(reason, str) and reason, reason
 
 
 def test_declare_invariant_still_accepts_the_registrys_own_endpoints() -> None:
@@ -2251,3 +2350,59 @@ def test_an_empty_repo_is_refused_rather_than_spending_a_call(tmp_path: Path) ->
     with pytest.raises(C.TtlNotPermitted):
         _read("repo.metadata", scope="@main", now=1000.0, reader=r, cache_dir=tmp_path)
     assert r.n == 0
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+# CYCLE-17 — the empty-input refusal belongs in `scope_for`, the ONE function both live paths call
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+@pytest.mark.parametrize("repo,branch", [("", "main"), ("   ", "main"), ("o/r", ""), ("o/r", "  ")])
+def test_scope_for_refuses_an_empty_repo_or_an_empty_branch(repo: str, branch: str) -> None:
+    """⛔ The empty-repo guard lived in `read()` ONLY, so the CLI's `--no-cache` branch — which calls
+    `reader(a.key)` directly and never enters `read()` — walked around it and spent one call on
+    `gh api repos//branches/main/protection` (a guaranteed 404, reported as a GitHub fault).
+
+    An empty BRANCH had the same shape and no guard at all: `f"{repo}@{branch}"` gives `"o/r@"`,
+    which is neither empty nor `"@"`-leading, so `read()`'s scope check, `_load` and the reader all
+    accepted it and the request became `branches//protection`.
+    """
+    with pytest.raises(C.TtlNotPermitted):
+        C.scope_for("repo.required_set", repo, branch)
+
+
+def test_scope_for_still_scopes_a_global_key_without_a_repo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The refusal must not swallow the GLOBAL branch: `user.identity` depends on the TOKEN, so it
+    is legitimately called with no repo/branch at all."""
+    monkeypatch.setenv("GH_TOKEN", "tok-value")
+    assert C.scope_for("user.identity", "", "").startswith("global@")
+
+
+@pytest.mark.parametrize("extra", [["--repo", ""], ["--repo", "o/r", "--branch", ""]])
+def test_the_CLI_no_cache_path_spends_no_call_on_an_empty_repo_or_branch(
+    extra, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """The `--no-cache` arm, end to end. Measured at `a9321ddc6`: `main(["--key","repo.required_set",
+    "--repo","","--no-cache"])` attempted the call while the cached path attempted none."""
+    calls: list[str] = []
+    monkeypatch.setattr(
+        C, "_gh_reader", lambda repo, branch: lambda key: calls.append(key) or b"{}"
+    )
+    rc = C.main(["--key", "repo.required_set", "--no-cache", *extra])
+    assert rc == 1
+    assert calls == [], "a guaranteed-404 call was spent from the pool this module protects"
+    assert "REFUSED" in capsys.readouterr().err
+
+
+def test_the_CLI_cached_path_refuses_an_empty_repo_too(
+    monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """The cached path must reach the same verdict — both paths through `scope_for`."""
+    calls: list[str] = []
+    monkeypatch.setattr(
+        C, "_gh_reader", lambda repo, branch: lambda key: calls.append(key) or b"{}"
+    )
+    rc = C.main(["--key", "repo.required_set", "--repo", ""])
+    assert rc == 1
+    assert calls == []
+    assert "REFUSED" in capsys.readouterr().err

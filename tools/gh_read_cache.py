@@ -60,7 +60,9 @@ earlier blanket claim ("each is pinned by a test that fails when the guard is re
    ``read()`` stores only ``spec.project(decode_pages(raw))`` — so the guard holds for every
    caller, including one that supplies its own ``reader`` (it used to hold only on the CLI's
    private helper, and the documented library usage cached whole bodies). Enforced at import as
-   well; argv may not carry ``--jq``/``--slurp``. Stated honestly: this pins the SIX SHIPPED
+   well; argv may not carry ``--jq``/``--slurp``, and the argv must be ONE ``gh api`` READ of an
+   endpoint on the invariant allow-list (:data:`_INVARIANT_ENDPOINTS`) — never a deny-list of
+   mutable spellings, which cannot be complete. Stated honestly: this pins the SIX SHIPPED
    KEYS, not the concept — a ``project=lambda d: d`` passes every guard, so a future key still
    needs a reviewer. What IS mechanical is that a projection cannot silently return an empty or
    all-``None`` answer from a body it does not recognise (see :func:`_require_shape`).
@@ -752,34 +754,81 @@ def ttl_for(key: str) -> int:
     return INVARIANTS[key].ttl_s
 
 
-# ⛔ ENDPOINTS WHOSE ANSWER IS MUTABLE BY CONSTRUCTION. `_is_mutable_name` reads the KEY, so
-# `declare_invariant("repo.identity", argv=("api", "repos/{repo}/pulls/9"))` was ACCEPTED — an
-# invariant-sounding name over a mutable endpoint, which cached a PR's `state` for an hour and
-# served it as a fresh hit after the PR closed. The door must check what is being READ, not only
-# what it is called. These are the families where a cached answer is a LIE rather than a wait;
-# the registry's own endpoints (`repos/{repo}`, `/labels`, `/actions/workflows`,
-# `/actions/runners`, `/branches/{branch}/protection`, `user`) are deliberately absent.
-_MUTABLE_ENDPOINTS = (
-    "/pulls",
-    "/issues",
-    "/actions/runs",
-    "/commits",
-    "/check-runs",
-    "/status",
-    "/comments",
-    "/releases",
-    "/tags",
-    "/merges",
+# ⛔ THE DOOR IS AN ALLOW-LIST OF ENDPOINTS, NOT A DENY-LIST OF SPELLINGS — and this is the THIRD
+# spelling of ONE mistake, so the history goes here so a fourth does not get written.
+#
+#   1. `_is_mutable_name` read the KEY, so `declare_invariant("repo.identity",
+#      argv=("api", "repos/{repo}/pulls/9"))` was ACCEPTED — an invariant-sounding NAME over a
+#      mutable READ, cached for an hour and served after the PR closed.
+#   2. The next head added a deny-list: ten literal substrings matched with `marker in a` (whose
+#      docstring claimed to be "segment-bounded" — it was not). A deny-list at a boundary CANNOT be
+#      complete. Absent from it, and therefore ACCEPTED: `/git/refs/…` (a moving ref), `/branches`,
+#      `/deployments`, `/rulesets`, `notifications`, `graphql` — measured, a moved ref was served as
+#      a provably-fresh hit for the full hour with ZERO reader calls. Deeper hole in the same door:
+#      `("api","repos/{repo}","-X","POST","-f","name=x")` passed every guard, so the MUTATION ran
+#      once and every later caller was handed its cached response without the mutation running.
+#   3. This one — the shape OWASP's Input Validation Cheat Sheet states and R4 already promised:
+#      *"Define what the application accepts and reject values outside those rules. Do not try to
+#      recognize every malicious string."*
+#
+# The match is EXACT TUPLE EQUALITY on the path's `/`-separated segments, deliberately NOT a prefix
+# match: a prefix match on `repos/{repo}` would re-admit `repos/{repo}/pulls`, the hole this
+# replaces. `{repo}`/`{branch}` must be spelled as PLACEHOLDERS — a concrete repo in a declared argv
+# would read ONE fixed repo for every scope, which is guard 1's failure with the wrong subject.
+_INVARIANT_ENDPOINTS: tuple[tuple[str, ...], ...] = (
+    ("repos", "{repo}"),
+    ("repos", "{repo}", "branches", "{branch}", "protection"),
+    ("repos", "{repo}", "labels"),
+    ("repos", "{repo}", "actions", "workflows"),
+    ("repos", "{repo}", "actions", "runners"),
+    ("user",),
 )
 
+# The ONLY element that may follow the path. Everything else — `-X`/`--method`/`-f`/`-F`/`--input`,
+# or a SECOND path — is refused by OMISSION rather than enumerated, because enumerating the mutations
+# somebody thought of is exactly the shape this replaces.
+_ALLOWED_ARGV_FLAGS: frozenset[str] = frozenset({"--paginate"})
 
-def _mutable_endpoint_in(argv: Sequence[str]) -> str | None:
-    """The first mutable-endpoint marker in an argv, or None. Segment-bounded so `repo.labels`
-    (`/labels`) is not caught by a `...` prefix accident."""
-    for a in argv:
-        for marker in _MUTABLE_ENDPOINTS:
-            if marker in a:
-                return marker
+
+def _endpoint_refusal(argv: Sequence[str]) -> str | None:
+    """The reason this argv is not a READ of a declared-invariant endpoint, or ``None``.
+
+    One question, one function: the shape (`api` + ONE path + `--paginate` at most) AND the endpoint
+    (exact allow-list membership) are the same decision, so a caller cannot satisfy one and slip
+    past the other.
+    """
+    args = list(argv) if isinstance(argv, (list, tuple)) else None
+    if args is None:
+        return f"its argv is {argv!r}, not a list/tuple of arguments"
+    if len(args) < 2 or args[0] != "api":
+        return (
+            f"its argv {tuple(args)!r} is not `('api', <one path>)` — this cache stores `gh api` "
+            f"READS only"
+        )
+    path = args[1]
+    if not isinstance(path, str) or not path:
+        return f"its argv names no endpoint path ({path!r})"
+    if path.startswith("-"):
+        return f"its argv names the flag {path!r} where the endpoint path belongs"
+    for extra in args[2:]:
+        if not isinstance(extra, str) or extra not in _ALLOWED_ARGV_FLAGS:
+            return (
+                f"its argv carries {extra!r} after the path; only "
+                f"{sorted(_ALLOWED_ARGV_FLAGS)} may follow it. `-X`/`--method`/`-f`/`-F`/`--input` "
+                f"would cache a MUTATION's response and replay it to every later caller WITHOUT "
+                f"running the mutation again"
+            )
+    segments = path.split("/")
+    if not all(segments):
+        return f"the endpoint {path!r} has an empty path segment"
+    if tuple(segments) not in _INVARIANT_ENDPOINTS:
+        return (
+            f"the endpoint {path!r} is not one of the declared-invariant endpoints "
+            f"({', '.join('/'.join(e) for e in _INVARIANT_ENDPOINTS)}). An endpoint outside that "
+            f"list is not provably invariant, so it is refused rather than cached — enumerating "
+            f"the BAD routes cannot be complete (`/git/refs/…` moves on every push and `graphql` "
+            f"can ask for anything), so the door accepts only what is known to be stable"
+        )
     return None
 
 
@@ -795,14 +844,8 @@ def _validate_spec(key: str, argv: Sequence[str], projection: str, project: Any)
             f"{key!r} declares no usable projection id ({projection!r}). It is the cache-identity "
             f"stamp, so it must name the projection's SHAPE."
         )
-    marker = _mutable_endpoint_in(argv)
-    if marker is not None:
-        raise MutableReadRefused(
-            f"{key!r} reads an endpoint carrying {marker!r}. That answer is MUTABLE by "
-            f"construction: caching it replays a PR/run/commit state as if it were fresh. An "
-            f"invariant-sounding KEY is not an invariant READ — declare it only if the endpoint "
-            f"it names genuinely cannot change."
-        )
+    # ⛔ THE gh PROJECTION FLAGS FIRST, so `--jq` is refused for the reason it is actually wrong
+    # (projection is this module's job) rather than as an anonymous "unexpected flag" below.
     for a in argv:
         if a in _FORBIDDEN_ARGV_FLAGS or a.startswith(("--jq=", "--template=", "-q=")):
             raise TtlNotPermitted(
@@ -810,6 +853,12 @@ def _validate_spec(key: str, argv: Sequence[str], projection: str, project: Any)
                 f"--paginate --slurp --jq` is REFUSED by gh 2.103.3 ('--slurp is not supported with "
                 f"--jq'), and pflag takes the LAST --jq while a validator sees the FIRST."
             )
+    refused = _endpoint_refusal(argv)
+    if refused is not None:
+        raise MutableReadRefused(
+            f"{key!r} cannot be an invariant: {refused}. An invariant-sounding KEY is not an "
+            f"invariant READ — caching this would replay a past state as the current one."
+        )
 
 
 def declare_invariant(
@@ -823,9 +872,12 @@ def declare_invariant(
     """Add a key to the registry.
 
     Refuses: a mutable name, a non-positive TTL, a missing/non-callable ``project``, an argv
-    carrying gh's projection flags, and any attempt to WIDEN an existing key's ceiling. That last
-    one matters because this function is the documented way to add a key — so without the check the
-    ceiling that ``read()`` defends could be raised by a one-line call.
+    carrying gh's projection flags, an argv that is not ONE ``gh api`` READ of an endpoint on the
+    invariant allow-list (:data:`_INVARIANT_ENDPOINTS` — an unlisted endpoint, a second operand, or
+    any ``-X``/``--method``/``-f``/``-F``/``--input`` is refused, because a cached MUTATION replays
+    its response without running the mutation), and any attempt to WIDEN an existing key's ceiling.
+    That last one matters because this function is the documented way to add a key — so without the
+    check the ceiling that ``read()`` defends could be raised by a one-line call.
     """
     if _is_mutable_name(key):
         raise MutableReadRefused(
@@ -958,8 +1010,15 @@ def _envelope(
     """The stored bytes: digest over the PAYLOAD ONLY, freshness in the metadata.
 
     The split is deliberate. The digest answers *"are these the bytes that were stored?"*;
-    ``stored_at`` + ``ttl_s`` answer *"are they still fresh?"*. A digest over the metadata too would
-    make a rewritten ``stored_at`` look intact, which is the failure :func:`_load` exists to catch.
+    ``stored_at`` + ``ttl_s`` answer *"are they still fresh?"*.
+
+    ⛔ ``stored_at`` IS TRUSTED, and this docstring used to claim the opposite — that a digest over
+    the metadata would "make a rewritten ``stored_at`` look intact, which is the failure
+    :func:`_load` exists to catch". ``_load`` performs NO metadata-integrity check at all, so that
+    sentence described a mechanism that is not there. Stated plainly: a local writer that can
+    rewrite ``stored_at`` can make an old payload look fresh, and this is NOT a forgery defence —
+    the cache dir is box-wide and writable by any local process. The payload digest is the same kind
+    of control: it detects a corrupt or torn write, not a hostile one.
     """
     if projection is None:
         projection = INVARIANTS[key].projection
@@ -1106,7 +1165,16 @@ def _credential_fingerprint() -> str | None:
 
 
 def scope_for(key: str, repo: str, branch: str) -> str:
-    """Global keys are scoped by CREDENTIAL (not branch); everything else by repo AND branch."""
+    """Global keys are scoped by CREDENTIAL (not branch); everything else by repo AND branch.
+
+    ⛔ THE EMPTY-INPUT REFUSAL LIVES HERE, NOT ONLY IN ``read()``, because this is the ONE function
+    BOTH live paths call. `main()`'s ``--no-cache`` branch calls ``reader()`` directly and never
+    enters ``read()``, so `--repo '' --no-cache` still spent a call on
+    `gh api repos//branches/main/protection` (a guaranteed 404, reported as a GitHub fault) — the
+    exact call the guard was added to prevent. An empty BRANCH had the same shape:
+    ``f"{repo}@{branch}"`` gives ``"o/r@"``, which is neither empty nor ``"@"``-leading, so every
+    check downstream accepted it and the request became ``branches//protection``.
+    """
     if key in GLOBAL_KEYS:
         cred = _credential_fingerprint()
         if cred is None:
@@ -1115,6 +1183,17 @@ def scope_for(key: str, repo: str, branch: str) -> str:
                 f"cannot be identified — refusing to cache it. Set a token, or read it live."
             )
         return f"global@{cred}"
+    if not isinstance(repo, str) or not repo.strip():
+        raise TtlNotPermitted(
+            f"{key!r} is repo-scoped and was given {repo!r} as the repo. Pass --repo owner/name "
+            f"(or GH_REPO): an empty repo addresses `repos/` — a guaranteed 404 spent from the "
+            f"very pool this module exists to protect."
+        )
+    if not isinstance(branch, str) or not branch.strip():
+        raise TtlNotPermitted(
+            f"{key!r} is repo-scoped and was given {branch!r} as the branch. Pass a non-empty "
+            f"branch (`branches//protection` is not a route)."
+        )
     return f"{repo}@{branch}"
 
 
