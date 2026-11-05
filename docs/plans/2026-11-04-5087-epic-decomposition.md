@@ -1,0 +1,212 @@
+---
+title: "Extractor v4 (#5087) — epic decomposition: children, doors, and proofs"
+type: engineering
+domain: platform
+doc_status: draft
+created: 2026-11-04
+subjects.team: epistemic-team
+aboutSubjects: epistemic-team
+aboutObjects: "#5087, #7949, EXTRACTOR-V4-ARCHITECTURE.md, config/v4-mechanisms.yml, SUBSTRATE-REBUILD-MAP.md, packs/dev/manifest.yaml"
+---
+
+# Extractor v4 (#5087) — the epic decomposition
+
+**What this is.** The decomposition of epic **#5087** into children: for each, the **step** it lives in (S0–S6), the write **door** it changes, and the artifact that proves it. It lands no code.
+
+**What it is not.** Not a scope approval, not a schedule, not a redesign. The design of record is `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md`; the declared-vs-shipped ledger is `config/v4-mechanisms.yml`; the acceptance rows are **#7949** — 0 of 5 green, and its verdicts are not this document's to change.
+
+**Read §1 before trusting anything else**, including the epic body and this lane's own brief: three premises they carry are stale or false as measured on 2026-11-04.
+
+---
+
+## 1. What the tracker and the tree actually say
+
+| the claim carried by the epic body or the lane brief | measured 2026-11-04 | consequence |
+|---|---|---|
+| **"#4894 is OPEN — the design home … supplies align/scope"** | **CLOSED** (2026-10-14) | the align/scope artifacts this epic was to inherit do not exist as an open issue. They survive as **the architecture document** and the owner's 2026-11-04 brief; this decomposition treats those as the inherited align/scope and says so rather than pointing at a closed issue as a gate. |
+| **"every fleet point arrives through the agent-capture door running the legacy rule extractor (`tortoise/extractor.py::_classify_point_kind`, #4432)"** | **FALSE.** The fleet path is pi hook → `POST /v1/sessions` → `hosted_api.capture_session` → `sdk._extract_session_v2` → `extractor_v2.extract_session_v2`. `_classify_point_kind` is reachable only from the **documents** door (`ingest.py`), and the substrate map records that the owner moved `#4432` out of every lane. | the brief's constraint is right in direction — *the fleet's arrow is the only arrow that counts* — and wrong in fact. A child that improved `extractor.py` would improve a path the fleet does not use, so **no child here touches it**. |
+| the 12-row "The issues" table | **10 of 12 CLOSED** (#5006 #5007 #5008 #4899 #2453 #2730 #2552 #4716 #1026 #2714) | a decomposition read off that table re-files shipped work. |
+| **"Part of: #5086"** | **CLOSED** | children are filed against **#5087**. |
+| DoD: *"the EMBED gate is declared in the pack, not enforced"* | `embed_gate` is **`implemented`** (`tortoise/embed_gate.py`, flag-gated); `#5008` closed, residual is a *rate measurement* | the DoD bullet is a measurement question, not a build. |
+| the brief's `NULL pointKind 3,658 (19%)` read as a classify failure | **not a classify failure.** `pointKind` is `statement` by design for extraction Points; a NULL or empty `pointKind` marks a **non-extraction** Point — operator Points are written with `pointKind = ""` (`projection/__init__.py`), and the point fold is `coalesce($pk, n.pointKind)` | the "typed 0.6%" figure needs a definition before it can be a bar; the census child #10995 defines it and does not adopt the misreading. |
+
+**The epic's own acceptance rows** (`#7949`, `docs/evidence/7949-capstone/`): **0 of 5 green.**
+
+- **E1 `BLOCKED`** — the two before-arms on the frozen corpus are 0.3590 (78 Objects) and 0.5652 (69); the after-arm is 0.2131 (61). One pairing passes its bound, one fails, and the two before-runs differ by **20.6 pp**, wider than the 14.6 pp the arm moved. The next requirement is **n ≥ 2 per arm**, not a fix.
+- **E2 `BLOCKED`/RED** — `E2a` 8 of 14 against a 13-of-14 bar; the loss is upstream of the filter (`#10360`).
+- **E3 `RED`** — 157/397 anchored, and the registered `= 1.000` is unreachable as registered because `:Object` **mention** links are unanchored **by design** (`#5199`; metric re-registration `#9736`, now closed).
+- **E4 `RED`** — 5 of 15 planted operator edges; `#8503`'s own title splits the 10 losses into **4 operator-selection** and **5 endpoint-recall**.
+- **E5 `RED`** — ratio 1.0833 passes, raw absolute 0.4800 fails, n = 25, on a population (25 bound qualifiers) that is not the registered one (29 marker sentences).
+
+**The pre-registered metric set has no row for what the owner asked for.** E1–E5 measure volume, retention, anchoring, operator edges and narrative fidelity; **none of them measures a hierarchy**. Adding a sixth row is a pre-registration decision in the same class as `#9736`, so §8 puts the question to the owner instead of quietly adding one.
+
+---
+
+## 2. The three axes
+
+1. **The step** (S0 · S1 · S2.1 · S2.2 · S2.3 · S3 · S5 · S6) — which decision the child changes. §4.0's *purpose test* is the authority: a child must state its step's purpose in one clause no other step shares.
+2. **The door** — which write path it changes: hosted `/v1/sessions`, SDK `capture_session`, `commit_session`, documents/`ingest`, MCP + SDK primitives. A child that does not touch the fleet's capture door must say why it is still in scope — the brief's constraint, kept.
+3. **The proof** — the artifact that reds if the behaviour is removed. For most children that is a capstone row (`#7949`) or a registry pin (`tests/test_v4_declared_mechanisms.py`); where a row is owner-gated or foreclosed, the child's proof is its own pin and **the row is not claimed**.
+
+---
+
+## 3. The children
+
+| key | issue | step | door | the proof that reds | file family |
+|---|---|---|---|---|---|
+| **A** | #10994 | — (gate artifact) | all five, enumerated | the map itself, registered in the docs index | `docs/epics/` |
+| **B** | #10995 | S6 (measures) | all five | a committed census artifact + a re-derivation pin on the frozen corpus; an unmeasured door reads `UNMEASURED` | `tools/`, `docs/evidence/` |
+| **C** | #10996 | S2.2 (+ S2.3's collection) | fleet capture | default-arm DISCARD with its `rule_id`; the reference question's precision on the 25-name owner-labelled set; zero classified-and-deleted | `extractor_v2.py`, `vet_gate.py`, `s2_decision_seam.py` |
+| **D1** | #10997 | S3 (+ S5 pre-pass, S6) | fleet capture | `TestTheRemainingAbsence::test_an_unresolved_lookup_still_mints` reds; a partial run leaves the journal unchanged; the held set round-trips | `extractor_v2.py`, `sdk.py`, `failure_policy.py` |
+| **D2** | #10998 | S5 Job 2 | fleet capture | the Job-2 hold pin; held/committed/discarded as three counts; `failure_policy` flips only with both halves | `extractor_v2.py`, `failure_policy.py` |
+| **E** | #10999 | S2.1 + S5 Job 1 | fleet capture | E4 read from a receipt with `extractor_identity.real == true`; the `relations` channel's schema test; zero mints | `extractor_v2.py`, `commit_schema.py`, `tests/eval/write_path/` |
+| **F** | #11000 | S2.3 (the vocabulary) | fleet capture, indirectly | `expand_kind("dev:issue")` includes `WorkItem`; the index spec carries parent kinds | `pack_registry.py`, `value_extractor.py` |
+| **G** | #11001 | S5 → S6 | fleet capture + ingest | three declared pairs > 0 against a before-arm of **0**; `live == rebuild` on the new edge class; the fan-out cap holds | `pack_registry.py`, `projection/edges.py`, `extractor_v2.py` |
+| **H** | #11002 | S1 → S2.2 → S5 | fleet capture | the retry fires exactly once; a tie keeps the first narrative; `run_s4` is gone **with** an ADD-capable stage present | `extractor_v2.py`, `vet_gate.py` |
+
+### The children that do not touch S3 or S5, and why they are still in scope
+
+The brief requires this justification, and two of the answers are findings rather than concessions.
+
+- **B (the census) is the instrument, not a change.** Without it no child can say *which door it improved*, and the brief's own premise about the fleet's door turned out to be false when measured. A per-door census is how that class of error stops recurring.
+- **C does not touch S3/S5 and cannot fix the flat catalogue alone — and that is the finding.** `vet_gate.apply_vet`'s Rule 2 is *"a referenced entity is never removed"*, and every extracted Object is named by the claim that produced it, so **VET alone can never remove one**: the shipped arm moves the `^the <X>` share by **exactly 0.0**, which is what `tests/test_e1_e2_measurement.py` pins. C exists because without it **the gate does not run at all** on the fleet door, and because the reference *question* is what the owner's labelled set can measure cheaply (§8).
+- **F is one bug in the kind vocabulary.** S3's exact-match discriminator (`_find_existing_entity` folds `kind`) and the declared hierarchy both key on kinds, so a missing `subclassOf` widening quietly degrades resolution and enforcement at once. It is a precondition for **G**, not for the flat catalogue.
+- **H completes DoD bullet 1** — *"the pipeline is the eight steps, in that order"* — which is unmet while `run_s4` runs under `if story:` with no S4-specific switch. No open issue covers it: `#8500` closed with a design only.
+
+---
+
+## 4. Coverage — every epic scope item and its owner
+
+| scope item | owner after this decomposition | step | note |
+|---|---|---|---|
+| the eight steps in order, VET → CLASSIFY → RESOLVE | **C** (S2.2/S2.3), **H** (S4's removal + the bounded retry) | S2.2 · S2.3 · S1 | DoD bullet 1 |
+| S3 is the single authority on new-vs-existing | **D1** | S3 | the mint half of `failure_policy` |
+| the per-step failure policy (I1/I2/I3) | **D1** + **D2** | S3 · S5 | both halves, then `config/v4-mechanisms.yml` flips |
+| S5 Job 1, the batch's own story | **E** | S2.1 · S5 | adds the entity↔entity channel the contract lacks |
+| S5 Job 2, the batch against the graph | **D2** | S5 | fail-closed, per §4.4 |
+| the owner's map of the business | **G** (+ **F**, **E**) | S5 · S6 | declared `relations` become edges |
+| the verbatim span layer (DoD bullet 2) | **`#2684`** (open) — *not a child* | S6 | the value-bearing half is measured 101/112; the every-point widening is `#2684`'s and `config/v4-mechanisms.yml` says so |
+| the EMBED gate (DoD bullet 3) | **`#5008`** (closed) — *not a child* | S5 | `implemented`; the residual is a rate measurement |
+| the bounded fan-out / sufficiency (DoD bullet 4) | **`#5009`** (open, the last item of lane L3) + `fanout_cap` (`implemented`) | read path | *not a child* |
+| near-duplicate MERGE, exact dedup, source dedup, `against_priors_consolidation` | `#5006`, `#5012`/`#5007` — **all closed / `implemented`** | S2.2a · S3 | the registry is the ledger |
+| the atomic point write | **`#9879`** (open) | S2.2a | a precondition of the against-store exact dedup, **not** of D1's HOLD |
+| the narrative + raw-span persistence (G1) | **`#10000`** + **`#10394`** (open) | S1 · S6 | *not a child* — it has an owner |
+| the seam's request shape | **`#10176`** (open) | S2.2 | a stated precondition of the first *armed* scored run |
+| `link_before_create` contract with no consumer | **`#10448`** (open) | S3 | reads the same receipt `#10533`/`#10449` argue about |
+| the S3 receipt's `search` block | **`#10533`** + **`#10449`** (open, the same defect twice) | S3 | **B** declares which reader it trusts and does not add a third |
+| E2 retention | **`#10360`** + **`#9775`** (closed render half) | S2.1 | upstream of selection |
+| E3's metric | **`#9736`** (closed) | — | the row needs a re-run, not work |
+| E4's receipt retrievability | **`#9596`** (open) | — | a different gap from E4's unformed edges |
+| the relocation / destructive half | **`#5333`** + **`#5059`** (open, owner-gated) | — | **no pass may remove a committed row**; see §8 |
+| the claim-class write path (L8: `#9417`, `#9727`, `#9819`) | **lane L8** (declared, no issue yet) | supersede · ingest | the substrate map's *"L8 before E1's payoff"*: a selective writer into a path that can still move a terminal fact selects about the wrong thing |
+| vector reaping / text-worth-a-vector | **`#4997`** · **`#4998`** (open) | — | not this epic |
+
+---
+
+## 5. Order, file families, and the honest parallelism
+
+**Six of the nine children edit `tortoise/extractor_v2.py`.** `config/ci-surfaces.yml` is a *serialization point* rather than a file — every PR that adds a test edits it — so "nine children, nine lanes" would be false. The honest number is **one extractor lane**, with three genuinely parallel side lanes.
+
+```text
+A (docs) ────────────────────────────────────────────────► no dependency, gates the checklists
+B (tools/ + docs/evidence/) ──────────────┐
+F (pack_registry + value_extractor) ──────┤ parallel
+                                          ▼
+C ──► D1 ──► D2 ──► E ──► H ──► G          the extractor_v2 lane — strictly serial
+```
+
+- **A first**: it is the checklist source for every other child.
+- **C before D1**: the gate must run before its disambiguation can be calibrated.
+- **D1 before E**: an edge can only be wired between endpoints that resolve.
+- **H before G** and **G last**: the align gate's verdict (below) — the hierarchy moves **none** of the five acceptance rows, so it must not front-run the claim/edge work.
+- **Max parallelism 3** (B, F, and exactly one extractor child); **honest schedule: 1** for the extractor family.
+
+### The align gate's verdict, recorded
+
+A fresh-context adversarial align review returned: *"the goal is right; the decomposition is not proportionate — it is sequenced after the constraint it depends on"*, on the evidence that 64% of statement Points carry neither `IMPL` nor `NAND`. **Applied**: the claim/edge children (C, D1, D2, E, H) precede G, and G is scoped to not delay them. Its other two points were checked rather than adopted:
+
+- *"the relations writer is near-zero code — `create_direct_edge` already admits `:Object` endpoints"* — **true and useful** (`sdk.py`'s `create_direct_edge`, owner rulings `#7813`/`#7902`), so G is instructed to try the one-call operator path before adding a producer.
+- *"pointless if the zero is deliberate — `#9736` says `:Object` mention links are unanchored by design"* — **a conflation, and refuted**: `#9736` is about E3's denominator counting `Point→Object` **mention** links; it says nothing about **Object→Object** edges, which ONTOLOGY §3.7 declares (`hasPart`, `wasDerivedFrom`) and which no producer writes. The zero is a gap, not a design outcome. Recorded so the next reader does not have to re-derive it.
+
+---
+
+## 6. Deliberately out, with the owner
+
+Every row of §4's last block is out for a reason that is **not** capacity: it has an owner, it is closed, or it is a decision this lane may not take. The three that matter most:
+
+- **`#5333` / `#5059` (relocation, owner-gated)** — *"a pass may add; after COMMIT no pass may remove a committed row except through the journaled `restatus` fold where no visible successor exists, or the D7 `ObjectSuperseded` arm where one does; a physical delete is foreclosed to every pass."* No child here writes to an existing Object.
+- **`#2684` (the every-point span)** — the value-bearing half is measured at 101 of 112; the widening is a different mechanism with its own registry row and tracking issue. A child here that claimed "the span layer" would recreate exactly the declared-implies-present defect `#5064` exists to catch.
+- **L8 (`#9417`, `#9727`, `#9819`)** — the substrate map's declared edge: a selective writer on a path that can still move a terminal fact is selective about the wrong thing.
+
+**Also out, and named so it is not rediscovered:** `#5009` (the sufficiency router — the only remaining item of the one open lane), `#9879` (the atomic write — a precondition of the exact-dedup arm, deliberately *not* a `preconditions:` edge on it), `#10000`/`#10394` (narrative/raw persistence), `#10176` (the seam's request shape), `#10448`, `#10533`/`#10449`, `#9596`, `#10360`, `#9736`, `#8503`, `#8500`, `#4997`, `#4998`, `#1936`, `#5202`/`#8325`/`#9412`.
+
+---
+
+## 7. The review record
+
+Three fresh-context rounds, and what was done with each finding. **A finding is a claim; it was verified against its cited artifact before being applied.**
+
+| round | findings | applied | rejected (with the evidence) |
+|---|---|---|---|
+| **per-child** (9 children, pre-filing) | 8 of 8 children carried at least one issue | merged C3+C4 into **C** (the arbiter seam is already reachable — `_run_vet_pass` calls `_s2_seam_arbiter`, so no `sdk.py` change); dropped the structured-source S0 child (GitHub→Object mapping already ships: `github_map.issue_to_object`, `connectors/github.py`); scoped **E** to a `real: true` receipt instead of deleting the eval lane's patch; scoped **D1** to unresolved *identity* so it does not touch the value-fidelity refusal; scoped **G** to consume `pack_registry.relation_write_paths()`; added the `OVERRIDES:` guard to **C** | *"S2.3's two passes should become one"* — **refused**: the S2 pass must precede S3 so the lookup sees final kinds, and the union pass re-classifies the S4 superset with `_restamp_s2_kinds` |
+| **MECE** | 6 findings | split D into **D1**/**D2** (only the pair flips `failure_policy`); added **H** (the re-narrate + S4 removal, which no open issue owned); added the edges B→C, D→E, F-after-C; corrected C's and F's file families; scoped **C** to carry an `OVERRIDES:` line and to flip the default in `extractor_v2`, never in the `value_gate` leaf; scoped **B** to declare `#10449`/`#10533` rather than add a third reader | *"B and E both claim E4 is observable"* — **accepted**: E owns the E4 read, B publishes doors only |
+| **align** | 1 verdict, 3 findings | reordered the claim/edge children ahead of **G**; instructed G to try the one-call operator path first | *"the zero Object→Object count is by design (`#9736`)"* — **refused**, see §5 |
+
+**Two process facts, recorded rather than smoothed over:** `tools/collision_preflight.py 5087 --repo .` **did not complete** in this worktree — one of its `gh`/API calls sat in flight for over eight minutes and was abandoned — so the mandated pre-dispatch collision check could not be run to a verdict; and the epic-workflow sequence-enforcer's stage gates blocked the parent session's shell, so the mechanical half of this lane (issue creation, this document, the PR) was executed by child sessions while the judgment stayed with the parent.
+
+---
+
+## 8. The one decision this decomposition puts to the owner: E1
+
+**The position, measured.** E1 is the epic's volume bar: the `^the <X>` share of `:Object` nodes must at least halve, over a floor of 30 Objects. Measured on the frozen corpus, the two before-arms are **0.3590** and **0.5652**, the after-arm **0.2131**; one pairing passes and one fails, and the two before-runs differ by **20.6 pp** — wider than the 14.6 pp the arm moved. So E1 is `BLOCKED` on **n ≥ 2 per arm**, not on a mechanism.
+
+**But the mechanism question is answered, and the answer is that there is not one.** `docs/evidence/9889/on-arm.log` states it: *"the mechanism that must move the share is an owner ruling on removal/relocation (`#5333`)"*. Three measured facts make that true:
+
+- the mechanical predicate is **identifier-only by design** and drops **0 of 61** Objects (**0 of 13** bare-definite) — its positive controls fire, so the zero is a measurement, not a dead predicate;
+- `apply_vet`'s **Rule 2** (*"a referenced entity is never removed"*) means VET cannot remove an entity a surviving claim names, and every extracted Object is named by the claim that produced it — so VET alone moves the share by **exactly 0.0**, which `tests/test_e1_e2_measurement.py` pins;
+- mint-time **name-pattern** drops are foreclosed: `#1026` ruled *"no name patterns; nothing is dropped at mint"*, and `packs/_template/manifest.yaml` refuses those keys at validation.
+
+**The options, and what each costs.**
+
+| option | what it buys | what it costs | who can take it |
+|---|---|---|---|
+| **1 · authorise the relocation pass** (`#5333` task 1) | the only mechanism that can move the **existing** population's share | the design defers it *"until recall cost is measured"*; every read keeps the status predicate; the ≈48% figure is the **name-pattern** method's precision, **not the arbiter's** | **owner** |
+| **2 · retire E1 as a closing bar, keep E1b** | the epic can close on the rows that measure the pipeline (E1b 90/90 no-loss; E2–E5) | the volume claim is dropped and the 62.3% class stays | owner (a metric decision, the same class as `#9736`) |
+| **3 · leave E1 as it is** | nothing | an epic that cannot close, whose only lever is option 1 | — |
+
+**Recommendation: measure before ruling, and the measurement is cheap.** The owner-labelled audit set already exists — `tests/eval/write_path/salience_labels.jsonl`, **25 names, owner-confirmed 2026-09-23**, with a `verdict` column — and the seam's arbiter has **never been scored against it**. One probe over those 25 rows (plus the 15 shape-in-scope ones) reports the arbiter's precision and recall on *"not an entity"*: that is the number option 1 needs and the number option 2 would retire. **The ≈48% is the name-pattern's precision; using it to refuse the arbiter is refusing a method nobody has measured.** Run that probe — an hour, and scorable by hand if the vendor key is unavailable — then take option 1 or option 2 with a number in hand.
+
+**A second, smaller hole in the same class: E5's population reconciliation is unowned.** `#9738` closed on its own *record* correction, not on a measurement; E5 is registered over **29 marker-bearing sentences** and measured over **25 bound qualifiers**, and `preregistration.json` says *"neither is final until the populations are reconciled"*. No issue owns that reconciliation today. It is a measurement, so it may belong to `#7949` rather than to this epic — but someone must own it, or E5 stays RED by attrition.
+
+---
+
+## 9. Reproduce
+
+```bash
+# the tracker state this document asserts (do not trust the epic body — re-run this)
+for n in 4894 5086 5006 5007 5008 4899 2453 2730 2552 4716 1026 2714 2684 5009 9879 5333 5059 \
+         8500 8503 9596 9736 9738 9775 10360 10000 10394 10176 10448 10449 10533 4997 4998; do
+  gh issue view $n --json number,state,title --jq '"\(.number)\t\(.state)\t\(.title)"'
+done
+
+# the fleet door (the brief's claim, falsified)
+grep -n "_classify_point_kind" tortoise/extractor.py tortoise/ingest.py
+grep -n "_extract_session_v2\|extract_session_v2" tortoise/sdk.py tortoise/hosted_api.py | head
+
+# the two absent channels
+grep -n "OUTPUT_CONTRACT = " -A 20 tortoise/extractor_v2.py      # no entity↔entity array
+grep -n "STRUCTURAL_REL_LABELS" -A 12 tortoise/projection/edges.py   # no hasPart / wasDerivedFrom
+
+# the subclassOf bug (the loop's `parent` is unused)
+grep -n "kind_subclasses.items" -A 4 tortoise/pack_registry.py
+
+# the flag defaults
+grep -n "def _vet_enabled\|def _value_gate_enabled\|def _classify_later_enabled" -A 6 tortoise/extractor_v2.py
+
+# the acceptance rows (re-run the probe; never edit a number)
+uv run python docs/evidence/7949-capstone/probes/e1_e2_scores.py --out /tmp/e1-e2-scores.json
+uv run python tools/capstone_verdict_check.py \
+    docs/evidence/7949-capstone/capstone-measured-9152448d.log
+```
+
+**Revising this document.** A number here that a reader cannot re-derive from the commands above is a defect in the document, not a fact about the system. Re-measure before quoting; the epic body and the lane brief were both wrong in the same way.
