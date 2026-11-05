@@ -4817,11 +4817,13 @@ def _narrative_statements(
     # from the session's TOPIC lexicon (`sdk._session_source_metadata`; it held
     # the transcript's first substantive utterance until #10000 removed the
     # prose route, §9.1/D1), which is NOT the S1 narrative — projecting it
-    # unconditionally would let an order-independent row hold a prose snippet in
-    # the narrative's companion column, and would make
+    # unconditionally would let an order-independent row hold a transcript-derived
+    # topic descriptor in the narrative's companion column, and would make
     # `SessionText.verbatim_available` true for a session whose narrative is
     # unknown. One carrier owns both columns, so they cannot mean different
-    # things.
+    # things. (The noun matters: the value a post-#10000 row would bring here is a
+    # TOPIC DESCRIPTOR, not prose — a later reader who believes this guard is
+    # about prose will "tidy" it away once prose is gone, #10852 review P3.)
     if "narrative" in values:
         summary = carrier.get("summary")
         if isinstance(summary, str) and summary.strip():
