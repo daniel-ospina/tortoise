@@ -5395,8 +5395,9 @@ def test_the_three_routes_to_the_e1_e2_verdict_state_the_records_verdict():
     bundle's own entry point told a reader the opposite of the table beside it.
     The cite is now held by `test_the_e2_routing_claim_cites_the_row_it_describes`
     below, which takes the LINE NUMBER from this docstring: review at `7c03efc1d`
-    found the previous revision had re-pointed it at `README.md:65`, a table-header
-    line, while quoting a reading that appears in neither bundle README.
+    found the previous revision had re-pointed it at `README.md:65`, which is `>` — a
+    blank blockquote line above the table header on `:66` — while quoting a reading
+    that appears in neither bundle README.
 
     Every leg is DERIVED, and each document is held to the ARTIFACT IT DESCRIBES — which
     after the 2026-11-02 re-measure is two different artifacts, deliberately:
@@ -5794,9 +5795,11 @@ def test_the_e2_routing_claim_cites_the_row_it_describes():
     taken from the docstring, so this pin carries no count of its own — it holds the
     prose to the artifact the prose points at, and moving either side alone reds.
 
-    Non-vacuity: at the pre-fix head this reds, because `README.md:65` carries
-    `| row | frozen bar | measured | verdict |` and neither reading the docstring
-    attributes to it.
+    Non-vacuity: at the pre-fix head this reds, because `README.md:65` is `>` — a blank
+    blockquote line; the header the old sentence called a table header is on `:66` — so
+    nothing the docstring attributes to the row appears there. Measured by re-pointing
+    this docstring's cite back to 65: the pin reds with `cites README.md:65 for [...]
+    but that line reads '>'`.
     """
     docstring = (test_the_three_routes_to_the_e1_e2_verdict_state_the_records_verdict
                  .__doc__ or "")
