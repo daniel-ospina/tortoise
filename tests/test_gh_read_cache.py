@@ -220,6 +220,32 @@ class CacheTest(unittest.TestCase):
             self.assertEqual(r.returncode, 0, f"{slug} must be served: {r.stderr}")
             self.assertIn("1296269", r.stdout)
 
+    def test_clock_skew_tolerance_boundary_is_pinned_both_ways(self) -> None:
+        """`CLOCK_SKEW_TOLERANCE_S` is the only bound on served UNPROVEN freshness.
+
+        Mutants 60→10 and 60→600 both left the earlier 40-test suite green (the tests sat at
+        +5 and +4000). With the documented `--ttl 1`, a stamp 59 s in the future is SERVED
+        and its age is displayed as 0 — the tolerance, not the requested TTL, decides. So the
+        boundary is pinned from both sides, through `status`, where it is observable.
+        """
+        self.run_tool("get", "rate_limit", "--gh", str(self.stub), "--cache-dir", str(self.cachedir))
+        p = self.entry_path("rate_limit")
+
+        def stamp_relative(delta: float) -> dict:
+            d = json.loads(p.read_text())
+            d["fetched_at"] = time.time() + delta
+            p.write_text(json.dumps(d))
+            out = self.run_tool("status", "rate_limit", "--ttl", "1", "--cache-dir", str(self.cachedir))
+            self.assertEqual(out.returncode, 0, out.stderr)
+            return json.loads(out.stdout)
+
+        self.assertTrue(stamp_relative(59)["fresh"], "a stamp inside the tolerance reads as age 0 and is served")
+        self.assertFalse(stamp_relative(61)["fresh"], "a stamp beyond the tolerance is a MISS")
+        self.assertEqual(
+            stamp_relative(61)["reason"], "clock_skew_future",
+            "and it must say WHY, so a skewed peer's writes are distinguishable from a stale entry",
+        )
+
     def test_status_refuses_a_mutable_key_as_rc3(self) -> None:
         """REGRESSION ([VGATE] F3): `status` must honour the same contract as `get`."""
         r = self.run_tool("status", "pr_state", "--repo", "o/n", "--cache-dir", str(self.cachedir))
@@ -375,6 +401,24 @@ class CacheTest(unittest.TestCase):
         self.assertEqual(nan.returncode, 0, nan.stderr)
         self.assertEqual(self.calls(), 2, "a NaN stamp must never be served")
 
+    def test_infinite_stamp_reports_no_age(self) -> None:
+        """`math.isfinite` in `cmd_status` is not redundant with the surrounding `try`.
+
+        `float(inf)` does not raise, so `_reported_age` answers `max(0, now - inf) == 0.0`: an
+        infinite stamp was reported as `age_s: 0.0` — "just written" — on an entry `status`
+        simultaneously called not fresh. Only `isfinite` produces the null.
+        """
+        self.run_tool("get", "rate_limit", "--gh", str(self.stub), "--cache-dir", str(self.cachedir))
+        p = self.entry_path("rate_limit")
+        d = json.loads(p.read_text())
+        d["fetched_at"] = float("inf")
+        p.write_text(json.dumps(d))
+        out = self.run_tool("status", "rate_limit", "--cache-dir", str(self.cachedir))
+        self.assertEqual(out.returncode, 0, out.stderr)
+        report = json.loads(out.stdout)
+        self.assertFalse(report["fresh"], "an infinite stamp is not fresh")
+        self.assertIsNone(report["age_s"], "and its age is uncomputable — it must not read as 0.0, i.e. 'just written'")
+
     def test_ttl_override_can_only_shrink(self) -> None:
         """BEHAVIOURAL, because asserting a stored field proved nothing.
 
@@ -430,6 +474,15 @@ class CacheTest(unittest.TestCase):
         r = self.run_tool("get", "repo", "--repo", "o/n", "--gh", str(self.stub), "--cache-dir", str(self.cachedir))
         self.assertEqual(r.returncode, 4, f"an empty answer is a fail-closed read: {r.stderr}")
         self.assertEqual(list(self.cachedir.glob("*.json")), [], "an empty body must not be stored")
+
+        # ⛔ WHITESPACE-ONLY IS THE SAME ANSWER. `if not body:` let `"   "` through, which
+        # stores an entry that can never be a hit (the predicate requires a non-blank body),
+        # so every later read re-fetched and printed nothing with rc=0 — a paid call whose
+        # result is silently discarded, on every poll.
+        (self.stubdir / "body").write_text("   \n\t ")
+        w = self.run_tool("get", "repo", "--repo", "o/n", "--gh", str(self.stub), "--cache-dir", str(self.cachedir))
+        self.assertEqual(w.returncode, 4, f"a blank answer is a fail-closed read: {w.stderr}")
+        self.assertEqual(list(self.cachedir.glob("*.json")), [], "a blank body must not be stored")
 
     def test_unwritable_cache_dir_still_emits_the_value(self) -> None:
         """A spent call must not be thrown away because the cache dir is unwritable.
@@ -509,6 +562,53 @@ class CacheTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, f"host-prefixed form must be accepted: {r.stderr}")
         self.assertIn("1296269", r.stdout)
 
+    def test_a_single_label_or_port_host_is_accepted(self) -> None:
+        """Detecting a host by the presence of a DOT refused documented forms.
+
+        `ghe/o/n` (a single-label GHES host) and `localhost:8080/o/n` are both valid, and
+        both answered rc=2 "--repo must be owner/name (or host/owner/name)" — the false
+        usage class this tool's own malformed-slug test exists to avoid.
+        """
+        for form in ("ghe/o/n", "localhost:8080/o/n"):
+            r = self.run_tool("get", "repo", "--repo", form, "--gh", str(self.stub), "--cache-dir", str(self.cachedir))
+            self.assertEqual(r.returncode, 0, f"{form} is a documented HOST/OWNER/REPO form: {r.stderr}")
+
+    def test_two_hosts_do_not_share_an_entry(self) -> None:
+        """SAME `owner/name` ON TWO GH INSTANCES IS TWO REPOSITORIES.
+
+        The host was accepted and then DISCARDED (`parts = parts[1:]`), and `_identity` had
+        no host component, so `github.com/o/n` and `ghe.example.com/o/n` shared one entry:
+        the second read answered rc=0 with the FIRST instance's `default_branch` /
+        `visibility` and reported it FRESH for up to an hour — the one output this tool
+        forbids, reached through the identity instead of the read path. The cross-repo pin
+        next door could not catch it (two slugs, one host).
+        """
+        a = self.run_tool("get", "repo", "--repo", "github.com/o/n", "--gh", str(self.stub), "--cache-dir", str(self.cachedir))
+        self.assertEqual(a.returncode, 0, a.stderr)
+        self.assertIn("1296269", a.stdout)
+
+        (self.stubdir / "body").write_text('{"id": 42, "default_branch": "ghe-main"}')
+        b = self.run_tool("get", "repo", "--repo", "ghe.example.com/o/n", "--gh", str(self.stub), "--cache-dir", str(self.cachedir))
+        self.assertEqual(b.returncode, 0, b.stderr)
+        self.assertEqual(self.calls(), 2, "a different instance must be a MISS, not the other host's bytes")
+        self.assertIn("ghe-main", b.stdout)
+        self.assertNotIn("1296269", b.stdout)
+
+    def test_gh_host_env_var_is_part_of_the_identity(self) -> None:
+        """`GH_HOST` is how gh picks the instance, and it was never read."""
+        env = dict(os.environ, GH_STUB_DIR=str(self.stubdir), GH_HOST="ghe.example.com")
+        first = subprocess.run(
+            [sys.executable, str(TOOL), "get", "repo", "--repo", "o/n", "--gh", str(self.stub), "--cache-dir", str(self.cachedir)],
+            capture_output=True, text=True, env=env,
+        )
+        self.assertEqual(first.returncode, 0, first.stderr)
+        # The same slug WITHOUT GH_HOST is a different instance -> a different question.
+        (self.stubdir / "body").write_text('{"id": 42, "default_branch": "dotcom"}')
+        second = self.run_tool("get", "repo", "--repo", "o/n", "--gh", str(self.stub), "--cache-dir", str(self.cachedir))
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual(self.calls(), 2, "GH_HOST must participate in the cache identity")
+        self.assertIn("dotcom", second.stdout)
+
     def test_non_utf8_gh_output_fails_closed_not_crash(self) -> None:
         """UnicodeDecodeError escaped as an undocumented rc=1 traceback."""
         (self.stubdir / "body").write_bytes(b"\xff\xfe\x00binary")
@@ -527,6 +627,35 @@ class CacheTest(unittest.TestCase):
             r = self.run_tool("get", "repo", "--repo", "o/n", "--gh", str(self.stub), "--cache-dir", str(self.cachedir),
                               "--argv", *route)
             self.assertEqual(r.returncode, 0, f"{' '.join(route)} is not a verdict request: {r.stderr}")
+
+    def test_field_words_are_matched_as_whole_names_not_substrings(self) -> None:
+        """The ALLOWANCE direction of the FIELD scan for expressions.
+
+        `if field in lowered` over the joined projection text refused `--jq .merged_at` as
+        "names the verdict field 'merged'", and `mergeable_state` / `state_reason` the same
+        way — legitimate reads rejected by a guard whose job is to reject verdicts.
+        """
+        for expr in (("--jq", ".merged_at"), ("--jq", ".mergeable_state"), ("--json", "state_reason")):
+            r = self.run_tool("get", "repo", "--repo", "o/n", "--gh", str(self.stub), "--cache-dir", str(self.cachedir),
+                              "--argv", "api", "repos/o/n/labels", *expr)
+            self.assertEqual(r.returncode, 0, f"{' '.join(expr)} is not a verdict field: {r.stderr}")
+
+    def test_encoded_and_uppercase_route_spellings_are_refused(self) -> None:
+        """gh resolves these; a guard that only knows one spelling is not a guard.
+
+        `p%75lls` percent-decodes to `pulls` inside gh, `PULLS` is the same route, and an
+        `api graphql` query is a live read whose content cannot be classified from argv.
+        """
+        spellings = (
+            ("api", "repos/o/n/p%75lls/42"),
+            ("api", "repos/o/n/PULLS/42"),
+            ("api", "graphql", "-f", 'query={repository(owner:"o"){pullRequest(number:1){state}}}'),
+        )
+        for argv in spellings:
+            r = self.run_tool("get", "repo", "--repo", "o/n", "--gh", str(self.stub), "--cache-dir", str(self.cachedir),
+                              "--argv", *argv)
+            self.assertEqual(r.returncode, 3, f"{' '.join(argv)} must be refused: {r.stderr}")
+        self.assertEqual(self.calls(), 0, "a refused route must not reach gh at all")
 
     def test_concurrent_writers_leave_one_valid_entry_and_no_temp_files(self) -> None:
         """Atomicity (survivor M22): N parallel readers must not leave debris."""
@@ -621,18 +750,30 @@ class CacheTest(unittest.TestCase):
         self.assertEqual(self.calls(), 2, "a foreign schema must be re-fetched, never served")
 
     def test_oversized_integer_stamp_is_a_miss_not_a_crash(self) -> None:
-        """C4 finding: a `10**400` stamp made `math.isfinite` raise -> rc=1 traceback."""
+        """C4 finding: a `10**400` stamp made `math.isfinite` raise -> rc=1 traceback.
+
+        ⛔ `status` IS CHECKED WHILE THE CORRUPT STAMP IS STILL ON DISK. The first cut
+        asserted it only AFTER a second `get`, which re-fetched and OVERWROTE the entry, so
+        the assertion inspected a valid record: deleting `cmd_status`'s isfinite/`try` left
+        the whole suite green while `status` on a genuinely oversized stamp raised
+        `OverflowError: int too large to convert to float` -> an undocumented rc=1.
+        """
         r = self.run_tool("get", "repo", "--repo", "o/n", "--gh", str(self.stub), "--cache-dir", str(self.cachedir))
         self.assertEqual(r.returncode, 0, r.stderr)
         p = self.entry_path("repo")
         d = json.loads(p.read_text())
         d["fetched_at"] = 10 ** 400
         p.write_text(json.dumps(d))
+
+        st = self.run_tool("status", "repo", "--repo", "o/n", "--cache-dir", str(self.cachedir))
+        self.assertEqual(st.returncode, 0, f"status must not crash on a corrupt stamp: {st.stderr}")
+        report = json.loads(st.stdout)
+        self.assertFalse(report["fresh"], "an oversized stamp must not read as fresh")
+        self.assertIsNone(report["age_s"], "an uncomputable age must be null, not a traceback")
+
         out = self.run_tool("get", "repo", "--repo", "o/n", "--gh", str(self.stub), "--cache-dir", str(self.cachedir))
         self.assertEqual(out.returncode, 0, f"a corrupt stamp must be a MISS, not rc=1: {out.stderr}")
         self.assertEqual(self.calls(), 2)
-        st = self.run_tool("status", "repo", "--repo", "o/n", "--cache-dir", str(self.cachedir))
-        self.assertEqual(st.returncode, 0, f"status must not crash either: {st.stderr}")
 
     def test_status_degrades_with_an_uncreatable_cache_dir(self) -> None:
         """C4 finding: only `get`'s degraded path was pinned."""
