@@ -102,7 +102,7 @@ why this epic does not hold the critical path.
   they are elsewhere). The earlier *second* leg — *"the owner postponed arming, a deliberate scheduling
   signal"* — is **withdrawn**: the owner authorised arming on 2026-11-03 and the block is a
   credential/environment wall. That weakens "Not Urgent" and is stated rather than quietly dropped.
-- **The one genuinely urgent item is cheap and is not the epic's build:** the recall measurement (scope
+- **The one genuinely urgent item is cheap and is not the epic's build:** V1's evidence, which is **parked with V1** (`03-scope.md` §1 row 4) because no move is planned and it would therefore have no consumer.
   item 3) unblocks the decision and touches no production store.
 
 ---
@@ -154,7 +154,7 @@ there is no cheaper way to stop paying rent on four unindexed labels than to dec
 |---|---|---|---|
 | K1 | Vectors are stored in the graph and unindexed for four labels at HEAD | **high** — `ENTITY_TYPE_LABELS` = 5 served labels, `Point` indexed, `Point`-only DDL | a vector index appears for a non-`Point` label |
 | K2 | The rule exists and is off by default | **high** — object identity, and a 4-surface config walk that finds it unset | `TORTOISE_EMBED_GATE` set in a shipped surface, or `embed_gate_enabled()` true without it |
-| K3 | A cross-store vector move preserves recall on **our** query mix | **low — unmeasured, and it is the decision's hinge.** A comparable graph+`pgvector` shape measured recall@10 **0.63–0.72** after the same move; `pgvector`'s filtered ANN (`hnsw.iterative_scan`) is a capability we do not have at all today | the measurement in scope item 3 |
+| K3 | A cross-store vector move preserves recall on **our** query mix | **low — unmeasured, and it is the decision's hinge.** A comparable graph+`pgvector` shape measured recall@10 **0.63–0.72** after the same move; `pgvector`'s filtered ANN (`hnsw.iterative_scan`) is a capability we do not have at all today | **V1's evidence, parked with V1** (`03-scope.md` §1 row 4; `02-research.md` carries the numbers) — not this epic's work |
 | K4 | The record can serve reads without the graph, so a vector move is safe | **medium.** 4 of 4 layers exist in schema and `record_*` modules exist; the record is **not armed** — owner-authorised 2026-11-03, blocked `BLOCKED-CRED / BLOCKED-ENV` — and hosted record writes are still rejected `22P02` | the record serving a query with the graph stopped |
 | K5 | Arming the EMBED gate moves the write rate materially | **medium — unmeasured.** `#5008` ordered measurement first, deliberately | the rate measurement in scope item 1 |
 | K6 | Object/Subject embeddings absent from the record are a *re-embed cost*, not data loss | **high** — an embedding is derivable from its text | a stored vector whose source text is itself gone |

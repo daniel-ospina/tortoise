@@ -131,7 +131,7 @@ not this epic's.
 |---|---|---|---|
 | the gate's default | `tortoise/embed_gate.py` (`ENV_FLAG`, `embed_gate_enabled`) | shipped config sets it; **the default-reading code is unchanged** | a config default can be overridden per deployment — intended |
 | the gate's consult point | `tortoise/embeddings.py:1268` | **untouched** | — |
-| the exemption register | new leaf module (pattern: `tortoise/vector_index.py`, `tortoise/live.py`) | add | a leaf must not live under `tortoise/projection/` — importing that package executes `__init__`, a reproduced `ImportError` (`projection/__init__.py:428-435`) |
+| the exemption register | new leaf module (pattern: `tortoise/vector_index.py`, `tortoise/live.py`) | add | a leaf must not live under `tortoise/projection/` — importing that package executes `__init__`, a reproduced `ImportError` (`projection/__init__.py:1475-1476`) |
 | the inventory report | `tortoise/projection/__init__.py:18491` | **retain the SERVED set** beside the already-unconditional `_vector_indexed_labels` (`:18570`) and report the pair; `if gap:` (`:18577`) keeps gating the **warning** only; keep fail-open | **the read is on the unguarded `Projection.__init__` path** — covered by an existing pin |
 | the census | `tools/` (new, read-only) | add | must not run against production without `--dry-run` |
 
@@ -224,6 +224,3 @@ warning-vs-info **level** is the contract.
 
 - The four unindexed labels make every search of them a full scan. **Indexing** them is one command — and it
   is exactly the reversal the brief forbids, so it stays V1's.
-- `projection/__init__.py:3342` strips the embedding from the journal-derived snapshot with the comment
-  *"the replay re-derives it"*, recorded as **a defect**. A re-embed is a **re-run, not a replay** (§14.1 O1).
-  Not this epic's — named so it is not lost.

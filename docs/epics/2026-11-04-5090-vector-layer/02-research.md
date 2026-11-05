@@ -75,7 +75,7 @@ aboutObjects: "epic #5090, decision V1, filtered ANN, pgvector, FalkorDB HNSW, e
   `CALL db.indexes()` (discriminator is the `types` column, index 2 — copying the older `_row[0]/_row[1]`
   read would read the wrong column).
 - **Operator workflow.** `_ensure_indexes` runs from `Projection.__init__` **unguarded**, and again at
-  `hosted_api.py:17418`; ~28 sequential round trips. Any new read there **must be fail-open** or it breaks
+  and from `Projection.__init__`; ~28 sequential round trips (`monitoring.py:65`, `selfhost.py:392`). Any new read there **must be fail-open** or it breaks
   store construction.
 
 ### Tech Stack Research
