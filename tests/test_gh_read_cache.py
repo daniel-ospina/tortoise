@@ -29,6 +29,7 @@ Run standalone:    python3 tests/test_gh_read_cache.py
 """
 from __future__ import annotations
 
+import ast
 import json
 import os
 import re
@@ -1567,6 +1568,139 @@ class CacheTest(unittest.TestCase):
         )
         leaked = sorted(v for v in AMBIENT_VARS if v != "GH_CONFIG_DIR" and v in env)
         self.assertEqual(leaked, [], f"these ambient inputs survived into the child environment: {leaked}")
+
+    def _env_reads_in_tool(self) -> set[str]:
+        """Every environment variable the TOOL can read — derived from its AST.
+
+        The source regex above sees only LITERAL keys, so it is blind to the one read this
+        module performs dynamically: `_env_token` does `for key in keys: os.environ.get(key)`
+        over a host-family tuple. That case is pinned by name above — which covers today's
+        four token spellings and cannot cover a FIFTH computed-key axis someone adds later.
+        This derivation follows the binding instead, so the guard survives that shape.
+        """
+        tree = ast.parse(TOOL.read_text(encoding="utf-8"))
+        found: set[str] = set()
+
+        def literals(node: ast.AST) -> set[str]:
+            return {
+                c.value
+                for c in ast.walk(node)
+                if isinstance(c, ast.Constant) and isinstance(c.value, str)
+            }
+
+        def bindings_in(scope: ast.AST, target: str, seen: frozenset[str] = frozenset()) -> set[str]:
+            if target in seen:
+                return set()
+            seen = seen | {target}
+            out: set[str] = set()
+            for node in ast.walk(scope):
+                if isinstance(node, ast.Assign):
+                    if any(
+                        isinstance(n, ast.Name) and n.id == target
+                        for t in node.targets
+                        for n in ast.walk(t)
+                    ):
+                        out |= literals(node.value)
+                elif isinstance(node, (ast.For, ast.AsyncFor)) and any(
+                    isinstance(n, ast.Name) and n.id == target for n in ast.walk(node.target)
+                ):
+                    out |= literals(node.iter)
+                    # `for key in keys:` — follow the iterable's own binding too.
+                    for inner in ast.walk(node.iter):
+                        if isinstance(inner, ast.Name):
+                            out |= bindings_in(scope, inner.id, seen)
+            return out
+
+        def visit(node: ast.AST, scope: ast.AST) -> None:
+            nonlocal found
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                scope = node
+            key: ast.AST | None = None
+            if (
+                isinstance(node, ast.Subscript)
+                and isinstance(node.value, ast.Attribute)
+                and node.value.attr == "environ"
+            ):
+                key = node.slice
+            elif (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "get"
+                and isinstance(node.func.value, ast.Attribute)
+                and node.func.value.attr == "environ"
+                and node.args
+            ):
+                key = node.args[0]
+            if isinstance(key, ast.Constant) and isinstance(key.value, str):
+                found.add(key.value)
+            elif isinstance(key, ast.Name):
+                found |= bindings_in(scope, key.id)
+            for child in ast.iter_child_nodes(node):
+                visit(child, scope)
+
+        visit(tree, tree)
+        return found
+
+    def test_the_seam_pins_every_axis_a_COMPUTED_key_can_reach_too(self) -> None:
+        """The coverage guard above is literal-only; the token family is read through a variable.
+
+        `_env_token` iterates a host-family tuple (`for key in keys: os.environ.get(key, "")`),
+        so a regex over literal keys cannot see it — the guard above compensates by naming the
+        four spellings. That compensation is a hand-list, and a hand-list is exactly what missed
+        `GH_REPO`. This case derives the same set from the AST, following the `for`/assignment
+        binding, so the NEXT computed-key axis reds here instead of shipping box-dependence.
+        """
+        reads = self._env_reads_in_tool()
+        # Non-vacuity floors: the derivation must actually see both families of read.
+        self.assertIn("GH_REPO", reads, f"the derivation missed the tool's default-repo input: {sorted(reads)}")
+        self.assertIn("GH_TOKEN", reads, f"the derivation missed the computed token family: {sorted(reads)}")
+        self.assertIn("XDG_CONFIG_HOME", reads, f"the derivation missed the subscript read: {sorted(reads)}")
+        self.assertGreaterEqual(len(reads), 9, f"the tool reads more axes than this: {sorted(reads)}")
+        unseamed = sorted(reads - set(AMBIENT_VARS))
+        self.assertEqual(
+            unseamed, [],
+            "the tool reads these from the environment and the seam does not pin them, so a "
+            f"box that sets one tests itself: {unseamed}",
+        )
+
+    def test_the_suite_builds_its_environment_only_in_pinned_env(self) -> None:
+        """⛔ ONE CONSTRUCTION POINT. Six cases used to rebuild the environment by hand and
+        they had already drifted apart (`XDG_CONFIG_HOME` stripped in four, inherited in two)
+        — which is HOW the missing `GH_REPO` survived a suite that was otherwise careful. The
+        six are converted now; this case is what stops a seventh opinion from landing, because
+        the fix alone leaves the habit available. `mock.patch.dict(os.environ, ...)` is a PATCH
+        TARGET rather than an env source and stays legal.
+        """
+        tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+        patched: set[int] = set()
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "dict"
+                and isinstance(node.func.value, ast.Attribute)
+                and node.func.value.attr == "patch"
+            ):
+                for arg in node.args:
+                    if isinstance(arg, ast.Attribute) and arg.attr == "environ":
+                        patched.add(id(arg))
+        allowed = {"pinned_env", "test_the_suite_builds_its_environment_only_in_pinned_env"}
+        offenders: list[str] = []
+        for fn in [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
+            if fn.name in allowed:
+                continue
+            for node in ast.walk(fn):
+                if (
+                    isinstance(node, ast.Attribute)
+                    and node.attr == "environ"
+                    and id(node) not in patched
+                ):
+                    offenders.append(fn.name)
+        self.assertEqual(
+            sorted(set(offenders)), [],
+            "these cases re-derive the environment instead of calling pinned_env()"
+            " — route them through it (env_overrides, with None to unset)",
+        )
 
     def test_an_ambient_GH_REPO_cannot_supply_a_missing_repo(self) -> None:
         """⛔ `GH_REPO` IS THE TOOL'S `--repo` DEFAULT, SO AN AMBIENT ONE FAKES THE FLAG.
