@@ -41,10 +41,41 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tortoise.ingest import IngestOutcome, main
 
-# The DB is only needed by the arms that reach a projection. On a URI-less
-# (carve-out) CI lane those arms skip; the enum/exit-contract arms below run
-# everywhere, because they are the ones that pin the clause.
+# The DB is only needed by the arms that reach a projection. This file is a
+# DOCKER-lane member (the `core` surface in `config/ci-surfaces.yml`, NOT a
+# `carve_out:` entry), and its live arms carry the same
+# `skipif(not _DB_URI, ...)` shape as `tests/test_ingest.py::_live_db`. On a
+# URI-less lane those arms skip VISIBLY; the enum/exit-contract arms below need
+# no DB and run everywhere, because they are the ones that pin the clause.
 _DB_URI = os.environ.get("TORTOISE_DB_URI", "")
+
+
+def _graph_uri(test_graph: str) -> str:
+    """The lane's backend, on a PER-TEST ``test_*`` graph path.
+
+    The env URI's graph path is shared by every test file in the CI job
+    (``tortoise_test_matrix``), and this file cannot use it for two measured
+    reasons: ``--upgrade-all`` reads EVERY pending ``:Source`` in the graph, so
+    the sweep's verdict would be a statement about whatever else the lane has
+    parked (the round-3 review saw exactly that class when the `PARTIAL` arm
+    read as unreachable); and one arm ends with
+    ``MATCH (s:Source {url: $id}) DETACH DELETE s`` where ``$id`` is a SOURCE
+    BASENAME (``ingest.py`` sets ``source_id = args.transcript.name``), so on the
+    shared path it could delete a peer file's ``Source {url: "note.md"}`` —
+    the cross-file clobber `tests/test_derived_names.py`'s census exists to stop.
+
+    Same shape as `tests/test_ingest.py::_live_uri` (epic #1647 T7): swap only
+    the graph path, keep the backend. `from_uri` journals every minted graph in
+    TEST_MODE, so the session sweep drops these per-run graphs.
+    """
+    from urllib.parse import urlsplit, urlunsplit
+    parts = urlsplit(_DB_URI)
+    return urlunsplit((parts.scheme, parts.netloc, f"/{test_graph}", "", ""))
+
+
+def _fresh_graph(stem: str) -> str:
+    """A per-test ``test_8447_<stem>_<hex>`` URI — never the shared lane graph."""
+    return _graph_uri(f"test_8447_{stem}_{os.urandom(4).hex()}")
 
 
 def _run(argv: list[str]) -> tuple[object, str]:
@@ -190,7 +221,7 @@ class TestARefusalIsNotSuccess:
         doc.write_text("not a document — no ## sections, no Source row\n",
                        encoding="utf-8")
         outcome, out = _run([
-            "--upgrade", str(doc), "--db", _DB_URI,
+            "--upgrade", str(doc), "--db", _fresh_graph("refused"),
             "--log", str(tmp_path / "e.jsonl"), "--out", str(tmp_path / "g.html"),
             "--point-model", "mock:cheap", "--relation-model", "mock:reason",
         ])
@@ -214,7 +245,7 @@ class TestTheSkipArmWritesNothing:
         doc.write_text(
             "---\ntitle: Repro Note\n---\n\n## Section one\n\nSomething true.\n",
             encoding="utf-8")
-        base = ["--db", _DB_URI, "--log", str(tmp_path / "e.jsonl"),
+        base = ["--db", _fresh_graph("skip"), "--log", str(tmp_path / "e.jsonl"),
                 "--out", str(tmp_path / "second.html"),
                 "--point-model", "mock:cheap", "--relation-model", "mock:reason"]
 
@@ -255,7 +286,7 @@ class TestTheSkipArmWritesNothing:
         doc = tmp_path / "plain.txt"
         doc.write_text("just prose, no ## headers at all\n", encoding="utf-8")
         outcome, out = _run([
-            str(doc), "--capture-metadata", "--db", _DB_URI,
+            str(doc), "--capture-metadata", "--db", _fresh_graph("capture"),
             "--log", str(tmp_path / "e.jsonl"), "--out", str(tmp_path / "g.html"),
             "--point-model", "mock:cheap", "--relation-model", "mock:reason",
         ])
@@ -281,13 +312,14 @@ class TestTheSkipArmWritesNothing:
             "---\ntitle: Repro Note 2\n---\n\n## Section one\n\nSomething true.\n",
             encoding="utf-8")
         needle = f"Resolved: {doc.name}"
-        base = ["--db", _DB_URI, "--log", str(tmp_path / "e.jsonl"),
+        uri = _fresh_graph("resolution")
+        base = ["--db", uri, "--log", str(tmp_path / "e.jsonl"),
                 "--out", str(tmp_path / "g.html"), "--resolution",
                 "--point-model", "mock:cheap", "--relation-model", "mock:reason"]
 
         def _resolution_points() -> int:
             from tortoise.projection import FalkorProjection
-            proj = FalkorProjection.from_uri(_DB_URI)
+            proj = FalkorProjection.from_uri(uri)
             try:
                 return proj.g.query(
                     "MATCH (p:Point) WHERE p.pointKind = 'resolution-event' "
@@ -342,7 +374,11 @@ class TestTheSweepReportsOutstandingWork:
             "---\ntitle: Sweep Note\n---\n\n## Section one\n\nSomething true.\n",
             encoding="utf-8")
         monkeypatch.setenv("TORTOISE_INGEST_BASE_DIR", str(corpus))
-        base = ["--db", _DB_URI, "--log", str(tmp_path / "e.jsonl"),
+        # A per-test graph is what makes the sweep's verdict a statement about
+        # THIS corpus: `--upgrade-all` discovers every pending Source in the
+        # graph, so on the shared lane path a peer's leftovers would decide it.
+        uri = _fresh_graph("sweep")
+        base = ["--db", uri, "--log", str(tmp_path / "e.jsonl"),
                 "--out", str(tmp_path / "g.html"),
                 "--point-model", "mock:cheap", "--relation-model", "mock:reason"]
 
@@ -357,11 +393,12 @@ class TestTheSweepReportsOutstandingWork:
             f"(exit {outcome.returncode}); a caller reads that as done:\n{out}")
         assert outcome.returncode == 1
 
-        # The sweep is graph-GLOBAL: a Source left pending here would make every
-        # LATER sweep in this file (and on this lane) read `unresolved` and
-        # return PARTIAL. Drop what this test parked.
+        # The sweep is graph-GLOBAL: a Source left pending would make every
+        # LATER sweep on THIS graph read `unresolved`. The graph is per-test
+        # (`_fresh_graph`), so the delete can only reach this test's own node —
+        # and the session journal drops the graph itself.
         from tortoise.projection import FalkorProjection
-        proj = FalkorProjection.from_uri(_DB_URI)
+        proj = FalkorProjection.from_uri(uri)
         try:
             proj.g.query("MATCH (s:Source {url: $id}) DETACH DELETE s",
                          params={"id": doc.name})

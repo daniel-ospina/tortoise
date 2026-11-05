@@ -256,9 +256,13 @@ symbol pair this guard does check: the writers' retired-key allowlist
 `relabel_legacy_documents` (`migrate_kinds.py:167`).
 
 ⚠️ **The claim "`:Document` is not minted" is deliberately NOT regex-checked**,
-and the reason is measured: `:Document` occurs on **55** lines across **17**
-files under `tortoise/` at `4f68a2aa7` (`git grep -n ':Document'` → 55 lines,
-`git grep -l ':Document'` → 17 files — the file count is not the line count).
+and the reason is measured: `:Document` occurs on **56** lines across **17**
+files under `tortoise/` (`git grep -n ':Document'` → 56 lines,
+`git grep -l ':Document'` → 17 files — the file count is not the line count). The
+figure was 55 lines at `4f68a2aa7`; #8447's ingest door added one more prose
+reference (the `REFUSED_NOT_FOUND` enum docstring in `tortoise/ingest.py`), which
+is the same shape as the other 55 — a name, never a mint — so the sentence
+re-measures rather than narrows.
 `tests/test_substrate_map.py` re-derives both numbers over the **same**
 population this sentence is stated in — every *tracked* file under `tortoise/`,
 any suffix, not a `.py` walk — so the figure cannot go stale silently. Every one
