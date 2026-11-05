@@ -136,6 +136,13 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+# Both grammars are IMPORTED rather than re-derived, for the same measured reason: a weaker copy
+# here is a false positive on legitimate work. `strip_code` owns the fence grammar, and
+# `closes_landing`'s own history records the inline one — a QUOTED `Closes #N` written between TWO
+# backticks on each side counted as a claim (#10634 review P3-2). A single-backtick regex re-derived
+# in this module reproduced exactly that: ``Refs #1234`` was left as prose and flagged. CommonMark
+# closes a code span with a run of the SAME length, so run-length is the grammar's question.
+from tools.closes_landing import _strip_inline_code as _strip_inline_code_spans  # noqa: E402
 from tools.closes_landing import strip_code as _strip_fenced_blocks  # noqa: E402
 
 # --- exit codes (the caller's contract; see ADVISORY above) -------------------------------
@@ -152,7 +159,18 @@ SATISFIES_WORDS = ("satisfy", "satisfies", "satisfied")
 CLAIM_RE = re.compile(
     r"\b(?P<kw>refs?|related|part\s+of|see\s+also|satisf(?:y|ies|ied)|"
     r"close[sd]?|fix(?:e[sd])?|resolve[sd]?|serves?|addresses)\b"
-    r"(?P<mid>[^\n#]{0,16}?)(?:(?P<qual>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+))?#(?P<num>\d{1,7})\b",
+    r"(?P<mid>[^\n#]{0,16}?)(?:(?P<qual>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+))?#(?P<num>\d{1,7})\b"
+    # A COMMA-CONTINUED list is claimed in full: `Part of #10085, #10063` claims BOTH, and
+    # reading only the first dropped every subject after it (F3) — measured on three open PRs
+    # (#11038, #11065, #11093). The list shape is unambiguous in a way a bare `#N` elsewhere on
+    # the line is not, so only the comma-continued form is taken.
+    r"(?P<more>(?:\s*,\s*(?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#\d{1,7}\b)*)",
+    re.IGNORECASE,
+)
+# One entry per continued ref; a named group inside a repeated group keeps only the LAST match, so
+# the continuation is re-scanned rather than captured in place.
+CONTINUATION_RE = re.compile(
+    r"(?:(?P<qual>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+))?#(?P<num>\d{1,7})\b",
     re.IGNORECASE,
 )
 # An author may say, in the body, that the reference is deliberately NOT a closing one — a
@@ -173,6 +191,9 @@ IN_FLIGHT_RE = re.compile(r"IN[ -]FLIGHT\s*:\s*(?P<rest>.*)$", re.IGNORECASE)
 # quoted, not a claim; a remainder that says the issue was released is a release, not a claim.
 PLACEHOLDER_RE = re.compile(r"^[\s<>a-zA-Z0-9_./—-]*$")
 RELEASE_WORDS = ("none", "released", "unclaimed", "free", "—", "-")
+# The unambiguous release words, matched ANYWHERE in the marker's remainder (F6). `free` is left
+# out on purpose — see `in_flight_markers`.
+RELEASE_ANYWHERE_RE = re.compile(r"\b(?:none|released|unclaimed)\b", re.IGNORECASE)
 
 ARM_PR = "pr-unclaimed-issue"
 ARM_ISSUE = "wip-no-satisfies"
@@ -215,8 +236,9 @@ def strip_code(body: str) -> tuple[str, int]:
     text = re.sub(r"<!--.*?-->", "", body, flags=re.DOTALL)
     stats: dict[str, int] = {}
     text = _strip_fenced_blocks(text, stats=stats)
-    # Inline code spans: `gh pr view #1234` is a command being quoted, not a claim.
-    text = re.sub(r"`[^`\n]*`", "", text)
+    # Inline code spans: `gh pr view #1234` is a command being quoted, not a claim. Imported, not
+    # re-derived — a single-backtick regex here read a ``Refs #1234`` span as prose (F1).
+    text = _strip_inline_code_spans(text)
     return text, stats.get("hidden_lines", 0)
 
 
@@ -243,21 +265,24 @@ def _claims_in(text: str, own_number: int | None = None,
     for m in CLAIM_RE.finditer(text):
         line_no = sum(1 for st in line_starts if st <= m.start()) - 1
         into = found["declined"] if line_no in declined_lines else None
-        num = int(m.group("num"))
-        if own_number is not None and num == own_number:
-            continue  # a PR quoting its own number from a review is not claiming an issue
-        qual = m.group("qual")
-        if qual and (repo is None or qual.lower() != repo.lower()):
-            continue  # `owner/repo#N` for another repo is not this PR's business
         word = re.sub(r"\s+", " ", m.group("kw").lower())
-        if into is not None:
-            into.append(num)
-        elif word in CLOSING_WORDS:
-            found["closing"].append(num)
-        elif word in SATISFIES_WORDS:
-            found["satisfies"].append(num)
-        else:
-            found["weak"].append(num)
+        # The claiming word governs its WHOLE same-line list (F3).
+        refs = [(m.group("qual"), int(m.group("num")))]
+        refs += [(c.group("qual"), int(c.group("num")))
+                 for c in CONTINUATION_RE.finditer(m.group("more") or "")]
+        for qual, num in refs:
+            if own_number is not None and num == own_number:
+                continue  # a PR quoting its own number from a review is not claiming an issue
+            if qual and (repo is None or qual.lower() != repo.lower()):
+                continue  # `owner/repo#N` for another repo is not this PR's business
+            if into is not None:
+                into.append(num)
+            elif word in CLOSING_WORDS:
+                found["closing"].append(num)
+            elif word in SATISFIES_WORDS:
+                found["satisfies"].append(num)
+            else:
+                found["weak"].append(num)
     for key in found:
         found[key] = sorted(set(found[key]))
     return found
@@ -275,9 +300,12 @@ def has_satisfies_checklist(comment_bodies: list[str]) -> bool:
     Deliberately not "both in the same comment": criteria are often ticked in a follow-up comment
     once they are proved, and requiring co-location would re-flag an issue the moment it finishes.
     """
-    heading = any(SATISFIES_HEADING_RE.search(b) for b in comment_bodies)
-    boxes = any(CHECKBOX_RE.search(b) for b in comment_bodies)
-    return heading and boxes
+    # Read through `strip_code`, exactly as `in_flight_markers` does. A comment that SHOWS the
+    # format inside a fence is an example, not a checklist: matched against the raw bodies it
+    # silently cleared the arm it exists to raise, on an issue with WIP and no real criteria (F2).
+    headings = [SATISFIES_HEADING_RE.search(strip_code(b)[0]) for b in comment_bodies]
+    boxes = [CHECKBOX_RE.search(strip_code(b)[0]) for b in comment_bodies]
+    return any(headings) and any(boxes)
 
 
 def _marker_rest(line: str) -> str:
@@ -306,6 +334,13 @@ def in_flight_markers(comment_bodies: list[str]) -> list[str]:
             if not rest:
                 continue
             if rest.lower().split()[0].strip(":.,;") in RELEASE_WORDS:
+                continue
+            # The marker is often ANNOTATED rather than replaced: `IN FLIGHT: 3.2c — released
+            # 2026-11-05` / `IN FLIGHT: 3.2c (released)`. Reading only the FIRST token left both
+            # as live WIP and flagged finished work (F6). `free` is deliberately NOT in this scan
+            # — it heads a release, but also appears in ordinary work (`free tier`), so it stays
+            # a first-token-only word.
+            if RELEASE_ANYWHERE_RE.search(rest):
                 continue
             if "<" in rest and ">" in rest and PLACEHOLDER_RE.match(rest):
                 continue  # the unsubstituted template
@@ -508,6 +543,11 @@ def main(argv: list[str] | None = None) -> int:
         # One issue's verdict cannot speak for a population — that would flag (or clear) every
         # subject on a state measured for one of them.
         ap.error("--wip/--no-wip answer ONE issue; they cannot be applied to --sweep/--sweep-issues")
+    if args.label and args.sweep:
+        # `--label` filters the ISSUE population (`sweep_issues`); `--sweep` reads PRs and has no
+        # label filter — so the combination silently swept 50 unfiltered PRs while the doc's own
+        # example implied a filtered population (F4). Refuse it, as `--wip` is refused above.
+        ap.error("--label applies to --sweep-issues, not --sweep")
 
     findings: list[Finding] = []
     measured_rows: list[dict] = []
@@ -564,7 +604,12 @@ def main(argv: list[str] | None = None) -> int:
                                        "with_marker": marker_reads,
                                        "markerless": markerless,
                                        "populations_not_consulted":
-                                           ["branches", "worktrees", "ref-claims"]},
+                                           # An INJECTED verdict CAME from that population, so
+                                           # claiming it was not consulted is false (F7) — derive
+                                           # it, do not hard-code it.
+                                           ([] if measured_rows and all(
+                                               m["wip_source"] == "injected" for m in measured_rows)
+                                            else ["branches", "worktrees", "ref-claims"])},
                           "findings": [f.as_dict() for f in findings]}, indent=2))
     elif args.annotate:
         for note in notes:
@@ -584,8 +629,15 @@ def main(argv: list[str] | None = None) -> int:
         if measured_rows:
             print(f"  WIP arm: {len(measured_rows)} subject(s) read — {marker_reads} carried an "
                   f"`IN FLIGHT:` marker, {markerless} carried none.")
-            print("           branches/worktrees/ref-claims NOT consulted "
-                  "(tools/who_is_on.py owns that population) — so 'no marker' is not 'no WIP'.")
+            # The disclaimer must describe THIS run: under an INJECTED `--wip` verdict the
+            # population WAS consulted and the verdict came from it (F7).
+            if measured_rows and all(m["wip_source"] == "injected" for m in measured_rows):
+                print("           WIP verdict INJECTED (--wip) from the branches/worktrees/"
+                      "ref-claims population tools/who_is_on.py owns — that is where this "
+                      "verdict came from, not the marker count above.")
+            else:
+                print("           branches/worktrees/ref-claims NOT consulted "
+                      "(tools/who_is_on.py owns that population) — so 'no marker' is not 'no WIP'.")
         if not findings:
             print("  NOTHING FLAGGED")
         for f in findings:

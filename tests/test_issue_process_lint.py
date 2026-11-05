@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -412,3 +413,134 @@ def test_the_doc_block_matches_both_templates():
     fields = [b for b in template["body"] if b.get("id") == "working_process"]
     assert fields, "agent_finding.yml no longer carries the working_process field"
     assert fields[0]["attributes"]["value"].strip() == block
+
+
+# --- review round 3: seven findings, each paired with the control it must not break ---------
+# Every test here was red against the head that review saw (`a7a70671a`), and each is paired with
+# the legitimate population its fix must leave alone — the same red-first discipline as the arms
+# above, because a fix that over-corrects here would re-open the false-positive population the
+# tool exists to avoid.
+
+
+def test_a_multi_backtick_code_span_is_not_a_claim():
+    """A ``Refs #N`` span is CODE, exactly as a `Refs #N` span is (F1).
+
+    A single-backtick regex re-derived the grammar and read the wider span as prose, so an author
+    quoting the link syntax in a double-backtick span was flagged for the line they quoted — the
+    exact false-positive direction the module ranks worst, on a span `closes_landing` already
+    handles. The oracle is the renderer, not a second copy of the pattern.
+    """
+    body = "Write ``Refs #1234`` to link a partial PR.\n"
+    assert L.classify_pr(body, 9) == []
+    # The oracle: CommonMark makes that span a <code> element, i.e. not prose.
+    assert "<code>Refs #1234</code>" in MarkdownIt("commonmark").render(body)
+    # ...and the fix did not simply stop stripping code spans altogether.
+    assert L.classify_pr("Refs #1234\n", 9) != []
+    assert L.classify_pr("Write `Refs #1234` to link.\n", 9) == []
+
+
+def test_a_fenced_example_does_not_clear_the_satisfies_arm():
+    """An issue that only QUOTES the checklist format still has no finish line (F2).
+
+    `in_flight_markers` already read through `strip_code`; `has_satisfies_checklist` did not, so a
+    pasted example of the format silently cleared the arm that exists to flag WIP-without-criteria
+    — a silent miss, the harmful direction.
+    """
+    quoted = "The format is:\n\n```markdown\n## Satisfies\n- [ ] criterion\n```\n"
+    findings, measured = L.classify_issue([IN_FLIGHT, quoted], 4282)
+    assert [f.arm for f in findings] == [L.ARM_ISSUE]
+    assert measured["had_satisfies"] is False
+    # Control: a REAL checklist (not fenced) still clears it.
+    assert L.classify_issue([IN_FLIGHT, "## Satisfies\n- [ ] a\n"], 4282)[0] == []
+
+
+@pytest.mark.parametrize("body, expected", [
+    ("Part of #10085, #10063\n", [10063, 10085]),
+    ("Refs #10327, #10182, #7612, #5219, #3719\n", [3719, 5219, 7612, 10182, 10327]),
+])
+def test_a_comma_continued_claim_list_claims_every_subject(body, expected):
+    """`Part of #A, #B` claims BOTH; reading only the first dropped every subject after it (F3).
+
+    Measured on three live open PRs (#11038, #11065, #11093) — the second subject was never
+    evaluated, so a claimed-and-unresolved issue went unreported.
+    """
+    assert L._claims_in(L.strip_code(body)[0], None)["weak"] == expected
+
+
+def test_a_continuation_keeps_its_own_repo_and_self_number_rules():
+    """The list is a list of REFS, so each subject is subject to the same two exclusions (F3)."""
+    assert L._claims_in(L.strip_code("Refs #1, other/repo#2, #3\n")[0], 9, "me/here")["weak"] == [1, 3]
+    assert L._claims_in(L.strip_code("Refs #9, #10\n")[0], 9)["weak"] == [10]
+
+
+def test_the_label_filter_is_refused_with_pr_sweep():
+    """`--label` filters ISSUES; `--sweep` reads PRs and has no label filter (F4).
+
+    The combination used to run anyway, sweeping an unfiltered population while the doc's own
+    example implied a filtered one — so a reader measured a population they had not asked for.
+    """
+    r = _run("--sweep", "--label", "P0-blocker")
+    assert r.returncode != L.RC_CLEAN
+    assert r.returncode == 2, r.stderr
+    assert "--label applies to --sweep-issues" in r.stderr
+
+
+@pytest.mark.parametrize("marker", [
+    "IN FLIGHT: 3.2c — released 2026-11-05",
+    "IN FLIGHT: 3.2c (released)",
+])
+def test_an_annotated_release_marker_is_not_wip(marker):
+    """A lane often marks release by ANNOTATING the marker, not replacing it with `none` (F6).
+
+    Reading only the first token left those issues reading as WIP, so finished work was flagged.
+    """
+    assert L.in_flight_markers([marker]) == []
+
+
+def test_free_tier_work_is_still_wip():
+    """The control for F6: `free` heads a release but also appears in ordinary work descriptions,
+    so it is deliberately NOT in the anywhere-scan — a fix that swept it in would silently hide
+    live work."""
+    assert L.in_flight_markers(["IN FLIGHT: 3.2c — free tier refactor"]) == ["3.2c — free tier refactor"]
+
+
+def test_the_injected_wip_provenance_is_not_called_unconsulted(tmp_path):
+    """An INJECTED verdict CAME from the branches/worktrees population (F7).
+
+    Printing "NOT consulted" under it — and hard-coding that list in `--json` — made one run
+    describe itself two incompatible ways.
+    """
+    body = tmp_path / "i.md"
+    body.write_text("# an issue body\n", encoding="utf-8")
+    r = _run("--issue-body-file", str(body), "--wip")
+    assert "NOT consulted" not in r.stdout
+    assert "INJECTED" in r.stdout
+    payload = json.loads(_run("--issue-body-file", str(body), "--wip", "--json").stdout)
+    assert payload["wip_read"]["populations_not_consulted"] == []
+
+
+def test_every_bash_example_in_the_doc_parses(monkeypatch, capsys):
+    """The doc's examples are the only executable ones it has; a broken one wastes the reader (F5).
+
+    Every population seam is stubbed, so this asserts that the FLAGS are coherent (not mutually
+    exclusive, not refused) without touching the network — the examples are plain flags and paths.
+    """
+    monkeypatch.setattr(L, "resolve_repo", lambda repo: "daniel-ospina/tortoise")
+    monkeypatch.setattr(L, "sweep_prs", lambda repo, limit: [])
+    monkeypatch.setattr(L, "sweep_issues", lambda repo, limit, label: [])
+    monkeypatch.setattr(L, "fetch_issue", lambda number, repo: ("", []))
+    monkeypatch.setattr(L, "fetch_pr", lambda number, repo: ("", []))
+    doc = (ROOT / "docs" / "ops" / "ISSUE-WORKING-PROCESS.md").read_text(encoding="utf-8")
+    block = L.re.search(r"```bash\n(.*?)```", doc, L.re.DOTALL)
+    assert block, "the doc no longer carries its invocations in a ```bash fence"
+    examples = [line for line in block.group(1).splitlines()
+                if line.strip().startswith("uv run python tools/issue_process_lint.py")]
+    assert len(examples) >= 4, examples
+    for line in examples:
+        # The examples carry a trailing `# comment`; shlex does not treat `#` as a comment by
+        # default, so drop it before splitting.
+        argv = line.split("uv run python tools/issue_process_lint.py", 1)[1]
+        argv = L.re.split(r"\s+#\s", argv)[0]
+        rc = L.main(shlex.split(argv))
+        capsys.readouterr()  # each example owns its own output
+        assert rc in (L.RC_CLEAN, L.RC_FINDINGS), (line, rc)
