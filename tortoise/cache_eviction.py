@@ -21,14 +21,20 @@ is ONE Redis key**. Measured on the lane container (`fdb-lane-9361951d11`,
     evicted_keys: 2
     KEYS: ['pressure0']              # the graph key is GONE from the keyspace
     MATCH (n) RETURN count(n) -> 0   # 20,000 -> 0, silently, no error raised
-    GRAPH.LIST -> ['evict_probe']    # STILL NAMES THE GRAPH
+    GRAPH.LIST -> ['evict_probe']    # on THAT build, STILL NAMED THE GRAPH
 
-So the eviction unit is the whole graph, and the loss is silent twice over: no
-exception, and `GRAPH.LIST` still reports the graph as present while it holds zero
-nodes. Redis-level TTL is the same unit — the only key an operator could expire is
-the graph itself (`ttl=-1` on every key measured, including the per-graph
-`telemetry{}` stream) — and FalkorDB's own Enterprise offload confirms the
-granularity: *"serialize a graph to disk and evict it from memory, leaving a
+So the eviction unit is the whole graph, and the loss is silent: no exception, and no
+count that survives it. ⚠️ ``GRAPH.LIST`` is NOT a reliable detector of it — the last
+line above is what that build reported, while an independent re-measurement on
+``falkordb-server:v4.20.6`` after the same class of eviction saw ``GRAPH.LIST -> []``.
+Which of the two you get is a version detail, so nothing here may key a verdict on it
+(the census does not: ``tools/cache_eviction_census.py`` lists first only to keep a
+typo'd graph name from being CREATED, and an evicted-but-listed graph is still refused
+by the read itself — ``GRAPH.RO_QUERY`` answers ``Invalid graph operation on empty
+key``, which is a :class:`CacheReadError`). Redis-level TTL is the same unit — the only
+key an operator could expire is the graph itself (`ttl=-1` on every key measured,
+including the per-graph `telemetry{}` stream) — and FalkorDB's own Enterprise offload
+confirms the granularity: *"serialize a graph to disk and evict it from memory, leaving a
 lightweight stub"*, where *"removing a stub in any way — `DEL`, `UNLINK`, TTL
 expiration, or `FLUSHALL` — deletes the matching dump file"*
 (`docs.falkordb.com/enterprise/operations/graph-offloading`). Node-granular
@@ -61,8 +67,10 @@ invents a verdict for a class no instrument covers. A class with no instrument i
 `cannot-answer`, which is a refusal — never a silent skip and never an assumed pass.
 
 READ-ONLY, AND STRUCTURALLY SO. Nothing here writes, deletes or drops anything: the
-only statements it issues are counts and `INFO`/`CONFIG GET`/`TTL` reads, and every
-one of them goes through the graph's **read-only verb** — `ro_query`, i.e.
+only statements it issues are counts, and the only other commands are `INFO memory`,
+`EXISTS`/`TTL` on the graph's own key, and `GRAPH.MEMORY USAGE` reads (no `KEYS`, no
+`CONFIG GET`, no `CONFIG SET`) — and every count goes through the graph's
+**read-only verb** — `ro_query`, i.e.
 `GRAPH.RO_QUERY` — never `graph.query`. The `DELETE`-bearing arm does not exist to
 be called by mistake, and the tests assert that no refused assessment emitted a
 mutating statement.
@@ -839,9 +847,10 @@ def assess(
             ),
             "server_side_policy": (
                 "REFUSED, measured: a FalkorDB graph is ONE Redis key, so an eviction "
-                "policy takes the WHOLE graph (20,000 nodes -> 0, silently, with "
-                "GRAPH.LIST still naming it). `tools/test_lane.py` pins `noeviction` "
-                "for exactly that reason."
+                "policy takes the WHOLE graph (20,000 nodes -> 0, silently; on the "
+                "measured build `GRAPH.LIST` still named it, on v4.20.6 it did not — "
+                "either way the count is what refuses). `tools/test_lane.py` pins "
+                "`noeviction` for exactly that reason."
             ),
         }
 
