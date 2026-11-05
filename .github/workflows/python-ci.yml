@@ -1061,15 +1061,16 @@ jobs:
         # must never serve bge-small runs — a v1 restore would silently
         # exercise the WRONG embedder.
         #
-        # ⛔ RESTORE-ONLY, and this job does not need to write it (— #11063).
+        # ⛔ RESTORE-ONLY, and this job does not need to write it (#11063).
         # `actions/cache` saves in a POST step charged against this job's
         # `timeout-minutes` (#10182) with no timeout of its own. On the run that
-        # filed #11063 this save MISSED and its post step took **8 m 57 s**
-        # end-to-end for a 78,130,925 B archive (10:45:55.928 → 10:54:52.693) —
-        # the slowest post step anywhere in that job, and 5.5x the 1 m 38 s the
-        # carve-out job measured for the same cache, which is why #10327 could
-        # leave it in place there and this job cannot. (Bytes and elapsed only:
-        # tar time is inside that window, so no MB/s rate is claimed here.)
+        # filed #11063 the RESTORE missed, and the post step then took **8 m 57 s**
+        # end-to-end to land `Cache saved with key: hf-embedding-cache-v2-Linux`
+        # (10:45:55.928 → 10:54:52.693) for a 78,130,925 B archive, uploading at
+        # `Sent 72024064 of 78130925 (92.2%), 0.2 MBs/sec` — the slowest post step
+        # anywhere in that job, and 5.5x the 1 m 38 s the carve-out job measured
+        # for the same cache, which is why #10327 could leave it in place there
+        # and this job cannot.
         #
         # Nothing is lost: this key is SHARED, and THREE sibling jobs carry a
         # writer for it — `test-slow`, `test-concurrency-falkor`, `test-carve-out`
