@@ -1674,6 +1674,10 @@ def test_section_9_1b_counts_the_routes_it_actually_enumerates():
 _RETIRED_SUMMARY_BLUR = "We already write the summary — it is the S1 narrative"
 _RETIRED_VECTOR_FOOTNOTE = "would be **indexing an existing field**"
 _SOURCE_VECTOR_FOOTNOTE_ANCHOR = "Practical footnote for `:Source`"
+#: §9.4's DECIDING sentence — the one line that says what the vector reads. Carries
+#: BOTH the pointer and the negation, so it is asserted per-LINE as well as
+#: per-section (see the two-scoping note below).
+_SOURCE_VECTOR_SECTION_94_ANCHOR = "it is one vector attached to the `:Source` node"
 _S94_HEADING = "### 9.4 "
 _S95_HEADING = "### 9.5 "
 
@@ -1683,6 +1687,35 @@ def _storage_doc_text() -> str:
     return _STORAGE_DOC.read_text(encoding="utf-8")
 
 
+def _anchored_line(text: str, anchor: str, where: str, *, unique: bool = False) -> str:
+    """The whole LINE carrying `anchor` — the line, not a window around it.
+
+    Anchored, never positional: a line number would drift silently on the first
+    paragraph added above it, and the failure would then be *"the sentence is
+    fine"* reported about a different sentence.
+
+    `unique=True` also asserts the anchor occurs exactly once, because every
+    caller that binds to a sentence needs the FIRST match to BE that sentence —
+    a duplicate placed above the real one silently rebinds the pin to a sentence
+    the section does not own, and every assertion over it can then be satisfied
+    by the duplicate.
+    """
+    at = text.find(anchor)
+    assert at != -1, (
+        f"{_STORAGE_DOC.name} no longer carries {where} ({anchor!r}) — re-derive "
+        f"where it states what the source vector would index before freezing a "
+        f"pointer at it")
+    if unique:
+        assert text.count(anchor) == 1, (
+            f"{_STORAGE_DOC.name} carries {text.count(anchor)} occurrences of "
+            f"{anchor!r} — this pin binds to the FIRST match as {where}, so the "
+            f"anchor must occur exactly ONCE; a duplicate placed ABOVE the real "
+            f"one rebinds every assertion over it to a sentence the section does "
+            f"not own")
+    start = text.rfind("\n", 0, at) + 1
+    return text[start:].split("\n", 1)[0]
+
+
 def _source_vector_footnote(text: str) -> str:
     """§12.1b's `:Source` footnote, whole — the line, not a window around it.
 
@@ -1690,23 +1723,25 @@ def _source_vector_footnote(text: str) -> str:
     paragraph added above it, and the failure would then be *"the sentence is
     fine"* reported about a different sentence.
     """
-    at = text.find(_SOURCE_VECTOR_FOOTNOTE_ANCHOR)
-    assert at != -1, (
-        f"{_STORAGE_DOC.name} no longer carries §12.1b's `:Source` footnote "
-        f"({_SOURCE_VECTOR_FOOTNOTE_ANCHOR!r}) — re-derive where §12.1b states "
-        "what the source vector would index before freezing a pointer at it")
-    assert text.count(_SOURCE_VECTOR_FOOTNOTE_ANCHOR) == 1, (
-        f"{_STORAGE_DOC.name} carries "
-        f"{text.count(_SOURCE_VECTOR_FOOTNOTE_ANCHOR)} occurrences of "
-        f"{_SOURCE_VECTOR_FOOTNOTE_ANCHOR!r} — this pin binds to the FIRST "
-        "occurrence, so the anchor must occur exactly ONCE in the document (a "
-        "same-line or below-placement duplicate reds this count too, though "
-        "only an ABOVE one unseats §12.1b's footnote); a duplicate placed "
-        "ABOVE §12.1b's footnote would rebind all three §12.1b assertions to "
-        "it, which is how the pin starts certifying a sentence §12.1b does not "
-        "own")
-    start = text.rfind("\n", 0, at) + 1
-    return text[start:].split("\n", 1)[0]
+    return _anchored_line(text, _SOURCE_VECTOR_FOOTNOTE_ANCHOR,
+                          "§12.1b's `:Source` footnote", unique=True)
+
+
+def _source_vector_section_94_line(text: str) -> str:
+    """§9.4's DECIDING sentence — the line that says what the vector reads.
+
+    ⛔ PER-LINE, not per-section, and the distinction is load-bearing: a pointer
+    that survives *somewhere* in §9.4 is not a pointer in the sentence that
+    chooses the vector's input. Measured — moving
+    ``read from `public.session_narrative` `` out of this line and adding it as a
+    fresh line under the `### 9.4 ` heading leaves the SECTION-scoped assertion
+    GREEN (the section still contains the string) while this one REDs. Without
+    it the pin certifies that exact regression (§10980's landing had this scoping
+    and this branch's first union pass widened it away).
+    """
+    return _anchored_line(text, _SOURCE_VECTOR_SECTION_94_ANCHOR,
+                          "§9.4's `:Source`-vector deciding sentence",
+                          unique=True)
 
 
 def _section(text: str, start_heading: str, end_heading: str) -> str:
@@ -1852,10 +1887,28 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
     # narrative wherever it appears, and scoping it would let the same blur
     # return in §10 unremarked. Its failure message says so.
     s94 = _section(text, _S94_HEADING, _S95_HEADING)
-    assert f"read from `{home}`" in s94, (
-        f"§9.4 no longer states that the source vector's text is read from "
-        f"`{home}` — that pointer is what stops a design embedding a topic "
-        f"lexicon under #10000 once `#10852` lands")
+    # ⛔ TWO scopings for the pointer, on purpose, because they catch OPPOSITE
+    # regressions and neither subsumes the other:
+    #   • the DECIDING LINE (`_source_vector_section_94_line`) catches the pointer
+    #     MOVING out of the sentence that chooses the vector's input while a copy
+    #     survives elsewhere in §9.4 — a slice-only pin certifies that;
+    #   • the SECTION slice catches an ADDITIVE wrong instruction (`count` below),
+    #     which a line-only pin cannot see at all.
+    deciding = _source_vector_section_94_line(text)
+    assert f"read from `{home}`" in deciding, (
+        f"§9.4's DECIDING sentence (*{_SOURCE_VECTOR_SECTION_94_ANCHOR} …*) no "
+        f"longer states that the source vector's text is read from `{home}` — "
+        f"`{home}` appearing elsewhere in §9.4 does not satisfy this: the "
+        f"sentence that chooses the vector's input must name it. That pointer is "
+        f"what stops a design embedding a topic lexicon under #10000 once "
+        f"`#10852` lands")
+    assert "never from `:Source.summary`" in deciding, (
+        "§9.4's DECIDING sentence no longer states the NEGATION — naming "
+        "`:Source.summary` beside the narrative's home without saying which one "
+        "the vector must not read leaves the *\"embed the summary already "
+        "there\"* reading open. Asserted on the sentence, not the section: a "
+        "negation that survives elsewhere in §9.4 is not the instruction a "
+        "reader of this sentence receives")
     assert s94.count(":Source.summary") == 1, (
         f"§9.4 names `:Source.summary` {s94.count(':Source.summary')} times — "
         f"§9.4 is the paragraph that says which field the vector must NOT "
@@ -1873,9 +1926,11 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
         f"`:Source.summary` mention reds every docs-only PR, which is the "
         f"price of the trap, paid on purpose")
     assert "never from `:Source.summary`" in s94, (
-        "§9.4 no longer states the NEGATION — naming `:Source.summary` beside "
-        "the narrative's home without saying which one the vector must not "
-        "read leaves the *\"embed the summary already there\"* reading open")
+        "§9.4 (as a SECTION) no longer states the NEGATION anywhere — the "
+        "DECIDING sentence is asserted above, and this section-wide check is "
+        "the second, weaker half: it fails only if the negation left §9.4 "
+        "entirely, and it is kept so a rewrite that moves the whole paragraph "
+        "is diagnosed as a section loss rather than a sentence edit")
     assert _RETIRED_SUMMARY_BLUR not in text, (
         f"the document is back to *\"{_RETIRED_SUMMARY_BLUR}\"* — it conflates "
         f"the summary ON THE NODE with the narrative IN THE RECORD, and a design "
