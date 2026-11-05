@@ -106,6 +106,32 @@ def _nested_pytest_argv(tree: Path, *extra: str) -> list[str]:
     ]
 
 
+def _nested_pytest_env() -> dict[str, str]:
+    """The child's env with pytest's own ENV HOOKS stripped (#11095).
+
+    ``--confcutdir`` bounds the CONFTEST chain and covers none of this: pytest's
+    documented ways to inject config from the environment are ``PYTEST_ADDOPTS``
+    (ARGS) and ``PYTEST_PLUGINS`` (plugins), and both are inherited by a child
+    spawned from this suite — so an ambient value decides what the child
+    collects. That is the sibling half of the leaked-config class above, reached
+    without any ini or conftest involvement: measured on #11066, an inherited
+    ``PYTEST_ADDOPTS='-p <missing>'`` made the child die at startup and report
+    NO test result, which the pin then reported as a failure about output that
+    was never produced. ``PYTEST_ADDOPTS='-c …'`` was verified HERE to reopen the
+    ancestor walk that ``--confcutdir`` closes, and
+    ``PYTEST_ADDOPTS='--timeout=0'`` disarms the very budget two of these tests
+    measure.
+
+    ``PYTEST_TIMEOUT`` is stripped for the same reason: it is a HIGHER-priority
+    source than the ``-o``/ini value the tests below pin.
+    """
+    return {
+        k: v
+        for k, v in os.environ.items()
+        if k not in ("PYTEST_ADDOPTS", "PYTEST_PLUGINS", "PYTEST_TIMEOUT")
+    }
+
+
 def test_faulthandler_timeout_is_armed_below_the_per_test_budget():
     """Without the pyproject line a stall produces no frame — so this REDs.
 
@@ -219,7 +245,13 @@ def test_a_stall_dumps_its_own_frame(tmp_path):
         "test_stall.py",
     )
     with log.open("w", encoding="utf-8") as fh:
-        proc = subprocess.Popen(cmd, cwd=tmp_path, stdout=fh, stderr=subprocess.STDOUT)
+        proc = subprocess.Popen(
+            cmd,
+            cwd=tmp_path,
+            stdout=fh,
+            stderr=subprocess.STDOUT,
+            env=_nested_pytest_env(),  # #11095: no inherited args/plugins
+        )
         try:
             _wait_for_text(log, "Timeout (0:00:01)!", proc, deadline_s=30)
         finally:
@@ -381,11 +413,7 @@ def test_the_resolved_bound_from_the_repo_config_is_the_ci_budget(tmp_path):
         "          % (float(resolved), settings.method, settings.func_only))\n",
         encoding="utf-8",
     )
-    env = {
-        k: v
-        for k, v in os.environ.items()
-        if k not in ("PYTEST_TIMEOUT", "PYTEST_ADDOPTS")
-    }
+    env = _nested_pytest_env()
     proc = subprocess.run(
         _nested_pytest_argv(
             tmp_path,
@@ -794,13 +822,10 @@ def test_the_ini_source_kills_a_hung_item_with_no_timeout_flag(tmp_path):
     # The whole point is the branch that has no flag: assert the flag is absent
     # so a future edit cannot make this pass by supplying one.
     assert not any(a == "--timeout" or a.startswith("--timeout=") for a in argv)
-    # Every ambient override of the ini source is cleared: `PYTEST_TIMEOUT` is a
-    # HIGHER-priority source than the ini value this test is pinning.
-    env = {
-        k: v
-        for k, v in os.environ.items()
-        if k not in ("PYTEST_TIMEOUT", "PYTEST_ADDOPTS")
-    }
+    # Every ambient override of the ini source is cleared (#11095):
+    # `PYTEST_TIMEOUT` is a HIGHER-priority source than the ini value this test
+    # is pinning, and the two env HOOKS decide what the child collects at all.
+    env = _nested_pytest_env()
     started = time.monotonic()
     proc = subprocess.run(
         argv, cwd=tmp_path, capture_output=True, text=True, env=env, timeout=60
@@ -882,3 +907,41 @@ def test_a_nested_pytest_child_cannot_be_HIJACKED_by_a_LEAKED_config_beside_its_
         f"the nested child did not run its one item (rc={proc.returncode}):\n{output}"
     )
     assert "1 passed" in output, f"the child collected nothing:\n{output}"
+
+
+def test_an_inherited_PYTEST_ADDOPTS_cannot_steer_a_nested_child(tmp_path, monkeypatch):
+    """#11095 surface 4: the child's ARGS must not come from the parent's env.
+
+    ``--confcutdir`` bounds the conftest chain and covers none of this:
+    ``PYTEST_ADDOPTS`` is pytest's documented way to inject args, so a value
+    inherited from this suite decides what the child collects. Measured two
+    ways while fixing this file — an inherited ``PYTEST_ADDOPTS='-c …'``
+    REOPENS the ancestor walk that ``--confcutdir`` closes (the child loads a
+    foreign conftest again), and ``PYTEST_ADDOPTS='--timeout=0'`` disarms the
+    budget the sibling tests measure, i.e. the child would answer a different
+    question than the one it was spawned to answer.
+
+    The observation is BEHAVIOURAL (the child is really spawned), so returning
+    ``dict(os.environ)`` from ``_nested_pytest_env`` reddens this test:
+
+        E   error: unrecognized arguments: --no-such-flag-11095
+    """
+    monkeypatch.setenv("PYTEST_ADDOPTS", "--no-such-flag-11095")
+    (tmp_path / "test_ok.py").write_text(
+        "def test_ok():\n    assert True\n", encoding="utf-8"
+    )
+    proc = subprocess.run(
+        _nested_pytest_argv(tmp_path, "test_ok.py"),
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        env=_nested_pytest_env(),
+        timeout=120,
+    )
+    output = proc.stdout + proc.stderr
+    assert proc.returncode == 0, (
+        f"the nested child honoured the parent's PYTEST_ADDOPTS (#11095 "
+        f"surface 4):\n{output}"
+    )
+    assert "no-such-flag-11095" not in output, output
+    assert "1 passed" in output, output
