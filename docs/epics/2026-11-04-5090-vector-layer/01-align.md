@@ -18,8 +18,9 @@ context) — **two cycles**, and **cycle 2 changed the decision from PROCEED to 
 which supersedes this line, is **§6**.
 
 > ⛔ **READ §8 FIRST.** It records the decisions the repo and the graph had **already settled** before this
-> lane derived anything, and the three things this lane proposed that were **already refuted or on a
-> do-not-re-invent list**. §1–§7 are kept as the reasoning trail; where they conflict with §8, **§8 wins**.
+> lane derived anything, and the **six** things this lane proposed and then withdrew — several already
+> refuted, one on a do-not-re-invent list (all six enumerated in §8.2). §1–§7 are kept as the reasoning
+> trail; where they conflict with §8, **§8 wins**.
 
 ---
 
@@ -58,7 +59,7 @@ means **four further resident HNSW structures**, not three. ⚠️ `STORAGE-ARCH
 |---|---|---|
 | **A1** | **Discharge the epic as complete.** | **Rejected — on one reason, and it is the only one that survives checking.** Not *"closing would orphan `#4333`"* (that issue is independent; closing a parent removes a link, not the issue). Not *"it abandons row 4"* (V1 is carried OPEN by `STORAGE-ARCHITECTURE.md` §12.1c/§14.3, not by the epic). Not *"no capstone exists"* (a capstone is a Stage-6 artifact and cannot exist for an epic still in Stage 1 — its absence proves nothing). **The reason is `§14.3 V3`, whose row reads *"Rides on V1"*: the epic is the only ACTIONABLE record of that deferral.** ⚠️ **Cycle-2 withdrawal: the earlier wording claimed the epic was the *only* artifact binding `#4997` to V1. That is false** — `STORAGE-ARCHITECTURE.md:1520` states it, and so does the runtime warning text at `projection/__init__.py:18583-18586` (*"This is the gap that decision V1 … governs; indexing those labels is NOT done here"*). The epic is not the only *record*; it is the only one that can be **closed, reassigned or repointed** — a doc row and a log string cannot. Discharge it and the unindexed-label defect keeps its prose and loses its work item, which is how a deferred defect becomes an accepted one. **What follows is REPOINT (§7), not PROCEED and not discharge.** |
 | **A2** | **Index the four unindexed labels in FalkorDB.** | **Rejected, and the brief forbids it without a stated non-reversal.** It is V1's content; it commits **four** further permanently-resident HNSW structures on a store billed at provisioned RAM with no eviction; and it deepens the thing the epic exists to undo. Measured benefit at today's volume: **~6 ms** (`2.74 ms` indexed vs `9.26 ms` full scan of 7,859 `:Object` vectors). |
-| **A3** | **Answer V1 = move the vectors to Postgres now.** | **Rejected as premature, and the facts are worse for it than the epic assumes.** Verified: **no `pgvector` anywhere** (`grep -E 'pgvector\|vector(\|hnsw\|create extension' supabase/migrations/ tortoise/record_*.py` → zero); embeddings live in `embedding jsonb` on `point`/`source`/`event`; **`public.object`/`public.subject` have no embedding column and a CHECK forbidding one.** So branch 2 is build-from-nothing at the schema layer. And the record's DSN **is armed** (`/health` `record.armed: true`, read 2026-11-05T15:07Z, `#9548`) but **writes are rejected `22P02`** (`#10593`, OPEN) — ⚠️ **and the arming was never withheld by the owner**: the owner **authorised arming on 2026-11-03T19:06Z**, and `#9548` is OPEN because lane `hosted-arm-9548` returned `BLOCKED-CRED / BLOCKED-ENV`. That is a **fixable credential/host wall**, not a scheduling signal — which makes it a *transient* blocker, and makes the sequencing argument (record before vectors) sharper, not softer. |
+| **A3** | **Answer V1 = move the vectors to Postgres now.** | **Rejected as premature, and the facts are worse for it than the epic assumes.** Verified: **no `pgvector` anywhere** (`grep -E 'pgvector\|vector(\|hnsw\|create extension' supabase/migrations/ tortoise/record_*.py` → zero); embeddings live in `embedding jsonb` on `point`/`source`/`event`; **`public.object`/`public.subject` have no embedding column and a CHECK forbidding one.** So branch 2 is build-from-nothing at the schema layer. And the record's DSN **is armed** (`/health` `record.armed: true`, read 2026-11-05T15:07Z, `#9548`) but **writes are rejected `22P02`** (`#10593`, OPEN) — ⚠️ **and the arming was never withheld by the owner**: the owner **authorised arming on 2026-11-03T19:06Z**, and `#9548` is OPEN on its **write path** — the DSN **is armed** (`record.armed: true`, 2026-11-05T15:07Z) but hosted writes are rejected `22P02` (`#10593`, OPEN) and no hosted session is evidenced as projected. (`BLOCKED-CRED` in that lane is the *backup* credential gating a MIGRATION, not the arming.) That is a **write-path/evidence wall**, not a scheduling signal — which makes it a *transient* blocker, and makes the sequencing argument (record before vectors) sharper, not softer. |
 | **A4** | **Fold #5090 into `#10976` / `#7879`.** | **Rejected.** Three different claims: the cache's *egress*, the record's *authority*, the vector layer's *shape*. `#10976` names `#5090` as related, not parent; neither epic's acceptance covers *"what earns an embedding / where the index lives"*. |
 | **A5** | **Reduce the epic to evidence + decision carriers, and let the neighbours dissolve the cost.** | **ADOPTED as the shape of the remainder.** If `#10000` removes raw turns from the graph and `#10976` bounds residency, a material share of the vector class leaves with them — so the epic's own job is the *shape* question, not the *volume* question. |
 
@@ -100,7 +101,7 @@ why this epic does not hold the critical path.
 - **Not urgent — on one leg, not two.** Nothing gates launch on it (§2's own grid: the two P0s do, and
   they are elsewhere). The earlier *second* leg — *"the owner postponed arming, a deliberate scheduling
   signal"* — is **withdrawn**: the owner authorised arming on 2026-11-03 and the block is a
-  credential/environment wall. That weakens "Not Urgent" and is stated rather than quietly dropped.
+  write-path/evidence wall (`22P02`, `#10593`; no hosted projection evidenced). That weakens "Not Urgent" and is stated rather than quietly dropped.
 - **The one genuinely urgent item is cheap and is not the epic's build:** V1's evidence, which is **parked with V1** (`03-scope.md` §1 row 4) because no move is planned and it would therefore have no consumer. That work unblocks the decision and touches no production store.
 
 ---
@@ -206,7 +207,7 @@ Result: **1 P0, 4 P1, 3 P2, 1 P3**. All incorporated:
 
 | sev | finding | disposition |
 |---|---|---|
-| **P0** | `#9548` was described as *"postponed by the owner"*; the owner **authorised** arming 2026-11-03T19:06Z, the DSN **is armed** (`record.armed: true`, 2026-11-05T15:07Z), and it is OPEN on the **write path** (`22P02`, `#10593`) plus the unevidenced hosted projection — not on a credential wall | corrected in §0's table, §1.2 A3, §2, §5, K4 |
+| **P0** | `#9548` was described as *"postponed by the owner"*; the owner **authorised** arming 2026-11-03T19:06Z, the DSN **is armed** (`record.armed: true`, 2026-11-05T15:07Z), and it is OPEN on the **write path** (`22P02`, `#10593`) plus the unevidenced hosted projection — not on a credential wall | corrected in §1.2 A3, §2, §5, K4 |
 | **P0** | *"the warning fires on every search"* is false — setup-time, once per (process, graph); query fallback logs at info/debug | §0 row 1; K1 restated |
 | P1 | *"3 of 4 DoD bullets met"* is false; the probe returns **1 MET of 4** | §0 row 3, §1.1, §5 |
 | P1 | DoD **row 2's** remainder omitted; `#10541` closed COMPLETED with both rows still PARTIAL | §1.3, K7, §5 routing |
@@ -223,7 +224,7 @@ Result: **1 P0, 4 P1, 3 P2, 1 P3**. All incorporated:
 |---|---|---|
 | **P1** | **A1's sole surviving reason is falsified** — *"the epic is the only artifact binding `#4997` to V1"*; the doc row at `:1520` and the runtime warning at `projection/__init__.py:18583-18586` both state it | A1 re-argued on *actionability*, and **the decision changed from PROCEED to REPOINT** (§5, §7) |
 | **P1** | the `§14.3` register correction was *recorded as incorporated* while no artifact carried it — the named target, scope §3.2, does not exist | **delivered for real in §7**, and both files corrected |
-| P3 | §6 cited *"§0-preamble"*, where `#9548` appears nowhere | corrected to §0's table |
+| P3 | §6 cited *"§0-preamble"*, where `#9548` appears nowhere | the claim lives in §1.2 A3 and §2; the pointer now names them, and the §0 attribution is gone |
 
 **Verified clean by the cycle-2 reviewer:** the `#9548` authorisation wording; the setup-time warning
 characterisation; `1 of 4` MET; `#10541` CLOSED/COMPLETED with both rows still PARTIAL; both `P0-blocker`s
@@ -255,7 +256,8 @@ re-scoping upward (inventing children the neighbours already own).
 ## 8. The prior record — what was already settled, and what this lane withdraws
 
 **Added after the owner challenged the research depth. It was a fair challenge: this lane re-derived
-things the record already held, and proposed two things the record had already refused.** Recorded in full
+things the record already held, and proposed six things it then withdrew — several of which the record had
+already refused (§8.2).** Recorded in full
 so the next lane does not repeat it.
 
 ### 8.1 Already settled — do not re-open

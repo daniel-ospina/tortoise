@@ -35,9 +35,10 @@ counts reconcile (5 items → 6 children, +1 because S5 is two artifacts).**
 **No overlap:** no child touches more than one S-item's surface. **No gap:** no S-item is unowned.
 
 ⚠️ **Reconciled against the PRIOR decomposition, not just the issue tracker.** `#5090` carries a
-**2026-10-31** decomposition comment (pointer: `#5087` · `issuecomment-6550245534`) whose child set was
-`#4997` · `#4999` · `#4333` · `#8419` · `#10465`. Per-child disposition, so "MECE" is a claim and not an
-assertion:
+**2026-10-31** decomposition comment (pointer: `#5087` · `issuecomment-6550250938`) whose child set was
+**six** existing children — `#4997` · `#4999` · `#5096` · `#5407` · `#4333` · `#8419` · `#10465` is seven
+ids because `#8419` reaches the epic by neither mechanism, as the comment says — plus one new. Per-child
+disposition, so "MECE" is a claim and not an assertion:
 
 | prior child | state | disposition here |
 |---|---|---|
