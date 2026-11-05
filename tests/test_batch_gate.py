@@ -819,6 +819,52 @@ def test_content_contained_reports_an_uncomputable_diff_as_UNMEASURABLE(
     assert "could not compute the constituent diff" in detail, detail
 
 
+def test_a_fold_tree_that_cannot_be_materialised_is_UNMEASURABLE(
+    scratch_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(b3d) `git worktree add` failing is "nothing was compared", not "not contained".
+
+    The THIRD UNMEASURABLE arm, beside the absent-ref presence gate and the
+    uncomputable diff, and the one that had no pin: reverting this one line to
+    `NOT-CONTAINED` left the whole file green (measured, `47 passed`), so the arm
+    could regress straight back to printing
+
+        REFUSED (not contained in the fold — closing would destroy work)
+
+    and exiting **1** on a run where no comparison was made — the defect class this
+    PR closes one door over (T1/T5), and the sentence an operator acts on by closing
+    the PR by hand. Reachable whenever the fold head cannot be materialised: a
+    `worktree` entry left registered by a killed run, a read-only `TMPDIR`, a locked
+    worktree, or a partial clone.
+
+    Discrimination proof: revert `content_contained`'s `worktree add` branch to
+    `"NOT-CONTAINED"` and this reds; the sibling arms keep their own pins, so the
+    three are pinned separately rather than by one overlapping test.
+    """
+    base, const, fold = _three_way_fixture(scratch_repo)
+    real_git = bo._git
+
+    def _git(argv: list[str], cwd: Path) -> tuple[int, str]:
+        if list(argv[:2]) == ["worktree", "add"]:
+            return 1, "fatal: '…/fold' is a missing but already registered worktree"
+        return real_git(argv, cwd)
+
+    monkeypatch.setattr(bo, "_git", _git)
+
+    state, detail = bo.content_contained(const, base, fold, scratch_repo)
+    assert state == "UNMEASURABLE", (
+        "a fold tree that could not be BUILT compared nothing, so it is a failed "
+        f"measurement, not a containment verdict — got {state!r} ({detail})"
+    )
+    assert "could not materialise the fold tree" in detail, detail
+
+    # And the verdict path reaches it, so it is FILED as unmeasured (exit 2) rather
+    # than refused (exit 1) — which is what decides the printed line and the status.
+    verdict = bo.verdict_for(101, const, base, fold, scratch_repo)
+    assert verdict.state == "UNMEASURABLE", verdict
+    assert verdict.closable is False, verdict
+
+
 def test_an_absent_BASE_does_not_block_the_ANCESTRY_route(scratch_repo: Path) -> None:
     """(b3c) The presence gate must not over-block: ancestry needs `head` and `fold_head` only.
 
