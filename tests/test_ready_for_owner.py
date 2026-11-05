@@ -2313,7 +2313,10 @@ def test_every_required_check_being_merge_time_refuses_with_the_right_reason(
     )[0]
     gates = next(c for c in rfo.evaluate(probe).checks if c.name == "gates")
     assert gates.passed is False
-    assert "every required check is merge-time" in gates.raw
+    assert "every required check is merge-time" in gates.reason
+    # …and the raw carries the SET'S PROVENANCE, which is what a lane debugging
+    # NOT-READY needs in order to know which set it was judged against.
+    assert "source=" in gates.raw, gates.raw
 
 
 def test_the_required_set_verb_labels_a_config_error_as_one(
@@ -2373,6 +2376,45 @@ def test_the_gates_raw_discloses_the_required_set_source(
     assert gates.passed is True, gates.raw
     assert "source=" in gates.raw
     assert ".mergify.yml" in gates.raw
+
+
+def test_the_gates_raw_discloses_the_source_on_the_FAILING_arm_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The provenance must survive on a FAIL, not only on a PASS.
+
+    The only older pin used a green probe, so removing `[{source}]` from the failed arm
+    stayed green. A lane debugging NOT-READY reads exactly this line, and needs to know
+    WHICH set it was judged against.
+    """
+    runs = _check_runs_for(REQUIRED)
+    for run in runs:
+        if run["name"] == "docs":
+            run["conclusion"] = "failure"
+    probe = _collect(monkeypatch, _gh_payloads(check_runs=runs))[0]
+    gates = next(c for c in rfo.evaluate(probe).checks if c.name == "gates")
+    assert gates.passed is False
+    assert "source=" in gates.raw, gates.raw
+    assert ".mergify.yml" in gates.raw
+
+
+def test_the_gates_raw_discloses_the_source_when_every_check_is_merge_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The entry-empty arm also judges the SET, so it must name the set's provenance."""
+    probe = _collect(
+        monkeypatch,
+        _gh_payloads(check_runs=_check_runs_for(MERGE_TIME_REQUIRED)),
+        derive=lambda *a, **k: rfo_required.RequiredSet(
+            names=MERGE_TIME_REQUIRED,
+            source="test-source at origin/main (abc123abc123)",
+            queue_names=(),
+            merge_names=MERGE_TIME_REQUIRED,
+        ),
+    )[0]
+    gates = next(c for c in rfo.evaluate(probe).checks if c.name == "gates")
+    assert gates.passed is False
+    assert "source=" in gates.raw, gates.raw
 
 
 def test_collect_probe_marks_an_unreadable_declared_union(

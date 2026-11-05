@@ -248,9 +248,17 @@ def test_derive_from_ref_refuses_an_unreadable_ref(tmp_path: Path) -> None:
 
 
 def test_a_config_with_no_positive_check_condition_is_refused(tmp_path: Path) -> None:
+    """A readable config that names no `check-success=` is refused — and the MESSAGE must
+    be this arm's, not the record's.
+
+    ⛔ This case previously passed `write_record=False`, which made the MISSING-RECORD arm
+    raise the same exception class — so `if not union:` → `if False:` stayed GREEN (the
+    exact non-discriminating shape round 3 caught). It now supplies a readable EMPTY record
+    and matches the message, so the mutant reds on the record arm's different wording.
+    """
     rule = _rule(queue=(), merge=())
-    with pytest.raises(RequiredSetUnreadable):
-        derive_from_config(_tree(tmp_path, rules=[rule], required_contexts=[], write_record=False))
+    with pytest.raises(RequiredSetUnreadable, match="no positive"):
+        derive_from_config(_tree(tmp_path, rules=[rule], required_contexts=[]))
 
 
 def test_the_result_is_frozen() -> None:

@@ -1311,6 +1311,14 @@ def check_gates(probe: Probe) -> Check:
     In-flight is a FAIL here, not a wait: a head whose checks have not concluded is not
     ready *now*, and the answer the owner needs is about now.
     """
+    # ⛔ THE REQUIRED SET'S PROVENANCE IS PART OF THE VERDICT ON EVERY ARM THAT JUDGES THE
+    # SET, including the failing and the refuses-because-empty ones. The set is read from a
+    # local ref that the read never fetches, so the sha in `required_raw` is the ONLY honest
+    # statement about what was certified — and it used to reach output only through the two
+    # unreadable arms, leaving a READY (and any named-check failure) silent about provenance.
+    # (The one arm that does NOT carry it is `probe.groups is None`: that verdict is about
+    # the CHECK-RUNS read, whose provenance is its own `groups_raw`.)
+    source = probe.required_raw or "required-set: not read"
     if probe.required is None or probe.required_deferred is None:
         # An EMPTY required set is not "nothing is required" — it is a set that was not
         # read. Zero contexts, a truncated payload, or a hand-written fixture must never
@@ -1338,13 +1346,19 @@ def check_gates(probe: Probe) -> Check:
         return Check(
             "gates",
             False,
-            f"entry=0 merge-time={len(probe.required_deferred)} — every required check "
-            "is merge-time, so nothing is evaluated against the PR head",
-            "unreadable",
+            f"entry=0 merge-time={len(probe.required_deferred)} [{source}]",
+            "unreadable: every required check is merge-time, so nothing is evaluated "
+            "against the PR head",
             unreadable=True,
         )
     if probe.groups is None:
-        return Check("gates", False, probe.groups_raw or "-", "unreadable", unreadable=True)
+        return Check(
+            "gates",
+            False,
+            f"{probe.groups_raw or '-'} [grouping from ci_verdict; {source}]",
+            "unreadable",
+            unreadable=True,
+        )
     # ⛔ The BUCKET is the check's JOB NAME, because that is what `.mergify.yml` names:
     # `check-success=python-ci-gate` IS the job name (`python-ci-gate`, `docs`,
     # `ai-review-gate`). Matching anything else would leave a required context unmatched
@@ -1402,13 +1416,6 @@ def check_gates(probe: Probe) -> Check:
                 failed.append(f"{token}:{context}")
 
     raw = "; ".join(seen) if seen else "no check-runs on this head"
-    # ⛔ THE SOURCE IS PART OF THE VERDICT, ON EVERY ARM. The required set is read from a
-    # local ref that is never fetched by that read, so the ONLY honest statement about
-    # what was read is the sha `required_raw` carries — and it used to appear on the two
-    # unreadable arms only, leaving a PASS (and any named-check failure) silent about
-    # provenance. Reverting to `{raw}` alone reds
-    # `test_the_gates_raw_discloses_the_required_set_source`.
-    source = probe.required_raw or "required-set: not read"
     if failed:
         return Check(
             "gates",
@@ -2741,8 +2748,10 @@ def build_parser() -> argparse.ArgumentParser:
         default="origin/main",
         help=(
             "ref the required set is DERIVED from for --required-set (default "
-            "origin/main, the ref that governs the merge; pass HEAD to ask what THIS "
-            "worktree would require)"
+            "origin/main, the ref that governs the merge). ⛔ `HEAD` reads the last "
+            "COMMIT on this branch — `git show`, not the working tree — so an "
+            "UNCOMMITTED edit to `.mergify.yml` is not seen; commit it, or rely on the "
+            "default protected-ref read"
         ),
     )
     return parser

@@ -310,12 +310,15 @@ def derive_from_config(root: Path) -> RequiredSet:
                 f"{MERGIFY_REL} derives {', '.join(config_only)} but {RECORD_REL} does "
                 "not record it as live-required — the two sources disagree about "
                 "clause 1's EQUALITY, so condition 2 would be a verdict about a set "
-                "the repo does not agree is required. Fix it on the PROTECTION side and "
-                "re-attest: make the context required on the branch, then run "
-                "`tools/mergify_config_guard.py --live` with a credential that can read "
-                "protection (that records `required_contexts` from the observed live "
-                "set). `--recut` does NOT fix this — it rewrites only `gate_digest`, "
-                "`emitters` and `verified_at`"
+                "the repo does not agree is required. TWO remedies, pick by INTENT: "
+                "(a) if the name is a typo or a rename, correct the `check-success=` "
+                f"spelling in {MERGIFY_REL} — do NOT make it required on the branch, "
+                "because a name no workflow emits deadlocks the queue for every PR "
+                "(clause 1); (b) if the context really should be required, make it "
+                "required on the branch and re-attest with "
+                "`tools/mergify_config_guard.py --live` under a credential that can "
+                "read protection. `--recut` does NOT fix this — it rewrites only "
+                "`gate_digest`, `emitters` and `verified_at`"
             )
         agrees = True
     return RequiredSet(
@@ -344,8 +347,11 @@ def derive_from_ref(cwd: Path, ref: str = "origin/main", *, timeout: int = 60) -
     `RequiredSetUnreadable` — a refusal, never a silent fall back to the workdir copy.
 
     ``ref`` is a parameter because `--required-set --ref HEAD` is a legitimate
-    diagnostic ("what would THIS tree require?"); it is not a default, because the
-    protected ref is the authoritative answer.
+    diagnostic ("what would this BRANCH require?"); it is not a default, because the
+    protected ref is the authoritative answer. ⛔ It reads the last COMMIT on that ref
+    (`git show <ref>:<rel>` — both files as committed), never the working tree, so an
+    uncommitted edit to either file is invisible here BY DESIGN: a gate that read
+    uncommitted bytes would be reading the very tree it is judging.
 
     ⛔ IT DOES NOT FETCH, AND IT DOES NOT PRETEND TO. `git show <ref>:<rel>` succeeds on any
     ref that EXISTS, however stale, so freshness is not something this function can assert.
