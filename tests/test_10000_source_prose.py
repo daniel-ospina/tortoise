@@ -97,8 +97,8 @@ def _nodes_carrying(sdk, needle: str) -> list[tuple[list[str], dict, object]]:
     return hits
 
 
-def _capture(sdk, session_id: str) -> None:
-    sdk.capture_session(
+def _capture(sdk, session_id: str) -> dict:
+    return sdk.capture_session(
         conversation=[
             {"role": "user",
              "content": f"{MARKER} the raw transcript text must not live on a "
@@ -161,8 +161,9 @@ def test_the_guard_reports_a_lower_casing_writer(sdk):
     the ``:Source`` carried the marker in ``summary``, ``topics`` and
     ``_searchText`` and the guard reported none of them (`#10852` review, P1).
 
-    The node is seeded rather than captured because the capture path heals it
-    (the recapture test proves that half); this one isolates the SCAN.
+    The node is seeded rather than captured so this test isolates the SCAN.
+    ⛔ Do not read it as evidence that a pre-fix node heals: it does not — see
+    `test_a_re_capture_does_not_heal_a_pre_fix_node`, which pins the replay.
     """
     prose = (f"{MARKER} the raw transcript text must not live on a node"
              .lower())
@@ -285,23 +286,30 @@ def test_the_guard_reds_on_the_pre_fix_derivation(sdk, monkeypatch):
     )
 
 
-def test_a_recapture_replaces_the_prose_a_pre_fix_write_left_behind(sdk):
-    """A pre-fix node HEALS on re-capture — and the healing is the DERIVATION.
+def test_the_first_capture_replaces_the_prose_a_pre_seeded_stub_left_behind(
+        sdk):
+    """A node with NO `:Session` yet is replaced by its FIRST capture.
 
-    A Source captured before this change carries the utterance in ``summary``
-    and (because #3518 puts the summary in the searchable field) in
-    ``_searchText``. This seeds that exact pre-fix state and asserts the next
-    capture replaces it, so the fix does not merely stop new leaks.
+    This is a real shape and not the pre-fix one: `_link_source` MERGEs a
+    `session:<id>` Source STUB before any capture of that id has run, and the
+    first capture of the session is a genuine (non-replay) capture — so it DOES
+    reach `_materialize_session_source` and the derivation replaces whatever
+    the stub carried.
 
-    ⛔ WHAT THIS TEST DOES NOT PROVE, stated so nobody infers it: the ``_searchText``
-    SET is still ``coalesce($st, s._searchText)``, and THAT is not the healing
-    mechanism — ``coalesce`` already yields the new derivation whenever one
-    exists. An earlier cut of this PR rewrote the clause as an equivalent
-    ``CASE WHEN $st IS NOT NULL …`` and cited this test as its proof; it passes
-    under BOTH forms, so it is evidence for the metadata change and for nothing
-    about the clause (measured: 2 passed with the clause reverted).
+    ⛔ WHAT THIS TEST DOES *NOT* PROVE, stated so nobody infers it (the earlier
+    title/name claimed the opposite, `#10852` review P1). It does **not** show
+    that a PRE-FIX node heals on re-capture: a pre-fix node coexists with the
+    `:Session` node of the capture that wrote it, so re-capturing it is the
+    #1727 no-op REPLAY — `_materialize_session_source` is never called, and the
+    stale pair survives. `test_a_re_capture_does_not_heal_a_pre_fix_node` pins
+    that state. The `_searchText` SET is also still `coalesce($st,
+    s._searchText)`, and THAT is not the mechanism here either — `coalesce`
+    already yields the new derivation whenever one exists. An earlier cut of
+    this PR rewrote the clause as an equivalent `CASE WHEN $st IS NOT NULL …`
+    and cited this test as its proof; it passes under BOTH forms (measured: 2
+    passed with the clause reverted).
     """
-    session_id = "sess-source-prose-heal-10000"
+    session_id = "sess-source-prose-stub-10000"
     url = f"session:{session_id}"
     stale = f"{MARKER} stale prose from a pre-fix write"
     proj = sdk._get_proj()
@@ -317,10 +325,67 @@ def test_a_recapture_replaces_the_prose_a_pre_fix_write_left_behind(sdk):
                  in _nodes_carrying(sdk, f"{MARKER} stale")
                  if not _is_turn_store(labels, node_id, session_id)]
     assert not offenders, (
-        "a re-capture left the pre-fix prose on the node — the capture's own "
-        "derivation (a topic lexicon, non-NULL for any transcript with content) "
-        "must replace it:\n"
+        "the FIRST capture left the pre-seeded stub's prose on the node — its "
+        "own derivation (a topic lexicon, non-NULL for any transcript with "
+        "content) must replace it:\n"
         + "\n".join(f"  {labels} {props}" for labels, props in offenders))
+
+
+def test_a_re_capture_does_not_heal_a_pre_fix_node(sdk):
+    """⛔ A pre-fix node is NOT healed by a re-capture — a replay never writes.
+
+    THE CLAIM THIS REPLACES. This file and two docstrings used to say the pre-fix
+    population repairs itself: *"a pre-fix node HEALS on re-capture, and the
+    reason is the DERIVATION"*. That is false, and the mechanism is the MINT
+    GATE: `_materialize_session_source`'s only production caller sits inside
+    `if not session_existed or (retry_failed_capture and not no_provider)`, so a
+    re-capture of an ALREADY CAPTURED session id is the #1727 no-op replay and
+    never reaches the `SET`s. A node holding the pre-fix pair was written by a
+    run of that same method — i.e. one where `session_existed` was False — so it
+    coexists with the `:Session` node of its own capture (`capture_ok` True),
+    and the pair survives every later capture of that id, in the graph AND in
+    the Source FTS index (the OR-union pollution #10000 measures). Measured:
+    `#10852` review P1.
+
+    ⛔ WHAT THIS TEST IS. A PIN ON A RECORDED DECISION, not an endorsement of a
+    leak. #2104/#1727 require a re-capture of an existing session to be a TRUE
+    no-op (it must not re-SET the first capture's `capturedAt`/`contentHash`
+    either), so the repair for a legacy node is a NEW `session_id`, a retry of a
+    prior FAILED capture, or a record-sourced re-projection — never a replay
+    that writes. It therefore REDS in the good direction too: if someone
+    "fixes" the healing by re-SETting on the replay arm, this fails, and the
+    replay invariant above is the argument to read first.
+    """
+    session_id = "sess-source-prose-noheal-10000"
+    url = f"session:{session_id}"
+    stale = f"{MARKER} stale prose from a pre-fix write"
+    proj = sdk._get_proj()
+    # The pre-fix state EXACTLY: the prose-carrying Source and the `:Session`
+    # node of the completed capture that wrote it. Seeding only the Source — as
+    # the stub test above does — is a DIFFERENT state (a first capture, not a
+    # replay), and that difference is the whole finding.
+    proj.g.query(
+        "MERGE (s:Source {url:$u}) SET s.summary=$sum, s._searchText=$st",
+        params={"u": url, "sum": stale, "st": stale})
+    proj.g.query(
+        "MERGE (n:Session {id:$sid}) SET n.capture_ok=true",
+        params={"sid": session_id})
+
+    receipt = _capture(sdk, session_id)
+    assert receipt["extraction_mode"] == "replayed", (
+        "the fixture is not the state under test: a re-capture of a captured "
+        f"session must REPLAY, got {receipt['extraction_mode']!r}")
+
+    survivors = [(labels, props) for labels, props, node_id
+                 in _nodes_carrying(sdk, f"{MARKER} stale")
+                 if not _is_turn_store(labels, node_id, session_id)]
+    assert survivors, (
+        "the replay HEALED the pre-fix prose. It cannot: "
+        "`_materialize_session_source` is only called behind the fresh-capture "
+        "gate, so a replay never re-derives the Source. If this arm now clears "
+        "it, the replay is WRITING — read #2104/#1727 before keeping that.")
+    assert any("summary" in props or "_searchText" in props
+               for _, props in survivors), survivors
 
 
 # ── the derived metadata is still FINDABLE, and the display prefix is not ──
