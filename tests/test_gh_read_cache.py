@@ -2219,11 +2219,9 @@ def test_a_non_finite_clock_is_a_MISS_not_a_refusal(nonfinite, tmp_path: Path) -
         ("api", "repos/{repo}/releases"),
         ("api", "repos/{repo}/tags"),
         ("api", "repos/{repo}/merges"),
-        # ── the families the deny-list NEVER named, which is why a deny-list could not hold:
-        (
-            "api",
-            "repos/{repo}/git/refs/heads/main",
-        ),  # a MOVING REF (measured: served an hour stale)
+        # ── the families the deny-list NEVER named, which is why a deny-list could not hold.
+        #    `/git/refs/…` is a MOVING REF: measured at `a9321ddc6`, it was served an hour stale.
+        ("api", "repos/{repo}/git/refs/heads/main"),
         ("api", "repos/{repo}/branches"),
         ("api", "repos/{repo}/deployments"),
         ("api", "repos/{repo}/rulesets"),
@@ -2302,6 +2300,9 @@ def test_the_door_is_EXACT_membership_not_a_prefix() -> None:
         reason = C._endpoint_refusal(refused)
         assert reason is not None, f"{refused!r} was accepted by the door"
         assert isinstance(reason, str) and reason, reason
+    # A non-sequence argv is REFUSED, not iterated (a bare string would otherwise walk its chars).
+    for bad in ("api repos/{repo}", None, 42):
+        assert C._endpoint_refusal(bad) is not None, bad
 
 
 def test_declare_invariant_still_accepts_the_registrys_own_endpoints() -> None:
