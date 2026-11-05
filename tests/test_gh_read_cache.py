@@ -319,6 +319,20 @@ class CacheTest(unittest.TestCase):
         r = self.run_tool("get", "repo", "--repo", "not-a-slug", "--gh", str(self.stub), "--cache-dir", str(self.cachedir))
         self.assertEqual(r.returncode, 2, f"usage error must be rc=2, not a retryable rc=4: {r.stderr}")
 
+    def test_slug_charset_guard_rejects_route_smuggling(self) -> None:
+        """A `?`/`#`/space/brace in `--repo` rewrites the route the fetch actually asks.
+
+        Deleting the charset guard left the whole suite green while `--repo 'o/n?per_page=1'`
+        answered rc=0 and reached gh as `api repos/o/n?per_page=1`: the tool then cached the
+        answer under an identity no legitimate caller could reproduce. Braces are worse —
+        `_format_argv` substitutes TWICE, so `--repo 'o/{repo}'` sent `repos/o/{repo}` to gh
+        with the placeholder intact, and `--repo 'o/{base}'` silently fetched `o/main`.
+        """
+        for slug in ("o/n?per_page=1", "o/n#frag", "o /n", "o/{repo}", "o/{base}", "o/n/x/y"):
+            r = self.run_tool("get", "repo", "--repo", slug, "--gh", str(self.stub), "--cache-dir", str(self.cachedir))
+            self.assertEqual(r.returncode, 2, f"--repo {slug!r} must be usage (rc=2): {r.stderr}")
+        self.assertEqual(self.calls(), 0, "a malformed request must not spend a call")
+
     def test_repo_key_without_repo_is_usage(self) -> None:
         """A route that uses `{repo}` must REFUSE a missing --repo as usage (rc=2).
 
@@ -609,6 +623,49 @@ class CacheTest(unittest.TestCase):
         self.assertEqual(self.calls(), 2, "GH_HOST must participate in the cache identity")
         self.assertIn("dotcom", second.stdout)
 
+    def test_rate_limit_is_keyed_by_instance_too(self) -> None:
+        """The host is WHICH SERVER ANSWERED — true of `/rate_limit` as much as of `repo`.
+
+        The first host fix gated `host` on `uses_repo`, and `rate_limit`'s template has no
+        `{repo}`, so `host` was blanked for it: `GH_HOST=ghe.example.com get rate_limit`
+        then `get rate_limit` on github.com answered rc=0 from the FIRST instance's entry,
+        reporting another server's remaining quota as this one's, fresh for 30 s. A lane
+        reads quota precisely when it is deciding whether it may spend — the worst moment
+        to hand it a sibling instance's number.
+        """
+        env = dict(os.environ, GH_STUB_DIR=str(self.stubdir), GH_HOST="ghe.example.com")
+        (self.stubdir / "body").write_text('{"resources": {"core": {"remaining": 4990}}}')
+        first = subprocess.run(
+            [sys.executable, str(TOOL), "get", "rate_limit", "--gh", str(self.stub), "--cache-dir", str(self.cachedir)],
+            capture_output=True, text=True, env=env,
+        )
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertIn("4990", first.stdout)
+
+        (self.stubdir / "body").write_text('{"resources": {"core": {"remaining": 12}}}')
+        second = self.run_tool("get", "rate_limit", "--gh", str(self.stub), "--cache-dir", str(self.cachedir))
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual(self.calls(), 2, "two instances must not share a rate_limit entry")
+        self.assertIn("12", second.stdout)
+        self.assertNotIn("4990", second.stdout)
+
+    def test_spelled_and_unspelled_host_are_one_repository(self) -> None:
+        """`o/n` and `github.com/o/n` are the SAME repo, so they must be ONE entry.
+
+        Canonicalising an unspelled host to `""` made them two: `get --repo github.com/o/n`
+        wrote one entry, `status --repo o/n` looked for the other and reported
+        `present: false`, and the next `get` spent a call fetching what was already on disk.
+        """
+        g = self.run_tool("get", "repo", "--repo", "github.com/o/n", "--gh", str(self.stub), "--cache-dir", str(self.cachedir))
+        self.assertEqual(g.returncode, 0, g.stderr)
+        st = self.run_tool("status", "repo", "--repo", "o/n", "--cache-dir", str(self.cachedir))
+        self.assertEqual(st.returncode, 0, st.stderr)
+        self.assertTrue(json.loads(st.stdout)["present"], "status must find the entry get wrote")
+        again = self.run_tool("get", "repo", "--repo", "o/n", "--gh", str(self.stub), "--cache-dir", str(self.cachedir))
+        self.assertEqual(again.returncode, 0, again.stderr)
+        self.assertEqual(self.calls(), 1, "the unspelled spelling must be a HIT, not a second call")
+        self.assertEqual(len(list(self.cachedir.glob("repo*.json"))), 1, "one repository, one entry")
+
     def test_non_utf8_gh_output_fails_closed_not_crash(self) -> None:
         """UnicodeDecodeError escaped as an undocumented rc=1 traceback."""
         (self.stubdir / "body").write_bytes(b"\xff\xfe\x00binary")
@@ -650,12 +707,34 @@ class CacheTest(unittest.TestCase):
             ("api", "repos/o/n/p%75lls/42"),
             ("api", "repos/o/n/PULLS/42"),
             ("api", "graphql", "-f", 'query={repository(owner:"o"){pullRequest(number:1){state}}}'),
+            ("api", "repos/o/n/actions/artifacts"),
         )
         for argv in spellings:
             r = self.run_tool("get", "repo", "--repo", "o/n", "--gh", str(self.stub), "--cache-dir", str(self.cachedir),
                               "--argv", *argv)
             self.assertEqual(r.returncode, 3, f"{' '.join(argv)} must be refused: {r.stderr}")
         self.assertEqual(self.calls(), 0, "a refused route must not reach gh at all")
+
+    def test_bracket_index_verdict_spellings_are_refused(self) -> None:
+        """jq's `.["state"]` defeated both the name splitter and the `.field` regex.
+
+        Five real verdict reads were SERVED rc=0 while `.state` was refused — the documented
+        refusal contract, bypassable with a pair of quotes. A quoted STRING COMPARISON is a
+        filter, not a projection, and must stay allowed.
+        """
+        refused = (
+            ('.["state"]',), ('.[ "state" ]',), ('$x["mergeStateStatus"]',),
+            ('.["conclusion"]',), ('.["merged"]',), ('.["state"] // empty',),
+        )
+        for (expr,) in refused:
+            r = self.run_tool("get", "repo", "--repo", "o/n", "--gh", str(self.stub), "--cache-dir", str(self.cachedir),
+                              "--argv", "api", "repos/o/n/labels", "--jq", expr)
+            self.assertEqual(r.returncode, 3, f"--jq {expr} names a verdict field: {r.stderr}")
+        # …and the filter form is not a projection.
+        ok = self.run_tool("get", "repo", "--repo", "o/n", "--gh", str(self.stub), "--cache-dir", str(self.cachedir),
+                           "--argv", "api", "repos/o/n/labels", "--jq", 'map(select(.name=="state"))')
+        self.assertEqual(ok.returncode, 0, f"a string COMPARISON is not a projection: {ok.stderr}")
+        self.assertEqual(self.calls(), 1, "only the allowed read may reach gh")
 
     def test_concurrent_writers_leave_one_valid_entry_and_no_temp_files(self) -> None:
         """Atomicity (survivor M22): N parallel readers must not leave debris."""
@@ -715,7 +794,7 @@ class CacheTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.calls(), 1)
 
-        for field, value in (("repo", "ATTACKER/other"), ("argv", ["api", "repos/x/y"])):
+        for field, value in (("repo", "ATTACKER/other"), ("host", "ghe.attacker.example"), ("argv", ["api", "repos/x/y"])):
             p = self.entry_path("repo")
             d = json.loads(p.read_text())
             d["fetched_at"] = time.time()
