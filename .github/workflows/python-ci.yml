@@ -923,11 +923,13 @@ jobs:
         # afterwards and enforces uv.lock, so the installed versions are
         # unchanged. Reverting this step costs wall-clock only.
         #
-        # ⛔ RESTORE-ONLY. The save is NOT dropped — it moves to the BOUNDED step
-        # that is now the LAST step of this job
-        # (`Save uv + pip dependency caches`), because the implicit post-step save
-        # is UNBOUNDED and is charged against this job's `timeout-minutes`
-        # (#10182), so no cap can amortize it (#11063).
+        # ⛔ RESTORE-ONLY, AND THIS JOB NOW WRITES NOTHING (#11063). The implicit
+        # post-step save is UNBOUNDED and charged against this job's
+        # `timeout-minutes` (#10182), so no cap can amortize it — and the
+        # measurement below shows that on this pool a WRITE of this key cannot
+        # complete inside any bound the cap affords, so an explicit bounded save
+        # is not the remedy either: it would burn its bound on every miss shard
+        # and still never write the key.
         #
         # MEASURED (run 42000057137, job `test (d)` 127165076497, runner
         # `pi-runner-vm-6`): the restore MISSED —
@@ -937,37 +939,46 @@ jobs:
         # saving cache.`: `test (b)` 5.7 s, `test (a)` 6.6 s, `test (g)` 8.2 s,
         # `test (c)` 17.9 s, `test (h)` 20.7 s, `test (e)` 21.8 s, `test (f)`
         # 22.6 s, `test (i)` 32.7 s), so this is the MISS arm, not a key
-        # collision. The post step then tarred 10:54:53 -> 10:59:00 and began
-        # uploading
+        # collision. The post step then tarred 10:54:53 -> 10:59:00 (4 m 07 s) and
+        # uploaded
         #   `Sent 0 of 3882423064`  ->  a 3.88 GB UPLOAD PAYLOAD, 5.9x the
         # 662,393,744 B the cache API reports as `size_in_bytes` for that key
         # (the STORED entry the siblings restored — not the bytes a save sends).
-        # It then transferred NOT ONE BYTE: the post step spent the rest of its
-        # life retrying `getaddrinfo EAI_AGAIN
-        # results-receiver.actions.githubusercontent.com`, so no upload rate is
-        # derivable from this run at all (see the save step's note on that).
-        # Every WORK step was green (suite 10:28:58 -> 10:45:07, orphan gate
-        # 10:45:54) and the job was `cancelled` at 11:51:54 by its 90 m cap,
-        # 57 m 02 s into that post step — which `python-ci-gate` reads as RED by
-        # design (#5219: a cancelled leg certifies nothing). A required check was
-        # WITHHELD by a cache upload on a passing shard.
+        # The upload PROGRESSED, monotonically, at 0.6-0.9 MB/s —
+        #   `Sent 536870912 of 3882423064 (13.8%), 0.7 MBs/sec`   11:11:49
+        #   `Sent 2483027968 of 3882423064 (64.0%), 0.9 MBs/sec`  11:45:16
+        #   `Sent 3019898880 of 3882423064 (77.8%), 0.9 MBs/sec`  11:51:52
+        # — i.e. 3,019,898,880 B in 3,412 s, and it was still 22% short when the
+        # job cap fired. Every WORK step was green (suite 10:28:58 -> 10:45:07,
+        # orphan gate 10:45:54) and the job was `cancelled` at 11:51:54 by its
+        # 90 m cap, 57 m 02 s into that post step — which `python-ci-gate` reads
+        # as RED by design (#5219: a cancelled leg certifies nothing). A required
+        # check was WITHHELD by a cache upload on a passing shard.
         #
-        # Why not restore-only-with-no-writer (the `test-carve-out` / #10327
-        # shape): this key is written by THIS JOB ALONE — `uv-pip-<os>-<hash
-        # uv.lock>` occurs nowhere else in the workflow — so an unwritten key
-        # would re-add the cold torch download to all nine shards, which is the
-        # exact cost #7612 exists to remove. The save is therefore KEPT and
-        # BOUNDED, which is also the vendor's documented pattern for many
-        # parallel jobs on one dependency set (`actions/cache` caching-strategies,
-        # "Make cache read only / Reuse cache from centralized job"): restore in
-        # every consumer, one explicit `actions/cache/save`.
+        # ⛔ WHY NO WRITER, AND WHY THAT DOES NOT LOSE #7612's CACHE. #7612's
+        # decision — restore the dependency caches instead of re-downloading them
+        # — is PRESERVED: this step still restores, and a hit costs 5.7-32.7 s
+        # instead of the 93-219 s cold torch download. What the run above measures
+        # is that the WRITE cannot complete on this pool: at 0.9 MB/s sustained
+        # the 3.88 GB payload needs ~72 min (the same pool also took 8 m 57 s for
+        # the 78,130,925 B HF archive), while `docs/ops/ci-wall-clock.md` §2 arm 2
+        # leaves <= ~9.9 m of this 90 m job's budget for a cache-write term. No
+        # bound compatible with the cap can complete it, so a bounded save is a
+        # 9-minute-per-shard write that never lands. Restore-only keeps the read
+        # (the value #7612 wanted) and drops a write measurement shows is
+        # impossible here. The upload rate is the term to fix — not the bound.
         #
-        # (The `hf-embedding-cache-v2-<os>` step below takes the OTHER treatment —
-        # restore-only with NO save — because THREE sibling jobs carry that key's
-        # writer and one of them shares this job's gate, so dropping this job's
-        # save loses nothing. Different key, different fact, different remedy;
-        # both are needed to leave this job with no unbounded post-step save at
-        # all.)
+        # ⚠ REINSTATE the write only against a MEASURED SUCCESSFUL save of this
+        # payload inside the bound; the pin asserting this shape
+        # (`tests/test_ci_selection.py`
+        # ::test_the_test_job_carries_no_unbounded_cache_post_step) reds if a
+        # writer reappears, forcing that re-derivation instead of a stale premise.
+        #
+        # (The `hf-embedding-cache-v2-<os>` step below takes the SAME treatment
+        # for the same reason, with three sibling jobs still writing that key —
+        # so there the write is genuinely redundant. Different key, different
+        # fact, same remedy; both are needed to leave this job with no unbounded
+        # post-step save at all.)
         #
         # continue-on-error: a cache-SERVICE error (transport/503) must never red
         # this leg — a miss is the fail-open case, and install-cpu-torch downloads
@@ -1899,96 +1910,11 @@ jobs:
 
       - name: Stop FalkorDB services (#6673)
         # always(): a failed or cancelled job must not leave a FalkorDB container
-        # holding memory on the runner host. (The BOUNDED cache save below is the
-        # job's LAST step, on purpose — see its header — so this teardown is one
-        # before it and cannot be pre-empted by a save that burns its bound.)
+        # holding memory on the runner host. It is the job's last step again since
+        # #11063 removed the trailing cache save (a post step cannot be ordered,
+        # which is half of why that save is gone).
         if: always()
         uses: ./.github/actions/falkordb-teardown
-
-      # ⛔ LAST STEP OF THE JOB, ON PURPOSE (#11063). As a POST step this save ran
-      # after everything else; as a NORMAL step it must run after everything else
-      # too, or a bound that elapses here would `cancelled`-kill the job BEFORE
-      # the pytest-log artifact upload, the fail-closed skip-fail guard and the
-      # FalkorDB teardown ran — losing the timing artifact, the live-test guard
-      # and the container cleanup on the shared Docker daemon (#6673).
-      - name: Save uv + pip dependency caches (BOUNDED — #11063)
-        # #11063: the writer for `uv-pip-<os>-<hash uv.lock>`. `actions/cache`
-        # saves in a POST step, and (#10182) that post step is charged against the
-        # job's `timeout-minutes` like any other while having NO timeout of its
-        # own — an UNBOUNDED term, and headroom amortizes a bounded cost, never an
-        # unbounded one. As a normal step it takes the `timeout-minutes` below: an
-        # upload that cannot finish is ABORTED at the bound and, under
-        # `continue-on-error`, does not fail the job — the job concludes on the
-        # suite, which is the whole point (#5219: `cancelled` certifies nothing).
-        #
-        # WHAT THE BOUND IS, AND IS NOT. Numbers, all measured on run
-        # 42000057137 / job `test (d)`:
-        #   upload payload the miss arm built  3,882,423,064 B (`Sent 0 of 3882423064`)
-        #   entry the siblings restored          662,393,744 B (cache-API `size_in_bytes`
-        #     — the STORED entry, NOT the bytes a save must send)
-        #   `tar --posix -z` of that payload     4 m 07 s
-        #   bytes actually transferred           0 (`Sent 0 of`, then
-        #     `getaddrinfo EAI_AGAIN results-receiver.actions.githubusercontent.com`
-        #     retries until the job cap fired)
-        # ⛔ NO UPLOAD RATE IS DERIVABLE FROM THAT RUN, so none is claimed. An
-        # earlier revision of this comment reported 0.89 MB/s (and 0.16 MB/s for
-        # the HF save) by dividing bytes by elapsed; the log shows `Sent 0 of`,
-        # i.e. the transfer never STARTED, so those figures measured the stall and
-        # not the link, and sizing the bound from them was wrong in the only
-        # direction that matters (it read as "the link is 9x too slow" when the
-        # transfer never began).
-        #
-        # It is NOT a promise that the cache gets written. At the measured tar
-        # time (247 s) a 9 m bound leaves ~293 s of transfer, so a 3.88 GB cold
-        # payload completes only above ~13 MB/s and FAILS OPEN below that: the
-        # cache then stays a miss, which costs the cold torch download #7612
-        # removed (wall-clock only — never a red, and never a withheld check).
-        # The bound's job is to stop the term eating the cap; a payload this size
-        # is the term to shrink, never the bound to widen (arm 2 forbids it).
-        #
-        # SIZING (`docs/ops/ci-wall-clock.md` §2, arm 2: cap >= SUM x 1.5) — the
-        # bound is sized to the ARM-2 CEILING, not to a transfer-rate claim:
-        #   10 m    last-failed pre-phase (its own `timeout -s INT -k 10 10m`)
-        # + 26 m    worst emitted shard watchdog (`--emit-push-matrix`)
-        # +  6 m    embedder provision cap (`Embedding model REQUIRED`)
-        # + 3.05 m  `Set up job`, measured 10:21:30 -> 10:24:32
-        # + 3.6 m   other UNCAPPED pre-suite steps, measured 10:24:32.98 ->
-        #           10:28:58.91 minus the embedder's own 50 s (checkout 14 s,
-        #           uv+pip restore 3.9 s, install-cpu-torch, `pip install -e` 9 s,
-        #           HF restore 112.6 s, FalkorDB provision 6 s, canary/FILES 62 s,
-        #           lastfailed restore 0.9 s). The first revision of this row
-        #           counted these at ZERO via a 3 m "setup" constant, which is how
-        #           it claimed 87 <= 90.
-        # +  9 m    this bound
-        # + 0.38 m  last-failed save, measured 23 s (10:45:07 -> 10:45:30)
-        # = 58.03 m, x 1.5 = 87.05 <= 90. The row clears.
-        # ⚠ A bound above ~9.9 m puts arm 2 out of reach (12 m reads 91.5 > 90),
-        # and a cap raise re-opens #3239's stale-head exposure — so the pin
-        # re-derives this whole SUM rather than allowing a wider bound.
-        #
-        # Why `cache-hit != 'true'` and not an unconditional save: on the exact
-        # primary-key hit nothing needs uploading (the service refuses a second
-        # write to the same key and the archive would be identical to the entry
-        # already there). On a MISS the output is unset (`''`, per the vendor:
-        # `cache-hit` is only set on a match) and on a `restore-keys` PARTIAL hit
-        # it is `'false'` — both sides of `!= 'true'`, so both save. Every such
-        # shard then offers its save and the cache service arbitrates the
-        # reservation: exactly one uploads; the rest TAR FIRST and only then lose
-        # the reservation — `saveCacheV1` calls `createTar` BEFORE `reserveCache`
-        # (actions/toolkit `packages/cache/src/cache.ts`) and `saveImpl` does no
-        # reservation pre-check — so a losing shard still pays the 4 m 07 s
-        # archive above inside its own bound. That is the price of not nominating
-        # a "writer shard", which no matrix field guarantees exists on a tier-2
-        # subset.
-        if: always() && steps.uvpip-cache.outputs.cache-hit != 'true'
-        timeout-minutes: 9
-        continue-on-error: true
-        uses: actions/cache/save@v4
-        with:
-          path: |
-            ~/.cache/uv
-            ~/.cache/pip
-          key: uv-pip-${{ runner.os }}-${{ hashFiles('uv.lock') }}
 
   test-slow:
     needs: changes

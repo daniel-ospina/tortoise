@@ -9609,34 +9609,42 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
     `pi-runner-vm-6`, 90 m cap): the uv+pip restore MISSED
     (`Cache not found for input keys: uv-pip-Linux-8755d72f…, uv-pip-Linux-`)
     where the other EIGHT shards of the same run HIT it in 5.7-32.7 s (median
-    ~19 s), and the post step then tarred 4 m 07 s and began uploading a
-    3,882,423,064 B payload (`Sent 0 of 3882423064`) — 5.9x the 662,393,744 B the
-    cache API reports as `size_in_bytes` for the key, which is the STORED entry a
-    hit restores, NOT the bytes a save must send. It then transferred NOTHING
-    (retrying `getaddrinfo EAI_AGAIN results-receiver.actions.githubusercontent
-    .com`), so no upload rate is derivable from this run and none is claimed
-    here. Every WORK step was green (suite 10:28:58 → 10:45:07, orphan gate
-    10:45:54) and the job was `cancelled` at 11:51:54, 57 m 02 s into that post
-    step. `python-ci-gate` reads `cancelled` as RED by design (#5219), so a
-    REQUIRED check was WITHHELD by a cache upload on a passing shard.
+    ~19 s), and the post step then tarred 4 m 07 s (10:54:53 → 10:59:00) and
+    uploaded a 3,882,423,064 B payload — `Sent 0 of 3882423064` — which is 5.9x
+    the 662,393,744 B the cache API reports as `size_in_bytes` for the key (the
+    STORED entry a hit restores, NOT the bytes a save must send). The upload
+    PROGRESSED, monotonically, at 0.6-0.9 MB/s:
 
-    TWO keys, TWO remedies, and the difference is which jobs write them:
+        `Sent 536870912 of 3882423064 (13.8%), 0.7 MBs/sec`   11:11:49
+        `Sent 2483027968 of 3882423064 (64.0%), 0.9 MBs/sec`  11:45:16
+        `Sent 3019898880 of 3882423064 (77.8%), 0.9 MBs/sec`  11:51:52
 
-    * `uv-pip-<os>-<hash uv.lock>` is written by THIS JOB ALONE (asserted
-      below), so dropping its save would empty the cache for all nine shards and
-      re-add the cold torch download (140 wheels, ~3.2 GB) that #7612 exists to
-      remove. It is KEPT and BOUNDED: an explicit `actions/cache/save@v4` with
-      `timeout-minutes`, `continue-on-error` and a `cache-hit` gate.
-    * `hf-embedding-cache-v2-<os>` is written by three sibling jobs — and none of
-      them on EVERY run — so this job takes the #10327 shape: restore-only, no
-      save at all. (On this job the same post step measured 8 m 57 s end-to-end
-      for a 78,130,925 B archive — 5.5x the 1 m 38 s the carve-out job measured
-      for the same cache, which is why #10327 could leave it there and this job
-      cannot.)
+    i.e. 3,019,898,880 B in 3,412 s — still 22% short when the job cap fired.
+    Every WORK step was green (suite 10:28:58 → 10:45:07, orphan gate 10:45:54)
+    and the job was `cancelled` at 11:51:54, 57 m 02 s into that post step.
+    `python-ci-gate` reads `cancelled` as RED by design (#5219), so a REQUIRED
+    check was WITHHELD by a cache upload on a passing shard.
 
-    Non-vacuous in both directions: the pre-fix bare `actions/cache@v4` steps
-    red the implicit-post-save assertion, and DELETING the bounded save reds the
-    presence assertion, so neither shape passes.
+    BOTH keys are now restore-only in this job, and NEITHER is left without a
+    writer by accident:
+
+    * `uv-pip-<os>-<hash uv.lock>` — this job is its only writer, and the write is
+      given up deliberately: at the 0.9 MB/s that run sustained, the 3.88 GB
+      payload needs ~72 min while `docs/ops/ci-wall-clock.md` §2 arm 2 leaves
+      <= ~9.9 m of this job's 90 m cap for a cache-write term. NO bound compatible
+      with the cap can complete it, so a "bounded save" would burn 9 min per miss
+      shard and never write the key (#11065 cycle 2, finding 2). The READ — the
+      value #7612 wanted — is kept: a hit is 5.7-32.7 s against a 93-219 s cold
+      torch download. The pin asserts NO writer of this key anywhere, so
+      reinstating one requires re-deriving this measurement.
+    * `hf-embedding-cache-v2-<os>` — three sibling jobs carry its writer (none on
+      every run, but `test-concurrency-falkor` shares this job's `python == 'true'`
+      gate), so this job's save was redundant as well as slow: 8 m 57 s end-to-end
+      for a 78,130,925 B archive, 5.5x what the carve-out job measured.
+
+    Non-vacuous in both directions: the pre-fix bare `actions/cache@v4` steps red
+    the implicit-post-save assertion, and RE-ADDING a writer of `uv-pip-` (bounded
+    or not) reds the no-writer assertion, so neither shape passes.
     """
     wf = _load_python_ci()
     job = wf["jobs"]["test"]
@@ -9689,43 +9697,43 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
         "the uv+pip restore must be `continue-on-error: true` — a cache-SERVICE "
         "error (transport/503) must never red the leg; a miss is the fail-open "
         "case and install-cpu-torch downloads the pinned CPU wheel either way")
-    assert restore.get("id"), (
-        "the uv+pip restore needs an `id:` — the save step's `if:` reads its "
-        "`cache-hit` output to avoid re-uploading an entry already there")
+    # ⛔ NO WRITER of `uv-pip-<os>-<hash uv.lock>` MAY EXIST — in this job or any
+    # other. The write was given up on a MEASUREMENT, not on preference: 0.9 MB/s
+    # sustained (driven above) against a 3.88 GB payload is ~72 min, and arm 2
+    # leaves <= ~9.9 m for the term, so a bounded save cannot complete and merely
+    # burns its bound on every miss shard (#11065 cycle 2, finding 2). If a writer
+    # reappears, re-derive against a MEASURED SUCCESSFUL save inside the bound —
+    # do not delete this arm to get green.
+    key_root = next(k for k in (_key_of(s) for s in uvpip) if "uv-pip-" in k)
+    uv_writers = [(jid, s.get("name")) for jid, jd in wf["jobs"].items()
+                  for s in (jd.get("steps") or [])
+                  if key_root.split("${{")[0] in _key_of(s) and _is_writer(s)]
+    assert not uv_writers, (
+        f"a cache WRITER of `uv-pip-` reappeared {uv_writers}. On this pool the "
+        "write cannot complete inside any bound the `test` job's cap affords — "
+        "measured 3,019,898,880 B in 3,412 s (0.9 MB/s, cancelled at 77.8%) for a "
+        "3,882,423,064 B payload, i.e. ~72 min against arm 2's <= ~9.9 m ceiling — "
+        "and an unbounded one withholds the REQUIRED check (#11063). Reinstate it "
+        "only against a measured successful save of that payload inside the "
+        "bound, and pin that measurement here.")
 
-    saves = [s for s in uvpip if s.get("uses") == "actions/cache/save@v4"]
-    assert len(saves) == 1, (
-        "the `test` job must keep exactly ONE writer for "
-        f"`uv-pip-<os>-<hash uv.lock>` (found {len(saves)}) — it is the only job "
-        "that writes that key, so dropping it empties the cache for all nine "
-        "shards")
-    save = saves[0]
-    bound = save.get("timeout-minutes")
-    assert isinstance(bound, int) and bound > 0, (
-        f"the uv+pip save must carry a positive integer `timeout-minutes` (got "
-        f"{bound!r}) — an unbounded save is the defect (#11063): it killed a "
-        "green shard at the job cap")
-    assert save.get("continue-on-error") is True, (
-        "the bounded save must be `continue-on-error: true`: a save aborted at "
-        "its bound is a MISS, and a missing cache must never red a shard whose "
-        "suite passed (#5219)")
-    assert f"steps.{restore['id']}.outputs.cache-hit" in str(save.get("if") or ""), (
-        "the bounded save must be gated on the restore's `cache-hit` output — an "
-        "unconditional save re-uploads an entry the exact primary-key hit already "
-        "guarantees is there, and the service refuses that write anyway")
-    assert _path_of(save) == _path_of(restore), (
-        "the bounded save must upload the SAME paths the restore reads (restore "
-        f"{_path_of(restore)!r} vs save {_path_of(save)!r}). Every other arm here "
-        "would pass a save that quietly dropped `~/.cache/pip`, while the cold "
-        "install it exists to remove came back (#11065 cycle 1, note 3).")
-    # Placement: as a POST step this save ran LAST. As a normal step it must also
-    # run last, or a bound that elapses here kills the job before the pytest-log
-    # artifact, the fail-closed skip-fail guard and the FalkorDB teardown run.
-    assert steps[-1] is save, (
-        "the bounded save must be the LAST step of the `test` job (it is at "
-        f"index {steps.index(save)} of {len(steps) - 1}): it may burn its whole "
-        "bound, and a bound elapsing must not pre-empt the pytest-log upload, the "
-        "skip-fail guard or the FalkorDB teardown (#11063/#6673)")
+    # Any DEPENDENCY-cache write kept in this job must be explicit AND bounded: an
+    # unbounded save is the defect (#11063) — it killed a green shard at the cap.
+    # Scoped to `~/.cache` on purpose, so the arm cannot be read as covering the
+    # `Save pytest last-failed state (#6142)` write, which is still an explicit
+    # unbounded `actions/cache/save@v4` (disclosed in the PR body, payload
+    # measured at 23 s, OUT OF SCOPE here — #11065 cycle 2, closing note).
+    for s in (st for st in steps if _is_writer(st)
+              and "~/.cache" in _path_of(st)):
+        bound = s.get("timeout-minutes")
+        assert isinstance(bound, int) and bound > 0, (
+            f"the `test` job's cache write {s.get('name')!r} carries no positive "
+            f"integer `timeout-minutes` (got {bound!r}) — that is the UNBOUNDED "
+            "post-step shape that reds a required check (#11063/#10182)")
+        assert s.get("continue-on-error") is True, (
+            f"the cache write {s.get('name')!r} must be `continue-on-error: true`: "
+            "a save aborted at its bound is a MISS, and a missing cache must never "
+            "red a shard whose suite passed (#5219)")
 
     # The HF key takes the OTHER remedy: restore-only, because other jobs write it.
     hf_here = [s for s in steps if "~/.cache/huggingface" in _path_of(s)]
@@ -9800,19 +9808,21 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
     setup = 3.05              # measured, above
     uncapped_pre_suite = 3.6  # measured, above
     lastfailed = 0.38         # measured 23 s (10:45:07 -> 10:45:30), same run
+    # No cache-write term: #11063 removed the only one this job had (see the
+    # no-writer arm above), which is also why the row has more room than it did.
     total = (pre_phase + worst_watchdog + embedder + setup + uncapped_pre_suite
-             + bound + lastfailed)
+             + lastfailed)
     cap = job["timeout-minutes"]
     assert total * 3 / 2 <= cap, (
         f"the `test` job's SUM ({pre_phase}m pre-phase + {worst_watchdog}m worst "
         f"shard watchdog + {embedder}m embedder + {setup}m `Set up job` + "
-        f"{uncapped_pre_suite}m uncapped pre-suite + {bound}m bounded save + "
+        f"{uncapped_pre_suite}m uncapped pre-suite + "
         f"{lastfailed}m last-failed save = {total:g}m) x 1.5 = "
         f"{(total * 3 / 2):g}m no longer clears its {cap}m cap. Arm 2 "
         "(docs/ops/ci-wall-clock.md §2) requires the x1.5 margin on the SUM, not "
         "the median, and a save killed at the cap reds a REQUIRED check (#5219). "
-        "The bound is the term to shrink (<= ~9.9 m clears): raising the cap "
-        "instead re-opens #3239's stale-head exposure.")
+        "The pre-suite terms are the ones to shrink: raising the cap instead "
+        "re-opens #3239's stale-head exposure.")
 
 
 def _test_job_pre_phase_watchdog_minutes(steps: list) -> int:
