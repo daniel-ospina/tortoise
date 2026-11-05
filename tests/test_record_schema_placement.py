@@ -380,6 +380,47 @@ _INDEX_CENSUS_RE = re.compile(
     r"\*\*(?P<tables>\d+) record tables \+ (?P<views>\d+) procedural views\*\*"
 )
 
+# ── the same row's ARMING claim, which is a live-state claim like any other ───
+# `test_the_routing_index_census_matches_the_record_migrations` reads this row's
+# CENSUS. The row ALSO declares the record's **live operational state**, and that
+# half carried the pre-arming census ("the record is NOT ARMED … because R1 has
+# still not armed the DSN") for eleven days after the arming was measured, while
+# `08-hosted-prerequisites.md` §A8 and `09-record-tenancy-decision.md` — the file
+# this row's own source column points at — were corrected to say the opposite
+# (#11064 review, P2: the correction stopped one hop short, at the doc that
+# ROUTES every reader, so a lane arrives at the corrected page with the stale
+# premise already loaded). The arming is measured, not asserted: `#9548` comment
+# `6407834085` (2026-10-26, `armed: true`, `tortoise_record_app` granted `LOGIN`)
+# and the owner's 2026-11-03 decision (comment `6612968196`) that superseded the
+# ruling which had forbidden the provisioning.
+_INDEX_ARMED_CLAIM = "the record is ✅ ARMED on the hosted deployment"
+#: What makes that claim EVIDENCE rather than a second assertion — the build the
+#: reading was taken on and the counter that was actually read (the epic's own
+#: rounded bound: an empty `record_write_failures` falsifies "writes are failing"
+#: and does NOT establish that a row was written).
+_INDEX_ARMED_EVIDENCE = ("record_write_failures", "fc6a8a64b")
+#: The retired live-state sentences. They may STAY as history — this repo keeps a
+#: superseded statement in place, labelled and dated (the shape #11064 used at
+#: `08:205-238`, `09:196-212` and in the runbook) — but a row that carries one
+#: with no `SUPERSEDED` marker BEFORE it is telling a lane, in the present tense,
+#: something measured false on 2026-10-26.
+_INDEX_RETIRED_ARMING = (
+    "the record is NOT ARMED on the hosted deployment",
+    "because R1 has still not armed the DSN",
+)
+_INDEX_SUPERSEDED_MARKER = "SUPERSEDED"
+#: The two epic docs this row indexes, and the measured-arming sentence each now
+#: carries. Pinned PRESENT so a later edit cannot flip the row back into
+#: disagreement with the file it routes to.
+_ARMED_SOURCE_OF_TRUTH = {
+    "docs/epics/2026-10-10-7879-postgres-record/08-hosted-prerequisites.md": (
+        "ARMED — AND THE ACT IS AUTHORISED"
+    ),
+    "docs/epics/2026-10-10-7879-postgres-record/09-record-tenancy-decision.md": (
+        "is in force on production writes"
+    ),
+}
+
 # ── the two RE-DERIVED NUMBERS that are not table/view counts (#9638 P2) ─────
 # The census above counts tables and views. Two further figures are quoted in
 # the same ledgers as *the number of migrations on disk* and *how many lines a
@@ -641,6 +682,76 @@ def test_the_routing_index_census_matches_the_record_migrations():
             f"{tables['session_narrative']} defines public.session_narrative — "
             "the index tells a lane the home does not exist, in the file that "
             "exists to stop it re-deriving what the map already holds"
+        )
+
+
+def _index_record_row() -> str:
+    """The routing index's #7879 row — exactly one, or a loud failure."""
+    rows = [
+        line
+        for line in _INDEX_DOC.read_text(encoding="utf-8").splitlines()
+        if _INDEX_RECORD_ROW_MARKER in line
+    ]
+    assert len(rows) == 1, (
+        f"docs/00_index.md has {len(rows)} rows for the record's hosted "
+        f"prerequisites (marker {_INDEX_RECORD_ROW_MARKER!r})"
+    )
+    return re.sub(r"\s+", " ", rows[0])
+
+
+def test_the_routing_index_declares_the_measured_arming_not_the_census():
+    """The index's #7879 row says ARMED, and any retained "not armed" is labelled.
+
+    The row is the entry point a lane reads FIRST (AGENTS.md → Documentation
+    Filing: *"For topic-to-file routing, see `docs/00_index.md`"*), and its own
+    source column points at `08-hosted-prerequisites.md`, whose §A8 was corrected
+    to say the record is armed and authorised. Until this pin, the row still said
+    the opposite in the present tense — the same defect class the epic artifacts
+    were fixed for, one hop further out, where the review's own sweep over "the
+    files this PR edits" could not see it.
+
+    RED on the pre-fix text — measured at #11064's head before the correction: the
+    row carried **neither** `the record is ✅ ARMED on the hosted deployment`
+    **nor** the `record_write_failures` / `fc6a8a64b` evidence, and both retired
+    sentences appeared with **no** `SUPERSEDED` marker anywhere in the row.
+
+    Non-vacuity is the inverted half: the retired sentences are NOT banned — they
+    are this repo's convention for an overridden ruling (keep it, label it, date
+    it) — so the assertion is that any retained one is preceded by the label. A
+    row that re-asserts "R1 has still not armed the DSN" as live reds here, and so
+    does a rewrite that deletes the measured state instead of correcting it.
+    """
+    row = _index_record_row()
+    assert _INDEX_ARMED_CLAIM in row, (
+        "docs/00_index.md's #7879 row no longer states the MEASURED arming state "
+        f"({_INDEX_ARMED_CLAIM!r}). It is the routing surface a lane reads first, "
+        "and the epic doc it indexes (§A8) says the record is armed"
+    )
+    for needle in _INDEX_ARMED_EVIDENCE:
+        assert needle in row, (
+            f"docs/00_index.md's #7879 row states arming without {needle!r} — the "
+            "claim is then an assertion, not a measurement (cite the build and the "
+            "counter, and keep the bound: an empty `record_write_failures` is not "
+            "evidence that a row was written)"
+        )
+    for retired in _INDEX_RETIRED_ARMING:
+        at = row.find(retired)
+        if at == -1:
+            continue
+        labelled = row.find(_INDEX_SUPERSEDED_MARKER)
+        assert labelled != -1 and labelled < at, (
+            f"docs/00_index.md's #7879 row asserts {retired!r} with no "
+            f"{_INDEX_SUPERSEDED_MARKER} marker before it — that is a live "
+            "instruction, false since 2026-10-26 (#9548 comment 6407834085). Keep "
+            "the sentence only as labelled history, as 08 §A8 and 09 do"
+        )
+    # The row and the docs it routes to must AGREE — that disagreement is the
+    # finding, not the stale row on its own.
+    for path, anchor in _ARMED_SOURCE_OF_TRUTH.items():
+        text = re.sub(r"\s+", " ", (REPO_ROOT / path).read_text(encoding="utf-8"))
+        assert anchor in text, (
+            f"{path} no longer states the measured arming ({anchor!r}) — the "
+            "index row's correction was derived from it, so re-derive both together"
         )
 
 
