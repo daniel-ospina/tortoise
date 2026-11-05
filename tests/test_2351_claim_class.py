@@ -1592,17 +1592,20 @@ def test_supersede_repoint_judges_a_junk_direction_through_the_ONE_normalizer(
     instruction is that it be DELETED ("so the two cannot drift"), and after the
     shared normalizer reads a non-scalar as ABSENT the filter adds nothing to the
     verdict: ``_canonical_direction`` returns a present value VERBATIM, so the
-    plain call hands ``direction_blocks_create`` exactly what the shared reader
-    sees, and ``live.canonical_direction`` maps it to the same mutual default the
-    ``else`` branch hardcoded. Leaving it is a second source of truth for "what
-    does this token mean" — #10520's whole point.
+    plain call hands ``direction_blocks_create`` the stored value ITSELF — not
+    what the shared READER returns, which is ABSENT for a non-``str``
+    (``live.canonical_direction``) — and it is ``direction_flows`` that maps both
+    the raw junk and the ``else`` branch's hardcoded mutual default to the same
+    both-ways verdict. The VERDICT is what coincides; the VALUE does not.
+    Leaving the filter is a second source of truth for "what does this token
+    mean" — #10520's whole point.
 
     Its one EXTERNALLY VISIBLE effect is the refusal message, which is where the
     door publishes its reasoning: the pre-fix message reads
     ``direction ['sideways'] (judged 'bidirectional')`` — the stored value, then
     a token it does not carry, invented by the door. That is the drift made
-    observable, so it is what this pins: the judged token must be the stored
-    value's own reading, never a door-local substitution. ⛔ The VERDICT is
+    observable, so it is what this pins: the message must name the stored value
+    and must NOT publish a second, door-local token beside it. ⛔ The VERDICT is
     pinned unchanged by ``test_supersede_repoint_reads_a_junk_direction_as_both
     _ways`` (junk = both ways = REFUSED on the backward leg), which is why the
     deletion is behaviour-preserving except here.
@@ -1621,7 +1624,10 @@ def test_supersede_repoint_judges_a_junk_direction_through_the_ONE_normalizer(
     with pytest.raises(ValueError, match="re-pointing the NAND edge") as _exc:
         lane.supersede_point(old, new)
     _msg = str(_exc.value)
-    assert "judged ['sideways']" in _msg, _msg
+    assert "direction ['sideways']" in _msg, _msg
+    assert "judged" not in _msg, (
+        "the door re-published the stored value as its own `judged` token — "
+        f"the parenthetical now duplicates `direction` verbatim ({_msg})")
     assert "judged 'bidirectional'" not in _msg, (
         "the door substituted its OWN token for the stored value — a second "
         f"copy of the direction policy ({_msg})")
@@ -1633,7 +1639,8 @@ def test_supersede_repoint_judges_a_junk_direction_through_the_ONE_normalizer(
 
     # …and the HASHABLE half of the same rule, so the pin is not keyed on
     # "unhashable": ``3`` is read as both ways by ``direction_flows``, and the
-    # message must say so rather than substituting the mutual-default token.
+    # message must name the stored value rather than substituting the
+    # mutual-default token for it.
     h_old = lane.create_point("statement", "computed h1",
                               claim_class="derived")["id"]
     h_new = lane.create_point("statement", "authored h2")["id"]
@@ -1647,7 +1654,8 @@ def test_supersede_repoint_judges_a_junk_direction_through_the_ONE_normalizer(
     with pytest.raises(ValueError, match="re-pointing the NAND edge") as _hexc:
         lane.supersede_point(h_old, h_new)
     _hmsg = str(_hexc.value)
-    assert "(judged 3)" in _hmsg, _hmsg
+    assert "direction 3" in _hmsg, _hmsg
+    assert "judged" not in _hmsg, _hmsg
     assert "judged 'bidirectional'" not in _hmsg, _hmsg
 
 

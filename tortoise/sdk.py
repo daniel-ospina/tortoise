@@ -20118,8 +20118,9 @@ class TortoiseSDK:
         #
         # ⛔ ONE predicate: ``claim_class.direction_blocks_create``, fed the
         # edge's stored direction — a string verbatim, the edge TYPE's default
-        # when ABSENT, both ways for a present non-string (see the per-row
-        # note) — and, for the first two, the same canonicalizer as
+        # when ABSENT, and a present non-string VERBATIM TOO, which
+        # ``direction_flows`` then reads as BOTH ways (see the per-row note) —
+        # and, for the first two, the same canonicalizer as
         # ``create_operator``, ``create_direct_edge``, ``ingest``'s
         # partial-absorb branch and #10195's operator pre-flight above. A
         # second copy of "may this edge exist" would be a finding of its own.
@@ -20318,6 +20319,17 @@ class TortoiseSDK:
                 # door's.
                 _raw_dir = _rdict.get("direction")
                 _eff_dir = self._canonical_direction(_rtype, _raw_dir)
+                # ⛔ SAY ONLY WHAT THE MESSAGE DOES NOT ALREADY SAY. The
+                # canonicalizer returns a PRESENT value VERBATIM, so rendering
+                # ``(judged X)`` beside ``direction X`` is pure duplication —
+                # and deleting the door-local filter is exactly what turned the
+                # parenthetical from "the token this door substituted" into a
+                # copy of the value beside it. Render it ONLY where the
+                # canonicalization actually SUBSTITUTED (the ABSENT case, which
+                # the edge TYPE's default fills): that is the one reading the
+                # caller cannot take from the stored value itself.
+                _judged = ("" if _eff_dir is _raw_dir
+                           else f" (judged {_eff_dir!r})")
                 if _direction == "out":
                     _src_id, _tgt_id = new_id, _tid
                     _src_classes, _tgt_classes = _new_classes, _tid_classes
@@ -20335,8 +20347,7 @@ class TortoiseSDK:
                         surface=(f"supersede_point: re-pointing the "
                                  f"{_rtype} edge {_src_id!r}->{_tgt_id!r} "
                                  f"(from {old_id!r} to {new_id!r}, "
-                                 f"direction {_raw_dir!r} "
-                                 f"(judged {_eff_dir!r}))")))
+                                 f"direction {_raw_dir!r}{_judged})")))
 
         # #432 Task 3: durable PointSuperseded event (append-before-mutation,
         # AFTER the guard + edge-type validation — P2 review fix: emitting
