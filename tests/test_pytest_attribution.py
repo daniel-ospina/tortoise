@@ -1072,8 +1072,8 @@ KILLED_LEG_LOG = (
 #: RUN of each failure shape (see `test_the_emitted_detail_matches_pytest_s_own_block`
 #: for the matching `-r fEs`/FAILURES rendering each one is compared against).
 JUNIT_KILLED_LEG = """<?xml version="1.0" encoding="utf-8"?>\
-<testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="2" \
-skipped="0" tests="3" time="1570.0">\
+<testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="3" \
+skipped="0" tests="4" time="1570.0">\
 <testcase classname="tests.test_capture_cost_measurement" \
 name="test_emission_write_is_handed_off_the_event_loop" \
 file="tests/test_capture_cost_measurement.py" line="3097" time="300.0">\
@@ -1094,6 +1094,12 @@ time="0.1"><failure message="assert 2 == 1">v = 2
 E       assert 2 == 1
 
 tests/test_x.py:12: AssertionError</failure></testcase>\
+<testcase classname="tests.test_x.TestShape" name="test_class_leaf" file="tests/test_x.py" \
+line="19" time="0.1"><failure message="assert 3 == 1">    def test_class_leaf(self):
+&gt;       assert 3 == 1
+E       assert 3 == 1
+
+tests/test_x.py:20: AssertionError</failure></testcase>\
 </testsuite></testsuites>
 """
 
@@ -1103,6 +1109,11 @@ EMITTED_TIMEOUT = (
     " - Failed: Timeout (>300.0s) from pytest-timeout."
 )
 EMITTED_ASSERTION = "FAILED tests/test_x.py::test_shape[2] - AssertionError: assert 2 == 1"
+#: The CLASS-based failure. `testcase/@name` is the leaf only, so this id is only
+#: reconstructable from `@classname` — `file::name` would name `TestShape`'s sibling
+#: as if it were a module-level test (i.e. a nodeid pytest never wrote).
+EMITTED_CLASS_LEAF = (
+    "FAILED tests/test_x.py::TestShape::test_class_leaf - AssertionError: assert 3 == 1")
 
 
 def _killed_leg(tmp_path: Path, junit: str | None = JUNIT_KILLED_LEG) -> tuple[Path, Path]:
@@ -1132,7 +1143,8 @@ def test_a_killed_leg_states_its_failing_testcases_from_its_own_junitxml(
     result = run_script(log, "--junit", str(junit), rc="137")
     assert result.returncode == 0, result.stderr
     assert "INCOMPLETE" in result.stdout, "the leg must still be named unobservable"
-    assert _reported_failures(result.stdout) == [EMITTED_TIMEOUT, EMITTED_ASSERTION], (
+    assert _reported_failures(result.stdout) == [
+        EMITTED_TIMEOUT, EMITTED_ASSERTION, EMITTED_CLASS_LEAF], (
         f"the reporter did not state the leg's own failing testcases:\n{result.stdout}")
 
 
@@ -1281,10 +1293,17 @@ _____________________________ test_shape[2] ______________________________
 E       assert 2 == 1
 
 tests/test_x.py:12: AssertionError
+_____________________________ test_class_leaf ______________________________
+    def test_class_leaf(self):
+>       assert 3 == 1
+E       assert 3 == 1
+
+tests/test_x.py:20: AssertionError
 =========================== short test summary info ============================
 FAILED tests/test_capture_cost_measurement.py::test_emission_write_is_handed_off_the_event_loop - Failed: Timeout (>300.0s) from ...
 FAILED tests/test_x.py::test_shape[2] - assert 2 == 1
-===================== 2 failed in 300.4s ======================
+FAILED tests/test_x.py::TestShape::test_class_leaf - assert 3 == 1
+===================== 3 failed in 300.4s ======================
 """
 
 
@@ -1334,7 +1353,60 @@ def test_the_junit_emission_reaches_the_rail_as_the_same_failure(tmp_path: Path)
         "tests/test_capture_cost_measurement.py::"
         "test_emission_write_is_handed_off_the_event_loop",
         "tests/test_x.py::test_shape[2]",
+        "tests/test_x.py::TestShape::test_class_leaf",
     }, emitted
+
+
+#: Two failing tests that share a LEAF name inside one file, in two different
+#: classes — the shape `file::name` cannot represent. Pre-fix the reporter emitted
+#: `tests/test_x.py::test_class_leaf` TWICE: one id, so one of the two failures
+#: silently disappeared from the reported set.
+JUNIT_SAME_LEAF_TWO_CLASSES = """<?xml version="1.0" encoding="utf-8"?>\
+<testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="2" \
+skipped="0" tests="2" time="1.0">\
+<testcase classname="tests.test_x.TestAlpha" name="test_leaf" file="tests/test_x.py" \
+line="9" time="0.1"><failure message="assert 1 == 2">E       assert 1 == 2\n\ntests/test_x.py:10: AssertionError</failure></testcase>\
+<testcase classname="tests.test_x.TestBeta" name="test_leaf" file="tests/test_x.py" \
+line="19" time="0.1"><failure message="assert 3 == 4">E       assert 3 == 4\n\ntests/test_x.py:20: AssertionError</failure></testcase>\
+</testsuite></testsuites>
+"""
+
+
+def test_two_classes_sharing_a_leaf_name_keep_DISTINCT_nodeids(tmp_path: Path) -> None:
+    """The collapse arm: `file::name` makes two failures one id.
+
+    Both failures must reach the rail as the ids pytest itself recorded. Pre-fix the
+    reporter emitted the SAME line twice (`tests/test_x.py::test_leaf`), so the rail
+    saw one failure and the other vanished from the reported set — the failure set
+    `ci_exemption.py signatures` then compares against main is short by one.
+    """
+    log, junit = _killed_leg(tmp_path, junit=JUNIT_SAME_LEAF_TWO_CLASSES)
+    result = run_script(log, "--junit", str(junit), rc="137")
+    assert result.returncode == 0, result.stderr
+    assert _reported_failures(result.stdout) == [
+        "FAILED tests/test_x.py::TestAlpha::test_leaf - AssertionError: assert 1 == 2",
+        "FAILED tests/test_x.py::TestBeta::test_leaf - AssertionError: assert 3 == 4",
+    ], f"the class segment was dropped, collapsing two failures onto one id:\n{result.stdout}"
+    assert len(set(_reported_failures(result.stdout))) == 2, result.stdout
+
+
+def test_a_classname_naming_another_module_is_NOT_attributed_to_this_file(
+        tmp_path: Path) -> None:
+    """The honest arm: when the class chain cannot be attributed, say so.
+
+    `classname` and `file` disagree about the module, so the trailing capitalised
+    components belong to some other nodeid. Emitting `file::name` here would be an
+    invented plausible id — the docstring's own rule is to name the gap instead.
+    """
+    mismatched = JUNIT_KILLED_LEG.replace(
+        'classname="tests.test_x.TestShape" name="test_class_leaf"',
+        'classname="tests.test_other.TestShape" name="test_class_leaf"')
+    log, junit = _killed_leg(tmp_path, junit=mismatched)
+    result = run_script(log, "--junit", str(junit), rc="137")
+    assert result.returncode == 0, result.stderr
+    assert not [ln for ln in _reported_failures(result.stdout) if "test_class_leaf" in ln], (
+        f"a mismatched classname produced a fabricated nodeid:\n{result.stdout}")
+    assert "does not match" in result.stdout, result.stdout
 
 
 # ── 2c. the wiring: a leg that WRITES a junitxml must PASS it ──────────────

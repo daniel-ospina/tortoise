@@ -567,6 +567,42 @@ def _exception_type(text: str) -> str:
     return ""
 
 
+def _class_segments(path: str, classname: str):
+    """The CLASS components of `classname` for a nodeid rooted at `path` (or None).
+
+    `testcase/@name` is the LEAF ONLY — pytest puts the rest of the nodeid in
+    `@classname` (`_pytest/junitxml.py`: `names = nodeid.split("::")`,
+    `classname = ".".join(names[:-1])`, `name = names[-1]`). For
+    `tests/test_foo.py::TestBar::test_baz` the artifact is therefore
+    `file="tests/test_foo.py" classname="tests.test_foo.TestBar" name="test_baz"`,
+    and `f"{path}::{name}"` drops `TestBar` — an id that matches NO test, so the
+    rail cannot compare it against main's failure set and two same-named leaves in
+    different classes of one file collapse onto a single id.
+
+    A class is capitalised (`record-postgres-leg-gate.py::_leg_module` encodes the
+    same rule), so the trailing capitalised components are the class chain and what
+    is left is the module. `None` means the two attributes DISAGREE about the module
+    — then the class chain cannot be attributed to this file, and the honest answer
+    is the caller's "not attributable" arm rather than a shortened id.
+    """
+    parts = [p for p in classname.split(".") if p]
+    classes = []
+    while parts and parts[-1][:1].isupper():
+        classes.insert(0, parts.pop())
+    if not classes:
+        return []
+    module = ".".join(parts)
+    expected = path.replace("\\", "/")
+    if expected.endswith(".py"):
+        expected = expected[:-3]
+    expected = expected.replace("/", ".")
+    if expected.endswith(".__init__"):
+        expected = expected[: -len(".__init__")]
+    if module and module != expected and not module.endswith("." + expected):
+        return None
+    return classes
+
+
 try:
     root = ET.parse(sys.argv[1]).getroot()
 except Exception as exc:  # noqa: BLE001 — any parse failure is the same UNKNOWN
@@ -587,11 +623,20 @@ for case in root.iter("testcase"):
     tag, el = outcome
     path = (case.get("file") or "").strip()
     name = (case.get("name") or "").strip()
+    classname = (case.get("classname") or "").strip()
     if not path or not name:
         # No reconstructable nodeid: say so rather than invent a plausible one.
         print(f"({tag} in the junitxml with no file/name attributes — not attributable)")
         continue
-    nodeid = f"{path}::{name}"
+    classes = _class_segments(path, classname)
+    if classes is None:
+        # `classname` names a different module than `file`, so its class chain
+        # belongs to some other nodeid: abbreviating to `file::name` would name a
+        # test that does not exist.
+        print(f"({tag} in the junitxml whose classname {classname!r} does not match "
+              f"{path!r} — not attributable)")
+        continue
+    nodeid = "::".join([path, *classes, name])
     kind = _exception_type(el.text or "")
     message = " ".join((el.get("message") or "").split())
     if kind and message and not message.startswith(kind):
