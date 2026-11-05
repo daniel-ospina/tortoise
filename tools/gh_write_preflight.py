@@ -355,7 +355,8 @@ def _sanitise_result(res: dict, secret: str) -> dict:
     on stderr, and `--json`), and a fix applied per call site left `ratelimit_remaining` raw after
     cycles 5 and 6 both closed a sibling header — the exact "scrub at the source" lesson.
     """
-    for key in ("detail", "ratelimit_remaining", "scopes", "api_base", "repo"):
+    for key in ("detail", "ratelimit_remaining", "scopes", "api_base", "repo",
+                "credential_source"):
         if isinstance(res.get(key), str):
             res[key] = _scrub(res[key], secret)
     if isinstance(res.get("surfaces"), dict):
@@ -569,7 +570,10 @@ def preflight(repo: str, api_base: str, token: str, source: str) -> dict:
         # `--json` artifact cannot tell a measurement of GitHub from a measurement of anything else.
         # ⛔ REDACTED, because this dict IS the `--json` output: see `_printable_base`.
         "api_base": _scrub(_printable_base(api_base), token or ""),
-        "credential_source": source,
+        # ⛔ THE SOURCE LABEL IS BUILT FROM FILE CONTENT (`hosts.yml:{login}`), so it must be scrubbed
+        # like every other echoed field (review cycle 14): a hosts.yml holding the token in `user:` made
+        # the "label is never a value" promise unenforced and printed the credential on stderr and in --json.
+        "credential_source": _scrub(source, token or ""),
         "token_shape": token_shape(token) if token else "none",
         "ok": False,
         "reason": "",

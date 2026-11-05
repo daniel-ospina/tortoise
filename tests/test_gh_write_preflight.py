@@ -1116,6 +1116,28 @@ def test_the_repo_field_is_scrubbed_because_or_can_hold_the_credential():
                 f"the repo field leaked the credential at offset {off}: {blob!r}"
 
 
+def test_the_credential_source_label_is_scrubbed_because_it_carries_hosts_yml_text():
+    """`credential_source` is `hosts.yml:{login}` — FILE CONTENT, not a constant (review cycle 14).
+
+    A hosts.yml whose `user:` holds the token printed the credential on the summary line and in the
+    `--json` artifact, so the "label is never a value" promise was unenforced.
+    """
+    secret = "0123456789abcdef0123456789abcdef01234567"      # prefix-less: the shape regex cannot help
+    import tempfile, os as _os
+    with tempfile.TemporaryDirectory() as d:
+        with open(_os.path.join(d, "hosts.yml"), "w", encoding="utf-8") as fh:
+            fh.write(f"github.com:\n    user: {secret}\n    oauth_token: {secret}\n    git_protocol: https\n")
+        env = {k: v for k, v in _os.environ.items() if k not in ("GH_TOKEN", "GITHUB_TOKEN", "GH_HOST")}
+        env.update({"GH_CONFIG_DIR": d, "GH_WRITE_PREFLIGHT_API": "http://127.0.0.1:9",
+                    "HOME": "/tmp/gh-preflight-no-home"})
+        p = subprocess.run([sys.executable, str(TOOL), "--repo", "o/r", "--json"],
+                           capture_output=True, text=True, env=env, timeout=120)
+    blob = p.stdout + p.stderr
+    for off in range(0, max(1, len(secret) - 7)):
+        assert secret[off:off + 8] not in blob, \
+            f"credential_source leaked the credential at offset {off}: {blob!r}"
+
+
 if __name__ == "__main__":
     fns = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]
     failed = 0
