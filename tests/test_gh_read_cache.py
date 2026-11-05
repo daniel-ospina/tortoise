@@ -2128,6 +2128,10 @@ def test_required_set_null_still_answers_both_keys_empty() -> None:
         # leaving the empty-name check unreachable — measured, M65 SURVIVED on it.
         ("repo.labels", [[{"name": ""}]]),
         ("repo.labels", [[{"name": 5}]]),
+        # the FOURTH projection, same rule (M72): a runner naming nothing is not an inventory
+        # entry. `labels` must be present or the ABSENCE guard raises first and this check is
+        # unreachable — the same unreachability that let M67 survive on its first test.
+        ("runners.inventory", [{"runners": [{"name": "", "labels": []}]}]),
         ("repo.workflows", [{"workflows": [{"id": "abc", "path": "a", "state": "active"}]}]),
         ("repo.workflows", [{"workflows": [{"id": True, "path": "a", "state": "active"}]}]),
         ("repo.workflows", [{"workflows": [{"id": 1, "path": "", "state": "active"}]}]),

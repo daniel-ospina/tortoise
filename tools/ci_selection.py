@@ -2871,7 +2871,10 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # graph, no URI, no network) and `core` is where its suite is registered.
              "tools/ci_runner_labels.py",
              # #11047: `tools/gh_read_cache.py` is the SAME shape — a hermetic tool whose entire
-             # guard (`tests/test_gh_read_cache.py`, 241 collected cases) lives in `core`. `tools/`
+             # guard (`tests/test_gh_read_cache.py`) lives in `core`. ⛔ No case count is stated:
+             # this note said "241 collected cases" while the suite already collected 276 at
+             # `8edc371f3`, and a count in a comment re-stales on the next added case
+             # (`--collect-only` is the authority). `tools/`
              # is a flat NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row matches it, so a
              # TOOL-ONLY change — e.g. a maintenance edit to a `_project_*` helper, which the
              # module's own `-v2` id-bump rule says MUST be paired with a bump — filtered to
