@@ -595,8 +595,11 @@ surfaces:
   - test_backup_watcher_health.py
   # #9548 (R1): the arming REPORT — `/health`'s additive `record` block says whether
   # `TORTOISE_RECORD_DSN` resolves in this process, publishes the value's 8-hex
-  # fingerprint (never the value) and the three record counters, and degrades
-  # `status` only for a set-but-unusable DSN. Same dual registration as the guards
+  # fingerprint (never the value) and the record counters, and degrades
+  # `status` only for a set-but-unusable DSN. The POSITIVE pair
+  # (`record_writes_applied` / `record_last_write_at`) is pinned here too, so a
+  # rename that leaves the docstring and runbook false reds this suite. Same dual
+  # registration as the guards
   # above and for the same reason: the file it guards is `tortoise/hosted_api.py`,
   # which selects the `api` surface — and the arming state is invisible from
   # outside the process without this block, which is how the variable sat unset
