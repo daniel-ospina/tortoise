@@ -292,9 +292,13 @@ A marker is only an instrument if a caller can act on it. Therefore:
 |---|---|---|
 | **record write** | `RecordWriteOutcome.REFUSED` + `RecordWrite.refusal`; `status` reads `degraded` | `tortoise/record_writer.py`; `_record_health` reads the counters from `/health` |
 | **session read** | the door abstains visibly instead of `200` + an empty transcript | PR #10021 |
-| **capture** | the 2xx receipt carries `errors` / `warnings` / `diagnostics`; the turn cap REFUSES at the handler (`MAX_SESSION_TURNS`), the per-turn cap MARKS (`_CAPTURE_TRUNCATION_SENTINEL`) | `tortoise/hosted_api.py::_capture_session_impl` |
+| **capture** | the 2xx receipt carries `errors` / `warnings` / `diagnostics`; the turn cap REFUSES at the handler (`MAX_SESSION_TURNS`), the per-turn cap MARKS (`_CAPTURE_TRUNCATION_SENTINEL`) | `tortoise/hosted_api.py::_capture_session_impl` (the REFUSE half); `tortoise/sdk.py::_CAPTURE_TRUNCATION_SENTINEL` (the MARK half's sentinel, which `hosted_api.py` never names) |
 | **ingest** | `tortoise/ingest.py::IngestOutcome` — the exit status is the marker, and a refusal writes no completion artifact | `tests/test_8447_c3_ingest_door.py` |
 
-⛔ **A door's counters are part of the clause.** "Any counter it increments is read by something" —
-the record door's counters reach `/health` through `_record_health`; the ingest door increments none
-(the exit status is its instrument), so nothing is left unread there.
+⛔ **A door's counters are part of the clause.** §1a forbids a value indistinguishable from success
+*while* the failure is recorded somewhere the caller does not read — so a door must not make a counter
+its instrument unless the caller can read it back. The record door's counters reach `/health` through
+`_record_health`; the ingest door's SWEEP counters (`upgraded` / `skipped` / `unresolved` /
+`not_document` / `already_claimed` / `partial_sections`) are read back by that sweep's own summary
+lines — they are *not* nothing — while a single door run's instrument is the exit status
+(`IngestOutcome`), not a counter.

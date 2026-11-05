@@ -872,10 +872,21 @@ class TestAPartialExtractionIsNotDone:
 #: own subject is a row at `config/ci-surfaces.yml:10481` — five digits — so the
 #: natural short form (a bare ``(`:<n>`)`` after the filename was named a
 #: sentence earlier) walked through a guard that claims to ban it.
-#: Deliberately NOT matching a URL's port (``localhost:6379``) — the filename or
-#: backtick anchor is what makes it a citation.
+#: The THIRD alternative closes the census half's extension blind spot: the
+#: imported predicate reaches only `.py`/`.yml`/`.yaml`, so a docstring citing
+#: `BOUNDED-OPERATION-CONTRACT.md:120` or `pyproject.toml:60` — the two shapes
+#: this file's prose actually points at — walked through a guard whose positive
+#: control only ever exercised `.py`/`.yml` spellings. It matches a dotted token
+#: whose extension is one a SOURCE or DOC file carries, which is the claim it can
+#: keep: an extension outside that list and a host's TLD
+#: (``api.example.com:8080``, ``https://…:443``) are both outside the list on
+#: purpose, and the lookbehind refuses a match that starts mid-URL.
+#: Deliberately NOT matching a URL's port (``localhost:6379``) or a dotted
+#: host:port — the extension list, not the shape, is what makes it a citation.
 _COORDINATE = re.compile(
     rf"{_LINE_CITATION.pattern}"
+    r"|(?<![\w/:.])(?i:[\w./-]+)\.(?i:md|markdown|rst|toml|json|ya?ml|cfg|ini|txt|sh|bash"
+    r"|ts|tsx|js|jsx|sql|pyx|parquet)[\s`'\"]*[(\[]?[\s`'\"]*:\d[\w-]*"
     r"|`:\d{1,6}(?:-\d{1,6})?`")
 
 
@@ -968,8 +979,10 @@ class TestThisFilesEvidencePointersCannotGoStale:
 
         It matched only the contiguous single-suffix run, so the split form the
         repo actually writes (a bare path, then the coordinate in its own code
-        span), a ranged coordinate, and any non-`.py` path all walked through a
-        guard that claims no docstring here cites a coordinate. The spellings
+        span), a ranged coordinate, and the non-`.py` extensions the imported
+        half cannot reach all walked through a guard that claims no docstring
+        here cites a coordinate — that half reaches `.py`/`.yml`/`.yaml` only.
+        The spellings
         themselves live in the loop below, never in prose, because the guard
         applies to this docstring too — which is the point. This file's subject
         is a YAML row, so the missable spelling is the likely one.
@@ -984,6 +997,11 @@ class TestThisFilesEvidencePointersCannotGoStale:
             # version capped at four.
             "the durations row (`:10481`)",
             "(`:10481-10490`)",
+            # The extensions the imported half cannot reach, which this file's
+            # own prose points at: a `.md` contract doc and `pyproject.toml`.
+            "`docs/architecture/BOUNDED-OPERATION-CONTRACT.md:120`",
+            "pyproject.toml:60",
+            "config/x.json:12",
         ):
             assert _coordinate_citations(spelling), (
                 f"the guard is blind to {spelling!r} — a coordinate the census "
@@ -1043,8 +1061,18 @@ class TestThisFilesEvidencePointersCannotGoStale:
             f"{offenders}")
 
     def test_the_guard_does_not_red_on_a_host_port_or_a_symbol(self):
-        """The other direction: a URL port and a ``module::name`` cite stay green."""
+        """The other direction: a URL port and a ``module::name`` cite stay green.
+
+        The DOTTED host:port is here because the third alternative made it the
+        live risk: an extension-agnostic arm would read ``api.example.com:8080``
+        as a citation. The extension list is what prevents it, and this pins
+        that — a TLD is not a file extension.
+        """
         assert _coordinate_citations("docker://:f@localhost:6379/x") == []
+        assert _coordinate_citations(
+            "the endpoint api.example.com:8080 is live") == []
+        assert _coordinate_citations(
+            "https://api.premiselabs.co:443/v1/x") == []
         assert _coordinate_citations(
             "`tortoise/ingest.py::main` and "
             "`argparse.ArgumentParser.parse_args`") == []

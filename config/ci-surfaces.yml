@@ -10522,10 +10522,14 @@ durations:
   test_10194_eval_suite_non_gating.py: 4.7
   test_6388_startup_seam_assert.py: 0.1
   test_7949_e5_section10_writeback.py: 0.1
-  test_8447_c3_ingest_door.py: 6.0  # new in #8447 (C3, the ingest door) — a file a PR ADDS can never carry a CI
-  # junit reading yet (the refresher samples push-to-main runs only), so it takes a flat weight rather than
-  # this host's local reading, which the map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must
-  # EXIST, not merely default: the `core` registration puts one more file in `fast_pool()`. ⚠️ It needs a
+  test_8447_c3_ingest_door.py: 2.0  # unmeasured — a file a PR ADDS carries no push-to-main sample yet
+  # (the refresher samples push-to-main runs only), so its first weight is the header's flat
+  # `DEFAULT_FAST_WEIGHT`, which is what a new file's row carries (#2818/#3419/#4348). ⛔ NOT this host's
+  # local reading and NOT a hand-picked margin: a weight is a SHARD-LAYOUT input, so a number that does
+  # not model CI decides which files run together — the #2818 row itself shipped a hand-picked 4.9 under a
+  # comment claiming the convention it violated. The sweeper replaces the marker with a reading. The row
+  # must EXIST even though its weight equals the header default: the `core` registration puts one more file
+  # in `fast_pool()`. ⚠️ It needs a
   # DATABASE but NOT a MODEL — the split that matters for this row: the DB-bearing arms drive a real graph
   # through `main()` (a refused `--upgrade`, a skipped re-ingest, the already-extracted skip, the
   # `--capture-metadata` refusal, the resolution-Point control, a sweep that leaves a document behind, and the
@@ -10554,6 +10558,12 @@ durations:
   # and quoting one as history ("N against a quoted M") re-stales the same way one step removed. A VGATE
   # caught exactly that in this lane's own doc row, and a round-8 review caught this row repeating it.
   # The ungated arms are pure enum/entry-point assertions and run everywhere. ⛔ This row once said
+  # two of the classes, per-method on the gated arms of two more, and three classes carrying no `skipif` at
+  # all — do not say "class-level" for the whole set).
+  # The DB-free classes run everywhere, and they are NOT all enum/entry-point assertions: the
+  # sweep-idempotency arms drive `_do_upgrade_all` against stubs, and the pointer guard parses this file's
+  # own AST and docstrings. They need no database, which is a different claim from needing no scrutiny.
+  # ⛔ This row once said
   # "NOT hermetic" and carried a two-minute figure; both were wrong for the SAME reason, and the mechanism
   # is the part worth keeping. The cost was the DOCUMENT UPSERT constructing the real embedding model
   # (`add_document` → projection apply → `entities.encode_for_row` → `EmbeddingModel.get()`), whose
@@ -10562,8 +10572,8 @@ durations:
   # embedder's failed-load negative cache then answers the rest), which is why a pin on the single slow arm
   # only moved it to the next arm that needed the model. The pin that holds is FILE-WIDE: the module-level
   # autouse fixture `_no_embedder` requests `tests/conftest.py::force_sparse_tfidf` (#2573/#2772 — the
-  # documented "no embedder" pin) for every arm, so the file runs in SECONDS again. That is what makes `6.0`
-  # a safe flat weight rather than a model-load flake on every PR's required lane. ⛔ Do not de-duplicate it
+  # documented "no embedder" pin) for every arm, so the file runs in SECONDS again — which is what keeps a
+  # model-load flake off every PR's required lane. ⛔ Do not de-duplicate it
   # against the arm-level request: the arm-level one alone does not cover the other full-ingest arms.
   # ⛔ NO WALL-CLOCK FIGURE and NO CASE COUNT — both re-stale (a count on every case a round adds; a figure
   # on every host, and on every arm that gains a model call — this row has now been wrong twice that way).
