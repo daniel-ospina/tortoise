@@ -10526,13 +10526,16 @@ durations:
   # junit reading yet (the refresher samples push-to-main runs only), so it takes a flat weight rather than
   # this host's local reading, which the map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must
   # EXIST, not merely default: the `core` registration puts one more file in `fast_pool()`. ⚠️ NOT hermetic,
-  # unlike most flat-weight rows: the six DB-bearing arms drive a real graph through `main()` (`--upgrade`,
-  # `--capture-metadata`, `--upgrade-all`, a skipped re-ingest and its resolution-Point control), so the
+  # unlike most flat-weight rows: the DB-bearing arms drive a real graph through `main()` (a refused
+  # `--upgrade`, a skipped re-ingest, the already-extracted skip, the `--capture-metadata` refusal, the
+  # resolution-Point control, a sweep that leaves a document behind, and the partial-extraction arms on
+  # `--upgrade` and full ingest), so the
   # docker lane / carve-out split decides whether they run (the class-level `skipif` on `TORTOISE_DB_URI`).
   # The ungated arms are pure enum/entry-point assertions and run everywhere. Context for a human, NOT the
-  # weight: 11-17 s wall on this host in the private lane. ⛔ NO wall time figure beyond that and NO CASE
-  # COUNT — a hand-written count re-stales on every case a round adds (round 8 measured 21 collected against
-  # a quoted 16), and a VGATE already caught exactly that in this lane's own doc row.
+  # weight: 11-17 s wall on this host in the private lane. ⛔ NO CASE COUNT and NO past-count anecdote —
+  # a hand-written count re-stales on every case a round adds, and quoting one as history ("N against a
+  # quoted M") re-stales the same way one step removed. A VGATE caught exactly that in this lane's own
+  # doc row, and a round-8 review caught this row repeating it.
   # `tools/ci_timing.py --refresh-durations` replaces this from junit once a
   # push-to-main sweep includes it.
   test_8447_truncation_marker.py: 21.0
