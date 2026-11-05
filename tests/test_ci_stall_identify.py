@@ -56,6 +56,56 @@ WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
 _GIL_STALL = 're.match(r"(a+)+$", "a" * 32 + "b")'
 
 
+def _nested_pytest_argv(tree: Path, *extra: str) -> list[str]:
+    """Argv for a nested pytest CHILD, with its conftest chain pinned to ``tree``.
+
+    Every child this file spawns runs against a THROWAWAY tree (a ``tmp_path``
+    outside the repo), and pytest resolves ``conftest.py`` by walking EVERY
+    ancestor of the selected path — so whatever sits above that tree is
+    imported into the child. On a self-hosted runner the shared ``/tmp``
+    carried a leaked ``conftest.py`` + ``pyproject.toml`` (a stray copy of this
+    repo's config pair), the child's temp tree lives under it, and the leak
+    made the child's ini file the leaked ``pyproject.toml`` → ``confcutdir``
+    became the leaked directory → the leaked ``conftest.py`` was imported → it
+    does ``from tests._live_utils import …`` and died with
+    ``ModuleNotFoundError: No module named 'tests'`` before one item ran.
+
+    Measured on PR #11043's ``test (d)`` (run 42098379634): all three children
+    failed this way. ``test_a_stall_dumps_its_own_frame`` read
+    ``ImportError while loading conftest '/tmp/conftest.py'`` instead of a
+    frame (no faulthandler dump, so no ``Timeout (0:00:01)!``);
+    ``test_the_ini_source_kills_a_hung_item_with_no_timeout_flag`` never
+    reached its kill (no ``Timeout (>2.0s) from pytest-timeout.``);
+    ``test_the_resolved_bound_from_the_repo_config_is_the_ci_budget`` hit the
+    leaked conftest's own scan guard
+    (``SharedTmpdirScanError: os.scandir('/tmp')``). Each one was a ``rc=4``
+    collection failure with no verdict about the code under test.
+
+    ``--confcutdir=<tree>`` is the repo's existing remedy for exactly this
+    class — ``tools/skip-guard.py::_selection_confcutdir`` documents it, and
+    ``tests/test_ci_runner_x64_install.py`` pins the sibling ``--noconftest``
+    for its own temporary root. It must be the tree that HOLDS the child's
+    files, never its parent: pytest loads a ``conftest.py`` sitting AT the
+    confcutdir (``_is_in_confcutdir`` is ``path not in confcutdir.parents``),
+    and a parent-level pin was verified to still import the leak.
+
+    Mutation that makes the regression test RED: drop the ``--confcutdir``
+    entry below (verified: ``test_a_nested_pytest_child_cannot_be_HIJACKED_by_
+    a_LEAKED_config_beside_its_tree`` then reads the child's ``ImportError``
+    and its ``rc=4``).
+    """
+    return [
+        sys.executable,
+        "-m",
+        "pytest",
+        "-q",
+        "-p",
+        "no:cacheprovider",
+        f"--confcutdir={tree}",
+        *extra,
+    ]
+
+
 def test_faulthandler_timeout_is_armed_below_the_per_test_budget():
     """Without the pyproject line a stall produces no frame — so this REDs.
 
@@ -161,18 +211,13 @@ def test_a_stall_dumps_its_own_frame(tmp_path):
         encoding="utf-8",
     )
     log = tmp_path / "stall.log"
-    cmd = [
-        sys.executable,
-        "-m",
-        "pytest",
-        "-q",
-        "-p",
-        "no:cacheprovider",
+    cmd = _nested_pytest_argv(
+        tmp_path,
         "-o",
         "faulthandler_timeout=1",
         "--timeout=300",
         "test_stall.py",
-    ]
+    )
     with log.open("w", encoding="utf-8") as fh:
         proc = subprocess.Popen(cmd, cwd=tmp_path, stdout=fh, stderr=subprocess.STDOUT)
         try:
@@ -342,18 +387,13 @@ def test_the_resolved_bound_from_the_repo_config_is_the_ci_budget(tmp_path):
         if k not in ("PYTEST_TIMEOUT", "PYTEST_ADDOPTS")
     }
     proc = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "pytest",
-            "-q",
+        _nested_pytest_argv(
+            tmp_path,
             "-s",
-            "-p",
-            "no:cacheprovider",
             "-c",
             str(PYPROJECT),
             str(tmp_path / "test_probe.py"),
-        ],
+        ),
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
@@ -750,17 +790,7 @@ def test_the_ini_source_kills_a_hung_item_with_no_timeout_flag(tmp_path):
     (tmp_path / "test_hang.py").write_text(
         "import time\n\n\ndef test_hang():\n    time.sleep(600)\n", encoding="utf-8"
     )
-    argv = [
-        sys.executable,
-        "-m",
-        "pytest",
-        "-q",
-        "-p",
-        "no:cacheprovider",
-        "-o",
-        "timeout=2",
-        "test_hang.py",
-    ]
+    argv = _nested_pytest_argv(tmp_path, "-o", "timeout=2", "test_hang.py")
     # The whole point is the branch that has no flag: assert the flag is absent
     # so a future edit cannot make this pass by supplying one.
     assert not any(a == "--timeout" or a.startswith("--timeout=") for a in argv)
@@ -792,3 +822,63 @@ def _wait_for_text(path: Path, needle: str, proc: subprocess.Popen, deadline_s: 
         if path.exists() and needle in path.read_text(encoding="utf-8", errors="replace"):
             return
         time.sleep(0.2)
+
+
+def test_a_nested_pytest_child_cannot_be_HIJACKED_by_a_LEAKED_config_beside_its_tree(
+    tmp_path,
+):
+    """A leaked config pair ABOVE the child's tree must not be imported (#11043).
+
+    Every child in this file runs against a throwaway tree, and pytest resolves
+    ``conftest.py`` by walking EVERY ancestor of the selected path. On a
+    self-hosted runner the shared temp root carried a stray copy of this repo's
+    ``conftest.py`` + ``pyproject.toml``; the leaked ini file made its directory
+    the child's ``confcutdir``, so the leaked conftest was imported, failed its
+    own ``from tests._live_utils import …`` and killed the child at ``rc=4``
+    with no item collected — the whole red of PR #11043's ``test (d)``.
+
+    This test reproduces that leak two levels ABOVE the selected file (the real
+    shape: the child's tree is deep under the shared root) and asserts the
+    child still runs. It is not a change-detector for `--confcutdir` alone:
+    the leaked ``conftest.py`` raises, so a child that imports it FAILS rather
+    than merely behaving differently.
+
+    Mutation that makes this RED: remove ``--confcutdir`` from
+    ``_nested_pytest_argv`` — the child then prints
+    ``ImportError while loading conftest '<shared>/conftest.py'`` and reports
+    ``rc=4``, and a PARENT-level pin was verified to still import the leak, so
+    the pin must name the directory holding the selected file.
+    """
+    shared = tmp_path / "shared"
+    run_dir = shared / "deep" / "run"
+    run_dir.mkdir(parents=True)
+    # The leak, byte-shaped like the measured one: an ini file (so pytest's
+    # `confcutdir` default becomes the leaked directory) beside a conftest that
+    # cannot be imported from outside the repo.
+    (shared / "pyproject.toml").write_text(
+        "[tool.pytest.ini_options]\naddopts = \"\"\n", encoding="utf-8"
+    )
+    (shared / "conftest.py").write_text(
+        "from tests._live_utils import graph_delete_events  # the leaked\n"
+        "# conftest's own first repo-bound import (#11043)\n",
+        encoding="utf-8",
+    )
+    (run_dir / "test_ok.py").write_text(
+        "def test_ok():\n    assert True\n", encoding="utf-8"
+    )
+    proc = subprocess.run(
+        _nested_pytest_argv(run_dir, "test_ok.py"),
+        cwd=run_dir,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    output = proc.stdout + proc.stderr
+    assert "ImportError" not in output and "conftest" not in output, (
+        "the nested child imported a conftest ABOVE its own tree — a leaked "
+        f"config pair in a shared ancestor hijacked the run:\n{output}"
+    )
+    assert proc.returncode == 0, (
+        f"the nested child did not run its one item (rc={proc.returncode}):\n{output}"
+    )
+    assert "1 passed" in output, f"the child collected nothing:\n{output}"
