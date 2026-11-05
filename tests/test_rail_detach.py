@@ -1097,6 +1097,47 @@ def test_a_record_written_under_an_older_spelling_still_blocks(tmp_path):
         assert st.merge_sha == "deadbeefcafe1234"
         assert rd.main(["collect", "55", "--state-dir", str(sd2),
                         "--assert-merged"]) == 0
+
+        # ── THE FORK-WINDOW CARRIER (`SPAWNING=1` + `CHILD_PID`, no `PID`)
+        # ⛔ MEASURED: `_record_is_live` called `_rail_alive(0, child, …)`, which is
+        # False because `_pid_alive` refuses `pid <= 0` — so the LIVE carrier was
+        # skipped, the dead canonical fallback won, `collect` answered `lost`, and
+        # `launch` started a SECOND rail. This is the artifact an old copy leaves
+        # when its launcher dies between `Popen` returning and the `PID=` append.
+        sd3 = tmp_path / "state3"
+        sd3.mkdir()
+        carrier = sd3 / "rail-github.com-o-r-88.md"
+        carrier.write_text(f"PR=88\nREPO=github.com/o/r\nSTARTED_AT={rd._iso_now()}\n"
+                          f"SPAWNING=1\nCHILD_PID={live.pid}\n", encoding="utf-8")
+        dead_c = rd.artifact_path(sd3, "o/r", 88)
+        dead_c.write_text(f"PR=88\nREPO=o/r\nSTARTED_AT={rd._iso_now()}\n"
+                          f"PID={dead_pid}\n", encoding="utf-8")
+        assert rd._record_is_live(carrier), \
+            "a CHILD_PID-carried rail must read live (the fork-window shape)"
+        st = rd.collect(sd3, "o/r", 88)
+        assert st is not None and st.state == rd.WAITING, (st and st.as_dict())
+        assert st.artifact == str(carrier), "the live carrier must outrank a dead record"
+        with pytest.raises(rd.Refused) as exc:
+            rd.launch(88, cwd=co, state_dir=sd3, repo="o/r")
+        assert "ALREADY LIVE" in str(exc.value), str(exc.value)
+
+        # ── TWO REPOS, ONE SLUG: the canonical path is admitted by `REPO=`, too
+        # ⛔ `_slug` folds `/` to `-`, so `a/b-c` and `a-b/c` share
+        # `rail-a-b-c-9.md`. Trusting the path alone served `a-b/c#9` the MERGED
+        # record of `a/b-c#9`, and `--assert-merged` exited 0 for a repo that never
+        # merged (pre-existing on main; closed here because the module's identity is
+        # `_repo_key` and this was the one candidate that skipped it).
+        sd4 = tmp_path / "state4"
+        sd4.mkdir()
+        colliding = sd4 / "rail-a-b-c-9.md"
+        colliding.write_text(f"PR=9\nREPO=a/b-c\nSTARTED_AT={rd._iso_now()}\n"
+                            f"PID={dead_pid}\n", encoding="utf-8")
+        assert rd.collect(sd4, "a-b/c", 9) is None, \
+            "another repo's record was served to this repo"
+        assert rd.main(["collect", "9", "--repo", "a-b/c", "--state-dir", str(sd4),
+                        "--assert-merged"]) == 3
+        # …while the repo the record NAMES is still answered.
+        assert rd.collect(sd4, "a/b-c", 9) is not None
     finally:
         live.kill()
         live.wait()

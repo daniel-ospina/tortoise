@@ -1187,7 +1187,22 @@ def _artifact_for_any_spelling(state_dir: Path, repo: str, pr: int) -> Path | No
     art = artifact_path(state_dir, repo, pr)
     key = _repo_key(repo or "")
     sd = Path(state_dir)
-    cands = [art] if art.exists() else []
+    # ⛔ THE CANONICAL PATH IS ADMITTED BY `REPO=` TOO. `_slug` folds `/` to `-` (and
+    # now also folds `.git`/SCP prefixes), so `a/b-c` and `a-b/c` BOTH slug to
+    # `rail-a-b-c-9.md`: trusting the path alone served `a-b/c#9` the merged record of
+    # `a/b-c#9`, and `collect --assert-merged` exited 0 for a repo that never merged.
+    # One-sided, exactly like `_names_this_repo`: a record whose `REPO=` is absent or
+    # unreadable has nothing to contradict it (a torn canonical write must still
+    # read), a record that names a DIFFERENT repo is not this repo's record.
+    def _names_key(p: Path) -> bool:
+        try:
+            text = p.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return False
+        named = _repo_key(read_field(text, "REPO") or "")
+        return not named or named == key
+
+    cands = [art] if art.exists() and _names_key(art) else []
     if key and sd.exists():
         for cand in sorted(sd.glob(f"rail-*-{pr}.md")):
             if cand == art:
@@ -1274,6 +1289,19 @@ def _record_is_live(art: Path) -> bool:
     leader = _int_or_none(read_field(text, "PID")) or 0
     child = _int_or_none(read_field(text, "CHILD_PID")) or 0
     age = _age_seconds(read_field(text, "STARTED_AT"))
+    if leader <= 0 and child > 0:
+        # ⛔ THE FORK-WINDOW CARRIER — `SPAWNING=1` + `CHILD_PID` with no `PID`, the
+        # documented shape a launcher killed between `Popen` returning and its
+        # `PID=` append leaves behind (`launch` writes those in two steps). It is a
+        # LIVE rail for its whole (queue-length) life and `_collect_read` protects
+        # it through this same test; without it here the resolver's live pass skips
+        # the record, the canonical fallback reports `lost`, and `launch` starts a
+        # SECOND rail — measured. Same one-sided stranger test as the verdict path:
+        # it can only say "not ours", never "ours".
+        if not _pid_alive(child, ""):
+            return False
+        return not _pid_is_a_stranger(child, read_field(text, "CHILD_STARTED"),
+                                      read_field(text, "CHILD_START_TICKS"))
     if leader <= 0 and child <= 0:
         # A bare `SPAWNING=1` sentinel: the launch is mid-fork, so it IS live until
         # its own TTL expires — the same bound `_collect_read` applies, and for the
