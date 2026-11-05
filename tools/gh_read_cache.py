@@ -999,8 +999,36 @@ def _accepts_hostname(argv: list[str]) -> bool:
     pass-through of a porcelain verb (`repo view {repo}`) got the flag appended and died at
     flag parsing (`unknown flag: --hostname`) instead of being served — a call that used to
     run now failed, without ever asking the right server.
+
+    ⛔ THE COMMAND IS IDENTIFIED THE WAY THE REST OF THIS FILE IDENTIFIES IT — by the ROUTE
+    POSITIONAL (`_api_route`), never by `argv[0]`. `gh` intersperses a subcommand's own flags
+    AND their separate VALUES before the verb (`gh -X GET api …` is a real invocation, measured
+    accepted — the premise `_api_route`, `_verb_positions` and `_route_candidates` each state),
+    so an `argv[0]` test classified a flag-prefixed `api` command as PORCELAIN and the
+    porcelain rewrite then substituted the slug into an API ROUTE. Both directions were
+    measured wrong at gh_read_cache.py's previous cut:
+
+      * `--argv -X GET api repos/{repo}` sent `-X GET api repos/ghe.example.com/o/n` with NO
+        `--hostname` at all — a route the caller never asked for, still aimed at github.com,
+        one call spent on a 404. That is the corruption
+        `test_an_api_pass_through_never_gets_a_hosted_route` exists to close, reopened one flag
+        to the left.
+      * `--argv -X GET api rate_limit` was REFUSED rc=2 with "this command has no `--hostname`
+        flag (only `gh api` has one)" — about a command whose verb IS `gh api`, where the flag
+        would have worked. A refusal whose diagnosis is wrong is the #5128 class.
+
+    `_api_route` returns non-None exactly when the walk reaches an `api` verb at a verb
+    position AND finds the single endpoint argument that `gh api` requires, so it answers "is
+    this an api command" without ever reading `argv[0]`. One predicate for that question, or
+    the two halves of this module disagree about the same command.
+
+    Pinned in both directions by
+    `test_a_flag_prefixed_api_pass_through_keeps_its_route_and_expresses_the_host` (the
+    corrupted route) and `test_a_flag_prefixed_api_pass_through_is_not_falsely_refused` (the
+    wrong refusal), plus the porcelain cases beside them, which assert the rewrite still
+    happens where `--hostname` really is a parse error.
     """
-    return bool(argv) and argv[0] == "api"
+    return _api_route(tuple(argv)) is not None
 
 
 def fetch(argv: list[str], gh: str | None = None, host: str = "") -> tuple[str, bool]:

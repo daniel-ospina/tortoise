@@ -1333,6 +1333,47 @@ class CacheTest(unittest.TestCase):
         self.assertNotIn("repos/ghe.example.com", sent, f"the host must not be injected: {sent!r}")
         self.assertEqual(sent.count("--hostname"), 1, f"exactly one host expression: {sent!r}")
 
+    def test_a_flag_prefixed_api_pass_through_keeps_its_route_and_expresses_the_host(self) -> None:
+        """⛔ `gh` PUTS A SUBCOMMAND'S FLAGS BEFORE THE VERB, so the verb is not `argv[0]`.
+
+        `gh -X GET api …` is a real invocation (measured accepted), which is why `_api_route`,
+        `_verb_positions` and `_route_candidates` each find the verb at a VERB POSITION. The
+        hostname gate tested `argv[0]` instead, so a flag-prefixed `api` command was classified
+        PORCELAIN and the porcelain rewrite substituted the slug INTO THE ROUTE:
+        `-X GET api repos/ghe.example.com/o/n`, with no `--hostname` at all — a route the caller
+        never asked for, still aimed at github.com, one call spent on a 404. Same corruption
+        `test_an_api_pass_through_never_gets_a_hosted_route` closes with the flagless spelling,
+        reopened one flag to the left.
+
+        Dies if the predicate reverts to `argv[0] == "api"`: `--hostname` then never reaches gh.
+        """
+        r = self.run_tool("get", "repo", "--repo", "ghe.example.com/o/n", "--gh", str(self.stub),
+                          "--cache-dir", str(self.cachedir), "--argv", "-X", "GET", "api", "repos/{repo}")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        sent = (self.stubdir / "argv.log").read_text()
+        self.assertIn("repos/o/n", sent, f"the route must carry the slug only: {sent!r}")
+        self.assertNotIn("repos/ghe.example.com", sent, f"the host must not be injected: {sent!r}")
+        self.assertIn("--hostname ghe.example.com", sent, f"the spelled host must be expressed: {sent!r}")
+        self.assertEqual(sent.count("--hostname"), 1, f"exactly one host expression: {sent!r}")
+
+    def test_a_flag_prefixed_api_pass_through_is_not_falsely_refused(self) -> None:
+        """⛔ THE MIRROR SPELLING WAS REFUSED rc=2 WITH A SELF-CONTRADICTORY DIAGNOSIS.
+
+        `--argv -X GET api rate_limit` names an `api` verb, so `--hostname` IS available and the
+        call was deliverable. Reading `argv[0]` said porcelain, and the refusal told the caller
+        "this command has no `--hostname` flag (only `gh api` has one)" — about a command whose
+        verb is `gh api`. A refusal whose diagnosis is wrong is the #5128 class, and it spends a
+        turn refusing a call the caller could just make.
+
+        Dies if the predicate reverts to `argv[0] == "api"`: rc=2 instead of 0.
+        """
+        r = self.run_tool("get", "repo", "--repo", "ghe.example.com/o/n", "--gh", str(self.stub),
+                          "--cache-dir", str(self.cachedir), "--argv", "-X", "GET", "api", "rate_limit")
+        self.assertEqual(r.returncode, 0, f"an `api` verb takes --hostname: rc={r.returncode} {r.stderr}")
+        sent = (self.stubdir / "argv.log").read_text()
+        self.assertIn("api rate_limit", sent, f"the route must reach gh verbatim: {sent!r}")
+        self.assertIn("--hostname ghe.example.com", sent, f"the spelled host must be expressed: {sent!r}")
+
     def test_a_pass_through_without_repo_still_expresses_the_spelled_host(self) -> None:
         """`--argv repo list --repo ghe.example.com/o/n` asked the DEFAULT instance.
 
