@@ -505,8 +505,9 @@ constant.
 own measurement table records a per-job queue wait (`created_at → started_at`, p50 5.4 m / p95
 21.3 m) — note that §2 does NOT: §2 measures EXECUTED WALL (`first step start → last step end`),
 a different clock, and it never reads `created_at`. **GitHub creates every cell of a direct matrix
-when the run starts**, all sharing one `created_at`, and `max-parallel` gates which of those
-already-created cells may **start** — so on a capped matrix this interval now counts cap-induced
+in one batch, all sharing one `created_at`, when the job becomes eligible** (after its `needs:`
+resolves — see the measurement below), and `max-parallel` gates which of those already-created
+cells may **start** — so on a capped matrix this interval now counts cap-induced
 queueing **and** runner-availability wait together, and it can attribute neither. A capped PR's
 per-job wait will therefore **rise**, not fall: a leg held for a slot is queued for the whole
 wave ahead of it. (Lazy cell creation is a property of a matrix job that calls a reusable
@@ -518,7 +519,7 @@ job — compared against the same band on an uncapped run. That is the quantity 
 number a later reading should judge the regression against.
 
 The read that confirms the shape on this repo's first capped run — one shared `created_at` across
-all 9 fast legs, with `started_at` spread over ~3 waves, is this text; distinct `created_at`
+all 9 fast legs, with `started_at` spread over the waves, is this text; distinct `created_at`
 values that track `started_at` would mean these cells are created lazily and this paragraph is
 wrong for this workflow:
 
@@ -526,3 +527,31 @@ wrong for this workflow:
 gh api "repos/daniel-ospina/tortoise/actions/runs/<capped_run_id>/jobs?per_page=100&filter=all" \
   --jq '.jobs[] | select(.name|startswith("test ")) | {name, created_at, started_at, completed_at}'
 ```
+
+**Taken 2026-11-05 on the first capped run** (`pull_request`, head `80d059348f68`, run
+`42034142918`, 26 jobs, jobs API `filter=all`) — the shape holds, measured rather than assumed; the
+batch is real, but it is created when the job becomes eligible, NOT at the run's start:
+
+| reading | value |
+| --- | --- |
+| the 4 `needs:`-less jobs (`changes`, `manifest-integrity`, `surface-guard`, `workflow-lint`) | one `created_at`: `14:57:11Z` |
+| every cell of all 3 matrices + the 6 jobs that need only `changes` (22 jobs) | one `created_at`: `15:38:51Z` |
+| the run's own creation | `13:15:19Z` — so its first job was created 1 h 42 m later |
+| fast legs' `started_at` (4 of 9) | `16:40:46`, `16:45:34`, `16:46:13`, `17:36:36` |
+| their wait, `created_at` → `started_at` | 62, 67, 67, **118** minutes |
+
+So the cells are created in ONE batch that shares a timestamp, and `max-parallel` gates which may
+start — both halves of the paragraph above are confirmed. What the batch is NOT is "the run's
+start": the cells are created when the job becomes eligible, i.e. **after its `needs:` resolves** —
+2 h 23 m into this run, not at `13:15:19Z`. The spread over ~3 waves is still not observable from
+this read (only 4 of 9 fast legs had started when it was taken, and they were spread over 1 h), so
+a later reader wanting the BAND must take it from a run whose matrix drained.
+
+⛔ **And the per-job wait on a QUEUED leg reads exactly 0, which is a trap the table above cannot
+show.** GitHub does not leave `started_at` null for a cell it has created but not started — it
+fills it with `created_at`. Measured on the same run: `test (e)`–`test (i)` were `status: queued`
+and every one reported `created_at == started_at == 15:38:51Z`, i.e. a wait of **0**, while the
+true wait on them was already ~2 h and counting (`test (d)` read 0 in the same snapshot and 118 m
+once it actually started). This biases a matrix's per-job wait the WRONG way — the legs
+contributing the most wait contribute zero — so filter on `status == "completed"` (or discard a
+`started_at` equal to `created_at`) before averaging, and do not read a low average as relief.
