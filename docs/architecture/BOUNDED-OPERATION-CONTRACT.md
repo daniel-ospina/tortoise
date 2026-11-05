@@ -105,13 +105,27 @@ ANN-window case specifically), and this document is the census, not the fix.
 With `offset`/`page` given it returns a `hasMore`/`total` dict — the `tag` arm and the default arm
 both inside `tortoise/mcp_server.py::tortoise_query`, the latter via
 `tortoise/sdk.py::paginated_query`. Unpaginated it returns a bare list on the success path — `tag`, and
-default through `tortoise/sdk.py::query` — except when that list is empty, a `kind` was given, **and**
+the default arm, which **since #10602 reaches that SAME `paginated_query` accessor with
+`skip=0, limit=eff_limit` (100)** — except when that list is empty, a `kind` was given, **and**
 `tortoise/query_suggestions.py::compute_suggestion` has a hint to offer, where the same handler
 returns `{"results", "suggestion"}`, a dict carrying no `hasMore`/`total`. Boundary refusals
 (`page < 1`, `offset < 0`, `limit < 1`) and an SDK failure surfacing from `_safe` return a structured
 error dict instead. **This block is not an inventory**: none of these branches has a row in the census
 above, and per the absence rule below they read as named-but-not-yet-censused, never as compliant — a
 complete enumeration is a finding for a census row, not a parenthetical here.
+
+⛔ **#10602 measured that SILENT arm, and it was not merely incomplete — it was the outage.** The
+default arm had no LIMIT at all (`tortoise/sdk.py::query` is `MATCH (n:Point) WHERE … RETURN
+properties(n)`), so `tortoise_query(kind="statement", limit=3)` returned the whole label: **15,708
+rows, 15,417 ms, no data**, and a deterministic `-32009` "wait budget exceeded / retry_after: 10"
+against a 10 s `mcp_auth._TRANSPORT_WAIT_BOUND_S`. Four concurrent readers of it drove `db.latency_ms`
+to **6,291 ms** and left health unanswered for 9 s. The arm is now bounded at `eff_limit`; **the
+truncation is still SILENT on the wire** (a bare list carries no `hasMore`/`total`), so this row
+remains an OPEN census finding. What changed is only that the bound is now disclosed in the SERVED
+tool description (`tortoise/tool_registry.py` — the text a model reads, not the handler docstring),
+and that a paged read is advertised as the way to walk the population. Making the truncation visible
+on the wire — returning the `hasMore`/`total` dict when `total > len(results)` — is a return-shape
+change and is deliberately NOT done here.
 
 ⚠️ **The census is a population, and this table is the part of it that has been measured** — it is
 NOT yet exhaustive. §1 also names *body/log caps* and *ingest chunking*, and no row here covers

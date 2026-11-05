@@ -1315,6 +1315,15 @@ surfaces:
   # #2938 silent-drop class does NOT bite here: it needs a named-surface match that REPLACES
   # the `core` fallback, and `mcp_auth.py` selects `api`, which is this arm.
   - test_wait_bound_write_ack.py
+  # #10602: `tortoise_query`'s structural path dropped its `limit` and read the
+  # whole label (15,708 statements), outliving the 10 s transport wait bound and
+  # returning `-32009` — the bound is now pushed to `paginated_query`. Registered
+  # on `api` like the rest of the mcp_server family (`tortoise/mcp_server.py` and
+  # `tortoise/tool_registry.py`, the two files it guards, are SHARED_MODULEs whose
+  # own changes already take the FULL matrix); this entry is what makes the guard
+  # RUN when the seam it pins moves, and unregistered it reds `manifest-integrity`
+  # (a required `python-ci-gate.needs` leg) by name — the #10856 class.
+  - test_10602_query_limit_bound.py
   - test_mcp_telemetry.py
   # #3675: the result-bearing `mcp_tool_call` prop. Dual-registered like the
   # rest of the mcp_server family (`tortoise/mcp_server.py` is a SHARED_MODULE,
@@ -8856,6 +8865,7 @@ durations:
   test_oauth_consent_client_identity_8218.py: 2.7  # new in #8218; the same shape as the `test_oauth_consent_page_step4.py` row below, whose node-spawning harness this suite reuses. ONE row only: `durations` is a single global map keyed by file, so a second row would be a duplicate key a YAML loader silently collapses — per-surface reasoning belongs in `surfaces`, and this file is registered on `api` and `core` (see both entries; the `core` arm is the AST-enumeration half). What it covers: 20 cases — the reproduction and the count-based invariant both render the REAL page through `GET /oauth/authorize` and execute its inline script under node (~1-4 s per render, which is why the real reading will land above the default; measured 13.84 s for the whole file on this host 2026-11-01, recorded for the refresher, deliberately NOT used as the weight), plus two AST enumerations over the whole `tortoise/` package (every `oauth_clients` toucher, every `client_name` consumer) that red the suite when a new identity source is written. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it — ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 2.0
   test_oauth_consent_page_step4.py: 3.1  # new in #3524 §9 step 4 (it REPLACES test_oauth_consent_pkce.py, deleted with the inline client it pinned); ONE row only: this suite is DUAL-REGISTERED (`api` + `onboarding`), but `durations` is a single global map keyed by file, so a second row would be a duplicate key a YAML loader silently collapses — ordering and per-surface comments belong in `surfaces`. What it covers: 60 cases — the bounce, the scope the page DISPLAYS being the one the token CARRIES (measured end to end) + return-target recovery, the real allowlist executed under node, the page's inline script executed under node (a dozen-plus cases spawn node, ~1-4 s each, which is why the real reading will land well above the default), the #6001 placeholder set ×8, #3443's four navigation arms plus its guard-removed control, the org preview's two identity arms and the #1701 R1 chooser, and the token-bound AS round trips. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it — ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 2.0
   test_mcp_server.py: 4.3  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 0.9 — ci-timing junit-census+top-15 2026-11-02 (run 41375596528): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (3.2s) is a LOWER bound; kept 4.3
+  test_10602_query_limit_bound.py: 2.3  # new in #10602; stub-only (no database) — measured 2.26 s for all 6 cases on this host 2026-11-05 (`pytest tests/test_10602_query_limit_bound.py -q`). `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it
   test_dashboard_client_paths_resolve.py: 2.6  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 9.5
   test_dashboard_login.py: 6.1  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 22.2
   test_capture_phase_d_dedup.py: 13.9  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 2.3 — ci-timing junit-census+top-15 2026-11-02 (run 41375596528): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (10.7s) is a LOWER bound; kept 13.9

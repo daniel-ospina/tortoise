@@ -180,3 +180,46 @@ def test_a_real_failure_still_surfaces_through_the_bound(stub_factory):
     result = tortoise_query(kind="statement", limit=2)
     assert isinstance(result, _SafeError), (
         "a failed read must surface as _SafeError, not as an empty list")
+
+
+def test_a_reserved_filter_key_is_a_structured_error_not_a_typeerror(stub_factory):
+    """#10602 review F3 — the bound must not turn a clean refusal into a crash.
+
+    `skip`/`limit` are reserved filter keys (`security.validate_filter_key`) AND
+    the names the bounded path passes as explicit keywords, so a caller's
+    `filters={"limit": 5}` collides at the `_safe(...)` call site — OUTSIDE its
+    `try` — and escaped as a bare TypeError. Before the bound, the same input
+    reached `validate_filter_key` inside `_safe` and came back as the structured
+    "Reserved filter key" error. Fails on the value `isinstance(result,
+    _SafeError)`; the fixture reaches it because 5 > 0 points and the filter dict
+    carries a colliding key.
+    """
+    from tortoise.mcp_server import _SafeError, tortoise_query
+    stub_factory(n_points=5)
+    for bad in ({"limit": 5}, {"skip": 3}):
+        result = tortoise_query(kind="statement", filters=bad)
+        assert isinstance(result, _SafeError), (
+            f"filters={bad} escaped as {type(result).__name__} instead of a "
+            "structured refusal")
+        assert "Reserved filter key" in str(result.get("error", "")), result
+
+
+def test_the_served_description_discloses_the_bound():
+    """#10602 review F2 — the truncation must not be SILENT to the caller.
+
+    `docs/architecture/BOUNDED-OPERATION-CONTRACT.md` §1 forbids returning a
+    silently-truncated result indistinguishable from a complete one. This arm
+    still returns a bare list (no `hasMore`/`total`), so the disclosure has to
+    live in the text the model actually reads: the tool's SERVED description
+    (`ToolDefinition.description`, what `FunctionTool.from_function` publishes),
+    not the handler docstring. Fails on the value of that description.
+    """
+    from tortoise.tool_registry import TOOL_REGISTRY
+    entry = next(t for t in TOOL_REGISTRY if t.name == "tortoise_query")
+    desc = entry.description.lower()
+    assert "bound" in desc, (
+        "the served description does not say the structural read is bounded: "
+        f"{entry.description}")
+    assert "offset" in desc, (
+        "the served description does not say how to walk the population: "
+        f"{entry.description}")

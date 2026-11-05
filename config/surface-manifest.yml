@@ -57,7 +57,7 @@
 # a constant here.
 manifest_version: 1
 issue: 3863
-cut_at_commit: 61af70a1ca
+cut_at_commit: e7702b15e012d1ee7da7a6d4ee3ecd692a59c14b
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -810,7 +810,7 @@ retired:
   approval: null
 rows:
 - name: tortoise_query
-  served_from: tortoise/mcp_server.py:208059b02d86d00b
+  served_from: tortoise/mcp_server.py:4eebed566dedf04f
   served_attributes: 7a717e4e60ce3bfa
   family: memory
   family_rank: 1
@@ -822,9 +822,11 @@ rows:
   cluster: query
   canonical: true
   job: 'Query points by pointKind and/or property filters — structural exact-match retrieval for known shapes (Epic
-    #888: paginated_query + query_points_by_tag merged in). Pagination via offset=/limit= (or 1-based page=); tag=
-    filters Points by TAGGED edge; include_retracted=True surfaces tombstones. For semantic relevance use tortoise_search;
-    for a single known ID use tortoise_get_point.'
+    #888: paginated_query + query_points_by_tag merged in). The structural read returns at most `limit` rows (default
+    100) — it is BOUNDED, not a full-population scan, so a truncated answer is not distinguishable from a complete
+    one; walk offset=/limit= (or 1-based page=) until hasMore is false when you need every row. tag= filters Points
+    by TAGGED edge; include_retracted=True surfaces tombstones. For semantic relevance use tortoise_search; for
+    a single known ID use tortoise_get_point.'
   dependency: declares TortoiseSDK.paginated_query (resolves)
   lifecycle: active
   used_by: agents, tooling, docs

@@ -3797,9 +3797,23 @@ def tortoise_query(kind: str | None = None,
     # in 1,362 ms with `total=15708`. So the bound is pushed to the ACCESSOR —
     # `paginated_query` is the SDK method that applies LIMIT — rather than
     # slicing the full list here, which would still pay the unbounded read.
+    _filters = _public_filters(filters)
+    # #10602 review (F3): `skip`/`limit` are reserved filter keys
+    # (`security.validate_filter_key`) AND the names this path now passes as
+    # explicit keywords, so a caller's `filters={"limit": 5}` would collide at
+    # THIS call site — outside `_safe`'s try — and escape as a bare TypeError
+    # instead of the structured "Reserved filter key" error the plain path used
+    # to return. Refuse it here, with the same wording the SDK raises.
+    _collide = sorted(set(_filters) & {"skip", "limit"})
+    if _collide:
+        return _SafeError({
+            "error": f"Reserved filter key: {_collide[0]!r}. This name collides "
+                     f"with internal query parameters (kind, skip, limit, "
+                     f"kind_<n>). Rename the property.",
+        })
     bounded = _safe(_get_org_sdk().paginated_query, kind, skip=0, limit=eff_limit,
                     include_retracted=include_retracted,
-                    **_public_filters(filters))
+                    **_filters)
     # `_safe` returns an `_SafeError` (a dict SUBCLASS) instead of raising, so
     # reading `.get("results")` off it without this gate would turn every
     # database failure into a successful empty read — the false PASS #10602's
