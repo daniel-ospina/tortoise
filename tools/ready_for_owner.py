@@ -66,7 +66,11 @@ HARD RULES ENCODED
       are excluded by the `check-` PREFIX, never by deleting lines from the file
       — deleting them would re-open #3016 (see `.mergify.yml`'s own warning).
 
-Exit codes: 0 PASS · 1 FAIL · 2 FAIL(unreadable).
+Exit codes report **condition 2** — the only implemented condition:
+`0` PASS · `1` FAIL · `2` FAIL(unreadable).
+The report's `verdict` field reports the WHOLE gate and stays `NOT-READY` while
+conditions 1/3/4 are stubs, so the exit status must not be derived from it (a
+merged, fully-green PR would otherwise exit 1, i.e. "a required check is red").
 """
 from __future__ import annotations
 
@@ -372,6 +376,16 @@ def fetch_check_runs(repo: str, sha: str) -> list[dict]:
     # become a verdict, never an AttributeError from `run.get(...)` downstream.
     if not all(isinstance(run, dict) for run in runs):
         raise RequiredSetUnreadable(f"check-runs response for {sha} carried a non-object entry")
+    # A well-formed response can still be SHORT of its own `total_count` (a
+    # pagination cap, a short read, a proxy). Defending only against unterminated
+    # JSON is not enough: a dropped page is exactly how a superseding red attempt
+    # disappears and a check reads green, and a short-but-valid body would sail
+    # straight through as a PASS.
+    total = doc.get("total_count")
+    if isinstance(total, int) and len(runs) < total:
+        raise RequiredSetUnreadable(
+            f"check-runs truncated for {sha}: received {len(runs)} of {total} — refusing to read a partial set"
+        )
     return runs
 
 
@@ -750,29 +764,48 @@ def main(argv: list[str] | None = None) -> int:
 
     codes = [EXIT_PASS]
     reports = []
+    failures = []
     for index, pr in enumerate(args.pr):
         try:
             sha = args.sha[index] if args.sha else _resolve_head(repo=args.repo, pr=pr)
             report = gate(pr, args.repo, sha, root)
         except RequiredSetUnreadable as exc:  # includes RateLimited
-            print(str(exc) if isinstance(exc, RateLimited) else f"{FAIL_UNREADABLE}: #{pr}: {exc}")
+            message = str(exc) if isinstance(exc, RateLimited) else f"{FAIL_UNREADABLE}: #{pr}: {exc}"
+            # A machine consumer of `--json` must be able to PARSE stdout, and an
+            # unreadable PR must not silently vanish from `reports` (an absence
+            # read as a verdict). So the message goes to stderr and the PR lands
+            # in the JSON as an explicit unreadable record.
+            if args.json:
+                print(message, file=sys.stderr)
+            else:
+                print(message)
+            failures.append({
+                "pr": pr,
+                "repo": args.repo,
+                "head_sha": None,
+                "condition_2_verdict": FAIL_UNREADABLE,
+                "detail": str(exc),
+                "conditions": [],
+                "verdict": "NOT-READY",
+            })
             codes.append(EXIT_UNREADABLE)
             continue
         reports.append(report)
         if not args.json:
             _print_report(report)
-        if report["verdict"] != "READY":
-            # `FAIL(unreadable)` means "I could not read the head" — a caller that
-            # retries on 2 and acts on 1 must not be told the PR is not ready
-            # because the read failed.
-            codes.append(
-                EXIT_UNREADABLE
-                if report.get("condition_2_verdict") == FAIL_UNREADABLE
-                else EXIT_FAIL
-            )
+        # EXIT STATUS REPORTS CONDITION 2 — the only implemented condition. The
+        # report's own `verdict` field reports the WHOLE gate and stays NOT-READY
+        # while conditions 1/3/4 are stubs, so deriving the exit code from it
+        # would make a merged, fully-green PR exit 1 ("a required check is red")
+        # — the very readiness/rail divergence this instrument exists to remove.
+        c2 = report.get("condition_2_verdict")
+        if c2 == FAIL_UNREADABLE:
+            codes.append(EXIT_UNREADABLE)
+        elif c2 != PASS:
+            codes.append(EXIT_FAIL)
 
     if args.json:
-        print(json.dumps(reports, indent=2))
+        print(json.dumps(reports + failures, indent=2))
 
     return EXIT_UNREADABLE if EXIT_UNREADABLE in codes else max(codes)
 

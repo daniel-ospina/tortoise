@@ -652,6 +652,55 @@ def test_the_workflow_map_failure_is_surfaced_in_the_required_set_notes(tmp_path
     assert any("403" in n for n in notes)
 
 
+def test_exit_0_for_a_green_head_in_pr_mode(tmp_path, monkeypatch):
+    """A fully-green head exits 0 even while conditions 1/3/4 are stubs.
+
+    The exit status reports CONDITION 2; deriving it from the whole-gate verdict
+    would make a merged, green PR exit 1 — "a required check is red" — which is
+    the readiness/rail divergence this instrument exists to remove.
+    """
+    tree = _write_tree(tmp_path, mergify=_mergify())
+    runs = [run("docs"), run("ai-review-gate"), run("python-ci-gate")]
+    monkeypatch.setattr(rfo, "fetch_check_runs", lambda repo, sha: runs)
+    monkeypatch.setattr(rfo, "fetch_workflow_ids", lambda repo, sha: ({}, None))
+    assert rfo.main(["--pr", "1", "--sha", "deadbeef", "--root", str(tree)]) == rfo.EXIT_PASS
+
+
+def test_json_mode_emits_parsable_json_when_a_head_cannot_be_resolved(tmp_path, monkeypatch, capsys):
+    """stdout must always be JSON in `--json` mode, and the PR must not vanish."""
+    tree = _write_tree(tmp_path, mergify=_mergify())
+
+    def boom(repo, pr):
+        raise rfo.RequiredSetUnreadable("cannot resolve head")
+
+    monkeypatch.setattr(rfo, "_resolve_head", boom)
+    code = rfo.main(["--pr", "7", "--json", "--root", str(tree)])
+    out = capsys.readouterr().out
+    doc = json.loads(out)  # would raise on the old plain-text-on-stdout path
+    assert code == rfo.EXIT_UNREADABLE
+    assert len(doc) == 1 and doc[0]["pr"] == 7
+    assert doc[0]["condition_2_verdict"] == rfo.FAIL_UNREADABLE
+
+
+def test_a_short_but_valid_check_run_set_is_UNREADABLE_not_a_PASS(monkeypatch):
+    """`total_count` > the bodies received is a TRUNCATED set, not a clean one."""
+    monkeypatch.setattr(
+        rfo, "_gh_api_json",
+        lambda endpoint: {"total_count": 3, "check_runs": [{"name": "docs", "status": "completed",
+                                                             "conclusion": "success", "id": 1}]},
+    )
+    with pytest.raises(rfo.RequiredSetUnreadable) as excinfo:
+        rfo.fetch_check_runs("o/r", "deadbeef")
+    assert "truncated" in str(excinfo.value)
+    assert "1 of 3" in str(excinfo.value)
+
+
+def test_a_complete_set_passes_the_total_count_check(monkeypatch):
+    runs = [{"name": "docs", "status": "completed", "conclusion": "success", "id": 1}]
+    monkeypatch.setattr(rfo, "_gh_api_json", lambda endpoint: {"total_count": 1, "check_runs": runs})
+    assert rfo.fetch_check_runs("o/r", "deadbeef") == runs
+
+
 # ── helpers ─────────────────────────────────────────────────────────────────
 
 
