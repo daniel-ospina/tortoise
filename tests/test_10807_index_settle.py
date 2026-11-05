@@ -46,6 +46,15 @@ _OBJECT_WITH_FULLTEXT = [
 _OBJECT_WITHOUT_FULLTEXT = [
     ["Object", ["id", "name"], {"id": ["RANGE"], "name": ["RANGE"]}],
 ]
+#: The SAME unsatisfied `until` answer with an extra row, so a wait that hands
+#: back its FIRST read is distinguishable from one that hands back its LAST.
+#: Used only by the expiry test: both answers fail the same precondition, so
+#: the wait can only stop on the bound, never on settling.
+_OBJECT_WITH_FULLTEXT_LATER = [
+    ["Object", ["id", "name"],
+     {"id": ["RANGE"], "name": ["RANGE", "FULLTEXT"]}],
+    ["Point", ["id"], {"id": ["RANGE"]}],
+]
 _POINT_REBUILDING = [
     ["Point", ["id", "pointKind"], {"id": ["RANGE"], "pointKind": ["RANGE"]},
      None, "english", [], "NODE", "[Indexing] 3/7: UNDER CONSTRUCTION"],
@@ -133,16 +142,31 @@ def test_a_bound_that_expires_returns_the_LAST_read_never_a_tolerant_pass():
 
     On expiry the callers' own assertions run against the mid-flight catalogue
     and RED — a drop that genuinely cannot happen is still reported as failed
-    rather than passing vacuously. `timeout=0` bounds it here; the shipped
-    default is a runaway guard, not an expected wait.
+    rather than passing vacuously.
+
+    ⛔ This test SPECIFICALLY has to hold the "LAST" in its name, so the script
+    answers with TWO DIFFERENT catalogues that BOTH fail the caller's
+    precondition, and the bound expires after SEVERAL reads. A ``timeout=0``
+    bound permits exactly ONE read, which makes "first" and "last" the same
+    read: it proves fail-closed (no fabricated clean state) but cannot
+    distinguish a wait that hands back its last read from one that hands back
+    its first — and "keep polling, then report what you actually last saw" is
+    the contract both callers rely on.
     """
-    proj = _ScriptedProj(_OBJECT_WITH_FULLTEXT)
+    proj = _ScriptedProj(_OBJECT_WITH_FULLTEXT, _OBJECT_WITH_FULLTEXT_LATER)
     rows = index_rows_after_settle(
         proj,
         until=lambda r: index_kind_absent(r, "Object", "name", "FULLTEXT"),
-        timeout=0)
-    assert rows == _OBJECT_WITH_FULLTEXT, (
-        "an expired bound must hand back the unsettled read so the caller's "
+        timeout=0.2, poll_s=0.01)
+    assert proj.reads >= 2, (
+        f"the bound must expire after SEVERAL reads, or 'LAST' means nothing "
+        f"(this run made {proj.reads}) — neither scripted answer satisfies "
+        f"`until`, so only the bound can stop the wait")
+    assert rows != _OBJECT_WITH_FULLTEXT, (
+        "an expired bound must not hand back its FIRST read — that is a "
+        "cached answer, not the state the catalogue was last seen in")
+    assert rows == _OBJECT_WITH_FULLTEXT_LATER, (
+        "an expired bound must hand back the LAST read so the caller's "
         "assertion fires — returning [] or a fabricated clean state would turn "
         "a real failure into a silent pass")
     assert INDEX_SETTLE_TIMEOUT_S > 1.0, (
