@@ -295,6 +295,63 @@ class CacheTest(unittest.TestCase):
         self.assertEqual(self.calls(), 0, "a refused route must not reach gh")
         self.assertEqual(list(self.cachedir.glob("*.json")), [], "and must write nothing")
 
+    def test_mutable_graphql_is_refused_with_a_leading_global_flag(self) -> None:
+        """`api graphql` is refused — and a flag between the verb and the route must not save it.
+
+        `graphql` is the ONE declared mutable route that is NOT under `repos/`, and
+        `_route_candidates` synthesised its `api <route>` candidate only for `repos/`-prefixed
+        tokens. So the reviewed head refused `api graphql` (rc=3) but SERVED
+        `api --paginate graphql` as rc=0: the exact spelling that helper exists to survive,
+        defeated on the one entry whose docstring says an under-match here spends a real call.
+        Nothing was cached either way (`--argv` is a pass-through), so this is a broken refusal
+        CONTRACT, not a stale-fresh fail-open — the distinction is why this is P2.
+        """
+        for route in (
+            ("api", "graphql"),
+            ("api", "--paginate", "graphql"),
+            ("api", "-X", "GET", "graphql"),
+            ("api", "--hostname", "github.com", "graphql"),
+            ("api", "graphql", "-f", "query={viewer{login}}"),
+        ):
+            r = self.run_tool(
+                "get", "repo", "--repo", "o/n",
+                "--gh", str(self.stub), "--cache-dir", str(self.cachedir),
+                "--argv", *route,
+            )
+            self.assertEqual(r.returncode, 3, f"{' '.join(route)} must be refused: {r.stderr}")
+            self.assertEqual(r.stdout, "")
+        self.assertEqual(self.calls(), 0, "a refused route must not reach gh")
+        self.assertEqual(list(self.cachedir.glob("*.json")), [], "and must write nothing")
+
+    def test_a_legitimate_read_survives_the_widened_route_candidates(self) -> None:
+        """The widened `api <tok>` set must refuse NOTHING that is not a declared route.
+
+        A widened deny-set is only safe if the direction that cannot be observed in production
+        is pinned too: an over-match here silently bricks a real invariant read. Each spelling
+        below is a live read the tool is supposed to serve, including the two shapes the wider
+        candidate set newly touches — a token equal to a flag's VALUE (`GET`, `github.com`) and
+        a projection whose text mentions a mutable word.
+        """
+        for route in (
+            ("api", "repos/o/n"),
+            ("api", "repos/o/n/labels"),
+            ("api", "user"),
+            ("api", "--paginate", "repos/o/n/branches"),
+            ("api", "-X", "GET", "repos/o/n/topics"),
+            ("api", "repos/o/n/releases", "--jq", ".[].state_name"),
+        ):
+            r = self.run_tool(
+                "get", "repo", "--repo", "o/n",
+                "--gh", str(self.stub), "--cache-dir", str(self.cachedir),
+                "--argv", *route,
+            )
+            self.assertEqual(r.returncode, 0, f"{' '.join(route)} must be served: {r.stderr}")
+            self.assertIn("1296269", r.stdout)
+        self.assertEqual(
+            list(self.cachedir.glob("*.json")), [],
+            "a pass-through emits but still stores nothing",
+        )
+
     def test_repo_slug_that_looks_like_a_verdict_is_still_served(self) -> None:
         """REGRESSION ([VGATE] F2): the resolved slug is not a REQUEST.
 

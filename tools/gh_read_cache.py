@@ -661,20 +661,30 @@ def _route_candidates(argv: tuple[str, ...]) -> list[str]:
 
     ⛔ NOT just `" ".join(argv)`, because global `gh` flags sit BETWEEN `api` and the
     route (`api --paginate repos/…`, `api -X GET repos/…`), so a position-0 prefix match
-    is defeated by an ordinary flag. Each `repos/...` token is also offered with the `api`
-    verb in front, which is the shape the patterns are written in.
+    is defeated by an ordinary flag. Every route-shaped token is also offered with the
+    `api` verb in front, which is the shape the patterns are written in.
 
     ⛔ AND A LEADING SLASH IS A THIRD SPELLING. `gh api /repos/o/n/pulls/42` is a real
     invocation (gh normalises it), so the route passed through — falsifying this file's own
     "however the caller spelled it" claim. A **PERCENT-ENCODED** segment is a fourth
     (`p%75lls` decodes to `pulls` inside gh): both are normalised before matching, because
     an unquoted spelling that gh resolves must not slip past the guard.
+
+    ⛔ AND THE SYNTHESISED CANDIDATE IS NOT `repos/`-ONLY. Widening it to `repos/`-prefixed
+    tokens alone left the ONE pattern whose route is not under `repos/` unprotected:
+    `api graphql` was refused, but `api --paginate graphql` (and `-X GET`, and any other
+    leading global flag) matched no candidate and was served as rc=0 — the very spelling
+    this function exists to survive, defeating the one entry whose docstring says an
+    under-match here "spends a real call". Flag-shaped tokens are skipped because they are
+    not routes; the widened set is pinned in both directions by
+    `test_mutable_graphql_is_refused_with_a_leading_global_flag` (the refusal) and
+    `test_a_legitimate_read_survives_the_widened_route_candidates` (no false refusal).
     """
     raw = list(argv)
     norm = [tok[1:] if tok.startswith("/") else tok for tok in raw]
     unq = [urllib.parse.unquote(tok) for tok in norm]
     candidates = [" ".join(raw), " ".join(norm), " ".join(unq)]
-    candidates.extend(f"api {tok}" for tok in unq if tok.lower().startswith("repos/"))
+    candidates.extend(f"api {tok}" for tok in unq if not tok.startswith("-"))
     return candidates
 
 
