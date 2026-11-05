@@ -40,10 +40,19 @@ VERSION_MARKER = "# tortoise-hook-version: 4"
 #:
 #: Evidence (2026-11-05, head `192de3b5f`, PR #10610): `test (d)` on run
 #: 42006117288 reported `test_hook_detaches_so_codex_cannot_kill_the_capture`
-#: FAILED on `pi-runner-c5-x64-4`, in the same leg whose own WATCHDOG banner
-#: records the box running ~5x slower than the timing model, while shards
-#: (a)-(c) and (f)-(i) were green. A spawn-latency miss, not a detach
-#: regression: nothing in that diff touches this seam or `tortoise/`.
+#: FAILED on `pi-runner-c5-x64-4`, in a leg that never finished: its own banner
+#: reads `WATCHDOG: pytest killed after 21m (1679 passed, 1 failed, 0 errored so
+#: far)`. Shards (a)-(c) and (f)-(i) were green. A spawn-latency miss, not a
+#: detach regression: nothing in that diff touches this seam or `tortoise/`.
+#:
+#: ⛔ NO BLANKET SPEED FACTOR (#10610 review cycle 3, P3). This comment used to say
+#: the banner "records the box running ~5x slower than the timing model". Measured:
+#: the banner records no ratio at all, and the ONE place this repo measures per-class
+#: cost, `.github/workflows/python-ci.yml` (`WHICH RUNNER CLASS CARRIES THIS LEG`),
+#: puts the x64 cells at **1.16x per test (1.45x sum)** and states in terms that "a
+#: blanket number would mispredict them". So the attribution is CONTENTION plus a
+#: spawn-latency model tuned on an idle host — named as what it is, not as a ratio
+#: the box never reported.
 #:
 #: The `elapsed < 2.5` bounds below are deliberately NOT widened — THOSE are
 #: the mutant detectors (a synchronous capture pays the fake's whole `sleep_s`),

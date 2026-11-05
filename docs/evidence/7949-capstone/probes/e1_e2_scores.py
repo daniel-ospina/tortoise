@@ -299,9 +299,45 @@ def _read_json(path: Path) -> dict:
         raise _refuse(f"{path} does not exist — a row cannot cite an artifact "
                       "the tree does not carry")
     try:
-        return json.loads(path.read_text())
+        payload = json.loads(path.read_text())
     except json.JSONDecodeError as exc:  # pragma: no cover - corrupt input
         raise _refuse(f"{path} is not JSON: {exc}") from exc
+    # ⛔ THE TOP LEVEL IS AN OBJECT OR IT IS REFUSED (#10610 review at `73382c7e6`,
+    # P2). Every reader below grades NAMED fields, so a file holding a list, a
+    # number or a string reached `.get(...)` as an `AttributeError` — exit **1**
+    # with a traceback, which an operator cannot tell from a crash, and not the
+    # exit-2 refusal this module's docstring promises. One guard here covers every
+    # record this driver reads, rather than one per field.
+    if not isinstance(payload, dict):
+        raise _refuse(f"{path} carries a {type(payload).__name__} at the top "
+                      "level, not a JSON object — this driver reads named "
+                      "fields, so a record of another type is an edited file")
+    return payload
+
+
+def _object_block(where: str, field: str, value: dict) -> dict:
+    """A record's named BLOCK must be a JSON object, or the reader refuses.
+
+    ⛔ `(value or {})` IS NOT A GUARD (#10610 review at `73382c7e6`, P2). A
+    non-empty STRING, number or list is truthy, so `value or {}` handed it to the
+    caller unchanged and the next `.get(...)` raised `AttributeError` — exit **1**
+    with a traceback instead of the exit-**2** refusal, the same class
+    `_unit_id_members`, `_count`, `_float_token` and `_consistent_share` already
+    convert-and-refuse. Measured on a copy of the shipped bundle:
+    `"with_anchor": "none"` and `"as_written": "none"` both exited 1 at
+    `with_anchor.get("injected_anchor")` / `as_written.get("value_units")` before
+    this guard, because the only test applied to them was truthiness.
+
+    The empty case is the CALLER's, not this helper's: `{}` is a well-formed block
+    that wrote nothing, and each site refuses it with its own message ("present but
+    empty is not the flat shape").
+    """
+    if not isinstance(value, dict):
+        raise _refuse(f"{where} carries a {field} that is not a JSON object "
+                      f"({type(value).__name__}: {value!r}) — the reader grades "
+                      "that block field by field, so a value of another type is "
+                      "an edited record")
+    return value
 
 
 def _refuse(message: str) -> SystemExit:
@@ -561,6 +597,20 @@ def frozen_denominators(repo: Path) -> dict:
     corpus = prereg.get("corpus") or {}
     if not corpus.get("fixtures_hash"):
         raise _refuse(f"{PREREG} carries no corpus.fixtures_hash")
+    # ⛔ A PIN THAT IS PRESENT BUT NOT A STRING IS REFUSED HERE (#10610 review at
+    # `73382c7e6`, P2). Truthiness accepted `12345`, `{"a": 1}`, `[1, 2]` and
+    # `true`, and every one of them then reached `normalise_pin`'s
+    # `value.startswith` as an `AttributeError` — exit **1**, not the exit-2
+    # refusal. It was the single unguarded member of an otherwise-guarded family
+    # (`value_bearing_units`, the three `denominator_floors` entries and E2a's
+    # `of` all refuse by type), so the pin the whole E1 corpus comparison rests on
+    # was the one value nobody type-checked.
+    if not isinstance(corpus["fixtures_hash"], str):
+        raise _refuse(f"{PREREG}'s corpus.fixtures_hash is a "
+                      f"{type(corpus['fixtures_hash']).__name__} "
+                      f"({corpus['fixtures_hash']!r}), not a string — it is "
+                      "compared against every record's pin, so a value of "
+                      "another type cannot be one")
     value_bearing = corpus.get("value_bearing_units")
     if not isinstance(value_bearing, int) or isinstance(value_bearing, bool):
         raise _refuse(f"{PREREG} carries no integer corpus.value_bearing_units "
@@ -1096,7 +1146,13 @@ def e2_score(repo: Path, floors: dict) -> dict:
     # the E2a record's. Checked here, AFTER the frozen-denominator refusal, so a
     # denominator defect in that block still gets the message that names the
     # pre-registered number — the more specific finding.
-    falsifier_as_written = falsifier.get("as_written") or {}
+    falsifier_as_written = {}
+    if "as_written" in falsifier:
+        # ⛔ A BLOCK IS AN OBJECT OR IT IS REFUSED (#10610 review at `73382c7e6`,
+        # P2): `falsifier.get("as_written") or {}` passed a non-empty string or
+        # list through to `.get(...)`, which is an `AttributeError` -> exit 1.
+        falsifier_as_written = _object_block(
+            E2A_FALSIFIER, "as_written", falsifier.get("as_written"))
     if "as_written" in falsifier and (
             falsifier_as_written.get("value_units"),
             falsifier_as_written.get("value_survived")) != (units, survived):
@@ -1125,12 +1181,17 @@ def e2_score(repo: Path, floors: dict) -> dict:
     # is for a flat record that declares no block at all. An EMPTY block is a
     # record that did not write its counter, and inheriting the top-level numbers
     # there would attribute the injected 14/14 to a provenance it does not carry.
-    if "with_anchor" in falsifier and not (falsifier.get("with_anchor") or {}):
-        raise _refuse(f"{E2A_FALSIFIER}'s with-anchor block is present but "
-                      "empty — the injected reading is the block this score is "
-                      "taken over, so an empty one is not the flat shape "
-                      "(e2_score)")
-    with_anchor = (falsifier.get("with_anchor") or falsifier)
+    if "with_anchor" in falsifier:
+        with_anchor_block = _object_block(
+            E2A_FALSIFIER, "with_anchor", falsifier.get("with_anchor"))
+        if not with_anchor_block:
+            raise _refuse(f"{E2A_FALSIFIER}'s with-anchor block is present but "
+                          "empty — the injected reading is the block this score is "
+                          "taken over, so an empty one is not the flat shape "
+                          "(e2_score)")
+        with_anchor = with_anchor_block
+    else:
+        with_anchor = falsifier
     # ⛔ The scored block must DECLARE the injection it is credited for. The
     # artifact carries `injected_anchor` precisely to say which reading this is
     # (`as_written.injected_anchor: false`, `with_anchor.injected_anchor: true`),
@@ -1231,11 +1292,20 @@ def score(repo: Path = _ROOT) -> dict:
         # two blocks; whichever it declares is checked, and a record that
         # declares TWO runs is caught by the headline (the field a reader sees
         # first) or, if the blocks disagree, by the scored-block arms below.
+        #
+        # ⛔ BOTH BLOCKS ARE SHAPE-CHECKED BEFORE THEY ARE READ (#10610 review at
+        # `73382c7e6`, P2): `(record.get("with_anchor") or {}).get("graph")`
+        # passed a non-empty STRING through to `.get` — the very `AttributeError`
+        # the scored-block arms below were guarded against, still reachable from
+        # HERE, which runs first. A guard applied at one of two call sites is not
+        # a guard; this arm is what the cycle-3 pin caught after the first fix.
+        blocks = ({}
+                  if name != E2A_FALSIFIER else
+                  {field: _object_block(name, field, record.get(field))
+                   for field in ("with_anchor", "as_written") if field in record})
         graph = str(record.get("graph")
-                    or ((record.get("with_anchor") or {}).get("graph")
-                        if name == E2A_FALSIFIER else "")
-                    or ((record.get("as_written") or {}).get("graph")
-                        if name == E2A_FALSIFIER else "") or "")
+                    or (blocks.get("with_anchor") or {}).get("graph")
+                    or (blocks.get("as_written") or {}).get("graph") or "")
         if not _names_head(graph, after["head"]):
             raise _refuse(f"{name} was taken on graph {graph!r}, which does not "
                           f"name head {after['head'][:_HEAD_PREFIX]}")
@@ -1254,13 +1324,17 @@ def score(repo: Path = _ROOT) -> dict:
     # record itself when that block is absent, exactly as `e2_score` reads it),
     # so that is the block whose graph must be checked — a record whose other
     # block names the head proves nothing about the run it was scored on.
-    if "with_anchor" in falsifier_record and not (
-            falsifier_record.get("with_anchor") or {}):
-        raise _refuse(f"{E2A_FALSIFIER}'s with-anchor block is present but "
-                      "empty — the injected reading is the block this score is "
-                      "taken over, so an empty one is not the flat shape "
-                      "(score)")
-    falsifier_scored = falsifier_record.get("with_anchor") or falsifier_record
+    if "with_anchor" in falsifier_record:
+        with_anchor_scored = _object_block(
+            E2A_FALSIFIER, "with_anchor", falsifier_record.get("with_anchor"))
+        if not with_anchor_scored:
+            raise _refuse(f"{E2A_FALSIFIER}'s with-anchor block is present but "
+                          "empty — the injected reading is the block this score is "
+                          "taken over, so an empty one is not the flat shape "
+                          "(score)")
+        falsifier_scored = with_anchor_scored
+    else:
+        falsifier_scored = falsifier_record
     falsifier_graph = str(falsifier_scored.get("graph") or "")
     if not _names_head(falsifier_graph, after["head"]):
         raise _refuse(f"{E2A_FALSIFIER}'s scored block was taken on graph "
@@ -1291,7 +1365,13 @@ def score(repo: Path = _ROOT) -> dict:
     # so the same graph. An ABSENT graph there is not a licence to inherit the
     # scored block's — that would assume the provenance this check exists to
     # prove, and report it as proven.
-    as_written_block = falsifier_record.get("as_written")
+    as_written_block = None
+    if "as_written" in falsifier_record:
+        # ⛔ `(as_written_block or {}).get("graph")` was the same unguarded read one
+        # function over: a string block passed the `or {}` and raised at `.get`
+        # (#10610 review at `73382c7e6`, P2).
+        as_written_block = _object_block(
+            E2A_FALSIFIER, "as_written", falsifier_record.get("as_written"))
     as_written_present = "as_written" in falsifier_record
     as_written_graph = str((as_written_block or {}).get("graph") or "")
     if as_written_present and not as_written_graph:
