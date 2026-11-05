@@ -1466,7 +1466,8 @@ jobs:
               # (and `tests/test_pytest_attribution.py` reds on it by design,
               # because this leg's failure set is a SUBSET of the half).
               # One definition: pytest-attribution.sh.
-              bash .github/scripts/pytest-attribution.sh --log "$PYTEST_LOG" --rc "$LF_RC"
+              bash .github/scripts/pytest-attribution.sh --log "$PYTEST_LOG" --rc "$LF_RC" \
+                --junit "$PYTEST_JUNIT_LF"
               echo "==================== pytest failure nodeids ===================="
               grep -E '^(FAILED|ERROR) ' "$PYTEST_LOG" || echo "(no FAILED/ERROR nodeids)"
               echo "ci-selection: last-failed-subset (#6142) — this half ran only its previous failures; the FULL half did NOT run in this job"
@@ -1517,7 +1518,13 @@ jobs:
           # FULL log instead, and name the INCOMPLETE case out loud so an
           # unattributable leg is a NAMED failure rather than a silent gap in
           # the #3467 failure set. One definition: pytest-attribution.sh.
-          bash .github/scripts/pytest-attribution.sh --log "$PYTEST_LOG" --rc "$rc"
+          # #10914: pass the leg's OWN junitxml. A leg killed at its watchdog never
+          # reaches `-r fEs`, so this log carries no `FAILED <nodeid>` record and the
+          # #9984 predicate read `ids=0` → `job-unreadable::` → BLOCK (measured on run
+          # 42050189058, job `test (f)`: 907 passed, 1 failed). The artifact did record
+          # it; the reporter now states it from there.
+          bash .github/scripts/pytest-attribution.sh --log "$PYTEST_LOG" --rc "$rc" \
+            --junit "$PYTEST_JUNIT"
           # Emit the FAILED/ERROR nodeids explicitly. Under `-v` the
           # `short test summary info` block sits far from the end (a ~10.8k
           # line log puts the FAILED lines ~2.4k lines back), so the tail
@@ -2393,7 +2400,13 @@ jobs:
           # FULL log instead, and name the INCOMPLETE case out loud so an
           # unattributable leg is a NAMED failure rather than a silent gap in
           # the #3467 failure set. One definition: pytest-attribution.sh.
-          bash .github/scripts/pytest-attribution.sh --log "$PYTEST_LOG" --rc "$rc"
+          # #10914: pass the leg's OWN junitxml. A leg killed at its watchdog never
+          # reaches `-r fEs`, so this log carries no `FAILED <nodeid>` record and the
+          # #9984 predicate read `ids=0` → `job-unreadable::` → BLOCK (measured on run
+          # 42050189058, job `test (f)`: 907 passed, 1 failed). The artifact did record
+          # it; the reporter now states it from there.
+          bash .github/scripts/pytest-attribution.sh --log "$PYTEST_LOG" --rc "$rc" \
+            --junit "$PYTEST_JUNIT"
           # Emit the FAILED/ERROR nodeids explicitly. Under `-v` the
           # `short test summary info` block sits far from the end (a ~10.8k
           # line log puts the FAILED lines ~2.4k lines back), so the tail
@@ -2994,7 +3007,13 @@ jobs:
           # channel. Read the summary from the FULL log instead, and name the
           # INCOMPLETE case out loud. One definition: pytest-attribution.sh.
           tail -25 "$PYTEST_LOG"
-          bash .github/scripts/pytest-attribution.sh --log "$PYTEST_LOG" --rc "$rc"
+          # #10914: pass the leg's OWN junitxml. A leg killed at its watchdog never
+          # reaches `-r fEs`, so this log carries no `FAILED <nodeid>` record and the
+          # #9984 predicate read `ids=0` → `job-unreadable::` → BLOCK (measured on run
+          # 42050189058, job `test (f)`: 907 passed, 1 failed). The artifact did record
+          # it; the reporter now states it from there.
+          bash .github/scripts/pytest-attribution.sh --log "$PYTEST_LOG" --rc "$rc" \
+            --junit "$PYTEST_JUNIT"
           echo "track-b rc=$rc (must-pass — gate member)"
           exit $rc
       - name: Skip-fail guard (track-b, epic #1647 Task 9)
@@ -3344,7 +3363,13 @@ jobs:
           # FULL log instead, and name the INCOMPLETE case out loud so an
           # unattributable leg is a NAMED failure rather than a silent gap in
           # the #3467 failure set. One definition: pytest-attribution.sh.
-          bash .github/scripts/pytest-attribution.sh --log "$PYTEST_LOG" --rc "$rc"
+          # #10914: pass the leg's OWN junitxml. A leg killed at its watchdog never
+          # reaches `-r fEs`, so this log carries no `FAILED <nodeid>` record and the
+          # #9984 predicate read `ids=0` → `job-unreadable::` → BLOCK (measured on run
+          # 42050189058, job `test (f)`: 907 passed, 1 failed). The artifact did record
+          # it; the reporter now states it from there.
+          bash .github/scripts/pytest-attribution.sh --log "$PYTEST_LOG" --rc "$rc" \
+            --junit "$PYTEST_JUNIT"
           # Emit the FAILED/ERROR nodeids explicitly. Under `-v` the
           # `short test summary info` block sits far from the end (a ~10.8k
           # line log puts the FAILED lines ~2.4k lines back), so the tail
@@ -3693,7 +3718,8 @@ jobs:
           rc=0
           timeout -s INT -k 10 15m python -m pytest tests/ -m embedded_only \
             -v --timeout=300 -p no:cacheprovider --junitxml="${RUNNER_TEMP:-/tmp}/junit-d14.xml" -o junit_family=xunit1 2>&1 | tee "${RUNNER_TEMP:-/tmp}/pytest-d14.log" || rc=$?
-          bash .github/scripts/pytest-attribution.sh --log "${RUNNER_TEMP:-/tmp}/pytest-d14.log" --rc "$rc"
+          bash .github/scripts/pytest-attribution.sh --log "${RUNNER_TEMP:-/tmp}/pytest-d14.log" --rc "$rc" \
+            --junit "${RUNNER_TEMP:-/tmp}/junit-d14.xml"
           [ "$rc" -eq 0 ] || exit "$rc"
           # Fail-closed on a silent all-skip — the #2188 review P3-1 shape,
           # widened. The floor is 30 and the number is NOT arbitrary: the four
@@ -4278,7 +4304,8 @@ jobs:
             2>&1 | tee "$SCRATCH/pytest.log"
           rc=${PIPESTATUS[0]}
           echo "$rc" > "$SCRATCH/pytest-rc"
-          bash .github/scripts/pytest-attribution.sh --log "$SCRATCH/pytest.log" --rc "$rc"
+          bash .github/scripts/pytest-attribution.sh --log "$SCRATCH/pytest.log" --rc "$rc" \
+            --junit "$SCRATCH/junit.xml"
           exit $rc
       - name: The DB legs RAN, not skipped (#9551)
         # The target of the issue is "0 of the two DB legs skipped in the armed

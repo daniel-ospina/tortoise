@@ -1035,6 +1035,171 @@ def test_bad_invocation_is_exit_2(argv: list[str]) -> None:
     assert "::error::pytest-attribution:" in result.stdout
 
 
+# ── 1c. a killed leg states its FAILURE SET from its own junitxml (#10914) ──
+#
+# A leg killed at its watchdog never reaches `-r fEs`, so its LOG carries no
+# `FAILED <nodeid>` record: the failing testcase appears only as a `-v` progress
+# line. Measured on run 42050189058, job `test (f)` (907 passed, **1 failed**,
+# killed at its 26m budget): `ci_exemption.py ids` read ZERO ids from that log, so
+# the #9984 predicate fell back to `job-unreadable::test-f` and the merge was
+# BLOCKED — while the leg's own `--junitxml` held the nodeid AND its exception type
+# on disk. The record existed; nothing read it.
+#
+# These tests pin the three properties that make reading it safe:
+#   1. the emission is pytest's OWN `-r fEs` shape, so the rail derives the same id
+#      and the same signature a completed run would (pinned against the rail itself
+#      in §2b — the equivalence is EXECUTED, not asserted);
+#   2. a leg that owns a verdict never re-emits — one failure, one source;
+#   3. an absent/unparseable artifact is NAMED as unknown and emits no id, so a
+#      missing junitxml can never read as "no test failed".
+
+#: A killed leg's log: pytest's `-v` progress stream, no session summary, and no
+#: `FAILED`/`ERROR` record — the shape the rail reads as `ids=0`.
+KILLED_LEG_LOG = (
+    "==================== test session starts ====================\n"
+    "platform linux -- Python 3.12.14, pytest-9.1.1, pluggy-1.5.0\n"
+    "plugins: xdist-3.8.0, timeout-2.4.0\n"
+    "timeout: 300.0s\ntimeout method: signal\n"
+    "created: 4/4 workers\n"
+    "tests/test_capture_cost_measurement.py::test_a_cost_row_is_emitted PASSED [ 17%]\n"
+    "tests/test_capture_cost_measurement.py::test_emission_write_is_handed_off_the_event_loop"
+    " FAILED [ 18%]\n"
+    # Started, never resolved: the kill landed here (the in-flight report's subject).
+    "tests/test_capture_phase_d_dedup.py::test_capture_promotes_a_new_operator\n"
+)
+
+#: The junitxml that leg wrote — pytest's own xunit1 output, COPY-EDITED FROM A REAL
+#: RUN of each failure shape (see `test_the_emitted_detail_matches_pytest_s_own_block`
+#: for the matching `-r fEs`/FAILURES rendering each one is compared against).
+JUNIT_KILLED_LEG = """<?xml version="1.0" encoding="utf-8"?>\
+<testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="2" \
+skipped="0" tests="3" time="1570.0">\
+<testcase classname="tests.test_capture_cost_measurement" \
+name="test_emission_write_is_handed_off_the_event_loop" \
+file="tests/test_capture_cost_measurement.py" line="3097" time="300.0">\
+<failure message="Failed: Timeout (&gt;300.0s) from pytest-timeout.">\
+def test_emission_write_is_handed_off_the_event_loop():
+&gt;       resp = _b7_capture_client.post("/v1/sessions", json={...})
+E       Failed: Timeout (&gt;300.0s) from pytest-timeout.
+
+tests/test_capture_cost_measurement.py:3143: Failed</failure></testcase>\
+<testcase classname="tests.test_capture_cost_measurement" name="test_a_cost_row_is_emitted" \
+file="tests/test_capture_cost_measurement.py" line="1428" time="0.1" />\
+<testcase classname="tests.test_x" name="test_shape[2]" file="tests/test_x.py" line="9" \
+time="0.1"><failure message="assert 2 == 1">v = 2
+
+    @pytest.mark.parametrize("v", [1, 2])
+    def test_shape(v):
+&gt;       assert v == 1
+E       assert 2 == 1
+
+tests/test_x.py:12: AssertionError</failure></testcase>\
+</testsuite></testsuites>
+"""
+
+EMITTED_TIMEOUT = (
+    "FAILED tests/test_capture_cost_measurement.py::"
+    "test_emission_write_is_handed_off_the_event_loop"
+    " - Failed: Timeout (>300.0s) from pytest-timeout."
+)
+EMITTED_ASSERTION = "FAILED tests/test_x.py::test_shape[2] - AssertionError: assert 2 == 1"
+
+
+def _killed_leg(tmp_path: Path, junit: str | None = JUNIT_KILLED_LEG) -> tuple[Path, Path]:
+    log = tmp_path / "pytest.log"
+    log.write_text(KILLED_LEG_LOG, encoding="utf-8")
+    path = tmp_path / "junit.xml"
+    if junit is not None:
+        path.write_text(junit, encoding="utf-8")
+    return log, path
+
+
+def _reported_failures(stdout: str) -> list[str]:
+    """The `FAILED`/`ERROR` records the reporter itself emitted (not its prose)."""
+    return [ln for ln in stdout.splitlines() if re.match(r"^(FAILED|ERROR) ", ln)]
+
+
+def test_a_killed_leg_states_its_failing_testcases_from_its_own_junitxml(
+        tmp_path: Path) -> None:
+    """The measured gap: the leg's own artifact names what its log could not.
+
+    Both failures are reported — the parametrized id keeps its `[2]` suffix (a
+    truncated id is a DIFFERENT test, and the comparable database keys on it) — and
+    each carries pytest's `<ExceptionType>: <E-line>` shape, which is what gives the
+    rail a signature to compare against main instead of an unsigned row.
+    """
+    log, junit = _killed_leg(tmp_path)
+    result = run_script(log, "--junit", str(junit), rc="137")
+    assert result.returncode == 0, result.stderr
+    assert "INCOMPLETE" in result.stdout, "the leg must still be named unobservable"
+    assert _reported_failures(result.stdout) == [EMITTED_TIMEOUT, EMITTED_ASSERTION], (
+        f"the reporter did not state the leg's own failing testcases:\n{result.stdout}")
+
+
+def test_a_completed_leg_never_re_emits_its_failures_from_the_junitxml(
+        tmp_path: Path) -> None:
+    """One failure, ONE source: a leg that owns a summary already published them.
+
+    Re-emitting would put the same id in the log twice with a second provenance — a
+    signature that could disagree with the block the rail prefers.
+    """
+    log = tmp_path / "pytest.log"
+    log.write_text(
+        "==================== test session starts ====================\n"
+        "tests/test_x.py::test_shape[2] FAILED [ 50%]\n"
+        "==================== short test summary info ====================\n"
+        "FAILED tests/test_x.py::test_shape[2] - assert 2 == 1\n"
+        "= 1 failed in 0.50s =\n",
+        encoding="utf-8")
+    junit = tmp_path / "junit.xml"
+    junit.write_text(JUNIT_KILLED_LEG, encoding="utf-8")
+    result = run_script(log, "--junit", str(junit), rc="1")
+    assert result.returncode == 0, result.stderr
+    assert _reported_failures(result.stdout) == [], (
+        f"a completed leg re-emitted its own failure records:\n{result.stdout}")
+
+
+@pytest.mark.parametrize(
+    ("junit_state", "expected"),
+    [
+        ("missing", "does not exist"),
+        ("empty", "holds no failing testcase"),
+        ("unparseable", "could not be parsed"),
+    ],
+)
+def test_an_unreadable_junitxml_is_named_unknown_never_an_empty_failure_set(
+        tmp_path: Path, junit_state: str, expected: str) -> None:
+    """Fail CLOSED: no artifact is UNKNOWN, and UNKNOWN is not "nothing failed".
+
+    The interesting failure is silent: a reporter that emitted nothing at all here
+    would be indistinguishable from a clean leg, which is the class this file exists
+    to prevent.
+    """
+    junit_text = {
+        "missing": None,
+        "empty": '<?xml version="1.0"?><testsuites><testsuite /></testsuites>',
+        "unparseable": "<testsuites><testsuite><testcase ",
+    }[junit_state]
+    log, junit = _killed_leg(tmp_path, junit=junit_text)
+    result = run_script(log, "--junit", str(junit), rc="137")
+    assert result.returncode == 0, result.stderr
+    assert _reported_failures(result.stdout) == [], (
+        f"an unreadable junitxml produced a failure id:\n{result.stdout}")
+    assert expected in result.stdout, (
+        f"the {junit_state} artifact was not NAMED (expected {expected!r}):\n"
+        f"{result.stdout}")
+
+
+def test_a_leg_that_wrote_no_junitxml_states_no_test_level_identity(
+        tmp_path: Path) -> None:
+    """`--junit` is optional, and its absence is stated — never silently empty."""
+    log, _ = _killed_leg(tmp_path, junit=None)
+    result = run_script(log, rc="137")
+    assert result.returncode == 0, result.stderr
+    assert _reported_failures(result.stdout) == [], result.stdout
+    assert "no --junit was passed" in result.stdout, result.stdout
+
+
 # ── 2. the rail, executed — the marker is ATTRIBUTABLE ─────────────────────
 
 
@@ -1086,6 +1251,154 @@ def test_incomplete_marker_becomes_a_named_attributable_failure(tmp_path: Path) 
     keys, rc = _rail_ids(_capture(INCOMPLETE_MARKER), tmp_path)
     assert rc == 0
     assert "test-leg-INCOMPLETE-no-pytest-summary-failure-set-unobservable" in keys, keys
+
+
+# ── 2b. the emitted record IS the rail's record — measured, not asserted ────
+#
+# The point of emitting from the junitxml is not "the log now names a test". It is
+# that the rail can COMPARE that name against main, which needs the same id AND the
+# same signature a completed run produces for the same failure. Below: the same two
+# failures rendered both ways — as pytest renders them on a completed run (FAILURES
+# block + `-r fEs`), and as this reporter renders them from the killed leg's
+# junitxml — through the SAME two doors, compared for equality. If a future edit
+# changes the emission shape (drops the `<Type>: ` prefix, truncates a parametrized
+# suffix), the two sides stop matching here.
+
+#: The SAME failures as `JUNIT_KILLED_LEG`, in the shape a COMPLETED run writes: the
+#: FAILURES block (where the rail takes the exception TYPE from, via pytest's
+#: `path.py:LINE: ExceptionType` trailer) and the `-r fEs` short summary.
+COMPLETED_LEG_LOG = """\
+___________________ test_emission_write_is_handed_off_the_event_loop ___________________
+    def test_emission_write_is_handed_off_the_event_loop():
+>       resp = _b7_capture_client.post("/v1/sessions", json={...})
+E       Failed: Timeout (>300.0s) from pytest-timeout.
+
+tests/test_capture_cost_measurement.py:3143: Failed
+_____________________________ test_shape[2] ______________________________
+    @pytest.mark.parametrize("v", [1, 2])
+    def test_shape(v):
+>       assert v == 1
+E       assert 2 == 1
+
+tests/test_x.py:12: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_capture_cost_measurement.py::test_emission_write_is_handed_off_the_event_loop - Failed: Timeout (>300.0s) from ...
+FAILED tests/test_x.py::test_shape[2] - assert 2 == 1
+===================== 2 failed in 300.4s ======================
+"""
+
+
+def _rail_signatures(text: str, tmp_path: Path) -> dict[str, set[str]]:
+    """`ci_exemption.py signatures` over a de-stamped capture, as nodeid -> signatures.
+
+    De-stamped on purpose: the #9984 predicate removes the per-line transport stamp
+    (`strip_transport_stamps`) before EITHER door reads the per-job log, and the
+    signature door's `_LOG_PREFIX_RE` requires a tab before a timestamp — so a
+    stamped line never matches its `^FAILED` anchor (#10202 review 4).
+    """
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    cap = tmp_path / "capture-signatures.txt"
+    cap.write_text(text)
+    result = subprocess.run(
+        [sys.executable, str(EXEMPTION_PY), "signatures", "--log", str(cap)],
+        capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    out: dict[str, set[str]] = {}
+    for line in result.stdout.splitlines():
+        if not line or line.startswith("ci-exemption:"):
+            continue
+        nodeid, _, sig = line.partition("\t")
+        if nodeid.strip():
+            out.setdefault(nodeid.strip(), set()).add(sig.strip())
+    return out
+
+
+@pytest.mark.skipif(not RAIL_AVAILABLE, reason=RAIL_ABSENT_REASON)
+def test_the_junit_emission_reaches_the_rail_as_the_same_failure(tmp_path: Path) -> None:
+    """Both renderings of one failure must land on the SAME id and signature."""
+    log, junit = _killed_leg(tmp_path)
+    killed = run_script(log, "--junit", str(junit), rc="137")
+    assert killed.returncode == 0, killed.stderr
+    emitted = _rail_signatures(killed.stdout, tmp_path / "killed")
+    completed = _rail_signatures(COMPLETED_LEG_LOG, tmp_path / "completed")
+    assert emitted, (
+        "the rail read NO id from the reporter's own output — the emission is "
+        f"unattributable, which is the whole defect:\n{killed.stdout}")
+    assert emitted == completed, (
+        "the killed leg's junitxml does not reproduce the failure a completed run "
+        f"records for the same test — the rows are not comparable:\n"
+        f"emitted:   {emitted}\ncompleted: {completed}")
+    # And the ids are the real ones, suffix and all.
+    assert set(emitted) == {
+        "tests/test_capture_cost_measurement.py::"
+        "test_emission_write_is_handed_off_the_event_loop",
+        "tests/test_x.py::test_shape[2]",
+    }, emitted
+
+
+# ── 2c. the wiring: a leg that WRITES a junitxml must PASS it ──────────────
+#
+# The emission above is worthless if the call site forgets `--junit`: the leg falls
+# straight back to stating nothing, which is the `ids=0` → `job-unreadable::` →
+# BLOCK path this change closes (#10914). So the pairing is derived from the
+# workflow rather than remembered: for EVERY reporter call, the pytest invocation it
+# reports on is located, and when that invocation writes `--junitxml=`, the call
+# must name the same artifact with `--junit`.
+#
+# It is a REQUIRED pairing, not a suggestion, only where the artifact exists — the
+# `test-concurrency-falkor` leg runs a fixed nodeid list with no `--junitxml` at all,
+# so it is correctly exempt by construction (not by an allow-list that would rot).
+
+_JUNITXML_ARG_RE = re.compile(r"--junitxml=(\"[^\"]+\"|\S+)")
+
+
+def _joined_command(lines: list[str], start: int) -> str:
+    """A bash command as written: the line at `start` plus its `\\` continuations."""
+    parts = [lines[start]]
+    i = start
+    while parts[-1].rstrip().endswith("\\") and i + 1 < len(lines):
+        i += 1
+        parts.append(lines[i])
+    return "\n".join(parts)
+
+
+def test_every_leg_that_writes_a_junitxml_passes_it_to_the_reporter() -> None:
+    lines = WORKFLOW.read_text().splitlines()
+    # A commented-out invocation is not a site; `# ... python -m pytest` in the prose
+    # above every leg is common in this file and must not be counted.
+    pytest_sites = [
+        i for i, ln in enumerate(lines)
+        if re.search(r"\bpython\s+-m\s+pytest\b", ln) and not ln.strip().startswith("#")
+    ]
+    checked = 0
+    for site, line in enumerate(lines):
+        if "bash .github/scripts/pytest-attribution.sh" not in line:
+            continue
+        assert not line.strip().startswith("#"), (
+            f"python-ci.yml:{site + 1}: the reporter call is COMMENTED OUT:\n{line}")
+        call = _joined_command(lines, site)
+        prior = [i for i in pytest_sites if i < site]
+        assert prior, (
+            f"python-ci.yml:{site + 1}: no `python -m pytest` invocation above this "
+            "reporter call — this guard no longer knows what the call reports on")
+        invocation = _joined_command(lines, prior[-1])
+        junit = _JUNITXML_ARG_RE.search(invocation)
+        if junit is None:
+            # The leg keeps no junitxml: there is no artifact to name (#10914's
+            # concurrency leg). Nothing to require.
+            continue
+        checked += 1
+        assert "--junit" in call, (
+            f"python-ci.yml:{site + 1}: this leg writes {junit.group(0)} but does not "
+            "pass it to the reporter — a kill at its watchdog then states NO failing "
+            "testcase, which is the `ids=0` → `job-unreadable::` → BLOCK defect this "
+            f"change closes (#10914):\n{call}")
+    assert checked >= 6, (
+        f"only {checked} reporter call(s) in python-ci.yml were checked for the "
+        "--junit pairing — the legs that write a junitxml are not the ones this "
+        "guard just inspected, so it has gone vacuous (raise/lower this floor with "
+        "the leg inventory, never to make a red go away)")
 
 
 # ── 3. coverage of the workflow's legs (structural) ────────────────────────
