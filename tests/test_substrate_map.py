@@ -1553,7 +1553,7 @@ def test_the_document_label_prose_count_is_the_LINE_count() -> None:
 
     The figure is pinned to the TREE, not to `4f68a2aa7`, because that is what §5
     claims it is: population = every tracked file under `tortoise/`. It has since
-    moved to **56** lines across **18** files — `cache_eviction.py:611` (the #10976
+    moved to **56** lines across **18** files — `cache_eviction.py:616` (the #10976
     census's note on why labels do not partition the node set) is one more piece of
     prose naming the retired label. That move is the mechanism working: the census
     landed, this check reddened, and §5 was re-measured instead of the number being
@@ -1561,7 +1561,7 @@ def test_the_document_label_prose_count_is_the_LINE_count() -> None:
 
     §5's second number is pinned with it: the narrow `\\(\\w*:Document` pattern
     matching **three** lines now — the two RST literals in `migrate_kinds.py:63,170`
-    plus that same `cache_eviction.py:611` comment — is what makes *"a guard would
+    plus that same `cache_eviction.py:616` comment — is what makes *"a guard would
     have needed a hand-maintained allowlist"* a measurement rather than an assertion,
     and it moved 2 → 3 with the line count. The pin is exact for the same reason the
     first one is: a narrow pattern that starts matching most of the prose is the day
@@ -1591,6 +1591,47 @@ def test_the_document_label_prose_count_is_the_LINE_count() -> None:
         "§5 records (2 RST literals in `migrate_kinds.py` + the `cache_eviction.py` "
         "comment) — the exclusion argument needs re-measuring"
     )
+
+
+def test_every_cited_line_in_this_section_still_carries_the_prose_it_describes() -> None:
+    """Fails if a `cache_eviction.py:<n>` pointer drifts off the line it names.
+
+    Reachable — and it WAS the shipped state: §5 (and this file's docstring) cited
+    `cache_eviction.py:611`, which was correct at `52c15ebca` and then became a bare
+    `)` when `6e96734e3` ("`__all__` names every public symbol…") added five entries
+    to `__all__` ABOVE the comment. The line COUNT was re-measured in that paragraph;
+    the pointer was not. A reader re-examining the no-regex-check decision follows
+    that pointer as the evidence — and lands on `)`.
+
+    The count pin above cannot catch this: it pins the NUMBER (56/18), not where the
+    number came from. This is the same silent-staleness class the PR closed for
+    `Pinned by tests/…` citations with
+    `test_every_pin_reference_in_ci_selection_names_a_test_that_exists`: a citation
+    that names something is checked against the thing it names, or it is decoration.
+
+    A line pointer is a moving target by design, and that is the point — when the
+    prose moves, this reds and §5 is re-measured rather than read past.
+    """
+    doc = _doc()
+    cited = sorted({int(n) for n in re.findall(r"cache_eviction\.py:(\d+)", doc)})
+    assert cited, (
+        "§5's `cache_eviction.py:<line>` citation is gone — re-state the evidence "
+        "pointer rather than dropping it silently"
+    )
+    source_lines = (REPO / "tortoise" / "cache_eviction.py").read_text(
+        encoding="utf-8"
+    ).splitlines()
+    for line_no in cited:
+        assert 1 <= line_no <= len(source_lines), (
+            f"§5 cites `cache_eviction.py:{line_no}`, but the file has only "
+            f"{len(source_lines)} lines"
+        )
+        assert ":Document" in source_lines[line_no - 1], (
+            f"§5 cites `cache_eviction.py:{line_no}` as the `:Document` prose line, "
+            f"but that line is {source_lines[line_no - 1]!r} — the pointer drifted "
+            f"when lines moved above it; re-measure the pointer (§5), never widen "
+            f"this assertion"
+        )
 
 
 def test_the_summary_line_agrees_with_the_named_holes_section() -> None:

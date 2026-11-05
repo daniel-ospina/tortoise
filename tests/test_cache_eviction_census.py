@@ -33,6 +33,7 @@ from tortoise.cache_eviction import (
     ParityReport,
     assess,
     classify,
+    config_labels,
     load_parity_report,
     measure_state,
     node_total,
@@ -374,13 +375,42 @@ def test_config_labels_come_from_projections_registry_not_a_copy():
     The config term has ONE owner, `projection._config_classes()`. If this module
     kept its own list the two would drift the first time a pack is added, and the
     drift would show up as a config node counted as derived.
+
+    ⛔ This goes THROUGH `config_labels()`, and then through `assess()` — its only
+    caller — because a test named for that function must fail when the function
+    does. An earlier revision built the label set HERE and handed it to
+    `classify(config=...)` directly, so `return frozenset()` inside `config_labels()`
+    survived the entire suite: the empty set is the safe direction today and the
+    WRONG one the day a class is proven, which is exactly what that function's own
+    docstring is about.
     """
     from tortoise.projection import _config_classes
 
-    labels = {cls.label for cls in _config_classes()}
-    assert labels, "the config registry must not be empty"
-    for label in sorted(labels)[:3]:
-        assert classify(label, config=labels) == "config"
+    registry = frozenset(cls.label for cls in _config_classes())
+    assert registry, "the config registry must not be empty"
+    assert config_labels() == registry, (
+        "`config_labels()` must BE projection's registry, not a second copy: a "
+        "hand-kept list drifts the first time a pack is added"
+    )
+    for label in sorted(registry):
+        assert classify(label, config=config_labels()) == "config"
+
+    # And through the only consumer: a registry class reaches `assess` as `config`,
+    # is never eligible, and is never offered as evictable. With `frozenset()` here
+    # the authority below is `unclassified` — a different CLASS, not just a
+    # different word, so this cannot pass on the mutation.
+    config_label = sorted(registry)[0]
+    g = _FakeGraph({config_label: 3})
+    c = _FakeClient(used=900, maxmemory=0)
+
+    result = assess(c, g, "tortoise")
+
+    reading = {cls.label: cls for cls in result.classes}[config_label]
+    assert reading.authority == "config"
+    assert reading.eligible is False
+    assert reading.proven is False
+    assert config_label in result.plan["not_evictable"]
+    assert g.mutated == []
 
 
 def test_an_unknown_label_is_unclassified_and_refused_not_defaulted():
