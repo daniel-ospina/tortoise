@@ -9,6 +9,14 @@ gates are OPEN, so a sweep today would delete nodes whose only copy is the graph
 The `--execute` flag is therefore REFUSED BY NAME rather than absent, so a caller
 that tries it learns why instead of concluding the flag was misspelled.
 
+⛔ **A graph that is not on the instance is REFUSED, never measured.** Reading a
+non-existent graph CREATES it (FalkorDB materialises the keyspace on the first query,
+measured — see `tools/engine_probe.py`), so a typo'd `--graph` would leave an empty
+graph behind on the production cache and then be reported on as if it were an empty
+one. `GRAPH.LIST` creates nothing, so this census lists first and refuses, and every
+count it issues afterwards goes through `GRAPH.RO_QUERY` (`tortoise/cache_eviction.py`),
+which cannot mint either.
+
     # measure the cache, name every class that cannot be proven, and refuse.
     # ⚠️ `--graph` must be the graph the URI names — a mismatch is a USAGE error, not
     # a silent measurement of a different cache:
@@ -86,41 +94,85 @@ from tortoise.cache_eviction import (
 _REFUSED_FLAGS = ("--execute", "--sweep", "--purge", "--evict")
 
 
-def _parse_uri(uri: str) -> tuple[str, int, str | None, str]:
-    """Parse a Tortoise URI into ``(host, port, password, graph_name)``.
+def _endpoint(uri: str):
+    """Resolve *uri* into a FalkorDB endpoint — via the repo's ONE derivation.
 
-    Accepts the shapes the repo uses: ``docker://[:pass@]host:port/graph`` and a bare
-    ``host:port/graph``. Anything else is a USAGE error — guessing a host is how a
-    census ends up measuring a different cache than the caller meant, which is the
-    one thing a number an owner decides on must never do.
+    ⛔ NOT A SECOND URI PARSER. ``tortoise.projection.resolve_db_endpoint``
+    (``tortoise/projection/__init__.py``) is THE canonical URI → endpoint derivation:
+    ``FalkorProjection.from_uri`` (every product connection) and
+    ``tortoise.backup._bgsave`` both call it, so a census can never dial a different
+    instance than the product it is measuring. The hand-rolled parse this replaces
+    returned only ``(host, port, password, graph)``: it DROPPED ``username`` and
+    ``ssl``, so a ``rediss://`` endpoint was a usage error (``rediss`` parsed as the
+    host) and an ACL user was silently discarded. ``tools/edge_census.py``'s sibling
+    census already reuses the canonical derivation for exactly this reason.
+
+    The ONE rule kept local is a REFUSAL, not a second derivation: the URI must NAME
+    a host and a port. The canonical rule fills defaults (``localhost`` / ``16379``)
+    when the URI names neither, which for this tool means measuring an instance the
+    operator never named — the one thing a number an owner decides on must never do.
 
     ⚠️ PARSING IS SEPARATE FROM CONNECTING on purpose: a request that is going to be
-    refused (a `--graph` that disagrees with the URI, a destructive flag) must not
-    open a socket first, or a typo reads back as a network fault.
+    refused (a `--graph` that disagrees with the URI, a destructive flag, a graph that
+    is not on the instance) must not open a socket first, or a typo reads back as a
+    network fault.
     """
-    raw = uri
-    for scheme in ("docker://", "redis://", "bolt://"):
-        if raw.startswith(scheme):
-            raw = raw[len(scheme):]
-            break
+    from urllib.parse import urlparse
 
-    credentials, _, rest = raw.rpartition("@")
-    password = None
-    if credentials:
-        _, _, password = credentials.partition(":")
-        password = password or None
-    hostport, _, graph_name = rest.partition("/")
-    host, _, port = hostport.partition(":")
-    if not host or not port or not graph_name:
+    from tortoise.projection import resolve_db_endpoint
+
+    declared = urlparse(uri)
+    # `declared.port` raises ValueError for a non-numeric port, which is the same
+    # USAGE outcome the caller already handles.
+    if not declared.hostname or declared.port is None:
         raise ValueError(
             f"cannot read a host:port/graph out of {uri!r} — expected "
-            f"docker://[:password@]host:port/graph"
+            f"docker://[:user:password@]host:port/graph"
         )
-    return host, int(port), password, graph_name
+    return resolve_db_endpoint(uri)
 
 
-def _connection(host: str, port: int, password: str | None, graph_name: str):
-    """A redis client and a FalkorDB graph handle for an already-parsed URI.
+def _absent_graph_refusal(client, graph_name: str) -> str | None:
+    """The refusal message when *graph_name* is not on the instance, else ``None``.
+
+    ⛔ A READ AGAINST A MISSING GRAPH STILL HAS A SIDE EFFECT: it CREATES the graph.
+    FalkorDB materialises the keyspace on the first query, so on a typo'd ``--graph``
+    (both halves can be typos — ``--graph``/URI equality only proves the operator
+    typed the same wrong name twice) or a graph that has been dropped, the census
+    would leave an empty graph behind on the PRODUCTION instance and then report a
+    verdict about it, indistinguishable from a genuinely empty cache. Measured and
+    written down three times in this repo: ``tools/engine_probe.py``
+    (*"QUERY MINTS the graph … a probe against a missing name created it and it
+    appeared in GRAPH.LIST"*), ``tools/backfill_graph_turns.py`` and
+    ``tools/edge_census.py``, the last two shipping ``_assert_graph_exists``.
+
+    ``GRAPH.LIST`` does not itself create anything (verified against a live instance
+    by ``tools/edge_census.py``), so listing first is the side-effect-free check.
+    This is the operator-facing message; the structural guarantee is
+    ``tortoise/cache_eviction.py``'s use of ``GRAPH.RO_QUERY``, which cannot mint even
+    if this guard is ever removed.
+    """
+    try:
+        names = {str(name) for name in (client.execute_command("GRAPH.LIST") or [])}
+    except Exception as exc:
+        # ⛔ FAIL CLOSED. "I could not list the graphs" is not "the graph is there":
+        # proceeding would measure through the verb that can mint.
+        return (f"the instance's graph list could not be read "
+                f"({type(exc).__name__}: {exc}) — refusing to be the thing that "
+                f"creates {graph_name!r}")
+    if graph_name in names:
+        return None
+    return (f"graph {graph_name!r} does not exist on this instance "
+            f"({len(names)} graph(s) there) — and reading a non-existent graph CREATES "
+            f"it (FalkorDB materialises the keyspace on the first query), so this "
+            f"census will not be the thing that creates it. Check the name.")
+
+
+def _connection(endpoint):
+    """A redis client and a FalkorDB graph handle for an already-resolved endpoint.
+
+    ⛔ EVERY field of the endpoint comes from the canonical derivation — including
+    ``username`` and ``ssl`` — so a TLS endpoint and an ACL user reach both clients.
 
     ⛔ BOTH clients take their socket bounds from the product's ONE resolver
     (``_bounded_server_socket_kwargs``), never from kwargs spelled here.
@@ -138,13 +190,16 @@ def _connection(host: str, port: int, password: str | None, graph_name: str):
 
     from tortoise.projection import _bounded_server_socket_kwargs
 
+    bound = _bounded_server_socket_kwargs()
     client = redis.Redis(
-        host=host, port=port, password=password, decode_responses=True,
-        **_bounded_server_socket_kwargs(),
+        host=endpoint.host, port=endpoint.port,
+        username=endpoint.username, password=endpoint.password,
+        ssl=endpoint.ssl, decode_responses=True, **bound,
     )
-    db = FalkorDB(host=host, port=port, password=password,
-                  **_bounded_server_socket_kwargs())
-    return client, db.select_graph(graph_name)
+    db = FalkorDB(host=endpoint.host, port=endpoint.port,
+                  username=endpoint.username, password=endpoint.password,
+                  ssl=endpoint.ssl, **bound)
+    return client, db.select_graph(endpoint.graph_name)
 
 
 def _usage_error(parser: argparse.ArgumentParser, message: str) -> int:
@@ -221,15 +276,18 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        host, port, password, graph_name = _parse_uri(args.graph_uri)
+        endpoint = _endpoint(args.graph_uri)
     except ValueError as exc:
         return _usage_error(parser, str(exc))
-    if graph_name != args.graph:
+    if endpoint.graph_name != args.graph:
         return _usage_error(
             parser,
-            f"--graph {args.graph!r} disagrees with the URI's graph {graph_name!r} — "
-            f"refusing to measure one cache and name another",
+            f"--graph {args.graph!r} disagrees with the URI's graph "
+            f"{endpoint.graph_name!r} — refusing to measure one cache and name "
+            f"another",
         )
+    # The graph this run measures: `args.graph`, proven equal to the URI's own above.
+    graph_name = args.graph
     # ⛔ VALIDATE EVERYTHING BEFORE CONNECTING. A request that will be refused must not
     # open a socket first: an unreachable host would otherwise turn a flag mistake —
     # or a destructive flag — into a network fault, and the caller would debug the
@@ -285,11 +343,21 @@ def main(argv: list[str] | None = None) -> int:
         # raised a traceback and exited 1 — the USAGE code — telling the caller to
         # retry flags against a store nobody could reach. An unreachable cache is a
         # refusal (3), not a typo.
-        client, graph = _connection(host, port, password, graph_name)
+        client, graph = _connection(endpoint)
     except Exception as exc:
         print("REFUSED — the cache could not be reached, so nothing is claimed:",
               file=sys.stderr)
         print(f"  - {type(exc).__name__}: {exc}", file=sys.stderr)
+        return CACHE_EVICTION_EXIT_REFUSED
+
+    # ⛔ BEFORE ANY STATEMENT THAT COULD MINT IT. Reading a graph that is not there
+    # creates it, so the existence check must precede `assess` — not be derived from
+    # the numbers it produces.
+    absent = _absent_graph_refusal(client, graph_name)
+    if absent is not None:
+        print("REFUSED — nothing is claimed about a graph that is not there:",
+              file=sys.stderr)
+        print(f"  - {absent}", file=sys.stderr)
         return CACHE_EVICTION_EXIT_REFUSED
 
     try:
@@ -316,7 +384,13 @@ def main(argv: list[str] | None = None) -> int:
     payload = census.as_dict()
     text = json.dumps(payload, indent=2, sort_keys=True) + "\n"
     if args.out:
-        args.out.write_text(text, encoding="utf-8")
+        try:
+            args.out.write_text(text, encoding="utf-8")
+        except OSError as exc:
+            # The same defect class `load_parity_report` fixes for UnicodeDecodeError
+            # (it escaped `main()` as a traceback): a bad path is "a flag or IO
+            # mistake", so it must exit 1 for BOTH IO paths.
+            return _usage_error(parser, f"--out {args.out}: {exc}")
         print(f"wrote census: {args.out}", file=sys.stderr)
     else:
         sys.stdout.write(text)
