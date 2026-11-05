@@ -35,6 +35,7 @@ from __future__ import annotations
 import http.server
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -523,37 +524,40 @@ def test_non_loopback_api_base_is_refused_before_anything_is_contacted():
     credential at all: `GH_WRITE_PREFLIGHT_API=http://127.0.0.1:40933`, token
     `ghp_NOT_A_REAL_CREDENTIAL` → rc 0, `GH-WRITE-OK(issues+pull-requests+contents writable)`, and no
     output naming the base. Here the base is a host that is neither GitHub nor loopback, so the ONLY
-    acceptable outcome is a refusal that reports `usage`, names no pass, and does not crash.
-
-    ⛔ THE CLASS IS PINNED BY THE `usage` REASON, NOT BY A STUB. This arm runs the tool with its base
-    pointed at `api.github.example.com`, so the tool never knows which server `_Stub()` bound — a
-    `seen == []` assertion here would be TRUE FOR EVERY IMPLEMENTATION of the tool (including one that
-    sent the READ probe first and only then refused), i.e. an enforcer whose condition can never fire.
-    The direct, reachable observation — `seen == []` against a base that IS the live stub, so a tool
-    that ordered the probe ahead of `_validate_api_base` would be caught — lives in
-    `test_api_base_carrying_credentials_is_refused_and_never_echoed` below, which is where the
-    "refused before any contact" claim is actually evidenced (review P3, F1).
+    acceptable outcome is a refusal that happens before any request: reason `usage` — the reason ONLY
+    `_validate_api_base` produces — with no OK line, no `transport` verdict and no traceback.
 
     Pre-fix, this same invocation reached the network and reported `GH-WRITE-UNAVAILABLE(transport)`,
     i.e. it both sent the credential nobody had vetted and blamed the token's environment for it.
+
+    ⛔ NON-VACUITY, and why there is no `seen == []` here (review finding F1). `_run(base, …)` is the
+    only thing that points the tool at an endpoint, so this arm's base names `api.github.example.com`
+    and the tool never knows about a stub: a `seen == []` assertion against a local `_Stub()` would be
+    true for EVERY implementation, including one that probes first and refuses afterwards — an inert
+    assertion cited as evidence is the class this branch already paid a cycle for. The property is
+    observed DIRECTLY by `test_api_base_carrying_credentials_is_refused_and_never_echoed`, whose base
+    IS the live stub, so `seen == []` there is evidence. What makes THIS arm discriminating is the
+    reason string: stub `_validate_api_base` out of `preflight()` and the run falls through to the
+    network and answers `transport` — i.e. it reds at the two assertions below.
     """
     rc, out, err = _run("http://api.github.example.com", token="ghp_NOT_A_REAL_CREDENTIAL")
     assert rc != 0, f"an unvetted endpoint produced a PASS: {out}"
     assert "GH-WRITE-UNAVAILABLE(usage)" in out, out
     assert "GH-WRITE-OK" not in out, out
     assert "api.github.example.com" in out, out
+    # ⛔ `transport` is exactly what a tool WITHOUT the base check answers here — it reaches the
+    # network and blames the path to it. Naming it is what makes this arm red on that pre-fix code.
+    assert "transport" not in out, f"the base was contacted before it was validated: {out}"
     assert "Traceback" not in err, err
 
 
 def test_api_base_carrying_credentials_is_refused_and_never_echoed():
     """`user:pass@` in the base is (a) refused and (b) NOT reprinted in the refusal (review round 7).
 
-    Reachability is the point, and THIS is the arm that carries it (review P3, F1): the base names the
-    LIVE stub, so a tool that ran its probe sequence before `_validate_api_base` would send the request
-    to `seen` and (had the payload been valid) print `GH-WRITE-OK` for `ghp_NOT_A_REAL_CREDENTIAL`.
-    `seen == []` here is therefore a real observation about the ORDER of validation and contact —
-    delete that assertion and a reordering that moves the READ probe ahead of the base validation goes
-    undetected.
+    Reachability is the point: this base names the LIVE stub, so a tool without the check would run
+    the whole probe sequence against it and print `GH-WRITE-OK` for `ghp_NOT_A_REAL_CREDENTIAL` — the
+    stub records every request, so `seen == []` is the direct evidence that the refusal happened
+    before the credential left the process.
     """
     with _Stub() as s:
         rc, out, err = _run(f"http://user:hunter2@{s.base.split('//', 1)[1]}",
@@ -1277,51 +1281,60 @@ def test_the_git_credential_residual_is_stated_where_a_lane_reads_it():
         f"the HARD RULE states a guarantee wider than the tool proves: {block!r}"
 
 
-def test_the_reason_table_does_not_send_a_lane_into_a_rerun_loop_on_forbidden():
-    """`forbidden` is STRUCTURAL: the HARD RULE must not file it under *transient* (P3, F2).
+def _reason_class_table() -> dict[str, list[str]]:
+    """Parse AGENTS.md's `THE REASON NAMES ITS OWN CLASS` bullets into {class: [reason, …]}."""
+    lines = (REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8").splitlines()
+    head = next(i for i, ln in enumerate(lines) if "THE REASON NAMES ITS OWN CLASS" in ln)
+    tail = next(i for i, ln in enumerate(lines) if "Why it is a gate and not a courtesy call" in ln)
+    bullets: list[list[str]] = []
+    for ln in lines[head:tail]:
+        m = re.match(r"\s*- \*\*(?P<name>[^*]+)\*\*\s+—(?P<body>.*)$", ln)
+        if m:
+            bullets.append([m.group("name").strip(), m.group("body")])
+        elif bullets and ln.strip():                      # a wrapped continuation of the last bullet
+            bullets[-1][1] += " " + ln.strip()
+    return {name: sorted(set(re.findall(r"`([a-z][a-z0-9]*(?:-[a-z0-9]+)*)`", body)))
+            for name, body in bullets}
 
-    `forbidden` is emitted at five places in the tool, and the ones that matter are structural, not
-    transient: a `2xx` on a must-be-invalid payload (a proxy/WAF/captive portal rewrote the request,
-    or a redirect was followed — `_write_probe`), ANY unexpected status (the docstring names a `410`
-    for Issues-disabled and a `451` — `:601`, `:727`), and a `403` that named neither a rate limit,
-    SSO, nor a resource permission (`_classify_403`). None of those changes on a second attempt, so a
-    lane following the HARD RULE's old "Re-run; do not park the work" would loop forever on a
-    condition the tool itself (correctly) never lets it past.
 
-    The HARD RULE is the artifact a lane is told to read instead of the exit code, so the bucket a
-    reason sits in IS its instruction. This pins the bucket, and pins the tool's own docstring to the
-    same class, so neither artifact can drift back alone.
+def test_the_agents_md_reason_table_covers_every_emittable_reason_and_forbidden_is_structural():
+    """The rule a lane reads must carry the tool's WHOLE reason space, and `forbidden` is structural (F2).
+
+    The HARD RULE is the artifact this change exists to deliver — a lane is told to read the reason and
+    take the fix from its class, so a reason missing from the table is a fix that lane never finds, and
+    a reason in the WRONG class is a lane doing the wrong thing on purpose. `forbidden` was filed under
+    **transient** ("Re-run; do not park the work"), but the tool emits it for conditions re-running
+    cannot change: a `2xx` on a payload GitHub must reject (a proxy/WAF/captive portal or a followed
+    redirect rewrote the request — `:571-576`), an unexpected status such as `410` with Issues disabled
+    or `451` (`:601`, `:727`), and a `403` carrying none of GitHub's own refusal signals (`:555`). A
+    lane following the old text loops forever on a repo setting.
+
+    So this pins three things, each of which reds on the pre-fix AGENTS.md: the classes exist as a set,
+    the table's reason tokens are EXACTLY the tool's emittable set (both directions — no undocumented
+    reason, no stale one), and `forbidden` sits in `structural` and not in `transient`.
     """
-    agents = (REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8")
-    lines = agents.splitlines()
-
-    def bucket(name: str) -> str:
-        hits = [i for i, ln in enumerate(lines) if f"**{name}**" in ln]
-        assert len(hits) == 1, f"expected exactly one {name!r} reason bucket, found {len(hits)}"
-        block = [lines[hits[0]]]
-        for ln in lines[hits[0] + 1:]:
-            if not ln.strip() or ln.startswith("  - **"):
-                break
-            block.append(ln)
-        return "\n".join(block)
-
-    transient = bucket("transient")
-    assert "forbidden" not in transient, (
-        "AGENTS.md files `forbidden` under *transient*, so it tells a lane to RE-RUN a structural "
-        f"refusal (a 410 with Issues disabled, a 2xx rewritten by a proxy) forever: {transient!r}")
-
-    structural = bucket("structural")
-    assert "forbidden" in structural, (
-        f"`forbidden` has no home in the reason table's classes: {structural!r}")
-    low = structural.lower()
-    assert "re-run" in low and "re-mint" in low, (
-        f"the structural bucket must say what NOT to do, or a lane invents its own retry policy: {structural!r}")
-
     tool_src = TOOL.read_text(encoding="utf-8")
-    reason_doc = [ln for ln in tool_src.splitlines() if ln.startswith("  forbidden")]
-    assert len(reason_doc) == 1, f"expected one docstring `forbidden` row, found {len(reason_doc)}"
-    assert "STRUCTURAL" in reason_doc[0], (
-        f"the tool's reason table still reads as a retryable class: {reason_doc[0]!r}")
+    start = tool_src.index("REASONS (`GH-WRITE-UNAVAILABLE(<reason>)`)")
+    reasons_doc = tool_src[start:tool_src.index("THE ENDPOINT IS PART OF THE VERDICT", start)]
+    # the REASONS block lists one reason per two-space-indented row; continuation rows (`fix: …`) are
+    # indented far enough that the token+gap rule below does not see them.
+    emittable = set(re.findall(r"^  ([a-z][a-z0-9-]*)\s{2,}\S", reasons_doc, re.M))
+    assert len(emittable) > 10, f"the REASONS block did not parse as a reason table: {sorted(emittable)}"
+
+    table = _reason_class_table()
+    assert set(table) == {"credential verdict", "environment", "transient", "structural"}, \
+        f"the HARD RULE's reason classes changed shape: {sorted(table)}"
+
+    listed = [reason for reasons in table.values() for reason in reasons]
+    assert len(listed) == len(set(listed)), f"a reason is filed under two classes: {sorted(listed)}"
+    assert set(listed) == emittable, (
+        "the AGENTS.md reason table and the tool disagree — undocumented: "
+        f"{sorted(emittable - set(listed))}, stale: {sorted(set(listed) - emittable)}")
+
+    assert "forbidden" in table["structural"], \
+        f"`forbidden` is not filed as structural: {table['structural']}"
+    assert "forbidden" not in table["transient"], \
+        f"`forbidden` is instructed to be RE-RUN, but it names conditions that cannot change: {table['transient']}"
 
 
 if __name__ == "__main__":

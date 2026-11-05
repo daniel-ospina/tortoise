@@ -499,9 +499,9 @@ failure paths belong to the caller, and they must be **measured and pinned, not 
   ⛔ **A pass whose OK line names any endpoint other than `https://api.github.com` is NOT a pass** — that is
   the hermetic test seam (`GH_WRITE_PREFLIGHT_API`), so unset it and re-run. (The tool proves those three
   grants; it does not promise a branch-protection rule will accept the merge.)
-- `exit 1` = `GH-WRITE-UNAVAILABLE(<reason>)` — do NOT start the work; name the reason in your report.
-  ⛔ **THE REASON NAMES ITS OWN CLASS, AND THE CLASS SAYS WHAT THE FIX IS — the credential is only one of
-  three, so read the reason and not just the exit code:**
+- `exit 1` = `GH-WRITE-UNAVAILABLE(<reason>)` — do NOT start the work yet; name the reason in your report.
+  ⛔ **THE REASON NAMES ITS OWN CLASS, AND THE CLASS SAYS WHAT THE FIX IS — the credential is only ONE of
+  them, so read the reason and not just the exit code:**
   - **credential verdict** — `contents-write-missing`, `pull-requests-write-missing`,
     `issues-write-missing`, `token-read-only`, `bad-credentials`, `no-credential`: the credential cannot
     write. Re-mint it with that permission (or point the lane at the credential that has it) before the
@@ -509,17 +509,17 @@ failure paths belong to the caller, and they must be **measured and pinned, not 
   - **environment** — `usage`, `wrong-host`, `repo-not-visible`, `sso-unauthorized`: the invocation or the
     access is wrong. ⛔ **Do NOT re-mint the token** — fix the `--repo`/`$OR` value (the documented command
     reads `$OR`, so an unset one answers `usage`), the host, the repo access, or the SSO authorisation.
-  - **transient** — `rate-limited`, `server-error`, `transport`: GitHub, or the path to it, failed
-    while it was working. **Re-run; do not re-mint the token and do not park the work.** The tool orders
-    the rate-limit check ahead of every permission verdict precisely so a shared-account limit is not
-    charged to the credential.
-  - **structural** — `forbidden`: the response did not come from GitHub's normal validation path (a
-    proxy, WAF, captive portal or followed redirect rewriting the request — a `2xx` on a must-be-invalid
-    payload lands here), or the surface is unavailable on this repo (a `410` with Issues disabled, a
-    `451`), or a `403` that named neither a rate limit, SSO, nor a resource permission. ⛔ **Do NOT
-    re-mint the token and do NOT re-run** — nothing about the credential or the next attempt changes it,
-    so a re-run loop never terminates. Read `detail` and the `surfaces` map in the `--json` verdict,
-    report the reason, and let a human decide whether the repo setting or the network path is the fix.
+  - **transient** — `rate-limited`, `server-error`, `transport`: GitHub, or the path to it, failed.
+    **Re-run; do not re-mint the token and do not park the work.** The tool orders the rate-limit check
+    ahead of every permission verdict precisely so a shared-account limit is not charged to the
+    credential.
+  - **structural** — `forbidden`: the answer did not come from GitHub's own validation path, so
+    re-running cannot change it — a proxy, WAF, captive portal or followed redirect rewrote the request
+    (a `2xx` on a payload GitHub must reject), the surface is unavailable on this repo (a `410` with
+    Issues disabled, `451`), or a `403` carrying none of GitHub's own refusal signals. ⛔ **Do NOT
+    re-mint the token and do NOT re-run** — report the reason and the surfaces map, and fix the path to
+    GitHub or the repo setting. Looping on it cannot converge, so it is not the credential and not a
+    transient fault.
 
 **Why it is a gate and not a courtesy call.** `gh` resolves `GH_TOKEN` → `GITHUB_TOKEN` →
 `$HOME/.config/gh/hosts.yml`, so a box with two credentials resolves whichever the environment happens to
