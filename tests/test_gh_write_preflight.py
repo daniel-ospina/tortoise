@@ -2219,19 +2219,29 @@ def test_keep_ref_json_never_advertises_cleanup(tmp_path: Path, capsys):
 
 
 def test_the_carve_out_guard_is_the_LAST_block_in_this_file():
-    """Nothing collectable may live below the `__main__` block that supplies the carve-out.
+    """Nothing at all may follow the `__main__` block that supplies the carve-out.
 
-    Measured at the pre-fix head: 26 cases sat below it. `pytest` re-imports the module, so they
+    Measured at the pre-fix head: 26 cases sat below it. `pytest` RE-IMPORTS the module, so they
     were still collected and nothing was red — which is exactly why the drift is invisible: the
     guard stops being "the one block" (the shape that silently defeated
     `tests/test_closes_landing.py`'s carve-out with a second mid-file copy) while every check stays
     green.
 
-    ⛔ PARSED, NOT GREPPED. The first version of this pin asserted `"\\ndef test_" not in below`,
-    and MEASURED green on both evasions a repo actually grows: a `class TestX:` (its methods are
-    indented) and a module-level `test_x = lambda: ...`. Both are collected by pytest, both sit
-    below the guard, and both left the pin passing — a false PASS in the gate that exists to stop
-    one. `ast` is what closes it: the walk is over real definitions, not over text shapes.
+    ⛔ NO NAME HEURISTICS — BOTH EARLIER VERSIONS OF THIS PIN REPORTED PASS ON THE DRIFT.
+
+    * v1 was a substring test (`"\\ndef test_" not in below`) and measured GREEN on a
+      `class TestX:` (its methods are indented) and on a module-level `test_x = lambda: ...`.
+    * v2 walked the AST for `test*`-named defs/classes/assignments and still measured GREEN on
+      `class TestZ(MixinTests): pass` — pytest collects capital-T classes and INHERITED methods,
+      so the case below the guard was collected while the pin passed — and on
+      `globals()["test_foo"] = ...`, `exec("def test_e(): ...")`, `setattr(sys.modules[__name__],
+      ...)` and `type("TestC", (), {...})`, none of which is a `def` node at all. It also
+      OVER-blocked a plain local named `test_cmd` inside the guard's own body, because the guard's
+      `if` line made its own body "below".
+
+    The invariant that needs no knowledge of what pytest collects: the guard is the LAST node of
+    the module. That is what `tests/test_closes_landing.py` records, and it is decidable from the
+    AST in one comparison.
     """
     tree = ast.parse(Path(__file__).read_text())
     guards = [
@@ -2240,32 +2250,10 @@ def test_the_carve_out_guard_is_the_LAST_block_in_this_file():
         if isinstance(node, ast.If) and "__main__" in ast.unparse(node.test)
     ]
     assert len(guards) == 1, f"expected exactly one `__main__` block, found {len(guards)}"
-    below = guards[0].lineno
-
-    def _named(node: ast.AST) -> bool:
-        return isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and (
-            node.name.startswith("test")
-        )
-
-    late = []
-    for node in ast.walk(tree):
-        if getattr(node, "lineno", 0) <= below:
-            continue
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            # a class below the guard is a problem even if its NAME is not `Test*` — pytest
-            # collects `Test*` classes, and a later rename would silently make it collectable.
-            if node.name.startswith("test") or any(
-                _named(child) for child in ast.walk(node) if child is not node
-            ):
-                late.append(f"{type(node).__name__} {node.name} (line {node.lineno})")
-        elif isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
-            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-            for target in targets:
-                if isinstance(target, ast.Name) and target.id.startswith("test"):
-                    late.append(f"{target.id} = ... (line {node.lineno})")
-    assert not late, (
-        "collectable code below the `__main__` carve-out guard — move it above so the guard stays "
-        f"the only, last block: {late}"
+    assert tree.body[-1] is guards[0], (
+        "the `__main__` carve-out guard must be the LAST statement in this file — anything after "
+        "it can be collected by pytest or shadow the guard: "
+        f"{ast.unparse(tree.body[-1])[:90]!r}"
     )
 
 
