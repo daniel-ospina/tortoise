@@ -5594,19 +5594,15 @@ def test_integrity_reddens_on_a_duplicate_entry(monkeypatch, capsys):
 # duplicate happened to be the LAST one. That check was green on a map whose
 # weights were not the ones the packer would use.
 #
-# `--integrity` was not the only guard on that file: `tools/registry_integrity.py`
-# reads it with `yaml.compose` and already refuses a duplicate mapping key at
-# any depth, and it runs in the SAME `manifest-integrity` job (#5373), so it
-# would have reddened that merge. The two are complements — that one is
-# authoritative for the file as TEXT, the parse below is what every READER gets
-# by construction — and `test_the_two_duplicate_key_guards_agree` pins that they
-# refuse the same document, so the pair cannot drift into disagreeing verdicts.
-#
-# What NEITHER may refuse is a `<<:` merge override: the YAML merge type is
-# "each of its key/value pairs is inserted into the current mapping, unless the
-# key already exists in it" (https://yaml.org/type/merge.html, Example 1's
+# What NEITHER guard may refuse is a `<<:` merge override: the YAML merge type
+# is "each of its key/value pairs is inserted into the current mapping, unless
+# the key already exists in it" (https://yaml.org/type/merge.html, Example 1's
 # `# Override`), so the document's own pair deliberately wins.
-# `test_a_merge_key_override_is_not_a_duplicate_mapping_key` is that arm.
+# `test_a_merge_key_override_is_NOT_a_duplicate` is that arm, and
+# `test_the_two_duplicate_key_guards_agree_on_a_merge_override` pins that the
+# two guards agree in that direction too — as
+# `test_the_two_duplicate_key_guards_agree_on_a_duplicate` does for the shape
+# they both must refuse, so the pair cannot drift into disagreeing verdicts.
 
 
 def _text_with_a_duplicated_durations_row(path: Path) -> tuple[str, str]:
