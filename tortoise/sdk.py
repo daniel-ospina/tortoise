@@ -23007,8 +23007,17 @@ class TortoiseSDK:
                 mitigation point is a calibrated live evidence point and the
                 decide flow ranks on the first try (no CalibrationError).
 
-        Raises ValueError if id not found, not an operator, strength out of
-        [0, 1], or credibility outside the ladder.
+        Raises ``ValueError`` if id not found, not an operator, strength out of
+        [0, 1], or credibility outside the ladder — AND
+        ``UnaddressableClaimError`` (a ``ValueError`` SUBCLASS, ``exceptions.py``,
+        #9754) when the operator's existing mitigation Point carries no ``id``:
+        the node this call would rewrite cannot be addressed at all, so refusing
+        is the only honest answer (it used to return ``{}`` — a false success).
+        The two are distinguishable BY CLASS, which is the point of the subclass:
+        a caller that can skip one unrepairable node and continue catches the
+        subclass (``commit_ops.apply_payload_operators`` does exactly that, per
+        item), while a caller that must abort on a defect in its OWN record
+        leaves the parent uncaught.
         Idempotent: a second call updates the existing CURRENT mitigation
         (reason + strength), does not create a duplicate. A mitigation the graph
         records as terminal (retracted/superseded/outdated/archived) is never
@@ -23090,21 +23099,50 @@ class TortoiseSDK:
         ).result_set
         if existing:
             mid = existing[0][0]
-            # #9262 (review cycle 2): an id-less mitigation Point (a
-            # hand-written / imported shape) makes ``mid`` None, and EVERY write
-            # in this branch is id-keyed — ``update_point``, the baseline writer
-            # and the word stamp all match zero rows. Until #9262 the baseline
-            # writer accepted what it could not bind, so this silently updated
-            # nothing and returned ``{}``; since #9262 it REFUSES that id, so
-            # without this guard the whole call aborts with a remedy the caller
-            # cannot execute (it named the OPERATOR, not the mitigation), and
-            # ``commit_ops`` would abort a write loop mid-graph. MEASURED on
-            # origin/main: the call returns ``{}`` and leaves
-            # ``_evidence[None] = (3.0, 1.0)``; that false PASS is a defect of
-            # its own (#9754) — this guard keeps the historical outcome rather
-            # than turning it into an abort.
+            # #9754: an id-less mitigation Point (a hand-written / imported
+            # shape) makes ``mid`` None, and EVERY write in this branch is
+            # id-keyed — ``update_point``, the baseline writer and the word
+            # stamp all match zero rows. #9262 guarded this branch to keep the
+            # historical outcome, but that historical outcome WAS the defect:
+            # ``return self.get_point(None)`` → ``{}``, an empty success the
+            # caller cannot distinguish from "there is no mitigation" (the
+            # reason/strength update did not land and no baseline was written,
+            # so EP's calibration gate then refuses the operator while
+            # ``calibrate_summary``'s advice — ``set_point_baseline(None, …)`` —
+            # cannot be executed). Measured: the call returns ``{}``.
+            # (An earlier version of this comment added "and leaves
+            # ``_evidence[None] = (3.0, 1.0)``" — false on both trees: #9262
+            # returned before ``set_point_baseline`` was ever reached, and
+            # ``_evidence`` is written only by ``create_point``'s baseline,
+            # ``set_point_baseline`` after its representability guard, and
+            # ``_hydrate_evidence`` — none of which this path enters. Dropped
+            # rather than carried forward: tests/test_calibration.py states the
+            # correct reading in this same change.)
+            #
+            # The repair is option 1 of #9754: REFUSE with the real cause. The
+            # message names the MITIGATION, never the operator the caller
+            # passed — the operator is addressable and its id is actionable by
+            # nobody here, so a refusal about it names a node the caller cannot
+            # repair. ``UnaddressableClaimError`` is the existing shape for
+            # "a node the run must price carries no usable id" (#9275), so
+            # callers already have one word for this class.
+            # ``apply_payload_operators`` classifies it per item (#9754): a
+            # single unaddressable mitigation must not abort a commit's whole
+            # write loop.
             if mid is None:
-                return self.get_point(mid)
+                from .exceptions import UnaddressableClaimError
+                raise UnaddressableClaimError(
+                    f"Operator {id!r} carries a mitigation Point with no id "
+                    "(a hand-written or imported shape), so the "
+                    "re-mitigation cannot be written: every write on this "
+                    "path is keyed on the mitigation's id. No reason, "
+                    "strength or baseline can be stored on it, and the "
+                    "calibration gate will keep refusing the operator while "
+                    "its advice (`set_point_baseline(<mitigation id>, …)`) "
+                    "has no id to name. Repair the graph: give the existing "
+                    "mitigation Point an id, or drop that unaddressable "
+                    "mitigation and call mitigate_operator again to mint an "
+                    "addressable one (#9754).")
             self.update_point(mid, content=f"[MITIGATION] {reason}",
                               mitigation_strength=strength)
             # An explicit belief on the idempotent-update path re-baselines
