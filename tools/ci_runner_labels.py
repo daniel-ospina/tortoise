@@ -72,9 +72,9 @@ from __future__ import annotations
 
 import sys
 
-# #5128: refuse a <3.12 interpreter before the imports below — a module-level
-# 3.11+-only import (`from datetime import UTC`, which this file uses at the
-# module level just below) would fail first (D9 shape).
+# #5128: refuse a <3.12 interpreter before the imports below — `from datetime import UTC`
+# is module-level and 3.11+, so an older interpreter raises ImportError there before any
+# later guard could run (the guard must be the first statement after the docstring).
 if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     raise SystemExit(
         f"tools/ci_runner_labels.py requires Python >= 3.12 (got "

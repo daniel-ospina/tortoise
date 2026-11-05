@@ -185,8 +185,15 @@ def test_n2_mcp_tools_list_serves_no_ask_tool(monkeypatch):
     # The floor guards against SILENT shrinkage, so it moves only with a recorded
     # reason: #3540 consolidated two per-source switches (github_index,
     # session_recording) into `tortoise_manage_sources`, which is a net -1 on
-    # the LISTED surface (2 retired, 1 added) — 75 listed before, 74 now.
-    assert len(names) >= 74, f"default surface shrank to {len(names)}"
+    # the LISTED surface (2 retired, 1 added) — 75 listed before, 74 then.
+    # The next recorded move is #4282 Phase 3.2: the five `run_onboarding` tools
+    # the owner ruled OFF the MCP (`docs/product/canonical-mcp-tools.md`, settled
+    # 2026-09-22, amendment (b) waiving the replacement warning) were all
+    # `http_policy=True`, so every one of them was part of this listing —
+    # 74 - 5 = 69, measured. Anything BELOW 69 is still unexplained shrinkage and
+    # this arm still reds on it; lowering the floor again needs the same kind of
+    # recorded reason, never a green run.
+    assert len(names) >= 69, f"default surface shrank to {len(names)}"
     assert _ASK_TOOL not in names
 
 

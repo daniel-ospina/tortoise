@@ -48542,7 +48542,9 @@ class TortoiseSDK:
 
         ``members`` is deliberately NOT marked: ``memberOf`` has a real
         producer (``onboarding/seed.py::seed_onboarding_anchors``, reached
-        from hosted onboarding and the ``tortoise_onboarding_seed`` tool), so
+        from hosted onboarding — via ``POST /v1/onboarding/seed``; the
+        ``tortoise_onboarding_seed`` MCP tool that also called it left the
+        surface in #4282 Phase 3.2), so
         an empty list there means no membership was filed — a finding, not a
         gap.
         """
