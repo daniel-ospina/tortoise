@@ -20306,8 +20306,13 @@ class TortoiseSDK:
                 # would be the over-refusal the directionless-NAND pin exists to
                 # prevent), and a present JUNK value is read as BOTH ways by
                 # ``direction_flows`` — which is also the fail-closed reading the
-                # EP backstop sees, and it keeps an unhashable value out of a
-                # frozenset membership test. ⛔ Do NOT reintroduce a per-value
+                # EP backstop sees. Its ``isinstance(..., str)`` screen is what
+                # keeps a NON-``str`` unhashable value (a list, a map) out of a
+                # frozenset membership test; it is NOT a guarantee for an
+                # unhashable ``str`` SUBCLASS, which passes that screen and would
+                # still raise inside ``canonical_direction``'s own membership test
+                # (unreachable from a graph read — neither FalkorDB nor a JSON
+                # projection can yield one). ⛔ Do NOT reintroduce a per-value
                 # branch here: a second copy of the policy is what let this door
                 # publish its own token as ``judged`` in the refusal below.
                 # ⛔ Scope of "ONE reader": the 2a-OPERATOR pre-flight above DOES
