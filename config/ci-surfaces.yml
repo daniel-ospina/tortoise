@@ -2947,6 +2947,21 @@ surfaces:
   # the re-key regression drives the real embedded capture commit, so this is
   # the `core` surface (same home as test_4716 above).
   - test_operator_idempotency_4971.py
+  # #9754: the SAME core-engine helper as the row above — `mitigate_operator`'s
+  # idempotency read matches `m.id`, which a hand-written / imported mitigation
+  # Point does not carry, so every id-keyed write in the branch matched zero
+  # rows and the call returned an EMPTY SUCCESS. The repair refuses with
+  # `UnaddressableClaimError` naming the MITIGATION, and
+  # `commit_ops.apply_payload_operators` classifies it per item so one
+  # unaddressable mitigation cannot abort a whole commit's write loop. That
+  # helper is `tortoise/commit_ops.py`, which matches no SOURCE_PATTERNS row and
+  # falls through to the `core` fallback (measured: `--changed-files
+  # tortoise/commit_ops.py` -> surfaces ['core'], full=false) — so this row IS
+  # what selects the guard on the one diff that can break it. Its other half,
+  # `tortoise/sdk.py`, is a SHARED_MODULES path that already fails closed to the
+  # FULL matrix, so no second registration is needed. Hermetic per test
+  # (embedded falkordblite `TortoiseSDK` in a tmp dir, no Docker, no network).
+  - test_9754_remitigation_unaddressable.py
   # #5361: both halves of the inverted-validity-window guard. Registered under
   # `core` ALONE, which is the surface that actually selects them: the audit half
   # guards tortoise/audit.py (no SOURCE_PATTERNS entry → `core` fallback) and the
@@ -3352,6 +3367,20 @@ surfaces:
   # the FULL matrix (no SOURCE_PATTERNS entry matches tools/), so this suite
   # runs on the PR that edits the gate — pinned by test_ci_selection.py.
   - test_finding_provenance.py
+  # #10146: the OTHER half of the contract the row above pins — the ISSUE FORM
+  # (`.github/ISSUE_TEMPLATE/agent_finding.yml`) against the gate's own
+  # module-level regexes, imported from `tools/finding_provenance.py`, never
+  # copied. DB-free and network-free (YAML + the gate's predicates in process).
+  # ⚠️ Unlike its sibling this row is CLASSIFICATION, not selection: all three
+  # of the file's subjects (the form, `.github/workflows/finding-provenance.yml`
+  # and `tools/finding_provenance.py`) match no SOURCE_PATTERNS entry, so a diff
+  # touching them fails closed to the FULL matrix (measured: each selects all
+  # eight surfaces, full=true). What the row buys is `--integrity`: an
+  # unregistered `tests/**/test_*.py` reds the unconditional `manifest-integrity`
+  # leg, and because `python-ci.yml` builds its selection from `--changed-files`
+  # an unregistered file also runs in NO leg at all — green without ever
+  # executing (the #1349/#2938/#10694 silent-drop class the rows above document).
+  - test_10146_agent_finding_form.py
   - test_health_client_effect.py  # #3811: /health client-visible effect over a real port (dual: api)
   - test_branch_reaper.py   # #4408: local-branch reaper — PR-state classification + safety guards
   # #6868: the wedged-CI-run reaper. Hermetic (stub gh; no network), so it pins
@@ -8565,6 +8594,7 @@ durations:
   test_onboarding_w6_capture_disclosure.py: 40.3  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 25.8
   test_onboarding_w4_settings.py: 6.9  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 21.0
   test_finding_provenance.py: 2.8  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 2.4
+  test_10146_agent_finding_form.py: 2.0  # ⛔ ci-timing PLACEHOLDER — replace from the next junit-census run; this is the header's flat `DEFAULT_FAST_WEIGHT`, NOT a measurement of this file. Same #3400/#4348 trap as every other PR-added row: the `durations` refresher samples push-to-main runs only, so a file a PR ADDS can never carry a CI junit reading at the head that adds it. Written as a placeholder rather than a plausible-looking decimal on purpose — a number nobody measured that reads like one is worse than an obvious placeholder. The row must EXIST, not merely default: registering the file on `core` puts it in `fast_pool()`, and `--integrity`'s duration-coverage floor is measured against that pool's own size (measured at the head that adds this row: pool 1096, 1082 weighted, `duration_coverage_issues() == []` with and without it, so the row is not what makes the gate pass — it is the record that someone looked at the cost, plus a row for `--refresh-durations` to re-base). What the weight covers: DB-free, graph-free, network-free and model-free — it loads `.github/ISSUE_TEMPLATE/agent_finding.yml` through `yaml` and drives `tools/finding_provenance`'s own regexes/predicates in process; no fixture, no URI. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
   test_onboarding_false_completion_repair.py: 4.8  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 3.6 — ci-timing junit-census+top-15 2026-11-02 (run 41375596528): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (3.0s) is a LOWER bound; kept 4.8
   test_onboarding_telemetry_w11.py: 0.8  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (0.2s) is a LOWER bound; kept 0.8
   test_graph_diagnostics.py: 18.2  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 18.1
@@ -9092,6 +9122,7 @@ durations:
   test_epic903_hosted.py: 3.8  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 4.6
   test_operator_dedup_parity.py: 2.0  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 1.4
   test_operator_idempotency_4971.py: 2.2  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 1.9
+  test_9754_remitigation_unaddressable.py: 2.0  # ⛔ ci-timing PLACEHOLDER — replace from the next junit-census run; this is the header's flat `DEFAULT_FAST_WEIGHT`, NOT a measurement of this file. Same #3400/#4348 trap as its sibling row above: a file a PR ADDS can never carry a CI junit reading yet (the refresher samples push-to-main runs only). ⚠️ Expect the census to RAISE it, not confirm it: each test takes an embedded falkordblite `TortoiseSDK` in its own tmp dir (spawn + teardown per case), which is the host-load-sensitive class, so 2.0 is a deliberate LOWER bound and the shard packing may be under-priced until the sweep re-bases it. Not substituted with a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419). The row must EXIST, not merely default: registering the file on `core` puts it in `fast_pool()` (measured at this head: pool 1096, 1082 weighted, `duration_coverage_issues() == []` either way, so `--integrity` is green with or without it — the row is the cost record and the `--refresh-durations` anchor, not what makes the gate pass). What the weight covers: no Docker, no Postgres, no network, no model — the embedded SDK is per-test and the write path under test is `sdk.mitigate_operator` + `commit_ops.apply_payload_operators`. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
   test_search_promoted_fields.py: 2.1  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 1.5
   test_selfhost_rest.py: 3.4  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 3.1
   test_volunteer_reflex_harness_seam.py: 2.7  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 1.9
