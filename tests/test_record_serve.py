@@ -553,11 +553,13 @@ def test_a_record_served_read_carries_no_derived_name():
     assert not (set(props) & _refused("point")), set(props) & _refused("point")
 
 
-# ── the FOURTH explanation: §9.1/D1's decline (#10867 review ISSUE 1) ────────
+# ── the THIRD explanation: §9.1/D1's decline (#10867 review ISSUE 1) ────────
 #
-# `record_serve.parity_difference` and `record_reconcile.scan_cache_view` are the
-# tree's TWO record↔cache field-comparison instruments. #10853 taught the second
-# one that an episodic Source's turn prose is CACHE-OWNED; leaving the first
+# `record_serve.parity_difference` and `record_reconcile.scan_cache_view` are two
+# of the tree's THREE record↔cache field-comparison instruments (the third,
+# `tools/turn_parity_census.py`, compares turn rows rather than Source nodes and
+# so is not touched by this decline). #10853 taught `scan_cache_view` that an
+# episodic Source's turn prose is CACHE-OWNED; leaving `parity_difference`
 # unaware made a DECLARED asymmetry and a real projection gap the same red — the
 # "signal indistinguishable from noise" class this change grades P1 elsewhere.
 

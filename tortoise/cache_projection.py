@@ -113,10 +113,14 @@ THE FOUR PROPERTIES, AND WHERE EACH LIVES
      projector) — **for a node the projection CREATES**. The write is additive
      (`MERGE … SET n += $props`, :func:`node_statement`), so a node that ALREADY
      carries the pair keeps it across a re-projection; this arm stops the pair
-     being written, it does not clear an existing one. Both verbs are also
-     TEST-GRAPH ONLY: `rebuild_from_record` runs `_assert_test_graph`, which
-     refuses every production graph name (`org_<org_id>`), so neither is a
-     production repair path at all. Clearing a populated cache's stale pair needs
+     being written, it does not clear an existing one. Both verbs also refuse
+     NON-TEST SERVER graphs: `rebuild_from_record` runs `_assert_test_graph`,
+     which rejects any server graph name that is not `test_`/`tortoise_test_`
+     prefixed — every production name (`org_<org_id>`) among them. ⚠️ That is a
+     NAME check, not a supervision one: an EMBEDDED projection (`path=`) is
+     exempt, and an embedded DB is a persistent user database
+     (`python -m tortoise rebuild --db <path>`), so a rebuild there does run.
+     Clearing a populated cache's stale pair needs
      an explicit property clear, and the sweep is #10000's capture change.
 
    ⛔ **OBLIGATION `#10852` OWES — named, not assumed (#10867 review, P1).**
@@ -135,7 +139,7 @@ THE FOUR PROPERTIES, AND WHERE EACH LIVES
    :func:`episodic_source_declined_properties` (a CALLER of that last one —
    read by the `props` tail door here and by `record_serve`),
    :func:`is_episodic_source_node`, the `record_reconcile.scan_cache_view`
-   subtraction and `record_serve.parity_difference`'s fourth explanation (that
+   subtraction and `record_serve.parity_difference`'s third explanation (that
    module imports both of the two names above, so deleting either alone is an
    `ImportError` on every `Source` comparison, and leaving it in place keeps
    explaining a real post-`#10852` gap away), and adds a leg that a lexicon
@@ -1288,7 +1292,7 @@ def _scalar(value: Any) -> Any:
 #: :func:`episodic_source_prose_properties`,
 #: :func:`episodic_source_declined_properties` (a CALLER of it),
 #: :func:`is_episodic_source_node`, the `scan_cache_view` subtraction and
-#: `record_serve.parity_difference`'s fourth explanation (the other caller), and
+#: `record_serve.parity_difference`'s third explanation (the other caller), and
 #: adds a leg that a lexicon `summary` + a topics-derived `_searchText` SURVIVE
 #: the door. Seven names, and the list is not the contract — the epic doc's
 #: check is a grep for surviving REFERENCES. Recorded on #10853.

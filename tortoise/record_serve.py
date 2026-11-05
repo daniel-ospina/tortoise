@@ -131,13 +131,16 @@ column nor an invented field can hide behind the carve-out. A field the cache
 has and the record does not, and that is **not** in the refused set, is an
 UNEXPLAINED absence and reddens the test.
 
-⛔ TWO sanctioned asymmetries, not one, and BOTH are enumerated in
+⛔ THREE sanctioned asymmetries, not one, and ALL are enumerated in
 :func:`parity_difference` rather than absorbed by a tolerant comparison: the
-SCHEMA's refusal set (the EP carve-out above) and, since #10853, the
+SCHEMA's refusal set (the EP carve-out above), a fold ``ON CREATE`` default
+(``FOLD_ON_CREATE_DEFAULTS``, #9634), and, since #10853, the
 PROJECTION's own §9.1/D1 decline of an episodic Source's turn prose
-(``cache_projection.episodic_source_declined_properties``). The second one
-exists because this module's parity rule is one of the TWO record↔cache field
-comparison instruments in the tree; teaching only `record_reconcile` about the
+(``cache_projection.episodic_source_declined_properties``). The last one
+exists because this module's parity rule is one of the THREE record↔cache
+field-comparison instruments in the tree — ``record_reconcile``, this function,
+and ``tools/turn_parity_census.py``, which compares turn rows rather than
+Source nodes; teaching only `record_reconcile` about the
 decline (#10867 review ISSUE 1) left this one reporting a legacy session node's
 own prose as a projection gap, i.e. a declared asymmetry reddening the same as a
 real defect.

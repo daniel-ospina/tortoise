@@ -243,7 +243,9 @@ title-derived `_searchText`, silently un-indexing it in the cache.
 
 #### The identity is read AS THE NODE WILL CARRY IT — the `props` tail included
 
-`props` is written to the node **verbatim**, so it can carry identity, not only
+`props` is written to the node with its property names **unmapped** (the tail is
+seeded first and a column value overwrites the same coordinate; an episodic
+Source's declined names are popped), so it can carry identity, not only
 prose: a row whose `source_kind` column is NULL while the tail holds
 `sourceKind='agentSession'` produces a node `is_episodic_source_node` calls a
 captured session. A predicate reading the **columns alone** therefore answered
@@ -311,10 +313,13 @@ bounds, both deliberate:
   additive (`MERGE … SET n += $props`, `cache_projection.node_statement`), so a
   node that ALREADY carries the pair keeps it across a re-projection; the
   narrowing stops the pair being written, it does not clear an existing one.
-  Both verbs are also **test-graph only**: `rebuild_from_record` runs
-  `_assert_test_graph`, which refuses every production graph name
-  (`org_<org_id>`), so neither is a production repair path at all. Clearing a
-  populated cache's stale pair needs an explicit property clear, and the sweep is
+  Both verbs also refuse **non-test server graphs**: `rebuild_from_record` runs
+  `_assert_test_graph`, which rejects any server graph name that is not
+  `test_`/`tortoise_test_` prefixed — every production name (`org_<org_id>`)
+  among them. ⚠️ That is a NAME check, not a supervision one: an EMBEDDED
+  projection (`path=`) is exempt, and an embedded DB is a persistent user
+  database (`python -m tortoise rebuild --db <path>`), so a rebuild there does
+  run. Clearing a populated cache's stale pair needs an explicit property clear, and the sweep is
   #10000's capture change.
 
 ### Obligation: `#10852` DELETES this rule, it does not converge with it
@@ -339,7 +344,7 @@ follow-up obligation on #10853.
 enumerations** (#10867 review, ISSUE 2). An obligation that named only the
 projection's own names was a trap in both directions:
 
-* `episodic_source_declined_properties` (`cache_projection.py:1567`) is a
+* `episodic_source_declined_properties` (`cache_projection.py:1589`) is a
   **caller** of `episodic_source_prose_properties`, so deleting the latter alone
   leaves `NameError` on the `props` tail for every episodic row;
 * `record_serve.parity_difference` (`record_serve.py:1137-1151`) imports **both**
