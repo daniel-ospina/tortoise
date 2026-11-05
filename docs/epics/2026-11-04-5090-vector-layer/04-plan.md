@@ -47,10 +47,10 @@ E2E, because those are the two places where "the metric went green and the promi
 | # | journey | entry state | exit state |
 |---|---|---|---|
 | **J1** | **Agent searches for meaning.** Issues a semantic query. | prose rows carry vectors; identifier-only rows do not | results are all *semantically* retrievable rows; no identifier-only row is dressed as a semantic match |
-| **J2** | **Agent searches a label with no index.** | four of five served labels have no vector index, and two of them (`Object` 7,859 + `Event` 4,798) hold stored vectors that a query full-scans today (`Source`/`Subject` hold none — §12.1b) | the answer arrives for a label that carries vectors, **and the trace names `scan_fallback`** so a caller can see it degraded |
+| **J2** | **Agent searches a label with no index.** | four of five served labels have no vector index, and two of them (`Object` 7,859 + `Event` 4,798) hold the stored vectors the 2026-09-24 count found, which a query full-scans today (`Source`/`Subject` carry no INDEX, and that reading counted none — their writers do store `embedding`, so the live population is `--census`'s to measure) | the answer arrives for a label that carries vectors, **and the trace names `scan_fallback`** so a caller can see it degraded |
 | **J3** | **Operator inspects the store's contract.** | setup has run | sees the serves/indexes pair for **every** served label — not only the broken ones |
 | **J4** | **Operator audits a write.** | a row was written without a vector | every embedding writer is either gated or carries a **runtime-resolvable** exemption |
-| **J5** | **Operator weighs removing dead vectors.** | two of the four unindexed labels (`Object`, `Event`) hold stored vectors — 12,657 between them; `Source`/`Subject` hold none (§12.1b) | a dry-run census names the population, its bytes, and **exactly which query results would change** — and the surface call is requested, not taken |
+| **J5** | **Operator weighs removing dead vectors.** | the 2026-09-24 count put all 12,657 stored-but-unindexed vectors on `Object` + `Event`; `Source`/`Subject` have no vector index and that reading counted none, but their writers do store `embedding` — so the census measures the live population rather than assuming it | a dry-run census names the population, its bytes, and **exactly which query results would change** — and the surface call is requested, not taken |
 
 **Edge cases (empty / error / degraded), all present in E2E:** empty store; a label with zero vectors; a
 store with **no** gap (the case that is silent today — E2E-4); an unreadable index catalogue; a writer the
@@ -145,9 +145,9 @@ existing probe**, not silent.
 ## 6. Interfaces
 
 **6.1 `_record_vector_index_inventory` (S4) — behaviour change, signature unchanged.**
-`(self, catalogue_rows=None) -> None` today; unchanged. The change is that it records/exposes
-`_vector_indexed_labels` **and the served set** on every setup, instead of returning early when `gap` is
-empty. Logging moves from *"warn on gap"* to *"report the pair at INFO; warn on gap"*, so the warning
+`(self, catalogue_rows=None) -> None` today; unchanged. The change is that it retains and exposes **the served set** beside the already-unconditional
+`_vector_indexed_labels` (assigned on every successful read — there is no early return on an empty `gap`);
+`if gap:` keeps gating the warning only. Logging moves from *"warn on gap"* to *"report the pair at INFO; warn on gap"*, so the warning
 semantics a caller may match on are preserved. **The one test that must change deliberately:**
 `tests/test_4997_vector_index_parity.py::test_a_store_with_no_gap_does_not_warn` — its *warning* claim
 stands; its *silence* claim is what S4 ends. The child states this so the change is not mistaken for a
@@ -166,7 +166,8 @@ unreadable catalogue rather than reporting an empty population.
 **6.4 Surface statement (⛔ the hard rule).** Nothing here adds or removes an MCP tool or public SDK method.
 **S3 is the one place that could**: removing the `Object`/`Event` vectors makes
 `entity_type='object'` / `'event'` return **zero rows** where they return rows today (`Source`/`Subject`
-hold no vectors at all — §12.1b). That is a surface
+carry no vector INDEX, and the 2026-09-24 count found none there — though both labels' writers do store
+`embedding`, so the census measures the live population — §12.1b). That is a surface
 change and **requires Daniel's approval before it is implemented** — so it is carried in the child's body as
 a request, with the census as its evidence.
 

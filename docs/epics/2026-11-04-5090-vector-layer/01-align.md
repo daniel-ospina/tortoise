@@ -293,7 +293,7 @@ survives is what nobody else owns:
 1. **The embedding rule is written and switched off** — a real defect, in nobody else's scope.
 2. **The exemption authority lives only in a read-only measurement script** — three write paths have no
 declared exemption in the product.
-3. **Four of five served labels have no vector index and no efficient query path** — two of them (`Object`, `Event`) hold the 12,657 stored vectors a full scan serves today; `Source` and `Subject` hold none (§12.1b) — and the *removal* of the
+3. **Four of five served labels have no vector index and no efficient query path** — the 2026-09-24 reading counted the 12,657 stored vectors on `Object` (7,859) and `Event` (4,798), which a full scan serves today, and none on `Source`/`Subject` — though BOTH of those labels' writers do store `embedding` (`_upsert_document` → `:Source`, D10; `_upsert_subject`, `#7845`), so the live population is what `--census` measures, never what the index inventory implies (§12.1b) — and the *removal* of the
    unindexed ones is **not authorised by any recorded decision**: the 2026-09-24 direction points the other
    way ("keep the vectors, make them searchable"), and the 2026-10-08 billing ruling removes the cost
    argument rather than granting one (retained bytes are revenue; removing bytes moves the bill by $0.00).

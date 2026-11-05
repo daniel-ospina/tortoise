@@ -127,7 +127,7 @@ comparables now say what that measurement will probably show, and how to run it:
 
 | Assumption | Confidence | Source | Validation plan |
 |---|---|---|---|
-| Vectors are stored and unindexed for **two** labels (`Object`, `Event`; four served labels are unindexed, `Source`/`Subject` carry no vectors) | high | `ENTITY_TYPE_LABELS` (5 served) + `Point`-only DDL (`projection/__init__.py:19765`, `:19783`) | re-run `tools/dod_5090_probe.py --census` on a graph that holds rows |
+| Vectors are stored and unindexed on **two** labels in the 2026-09-24 count (`Object` 7,859 + `Event` 4,798 = 12,657; four served labels are unindexed). ⚠️ NOT a claim that `Source`/`Subject` can never hold one — their writers DO store `embedding` (`_upsert_document` → `:Source`, `_upsert_subject`), which is why the census measures `db.labels()` instead of the index inventory | high | `ENTITY_TYPE_LABELS` (5 served) + `Point`-only DDL (`projection/__init__.py:19765`, `:19783`) | re-run `tools/dod_5090_probe.py --census` on a graph that holds rows |
 | The EMBED rule exists and is **off** by default | high | `embed_gate.RULE_SET is value_gate.RULES` → `True`; flag unset in the 4 shipped surfaces that exist | the arming measurement (scope item 1) |
 | **A cross-store move PRESERVES recall on OUR mix** (this is the `01-align.md` K3 statement; §3's evidence below is *against* it) | **low — the hinge** | 0.942 → 0.401 @ 10 % selectivity (post-filter); 0.63–0.72 (epic's comparable); both **not our corpus** | scope item 2 — exact ground truth, our selectivities, filtered recall reported separately |
 | `hnsw.iterative_scan` compensates enough to be a net win | **low — unmeasured** | recovers 0.847 in one config; costs CPU/memory/tail latency | scope item 2, same sweep |

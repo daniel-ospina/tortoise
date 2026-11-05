@@ -115,7 +115,9 @@ assertion:
   an empty population; the affected query paths are enumerated; **the removal is requested, not performed**.
 - **Complexity:** standard · **Blocked by:** none (the census half) · **Blocks:** none.
 - ⛔ **Why the removal is not in this child's authority:** `entity_type='object'` / `'event'` vector search
-  **returns rows today** by full scan (`Source`/`Subject` hold no vectors, so nothing changes there). Removing the vectors removes that answer —
+  **returns rows today** by full scan. (`Source`/`Subject` carry no vector index; the 2026-09-24 count found
+  no vectors there either, though both labels' writers do store `embedding` — so what the census finds on them is
+  a measurement, not an assumption.) Removing the vectors removes that answer —
   an MCP/SDK surface change, which `AGENTS.md` requires **Daniel's approval for before implementation**.
   The census is the evidence for that request; acting on it is not a lane's.
 - ⚠️ **Contradiction test, recorded:** **no recorded decision authorises** this removal. The 2026-09-24
