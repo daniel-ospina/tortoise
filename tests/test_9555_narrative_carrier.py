@@ -1738,6 +1738,47 @@ def _anchored_line(text: str, anchor: str, where: str, *, unique: bool = False) 
     return text[start:].split("\n", 1)[0]
 
 
+def _assert_vector_reads_the_narrative(line: str, where: str, home: str) -> None:
+    """The vector's TEXT **is** the S1 narrative read from `home` — bound, not implied.
+
+    ⛔ THE OBJECT, not just the table name. `f"read from `{home}`" in line` is a
+    bare substring, and it is satisfied by rewordings that invert or re-specify the
+    claim — all three measured GREEN before this helper existed, at BOTH call sites:
+
+      • `the one-line `summary` read from `public.session_narrative`.`summary``
+        — names a COLUMN of the narrative's own table as the vector's text (that
+        column exists: `supabase/migrations/20261023000001_record_session_narrative.sql:130`
+        `summary     text,`), so the fortiest reading of the sentence is a vector of
+        the summary — the one thing these two sections exist to forbid;
+      • `it is NOT read from `public.session_narrative`` — the pointer's own
+        negation, and the assert passed it;
+      • `read from `public.session_narrative`'s `summary` column` — the home
+        namespacing its own column.
+
+    So the clause is asserted with the phrase that carries the object
+    (`the S1 narrative read from `home``), the negated frame is refused, and the
+    home may not be used as a namespace for a column.
+    """
+    assert f"the S1 narrative read from `{home}`" in line, (
+        f"{where} no longer states that the source vector's text IS the S1 "
+        f"narrative read from `{home}` — `{home}` appearing on the line is not "
+        f"enough: rewriting the OBJECT (`the one-line `summary` read from "
+        f"`{home}`.`summary``) or NEGATING the pointer (`it is NOT read from "
+        f"`{home}`)` both satisfy a bare substring, and both order the vector "
+        f"these sections forbid (measured GREEN before this assert)")
+    assert "not read from" not in line.lower(), (
+        f"{where} NEGATES the pointer — the sentence now says the vector's text "
+        f"is *not* read from `{home}`, which a presence check cannot see; the "
+        f"negation these sections DO want is about `:Source.summary`, not about "
+        f"the narrative's home")
+    assert f"`{home}`." not in line and f"`{home}`'" not in line, (
+        f"{where} points the vector at a COLUMN of `{home}` rather than at its "
+        f"text (`{home}`.`summary` / `{home}`'s `summary`). The table has a "
+        f"`summary` column (`20261023000001_record_session_narrative.sql:130`), "
+        f"so this reading is grammatical and is exactly the bag-of-words vector "
+        f"§9.4 forbids")
+
+
 def _source_vector_footnote(text: str) -> str:
     """§12.1b's `:Source` footnote, whole — the line, not a window around it.
 
@@ -1859,8 +1900,8 @@ def _ontology_section_of(field: str) -> str:
         f"`docs/ONTOLOGY.md` has no `| `{field}` |` property row under a "
         f"numbered section heading — the ontology moved, so EVERY consumer of "
         f"this derived value must re-derive it: §9.4's deciding sentence and "
-        f"§12.1b's footnote both assert it, and fixing only the one this message "
-        f"names would leave the other pointing at a different type")
+        f"§12.1b's footnote both assert it, and fixing only ONE of those two "
+        f"call sites would leave the other pointing at a different type")
 
 
 def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
@@ -1882,9 +1923,11 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
     paragraph above it is caught too), but that half is not executed by a plain
     run at all. From `b748df7d0` (the base before the rebase,
     post-`#10978`) onward NEITHER retired string is present, and neither is
-    present at this head's base `e2584e2cb` — nor at any commit of THIS branch:
-    both of this branch's bases already carried `#10978`'s correction (`b748df7d0`
-    before the rebase, `e2584e2cb` after it). So on this
+    present at this head's BASE `78161a50a` (the merge-base after `95bfc475c`
+    merged `origin/main`; `e2584e2cb` was the base before that merge) — nor at any
+    commit of THIS branch: both of this branch's earlier bases already carried
+    `#10978`'s correction (`b748df7d0` before the rebase, `e2584e2cb` after it).
+    So on this
     branch both halves are that correction's REGRESSION GUARD, not its author:
     the pin reds if either section drifts back, which is the only thing that
     would catch it. "Measured on origin/main" would have been FALSE within the
@@ -1938,8 +1981,8 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
     deciding = _source_vector_section_94_line(text)
     # ⛔ THE BINDING, and it is not decoration: `_anchored_line` resolves the anchor
     # ANYWHERE in the document, so without this the deciding sentence can be moved
-    # into §9.5 (leaving §9.4 a bare negation) and the two asserts below still pass
-    # — measured, and the pin stayed GREEN. "§9.4 says it" means the sentence is IN
+    # into §9.5 (leaving §9.4 a bare negation) and the asserts below still pass —
+    # measured, and the pin stayed GREEN. "§9.4 says it" means the sentence is IN
     # §9.4, so that is asserted rather than assumed.
     assert deciding in s94, (
         f"§9.4's DECIDING sentence (*{_SOURCE_VECTOR_SECTION_94_ANCHOR} …*) is "
@@ -1947,13 +1990,7 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
         f"document, so a copy moved into another section satisfies the pointer "
         f"and negation asserts while §9.4 itself no longer says what the source "
         f"vector reads; re-derive where §9.4 states it before trusting this pin")
-    assert f"read from `{home}`" in deciding, (
-        f"§9.4's DECIDING sentence (*{_SOURCE_VECTOR_SECTION_94_ANCHOR} …*) no "
-        f"longer states that the source vector's text is read from `{home}` — "
-        f"`{home}` appearing elsewhere in §9.4 does not satisfy this: the "
-        f"sentence that chooses the vector's input must name it. That pointer is "
-        f"what stops a design embedding a topic lexicon under #10000 once "
-        f"`#10852` lands")
+    _assert_vector_reads_the_narrative(deciding, "§9.4's DECIDING sentence", home)
     assert "never from `:Source.summary`" in deciding, (
         "§9.4's DECIDING sentence no longer states the NEGATION — naming "
         "`:Source.summary` beside the narrative's home without saying which one "
@@ -2056,13 +2093,7 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
     #   • append "; embed that `:Source.summary` as the vector's text" -> GREEN
     #   • rewrite the vector's text as "the summary the node holds,
     #     see `public.session_narrative`"                        -> GREEN
-    assert f"read from `{home}`" in footnote, (
-        f"§12.1b's `:Source` footnote no longer states that the vector's TEXT is "
-        f"read from `{home}` — `{home}` merely appearing on the line (the "
-        f"`(§9.1, and §9.4 above …)` parenthesis is enough) does not say the "
-        f"vector reads it, and this is the section that decides WHERE vectors "
-        f"live; without this the footnote can order a different input and stay "
-        f"green")
+    _assert_vector_reads_the_narrative(footnote, "§12.1b's `:Source` footnote", home)
     assert "never the narrative" in footnote, (
         "§12.1b's `:Source` footnote no longer states the NEGATION (*\"a "
         "session's `summary` is … metadata and never the narrative\"*) — the "
