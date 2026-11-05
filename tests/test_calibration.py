@@ -1314,16 +1314,21 @@ def test_compute_confidence_survives_an_unaddressable_id(sdk):
 
 
 def test_mitigate_operator_survives_an_idless_mitigation(sdk):
-    """#9262: the refusal must not reach ``mitigate_operator`` either.
+    """#9262 → #9754: the refusal must not reach ``mitigate_operator`` either.
 
     The re-mitigation branch reads the existing mitigation's id from the graph
     (``… RETURN m.id``), so a hand-written id-less mitigation Point yields
     ``mid=None`` and every write in the branch is id-keyed. Measured on
-    ``origin/main``: the call returns ``{}`` (a pre-existing false PASS, filed
-    as #9754) and the run continues; with #9262's refusal alone it
-    RAISED ``no node with id None`` — aborting a call whose caller named the
-    OPERATOR, and mid-loop for ``commit_ops``. The guard keeps the historical
-    outcome instead of turning a broken path into an abort.
+    ``origin/main``: the call returned ``{}`` — a false PASS, filed as #9754.
+
+    #9262 shipped a silent guard here (``return self.get_point(mid)``) to keep
+    that historical outcome rather than abort mid-loop for ``commit_ops``.
+    #9754 is the actual repair and this test pins the CONTRACT it chose: the
+    call REFUSES with ``UnaddressableClaimError`` naming the mitigation, and
+    ``apply_payload_operators`` classifies the refusal per item so a commit's
+    write loop still survives it (see
+    ``tests/test_9754_remitigation_unaddressable.py``). Nothing is written and
+    no false ``{}`` success is returned.
     """
     g = sdk._get_proj().g
     op = sdk.create_point("statement", "operator claim", status="live",
@@ -1335,7 +1340,9 @@ def test_mitigate_operator_survives_an_idless_mitigation(sdk):
         "MATCH (op:Point {id:$id})-[:mitigated_by]->(m:Point) RETURN m.id",
         params={"id": op["id"]}).result_set == [[None]]
 
-    assert not sdk.mitigate_operator(op["id"], "second reason", strength=0.5)
+    with pytest.raises(UnaddressableClaimError):
+        sdk.mitigate_operator(op["id"], "second reason", strength=0.5)
+    # The false success is gone — no evidence row keyed on the ``None`` id.
     assert None not in sdk._evidence
 
 
