@@ -210,11 +210,11 @@ def _pick_last(
         raise Unreadable(
             f"{key}: the body carries none of {list(fields)} — it is not this endpoint's answer"
         )
-    missing = [f for f in required if f not in last]
+    missing = [f for f in required if last.get(f) is None]
     if missing:
-        raise Unreadable(
-            f"{key}: the body is missing {missing} — refusing to project an identity with nulls"
-        )
+        # ⛔ NULL is as useless as ABSENT: `{"id":1,"full_name":null,"default_branch":null}` used to
+        # cache a six-hour identity naming no repository.
+        raise Unreadable(f"{key}: the body has null {missing} — refusing to project nulls")
     out = {f: last.get(f) for f in fields}
     if all(v is None for v in out.values()):
         raise Unreadable(f"{key}: every projected field is null — the body was not an answer")
@@ -276,10 +276,21 @@ def _project_required_set(docs: Sequence[Any]) -> Any:
             "repo.required_set: required_status_checks has neither `contexts` nor `checks` — "
             "refusing to infer an empty required set from the inner object's shape"
         )
-    return {
-        "contexts": list(rsc.get("contexts") or []),
-        "checks": [c.get("context") for c in (rsc.get("checks") or []) if isinstance(c, dict)],
-    }
+    contexts = rsc.get("contexts")
+    checks = rsc.get("checks")
+    # ⛔ TYPE AND NULL-NESS, not presence. `{"contexts": "docs"}` used to project to
+    # `["d","o","c","s"]` and `{"checks": {"docs": {"app_id": 1}}}` to `[]` — an empty required set
+    # inferred from a shape the code did not understand, on the MERGE-GATING key.
+    if contexts is not None and not (
+        isinstance(contexts, list) and all(isinstance(c, str) for c in contexts)
+    ):
+        raise Unreadable("repo.required_set: `contexts` is not a list of strings")
+    if checks is not None and not (
+        isinstance(checks, list)
+        and all(isinstance(c, dict) and isinstance(c.get("context"), str) for c in checks)
+    ):
+        raise Unreadable("repo.required_set: `checks` is not a list of {context} objects")
+    return {"contexts": list(contexts or []), "checks": [c["context"] for c in (checks or [])]}
 
 
 def _project_labels(docs: Sequence[Any]) -> Any:
@@ -298,11 +309,13 @@ def _project_workflows(docs: Sequence[Any]) -> Any:
     for w in _expand(docs, "repo.workflows", "workflows"):
         if not isinstance(w, dict):
             raise Unreadable(f"repo.workflows: entry {w!r} is not a workflow")
-        missing = [f for f in ("id", "path", "state") if f not in w]
+        missing = [f for f in ("id", "path", "state") if w.get(f) is None]
         if missing:
-            # `[{}]` used to project to `[{"id": null, "path": null, "state": null}]` — a workflow
-            # list that names no workflow, cached for an hour.
-            raise Unreadable(f"repo.workflows: entry is missing {missing} — not a workflow")
+            # `[{}]` AND `[{"id": null, "path": null, "state": null}]` both used to project to a
+            # workflow list naming no workflow, cached for an hour. Null is as useless as absent.
+            raise Unreadable(f"repo.workflows: entry has null {missing} — not a workflow")
+        if not isinstance(w["path"], str) or not isinstance(w["state"], str):
+            raise Unreadable("repo.workflows: entry has a non-string path/state")
         # `state` here is the DEFINITION's enabled/disabled state on the default branch —
         # invariant on this timescale. It is not a run's state.
         out.append({k: w.get(k) for k in ("id", "path", "state")})
@@ -317,10 +330,12 @@ def _project_runners_inventory(docs: Sequence[Any]) -> Any:
     for r in _expand(docs, "runners.inventory", "runners"):
         if not isinstance(r, dict):
             raise Unreadable(f"runners.inventory: entry {r!r} is not a runner")
-        if "name" not in r:
-            # `[{}]` used to project to `[{"name": null, "labels": []}]` — an inventory entry that
-            # names no runner, cached for 30 minutes.
-            raise Unreadable("runners.inventory: entry has no `name` — not a runner")
+        if not isinstance(r.get("name"), str):
+            # `[{}]` AND `[{"name": null}]` both used to project to an inventory entry naming no
+            # runner, cached for 30 minutes.
+            raise Unreadable("runners.inventory: entry has a non-null-string `name` — not a runner")
+        if r.get("labels") is not None and not isinstance(r.get("labels"), list):
+            raise Unreadable("runners.inventory: entry has a non-list `labels`")
         labels = [lbl.get("name") for lbl in (r.get("labels") or []) if isinstance(lbl, dict)]
         out.append({"name": r.get("name"), "labels": labels})
     return out
@@ -467,6 +482,19 @@ _MUTABLE_TOKENS: frozenset[str] = frozenset(
         "approvedat",
         "headsha",
         "headoid",
+        # moving refs and human-editable metadata: `pr.head`'s SHA changes on every push, and
+        # `pr.title`/`repo.description`/`repo.topics` change without any invariant being involved.
+        "head",
+        "headref",
+        "base",
+        "title",
+        "ref",
+        "refs",
+        "description",
+        "topics",
+        "message",
+        "milestone",
+        "milestones",
         # counters/flags that ride the repo body (`repo.forks`, `repo.stargazers`, `repo.size`,
         # `repo.archived`, `pr.files`, `pr.additions`, `pr.rebaseable`, …).
         "forks",
@@ -661,7 +689,10 @@ def _assert_every_key_projects() -> frozenset[str]:
     checked: set[str] = set()
     for key, spec in INVARIANTS.items():
         _validate_spec(key, spec.argv, spec.projection, spec.project)
-        checked.add(key)
+        # ⛔ THE OBJECT ID IS THE PROOF. A literal `frozenset(INVARIANTS)` reproduces the key SET and
+        # survived the whole suite (measured). It cannot reproduce `id(spec)` — so this value can
+        # only be produced by a loop that actually visited the registry.
+        checked.add(f"{key}#{id(spec)}")
     return frozenset(checked)
 
 
@@ -1084,7 +1115,11 @@ def main(argv: list[str] | None = None) -> int:
         if a.key in GLOBAL_KEYS:
             print(f"gh_read_cache: live read (not cached) — {exc}", file=sys.stderr)
             try:
-                sys.stdout.buffer.write(reader(a.key))
+                # ⛔ PROJECTED, like every other exit path. `--no-cache` means "bypass the cache",
+                # NOT "change the document": emitting the raw body here gave one key two output
+                # schemas, so a caller written against the documented shape read NO required checks
+                # from a live body that named one.
+                sys.stdout.buffer.write(_project(a.key, reader(a.key)))
             except Unreadable as r_exc:
                 print(f"gh_read_cache: REFUSED — {r_exc}", file=sys.stderr)
                 return 1
@@ -1094,7 +1129,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if a.no_cache:
         try:
-            sys.stdout.buffer.write(reader(a.key))
+            sys.stdout.buffer.write(_project(a.key, reader(a.key)))
         except Unreadable as exc:
             print(f"gh_read_cache: REFUSED — {exc}", file=sys.stderr)
             return 1

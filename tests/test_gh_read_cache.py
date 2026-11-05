@@ -12,8 +12,8 @@ it turns "I could not read" into "I read X", which is this repo's false-PASS cla
 therefore about the FAILURE directions, not the happy path.
 
 ⛔ MUTATION-VERIFIED, AND HONEST ABOUT WHAT IS NOT. Two earlier rounds found fences that could not
-fail for the bug they named — a green suite proving nothing. 38 mutations of the module have now
-been run; **37 are KILLED** and one survives ALONE, on purpose:
+fail for the bug they named — a green suite proving nothing. 46 mutations of the module have now
+been run; **ALL 46 are KILLED** (M10 included — see below):
 
     M1  reader returns the unprojected body ............ KILLED   M12 decode_pages first doc only .... KILLED
     M2  _load ignores freshness ........................ KILLED   M13 envelope scope check removed ... KILLED
@@ -24,10 +24,17 @@ been run; **37 are KILLED** and one survives ALONE, on purpose:
     M7  import-time registry guard is a no-op .......... KILLED   M18 OverflowError escapes _load ... KILLED
     M8  _store is not atomic ........................... KILLED   M19 digest ignores projection SRC . KILLED
     M9  cache-write failure fails the read ............. KILLED   M20 shape check is a no-op ........ KILLED
-    M10 projection dropped from the FILENAME only ...... SURVIVES  M21 non-dict page accepted ....... KILLED
+    M10 projection dropped from the FILENAME only ...... KILLED    M21 non-dict page accepted ....... KILLED
     M11 projection dropped from the ENVELOPE only ...... KILLED   M22 error-document marker gone .... KILLED
 
-Two further rounds added M23-M38 after review (all KILLED):
+Two further rounds added M23-M46 after review (all KILLED):
+
+  cycle-8: M39a/M39b CLI live paths emitted the RAW body (one key, two schemas) — killed only
+           after a test covered the GLOBAL exit separately | M40/M41 required_set `contexts` /
+           `checks` TYPE checks (`{"contexts": "docs"}` -> ["d","o","c","s"]) | M42 workflow NULL id
+           | M43 runner `name` must be a str | M44 `_pick_last` required must be non-null
+           M45 the added mutable words (`pr.head`, `pr.title`, `repo.topics`, …)
+           M46 `_IMPORT_CHECK = frozenset(INVARIANTS)` — a literal reproducing the key SET
 
   cycle-6: M23 required_set ABSENT as empty | M24 _pick_last required | M25 workflow entry key
            M26 runner `name` | M27 all-null answer | M28 non-dict envelope | M29 reader non-bytes
@@ -37,11 +44,12 @@ Two further rounds added M23-M38 after review (all KILLED):
            M35 _IMPORT_CHECK constant (needed the checked-key SET — a count was spoofable by `6`)
            M36 ttl_s ValueError | M37 required_set inner absence | M38 _project doesn't refuse
 
-M10 surviving is the documented layering, not a hole: for the PROJECTION the envelope stamp is
-authoritative and the filename digest only stops two projections from thrashing one file. (For the
-TTL it is the other way round — the FILENAME is authoritative and the envelope's `ttl_s` check is
-redundant.) Dropping both projection layers IS killed. Do not delete either layer believing the
-other covers the same direction.
+⛔ M10 USED TO SURVIVE AND NO LONGER DOES — the earlier claim is corrected here rather than kept.
+Once the source-bearing digest moved into the FILENAME (to stop two revisions thrashing one file),
+dropping the filenames' projection component reds `test_two_projection_revisions_do_not_thrash_one_cache_file`.
+So both projection layers are now individually covered. For the TTL the direction is still one-way:
+the FILENAME is authoritative and the envelope's `ttl_s` check is redundant, which is why that
+layer alone is NOT pinned. Do not delete a layer believing the other covers the same direction.
 
 Hermetic: no network, no `gh`, no DB. The reader and the clock are injected.
 """
@@ -1054,9 +1062,10 @@ def test_the_import_time_registry_guard_actually_RAN() -> None:
     """⛔ The call was bare, so it could be deleted with all 107 earlier tests still green
     (every test called `_assert_every_key_projects` DIRECTLY). It is now bound to `_IMPORT_CHECK`,
     so deleting the call site raises AttributeError here."""
-    # The set the loop actually VISITED — not a boolean and not a count. Measured: a hardcoded
-    # `_IMPORT_CHECK = 6` satisfied `== len(INVARIANTS)` and survived the whole suite.
-    assert frozenset(C.INVARIANTS) == C._IMPORT_CHECK
+    # ⛔ `id(spec)` is the proof that a CALL happened. A literal `frozenset(INVARIANTS)` reproduces
+    # the key SET and left all 172 tests green (measured); a count was equally spoofable (`6`). An
+    # object id can only come from a loop that actually visited the registry.
+    assert frozenset(f"{k}#{id(v)}" for k, v in C.INVARIANTS.items()) == C._IMPORT_CHECK
 
 
 def test_read_validates_the_spec_on_every_call(tmp_path: Path) -> None:
@@ -1236,7 +1245,16 @@ def test_cli_no_cache_reads_live(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
         ["--key", "repo.metadata", "--repo", "o/r", "--cache-dir", str(tmp_path), "--no-cache"]
     )
     assert rc == 0
-    assert json.loads(out.buffer.getvalue())["id"] == 5
+    emitted = json.loads(out.buffer.getvalue())
+    assert emitted["id"] == 5
+    # ⛔ `--no-cache` bypasses the CACHE, not the projection: one key must not have two schemas.
+    assert "full_name" in emitted and set(emitted) <= {
+        "id",
+        "node_id",
+        "full_name",
+        "default_branch",
+        "visibility",
+    }
     assert calls == ["repo.metadata"]
     assert not list(tmp_path.iterdir()), "--no-cache must not write an entry"
 
@@ -1254,7 +1272,10 @@ def test_cli_global_key_without_a_token_still_reads_LIVE(
     def fake_reader(repo: str, branch: str):
         def _r(key: str) -> bytes:
             calls.append(key)
-            return json.dumps({"login": "someone", "id": 9}).encode()
+            # extra volatile fields, so a RAW emit is distinguishable from a PROJECTED one
+            return json.dumps(
+                {"login": "someone", "id": 9, "plan": {"name": "free"}, "created_at": "2020-01-01"}
+            ).encode()
 
         return _r
 
@@ -1263,7 +1284,11 @@ def test_cli_global_key_without_a_token_still_reads_LIVE(
     monkeypatch.setattr(C.sys, "stdout", out)
     rc = C.main(["--key", "user.identity", "--cache-dir", str(tmp_path)])
     assert rc == 0, "a global key with no identifiable credential must be read LIVE, not refused"
-    assert json.loads(out.buffer.getvalue())["login"] == "someone"
+    emitted = json.loads(out.buffer.getvalue())
+    assert emitted["login"] == "someone"
+    # ⛔ The GLOBAL live-read path must project too — it is a second exit that emitted the RAW body,
+    # giving one key two schemas.
+    assert set(emitted) <= {"login", "id"}, f"the global live path emitted a raw body: {emitted}"
     assert calls == ["user.identity"]
     assert not list(tmp_path.iterdir()), "an unidentifiable-credential read must not be cached"
 
@@ -1505,3 +1530,111 @@ def test_required_set_with_only_checks_projects() -> None:
         [{"required_status_checks": {"checks": [{"context": "docs"}]}}]
     )
     assert out == {"contexts": [], "checks": ["docs"]}
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+# 13. CYCLE-8 FINDINGS — type/null validation, one schema per key, a real import fence
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+@pytest.mark.parametrize(
+    ("key", "body"),
+    [
+        # `{"contexts": "docs"}` projected to ["d","o","c","s"] — a required set invented from a
+        # string, on the merge-gating key.
+        ("repo.required_set", [{"required_status_checks": {"contexts": "docs"}}]),
+        ("repo.required_set", [{"required_status_checks": {"contexts": [1, 2]}}]),
+        # A DICT of checks iterated to its keys and silently dropped, yielding an EMPTY required set.
+        ("repo.required_set", [{"required_status_checks": {"checks": {"docs": {"app_id": 1}}}}]),
+        ("repo.required_set", [{"required_status_checks": {"checks": [{"context": 5}]}}]),
+        # NULL as well as ABSENT: both used to cache an answer naming nothing.
+        ("repo.workflows", [{"workflows": [{"id": None, "path": None, "state": None}]}]),
+        ("repo.workflows", [{"workflows": [{"id": 1, "path": 5, "state": "active"}]}]),
+        # a NULL id with a perfectly good path/state: only the null-ness check catches this one
+        ("repo.workflows", [{"workflows": [{"id": None, "path": "ci.yml", "state": "active"}]}]),
+        ("runners.inventory", [{"runners": [{"name": None, "labels": []}]}]),
+        ("runners.inventory", [{"runners": [{"name": "r", "labels": "x64"}]}]),
+        ("repo.metadata", [{"id": 1, "full_name": None, "default_branch": None}]),
+        ("user.identity", [{"login": "a", "id": None}]),
+        ("repo.metadata", [{"id": 1, "full_name": "o/r", "default_branch": None}]),
+    ],
+)
+def test_presence_is_not_enough_type_and_null_are_checked(key: str, body) -> None:
+    """⛔ Inner projections validated PRESENCE only, so a shape they did not understand became a
+    cached wrong answer — including an EMPTY required set on the merge-gating key."""
+    with pytest.raises(C.Unreadable):
+        C.INVARIANTS[key].project(body)
+
+
+def test_the_documented_shapes_still_project() -> None:
+    """The added strictness must not refuse the shapes GitHub actually sends."""
+    assert C.INVARIANTS["repo.required_set"].project(
+        [{"required_status_checks": {"contexts": ["docs"]}}]
+    ) == {"contexts": ["docs"], "checks": []}
+    assert C.INVARIANTS["repo.workflows"].project(
+        [{"workflows": [{"id": 1, "path": ".github/workflows/ci.yml", "state": "active"}]}]
+    ) == [{"id": 1, "path": ".github/workflows/ci.yml", "state": "active"}]
+    assert C.INVARIANTS["runners.inventory"].project(
+        [{"runners": [{"name": "cmux", "labels": [{"name": "x64"}]}]}]
+    ) == [{"name": "cmux", "labels": ["x64"]}]
+
+
+def test_cli_no_cache_emits_the_SAME_SCHEMA_as_the_cached_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """⛔ One key must not have two output schemas. `--no-cache` bypasses the CACHE, not the
+    projection: a caller written against the documented shape read NO required checks from a live
+    body that named one."""
+    raw = json.dumps(
+        {"required_status_checks": {"contexts": ["docs"]}, "enforce_admins": {"enabled": True}}
+    ).encode()
+
+    def fake_reader(repo: str, branch: str):
+        return lambda key: raw
+
+    monkeypatch.setattr(C, "_gh_reader", fake_reader)
+    cached, live = _Out(), _Out()
+    monkeypatch.setattr(C.sys, "stdout", cached)
+    assert (
+        C.main(["--key", "repo.required_set", "--repo", "o/r", "--cache-dir", str(tmp_path)]) == 0
+    )
+    monkeypatch.setattr(C.sys, "stdout", live)
+    assert (
+        C.main(
+            [
+                "--key",
+                "repo.required_set",
+                "--repo",
+                "o/r",
+                "--cache-dir",
+                str(tmp_path),
+                "--no-cache",
+            ]
+        )
+        == 0
+    )
+    assert cached.buffer.getvalue() == live.buffer.getvalue()
+    assert json.loads(live.buffer.getvalue()) == {"contexts": ["docs"], "checks": []}
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "pr.head",
+        "pr.headref",
+        "pr.base",
+        "pr.title",
+        "repo.description",
+        "repo.topics",
+        "repo.refs",
+    ],
+)
+def test_moving_refs_and_editable_metadata_are_refused(key: str) -> None:
+    """⛔ The mutable vocabulary UNDER-refused: `pr.head`'s SHA changes on every push and was
+    ACCEPTED by `declare_invariant` — the natural name for a moving ref."""
+    assert C._is_mutable_name(key), f"{key!r} is mutable but was accepted"
+    with pytest.raises(C.MutableReadRefused):
+        C.declare_invariant(key, ttl_s=600, argv=("api", "x"), projection="p", project=lambda d: d)
+
+
+def test_the_shipped_keys_survive_the_wider_vocabulary() -> None:
+    for key in C.INVARIANTS:
+        assert C.kind_of(key) == "invariant", f"{key!r} is shipped but now reads as mutable"
