@@ -858,7 +858,7 @@ def test_a_short_but_valid_check_run_set_is_UNREADABLE_not_a_PASS(monkeypatch):
     with pytest.raises(rfo.RequiredSetUnreadable) as excinfo:
         rfo.fetch_check_runs("o/r", "deadbeef")
     assert "truncated" in str(excinfo.value)
-    assert "1 of 3" in str(excinfo.value)
+    assert "1 entries (1 distinct) of 3" in str(excinfo.value)
 
 
 def test_a_complete_set_passes_the_total_count_check(monkeypatch):
@@ -873,6 +873,71 @@ def test_short_check_runs_are_unreadable_when_total_count_is_missing(monkeypatch
     with pytest.raises(rfo.RequiredSetUnreadable) as excinfo:
         rfo.fetch_check_runs("o/r", "deadbeef")
     assert "total_count" in str(excinfo.value)
+
+
+def test_the_overlap_banner_says_LEGAL_under_mode_queue(tmp_path, capsys):
+    """Under `queue` an overlap is the REQUIRED shape, not a config error.
+
+    `_print_report` labelled every overlap "⛔ OVERLAP (config error)", but the guard
+    requires `merge_conditions` ⊆ `queue_conditions` under `mode=queue` — so the banner
+    invited an operator to "repair" a correct configuration.
+    """
+    legal = """\
+queue_rules:
+  - name: main
+    queue_conditions:
+      - base=main
+      - check-success=docs
+      - check-success=python-ci-gate
+    branch_protection_injection_mode: queue
+    merge_conditions:
+      - check-success=python-ci-gate
+"""
+    tree = _write_tree(tmp_path, mergify=legal)
+    required = rfo.resolve_required_set(tree)
+    assert required.overlap == ("python-ci-gate",)  # the legal shape really is an overlap
+    rfo._print_report({
+        "pr": 1, "head_sha": "deadbeefcafe", "verdict": "READY",
+        "required_set": {
+            "names": list(required.names), "source": required.source,
+            "overlap": list(required.overlap),
+            "injection_mode": required.mode,
+        },
+        "conditions": [],
+    })
+    out = capsys.readouterr().out
+    assert "config error" not in out, out
+    assert "legal under injection_mode=queue" in out, out
+
+
+def test_a_duplicated_page_boundary_entry_is_a_SHORT_set_not_a_complete_one(monkeypatch):
+    """`len(runs) < total` counts ENTRIES, so a duplicate can stand in for a missing run.
+
+    `_gh_api_json` merges the pages by EXTENDING the list and never de-duplicates it,
+    and the real list is strictly id-descending — so a check-run CREATED between two
+    page fetches repeats the page-1 boundary entry at the next page's head and pushes
+    the tail out. The merged list is then back to `total` ENTRIES while one run is
+    genuinely absent, and the dropped tail is the globally OLDEST: a required check
+    whose only attempt it was reads as `FAIL(missing)` — a false NOT-READY on a green
+    PR, from a guard that has stopped proving the thing it claims to prove.
+
+    The doc here is the POST-MERGE shape `_gh_api_json` hands to `fetch_check_runs`
+    (4 entries, 3 distinct ids) — not two fake pages, because the merging happens one
+    layer below this function.
+    """
+    merged = {
+        "total_count": 4,
+        "check_runs": [
+            {"name": "docs", "id": 3},   # page-1 tail
+            {"name": "docs", "id": 3},   # the same run, repeated at page-2's head
+            {"name": "docs", "id": 4},
+            {"name": "docs", "id": 5},
+        ],
+    }
+    monkeypatch.setattr(rfo, "_gh_api_json", lambda endpoint: merged)
+    with pytest.raises(rfo.RequiredSetUnreadable) as excinfo:
+        rfo.fetch_check_runs("o/r", "deadbeef")
+    assert "distinct" in str(excinfo.value)
 
 
 @pytest.mark.parametrize("total", [True, False])

@@ -485,9 +485,18 @@ def fetch_check_runs(repo: str, sha: str) -> list[dict]:
             f"check-runs response for {sha} carried no integer `total_count` — "
             "cannot prove the set is complete"
         )
-    if len(runs) < total:
+    # The guard must count DISTINCT runs, not entries. `_gh_api_json` extends the
+    # pages verbatim and nothing de-duplicates them, so a check-run created between
+    # two page fetches repeats the page-1 boundary entry (the list is strictly
+    # id-descending, so the repeat lands at the next page's head) and the tail is
+    # pushed out — `len(runs)` is then back to `total` while one run is genuinely
+    # ABSENT, which is how a required check's only attempt reads as missing. Counting
+    # ids closes it: N entries carrying a duplicate is N-1 runs, not N.
+    distinct = {r.get("id") for r in runs}
+    if len(runs) < total or len(distinct) < total:
         raise RequiredSetUnreadable(
-            f"check-runs truncated for {sha}: received {len(runs)} of {total} — refusing to read a partial set"
+            f"check-runs truncated for {sha}: received {len(runs)} entries "
+            f"({len(distinct)} distinct) of {total} — refusing to read a partial set"
         )
     return runs
 
@@ -1060,7 +1069,17 @@ def _print_report(report: dict) -> None:
         print(f"  required set from {rs['source']}")
         print(f"  union ({len(rs['names'])}): {', '.join(rs['names'])}")
         if rs["overlap"]:
-            print(f"  ⛔ OVERLAP (config error): {', '.join(rs['overlap'])}")
+            # An overlap is a CONFIGURATION ERROR only under `mode=merge`; under
+            # `queue` the guard REQUIRES `merge_conditions` ⊆ `queue_conditions`, so
+            # an overlap is the LEGAL shape. Calling it an error there invites an
+            # operator to "repair" a correct config.
+            if rs.get("injection_mode") == "merge":
+                print(f"  ⛔ OVERLAP (config error): {', '.join(rs['overlap'])}")
+            else:
+                print(
+                    f"  overlap (legal under injection_mode={rs.get('injection_mode')}): "
+                    f"{', '.join(rs['overlap'])}"
+                )
     c2 = next((c for c in report["conditions"] if c["condition"] == 2), None)
     if c2:
         print(f"  condition 2: {c2['verdict']}")
