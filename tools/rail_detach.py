@@ -1093,11 +1093,11 @@ def _identity(snap: _Snapshot) -> tuple[str, int, int]:
     return (read_field(snap.text, "ATTEMPT_ID"), snap.pid, snap.child)
 
 
-def _exit_verdict(st: RailState, snap: _Snapshot) -> RailState:
+def _exit_verdict(st: RailState, snap: _Snapshot, repo: str = "") -> RailState:
     """The verdict for an artifact that carries this attempt's `EXIT=`."""
     code = _int_or_none(snap.exits[-1])
     st.exit_code = code
-    merged, sha = _merge_evidence(snap.log, st.pr, st.repo)
+    merged, sha = _merge_evidence(snap.log, st.pr, st.repo or repo)
     if merged == MERGED:
         st.state, st.merge_sha = MERGED, sha
         if not sha:
@@ -1217,7 +1217,7 @@ def _artifact_for_any_spelling(state_dir: Path, repo: str, pr: int) -> Path | No
     # `waiting`/`lost`/`refused` are all still in flight in the sense that matters
     # here. So: merged first, then live, then canonical, then newest.
     for cand in cands:
-        if _record_is_merged(cand, pr):
+        if _record_is_merged(cand, pr, repo):
             return cand
     for cand in cands:
         if _record_is_live(cand):
@@ -1237,7 +1237,7 @@ def _artifact_for_any_spelling(state_dir: Path, repo: str, pr: int) -> Path | No
     return sorted(cands, key=_started, reverse=True)[0]
 
 
-def _record_is_merged(art: Path, pr: int) -> bool:
+def _record_is_merged(art: Path, pr: int, repo: str = "") -> bool:
     """Does this record carry THIS attempt's terminal merge?
 
     ⛔ SCOPED TO THE ATTEMPT, with the same two rules the verdict path uses —
@@ -1258,7 +1258,15 @@ def _record_is_merged(art: Path, pr: int) -> bool:
     except OSError:
         return False
     scoped = _attempt_log(full, read_field(text, "ATTEMPT_ID"))
-    state, _sha = _merge_evidence(scoped, pr, read_field(text, "REPO"))
+    # ⛔ THE REQUESTED REPO IS THE FALLBACK, because a TORN record names none. A
+    # header write cut before its `REPO=` line (SIGKILL/ENOSPC mid-`write_text`) is
+    # admitted by `_record_names_repo` on purpose — a torn record must still read —
+    # but the record's EMPTY repo was then handed to `_merge_evidence`, whose repo
+    # cross-check is one-sided (`_names_this_repo`: an empty repo has nothing to contradict), so the
+    # log's own `admin-merge: repo <other>` line — the reason that check exists — was
+    # skipped, and `collect --assert-merged` certified a merge for a repo that never
+    # merged. A torn record of the SAME repo still reads: the log names it.
+    state, _sha = _merge_evidence(scoped, pr, read_field(text, "REPO") or repo)
     return state == MERGED
 
 
@@ -1371,7 +1379,7 @@ def _collect_read(state_dir: Path, repo: str, pr: int) -> RailState | None:
     while True:
         st = _state_from(snap, pr, art)
         if snap.exits:
-            return _exit_verdict(st, snap)
+            return _exit_verdict(st, snap, repo)
 
         # No EXIT line yet. Alive ⇒ waiting; gone ⇒ lost (NEVER merged). ⛔ ALIVE
         # IS "THE WRAPPER **OR** THE RAIL": a killed wrapper leaves the rail
@@ -1540,7 +1548,7 @@ def _collect_read(state_dir: Path, repo: str, pr: int) -> RailState | None:
                                   "would lift only when it exits — clear with "
                                   f"`rm {st.artifact}`")
                 return st
-        merged, sha = _merge_evidence(log, pr, st.repo)
+        merged, sha = _merge_evidence(log, pr, st.repo or repo)
         if merged == MERGED:
             st.state, st.merge_sha = MERGED, sha
             st.reason = ("the rail's log records the merge"
@@ -1571,7 +1579,7 @@ def _collect_read(state_dir: Path, repo: str, pr: int) -> RailState | None:
     # `state=MERGED`. Reading it is not a gate being relaxed: the rail's gates ran
     # to completion, only the bookkeeping line was lost. Anything short of that
     # announcement stays `lost` (a vanished rail has NO verdict — #2235).
-    merged, sha = _merge_evidence(log, pr, st.repo)
+    merged, sha = _merge_evidence(log, pr, st.repo or repo)
     if merged == MERGED:
         st.state, st.merge_sha = MERGED, sha
         st.reason = ("the rail's log records the merge"
@@ -1839,6 +1847,28 @@ def launch(pr: int, *, cwd: Path, state_dir: Path, repo: str | None = None,
                 "`owner/name` slug identically cannot be railed separately in one "
                 "--state-dir. Use a separate --state-dir for this repo."
             )
+        # ⛔ AND THE LOG IS THE OTHER HALF OF THAT SHARED PATH. The check above is
+        # skipped the moment the artifact is gone — which is exactly the state this
+        # tool's OWN remedy creates (`rm <artifact>` clears a stale claim and stops
+        # nothing). The log is not removed with it, and the write below TRUNCATES it
+        # (`logp.open("w")`), so an orphan log left by a colliding repo would lose
+        # its `✅ merged …` line silently. One-sided, through the rail's own evidence
+        # line: a log with no attributable `repo <x>` line contradicts nothing (the
+        # same-repo `rm` residual stays exactly what it documents), while one naming
+        # a DIFFERENT repo is provably not ours to truncate.
+        if not art.exists() and logp.exists():
+            try:
+                said = logp.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                said = ""
+            if said and not _names_this_repo(said, repo):
+                raise Refused(
+                    f"the log {logp.name} belongs to ANOTHER repo's rail (its own "
+                    "`admin-merge: repo <x>` line names a different target) — this "
+                    "repo's artifact is gone, but launching here would truncate that "
+                    "rail's output, including any merge evidence it holds. Use a "
+                    "separate --state-dir for this repo."
+                )
         prior = collect(state_dir, repo, pr)
         if prior is not None and prior.state == WAITING:
             # ⛔ THE HINT IS PER-ARM, because `pid == 0` covers TWO waiting arms and

@@ -1168,6 +1168,68 @@ def test_a_record_written_under_an_older_spelling_still_blocks(tmp_path):
             "the refused launch rewrote another repo's record"
         assert "✅ merged PR #9" in logp9.read_text(encoding="utf-8"), \
             "the refused launch truncated another repo's log"
+
+        # ── A TORN RECORD NAMES NO REPO — SO IT MAY NOT CERTIFY A MERGE
+        # ⛔ `_record_names_repo` ADMITS a record whose `REPO=` is absent, on purpose:
+        # a header write cut before that line (SIGKILL/ENOSPC mid-`write_text`) must
+        # still read. But the record's EMPTY repo was then handed to
+        # `_merge_evidence`, whose own repo cross-check is one-sided — so the log's
+        # `admin-merge: repo <other>` line, the reason that check exists, was skipped
+        # and `--assert-merged` exited 0 for a repo that never merged. The requested
+        # repo is now the fallback, so a torn record still reads for the repo it
+        # actually belongs to and certifies nothing for anyone else.
+        sd5 = tmp_path / "state5"
+        sd5.mkdir()
+        torn = sd5 / "rail-a-b-c-9.md"
+        torn_log = torn.with_suffix(".log")
+        torn.write_text("# rail artifact — a/b-c#9\nPR=9\n", encoding="utf-8")
+        torn_log.write_text(
+            f"\n{rd.ATTEMPT_MARK} x attempt=t (detached) =====\n"
+            "admin-merge: repo a/b-c (resolved from --repo)\n"
+            "admin-merge: ✅ merged PR #9 at deadbeefcafe1234 (state=MERGED)\n",
+            encoding="utf-8")
+        st = rd.collect(sd5, "a/b-c", 9)
+        assert st is not None and st.state == rd.MERGED, (st and st.as_dict())
+        assert rd.main(["collect", "9", "--repo", "a/b-c", "--state-dir", str(sd5),
+                        "--assert-merged"]) == 0
+        # ⛔ PRE-FIX THIS WAS 0 — the torn record certified `a/b-c`'s merge to `a-b/c`.
+        assert rd.main(["collect", "9", "--repo", "a-b/c", "--state-dir", str(sd5),
+                        "--assert-merged"]) == 1
+
+        # ── THE LOG IS THE OTHER HALF OF THE SHARED PATH
+        # ⛔ With the artifact gone — the state this tool's OWN remedy creates
+        # (`rm <artifact>` clears a claim and stops nothing) — the artifact check is
+        # skipped and `launch` truncated the orphan log, including its merge line.
+        sd6 = tmp_path / "state6"
+        sd6.mkdir()
+        orphan = sd6 / "rail-a-b-c-9.log"
+        orphan.write_text(
+            f"\n{rd.ATTEMPT_MARK} x attempt=o (detached) =====\n"
+            "admin-merge: repo a/b-c (resolved from --repo)\n"
+            "admin-merge: ✅ merged PR #9 at deadbeefcafe1234 (state=MERGED)\n",
+            encoding="utf-8")
+        assert not (sd6 / "rail-a-b-c-9.md").exists(), \
+            "fixture is not the orphan-log shape: the artifact exists"
+        with pytest.raises(rd.Refused) as exc:
+            rd.launch(9, cwd=co, state_dir=sd6, repo="a-b/c")
+        assert "belongs to ANOTHER repo" in str(exc.value), str(exc.value)
+        assert "✅ merged PR #9" in orphan.read_text(encoding="utf-8"), \
+            "the refused launch truncated an orphaned log's merge evidence"
+
+        # ── THE CARRIER ARM REQUIRES `SPAWNING=` (the shape `_collect_read` uses)
+        # ⛔ Without the conjunct, `CHILD_PID` alone read LIVE — while the verdict
+        # path only reaches its carrier logic under `SPAWNING=`. The two probes had
+        # drifted once already, and the resolver's answer decides which record the
+        # verdict is drawn from. Pinned so the conjunct cannot be dropped silently.
+        sd7 = tmp_path / "state7"
+        sd7.mkdir()
+        no_sentinel = sd7 / "rail-o-r-91.md"
+        no_sentinel.write_text(f"PR=91\nREPO=o/r\nSTARTED_AT={rd._iso_now()}\n"
+                              f"CHILD_PID={live.pid}\n", encoding="utf-8")
+        assert not rd._record_is_live(no_sentinel), \
+            "a CHILD_PID with no SPAWNING= is not the fork-window carrier"
+        st = rd.collect(sd7, "o/r", 91)
+        assert st is not None and st.state == rd.LOST, (st and st.as_dict())
     finally:
         live.kill()
         live.wait()
