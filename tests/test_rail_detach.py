@@ -3478,3 +3478,47 @@ def test_the_shared_log_is_refused_even_without_the_artifact(tmp_path):
         assert ln.pid > 0
     finally:
         kill_group(ln.pid)
+
+
+def test_a_record_that_ALREADY_EXITED_is_not_live_whatever_its_pid_answers(tmp_path):
+    """`_record_is_live` must honour `EXIT=` before it consults `PID=`/`CHILD_PID=`.
+
+    ⛔ Deleting `if _attempt_exits(text): return False` left this whole suite green
+    (measured, 96 passed), so the arm had no regression detector. The consequence is
+    the ordering it exists for: during the window where a finished attempt's carrier
+    is still exiting, its pid (possibly recycled) still answers alive, so a FINISHED
+    attempt would outrank the genuinely-live record at `_artifact_for_any_spelling`'s
+    liveness pass — and `collect` would publish that attempt's `refused`/`lost`.
+    `lost` is exactly the state `launch`'s duplicate-rail guard ACCEPTS, i.e. the
+    #3061 direction (a second rail on one PR).
+
+    The control half matters as much as the pinned half: the same record WITHOUT the
+    `EXIT=` line must still read LIVE, so this cannot be satisfied by a blanket
+    `False` (which would make every rail look dead and re-open the duplicate launch
+    from the other side).
+    """
+    exited = tmp_path / "rail-o-r-77.md"
+    exited.write_text(
+        f"PR=77\nREPO=o/r\nSTARTED_AT={rd._iso_now()}\nPID={os.getpid()}\nEXIT=0\n",
+        encoding="utf-8",
+    )
+    assert not rd._record_is_live(exited), (
+        "a record whose writer already wrote EXIT= is FINISHED — a recycled pid must "
+        "not resurrect it"
+    )
+
+    alive = subprocess.Popen(["/bin/sleep", "20"], start_new_session=True,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        live = tmp_path / "rail-o-r-78.md"
+        live.write_text(
+            f"PR=78\nREPO=o/r\nSTARTED_AT={rd._iso_now()}\nPID={alive.pid}\n",
+            encoding="utf-8",
+        )
+        assert rd._record_is_live(live), (
+            "control: the same record with no EXIT= must read live, or the pin above "
+            "is satisfiable by a blanket False"
+        )
+    finally:
+        alive.kill()
+        alive.wait()
