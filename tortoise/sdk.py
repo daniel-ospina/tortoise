@@ -9799,6 +9799,58 @@ def _ledger_record(label: str, rows: list[dict]) -> None:
 #: Object / Source) that has no such property.
 _CLAIM_CLASS_POINT_TYPES: frozenset[str] = frozenset({"point", "operator"})
 
+#: Property filters that name a Point's PROVENANCE REFS — the one filter family
+#: whose value a Point can hold MANY of (#10063). Everything else is matched by
+#: exact property equality and is deliberately left alone.
+_REF_FILTER_PROPERTIES: frozenset[str] = frozenset({
+    "extractedFrom", "extractedFromAll",
+})
+
+
+def _property_filter_clause(key: str) -> str:
+    """The WHERE clause for one ``query()`` / ``paginated_query()`` filter.
+
+    DEFAULT: exact property EQUALITY — ``n.`<key>` = $<key>``. That is the
+    behaviour every core caller has always had, and it does not change here.
+
+    ``extractedFrom`` / ``extractedFromAll`` are the exception (#10063). They
+    name provenance REFS, and a Point can carry N of them, while the node
+    property is not the authority for that: ONTOLOGY §3.3 / #3263 make the
+    ``:Source`` EDGES authoritative and the property a query convenience. The
+    equality-only predicate therefore answered for exactly ONE ref:
+
+      * a dedup fold keeps the survivor's OWN creating ref in
+        ``extractedFrom`` as a SCALAR (deliberately, so the creating source
+        keeps answering — #7704 review P1) and carries the folded set on
+        ``extractedFromAll``; the folded-IN source matched NOTHING, so a claim
+        that had just been given a second source was invisible to it.
+      * a Point born from a ref SEQUENCE stores an ARRAY (the writer's shape
+        rule, #3263) — and an array never equals a string, so NONE of its refs
+        answered, including the ones it was created under.
+
+    The clause is a UNION of that equality (KEPT, so a ref that exists only as
+    a property — data from before the edges were written — still answers, and
+    NO caller loses a match it had before) and a PATTERN PREDICATE over the
+    authoritative edge.
+
+    ⛔ The edge arm is a pattern predicate, NOT ``$x IN n.<prop>``: this engine
+    raises ``Type mismatch: expected List or Null but was String`` when the
+    right-hand operand of ``IN`` is a scalar, so an ``IN`` arm would break
+    EVERY filter in the graph, not just the ref ones. FalkorDB documents
+    pattern predicates in ``WHERE`` as fully supported and
+    ``exists((n)-[:R]->(m))`` as NOT (docs.falkordb.com/cypher/cypher-support
+    and /cypher/functions) — this is the supported spelling; ``exists(...)``
+    over a pattern raises ``Unable to resolve filtered alias``.
+
+    Both directions are pinned in ``tests/test_provenance_extractedfrom_3263.py``:
+    a carried ref answers, an uncarried one still does not, a scalar property
+    filter stays exact, and a property-only ref keeps answering.
+    """
+    if key in _REF_FILTER_PROPERTIES:
+        return (f"(n.`{key}` = ${key} OR "
+                f"(n)-[:extractedFrom]->(:Source {{url: ${key}}}))")
+    return f"n.`{key}` = ${key}"
+
 
 class TortoiseSDK:
     """Layer 1 facade for Tortoise epistemic graph interaction.
@@ -23168,7 +23220,7 @@ class TortoiseSDK:
             # overwrote auto-generated parameters).
             from .security import validate_filter_key
             validate_filter_key(key)
-            clauses.append(f"n.`{key}` = ${key}")
+            clauses.append(_property_filter_clause(key))
             params[key] = val
         where = " AND ".join(clauses) if clauses else "true"
         rows = proj.g.query(
@@ -23239,7 +23291,7 @@ class TortoiseSDK:
             # overwrote auto-generated parameters).
             from .security import validate_filter_key
             validate_filter_key(key)
-            clauses.append(f"n.`{key}` = ${key}")
+            clauses.append(_property_filter_clause(key))
             params[key] = val
         where = " AND ".join(clauses) if clauses else "true"
         total = proj.g.query(
