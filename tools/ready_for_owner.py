@@ -35,9 +35,18 @@ THE FIX — derive the set from the REPO, never the API
       2. `docs/ci/required-contexts.json`     (committed snapshot — see below)
       3. FAIL(unreadable)
 
-    Both live in the tree, so condition 2 needs **no credential at all**. The
-    protection API is never called here — calling it would reintroduce the exact
-    failure this file exists to remove.
+    Both live in the tree, so DERIVING the required set needs **no credential at
+    all** — in particular no admin scope, which is the 403 this file exists to
+    remove. The protection API is never called here — calling it would
+    reintroduce the exact failure this file exists to remove.
+
+    ⚠️ The HEAD reads are a different matter, and this is not a credential-free
+    tool end to end: `fetch_check_runs` / `fetch_workflow_ids` DO issue
+    authenticated `gh api` calls (the plain `repo` read scope — never
+    `Administration`). A missing or under-scoped token therefore degrades honestly
+    to `FAIL(unreadable)` carrying gh's stderr in the detail — never to a guessed
+    verdict and never to a pass — but a credential-less context must not read that
+    refusal as "a required check is red".
 
     ⚠️ The snapshot is used to REPORT the set, never to decide condition 2: it is
     a flat `required_contexts` list with no entry/merge split, so it cannot say
