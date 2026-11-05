@@ -5560,6 +5560,47 @@ def test_duplicate_entries_reports_same_surface_repeats():
     assert duplicate_entries({"surfaces": {"core": None}}) == []
 
 
+def test_ci_surfaces_declares_each_yaml_key_at_most_once():
+    """Review round 5 on #11057 — a duplicate `durations` key is SILENT, and worse than a list one.
+
+    `duplicate_entries` (#2913/#5373, the test above) gates a name repeated within one
+    `surfaces` list, because `config/ci-surfaces.yml` carries `merge=union`: a conflicting
+    hunk keeps BOTH sides' lines, so two lanes appending the same registration is the
+    natural conflict shape. The `durations` map has the same hazard and a strictly worse
+    failure mode — it is a YAML MAPPING, so a second row for the same file is not a repeat
+    any list check can see. The loader collapses it and the LAST row wins, silently.
+
+    Measured on #11057, not hypothesised: a round-5 commit appended a second
+    `test_10602_query_limit_bound.py` row on top of an existing one. The effective weight
+    became the newcomer's, the row the newcomer's author never saw stayed in the file, and
+    `--integrity` stayed GREEN — it reads the PARSED map, where only one key survives, so
+    the evidence is gone before any Python check runs. Parsing at the NODE level here is
+    the whole point: `yaml.safe_load` has already discarded the duplication.
+    """
+    manifest_path = REPO / "config" / "ci-surfaces.yml"
+    duplicates: list[str] = []
+
+    def walk(node, path: str = "") -> None:
+        if isinstance(node, yaml.MappingNode):
+            seen: set[str] = set()
+            for key, value in node.value:
+                if isinstance(key, yaml.ScalarNode):
+                    if key.value in seen:
+                        duplicates.append(
+                            f"{path}: {key.value} (line {key.start_mark.line + 1})")
+                    seen.add(key.value)
+                walk(value, f"{path}/{getattr(key, 'value', '?')}")
+        elif isinstance(node, yaml.SequenceNode):
+            for i, value in enumerate(node.value):
+                walk(value, f"{path}[{i}]")
+
+    walk(yaml.compose(manifest_path.read_text(), Loader=yaml.SafeLoader))
+    assert duplicates == [], (
+        "config/ci-surfaces.yml declares the same key twice, so the LAST one wins "
+        "silently and `--integrity` cannot see it (`merge=union` makes this the natural "
+        f"conflict shape): {duplicates}")
+
+
 def test_integrity_reddens_on_a_duplicate_entry(monkeypatch, capsys):
     """#5373: a duplicate entry must FAIL `--integrity`, not print a note.
 
