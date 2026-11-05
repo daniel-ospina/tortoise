@@ -86,6 +86,34 @@ def _row_in_select_star_order(**overrides: object) -> dict[str, object]:
     return row
 
 
+#: Where the `props` tail can sit in a real row. See :func:`_with_tail_at`.
+TAIL_POSITIONS = ("first", "middle", "last")
+
+
+def _with_tail_at(row: dict[str, object], position: str) -> dict[str, object]:
+    """The same row, with `props` moved to `first` / `middle` / `last`.
+
+    ⚠️ `last` is what `public.source` really yields, because no migration has
+    ever added a column to it. It is NOT the only real layout: `public.point`
+    gains columns by `ALTER TABLE … ADD COLUMN`
+    (`20261018000001_record_point_money_value_2782.sql`,
+    `20261029000001_record_point_cache_tier.sql`), and Postgres numbers the new
+    attributes upward from the last existing one, so on such a table the tail
+    sits in the MIDDLE and `SELECT *` yields it BEFORE columns. Pre-fix the
+    column/tail winner was the row's mapping order, so moving the tail changes
+    the answer — which is the defect, not the layout.
+    """
+    items = [(name, value) for name, value in row.items() if name != "props"]
+    tail = ("props", row["props"])
+    if position == "first":
+        items.insert(0, tail)
+    elif position == "middle":
+        items.insert(len(items) // 2, tail)
+    else:
+        items.append(tail)
+    return dict(items)
+
+
 def _captured_session_row(**overrides: object) -> dict[str, object]:
     """The row a legacy capture wrote: a session Source whose column holds prose."""
     row = _source_row(
@@ -598,8 +626,13 @@ def test_a_column_value_wins_the_tail_on_a_real_SELECT_star_row():
     VALUE WINS over the tail's spelling of the same coordinate"* — but
     `_props_from_row` never applied it: it wrote the tail with `out.update(...)`
     wherever the `props` column happened to sit, so the winner was the row's
-    MAPPING ORDER. `props` is declared LAST in the record DDL, so on a real row
-    the TAIL won while the row predicate read the COLUMN: the node carried
+    MAPPING ORDER. `props` is the last column DECLARED in `CREATE TABLE
+    public.source`, so on a real `source` row the TAIL won while the row
+    predicate read the COLUMN (a table that gains columns by `ALTER TABLE …
+    ADD COLUMN` — `public.point` does — puts the tail in the MIDDLE instead; the
+    rule must hold at every position, and
+    :func:`test_the_column_wins_at_every_position_the_tail_can_sit` pins that):
+    the node carried
     `sourceKind='agentSession'` — `is_episodic_source_node` calls that a session
     — WITH the turn prose on it, so R1 (*"from any row shape"*) failed open and
     `scan_cache_view` then subtracted the pair from `placed`, reporting a real
@@ -679,6 +712,60 @@ def test_the_projection_does_not_depend_on_the_row_mapping_order():
     assert (cp.is_episodic_source_node(select_star.props)
             == cp._is_episodic_source_row(_row_in_select_star_order(**overrides))
             is False)
+
+
+@pytest.mark.parametrize("tail_position", TAIL_POSITIONS)
+def test_the_column_wins_at_every_position_the_tail_can_sit(tail_position):
+    """The precedence is a RULE, not an effect of `props` being declared last.
+
+    ⛔ "`props` is the last column" holds for `public.source` and NOT for every
+    record table: `public.point` gained five columns by `ALTER TABLE … ADD
+    COLUMN` AFTER `props`, and Postgres numbers added attributes upward, so
+    `SELECT *` on such a row yields the tail in the MIDDLE. Scoping the rule to
+    the one layout is how the same defect comes back on the next table that
+    migrates a column in — so the collision is pinned at every position.
+
+    Non-vacuous: on the pre-fix code (the tail written with `out.update`
+    wherever the `props` column happens to sit) the `last` leg below reds with
+    `sourceKind == "agentSession"`, while `first`/`middle` pass. Pinned as one
+    parametrization so a fix that only handles the real `source` ordering, or
+    only the `last` position, cannot satisfy the rule.
+    """
+    from tortoise import cache_projection as cp
+
+    row = _with_tail_at(
+        _row_in_select_star_order(
+            url="session.md",
+            id="session.md",
+            name="session.md",
+            source_kind="document",
+            title="the COLUMN's title",
+            summary=UTTERANCE,
+            _search_text=UTTERANCE,
+            props='{"sourceKind": "agentSession", "title": "the TAIL title"}',
+        ),
+        tail_position,
+    )
+    node = node_from_row("Source", row)
+
+    assert node.props["sourceKind"] == "document", (
+        f"the tail won the identity with `props` {tail_position} in the row: the "
+        f"winner is the row's MAPPING ORDER, not the rule `_row_identity_view` "
+        f"declares (a COLUMN VALUE WINS over the tail's spelling)"
+    )
+    assert node.props["title"] == "the COLUMN's title", (
+        "pinned on a NON-identity column too, so a fix narrowed to `sourceKind` "
+        "cannot pass — the rule is about the whole map"
+    )
+    assert cp.is_episodic_source_node(node.props) is False, (
+        "the column says DOCUMENT, so the node may not be classified a session"
+    )
+    assert (cp.is_episodic_source_node(node.props)
+            == cp._is_episodic_source_row(row)), (
+        "the row predicate and the node predicate disagree about the SAME row"
+    )
+    # A DOCUMENT keeps its own metadata (the declared asymmetry).
+    assert node.props.get("summary") == UTTERANCE
 
 
 @pytest.mark.parametrize("shape", [

@@ -280,11 +280,13 @@ bounds, both deliberate:
 
 * the **journal fold** still projects the value until #10000's capture-side change
   lands, so the two rebuild paths disagree on that one column until then — in the
-  ruling's direction, and it does **not** converge on its own (see the obligation
-  below);
+  ruling's direction, and it does **not** converge on its own. ⛔ The arm of #10000
+  that lands it is **#10852**, and it is the one that DELETES this rule — a lane
+  reading this bullet alone must not conclude the narrowing can stay (see the
+  obligation below);
 * graph-side FTS over a session Source's own utterances goes with the prose. The
   value survives in the record (retrievable by a column read; there is no
-  record-side text index), and #10000 replaces the capture's summary with a topic
+  record-side text index), and #10852 replaces the capture's summary with a topic
   lexicon;
 * `python -m tortoise record-reconcile` builds its RECORD side through the same
   projector, so its truth side omits what the cache holds. **The population is not
@@ -305,7 +307,8 @@ bounds, both deliberate:
   so on that lane the rebuild does wipe and re-create and the pair IS cleared;
   this bound is about a server cache, which is the population this rule is for.
   Clearing a populated server cache's stale pair therefore needs an explicit
-  property clear, and the sweep is #10000's capture change.
+  property clear, and the sweep is #10000's capture change — **#10852**, whose
+  deletion obligation is the next section.
 
 ### Obligation: `#10852` DELETES this rule, it does not converge with it
 

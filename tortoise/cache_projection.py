@@ -1684,14 +1684,24 @@ def _props_from_row(table: str, row: Mapping[str, Any], *,
     episodic_source = (table == "source"
                        and _is_episodic_source_row(row, tail))
     # ⛔ THE TAIL IS SEEDED FIRST, AND A COLUMN VALUE WINS (#10867 review ISSUE
-    # 1). Ordering here is not cosmetic: `props` is declared LAST in every
-    # record table (`CREATE TABLE public.source` … `props jsonb NOT NULL DEFAULT
-    # '{}' :189), and Postgres yields `SELECT *` columns in DDL order
+    # 1). Ordering here is not cosmetic: `props` is the last column DECLARED in
+    # `public.source` (`supabase/migrations/20261012000001_record_event_stream.sql:189`,
+    # `props jsonb NOT NULL DEFAULT '{}'::jsonb`, immediately above the PRIMARY
+    # KEY), and Postgres yields `SELECT *` columns in DDL order
     # (`pg_attribute.attnum` — "ordinary columns are numbered from 1 up"), so on
-    # a REAL row the tail used to be iterated last and `out.update(dict(tail))`
-    # made it the WINNER — of every coordinate it carried, not just the identity.
-    # The winner was therefore the row's MAPPING ORDER (`sorted()` in a test
-    # fixture puts `props` early, `SELECT *` puts it last), while
+    # a REAL `source` row the tail used to be iterated last and
+    # `out.update(dict(tail))` made it the WINNER — of every coordinate it
+    # carried, not just the identity.
+    # ⚠️ "LAST" IS A FACT ABOUT THIS TABLE, NOT ABOUT THE TAIL. A table that
+    # gains columns by `ALTER TABLE … ADD COLUMN` gets them AFTER `props`
+    # (Postgres numbers added attributes upward): `public.point` has done that in
+    # two migrations (`20261018000001_record_point_money_value_2782.sql:46`,
+    # `20261029000001_record_point_cache_tier.sql:29`), so on such a row the tail
+    # sits in the MIDDLE and `SELECT *` yields it before columns. The rule below
+    # does not depend on either layout — see
+    # `tests/test_10853_session_source_prose.py::test_the_column_wins_at_every_position_the_tail_can_sit`.
+    # Pre-fix the winner was therefore the row's MAPPING ORDER (`sorted()` in a
+    # test fixture puts `props` early, `SELECT *` puts it last), while
     # `_row_identity_view` declares the opposite rule — *"a COLUMN VALUE WINS
     # over the tail's spelling of the same coordinate"*. On a row whose
     # `source_kind` COLUMN and `sourceKind` tail disagreed, the row predicate
