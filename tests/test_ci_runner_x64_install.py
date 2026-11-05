@@ -3754,7 +3754,7 @@ def test_the_runbooks_cross_file_refs_land_on_what_they_name():
     on `main` (the cited comment sits at `:1761`). Each still passed the only check they had — `1 <=
     n <= EOF` — which an offset-shifted number always passes.
 
-    Mutation: revert any of the four refs to its pre-fix number -> RED with the line it actually
+    Mutation: revert any of the five refs to its pre-fix number -> RED with the line it actually
     hit. A ref that lands two files away is worse than none: a fixer sent there edits workflow
     routing or a shell script the sentence never named.
     """
@@ -3801,10 +3801,30 @@ def test_the_runbooks_cross_file_refs_land_on_what_they_name():
         f"(pending-not-answered instead of a false red): {span!r}"
     )
 
+    # The fourth ref, and the one that had NO pin: "Absence from the required aggregate's
+    # `needs:`". It cited `:4441` — a comment three jobs above the list — so every commit above the
+    # list silently moved it further away while the citation still passed the only check it had
+    # (`1 <= n <= EOF`). Measured at the head that re-anchored it: #6744's `max-parallel` comments
+    # shifted the list to `:4578`, i.e. 137 lines past the citation, and nothing red.
+    #
+    # Pinned by SHAPE, not by contents: the assertion requires the citation to land on the
+    # aggregate's own `needs:` LIST, so extending or reordering that list (a workflow change, not a
+    # doc change) does not red this — while an offset-shifted number does, which is the whole point.
+    m = re.search(r"required aggregate's `needs:` \(`python-ci\.yml:(\d+)`\)", runbook)
+    assert m is not None, (
+        "the runbook no longer cites the required aggregate's `needs:` by line — re-anchor this pin "
+        "rather than deleting it"
+    )
+    n = int(m.group(1))
+    assert at(".github/workflows/python-ci.yml", n).lstrip().startswith("needs: ["), (
+        f"the runbook cites python-ci.yml:{n} as the required aggregate's `needs:`, but that line "
+        f"is {at('.github/workflows/python-ci.yml', n)!r}"
+    )
+
     # The provisioner invocation — a ref into a file THIS PR edits, and one the first pass missed.
     # `tools/runner_autoscale.py` gained ~96 lines above it, so the number that was correct on
     # `main` (`:965`, the installer invocation) landed on a systemd unit-name f-string here and
-    # still passed the only check it had (`1 <= n <= EOF`). Pinned by SENTENCE, like the three
+    # still passed the only check it had (`1 <= n <= EOF`). Pinned by SENTENCE, like the four
     # above, so a sibling-bullet ref drifts red instead of passing a range check.
     m = re.search(r"`tools/runner_autoscale\.py:(\d+)` invokes the installer", runbook)
     assert m is not None, (
