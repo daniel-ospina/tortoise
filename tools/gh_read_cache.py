@@ -370,15 +370,34 @@ def _account_fingerprint(host: str = "") -> tuple[str, bool]:
     token, so folding `--gh` in would make `get --gh /p/gh` and a later `status` (default
     `gh`) two different accounts and break the write-then-read pair.
     """
-    env_vars = ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN")
-    secret = "\x00".join(os.environ.get(k, "") for k in env_vars)
-    if secret.strip("\x00"):
-        return hashlib.sha256(secret.encode()).hexdigest()[:16], True
-
-    token = _config_token(host)
+    token = _env_token(host) or _config_token(host)
     if not token:
         return "", False
+    # ⛔ HASH THE TOKEN, NOT THE RECORD. Hashing the four-slot record made ONE secret up to
+    # four identities (`GH_TOKEN=X`, `GITHUB_TOKEN=X`, `"X "`, `hosts.yml: X`), splitting a
+    # single account into separate entries. The token is the account.
     return hashlib.sha256(token.encode()).hexdigest()[:16], True
+
+
+def _env_token(host: str) -> str:
+    """The token gh would take from the ENVIRONMENT for `host`, or "".
+
+    ⛔ gh SELECTS BY HOST, SO THIS MUST TOO. Joining all four variables into one record made
+    *any* exported enterprise token label *every* host — so a box exporting
+    `GH_ENTERPRISE_TOKEN` for its GHES instance keyed its `github.com` reads by that token,
+    and two real `github.com` accounts in one `hosts.yml` pooled. gh's own rule (its help
+    text, and `gh auth token` empirically): `GH_TOKEN`/`GITHUB_TOKEN` apply to github.com and
+    to a subdomain of `ghe.com`; `GH_ENTERPRISE_TOKEN`/`GITHUB_ENTERPRISE_TOKEN` apply when
+    the command targets a GH Enterprise SERVER host — and when the variable for the OTHER
+    family is the only one set, gh ignores it and falls back to `hosts.yml`.
+    """
+    dotcom = host in ("", "github.com") or host.endswith(".ghe.com")
+    keys = ("GH_TOKEN", "GITHUB_TOKEN") if dotcom else ("GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN")
+    for key in keys:
+        value = os.environ.get(key, "").strip()
+        if value:
+            return value
+    return ""
 
 
 def _config_token(host: str) -> str:
@@ -388,8 +407,19 @@ def _config_token(host: str) -> str:
     host's block is found by its own line and the token by an indented key. When no block
     matches exactly, a SINGLE `oauth_token` in the file is taken (the common one-account
     case); two or more is ambiguous and reported as unresolvable rather than guessed.
+
+    ⛔ THE DIRECTORY FOLLOWS gh'S DOCUMENTED PRECEDENCE — `GH_CONFIG_DIR`, then
+    `$XDG_CONFIG_HOME/gh`, then `~/.config/gh`. Skipping the middle step made the tool read a
+    DIFFERENT `hosts.yml` from the one gh uses: on a box selecting its account with
+    `XDG_CONFIG_HOME`, the stale default file's token became the digest for every lane, so two
+    live accounts pooled onto it — and when no stale file existed the symptom was merely a
+    permanently uncached `rate_limit`, which is why it hid.
     """
-    config_dir = os.environ.get("GH_CONFIG_DIR") or str(Path.home() / ".config" / "gh")
+    config_dir = os.environ.get("GH_CONFIG_DIR") or (
+        os.path.join(os.environ["XDG_CONFIG_HOME"], "gh")
+        if os.environ.get("XDG_CONFIG_HOME")
+        else str(Path.home() / ".config" / "gh")
+    )
     try:
         text = Path(config_dir, "hosts.yml").read_text(encoding="utf-8", errors="replace")
     except OSError:
@@ -793,7 +823,16 @@ def cmd_get(args: argparse.Namespace) -> int:
         # for the account-scoped `/rate_limit` both made the key unusable bare and split
         # the cache per repo — two calls for one answer.
         uses_repo = any("{repo}" in a for a in template)
-        host, repo = _resolve_repo(args.repo) if uses_repo else (_default_host(), "")
+        if uses_repo and not args.repo:
+            raise Usage("--repo is required for this key")
+        # ⛔ THE HOST COMES FROM `--repo` EVEN WHEN THE TEMPLATE HAS NO `{repo}`. Taking
+        # `_default_host()` there made `--argv repo list --repo ghe.example.com/o/n` ask the
+        # DEFAULT instance and never express the spelled one — a live fetch of the wrong
+        # server. `uses_repo` decides whether the SLUG is formatted in, not which host is
+        # meant.
+        host, repo = _resolve_repo(args.repo) if args.repo else (_default_host(), "")
+        if not uses_repo:
+            repo = ""
         argv = _format_argv(template, repo, args.base)
         # (2) COMMAND-level refusal, as defence in depth (see refuse_if_mutable).
         refuse_if_mutable(args.key, tuple(argv), tuple(template), repo, args.base)
@@ -822,8 +861,21 @@ def cmd_get(args: argparse.Namespace) -> int:
         # occupies, so it is re-formatted as `host/owner/name` (the form gh's own `-R` and
         # positional parsing accept).
         pass_argv = argv
-        if host and host != _default_host() and not _accepts_hostname(template) and repo:
+        named_host = bool(host) and host != _default_host()
+        if named_host and not _accepts_hostname(template) and repo:
             pass_argv = _format_argv(template, f"{host}/{repo}", args.base)
+        elif named_host and not _accepts_hostname(template):
+            # ⛔ NOWHERE TO PUT IT. A porcelain verb has no `--hostname`, and a template with
+            # no `{repo}` has no argument to carry `host/owner/repo` — so the pass-through used
+            # to ask the DEFAULT instance while the caller had named another, silently. Refuse
+            # instead of fetching the wrong server: an actuator that cannot deliver is a defect,
+            # not a status.
+            sys.stderr.write(
+                f"gh_read_cache: --repo names the host {host!r} but this command has no "
+                "`--hostname` flag (only `gh api` has one) and no `{repo}` to carry "
+                "host/owner/name — refusing rather than querying the default instance\n"
+            )
+            return 2
         body, ok = fetch(pass_argv, args.gh, host)
         if not ok:
             sys.stderr.write("gh_read_cache: --argv pass-through fetch failed — no value emitted\n")
@@ -841,12 +893,21 @@ def cmd_get(args: argparse.Namespace) -> int:
         # costs latency, never budget. Fetch live and store NOTHING.
         sys.stderr.write(
             "gh_read_cache: the credential behind this account-scoped read could not be "
-            "resolved (no token in the environment and `gh auth token` failed) - reading "
-            "live without a cache rather than pooling unknown accounts\n"
+            "resolved (no usable token in the environment, and no `oauth_token` for "
+            f"{host or 'github.com'} in the gh config's hosts.yml) — reading live without a "
+            "cache rather than pooling unknown accounts\n"
         )
         body, ok = fetch(argv, args.gh, host)
         if not ok:
-            sys.stderr.write("gh_read_cache: FAIL-CLOSED - the refresh failed and no value will be emitted\n")
+            sys.stderr.write("gh_read_cache: FAIL-CLOSED — the refresh failed and no value will be emitted\n")
+            return 4
+        if not body.strip():
+            # The caching path already refuses this; the degraded path must agree, or a
+            # caller gets rc=0 with nothing on stdout — "success" and no value.
+            sys.stderr.write(
+                "gh_read_cache: FAIL-CLOSED — gh succeeded but returned an empty body; "
+                "an empty answer is not a value\n"
+            )
             return 4
         sys.stdout.write(body)
         return 0
