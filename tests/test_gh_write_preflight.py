@@ -1165,12 +1165,10 @@ def test_the_credential_source_label_is_scrubbed_because_it_carries_hosts_yml_te
     `--json` artifact, so the "label is never a value" promise was unenforced.
     """
     secret = "0123456789abcdef0123456789abcdef01234567"      # prefix-less: the shape regex cannot help
-    import os as _os
-    import tempfile
     with tempfile.TemporaryDirectory() as d:
-        with open(_os.path.join(d, "hosts.yml"), "w", encoding="utf-8") as fh:
+        with open(os.path.join(d, "hosts.yml"), "w", encoding="utf-8") as fh:
             fh.write(f"github.com:\n    user: {secret}\n    oauth_token: {secret}\n    git_protocol: https\n")
-        env = {k: v for k, v in _os.environ.items() if k not in ("GH_TOKEN", "GITHUB_TOKEN", "GH_HOST")}
+        env = {k: v for k, v in os.environ.items() if k not in ("GH_TOKEN", "GITHUB_TOKEN", "GH_HOST")}
         env.update({"GH_CONFIG_DIR": d, "GH_WRITE_PREFLIGHT_API": "http://127.0.0.1:9",
                     "HOME": "/tmp/gh-preflight-no-home"})
         p = subprocess.run([sys.executable, str(TOOL), "--repo", "o/r", "--json"],
@@ -1191,12 +1189,10 @@ def test_a_login_shaped_value_is_kept_but_file_content_never_becomes_the_label()
     """
     token = "0123456789abcdef0123456789abcdef01234567"          # the credential actually used
     not_a_login = "fedcba9876543210fedcba9876543210fedcba98"     # a DIFFERENT prefix-less secret
-    import os as _os
-    import tempfile
     with tempfile.TemporaryDirectory() as d:
-        with open(_os.path.join(d, "hosts.yml"), "w", encoding="utf-8") as fh:
+        with open(os.path.join(d, "hosts.yml"), "w", encoding="utf-8") as fh:
             fh.write(f"github.com:\n    user: {not_a_login}\n    oauth_token: {token}\n    git_protocol: https\n")
-        env = {k: v for k, v in _os.environ.items() if k not in ("GH_TOKEN", "GITHUB_TOKEN", "GH_HOST")}
+        env = {k: v for k, v in os.environ.items() if k not in ("GH_TOKEN", "GITHUB_TOKEN", "GH_HOST")}
         env.update({"GH_CONFIG_DIR": d, "GH_WRITE_PREFLIGHT_API": "http://127.0.0.1:9",
                     "HOME": "/tmp/gh-preflight-no-home"})
         p = subprocess.run([sys.executable, str(TOOL), "--repo", "o/r", "--json"],
@@ -1234,12 +1230,10 @@ def test_inputs_that_are_not_credentials_are_still_never_echoed_as_one():
     assert secret not in blob, f"a no-credential refusal echoed the repo: {blob!r}"
 
     # (c) the hosts.yml label carries no file content at all
-    import os as _os
-    import tempfile
     with tempfile.TemporaryDirectory() as d:
-        with open(_os.path.join(d, "hosts.yml"), "w", encoding="utf-8") as fh:
+        with open(os.path.join(d, "hosts.yml"), "w", encoding="utf-8") as fh:
             fh.write(f"github.com:\n    user: {secret}\n    oauth_token: 0123456789abcdef0123456789abcdef01234567\n    git_protocol: https\n")
-        env = {k: v for k, v in _os.environ.items() if k not in ("GH_TOKEN", "GITHUB_TOKEN", "GH_HOST")}
+        env = {k: v for k, v in os.environ.items() if k not in ("GH_TOKEN", "GITHUB_TOKEN", "GH_HOST")}
         env.update({"GH_CONFIG_DIR": d, "GH_WRITE_PREFLIGHT_API": "http://127.0.0.1:9",
                     "HOME": "/tmp/gh-preflight-no-home-3"})
         p = subprocess.run([sys.executable, str(TOOL), "--repo", "o/r", "--json"],
