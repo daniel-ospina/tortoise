@@ -455,8 +455,10 @@ def _self_test() -> int:
     `test_self_test_passes_on_a_host_with_no_database` and
     `test_a_red_self_test_is_70_never_the_post_failure_1` both red, with `--self-test`
     exiting 70 over an `ERROR at setup` naming the URI gate. `EXPECT_URI` is the
-    workflow's `$GITHUB_ENV` spelling of the same declaration and `tests/_live_gate.py`
-    reads it too, so BOTH are dropped: a child that declares itself URI-less
+    workflow's `$GITHUB_ENV` spelling of the same declaration and it IS read: the reader
+    is `tools/skip-guard.py::lane_expects_live_uri()` (`_LANE_EXPECT_URI_ENV_ALIASES`,
+    `tools/skip-guard.py:377`), reached by `tests/_live_gate.py:203`, so BOTH are
+    dropped: a child that declares itself URI-less
     (`TORTOISE_TEST_CARVE_OUT=1`) must not also carry a promise it cannot keep.
     """
     env = dict(os.environ)
