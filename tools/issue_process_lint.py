@@ -191,9 +191,15 @@ IN_FLIGHT_RE = re.compile(r"IN[ -]FLIGHT\s*:\s*(?P<rest>.*)$", re.IGNORECASE)
 # quoted, not a claim; a remainder that says the issue was released is a release, not a claim.
 PLACEHOLDER_RE = re.compile(r"^[\s<>a-zA-Z0-9_./—-]*$")
 RELEASE_WORDS = ("none", "released", "unclaimed", "free", "—", "-")
-# The unambiguous release words, matched ANYWHERE in the marker's remainder (F6). `free` is left
-# out on purpose — see `in_flight_markers`.
-RELEASE_ANYWHERE_RE = re.compile(r"\b(?:none|released|unclaimed)\b", re.IGNORECASE)
+# The unambiguous release words, but only in an ANNOTATION POSITION (F6). An unanchored anywhere-
+# scan is a silent MISS in the flagging direction: the marker the process block mandates carries
+# author text after the ids (`IN FLIGHT: 4282 — branch fix/unclaimed-issue-arm2 — box cell-3`), and
+# `unclaimed` is this tool's OWN vocabulary, so a lane named after the arm it is working on would
+# clear its own WIP marker. A release is a delimited annotation — `— released …`, `(released)`,
+# `; none` — so that is what is matched. `free` is excluded entirely: it heads a release, but also
+# appears in ordinary work (`free tier`), so it stays a FIRST-TOKEN-only word.
+RELEASE_ANYWHERE_RE = re.compile(
+    r"(?:^|[—–\-(;,])\s*(?:none|released|unclaimed)\b", re.IGNORECASE)
 
 ARM_PR = "pr-unclaimed-issue"
 ARM_ISSUE = "wip-no-satisfies"
@@ -337,9 +343,8 @@ def in_flight_markers(comment_bodies: list[str]) -> list[str]:
                 continue
             # The marker is often ANNOTATED rather than replaced: `IN FLIGHT: 3.2c — released
             # 2026-11-05` / `IN FLIGHT: 3.2c (released)`. Reading only the FIRST token left both
-            # as live WIP and flagged finished work (F6). `free` is deliberately NOT in this scan
-            # — it heads a release, but also appears in ordinary work (`free tier`), so it stays
-            # a first-token-only word.
+            # as live WIP and flagged finished work (F6). Matched in an ANNOTATION POSITION only,
+            # so a release word inside a branch slug cannot clear a real marker.
             if RELEASE_ANYWHERE_RE.search(rest):
                 continue
             if "<" in rest and ">" in rest and PLACEHOLDER_RE.match(rest):
@@ -553,7 +558,13 @@ def main(argv: list[str] | None = None) -> int:
     measured_rows: list[dict] = []
     notes: list[str] = []
     try:
-        repo = resolve_repo(args.repo)
+        # Resolve the repo through `gh` ONLY in the modes that reach GitHub. The `--body-file` and
+        # `--issue-body-file` modes are documented as OFFLINE, and making an unannounced network
+        # call from them falsified that (and, on a box without `gh`, silently dropped every
+        # self-qualified `owner/repo#N` claim — a smaller population measured without refusing).
+        # An explicit `--repo` is still honoured offline; it just is not looked up.
+        live_mode = bool(args.pr or args.issue or args.sweep or args.sweep_issues)
+        repo = resolve_repo(args.repo) if live_mode else args.repo
         if args.body_file is not None:
             body = args.body_file.read_text(encoding="utf-8")
             findings += classify_pr(body, "body-file", repo, notes=notes)
@@ -617,9 +628,17 @@ def main(argv: list[str] | None = None) -> int:
         for f in findings:
             print(f.annotate())
         if measured_rows:
-            print(f"::notice title=issue-process-lint::WIP arm read {marker_reads} subject(s) "
-                  f"carrying an `IN FLIGHT:` marker; {markerless} carried none "
-                  f"(branches/worktrees NOT consulted — tools/who_is_on.py owns that population)")
+            # The annotation note must describe THIS run, exactly as the human/`--json` modes do —
+            # an injected verdict CAME from the population, so calling it "not consulted" made one
+            # run describe itself two incompatible ways (F7).
+            if all(m["wip_source"] == "injected" for m in measured_rows):
+                flag = "--wip" if wip else "--no-wip"
+                print(f"::notice title=issue-process-lint::WIP verdict INJECTED ({flag}) from the "
+                      f"branches/worktrees/ref-claims population tools/who_is_on.py owns")
+            else:
+                print(f"::notice title=issue-process-lint::WIP arm read {marker_reads} subject(s) "
+                      f"carrying an `IN FLIGHT:` marker; {markerless} carried none "
+                      f"(branches/worktrees NOT consulted — tools/who_is_on.py owns that population)")
         if not findings:
             print(f"::notice title=issue-process-lint::nothing flagged over {population}")
     else:
@@ -632,7 +651,8 @@ def main(argv: list[str] | None = None) -> int:
             # The disclaimer must describe THIS run: under an INJECTED `--wip` verdict the
             # population WAS consulted and the verdict came from it (F7).
             if measured_rows and all(m["wip_source"] == "injected" for m in measured_rows):
-                print("           WIP verdict INJECTED (--wip) from the branches/worktrees/"
+                flag = "--wip" if wip else "--no-wip"
+                print(f"           WIP verdict INJECTED ({flag}) from the branches/worktrees/"
                       "ref-claims population tools/who_is_on.py owns — that is where this "
                       "verdict came from, not the marker count above.")
             else:
