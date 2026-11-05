@@ -1716,6 +1716,51 @@ def test_signed_push_and_push_options_config_do_not_fake_a_refusal(tmp_path: Pat
         assert "gh-write-preflight" not in _remote_refs(remote)
 
 
+def test_step_details_are_redacted_AT_INGESTION(tmp_path: Path):
+    """The `redact()` inside `step()` is load-bearing and must be pinned.
+
+    Deleting it left the suite green (a mutation survived a whole review), yet the refusal paths do
+    `verdict.detail = verdict.steps[-1]["detail"]` and `main()` prints that unredacted, so a
+    credential in a remote's error text would reach stderr. The existing
+    `test_verdict_object_holds_no_credential` never puts a secret into a step detail.
+    """
+    work, _remote = _make_pair(tmp_path)
+    secret_url = "https://example.invalid/x.git?access_token=SECRETSTEPTOKEN"
+
+    class EchoesTheUrl(Runner):
+        """Real git echoes the URL it failed on — including the query token."""
+
+        def run(self, argv, cwd=None, timeout=120, env_extra=None):
+            if argv[1] == "ls-remote":
+                return Proc(128, err=f"fatal: unable to access '{secret_url}/': FAILED")
+            return super().run(argv, cwd=cwd, timeout=timeout, env_extra=env_extra)
+
+    verdict = check_writable(work, runner=EchoesTheUrl())
+
+    assert verdict.reason == "remote-unreachable", verdict.reason
+    blob = repr(verdict) + str(verdict.detail) + str(verdict.steps)
+    assert "SECRETSTEPTOKEN" not in blob, "the credential reached a step detail or the verdict"
+    assert "<redacted>" in blob or "userinfo-redacted" in blob
+
+
+def test_a_query_parameter_credential_never_reaches_argv(tmp_path: Path):
+    """`?access_token=…` is masked in the display, so it must also be kept off argv.
+
+    Measured before: `_url_has_credential` scanned only the bare-token shapes, so the raw URL went
+    to `git ls-remote` as an argument (0444 on a shared cell) while `redact()` hid it.
+    """
+    from tools.gh_write_preflight import _read_targets, _url_has_credential
+
+    q = "https://example.invalid/x.git?access_token=SECRETQUERY123"
+    assert _url_has_credential(q) is True, "a query credential is a credential"
+    assert _read_targets("origin", "https://example.invalid/fetch.git", [q]) == [
+        "gh-write-preflight-push0:"
+    ], "the raw query url must be reached through the alias, never as data"
+    # ...and an ordinary path/url is unaffected.
+    assert _url_has_credential("https://example.invalid/x.git") is False
+    assert _url_has_credential("/tmp/x/y.git") is False
+
+
 def test_bare_userinfo_with_no_separator_is_redacted(tmp_path: Path):
     """`mytoken123@host.example` — detected as a credential, so it must be redacted too.
 

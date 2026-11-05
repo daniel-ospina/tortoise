@@ -410,7 +410,14 @@ def _url_has_credential(url: str) -> bool:
     embeds a credential must NEVER be handed to git as an argument. `git@host` (an SSH user, no
     password) does NOT count — it carries no secret, and refusing it would be a false block.
     """
-    if any(p.search(url) for p, _ in _REDACT_PATTERNS[3:]):   # bare token shapes
+    # ⛔ ONE DEFINITION OF "SECRET" FOR BOTH DIRECTIONS. This used `_REDACT_PATTERNS[3:]` (bare
+    # `ghp_…`/`github_pat_…` shapes only), so a credential carried as a QUERY PARAMETER
+    # (`…/x.git?access_token=SECRET`) was masked by `redact()` but NOT treated as a credential —
+    # and `_read_targets` therefore handed the RAW url to `git ls-remote` on argv (0444), while
+    # real git even echoes the query token in its error text. `[2:]` adds the keyword form
+    # (`token=`/`api_key=`/`password=`), which requires a `=`/`:` separator so ordinary paths are
+    # unaffected.
+    if any(p.search(url) for p, _ in _REDACT_PATTERNS[2:]):   # bare token + keyword shapes
         return True
     try:
         parts = urlsplit(url)
