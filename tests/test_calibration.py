@@ -1313,8 +1313,15 @@ def test_compute_confidence_survives_an_unaddressable_id(sdk):
         params={"id": real["id"]}).result_set[0][0] == "inherited-from-source"
 
 
-def test_mitigate_operator_survives_an_idless_mitigation(sdk):
-    """#9262 → #9754: the refusal must not reach ``mitigate_operator`` either.
+def test_mitigate_operator_refuses_an_idless_mitigation(sdk):
+    """#9262 → #9754: the refusal DOES reach ``mitigate_operator``, and is pinned.
+
+    (The name and the first line of this docstring used to say the opposite —
+    ``…survives_an_idless_mitigation`` / "the refusal must not reach
+    ``mitigate_operator`` either" — which is #9262's contract verbatim, i.e. the
+    defect #9754 replaced. A docstring that asserts a consequence the code does
+    not produce is worse than none, so it is restated here rather than left for
+    a skimmer to read 180° wrong.)
 
     The re-mitigation branch reads the existing mitigation's id from the graph
     (``… RETURN m.id``), so a hand-written id-less mitigation Point yields

@@ -22944,11 +22944,18 @@ class TortoiseSDK:
             # historical outcome, but that historical outcome WAS the defect:
             # ``return self.get_point(None)`` → ``{}``, an empty success the
             # caller cannot distinguish from "there is no mitigation" (the
-            # reason/strength update did not land, no baseline was written, and
-            # EP's calibration gate then refuses the operator while
+            # reason/strength update did not land and no baseline was written,
+            # so EP's calibration gate then refuses the operator while
             # ``calibrate_summary``'s advice — ``set_point_baseline(None, …)`` —
-            # cannot be executed). Measured: the call returns ``{}`` and leaves
-            # ``_evidence[None] = (3.0, 1.0)``.
+            # cannot be executed). Measured: the call returns ``{}``.
+            # (An earlier version of this comment added "and leaves
+            # ``_evidence[None] = (3.0, 1.0)``" — false on both trees: #9262
+            # returned before ``set_point_baseline`` was ever reached, and
+            # ``_evidence`` is written only by ``create_point``'s baseline,
+            # ``set_point_baseline`` after its representability guard, and
+            # ``_hydrate_evidence`` — none of which this path enters. Dropped
+            # rather than carried forward: tests/test_calibration.py states the
+            # correct reading in this same change.)
             #
             # The repair is option 1 of #9754: REFUSE with the real cause. The
             # message names the MITIGATION, never the operator the caller

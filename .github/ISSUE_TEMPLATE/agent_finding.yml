@@ -1,33 +1,43 @@
 name: Agent finding (internal)
 description: An internal finding from a lane — a measured result, a defect, or a routing decision
 title: "[finding]: "
-# ⛔ NO `labels:` KEY HERE, DELIBERATELY (#10146 F1). This template used to
-# declare `labels: ["internal"]`, and the gate refused a malformed form-filed
-# body by testing for that label. `internal` is NOT a label in this repo
-# (measured 2026-11-05: `gh api repos/daniel-ospina/tortoise/labels?per_page=100`
-# → 78 labels, `.name | grep -x internal` → exit 1), and GitHub SILENTLY DROPS a
-# template label that does not exist. So every form-filed issue arrived with NO
-# label, the refusal branch never fired, and the fail-open it was written to
-# close stayed open in production while its own tests passed — they injected
-# the label this form cannot deliver.
+# ⛔ THE GATE'S KEY IS THE PROVENANCE FIELD'S LABEL, BELOW — and the two keys
+# this header used to name were both DEAD IN PRODUCTION (#10146 F1, twice).
 #
-# A label the repo must own is repo STATE, and state silently diverged. The gate
-# therefore keys on what THIS FILE delivers by itself and no repo state can take
-# away:
-#   * the `title:` prefix above (`[finding]: `), read by the gate's `decide`
-#     step — GitHub applies it at filing and never validates it against the
-#     repo's label set;
-#   * the hidden `<!-- finding -->` marker in the first markdown block below,
-#     which is the same token `tools/finding_provenance.py` already selects via
-#     `FINDING_MARKER_RE` / `claims_finding()` for the COMMENT arm.
-# Pinned in `tests/test_finding_provenance.py`
-# (`test_the_form_delivers_the_key_the_gate_keys_on`) against a body RENDERED
-# FROM THIS FILE, so deleting either key reddens that test.
+#   1. `labels: ["internal"]`. `internal` is NOT a label in this repo (measured
+#      2026-11-05: `gh api repos/daniel-ospina/tortoise/labels?per_page=100`
+#      → 78 labels, `.name | grep -x internal` → exit 1), and GitHub SILENTLY
+#      DROPS a template label that does not exist. So a form-filed issue
+#      arrived with NO label and a refusal keyed on it never fired.
+#   2. `<!-- finding -->` inside a `type: markdown` element. GitHub's form
+#      schema says of `markdown`: *“Markdown text that is displayed in the form
+#      … but is not submitted”* — so the marker NEVER reaches the issue body,
+#      and a gate keying on it saw nothing on any real filing either. Both
+#      tests were green because the renderer wrote the marker in itself.
+#
+# A label is repo STATE that silently diverged; a `markdown` element is UI text
+# the platform drops at filing. So the key is a SUBMITTED, REQUIRED field whose
+# LABEL the gate's own claim parser selects — `### Measured at …`, which GitHub
+# renders into the body for every filing (a field's `### <label>` heading is
+# part of the submitted markdown; only `markdown` elements are not). That is
+# the `measured_at` field below, and it is why its label begins `Measured at`:
+# it is not decoration, it is the gate's trigger. Delete or rename it and a
+# malformed filing goes back to being silently SKIPPED (#10146).
+#
+# The `title:` prefix above stays as a SECOND key: GitHub applies it at filing
+# and never validates it against repo state. It is weaker than the field label
+# — the filer can overwrite a pre-populated title — so the gate must never rest
+# on it alone.
+#
+# Pinned against a body RENDERED THE WAY GITHUB RENDERS IT (markdown elements
+# excluded) in `tests/test_finding_provenance.py`
+# (`test_the_form_delivers_the_key_the_gate_keys_on`) and
+# `tests/test_10146_agent_finding_form.py`, so dropping the claim from the
+# field label reddens them.
 body:
   - type: markdown
     attributes:
       value: |
-        <!-- finding -->
         **Keep this short.** The owner's standing instruction is to reduce bureaucracy, so this form is
         deliberately four fields. A finding that reaches the graph is worth more than a well-formatted one
         that stays in a session.
@@ -42,7 +52,12 @@ body:
   - type: textarea
     id: measured_at
     attributes:
-      label: Provenance (paste the `--emit` line)
+      # ⛔ THIS LABEL IS THE GATE'S TRIGGER — do not “tidy” it into `Provenance`.
+      # Rendered as `### Measured at (paste the `--emit` line)` it is a provenance
+      # CLAIM by the gate's own PROVENANCE_CLAIM_RE, so the body is gated (and
+      # refused as UNKNOWN_PROVENANCE when the answer is not a parseable line)
+      # instead of being skipped. See the file header.
+      label: Measured at (paste the `--emit` line)
       description: The full `Measured at:` line from `uv run python tools/finding_provenance.py --emit` — a line beginning `Measured at` followed by `<ref>@<40-hex-sha> on <YYYY-MM-DD>`. Re-read the finding against the tree you name before you paste; an unmeasured guess is worse than none.
       placeholder: Run `uv run python tools/finding_provenance.py --emit` in the checkout you measured and paste its single output line here.
     validations:

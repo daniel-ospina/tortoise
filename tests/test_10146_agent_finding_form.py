@@ -31,30 +31,45 @@ That fail-open is the real residual of #10146 and is closed in the workflow's
 REFUSES a form-filed body carrying no parseable claim instead of skipping it
 (pinned in ``tests/test_finding_provenance.py``).
 
-⛔ THE KEY THAT REFUSAL USES — corrected (#10146 F1). The first repair keyed
-the refusal on the label this form declared (``labels: ["internal"]``). That
-label does **not exist** in this repo (measured 2026-11-05: 78 labels, none
+⛔ THE KEY THAT REFUSAL USES — corrected twice (#10146 F1). The first repair
+keyed the refusal on the label this form declared (``labels: ["internal"]``).
+That label does **not exist** in this repo (measured 2026-11-05: 78 labels, none
 named ``internal``), and GitHub **silently drops** a template label that does
 not exist — so a form-filed issue arrived with NO label, the refusal never
 fired, and the fail-open stayed open in production while the tests passed on an
-injected label the form cannot deliver. The refusal is now keyed on what THIS
-FILE delivers by itself and no repo state can remove:
+injected label the form cannot deliver.
 
-* the hidden ``<!-- finding -->`` marker in the first ``markdown`` block, which
-  the gate's own ``claims_finding()`` / ``FINDING_MARKER_RE`` already selects,
-  and
-* the ``title: "[finding]: "`` prefix, which GitHub applies at filing.
+The second repair keyed it on a ``<!-- finding -->`` marker placed in a
+``type: markdown`` element. GitHub documents a ``markdown`` element as
+*“displayed in the form … but is not submitted”* — it is **UI text**, so that
+marker reached no real issue body either, and the two pins that asserted it
+were green because the renderer appended ``markdown`` values itself.
 
-``test_the_form_ships_a_marker_the_gate_selects`` below is the anti-rot pin on
-this half of the contract.
+So the key is a **SUBMITTED, REQUIRED field whose label the gate's own claim
+parser selects**: ``measured_at`` is labelled ``Measured at (paste the `--emit`
+line)``, so GitHub renders ``### Measured at …`` into every filing and
+``claims_finding()`` / ``PROVENANCE_CLAIM_RE`` selects the body. It cannot be
+dropped by repo state (unlike a label), cannot be dropped by the platform
+(unlike a ``markdown`` element), and survives a filer who rewrites the
+pre-populated title (the ``title: "[finding]: "`` prefix is kept as a weaker
+second key).
 
-The rendering below mirrors what GitHub puts in the created issue body: a
-``markdown`` block's ``value`` verbatim, and for each question field a
-``### <label>`` heading followed by the answer (``_No response_`` when blank).
-Field ``description`` text is UI-side hint, but it is checked too — the owner's
-constraint on this issue is that no part of the form may ship a line the
-*claim* parser selects, because the claim parser tolerates markdown prefixes
-(``#``, ``>``, ``*``, ``-``) that a rendered heading supplies for free.
+``test_the_form_delivers_the_claim_the_gate_selects`` below is the anti-rot pin
+on this half of the contract.
+
+⛔ AND THE SAME RULE ONE TEMPLATE OVER: a field label that reads as a claim
+gates EVERY filing of that form. That is right for this form (its only required
+substantive answer IS the provenance line) and wrong for ``bug_report.yml``,
+whose ``beta-feedback`` exemption depends on a blank report NOT claiming —
+``test_no_field_label_of_the_bug_form_reads_as_a_provenance_claim`` pins that.
+
+The rendering below mirrors what GitHub puts in the created issue body — from
+the PLATFORM's rules, not from what would make the assertions pass: a
+``markdown`` element is *“displayed in the form … but is not submitted”*, so its
+``value`` is never in the body, and an unanswered field renders as
+``_No response_`` (not its placeholder). For each SUBMITTED field GitHub writes
+a ``### <label>`` heading followed by the answer. That is the whole model, and
+getting it wrong is what let two repairs key on tokens no real issue carries.
 """
 from __future__ import annotations
 
@@ -70,20 +85,27 @@ from tools.finding_provenance import (
 )
 
 FORM = Path(__file__).resolve().parent.parent / ".github" / "ISSUE_TEMPLATE" / "agent_finding.yml"
+BUG_FORM = Path(__file__).resolve().parent.parent / ".github" / "ISSUE_TEMPLATE" / "bug_report.yml"
 
 
-def _load():
-    return yaml.safe_load(FORM.read_text(encoding="utf-8"))
+def _load(path: Path = FORM):
+    return yaml.safe_load(path.read_text(encoding="utf-8"))
 
 
 def _render_body(form) -> str:
-    """What GitHub puts in the issue body when the form is used, unanswered."""
+    """What GitHub puts in the issue body when the form is used, unanswered.
+
+    ``markdown`` elements are NOT submitted (platform rule), so they are
+    excluded; an unanswered field renders as ``_No response_``, not as its
+    placeholder. A renderer that appends ``markdown`` values models the
+    platform wrong — that is how the ``<!-- finding -->`` key looked delivered
+    while reaching no real issue (the blocking finding on this PR).
+    """
     lines: list[str] = []
     for item in form["body"]:
         kind = item.get("type")
         attrs = item.get("attributes") or {}
         if kind == "markdown":
-            lines.append(str(attrs.get("value", "")))
             continue
         lines.append(f"### {attrs.get('label', '')}")
         lines.append("")
@@ -91,35 +113,88 @@ def _render_body(form) -> str:
             for opt in attrs.get("options") or []:
                 lines.append(f"- [ ] {opt.get('label', '')}")
         else:
-            lines.append(str(attrs.get("placeholder") or "_No response_"))
+            lines.append("_No response_")
         lines.append("")
     return "\n".join(lines)
 
 
-def test_rendered_form_never_ships_a_malformed_provenance_claim():
-    """No line of the rendered body may be a ``Measured at`` CLAIM.
+def _submitted(form):
+    return [item for item in form["body"] if item.get("type") != "markdown"]
 
-    The claim parser tolerates leading ``#``/``>``/``*``/``-``, so a field
-    LABEL of ``Measured at …`` renders as ``### Measured at …`` — a claim the
-    strict parser rejects, i.e. ``FAIL UNKNOWN_PROVENANCE`` wherever it IS
-    classified.
 
-    ⛔ Do NOT read this as "the form's label made the gate fail" (#10146's
-    miscited root cause). It made the gate **skip** the body: the issue-body
-    arm classified with a column-0 ``grep``, which cannot see a ``###`` prefix,
-    and the form's declared ``internal`` label was dropped by GitHub (the label
-    does not exist), so the issue matched neither label fallback. The
-    strict-parser rejection above is the consequence on the COMMENT arm (and on
-    the issue arm only since it started refusing a form-filed body with no
-    parseable claim). The assertion below is the pin in both worlds: the form
-    must ship no line the claim parser selects.
+def test_the_form_delivers_the_claim_the_gate_selects():
+    """#10146 F1 — the refusal key must be delivered BY THE PLATFORM, not by a
+    label and not by a ``markdown`` element.
+
+    The gate's ``decide`` step classifies every issue body with the repo's own
+    claim parser and REFUSES a form-filed body carrying no parseable claim, so
+    the body this form produces must SELECT there. The two keys that did not:
+    ``labels: ["internal"]`` (a repo label that does not exist — GitHub drops
+    it) and a ``<!-- finding -->`` marker in a ``type: markdown`` element
+    (documented as not submitted — GitHub drops it too).
+
+    The delivered key is a submitted, required field's ``### <label>`` heading.
     """
-    body = _render_body(_load())
-    hits = [ln for ln in body.splitlines() if PROVENANCE_CLAIM_RE.match(ln)]
+    form = _load()
+    body = _render_body(form)
+    assert claims_finding(body), (
+        "the body this form produces is not selected by the gate's own "
+        "claims_finding() — a form-filed finding with a malformed provenance "
+        "field would be SKIPPED instead of refused (#10146 F1)")
+    # …and the claim must not come from a `markdown` element, which GitHub never
+    # submits: a key there is dead code that reads as delivered.
+    markdown_claim = "\n".join(
+        str((item.get("attributes") or {}).get("value", ""))
+        for item in form["body"] if item.get("type") == "markdown")
+    assert not claims_finding(markdown_claim), (
+        "this form puts a finding claim inside a `type: markdown` element. "
+        "GitHub documents markdown elements as displayed-but-not-submitted, so "
+        "it can never reach the gate — the exact defect that made the previous "
+        "repair dead code (#10146 F1)")
+    carrying = [item for item in _submitted(form)
+                if claims_finding("### " + str(
+                    (item.get("attributes") or {}).get("label", "")))]
+    assert carrying, (
+        "no SUBMITTED field of this form carries a claim, so a form-filed body "
+        "is only gated if the filer leaves the pre-populated title alone")
+    assert any((item.get("validations") or {}).get("required")
+               for item in carrying), (
+        "the field carrying the gate's claim is not required, so a filing can "
+        "arrive without it")
+    assert _load().get("title") == "[finding]: ", (
+        "the form's title prefix is the second (weaker) delivered key the gate "
+        "reads — it is gone")
+    assert _load().get("labels") is None, (
+        "this form declares labels again. A label is repo STATE: GitHub drops "
+        "one that does not exist, silently, which is exactly how the #10146 "
+        "refusal became dead code. If a label is ever needed here, pin that it "
+        "EXISTS in the repo.")
+
+
+def test_no_field_label_of_the_bug_form_reads_as_a_provenance_claim():
+    """The same rule, one template over — and the sign is INVERTED.
+
+    ``bug_report.yml`` stamps ``beta-feedback``, and the workflow exempts an
+    external report with no measurement. A field's ``### <label>`` heading IS
+    part of the submitted body, so a label reading ``Measured at …`` makes every
+    blank-filed beta report a claim — it takes the `0` arm ahead of the
+    exemption and is labelled ``provenance-stale``, with a reply telling a
+    hosted reporter to re-verify against ``origin/main``.
+
+    So here (unlike ``agent_finding.yml``) the label must stay NEUTRAL, and the
+    shape is taught by ``description``/``placeholder``, which are UI-only.
+    """
+    form = _load(BUG_FORM)
+    hits = [str((item.get("attributes") or {}).get("label", ""))
+            for item in _submitted(form)
+            if any(PROVENANCE_CLAIM_RE.match(ln) for ln in str(
+                (item.get("attributes") or {}).get("label", "")).splitlines())]
     assert not hits, (
-        "the form renders lines the provenance claim parser selects (a claim "
-        "the strict parser rejects, so the body is UNKNOWN_PROVENANCE wherever "
-        f"it is classified): {hits}")
+        "bug_report.yml field labels read as provenance claims, so every "
+        f"blank-filed beta report is gated instead of exempted: {hits}")
+    assert not claims_finding(_render_body(form)), (
+        "the body a blank-filed beta report arrives with claims to be a "
+        "finding, making the `beta-feedback` exemption unreachable")
 
 
 def test_the_old_label_claim_is_selected_by_one_parser_and_refused_by_the_other():
@@ -139,19 +214,6 @@ def test_the_old_label_claim_is_selected_by_one_parser_and_refused_by_the_other(
         "…and it is never a valid provenance line — the strict parser refuses it")
 
 
-def test_no_field_label_or_description_reads_as_a_provenance_claim():
-    """Same pin over the UI-side text, which the form must also keep clean."""
-    form = _load()
-    for item in form["body"]:
-        attrs = item.get("attributes") or {}
-        for key in ("label", "description", "placeholder"):
-            text = str(attrs.get(key) or "")
-            for line in text.splitlines():
-                assert not PROVENANCE_CLAIM_RE.match(line), (
-                    f"field {item.get('id')!r} {key} carries a malformed "
-                    f"provenance claim: {line!r}")
-
-
 def test_form_tells_the_filer_the_command_that_emits_the_line():
     """The filer must be told to paste the gate's own output (`--emit`).
 
@@ -167,33 +229,6 @@ def test_form_tells_the_filer_the_command_that_emits_the_line():
     # careful filer can self-check without running anything.
     assert "<ref>@<40-hex-sha> on <YYYY-MM-DD>" in text, (
         "the form does not state the exact shape PROVENANCE_RE accepts")
-
-
-def test_the_form_ships_a_marker_the_gate_selects():
-    """#10146 F1 — the refusal key must be delivered BY THE FORM, not by a label.
-
-    The gate's ``decide`` step refuses a form-filed body with no parseable
-    claim, and it keys that refusal on two things THIS FILE delivers: the
-    hidden ``<!-- finding -->`` marker in the rendered body (selected by the
-    gate's own ``claims_finding()``, imported — never copied) and the
-    ``title:`` prefix. The previous key was ``labels: ["internal"]``, a label
-    this repo does not have, which GitHub silently drops at filing — the
-    refusal was dead code in production.
-    """
-    body = _render_body(_load())
-    assert claims_finding(body), (
-        "the body this form produces is not selected by the gate's own "
-        "claims_finding() — a form-filed finding with a malformed provenance "
-        "field would be SKIPPED instead of refused (#10146 F1)")
-    assert "<!-- finding -->" in body
-    assert _load().get("title") == "[finding]: ", (
-        "the form's title prefix is the second delivered key the gate reads — "
-        "it is gone")
-    assert _load().get("labels") is None, (
-        "this form declares labels again. A label is repo STATE: GitHub drops "
-        "one that does not exist, silently, which is exactly how the #10146 "
-        "refusal became dead code. If a label is ever needed here, pin that it "
-        "EXISTS in the repo.")
 
 
 def test_measured_at_is_required():
