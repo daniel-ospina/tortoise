@@ -1038,7 +1038,12 @@ def _read_snapshot(art: Path, logp_default: Path,
         text = art.read_text(encoding="utf-8", errors="replace")
     logp = Path(read_field(text, "LOG", str(logp_default)))
     log = ""
-    if logp.exists():
+    # ⛔ `.is_file()`, NOT `.exists()`: a torn `LOG=` line (a header write cut at
+    # `LOG=`) resolves to `Path(".")`, which EXISTS — and `read_text()` then
+    # raises `IsADirectoryError` out of `collect`, so `collect --assert-merged`
+    # exited 1 ("the state is NOT merged") for a crash, which is the one signal
+    # the tool's own docstring says must never wear that code.
+    if logp.is_file():
         full = logp.read_text(encoding="utf-8", errors="replace")
         # ⛔ THE LOG IS APPEND-ONLY ACROSS ATTEMPTS. Parsing the whole file lets a
         # DEAD attempt inherit a PREVIOUS attempt's `✅ merged` line and be
@@ -1187,22 +1192,7 @@ def _artifact_for_any_spelling(state_dir: Path, repo: str, pr: int) -> Path | No
     art = artifact_path(state_dir, repo, pr)
     key = _repo_key(repo or "")
     sd = Path(state_dir)
-    # ⛔ THE CANONICAL PATH IS ADMITTED BY `REPO=` TOO. `_slug` folds `/` to `-` (and
-    # now also folds `.git`/SCP prefixes), so `a/b-c` and `a-b/c` BOTH slug to
-    # `rail-a-b-c-9.md`: trusting the path alone served `a-b/c#9` the merged record of
-    # `a/b-c#9`, and `collect --assert-merged` exited 0 for a repo that never merged.
-    # One-sided, exactly like `_names_this_repo`: a record whose `REPO=` is absent or
-    # unreadable has nothing to contradict it (a torn canonical write must still
-    # read), a record that names a DIFFERENT repo is not this repo's record.
-    def _names_key(p: Path) -> bool:
-        try:
-            text = p.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            return False
-        named = _repo_key(read_field(text, "REPO") or "")
-        return not named or named == key
-
-    cands = [art] if art.exists() and _names_key(art) else []
+    cands = [art] if art.exists() and _record_names_repo(art, repo) else []
     if key and sd.exists():
         for cand in sorted(sd.glob(f"rail-*-{pr}.md")):
             if cand == art:
@@ -1272,6 +1262,26 @@ def _record_is_merged(art: Path, pr: int) -> bool:
     return state == MERGED
 
 
+def _record_names_repo(art: Path, repo: str) -> bool:
+    """Does this record's own `REPO=` name `repo` (or name nothing at all)?
+
+    ⛔ THE CANONICAL PATH MUST BE ADMITTED BY `REPO=`, NOT BY ITS FILENAME. `_slug`
+    folds `/` to `-`, so `a/b-c` and `a-b/c` BOTH resolve to `rail-a-b-c-9.md`:
+    trusting the path served `a-b/c#9` the merged record of `a/b-c#9`, and `collect
+    --assert-merged` exited 0 for a repo that never merged.
+
+    ONE-SIDED, exactly like `_names_this_repo`: a record whose `REPO=` is absent or
+    unreadable has nothing to contradict it — a torn canonical write must still read
+    — while a record that names a DIFFERENT repo is not this repo's record.
+    """
+    try:
+        text = art.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    named = _repo_key(read_field(text, "REPO") or "")
+    return not named or named == _repo_key(repo or "")
+
+
 def _record_is_live(art: Path) -> bool:
     """Does this record name a process that is still running?
 
@@ -1289,7 +1299,7 @@ def _record_is_live(art: Path) -> bool:
     leader = _int_or_none(read_field(text, "PID")) or 0
     child = _int_or_none(read_field(text, "CHILD_PID")) or 0
     age = _age_seconds(read_field(text, "STARTED_AT"))
-    if leader <= 0 and child > 0:
+    if leader <= 0 and child > 0 and read_field(text, "SPAWNING"):
         # ⛔ THE FORK-WINDOW CARRIER — `SPAWNING=1` + `CHILD_PID` with no `PID`, the
         # documented shape a launcher killed between `Popen` returning and its
         # `PID=` append leaves behind (`launch` writes those in two steps). It is a
@@ -1808,6 +1818,27 @@ def launch(pr: int, *, cwd: Path, state_dir: Path, repo: str | None = None,
     with lock.open("a+") as lockfh:
         fcntl.flock(lockfh.fileno(), fcntl.LOCK_EX)
         state_dir.mkdir(parents=True, exist_ok=True)
+        # ⛔ REFUSE A SHARED PATH OCCUPIED BY ANOTHER REPO'S RECORD, BEFORE ANY WRITE.
+        # `_slug` folds `/` to `-`, so `a/b-c#9` and `a-b/c#9` are ONE artifact, ONE
+        # log and ONE `.lock`, and the write below is unconditional (`write_text` of
+        # the artifact, TRUNCATION of the log). Once `collect` correctly declined to
+        # serve `a-b/c` the record naming `a/b-c`, `prior` was None — so the guard
+        # passed and the launch REWROTE that live record's `REPO=`, truncated its log
+        # (destroying a real `✅ merged …` line for good) and ran a second rail whose
+        # appends interleave in the same two files. Silent destruction of a live
+        # record AND two rails on one PR: measured, and both are the classes this
+        # module exists to refuse. `origin/main` refused this launch only because it
+        # read the shared record as this repo's own — the refusal was the right
+        # answer for the wrong reason, and it must not be re-opened by making the
+        # identity check correct.
+        if art.exists() and not _record_names_repo(art, repo):
+            raise Refused(
+                f"the artifact path {art} is occupied by ANOTHER repo's record — the "
+                "path, the log and the lock are shared, so launching here would "
+                "overwrite that rail's record and truncate its log; two repos whose "
+                "`owner/name` slug identically cannot be railed separately in one "
+                "--state-dir. Use a separate --state-dir for this repo."
+            )
         prior = collect(state_dir, repo, pr)
         if prior is not None and prior.state == WAITING:
             # ⛔ THE HINT IS PER-ARM, because `pid == 0` covers TWO waiting arms and

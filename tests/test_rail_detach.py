@@ -1138,6 +1138,25 @@ def test_a_record_written_under_an_older_spelling_still_blocks(tmp_path):
                         "--assert-merged"]) == 3
         # …while the repo the record NAMES is still answered.
         assert rd.collect(sd4, "a/b-c", 9) is not None
+
+        # ⛔ AND `launch` MUST REFUSE THAT SHARED PATH, NOT CLOBBER IT. Declining to
+        # serve the record is only half the fix: the write below is unconditional
+        # (artifact `write_text`, log TRUNCATION), so with `collect` correctly silent
+        # the guard passed and the launch rewrote the other repo's `REPO=`, destroyed
+        # its log — including a real `✅ merged` line — and ran a second rail
+        # appending into the same two files. Measured before this arm existed.
+        logp9 = colliding.with_suffix(".log")
+        logp9.write_text(f"\n{rd.ATTEMPT_MARK} x attempt=z (detached) =====\n"
+                         "admin-merge: ✅ merged PR #9 at deadbeefcafe1234 "
+                         "(state=MERGED confirmed via the API)\n", encoding="utf-8")
+        before = colliding.read_text(encoding="utf-8")
+        with pytest.raises(rd.Refused) as exc:
+            rd.launch(9, cwd=co, state_dir=sd4, repo="a-b/c")
+        assert "ANOTHER repo's record" in str(exc.value), str(exc.value)
+        assert colliding.read_text(encoding="utf-8") == before, \
+            "the refused launch rewrote another repo's record"
+        assert "✅ merged PR #9" in logp9.read_text(encoding="utf-8"), \
+            "the refused launch truncated another repo's log"
     finally:
         live.kill()
         live.wait()
