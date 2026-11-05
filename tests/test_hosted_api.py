@@ -7367,6 +7367,180 @@ def test_registry_anchor_caches_the_uri_mode_handle(monkeypatch):
     ha._reset_registry_probe_sdk()  # the suite's isolation hook owns the close
 
 
+@pytest.mark.embedded_only  # #8867 embedded keepalive lock protocol (URI-less lane, D14)
+def test_the_registry_probe_never_CONSTRUCTS_under_the_keepalive_lock(monkeypatch):
+    """#8867 finding 2 — the registry probe must not hold `_KEEPALIVE_LOCK`
+    across its construction.
+
+    `_make_sdk`'s EMBEDDED branch takes that SAME lock and `threading.Lock` is
+    not reentrant, so a construction that runs while this caller holds it is a
+    self-deadlock the moment `TORTOISE_DB_URI` reads as set to the caller and
+    unset to `_make_sdk`'s own re-read — which the suite does continuously via
+    `monkeypatch.delenv`. The probe then never releases the lock, and the hang
+    cascades: `_probe_sdk` holds `_PROBE_SDK_LOCK` across its own `_make_sdk`,
+    so `_probe_sdk_reset()` blocks forever and `_lifespan` never returns.
+
+    MEASURED 2026-11-05, CI run 42025169439, required check `test (d)`: the leg
+    stopped at `1253 passed` for 16 minutes and died at its 26m watchdog with
+    "failure set unobservable" — pytest-timeout fired at 4m40s inside
+    `tests/test_body_cap_sweep.py`'s `embedded_client` fixture, and the stack
+    dump was exactly `_registry_anchor` -> `_registry_probe_sdk` -> `_make_sdk`
+    blocked entering `_KEEPALIVE_LOCK`.
+
+    The leg asks for the lock NON-BLOCKINGLY, so it reports the pre-fix
+    deadlock condition as `False` instead of wedging the whole session.
+    """
+    import tortoise.hosted_api as ha
+
+    monkeypatch.setenv("TORTOISE_DB_URI",
+                       "docker://:pw@localhost:6379/probe-lock")
+    ha._reset_registry_probe_sdk()
+    acquired: list[bool] = []
+
+    class _Recording:
+        def _get_proj(self):
+            return object()
+
+        def close(self):
+            pass
+
+    def _spy_make_sdk(*, namespace=None, graph_name=None):
+        got = ha._KEEPALIVE_LOCK.acquire(blocking=False)
+        acquired.append(got)
+        if got:
+            ha._KEEPALIVE_LOCK.release()
+        return _Recording()
+
+    monkeypatch.setattr(ha, "_make_sdk", _spy_make_sdk)
+    try:
+        ha._registry_probe_sdk()
+    finally:
+        ha._reset_registry_probe_sdk()
+
+    assert acquired == [True], (
+        "the registry probe built its handle while HOLDING `_KEEPALIVE_LOCK`; "
+        "`_make_sdk`'s embedded branch takes that same non-reentrant lock as "
+        "soon as TORTOISE_DB_URI vanishes between the two reads, so the probe "
+        "self-deadlocks holding it and app startup hangs forever (#8867 f2)")
+
+
+@pytest.mark.embedded_only  # #8867 embedded keepalive lock protocol (URI-less lane, D14)
+def test_a_losing_builder_neither_installs_nor_LEAKS_its_handle(monkeypatch):
+    """Concurrency: the pre-fix arm's stated guarantee ("two worker threads
+    cannot both build one and leak the loser") must SURVIVE the lock being
+    released for the construction — otherwise the fix trades a deadlock for a
+    connection leak or for two live cached handles.
+
+    Both builders are parked inside `_make_sdk` on a barrier, so both have a
+    handle before either can install. The winner installs; the loser must
+    return the WINNER's handle (one cached handle per identity) and close its
+    own.
+    """
+    import threading
+
+    import tortoise.hosted_api as ha
+
+    monkeypatch.setenv("TORTOISE_DB_URI",
+                       "docker://:pw@localhost:6379/probe-race")
+    ha._reset_registry_probe_sdk()
+    built: list = []
+    barrier = threading.Barrier(2, timeout=30)
+
+    class _Handle:
+        def __init__(self):
+            self.closed = 0
+            built.append(self)
+
+        def _get_proj(self):
+            return object()
+
+        def close(self):
+            self.closed += 1
+
+    def _spy_make_sdk(*, namespace=None, graph_name=None):
+        handle = _Handle()
+        barrier.wait()  # both builders hold a handle before either installs
+        return handle
+
+    monkeypatch.setattr(ha, "_make_sdk", _spy_make_sdk)
+    handed: dict[str, object] = {}
+
+    def _run(tag):
+        handed[tag] = ha._registry_probe_sdk()
+
+    threads = [threading.Thread(target=_run, args=(tag,), daemon=True)
+               for tag in ("a", "b")]
+    try:
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(30)
+        assert not any(thread.is_alive() for thread in threads), (
+            "a concurrent registry probe deadlocked")
+        assert handed["a"] is handed["b"], (
+            "two handles were handed out for ONE cache identity — the losing "
+            "builder installed its own instead of yielding to the winner")
+        assert len(built) == 2, built
+        losers = [handle for handle in built if handle is not handed["a"]]
+        assert len(losers) == 1, (built, handed)
+        assert losers[0].closed == 1, (
+            "the losing builder's handle was closed neither by the install "
+            "path nor by itself — an unreachable connection leak")
+    finally:
+        ha._reset_registry_probe_sdk()
+
+
+@pytest.mark.embedded_only  # #8867 embedded keepalive lock protocol (URI-less lane, D14)
+def test_a_URI_drift_DURING_the_build_is_recorded_against_what_was_built(
+        monkeypatch):
+    """The cached identity must describe the handle that was actually built.
+
+    `_make_sdk` re-reads `TORTOISE_DB_URI` immediately before it constructs, so
+    a drift that lands between this caller's identity read and the build is
+    resolved in the BUILD's favour. Recording the pre-build read instead pairs
+    a NEW server's handle with the OLD identity, and a later caller still
+    resolving the old identity is then served a handle bound to the new one —
+    a cross-server read, which is the drift `_registry_probe_sdk` exists to
+    refuse (#1502's "reusing it would probe a graph this process no longer
+    resolves to").
+    """
+    import tortoise.hosted_api as ha
+
+    monkeypatch.setenv("TORTOISE_DB_URI",
+                       "docker://:pw@localhost:6379/drift-old")
+    ha._reset_registry_probe_sdk()
+    constructed = []
+
+    class _Recording:
+        def __init__(self):
+            constructed.append(1)
+
+        def _get_proj(self):
+            return object()
+
+        def close(self):
+            pass
+
+    def _drifting_make_sdk(*, namespace=None, graph_name=None):
+        # The reconfiguration lands AFTER the caller read the identity and
+        # BEFORE the handle exists — `_make_sdk` would build for the NEW URI.
+        monkeypatch.setenv("TORTOISE_DB_URI",
+                           "docker://:pw@localhost:6379/drift-new")
+        return _Recording()
+
+    monkeypatch.setattr(ha, "_make_sdk", _drifting_make_sdk)
+    try:
+        first = ha._registry_probe_sdk()
+        assert ha._REGISTRY_PROBE_URI.endswith("/drift-new"), (
+            "the cached identity kept the pre-build URI, so the handle built "
+            "against the NEW server is filed under the OLD one")
+        assert ha._registry_probe_sdk() is first, (
+            "a repeat call at the identity we just recorded rebuilt the handle")
+        assert len(constructed) == 1, constructed
+    finally:
+        ha._reset_registry_probe_sdk()
+
+
 @pytest.mark.embedded_only  # #2172 embedded keepalive anchor race (URI-less lane, D14)
 def test_registry_anchor_concurrent_first_calls_single_anchor(monkeypatch):
     """#2172: _registry_anchor() and _make_sdk(namespace="registry") share

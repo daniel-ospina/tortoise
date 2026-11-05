@@ -35315,12 +35315,42 @@ def _reset_registry_probe_sdk() -> None:
 def _registry_probe_sdk() -> TortoiseSDK:
     """The process-lifetime registry SDK behind `list_graphs()` (#4661).
 
-    URI mode only — the embedded caller keeps its fresh handle. Construction
-    (and the eager `_get_proj()` that binds the projection) runs under
-    `_KEEPALIVE_LOCK`, so two worker threads cannot both build one and leak
-    the loser. A construction FAILURE is not cached: the exception propagates
-    to `_registry_existing_graphs`'s never-raise wrapper and the next probe
-    retries, so the fail-open contract is unchanged."""
+    URI mode only — the embedded caller keeps its fresh handle. A construction
+    FAILURE is not cached: the exception propagates to
+    `_registry_existing_graphs`'s never-raise wrapper and the next probe
+    retries, so the fail-open contract is unchanged.
+
+    ⛔ CONSTRUCTION RUNS OUTSIDE `_KEEPALIVE_LOCK` (#8867 finding 2). It used
+    to run INSIDE it, on the claim that the lock then guarantees "two worker
+    threads cannot both build one and leak the loser". That claim was the bug:
+    the lock's own contract (`_KEEPALIVE_LOCK`'s declaration, #2172) says "the
+    lock is never held across a per-request fresh-SDK construction", because
+    `_make_sdk`'s EMBEDDED branch takes that SAME lock and `threading.Lock` is
+    not reentrant. URI mode never re-entered, so the window was only reachable
+    when `TORTOISE_DB_URI` looked set to this caller and unset to `_make_sdk`'s
+    own re-read — which the test suite does continuously via
+    `monkeypatch.delenv`. When it fires, the probe thread SELF-DEADLOCKS while
+    still holding `_KEEPALIVE_LOCK`, and the hang cascades process-wide:
+    `_probe_sdk` holds `_PROBE_SDK_LOCK` across its own `_make_sdk`, so
+    `_probe_sdk_reset()` blocks forever — and `_lifespan` calls that on app
+    startup, so the app never starts.
+
+    MEASURED 2026-11-05 (CI run 42025169439, required check `test (d)`, nodeid
+    `tests/test_body_cap_sweep.py::TestAgentSignupCap::test_agent_signup_empty_
+    no_ct_mints_200`): pytest-timeout fired at 4m40s inside the `embedded_client`
+    fixture's `TestClient.__enter__`, the shard stopped at `1253 passed` for the
+    following 16 minutes, and the leg died at its 26m watchdog with "failure set
+    unobservable". The dump's frames were exactly this deadlock:
+    `_registry_anchor` → `_registry_probe_sdk` → `_make_sdk` (blocked entering
+    `_KEEPALIVE_LOCK`) alongside `_probe_sdk` (holding `_PROBE_SDK_LOCK`, same
+    block) and `_lifespan` → `_probe_sdk_reset` (blocked on `_PROBE_SDK_LOCK`).
+
+    So the shape is: build first (nothing held), install under the lock with a
+    re-check. A peer that won the race keeps its handle and the loser closes
+    its OWN — a loser is never installed and never leaked, which is the
+    invariant the old code wanted, and the lock is never held across a
+    construction the stack can call back into.
+    """
     global _REGISTRY_PROBE_SDK, _REGISTRY_PROBE_URI, _REGISTRY_PROBE_PATH
     identity = _registry_probe_identity()
     uri, path_pin = identity
@@ -35328,35 +35358,49 @@ def _registry_probe_sdk() -> TortoiseSDK:
     if (cached is not None and uri == _REGISTRY_PROBE_URI
             and path_pin == _REGISTRY_PROBE_PATH):
         return cached
+
+    sdk = _make_sdk(namespace="registry")
+    try:
+        sdk._get_proj()
+    except Exception:
+        try:  # noqa: SIM105
+            sdk.close()
+        except Exception:
+            pass
+        raise
+    # Re-read the identity AFTER the build: `_make_sdk` re-reads the env itself
+    # a line before it constructs, so this read is the one the handle was
+    # actually built against. Recording the pre-build read instead would let a
+    # drift DURING the build pair a NEW server's handle with the OLD identity,
+    # and a later caller still on the old identity would be served it.
+    installed = _registry_probe_identity()
+    installed_uri, installed_path = installed
+    retired = None
     with _KEEPALIVE_LOCK:
         cached = _REGISTRY_PROBE_SDK
-        if (cached is not None and uri == _REGISTRY_PROBE_URI
-                and path_pin == _REGISTRY_PROBE_PATH):
-            return cached
-        if cached is not None:
+        if (cached is not None and installed_uri == _REGISTRY_PROBE_URI
+                and installed_path == _REGISTRY_PROBE_PATH):
+            # A peer installed a matching handle while we were building. Keep
+            # ITS handle (one cached handle per identity, as before) and close
+            # ours — the loser closes its own, so nothing leaks.
+            retired, sdk = sdk, cached
+        else:
             # The configured server OR the embedded path pin changed — a
             # reconfiguration event, not a request event (the embedded anchor
             # evicts on drift the same way, #1502). Drop the handle: reusing it
             # would probe a graph this process no longer resolves to.
-            try:  # noqa: SIM105
-                cached.close()
-            except Exception:
-                pass
-            _REGISTRY_PROBE_SDK = None
-            _REGISTRY_PROBE_URI = None
-            _REGISTRY_PROBE_PATH = None
-        sdk = _make_sdk(namespace="registry")
-        try:
-            sdk._get_proj()
+            retired = cached
+            _REGISTRY_PROBE_SDK = sdk
+            _REGISTRY_PROBE_URI, _REGISTRY_PROBE_PATH = installed
+    if retired is not None:
+        # Closed OUTSIDE the lock (#2172): a slow close must not block a
+        # concurrent construction, and a close under the lock is the
+        # close-under-use hazard #8867 finding 1 owns.
+        try:  # noqa: SIM105
+            retired.close()
         except Exception:
-            try:  # noqa: SIM105
-                sdk.close()
-            except Exception:
-                pass
-            raise
-        _REGISTRY_PROBE_SDK = sdk
-        _REGISTRY_PROBE_URI, _REGISTRY_PROBE_PATH = identity
-        return sdk
+            pass
+    return sdk
 
 
 def _registry_existing_graphs() -> set[str] | None:
