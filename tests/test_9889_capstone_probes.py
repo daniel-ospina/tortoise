@@ -394,8 +394,20 @@ def test_the_min_before_share_is_read_out_of_the_frozen_record_not_typed(
         "the share floor must MOVE with the record")
 
 
-def test_the_min_before_share_refuses_an_unreadable_floor(monkeypatch):
-    """Absent/unreadable is REFUSED, never "no floor stated" (#9513)."""
+def test_the_min_before_share_refuses_an_unreadable_floor(monkeypatch, tmp_path):
+    """Absent/unreadable is REFUSED, never "no floor stated" (#9513) — in `main()` too.
+
+    #10610 review at `2d9e8608` (P3): this case drove the HELPER only, and the
+    production path refused one helper earlier. `parse_bars` reads
+    `e1_min_before_share` too (this PR added it), so `main()`'s map-backed
+    `object_floor()` raised a bare `ValueError` for exactly the shapes the
+    `REFUSED:` message below exists for — leaving that message dead code in
+    `main()` and the run an operator saw indistinguishable from a crash. A pin
+    whose stated subject is the production path has to RUN it.
+
+    Non-vacuity: at the pre-fix head `main()` propagates `ValueError` out of
+    `object_floor` (measured), so the `SystemExit` expectation on the run reds.
+    """
     import pytest
 
     monkeypatch.setattr(e1_paired_arm, "read_preregistration",
@@ -406,6 +418,18 @@ def test_the_min_before_share_refuses_an_unreadable_floor(monkeypatch):
         e1_paired_arm.min_before_share()
 
     assert "e1_min_before_share" in str(caught.value)
+
+    # …and the RUN prints it, because a refusal a caller cannot read off the
+    # invocation is not the refusal this probe documents.
+    with pytest.raises(SystemExit) as refused:
+        _run_paired_arm(monkeypatch, tmp_path, share_floor="0.20",
+                        object_names=["the rail 1"])
+    assert refused.value.code, refused.value
+    assert "REFUSED" in str(refused.value), refused.value
+    assert "e1_min_before_share" in str(refused.value), refused.value
+    assert not (tmp_path / "off.json").exists(), (
+        "a refused run writes no record — the record's presence is what tells a "
+        "refusal apart from a failed session")
 
 
 def test_the_paired_arm_still_reports_a_failed_session(monkeypatch, tmp_path):
