@@ -125,8 +125,13 @@ Exit codes
   0  a value was emitted — from cache (fresh) or from a successful fetch
   2  usage / undeclared key (nothing fetched, nothing written)
   3  REFUSED: a mutable state read (nothing fetched, nothing written)
-  4  FAIL-CLOSED: the fetch failed, or freshness could not be proven and the
-     fetch could not recover it. No value is emitted — never the stale one.
+  4  FAIL-CLOSED: the fetch failed, freshness could not be proven and the fetch
+     could not recover it, or gh SUCCEEDED but emitted no body (`--silent`, an
+     empty `--jq`, a 204). No value is emitted — never the stale one.
+     ⛔ The empty-body leg is deliberate: `0` means a value WAS emitted, on every
+     branch, so a successful-but-silent read is refused rather than reported as
+     success with nothing on stdout. It is not a transient fault — do not retry
+     it as one; drop `--silent`/the empty projection instead.
 
 Seams
 -----
@@ -718,21 +723,29 @@ def _api_route(argv: tuple[str, ...]) -> str | None:
     # description the route and refused a live read. Leading flags and their values are
     # skipped; the first token after them must BE `api`, or this is not an `api` command.
     #
-    # ⛔ AND AN EMPTY TOKEN IS SKIPPED, BECAUSE gh SKIPS IT. `_verb_positions` states the rule
-    # and corroborates it (`gh "" pr view` RUNS `pr view`; measured), but this walk used to
-    # `return None` on `""` — so `_accepts_hostname(('', 'api', <route>))` said PORCELAIN while
-    # `_verb_positions` said the verb sits at index 1. The two halves of the module then
-    # disagreed about the same command, which is the whole defect `_accepts_hostname` now
-    # delegates here to avoid: `--argv "" api repos/{repo}` had the slug substituted INTO THE
-    # ROUTE (`api repos/ghe.example.com/o/n`, no `--hostname`) and `--argv "" api rate_limit`
-    # was refused rc=2 with "only `gh api` has one". A quoted unset variable (`--argv "$X" api
-    # …`) produces exactly this spelling.
+    # ⛔ AND AN EMPTY TOKEN IS SKIPPED, BECAUSE gh RESOLVES THE VERB PAST IT. `_verb_positions`
+    # states the rule (`argv[k] == ""` qualifies), and `gh "" api --help` printing the `api`
+    # help is the measurement behind it. This walk used to `return None` on `""` — so
+    # `_accepts_hostname(('', 'api', <route>))` said PORCELAIN while `_verb_positions` said the
+    # verb sits at index 1. The two halves of the module then disagreed about the same command,
+    # which is the whole defect `_accepts_hostname` now delegates here to avoid: `--argv "" api
+    # repos/{repo}` had the slug substituted INTO THE ROUTE (`api repos/ghe.example.com/o/n`, no
+    # `--hostname`) and `--argv "" api rate_limit` was refused rc=2 with "only `gh api` has
+    # one". A quoted unset variable (`--argv "$X" api …`) produces exactly this spelling.
     #
-    # ⛔ ONLY THE LEADING WALK. The route scan below is deliberately NOT changed: whether gh
-    # drops an empty token from the leaf's own positional list (`api "" graphql`) was not
-    # measured, and a guess there would move the refusal contract. `--argv` stores nothing, so
-    # that residual cannot serve a stale body — it can only lose a refusal, and it is recorded
-    # as such rather than assumed closed.
+    # ⛔ BUT "gh SKIPS IT" IS ONLY TRUE OF VERB RESOLUTION — NOT OF THE ARGUMENT LIST. Measured
+    # on gh 2.103.3: `gh "" api --help` resolves the verb and prints the api help, while
+    # `gh "" api rate_limit` → rc=1 `accepts 1 arg(s), received 2`. So gh still COUNTS the empty
+    # token as one of `api`'s positionals and the invocation fails at its own arg-count check:
+    # this walk must match gh's VERB RESOLUTION (which is what a classifier needs), and must not
+    # be read as a claim that the call then works. It cannot fail open either way — `--argv`
+    # stores nothing, and the invocation this classifies correctly is one gh itself rejects.
+    #
+    # ⛔ ONLY THE LEADING WALK. The route scan below is deliberately NOT changed: the same
+    # measurement shows gh keeps an empty token in the leaf's positional list, so `api ""
+    # graphql` is an invocation gh REJECTS rather than a graphql read — the refusal it loses is
+    # for a command that could never have reached the edge. `--argv` stores nothing, so neither
+    # residual can serve a stale body; both are recorded rather than assumed closed.
     start = 0
     while start < len(argv):
         tok = argv[start]
@@ -1194,7 +1207,7 @@ def cmd_get(args: argparse.Namespace) -> int:
         if not body.strip():
             # ⛔ THE THIRD BRANCH, AND IT WAS THE ONE THAT DID NOT AGREE. The other two
             # branches that can emit a fetched value — the CACHING path below and the
-            # DEGRADED-CREDENTIAL path above — already fail closed on an empty body; this
+            # DEGRADED-CREDENTIAL path below — already fail closed on an empty body; this
             # pass-through emitted `rc=0` with ZERO bytes on stdout — "success" and no
             # value — while the module docstring's "Exit codes" section says `0` means "a
             # value was emitted". Cited by SYMBOL, not by line: line numbers in this region

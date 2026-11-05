@@ -1384,16 +1384,24 @@ class CacheTest(unittest.TestCase):
         self.assertIn("--hostname ghe.example.com", sent, f"the spelled host must be expressed: {sent!r}")
 
     def test_an_empty_leading_token_is_still_an_api_command(self) -> None:
-        """⛔ `gh` SKIPS AN EMPTY ARGUMENT, so the verb walk must not stop on one.
+        """⛔ `gh` RESOLVES THE VERB PAST AN EMPTY ARGUMENT, so the verb walk must not stop on one.
 
-        `gh "" pr view` RUNS `pr view` (measured), which is why `_verb_positions` accepts an
-        empty token (`argv[k] == ""`) — the rule is documented there and pinned in the refusal
-        table. `_api_route`'s LEADING walk did the opposite and returned None on `""`, so the
-        two halves of the module disagreed about the same command one empty token to the left:
-        `--argv "" api repos/{repo}` was classified PORCELAIN and the slug was substituted INTO
-        THE ROUTE (`api repos/ghe.example.com/o/n`, no `--hostname`, so still github.com), and
-        `--argv "" api rate_limit` was refused rc=2 with "only `gh api` has one". Reachable
-        without anything exotic: a quoted unset variable (`--argv "$X" api …`) produces it.
+        `gh "" api --help` prints the `api` help (measured, gh 2.103.3), which is why
+        `_verb_positions` accepts an empty token (`argv[k] == ""`) — the rule is documented
+        there and pinned in the refusal table. `_api_route`'s LEADING walk did the opposite and
+        returned None on `""`, so the two halves of the module disagreed about the same command
+        one empty token to the left: `--argv "" api repos/{repo}` was classified PORCELAIN and
+        the slug was substituted INTO THE ROUTE (`api repos/ghe.example.com/o/n`, no
+        `--hostname`, so still github.com), and `--argv "" api rate_limit` was refused rc=2 with
+        "only `gh api` has one". Reachable without anything exotic: a quoted unset variable
+        (`--argv "$X" api …`) produces it.
+
+        ⛔ THIS FIXES THE CLASSIFICATION ONLY — it does not make that invocation work. gh still
+        COUNTS the empty token as one of `api`'s positionals: measured, `gh "" api rate_limit`
+        → rc=1 `accepts 1 arg(s), received 2`. The stub here accepts anything, so the case is
+        asserting the tool's argv handling, which is what the classifier decides; it must not be
+        read as a claim that real gh would serve this spelling. Nothing can fail open either
+        way — `--argv` stores nothing.
 
         Dies if the leading walk stops skipping empty tokens: rc=2 here, mangled route above.
         """
