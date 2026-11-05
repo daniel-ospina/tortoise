@@ -9623,6 +9623,13 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
     magnitude rather than a bound — scope variance is large), so this job keeps
     one writer, and the save archives `~/.cache/uv` ALONE.
 
+    The HF restore in the same job is the SAME degradation without being a miss:
+    `Cache hit for: hf-embedding-cache-v2-Linux` 10:25:10.498, then
+    `Received 8388608 of 78130875 (10.7%), 0.1 MBs/sec` and
+    `##[warning]Failed to restore: The operation cannot be completed in timeout`
+    at 10:26:59.872 — a transport timeout on an entry that existed, which is why
+    the remedy there is restore-only rather than a smaller write.
+
     Bounded twice, because a time bound alone on an unbounded payload is the
     shape #11065 cycle 2 already rejected:
       * SIZE — `uv cache prune` runs before the save, removing entries no current
@@ -9682,7 +9689,10 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
         "57 m 02 s into the post step against a 3.88 GB archive, ending "
         "`cancelled` and withholding a REQUIRED check on a green shard (#11063). "
         "Use `actions/cache/restore@` plus an explicit, BOUNDED "
-        "`actions/cache/save@`.")
+        "`actions/cache/save@` — for a NEW key. The two keys this job already "
+        "carries are pinned separately and a save is REJECTED for both: `pip-` "
+        "because four other jobs write it, and `uv-cache-` because it must keep "
+        "exactly one bounded writer (the next two arms).")
 
     # ── The pip half: READ ONLY, because FOUR other jobs write it ──────────────
     pip_steps = [s for s in steps if "~/.cache/pip" in _path_of(s)]
@@ -9927,6 +9937,44 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
         "the median, and a save killed at the cap reds a REQUIRED check (#5219). "
         "The pre-suite terms are the ones to shrink: raising the cap instead "
         "re-opens #3239's stale-head exposure.")
+
+    # The §2 row's OWN watchdog figure must be the one the tool emits. `df8adb90a`
+    # restated 27 m while `--emit-push-matrix` emitted 26 m, so the doc and the pin
+    # disagreed by a minute on the same SUM and neither was checkable at a glance
+    # (#11065 cycle 2, finding 3). Parsed from the doc, compared to the emission:
+    # prose restating a computed constant is exactly how a constant goes stale.
+    wall = (Path(__file__).resolve().parents[1]
+            / "docs" / "ops" / "ci-wall-clock.md").read_text()
+    stated = re.search(r"the emitted \*\*(\d+) m\*\* per-shard|the emitted (\d+) m per-shard",
+                       wall)
+    assert stated, (
+        "docs/ops/ci-wall-clock.md §2 no longer states the emitted per-shard "
+        "watchdog in a form this pin can read (`the emitted <N> m per-shard`), so "
+        "the doc and the emission cannot be compared — restore the phrase or "
+        "update this arm with it")
+    stated_n = int(stated.group(1) or stated.group(2))
+    assert stated_n == worst_watchdog, (
+        f"docs/ops/ci-wall-clock.md §2 states the emitted per-shard watchdog as "
+        f"{stated_n} m, but `--emit-push-matrix` emits {worst_watchdog} m. The "
+        "row's SUM, and the headroom the workflow comment quotes from it, are "
+        "computed from this term: a doc that restates it wrongly makes the "
+        "arithmetic unfalsifiable (#11065 cycle 2, finding 3).")
+
+    # An `id:` on a cache step is a CONTRACT (`steps.<id>.outputs.cache-hit`,
+    # `steps.<id>.outcome`) — `actions/cache` exposes nothing else through it. An id
+    # nothing reads is either a leftover or a consumer somebody meant to write, and
+    # in both cases it reads as a gate that is not there (#11065 cycle 2, finding 7:
+    # `id: uvpip-cache` / `id: hf-cache` were declared here and referenced nowhere,
+    # `grep -n 'cache-hit'` = 0).
+    wf_text = (Path(__file__).resolve().parents[1]
+               / ".github" / "workflows" / "python-ci.yml").read_text()
+    for s in (st for st in steps
+              if _uses_of(st).startswith("actions/cache") and st.get("id")):
+        assert f"steps.{s['id']}." in wf_text, (
+            f"the cache step {s.get('name')!r} declares `id: {s['id']}` but no "
+            f"`steps.{s['id']}.…` reference exists anywhere in the workflow, so the "
+            "id is inert. Either add the consumer (`cache-hit` / `outcome`) or drop "
+            "the `id:` — an unused id reads as a gate that is not there.")
 
 
 def _test_job_pre_phase_watchdog_minutes(steps: list) -> int:
