@@ -569,13 +569,15 @@ def map_issues(manifest: dict) -> list[str]:
     This is the ONE composition both enforcing entry points reach
     (``ci_selection --integrity`` and ``ci_timing.integrity_problems``, via
     :func:`check`), so a check added here cannot be half-wired. ``#6135``'s
-    ``fast_shard_issues`` and ``#2913/#5373``'s ``duplicate_entries`` are
-    carried here for exactly that reason: both landed on main beside the
-    #5050 validator, and leaving them at a call site would have made them
-    reachable from one entry point only — the half-wired state this
-    composition exists to prevent. Order follows main's own composition
-    (``fast_shard_issues`` first, ``duplicate_entries`` last) so a diagnostic
-    list reads the same on either entry point.
+    ``fast_shard_issues``, ``#2913/#5373``'s ``duplicate_entries`` and
+    ``#10575``'s ``floor_issues`` are carried here for exactly that reason: the
+    first two landed on main beside the #5050 validator, the third landed on main
+    through #10704, and leaving any of them at a call site would have made it
+    reachable from one entry point only — the half-wired state this composition
+    exists to prevent. Order follows main's own composition (``fast_shard_issues``
+    first, ``duplicate_entries`` last, and ``floor_issues`` between
+    ``duration_coverage_issues`` and ``duplicate_entries`` exactly as the body
+    composes it) so a diagnostic list reads the same on either entry point.
     """
     cs = _ci_selection()
     return (cs.fast_shard_issues(manifest)
