@@ -519,17 +519,26 @@ def test_the_injected_wip_provenance_is_not_called_unconsulted(tmp_path):
     assert payload["wip_read"]["populations_not_consulted"] == []
 
 
-def test_every_bash_example_in_the_doc_parses(monkeypatch, capsys):
+def test_every_bash_example_in_the_doc_parses(monkeypatch, capsys, tmp_path):
     """The doc's examples are the only executable ones it has; a broken one wastes the reader (F5).
 
     Every population seam is stubbed, so this asserts that the FLAGS are coherent (not mutually
     exclusive, not refused) without touching the network — the examples are plain flags and paths.
+
+    ⚠️ The doc's two file operands are PLACEHOLDERS a reader creates, so they are materialised here
+    and substituted. An earlier version ran the examples verbatim against `/tmp/body.md` and
+    `/tmp/i.md`, which passed only because another lane had left those files on the box — on a
+    fresh runner it raised `FileNotFoundError` and this file sits on the REQUIRED `core` surface.
+    A test must not depend on the host's `/tmp` contents in EITHER direction.
     """
     monkeypatch.setattr(L, "resolve_repo", lambda repo: "daniel-ospina/tortoise")
     monkeypatch.setattr(L, "sweep_prs", lambda repo, limit: [])
     monkeypatch.setattr(L, "sweep_issues", lambda repo, limit, label: [])
     monkeypatch.setattr(L, "fetch_issue", lambda number, repo: ("", []))
     monkeypatch.setattr(L, "fetch_pr", lambda number, repo: ("", []))
+    operands = {"/tmp/body.md": tmp_path / "body.md", "/tmp/i.md": tmp_path / "i.md"}
+    operands["/tmp/body.md"].write_text("Refs #1\n", encoding="utf-8")
+    operands["/tmp/i.md"].write_text("# an issue body\n", encoding="utf-8")
     doc = (ROOT / "docs" / "ops" / "ISSUE-WORKING-PROCESS.md").read_text(encoding="utf-8")
     block = L.re.search(r"```bash\n(.*?)```", doc, L.re.DOTALL)
     assert block, "the doc no longer carries its invocations in a ```bash fence"
@@ -541,6 +550,93 @@ def test_every_bash_example_in_the_doc_parses(monkeypatch, capsys):
         # default, so drop it before splitting.
         argv = line.split("uv run python tools/issue_process_lint.py", 1)[1]
         argv = L.re.split(r"\s+#\s", argv)[0]
+        for placeholder, real in operands.items():
+            argv = argv.replace(placeholder, str(real))
         rc = L.main(shlex.split(argv))
         capsys.readouterr()  # each example owns its own output
         assert rc in (L.RC_CLEAN, L.RC_FINDINGS), (line, rc)
+
+
+# --- review round 4: five findings, one of them a REGRESSION the round-3 fix introduced ------
+# Round 3's F6 fix over-corrected (a release word anywhere in the marker cleared real WIP) and its
+# F5 test depended on the host's /tmp. Both are pinned here, in both directions, because an
+# over-correction in a warn-only tool silently stops flagging the thing it exists to flag.
+
+
+@pytest.mark.parametrize("marker", [
+    "IN FLIGHT: 4282, 11077 — branch fix/unclaimed-issue-arm2 — box cell-3 — since 2026-11-05T09:00Z",
+    "IN FLIGHT: 3.2c — branch fix/none-handling — box cell-4",
+    "IN FLIGHT: 3.2c — branch released-work — box cell-4",
+    "IN FLIGHT: 3.2c — free tier refactor",
+])
+def test_a_branch_slug_containing_a_release_word_is_still_wip(marker):
+    """The F6 fix must not over-correct: a release word ANYWHERE cleared real WIP.
+
+    The marker the process block mandates carries author text after the ids, and `unclaimed` is
+    this tool's own vocabulary — so a lane named after the arm it is working on would have cleared
+    its own marker and reported the issue clean. A release is a delimited annotation, and that is
+    what is matched now.
+    """
+    assert L.in_flight_markers([marker]) == [L._marker_rest(marker)]
+
+
+@pytest.mark.parametrize("marker", [
+    "IN FLIGHT: 3.2c — branch b — box c — released 2026-11-05",
+    "IN FLIGHT: 3.2c (released)",
+    "IN FLIGHT: none — released",
+])
+def test_an_annotation_position_release_does_clear_wip(marker):
+    """The other side of the same pin: the annotated forms still clear, so the anchor did not
+    swallow the fix it was added for."""
+    assert L.in_flight_markers([marker]) == []
+
+
+def test_the_offline_modes_make_no_gh_call(monkeypatch, tmp_path, capsys):
+    """`--body-file` / `--issue-body-file` are documented as OFFLINE (F2 of round 4).
+
+    `resolve_repo` used to run before the mode dispatch, so both made a network call — falsifying
+    the help text AND this PR's own `config/ci-surfaces.yml` note, and, on a box without `gh`,
+    silently dropping every self-qualified `owner/repo#N` claim.
+    """
+    calls: list[str] = []
+    real = L.resolve_repo
+    monkeypatch.setattr(L, "resolve_repo", lambda repo: calls.append(str(repo)) or real(repo))
+    body = tmp_path / "b.md"
+    body.write_text("Refs #1\n", encoding="utf-8")
+    issue = tmp_path / "i.md"
+    issue.write_text("# issue\n", encoding="utf-8")
+    L.main(["--body-file", str(body)])
+    L.main(["--issue-body-file", str(issue), "--wip"])
+    capsys.readouterr()
+    assert calls == [], f"the offline modes resolved the repo through gh: {calls}"
+
+
+def test_the_annotate_mode_also_reports_an_injected_verdict(tmp_path, capsys):
+    """F7 was fixed in the human and `--json` modes only; `--annotate` still said "NOT consulted"
+    about the population the verdict came from (round-4 F3)."""
+    issue = tmp_path / "i.md"
+    issue.write_text("# an issue body\n", encoding="utf-8")
+    L.main(["--issue-body-file", str(issue), "--wip", "--annotate"])
+    out = capsys.readouterr().out
+    assert "NOT consulted" not in out
+    assert "INJECTED (--wip)" in out
+    # ...and it names the flag that was actually passed.
+    L.main(["--issue-body-file", str(issue), "--no-wip", "--annotate"])
+    out = capsys.readouterr().out
+    assert "INJECTED (--no-wip)" in out
+
+
+def test_the_index_row_does_not_overstate_template_coverage():
+    """`docs/00_index.md` is the artifact a later lane ROUTES from (round-4 F5).
+
+    It said the block is rendered into "both issue forms"; only the internal `agent_finding.yml`
+    carries it, and this PR's own doc calls the `bug_report.yml` exclusion deliberate.
+    """
+    index = (ROOT / "docs" / "00_index.md").read_text(encoding="utf-8")
+    row = next(ln for ln in index.splitlines() if "ISSUE-WORKING-PROCESS" in ln)
+    assert "both issue forms" not in row
+    templates = ROOT / ".github" / "ISSUE_TEMPLATE"
+    carriers = [p.name for p in templates.glob("*.yml")
+                if "working_process" in p.read_text(encoding="utf-8")]
+    assert carriers == ["agent_finding.yml"], carriers
+    assert "agent_finding.yml" in row
