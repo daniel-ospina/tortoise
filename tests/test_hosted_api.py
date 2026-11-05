@@ -7752,6 +7752,89 @@ def test_a_TORN_cache_publication_cannot_pair_a_new_handle_with_the_OUTGOING_ide
         ha._reset_registry_probe_sdk()
 
 
+def test_the_un_cached_fallback_INSTALLS_nothing_and_LEAVES_a_pre_existing_entry_alone(
+        monkeypatch):
+    """The last resort declines to INSTALL — it does not empty the cache
+    (#10962 round-6 obs 2).
+
+    The two are different behaviours, and the churn leg cannot tell them apart:
+    it calls `_reset_registry_probe_sdk()` first, so the cache is already `None`
+    before the call, and "installed nothing" is indistinguishable from "cleared
+    it". Here an entry is CACHED FIRST, at a stable identity, and only then does
+    the identity churn through every attempt.
+
+    The correct outcome is that the earlier entry SURVIVES untouched. A churning
+    identity can never equal the identity that entry is filed under, so it can
+    never be matched to it; evicting it would only close a handle a concurrent
+    caller may still be using (#8867 finding 1's close-under-use hazard), and
+    would defeat the cache for the stable identity a later request arrives on.
+    The comment claimed "Cache NOTHING", which reads as an eviction; it now says
+    what the code does.
+
+    Discrimination: this reds on the plausible "fix" — clearing
+    `_REGISTRY_PROBE_CACHE` in the fallthrough — measured, not assumed.
+    """
+    import tortoise.hosted_api as ha
+
+    stable = "docker://:pw@localhost:6379/stable-a"
+    monkeypatch.setenv("TORTOISE_DB_URI", stable)
+    monkeypatch.setenv("TORTOISE_DB_PATH", "")
+    ha._reset_registry_probe_sdk()
+    built = []
+    churn = {"on": False, "n": 0}
+
+    class _Handle:
+        def __init__(self):
+            self.closed = 0
+            built.append(self)
+
+        def _get_proj(self):
+            if churn["on"]:
+                churn["n"] += 1
+                monkeypatch.setenv(
+                    "TORTOISE_DB_URI",
+                    f"docker://:pw@localhost:6379/churn-{churn['n']}")
+            return object()
+
+        def close(self):
+            self.closed += 1
+
+    monkeypatch.setattr(ha, "_make_sdk",
+                        lambda *, namespace=None, graph_name=None: _Handle())
+    try:
+        first = ha._registry_probe_sdk()  # cached, at the STABLE identity
+        assert ((stable, ""), first) == ha._REGISTRY_PROBE_CACHE
+
+        # Identity churns under EVERY build, starting from an identity that
+        # differs from the cached one so the fast path misses.
+        churn["on"] = True
+        monkeypatch.setenv("TORTOISE_DB_URI",
+                           "docker://:pw@localhost:6379/stable-b")
+        served = ha._registry_probe_sdk()
+
+        assert served is built[-1], "the fallback did not serve its last build"
+        assert ((stable, ""), first) == ha._REGISTRY_PROBE_CACHE, (
+            "the un-cached fallback TOUCHED the cache — it must install nothing "
+            "and evict nothing. The pre-existing entry's identity cannot match "
+            "a churning one, so destroying it only removes a handle a "
+            f"concurrent caller may be using. cache={ha._REGISTRY_PROBE_CACHE}")
+        assert first.closed == 0, (
+            "the pre-existing cached handle was CLOSED by a churn on a "
+            "DIFFERENT identity — close-under-use (#8867 finding 1)")
+        assert [h.closed for h in built[1:-1]] == [1] * len(built[1:-1]), (
+            "a discarded (never-installed) handle was not closed")
+        assert served.closed == 0, "the served handle was closed before use"
+
+        # The surviving entry is still SERVED at its own identity, so the churn
+        # did not cost the stable caller its handle.
+        monkeypatch.setenv("TORTOISE_DB_URI", stable)
+        assert ha._registry_probe_sdk() is first, (
+            "the stable identity's cached handle was lost to a churn on another "
+            "identity — the cache the probe exists for was defeated")
+    finally:
+        ha._reset_registry_probe_sdk()
+
+
 def test_the_reset_clears_the_atomic_tuple_BEFORE_the_scalars():
     """The ORDER of the reset's stores is the fix, and it is not observable at
     close time — every ordering clears before `sdk.close()` — so a post-
@@ -7784,16 +7867,64 @@ def test_the_reset_clears_the_atomic_tuple_BEFORE_the_scalars():
 
 def test_the_registry_probe_retry_is_BOUNDED_and_it_is_not_a_spin(
         monkeypatch):
-    """The retry constant is a bound, not a slider: the rebuild exists for a
-    reconfiguration that settles, so a handful of attempts is the whole budget.
-    A process whose identity never settles must reach the un-cached fallback
-    quickly rather than rebuild in a loop on a request path."""
+    """A never-settling identity must make the call RETURN, not spin.
+
+    ⛔ THIS PINS THE OUTCOME, NOT THE CONSTANT (#10962 round-6 obs 3). Its
+    previous body was a single `assert 2 <= _REGISTRY_PROBE_BUILD_ATTEMPTS <= 5`
+    — a restatement of a production constant, which cannot fail for any change
+    to the loop and only reds on an edit to a number (a design pin, not a test).
+    The property a request path actually needs is that the loop ENDS with a
+    handful of builds whatever the budget happens to be; the churn leg already
+    pins the exact `attempts + 1` count against the constant, which is what
+    frees the constant to move here.
+
+    `_SPIN_CEILING` is chosen independently of the constant on purpose: it is
+    the behavioural ceiling this test will accept, so raising the budget by a
+    little stays green while turning the retry into a spin goes red. A spin
+    FAILS FAST instead of hanging — the build past the ceiling raises.
+    """
     import tortoise.hosted_api as ha
 
-    assert 2 <= ha._REGISTRY_PROBE_BUILD_ATTEMPTS <= 5, (
-        f"_REGISTRY_PROBE_BUILD_ATTEMPTS={ha._REGISTRY_PROBE_BUILD_ATTEMPTS} is "
-        "either too small to absorb one reconfiguration or unbounded enough to "
-        "spin builds on the request path")
+    _SPIN_CEILING = 8  # deliberately NOT `_REGISTRY_PROBE_BUILD_ATTEMPTS`
+
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@localhost:6379/spin-0")
+    ha._reset_registry_probe_sdk()
+    built = []
+    churn = {"n": 0}
+
+    class _Handle:
+        def __init__(self):
+            self.closed = 0
+            built.append(self)
+
+        def _get_proj(self):
+            churn["n"] += 1
+            monkeypatch.setenv(
+                "TORTOISE_DB_URI",
+                f"docker://:pw@localhost:6379/spin-{churn['n']}")
+            return object()
+
+        def close(self):
+            self.closed += 1
+
+    def _make_sdk(*, namespace=None, graph_name=None):
+        if len(built) >= _SPIN_CEILING:
+            raise AssertionError(
+                f"the probe is building handle #{len(built) + 1} for a "
+                f"never-settling identity — the retry SPINS on the request "
+                f"path instead of reaching the un-cached fallback")
+        return _Handle()
+
+    monkeypatch.setattr(ha, "_make_sdk", _make_sdk)
+    try:
+        hand = ha._registry_probe_sdk()  # must RETURN, not spin and not raise
+        assert hand is built[-1], "the probe did not hand back its last build"
+        assert len(built) <= _SPIN_CEILING, (
+            f"the retry built {len(built)} handles for a never-settling "
+            f"identity — that is a spin, not a bound")
+    finally:
+        ha._reset_registry_probe_sdk()
+
 
 
 
