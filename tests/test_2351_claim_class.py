@@ -1428,8 +1428,14 @@ def test_supersede_repoint_and_create_direct_edge_agree_on_a_directionless_NAND(
         "MATCH (a:Point {id:$a}), (b:Point {id:$b}) MERGE (a)-[r:NAND]->(b)",
         params={"a": c_old, "b": c_t})  # NO direction property on disk
     assert _direct_rows(lane, c_old)[0][2] == ""
-    with pytest.raises(ValueError, match="re-pointing the NAND edge"):
+    with pytest.raises(ValueError, match="re-pointing the NAND edge") as _aexc:
         lane.supersede_point(c_old, c_new)
+    # The ABSENT arm is the ONE place the refusal still renders a ``judged``
+    # token (a present value is returned verbatim, so the parenthetical would
+    # only duplicate it). Without this assertion the branch is unpinned: an
+    # unconditional ``_judged = ""`` keeps every other test green.
+    assert "direction None (judged 'unidirectional')" in str(_aexc.value), (
+        str(_aexc.value))
     assert _direct_rows(lane, c_new) == []
     assert _direct_rows(lane, c_old)[0][2] == ""
 
@@ -1625,7 +1631,7 @@ def test_supersede_repoint_judges_a_junk_direction_through_the_ONE_normalizer(
         lane.supersede_point(old, new)
     _msg = str(_exc.value)
     assert "direction ['sideways']" in _msg, _msg
-    assert "judged" not in _msg, (
+    assert "judged ['sideways']" not in _msg, (
         "the door re-published the stored value as its own `judged` token — "
         f"the parenthetical now duplicates `direction` verbatim ({_msg})")
     assert "judged 'bidirectional'" not in _msg, (
@@ -1655,7 +1661,7 @@ def test_supersede_repoint_judges_a_junk_direction_through_the_ONE_normalizer(
         lane.supersede_point(h_old, h_new)
     _hmsg = str(_hexc.value)
     assert "direction 3" in _hmsg, _hmsg
-    assert "judged" not in _hmsg, _hmsg
+    assert "judged 3" not in _hmsg, _hmsg
     assert "judged 'bidirectional'" not in _hmsg, _hmsg
 
 

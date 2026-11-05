@@ -20120,9 +20120,12 @@ class TortoiseSDK:
         # edge's stored direction — a string verbatim, the edge TYPE's default
         # when ABSENT, and a present non-string VERBATIM TOO, which
         # ``direction_flows`` then reads as BOTH ways (see the per-row note) —
-        # and, for the first two, the same canonicalizer as
-        # ``create_operator``, ``create_direct_edge``, ``ingest``'s
-        # partial-absorb branch and #10195's operator pre-flight above. A
+        # and, all three of them, through the same canonicalizer as
+        # ``create_operator``, ``create_direct_edge`` and ``ingest``'s
+        # partial-absorb branch. #10195's operator pre-flight above reads the
+        # same predicate, but it screens a non-string to ``"<->"`` BEFORE
+        # canonicalizing — a hashability screen, not a second policy (see the
+        # per-row note). A
         # second copy of "may this edge exist" would be a finding of its own.
         # The REFUSAL message is that
         # predicate's own (``override_refusal``), with this surface named —
@@ -20320,15 +20323,19 @@ class TortoiseSDK:
                 _raw_dir = _rdict.get("direction")
                 _eff_dir = self._canonical_direction(_rtype, _raw_dir)
                 # ⛔ SAY ONLY WHAT THE MESSAGE DOES NOT ALREADY SAY. The
-                # canonicalizer returns a PRESENT value VERBATIM, so rendering
-                # ``(judged X)`` beside ``direction X`` is pure duplication —
-                # and deleting the door-local filter is exactly what turned the
-                # parenthetical from "the token this door substituted" into a
-                # copy of the value beside it. Render it ONLY where the
-                # canonicalization actually SUBSTITUTED (the ABSENT case, which
-                # the edge TYPE's default fills): that is the one reading the
-                # caller cannot take from the stored value itself.
-                _judged = ("" if _eff_dir is _raw_dir
+                # canonicalizer substitutes ONLY for an ABSENT value (a present
+                # one is returned VERBATIM), so rendering ``(judged X)`` beside
+                # ``direction X`` is pure duplication — and deleting the
+                # door-local filter is exactly what turned the parenthetical
+                # from "the token this door substituted" into a copy of the
+                # value beside it. Render it ONLY where the canonicalization
+                # SUBSTITUTED: that is the one reading the caller cannot take
+                # from the stored value itself. ⛔ The condition is "did this
+                # substitute" (``_raw_dir is None``), NOT "is the result the same
+                # object": those coincide only while every token is returned
+                # by identity, and a normalizer that returned an EQUAL BUT
+                # DISTINCT token would silently re-create the duplicate.
+                _judged = ("" if _raw_dir is not None
                            else f" (judged {_eff_dir!r})")
                 if _direction == "out":
                     _src_id, _tgt_id = new_id, _tid
