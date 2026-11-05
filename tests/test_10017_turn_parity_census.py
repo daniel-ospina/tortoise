@@ -178,6 +178,12 @@ def test_exact_parity_passes_and_the_dry_run_counts():
     rows = {f"s1_t{i}": _record_row(f"s1_t{i}") for i in range(3)}
     report = _census(nodes, rows)
     assert report["verdict"] == "CLEAN"
+    # ⛔ THE ARTIFACT NAMES ITSELF (#11004 review, gate-fail-open). The consumer
+    # (`tortoise/cache_eviction.py::load_parity_report`) REFUSES a report that names no
+    # instrument, because a nameless one is attributable to any population by whoever
+    # hands it over — so the honest report must carry this field or requiring it would
+    # be a gate that can never open.
+    assert report["instrument"] == tpc.INSTRUMENT == "tools/turn_parity_census.py"
     assert report["dry_run"]["would_delete_turn_nodes"] == 3
     assert report["parity"]["failed_sessions"] == []
     session = report["dry_run"]["per_session_sample"][0]

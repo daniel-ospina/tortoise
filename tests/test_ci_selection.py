@@ -2932,6 +2932,30 @@ def test_inbound_relay_sweep_tool_change_selects_core_not_tier1():
     assert r["full"] is False, r
 
 
+def test_gh_write_preflight_tool_change_selects_core_not_tier1():
+    """A change to the credential write preflight must run the cases pinning it (#11026).
+
+    `tests/test_gh_write_preflight.py` is registered on `core` and owns the write-proof's
+    guarantees: a read-only credential is REFUSED, the probe ref is created and confirmed and
+    deleted, cleanup is verified on the PUSH target, and no credential reaches argv or output. That
+    registration is INERT for a tool-only diff — `tools/` is a flat NON_PYTHON_PREFIXES entry and
+    no SOURCE_PATTERNS row matches `tools/gh_write_preflight.py`, so `select()` returns NO surface,
+    takes the docs-only early return and falls back to the tier-1 smoke set, which does not contain
+    the file. The PR that weakens the proof would then be the one that never ran the cases pinning
+    it — the same silent-drop class as #10220's report, and worse here, because this tool exists
+    precisely to stop a silent pass (a 17-lane wave delivered nothing while every lane reported
+    "built, parked").
+
+    Mutation check: removing the CORE_ALSO entry fails the FIRST assert
+    (`"core" in r["surfaces"]`); the docs-only early return then yields `full: False` with no pin,
+    so the later asserts pass unexercised.
+    """
+    r = _sel(["tools/gh_write_preflight.py"])
+    assert "core" in r["surfaces"], r
+    assert "test_gh_write_preflight.py" in r["test_files"], r
+    assert r["full"] is False, r
+
+
 def test_worktree_report_tool_change_selects_core_not_tier1():
     """A change to the lane report must run the rules it pins (#10220).
 
@@ -14847,6 +14871,33 @@ def test_runner_label_gate_runs_on_a_tools_only_change():
     assert "test_ci_runner_label_coverage.py" in r["test_files"], r
 
 
+def test_cache_eviction_census_runs_on_the_diffs_that_can_weaken_it():
+    # #10976: `tests/test_cache_eviction_census.py` pins the egress census —
+    # `tortoise/cache_eviction.py` (an unproven population may not be swept) and its
+    # CLI `tools/cache_eviction_census.py` (the LICENCE exit split, the
+    # destructive-flag guard, `--graph`/`--parity-graph` disagreement, the report
+    # provenance rules).
+    #
+    # TWO arms, because the census has TWO subjects and they reach CI by different
+    # routes:
+    #  * the MODULE arm is the `core` surface row (`tortoise/cache_eviction.py`
+    #    matches no SOURCE_PATTERNS row, so it takes the `core` fallback). Mutation
+    #    check: dropping that row from `config/ci-surfaces.yml` fails arm 2.
+    #  * the CLI arm needs `CORE_ALSO`:
+    #    `tools/` is a flat NON_PYTHON_PREFIXES entry, so before that entry a
+    #    tool-only diff filtered to `changed == []` and took the docs-only early
+    #    return — `select(["tools/cache_eviction_census.py"])` returned
+    #    surfaces=[], 72 files, the suite ABSENT, i.e. the #1349/#3332/#3616
+    #    silent-drop class on the file that decides whether a population is swept.
+    #    Mutation check: removing the CORE_ALSO entry fails arm 1 (surfaces == []
+    #    and the suite absent from test_files).
+    for path in ("tools/cache_eviction_census.py", "tortoise/cache_eviction.py"):
+        r = _sel([path])
+        assert r["full"] is False, (path, r["full"])
+        assert r["surfaces"] == ["core"], (path, r["surfaces"])
+        assert "test_cache_eviction_census.py" in r["test_files"], (path, r["test_files"])
+
+
 def test_turn_parity_census_guard_runs_on_a_tools_only_change():
     # #10017: `tests/test_10017_turn_parity_census.py` (registered `core`)
     # pins the refusal arms of `tools/turn_parity_census.py` — the purge gate
@@ -15003,3 +15054,131 @@ def test_seal_session_events_tool_change_selects_core_not_tier1():
     assert "core" in r["surfaces"], r
     assert "test_session_events_seal.py" in r["test_files"], r
     assert r["full"] is False, r
+
+
+def _pin_reference_scan(lines: list[str], root: Path) -> tuple[int, list[str]]:
+    r"""Resolve every `Pinned by tests/….py::name` citation in `lines`.
+
+    Returns `(refs_seen, violations)` — the count is what the caller's non-vacuity
+    floor reads, and each violation is a citation that names nothing.
+
+    #11004 review P2: a citation is written in THREE shapes in `tools/ci_selection.py`,
+    # and the first version of this scan checked only the first two. The third is the
+    # shape where the citation line ENDS at `::` and the whole name sits on the next
+    # comment line — 31 of the file's 104 citations at the #11004 head, so a fabricated
+    # name written that way read as verification while verifying NOTHING and the pin
+    # stayed green. The `(\w*)` group (not `(\w+)`) is what makes that shape reachable:
+    # with `(\w+)` the regex demanded a name character after `::` and matched nothing.
+
+      1. on one line — `…::test_x`
+      2. wrapped MID-name — `…::test_x_` / `# the_rest.`
+      3. `::` ends the line — `…::` / `# TestName`   <- the shape this closes
+
+    For 2 and 3 both the bare name and `name + <first word of the next comment line>`
+    are candidates; the citation resolves if EITHER names a real `def`/`class`, so a
+    wrap is not mistaken for a dangling reference (and vice versa). The next-line word
+    keeps its leading case because shape 3 also cites `class` names. A citation with
+    NO resolvable name at all (a bare `file::`) is a violation, never a skip.
+    """
+    refs: list[tuple[str, list[str]]] = []
+    for i, line in enumerate(lines):
+        for m in re.finditer(r"(tests/[\w./-]+\.py)::(\w*)", line):
+            relpath, name = m.group(1), m.group(2)
+            candidates = [name] if name else []
+            nxt = lines[i + 1].strip() if i + 1 < len(lines) else ""
+            if not line[m.end():].strip() and nxt.startswith("#"):
+                words = nxt.lstrip("#").strip().split()
+                first = words[0].rstrip(".,;:`)") if words else ""
+                if re.fullmatch(r"[A-Za-z_]\w*", first):
+                    candidates.append(name + first)
+            refs.append((relpath, candidates))
+
+    violations = []
+    for relpath, candidates in refs:
+        label = " | ".join(candidates) if candidates else "<no name after ::>"
+        path = root / relpath
+        if not path.exists():
+            violations.append(f"{relpath}::{label} (no such file)")
+            continue
+        body = path.read_text(encoding="utf-8")
+        if not candidates or not any(
+            re.search(rf"^(?:def|class)\s+{re.escape(name)}\b", body, re.M)
+            for name in candidates
+        ):
+            violations.append(f"{relpath}::{label}")
+    return len(refs), violations
+
+
+def test_every_pin_reference_in_ci_selection_names_a_test_that_exists():
+    # #10976 / #11004 review P2: every `Pinned by tests/….py::name` citation is what
+    # makes "Pinned by" CHECKABLE — a reader greps the name and confirms the guard.
+    # A citation of a test that does not exist reads as verification while verifying
+    # nothing. Measured before this guard: the census CORE_ALSO entry cited
+    # `test_cache_eviction_census_tool_change_selects_core_not_tier1`, which existed
+    # only in that comment; the real pin is
+    # `test_cache_eviction_census_runs_on_the_diffs_that_can_weaken_it` (above).
+    root = Path(__file__).resolve().parents[1]
+    lines = (root / "tools/ci_selection.py").read_text(encoding="utf-8").splitlines()
+    refs_seen, violations = _pin_reference_scan(lines, root)
+
+    # Non-vacuity: the file really does cite its pins (a regex that matched nothing
+    # would pass this guard while checking nothing). Measured at the #11004 head:
+    # 104 citations in total — 73 named on the line, 31 named on the next comment
+    # line — so the floor sits well under the true count and cannot be satisfied by
+    # one shape alone. `test_pin_reference_scan_sees_the_colon_then_newline_
+    # citation_shape` is what pins the 31.
+    assert refs_seen > 50, refs_seen
+    assert not violations, f"pin reference(s) that name nothing: {violations}"
+
+
+def test_pin_reference_scan_sees_the_colon_then_newline_citation_shape():
+    # #11004 review P2, RED-FIRST: the guard above passed on the pre-fix matcher
+    # (`(\w+)`) while skipping 31 of 104 citations, because the citation line ended
+    # at `::` and the name sat wholly on the next comment line. Each case below is
+    # asserted against the real tree, so only the NAME is fabricated.
+    root = Path(__file__).resolve().parents[1]
+
+    # 1. The hole: a name that does not exist, in the `::`-then-newline form, is
+    #    REPORTED. Before the fix this scan matched nothing here and stayed silent —
+    #    which is exactly how a fabricated pin reads as verification.
+    refs_bad, violations_bad = _pin_reference_scan(
+        [
+            "# Pinned by tests/test_ci_selection.py::",
+            "# test_no_such_pin_exists_xyzzy.",
+        ],
+        root,
+    )
+    assert refs_bad == 1, refs_bad
+    assert violations_bad, "the `::`-then-newline citation shape is not checked"
+    assert "test_no_such_pin_exists_xyzzy" in violations_bad[0], violations_bad
+
+    # 2. The resolving control — so case 1 cannot pass by refusing every line.
+    refs_ok, violations_ok = _pin_reference_scan(
+        [
+            "# Pinned by tests/test_ci_selection.py::",
+            "# test_every_pin_reference_in_ci_selection_names_a_test_that_exists.",
+        ],
+        root,
+    )
+    assert refs_ok == 1, refs_ok
+    assert not violations_ok, violations_ok
+
+    # 3. A `class` name on the next line is the same shape (the file cites
+    #    `tests/test_website_static.py::` / `# TestMonospaceStackRendersAsAMonoFace`),
+    #    so the next-line word must keep its leading capital.
+    refs_cls, violations_cls = _pin_reference_scan(
+        [
+            "# Pinned by tests/test_ci_selection.py::",
+            "# NoSuchTestCaseClass.",
+        ],
+        root,
+    )
+    assert refs_cls == 1 and violations_cls, (refs_cls, violations_cls)
+
+    # 4. A bare `file::` with nothing resolvable after it names nothing at all —
+    #    that is a defect to report, not a citation to skip.
+    refs_bare, violations_bare = _pin_reference_scan(
+        ["# see tests/test_ci_selection.py::"], root
+    )
+    assert refs_bare == 1, refs_bare
+    assert violations_bare, "a bare `file::` citation is silently skipped"
