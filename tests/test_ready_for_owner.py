@@ -783,6 +783,16 @@ def test_the_clear_guard_grades_both_directions_on_its_own() -> None:
         "**Verdict: CLEAN.**\n\nFixed the P1 in 4f450ae81.",
         "**Verdict: CLEAN.**\n\nThe two P2 findings are closed.",
         "**Verdict: CLEAN**\n\nno P0/P1/P2 findings; three P3 nits noted.",
+        # ⛔ THE TWO SHAPES THE CROSSING MUST NOT CATCH — they are the whole reason the
+        # detached paragraph drops rule (3) instead of carrying the full rule set across.
+        # Both CLEARED before the window crossed a blank line and must still clear after.
+        "**Verdict: CLEAN.**\n\nFixed the P1 in 4f450ae81; no other files changed except the fixture.",
+        "**Verdict: CLEAN.**\n\nAll six findings are closed. Nothing else changed except AGENTS.md.",
+        # ⛔ KNOWN RESIDUAL, pinned as a DECISION not an accident: rule (3)'s exception words
+        # are graded only in the verdict's own paragraph, so an exception alone one paragraph
+        # down clears. Stated in `asserts_a_clear`'s docstring; this arm makes the trade
+        # visible, so a later tightening has to come here and change a test on purpose.
+        "**Verdict: CLEAN.**\n\nExcept the concern raised in cycle 4.",
     ):
         assert rfo.asserts_a_clear(body) is True, body
     # …and standing the severity arm down does NOT stand down the retraction rules (1)–(3)
@@ -920,6 +930,9 @@ def test_a_verdict_that_is_RETRACTED_in_the_same_sentence_cannot_close_a_finding
         "**Verdict: CLEAN**\n\nThis no longer holds.",
         "**Verdict: CLEAN**\n\nThe P1 is still open.",
         "verdict: CLEAN\r\n\r\nno longer holds",
+        "**Verdict: CLEAN** — cycle 4.\n\nExcept the open P1 below.",
+        "**Verdict: CLEAN** (cycle 5).\n\n— except the open P1",
+        "**Verdict: CLEAN** — cycle 4.\n\nThe P1 below is still open.",
     ):
         comments = [
             {
@@ -2498,3 +2511,21 @@ def test_each_mutation_is_killed(mutant_name: str, label: str, fixture_fn) -> No
         f"SURVIVED MUTANT: {label} — the mutant did not flip {condition} to PASS, so the "
         f"per-mode test does not discriminate. Mutant raw: {mutant_check.raw}"
     )
+
+
+def test_the_retraction_rule_source_is_the_same_text_in_both_forms() -> None:
+    """The split named fragments must BE the combined source — not a second copy of it.
+
+    `_retracted_from` grades two windows that must agree about what a retraction is: the
+    verdict's own paragraph uses the combined `_RETRACTION_RULES_1_TO_3`, and the paragraph
+    after uses the same rules MINUS rule (3) (`_NEXT_PARA_RETRACTION_RE`). They are therefore
+    rebuilt from one set of named fragments. Two independently-typed copies of a regex that
+    have to agree is exactly how one of them rots unnoticed — the next rule added to one form
+    and not the other would silently reopen a hole. This pin is the tripwire.
+    """
+    assert (rfo._R1_NO_LONGER + rfo._R2_ATTRIBUTED + rfo._R3_EXCEPTION + rfo._R4_WORDS) == \
+        rfo._RETRACTION_RULES_1_TO_3
+    # …and the detached form is exactly that minus rule (3), not some other subset
+    assert rfo._R3_EXCEPTION not in rfo._NEXT_PARA_RETRACTION_RE.pattern
+    for fragment in (rfo._R1_NO_LONGER, rfo._R2_ATTRIBUTED, rfo._R4_WORDS):
+        assert fragment in rfo._NEXT_PARA_RETRACTION_RE.pattern

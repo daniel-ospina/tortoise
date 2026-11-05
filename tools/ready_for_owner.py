@@ -263,6 +263,34 @@ _RETRACTION_RULES_1_TO_3 = (
     # (4) a still-live finding, declared in words
     r"|unfixed\b|unaddressed\b|still\s+open\b|remains?\s+open\b|not\s+fixed\b"
 )
+#: The same source SPLIT BY RULE, so the two windows below can grade DIFFERENT subsets without
+#: the pattern text drifting apart. `_R1 + _R2 + _R3 + _R4_WORDS` is byte-identical to
+#: `_RETRACTION_RULES_1_TO_3`; a pin in the test file asserts that, because two copies of a
+#: regex that must agree is exactly how one of them rots unnoticed.
+_R1_NO_LONGER = (
+    r"no\s+longer\b"
+    r"|(?:is|was|are|were)\s+(?:now\s+)?not\b"
+    r"|(?:is|was|are|were)\s+(?:now\s+)?(?:superseded|stale|outdated|obsolete|invalid|wrong|moot)\b"
+    r"|superseded\b|stale\b|outdated\b|obsolete\b|invalid\b|moot\b"
+    r"|predat(?:e|es|ed|ing)\b|was\s+returned\b|had\s+been\b"
+    r"|\bno\s+(?:evidence|proof|test|sign|indication|mention|attempt)\b"
+    r"|\bno\s+one\s+(?:has|have|did)\b|\bhas\s+since\b|\bhas\s+moved\b|\bsince\s+moved\b"
+)
+_R2_ATTRIBUTED = (
+    r"|(?:previous|earlier|prior|old)\s+(?:head|record|round|assessment|verdict|review)\b"
+    r"|that\s+(?:was|is)\s+the\s+(?:previous|earlier|prior|old)\b"
+    r"|only\s+(?:before|until|as\s+of)\b|before\s+the\s+(?:last|previous|latest)\b"
+)
+#: ⛔ RULE (3) IS THE ONE THAT DOES NOT DETACH. `except`, `apart from`, `besides`, `unless`
+#: describe the verdict when they sit beside it, but in the PARAGRAPH AFTER one they are
+#: ordinary English — `no other files changed except the fixture` retracts nothing — so a
+#: window that carried rule (3) into the next paragraph refused real clears (the #10962
+#: direction, measured history). It is graded over the verdict's OWN paragraph only.
+_R3_EXCEPTION = (
+    r"|except\b|apart\s+from\b|other\s+than\b|aside\s+from\b|besides\b"
+    r"|unless\b|subject\s+to\b|provided\s+that\b"
+)
+_R4_WORDS = r"|unfixed\b|unaddressed\b|still\s+open\b|remains?\s+open\b|not\s+fixed\b"
 #: Rule (4)'s SEVERITY arm — the bare tokens, and the ones a reviewer actually writes.
 #: ⛔ THIS ARM IS GRADED PER TOKEN, NOT PER LINE. An earlier draft stood the whole arm down
 #: whenever a negation word appeared ANYWHERE in the suffix, so one `no` anywhere erased a live
@@ -272,6 +300,22 @@ _RETRACTION_RULES_1_TO_3 = (
 _SEVERITY_TOKEN_RE = re.compile(r"(?i)\b(?:P[0-2]|blockers?|priority\s+[0-2])\b")
 #: Rules (1)–(3) plus rule (4)'s WORD arm, compiled once and graded over the PARAGRAPH.
 _RETRACTION_NO_SEVERITY_RE = re.compile(r"(?i)(?:" + _RETRACTION_RULES_1_TO_3 + r")")
+#: ⛔ THE PARAGRAPH AFTER THE VERDICT IS GRADED NARROWER, NOT WIDER. Every one of rules (1)–(4)
+#: except rule (3) is about the VERDICT's own state (`no longer holds`, `still open`, `previous
+#: head`), which reads the same one paragraph down; rule (3)'s exception words do not (see
+#: `_R3_EXCEPTION`). This is what lets the window cross a blank line — closing the fail-open
+#: where `**Verdict: CLEAN** — cycle 4.\n\nExcept the open P1 below.` CLEARED — without
+#: refusing `…\n\nFixed the P1 in 4f450ae81; no other files changed except the fixture.`
+_NEXT_PARA_RETRACTION_RE = re.compile(
+    r"(?i)(?:" + _R1_NO_LONGER + _R2_ATTRIBUTED + _R4_WORDS + r")"
+)
+#: A SEVERITY TOKEN IN THE NEXT PARAGRAPH ALSO HAS A COMPLETION ON ITS LEFT. `Fixed the P1 in
+#: 4f450ae81.` states the completion BEFORE the token, so `_SEVERITY_COMPLETED_AFTER_RE` alone
+#: cannot exempt it and the token would block a real clear. Only used in the detached window;
+#: on the verdict's own line the existing per-token exemptions already decide.
+_SEVERITY_COMPLETED_BEFORE_RE = re.compile(
+    r"(?i)\b(?:closed|fixed|resolved|addressed|landed)\b(?:\s+\w+){0,2}\s+\Z"
+)
 #: The clear spelling for a token: `no P0/P1/P2` / `without P1` — a negation IMMEDIATELY before
 #: it, allowing the slash-separated list it governs (`no P0/P1/P2` negates all three). It must
 #: be immediate: `no test for the P1` is a LIVE finding, not an exemption.
@@ -319,39 +363,62 @@ def _retracted_from(text: str, end: int) -> bool:
     unavoidable was wrong; splitting the windows gives both.
 
     ⛔ AND THE BLANK-LINE FORM NEEDS ONE MORE STEP, or the two windows contradict each other
-    (review cycle 5, finding 1): `para_end = text.find("\n\n", end)` LANDS ON `end` when the
-    verdict is followed by a blank line, so `para` was `""` and every rule below was skipped —
-    `**Verdict: CLEAN**\n\nthe P1 is still open.` CLEARED while the single-newline spelling of
-    the same sentence BLOCKED, one character apart, and the paragraph window claimed credit for
-    closing it.
+    (review cycle 5, finding 1; widened in cycle 6): `para_end = text.find("\n\n", end)` LANDS
+    ON `end` when the verdict is followed by a blank line, so `para` was `""` and every rule
+    below was skipped — `**Verdict: CLEAN**\n\nthe P1 is still open.` CLEARED while the
+    single-newline spelling of the same sentence BLOCKED, one character apart, and the
+    paragraph window claimed credit for closing it.
 
-    ⛔ SO THE WINDOW LOOKS PAST A BLANK LINE ONLY AFTER A **STANDALONE** VERDICT. That is the
-    exact shape that had the hole (nothing but closing emphasis or punctuation after the
-    phrase). When the verdict SHARES its line with prose, the ordinary paragraph bound already
-    covers the rest of that line, and extending it into the next paragraph would refuse real
-    clears — the #10962 direction, with measured history. Both directions are pinned in
-    `tests/test_ready_for_owner.py`.
+    ⛔ SO THE WINDOW IS THREE-TIER, AND EACH TIER IS GRADED BY THE RULES THAT SURVIVE THE
+    DISTANCE. Restricting the crossing to a STANDALONE verdict (the cycle-5 fix) closed the
+    reported spelling and left its neighbour open — `**Verdict: CLEAN** — cycle 4.\n\nExcept
+    the open P1 below.` still CLEARED, one trailing clause from the blocked form, in the sole
+    input to `check_blocking_finding`. The tiers are:
+
+      • the verdict's own LINE — the per-token severity arm (exemptions: negated before,
+        completed after), so `the P1 was not resolved` blocks and `no P0/P1/P2` clears;
+      • the rest of its PARAGRAPH — rules (1)–(4) in full, including rule (3)'s exception
+        words, which are anchored to the verdict here;
+      • the PARAGRAPH AFTER, across one or more blank lines — rules (1), (2) and (4)'s WORD
+        arm plus the severity arm, and NOT rule (3): `except` describes the verdict beside it
+        and describes prose one paragraph away, so carrying it across refused real clears
+        (`no other files changed except the fixture`, #10962 direction). A token there is
+        also exempted by a completion on its LEFT (`Fixed the P1 in 4f450ae81`), which the
+        own-line arm never needs.
+
+    Every boundary is pinned in `tests/test_ready_for_owner.py` in BOTH directions, including
+    the two shapes the crossing must NOT catch — they are the reason tier 3 is narrower.
     """
-    line_end = text.find("\n", end)
-    rest_of_line = text[end : line_end if line_end != -1 else len(text)]
-    if line_end != -1 and not rest_of_line.strip(" \t\r*_`—–-.:;!()[]\"'"):
-        # standalone: skip this line's own ending AND any blank lines, then read the next
-        # paragraph in full — the window still STARTS at the verdict.
-        p = line_end + 1
-        while p < len(text) and text[p] in "\r\n":
-            p += 1
-        para_end = text.find("\n\n", p)
-    else:
-        para_end = text.find("\n\n", end)
-    para = text[end : para_end if para_end != -1 else len(text)]
-    if _RETRACTION_NO_SEVERITY_RE.search(para):
-        return True
     line_end = text.find("\n", end)
     line = text[end : line_end if line_end != -1 else len(text)]
     for token in _SEVERITY_TOKEN_RE.finditer(line):
         if _SEVERITY_NEGATED_BEFORE_RE.search(line[: token.start()]):
             continue
         if _SEVERITY_COMPLETED_AFTER_RE.search(line, token.end(), token.end() + 48):
+            continue
+        return True
+
+    para_end = text.find("\n\n", end)
+    if _RETRACTION_NO_SEVERITY_RE.search(text[end : para_end if para_end != -1 else len(text)]):
+        return True
+
+    # tier 3 — the paragraph AFTER, across the blank line(s). Nothing to read past the verdict
+    # itself means there is no second paragraph, and this tier must not fire on nothing.
+    if para_end == -1:
+        return False
+    nxt = para_end
+    while nxt < len(text) and text[nxt] in "\r\n":
+        nxt += 1
+    nxt_end = text.find("\n\n", nxt)
+    after = text[nxt : nxt_end if nxt_end != -1 else len(text)]
+    if _NEXT_PARA_RETRACTION_RE.search(after):
+        return True
+    for token in _SEVERITY_TOKEN_RE.finditer(after):
+        if _SEVERITY_NEGATED_BEFORE_RE.search(after[: token.start()]):
+            continue
+        if _SEVERITY_COMPLETED_BEFORE_RE.search(after[: token.start()]):
+            continue
+        if _SEVERITY_COMPLETED_AFTER_RE.search(after, token.end(), token.end() + 48):
             continue
         return True
     return False
@@ -377,13 +444,26 @@ def asserts_a_clear(text: str) -> bool:
     graded — the suffix (a retraction) and the same-line preamble (an attribution) — because a
     citation can carry neither, one, or both.
 
-    ⛔ THE SUFFIX IS GRADED IN TWO WINDOWS, and the earlier note claiming only one was possible
-    was wrong. Rules (1)–(3) and the rule-(4) WORD arm run over the rest of the PARAGRAPH, so a
-    line break — blank, single, or inside emphasis, `**Verdict: CLEAN**\n— except the open P1` —
-    no longer hides a retraction. Only the BARE SEVERITY arm stays line-scoped, because a
-    paragraph-wide severity search refuses the real
-    `**Verdict: CLEAN.**\nFixed the P1 in 4f450ae81.`, where the `P1` is a SUBJECT rather than a
-    retraction. Splitting the windows is what makes both directions available at once.
+    ⛔ THE SUFFIX IS GRADED IN THREE WINDOWS, AND EACH CARRIES ONLY THE RULES THAT SURVIVE THE
+    DISTANCE (see `_retracted_from`): the verdict's own LINE (the per-token severity arm), the
+    rest of its PARAGRAPH (rules (1)–(4) in full), and the PARAGRAPH AFTER, across one or more
+    blank lines (rules (1), (2), (4)'s WORD arm, and the severity arm). A line break — single
+    or blank — therefore does not hide a retraction that NAMES a finding: a severity token one
+    paragraph down blocks unless a completion sits on its LEFT, so
+    `**Verdict: CLEAN.**\nFixed the P1 in 4f450ae81.` and its blank-line twin both stay clears.
+    (The bare severity arm stays per-token because a paragraph-wide search refuses exactly
+    those two real clears, where the `P1` is a SUBJECT rather than a retraction.)
+
+    ⛔ KNOWN RESIDUAL, DELIBERATE, and pinned in `tests/test_ready_for_owner.py`: rule (3)'s
+    EXCEPTION WORDS (`except`, `apart from`, `besides`, `unless`) are graded only in the
+    verdict's OWN paragraph. Detached by a blank line they are ordinary English —
+    `no other files changed except the fixture` retracts nothing — so
+    `**Verdict: CLEAN.**\n\nExcept the concern raised in cycle 4.` still clears. That is a
+    measured trade, not an oversight: carrying rule (3) across refused real clears (that same
+    `… except the fixture` sentence, which is the #10962 false-NOT-READY direction with
+    measured history). A retraction that NAMES a finding is caught in all three windows; only
+    the ones that name nothing are not. An earlier revision of this docstring claimed the
+    blank-line form was closed outright, which was false and is why this paragraph exists.
     """
     for m in CLEAR_VERDICT_RE.finditer(text):
         if _retracted_from(text, m.end()):
