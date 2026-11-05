@@ -207,7 +207,7 @@ evidence as against it. A low-confidence assumption cannot be *"confirmed"* by e
 real.
 
 ### P2-b — the benchmark's dataset was unnamed
-It is **SIFT-128-euclidean** (ann-benchmarks), **128-dim**. Our embeddings are **1,536-dim**. The
+It is **SIFT-128-euclidean** (ann-benchmarks), **128-dim**. **Our embeddings are 384-dim** (`tortoise/embeddings.py` `EMBEDDING_DIM = 384`); **1,536 is the stored BYTE width** (384 × float32), not the dimension — so the dimensional gap is **3×**, not 12×, and the distinction matters because HNSW's recall and build cost are functions of dimension, not of stored bytes. The
 benchmark's own caveat is dimensional (*"do not substitute random vectors … in 128 dimensions"*), so its
 distances must not be read as ours — and at 1,536 dims HNSW behaves differently in both recall and build
 cost. Also noted: the *AI Engineering Playbook* row is the only citation that is neither fetchable nor a
@@ -216,5 +216,5 @@ repo artefact.
 ### P3-a / P3-b — heading contract and units
 `### Raw Notes` → `## Raw Notes` (the contract names H2), and the extra section demoted to an H2 so a
 reader walking headings gets the promised tree. **Units corrected: `$1.32/month`, not `$1.38`** — the
-earlier figure divided bytes by MiB rather than GiB (19,441,152 B = 0.0181 GiB × $73 = $1.32).
+the corrected figure is **$1.32/month** (19,441,152 B = 0.0181 GiB × $73). ⚠️ **And the chain itself is withdrawn — `01-align.md` §8.2:** the bill is provisioned RAM and retained bytes are revenue, so this figure's only surviving use is as the refutation.
 

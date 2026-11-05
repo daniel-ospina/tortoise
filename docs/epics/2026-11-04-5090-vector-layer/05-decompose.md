@@ -34,6 +34,21 @@ counts reconcile (5 items → 6 children, +1 because S5 is two artifacts).**
 
 **No overlap:** no child touches more than one S-item's surface. **No gap:** no S-item is unowned.
 
+⚠️ **Reconciled against the PRIOR decomposition, not just the issue tracker.** `#5090` carries a
+**2026-10-31** decomposition comment (pointer: `#5087` · `issuecomment-6550245534`) whose child set was
+`#4997` · `#4999` · `#4333` · `#8419` · `#10465`. Per-child disposition, so "MECE" is a claim and not an
+assertion:
+
+| prior child | state | disposition here |
+|---|---|---|
+| `#4997` | CLOSED (PR #5434) | **not re-filed.** Landed the measurement half only; its residual is C4 (**corrected**: the served set is never retained) and its population question is C5. |
+| `#4999` | CLOSED (PR #5159) | **not re-filed.** `scan_fallback` is MET; D13 is a regression pin only. |
+| `#4333` | OPEN, native child | **not re-filed.** Owns the storage architecture; cited 6× as the home of what this epic excludes. |
+| `#8419` | OPEN, parented by neither | **not re-filed.** Root is the D10 fold (`#5088`); named in §4, not claimed. |
+| `#10465` | CLOSED | **not re-filed.** Its instrument is re-runnable and is cited in C6. |
+| `#10541` | CLOSED COMPLETED 2026-11-04 | **not re-filed.** Delivered the census; **C2** is the narrower, different residual — the exemption authority has no production home. |
+| _"state the rule for what earns an embedding"_ | **deliberately not filed 2026-10-31** | **still not filed.** Duplicates `#5008` (CLOSED). This lane reaches the same conclusion independently. |
+
 ---
 
 ## 2. The children
@@ -54,7 +69,7 @@ counts reconcile (5 items → 6 children, +1 because S5 is two artifacts).**
   carry **no declared exemption** classified (`hosted_backup::restore_graph`,
   `projection.entities::_event_plain_merge`, `projection::_rebuild_all_replay`); **zero** `bypass`; a
   duplicated key **raises**.
-- **T:** `tools/dod_5090_probe.py` reports **zero unclassified** writers and **zero** bypass; DoD rows 1–2 are
+- **T:** a check that **must change** when this lands (the "zero unclassified" condition is **already true at HEAD** — `tools/dod_5090_probe.py` reports 15 of 15 writers classified, 6 recognised producers / 9 exempt / 0 bypasses, so it cannot distinguish completion from a no-op): the **three writers with no declared exemption** (`hosted_backup::restore_graph`, `projection.entities::_event_plain_merge`, `projection::_rebuild_all_replay`) resolve to a register entry **imported from `tortoise/`**, and the probe's own declaration table is **no longer the only source** — i.e. the probe reads the product's register instead of owning one. DoD rows 1–2 are
   re-scored with the reading stated; the register is a leaf module with a cycle-safety note.
 - **Complexity:** standard · **Blocked by:** none · **Blocks:** **C3** (arming the gate before the register
   exists would make three undeclared writers bypass silently — that ordering is the reason this is not one issue).
@@ -84,7 +99,7 @@ counts reconcile (5 items → 6 children, +1 because S5 is two artifacts).**
 - **Complexity:** micro · **Blocked by:** none · **Blocks:** none.
 - ⚠️ **Deliberate test change:** `tests/test_4997_vector_index_parity.py::test_a_store_with_no_gap_does_not_warn`
   — its *warning* claim stands, its *silence* claim is what this ends. Stated so it is not read as a regression.
-- ⚠️ **Not a duplicate of `#4997`.** PR #5434 landed the report; this is one line of residual on it.
+- ⚠️ **Corrected premise, and it changes the size of this child.** `_vector_indexed_labels` is assigned **unconditionally** (`:18570`); `if gap:` (`:18577`) gates only the **`log.warning`**, and `tests/test_4997_vector_index_parity.py:415` already asserts the attribute for a no-gap store. **What is missing is the SERVED set** — it is never retained — so this needs **new state**, not one un-gated emit. It is still **not** a second inventory: it extends the one function that already reads the catalogue.
 
 ### C5 — `census the unretrievable vectors, and carry the surface call for removing them`
 - **O:** quantify the stored vectors that no index and no efficient query path can serve, and put the

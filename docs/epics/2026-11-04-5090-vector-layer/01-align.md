@@ -30,7 +30,7 @@ Recorded first, because the scope is wrong if they are taken on trust. Each was 
 |---|---|
 | *"the runtime warns on every search"* | **The warning is SETUP-time, not per-search.** `_record_vector_index_inventory` (`projection/__init__.py:18583`) emits `log.warning` **once per (endpoint, graph) per process**, from `_ensure_indexes`, guarded by `_VECTOR_INDEX_GAP_WARNED`. The **query-time** fallback logs at **info/debug** (source comment cites #1359 for *"not warning"*). It *looks* per-search on any short-lived CLI process (each `goal-state.py --line` invocation is a fresh process); it is not per query. **The full-scan defect is real and is paid on every query — the warning framing is what is wrong.** |
 | *"$73/GB"* as a per-byte cost of the *whole* graph | Correct as the recorded basis (`billing.cost_basis.falkordb_per_gb = 73.0`), but it must be applied to the **removable payload**, not to 195 MB. See §3. |
-| the epic is *"3 of 4 DoD bullets met"* | **1 of 4 is MET.** `uv run python tools/dod_5090_probe.py` at this head: **`PARTIAL / PARTIAL / MET / NOT MET`**. Rows 1 and 2 are PARTIAL, row 4 NOT MET. *(This figure was asserted as 3-of-4 in an earlier draft of this document and in the 2026-10-31 decomposition comment; both are wrong. PARTIAL means partly addressed, and it is still not met.)* |
+| the epic is *"3 of 4 DoD bullets met"* | **1 of 4 is MET.** `uv run python tools/dod_5090_probe.py` at this head: **`PARTIAL / PARTIAL / MET / NOT MET`**. Rows 1 and 2 are PARTIAL, row 4 NOT MET. |
 
 ---
 
@@ -49,7 +49,7 @@ Recorded first, because the scope is wrong if they are taken on trust. Each was 
 **The labels, precisely.** The served/written set is `{Event, Object, Point, Source, Subject}`
 (`ENTITY_TYPE_LABELS`). `Point` is indexed ⇒ **four** labels are unindexed ⇒ *"index them in the graph"*
 means **four further resident HNSW structures**, not three. ⚠️ `STORAGE-ARCHITECTURE.md` §12.1c still says
-*"a SECOND … and a THIRD"*; that count is wrong and is corrected in scope (§3.2), not here.
+*"a SECOND … and a THIRD"*; that count is wrong and is corrected in **§7.2**, not here.
 
 ### 1.2 Alternatives considered
 
@@ -89,7 +89,7 @@ unfiled gap. Both are in scope; nothing else is.
 
 **Placement: Important / Not Urgent → Schedule.**
 
-⚠️ **Correction to an earlier draft:** it placed `#10976`/`#10000` in *Not Important* by inferring
+⚠️ **`#10976` and `#10000` sit in Important/Urgent, not here:** both are `P0-blocker` and launch-gating, and importance is not inferred from ownership —
 importance from **ownership** (*"other owners"*), which is not one of the two axes. A `P0-blocker` that
 gates launch is **Important** by definition. They are also *more* urgent than this epic, which is part of
 why this epic does not hold the critical path.
@@ -119,8 +119,8 @@ before the product has earned the price.
 | quantity | value | basis |
 |---|---|---|
 | removable vector payload today | **19.4 MB** | 12,657 × 1,536 B (the epic's own 2026-10-08 correction) |
-| ⇒ rent avoided | **≈ $1.32/month** | 19.4 MB = **0.0181 GiB** × $73/GiB *(an earlier draft divided bytes by MiB rather than GiB and printed $1.38)* |
-| at 10 tenants of this size | **≈ $13/month** | ×10 |
+| ⇒ rent avoided | **$0.00** | the bill is **provisioned** RAM, so neither the payload nor the index changes it (§16.1, HIGH) |
+| at 10 tenants of this size | **still $0.00** | the tier is a machine size, not a data size |
 | to reach **$1,000/month** | **≈ 14 GB** removable | ~730× today's payload |
 
 ⚠️ **This corrects two inflated figures in an earlier draft, and the correction matters.** That draft said
@@ -169,10 +169,13 @@ forbids `object`/`subject` embeddings, the record is unarmed on a cred/env wall)
 (A4 — rejected: three different claims); let the neighbours dissolve the cost (A5 — adopted as the shape
 of the remainder).
 
-**Profit impact:** ≈ **$1.32/month per tenant** today on the removable 19.4 MB; ≈ **$14/month at ten
-tenants**; **$45–75/month** at the month-6 vector projection. Value is structural — deciding where 48 % of
-the graph lives, before customers make it irreversible. **Not the volume fix** (`#10000`/`#10976` are,
-and they are larger).
+**Profit impact:** **none directly, and that is the finding.** The bill is on provisioned RAM (§16.1,
+HIGH) and the 2026-10-08 billing ruling makes **retained bytes revenue** — so no byte-removal on this epic's
+surface moves the bill or the price. What this epic is worth is **structural**: it makes the embedding rule
+operative, makes the writer population's exemptions a property of the product, makes the store state its own
+vector contract, and removes an inconsistency between three artifacts about a decision still open. §3's table
+above is the arithmetic that **refutes** the cost story, kept because the refutation is the finding.
+**Not the volume fix** (`#10000`/`#10976` are, and they are larger).
 
 **Eisenhower placement:** Important / Not Urgent → **Schedule**. Nothing gates launch on it; the decision
 gets more expensive once customer data lands; the only cheap-and-urgent item is the measurement. Its
@@ -240,7 +243,7 @@ re-scoping upward (inventing children the neighbours already own).
 
 1. The embedding rule is operative on the shipped default, with the measured rate recorded (scope S1).
 2. The exemption register has a production home, and DoD rows 1–2 are re-scored as a recorded decision (S2).
-3. **V1 is decided, implemented, and reconciled** with `#10976`/`#7879` (S3).
+3. **The unretrievable vectors are censused and their removal carried with its surface-approval request**, and `#10976`/`#7879` are reconciled to **"pending V1"** (S3). **V1 itself is §14.3's and is NOT this epic's acceptance.**
 4. The store reports its vector contract positively, not only when deficient (S4).
 5. The test-design map and the capstone exist and pass (S5).
 

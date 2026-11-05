@@ -132,7 +132,7 @@ not this epic's.
 | the gate's default | `tortoise/embed_gate.py` (`ENV_FLAG`, `embed_gate_enabled`) | shipped config sets it; **the default-reading code is unchanged** | a config default can be overridden per deployment — intended |
 | the gate's consult point | `tortoise/embeddings.py:1268` | **untouched** | — |
 | the exemption register | new leaf module (pattern: `tortoise/vector_index.py`, `tortoise/live.py`) | add | a leaf must not live under `tortoise/projection/` — importing that package executes `__init__`, a reproduced `ImportError` (`projection/__init__.py:428-435`) |
-| the inventory report | `tortoise/projection/__init__.py:18491` | un-gate the emit; keep fail-open | **the read is on the unguarded `Projection.__init__` path** — covered by an existing pin |
+| the inventory report | `tortoise/projection/__init__.py:18491` | **retain the SERVED set** beside the already-unconditional `_vector_indexed_labels` (`:18570`) and report the pair; `if gap:` (`:18577`) keeps gating the **warning** only; keep fail-open | **the read is on the unguarded `Projection.__init__` path** — covered by an existing pin |
 | the census | `tools/` (new, read-only) | add | must not run against production without `--dry-run` |
 
 **Failure modes addressed:** (a) a raising catalogue read breaks store construction → **fail-open is
@@ -189,6 +189,7 @@ Expanded from `03-scope.md` §4. Each names its layer.
 | **D10** | unit | a census over a label with N vectors | reports N and its bytes; states the affected `entity_type` values; **issues no write** | S3 |
 | **D11** | unit — **negative** | a census pointed at an unreadable catalogue | exits non-zero, does **not** report an empty population | S3 |
 | **D12** | doc/assert | the epic's artifact paths | the surface map and capstone exist and the capstone references every S-item | S5 |
+| **D13** | unit — **negative** | a vector query on a label with no index | the leg trace names **`scan_fallback`**, and is distinguishable from an index hit **without** reading the source | S4 |
 
 **Brittleness avoided:** no test asserts a *count* of writers (the population moves); tests assert the
 **verdict** (classified / unclassified / duplicate). No test sleeps. No test asserts a log *string* where a
@@ -201,7 +202,8 @@ warning-vs-info **level** is the contract.
 ### 8.1 Cross-substep drift
 
 - **Journeys ↔ E2E:** J1–J5 map to D1–D2 (J1), D5–D8 (J3), D3–D4 (J4), D9–D11 (J5). **J2** (degraded search
-  naming `scan_fallback`) is already **MET** by `#4999`/PR #5159 — it is covered by D6's gap branch, and it is
+  naming `scan_fallback`) is already **MET** by `#4999`/PR #5159 — **D13** is the regression pin for it; D6 asserts the pair and the
+  gap warning, which is a different claim.
   not new work. **No journey lacks a test; no test lacks a journey.**
 - **Data model ↔ interfaces:** the register is code, not a table — consistent with §4. The one place a
   schema would have entered (an `embedding` column on object/subject) is explicitly declined and assigned to V1.
