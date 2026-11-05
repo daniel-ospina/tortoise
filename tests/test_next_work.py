@@ -353,7 +353,7 @@ def test_unreadable_surface_refuses_the_pick(tmp_path: Path):
     assert "REFUSED" in text
 
 
-def test_a_malformed_pace_env_never_reads_as_an_empty_queue():
+def test_a_malformed_pace_env_never_reads_as_an_empty_queue(monkeypatch: pytest.MonkeyPatch):
     """⛔ `NEXT_WORK_PACE=0.2s` must not turn into "the queue is empty".
 
     `PACE_SECONDS` was parsed by `float()` at MODULE level, so a malformed knob raised
@@ -380,6 +380,12 @@ def test_a_malformed_pace_env_never_reads_as_an_empty_queue():
 
     from tools import next_work
 
+    # …and the USE-time fallback, which the child import alone does not exercise: with
+    # the `except ValueError` replaced by a bare `float(raw)` the import still exits 0.
+    # ⛔ The knob is set HERE, not read from the ambient env: an inherited
+    # `NEXT_WORK_PACE=5` would otherwise make this a false red on a healthy tree — and
+    # `_pace()` would genuinely sleep for it (#review cycle 3).
+    monkeypatch.setenv("NEXT_WORK_PACE", "0.2s")
     assert next_work._pace_seconds() == next_work.PACE_DEFAULT_SECONDS
     next_work._pace()  # must not raise, and must not print a traceback
 
