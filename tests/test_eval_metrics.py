@@ -1064,15 +1064,28 @@ def _stdlib_shadowing_paths(tests_root: Path) -> list[str]:
     reports both:
 
     * a MODULE — `tests/eval/types.py`: the file's stem becomes the name;
-    * a PACKAGE DIRECTORY — `tests/eval/types/` (with or without an
-      `__init__.py`): the directory's name becomes the name. Scanning files
-      alone misses this shape entirely, because the `__init__.py` filter skips
-      the only file in it and its stem is `__init__`, not `types`.
+    * a REGULAR PACKAGE — `tests/eval/types/__init__.py`: the directory's name
+      becomes the name. Scanning files alone misses this shape entirely, because
+      the `__init__.py` filter skips the only file in it and its stem is
+      `__init__`, not `types`.
 
     Directory hits carry a trailing `/` so the failure message names the shape it
-    found. A directory is reported only when it holds Python content, so an
-    unrelated fixture directory that happens to share a stdlib name cannot red
-    the guard.
+    found. A directory is reported ONLY when it holds an `__init__.py`, and that
+    is a measurement rather than caution: a directory WITHOUT one is a namespace
+    PORTION, and a namespace portion loses to a real module found later on
+    `sys.path`, so it never shadows. Measured with a `types/` directory holding
+    `payload.py` and no `__init__.py`, on `PYTHONPATH`:
+
+        python -c "import types; print(types.__file__)"
+        -> /usr/lib/python3.12/types.py          # the stdlib won
+
+    while the same directory WITH `__init__.py` kills a child during `site` init:
+
+        ImportError: cannot import name 'GenericAlias' from 'types'
+        (.../types/__init__.py)
+
+    Reporting the namespace shape would red this guard on a fixture directory
+    that cannot shadow, and tell its owner to rename something harmless.
     """
     stdlib_names = set(sys.stdlib_module_names)
     hits = {
@@ -1083,7 +1096,7 @@ def _stdlib_shadowing_paths(tests_root: Path) -> list[str]:
     hits |= {
         f"{path.parent.relative_to(tests_root.parent)}/"
         for path in tests_root.rglob("*.py")
-        if path.parent.name in stdlib_names
+        if path.name == "__init__.py" and path.parent.name in stdlib_names
     }
     return sorted(hits)
 
@@ -1109,7 +1122,7 @@ def test_no_test_module_shadows_a_stdlib_top_level_name():
     live for any child a test spawns, and it greens in a single-file run and
     reds only in the full suite.
 
-    Two assertions on purpose. The structural one names every offending file, so
+    Two assertions on purpose. The structural one names every offending path, so
     a second shadow cannot be introduced quietly. The behavioural one proves the
     harm on a real child interpreter instead of asserting the theory.
     """
@@ -1117,12 +1130,12 @@ def test_no_test_module_shadows_a_stdlib_top_level_name():
 
     shadowing = _stdlib_shadowing_paths(tests_root)
     assert not shadowing, (
-        f"module(s) under tests/ shadow a stdlib top-level name: {shadowing}. "
+        f"path(s) under tests/ shadow a stdlib top-level name: {shadowing}. "
         f"pytest puts a directory without __init__.py verbatim on sys.path, so a "
         f"child interpreter resolves the shadow during site init and dies before "
-        f"running its own code (#10060). Rename the file (e.g. "
-        f"tests/eval/types.py -> tests/eval/eval_types.py) or the directory (a "
-        f"trailing `/` marks a directory hit)."
+        f"running its own code (#10060). Rename the module (e.g. "
+        f"tests/eval/types.py -> tests/eval/eval_types.py) or the package "
+        f"directory (a trailing `/` marks a directory hit)."
     )
 
     # The behavioural half: the exact child that used to die. Kept after the
@@ -1148,12 +1161,18 @@ def test_no_test_module_shadows_a_stdlib_top_level_name():
 def test_the_stdlib_shadow_scan_sees_a_package_directory_not_just_a_file(tmp_path):
     """The scan is a property guard, so it must see BOTH shadow shapes.
 
-    A file named `types.py` and a package DIRECTORY named `types/` shadow the
+    A file named `types.py` and a regular PACKAGE named `types/` shadow the
     stdlib identically for a child handed the containing directory on `sys.path`,
     and the directory shape survives the `__init__.py` filter untouched — so
     without this pin a scan that had been narrowed back to files alone would
     still pass, and the guard's claim ("a second shadow cannot be introduced
     quietly") would be false.
+
+    The last arm is the opposite direction, and it is why the directory shape is
+    spelled `path.name == "__init__.py"` rather than "any directory holding
+    Python": a directory WITHOUT `__init__.py` is a namespace PORTION, which a
+    real module later on `sys.path` beats, so it does not shadow. Reporting it
+    would red this guard on a fixture directory that cannot break a child.
     """
     tests_root = tmp_path / "tests"
     (tests_root / "eval").mkdir(parents=True)
@@ -1167,3 +1186,10 @@ def test_the_stdlib_shadow_scan_sees_a_package_directory_not_just_a_file(tmp_pat
     (tests_root / "eval" / "types").mkdir()
     (tests_root / "eval" / "types" / "__init__.py").write_text("x = 1\n")
     assert _stdlib_shadowing_paths(tests_root) == ["tests/eval/types/"]
+
+    # A namespace portion — same name, Python content, NO `__init__.py` — cannot
+    # shadow, so it must not be reported (measured: `import types` still resolves
+    # to the stdlib with such a directory first on PYTHONPATH).
+    (tests_root / "eval" / "types" / "__init__.py").unlink()
+    (tests_root / "eval" / "types" / "payload.py").write_text("x = 1\n")
+    assert _stdlib_shadowing_paths(tests_root) == []
