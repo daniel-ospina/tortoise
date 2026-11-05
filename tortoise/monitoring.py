@@ -3322,6 +3322,19 @@ async def reawait_control_plane_call(future, *, op: str, timeout: float,
                 if future_exc is exc:
                     raise
                 raise future_exc from exc
+            # ⛔ #10941: the MIRROR of the arm above — a submission that RETURNED
+            # while the expiry was delivered late. The witness is None for a
+            # SUCCESS, so it fell straight past the arm above into the bound miss
+            # below: the finished result was thrown away, the caller was answered
+            # 503 ``graph_unavailable``, and ``bound_miss_running`` counted a pool
+            # that had nothing running. The paragraph above already states the
+            # rule — "throwing a FINISHED result away as a bound miss would waste
+            # the one re-await this lane allows" — and the code did exactly that.
+            # No clock is needed on this arm: the value is already in hand, so
+            # there is nothing left to wait for.
+            if future.done() and not future.cancelled() and future_exc is None:
+                outcome = "completed"
+                return future.result()
             if not future.done():
                 future.add_done_callback(_log_abandoned_outcome(op))
             outcome = "bound_miss_running"

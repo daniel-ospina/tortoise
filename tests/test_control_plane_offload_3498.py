@@ -1792,6 +1792,38 @@ def test_a_re_await_keeps_the_callable_error_it_found(monkeypatch):
     assert [r[2] for r in records] == ["domain_error"], records
 
 
+def test_a_re_await_returns_a_finished_result_instead_of_a_bound_miss(monkeypatch):
+    """#10941: the re-await's third polarity — a SUCCESS already in hand.
+
+    The arm above keeps a finished FAILURE; its mirror was still broken. A future
+    that is DONE with a RESULT while the expiry is delivered late set
+    ``future_exc = None``, so it skipped the callable arm, skipped the
+    still-running arm, and fell into ``outcome = "bound_miss_running"`` +
+    ``ControlPlaneOffloadError(in_flight=None)`` — 503 ``graph_unavailable`` for a
+    read that had already returned, with nothing left for the caller to fetch.
+    The paragraph this arm's comment already carries names that as the exact
+    waste it exists to prevent.
+    """
+    import concurrent.futures as _cf
+
+    _stalled_delivery(monkeypatch)
+    future: _cf.Future = _cf.Future()
+    assert future.set_running_or_notify_cancel() is True
+    future.set_result("THE ROW")
+
+    async def _run():
+        return await monitoring.reawait_control_plane_call(
+            future, op="reawait-done-success", timeout=0.05)
+
+    assert asyncio.run(_run()) == "THE ROW"
+    records = [r for r in monitoring.control_plane_offload_records()
+               if r[0] == "reawait-done-success"]
+    assert [r[2] for r in records] == ["completed"], (
+        f"a re-await of an already-finished result recorded "
+        f"{[r[2] for r in records]!r} — the value was in hand and the lane was "
+        "never saturated")
+
+
 def test_a_genuine_re_armed_bound_miss_still_refuses_and_counts_running():
     """The other direction, so "never call it a bound miss" cannot pass above.
 
