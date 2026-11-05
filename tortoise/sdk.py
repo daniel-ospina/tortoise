@@ -4138,8 +4138,10 @@ _SESSION_SOURCE_STOPWORDS = frozenset({
 #: (under the OR-union every such session would match a one-word source query
 #: for "user") — and the strip keeps that closed for the same reason.
 #:
-#: ``\s*`` after the colon: the builder always writes one space, and a
-#: hand-written/unit fixture may not (``"user:\nassistant:"``).
+#: ``[ \t]*`` after the colon (never ``\s*``, which would swallow the newline
+#: that separates a labels-only turn from the next one's body): the builder
+#: always writes one space, and a hand-written/unit fixture may not
+#: (``"user:\nassistant:"``).
 #:
 #: ⚠️ Stated residual: a caller that hands this function a BARE SENTENCE whose
 #: first word is followed by a colon (``"Note: the deploy failed"``) loses that
@@ -4147,7 +4149,7 @@ _SESSION_SOURCE_STOPWORDS = frozenset({
 #: output, whose every line starts with the speaker — and the alternative
 #: (filtering the token stream by spelling) is the defect above.
 _SESSION_SOURCE_TURN_LABEL_RE = re.compile(
-    r"^[^\W\d_][\w .'-]{0,40}:\s*", re.MULTILINE)
+    r"^[^\W\d_][\w .'-]{0,40}:[ \t]*", re.MULTILINE)
 
 
 def _session_source_lexicon(counts: Mapping[str, int]) -> list[str]:
