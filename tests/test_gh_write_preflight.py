@@ -926,9 +926,48 @@ def test_repo_from_url_handles_every_real_github_shape() -> None:
         "git@github.com:daniel-ospina/tortoise.git": "daniel-ospina/tortoise",
         "git@github.com:daniel-ospina/tortoise": "daniel-ospina/tortoise",
         "ssh://git@github.com/daniel-ospina/tortoise.git": "daniel-ospina/tortoise",
+        # An explicit PORT is part of a real GitHub URL. Without the optional `(?::\d+)?` the port was
+        # read as the OWNER, the tail could not match, and the raw URL came back — so the documented
+        # `--repo owner/name` assertion was refused as `repo-mismatch` for a checkout whose origin IS
+        # that repo (a parse limitation reported as a disagreement).
+        "ssh://git@github.com:22/daniel-ospina/tortoise.git": "daniel-ospina/tortoise",
+        "https://github.com:443/daniel-ospina/tortoise.git": "daniel-ospina/tortoise",
     }
     for url, want in cases.items():
         assert mod._repo_from_url(url) == want, f"{url} -> {mod._repo_from_url(url)!r}, want {want!r}"
+
+
+def test_credential_target_accepts_the_userless_scp_form_but_no_local_path() -> None:
+    """An ssh-config host alias is a real remote; every LOCAL shape must stay local.
+
+    The `@`-only scp arm missed `myhost:owner/name.git`, so such a checkout was classified `local` and
+    answered `cannot-verify:credential-not-exercised` with the detail "a push there uses no
+    credential" — a false diagnosis that also made the documented exit-0 gate unpassable for it. The
+    reverse error is far worse: misreading a local path as a remote was the false PASS this predicate
+    exists to stop, so the LOCAL shapes are pinned first and outnumber the remote ones.
+    """
+    mod = _load_tool()
+    for url in (
+        "/srv/mirrors/owner/name.git",
+        "/tmp/repo.git",
+        "../relative/repo.git",
+        "./repo.git",
+        "repo.git",
+        "file:///srv/repo.git",
+        "C:/Users/x/repo.git",
+        "/tmp/x:y",
+        "",
+    ):
+        assert mod._is_credential_target(url) is False, f"{url!r} was read as a credential target"
+    for url in (
+        "myhost:owner/name.git",  # ssh-config alias with no user — the arm this test exists for
+        "github.com:owner/name.git",
+        "git@github.com:owner/name.git",
+        "ssh://git@github.com/owner/name.git",
+        "https://github.com/owner/name",
+        "git://github.com/owner/name.git",
+    ):
+        assert mod._is_credential_target(url) is True, f"{url!r} was read as local"
 
 
 def test_repo_assertion_passes_on_a_real_github_origin(tmp_path: Path) -> None:

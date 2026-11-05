@@ -340,7 +340,18 @@ def _is_credential_target(url: str) -> bool:
     low = u.lower()
     if low.startswith(("http://", "https://", "ssh://", "git://", "git+ssh://")):
         return True
-    return bool(re.match(r"^[^/@]+@[^/:]+:", u))
+    if re.match(r"^[^/@]+@[^/:]+:", u):
+        return True
+    # ⛔ THE SCP FORM DOES NOT REQUIRE A USER. An ssh-config host alias (`origin myhost:owner/name.git`)
+    # is a real remote that consults a credential, but the `@`-arm above misses it, so it fell to
+    # `local` and the tool answered `cannot-verify:credential-not-exercised` with the detail "a push
+    # there uses no credential" — a FALSE DIAGNOSIS that also made the documented exit-0 gate
+    # unpassable for such a checkout. Git's OWN rule for the scheme-less form is "a `:` before the
+    # first `/` means ssh", which is exactly the arm below; it keeps the local shapes local because
+    # each one has a `/` (or no colon) after that first colon: `/srv/x`, `../x`, `C:/x`, `file:///x`.
+    # Misreading a LOCAL path as a remote was the false PASS this predicate exists to stop, so this
+    # arm is strictly narrower than "anything with a colon".
+    return bool(re.match(r"^[^/@\s:]+:[^/\s]", u))
 
 
 def _repo_from_url(url: str) -> str:
@@ -361,7 +372,12 @@ def _repo_from_url(url: str) -> str:
     # `/srv/mirrors/github.com/o/n.git` and on a vendor mirror path — and then the tool reports a
     # GitHub slug (`GH-WRITE-OK(repo=owner/name …)`) for a remote it never touched, even with NO
     # `--repo` argument. Only a scheme boundary, a `//` authority, or an `@` (scp form) may precede it.
-    m = re.search(r"(?:^|//|@)github\.com[:/]+([^/]+)/([^/]+?)(?:\.git)?/?$", clean)
+    # ⛔ AN EXPLICIT PORT IS PART OF A REAL GITHUB URL. `ssh://git@github.com:22/o/n.git` is a
+    # legitimate origin, and without the optional `(?::\d+)?` the `[:/]+` above consumed only the
+    # `:` and read the PORT as the owner, so the tail could not match, the function returned the raw
+    # URL, and `--repo owner/name` was refused as `cannot-verify:repo-mismatch` for a checkout whose
+    # origin IS that repo — a parse limitation reported as a disagreement.
+    m = re.search(r"(?:^|//|@)github\.com(?::\d+)?[:/]+([^/]+)/([^/]+?)(?:\.git)?/?$", clean)
     if m:
         return f"{m.group(1)}/{m.group(2)}"
     return clean
