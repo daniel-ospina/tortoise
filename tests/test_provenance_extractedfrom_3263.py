@@ -495,6 +495,59 @@ def test_scalar_property_filters_keep_EXACT_equality(prov):
         "the value 'tester'")
 
 
+def test_the_accumulated_refs_filter_answers_for_every_carried_ref(prov):
+    """`extractedFromAll` is a REF filter too: answered by the EDGE, not by
+    equality.
+
+    `_REF_FILTER_PROPERTIES` carries BOTH ref keys, because both can hold more
+    than one ref while the node property cannot be equality-matched: a fold
+    stores the accumulated set as an ARRAY beside the scalar, so
+    `n.extractedFromAll = $extractedFromAll` is `array = 'string'` — never
+    true. Without the edge arm the filter would answer for nothing at all.
+
+    Until this pin, `-k extractedFromAll` selected 0 tests, so nothing covered
+    the key: dropping it from the family, or rewriting the arm into a
+    membership test (`$x IN n.<prop>`, a type mismatch on a scalar), would
+    have changed the read door silently. Both directions are asserted, so an
+    over-matching arm fails here too.
+    """
+    sdk, _events = prov
+    alpha, beta = (f"https://example.com/all-{n}" for n in ("alpha", "beta"))
+    content = "a folded claim answers for the accumulated set as well"
+    pid = sdk.create_point("statement", content, extractedFrom=alpha,
+                           dedup=True)["id"]
+    sdk.create_point("statement", content, extractedFrom=beta, dedup=True)
+
+    proj = sdk._get_proj()
+    assert sorted(_all_prop_refs(proj, pid)) == sorted([alpha, beta]), \
+        "guard: the fold must accumulate both refs on the property"
+
+    for ref in (alpha, beta):
+        assert [p["id"] for p in sdk.query(extractedFromAll=ref)] == [pid], (
+            f"query(extractedFromAll={ref!r}) must return the survivor — the "
+            "accumulated ref is on its `:Source` edges (#3263)")
+        page = sdk.paginated_query(extractedFromAll=ref)
+        assert [p["id"] for p in page["results"]] == [pid]
+        assert page["total"] == 1
+
+    # The ARRAY shape, which equality can never match at all.
+    seq_pid = sdk.create_point(
+        "statement", "a sequence-born claim, queried by its accumulated refs",
+        extractedFrom=[alpha, beta])["id"]
+    assert seq_pid != pid
+    for ref in (alpha, beta):
+        assert sorted(p["id"] for p in sdk.query(extractedFromAll=ref)) == \
+            sorted([pid, seq_pid]), (
+                f"query(extractedFromAll={ref!r}) must return BOTH Points "
+                "carrying that ref")
+
+    # …and the over-match direction: a ref neither Point carries is not
+    # dragged in by the edge arm.
+    assert sdk.query(extractedFromAll="https://example.com/all-gamma") == []
+    assert sdk.paginated_query(
+        extractedFromAll="https://example.com/all-gamma")["total"] == 0
+
+
 def test_a_fold_keeps_the_refs_of_a_sequence_born_point(prov):
     """#10010 review P2 — a fold must not NARROW a sequence-born prop.
 
