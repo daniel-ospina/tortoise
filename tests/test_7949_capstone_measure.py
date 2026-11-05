@@ -5578,8 +5578,8 @@ def test_the_three_routes_to_the_e1_e2_verdict_state_the_records_verdict():
     # the route a reader meets first (review). The leg above derives the loss for `E1-E5-PROOFS`
     # only, so `docs/00_index.md`'s copy was read by nothing: it sat at "the 1-of-14 value loss"
     # — the superseded `#9775` reading — while the same row printed `RED 8/14` and the record
-    # scored {survived} of {of} surviving, i.e. `{lost} of {of}` lost. Measured: the suite stayed
-    # green over that contradiction (190 passed). One criterion, two documents, one derivation —
+    # scored 8 of 14 surviving, i.e. `6 of 14` lost. Measured: the suite stayed green over that
+    # contradiction. One criterion, two documents, one derivation —
     # the same rule the dependency row is held to, so a count typed into either row is refused.
     assert f"`{lost} of {e2a['frozen_units']}` lost" in route, (
         f"the `#9080` index row does not state the record's loss (`{lost} of "
