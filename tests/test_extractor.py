@@ -413,7 +413,13 @@ def test_mock_extractor_multi_source_embedding():
     #1626's embedder-less CI handling (HF cache unreachable on runners).
     """
     from tortoise.embeddings import EmbeddingModel
-    if EmbeddingModel.get(load_timeout=120) is None:
+    # No `load_timeout=` override: `tests/conftest.py` pins
+    # `EmbeddingModel._LOAD_TIMEOUT_S = 270.0` for the test lane (a cold model
+    # load on a loaded runner takes minutes), and an explicit per-call argument
+    # OVERRIDES it. With 120 here the probe returned `None` ~7 s before the load
+    # finished and the test skipped — which `tools/skip-guard.py` refuses
+    # (#2573), reddening a required check on a run with zero failures.
+    if EmbeddingModel.get() is None:
         pytest.skip("sentence-transformers / bge-small cache not available "
                     "— multi-source embedding test skipped (embedder-less CI)")
 

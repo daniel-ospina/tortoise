@@ -20285,7 +20285,24 @@ class TortoiseSDK:
                 # this arm's mixed-``idx`` sibling closes, on the direction axis).
                 # A node with no ``op_type`` is pre-v3.6 legacy; the rel type that
                 # carried it into this set IS its mechanism then.
-                _dirs = {_d for _, _d in _meta_rows}
+                # ⛔ A stored ``direction`` may be a RAW-WRITTEN non-scalar (list/
+                # map — hand edit, a foreign/legacy writer, a bulk import) and
+                # such a value is UNHASHABLE, so the bare set comprehension this
+                # replaced raised ``TypeError: unhashable type`` BEFORE any
+                # verdict — aborting every supersede that touched that operator,
+                # not only override-shaped ones (#10559).
+                # The reading mirrors #10552's 2a-DIRECT arm: a PRESENT
+                # non-string is judged BOTH ways (``<->``, which
+                # ``_canonical_direction`` returns verbatim for every type, so
+                # the stand-in flows through the existing predicate unchanged —
+                # fail-CLOSED, since a reader sees a present junk token as the
+                # mutual default), while ABSENT (``None``) keeps the edge type's
+                # own default exactly as before.
+                _dirs = {
+                    _d if isinstance(_d, str)
+                    else ("<->" if _d is not None else None)
+                    for _, _d in _meta_rows
+                }
                 # ⛔ A stored ``op_type`` OUTSIDE the pair is no exemption
                 # (#10418 review P3). ``create_operator`` routes every other
                 # ``op_type`` to a ``hasPart`` edge (``:20244``), so

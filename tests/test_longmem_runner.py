@@ -102,11 +102,22 @@ def _reset_embedding_singleton():
 def _require_embedder():
     """Skip when the embedder is unavailable — the R3 tests that ASSERT
     dense-leg behavior (write-time coverage == 1.0, vector-leg hits) need
-    sentence-transformers + the cached all-MiniLM-L6-v2 model. The
+    sentence-transformers + the cached bge-small model. The
     embedder-present variants run where CI guarantees them; skip-if-no-
-    embedder keeps the module green on any env."""
+    embedder keeps the module green on any env.
+
+    ⛔ NO `load_timeout=` OVERRIDE. This probe used to pass a literal 120 s
+    bound, which DEFEATED the test lane's own bound: `tests/conftest.py` pins
+    `EmbeddingModel._LOAD_TIMEOUT_S = 270.0` for exactly this reason (a cold
+    model load on a loaded runner takes minutes, not seconds), and an explicit
+    per-call argument overrides it. Measured on a saturated carve-out host: the
+    load began, exceeded 120 s and `get()` returned `None`, so the test SKIPPED —
+    and `tools/skip-guard.py` refuses an embedder-unavailable skip
+    (#2573), so a required check went red on a run whose pytest had zero
+    failures. Inheriting the lane's bound is what the pin is for.
+    """
     from tortoise.embeddings import EmbeddingModel
-    m = EmbeddingModel.get(load_timeout=120)
+    m = EmbeddingModel.get()
     if m is None:
         pytest.skip("sentence-transformers / all-MiniLM-L6-v2 cache "
                     "not available — dense-leg assertion skipped")
