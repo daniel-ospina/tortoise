@@ -122,9 +122,9 @@ def _wait_for_probe(selfhost_mod, timeout: float = 40.0, *, require_ok: bool = T
         info = selfhost_mod._HEALTH_PROBE.info()
         snap = selfhost_mod._HEALTH_PROBE.snapshot()
         observed = snap.get("observed", True) is not False
-        if observed and info.get("result_age_s") is not None:
-            if not require_ok or snap.get("ok") is True:
-                return
+        if (observed and info.get("result_age_s") is not None
+                and (not require_ok or snap.get("ok") is True)):
+            return
         # Only a COMPLETED unobserved verdict says anything about the slot: an
         # in-flight probe (or none yet) is the cold start this wait exists to
         # absorb, and releasing on it would abandon exactly the probe we want.
