@@ -14336,6 +14336,59 @@ def test_seal_session_events_tool_change_selects_core_not_tier1():
     assert r["full"] is False, r
 
 
+def _pin_reference_scan(lines: list[str], root: Path) -> tuple[int, list[str]]:
+    r"""Resolve every `Pinned by tests/….py::name` citation in `lines`.
+
+    Returns `(refs_seen, violations)` — the count is what the caller's non-vacuity
+    floor reads, and each violation is a citation that names nothing.
+
+    #11004 review P2: a citation is written in THREE shapes in `tools/ci_selection.py`,
+    # and the first version of this scan checked only the first two. The third is the
+    # shape where the citation line ENDS at `::` and the whole name sits on the next
+    # comment line — 31 of the file's 104 citations at the #11004 head, so a fabricated
+    # name written that way read as verification while verifying NOTHING and the pin
+    # stayed green. The `(\w*)` group (not `(\w+)`) is what makes that shape reachable:
+    # with `(\w+)` the regex demanded a name character after `::` and matched nothing.
+
+      1. on one line — `…::test_x`
+      2. wrapped MID-name — `…::test_x_` / `# the_rest.`
+      3. `::` ends the line — `…::` / `# TestName`   <- the shape this closes
+
+    For 2 and 3 both the bare name and `name + <first word of the next comment line>`
+    are candidates; the citation resolves if EITHER names a real `def`/`class`, so a
+    wrap is not mistaken for a dangling reference (and vice versa). The next-line word
+    keeps its leading case because shape 3 also cites `class` names. A citation with
+    NO resolvable name at all (a bare `file::`) is a violation, never a skip.
+    """
+    refs: list[tuple[str, list[str]]] = []
+    for i, line in enumerate(lines):
+        for m in re.finditer(r"(tests/[\w./-]+\.py)::(\w*)", line):
+            relpath, name = m.group(1), m.group(2)
+            candidates = [name] if name else []
+            nxt = lines[i + 1].strip() if i + 1 < len(lines) else ""
+            if not line[m.end():].strip() and nxt.startswith("#"):
+                words = nxt.lstrip("#").strip().split()
+                first = words[0].rstrip(".,;:`)") if words else ""
+                if re.fullmatch(r"[A-Za-z_]\w*", first):
+                    candidates.append(name + first)
+            refs.append((relpath, candidates))
+
+    violations = []
+    for relpath, candidates in refs:
+        label = " | ".join(candidates) if candidates else "<no name after ::>"
+        path = root / relpath
+        if not path.exists():
+            violations.append(f"{relpath}::{label} (no such file)")
+            continue
+        body = path.read_text(encoding="utf-8")
+        if not candidates or not any(
+            re.search(rf"^(?:def|class)\s+{re.escape(name)}\b", body, re.M)
+            for name in candidates
+        ):
+            violations.append(f"{relpath}::{label}")
+    return len(refs), violations
+
+
 def test_every_pin_reference_in_ci_selection_names_a_test_that_exists():
     # #10976 / #11004 review P2: every `Pinned by tests/….py::name` citation is what
     # makes "Pinned by" CHECKABLE — a reader greps the name and confirms the guard.
@@ -14346,36 +14399,66 @@ def test_every_pin_reference_in_ci_selection_names_a_test_that_exists():
     # `test_cache_eviction_census_runs_on_the_diffs_that_can_weaken_it` (above).
     root = Path(__file__).resolve().parents[1]
     lines = (root / "tools/ci_selection.py").read_text(encoding="utf-8").splitlines()
-
-    # A citation may be WRAPPED across comment lines (`…::test_x_` / `# the_rest.`),
-    # so a name that ends its line inside a comment also offers `name + <next word>`
-    # as a candidate. Both are tried; the citation resolves if EITHER names a real
-    # definition, so a wrap is not mistaken for a dangling reference (and vice versa).
-    refs: list[tuple[str, list[str]]] = []
-    for i, line in enumerate(lines):
-        for m in re.finditer(r"(tests/[\w./-]+\.py)::(\w+)", line):
-            relpath, name = m.group(1), m.group(2)
-            candidates = [name]
-            nxt = lines[i + 1].strip() if i + 1 < len(lines) else ""
-            if not line[m.end():].strip() and nxt.startswith("#"):
-                words = nxt.lstrip("#").strip().split()
-                first = words[0].rstrip(".,;:`") if words else ""
-                if re.fullmatch(r"[a-z_]\w*", first):
-                    candidates.append(name + first)
-            refs.append((relpath, candidates))
+    refs_seen, violations = _pin_reference_scan(lines, root)
 
     # Non-vacuity: the file really does cite its pins (a regex that matched nothing
-    # would pass this guard while checking nothing).
-    assert len(refs) > 50, len(refs)
+    # would pass this guard while checking nothing). Measured at the #11004 head:
+    # 104 citations in total — 73 named on the line, 31 named on the next comment
+    # line — so the floor sits well under the true count and cannot be satisfied by
+    # one shape alone. `test_pin_reference_scan_sees_the_colon_then_newline_
+    # citation_shape` is what pins the 31.
+    assert refs_seen > 50, refs_seen
+    assert not violations, f"pin reference(s) that name nothing: {violations}"
 
-    missing = []
-    for relpath, candidates in refs:
-        path = root / relpath
-        if not path.exists():
-            missing.append(f"{relpath}::{candidates[0]} (no such file)")
-            continue
-        body = path.read_text(encoding="utf-8")
-        if not any(re.search(rf"^(?:def|class)\s+{re.escape(name)}\b", body, re.M)
-                   for name in candidates):
-            missing.append(f"{relpath}::" + " | ".join(candidates))
-    assert not missing, f"pin reference(s) that name nothing: {missing}"
+
+def test_pin_reference_scan_sees_the_colon_then_newline_citation_shape():
+    # #11004 review P2, RED-FIRST: the guard above passed on the pre-fix matcher
+    # (`(\w+)`) while skipping 31 of 104 citations, because the citation line ended
+    # at `::` and the name sat wholly on the next comment line. Each case below is
+    # asserted against the real tree, so only the NAME is fabricated.
+    root = Path(__file__).resolve().parents[1]
+
+    # 1. The hole: a name that does not exist, in the `::`-then-newline form, is
+    #    REPORTED. Before the fix this scan matched nothing here and stayed silent —
+    #    which is exactly how a fabricated pin reads as verification.
+    refs_bad, violations_bad = _pin_reference_scan(
+        [
+            "# Pinned by tests/test_ci_selection.py::",
+            "# test_no_such_pin_exists_xyzzy.",
+        ],
+        root,
+    )
+    assert refs_bad == 1, refs_bad
+    assert violations_bad, "the `::`-then-newline citation shape is not checked"
+    assert "test_no_such_pin_exists_xyzzy" in violations_bad[0], violations_bad
+
+    # 2. The resolving control — so case 1 cannot pass by refusing every line.
+    refs_ok, violations_ok = _pin_reference_scan(
+        [
+            "# Pinned by tests/test_ci_selection.py::",
+            "# test_every_pin_reference_in_ci_selection_names_a_test_that_exists.",
+        ],
+        root,
+    )
+    assert refs_ok == 1, refs_ok
+    assert not violations_ok, violations_ok
+
+    # 3. A `class` name on the next line is the same shape (the file cites
+    #    `tests/test_website_static.py::` / `# TestMonospaceStackRendersAsAMonoFace`),
+    #    so the next-line word must keep its leading capital.
+    refs_cls, violations_cls = _pin_reference_scan(
+        [
+            "# Pinned by tests/test_ci_selection.py::",
+            "# NoSuchTestCaseClass.",
+        ],
+        root,
+    )
+    assert refs_cls == 1 and violations_cls, (refs_cls, violations_cls)
+
+    # 4. A bare `file::` with nothing resolvable after it names nothing at all —
+    #    that is a defect to report, not a citation to skip.
+    refs_bare, violations_bare = _pin_reference_scan(
+        ["# see tests/test_ci_selection.py::"], root
+    )
+    assert refs_bare == 1, refs_bare
+    assert violations_bare, "a bare `file::` citation is silently skipped"
