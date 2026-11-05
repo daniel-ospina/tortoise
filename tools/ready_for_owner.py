@@ -609,7 +609,18 @@ def evaluator_for(
         )
 
     workflow_of = workflow_of or {}
-    ambiguous = _ambiguous_names(runs, workflow_of, required)
+    try:
+        for run in runs:
+            # Agree with `fetch_check_runs` about what a payload may contain: a
+            # non-object here would otherwise raise AttributeError out of a
+            # function documented to return a verdict on every path.
+            if not isinstance(run, dict):
+                raise RequiredSetUnreadable(
+                    f"check-run entry is not an object ({type(run).__name__})"
+                )
+        ambiguous = _ambiguous_names(runs, workflow_of, required)
+    except RequiredSetUnreadable as exc:
+        return ConditionResult(verdict=FAIL_UNREADABLE, required=required, detail=str(exc))
     if ambiguous:
         reason = workflow_error or "attempts not present in the workflow map"
         return ConditionResult(
@@ -762,6 +773,21 @@ def condition_2(root: Path, repo: str, sha: str) -> ConditionResult:
         return ConditionResult(verdict=FAIL_CONFIG, detail=str(exc))
     except RequiredSetUnreadable as exc:
         return ConditionResult(verdict=FAIL_UNREADABLE, detail=str(exc))
+    # Refuse an unevaluable set BEFORE reading the head. Otherwise a read failure
+    # (auth, network, rate limit) masks the real reason and the operator is sent
+    # after the wrong cause — and any test of this branch passes on the read
+    # failure alone, so the guard itself is never exercised.
+    if not required.entry_merge_split:
+        return ConditionResult(
+            verdict=FAIL_UNREADABLE,
+            required=required,
+            detail=(
+                "cannot evaluate: the required set came from the committed snapshot, "
+                "which is a flat list with no entry/merge split — refusing to guess "
+                "which checks are merge-time (a wrong guess re-creates the false "
+                "FAIL(missing) on python-ci-gate)"
+            ),
+        )
     try:
         runs = fetch_check_runs(repo, sha)
         workflow_of, workflow_error = fetch_workflow_ids(repo, sha)

@@ -1021,6 +1021,57 @@ def test_a_field_that_changes_type_across_pages_is_a_verdict(monkeypatch):
         sp.run = original
 
 
+def test_a_snapshot_only_set_refuses_BEFORE_reading_the_head(tmp_path, monkeypatch):
+    """The snapshot refusal must not be masked by a read failure.
+
+    Previously `condition_2` fetched check-runs first, so this branch was
+    satisfied by a live `gh api` 404 and the guard itself was never exercised —
+    deleting it left the suite green.
+    """
+    tree = _write_tree(tmp_path, snapshot=["docs", "python-ci-gate"])
+    required = rfo.resolve_required_set(tree)
+    assert required.entry_merge_split is False
+
+    # Network-free: the refusal happens inside evaluator_for.
+    result = rfo.evaluator_for(required, [], {})
+    assert result.verdict == rfo.FAIL_UNREADABLE
+    assert "entry/merge split" in result.detail
+
+    def _must_not_be_called(repo, sha):
+        raise AssertionError("condition_2 read the head before refusing an unevaluable set")
+
+    monkeypatch.setattr(rfo, "fetch_check_runs", _must_not_be_called)
+    via_condition = rfo.condition_2(tree, "o/r", "deadbeef")
+    assert via_condition.verdict == rfo.FAIL_UNREADABLE
+    assert "entry/merge split" in via_condition.detail
+
+
+def test_RED_wins_over_in_flight_on_the_same_head(tmp_path):
+    """A definitively red check must not be reported as "retry later".
+
+    Every red test used only `completed` and every in-flight test used a single
+    pending attempt, so swapping the two arms went undetected: a polling caller
+    would wait forever on a PR that can never go green.
+    """
+    runs = [
+        run("docs", conclusion="failure"),
+        run("ai-review-gate", status="in_progress", conclusion=None),
+    ]
+    result = evaluate(_write_tree(tmp_path, mergify=_mergify()), runs)
+    assert result.verdict == rfo.FAIL_RED
+    assert next(r for r in result.rows if r.name == "docs").verdict == rfo.FAIL_RED
+    assert result.verdict != rfo.FAIL_PENDING
+
+
+def test_a_non_object_run_reaching_the_evaluator_is_a_verdict(tmp_path):
+    runs = [run("docs"), "oops"]
+    result = rfo.evaluator_for(
+        rfo.resolve_required_set(_write_tree(tmp_path, mergify=_mergify())), runs, {}
+    )
+    assert result.verdict == rfo.FAIL_UNREADABLE
+    assert "not an object" in result.detail
+
+
 # ── helpers ─────────────────────────────────────────────────────────────────
 
 
