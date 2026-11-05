@@ -202,6 +202,25 @@ ISSUES_RE = re.compile(r"^\s*ISSUES\s+(\d+)\b", re.MULTILINE)
 CLEAR_RE = re.compile(
     r"(?im)(?:^\s*CLEAN\b|NO ISSUES FOUND|(?:^|[*\s])outcome:[\t ]*[*\s]*clean\b)"
 )
+#: ⛔ A CLEAR MUST BE A VERDICT, NOT A CITATION OF ONE. `CLEAR_RE` matches the bare phrase
+#: ANYWHERE in a body, and `_read_comments` feeds it every artifact — so a STATUS comment that
+#: merely quotes a past clean verdict closed an open blocker. Measured on #10929, comment
+#: `6636540079` (*"## Merge blocked on runner capacity — the exact mechanism, measured"*):
+#: *"Six fresh-context review rounds; the last returned **`NO ISSUES FOUND`** (comment above)."*
+#: `CLEAR_RE` matched the quoted phrase, `_grades_as_blocking` correctly called the body not a
+#: finding, and condition 6 returned PASS over a P1 posted before it — `READY-FOR-OWNER` on the
+#: owner's tab for a PR carrying an open P1, the exact false PASS this condition exists to stop.
+#: The SHAPE decides, not the phrase: the clear must STAND AS the artifact's verdict — its own
+#: line (optionally emphasised or blockquoted) or introduced by a verdict cue. That keeps every
+#: real verdict form in the fleet's corpus (`**NO ISSUES FOUND**`, `Reviewer verdict: NO ISSUES
+#: FOUND`, `Re-review: NO ISSUES FOUND at the new head.`, `**Outcome: CLEAN.**`) and rejects the
+#: citation, whose phrase is embedded in prose ABOUT the commentary that reported it.
+CLEAR_VERDICT_RE = re.compile(
+    r"(?im)(?:^[ \t>*_]*CLEAN\b"
+    r"|^[ \t>*_]*NO ISSUES FOUND\b"
+    r"|\b(?:verdict|outcome|result|conclusion|review|reviewed|re-?review|final)\b"
+    r"[\s:*_\u2014\u2013-]{0,4}(?:NO ISSUES FOUND|CLEAN)\b)"
+)
 #: A CAPPED / ABORTED / DECLARED-NEGATIVE review exit. ⛔ THE VOCABULARY IS COPIED FROM
 #: `scripts/record-review.sh`, NOT INVENTED HERE: it is that script's arms (1) and (1b) —
 #: the two it applies UNCONDITIONALLY when deciding whether a review artifact is evidence
@@ -390,6 +409,37 @@ ONE_OPEN_COUNT_RE = re.compile(
     + r"\b(?:\s+\w+){0,2}\s+"
     + _ONE_OPEN_CUE
     + r"\b"
+)
+#: ⛔ THE CUE-BEFORE-COUNT SPELLING — the one a reviewer writes when SUMMARISING, and the one
+#: the two arms above cannot take: they require the cue BETWEEN count and token or AFTER the
+#: token. Measured at `858191e28`: `CLEAN — 1 remaining P1` blocked, while
+#: `CLEAN — remaining: 1 P1 (open)` did NOT — the same polarity flip the count-`1` fix closed,
+#: reached by moving the cue one word to the left. `NO ISSUES FOUND except 1 P1.` reaches it
+#: without a `CLEAN` prefix at all, because `CLEAR_RE` matches the bare phrase and wins.
+#: The EXCLUSION cues (`apart from` / `except` / `other than` / `aside from` / `besides`) carry
+#: the same polarity — they name the finding as the exception to an otherwise clean result — and
+#: `single` / `a single` are count words for the commonest one-item summary.
+#: The article guard round 8 measured is kept in the OTHER direction: a completing verb after the
+#: token (`remaining: 1 P1 was fixed`) is a CLOSED finding, not an open one, and must stay
+#: certifiable — the same rule `_fixed_after_token` encodes for the sibling arms.
+_ONE_OPEN_CUE_BEFORE = (
+    _ONE_OPEN_CUE
+    + r"|apart\s+from|except(?:ing|ed)?(?:\s+for)?|other\s+than|aside\s+from|besides"
+)
+ONE_OPEN_CUE_BEFORE_COUNT_RE = re.compile(
+    r"(?i)(?<![\w-])(?:"
+    + _ONE_OPEN_CUE_BEFORE
+    + r")\b[\s:=\u2014\u2013-]{0,4}"
+    + r"(?:a\s+)?(?:1|one|single)\b(?:\s+\w+){0,2}\s+"
+    + SEV
+    + r"\b"
+    # ⛔ THE CLOSED DIRECTION: a completing verb after the token means the finding was FIXED.
+    # `remaining: 1 P1 was fixed`, `apart from a single P2, now closed` — the same declarative
+    # form with or without a copula, and the false-BLOCK direction round 8 measured. The verb
+    # itself is NOT optional in this lookahead, so a live `1 P1 (open)` is never exempted.
+    + r"(?!\s*(?:,\s*)?(?:now\s+)?"
+    + r"(?:(?:was|were|is|are|has|have|had)\s+(?:now\s+)?)?"
+    + r"(?:fixed|closed|resolved|addressed|landed|cleared|done))"
 )
 #: A bracketed severity token used as a NOUN in running text (`2 [P1] open blocking defects`).
 BRACKET_SEVERITY_RE = re.compile(
@@ -1114,6 +1164,7 @@ def _grades_as_blocking(text: str, item: Mapping[str, Any]) -> bool:
         or BLOCKING_COUNT_RE.search(text)
         or COUNT_BEFORE_TOKEN_RE.search(text)
         or ONE_OPEN_COUNT_RE.search(text)
+        or ONE_OPEN_CUE_BEFORE_COUNT_RE.search(text)
         # A severity token beside an ISSUE-block SIBLING is a finding even when the body
         # never uses the word "severity" — `4 × `P2`, `check_type: bug`, `origin: diff``
         # is the dominant shape in the fold PRs (#10902/#10909/#10920).
@@ -1220,7 +1271,7 @@ def check_blocking_finding(probe: Probe) -> Check:
             blocking_seen += 1
             open_finding = item
             continue
-        if CLEAR_RE.search(text) or str(item.get("state") or "").upper() == APPROVED:
+        if CLEAR_VERDICT_RE.search(text) or str(item.get("state") or "").upper() == APPROVED:
             # A formal APPROVAL is a clear in its own right — otherwise a change request
             # at T1 could never be closed by an approval at T2, because each item is
             # graded on its own state forever, and the PR would read NOT-READY to eternity.

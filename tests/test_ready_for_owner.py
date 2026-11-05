@@ -717,6 +717,78 @@ def test_a_fixed_blocking_finding_does_not_block() -> None:
     assert "last-clear=21" in check.raw
 
 
+def test_a_status_comment_that_only_CITES_a_clean_verdict_cannot_close_an_open_P1() -> None:
+    """A QUOTED verdict is not a verdict — the live false PASS, as it was posted.
+
+    Reproduced from #10929 comment `6636540079` (*"## Merge blocked on runner capacity — the
+    exact mechanism, measured"*), whose own text reads *"Six fresh-context review rounds; the
+    last returned **`NO ISSUES FOUND`** (comment above)."* `CLEAR_RE` matches the bare phrase
+    anywhere, so the status comment set `last_clear` and erased the open P1 posted before it:
+    condition 6 returned PASS over an open blocker, and the owner's tab said READY-FOR-OWNER.
+
+    Revert red: put `CLEAR_RE.search(text)` back at the clear test in
+    `check_blocking_finding` — this arm then reports PASS and the assertion below fails, while
+    every other arm in this file stays green (which is why the defect survived review rounds
+    that read this condition's corpus).
+    """
+    comments = [
+        {
+            "id": 1,
+            "created_at": "2026-11-05T09:00:00Z",
+            "kind": "review",
+            "body": "Outcome: NOT CLEAN — 1 open P1: the contents probe is missing.",
+        },
+        {
+            "id": 2,
+            "created_at": "2026-11-05T10:00:00Z",
+            "kind": "comment",
+            "body": (
+                "## Merge blocked on runner capacity\n\n"
+                "Six fresh-context review rounds; the last returned "
+                "**`NO ISSUES FOUND`** (comment above)."
+            ),
+        },
+    ]
+    check = _assert_fails("blocking-finding", "open-blocking-finding", comments=comments)
+    assert "open=review:1" in check.raw, check.raw
+    # The citation must not even count as a CLEAR, so no `last-clear` was recorded for it.
+    assert "last-clear=-" in check.raw, check.raw
+
+
+def test_a_verdict_HEADER_still_closes_a_finding() -> None:
+    """…and the fix must not over-correct: a verdict SHAPE still clears (the #10962 direction).
+
+    Requiring the clear to stand as a verdict is the sharp edge: reading only a bare
+    `^NO ISSUES FOUND` would refuse every body whose verdict is introduced by its own header,
+    which is the fleet's dominant format — measured on #10962, where two clean verdicts in that
+    shape left `last-clear=-` and a PR with a long-since-fixed finding could NEVER be certified.
+    """
+    for body in (
+        "## Fresh-context review — NO ISSUES FOUND at `ab60fa6a3`",
+        "**NO ISSUES FOUND**",
+        "Reviewer verdict: NO ISSUES FOUND",
+        "Re-review: NO ISSUES FOUND at the new head.",
+        "> NO ISSUES FOUND",
+    ):
+        comments = [
+            {
+                "id": 30,
+                "created_at": "2026-11-04T11:40:00Z",
+                "kind": "review",
+                "body": "[P1] tools/x.py:5 — the guard returns 0 on a failed read",
+            },
+            {
+                "id": 31,
+                "created_at": "2026-11-04T11:55:00Z",
+                "kind": "comment",
+                "body": body,
+            },
+        ]
+        check = _check("blocking-finding", comments=comments)
+        assert check.passed is True, f"{body!r} did not clear: {check.raw}"
+        assert "last-clear=31" in check.raw, check.raw
+
+
 def test_issues_verdict_is_a_blocking_record() -> None:
     comments = [
         {
@@ -1191,6 +1263,22 @@ ROUND9_CORPUS: tuple[tuple[str, bool], ...] = (
     # is not a count, so it must stay NEUTRAL (round 8's false-BLOCK direction).
     ("**Outcome: CLEAN.** One P2 was fixed; two P3 deferred.", False),
     ("**Outcome: CLEAN.** 1 P2 was fixed in the last commit.", False),
+    # ROUND-23: the CUE-BEFORE-COUNT spelling — the one a reviewer writes when SUMMARISING.
+    # `ONE_OPEN_COUNT_RE` requires the cue BETWEEN count and token or AFTER the token, so
+    # moving the cue one word to the rest of the sentence flipped the polarity back: measured
+    # at `858191e28`, `CLEAN — 1 remaining P1` blocked while `CLEAN — remaining: 1 P1 (open)`
+    # did not, and `CLEAR_RE` matched the body so it was graded a CLEAR. The EXCLUSION cues
+    # carry the same polarity (they name the finding as the exception to a clean result) and
+    # `single`/`a single` is the commonest one-item spelling.
+    ("CLEAN — remaining: 1 P1 (open)", True),
+    ("CLEAN — outstanding: one P1", True),
+    ("CLEAN apart from a single P1.", True),
+    ("NO ISSUES FOUND except 1 P1.", True),
+    ("Everything landed cleanly, other than 1 P2 in the guard.", True),
+    # …and the CLOSED direction stays certifiable: a completing verb after the token means the
+    # finding was fixed, which is the false-BLOCK direction round 8 measured.
+    ("**Outcome: CLEAN.** remaining: 1 P1 was fixed and verified.", False),
+    ("**Outcome: CLEAN.** apart from a single P2, now closed after round 9.", False),
 )
 
 
