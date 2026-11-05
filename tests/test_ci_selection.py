@@ -7206,9 +7206,16 @@ def test_the_flat_default_value_pin_bites_on_the_pre_fix_row_and_spares_a_ci_rea
     tail (a CI basis), never on its value. Reusing the LIVE tail exempts the
     reconstructed pre-fix value the moment `--refresh-durations` adopts this row
     onto its row line — which the row's own note promises it will — and this pin
-    then reds about its own fixture. `""` is the FAITHFUL pre-fix tail: `36b028494`
-    carried `4.0` bare on the row line, its measurement note in the continuation
-    block below (#10726 review round 4, P2).
+    then reds about its own fixture. `""` is the FAITHFUL pre-fix tail: the `4.0`
+    row carried nothing after it on its row line, its measurement note in the
+    continuation block below (#10726 review round 4, P2).
+
+    The pre-fix state is dated by its own commits, not by memory: `33b312feb`
+    (`fix(10692)`) INTRODUCED the row as `…search_keys_shape.py: 4.0` with an empty
+    row-line tail, and `36b028494` (`fix(10726)`) is the commit that REPLACED it
+    with `2.0` (`git show 36b028494^:config/ci-surfaces.yml` still carries `4.0`;
+    `git show 36b028494:config/ci-surfaces.yml` carries `2.0`). So the fixing commit
+    is `36b028494` and the carrier of the defect is its parent.
     """
     from tools.ci_selection import load_manifest
     real = load_manifest()["durations"]
