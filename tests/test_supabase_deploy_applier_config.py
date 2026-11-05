@@ -106,6 +106,22 @@ def _applier_steps() -> list[dict]:
     return steps
 
 
+def _mutating_steps() -> list[dict]:
+    """The steps that actually RUN a hosted-mutating CLI command (by command position)."""
+    mutating = ("supabase db push", "supabase functions deploy", "supabase migration repair")
+    return [
+        step
+        for step in _applier_steps()
+        if any(c.startswith(mutating) for c in _commands_in(step))
+    ]
+
+
+def _commands_in(step: dict) -> list[str]:
+    """The CLI invocations one step runs (shell line-continuations joined, prose skipped)."""
+    body = str(step.get("run") or "").replace("\\\n", " ")
+    return [line.strip() for line in body.splitlines() if line.strip().startswith("supabase ")]
+
+
 def _applier_commands() -> list[str]:
     """The Supabase CLI commands the workflow actually RUNS, one string per invocation.
 
@@ -115,14 +131,7 @@ def _applier_commands() -> list[str]:
     correct file when a matcher is broad enough to read prose as a command, which is why the seam
     is the command position rather than a substring anywhere in the body.
     """
-    commands: list[str] = []
-    for step in _applier_steps():
-        body = str(step.get("run") or "").replace("\\\n", " ")
-        for line in body.splitlines():
-            stripped = line.strip()
-            if stripped.startswith("supabase "):
-                commands.append(stripped)
-    return commands
+    return [command for step in _applier_steps() for command in _commands_in(step)]
 
 
 def test_the_production_applier_is_version_pinned() -> None:
@@ -172,12 +181,45 @@ def test_the_apply_and_function_steps_pass_yes() -> None:
             "`supabase db push` on a hosted target is consent-gated in CLI v3 and cannot prompt "
             "in CI: without `--yes` it applies ZERO migrations (#10896)"
         )
+        # The flag set alone does not prove the applier APPLIES: `--dry-run` keeps both flags and
+        # exits 0 having applied nothing, and a `db push` with no remote selector silently targets
+        # the LOCAL stack (`Target: local stack (127.0.0.1:54322)` → DbConnectError). Either edit is
+        # one token, and either leaves a green suite over an applier that did nothing — the exact
+        # "reads as a deploy" inversion this module exists to catch.
+        assert not re.search(r"--dry[-_]run", cmd), (
+            f"`--dry-run` must never reach the production applier ({cmd!r}): it prints the plan and "
+            f"applies nothing, and it exits 0 — a deploy that looks successful and left the schema "
+            f"unapplied (#10896, #3627)"
+        )
+        assert re.search(r"--(linked|remote)\b", cmd), (
+            f"the production apply must name its REMOTE target ({cmd!r}): without `--linked`/"
+            f"`--remote`, `db push` addresses the local stack (127.0.0.1:54322) and applies nothing "
+            f"to production (#10896)"
+        )
+        if "--linked" in cmd:
+            assert any(
+                c.startswith("supabase link") for c in commands
+            ), (
+                "`db push --linked` needs a linked project: the workflow must still run "
+                "`supabase link --project-ref …` before it, or the push dies with "
+                "ProjectRefNotLinkedError (#10896)"
+            )
     fn_deploys = [c for c in commands if c.startswith("supabase functions deploy")]
     assert fn_deploys, "the edge-function deploy steps must still exist (#3627 co-move)"
     for cmd in fn_deploys:
         assert "--yes" in cmd, (
             "`supabase functions deploy` is consent-gated in CLI v3; without `--yes` the schema "
             "applies and the app half never flips — the mismatched pair #3627 exists to prevent"
+        )
+    # A failed applier must still FAIL. `continue-on-error: true` on any mutating step satisfies the
+    # job's implicit `success()`, so `Dispatch deploy-hosted` (the last step, #3627) fires over an
+    # unapplied schema — a broken deploy that reads as a successful one, with every flag above
+    # intact. `test_comove_dispatch_3627` pins this on the DISPATCH step only, never on the applies.
+    for step in _mutating_steps():
+        assert not step.get("continue-on-error"), (
+            f"step {step.get('name')!r} runs a hosted mutation and must not set `continue-on-error`: "
+            f"a failed apply would stop blocking, and the app flip at the end of the same job would "
+            f"fire over an unapplied schema (#10896, #3627)"
         )
 
 
@@ -237,21 +279,22 @@ def test_the_drift_banner_remedy_passes_yes_too() -> None:
     Asserted on the PARSED workflow (this file's convention), and only on banner messages that
     print the consent-gated remedy, so a banner carrying prose alone cannot false-red.
     """
-    # One message per `::warning::` rather than one per PHYSICAL LINE, and the selector names the
-    # command root, not just its flag: both narrow a false-red found in review. A cosmetic shell
-    # line-continuation reflow is semantically identical (the shell deletes `\` + newline), but it
-    # would separate `--yes` from the remedy on the next physical line and red a CORRECT banner;
-    # and a future banner that merely EXPLAINS the repair in prose would otherwise be selected as
-    # if it were one. Reuses `_applier_steps()` so there is one YAML traversal to keep in sync.
+    # One message per `::warning::` rather than one per PHYSICAL LINE, shell line-continuations
+    # JOINED first, and the selector matched with a whitespace-tolerant regex: all three narrow a
+    # false-red found in review. A cosmetic reflow is semantically identical (the shell deletes
+    # `\` + newline) but would separate `migration repair` from `--status applied` — or `--yes`
+    # from the remedy — on the next physical line and red a CORRECT banner. A future banner that
+    # merely EXPLAINS the repair in prose is still excluded by the command root, and `_applier_steps()`
+    # keeps one YAML traversal to maintain.
     banners = [
         "::warning::" + part
         for step in _applier_steps()
-        for part in str(step.get("run") or "").split("::warning::")[1:]
+        for part in str(step.get("run") or "").replace("\\\n", " ").split("::warning::")[1:]
     ]
     remedies = [
         banner
         for banner in banners
-        if "migration repair" in banner and "--status applied" in banner
+        if re.search(r"migration\s+repair", banner) and re.search(r"--status\s+applied", banner)
     ]
     assert remedies, (
         "the drift banner must still name the `migration repair --status applied` remedy: an "
