@@ -875,6 +875,141 @@ class CacheTest(unittest.TestCase):
         self.assertEqual(sent.count("--hostname"), 1, f"exactly one host must reach gh: {sent!r}")
         self.assertIn("--hostname=ghe.example.com", sent, "the caller's explicit choice must win")
 
+    def test_the_tenancy_and_localhost_families_use_the_dotcom_token(self) -> None:
+        """gh folds `*.ghe.com`, `*.github.com`, `github.localhost` into the GH_TOKEN family.
+
+        Hand-listing `github.com` + `*.ghe.com` left `github.localhost` (gh's local-API and
+        Codespaces host) falling to the enterprise family, so gh sent `GH_TOKEN` while the
+        digest hashed something else - two genuinely different credentials produced the SAME
+        digest and `rate_limit` crossed between them, reported fresh.
+        """
+        (self.stubdir / "body").write_text('{"resources": {"core": {"remaining": 4990}}}')
+        clean = {k: v for k, v in os.environ.items() if k not in (
+            "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN",
+            "GH_HOST", "GH_CONFIG_DIR", "XDG_CONFIG_HOME")}
+
+        def read(token: str, repo: str) -> tuple[int, str]:
+            env = dict(clean, GH_TOKEN=token, GH_STUB_DIR=str(self.stubdir),
+                       GH_CONFIG_DIR=str(Path(self.tmp) / "no-config"))
+            proc = subprocess.run(
+                [sys.executable, str(TOOL), "get", "rate_limit", "--repo", repo,
+                 "--gh", str(self.stub), "--cache-dir", str(self.cachedir)],
+                capture_output=True, text=True, env=env,
+            )
+            return proc.returncode, proc.stdout
+
+        for host in ("github.localhost", "acme.ghe.com", "api.github.com"):
+            repo = f"{host}/o/n"
+            read("account-A", repo)
+            # ⛔ READ A SECOND TIME AND REQUIRE A HIT. Without this the test does not
+            # discriminate: a host that falls to the WRONG family makes the credential
+            # unresolvable, and the unresolvable path also costs exactly one call (it fetches
+            # live and stores nothing). Only a HIT proves the family was chosen correctly.
+            settled = self.calls()
+            read("account-A", repo)
+            self.assertEqual(self.calls(), settled, f"{host}: a repeat read must HIT, so the token must be resolvable")
+
+            (self.stubdir / "body").write_text('{"resources": {"core": {"remaining": 12}}}')
+            before = self.calls()
+            code, out = read("account-B", repo)
+            self.assertEqual(code, 0, f"{host}")
+            self.assertEqual(self.calls(), before + 1, f"{host} must MISS on a credential change")
+            self.assertIn("12", out, f"{host}: a GH_TOKEN change is a different account")
+            self.assertNotIn("4990", out)
+
+    def test_the_documented_token_order_is_kept(self) -> None:
+        """With both spellings set, gh sends `GH_TOKEN`; the digest must follow that one.
+
+        Reversing the family's order made two lanes that share `GITHUB_TOKEN` but differ in
+        `GH_TOKEN` collide - the same silent-wrong-quota class as the host-blind bug.
+        """
+        (self.stubdir / "body").write_text('{"resources": {"core": {"remaining": 4990}}}')
+        base = {k: v for k, v in os.environ.items() if k not in (
+            "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN",
+            "GH_HOST", "GH_CONFIG_DIR")}
+        env = dict(base, GH_TOKEN="the-one-gh-sends", GITHUB_TOKEN="shared-by-two-lanes",
+                   GH_STUB_DIR=str(self.stubdir), GH_CONFIG_DIR=str(Path(self.tmp) / "no-config"))
+        for _ in range(2):
+            subprocess.run(
+                [sys.executable, str(TOOL), "get", "rate_limit", "--gh", str(self.stub), "--cache-dir", str(self.cachedir)],
+                capture_output=True, text=True, env=env,
+            )
+        self.assertEqual(self.calls(), 1, "two identical reads are one call")
+
+        (self.stubdir / "body").write_text('{"resources": {"core": {"remaining": 6}}}')
+        before = self.calls()
+        r = subprocess.run(
+            [sys.executable, str(TOOL), "get", "rate_limit", "--gh", str(self.stub), "--cache-dir", str(self.cachedir)],
+            capture_output=True, text=True,
+            env=dict(env, GH_TOKEN="the-one-gh-sends-differently"),
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.calls(), before + 1, "a change in GH_TOKEN (the one gh sends) must MISS")
+        self.assertIn("6", r.stdout)
+
+    def test_gh_config_dir_wins_over_xdg_config_home(self) -> None:
+        """gh's precedence is `GH_CONFIG_DIR` -> `$XDG_CONFIG_HOME/gh` -> `~/.config/gh`."""
+        (self.stubdir / "body").write_text('{"resources": {"core": {"remaining": 4990}}}')
+        base = {k: v for k, v in os.environ.items() if k not in (
+            "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN",
+            "GH_HOST", "GH_CONFIG_DIR", "XDG_CONFIG_HOME")}
+        xdg = Path(self.tmp) / "xdg-precedence"
+        (xdg / "gh").mkdir(parents=True)
+        (xdg / "gh" / "hosts.yml").write_text("github.com:\n    oauth_token: XDG-ACCOUNT\n")
+        ghc = Path(self.tmp) / "ghc-precedence"
+        ghc.mkdir()
+        (ghc / "hosts.yml").write_text("github.com:\n    oauth_token: GH_CONFIG_DIR-ACCOUNT\n")
+
+        # Both set: the answer must be keyed by GH_CONFIG_DIR's token. Read it, then change
+        # ONLY GH_CONFIG_DIR's token and require a MISS.
+        env = dict(base, GH_CONFIG_DIR=str(ghc), XDG_CONFIG_HOME=str(xdg), GH_STUB_DIR=str(self.stubdir))
+        self.run_env_get(env)
+        (ghc / "hosts.yml").write_text("github.com:\n    oauth_token: GH_CONFIG_DIR-ACCOUNT-2\n")
+        (self.stubdir / "body").write_text('{"resources": {"core": {"remaining": 9}}}')
+        before = self.calls()
+        out = self.run_env_get(env)
+        self.assertEqual(self.calls(), before + 1, "GH_CONFIG_DIR must win over XDG_CONFIG_HOME")
+        self.assertIn("9", out)
+
+    def test_status_agrees_with_get_on_a_spelled_host(self) -> None:
+        """`status` still tied the host to `{repo}`, so it denied entries `get` had written.
+
+        It reported `host: github.com` and `present: false` for an entry the very next
+        `get --repo ghe.example.com/...` served: a hit could not be attributed to a server,
+        which is the whole point of that report.
+        """
+        r = self.run_tool("get", "rate_limit", "--repo", "ghe.example.com/o/n", "--gh", str(self.stub),
+                          "--cache-dir", str(self.cachedir))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        sent = (self.stubdir / "argv.log").read_text()
+        self.assertIn("--hostname ghe.example.com", sent, "the spelled host must reach gh for rate_limit too")
+
+        st = self.run_tool("status", "rate_limit", "--repo", "ghe.example.com/o/n", "--cache-dir", str(self.cachedir))
+        self.assertEqual(st.returncode, 0, st.stderr)
+        report = json.loads(st.stdout)
+        self.assertEqual(report["host"], "ghe.example.com", "status must name the server")
+        self.assertTrue(report["present"], "status must find the entry get wrote")
+
+    def test_a_pass_through_that_names_the_host_itself_is_not_refused(self) -> None:
+        """The refusal must fire only when no template token already names the host.
+
+        `--argv repo view ghe.example.com/o/n` and `-R ghe.example.com/o/n` are real gh
+        invocations that DO express the host; refusing them broke a working call, and it fired
+        for any lane exporting `GH_REPO=<host>/<owner>/<repo>` without typing `--repo`.
+        """
+        for argv in (("repo", "view", "ghe.example.com/o/n"), ("repo", "view", "-R", "ghe.example.com/o/n")):
+            r = self.run_tool("get", "repo", "--repo", "ghe.example.com/o/n", "--gh", str(self.stub),
+                              "--cache-dir", str(self.cachedir), "--argv", *argv)
+            self.assertEqual(r.returncode, 0, f"{' '.join(argv)} expresses the host: {r.stderr}")
+
+    def run_env_get(self, env: dict) -> str:
+        r = subprocess.run(
+            [sys.executable, str(TOOL), "get", "rate_limit", "--gh", str(self.stub), "--cache-dir", str(self.cachedir)],
+            capture_output=True, text=True, env=env,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return r.stdout
+
     def test_an_api_pass_through_never_gets_a_hosted_route(self) -> None:
         """For an `api` route the host is `--hostname`; injecting it into `{repo}` corrupts it.
 
