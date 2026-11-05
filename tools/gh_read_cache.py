@@ -42,7 +42,12 @@ allowed to be wrong. Concretely:
     is refused (rc=2), not cached with a default TTL.
   - Mutable state reads are refused OUTRIGHT (rc=3), by key AND by command:
     `pr view`, `pr checks`, `pr list`, `run view`, `run list`, the Actions REST
-    routes, and the fields `state`/`mergeStateStatus`/`status`/`conclusion`.
+    routes, and the fields `state`/`mergeStateStatus`/`status`/`conclusion`/
+    `merged`/`mergeable` — in every spelling, including `--json`, `--jq`/`-q`,
+    `--template`/`-t`, the `=`-attached forms, and jq's bracket index `.["state"]`.
+    The denylist is a REFUSAL CONTRACT, not the safety property: `--argv` stores
+    nothing, so a route it has never heard of cannot poison the cache — it only
+    spends the call it would have spent anyway.
   - `--argv` is a **pass-through**: it fetches and emits, and **stores nothing**.
     An override is not the declared command, so it has no declared invariant to
     cache — and a denylist of routes is not an identity, which is exactly how a
@@ -81,11 +86,14 @@ Deliberately NOT declared:
   - the Actions runner list (autoscale changes it), every PR/run/check read (all mutable),
     and `.mergify.yml` (a file read, not an API read — no quota to save).
 
-Cache identity is (key, repo, base, effective argv) — but `repo`/`base` participate ONLY
-when the declared route actually references `{repo}`/`{base}`. Keying them unconditionally
+Cache identity is (key, host, repo, base, effective argv). `repo`/`base` participate ONLY
+when the declared route actually references `{repo}`/`{base}`: keying them unconditionally
 fragmented the cache per branch/per repo for routes that do not vary by either, spending
 two calls for one answer; and omitting `base` when it IS used once served `main`'s policy
-as `release/1.0`'s.
+as `release/1.0`'s. `host` participates ALWAYS — it is which server answered, and the
+`/rate_limit` buckets are per instance — so it is canonicalised (`GH_HOST`, else
+`github.com`) rather than left blank, which would have made `o/n` and `github.com/o/n` two
+entries for one repository.
 
 Usage
 -----
@@ -111,6 +119,11 @@ Seams
              GH_READ_CACHE_GH    path to the `gh` binary (default `gh` on PATH)
              GH_REPO             default for `--repo` (gh's own variable; both `OWNER/REPO`
                                  and gh's documented `HOST/OWNER/REPO` are accepted)
+             GH_HOST             the instance, when `--repo` carries no `HOST/` prefix.
+                                 ⛔ THIS SEAM SELECTS THE CACHE ENTRY, so a lane that sets
+                                 it reads a different cache than one that does not —
+                                 undocumented it was invisible (a reviewer greped for the
+                                 env vars this tool reads and found only two).
              --gh / --cache-dir  the same as the first two, per invocation
 """
 from __future__ import annotations
@@ -206,6 +219,11 @@ MUTABLE_ARGV: tuple[tuple[tuple[str, ...], str], ...] = (
     (("run", "watch"), "run status"),
     (("api", "repos/{repo}/actions/runs"), "Actions run state"),
     (("api", "repos/{repo}/actions/workflows"), "Actions run state"),
+    # The rest of the Actions family (`artifacts`, `caches`, `secrets`, `variables`) is
+    # live too, and the docstring tells callers the Actions REST routes are refused — so
+    # the prefix is the FAMILY, not two members of it. (Nothing is cached either way;
+    # this keeps the documented refusal honest rather than narrowing the claim.)
+    (("api", "repos/{repo}/actions"), "the Actions family is live state"),
     (("api", "repos/{repo}/commits"), "branch head moves constantly"),
     (("api", "repos/{repo}/pulls"), "PR state"),
     (("api", "repos/{repo}/issues"), "issue state"),
@@ -253,17 +271,30 @@ def _repo_slug(repo: str) -> tuple[str, str]:
         raise Usage(f"--repo must be owner/name (or host/owner/name), got {repo!r}")
     for piece in ([host] if host else []) + parts:
         # A slug with whitespace or a query/fragment would reach gh as a different route.
-        if not piece or any(ch in piece for ch in " \t\n?#"):
+        # ⛔ BRACES TOO: `--repo 'o/{repo}'` used to be substituted a SECOND time by
+        # `_format_argv`, so the placeholder survived into `api repos/o/{repo}` and the
+        # identity named a question the fetch never asked (falsifying the premise of
+        # `test_no_unresolved_placeholder_ever_reaches_gh`). No real slug carries braces.
+        if not piece or any(ch in piece for ch in " \t\n?#{}"):
             raise Usage(f"--repo segment {piece!r} is not a valid repository component")
     return host, "/".join(parts)
 
 
+def _default_host() -> str:
+    """The instance gh would talk to with no `HOST/` prefix and no `--hostname`.
+
+    ⛔ CANONICALISED, NOT BLANK. Leaving it `""` made `--repo o/n` and `--repo
+    github.com/o/n` two cache entries for ONE repository: `get` wrote one, `status` looked
+    for the other and reported `present: false`, and the next `get` spent a call to fetch
+    what was already on disk. That is the same fragmentation the `base` gate was fixed for.
+    """
+    return os.environ.get("GH_HOST", "") or "github.com"
+
+
 def _resolve_repo(repo: str) -> tuple[str, str]:
-    """(host, slug), with gh's own `GH_HOST` supplying the instance when not spelled."""
+    """(host, slug), with `GH_HOST` — else github.com — supplying an unspelled instance."""
     host, slug = _repo_slug(repo)
-    if not host:
-        host = os.environ.get("GH_HOST", "")
-    return host, slug
+    return (host or _default_host()), slug
 
 
 def _cache_dir(override: str | None = None) -> Path:
@@ -294,7 +325,12 @@ def _identity(key: str, repo: str, base: str, argv: list[str], template: tuple[s
     return {
         "key": key,
         "repo": repo if uses_repo else "",
-        "host": host if uses_repo else "",
+        # ⛔ THE HOST IS UNCONDITIONAL. `repo`/`base` are gated on "when used" because a
+        # route that does not reference them cannot vary by them; the HOST is different —
+        # it is WHICH SERVER ANSWERED, for every route including the account-scoped
+        # `/rate_limit`, whose buckets are per instance. Gating it on `uses_repo` blanked
+        # it for `rate_limit` and served one GHES instance's counters as another's, fresh.
+        "host": host,
         "base": base if uses_base else "",
         "argv": list(argv),
     }
@@ -496,6 +532,14 @@ def _verdict_field_names(tokens: tuple[str, ...]) -> set[str]:
                 names.add(piece.split(".")[-1].lower())
         for expr in re.findall(r"\.([A-Za-z_][A-Za-z0-9_]*)", val):
             names.add(expr.lower())
+        # ⛔ JQ'S BRACKET-INDEX FORM IS A SEPARATE SPELLING. `.["state"]`,
+        # `$x["mergeStateStatus"]`, `-q '.["conclusion"]'` and `.["state"] // empty` were
+        # all SERVED rc=0: the quote characters defeated both the name splitter and the
+        # `.field` regex, so five real verdict reads slipped past a guard that refused
+        # `.state`. Only QUOTED bracket keys are read — a quoted STRING COMPARISON
+        # (`map(select(.name=="state"))`) is a filter, not a projection, and stays allowed.
+        for bracket in re.findall(r"\[\s*[\"']([A-Za-z_][A-Za-z0-9_]*)[\"']\s*\]", val):
+            names.add(bracket.lower())
     names.discard("")
     return names
 
@@ -601,7 +645,7 @@ def cmd_get(args: argparse.Namespace) -> int:
         # for the account-scoped `/rate_limit` both made the key unusable bare and split
         # the cache per repo — two calls for one answer.
         uses_repo = any("{repo}" in a for a in template)
-        host, repo = _resolve_repo(args.repo) if uses_repo else ("", "")
+        host, repo = _resolve_repo(args.repo) if uses_repo else (_default_host(), "")
         argv = _format_argv(template, repo, args.base)
         # (2) COMMAND-level refusal, as defence in depth (see refuse_if_mutable).
         refuse_if_mutable(args.key, tuple(argv), tuple(template), repo, args.base)
@@ -699,7 +743,7 @@ def cmd_status(args: argparse.Namespace) -> int:
             raise Usage(f"{args.key!r} is not a declared invariant")
         ttl = _effective_ttl(args.ttl, decl.ttl)
         uses_repo = any("{repo}" in a for a in decl.argv)
-        host, repo = _resolve_repo(args.repo) if uses_repo else ("", "")
+        host, repo = _resolve_repo(args.repo) if uses_repo else (_default_host(), "")
     except Refused as exc:
         sys.stderr.write(f"gh_read_cache: REFUSED — {exc}\n")
         return 3
@@ -732,6 +776,7 @@ def cmd_status(args: argparse.Namespace) -> int:
             {
                 "key": args.key,
                 "repo": repo,
+                "host": host,
                 "base": args.base,
                 "present": entry is not None,
                 "fresh": fresh,
