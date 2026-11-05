@@ -1949,14 +1949,47 @@ def test_the_renderer_renders_a_log_from_the_committed_record(monkeypatch):
     assert "e1_min_before_share 0.35" in render(moved)
 
 
-def test_the_committed_score_record_is_what_the_probe_produces():
+def test_the_committed_score_record_is_what_the_probe_produces(tmp_path):
     """P2-10: the committed record may not drift from its own inputs.
 
     Without this, `e1b`, `e2b`, `gate_drops` and `denominators` could be
     hand-edited (or fall behind a probe change) while every other pin stayed
     green — the artifact would then be a claim, not a measurement.
+
+    ⛔ The claim this pin is CITED for is byte-level — `config/ci-surfaces.yml`'s
+    `durations` note, item 72: *"reproduce `e1-e2-scores.json` byte-for-byte"* —
+    and `==` over two parsed values does not establish it: key order and
+    formatting are not preserved by value equality, so a reformat or a
+    renumbered-key hand edit passed the value pin while a maintainer reading the
+    note believed the bytes had been checked (#10610 review at `48187660a`). The
+    producer writes `json.dumps(record, indent=1) + "\n"`
+    (`probes/e1_e2_scores.py:1524`), so the byte property is exactly that
+    expression.
+
+    The comparison is over BYTES, not `read_text()`: universal-newline
+    translation would make a CRLF-rewritten record read back identical to the
+    producer's LF output, which is precisely the serialization drift this half
+    exists to refuse. Do not "simplify" it back to `read_text()`.
+
+    VALUE is asserted first and separately, because a drifted number should name
+    the region that moved instead of printing a whole-file diff.
     """
-    assert scores_probe.score(_REPO) == json.loads(SCORES.read_text())
+    produced = scores_probe.score(_REPO)
+    committed = SCORES.read_bytes()
+    assert produced == json.loads(committed)
+    assert (json.dumps(produced, indent=1) + "\n").encode() == committed, (
+        "the committed record is value-equal but NOT byte-equal to what the "
+        "probe writes — its serialization (indent=1, one trailing newline) "
+        "drifted, which the value assertion above cannot see")
+
+    # Non-vacuity, measured: a VALUE-equal / BYTE-different form of the same
+    # record is exactly what the value half cannot refuse (a reformat to
+    # `indent=2`), and the byte half does. Without this the two assertions above
+    # would be indistinguishable from one, which is the state the review found.
+    reformatted = tmp_path / SCORES.name
+    reformatted.write_text(json.dumps(produced, indent=2) + "\n")
+    assert json.loads(reformatted.read_bytes()) == produced  # value: accepts
+    assert reformatted.read_bytes() != (json.dumps(produced, indent=1) + "\n").encode()
 
 
 def test_the_e1b_note_claims_only_the_arm_the_record_carries():
