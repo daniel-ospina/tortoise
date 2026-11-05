@@ -670,14 +670,29 @@ def preflight(repo: str, api_base: str, token: str, source: str) -> dict:
         default_branch = json.loads(body).get("default_branch") or "main"
 
     # ── 3. ISSUES WRITE — empty payload, so nothing can be created.
-    issues = _write_probe(f"{api_base}/repos/{repo}/issues", token, b"")
+    # ⛔ THE THREE PROBE URLS MUST BE THREE DISTINCT ENDPOINTS (review cycle 10). `repo` is spliced into a
+    # request path, and `http.client` strips everything after `#`, so `--repo 'o/r/issues#'` collapsed the
+    # pulls and contents probes onto the issues path — ONE 422 then satisfied all three gates and the tool
+    # printed GH-WRITE-OK for a token that can neither push nor comment on a PR (measured, with the real
+    # GitHub answer shape: exit 0, stub saw three POSTs to /repos/o/r/issues). A URL-unsafe `repo` is
+    # refused in `main`, and this assertion fails closed even if a future caller reaches `preflight`
+    # directly: a measurement that asked one endpoint three times is not a measurement.
+    _probe_urls = (f"{api_base}/repos/{repo}/issues", f"{api_base}/repos/{repo}/pulls",
+                   f"{api_base}/repos/{repo}/git/refs")
+    if len(set(_probe_urls)) != 3:
+        result.update(reason="usage",
+                      detail="the three write probes do not name three distinct endpoints — a repo value "
+                             "carrying '?' or '#' collapses them onto one path, so one 422 would satisfy "
+                             "all three gates (the value is not echoed)")
+        return result
+    issues = _write_probe(_probe_urls[0], token, b"")
     result["surfaces"]["issues"] = issues["status"]
 
     # ── 4. PULL REQUESTS WRITE — a head ref that cannot exist, so no PR can be created.
     bogus_head = f"gh-write-preflight-{secrets.token_hex(8)}"
     pulls_body = json.dumps({"head": f"refs/heads/{bogus_head}", "base": default_branch,
                              "title": "gh-write-preflight (never created)"}).encode()
-    pulls = _write_probe(f"{api_base}/repos/{repo}/pulls", token, pulls_body)
+    pulls = _write_probe(_probe_urls[1], token, pulls_body)
     result["surfaces"]["pull_requests"] = pulls["status"]
 
     # ── 5. CONTENTS WRITE — a random ref name and an unresolvable sha, so no ref can be created.
@@ -689,7 +704,7 @@ def preflight(repo: str, api_base: str, token: str, source: str) -> dict:
     # MEASURED: 422 "Object does not exist" authorised, 403 refused, and matching-refs stays empty.
     bogus_ref = f"gh-write-preflight-{secrets.token_hex(8)}"
     contents_body = json.dumps({"ref": f"refs/heads/{bogus_ref}", "sha": "0" * 40}).encode()
-    contents = _write_probe(f"{api_base}/repos/{repo}/git/refs", token, contents_body)
+    contents = _write_probe(_probe_urls[2], token, contents_body)
     result["surfaces"]["contents"] = contents["status"]
 
     issues_ok, pulls_ok, contents_ok = issues["ok"], pulls["ok"], contents["ok"]
@@ -766,7 +781,8 @@ def main(argv: list[str]) -> int:
     # MEASURED: `--repo 'o/rép'` makes `http.client` raise `UnicodeEncodeError` (a `ValueError`, so NOT
     # caught by `_request`), escaping as a traceback with EMPTY stdout — breaking the
     # `GH-WRITE-UNAVAILABLE(<reason>)` and `--json` contracts exactly as the newline token did.
-    if not args.repo.isascii() or any(ord(ch) < 0x21 or ord(ch) == 0x7F for ch in args.repo):
+    if (not args.repo.isascii() or any(ord(ch) < 0x21 or ord(ch) == 0x7F for ch in args.repo)
+            or not re.fullmatch(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+", args.repo)):
         if args.json:
             # ⛔ A `--json` CALLER PARSES STDOUT — a human line here is `json.loads` raising on the
             # consumer side, so the usage refusal must serialise like every other refusal does.

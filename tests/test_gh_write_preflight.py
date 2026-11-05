@@ -1018,6 +1018,22 @@ def test_an_INTERIOR_fragment_of_the_credential_is_redacted_too():
             assert frag not in blob, f"an INTERIOR fragment leaked from {read[0]} (offset {start}): {blob!r}"
 
 
+def test_a_repo_value_cannot_collapse_the_three_probes_onto_one_endpoint():
+    """`--repo 'o/r/issues#'` made all three write probes the SAME request (review cycle 10).
+
+    `http.client` strips everything after `#`, so one 422 on `/repos/o/r/issues` satisfied the issues,
+    pulls and contents gates at once and the tool printed GH-WRITE-OK for a token that cannot push. This
+    is reachable from the documented `$OR` default, with no hostile responder.
+    """
+    with _Stub() as s:
+        env = _env(s.base, "github_pat_dummy_finegrained")
+        p = subprocess.run([sys.executable, str(TOOL), "--repo", "o/r/issues#"],
+                           capture_output=True, text=True, env=env, timeout=120)
+    assert p.returncode == 1, f"a collapsing repo value PASSED: {p.stdout}{p.stderr}"
+    assert "GH-WRITE-UNAVAILABLE(usage)" in p.stdout, p.stdout
+    assert "GH-WRITE-OK" not in p.stdout, p.stdout
+
+
 if __name__ == "__main__":
     fns = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]
     failed = 0
