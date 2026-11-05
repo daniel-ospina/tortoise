@@ -343,6 +343,7 @@ class TestTheSweepReportsOutstandingWork:
         """An empty sweep is the ask's own answer, not a refusal."""
         assert IngestOutcome.SKIPPED_NOTHING_PENDING.returncode == 0
 
+    @pytest.mark.skipif(not _DB_URI, reason="needs TORTOISE_DB_URI (docker lane)")
     def test_the_sweep_returns_partial_when_it_leaves_a_document_behind(
             self, tmp_path, monkeypatch):
         """Round 3's P2: `return IngestOutcome.PARTIAL` survived a `pass` mutant.
@@ -377,16 +378,6 @@ class TestTheSweepReportsOutstandingWork:
         # The sweep is graph-GLOBAL: a Source left pending here would make every
         # LATER sweep in this file (and on this lane) read `unresolved` and
         # return PARTIAL. Drop what this test parked.
-        from tortoise.projection import FalkorProjection
-        proj = FalkorProjection.from_uri(_DB_URI)
-        try:
-            proj.g.query("MATCH (s:Source {url: $id}) DETACH DELETE s",
-                         params={"id": doc.name})
-        finally:
-            proj.close()
-
-        # The sweep is graph-global: a Source left pending here would make every
-        # LATER sweep in this file read `unresolved` and return PARTIAL. Drop it.
         from tortoise.projection import FalkorProjection
         proj = FalkorProjection.from_uri(_DB_URI)
         try:
@@ -456,6 +447,24 @@ class TestTheSweepDoesNotRedOnItsOwnIdempotency:
             "a sweep whose ONLY skip is 'already claimed at this extractor "
             f"version' returned {outcome!r} (exit {outcome.returncode}) — a "
             "benign idempotent re-sweep must stay green")
+
+    def test_a_not_document_candidate_is_partial(self, tmp_path, monkeypatch):
+        """The `not_document` half of the predicate, in ISOLATION.
+
+        ⚠️ The live sweep test cannot pin this: `--upgrade-all` is graph-GLOBAL,
+        so a foreign pending Source decides `PARTIAL` for it and the
+        `unresolved or not_document` -> `unresolved` mutant survives. This
+        population has `unresolved == 0`, so `PARTIAL` can only come from
+        `not_document`.
+        """
+        doc = tmp_path / "plain.md"
+        doc.write_text("just prose, no ## headers\n", encoding="utf-8")
+        outcome = self._sweep(tmp_path, monkeypatch,
+                              [(doc.name, str(doc), True, None)], begin_skip=False)
+        assert outcome is IngestOutcome.PARTIAL, (
+            "a sweep whose only candidate has no ## sections returned "
+            f"{outcome!r}; `not_document` is outstanding work")
+        assert outcome.returncode == 1
 
     def test_an_unreadable_candidate_is_partial(self, tmp_path, monkeypatch):
         """The `unresolved` bucket — the arm a `pass` mutant used to survive."""
