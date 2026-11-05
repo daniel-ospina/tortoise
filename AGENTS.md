@@ -367,6 +367,7 @@ Public repository that houses:
 | Finding bugs | `skills/find-bugs/SKILL.md` | Missed regressions |
 | Any non-trivial research | `skills/research/SKILL.md` | Shallow analysis, costly rework |
 | Dispatching work on any issue (worktree, branch, sub-agent, parallel workstream) | `uv run python tools/collision_preflight.py <N> --repo .` — must exit 0 before dispatch | A second agent duplicates live work; overlapping PRs and a wasted dispatch cycle (#3061) |
+| Starting a lane on an issue that must **land** work, **before the first hour of work** (not at the push step — by then the work is already undeliverable) | `uv run python tools/gh_write_preflight.py` — must exit 0 | The 17-lanes/0-landings shape: a contents-READ credential shadowed `GH_TOKEN`, every lane did the work, none could deliver, and all 17 honestly reported "built, parked". ⚠️ It measures ONE thing: that the credential can write repository CONTENTS here. Two limits are named, not hidden: it does not measure the `pull requests: write` permission a PR needs, and a PAT without the `workflow` scope is caught only when the lane's HEAD already touches `.github/workflows/*` (reported as `workflow-scope-denied`) — a lane that ADDS a workflow file later is still refused at push time (#9141, #9589). Exit 2 = could not verify (not a refusal); see the tool's docstring. |
 
 ### ⛔ HARD RULE: MCP/SDK Surface Approval — Ask Daniel Before You Change the Surface
 
