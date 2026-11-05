@@ -3838,7 +3838,7 @@ def test_integrity_problems_catches_a_duplicate_durations_key() -> None:
 
     key = "test_7818_plan_record_5362.py"
     anchor = f"  {key}: "
-    real_value = _yaml.safe_load(real)["durations"][key]
+    real_value = yaml.safe_load(real)["durations"][key]
     # derive a value that provably DIFFERS from the real one, whatever it is
     other_value = 0.9 if real_value != 0.9 else 0.8
     dup = f"  {key}: {other_value}  # duplicate planted by this test\n"
@@ -3868,12 +3868,13 @@ def test_integrity_problems_catches_a_duplicate_durations_key() -> None:
 
     # SECOND ARM — the shape that actually REACHES the writer (#10726 review).
     # A duplicated `.durations:` ROW cannot get there: `_locate_durations_block`
-    # refuses it and `render_refreshed_manifest` raises `DurationsBridgeError`
-    # before any rewriting. What DOES reach it is a duplicated TOP-LEVEL
-    # `durations:` key: that locator stops at the first block's end, so the
-    # renderer does not see the second and emits BOTH blocks, and
-    # `validate_refreshed_manifest` does not report it either. Without this arm
-    # the pin above covers only a shape the writer would have refused anyway.
+    # refuses it, raising `DurationsBridgeError` ("duplicate `durations:` key
+    # 'test_7818_plan_record_5362.py' on lines 8566 and 8567") before anything is
+    # rendered. What DOES reach it is a duplicated TOP-LEVEL `durations:` key:
+    # that locator `break`s at the first block's end, so the renderer never sees
+    # the second — measured, it emits TWO `durations:` blocks and
+    # `validate_refreshed_manifest` reports nothing. Without this arm the pin
+    # above covers only a shape the writer would have refused anyway.
     top_level_dup = real + f"\ndurations:\n  {key}: {other_value}\n"
     top_problems = ci_timing.integrity_problems(top_level_dup)
     assert any("duplicate mapping key 'durations'" in p for p in top_problems), (
