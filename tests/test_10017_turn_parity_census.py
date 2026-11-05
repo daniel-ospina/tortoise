@@ -655,6 +655,18 @@ def test_a_graph_read_row_of_the_wrong_shape_is_an_unreadable_side(
     class _Proj:
         g = _G()
 
+        class _DB:
+            @staticmethod
+            def list_graphs():
+                return ["g"]
+
+        db = _DB()
+
+        # `from_uri('docker://…/g')` resolves the graph name from the URI path;
+        # the fake carries it so the presence pre-check asks about the graph the
+        # real projection would have addressed, not the default.
+        graph_name = _graph_name = "g"
+
         @classmethod
         def from_uri(cls, *a, **k):
             return cls()
@@ -684,6 +696,14 @@ def test_a_non_sequence_graph_vector_refuses_rather_than_reading_as_absent(
 
     class _Proj:
         g = _G()
+
+        class _DB:
+            @staticmethod
+            def list_graphs():
+                return ["g"]
+
+        db = _DB()
+        graph_name = _graph_name = "g"
 
     from tortoise.projection import FalkorProjection
     monkeypatch.setattr(FalkorProjection, "from_uri",
@@ -814,12 +834,22 @@ def _turn_row(inner_id: int, tid: str, sid: str, et=None) -> list:
             "2026-10-25T00:00:00+00:00", "event", None, False, [sid], et]
 
 
-def _patch_proj(monkeypatch, g):
+def _patch_proj(monkeypatch, g, graphs=("g", "tortoise")):
     from tortoise.projection import FalkorProjection
+
+    class _DB:
+        # The presence pre-check asks the STORE (`GRAPH.LIST`) before the leg
+        # addresses the graph it was handed — a projection without a store
+        # handle is not a projection, and a fake that omits it would silently
+        # exercise the "store unreadable" refusal instead of the read.
+        @staticmethod
+        def list_graphs():
+            return list(graphs)
 
     class _Proj:
         def __init__(self, inner):
             self.g = inner
+            self.db = _DB()
 
         @classmethod
         def from_uri(cls, *a, **k):
@@ -1044,18 +1074,141 @@ def test_the_embedded_leg_honours_graph_name(monkeypatch):
             seen["path"] = path
             seen.update(kwargs)
             self.g = _G()
+            # the presence pre-check asks about the projection's OWN resolved
+            # name, so the fake must carry one like the real projection does
+            self.graph_name = self._graph_name = kwargs.get("graph_name")
+
+        class _DB:
+            @staticmethod
+            def list_graphs():
+                return ["team_acme", "tortoise"]
+
+        db = _DB()
 
     import tortoise.projection as projection
     monkeypatch.setattr(projection, "FalkorProjection", _Proj)
 
     graph = tpc.read_graph_turns(None, "/tmp/x.db", "team_acme")
     assert graph["nodes"] == {}
-    assert seen == {"path": "/tmp/x.db", "graph_name": "team_acme"}
+    # the bind is asked to WRITE NOTHING (#11112): the health probe and the
+    # schema DDL are both `GRAPH.QUERY` statements, and on a graph that does not
+    # exist yet the first one creates it.
+    assert seen == {"path": "/tmp/x.db", "graph_name": "team_acme",
+                    "skip_health_check": True, "ensure_indexes": False}
 
     seen.clear()
     tpc.read_graph_turns(None, "/tmp/x.db", None)
-    assert seen == {"path": "/tmp/x.db", "graph_name": "tortoise"}
+    assert seen == {"path": "/tmp/x.db", "graph_name": "tortoise",
+                    "skip_health_check": True, "ensure_indexes": False}
 
+
+# ── the graph must ALREADY EXIST: the gate never creates its own target ──────
+#
+# #11112. Measured on `origin/main` before this pin: `--graph-name tortise`
+# (typo) on a store holding only `tortoise` exited 3 with the correct verdict,
+# and `GRAPH.LIST` afterwards held `['tortise', 'tortoise']` — the first
+# `GRAPH.QUERY` on a selected graph is the creating operation on BOTH legs, so
+# a wrong name wrote a stub graph into the store the run was certifying. The
+# verdict was safe; the store was not, and the exit-3 message then described a
+# graph the previous typo had created (wrong name vs drained graph stopped
+# being distinguishable in practice, not just in the message).
+
+def _embedded_store_with_tortoise(tmp_path, monkeypatch):
+    """A real embedded store holding exactly one graph, `tortoise`."""
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    from tortoise.projection import FalkorProjection
+
+    db_path = str(tmp_path / "census_presence.db")
+    proj = FalkorProjection(db_path, graph_name="tortoise",
+                            skip_health_check=True)
+    try:
+        proj.g.query("CREATE (:Point {id:'s1_t1', is_episodic:true, "
+                     "pointKind:'event'})")
+        assert sorted(proj.db.list_graphs()) == ["tortoise"]
+    finally:
+        proj.close()
+    return db_path
+
+
+def test_a_wrong_graph_name_is_REFUSED_before_it_creates_the_graph(
+        tmp_path, monkeypatch):
+    """The gate must not mint the target it certifies (#11112)."""
+    db_path = _embedded_store_with_tortoise(tmp_path, monkeypatch)
+
+    with pytest.raises(tpc.CensusError) as exc:
+        tpc.read_graph_turns(None, db_path, "tortise")
+    assert "does not exist" in str(exc.value)
+    assert "tortoise" in str(exc.value)      # names what IS there
+
+    from tortoise.projection import FalkorProjection
+    proj = FalkorProjection(db_path, graph_name="tortoise",
+                            skip_health_check=True)
+    try:
+        # the ROW is the measurement: the typo did not become a graph.
+        assert sorted(proj.db.list_graphs()) == ["tortoise"]
+    finally:
+        proj.close()
+
+
+def test_a_present_graph_is_never_refused_by_the_presence_check(
+        tmp_path, monkeypatch):
+    """A drained/existing graph still reads — presence is not emptiness.
+
+    `--expect-empty` is #10017's own post-purge re-run: after the delete the
+    graph legitimately holds zero turn nodes but must still EXIST, or the
+    presence check would refuse the exact run the issue ends on.
+    """
+    db_path = _embedded_store_with_tortoise(tmp_path, monkeypatch)
+    graph = tpc.read_graph_turns(None, db_path, "tortoise")
+    assert "s1_t1" in graph["nodes"]
+
+
+def test_an_unlistable_store_REFUSES_rather_than_reading_through(
+        monkeypatch):
+    """Fail closed: "I could not ask" is not "the graph is there"."""
+    class _DB:
+        @staticmethod
+        def list_graphs():
+            raise RuntimeError("store went away")
+
+    class _Proj:
+        db = _DB()
+        g = object()
+
+    import tortoise.projection as projection
+    monkeypatch.setattr(projection, "FalkorProjection", lambda *a, **k: _Proj())
+    with pytest.raises(tpc.CensusError) as exc:
+        tpc.read_graph_turns(None, "/tmp/x.db", "tortoise")
+    assert "could not be listed" in str(exc.value)
+
+
+def test_a_caller_holding_the_handle_does_not_re_ask_the_store(monkeypatch):
+    """The delete-time re-check addresses a handle it ALREADY holds.
+
+    `purge_legacy_turns` re-reads a session through the projection it is about
+    to delete from (`g=proj.g`, #10483 review P2-1). Listing the store there
+    would ask a second connection about the graph the caller is already
+    addressing — and refuse work that is provably addressable.
+    """
+    class _G:
+        def query(self, cypher, params=None):
+            class _R:
+                result_set = [[0]] if "count" in cypher else []
+            return _R()
+
+    class _Proj:
+        class _DB:
+            @staticmethod
+            def list_graphs():
+                raise AssertionError("the store was listed for a bound handle")
+
+        db = _DB()
+        g = _G()
+
+    import tortoise.projection as projection
+    monkeypatch.setattr(projection, "FalkorProjection", lambda *a, **k: _Proj())
+    assert tpc.read_graph_turns(None, None, None, node_ids=["s1_t1"],
+                                g=_Proj.g)["nodes"] == {}
 
 # ── the record leg: its door, its SQL contract, and its refusals ───────────
 #
@@ -2361,6 +2514,13 @@ def test_expect_empty_reaches_a_verdict_when_the_local_record_is_absent(
         def __init__(self, inner=None):
             self.g = _G()
 
+        class _DB:
+            @staticmethod
+            def list_graphs():
+                return ["g"]
+
+        db = _DB()
+
     class _G:
         def query(self, cypher, params=None):
             class R:
@@ -2399,6 +2559,13 @@ def test_expect_empty_does_NOT_skip_the_hosted_leg(tmp_path, monkeypatch):
     class _Empty:
         def __init__(self, *a, **k):
             self.g = _G()
+
+        class _DB:
+            @staticmethod
+            def list_graphs():
+                return ["g"]
+
+        db = _DB()
 
     monkeypatch.setattr(FalkorProjection, "from_uri",
                         classmethod(lambda cls, *a, **k: _Empty()))

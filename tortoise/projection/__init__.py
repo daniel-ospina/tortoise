@@ -10841,7 +10841,8 @@ class FalkorProjection(
                  graph_name: str = "tortoise",
                  ssl: bool = False,
                  allow_nonstandard_path: bool = False,
-                 skip_health_check: bool = False):
+                 skip_health_check: bool = False,
+                 ensure_indexes: bool = True):
 
         # Epic #1647 (D-1=A): capture whether the caller passed an explicit
         # path BEFORE the no-arg fallback below resolves it — the redirect
@@ -11264,7 +11265,19 @@ class FalkorProjection(
         # Its `None` default is set ABOVE, before the health check — the
         # recovery replay reads it through `required_embedding_dim`, so it must
         # exist first (#5119).
-        self._ensure_indexes()
+        #
+        # ``ensure_indexes=False`` is for a caller that must address the store
+        # WITHOUT writing to it (#11112: the #10017 purge census, which
+        # certifies a store it must not mutate). The DDL this call issues is a
+        # set of `GRAPH.QUERY` statements, and on a graph that does not exist
+        # yet the FIRST ONE CREATES IT — so a read-only instrument could not
+        # avoid minting the target it was asked to look at. Skipping the schema
+        # leaves `_vector_index_api` at its documented `None` and the index
+        # inventory at "not measured"; both are read-path-neutral (the census
+        # issues no vector query), and the schema is recreated by the next
+        # ordinary construction.
+        if ensure_indexes:
+            self._ensure_indexes()
 
         # Lifecycle hardening (plan Task 4 + issue #1005):
         # - _closed flag for idempotent close()
@@ -11875,7 +11888,9 @@ class FalkorProjection(
                 result["corrupt_lines"], result.get("reason"))
 
     @classmethod
-    def from_uri(cls, uri: str, graph_name: str | None = None) -> "FalkorProjection":  # noqa: UP037
+    def from_uri(cls, uri: str, graph_name: str | None = None, *,
+                 skip_health_check: bool = False,
+                 ensure_indexes: bool = True) -> "FalkorProjection":  # noqa: UP037
         """Parse a connection URI into a projection.
 
         Supported schemes (all treated as docker://):
@@ -11914,7 +11929,9 @@ class FalkorProjection(
                    username=endpoint.username,
                    password=endpoint.password,
                    graph_name=graph_name,
-                   ssl=endpoint.ssl)
+                   ssl=endpoint.ssl,
+                   skip_health_check=skip_health_check,
+                   ensure_indexes=ensure_indexes)
 
     def _norm(self, ev: dict) -> dict:
         """Normalize event shape — tolerates API (flat) and script (nested point)."""
