@@ -7,8 +7,9 @@ body:
     attributes:
       value: |
         **Keep this short.** The owner's standing instruction is to reduce bureaucracy, so this form is
-        deliberately four fields. A finding that reaches the graph is worth more than a well-formatted one
-        that stays in a session.
+        deliberately four fields — plus the `working_process` block at the end, which is not a field to
+        fill in but the route the next agent follows (it is pre-filled; leave it alone). A finding that
+        reaches the graph is worth more than a well-formatted one that stays in a session.
 
   - type: input
     id: measured_at
@@ -79,6 +80,45 @@ body:
 
         ⛔ **Mark deliberate departures** with an `OVERRIDES:` line, so a later reader can tell an
         intentional ruling from an accident of history.
+
+  # --- The working process that TRAVELS WITH THE ISSUE --------------------
+  # Rationale and the full argument: docs/ops/ISSUE-WORKING-PROCESS.md.
+  #
+  # ⚠️ WHY A PRE-FILLED `textarea` AND NOT A `markdown` ELEMENT. A `markdown`
+  # element in a GitHub issue form is DISPLAY-ONLY: its text is shown while
+  # filling the form and is NOT submitted into the issue body (GitHub form
+  # schema, docs.github.com — "syntax for GitHub's form schema": markdown
+  # "displays explanatory text ... but is not submitted"). This block must reach
+  # the NEXT reader, who sees only the body, so it has to be a submitted field.
+  # A `textarea` whose `value:` is pre-filled does both: it renders with the
+  # text in place while the form is filled AND it is submitted as body markdown.
+  # Do not "tidy" this into a `markdown` element — that would silently stop
+  # persisting the very thing this field exists for.
+  - type: textarea
+    id: working_process
+    attributes:
+      label: Working this issue — process (keep it; it is authoritative)
+      description: >-
+        The route any agent follows when it takes this issue over. If a dispatch
+        brief omits a step, this wins. Do not delete it; if it needs to change,
+        change docs/ops/ISSUE-WORKING-PROCESS.md first.
+      value: |
+        ## Working this issue — process (authoritative; if a dispatch omitted it, this wins)
+        This issue states a PROBLEM. Its completion criteria do not exist yet — SCOPING creates them (§4).
+        1. PRE-FLIGHT all machines: `uv run python tools/collision_preflight.py <N> --repo .` exits 0, then
+           `uv run python tools/who_is_on.py <N> --repo .` (branches + worktrees + claims). Claim before starting.
+        2. WIP: read the newest `<!-- p01-status -->` comment. Merged work present ⇒ NOT a fresh start; take only unproven criteria.
+        3. RESEARCH (from 0 only): skills/research/SKILL.md in full — preflight + domain classification + three sources incl. external.
+        4. SCOPING ⇒ post a `## Satisfies` COMMENT: one `- [ ]` per acceptance criterion, each with a file:line or named test.
+           ⛔ Do not implement before this comment exists. Name any parallel issue covering part of it; mark a deliberate
+           `⚠️ BAND-AID: <why + where the real fix lives>`.
+        5. PLAN ⇒ skills/writing-plans/SKILL.md, one step per criterion.   6. IMPLEMENT red-first per criterion (red, green, revert-fails).
+        7. PR body: `Satisfies #<N>: <ids>` for partial work · `Closes #<N>` ONLY on the last unchecked criterion · no-issue PRs write neither.
+        8. REVIEW skills/code-review/SKILL.md (fresh context), findings fixed before the record; six ENTRY checks; rail from a linked worktree.
+        9. CLOSE: tick proved criteria in the `## Satisfies` comment; close only when all ticked; read the closure back.
+        ### Claim: `IN FLIGHT: <ids> — branch <b> — box <c> — since <UTC>` appended to the issue's `<!-- p01-status -->` comment.
+    validations:
+      required: false
 
   - type: checkboxes
     id: confirmations
