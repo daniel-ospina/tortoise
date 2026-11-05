@@ -102,6 +102,58 @@ def test_duplicate_sequence_entry_is_refused(tmp_path: Path) -> None:
     assert len(problems) == 1 and "duplicate entry 'test_a.py'" in problems[0]
 
 
+def test_a_duplicate_key_inside_a_nested_mapping_is_refused(tmp_path: Path) -> None:
+    """Depth is the point: `_walk` must RECURSE into `.durations` (#10894).
+
+    WHICH mutant this pins, measured rather than assumed. Every other arm in this file
+    duplicates the ROOT mapping or a `surfaces:` SEQUENCE, and all eleven of them pass
+    on a `_walk` whose mapping branch stops descending into a nested mapping **whose
+    values are all scalars** — the plausible "a dict of scalars is a leaf" shortcut
+    (measured on that mutant: `1 failed, 11 passed`, the failure being this arm). A
+    cruder mutant that never descends a mapping value at all also reds
+    `test_duplicate_sequence_entry_is_refused` (`2 failed, 10 passed`), so this arm's
+    distinct contribution is the scalar-leaf depth, not "nested-ish" in general.
+    `config/ci-surfaces.yml` carries `merge=union`, and
+    `.gitattributes` applies it to the whole FILE — so a retimed block appended on
+    both sides of a base move lands as two `durations:` rows with the SAME key, at
+    exactly the depth this suite did not reach.
+
+    Reproduced from this repo's own history rather than quoted:
+    `git merge-tree --write-tree --merge-base=76f422bd3 d99c25912 641e5f1b3` yields
+    tree `a0d401c30`, and `check_registry()` on that tree's
+    `config/ci-surfaces.yml` returns **12** duplicate keys, all at `.durations`
+    (1,254 rows over 1,242 distinct by `yaml.compose`). The head of that same merge
+    returns **0**. The required `manifest-integrity` job
+    (`.github/workflows/python-ci.yml:590`) runs this validator at every depth, so
+    it was RED for it — but nothing in THIS suite named the class, so a reviewer
+    reading only the tests saw a green tree.
+
+    A duplicated WEIGHT is the silent half: the file still parses, `safe_load`
+    keeps the LAST value, and the shard packer then uses it. This test is
+    non-vacuous in both directions — it rejects a real `.durations` duplicate and
+    passes on a clean document.
+    """
+    victim = tmp_path / "ci-surfaces.yml"
+    victim.write_text(
+        "version: 1\n"
+        "durations:\n"
+        "  test_same.py: 2.0\n"
+        "  test_other.py: 1.0\n"
+        "  test_same.py: 9.0\n",
+        encoding="utf-8",
+    )
+    problems = check_registry(victim)
+    assert len(problems) == 1, problems
+    assert "duplicate mapping key 'test_same.py' at .durations" in problems[0], problems
+
+    clean = tmp_path / "clean.yml"
+    clean.write_text(
+        "version: 1\ndurations:\n  test_same.py: 2.0\n  test_other.py: 1.0\n",
+        encoding="utf-8",
+    )
+    assert check_registry(clean) == [], "a clean nested mapping must NOT be refused"
+
+
 def test_duplicate_name_in_the_frozen_baseline_is_refused(tmp_path: Path) -> None:
     """A name-keyed comparison drops all but the last row — unverified content."""
     victim = tmp_path / "surface-manifest.yml"
