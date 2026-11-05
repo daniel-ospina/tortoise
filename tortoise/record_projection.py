@@ -4821,9 +4821,9 @@ def _narrative_statements(
     # topic descriptor in the narrative's companion column, and would make
     # `SessionText.verbatim_available` true for a session whose narrative is
     # unknown. One carrier owns both columns, so they cannot mean different
-    # things. (The noun matters: the value a post-#10000 row would bring here is a
-    # TOPIC DESCRIPTOR, not prose — a later reader who believes this guard is
-    # about prose will "tidy" it away once prose is gone, #10852 review P3.)
+    # things. (The noun matters: the value a post-#10000 row would bring here is a TOPIC DESCRIPTOR, not the S1
+    # NARRATIVE, though a space-less (CJK) descriptor carries the turn's run verbatim (residual:
+    # `sdk._session_source_metadata`) — which is why this guard is about the COLUMN, not about prose, and a reader who reads it as a prose guard will "tidy" it away, #10852 review P3.)
     if "narrative" in values:
         summary = carrier.get("summary")
         if isinstance(summary, str) and summary.strip():

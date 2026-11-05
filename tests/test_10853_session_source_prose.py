@@ -1,4 +1,6 @@
-"""#10853 — the session `:Source` carries no turn prose, on the RECOVERY door.
+"""#10853 — the session `:Source` carries no turn prose, on the RECOVERY door
+(except a space-less (CJK) run, which arrives whole — the residual the
+`_session_source_metadata` docstring names).
 
 A PRE-#10000 capture wrote the transcript's first substantive utterance as the
 session `Source`'s `summary` and derived `_searchText` from that same value
@@ -142,7 +144,8 @@ def test_the_drop_is_narrow_the_session_metadata_still_projects():
     assert node.props["sessionId"] == "s-10853"
     assert node.props["topics"] == ["fridays", "rebuild"], (
         "`topics` is the capture's word LEXICON (its most frequent content "
-        "words), not a transcript slice — it is the metadata #10000 keeps"
+        "words) — not a CHOSEN transcript slice (a space-less CJK run arrives "
+        "whole, so it can be one; see `_session_source_metadata`'s residual)"
     )
 
 
@@ -421,7 +424,7 @@ def test_the_reconciler_exclusion_is_scoped_to_the_Source_label():
     )
 
 
-# ── THE PROVENANCE LEG (#10965): a post-#10000 pair is METADATA, not prose ──
+# ── THE PROVENANCE LEG (#10965): a post-#10000 pair is METADATA, not a CHOSEN utterance ──
 
 #: The transcript a post-#10000 capture derives its metadata from. Deliberately
 #: NOT the same string as :data:`UTTERANCE`: the two rows these legs discriminate
@@ -464,9 +467,10 @@ def test_a_post_10000_session_row_keeps_the_field_its_fts_index_is_declared_on()
     `record-restore` / `rebuild_from_record` MATERIALISE through `node_from_row`,
     so dropping `_searchText` left a restored session `:Source` with no searchable
     text at all — `tortoise_fts_query(entity_type='source')` never returns it
-    (#3518), silently, on the door this file pins. The pair is no longer prose
-    here: it is the topic lexicon, and the lexicon is the whole point of the
-    capture-side change (#10000).
+    (#3518), silently, on the door this file pins. The pair is no longer a CHOSEN
+    utterance here: it is the topic lexicon (a space-less CJK run arrives whole, so
+    for such a turn the run IS the member — the documented residual), and the
+    lexicon is the whole point of the capture-side change (#10000).
     """
     row = _post_10000_session_row()
     topics = row["topics"]
@@ -487,10 +491,13 @@ def test_a_post_10000_session_row_keeps_the_field_its_fts_index_is_declared_on()
     # wrote, so a served node and a rebuilt node cannot disagree on it.
     assert node.props[SOURCE_SEARCH_TEXT_FIELD] == _source_search_text(topics=topics)
 
-    # ⛔ AND THE KEEP IS NOT A PROSE LEAK: what lands is the bag of words, never
-    # the turn. The transcript's own phrase must not appear in the restored field
-    # — the property this file's sibling guard (`test_10000_source_prose.py`)
-    # scans every node's strings for.
+    # ⛔ AND THE KEEP IS NOT A PROSE LEAK in this fixture: what lands is the bag of
+    # words, never the turn. (A space-less (CJK) run is the one shape where the run
+    # IS the field — `_session_source_metadata`'s residual — so this leg's English,
+    # word-delimited transcript is what makes the absence assertion meaningful.)
+    # The transcript's own phrase must not appear in the restored field, which is
+    # the property this file's sibling guard (`test_10000_source_prose.py`) scans
+    # every node's strings for.
     needle = POST_10000_TRANSCRIPT.split(": ", 1)[1].rstrip(".")
     assert needle.lower() not in node.props[SOURCE_SEARCH_TEXT_FIELD].lower(), (
         "the record door put the transcript's own phrase back on the node"

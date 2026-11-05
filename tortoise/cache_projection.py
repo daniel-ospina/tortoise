@@ -1226,8 +1226,8 @@ def _scalar(value: Any) -> Any:
 #: (already redacted) transcript — and writes `summary` = a display DESCRIPTOR
 #: over it and `_searchText` = `", ".join(topics)`, both from the SAME list in ONE
 #: statement (`sdk._materialize_session_source`). So on a post-#10000 row
-#: `_search_text` is **not a quoted utterance**: it is the lexicon — TOKEN-shaped, so
-#: a space-less CJK run arrives WHOLE and a Thai one FRAGMENTS at its combining marks
+#: `_search_text` is **not a CHOSEN utterance**: in a word-delimited script it is the lexicon — TOKEN-shaped, so
+#: a space-less CJK run arrives WHOLE, i.e. that member IS the turn's prose verbatim; a Thai one FRAGMENTS at its combining
 #: (the residual in `sdk._session_source_metadata`) — and it is the ONLY field the Source
 #: FTS index is declared on (`_FULLTEXT_INDEX_LABEL_FIELDS`), i.e. #3518's findability.
 #: Dropping it by column NAME on such a row silently UN-INDEXES the session on the recovery door (#10965).
@@ -1496,9 +1496,9 @@ def _props_from_row(table: str, row: Mapping[str, Any], *,
     projected = projected_columns(table)
     # §9.1/D1 (#10853): resolved ONCE per row, from the row itself.
     episodic_source = table == "source" and _is_episodic_source_row(row)
-    # ⛔ PROVENANCE, PER ROW (#10965) — never the column's NAME. On a post-#10000
-    # row `_search_text` is the topic lexicon (exactly `", ".join(topics)`), not
-    # prose, and it is the ONLY field the Source FTS index is declared on, so
+    # ⛔ PROVENANCE, PER ROW (#10965) — never the column's NAME. On a post-#10000 row `_search_text` is the topic
+    # lexicon (exactly `", ".join(topics)`) — not a CHOSEN utterance, though a space-less CJK run arrives whole (the
+    # residual in `sdk._session_source_metadata`) — and it is the ONLY field the Source FTS index is declared on, so
     # dropping it un-indexes a restored session. The proof is TWO-TERM (#10852
     # review, P2): the join equality AND a `summary` that is that same join behind
     # `SESSION_SOURCE_SUMMARY_PREFIX`, because a legacy PROSE value can itself BE

@@ -4185,7 +4185,7 @@ def _session_source_metadata(transcript: str) -> tuple[str, list[str]]:
     sentence is still the session's sentence.
 
     So the derived metadata is the session's TOPIC LEXICON — never a CHOSEN sentence and
-    never a quote: the six most frequent content words of the (already redacted) transcript,
+    never a CHOSEN quote: the six most frequent content words of the (already redacted) transcript,
     words the capture already derives, as one stable descriptor (⚠️ a space-less CJK run is
     ONE token and can BE that sentence — see the residual below), keeping a captured session findable through
     ``tortoise_fts_query(entity_type='source')`` — the regression #3518 closed,
