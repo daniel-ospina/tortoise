@@ -404,13 +404,13 @@ def test_a_raw_written_non_scalar_EDGE_direction_reads_as_ABSENT(sdk):
 def test_ingest_reports_a_non_scalar_direction_as_a_SHAPE_violation(sdk):
     """#10520 (A3) — a non-scalar ``direction`` reaches the contract as a REPORT.
 
-    ``_check_connection`` screens the caller's ``direction`` with
+    ``_check_connection`` used to screen the caller's ``direction`` with
     ``direction not in _INGEST_DIRECTION_VALUES`` — a raw frozenset membership
     test — so a non-scalar (``["->"]``, reachable from a JS/Python caller or a
     bulk import) raised ``TypeError: unhashable type: 'list'`` and aborted the
     WHOLE validator with a traceback instead of returning the violation it
-    exists to return. The sibling ``to`` arm two checks above already guards the
-    identical hazard (``isinstance(t, str)`` ⇒ a SHAPE violation), so the
+    exists to return. The sibling ``to`` arm several checks above already guards
+    the identical hazard (``isinstance(t, str)`` ⇒ a SHAPE violation), so the
     contract disagreed with itself about the same value class.
 
     ⛔ ``TypeError`` is not a ``ValueError``, so ``pytest.raises(ValueError)``

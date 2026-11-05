@@ -20313,7 +20313,8 @@ class TortoiseSDK:
                 # a SET KEY there, and an unhashable list/map aborted the whole
                 # pre-flight (#10559). Its ``<->`` stand-in yields the same verdict
                 # as this door's reading; what it does NOT do is name the stored
-                # value in its refusal, which is #11033's residue, not this
+                # value in its refusal — that residue is unrecorded (it is NOT
+                # #11033, which is the ID axis of the same pre-flight), not this
                 # door's.
                 _raw_dir = _rdict.get("direction")
                 _eff_dir = self._canonical_direction(_rtype, _raw_dir)
@@ -24449,8 +24450,8 @@ class TortoiseSDK:
                 # list/map from a JS caller or a bulk import) raised
                 # ``TypeError: unhashable type: 'list'``, aborting the WHOLE
                 # validator with a traceback instead of returning the violation it
-                # exists to return. The ``to`` arm above screens its items the
-                # same way, for the same reason (#9173 review): the contract's job
+                # exists to return. The ``to`` arm screens its items the same way,
+                # for the same reason (#1091's shape guards): the contract's job
                 # is to NAME the bad field, and a traceback names nothing a caller
                 # can act on. ⛔ Scope: this closes the class for ``direction``
                 # ONLY. The sibling ``operator`` and ``relation`` keys are still
