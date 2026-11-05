@@ -1,0 +1,260 @@
+"""Pins for `tools/required_set` — the credential-free REQUIRED-set derivation.
+
+WHY THESE ARE GATE PINS AND NOT UNIT TESTS
+    `tools/required_set.py` decides WHAT COUNTS AS REQUIRED, and every readiness verdict
+    is a statement about that set. A defect here is not "a bug in a helper": it is a
+    fail-OPEN in the thing that certifies a merge, which this repo classes as the one
+    failure a gate may never have. So each case below is written to RED if the protected
+    behaviour is reverted, and the ones that matter say what to revert.
+
+Hermetic: every case writes its own `tmp_path` tree. No DB, no network, no live `gh`.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import json
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+import pytest
+import yaml
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from tools.mergify_config_guard import (  # noqa: E402
+    MERGIFY_REL,
+    RECORD_REL,
+    GuardUnreadable,
+)
+from tools.required_set import (  # noqa: E402
+    RequiredSet,
+    RequiredSetConfigError,
+    RequiredSetUnreadable,
+    derive_from_config,
+    derive_from_ref,
+)
+
+#: The cheap entry checks this repo actually gates entry on.
+ENTRY = ("docs", "test-isolation", "pricing-artifact")
+
+#: The heavy suite, deliberately in `merge_conditions` — the shape #10991 is about.
+HEAVY = "python-ci-gate"
+
+
+def _rule(
+    *, mode: str = "merge", queue: tuple[str, ...] = ENTRY, merge: tuple[str, ...] = (HEAVY,)
+) -> dict[str, Any]:
+    return {
+        "name": "main",
+        "queue_conditions": ["base=main", "-draft", *[f"check-success={c}" for c in queue]],
+        "branch_protection_injection_mode": mode,
+        "merge_conditions": [f"check-success={c}" for c in merge],
+    }
+
+
+def _tree(
+    root: Path,
+    *,
+    rules: list[dict[str, Any]] | None = None,
+    required_contexts: list[str] | None = None,
+    write_record: bool = True,
+) -> Path:
+    """A minimal tree carrying `.mergify.yml` + the committed snapshot.
+
+    `required_contexts` defaults to the union of the rules, so a case only names it when
+    it is deliberately testing a DISAGREEMENT between the two sources.
+    """
+    rules = rules if rules is not None else [_rule()]
+    root.mkdir(parents=True, exist_ok=True)
+    (root / MERGIFY_REL).write_text(
+        yaml.safe_dump({"queue_rules": rules, "merge_protections_settings": {}}), encoding="utf-8"
+    )
+    if write_record:
+        if required_contexts is None:
+            required_contexts = sorted(
+                {
+                    name
+                    for rule in rules
+                    for key in ("queue_conditions", "merge_conditions")
+                    for cond in rule.get(key) or []
+                    if isinstance(cond, str) and cond.startswith("check-success=")
+                    for name in (cond.split("=", 1)[1],)
+                }
+            )
+        record = root / RECORD_REL
+        record.parent.mkdir(parents=True, exist_ok=True)
+        record.write_text(
+            json.dumps({"required_contexts": required_contexts}, indent=2), encoding="utf-8"
+        )
+    return root
+
+
+# ── the split this repo actually has ────────────────────────────────────────
+
+
+def test_derives_this_repo_split_from_the_tracked_config() -> None:
+    """The live tree: entry and merge-time are SEPARATE lists, and the record agrees.
+
+    Revert the split (return one flat `names` list as `queue_names` too) and the
+    assertion on `merge_names` reds.
+    """
+    required = derive_from_config(REPO_ROOT)
+    assert required.mode == "merge"
+    assert HEAVY not in required.queue_names
+    assert HEAVY in required.merge_names
+    assert set(required.names) == set(required.queue_names) | set(required.merge_names)
+    assert required.snapshot_agrees is True
+
+
+def test_a_merge_time_check_is_not_an_entry_check(tmp_path: Path) -> None:
+    """The whole point: `merge_conditions` names must not be reported as entry gates.
+
+    A consumer that treats them as entry reports NOT-READY on every PR head, because
+    Mergify has not run them there (measured 2026-11-04: 0 of 6 open PR heads).
+    """
+    required = derive_from_config(_tree(tmp_path))
+    assert required.queue_names == ENTRY
+    assert required.merge_names == (HEAVY,)
+
+
+# ── the injection mode is READ, and it CHANGES THE ANSWER ──────────────────
+
+
+def test_injection_mode_queue_folds_every_check_into_entry(tmp_path: Path) -> None:
+    """`queue` injection means NOTHING is deferred: every required context gates entry.
+
+    ⛔ THE DISCRIMINATING CASE FOR A FALSE PASS. Under `queue` the protected contexts are
+    injected for queuing AND merging (`.mergify.yml` clause 4), so a consumer that
+    deferred `merge_conditions` would say READY on a head the queue refuses at ENTRY.
+    Revert the fold (`q, m = ..., ()` under mode == "queue") and this reds.
+    """
+    required = derive_from_config(_tree(tmp_path, rules=[_rule(mode="queue")]))
+    assert required.mode == "queue"
+    assert required.merge_names == ()
+    assert set(required.queue_names) == set(ENTRY) | {HEAVY}
+
+
+def test_an_overlap_is_legal_under_queue_and_an_error_under_merge(tmp_path: Path) -> None:
+    """The mode decides whether "named in both lists" is a violation.
+
+    Under `merge` clause 1 requires EXACTLY ONE list; under `queue` the guard REQUIRES
+    `merge_conditions` ⊆ `queue_conditions`, so the overlap is the legal shape.
+    """
+    with pytest.raises(RequiredSetConfigError):
+        derive_from_config(_tree(tmp_path / "a", rules=[_rule(queue=ENTRY, merge=(ENTRY[0],))]))
+    legal = derive_from_config(
+        _tree(tmp_path / "b", rules=[_rule(mode="queue", queue=ENTRY, merge=(ENTRY[0],))])
+    )
+    assert legal.mode == "queue"
+    assert legal.merge_names == ()
+
+
+def test_an_unknown_injection_mode_is_refused(tmp_path: Path) -> None:
+    """A mode this module has not seen is not "probably merge"."""
+    with pytest.raises(RequiredSetUnreadable):
+        derive_from_config(_tree(tmp_path, rules=[_rule(mode="sometimes")]))
+
+
+# ── the snapshot is a witness, and losing it must not be a shortcut ────────
+
+
+def test_a_missing_record_is_a_refusal_not_an_empty_pass(tmp_path: Path) -> None:
+    """Deleting the record must never be the cheapest route to a green set."""
+    with pytest.raises(RequiredSetUnreadable):
+        derive_from_config(_tree(tmp_path, write_record=False))
+
+
+def test_an_empty_record_is_a_refusal(tmp_path: Path) -> None:
+    with pytest.raises(RequiredSetUnreadable):
+        derive_from_config(_tree(tmp_path, required_contexts=[]))
+
+
+def test_a_context_the_record_names_and_the_config_dropped_is_a_config_error(
+    tmp_path: Path,
+) -> None:
+    """THE #3016 REGRESSION. Delete one `check-success=` line and the derived set silently
+    shrinks; the record is the only witness that it is no longer the required set.
+
+    The dangerous direction is the RECORD naming a context the CONFIG does not derive —
+    a name the tool knows is required and would never evaluate. Treat this as a note (or
+    drop the refusal) and the tool reports READY over a red required check.
+    """
+    dropped = ["docs", "test-isolation", "pricing-artifact", HEAVY, "retired-but-required"]
+    with pytest.raises(RequiredSetConfigError) as excinfo:
+        derive_from_config(_tree(tmp_path, required_contexts=dropped))
+    assert "retired-but-required" in str(excinfo.value)
+
+
+def test_an_unreadable_config_is_unreadable(tmp_path: Path) -> None:
+    (tmp_path / MERGIFY_REL).write_text("queue_rules: [[[\n", encoding="utf-8")
+    with pytest.raises(GuardUnreadable):
+        derive_from_config(tmp_path)
+
+
+# ── the protected ref, not the tree being judged ───────────────────────────
+
+
+def _git(cwd: Path, *args: str) -> None:
+    subprocess.run(
+        ["git", "-c", "user.email=t@example.com", "-c", "user.name=t", *args],
+        cwd=str(cwd),
+        check=True,
+        capture_output=True,
+    )
+
+
+def test_derive_from_ref_ignores_a_branch_that_shrinks_its_own_set(tmp_path: Path) -> None:
+    """⛔ A GATE THAT READS ITS OWN SUBJECT IS DEFEATABLE BY ITS SUBJECT.
+
+    A PR can edit `.mergify.yml` AND `docs/ci/required-contexts.json` in one diff, so the
+    two agree with each other and the witness certifies the shrunken set it was just
+    changed to. Verified here by shrinking BOTH in the working tree: `derive_from_config`
+    happily reports the smaller set (that is why it must not be the production read),
+    while `derive_from_ref("HEAD")` still reports the committed one.
+
+    Revert `_read_required_contexts` to read the workdir and this is the bypass.
+    """
+    (tmp_path / MERGIFY_REL).parent.mkdir(parents=True, exist_ok=True)
+    _tree(tmp_path, required_contexts=sorted({*ENTRY, HEAVY}))
+    _git(tmp_path, "init", "-b", "main")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "config")
+
+    # Now the "PR": drop `docs` from the config AND from the record, in one change.
+    shrunk = [*ENTRY[1:], HEAVY]
+    _tree(tmp_path, rules=[_rule(queue=ENTRY[1:])], required_contexts=sorted(shrunk))
+
+    assert "docs" not in derive_from_config(tmp_path).names  # the bypass, if used
+    assert "docs" in derive_from_ref(tmp_path, "HEAD").names  # the committed truth
+
+
+def test_derive_from_ref_refuses_an_unreadable_ref(tmp_path: Path) -> None:
+    """A ref that cannot be read is a REFUSAL — never a fall back to the workdir copy."""
+    _tree(tmp_path)
+    _git(tmp_path, "init", "-b", "main")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "config")
+    with pytest.raises(RequiredSetUnreadable) as excinfo:
+        derive_from_ref(tmp_path, "origin/does-not-exist")
+    assert "origin/does-not-exist" in str(excinfo.value)
+
+
+# ── an empty set is never a pass ───────────────────────────────────────────
+
+
+def test_a_config_with_no_positive_check_condition_is_refused(tmp_path: Path) -> None:
+    rule = _rule(queue=(), merge=())
+    with pytest.raises(RequiredSetUnreadable):
+        derive_from_config(_tree(tmp_path, rules=[rule], required_contexts=[], write_record=False))
+
+
+def test_the_result_is_frozen() -> None:
+    """A verdict input that a consumer can mutate is not a verdict input."""
+    required: RequiredSet = derive_from_config(REPO_ROOT)
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        required.names = ()  # type: ignore[misc]

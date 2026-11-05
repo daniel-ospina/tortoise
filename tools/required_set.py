@@ -69,6 +69,16 @@ THE COMMITTED SNAPSHOT IS A WITNESS, AND ITS ABSENCE IS A REFUSAL
     welcome to cross-check; a disagreement is a loud config error, never a silent
     substitution.
 
+READ FROM THE PROTECTED REF, NEVER FROM THE TREE BEING JUDGED
+    Both inputs are tracked files, so a PR can edit `.mergify.yml` and
+    `docs/ci/required-contexts.json` in the SAME diff — and the two then agree with
+    each other, letting the witness certify the shrunken set it was just changed to.
+    That is why consumers derive through `derive_from_ref` (`origin/main` by default):
+    the required set that governs a merge is the one on the protected ref, not the
+    one the candidate branch would prefer. `derive_from_config` exists for that ref
+    path (and for a deliberate `--ref HEAD` diagnostic), and reads the same parser
+    either way.
+
 The parser is `tools/mergify_config_guard.py` (`_load_mergify`, `_success_names`,
 `_effective_mode`, `KNOWN_INJECTION_MODES`) — the same CI-gated code the guard
 uses for its own clause checks, not a second parser that could drift from it.
@@ -87,7 +97,6 @@ from tools.mergify_config_guard import (
     KNOWN_INJECTION_MODES,
     MERGIFY_REL,
     RECORD_REL,
-    GuardUnreadable,
     _effective_mode,
     _load_mergify,
     _success_names,
@@ -113,9 +122,6 @@ class RequiredSet:
     merge_names: tuple[str, ...] = ()
     snapshot_agrees: bool | None = None
     notes: tuple[str, ...] = ()
-    # False only for a snapshot-only fallback, which cannot be evaluated: the
-    # flat `required_contexts` list carries no entry/merge split.
-    entry_merge_split: bool = True
     # `branch_protection_injection_mode` — LOAD-BEARING, never assumed. Under
     # `merge` (set here) the required contexts are injected for the MERGE only, so
     # `queue_conditions` IS the entry gate and a name in both lists is a config
@@ -125,9 +131,7 @@ class RequiredSet:
     # deferred. A gate that hard-codes one mode disagrees with the guard about
     # what a legal config is; `.mergify.yml` itself says "Read the mode before
     # reasoning about the list".
-    # None on the snapshot-only path: a datum must not assert a config read that
-    # never happened, in a module whose own contract says the mode is never assumed.
-    mode: str | None = None
+    mode: str = "merge"
 
     @property
     def overlap(self) -> tuple[str, ...]:
@@ -212,7 +216,7 @@ def derive_from_config(root: Path) -> RequiredSet:
     overlap = tuple(n for n in q if n in set(m))
     # Only under `merge` is an overlap a CONFIGURATION ERROR (the contract's "named
     # in EXACTLY ONE list"). Under `queue` the guard REQUIRES
-    # merge_conditions subset-of queue_conditions, so an overlap is the legal shape.
+    # `merge_conditions` subset-of `queue_conditions`, so an overlap is the legal shape.
     if mode == "merge" and overlap:
         raise RequiredSetConfigError(
             "check(s) named in BOTH queue_conditions and merge_conditions: "
@@ -221,6 +225,16 @@ def derive_from_config(root: Path) -> RequiredSet:
             "contract (clause 1) requires EXACTLY ONE list; a name in both is a "
             "configuration error, not a de-duplication problem"
         )
+    if mode == "queue":
+        # ⛔ MODE `queue` INJECTS EVERY REQUIRED CONTEXT FOR QUEUING *AND* MERGING
+        # (`.mergify.yml` clause 4), so there is NO merge-time bucket there: every
+        # name gates ENTRY and is evaluated against the PR head. Folding them here,
+        # in the DERIVATION, keeps every consumer safe — a consumer that merely
+        # bucketed `merge_names` as deferred would tell a lane READY on a head the
+        # queue itself would refuse at entry, which is the false PASS this module
+        # exists to prevent. The mode is read above, never assumed; this is where it
+        # changes the ANSWER and not only the overlap rule.
+        q, m = _uniq(list(q) + list(m)), ()
 
     union = tuple(dict.fromkeys(q + m))
     if not union:
@@ -292,22 +306,55 @@ def derive_from_config(root: Path) -> RequiredSet:
     )
 
 
-def resolve_required_set(root: Path) -> RequiredSet:
-    """Config first, committed snapshot second, unreadable third — never an empty pass."""
-    try:
-        return derive_from_config(root)
-    except RequiredSetConfigError:
-        raise  # a config error is a verdict, not a reason to fall back
-    except (GuardUnreadable, RequiredSetUnreadable) as primary:
-        snapshot = _snapshot_names(root)
-        if snapshot:
-            return RequiredSet(
-                names=snapshot,
-                source=f"{RECORD_REL} (committed snapshot fallback)",
-                notes=(f"{MERGIFY_REL} unreadable ({primary}); using the snapshot",),
-                entry_merge_split=False,
-            )
-        raise RequiredSetUnreadable(
-            f"required set unreadable from BOTH sources — {MERGIFY_REL}: {primary}; "
-            f"{RECORD_REL}: absent or carrying no `required_contexts`"
-        ) from None
+def derive_from_ref(cwd: Path, ref: str = "origin/main", *, timeout: int = 60) -> RequiredSet:
+    """Derive the required set as it stands on a PROTECTED ref — never the caller's tree.
+
+    ⛔ A GATE THAT READS ITS OWN SUBJECT IS DEFEATABLE BY ITS SUBJECT. Both inputs are
+    tracked files, so a PR can edit `.mergify.yml` and `docs/ci/required-contexts.json`
+    in the SAME diff and the two agree with each other: the snapshot witness would then
+    certify the shrunken set it was just changed to. Measured on a scratch tree — delete
+    one `check-success=docs` line and `docs` from `required_contexts` together and the
+    derivation reports `snapshot_agrees: True` with `docs` simply absent from the set it
+    evaluates, which is the "READY while a required check is red" direction this module
+    exists to refuse.
+
+    So the bytes are read from the protected ref (`origin/main` by default), where the
+    set that actually governs the merge lives. A ref that cannot be read is
+    `RequiredSetUnreadable` — a refusal, never a silent fall back to the workdir copy.
+
+    ``ref`` is a parameter because `--required-set --ref HEAD` is a legitimate
+    diagnostic ("what would THIS tree require?"); it is not a default, because the
+    protected ref is the authoritative answer.
+    """
+    import subprocess
+    import tempfile
+
+    with tempfile.TemporaryDirectory(prefix="required-set-") as tmp:
+        root = Path(tmp)
+        for rel in (MERGIFY_REL, RECORD_REL):
+            try:
+                proc = subprocess.run(
+                    ["git", "show", f"{ref}:{rel}"],
+                    cwd=str(cwd),
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                    check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise RequiredSetUnreadable(f"git show {ref}:{rel}: {exc}") from None
+            if proc.returncode != 0:
+                detail = (proc.stderr or proc.stdout or "").strip().splitlines()
+                raise RequiredSetUnreadable(
+                    f"git show {ref}:{rel} failed: "
+                    f"{detail[0] if detail else f'exit {proc.returncode}'} — the required "
+                    "set must be read from the protected ref, never from the tree being "
+                    "judged, so this is a refusal rather than a fallback"
+                )
+            target = root / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(proc.stdout, encoding="utf-8")
+        # The committed-config parser is the SAME one, so the ref path cannot drift
+        # from the workdir path: only the bytes differ.
+        derived = derive_from_config(root)
+    return derived

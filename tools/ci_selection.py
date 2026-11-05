@@ -3287,6 +3287,25 @@ TOOL_CARVEOUTS = (
     # not of the tool. Pinned by
     # test_ci_selection.test_ready_for_owner_tool_change_fails_closed_to_full.
     "tools/ready_for_owner.py",
+    # #10991: tools/required_set.py DECIDES WHAT COUNTS AS REQUIRED, so it is the same
+    # fail-OPEN class as ready_for_owner.py above — arguably closer to the decision, since
+    # every readiness verdict is a statement about the set this module derives. Unregistered
+    # it took its own version of the silent-drop: MEASURED before this entry,
+    # `echo tools/required_set.py | ci_selection.py --changed-files -` -> `surfaces: []`,
+    # `full: false`, `test_required_set.py` ABSENT from the 73 tier-1 files — so a change
+    # that dropped the protected-ref read, or widened what counts as green, would merge with
+    # none of its pins running. That was not hypothetical: before this entry the ONLY thing
+    # that ran the pins was the accident of a diff also touching `ready_for_owner.py`.
+    # ⛔ THIS TUPLE MEANS FULL MATRIX, NOT `core` (see the comment block above: a path here
+    # is "unknown to every SOURCE_PATTERN" and takes the fail-closed `_full_selection()`).
+    # That is deliberate and matches the sibling: `ready_for_owner.py` is registered here for
+    # the same reason (`test_ready_for_owner_tool_change_fails_closed_to_full`), and the
+    # deciding code is worth the whole matrix. Do NOT "optimise" this into `CORE_ALSO` —
+    # that tells `_keep_changed` the path maps to one surface while this tuple says unknown,
+    # and the two registrations pin OPPOSITE values (`full is True` vs `full is False`), the
+    # contradiction the gh_write_preflight note above records.
+    # Pinned by test_ci_selection.test_required_set_tool_change_fails_closed_to_full.
+    "tools/required_set.py",
 )
 
 

@@ -22,7 +22,10 @@ each printing PASS/FAIL with the RAW VALUE it read:
   1. ``tree``             ``git merge-tree --write-tree origin/main <head>`` — never the
                           ``mergeable`` flag (a stale flag is not evidence).
   2. ``gates``            the newest attempt per ``(app.slug, workflow, job)`` for every
-                          required context, and ``success`` is the ONLY pass.
+                          required ENTRY context, and ``success`` is the ONLY pass.
+                          ``merge_conditions`` names are DEFERRED at a PR head (Mergify
+                          settles them on the queue branch) but still fail it if they
+                          ran here and red — see ``check_gates``.
   3. ``review``           ``record-review.sh --check-carry`` bound to the LIVE head.
   4. ``coverage``         the CI selection covers the union of the touched files; a
                           hand-picked subset of a declared union is refused.
@@ -74,12 +77,12 @@ Live use::
     python tools/ready_for_owner.py 10962 --json
     python tools/ready_for_owner.py 10962 --repo daniel-ospina/tortoise
 
-⛔ ONE RESIDUAL IN THE GATE READ, NAMED RATHER THAN HIDDEN: the required-context read
-keeps each `checks[].context` NAME and drops its `app_id`, and `ci_verdict`'s
-``GroupVerdict`` carries the app SLUG (not its numeric id), so a context that protection
-scopes to one app is satisfied by a same-named ``success`` from another. Inert in this repo
-— GitHub Actions is the only publisher of all seven contexts — and closing it needs an
-``app.id`` on ``GroupVerdict``, i.e. a change to the ONE check-run reading (#5042) rather
+⛔ ONE RESIDUAL IN THE GATE READ, NAMED RATHER THAN HIDDEN: the required set is DERIVED
+from `.mergify.yml` and carries check NAMES only, while `ci_verdict`'s ``GroupVerdict``
+carries the app SLUG (not its numeric id), so a required name is satisfied by a
+same-named ``success`` from another app. Inert in this repo — GitHub Actions is the only
+publisher of all seven names — and closing it needs an ``app.id`` on ``GroupVerdict``, i.e.
+a change to the ONE check-run reading (#5042) rather
 than a second grouping here.
 
 ⛔ ONE KNOWN LIMITATION, NAMED RATHER THAN HIDDEN: condition 3 asks
@@ -132,6 +135,7 @@ from tools.required_set import (  # noqa: E402  (path set up above)
     RequiredSetConfigError,
     RequiredSetUnreadable,
     derive_from_config,
+    derive_from_ref,
 )
 
 # ── the contract's constants ────────────────────────────────────────────────
@@ -1284,15 +1288,21 @@ def _gate_token(group: ci_verdict.GroupVerdict) -> str:
 
 
 def check_gates(probe: Probe) -> Check:
-    """Every required context must have a newest attempt concluded ``success``.
+    """Every required ENTRY context must have a newest attempt concluded ``success``.
+
+    ``merge_conditions`` names are a different case: they are settled by Mergify on
+    ``mergify/merge-queue/<sha>``, so at a PR head they are ``DEFERRED(merge-time)``
+    rather than missing — but a merge-time check that DID run here and is red still
+    fails, because a measured red is evidence about this tree wherever it is judged.
 
     In-flight is a FAIL here, not a wait: a head whose checks have not concluded is not
     ready *now*, and the answer the owner needs is about now.
     """
-    if probe.required is None or not probe.required:
+    if probe.required is None or probe.required_deferred is None:
         # An EMPTY required set is not "nothing is required" — it is a set that was not
-        # read. Zero protection contexts, a truncated payload, or a hand-written fixture
-        # must never read as an unconditional pass.
+        # read. Zero contexts, a truncated payload, or a hand-written fixture must never
+        # read as an unconditional pass. (`is None` is the UNREADABLE case precisely so
+        # the empty-but-read configurations below can be diagnosed as what they are.)
         return Check(
             "gates",
             False,
@@ -1300,17 +1310,37 @@ def check_gates(probe: Probe) -> Check:
             "unreadable",
             unreadable=True,
         )
+    if not probe.required and not probe.required_deferred:
+        return Check(
+            "gates",
+            False,
+            probe.required_raw or "required context set is empty",
+            "unreadable",
+            unreadable=True,
+        )
+    if not probe.required:
+        # A READABLE config whose every check is merge-time: nothing is decided at the
+        # head, so PASS would be a claim about nothing. This is a configuration fact,
+        # not a read failure — but it still refuses, and says which it is.
+        return Check(
+            "gates",
+            False,
+            f"entry=0 merge-time={len(probe.required_deferred)} — every required check "
+            "is merge-time, so nothing is evaluated against the PR head",
+            "unreadable",
+            unreadable=True,
+        )
     if probe.groups is None:
         return Check("gates", False, probe.groups_raw or "-", "unreadable", unreadable=True)
-    # ⛔ The BUCKET is the check's JOB NAME, because that is what branch protection
-    # names: `checks[].context` IS the job name (`python-ci-gate`, `docs`, `ai-review-gate`).
-    # Matching anything else would leave a required context unmatched forever. What is NOT
-    # re-derived here is the GROUPING — whether two check-runs are the same workflow's next
-    # attempt, and which attempt is newest, is `ci_verdict`'s (`(app.slug, workflow, job)`,
-    # latest by `id`). Two workflows may therefore publish one job name and land in one
-    # bucket: every group in it must then pass, which is the fail-CLOSED direction (a bad
-    # attempt in either workflow fails the context) and is why the spread below is over all
-    # matching groups rather than the newest only.
+    # ⛔ The BUCKET is the check's JOB NAME, because that is what `.mergify.yml` names:
+    # `check-success=python-ci-gate` IS the job name (`python-ci-gate`, `docs`,
+    # `ai-review-gate`). Matching anything else would leave a required context unmatched
+    # forever. What is NOT re-derived here is the GROUPING — whether two check-runs are
+    # the same workflow's next attempt, and which attempt is newest, is `ci_verdict`'s
+    # (`(app.slug, workflow, job)`, latest by `id`). Two workflows may therefore publish
+    # one job name and land in one bucket: every group in it must then pass, which is the
+    # fail-CLOSED direction (a bad attempt in either workflow fails the context) and is
+    # why the spread below is over all matching groups rather than the newest only.
     by_job: dict[str, list[ci_verdict.GroupVerdict]] = {}
     for group in probe.groups:
         by_job.setdefault(group.job, []).append(group)
@@ -1320,8 +1350,8 @@ def check_gates(probe: Probe) -> Check:
     for context in probe.required:
         groups = by_job.get(context) or []
         if not groups:
-            # A required check that is ABSENT is a FAIL, never a skip. #10962 currently
-            # has no `python-ci-gate` run at all.
+            # A required check that is ABSENT is a FAIL, never a skip — for an ENTRY
+            # context. (`merge_conditions` absence is DEFERRED, handled below.)
             failed.append(f"missing:{context}")
             seen.append(f"{context}=MISSING(no check-run on this head)")
             continue
@@ -1357,18 +1387,6 @@ def check_gates(probe: Probe) -> Check:
             token = _gate_token(group)
             if token:
                 failed.append(f"{token}:{context}")
-
-    if not probe.required and not probe.required_deferred:
-        # Every required context is merge-time: nothing is decided at the head, so a
-        # PASS would be a claim about nothing. (`probe.required` empty alone is caught
-        # above; this arm is the both-empty case.)
-        return Check(
-            "gates",
-            False,
-            probe.required_raw or "required context set is empty",
-            "unreadable",
-            unreadable=True,
-        )
 
     raw = "; ".join(seen) if seen else "no check-runs on this head"
     if failed:
@@ -2070,25 +2088,25 @@ def _read_required_contexts(gh: Gh, workdir: Path) -> tuple[RequiredSet, str]:
     it. The API is deliberately not called here: it IS the credential dependency this
     removes, and its recorded answer is already in the tree.
 
+    ⛔ A GATE THAT READS ITS OWN SUBJECT IS DEFEATABLE BY ITS SUBJECT, so the bytes come
+    from the PROTECTED ref (``origin/main``), never from the workdir being judged. Both
+    inputs are tracked files: a PR that deletes a ``check-success=`` line AND the matching
+    ``required_contexts`` entry in the same diff would otherwise have the snapshot certify
+    the set it just shrank. See ``tools.required_set.derive_from_ref``.
+
     ⛔ A set that cannot be SPLIT is not evaluated: guessing which names are merge-time
     re-creates the false NOT-READY, so it is a refusal rather than a verdict.
     """
     try:
-        required = derive_from_config(workdir)
+        required = derive_from_ref(workdir, f"origin/{PROTECTED_BRANCH}")
     except (GuardUnreadable, RequiredSetUnreadable, RequiredSetConfigError) as exc:
         # A config error is a VERDICT about the repo's contract, and an unreadable
         # config is "I could not read it". Both REFUSE; neither may fall back to a
         # guessed set.
         raise ReadError(str(exc)) from None
-    if not required.entry_merge_split:
-        raise ReadError(
-            f"required set came from {required.source}, which is a flat list with no "
-            "entry/merge split — refusing to guess which checks are merge-time (a wrong "
-            f"guess re-creates the false FAIL(missing) on merge_conditions names); "
-            "restore `.mergify.yml` so the split can be derived"
-        )
     raw = (
-        f"source={required.source} entry={len(required.queue_names)} "
+        f"source={required.source}@origin/{PROTECTED_BRANCH} "
+        f"entry={len(required.queue_names)} "
         f"merge-time={len(required.merge_names)} mode={required.mode} "
         f"snapshot_agrees={required.snapshot_agrees}"
         + (f" {' '.join(required.notes)}" if required.notes else "")
@@ -2537,6 +2555,12 @@ def collect_probe(
         # NOT evidence about the tree, so it must not be written into `tree_raw`.
         probe.head_committed_at = ""
 
+    # ⛔ ORDER MATTERS: the required set is read from `origin/main`, and `_try_tree` is
+    # what FETCHES it. Reading the derived set first would use whatever `origin/main` the
+    # worktree happened to hold — a stale protected ref is exactly the "stale list is a
+    # silent deadlock" ` .mergify.yml` clause 2 warns about. A failed fetch leaves
+    # `origin/main` unrefreshed and the read below is then a REFUSAL, not a guess.
+    probe.tree, probe.tree_raw = _try_tree(gh, pr, head, workdir)
     try:
         required, probe.required_raw = _read_required_contexts(gh, workdir)
     except RateLimited:
@@ -2555,7 +2579,6 @@ def collect_probe(
     probe.groups, probe.groups_raw = _try(
         gh, lambda g: _read_check_groups(g, head, repo), surface="check-runs"
     )
-    probe.tree, probe.tree_raw = _try_tree(gh, pr, head, workdir)
     (
         probe.review_token,
         probe.review_exit,
@@ -2651,7 +2674,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         nargs="?",
         default=None,
-        help="pull request number (omit only with --fixture)",
+        help="pull request number (omit only with --fixture or --required-set)",
     )
     parser.add_argument("--repo", default=DEFAULT_REPO, help=f"owner/name (default {DEFAULT_REPO})")
     parser.add_argument("--json", action="store_true", help="emit the verdict as JSON")
@@ -2673,23 +2696,40 @@ def build_parser() -> argparse.ArgumentParser:
             "(queue=ENTRY, merge=merge-time) and exit; no PR number and no credential"
         ),
     )
+    parser.add_argument(
+        "--ref",
+        default="origin/main",
+        help=(
+            "ref the required set is DERIVED from for --required-set (default "
+            "origin/main, the ref that governs the merge; pass HEAD to ask what THIS "
+            "worktree would require)"
+        ),
+    )
     return parser
 
 
-def report_required_set(workdir: Path) -> int:
-    """Print the derived required set. Exit 0 PASS · 2 FAIL(unreadable).
+def report_required_set(workdir: Path, ref: str = "origin/main") -> int:
+    """Print the derived required set. Exit 0 PASS · 2 unusable (with the REASON labelled).
 
     A REPORTING verb, and it is deliberately a separate output shape from the
     READY/NOT-READY contract: it answers "what is required here?", not "is this PR
     ready?". Exit ``2`` on an unusable set so "I could not read it" is never mistaken
     for "nothing is required", which is the fail-open this whole module refuses.
+
+    ⛔ A CONFIG ERROR IS LABELLED AS ONE. Both are exit 2, but a reader comes to this
+    verb to find out WHY, and `REQUIRED-SET-UNREADABLE(<the config is wrong>)` points at
+    the wrong subsystem — the body would say the contract is violated while the label
+    says I/O failed.
     """
     try:
-        required = derive_from_config(workdir)
-    except (GuardUnreadable, RequiredSetUnreadable, RequiredSetConfigError) as exc:
+        required = derive_from_ref(workdir, ref) if ref else derive_from_config(workdir)
+    except RequiredSetConfigError as exc:
+        print(f"REQUIRED-SET-CONFIG-ERROR({exc})")
+        return 2
+    except (GuardUnreadable, RequiredSetUnreadable) as exc:
         print(f"REQUIRED-SET-UNREADABLE({exc})")
         return 2
-    print(f"source: {required.source}")
+    print(f"source: {required.source}" + (f" at {ref}" if ref else " (this worktree)"))
     print(f"mode: {required.mode}")
     print(f"queue_conditions (ENTRY, at the PR head): {', '.join(required.queue_names)}")
     print(f"merge_conditions (MERGE-time, deferred here): {', '.join(required.merge_names)}")
@@ -2705,7 +2745,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.required_set:
-        return report_required_set(Path(args.workdir).resolve())
+        return report_required_set(Path(args.workdir).resolve(), args.ref)
     if args.fixture is None and args.pr is None:
         parser.error("a pull request number is required unless --fixture or --required-set is used")
     workdir = Path(args.workdir).resolve()
@@ -2826,8 +2866,13 @@ def probe_from_dict(data: Mapping[str, Any]) -> Probe:
         groups=parsed_groups,
         groups_raw=str(data.get("groups_raw", "")),
         required=None if data.get("required") is None else tuple(data["required"]),
+        # Same absent-vs-null idiom as `labels` above: a fixture that OMITS the key is a
+        # pre-split fixture whose flat set was all entry checks (so `()` is faithful),
+        # while an explicit null is "the READ was unreadable" and must refuse.
         required_deferred=(
-            None if data.get("required_deferred") is None else tuple(data["required_deferred"])
+            None
+            if "required_deferred" in data and data["required_deferred"] is None
+            else tuple(data.get("required_deferred") or ())
         ),
         required_raw=str(data.get("required_raw", "")),
         review_token=data.get("review_token"),

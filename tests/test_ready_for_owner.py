@@ -47,6 +47,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from tools import ci_verdict  # noqa: E402
 from tools import ready_for_owner as rfo  # noqa: E402
+from tools import required_set as rfo_required  # noqa: E402
 
 REPO = "daniel-ospina/tortoise"
 HEAD = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678"
@@ -2186,12 +2187,29 @@ def _gh_payloads(
     }
 
 
-def _collect(monkeypatch: pytest.MonkeyPatch, payloads: dict[str, Any], fail: str | None = None):
+def _collect(
+    monkeypatch: pytest.MonkeyPatch,
+    payloads: dict[str, Any],
+    fail: str | None = None,
+    derive=None,
+):
     fake = _FakeGh(payloads, fail=fail)
     monkeypatch.setattr(rfo, "Gh", lambda repo, **kw: fake)
     monkeypatch.setattr(rfo, "_read_tree", lambda gh, pr, head, workdir: (True, "merge-tree ok"))
     monkeypatch.setattr(
         rfo, "_read_review", lambda *a, **kw: ("head", 0, "token=head exit=0", "clean")
+    )
+    # The required set is read from the PROTECTED ref in production (so a branch cannot
+    # shrink the set that judges it). A unit test has no fetched `origin/main` to read and
+    # must not depend on one, so the derivation is pinned to the workdir here — the
+    # ref-vs-workdir distinction has its own cases in `tests/test_required_set.py` and in
+    # `test_the_required_set_is_read_from_the_protected_ref` below.
+    monkeypatch.setattr(
+        rfo,
+        "derive_from_ref",
+        derive
+        if derive is not None
+        else (lambda cwd, ref=None, **kw: rfo_required.derive_from_config(REPO_ROOT)),
     )
     return rfo.collect_probe(10999, REPO, REPO_ROOT, now=NOW), fake
 
@@ -2254,6 +2272,73 @@ def test_a_merge_time_check_that_ran_and_red_here_still_fails(
     assert gates.passed is False
     assert "python-ci-gate" in gates.reason
     assert verdict.ready is False
+
+
+def test_the_required_set_is_read_from_the_protected_ref(monkeypatch: pytest.MonkeyPatch) -> None:
+    """⛔ A GATE THAT READS ITS OWN SUBJECT IS DEFEATABLE BY ITS SUBJECT.
+
+    Both inputs are tracked files, so a branch that edits `.mergify.yml` and
+    `docs/ci/required-contexts.json` together can shrink the set that judges it. The read
+    must therefore go to the PROTECTED ref. Asserting the exact ref — rather than only
+    that a set came back — is what makes this discriminating: point the read at the
+    workdir and this reds.
+    """
+    seen: list[str] = []
+
+    def _spy(cwd, ref=None, **kw):
+        seen.append("" if ref is None else ref)
+        return rfo_required.derive_from_config(REPO_ROOT)
+
+    _collect(monkeypatch, _gh_payloads(), derive=_spy)
+    assert seen == ["origin/main"], seen
+
+
+def test_every_required_check_being_merge_time_refuses_with_the_right_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A readable config whose entry gate is EMPTY decides nothing at the head.
+
+    That is a configuration fact, not a read failure, and the check must say which it is
+    rather than reusing the unreadable arm's wording.
+    """
+    probe = _collect(
+        monkeypatch,
+        _gh_payloads(check_runs=_check_runs_for(MERGE_TIME_REQUIRED)),
+        derive=lambda *a, **k: rfo_required.RequiredSet(
+            names=MERGE_TIME_REQUIRED,
+            source="test",
+            queue_names=(),
+            merge_names=MERGE_TIME_REQUIRED,
+        ),
+    )[0]
+    gates = next(c for c in rfo.evaluate(probe).checks if c.name == "gates")
+    assert gates.passed is False
+    assert "every required check is merge-time" in gates.raw
+
+
+def test_the_required_set_verb_labels_a_config_error_as_one(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Exit 2 either way, but a reader comes here to learn WHY — so the LABEL must say
+    which it is. A config error reported as `UNREADABLE` sends them to the wrong place."""
+    from tools.mergify_config_guard import MERGIFY_REL, RECORD_REL
+
+    (tmp_path / MERGIFY_REL).write_text(
+        "queue_rules:\n"
+        "  - name: main\n"
+        "    queue_conditions: ['base=main', 'check-success=docs']\n"
+        "    branch_protection_injection_mode: merge\n"
+        "    merge_conditions: []\n",
+        encoding="utf-8",
+    )
+    record = tmp_path / RECORD_REL
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record.write_text(json.dumps({"required_contexts": ["docs", "vanished"]}), encoding="utf-8")
+    code = rfo.main(["--required-set", "--workdir", str(tmp_path), "--ref", ""])
+    out = capsys.readouterr().out
+    assert code == 2
+    assert "REQUIRED-SET-CONFIG-ERROR" in out
+    assert "REQUIRED-SET-UNREADABLE" not in out
 
 
 def test_collect_probe_marks_an_unreadable_declared_union(

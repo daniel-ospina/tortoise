@@ -5158,6 +5158,28 @@ def test_ready_for_owner_tool_change_fails_closed_to_full():
     # `full=False`). Asserting it here would assert an accident, not a property.
 
 
+def test_required_set_tool_change_fails_closed_to_full():
+    # #10991: tools/required_set.py DECIDES WHAT COUNTS AS REQUIRED — every readiness verdict is a
+    # statement about the set it derives, and it is also the file that refuses to let a branch
+    # shrink the set that judges it. Same fail-OPEN class as ready_for_owner.py above, one step
+    # closer to the decision.
+    #
+    # Measured pre-fix:
+    #     echo tools/required_set.py | ci_selection.py --changed-files -
+    #       -> surfaces: []  full: False  tier-1 `test_files`,
+    #          with `test_required_set.py` ABSENT
+    # so a change that dropped the protected-ref read, or widened what counts as green, merged with
+    # none of its pins running. The only thing that ran them was the accident of a diff also
+    # touching `ready_for_owner.py`.
+    #
+    # Mutation check: removing the TOOL_CARVEOUTS entry re-opens the docs-only early return, so
+    # `full` is False and `test_files` is the tier-1 list — every assert below fails.
+    r = _sel(["tools/required_set.py"])
+    assert r["full"] is True, r
+    assert r["test_files"] == "ALL", r
+    assert "core" in r["surfaces"], r
+
+
 def test_session_schema_guard_runs_on_every_declared_writer_surface():
     # #3554: the declared :Session writer inventory SPANS surfaces —
     # tools/longmem_eval/ingest.py and ingest_v2.py select `eval`,
