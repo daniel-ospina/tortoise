@@ -583,7 +583,13 @@ class IngestOutcome(StrEnum):
     console script and ``python -m tortoise.ingest``) hand it to the shell.
     """
 
-    #: The ask was done (extraction ran, or a metadata capture was written).
+    #: The ask was done: extraction ran, a metadata capture was written, or the
+    #: named document had no ``##`` sections to extract at all — that last arm
+    #: prints its own warning and still clears the pending marker, which is the
+    #: recorded ``--upgrade`` parity decision (``_do_upgrade`` step 3). It is
+    #: NOT the sweep's rule: the sweep leaves a no-sections document PENDING and
+    #: returns ``PARTIAL``, because a sweep did not name it. Same condition, two
+    #: honest answers, because only one of the two callers chose the target.
     DONE = "done"
     #: The ask was already satisfied: same content + extractor version.
     SKIPPED_ALREADY_PROCESSED = "skipped-already-processed"
@@ -1245,7 +1251,14 @@ def main(argv=None) -> IngestOutcome:
                 # #1157: shared helper — priors from stored confidence only;
                 # refuses (loud flag) when the graph has none.
                 _run_ep_propagation(proj, api, label="EP")
-            else:
+            elif not args.capture_metadata:
+                # #8447 C3 review (round 2, P2): this `else` used to catch the
+                # --capture-metadata arm too, so a metadata-only capture ran the
+                # session extractor AFTER printing "[capture-metadata] …
+                # extraction skipped" — measured: 2 statements + 2 operators
+                # written, while the door's own stdout said it extracted
+                # nothing. That is the clause this whole issue is about, in the
+                # one arm whose entire purpose is to skip extraction.
                 extractor.run(text, source_id, api, max_utterances=args.max_utterances)
 
         if args.resolution:
