@@ -34,8 +34,15 @@ about the deliverable path, not about a proxy for it.
 
 Contract
 --------
-* Exit **0** — the credential can write: a throwaway branch was created, confirmed by
-  ``git ls-remote``, and deleted.
+* Exit **0** — the credential can write: a throwaway branch was created and confirmed by
+  ``git ls-remote`` at OUR sha, and the deletion was then **attempted** and confirmed whenever the
+  remote stayed readable. ``cleaned_up`` records exactly what is known: ``True`` only on a positive
+  "ref absent" read, ``False`` on a proven survivor, ``None`` when the confirming read failed (the
+  ref may or may not be gone). An unconfirmed cleanup is NOT a failed write — the credential still
+  wrote — so it does not change the exit code; it is reported loudly on the ``cleanup UNCONFIRMED``
+  line and in ``--json``. A KNOWN survivor does not change the exit code either, but it is not a
+  pass: ``writable`` is forced ``False`` and ``reason`` becomes ``delete-failed``, because a tool
+  must not call a credential usable while leaving garbage on a shared remote.
 * Exit **1** — ``GH-WRITE-UNAVAILABLE(<reason>)`` on stderr (emitted in ``--json`` mode too; stdout
   stays pure JSON). Reasons are stable tokens from ``REASONS`` (top-level, non-nested), so a caller
   can branch on them without parsing prose. **No path returns 1 without a token from that set** —
@@ -168,16 +175,20 @@ def redact(text: str) -> str:
 # The userinfo is the text before the FIRST `@` and can never contain `/`, which is what separates a
 # credential from a local path that merely contains an `@`.
 _SCP_LIKE_USERINFO = re.compile(
-    r"(?<![\w@./-])([A-Za-z0-9._%+~-]+)(?::([^@\s/]+))?@([A-Za-z0-9.-]+):"
+    # Userinfo is everything up to the LAST `@` before the host, so a password that itself contains
+    # `@` (`user:p@ss@host:path`) is covered — the earlier first-`@` form left that shape intact and
+    # therefore PRINTED a credential the detector had already classified as one (measured).
+    r"(?<![\w@./-])([^\s/]+)@([A-Za-z0-9.-]+):(?=\S)"
 )
 
 
 def _redact_scp_userinfo(text: str) -> str:
     def _sub(m: re.Match[str]) -> str:
-        user, pw, host = m.group(1), m.group(2), m.group(3)
+        userinfo, host = m.group(1), m.group(2)
+        user = userinfo.split(":", 1)[0]
         # `git@host:` / `ssh@host:` carry no secret — redacting them would destroy ordinary
         # diagnostics and is not required by anything.
-        if pw is None and user.lower() in _NON_SECRET_USERINFO:
+        if ":" not in userinfo and user.lower() in _NON_SECRET_USERINFO:
             return m.group(0)
         return f"<userinfo-redacted>@{host}:"
 
@@ -307,8 +318,14 @@ def _insteadof_env(url: str, alias: str, slot: int) -> dict[str, str]:
     """Env that makes git rewrite the inert `alias:` to `url`, keeping the secret OUT of argv.
 
     `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n` (kept by `_child_env`) define the
-    rewrite inside the PROCESS ENV — which is mode 0400 — instead of on the command line, which is
-    mode 0444 and readable by every process on a shared cell.
+    rewrite inside the PROCESS ENV instead of on the command line.
+
+    ⛔ WHAT THIS BUYS, EXACTLY — do not overstate it. argv (`/proc/<pid>/cmdline`) is mode 0444:
+    readable by EVERY process on the box, including other users and `ps`. `/proc/<pid>/environ` is
+    mode 0400, owned by the lane's own user. On a cell where all lanes run as the SAME user a
+    sibling lane can still read it (measured), so this is a narrowing, not isolation: it removes the
+    blank-world-readable copy and the `ps` snapshot, and it separates lanes that run as different
+    users. A future lane should not treat the value as secret from its own user.
 
     `slot` is the absolute `GIT_CONFIG_*` index to occupy. It is passed in rather than derived
     from the ambient `GIT_CONFIG_COUNT` because a caller may need SEVERAL rewrites in one env:
@@ -394,6 +411,16 @@ def _url_has_credential(url: str) -> bool:
     # `https://token@host/…` — it must not be treated as data just because `urlsplit` sees no
     # scheme. `git@host:path` and a bare local path stay non-secrets (the exemption list, and the
     # `"/" not in userinfo` test above).
+    #
+    # ⚠️ DELIBERATE OVER-DETECTION, accepted. An account-name user we do not list
+    # (`daniel-ospina@github.com:o/r.git`, `repo@backup.git`) is treated as a credential too, so it
+    # is routed through the `insteadOf` alias and its display is masked. That is not free: the
+    # `remote:`/`remote_url` line shows `<userinfo-redacted>@host:` instead of the account name.
+    # It is still the right side of the asymmetry — a false positive costs a diagnostic, and the
+    # HOST and PATH (which is what identifies two different remotes) are preserved, while a false
+    # negative puts a token on world-readable argv. Do not "fix" this by adding a token-shape
+    # heuristic: an opaque token has no shape, and the heuristic would reopen the leak on exactly
+    # the credentials hardest to recognise.
     if "@" in url and "/" not in userinfo and ":" not in userinfo:
         if userinfo and userinfo.lower() not in _NON_SECRET_USERINFO:
             return True
@@ -613,18 +640,22 @@ def _push_verify_cleanup(
         # carrying the sha — a separate second read of the first target can fail transiently and
         # flip a proven write into `verify-mismatch` (a false block) while this read says present.
         reads = _ref_reads(runner, root, read_targets, verdict.probe_ref, env_extra=read_env)
+        # ⛔ EVERY target must be present AT OUR SHA. A ref that exists at another sha is not our
+        # write; a target that cannot be read is not proven.
+        bad = [(u, st, sha) for u, st, sha in reads if not (st == "present" and sha == head)]
         verdict.steps.append(
             {
                 "step": "ls-remote-verify",
-                "rc": 0 if all(st != "unverifiable" for _u, st, _h in reads) else 1,
+                # The step's rc follows the VERDICT-DECIDING set, not mere readability: keying it on
+                # readability rendered `[ok] ls-remote-verify (rc=0)` immediately above
+                # `GH-WRITE-UNAVAILABLE(verify-mismatch)` — a false-PASS line in the log an
+                # operator reads first.
+                "rc": 1 if bad else 0,
                 "detail": redact(
                     "; ".join(f"{u.split('@')[-1]}={st}:{sha[:12] or '-'}" for u, st, sha in reads)
                 ),
             }
         )
-        # ⛔ EVERY target must be present AT OUR SHA. A ref that exists at another sha is not our
-        # write; a target that cannot be read is not proven.
-        bad = [(u, st, sha) for u, st, sha in reads if not (st == "present" and sha == head)]
         if not bad:
             verdict.writable = True
         else:
@@ -651,6 +682,15 @@ def _push_verify_cleanup(
         # cleanup below still runs and is CONFIRMED by ls-remote.
         verdict.reason = "push-refused"
         verdict.detail = verdict.steps[-1]["detail"]
+        # ⛔ A timeout is NOT a refusal. rc 124 is OUR OWN deadline (Runner maps TimeoutExpired),
+        # so the credential's capability is UNKNOWN, not absent. Without this note the verdict reads
+        # "read-only credential" and a lane goes hunting for a permissions problem that is really a
+        # slow remote — the same "plausible diagnosis for the wrong cause" the tool exists to end.
+        if push_proc.rc == 124:
+            verdict.detail = (
+                f"{verdict.detail} | the push TIMED OUT (our own deadline) — write capability is "
+                "UNKNOWN, not refused; re-run before concluding the credential is read-only"
+            )
 
     # (8) CLEANUP — one place, no `return` (a `return` inside `finally` would swallow an in-flight
     # exception and emit `GH-WRITE-UNAVAILABLE(None)`).
@@ -860,14 +900,30 @@ def _check_writable(
             runner, root, remote, read_targets, read_env, verdict, head, keep_ref, step
         )
     finally:
-        if not keep_ref and not verdict.cleaned_up:
-            # Best effort: if the in-flight exception was a kill of the delete itself, try once
-            # more. Never let a failure here replace the original exception.
+        # ⛔ ONLY WHEN AN EXCEPTION IS ACTUALLY PROPAGATING. An earlier revision guarded on the
+        # verdict alone (`not cleaned_up`), so the retry ALSO ran on the ordinary "delete failed"
+        # path, deleted the ref for real, and never re-read — leaving the verdict claiming
+        # `leftover_ref=True` / "PROBE REF SURVIVED" for a remote that was already clean: a false
+        # block (the one failure this tool must never add) plus a false litter claim, with two
+        # deletes issued while `steps` recorded one. `sys.exc_info()` is the in-flight test; on the
+        # ordinary path the cleanup has ALREADY reported the truth and must not be second-guessed.
+        if sys.exc_info()[0] is not None and not keep_ref and not verdict.cleaned_up:
             try:
-                runner.run(
+                rp = runner.run(
                     ["git", "push", "--no-verify", remote, "--delete", "--", verdict.probe_ref],
                     cwd=root,
                 )
+                verdict.steps.append(
+                    {"step": "delete-retry", "rc": rp.rc, "detail": redact(rp.detail[-800:])}
+                )
+                # The retry's effect is READ BACK, so the verdict describes the remote as it now is
+                # rather than as it was before the retry.
+                state = _ref_state_multi(
+                    runner, root, read_targets, verdict.probe_ref, env_extra=read_env
+                )
+                if state == "absent":
+                    verdict.cleaned_up = True
+                    verdict.leftover_ref = False
             except Exception:  # noqa: BLE001 — must not mask the original failure
                 pass
 

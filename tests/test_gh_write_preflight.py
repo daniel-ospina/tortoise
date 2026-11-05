@@ -474,6 +474,12 @@ def test_unrenderable_prefix_is_refused_by_git_not_reported_as_push_refused(tmp_
     git rejects, and the tool returned `GH-WRITE-UNAVAILABLE(push-refused)` on a fully writable
     remote — a usage mistake reported as "your credential cannot write", the inversion the guard
     exists to prevent.
+
+    ⚠️ HONEST SCOPE: every prefix in this list is ALSO rejected by `_valid_prefix`, and over 734
+    measured candidates the belt accepts nothing `git check-ref-format` rejects — so `main()`'s
+    git arm is DEFENCE IN DEPTH and is not reachable through this list. The arm itself is pinned
+    directly, by `test_prefix_ok_rejects_gits_own_invalid_verdict`. If the belt is ever loosened,
+    this test keeps the USAGE-error contract but would no longer prove the git arm fired.
     """
     work, remote = _make_pair(tmp_path)
     before = _remote_refs(remote)
@@ -1653,3 +1659,122 @@ def test_an_exception_after_the_push_still_deletes_the_probe_ref(tmp_path: Path)
         pass
     assert deleted, "the probe ref was NOT deleted after an interrupt"
     assert "gh-write-preflight" not in _remote_refs(remote)
+
+
+def test_a_push_timeout_is_reported_as_UNKNOWN_not_as_a_refusal(tmp_path: Path):
+    """rc 124 is OUR deadline, not the remote's answer.
+
+    Without the note, a slow remote reads as "read-only credential" and the lane hunts a
+    permissions problem that does not exist — the plausible-diagnosis-for-the-wrong-cause failure
+    this tool exists to end.
+    """
+    work, _remote = _make_pair(tmp_path)
+
+    class SlowPush(Runner):
+        def run(self, argv, cwd=None, timeout=120, env_extra=None):
+            if argv[1] == "push" and "--delete" not in argv:
+                return Proc(124, err="git: timed out after 120s")
+            if argv[1] == "ls-remote":
+                return Proc(0, out="")
+            if argv[1] == "push":
+                return Proc(0, out="")
+            return super().run(argv, cwd=cwd, timeout=timeout, env_extra=env_extra)
+
+    verdict = check_writable(work, runner=SlowPush())
+
+    assert verdict.writable is False
+    assert verdict.reason == "push-refused", "the token stays stable for callers that branch on it"
+    assert "TIMED OUT" in (verdict.detail or "")
+    assert "UNKNOWN, not refused" in (verdict.detail or ""), verdict.detail
+
+
+def test_password_containing_an_at_sign_is_redacted():
+    """`user:p@ss@host:path` — the password holds the separator character itself.
+
+    The first-`@` redaction form matched nothing, so the tool classified this as a credential and
+    then printed it (measured: `--json` showed it in remote_url AND push_url).
+    """
+    out = redact("user:p@ss@example.invalid:repo.git")
+    assert "p@ss" not in out, out
+    assert "example.invalid" in out, "the host must survive so the remote is still identifiable"
+    # A plain address with a space after the colon is prose, not a URL — leave it alone.
+    assert redact("write to a@b.com: please") == "write to a@b.com: please"
+
+
+def test_the_retry_does_NOT_run_on_the_ordinary_delete_failed_path(tmp_path: Path):
+    """Retry only while an exception is propagating, and read the result back.
+
+    Measured before: guarding on the verdict alone made the retry delete the ref on the ordinary
+    `delete-failed` path without re-reading, so the verdict claimed `leftover_ref=True` / "PROBE REF
+    SURVIVED" for a remote that was already clean — a false block plus a false litter claim.
+    """
+    work, remote = _make_pair(tmp_path)
+    deletes = []
+
+    class FirstDeleteDenied(Runner):
+        """The delete is refused ONCE, then a retry would succeed if one were attempted."""
+
+        def __init__(self):
+            self.deleted = False
+
+        def run(self, argv, cwd=None, timeout=120, env_extra=None):
+            if argv[1] == "ls-remote" and "refs/heads/" in " ".join(argv):
+                return Proc(0, out="" if self.deleted else "a" * 40 + "\trefs/heads/gh-write-preflight/x\n")
+            if argv[1] == "ls-remote":
+                return Proc(0, out="")
+            if argv[1] == "push" and "--delete" in argv:
+                deletes.append(argv[-1])
+                if len(deletes) == 1:
+                    return Proc(1, err="stub: denied once")
+                self.deleted = True
+                return Proc(0, out="")
+            if argv[1] == "push":
+                return Proc(0, out="*\tHEAD:refs/heads/gh-write-preflight/x\t[new branch]\n")
+            return super().run(argv, cwd=cwd, timeout=timeout, env_extra=env_extra)
+
+    verdict = check_writable(work, runner=FirstDeleteDenied())
+
+    assert len(deletes) == 1, f"the retry must not run on a normal path; saw {deletes}"
+    assert verdict.cleaned_up is False
+    assert verdict.leftover_ref is True, "with no retry, the verdict must report the survivor"
+
+
+def test_verify_mismatch_is_not_rendered_as_an_ok_step(tmp_path: Path):
+    """A step whose outcome decides a refusal must not print `[ok]`.
+
+    Measured before: the step's rc was keyed on readability, so a verify-mismatch rendered
+    `[ok] ls-remote-verify (rc=0)` directly above `GH-WRITE-UNAVAILABLE(verify-mismatch)`.
+    """
+    work, _remote = _make_pair(tmp_path)
+
+    class WrongSha(Runner):
+        def run(self, argv, cwd=None, timeout=120, env_extra=None):
+            if argv[1] == "ls-remote" and "refs/heads/" in " ".join(argv):
+                return Proc(0, out="a" * 40 + "\trefs/heads/gh-write-preflight/x\n")
+            if argv[1] == "ls-remote":
+                return Proc(0, out="")
+            if argv[1] == "push" and "--delete" not in argv:
+                return Proc(0, out="*\tHEAD:refs/heads/gh-write-preflight/x\t[new branch]\n")
+            if argv[1] == "push":
+                return Proc(0, out="")
+            return super().run(argv, cwd=cwd, timeout=timeout, env_extra=env_extra)
+
+    verdict = check_writable(work, runner=WrongSha())
+    verify_steps = [s for s in verdict.steps if s["step"] == "ls-remote-verify"]
+    assert verify_steps and verify_steps[0]["rc"] == 1, verify_steps
+    assert verdict.reason == "verify-mismatch"
+
+
+def test_keep_ref_json_never_advertises_cleanup(tmp_path: Path, capsys):
+    """`--keep-ref` must say `cleaned_up: false` in the MACHINE payload, not just in prose.
+
+    Mutation that escaped: forcing `cleaned_up = True` on the keep-ref path left every test green,
+    because the only assertion read the word "KEPT" from stdout.
+    """
+    work, _remote = _make_pair(tmp_path)
+    rc = main(["--repo", str(work), "--keep-ref", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == EXIT_WRITABLE
+    assert payload["kept_ref"] is True
+    assert payload["cleaned_up"] is False, "a deliberately kept ref is not a clean cleanup"
+    assert payload["leftover_ref"] is False, "kept_ref is not an accidental survivor"
