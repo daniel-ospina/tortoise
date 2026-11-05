@@ -140,6 +140,6 @@ aboutObjects: "#5087, #7949, #10994-#11002, #11021, #11083"
 |---|---|---|
 | **The arbiter is unmeasured** (top risk) | the whole mention-vs-entity lever rests on a judgement nobody has scored against our data | score it on the 25 owner-labelled rows **first**; E1's row at n≥2 arms after |
 | **`#1026`'s "no name patterns"** may be read as forbidding the cue | adopting it quietly would reverse a recorded decision | `OVERRIDES:` on `#1026` (6648049935); **one narrow owner read requested** — it is the only decision this scope needs from you |
-| six children in one 10.7k-line file | merge collisions, serialized lane | one extractor lane, order fixed in the decomposition |
+| seven children in one 13.6k-line file | merge collisions, serialized lane | one extractor lane, order fixed in the decomposition |
 | the existing population stays junk | the epic improves new writes while the measured problem persists | stated, not smoothed; `#5333` owns it |
 | E4's tenth miss (`wp02`) has no owner | E4 cannot reach 15/15 on this decomposition | stated in the decomposition §8; needs a re-registration or a content-level fix |

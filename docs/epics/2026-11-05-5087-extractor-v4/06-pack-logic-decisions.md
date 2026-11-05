@@ -204,7 +204,7 @@ product-strategy  Product → Feature                                  (hasPart)
 venture           Investment → Program, Program → Asset              (hasPart)
 ```
 
-**6 declared hierarchy paths across 4 packs.** So the declared population is **42** (36 relations + 6 hierarchies), and a census that reads only `relations` under-counts it by **14%** — a sixth, not a third — and `producedBy` above is precisely a relation duplicating a hierarchy path, which is the drift the census exists to expose. `#11083`'s scope is corrected accordingly.
+**6 declared hierarchy paths across 4 packs.** So the declared population is **42** (36 relations + 6 hierarchies), and a census that reads only `relations` under-counts it by **14%** — a sixth, not a third — and it is what lets the census **see** `producedBy` alongside the `Program → Asset` `hasPart` path, so it can report both. ⚠️ **It must not call that pair a duplicate:** the owner ruled the two are different assertions (production vs containment), and both are written. `#11083`'s scope is corrected accordingly.
 
 ---
 
