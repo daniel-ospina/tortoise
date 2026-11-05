@@ -48,6 +48,7 @@ from tools.gh_write_preflight import (
     Proc,
     Runner,
     _child_env,
+    _neutral_push_env,
     _read_env,
     _read_targets,
     _ref_state,
@@ -1660,6 +1661,94 @@ def test_an_exception_after_the_push_still_deletes_the_probe_ref(tmp_path: Path)
     assert "gh-write-preflight" not in _remote_refs(remote)
 
 
+def test_ambient_GIT_CONFIG_slots_are_NOT_clobbered(tmp_path: Path):
+    """The neutralisation must count UP from the ambient count, not start at zero.
+
+    A box that injects its credential through `GIT_CONFIG_*` (`url.<base>.insteadOf` +
+    `credential.helper`) had every slot overwritten, which replaced the working credential with
+    git's fallback: measured `writable=False, push-refused` on a repo whose raw `git push` exited 0,
+    and `credential.helper` silently changed. That is a false block.
+    """
+    work, _remote = _make_pair(tmp_path)
+    # An ambient slot that the probe must NOT clobber: a harmless setting whose loss is observable.
+    os.environ["GIT_CONFIG_COUNT"] = "1"
+    os.environ["GIT_CONFIG_KEY_0"] = "ghwritepreflight.testslot"
+    os.environ["GIT_CONFIG_VALUE_0"] = "kept"
+    try:
+        extra = _neutral_push_env("origin")
+        merged = _child_env(extra)
+    finally:
+        for k in ("GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"):
+            os.environ.pop(k, None)
+
+    # The ambient slot SURVIVES the merge — that is what "not clobbered" means.
+    assert merged["GIT_CONFIG_KEY_0"] == "ghwritepreflight.testslot", (
+        f"the ambient slot was overwritten: {merged.get('GIT_CONFIG_KEY_0')!r}"
+    )
+    assert merged["GIT_CONFIG_VALUE_0"] == "kept"
+    assert int(merged["GIT_CONFIG_COUNT"]) > 1, "our settings must EXTEND the count, not replace it"
+    assert "GIT_CONFIG_KEY_0" not in extra, "we must not occupy the ambient slot"
+    assert any(
+        v == "push.followTags" and k != "GIT_CONFIG_KEY_0"
+        for k, v in merged.items()
+        if k.startswith("GIT_CONFIG_KEY_")
+    ), f"our settings must start ABOVE the ambient count: {merged}"
+    # ...and a real probe still passes with an ambient slot present.
+    assert check_writable(work, remote="origin").writable is True
+
+
+def test_signed_push_and_push_options_config_do_not_fake_a_refusal(tmp_path: Path):
+    """REAL git: `push.gpgSign` / `push.pushOption` make a writable remote refuse the push.
+
+    Measured before: `push.gpgSign=true` -> `fatal: the receiving end does not support --signed
+    push`; `push.pushOption=ci.skip` -> `does not support push options`; both surfaced as
+    `push-refused` (= read-only credential) on a remote that writes fine.
+    """
+    for key, value in (("push.gpgSign", "true"), ("push.pushOption", "ci.skip")):
+        work, remote = _make_pair(tmp_path / key.replace(".", "_"))
+        _git("config", key, value, cwd=work)
+        verdict = check_writable(work)
+        assert verdict.writable is True, (
+            f"{key}={value} must not be read as a credential refusal: "
+            f"{verdict.reason!r} {verdict.detail!r}"
+        )
+        assert verdict.cleaned_up is True
+        assert "gh-write-preflight" not in _remote_refs(remote)
+
+
+def test_bare_userinfo_with_no_separator_is_redacted(tmp_path: Path):
+    """`mytoken123@host.example` — detected as a credential, so it must be redacted too.
+
+    Neither redaction pattern matched this shape, so the secret reached `--json`
+    remote_url/push_url verbatim (measured). `git remote get-url` prints exactly this for a
+    scheme-less remote.
+    """
+    assert _url_has_credential("mytoken123@host.example") is True
+    assert "mytoken123" not in redact("mytoken123@host.example")
+    assert redact("git@github.com") == "git@github.com", "the exempt user must survive"
+
+
+def test_internal_error_does_not_name_a_ref_that_never_existed(tmp_path: Path):
+    """No push step means no possible survivor — the note must not be invented.
+
+    Measured before: an exception on the REACHABILITY read produced `steps: []` and still said the
+    probe ref "may still be on origin", while the remote held only `refs/heads/main`.
+    """
+    work, _remote = _make_pair(tmp_path)
+
+    class DiesEarly(Runner):
+        def run(self, argv, cwd=None, timeout=120, env_extra=None):
+            if argv[1] == "ls-remote":
+                raise RuntimeError("stub: reachability read died")
+            return super().run(argv, cwd=cwd, timeout=timeout, env_extra=env_extra)
+
+    verdict = check_writable(work, runner=DiesEarly())
+
+    assert verdict.reason == "internal-error"
+    assert not any(s["step"] == "push" for s in verdict.steps)
+    assert "may still be on" not in (verdict.detail or ""), verdict.detail
+
+
 def test_a_push_timeout_is_reported_as_UNKNOWN_not_as_a_refusal(tmp_path: Path):
     """rc 124 is OUR deadline, not the remote's answer.
 
@@ -1682,9 +1771,12 @@ def test_a_push_timeout_is_reported_as_UNKNOWN_not_as_a_refusal(tmp_path: Path):
     verdict = check_writable(work, runner=SlowPush())
 
     assert verdict.writable is False
-    assert verdict.reason == "push-refused", "the token stays stable for callers that branch on it"
+    # A DISTINCT token: `push-refused` is published as "the credential is at fault", so branching on
+    # it parked deliverable work on a slow push. A caller must be able to tell the two apart.
+    assert verdict.reason == "push-unknown", verdict.reason
+    assert "push-unknown" in REASONS
+    assert "UNKNOWN" in REASONS["push-unknown"]
     assert "TIMED OUT" in (verdict.detail or "")
-    assert "UNKNOWN, not refused" in (verdict.detail or ""), verdict.detail
 
 
 def test_a_SIGNALLED_push_is_reported_as_UNKNOWN_not_as_a_refusal(tmp_path: Path):
@@ -1709,7 +1801,7 @@ def test_a_SIGNALLED_push_is_reported_as_UNKNOWN_not_as_a_refusal(tmp_path: Path
     verdict = check_writable(work, runner=Killed())
 
     assert verdict.writable is False
-    assert verdict.reason == "push-refused"
+    assert verdict.reason == "push-unknown", verdict.reason
     assert "UNKNOWN, not refused" in (verdict.detail or ""), verdict.detail
 
 
@@ -1796,6 +1888,32 @@ def test_keep_ref_on_a_refused_push_does_not_claim_a_survivor(tmp_path: Path):
     assert verdict.cleaned_up is None, (
         f"nothing was created, so there is no survivor to report: {verdict.cleaned_up}"
     )
+
+
+def test_keep_ref_on_an_up_to_date_push_does_not_claim_a_survivor(tmp_path: Path):
+    """`push_ok` is not evidence of a write: "Everything up-to-date" exits 0 having created nothing.
+
+    Keying the enum on `push_ok` reported `cleaned_up=False` (documented as a PROVEN SURVIVOR) for a
+    run with no write, beside `leftover_ref=False`.
+    """
+    work, _remote = _make_pair(tmp_path)
+
+    class UpToDate(Runner):
+        def run(self, argv, cwd=None, timeout=120, env_extra=None):
+            if argv[1] == "push":
+                return Proc(0, out="=")  # porcelain: up to date, NO write
+            if argv[1] == "ls-remote":
+                return Proc(0, out="")
+            return super().run(argv, cwd=cwd, timeout=timeout, env_extra=env_extra)
+
+    verdict = check_writable(work, runner=UpToDate(), keep_ref=True)
+
+    assert verdict.reason == "push-refused"
+    assert verdict.kept_ref is True
+    assert verdict.cleaned_up is None, (
+        f"no write happened, so there is no survivor: {verdict.cleaned_up}"
+    )
+    assert verdict.leftover_ref is False
 
 
 def test_a_push_follow_tags_style_config_cannot_widen_the_probe(tmp_path: Path):

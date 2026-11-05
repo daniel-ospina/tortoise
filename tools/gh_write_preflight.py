@@ -127,6 +127,10 @@ REASONS = {
     "no-head": "HEAD does not resolve to a commit (no pushable object)",
     "remote-unreachable": "the remote refused or failed `ls-remote`",
     "push-refused": "`git push` was refused (read-only credential, branch protection, or no network)",
+    "push-unknown": (
+        "`git push` did not complete (timed out, was signalled, or produced no output), so write "
+        "capability is UNKNOWN — this is NOT evidence the credential is read-only"
+    ),
     "verify-mismatch": "the push reported success but `ls-remote` does not show the ref",
     "delete-failed": "the probe ref could not be deleted; it is left on the remote",
     "internal-error": "the probe itself failed unexpectedly (no verdict is available)",
@@ -190,9 +194,16 @@ _SCP_LIKE_USERINFO = re.compile(
 )
 
 
+_SCP_LIKE_BARE = re.compile(
+    # Same shape, anchored at the end of the token: `user@host` with nothing after it.
+    r"(?<![\w@./-<])([^<>\s/@]+)@([A-Za-z0-9._-]+)(?=\s|$)"
+)
+
+
 def _redact_scp_userinfo(text: str) -> str:
     def _sub(m: re.Match[str]) -> str:
-        userinfo, host, sep = m.group(1), m.group(2), m.group(3)
+        userinfo, host = m.group(1), m.group(2)
+        sep = m.group(3) if m.lastindex and m.lastindex >= 3 else ""
         user = userinfo.split(":", 1)[0]
         # `git@host:` / `ssh@host:` carry no secret — redacting them would destroy ordinary
         # diagnostics and is not required by anything.
@@ -200,7 +211,11 @@ def _redact_scp_userinfo(text: str) -> str:
             return m.group(0)
         return f"<userinfo-redacted>@{host}{sep}"
 
-    return _SCP_LIKE_USERINFO.sub(_sub, text)
+    out = _SCP_LIKE_USERINFO.sub(_sub, text)
+    # A BARE userinfo with NO separator at all (`token@host.example`) was classified as a credential
+    # and then printed VERBATIM: neither pattern matched, so the secret reached `--json`
+    # remote_url/push_url. `git remote get-url` prints exactly this for a scheme-less remote.
+    return _SCP_LIKE_BARE.sub(_sub, out)
 
 
 @dataclass
@@ -501,16 +516,34 @@ def _neutral_push_env(remote: str) -> dict[str, str]:
 
     Set through `GIT_CONFIG_*` (env, kept by `_child_env`) rather than `git -c` so argv stays the
     documented shape and no caller's flags are inherited.
+
+    ⛔ OCCUPY SLOTS **ABOVE** THE AMBIENT COUNT, never from zero. `GIT_CONFIG_COUNT=3` with keys
+    0-2 OVERWRITES every ambient slot, and on a box that injects its credential through that
+    channel (`url.<base>.insteadOf` + `credential.helper`) this REPLACED the working credential with
+    git's fallback — measured: a repo whose push target is resolved by an ambient `insteadOf`
+    returned `writable=False, push-refused` while a raw `git push` under the same env exited 0, and
+    `credential.helper` silently changed from the lane's helper to `!gh auth git-credential`. That
+    is a false block — the one failure this module says it must never add. `_read_env` counts up
+    from the ambient count for the same reason; do the same here.
     """
-    return {
-        "GIT_CONFIG_COUNT": "3",
-        "GIT_CONFIG_KEY_0": "push.followTags",
-        "GIT_CONFIG_VALUE_0": "false",
-        "GIT_CONFIG_KEY_1": f"remote.{remote}.mirror",
-        "GIT_CONFIG_VALUE_1": "false",
-        "GIT_CONFIG_KEY_2": "push.useForceIfIncludes",
-        "GIT_CONFIG_VALUE_2": "false",
+    settings = {
+        "push.followTags": "false",
+        f"remote.{remote}.mirror": "false",
+        "push.useForceIfIncludes": "false",
+        # A signed push is refused outright by a remote (or a hook) that does not accept signatures
+        # (`fatal: the receiving end does not support --signed push`), and push options are refused
+        # by a remote that does not advertise them. Both then read as "read-only credential".
+        # An EMPTY value disables the ambient push options — `--no-push-option` does NOT
+        # countermand a configured `push.pushOption` (measured: still rc 128).
+        "push.gpgSign": "false",
+        "push.pushOption": "",
     }
+    base = int(os.environ.get("GIT_CONFIG_COUNT") or 0)
+    env: dict[str, str] = {"GIT_CONFIG_COUNT": str(base + len(settings))}
+    for offset, (key, value) in enumerate(settings.items()):
+        env[f"GIT_CONFIG_KEY_{base + offset}"] = key
+        env[f"GIT_CONFIG_VALUE_{base + offset}"] = value
+    return env
 
 
 def _probe_ref(prefix: str = "gh-write-preflight") -> str:
@@ -727,6 +760,12 @@ def _push_verify_cleanup(
         # A signalled push (rc < 0 - e.g. the OOM killer, documented for these cells) or one that
         # produced no output at all says nothing about the credential either.
         if push_proc.rc == 124 or push_proc.rc < 0 or not (push_proc.err or "").strip():
+            # A DISTINCT TOKEN, not just prose: the published contract is that a caller can branch
+            # on `reason` without parsing detail, and `push-refused` means the credential is at
+            # fault. A timeout or a kill is not that, so pinning the token to `push-refused` parked
+            # deliverable work on a slow or OOM-killed push — the exact diagnosis error the note
+            # below exists to prevent.
+            verdict.reason = "push-unknown"
             verdict.detail = (
                 f"{verdict.detail} | the push TIMED OUT (our own deadline) — write capability is "
                 "UNKNOWN, not refused; re-run before concluding the credential is read-only"
@@ -739,7 +778,10 @@ def _push_verify_cleanup(
         # `cleaned_up=False` is documented as "a PROVEN SURVIVOR". On a `--keep-ref` run where the
         # push was refused nothing was ever created, so claiming a survivor overloads the field a
         # consumer branches on; `None` (not applicable / unknown) is the honest value.
-        verdict.cleaned_up = False if (push_ok or verdict.reason != "push-refused") else None
+        # Keyed on EVIDENCE of a write, not on `push_ok`: an "up to date" push exits 0 having
+        # created nothing, and calling that a PROVEN SURVIVOR invents litter while `leftover_ref`
+        # stays False beside it.
+        verdict.cleaned_up = False if (push_ok and wrote) else None
         return verdict
 
     dp = runner.run(
@@ -834,7 +876,8 @@ def check_writable(
         verdict.reason = "internal-error"
         note = redact(f"{type(exc).__name__}: {exc}")
         verdict.detail = f"{verdict.detail} | {note}" if verdict.detail else note
-        if verdict.probe_ref and verdict.cleaned_up is None and not verdict.kept_ref:
+        pushed = any(s.get("step") == "push" for s in verdict.steps)
+        if pushed and verdict.probe_ref and verdict.cleaned_up is None and not verdict.kept_ref:
             # A ref may survive this path; say so rather than implying a clean remote.
             verdict.detail += (
                 f" | the probe ref {verdict.probe_ref} may still be on {remote} — clean it up"
