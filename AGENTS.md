@@ -505,7 +505,9 @@ no verdict: after a killed run, check `git ls-remote <remote> 'refs/heads/<prefi
   **created and confirmed on the remote**, then deleted — unless cleanup was switched off or could not
   be confirmed. That is the `git push` path, so a lane can publish its branch (which is what every
   later step needs a remote ref for) — subject to the branch-ruleset caveat in the `push-refused`
-  bullet below, which is the one case where a writable credential is refused. Read the `cleanup`
+  bullet below, which is the one sub-case of `push-refused` where the branch *namespace* — not the
+  credential — is what the remote rejects. (The other `push-refused` causes — no network, a transport
+  failure — are also not credential verdicts: re-run before concluding "read-only".) Read the `cleanup`
   clause rather than assuming the remote is clean: `deleted` (confirmed), `KEPT (--keep-ref)` (asked
   for), or `deletion UNCONFIRMED` (the delete or its read-back failed — the credential still wrote;
   check the remote).
