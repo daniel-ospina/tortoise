@@ -37,6 +37,7 @@ import pytest
 
 from tortoise.exceptions import BundleValidationError
 from tortoise.sdk import (
+    _KEY_INDEX_TRIM_SET,
     _POINT_ITEM_MINT_STATUS_DEPTH,
     TortoiseSDK,
     _content_candidate_resolution,
@@ -2345,3 +2346,96 @@ def test_the_bundle_key_identity_holds_in_the_OTHER_padding_direction(sdk):
             promotion_policy="auto",
         )
     assert _points_with_key(sdk, "PK2") == []
+
+
+#: The pads the ENGINE's key index trims, measured **per character** on the
+#: embedded engine (2026-11-05): a Point written under ``f"{c}PK{c}"`` is found
+#: by the TRIMMED term and NOT by the raw one for every character below, while
+#: NBSP (U+00A0), U+2003 and U+001F are found by the raw term (verbatim).
+#:
+#: ⛔ A LITERAL on purpose — never derived from ``_KEY_INDEX_TRIM_SET``. Iterating
+#: the constant would make a NARROWED set drop its own cases and stay green; the
+#: equality assertion below reds instead, and each case then proves the trimmed
+#: term is the one the INDEX serves.
+_ENGINE_TRIMMED_PADS = (" ", "\t", "\n", "\v", "\f", "\r")
+
+
+def test_every_ENGINE_trimmed_pad_is_found_by_its_OWN_spelling(sdk):
+    """ALL SIX of the engine's trimmed pads are seekable — not just the space.
+
+    #10481's review recorded this as an observation, not a finding: of the six
+    characters in ``_KEY_INDEX_TRIM_SET``, CI pinned only the OUTER boundary
+    (space trimmed by ``test_a_padded_key_is_found_by_its_OWN_spelling``; NBSP
+    NOT trimmed by ``test_a_NON_ASCII_pad_is_seekable_by_its_OWN_spelling``), so
+    ``\\t\\n\\v\\f\\r`` were undefended. They are not cosmetic: a seek that sends
+    the RAW term for any of them misses the holder (the engine indexed the
+    trimmed one), which is the #6110 duplicate this whole fix exists to prevent
+    — a key padded with a TAB would mint twice while the suite stayed green.
+
+    Red on the pre-fix seek for every case (it sent the raw spelling), and red on
+    a NARROWED ``_KEY_INDEX_TRIM_SET`` — the two directions CI did not have.
+    """
+    assert "".join(_ENGINE_TRIMMED_PADS) == _KEY_INDEX_TRIM_SET, (
+        f"_KEY_INDEX_TRIM_SET is {_KEY_INDEX_TRIM_SET!r}; the engine's measured "
+        f"set is {' '.join(repr(c) for c in _ENGINE_TRIMMED_PADS)}. Changing it "
+        f"needs a fresh per-character measurement, and the cases below must move "
+        f"with it (#10481)"
+    )
+    for i, pad in enumerate(_ENGINE_TRIMMED_PADS):
+        key = f"{pad}PKT{i}{pad}"
+        a = sdk.create_point("statement", f"TRIMPAD-{i}", key=key, dedup=True)
+        assert sdk._find_points_by_key(key, pointKind="statement") == [a["id"]], (
+            f"the engine trims {pad!r} in the key index, so a key padded with it "
+            f"must be findable by its OWN spelling — sending the raw term missed "
+            f"the holder before #10481"
+        )
+        holders, _terminal = sdk._key_holder_state("statement", key)
+        assert holders == [a["id"]], (
+            f"the Phase-1 guard cannot see a {pad!r}-padded holder")
+        stored = sdk._get_proj().g.query(
+            "MATCH (n:Point) WHERE n.id = $id RETURN n.key",
+            params={"id": a["id"]}).result_set
+        assert stored and stored[0][0] == key, stored
+
+
+def test_a_blank_to_PYTHON_key_agrees_across_the_simulation_and_the_writer(sdk):
+    """OBSERVATION PINNED (recorded by the #10481 review, not charged as a
+    finding): ``_item_dedup_key`` gates PRESENCE with Python's ``str.strip()``
+    while normalising the TERM with the engine's set — two strip classes in one
+    expression — and nothing in the suite pinned what happens for a key that is
+    whitespace to Python but REAL to the engine (NBSP-only).
+
+    Pinned because the two halves must move TOGETHER, and because "the bundle
+    simulation models the writer AS IT IS" is the invariant the whole bundle
+    path rests on. Today both answer the same way, and the answer is SPLIT by
+    design: PRESENCE (Python's class) decides ABSENT — ``_item_dedup_key``
+    returns ``None``, mirroring the writer's own ``_has_key`` gate — while
+    STORAGE keeps the caller's bytes verbatim (``_item_stored_key`` and the
+    node agree), which is #9599's recorded position.
+
+    ⛔ NOT decided here, and not decided by #10481: whether a present-but-blank
+    key is "no key at all" (then it must not be STORED either) or "an identity
+    the engine indexes verbatim" (then the PRESENCE gate must use the engine's
+    set and the key leg must run). That is the open owner question on #11044 /
+    #9599 (comment 6342343424) — this test only pins that the simulation and
+    the writer give the SAME answer while it is open.
+    """
+    nb = "\u00a0"  # NBSP: whitespace to Python, REAL to the engine's index
+    # The simulation's two halves — presence says ABSENT, storage keeps bytes.
+    assert _item_dedup_key({"key": nb}) is None, (
+        "the PRESENCE gate must mirror the writer's own `.strip()` gate; if it "
+        "became engine-aware here, #11044 was decided and the writer's gate "
+        "must have moved with it")
+    assert _item_stored_key({"key": nb}) == nb
+    # …and the writer agrees with BOTH halves of that same answer.
+    a = sdk.create_point("statement", "BLANKISH-A", key=nb, dedup=True)
+    stored = sdk._get_proj().g.query(
+        "MATCH (n:Point) WHERE n.id = $id RETURN n.key",
+        params={"id": a["id"]}).result_set
+    assert stored and stored[0][0] == nb, stored
+    b = sdk.create_point("statement", "BLANKISH-B", key=nb, dedup=True)
+    assert b["id"] != a["id"], (
+        "this FOLDED, so the presence gate became engine-aware — that is "
+        "#11044's decision to make, and `_item_dedup_key({'key': NBSP})` must "
+        "then return the NBSP term instead of None (the two halves move "
+        "together; this test is the change-detector for that)")
