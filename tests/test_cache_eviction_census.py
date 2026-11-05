@@ -1038,6 +1038,10 @@ def test_the_documented_parity_example_supplies_the_graph_binding_the_code_requi
 
         assert "requires --parity-graph" not in err, (command, err)
         assert "not a registered parity instrument" in err, (command, err)
+        # A run that reached the cache would print the measurement and a verdict line;
+        # this one must stop at the report, so neither may appear.
+        assert "verdict:" not in err, (command, err)
+        assert "resident" not in err, (command, err)
         assert not attempted, (command, attempted)
         assert code == 3, (command, code, err)
 
@@ -1087,3 +1091,45 @@ def test_the_documented_example_refuses_before_a_reachable_cache_is_measured(
     assert code == 3, (code, err)
     assert not reached, (reached, "a refused report must refuse BEFORE the cache is read")
     assert not graph.statements, graph.statements
+
+
+def test_a_readable_documented_report_DOES_reach_the_connection(tmp_path, capsys,
+                                                                monkeypatch):
+    """Non-vacuity for the poisoned `_connection` above: a READABLE report gets past it.
+
+    The two tests above prove a refused report never connects. Neither can tell that
+    apart from "this CLI never connects on ANY input", and that is exactly the shape
+    the round-6 P2 was: an assertion that held for a reason unrelated to the claim.
+    Same documented argv, a report the loader ACCEPTS, and the fakes behind
+    `_connection` — so the run must reach the documented target (host, port, password,
+    graph) and return a MEASURED verdict (CLEAN: 900 B resident against a 1000 B
+    `maxmemory`) with exit 0, still without opening a socket.
+    """
+    import json
+    import shlex
+
+    doc = _docstring_of("tools/cache_eviction_census.py")
+    command = next(c for c in _documented_commands(doc, "tools/cache_eviction_census.py")
+                   if "--parity-report" in c)
+
+    report = tmp_path / "turns.json"
+    report.write_text(json.dumps(_real_shape_report()), encoding="utf-8")
+
+    cli = _cli()
+    seen: list[tuple] = []
+
+    def _a_cache_that_answers(host, port, password, graph_name):
+        seen.append((host, port, password, graph_name))
+        return _FakeClient(used=900, maxmemory=1_000), _FakeGraph({"Point": 120})
+
+    monkeypatch.setattr(cli, "_connection", _a_cache_that_answers)
+
+    argv = shlex.split(command)
+    argv[argv.index("--parity-report") + 1] = str(report)
+
+    code = cli.main(argv)
+    err = capsys.readouterr().err
+
+    assert seen == [("localhost", 6379, "falkordb", "tortoise")], (command, seen)
+    assert "verdict: CLEAN" in err, (command, err)
+    assert code == 0, (command, code, err)
