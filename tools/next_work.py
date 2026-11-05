@@ -47,8 +47,9 @@ WHAT IT EMITS, AND WHY THAT IS THE POINT
 A ranked list is a REPORT. This tool prints, for the top row, the exact command
 a runner would execute — which rail, which PR, which issue — or, when the top row
 needs a HUMAN (a review, or a gate refusal: another base, a missing required label,
-an unreadable base), is waiting on a runner, has an UNMEASURED merge tree, or is a
-DRAFT, the ACTION and then the first lower-ranked unit that DOES have a command.
+an unreadable base), is waiting on a runner, has an UNMEASURED merge tree, has a
+required check that never REPORTED, or is a DRAFT, the ACTION and then the first
+lower-ranked unit that DOES have a command.
 That is the difference
 between a consumer and an actuator, and it is why the output has a
 ``NEXT ACTION`` block rather than a table alone.
@@ -104,9 +105,10 @@ Usage
 
 Exit codes
     0  the queue was fully read and a next action was decided. When the top row has
-       nothing to run — NEEDS-TEST (a runner, or a merge tree that could not be
-       measured), NEEDS-REVIEW (a human), or a DRAFT (the author's) — the block
-       prints that row's ``ACTION`` and then the first
+       nothing to run — NEEDS-TEST (a runner, a merge tree that could not be measured,
+       or a required check that never REPORTED), NEEDS-REVIEW (a human: a review, a
+       gate refusal, or a review gate that is red with a bound record), or a DRAFT
+       (the author's) — the block prints that row's ``ACTION`` and then the first
        lower-ranked unit that DOES have a command; when NOTHING is runnable it says
        so and names no unit
     1  the queue was read but NO unit is pickable — every one is held, is a fold
@@ -145,6 +147,7 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
 import argparse
 import contextlib
 import json
+import math
 import os
 import re
 import shlex
@@ -431,18 +434,27 @@ class Unit:
     def executable(self) -> bool:
         """Pickable AND there is something to run now.
 
-        `NEEDS-TEST` is a real position but not an action: either the head is
-        waiting on a runner (checks in flight) or the merge tree could not be
-        MEASURED, and no dispatch changes either. Reporting it as the next action
+        `NEEDS-TEST` is a real position but not a RUNNABLE action (it still gets an
+        ACTION line, never a command): the head is waiting on a
+        runner (checks in flight), or the merge tree could not be MEASURED, or a
+        required check has never REPORTED (a harness defect), and no dispatch
+        changes any of them. Reporting it as the next action
         would be the actuator-that-cannot-deliver defect — measured 2026-11-04,
         when the CI queue itself was the blocker and every P0 sat in it.
         """
         # The positions that have a RUNNABLE rail. NEEDS-REVIEW (a reviewer + an
-        # evidence id) and NEEDS-TEST (a runner queue, or an unmeasured merge tree)
-        # have an ACTION, not a command — see `next_action`.
+        # evidence id) and NEEDS-TEST (a runner queue, an unmeasured merge tree, or
+        # a check that never reported) have an ACTION, not a command — see
+        # `next_action`.
+        # ⛔ THE CLASSIFICATION MUST AGREE WITH THE EMITTER. `next_command` also
+        # refuses a gate-refused row, so leaving this predicate without that guard
+        # made `executable=True` sit beside `next_command is None` — and `render`
+        # chose the RUNNABLE slot by `executable`, printing a literal `None` where
+        # the command belongs under "this is the first unit a lane can act on NOW".
         return (
             self.pickable
             and not self.draft
+            and not any(d.startswith("gate-refusal:") for d in self.detail)
             and self.position in ("READY-TO-LAND", "NEEDS-FIX", "NO-PR")
         )
 
@@ -663,6 +675,17 @@ def _normalise_shapes(raw: dict[str, Any], snap: Snapshot) -> None:
             snap.local_holders = {
                 k: v for k, v in snap.local_holders.items() if isinstance(v, list)
             }
+    if "local_holders" not in raw:
+        # ⛔ ABSENT IS NOT EMPTY, for this surface too. `claims` already refuses an
+        # absent map ("freedom is not provable"); `local_holders` fell back to the
+        # dataclass default `{}`, which `_claim_of` reads as "nothing local holds it"
+        # — measured: a snapshot that simply OMITS the field, with a local branch
+        # holding the unit, exited 0 WITH a merge command. The local half has no
+        # registry entry by construction, so no rail can catch it downstream.
+        snap.unreadable.append(
+            "local_holders: the snapshot carries no local-holder map — whether this box "
+            "already holds the work is not provable"
+        )
     if "claims" not in raw:
         # ABSENT is not the same as EMPTY: `_claim_of`'s `ref not in snap.claims`
         # branch is documented as "the registry was read and does not hold this key".
@@ -979,6 +1002,15 @@ def _position_for_pr(
     att = snap.attestation.get(str(pr["number"])) or {}
     verdict = str(att.get("verdict") or "")
 
+    # ⛔ THE REFUSAL IS RECORDED WHATEVER THE POSITION. It used to be appended only
+    # in the `elif structural` branch, so a structural refusal OUT-VOTED by a red
+    # check left no `gate-refusal:` detail — and the command guard, which keys on
+    # that detail, then handed out `fix-one.sh` for a gate-refused PR.
+    if structural:
+        detail.append(
+            f"gate-refusal: {'; '.join(structural)} — no code change and no rail fixes this; "
+            f"{_gate_refusal_edit(structural)}"
+        )
     if other_fails:
         pos = "NEEDS-FIX"
     elif structural:
@@ -988,10 +1020,6 @@ def _position_for_pr(
         # finds no findings, pushes nothing, and re-fails the chain. Same conflation
         # round 14 fixed for the review gate; a human retargets or relabels.
         pos = "NEEDS-REVIEW"
-        detail.append(
-            f"gate-refusal: {'; '.join(structural)} — no code change and no rail fixes this; "
-            f"{_gate_refusal_edit(structural)}"
-        )
     elif review_red and verdict not in ("head", "carry"):
         # Red by design: the record does not bind this head. The attestation block
         # below decides whether a review or a re-record is owed.
@@ -1288,7 +1316,17 @@ def next_command(unit: Unit, repo: str) -> str | None:
         # A command with an empty slug is not "the exact command a runner would
         # execute" — a hand-written snapshot with no `repo` produced `'' 1001`.
         return None
-    if not unit.pickable or unit.draft:
+    # ⛔ A GATE-REFUSED ROW NEVER REACHES A RAIL — the same guard the DRAFT fix
+    # added, for the same reason. A structural refusal (`base=` / `label=`) can be
+    # out-voted on POSITION by a red check or a merge conflict (`other_fails` wins,
+    # and the merge block downgrades unconditionally), so the row is NEEDS-FIX and
+    # used to be handed `fix-one.sh` — while `next_action` printed "nothing is
+    # dispatched" beside it. Measured: wrong base + conflict → COMMAND fix-one.sh,
+    # and `--json` carried a command AND an action for one unit, breaking this
+    # file's own `command XOR action` invariant.
+    if not unit.pickable or unit.draft or any(
+        d.startswith("gate-refusal:") for d in unit.detail
+    ):
         # A draft is the AUTHOR's; the queue refuses it at entry and a fixer would
         # be a second lane on a human's branch.
         return None
@@ -1411,6 +1449,16 @@ def next_action(unit: Unit, repo: str) -> str | None:
             f"retry the sweep for {target} — the merge tree could not be measured "
             f"({next(d for d in unit.detail if 'UNMEASURED' in d)}), so nothing hosts a wait"
         )
+    if unit.position == "NEEDS-TEST" and any("no check-run" in d for d in unit.detail):
+        # ⛔ NOTHING IS IN A RUNNER QUEUE when a required check has never REPORTED:
+        # a check name nothing emits, or a paths-ignore skip (a CANCELLED run does
+        # report — `completed/cancelled` — and lands in `fails`). Waiting is not the
+        # remedy — that is a harness defect.
+        which = next(d for d in unit.detail if "no check-run" in d)
+        return (
+            f"a required check has NEVER REPORTED for {target} ({which}) — nothing is queued and "
+            "waiting will not fix it; treat it as a harness defect"
+        )
     if unit.position == "NEEDS-TEST":
         return f"wait — {target} is in a runner queue; nothing to dispatch until its head reports"
     return None
@@ -1431,7 +1479,16 @@ def next_action(unit: Unit, repo: str) -> str | None:
 #:
 #: So a bad value falls back to the documented default with a named warning on stderr, and can
 #: never decide an exit code.
+#:
+#: ⛔ AND "NOT A NUMBER" WAS ONLY HALF THE HOLE (fold review, P2). `float("inf")` (or `1e400`)
+#: parsed FINE and then `time.sleep(inf)` raised `OverflowError` — an `ArithmeticError`, which
+#: `main`'s catch tuple does not name — so a typo'd knob still exited **1**, the "queue
+#: exhausted" code; and a huge finite value would have slept for years. The seam is therefore
+#: graded on the VALUE, not only on the parse: finite, non-negative, capped.
 PACE_SECONDS_DEFAULT = 0.2
+#: The documented ceiling. A pacing knob is a rate-limit courtesy; a value that can outlast a
+#: lane is not a pace, it is a hang.
+PACE_SECONDS_MAX = 5.0
 _PACE_WARNED = False
 
 
@@ -1442,16 +1499,25 @@ def pace_seconds() -> float:
     if raw is None or raw == "":
         return PACE_SECONDS_DEFAULT
     try:
-        return float(raw)
+        value = float(raw)
     except (TypeError, ValueError):
+        value = None
+    if value is None or not math.isfinite(value) or value < 0:
         if not _PACE_WARNED:
             _PACE_WARNED = True
             print(
-                f"next-work: NEXT_WORK_PACE={raw!r} is not a number — using the default "
-                f"{PACE_SECONDS_DEFAULT}",
+                f"next_work: ignoring NEXT_WORK_PACE={raw!r} (not a usable number); "
+                f"using {PACE_SECONDS_DEFAULT}s",
                 file=sys.stderr,
             )
         return PACE_SECONDS_DEFAULT
+    return min(value, PACE_SECONDS_MAX)
+
+
+#: A snapshot of the same seam, read once at import, for callers that report the pace rather
+#: than use it (and for `--help`-shaped runs that never pace). It is NOT what `_pace()` reads:
+#: the pacing gap itself is resolved at USE time, so a test can move it.
+PACE_SECONDS = pace_seconds()
 
 
 def _pace() -> None:
@@ -2174,6 +2240,8 @@ def render(
                     "the rank leader's merge tree could not be MEASURED (see ACTION) — "
                     "nothing is in a runner queue"
                 )
+            elif pick.position == "NEEDS-TEST" and any("no check-run" in d for d in pick.detail):
+                why = "a required check has NEVER REPORTED for the rank leader (see ACTION)"
             elif pick.position == "NEEDS-TEST":
                 why = "the rank leader's head is waiting on a runner"
             else:
@@ -2254,9 +2322,17 @@ def render(
     # nulled every `next_command` while this footer still printed them, so a text
     # consumer grepping for a command could find one on a run the tool itself
     # calls REFUSED — the same fail-open, one format over.
+    # ⛔ THE COMMAND IS PRINTED WHOLE. This row used to carry `cmd[:96]`, which cut a real
+    # command MID-TOKEN with no marker: measured with a live-shaped branch, the footer said
+    # `merge-one.sh . daniel-ospina/tortoise 1001 fix/10955-queue-con` — a branch that does not
+    # exist, in the block `tests/` itself treats as a command surface. A truncated command is
+    # worse than no command: it is runnable, plausible and wrong, and the reader has no signal
+    # that a character is missing. An earlier fix moved only the `NEXT ACTION` `COMMAND` line
+    # to the whole string and left this footer site behind, so the defect survived a review
+    # that recorded it as closed.
     for i, u in enumerate(shown, 1):
         cmd = "" if snap.unreadable else (next_command(u, repo) or "")
-        out.append(f"  {i}. {_label(u):<12} {u.priority:<11} {u.reason:<19} {cmd[:96]}".rstrip())
+        out.append(f"  {i}. {_label(u):<12} {u.priority:<11} {u.reason:<19} {cmd}".rstrip())
     out.append(
         "ordering key = (priority, position, (kind, number)) — total, and no clock enters the decision, "
         "so a re-run picks the same row."
@@ -2330,8 +2406,8 @@ def _main(argv: Sequence[str] | None = None) -> int:
             "this fleet keeps re-learning. The 'NEXT ACTION' block is the actuator half: the exact "
             "command for the top row — or, when the top row needs a HUMAN (a review, or a gate "
             "refusal: another base, a missing required label, an unreadable base), is waiting on "
-            "a runner, has an UNMEASURED merge tree, or is a DRAFT, the ACTION for it plus the "
-            "first unit below it that DOES have a command.\n\n"
+            "a runner, has an UNMEASURED merge tree, a required check that never REPORTED, or is a "
+            "DRAFT, the ACTION for it plus the first unit below it that DOES have a command.\n\n"
             "IDEMPOTENT BY CONSTRUCTION: the ordering key is total — (priority, position, "
             "(kind, number)), where an issue is (0, n) and a fold is (1, pr) — "
             "so two runs on one snapshot agree on the row. That is AGREEMENT, not exclusion: two "

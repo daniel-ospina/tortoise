@@ -413,7 +413,7 @@ _SEVERITY_ZERO_COUNT_RE = re.compile(
 #: spelling (review cycles 7 and 8). It must NOT be permissive enough to run away from the
 #: negation: `no test for the P1` is a LIVE finding.
 _SEVERITY_NEGATED_BEFORE_RE = re.compile(
-    r"(?i)(?:\bno|\bwithout\b|\bzero\b|\bnone\s+of)\b"
+    r"(?i)(?:\bno|\bwithout\b|\bzero\s+of\b|\bzero\b|\bnone\s+of)\b"
     r"(?:\s+(?:new|remaining|outstanding|other|further|open))?\s+(?:the\s+)?"
     r"(?:P[0-2]s?\s*(?:[/,]|\bor\b|\band\b)?\s*)*\Z"
 )
@@ -449,6 +449,28 @@ _SEVERITY_COMPLETED_AFTER_RE = re.compile(
 _SEVERITY_PREDICATE_AFTER_RE = re.compile(
     r"(?i)\s*(?:needs?|requires?|remains?|is|are|was|were|still|unresolved|open|unfixed|not"
     r"|has|have|had)\b"
+)
+#: ⛔ THE NEGATED ARM'S COMPLETION PREDICATE. `_SEVERITY_NEGATED_BEFORE_RE` exempts a token whose
+#: left neighbour is `no|without|zero|none of` — an ABSENCE spelling. That is only sound while the
+#: negation governs the TOKEN as a noun. When a COMPLETION verb is attached to the token, the
+#: negation is reaching the VERB, and the sentence says the completion did not happen: `without
+#: the P1 being fixed`, `None of the P1 findings were addressed`, `No P2 was fixed`, `zero of the
+#: P1 findings were closed`. Those are LIVE findings, and before this regex they cleared.
+#:
+#: It is deliberately NARROWER than `_SEVERITY_COMPLETED_AFTER_RE`: it accepts the passive and
+#: progressive spellings that regex cannot (`being fixed`, `were addressed`), and it does NOT
+#: accept a liveness predicate — `No P1 remains.` / `No P1 is open.` are real clears, so widening
+#: the liveness side here would reintroduce the #10962 false NOT-READY in the other direction.
+_SEVERITY_COMPLETION_NEGATED_AFTER_RE = re.compile(
+    r"(?i)\s*"
+    # the noun the token modifies (`None of the P1 findings were …`, `No P1 changes were …`)
+    r"(?:(?:findings?|issues?|items?|ones?|blockers?|fixes|fix|patches?|patch|changes?|change)"
+    r"\s+)?"
+    # the copula/auxiliary that carries the completion (`were`, `is`, `has been`, `being`)
+    r"(?:(?:is|are|was|were|has|have|had|being)\s+)?"
+    r"(?:been\s+|now\s+|already\s+|both\s+|all\s+|yet\s+)*"
+    # THE COMPLETION ITSELF. Only a completion — never a liveness word.
+    r"(?:closed|fixed|resolved|addressed|landed|gone|made)\b"
 )
 #: ⛔ A VERDICT ATTRIBUTED TO ANOTHER ARTIFACT IS A CITATION. The preamble is graded to the
 #: START OF THE LINE — an arbitrary character cap bought nothing and cost a bypass: the same
@@ -533,7 +555,26 @@ def _retracted_from(text: str, end: int) -> bool:
     # is the bug, whichever distance it happens to use.
     for token in _SEVERITY_TOKEN_RE.finditer(suffix):
         left = suffix[: token.start()]
+        # ⛔ A NEGATION THAT REACHES A COMPLETION VERB NEGATES THE COMPLETION, NOT THE FINDING.
+        # `no|without|zero|none of` before the token reads as ABSENCE (`No P1 remains.`), which
+        # is why the arm exists. But the same negation also spells a completion that did NOT
+        # happen — `without the P1 being fixed`, `None of the P1 findings were addressed` — and
+        # the token then names a LIVE finding. Exempting on the left window alone let those
+        # clear, and so did the COMPLETED_AFTER arm below, which reads `findings were addressed`
+        # as a completion without asking who negates it: measured at the pre-fix head,
+        # `**Verdict: CLEAN** — without the P1 being fixed.` and
+        # `**Verdict: CLEAN.** None of the P1 findings were addressed.` both yielded
+        # `asserts_a_clear=True` / `_grades_as_blocking=False`, and `evaluate()` printed
+        # `READY-FOR-OWNER` over an open P1 — the false PASS this module exists to prevent,
+        # since the owner does not review. So the combination is DECISIVE, not a `continue`:
+        # it must outrank the completion arm below, which is what a plain `continue` allowed.
+        # The completion is graded ANCHORED at the token (a window is the bug this file has
+        # re-learned four times), and only a COMPLETION verb counts: a liveness predicate after
+        # the token (`remains`, `is open`, `needs work`) is itself negated by the `no`, so
+        # `No P1 remains.` still clears.
         if _SEVERITY_NEGATED_BEFORE_RE.search(left):
+            if _SEVERITY_COMPLETION_NEGATED_AFTER_RE.match(suffix, token.end()):
+                return True
             continue
         if _SEVERITY_ZERO_COUNT_RE.match(suffix, token.end()):
             continue
