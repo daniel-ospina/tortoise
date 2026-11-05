@@ -277,7 +277,7 @@ jobs:
           if [ "${#missing[@]}" -gt 0 ]; then
             echo "::error::MISSING Supabase secrets required by tenant-provision:"
             for name in "${missing[@]}"; do echo "::error::  $name"; done
-            echo "::error::Set them with: supabase secrets set --project-ref $SUPABASE_PROJECT_REF <NAME>='...'"
+            echo "::error::Set them with: supabase secrets set --project-ref $SUPABASE_PROJECT_REF <NAME>='...' --yes"
             exit 1
           fi
           if present SUPABASE_SERVICE_ROLE_KEY; then

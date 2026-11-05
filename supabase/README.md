@@ -208,13 +208,13 @@ running one since `cancel-in-progress: false`, #10155), and the automated run
 then reports that its flip was superseded.
 
 ```bash
-supabase db push --project-ref ybetwichurajbfswfeqa
+supabase db push --project-ref ybetwichurajbfswfeqa --yes
 supabase functions deploy waitlist-subscribe \
-  --project-ref ybetwichurajbfswfeqa --no-verify-jwt
+  --project-ref ybetwichurajbfswfeqa --no-verify-jwt --yes
 supabase functions deploy tenant-provision \
-  --project-ref ybetwichurajbfswfeqa --no-verify-jwt
+  --project-ref ybetwichurajbfswfeqa --no-verify-jwt --yes
 supabase functions deploy deck-view \
-  --project-ref ybetwichurajbfswfeqa --no-verify-jwt
+  --project-ref ybetwichurajbfswfeqa --no-verify-jwt --yes
 gh workflow run deploy-hosted.yml --ref main   # the app flip, after a FAILED co-move
 ```
 
@@ -240,7 +240,7 @@ psql --single-transaction -v ON_ERROR_STOP=1 "$DATABASE_URL" \
   -f supabase/migrations/<version>_<name>.sql
 # 2. record it in the ledger, or check-migration-drift stays RED (it cannot tell
 #    "applied out-of-band" from "never applied")
-supabase migration repair --linked --status applied <version>
+supabase migration repair --linked --status applied <version> --yes
 supabase migration list --linked            # confirm: no repo-ahead version left
 ```
 

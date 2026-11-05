@@ -30,6 +30,7 @@ lane can prove without a project credential.
 from __future__ import annotations
 
 import re
+import tomllib
 from pathlib import Path
 
 import yaml
@@ -40,33 +41,50 @@ CONFIG = REPO_ROOT / "supabase" / "config.toml"
 
 
 def _sections(text: str) -> set[str]:
-    """Top-level TOML section names (`[name]`), comments/blank lines ignored."""
+    """Top-level TOML section names (`[name]`), comments/blank lines ignored.
+
+    Kept only for the human-readable list in failure messages; the ASSERTIONS parse with
+    ``tomllib`` (see ``_config_doc``) because a lexical scan cannot see the spellings the CLI
+    rejects: ``[inbucket] # legacy``, ``[ inbucket ]`` (both legal TOML) and the documented
+    ``[remotes.<name>.inbucket]`` scope, which v3 scans for the removed name.
+    """
     return set(re.findall(r"^\[([^\[\]]+)\]\s*$", text, flags=re.MULTILINE))
+
+
+def _config_doc() -> dict:
+    return tomllib.loads(CONFIG.read_text(encoding="utf-8"))
 
 
 def test_config_has_no_section_the_cli_rejects() -> None:
     """`[inbucket]` is a hard CLI error from v3.0.0 — it aborts `db push` before any migration."""
-    sections = _sections(CONFIG.read_text(encoding="utf-8"))
-    assert "inbucket" not in sections, (
+    doc = _config_doc()  # a parse failure here is itself a defect: the CLI would reject it too
+    assert "inbucket" not in doc, (
         "supabase/config.toml declares [inbucket], which Supabase CLI >= 3.0.0 rejects with "
         "exit 1 — `supabase db push` then applies NOTHING (#10896)."
     )
-    assert "local_smtp" in sections, (
+    assert "local_smtp" in doc, (
         "the local mail catcher section must be spelled [local_smtp] for CLI >= 3.0.0 (#10896)"
     )
+    # v3 scans every `[remotes.<name>.*]` scope for the removed name too, so the nested form is
+    # the same break — and a top-level-only check would miss it.
+    for name, remote in (doc.get("remotes") or {}).items():
+        assert "inbucket" not in remote, (
+            f"[remotes.{name}.inbucket] is rejected by Supabase CLI >= 3.0.0 (#10896) — rename it "
+            f"to [remotes.{name}.local_smtp]"
+        )
 
 
 def test_local_smtp_keeps_the_mail_catcher_settings() -> None:
     """The rename must not drop the settings the local dev workflow reads (#801/#863)."""
     text = CONFIG.read_text(encoding="utf-8")
-    match = re.search(r"^\[local_smtp\]\s*$", text, flags=re.MULTILINE)
-    assert match is not None, "[local_smtp] section not found (#10896)"
-    section = text[match.end():].split("\n[", 1)[0]
-    assert re.search(r"^enabled\s*=\s*true\s*$", section, flags=re.MULTILINE), (
+    doc = _config_doc()
+    assert "local_smtp" in doc, "[local_smtp] section not found (#10896)"
+    section = doc["local_smtp"]
+    assert section.get("enabled") is True, (
         "the local SMTP section must keep `enabled = true` — local dev relies on the mail "
         "catcher for the signup-confirmation branch (#801)"
     )
-    assert re.search(r"^port\s*=\s*54324\s*$", section, flags=re.MULTILINE), (
+    assert section.get("port") == 54324, (
         "the local SMTP UI port (54324) is referenced by the local-dev instructions"
     )
 
