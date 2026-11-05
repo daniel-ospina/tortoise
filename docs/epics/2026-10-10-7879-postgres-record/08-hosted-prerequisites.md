@@ -673,7 +673,7 @@ write order.
 | column | carrier (§3: PRIMARY iff the journal carries it) |
 |---|---|
 | `narrative` | the commit's `story_arc`, carried by `SessionNarrated` — the record #9555's follow-up added to the layer-1 commit path (see the ✅ block below; when this table landed the class was *PRIMARY-WITHOUT-CARRIER*, and the journal was extended, which is what that block records) |
-| `summary` | the same record's `summary`, projected ONLY alongside the narrative (the capture's own session `:Source` sets `summary` to the transcript's first utterance, which is not the narrative) |
+| `summary` | the same record's `summary`, projected ONLY alongside the narrative (the capture's own session `:Source` sets `summary` to a display descriptor over the session's TOPIC lexicon — never prose — which is not the narrative) |
 | `capture_redactions` | `SessionRecorded.capture_redactions` (`#4911`) — **integer**, because a count is not an envelope. It lands: the carrier's `session.capture_redactions` was narrowed to `integer` by `20261022000001` (`#9264`, fixed — see the `session` record row in §A2), so the `SessionRecorded` that carries this count reaches the record instead of being refused; a count this column cannot hold is still written as NO count, never a 0 or a coerced shape |
 | `turn_count` | `SessionRecorded.turn_count` |
 
