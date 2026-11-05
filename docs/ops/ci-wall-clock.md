@@ -366,8 +366,11 @@ reading it as one would be wrong — `.github/workflows/mirror-images.yml` still
 `matrix` with no cap. That one is out of scope rather than overlooked: it is not PR-triggered
 (`workflow_dispatch` plus a nightly `schedule`), so it has no per-PR fan-out to bound, and its
 `matrix` is a static 3-target `include:` list (mirroring registry images), not a shard set that
-grows with the suite — and it runs on a hosted `ubuntu-24.04` runner, so it cannot take a slot
-from the self-hosted pool this section measures. It is
+grows with the suite. It is pinned to a GitHub-hosted `ubuntu-24.04` runner **by choice** (its own
+egress IP keeps these registry pulls off the fleet's shared quota) — but that is not a guarantee it
+stays off the measured pool: `mirror-images.yml` records that since the 2026-10-29 mitigation the
+x64 pool can answer `ubuntu-24.04` under `CI_RUNNER_OS_LABEL=on|auto`, so while that mitigation is
+engaged this job is POOL-ELIGIBLE and can take up to 3 of the 12 measured slots. It is
 recorded here only so a later reader does not mistake this section for "every matrix in the repo
 is bounded".
 
@@ -415,11 +418,12 @@ the queue the PR no longer waits behind — gives per-PR peak / matrix-band delt
 **The accepted regression has two components, and only the run-level number judges it.** The slow
 matrix gains its second wave (`ceil(5/3)` = 2): its band goes ~13 m → ~18 m, still narrower than
 the fast band under the same cap (~31.5 m), so it does not become the run's widest leg. The fast
-matrix's band is pinned at `ceil(9/3)` = 3 waves — inside the measured 2–4 wave band, so it costs
-a wave on the runs where the pool delivered those 9 shards in 2 and saves one where it took 4. The
-pair is what the simulation's **matrix-band end delta of +17.9 m p50 / +23.2 m max** (table above)
-records, and that — not the slow matrix's ~5 m in isolation — is the figure a keep-vs-rollback
-reading must use (see "The re-derivation cannot use per-job queue wait", below). Capping slow at
+matrix's band is pinned at `ceil(9/3)` = 3 waves — inside the 2–4 wave band invariant 1 protects,
+but on the runs where the pool delivered those 9 shards in 2, the third wave is new wall. No saving
+is claimed on the runs where it took 4. The pair is what the simulation's **matrix-band end delta
+of +17.9 m p50 / +23.2 m max** (table above) records, and that — not the slow matrix's ~5 m in
+isolation — is the figure a keep-vs-rollback reading must use (see "The re-derivation cannot use
+per-job queue wait", below). Capping slow at
 5 to keep its single wave would put a PR's maximum **matrix** hold at 11 of 12 runners and fail
 invariant 2.
 
@@ -439,7 +443,7 @@ jobs** (17 matrix legs + 11 non-matrix — the 12th, `canary-streak`, is `push`-
 most **17 can run concurrently** (9 matrix slots + the 8 eligible non-matrix), and only **the pool
 — 12 — bounds that**. Not the cap, and not 9. The cap is a fairness bound on the FAN-OUT (which is
 what was unbounded, and what made one PR own the pool); it is not a total concurrency budget, and
-reading 9 as one would understate the hold by up to a third.
+reading 9 as one would understate the hold by nearly half (it is 9 of 17).
 
 ⛔ **Why it cannot false-red a shard.** `max-parallel` limits start order only. Every bound in
 these jobs is measured from runner pickup — the in-step watchdog is started INSIDE the job — so a
@@ -458,8 +462,12 @@ pins rather than two — the caps are a different property from the two false-re
 
 **Re-derive before moving any of the three numbers**: re-read the pool (`gh api
 repos/<owner>/<repo>/actions/runners`), the per-shard wall and the start stagger with §2's
-command. If the pool grows, invariant 2 permits a larger cap; if a shard's wall grows past
-`4 × cap × wall` catching the carve-out, invariant 1 is the one that moves.
+command. If the pool grows, invariant 2 permits a larger cap — and that move is not free: the
+`measured_pool` literal in the test is the one input that must be edited with the caps (below). If
+a shard's wall grows, the accepted regression grows with it, because each added wave costs one
+shard wall: recompute `waves × wall` for each capped matrix (at cap 3: fast `3 × 10.5 m ≈ 31.5 m`,
+slow `2 × 8.9 m ≈ 17.8 m`, carve-out `1 × 8.8 m ≈ 8.8 m`) and compare each against that same
+matrix's uncapped band before trusting the +17.9 m figure above.
 
 ⛔ **Re-measuring the pool is not only a reason to move a cap — it is an edit to the pin.**
 `tests/test_ci_selection.py` holds `measured_pool = 12` as a **literal** and asserts
