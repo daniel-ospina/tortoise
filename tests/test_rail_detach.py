@@ -1262,6 +1262,73 @@ def test_a_record_written_under_an_older_spelling_still_blocks(tmp_path):
         live.wait()
 
 
+def test_a_torn_record_cannot_certify_or_shadow_a_live_rail(tmp_path):
+    """⛔ THE REQUESTED REPO IS HALF OF EVERY MERGE VERDICT — PIN BOTH SITES.
+
+    `_record_names_repo` admits a record whose `REPO=` is absent (a header write cut
+    before that line must still read). The record then names NO repo, so every
+    `_merge_evidence` call needs the REQUESTED repo as its fallback — otherwise the
+    log's `admin-merge: repo <x>` cross-check is one-sided on an empty value and
+    silently skipped, which is how a torn record certified a merge it never made.
+
+    Two of those four fallback sites had no pin, so each could be reverted with the
+    suite still green: the RANKING site (`_record_is_merged`) let a torn record that
+    merely sits beside another repo's merged log outrank a genuinely LIVE rail,
+    reporting `lost`; the EXIT site (`_exit_verdict`) certified `merged` for the
+    wrong repo. The ranking one is reachable; the EXIT one is defence-in-depth (a
+    torn record is a PREFIX of one `write_text`, so it cannot carry `EXIT=` in
+    practice) and is pinned anyway, because "unreachable today" is how it re-opens.
+    """
+    live = subprocess.Popen(["/bin/sleep", "20"], start_new_session=True,
+                            stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL)
+    try:
+        # ── THE RANKING SITE: a torn record beside another repo's merged log must
+        # NOT outrank this repo's live rail.
+        sd = tmp_path / "state"
+        sd.mkdir()
+        torn = sd / "rail-a-b-c-9.md"            # canonical for BOTH spellings
+        torn.write_text("# rail artifact — a/b-c#9\nPR=9\n", encoding="utf-8")
+        torn_log = torn.with_suffix(".log")
+        torn_log.write_text(
+            f"\n{rd.ATTEMPT_MARK} x attempt=xyz (detached) =====\n"
+            "admin-merge: repo a/b-c (resolved from --repo)\n"
+            "admin-merge: ✅ merged PR #9 at deadbeefcafe1234 (state=MERGED)\n",
+            encoding="utf-8")
+        mine = sd / "rail-github.com-a-b-c-9.md"   # this repo's LIVE rail, legacy name
+        mine.write_text(f"PR=9\nREPO=github.com/a-b/c\nSTARTED_AT={rd._iso_now()}\n"
+                        f"PID={live.pid}\n", encoding="utf-8")
+        st = rd.collect(sd, "a-b/c", 9)
+        assert st is not None and st.state == rd.WAITING, (
+            "a torn record borrowed another repo's merge and shadowed the live "
+            f"rail: {st and st.as_dict()}")
+        assert st.artifact == str(mine), st.artifact
+
+        # ── THE EXIT SITE: the same torn shape, now carrying EXIT=, must not
+        # certify `merged` for a repo the log says was never graded.
+        sd2 = tmp_path / "state2"
+        sd2.mkdir()
+        torn2 = sd2 / "rail-a-b-c-9.md"
+        torn2.write_text("PR=9\nATTEMPT_ID=t\nEXIT_ATTEMPT=t\nEXIT=0\n",
+                         encoding="utf-8")
+        torn2.with_suffix(".log").write_text(
+            f"\n{rd.ATTEMPT_MARK} x attempt=t (detached) =====\n"
+            "admin-merge: repo a/b-c (resolved from --repo)\n"
+            "admin-merge: ✅ merged PR #9 at deadbeefcafe1234 (state=MERGED)\n",
+            encoding="utf-8")
+        st = rd.collect(sd2, "a-b/c", 9)
+        assert st is not None and st.state != rd.MERGED, (st and st.as_dict())
+        assert rd.main(["collect", "9", "--repo", "a-b/c", "--state-dir", str(sd2),
+                        "--assert-merged"]) == 1
+        # …while the repo the log NAMES is still certified by the SAME record.
+        st = rd.collect(sd2, "a/b-c", 9)
+        assert st is not None and st.state == rd.MERGED, (st and st.as_dict())
+    finally:
+        live.kill()
+        live.wait()
+
+
 def test_an_announced_merge_outranks_a_recycled_child_pid(tmp_path):
     """⛔ ANNOUNCED BEATS `lost` — INCLUDING THE `lost` A RECYCLED PID DRAWS.
 
