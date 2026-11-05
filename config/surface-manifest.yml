@@ -55,9 +55,17 @@
 # docs/product/canonical-mcp-tools.md and docs/product/beta-sdk-surface.md; compliance
 # with it is checked by tools/surface-target-check.py, which reads those docs rather than
 # a constant here.
+#
+# `cut_at_commit` IS a DEFAULT-BRANCH COMMIT, never a lane one (#11057 review F1). It names
+# the `main` commit this baseline was cut AGAINST, so `cut --commit <sha-in-main>` — not the
+# worktree HEAD it happened to run in. This repo squash-merges and deletes the source
+# branch, so a lane SHA resolves in the PR's own CI (which fetches every head) and exists
+# NOWHERE once it lands; a required provenance check that accepted one would red `main`
+# permanently. `check` therefore requires the record to be an ANCESTOR of the default
+# branch, not merely present in the clone.
 manifest_version: 1
 issue: 3863
-cut_at_commit: 9cd6cf28e6d45abd7790fbaf74d33c17b6c18044
+cut_at_commit: af36e9240f30cf7f3ec37f1d82a18a91d45c08e0
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -789,7 +797,7 @@ retired:
   http_policy: true
   approval: null
 - name: tortoise_query_points_by_tag
-  use_instead: tortoise_query(tag=...)
+  use_instead: tortoise_query(tag=..., offset=..., limit=...)
   sdk_method: query_points_by_tag
   http_policy: true
   approval: null

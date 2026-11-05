@@ -91,7 +91,7 @@ not something to reconcile silently.
 | 71 | `tortoise_promote_point` | `tool_registry.py:593` | **no replacement** | `refresh_confidence` | absent |
 | 72 | `tortoise_provenance` | `tool_registry.py:1160` | **no replacement** | `check_confidence` | absent |
 | 73 | `tortoise_query` | `tool_registry.py:294` | **no replacement** | `search_knowledge` | absent |
-| 74 | `tortoise_query_points_by_tag` | `tool_registry.py:469` | `tortoise_query(tag=...)` | `search_knowledge` | warning shim |
+| 74 | `tortoise_query_points_by_tag` | `tool_registry.py:469` | `tortoise_query(tag=..., offset=..., limit=...)` | `search_knowledge` | warning shim |
 | 75 | `tortoise_recall` | `tool_registry.py:522` | **no replacement** | `check_confidence` | absent |
 | 76 | `tortoise_retract_point` | `tool_registry.py:878` | **no replacement** | `update_knowledge` | absent |
 | 77 | `tortoise_review_connections` | `tool_registry.py:1124` | **no replacement** | `review_link_candidates` | absent |
@@ -203,7 +203,7 @@ resolving *which* destination is right is a design decision, not a build step.
 | `tortoise_onboarding_github_index` | `manage_sources` | `tortoise_manage_sources(action="enable", source="github_issues") (no per-repo scope: it indexes every connected repo)` | `manage_sources` | AGREE |
 | `tortoise_onboarding_session_recording` | `manage_sources` | `tortoise_manage_sources(action="enable" or "disable", source="agent_sessions")` | `manage_sources` | AGREE |
 | `tortoise_paginated_query` | `search_knowledge` | `tortoise_query(offset=..., limit=...)` | `search_knowledge` | AGREE |
-| `tortoise_query_points_by_tag` | `search_knowledge` | `tortoise_query(tag=...)` | `search_knowledge` | AGREE |
+| `tortoise_query_points_by_tag` | `search_knowledge` | `tortoise_query(tag=..., offset=..., limit=...)` | `search_knowledge` | AGREE |
 | `tortoise_stale` | `graph_overview` | `tortoise_overview(section="stale")` | `graph_overview` | AGREE |
 | `tortoise_status` | `graph_overview` | `tortoise_overview(section="status")` | `graph_overview` | AGREE |
 | `tortoise_taxonomy` | `graph_overview` | `tortoise_overview(section="taxonomy")` | `graph_overview` | AGREE |

@@ -468,3 +468,40 @@ def test_every_editable_served_skill_that_reads_a_population_discloses_the_bound
         "a served skill reads a bounded population but does not tell its reader so "
         f"(#10602 review P2-1): {offenders}. State the cap AND the walk — `offset=` "
         "plus `hasMore` — or the skill reports a subset as a complete set.")
+
+
+def test_the_retirement_pointer_names_the_walk_it_recommends():
+    """#11057 review F3 — the string a retired-tool caller is actually told to follow.
+
+    `RETIRED_USE_INSTEAD` is SERVED, not cosmetic: `tortoise/mcp_server.py` renders it
+    into the retired shim's message and description, and
+    `docs/product/mcp-rename-table.md` is GENERATED from it. The pointer read
+    `tortoise_query(tag=...)`, which after this PR caps its RESPONSE at the un-paginated
+    default (100 rows) and answers a plain list with no `hasMore`/`total` — so following
+    the printed migration landed on a truncated answer indistinguishable from a complete
+    one, the exact harm the handler docstring's `Migrate to:` repudiates one layer up.
+
+    Non-vacuous on the pre-fix map: the value named neither `offset=` nor `limit=`, and
+    the generated table's two rows carried the bare form.
+    """
+    from pathlib import Path
+
+    from tortoise.tool_registry import RETIRED_USE_INSTEAD
+
+    expr = RETIRED_USE_INSTEAD["tortoise_query_points_by_tag"]
+    assert "offset=" in expr and "limit=" in expr, (
+        "the retirement pointer still names the bare read, so a caller who follows it "
+        f"lands on a response capped at 100 that cannot be walked or told apart: {expr!r}")
+
+    doc = (Path(__file__).resolve().parent.parent / "docs" / "product"
+           / "mcp-rename-table.md").read_text(encoding="utf-8")
+    rows = [ln for ln in doc.splitlines()
+            if ln.startswith("| 74 | `tortoise_query_points_by_tag`")
+            or (ln.startswith("| `tortoise_query_points_by_tag`") and "| AGREE |" in ln)]
+    assert len(rows) == 2, (
+        f"expected the generated table's two `tortoise_query_points_by_tag` rows "
+        f"(the migration table and the redirect-agreement table), found {rows!r}")
+    for row in rows:
+        assert f"`{expr}`" in row, (
+            "a generated artifact still carries a retirement pointer the registry no "
+            f"longer emits — regenerate `tools/mcp_rename_table.py`. Row: {row}")

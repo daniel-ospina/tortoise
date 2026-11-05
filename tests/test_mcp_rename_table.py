@@ -69,7 +69,12 @@ RETIRED_LITERAL: dict[str, str] = {
     "tortoise_list_sources": 'tortoise_overview(section="sources")',
     "tortoise_list_tags": 'tortoise_overview(section="tags")',
     "tortoise_paginated_query": "tortoise_query(offset=..., limit=...)",
-    "tortoise_query_points_by_tag": "tortoise_query(tag=...)",
+    # #11057 review F3: the RETIREMENT POINTER is part of the served contract, and the
+    # bare `tortoise_query(tag=...)` is the read this PR bounded at 100 rows with a plain
+    # list and no `hasMore`/`total` — pointing a retired caller at it lands them on a
+    # truncated answer they cannot distinguish from a complete one. The literal oracle
+    # carries the WALK for that reason, not the shortest spelling.
+    "tortoise_query_points_by_tag": "tortoise_query(tag=..., offset=..., limit=...)",
     "tortoise_stale": 'tortoise_overview(section="stale")',
     "tortoise_status": 'tortoise_overview(section="status")',
     "tortoise_taxonomy": 'tortoise_overview(section="taxonomy")',

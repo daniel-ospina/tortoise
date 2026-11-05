@@ -2078,7 +2078,13 @@ RETIRED_USE_INSTEAD: dict[str, str] = {
     "tortoise_stale": 'tortoise_overview(section="stale")',
     # Tier 2 — the entry's own description already named its replacement.
     "tortoise_paginated_query": "tortoise_query(offset=..., limit=...)",
-    "tortoise_query_points_by_tag": "tortoise_query(tag=...)",
+    # #11057 review F3: the walk, not the bare read. `tortoise_query(tag=...)`
+    # caps its RESPONSE at the un-paginated default and answers a plain list with
+    # no `hasMore`/`total`, so pointing a retired-tool caller at it lands them on a
+    # truncated answer they cannot distinguish from a complete one — the #8447 §1
+    # shape the alias's own `Migrate to:` text repudiates 1000 lines away. The
+    # paged form is the only destination that can be walked to the whole population.
+    "tortoise_query_points_by_tag": "tortoise_query(tag=..., offset=..., limit=...)",
     "tortoise_index_sessions": "tortoise_index_files(directory)",
     "tortoise_ingest_corpus": "tortoise_index_files(directory)",
     # #3540 ruling B (owner, 2026-10-12): ONE consolidated source-management
