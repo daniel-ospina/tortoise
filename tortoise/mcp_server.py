@@ -507,6 +507,19 @@ def _emit_mcp_wait_bound_breach_off_loop(org_id: str, latency_ms: int,
     # import. Sanitized on the loop (pure and cheap), so the off-loop closure
     # carries only the safe value.
     safe_name = _mcp_auth._sanitize_for_log(name)
+    # #10602: count the breach on THIS thread, before the emit is submitted.
+    # ``submit`` returns a PRE-FAILED future when the telemetry pool's bounded
+    # backlog is full — the saturation that also causes breaches — so a counter
+    # incremented inside ``_emit`` would under-count precisely when it matters.
+    #
+    # EXACTLY-ONCE across the whole `/mcp` surface: this helper is the seam's
+    # only counting site, and the seam reaches it from exactly one place — the
+    # ``else`` of ``if _wait_bound_refused():``. The two ``dispatched=False``
+    # returns deliberately emit nothing (the transport already answered and
+    # already counted, as ``mcp``), so one refused MCP request is one count no
+    # matter which detector saw it. `test_the_mcp_module_has_exactly_one
+    # _breach_counting_site` pins that a second site is not added.
+    monitoring.record_wait_bound_breach("mcp")
 
     def _emit() -> None:
         try:

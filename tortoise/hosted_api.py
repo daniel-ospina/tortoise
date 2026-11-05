@@ -5331,6 +5331,22 @@ class WaitBoundMiddleware:
         # be forged. The helper lives in ``mcp_auth`` (#3834 F-3) so the MCP
         # arm shares it without importing this module.
         safe_route_path = _mcp_auth._sanitize_for_log(route_path)
+        # #10602: count the breach HERE, synchronously and before the emit is
+        # scheduled. The emit is best-effort (telemetry pool, bounded backlog,
+        # `logger.debug` on failure); a counter that rode inside it would go
+        # silent under exactly the overload that causes breaches.
+        #
+        # ⛔ Classified by SURFACE, not by arm. THIS middleware also owns the
+        # `/mcp` refusal for a request that stalls BEFORE its SSE response
+        # begins (see the class docstring), and that refusal is served with the
+        # JSON-RPC `-32009` body — the exact shape #10602 recorded. Labelling it
+        # "rest" would report the P0's own refusal class under the surface an
+        # operator is told is NOT the read path, sending them to the REST routes
+        # while MCP tool calls are the ones being refused. `_is_jsonrpc_surface`
+        # is the same predicate `_send_wait_bound_refusal` uses three lines below
+        # to CHOOSE that body, so the label and the body cannot disagree.
+        _monitoring.record_wait_bound_breach(
+            "mcp" if _is_jsonrpc_surface(route_path) else "rest")
         _emit_wait_bound_breach(org_id or "", safe_route_path,
                                 scope.get("method", ""),
                                 int((time.monotonic() - t0) * 1000))
@@ -6673,6 +6689,14 @@ async def health():
             else "degraded",
             "db": db, "probe": probe_meta, "loop_stale_ms": loop_age_ms,
             "backup_watcher": watcher, "change_feed": _change_feed_health(),
+            # #10602: the transport wait bound's own breach count. This is the
+            # surface an operator curls FIRST, and on 2026-11-02T15:44Z it read
+            # `status: "ok"` while 6/6 searches were refused with `-32009`.
+            # Same rule as `change_feed` / `build` above: it is REPORTED, never
+            # folded into `status` — `degraded` stays reserved for an observed
+            # probe failure, and a cumulative counter would pin the deployment
+            # degraded for the life of the process.
+            "wait_bound_breaches": _monitoring.wait_bound_breach_counts(),
             "record": record, "build": _build_identity()}
 
 

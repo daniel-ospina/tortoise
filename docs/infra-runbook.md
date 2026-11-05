@@ -742,6 +742,76 @@ stall (the #2924 shape) reds. It complements
 `tests/test_health_ready_nonblocking.py`, which pins nonblocking *structure*
 in-process and names no client-visible budget.
 
+### 4.1.1 The read path's own signal — `wait_bound_breaches` (#10602)
+
+**Symptom this exists for.** `status: "ok"` and `db.ok: true` while the core
+read path fails. Measured on 2026-11-02T15:44Z: `tortoise_health` answered `ok`
+with `db.latency_ms` 3,030 – 6,080 ms while **6/6** single-agent
+`tortoise_search` calls were refused
+
+```text
+HTTP 504  {"error":{"code":-32009,"message":"The server's wait budget for this
+           request was exceeded before a response was ready. …",
+           "data":{"retry_after":10}}}
+```
+
+`status` is **not** the field that reports this, and that is a recorded decision
+rather than an oversight: `degraded` is reserved for an observed probe *failure*,
+so a slow-but-reachable store must not flip it (`monitoring.metrics`). Do not
+"fix" the miss by deriving `status` from latency — that reverses the decision.
+
+**Read this field instead.** The health body carries
+
+```json
+"wait_bound_breaches": {"total": 0, "by_surface": {"mcp": 0, "rest": 0}, "error": null}
+```
+
+cumulative since process start, incremented on every wait-bound refusal — the
+`-32009` JSON-RPC body on the MCP surface, the `{"detail"}` 504 on the REST one.
+Both surface keys are always present, at `0`, so a measured zero is
+distinguishable from a build that cannot see breaches at all; `error` is `null`
+when the read succeeded and names the reason when it did not, because a failed
+read reported as `0` would be the same false reassurance.
+
+```bash
+# CUMULATIVE since this process started — not a rate, not a current state.
+curl -sS https://api.premiselabs.co/health | jq '.wait_bound_breaches'
+```
+
+Three properties of this number, because a counter misread as a gauge is its own
+false reassurance:
+
+- **Cumulative, not a rate.** A non-zero `total` means "breached since boot", not
+  "breaching now". It resets to `0` on every deploy. Sample twice to get a rate.
+- **Per process and per machine.** Every Fly machine keeps its own; a `0` from
+  one `curl` is not a fleet-wide `0`. Read **each machine** over SSH against the
+  app's own port — there is **no `/metrics` route on the hosted app** (§6.9
+  item 2 below says the same thing about the 9090 listener: `/healthz` only,
+  404 for everything else, and `serve_health` is not a `fly.toml` process):
+
+  ```bash
+  fly ssh console -a tortoise-y4mjjq -C "curl -s localhost:8000/health" | jq .wait_bound_breaches
+  ```
+
+  `jq` runs on YOUR side of the quote on purpose — the hosted image carries
+  `curl` but no `jq` (§6.0's rule: probe with what the image has, parse on the
+  operator's side; §6.9 item 2 is the same trap for `ss`).
+- **Attributed by SURFACE, not by arm.** `mcp` covers everything under `/mcp`,
+  including the pre-SSE stall the transport refuses with the JSON-RPC `-32009`
+  body — which is the shape `#10602` recorded. So a recurrence of *this* P0
+  shows up as `mcp`, never as `rest`.
+
+The same field is on the MCP health tool (`tortoise_health`, or
+`tortoise_overview(section="health")`) — the surface `#10602` itself was
+measured on — and on `monitoring.serve_health`'s `/metrics` families.
+
+**What its absence used to cost.** Breaches were emitted to exactly one place —
+a best-effort external analytics write, swallowed at `debug` on failure — so
+finding this P0 required an agent to hand-measure six sequential calls. A
+non-zero `total` with a healthy `db.ok` means the store is too slow for the
+bound, not unreachable: the refusal is legible, the work may still complete, and
+the fix is capacity or a narrower query, never a retry loop.
+
 ### 4.2 Billing mirror drift — verify and repair an under-delivered plan (#8878)
 
 **Symptom.** A customer pays for a higher tier and is enforced at a lower one.

@@ -770,6 +770,60 @@ RECORD_NON_JOURNAL_SKIP_COUNT = Counter(
     "(#9231 review P2)",
     ["reason"],
 )
+# ── #10602: the transport wait bound's OWN breach channel ───────────────────
+#: Requests REFUSED because the transport wait bound expired — the `-32009`
+#: "the server's wait budget for this request was exceeded" refusal, which is
+#: the entire symptom `#10602` is filed about.
+#:
+#: WHY A COUNTER AND NOT JUST THE ANALYTICS EVENT. `-32009` breaches were
+#: emitted to exactly one place: `hosted_api._emit_wait_bound_breach`, a
+#: BEST-EFFORT write to the external analytics sink, scheduled on the telemetry
+#: pool and swallowed on any failure (``logger.debug``). Two consequences, both
+#: measured on `#10602` itself:
+#:
+#: * The health surface could not report the class. On 2026-11-02T15:44Z
+#:   `tortoise_health` answered ``status: "ok"`` while 6/6 single-agent
+#:   `tortoise_search` calls were being refused with `-32009`. Finding the P0
+#:   therefore required an agent to hand-measure six sequential calls — the
+#:   exact work this counter makes unnecessary.
+#: * With no analytics sink reachable, a breach left NO in-process trace at all.
+#:   A channel that is a no-op when its writer is absent is not an observation.
+#:
+#: ``status`` itself is deliberately NOT derived from this counter. The rule
+#: that ``degraded`` means an OBSERVED probe FAILURE — and that a cumulative
+#: counter must never pin a deployment degraded for the life of the process —
+#: is recorded at `metrics`'s own `status` mapping and at `hosted_api.health`'s
+#: docstring (which cites #10185/#10620 for it). This is an ADDITIVE field
+#: beside that verdict, never a rewrite of it.
+#:
+#: ``surface`` is the SURFACE the refused request was SERVED ON — ``mcp`` for
+#: anything under the mounted MCP app, ``rest`` otherwise — NOT the arm that
+#: detected it. The distinction is load-bearing: `WaitBoundMiddleware` owns the
+#: `/mcp` refusal for a request that stalls BEFORE its SSE response begins, and
+#: that pre-SSE stall is served with the JSON-RPC `-32009` body — the exact
+#: shape #10602 recorded. Labelling it by ARM would report the P0's own refusal
+#: class as `rest`, sending an operator to the REST routes while the failing
+#: operation is an MCP tool call. Both writers therefore classify with
+#: ``_is_jsonrpc_surface`` (see the REST call site).
+#:
+#: Two values, both literals — a FIXED label set by construction. The
+#: client-supplied route path and tool name stay where they already were (the
+#: analytics prop and the warning log line); putting either on a metric label
+#: would let a caller grow this process's label set without bound.
+#:
+#: The single writer is ``record_wait_bound_breach``, called from each detector's
+#: OWN breach decision point BEFORE any telemetry is scheduled — never from
+#: inside a scheduled closure, which the pool may drop under exactly the
+#: overload that causes breaches (the inert-enforcer shape `#10602` must not
+#: recreate).
+#: The two surfaces the wait bound is enforced on, spelled once so the health
+#: report's zero-padding and the writers cannot drift apart.
+_WAIT_BOUND_SURFACES = ("mcp", "rest")
+WAIT_BOUND_BREACH_COUNT = Counter(
+    "tortoise_wait_bound_breaches_total",
+    "Requests refused because the transport wait bound expired (#10602)",
+    ["surface"],
+)
 # #10515: a LEGITIMATE revision was refused by `update_point`'s ABSENT arm.
 #
 # The arm itself is #10119's and is correct: an id absent from the live graph at
@@ -1539,6 +1593,53 @@ def record_non_journal_skip(reason: str = "no_durable_journal") -> None:
 def record_non_journal_skip_counts() -> dict[str, int]:
     """In-process snapshot of ``RECORD_NON_JOURNAL_SKIP_COUNT``, by reason."""
     return _collect_by_label(RECORD_NON_JOURNAL_SKIP_COUNT, "reason")
+
+
+def record_wait_bound_breach(surface: str) -> None:
+    """Count one request the transport wait bound REFUSED (#10602).
+
+    ``surface`` is ``"mcp"`` or ``"rest"``. Called from each arm's breach
+    decision point BEFORE its analytics emit is scheduled: the emit is
+    best-effort and may be dropped by the telemetry pool's bounded backlog, and
+    a breach counter that goes quiet precisely during a breach storm would be
+    the opposite of what it is for.
+
+    Cheap and synchronous on purpose (a single labelled counter increment, no
+    I/O), so the refusal path does not pay for its own observation.
+    """
+    WAIT_BOUND_BREACH_COUNT.labels(surface=surface).inc()
+
+
+def wait_bound_breach_counts() -> dict:
+    """In-process snapshot of ``WAIT_BOUND_BREACH_COUNT`` (#10602).
+
+    ``{"total": N, "by_surface": {"mcp": n, "rest": n}, "error": None}``.
+
+    ⛔ NEVER RAISES, and that is a CONTRACT rather than a convenience: this is
+    read by ``hosted_api.health()``, whose docstring promises "it never 5xxes"
+    and whose every other read is wrapped for exactly that reason (#10648
+    review P2, #2850). A monitoring read that can throw turns the change that
+    makes an outage visible into a 500 on the endpoint Fly probes.
+
+    Every known surface is present even at 0 — a missing key and a measured
+    zero must not read the same (``#3253``'s rule for ``graph_size_error``).
+
+    ⛔ A FAILED READ IS NOT A ZERO, so the same rule applies to that failure:
+    when the counter family cannot be collected, ``error`` carries the reason
+    and the counts stay 0. Reporting a bare 0 would be the false reassurance
+    this whole channel exists to remove, so a reader must check ``error`` —
+    absent/None means MEASURED.
+    """
+    by_surface = dict.fromkeys(_WAIT_BOUND_SURFACES, 0)
+    error: str | None = None
+    try:
+        by_surface.update(_collect_by_label(WAIT_BOUND_BREACH_COUNT, "surface"))
+    except Exception as exc:
+        logger.warning(
+            "#10602: wait-bound breach counts unreadable: %r", exc)
+        error = f"wait_bound_breaches unreadable: {type(exc).__name__}"
+    return {"total": sum(by_surface.values()), "by_surface": by_surface,
+            "error": error}
 
 
 def record_silent_revision_loss(reason: str) -> None:
@@ -5682,6 +5783,14 @@ def metrics(sdk=None, setup_timeout=None) -> dict:
         # not be confirmed). Zero on a healthy lane means "no revision was lost in
         # silence" — the typo path does not touch it, by design.
         "silent_revision_losses": silent_revision_loss_counts(),
+        # #10602: the transport wait bound's OWN breach channel. `-32009`
+        # "wait budget exceeded" refusals were emitted only to a best-effort
+        # external analytics writer, so the health surface could report
+        # `status: "ok"` while every search was being refused — measured
+        # 2026-11-02T15:44Z. This is the in-process, always-present count.
+        # It does NOT feed `status`: `degraded` stays reserved for an observed
+        # probe failure (see `metrics`'s own note), so this is additive only.
+        "wait_bound_breaches": wait_bound_breach_counts(),
         # #9307 review F1: a DURABLE journal whose append could not prove the
         # record's position writes no layer-1 row (a replay heals it). Its own
         # key, so neither the failure counter nor the non-journal skip counter
