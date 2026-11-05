@@ -637,23 +637,37 @@ def _tokens(key: str) -> list[str]:
     return [t.lower() for t in _TOKEN_SPLIT.split(_CAMEL.sub("-", key)) if t]
 
 
-def _is_mutable_name(key: str) -> bool:
-    """Token-exact match, plus adjacent-PAIR phrases, plus a glued suffix/prefix test."""
+def _vocabulary_for(key: str) -> frozenset[str]:
+    """The mutable-token vocabulary that applies to THIS key — the ONE set both the decision
+    (`_is_mutable_name`) and the refusal message (`_mutable_words_in`) walk.
+
+    ⛔ NEVER FORK THIS AGAIN. The decision set and the message set drifted for exactly one commit:
+    `_is_mutable_name` added `_CONTAINER_SCOPED_MUTABLE`, `_mutable_words_in` did not, so
+    `pr.labels` was refused (correctly) with an EMPTY reason list — `carries mutable-state
+    vocabulary ()` — on the very key pair the container-scoped vocabulary was added for. Two
+    functions that must agree, deriving their set independently, is how that happens; one helper
+    is how it cannot.
+    """
     tokens = _tokens(key)
     # ⛔ THE EXEMPTION IS EXACTLY `repo.labels`, NOT ANY `repo.`-PREFIXED NAME. A prefix test
     # admitted `repo.pr.labels` (argv `repos/{repo}/pulls/9/labels`) — a PR's triage ASSIGNMENT
     # cached for an hour, which is the case this exemption exists to keep OUT.
-    definitions_key = tokens == ["repo", "labels"]
-    mutable_here = _MUTABLE_TOKENS | _CONTAINER_SCOPED_MUTABLE
-    if definitions_key:
-        mutable_here = _MUTABLE_TOKENS - _CONTAINER_SCOPED_MUTABLE
+    if tokens == ["repo", "labels"]:
+        return frozenset(_MUTABLE_TOKENS - _CONTAINER_SCOPED_MUTABLE)
+    return frozenset(_MUTABLE_TOKENS | _CONTAINER_SCOPED_MUTABLE)
+
+
+def _is_mutable_name(key: str) -> bool:
+    """Token-exact match, plus adjacent-PAIR phrases, plus a glued suffix/prefix test."""
+    tokens = _tokens(key)
+    mutable_here = _vocabulary_for(key)
     if any(t in mutable_here for t in tokens):
         return True
     if any((a + b) in _MUTABLE_PAIRS for a, b in itertools.pairwise(tokens)):
         return True
-    long_words = [w for w in _MUTABLE_TOKENS if len(w) >= _MIN_GLUED_WORD]
+    long_words = [w for w in mutable_here if len(w) >= _MIN_GLUED_WORD]
     for t in tokens:
-        if t in _MUTABLE_TOKENS:
+        if t in mutable_here:
             continue
         # A single token that IS a glued phrase (`ratelimit`). Per-TOKEN, never across the whole
         # key: `accurate`+`limit` glue to the same string from two tokens, and a whole-key scan
@@ -666,13 +680,18 @@ def _is_mutable_name(key: str) -> bool:
 
 
 def _mutable_words_in(key: str) -> list[str]:
-    """The words that made a name mutable — for the refusal message, never for the decision."""
+    """The words that made a name mutable — for the refusal message, never for the decision.
+
+    Walks `_vocabulary_for(key)`, the SAME set `_is_mutable_name` decides from, so a refusal can
+    never again name an empty reason list for a word the decision refused.
+    """
     tokens = _tokens(key)
-    hits = [t for t in tokens if t in _MUTABLE_TOKENS]
+    mutable_here = _vocabulary_for(key)
+    hits = [t for t in tokens if t in mutable_here]
     hits += [a + b for a, b in itertools.pairwise(tokens) if (a + b) in _MUTABLE_PAIRS]
-    long_words = [w for w in _MUTABLE_TOKENS if len(w) >= _MIN_GLUED_WORD]
+    long_words = [w for w in mutable_here if len(w) >= _MIN_GLUED_WORD]
     for t in tokens:
-        if t in _MUTABLE_TOKENS:
+        if t in mutable_here:
             continue
         hits += [ph for ph in _MUTABLE_PAIRS if ph in t]
         hits += [w for w in long_words if t.endswith(w) or t.startswith(w)]
@@ -982,12 +1001,18 @@ def _warn_write_failed(path: Path, exc: OSError) -> None:
     _WRITE_WARNED = True
     import sys as _sys
 
-    print(
-        f"gh_read_cache: WARNING — could not write the cache entry ({path.parent}): {exc}. "
-        f"Every read will be a LIVE call until this is fixed (this tool is a pass-through, not "
-        f"a cache) — the expected-live-call burn may return.",
-        file=_sys.stderr,
-    )
+    # ⛔ THE ANNOUNCE MUST NOT PROPAGATE. This runs inside `read()`'s `except OSError` handler, so
+    # an exception raised here escapes `read()` and DISCARDS the payload that was just read live —
+    # the exact conflation the comment at the call site forbids ("a full disk into a total gh
+    # outage"). A closed stream raises `ValueError`, a broken pipe `BrokenPipeError`; a diagnostic
+    # that cannot be written is swallowed, because the operation outranks its narration.
+    with contextlib.suppress(Exception):
+        print(
+            f"gh_read_cache: WARNING — could not write the cache entry ({path.parent}): {exc}. "
+            f"Every read will be a LIVE call until this is fixed (this tool is a pass-through, not "
+            f"a cache) — the expected-live-call burn may return.",
+            file=_sys.stderr,
+        )
 
 
 # ── the read ─────────────────────────────────────────────────────────────────────────────────

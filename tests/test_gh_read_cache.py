@@ -1960,3 +1960,90 @@ def test_repo_labels_is_still_the_invariant_definition_set() -> None:
     """The other direction: the shipped key must not be caught by the tightened rule."""
     assert not C._is_mutable_name("repo.labels")
     assert C.kind_of("repo.labels") == "invariant"
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+# 17. CYCLE-15 FINDINGS — the announce that could discard a live read, and a refusal with no reason
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+def test_an_unwritable_STDERR_cannot_discard_a_read_that_SUCCEEDED(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """⛔ `_warn_write_failed` runs INSIDE `read()`'s `except OSError` handler and ended in an
+    UNGUARDED `print(..., file=sys.stderr)`. An exception raised inside an `except` block
+    propagates, so an unwritable cache (the very fault being announced) plus an unwritable stderr
+    (a closed stream -> `ValueError`, a broken pipe -> `BrokenPipeError`) discarded the payload that
+    had just been read live and raised out of `read()` instead of returning it — the exact
+    conflation the comment at the call site forbids ("a full disk into a total gh outage").
+
+    Two simultaneous faults are needed, so this was P3; but R8 says *never*, and the previous code
+    (`contextlib.suppress(OSError)` around the store) could not raise at all.
+    """
+
+    class _BrokenStderr:
+        def write(self, _s: str) -> int:
+            raise BrokenPipeError(32, "Broken pipe")
+
+        def flush(self) -> None:
+            raise BrokenPipeError(32, "Broken pipe")
+
+        def close(self) -> None:
+            raise BrokenPipeError(32, "Broken pipe")
+
+    monkeypatch.setattr(C, "_WRITE_WARNED", False)
+    monkeypatch.setattr(C, "_store", _raise_read_only_fs)
+    # `_warn_write_failed` does `import sys as _sys` at CALL time, so patching the real module
+    # object is the seam that reaches it — a monkeypatched name in this test's namespace is not.
+    monkeypatch.setattr(sys, "stderr", _BrokenStderr())
+
+    out = _read("repo.metadata", now=1000.0, reader=Counter(), cache_dir=tmp_path)
+    assert json.loads(out)["id"] == 1, (
+        "a failed cache WRITE plus a failed ANNOUNCE must still RETURN the value that was read live"
+    )
+
+
+def _raise_read_only_fs(path: Path, blob: bytes) -> None:
+    raise OSError("read-only file system")
+
+
+@pytest.mark.parametrize("key", ["pr.labels", "issue.labels"])
+def test_the_refusal_names_the_WORD_that_made_the_key_mutable(key: str) -> None:
+    """⛔ The container-scoped vocabulary was added to the DECISION (`_is_mutable_name`) but not to
+    the MESSAGE builder (`_mutable_words_in`), so `declare_invariant("pr.labels", …)` was refused
+    with `carries mutable-state vocabulary ()` — an empty reason list, on exactly the key pair the
+    new vocabulary was added for. The two functions must walk ONE set; they now share
+    `_vocabulary_for(key)`.
+    """
+    assert C._mutable_words_in(key) == ["labels"], (
+        f"{key!r} was refused for a word the message did not name: {C._mutable_words_in(key)!r}"
+    )
+    with pytest.raises(C.MutableReadRefused) as exc:
+        C.declare_invariant(key, ttl_s=600, argv=("api", "x"), projection="p", project=lambda d: d)
+    assert "(labels)" in str(exc.value), str(exc.value)
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "pr.labels",
+        "issue.labels",
+        "repo.labels",
+        "repo.pr.labels",
+        "repo.issueLabels",
+        "repo.visibility",
+        "pr.head",
+        "repo.checksum",
+        "repo.rateLimit",
+        "pr.reviewDecision",
+        "repo.topics",
+        "issue.title",
+        "x.accurateLimit",
+        "runners",
+        "user.identity",
+    ],
+)
+def test_the_decision_and_the_refusal_message_AGREE_on_every_key(key: str) -> None:
+    """The property the drift violated: a key the guard REFUSES must produce a non-empty reason
+    list. Any future fork of the two sets reds here instead of shipping an empty `()`."""
+    assert C._is_mutable_name(key) == bool(C._mutable_words_in(key)), (
+        f"{key!r}: decision={C._is_mutable_name(key)} words={C._mutable_words_in(key)!r}"
+    )

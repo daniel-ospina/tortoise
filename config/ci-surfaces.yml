@@ -6101,6 +6101,20 @@ surfaces:
   # deliberately NOT carve_out-registered: it belongs on the fast pool, at the flat
   # `DEFAULT_FAST_WEIGHT` row below until a push-to-main sweep measures it.
   - test_cache_eviction_census.py
+  # #11047: `tests/test_gh_read_cache.py` pins `tools/gh_read_cache.py`'s fail-closed contract —
+  # scope in the filename AND the envelope, `0 <= age < ttl` as ONE comparison, the projection in
+  # the cache identity, `decode_pages`, and a failed cache WRITE never failing a successful read.
+  # `core` is the right home and NOT `carve_out:`: the suite is hermetic (stdlib-only, an injected
+  # clock and reader, temp dirs — no DB, no network, no FalkorDB). Before this row the file was in
+  # NO surface, so `ci_selection.py --integrity` listed it as drift and redded the REQUIRED
+  # `manifest-integrity` leg (measured at `695c2277f`: `❌ manifest drift: ['test_gh_read_cache.py']`)
+  # and no leg selected the suite at all — the 241 collected cases the PR rests on had zero CI
+  # signal. ⚠️ The registration alone does NOT make the pin run on the file it guards: `tools/` is
+  # a flat `NON_PYTHON_PREFIXES` entry and `tools/gh_read_cache.py` matches no `SOURCE_PATTERNS`
+  # row, so a tool-only diff filters to `changed == []` and takes the docs-only early return. That
+  # half is closed by the `CORE_ALSO` entry beside this one in `tools/ci_selection.py` — the
+  # #1349/#3332/#3616 silent-drop class.
+  - test_gh_read_cache.py
   ep:
   # #7951 (remaining doors) / review P1: DUAL-REGISTERED with `core` (below)
   # and the other exact-match surfaces. The write-door INVENTORY scans ALL of
@@ -10714,6 +10728,7 @@ durations:
   test_vocabulary_gap_census_5329.py: 0.4
   test_worktree_report.py: 6.5
   test_gh_read_cache.py: 2.0  # unmeasured — new in #11052, so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a dev-box reading: a file a PR ADDS can never carry a CI junit reading yet (the refresher samples push-to-main runs only), and this map forbids a local timing as a SHARD-LAYOUT input. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it. ⛔ READ THIS BEFORE "JUST SETTING THE MEASURED NUMBER": an earlier cut of this row carried 22.8 taken from a local run, which is exactly the "just pick a number" the header forbids — and it is not a harmless one, because a weight decides which files are pooled together. The two local bases were therefore taken only to confirm this file belongs on the FAST pool at all, and NEITHER is the weight: the pytest basis (`python3 -m pytest tests/test_gh_read_cache.py -q`) landed at 25.0s and the suite's own documented `python3` runner at 21.3s — the same order as its `core` siblings, which is the only claim they support. ⛔ NO CASE COUNT IS RECORDED EITHER: this row has already carried 76, 82 and 84, each correct at the head that measured it and stale one commit later, so count it with `grep -c 'def test_' tests/test_gh_read_cache.py` when you need it. Hermetic (stdlib + one `sys.executable` subprocess per case against a bash stub, no network/graph).
+  test_gh_read_cache.py: 2.0  # unmeasured — new in #11047 (#3400/#4348 trap): a file a PR ADDS can never carry a CI junit reading (the refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` rather than a local reading, which this map forbids as a shard-layout input. The row must EXIST, not merely default: the `core` registration above puts one more file in `fast_pool()`, and `--integrity`'s `duration_coverage_issues` measures its ratio against the pool's own size. What the weight covers: 241 collected cases, DB-free, graph-free and network-free — it loads `tools/gh_read_cache.py` by path and drives a recording fake `gh` reader plus a temp cache dir (injected clock, injected reader, no subprocess in the cached path). `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
 # ── THE NON-GATING LANE (`on_demand:`) ──
 #
 # A file listed here RUNS but does not GATE: it is excluded from every pre-merge

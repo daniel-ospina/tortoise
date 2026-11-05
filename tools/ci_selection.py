@@ -2869,7 +2869,20 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # load_manifest())` -> surfaces=[], tier-1 files, the pin ABSENT. CORE_ALSO (not
              # TOOL_CARVEOUTS) because the gate is hermetic (a committed JSON snapshot, no
              # graph, no URI, no network) and `core` is where its suite is registered.
-             "tools/ci_runner_labels.py")
+             "tools/ci_runner_labels.py",
+             # #11047: `tools/gh_read_cache.py` is the SAME shape — a hermetic tool whose entire
+             # guard (`tests/test_gh_read_cache.py`, 241 collected cases) lives in `core`. `tools/`
+             # is a flat NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row matches it, so a
+             # TOOL-ONLY change — e.g. a maintenance edit to a `_project_*` helper, which the
+             # module's own `-v2` id-bump rule says MUST be paired with a bump — filtered to
+             # `changed == []` and took the docs-only early return, so the pins that fence the
+             # fail-closed contract (scope in the filename AND the envelope, `0 <= age < ttl` as one
+             # comparison, projection in the cache identity) never ran on the file that defines
+             # them. That is the #1349/#3332/#3616 silent-drop class, and the #4348 trap is doubled
+             # here: the `core` row is CLASSIFICATION only, so a name in a surface's test_files runs
+             # only when that surface is ALREADY selected. CORE_ALSO (not TOOL_CARVEOUTS) because
+             # the suite is hermetic (stdlib-only, injected clock and reader, temp dirs).
+             "tools/gh_read_cache.py")
 NON_PYTHON_PREFIXES = (
     "docs/", "website/", "product/", "legal/", "growth/", "engineering/",
     "finance-accounting/", "menu-bar/", "ux/", "data/", "operations/",
