@@ -7,7 +7,7 @@ The tool exists to flag exactly two shapes and to *not* flag two others. A test 
 proved the flags would be satisfied by a tool that flags everything, so every arm is paired with the
 legitimate population it must leave alone:
 
-    flagged:        PR CLAIMS an issue, only a linking word resolves it  <->  control: claims none
+    flagged:        PR CLAIMS an issue, nothing closes it            <->  control: claims none
     flagged:        issue has WIP, no `## Satisfies` checklist           <->  control: fresh issue
 
 The pairs are the requirement, not decoration: a false positive points bureaucracy at legitimate
@@ -402,8 +402,10 @@ def test_the_lint_is_never_wired_as_a_required_check():
         assert "issue_process_lint" not in mergify.read_text(encoding="utf-8")
 
 
-def test_the_doc_block_matches_both_templates():
-    """The block is copied into two YAML templates. A byte-equal pin is what stops the drift."""
+def test_the_doc_block_matches_the_template():
+    """The block is copied VERBATIM into the internal `agent_finding.yml` field; the external
+    `bug_report.yml` deliberately does not carry it (it would pre-fill repo-internal commands an
+    outside reporter cannot run). A byte-equal pin is what stops the two copies drifting."""
     doc = (ROOT / "docs" / "ops" / "ISSUE-WORKING-PROCESS.md").read_text(encoding="utf-8")
     m = L.re.search(r"```markdown\n(## Working this issue — process.*?)```", doc, L.re.DOTALL)
     assert m, "the doc no longer carries the paste-ready block in a ```markdown fence"
@@ -793,3 +795,54 @@ def test_the_skipped_claim_note_names_the_right_cause(monkeypatch, capsys):
     assert "could not be resolved" in out
     assert "NARROWER" in out
     assert "offline" not in out
+
+
+# --- review round 7: the message must not misquote the author's body ---------------------------
+# Round 6 made a comma-continuation of a CLOSING word a CLAIM rather than a RESOLUTION. The verdict
+# became right; the emitted REASON did not, because every `weak` subject was described as "only a
+# linking word" — so an author who wrote `Closes #A, #B` was told they wrote `Refs`. In a warn-only
+# tool the message IS the product, and a correct flag with a false reason is indistinguishable from
+# a broken tool.
+
+
+def test_the_finding_does_not_misquote_a_closing_word_as_a_linking_word():
+    """`Closes #A, #B` → #B is flagged, and the text must not claim the author wrote `Refs`."""
+    findings = L.classify_pr("Closes #1, #2\n", 999)
+    assert [f.arm for f in findings] == [L.ARM_PR]
+    assert findings[0].evidence["unresolved"] == [2]
+    detail = findings[0].detail
+    assert "only a linking word" not in detail
+    # ...and it states the actual rule, so the remedy the reader infers is the right one.
+    assert "FIRST ref" in detail
+    # A genuine linking-word claim still reads correctly under the same wording.
+    assert "no closing keyword of its own" in L.classify_pr("Refs #1\n", 999)[0].detail
+
+
+@pytest.mark.parametrize("marker", [
+    "3.2c — released: 2026-11-05",
+    "3.2c — released - 2026-11-05",
+])
+def test_a_date_separated_from_the_release_word_still_clears(marker):
+    """`:` and `-` may separate the DATE from the word (the same class rounds 2-4 fixed)."""
+    assert L.in_flight_markers(["IN FLIGHT: " + marker]) == []
+
+
+@pytest.mark.parametrize("marker", [
+    "3.2c — released: pending",
+    "3.2c — released-pending",
+    "3.2c — branch feat/retrieval-none-mode",
+])
+def test_a_separator_alone_does_not_make_a_release(marker):
+    """The control: admitting `:`/`-` ONLY in front of a date must not turn a status note into a
+    release — that would be a silent miss, the direction this arm cannot afford."""
+    assert L.in_flight_markers(["IN FLIGHT: " + marker]) != []
+
+
+def test_the_arm_table_states_that_a_continuation_does_not_resolve():
+    """The table is the spec a maintainer edits `CLAIM_RE` from; round 6 fixed the CODE for
+    continuations and left the table claiming the opposite (one clause over)."""
+    doc = L.__doc__ or ""
+    assert "only the\n                           **first** ref of a RESOLVING word resolves" in doc
+    assert "a continuation is CLAIMED, never resolved" in doc
+    # agree with the code
+    assert L.claims("Closes #1, #2\n", None, None)["closing"] == [1]
