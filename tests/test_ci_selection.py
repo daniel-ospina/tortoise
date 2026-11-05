@@ -7739,8 +7739,16 @@ def test_the_9548_rows_note_is_readable_by_the_guard_whatever_its_shape():
 
         committed                                     span = 42, reader joins 2,870
         CUT arm, `_joined_note_tail` -> `{rendered_row}{tail}`
-                                                      span =  0, reader joins 2,918
+                                                      span =  0, reader joins 2,831
         `⛔` dropped so the block opens a note         span =  0, reader joins      0
+
+    ⛔ THE CUT ARM CAN ONLY SHRINK (#10726 review P2). Flattening re-emits the SAME
+    note on the row line, so it drops each continuation's `#`/leading space and the
+    wrap separators and adds nothing — a CUT-arm figure ABOVE the committed one is
+    therefore a measurement bug, not a rendering. The `2,918` this line carried was
+    exactly that: it had been read off `_joined_note_tail(<the ROW line>, …)`, which
+    duplicates the row into the note's own text. Measured faithfully (the fragment is
+    the FIRST CONTINUATION line, not the row) the arm joins 2,831 < 2,870.
 
     So the shapes are told apart by READABILITY alone, and the pin below is the one
     property every healthy shape satisfies and a detached block does not: whatever
@@ -7764,7 +7772,7 @@ def test_the_9548_rows_note_is_readable_by_the_guard_whatever_its_shape():
                if i > block_start and ln.startswith(f"  {key}:"))
 
     # Raw extent of the block below the row, with the reader's blank-line rule
-    # (`tools/ci_timing.py:2208`: a blank line does NOT end a note; any other
+    # (`tools/ci_timing.py:2237`: a blank line does NOT end a note; any other
     # non-comment line does). Used only to pick the DIAGNOSIS when the span is empty.
     raw_block: list[str] = []
     for ln in lines[row + 1:]:
