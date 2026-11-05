@@ -35,6 +35,7 @@ from tortoise.cache_eviction import (
     classify,
     load_parity_report,
     measure_state,
+    node_total,
     resident_counts,
 )
 
@@ -45,12 +46,19 @@ MUTATING = ("DELETE", "DETACH", "DROP", "CREATE", "MERGE", "SET ", "REMOVE",
 
 
 class _FakeGraph:
-    """A graph handle that answers label/count reads and RECORDS every statement."""
+    """A graph handle that answers label/count reads and RECORDS every statement.
+
+    ⛔ ``query`` is GRAPH.QUERY — the verb that MINTS a missing graph — so it is not a
+    recording stub: it RAISES. Any module path that reads through it fails the run
+    rather than being argued about (measured in this repo: a probe against a missing
+    name created it and it appeared in `GRAPH.LIST`, `tools/engine_probe.py`).
+    """
 
     def __init__(self, counts: dict[str, int], *, unlabelled: int = 0) -> None:
         self._counts = dict(counts)
         self._unlabelled = unlabelled
-        self.statements: list[str] = []
+        #: (verb, statement) for EVERY statement, so a test can assert the VERB.
+        self.queries: list[tuple[str, str]] = []
         # The TRUE node count. Defaults to the label sum so ordinary fixtures stay
         # unsurprising; a multi-label fixture overrides it (the label sum then
         # over-states, exactly as it does on a real graph).
@@ -60,8 +68,21 @@ class _FakeGraph:
         def __init__(self, rows):
             self.result_set = rows
 
+    def ro_query(self, statement: str, params=None):
+        """GRAPH.RO_QUERY — the read-only verb, which cannot create a graph."""
+        self.queries.append(("ro_query", statement))
+        return self._answer(statement)
+
     def query(self, statement: str, params=None):
-        self.statements.append(statement)
+        """GRAPH.QUERY — refuses, because a census must never issue it."""
+        self.queries.append(("query", statement))
+        raise AssertionError(
+            f"the census issued GRAPH.QUERY ({statement!r}) — GRAPH.QUERY CREATES the "
+            f"graph when the name does not exist, so every read must go through "
+            f"GRAPH.RO_QUERY (`ro_query`)"
+        )
+
+    def _answer(self, statement: str):
         if "db.labels" in statement:
             return self._Result([[label] for label in self._counts])
         if "size(labels(n)) = 0" in statement:
@@ -76,6 +97,10 @@ class _FakeGraph:
                 return self._Result([[self.true_total]])
             return self._Result([[sum(self._counts.values()) + self._unlabelled]])
         raise AssertionError(f"unexpected statement: {statement}")
+
+    @property
+    def statements(self) -> list[str]:
+        return [statement for _verb, statement in self.queries]
 
     @property
     def mutated(self) -> list[str]:
@@ -95,10 +120,10 @@ class _FakeGraph:
 
 
 class _FakeClient:
-    """A redis client that answers INFO/KEYS/TTL and refuses everything else."""
+    """A redis client that answers INFO/GRAPH.LIST/keyspace probes and nothing else."""
 
     def __init__(self, *, used=1_000, maxmemory=10_000, policy="noeviction",
-                 keys=("tortoise",), ttl=-1) -> None:
+                 keys=("tortoise",), ttl=-1, graphs=("tortoise",)) -> None:
         self._info = {
             "used_memory": used,
             "maxmemory": maxmemory,
@@ -106,6 +131,9 @@ class _FakeClient:
         }
         self._keys = list(keys)
         self._ttl = ttl
+        #: What `GRAPH.LIST` reports. Listing creates nothing, so this is the
+        #: side-effect-free existence check the census makes before it reads.
+        self._graphs = list(graphs)
         self.calls: list[tuple[str, tuple]] = []
 
     def info(self, section=None):
@@ -137,6 +165,8 @@ class _FakeClient:
         # only by the wording of an error message, which is what made the old pin
         # vacuous.
         self.calls.append(("execute_command", args))
+        if args and str(args[0]).upper() == "GRAPH.LIST":
+            return list(self._graphs)
         return ["total_graph_sz_mb", 12.5]
 
     # Deliberately absent: set/delete/flushall. A census reaching for them is a
@@ -1233,8 +1263,8 @@ def test_a_readable_documented_report_DOES_reach_the_connection(tmp_path, capsys
     cli = _cli()
     seen: list[tuple] = []
 
-    def _a_cache_that_answers(host, port, password, graph_name):
-        seen.append((host, port, password, graph_name))
+    def _a_cache_that_answers(endpoint):
+        seen.append(endpoint)
         return _FakeClient(used=900, maxmemory=1_000), _FakeGraph({"Point": 120})
 
     monkeypatch.setattr(cli, "_connection", _a_cache_that_answers)
@@ -1245,6 +1275,316 @@ def test_a_readable_documented_report_DOES_reach_the_connection(tmp_path, capsys
     code = cli.main(argv)
     err = capsys.readouterr().err
 
-    assert seen == [("localhost", 6379, "falkordb", "tortoise")], (command, seen)
+    assert len(seen) == 1, (command, seen)
+    assert (seen[0].host, seen[0].port, seen[0].password,
+            seen[0].graph_name) == ("localhost", 6379, "falkordb", "tortoise"), \
+        (command, seen)
     assert "verdict: CLEAN" in err, (command, err)
     assert code == 0, (command, code, err)
+
+
+# --------------------------------------------------------------------------- #
+# #8118 / #3065: the census's OWN clients carry the product's READ BOUND.
+# --------------------------------------------------------------------------- #
+
+def _capture_client_kwargs(monkeypatch, cli,
+                           uri="docker://:falkordb@localhost:6379/tortoise") \
+        -> dict[str, dict]:
+    """Drive `_connection` with stand-in constructors and return their kwargs."""
+    import falkordb
+    import redis
+
+    from tortoise.projection import resolve_db_endpoint
+
+    captured: dict[str, dict] = {}
+
+    class _RecordingRedis:
+        def __init__(self, **kwargs):
+            captured["redis"] = kwargs
+
+    class _RecordingFalkorDB:
+        def __init__(self, **kwargs):
+            captured["falkordb"] = kwargs
+
+        def select_graph(self, name):
+            captured["graph"] = {"name": name}
+            return object()
+
+    monkeypatch.setattr(redis, "Redis", _RecordingRedis)
+    monkeypatch.setattr(falkordb, "FalkorDB", _RecordingFalkorDB)
+
+    endpoint = resolve_db_endpoint(uri)
+    client, graph = cli._connection(endpoint)
+
+    assert captured["graph"] == {"name": endpoint.graph_name}, (
+        "the handle must name the graph")
+    assert graph is not None
+    assert client is not None
+    return captured
+
+
+def test_both_census_clients_carry_the_products_read_bound(monkeypatch):
+    """An UNBOUNDED client parks this census in ``recv()`` forever — it does not read slowly.
+
+    ``falkordb.FalkorDB`` defaults ``socket_timeout=None`` and hands that to
+    redis-py EXPLICITLY, so the handle this tool measures through is unbounded
+    unless it is given a bound. Against a stalled engine (the #2969 defrag loop,
+    the #2838 MERGE lock) the process then stays alive at 0% CPU and prints
+    nothing — which a caller deciding an EVICTION from this census cannot tell
+    apart from "still measuring" (#3065, #8118). The pre-fix code passed NO
+    bound to ``FalkorDB(...)`` at all, so the assertions below fail on it.
+    """
+    from tortoise.projection import _bounded_server_socket_kwargs
+
+    monkeypatch.delenv("TORTOISE_DB_SOCKET_TIMEOUT", raising=False)
+    monkeypatch.delenv("TORTOISE_DB_SOCKET_CONNECT_TIMEOUT", raising=False)
+
+    captured = _capture_client_kwargs(monkeypatch, _cli())
+    expected = _bounded_server_socket_kwargs()
+
+    for name in ("redis", "falkordb"):
+        kwargs = captured[name]
+        read_to = kwargs["socket_timeout"]
+        assert isinstance(read_to, (int, float)) and read_to > 0, (
+            f"the {name} client was constructed with NO read bound "
+            f"(socket_timeout={read_to!r}) — an unbounded recv() that a stalled "
+            f"engine parks forever (#3065/#8118)")
+        assert kwargs["socket_connect_timeout"] > 0, name
+        # The bound comes from the ONE resolver, not from a copy of its defaults.
+        assert read_to == expected["socket_timeout"], name
+        assert kwargs["socket_connect_timeout"] == expected["socket_connect_timeout"], name
+
+
+def test_the_operators_socket_knob_reaches_BOTH_census_clients(monkeypatch):
+    """Bounded-but-knob-blind literals are the same defect one step milder (#3065).
+
+    The pre-fix code spelled ``socket_connect_timeout=10, socket_timeout=60`` at
+    the ``redis.Redis`` site, so an operator who set
+    ``TORTOISE_DB_SOCKET_TIMEOUT`` for a loaded server got 60s anyway, and the
+    ``FalkorDB`` site ignored the knob entirely. Both clients must resolve it.
+    """
+    monkeypatch.setenv("TORTOISE_DB_SOCKET_TIMEOUT", "3")
+    monkeypatch.delenv("TORTOISE_DB_SOCKET_CONNECT_TIMEOUT", raising=False)
+
+    captured = _capture_client_kwargs(monkeypatch, _cli())
+
+    for name in ("redis", "falkordb"):
+        assert captured[name]["socket_timeout"] == 3.0, (
+            f"the operator's TORTOISE_DB_SOCKET_TIMEOUT did not reach the {name} "
+            f"client: {captured[name].get('socket_timeout')!r}")
+
+
+# --------------------------------------------------------------------------- #
+# Round-7 findings — GRAPH.QUERY MINTS, so "read-only by construction" needs the
+# VERB and not only the statement text, and the URI derivation is the canonical one.
+# --------------------------------------------------------------------------- #
+
+def test_the_read_only_verb_is_the_only_verb_the_census_issues():
+    """⛔ `graph.query` is GRAPH.QUERY, which CREATES the graph when it is missing.
+
+    The statement text of a count is innocent; the verb carrying it is not. Measured
+    in this repo three times (`tools/engine_probe.py`, `tools/backfill_graph_turns.py`,
+    `tools/edge_census.py` — the last two ship `_assert_graph_exists` for it), so a
+    census whose contract is "changes nothing" must read through GRAPH.RO_QUERY.
+
+    Non-vacuity: `_FakeGraph.query` RAISES, so the pre-fix code (all four counts through
+    `query`) fails here on the first statement rather than passing silently.
+    """
+    g = _FakeGraph({"Point": 7, "GraphEvent": 2}, unlabelled=1)
+
+    counts = resident_counts(g)
+    total = node_total(g)
+
+    assert counts == {"Point": 7, "GraphEvent": 2, "<unlabelled>": 1}
+    assert total == 10
+    assert {verb for verb, _statement in g.queries} == {"ro_query"}, g.queries
+    # The four reads really were issued — a fake that recorded nothing would satisfy
+    # a verb-only assertion vacuously.
+    assert len(g.queries) == 5, g.queries  # labels + 2 label counts + unlabelled + total
+    assert g.mutated == [], g.statements
+
+
+def test_a_handle_with_no_read_only_verb_is_refused_never_measured_with_query():
+    """⛔ NO FALLBACK. A handle that cannot read is a REFUSAL, not a reason to mint.
+
+    A duck-typed stub (or a guard proxy that lost the verb) is the handle most likely
+    to lack `ro_query`, and "fall back to `query` so we can still measure" is exactly
+    the fail-open the read-only contract exists to close.
+    """
+    class _QueryOnly:
+        def __init__(self):
+            self.calls: list[str] = []
+
+        def query(self, statement, params=None):
+            self.calls.append(statement)
+            raise AssertionError(
+                "the census fell back to GRAPH.QUERY, which CREATES a missing graph"
+            )
+
+    handle = _QueryOnly()
+
+    with pytest.raises(CacheReadError) as excinfo:
+        resident_counts(handle)
+
+    assert "ro_query" in str(excinfo.value), str(excinfo.value)
+    assert handle.calls == [], handle.calls
+
+
+def test_the_cli_refuses_a_graph_that_is_not_on_the_instance(capsys, monkeypatch):
+    """⛔ A typo'd `--graph` must not be the thing that CREATES the graph.
+
+    `--graph` / URI equality is not evidence the graph exists: both halves can carry
+    the same typo, and a graph can have been dropped. Reading it would materialise an
+    empty keyspace and then report a verdict indistinguishable from an empty cache, so
+    the census lists first (`GRAPH.LIST` creates nothing) and refuses — exit 3, a
+    statement about the store rather than a flag mistake, and NO statement at all
+    against the graph.
+    """
+    cli = _cli()
+    graph = _FakeGraph({"Point": 10})
+
+    monkeypatch.setattr(
+        cli, "_connection",
+        lambda endpoint: (_FakeClient(used=900, maxmemory=1_000,
+                                      graphs=("some_other_graph",)), graph),
+    )
+
+    code = cli.main(["--graph-uri", "docker://h:1/tortoise", "--graph", "tortoise"])
+    err = capsys.readouterr().err
+
+    assert code == 3, err
+    assert "does not exist" in err, err
+    assert "CREATES" in err, err
+    assert graph.queries == [], graph.queries
+    assert "verdict:" not in err, err
+
+
+def test_an_unreadable_graph_list_is_a_refusal_not_a_licence_to_measure(capsys,
+                                                                       monkeypatch):
+    """⛔ FAIL CLOSED. "I could not list the graphs" is not "the graph is there".
+
+    Proceeding on an unreadable list would measure through the one verb that can mint
+    a missing graph, so an unreadable list is a refusal (3) and no statement is issued.
+    """
+    cli = _cli()
+    graph = _FakeGraph({"Point": 10})
+
+    class _BlindClient(_FakeClient):
+        def execute_command(self, *args, **kwargs):
+            if args and str(args[0]).upper() == "GRAPH.LIST":
+                raise RuntimeError("NOPERM this user has no permissions to run GRAPH.LIST")
+            return super().execute_command(*args, **kwargs)
+
+    monkeypatch.setattr(
+        cli, "_connection",
+        lambda endpoint: (_BlindClient(used=900, maxmemory=1_000), graph),
+    )
+
+    code = cli.main(["--graph-uri", "docker://h:1/tortoise", "--graph", "tortoise"])
+    err = capsys.readouterr().err
+
+    assert code == 3, err
+    assert "graph list could not be read" in err, err
+    assert "NOPERM" in err, err
+    assert graph.queries == [], graph.queries
+
+
+def test_every_existing_cache_in_place_still_reaches_the_measurement(capsys,
+                                                                    monkeypatch):
+    """Non-vacuity for the two refusals above: an EXISTING graph still measures.
+
+    Without this, "the CLI refuses" would be indistinguishable from "this CLI never
+    gets past the existence check", which is the class of pin that holds for a reason
+    unrelated to its claim.
+    """
+    cli = _cli()
+    graph = _FakeGraph({"Point": 10})
+    monkeypatch.setattr(
+        cli, "_connection",
+        lambda endpoint: (_FakeClient(used=900, maxmemory=1_000,
+                                      graphs=("tortoise",)), graph),
+    )
+
+    code = cli.main(["--graph-uri", "docker://h:1/tortoise", "--graph", "tortoise"])
+    err = capsys.readouterr().err
+
+    assert code == 0, err
+    assert "verdict: CLEAN" in err, err
+    assert graph.queries, "the graph must actually be read once it exists"
+
+
+def test_the_uri_is_resolved_by_the_repos_canonical_derivation():
+    """⛔ NOT A SECOND PARSER: `username` and `ssl` were DROPPED by the hand-rolled one.
+
+    Its consequences were a `rediss://` endpoint rejected as a usage error (`rediss`
+    parsed as the host) and an ACL user silently discarded — on the one tool whose job
+    is to name the right cache. `tortoise.projection.resolve_db_endpoint` is THE
+    canonical derivation (`FalkorProjection.from_uri` and `backup._bgsave` call it), so
+    the census must agree with it field for field.
+    """
+    from tortoise.projection import resolve_db_endpoint
+
+    cli = _cli()
+    uri = "rediss://alice:s3cret@cache.example.com:6380/tortoise"
+
+    endpoint = cli._endpoint(uri)
+
+    assert endpoint == resolve_db_endpoint(uri)
+    assert endpoint.host == "cache.example.com"
+    assert endpoint.port == 6380
+    assert endpoint.username == "alice"
+    assert endpoint.password == "s3cret"
+    assert endpoint.ssl is True
+    assert endpoint.graph_name == "tortoise"
+
+
+def test_both_clients_receive_the_username_and_tls_the_uri_named(monkeypatch):
+    """The endpoint's `username`/`ssl` must reach BOTH clients, not just the parse."""
+    captured = _capture_client_kwargs(
+        monkeypatch, _cli(),
+        uri="rediss://alice:s3cret@cache.example.com:6380/tortoise",
+    )
+
+    for name in ("redis", "falkordb"):
+        assert captured[name]["username"] == "alice", (name, captured[name])
+        assert captured[name]["password"] == "s3cret", (name, captured[name])
+        assert captured[name]["ssl"] is True, (name, captured[name])
+
+
+@pytest.mark.parametrize("uri", ["", "localhost", "localhost:6379",
+                                 "docker://:6379/g", "docker://h:not-a-port/g"])
+def test_a_uri_that_names_no_host_and_port_is_refused(uri, capsys):
+    """The ONE local rule kept beside the canonical derivation is a REFUSAL.
+
+    `resolve_db_endpoint` fills defaults (`localhost` / `16379`) for a URI that names
+    neither, which for this tool means measuring an instance the operator never named.
+    """
+    code = _cli().main(["--graph-uri", uri, "--graph", "g"])
+
+    assert code == 1
+
+
+def test_an_unwritable_out_path_is_a_usage_error_not_a_traceback(tmp_path, capsys,
+                                                                 monkeypatch):
+    """A bad `--out` escaped `main()` as a traceback; the IO path must match the loader.
+
+    `load_parity_report` already turns an unreadable report into exit 1 rather than a
+    traceback, and "a flag or IO mistake" is the tool's own definition of exit 1 — it
+    has to be true for the WRITE path too.
+    """
+    cli = _cli()
+    graph = _FakeGraph({"Point": 10})
+    monkeypatch.setattr(
+        cli, "_connection",
+        lambda endpoint: (_FakeClient(used=900, maxmemory=1_000), graph),
+    )
+
+    target = tmp_path / "no-such-directory" / "census.json"
+
+    code = cli.main(["--graph-uri", "docker://h:1/tortoise", "--graph", "tortoise",
+                     "--out", str(target)])
+    err = capsys.readouterr().err
+
+    assert code == 1, err
+    assert "--out" in err, err
+    assert "Traceback" not in err, err

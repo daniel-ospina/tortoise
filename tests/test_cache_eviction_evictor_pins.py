@@ -71,6 +71,11 @@ class _FakeGraph:
         self.statements: list[str] = []
         self.deletes: list[tuple[str, list[dict]]] = []
 
+    def ro_query(self, statement: str, params=None):
+        """The census's read verb (`GRAPH.RO_QUERY`). A handle without it is
+        REFUSED by `cache_eviction._read_statement`, so the fake must expose it."""
+        return self.query(statement, params=params)
+
     def query(self, statement: str, params=None):
         self.statements.append(statement)
         if "MATCH (n) RETURN count(n)" in statement:

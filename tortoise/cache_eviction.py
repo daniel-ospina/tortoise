@@ -61,9 +61,21 @@ invents a verdict for a class no instrument covers. A class with no instrument i
 `cannot-answer`, which is a refusal — never a silent skip and never an assumed pass.
 
 READ-ONLY, AND STRUCTURALLY SO. Nothing here writes, deletes or drops anything: the
-only statements it issues are counts and `INFO`/`CONFIG GET`/`TTL` reads. The
-`DELETE`-bearing arm does not exist to be called by mistake, and the tests assert
-that no refused assessment emitted a mutating statement.
+only statements it issues are counts and `INFO`/`CONFIG GET`/`TTL` reads, and every
+one of them goes through the graph's **read-only verb** — `ro_query`, i.e.
+`GRAPH.RO_QUERY` — never `graph.query`. The `DELETE`-bearing arm does not exist to
+be called by mistake, and the tests assert that no refused assessment emitted a
+mutating statement.
+
+⛔ WHY THE VERB IS PART OF THE CONTRACT, not a stylistic preference. `graph.query`
+is `GRAPH.QUERY`, which **CREATES the graph** when the name does not exist; a census
+whose whole justification is *"changes nothing"* cannot count through it. Measured
+in this repo three times: `tools/engine_probe.py` (*"QUERY MINTS the graph when it
+does not exist — a probe against a missing name created it and it appeared in
+`GRAPH.LIST`"*), `tools/backfill_graph_turns.py` and `tools/edge_census.py`, the
+last two shipping `_assert_graph_exists` for exactly this reason. `GRAPH.RO_QUERY`
+answers `-ERR Invalid graph operation on empty key` for a missing graph and creates
+nothing — so a typo'd graph name is a REFUSAL here, never a store mutation.
 """
 from __future__ import annotations
 
@@ -513,6 +525,42 @@ def _safe_label(name: str, quote: Any) -> str:
     return quoted
 
 
+def _read_statement(graph: Any, statement: str, what: str) -> list[Any]:
+    """Run *statement* through the graph's READ-ONLY verb, or REFUSE.
+
+    ⛔ ``graph.query`` IS ``GRAPH.QUERY``, AND ``GRAPH.QUERY`` MINTS THE GRAPH. The
+    statement text of a count is innocent; the VERB that carries it is not — a
+    `MATCH (n) RETURN count(n)` against a name that does not exist leaves an empty
+    graph of that name behind (measured; see the module docstring). On a typo'd
+    ``--graph`` — where both halves can carry the same typo, since the ``--graph`` /
+    URI equality check only proves the operator typed the same wrong name twice —
+    that would CREATE a graph on the production instance and then report a verdict
+    about it, indistinguishable from a genuinely empty cache.
+
+    ``ro_query`` is ``GRAPH.RO_QUERY``, which answers ``-ERR Invalid graph operation
+    on empty key`` and creates nothing. This is the distinction
+    ``tortoise/cypher_guard.py`` names in the same words: ``read_only`` selects the
+    VERB.
+
+    ⛔ NO FALLBACK to ``query``. A handle that exposes no read-only verb is a
+    REFUSAL, not a reason to "keep measuring" through the one statement that can
+    write: a duck-typed stub is exactly the handle most likely to lack it, and a
+    fail-open here is the property this module's whole contract rests on.
+    """
+    read = getattr(graph, "ro_query", None)
+    if not callable(read):
+        raise CacheReadError(
+            f"{what} cannot be read: this graph handle exposes no read-only verb "
+            f"(`ro_query`), and `query` is GRAPH.QUERY — which CREATES the graph when "
+            f"the name does not exist. A census that must change nothing cannot use "
+            f"it, so this is a refusal rather than a fallback."
+        )
+    try:
+        return list(read(statement).result_set)
+    except Exception as exc:
+        raise CacheReadError(f"{what} unreadable (GRAPH.RO_QUERY): {exc}") from exc
+
+
 def resident_counts(graph: Any) -> dict[str, int]:
     """Node count per label, read from the graph. A label is never inferred.
 
@@ -538,20 +586,17 @@ def resident_counts(graph: Any) -> dict[str, int]:
     """
     from tortoise.graph_key_restore import _quote_identifier
 
-    try:
-        labels = [row[0] for row in graph.query("CALL db.labels()").result_set]
-    except Exception as exc:
-        raise CacheReadError(f"CALL db.labels() unreadable: {exc}") from exc
+    labels = [row[0] for row in
+              _read_statement(graph, "CALL db.labels()", "the label enumeration")]
 
     counts: dict[str, int] = {}
     for label in labels:
-        try:
-            rows = graph.query(
-                f"MATCH (n:{_safe_label(str(label), _quote_identifier)}) RETURN count(n)"
-            ).result_set
-            counts[label] = int(rows[0][0])
-        except Exception as exc:
-            raise CacheReadError(f"count for label {label!r} unreadable: {exc}") from exc
+        rows = _read_statement(
+            graph,
+            f"MATCH (n:{_safe_label(str(label), _quote_identifier)}) RETURN count(n)",
+            f"the count for label {label!r}",
+        )
+        counts[label] = int(rows[0][0])
 
     # ⛔ MEASURED, not derived as a residual. Labels do NOT partition the node set:
     # multi-label nodes are real here (`(n:Point:Object)`, `(e:Object:Event)`,
@@ -559,13 +604,11 @@ def resident_counts(graph: Any) -> dict[str, int]:
     # carrying two labels is counted once per label and `total - sum(counts)` goes
     # NEGATIVE. A negative node count in the artifact an owner decides on is worse than
     # no residual at all, so label-less nodes are counted directly.
-    try:
-        rows = graph.query(
-            "MATCH (n) WHERE size(labels(n)) = 0 RETURN count(n)"
-        ).result_set
-        unlabelled = int(rows[0][0]) if rows else 0
-    except Exception as exc:
-        raise CacheReadError(f"unlabelled node count unreadable: {exc}") from exc
+    rows = _read_statement(
+        graph, "MATCH (n) WHERE size(labels(n)) = 0 RETURN count(n)",
+        "the unlabelled node count",
+    )
+    unlabelled = int(rows[0][0]) if rows else 0
     if unlabelled:
         counts["<unlabelled>"] = unlabelled
     return counts
@@ -586,10 +629,9 @@ def node_total(graph: Any) -> int:
     cheap form — unlike the label-scan `size(labels(n)) = 0` query in
     :func:`resident_counts`.
     """
-    try:
-        return int(graph.query("MATCH (n) RETURN count(n)").result_set[0][0])
-    except Exception as exc:
-        raise CacheReadError(f"total node count unreadable: {exc}") from exc
+    rows = _read_statement(graph, "MATCH (n) RETURN count(n)",
+                           "the total node count")
+    return int(rows[0][0])
 
 
 def classify(label: str, *, config: Iterable[str]) -> str:
