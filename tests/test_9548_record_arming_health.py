@@ -26,7 +26,11 @@ the old payload fails here rather than in production:
         indicator (b) of the issue (`record_write_failures` = 0) has a reader on
         the deployment it is claimed about;
   * (f) `TORTOISE_RECORD_SINGLE_TENANT` — which the issue requires stay UNSET —
-        is reported, so "left unset" is checkable rather than assumed.
+        is reported, so "left unset" is checkable rather than assumed;
+  * (i) the POSITIVE channel — `record_writes_applied` / `record_last_write_at`,
+        counted after the COMMIT, `None` (never `0`) when unread, and pinned
+        against `metrics()`'s own key names so a rename cannot silently make this
+        block's claim false.
 """
 
 from __future__ import annotations
@@ -546,7 +550,7 @@ def test_a_failing_counter_snapshot_does_not_fail_open(monkeypatch):
     )
 
 
-# ── (g) the POSITIVE channel: did the record ever actually WRITE? ────────────
+# ── (i) the POSITIVE channel: did the record ever actually WRITE? ────────────
 #
 # Indicator (a) of #9548 is "a captured session writes `journal_event` + `point`
 # rows", and indicator (b) is "`record_write_failures` stays at 0". Every
@@ -644,6 +648,25 @@ def test_an_armed_deployment_reports_the_writes_it_applied(monkeypatch):
     assert record["record_writes_applied"] == 7
     assert record["record_last_write_at"] == "2026-11-05T21:07:11+00:00"
     assert record["ok"] is True
+
+
+def test_the_positive_pair_is_named_by_metrics_too(monkeypatch):
+    """The block's claim is *"under the SAME names metrics() publishes"* — pin it.
+
+    Without this, renaming the two `metrics()` keys leaves every leg above green
+    (they pin the /health literals only) while the docstring and the runbook both
+    become false — the paper-only claim this codebase treats as a defect. The
+    sibling counter has exactly this pin in
+    `tests/test_9078_record_written_by_production_path.py`; this is its other
+    half. Asserted against the real `metrics()` dict, key-set form, so the test
+    cannot pass vacuously on a substring of some other key.
+    """
+    published = monitoring.metrics()
+
+    assert {"record_writes_applied", "record_last_write_at"} <= set(published), (
+        "the /health block documents these as `metrics()`'s own names, and "
+        f"metrics() publishes {sorted(published)}"
+    )
 
 
 def test_an_unread_applied_counter_publishes_none_never_a_zero(monkeypatch):
