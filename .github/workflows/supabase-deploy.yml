@@ -198,8 +198,27 @@ jobs:
       - name: Runner tool contract — provide gh (#9018)
         run: bash .github/scripts/runner-tools.sh ensure gh
       - uses: supabase/setup-cli@v1
+        # ⛔ PINNED, NOT `latest` (#10593). The CLI is not an ordinary dependency here: its
+        # MAJOR versions change the `supabase/config.toml` schema, and this workflow is the ONLY
+        # door that applies migrations to production. `latest` floated to 3.0.0 on 2026-11-05,
+        # which refuses to load a config still declaring `[inbucket]` (`DbConfigLoadError` ⇒
+        # exit 1 at CONFIG LOAD, before `db push` contacts the database):
+        #
+        #   [inbucket] in supabase/config.toml is no longer supported. Use [local_smtp] instead.
+        #   ##[error]Process completed with exit code 1.          -- run 42091073635, 19:45:57Z
+        #
+        # Every apply between 2026-11-03T02:53:49Z and this pin died there, which is why
+        # `deploy-hosted`'s drift gate stayed red naming `20261102000001`/`20261102000002` while
+        # its own prescribed remedy (`gh workflow run supabase-deploy.yml --ref main`) could
+        # never succeed. 2.122.1 is `v2.stable`; measured at the same moment, it LOADS this
+        # config and fails only for want of the access token CI supplies.
+        #
+        # Moving to 3.x is a deliberate change, not a version bump: it must first migrate
+        # `config.toml` to v3's schema (and validate `supabase start`/`db reset` + the local-auth
+        # harnesses under it). `tests/test_supabase_cli_pin_10593.py` enforces the coupling — an
+        # exact pin, and no major-3 pin while the config still declares `[inbucket]`.
         with:
-          version: latest
+          version: 2.122.1
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
       # Flip gating (#771): dispatch-only, so a routine supabase/** push can
