@@ -25,11 +25,10 @@ already landed in the batch fold `a6e20f05b` when the first reading was taken** 
 stale before the window opened, not during it. Two more were **simply wrong** (#10620 is an unrelated docs PR;
 the detection machinery this plan first called "existing" does not exist in code). §9's log records the review
 rounds that corrected a **claim in this plan**, with the commit that landed each (rows 6–11), while §1.1 /
-§7.1–7.2 carry the corrections themselves, so the next lane does not re-derive them. **Rounds whose content
-change was confined to this log's own rows, a corrected token, or a re-wrap are recorded in the commit that makes them** —
-`1620503a1` (this sentence, row 3, row 10's tally and landing list), `62d7aa41d` (row 6 and row 9's tallies, and
-`carve_only: 0` → **0** carve-out-only in `01-test-design.md`), `c0dacfc0d` (a re-wrap) — and a commit cannot
-name itself, so the log does not grow one row per row. Rows 6–11 name the rounds that corrected a **claim**.
+§7.1–7.2 carry the corrections themselves, so the next lane does not re-derive them. **A round whose only effect
+is on this log's own wording, a tally, or a line wrap is recorded in its commit rather than as a row, and a fix
+that a later commit sharpens is recorded in that commit's message** — so the log does not grow one row per row,
+and no enumeration in this paragraph is closed.
 
 ---
 
@@ -374,7 +373,8 @@ was **closed unmerged**, so nothing landed. What *does* exist points the other w
   vocabulary, and the value→declared-type predicate.** And `_COLUMN_RE`'s type vocabulary is a **hardcoded
   seven-term allow-list** (`text|jsonb|integer|boolean|bigint|double precision|timestamptz`), so a
   derivation built on it **silently skips any column of another type** — which is why #11075's closure target
-  ("a column added to a migration with no expectation reds") holds **only for types that vocabulary admits**, and the issue says so.
+  ("a column added to a migration with no expectation reds") holds **only for types that vocabulary
+  admits**, and the issue says so.
 
 **Consequence for #11075, and it is the sharp one:** an implementer who follows "reuse `jsonb_columns()`" reads
 `search_keys jsonb` from the *original* migration, and the pin **reds on the current, correct tree** — whose
