@@ -67,7 +67,8 @@ contract is §6.2's).
 *Failure mode:* a writer that never reaches `encode_for_row` — **S2 gives it a declared home**.
 
 **W2 — store setup.** `Projection.__init__ → _ensure_indexes → _ensure_vector_index_api → _record_vector_index_inventory`.
-*Seam:* the report is gated on `if gap:`; **S4 emits the pair unconditionally**. *Failure mode:* the read is
+*Seam:* the `if gap:` warning is preserved; **S4 retains the served set — new state — and reports the pair
+beside the measured indexed set**. *Failure mode:* the read is
 **fail-open by requirement** — `Projection.__init__` calls it unguarded, so a raising catalogue read must
 leave store construction healthy (already true; **pinned**, not changed).
 
@@ -150,10 +151,11 @@ existing probe**, not silent.
 `(self, catalogue_rows=None) -> None` today; unchanged. The change is that it retains and exposes **the served set** beside the already-unconditional
 `_vector_indexed_labels` (assigned on every successful read — there is no early return on an empty `gap`);
 `if gap:` keeps gating the warning only. Logging moves from *"warn on gap"* to *"report the pair at INFO; warn on gap"*, so the warning
-semantics a caller may match on are preserved. **The one test that must change deliberately:**
-`tests/test_4997_vector_index_parity.py::test_a_store_with_no_gap_does_not_warn` — its *warning* claim
-stands; its *silence* claim is what S4 ends. The child states this so the change is not mistaken for a
-regression.
+semantics a caller may match on are preserved. **The pin that must STAY GREEN:**
+`tests/test_4997_vector_index_parity.py::test_a_store_with_no_gap_does_not_warn` — it captures at
+`logging.WARNING` and asserts no `#4997` warning record plus `_vector_indexed_labels == set(SERVED)`, and
+S4 preserves both, so **it should survive unchanged**: S4 ADDS a no-gap INFO assertion rather than editing
+this one. The child states this so the new assertion is not mistaken for a change to the existing guard.
 
 **6.2 The exemption register (S2) — new, internal, no MCP/SDK surface.**
 A frozen mapping from `module::function` to a classification record `{class, reason, owner_issue}` where

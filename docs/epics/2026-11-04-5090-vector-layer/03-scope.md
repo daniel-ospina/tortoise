@@ -121,7 +121,7 @@ plus a named approval request.
 | Axis | Rating | Rationale |
 |---|---|---|
 | **UX** | **low** | No GUI. The users are an agent (precision, degradation visibility) and an operator (contract visibility). Artefact is a state diagram. |
-| **Architecture** | **low** | **Nothing in this scope moves a store or changes a schema.** S1 flips a config default; S2 adds a declaration; S3 censuses; S4 un-gates an existing report; S5 writes documents. *Placement* is `#4333`'s, and it is out. |
+| **Architecture** | **low** | **Nothing in this scope moves a store or changes a schema.** S1 flips a config default; S2 adds a declaration; S3 censuses; S4 retains the served set and reports the pair (new state, one value); S5 writes documents. *Placement* is `#4333`'s, and it is out. |
 | **Ontology** | **low** | The four layers, D10 and §4.7 temporal are **read**, not changed. |
 | **Accessibility** | **low** | n/a — no user interface in scope. |
 | **Library-deps** | **none** | No new dependency. No `pgvector`, no extension, no `create extension`. |
