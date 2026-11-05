@@ -5768,8 +5768,13 @@ def metrics(sdk=None, setup_timeout=None) -> dict:
         # #9548: the POSITIVE pair beside the three failure/decline keys above.
         # Without it `record_write_failures: {}` is equally consistent with "the
         # record is writing" and "no write was ever attempted" — the ambiguity
-        # this P0 was closed on and reopened from. Both are ``None`` when the
-        # snapshot could not be read (see the counter block in ``_record_health``).
+        # this P0 was closed on and reopened from. ⚠️ `metrics()` builds this dict
+        # inline and has no snapshot read, so the ``None``-on-unread rule is NOT
+        # implemented here: ``record_writes_applied`` is always an int, and
+        # ``record_last_write_at`` is ``None`` only until this process's first
+        # committed write. The all-or-``None`` snapshot lives in
+        # ``hosted_api._record_health`` and is the surface to read when an unread
+        # counter must not be mistaken for a zero.
         "record_writes_applied": record_write_applied_count(),
         "record_last_write_at": record_last_write_at(),
         # #7924 review P2: an audit event that reached no durable sink is
