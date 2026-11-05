@@ -487,6 +487,32 @@ failure paths belong to the caller, and they must be **measured and pinned, not 
   the record of *why* the seam was needed; the seam itself is built, see
   `docs/architecture/S2-DECISION-SEAM.md` — not this file.
 
+### ⛔ HARD RULE: Prove the Credential Can WRITE — before an hour you cannot deliver
+
+**One line, before delivery work:** `uv run python tools/gh_write_preflight.py --repo "$OR"`
+
+- `exit 0` = `GH-WRITE-OK(issues+pull-requests+contents writable @ https://api.github.com)` — the credential
+  carries Issues, Pull-requests and Contents write, so it will not be refused at push/comment/close time.
+  ⛔ **A pass whose OK line names any endpoint other than `https://api.github.com` is NOT a pass** — that is
+  the hermetic test seam (`GH_WRITE_PREFLIGHT_API`), so unset it and re-run. (The tool proves those three
+  grants; it does not promise a branch-protection rule will accept the merge.)
+- `exit 1` = `GH-WRITE-UNAVAILABLE(<reason>)` — do NOT start the work. Name the reason in your report; the
+  fix is the credential (re-mint with that permission, or point the lane at the credential that has it).
+
+**Why it is a gate and not a courtesy call.** `gh` resolves `GH_TOKEN` → `GITHUB_TOKEN` →
+`$HOME/.config/gh/hosts.yml`, so a box with two credentials resolves whichever the environment happens to
+name — and `git` inherits it through `credential.helper = !gh auth git-credential`. A read-only credential
+therefore fails **only at push time**, after the work exists, and it presents as
+`remote: Permission … denied`, which reads like an account problem. Measured 2026-11-05: a 17-lane wave
+produced **0 landings** while every lane honestly reported "built, parked".
+
+⛔ **`GET /repos/{o}/{r}` → `.permissions` is NOT this test** — it reports the USER's access, so it
+returns `push: true` for a token that 403s on push. And on a fine-grained PAT `Issues: write`,
+`Pull requests: write` and `Contents: write` are three separate grants, charged by different actions
+(a PR comment needs the PR one; `git push` and merging need **Contents: write**). The preflight probes
+each surface with a zero-side-effect call (`422` = authorised, `403` = not) and refuses unless all three
+are writable.
+
 ### ⛔ HARD RULE: Confirm the Dispatch Landed — `cmux send` Success Is Not Delivery
 
 Never dispatch to a cmux pane with a bare `cmux send`. **Use `tools/cmux_dispatch.py`** — it is the
