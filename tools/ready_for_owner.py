@@ -126,13 +126,13 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from tools import ci_verdict  # noqa: E402  (path set up above)
+from tools.mergify_config_guard import GuardUnreadable  # noqa: E402
 from tools.required_set import (  # noqa: E402  (path set up above)
     RequiredSet,
     RequiredSetConfigError,
     RequiredSetUnreadable,
     derive_from_config,
 )
-from tools.mergify_config_guard import GuardUnreadable  # noqa: E402
 
 # ── the contract's constants ────────────────────────────────────────────────
 
@@ -402,9 +402,7 @@ _SUFFIX_RETRACTION_RE = re.compile(
 #: the fourth-newline spelling blocked. That body NAMES a severity token, and the per-token
 #: severity arm below is graded over the WHOLE suffix (never windowed), so both spellings still
 #: block, for the reason that actually applies. A token is a token wherever it sits.
-_NEXT_PARA_RETRACTION_RE = re.compile(
-    r"(?i)(?:" + _R1_NO_LONGER + _R2_ATTRIBUTED + r")"
-)
+_NEXT_PARA_RETRACTION_RE = re.compile(r"(?i)(?:" + _R1_NO_LONGER + _R2_ATTRIBUTED + r")")
 #: ⛔ IT MAY NOT CROSS A CONTRASTIVE, A CLAUSE BREAK, OR A COMMA (review cycle 8). A plain
 #: character window reached from `fixed` in `the earlier P2 was fixed, but the P1 is still
 #: there` all the way to the P1 and exempted the very finding the sentence warns about; the
@@ -629,15 +627,17 @@ def _retracted_from(text: str, end: int) -> bool:
         # `Not all of the P1 findings were fixed.` asserts at least one is still open.
         if _SEVERITY_UNIVERSAL_NEGATION_BEFORE_RE.search(left):
             return True
-        if _SEVERITY_NEGATED_BEFORE_RE.search(left) or \
-                _SEVERITY_ABSOLUTE_NEGATION_BEFORE_RE.search(left):
+        if _SEVERITY_NEGATED_BEFORE_RE.search(left) or _SEVERITY_ABSOLUTE_NEGATION_BEFORE_RE.search(
+            left
+        ):
             if _SEVERITY_COMPLETION_NEGATED_AFTER_RE.match(suffix, token.end()):
                 return True
             continue
         if _SEVERITY_ZERO_COUNT_RE.match(suffix, token.end()):
             continue
-        if _SEVERITY_COMPLETED_BEFORE_RE.search(left) and not \
-                _SEVERITY_PREDICATE_AFTER_RE.match(suffix, token.end()):
+        if _SEVERITY_COMPLETED_BEFORE_RE.search(left) and not _SEVERITY_PREDICATE_AFTER_RE.match(
+            suffix, token.end()
+        ):
             continue
         if _SEVERITY_COMPLETED_AFTER_RE.match(suffix, token.end()):
             continue
@@ -720,6 +720,7 @@ def asserts_a_clear(text: str) -> bool:
             continue
         return True
     return False
+
 
 #: A CAPPED / ABORTED / DECLARED-NEGATIVE review exit. ⛔ THE VOCABULARY IS COPIED FROM
 #: `scripts/record-review.sh`, NOT INVENTED HERE: it is that script's arms (1) and (1b) —
@@ -904,11 +905,7 @@ ONE_OPEN_COUNT_RE = re.compile(
     + r"\b(?:\s+\w+){0,2}\s+"
     + SEV
     + r"\b"
-    r"|\b(?:1|one)\b(?:\s+\w+){0,2}\s+"
-    + SEV
-    + r"\b(?:\s+\w+){0,2}\s+"
-    + _ONE_OPEN_CUE
-    + r"\b"
+    r"|\b(?:1|one)\b(?:\s+\w+){0,2}\s+" + SEV + r"\b(?:\s+\w+){0,2}\s+" + _ONE_OPEN_CUE + r"\b"
 )
 #: ⛔ THE CUE-BEFORE-COUNT SPELLING — the one a reviewer writes when SUMMARISING, and the one
 #: the two arms above cannot take: they require the cue BETWEEN count and token or AFTER the
@@ -923,8 +920,7 @@ ONE_OPEN_COUNT_RE = re.compile(
 #: token (`remaining: 1 P1 was fixed`) is a CLOSED finding, not an open one, and must stay
 #: certifiable — the same rule `_fixed_after_token` encodes for the sibling arms.
 _ONE_OPEN_CUE_BEFORE = (
-    _ONE_OPEN_CUE
-    + r"|apart\s+from|except(?:ing|ed)?(?:\s+for)?|other\s+than|aside\s+from|besides"
+    _ONE_OPEN_CUE + r"|apart\s+from|except(?:ing|ed)?(?:\s+for)?|other\s+than|aside\s+from|besides"
 )
 ONE_OPEN_CUE_BEFORE_COUNT_RE = re.compile(
     r"(?i)(?<![\w-])(?:"
@@ -1022,6 +1018,7 @@ REVIEW_OK_TOKENS = frozenset({"head", "carry"})
 #: anything else — `not-clean` above all — is an explicit statement that the PR is NOT
 #: ready, however the `--check-carry` token reads.
 CLEAN_REVIEW_VERDICTS = frozenset({"clean", "clean-micro", "clean-low"})
+
 
 def _env_int(name: str, default: int) -> int:
     """A bounded knob from the environment, parsed WITHOUT risking the verdict contract.
@@ -1356,9 +1353,7 @@ def check_gates(probe: Probe) -> Check:
             seen.append(f"{context}={DEFERRED}")
             continue
         for group in sorted(groups, key=lambda g: g.check_id or 0, reverse=True):
-            seen.append(
-                f"{context}={group.status}/{(group.conclusion or 'null')}#{group.check_id}"
-            )
+            seen.append(f"{context}={group.status}/{(group.conclusion or 'null')}#{group.check_id}")
             token = _gate_token(group)
             if token:
                 failed.append(f"{token}:{context}")
@@ -2712,9 +2707,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.required_set:
         return report_required_set(Path(args.workdir).resolve())
     if args.fixture is None and args.pr is None:
-        parser.error(
-            "a pull request number is required unless --fixture or --required-set is used"
-        )
+        parser.error("a pull request number is required unless --fixture or --required-set is used")
     workdir = Path(args.workdir).resolve()
     try:
         if args.fixture:
@@ -2834,9 +2827,7 @@ def probe_from_dict(data: Mapping[str, Any]) -> Probe:
         groups_raw=str(data.get("groups_raw", "")),
         required=None if data.get("required") is None else tuple(data["required"]),
         required_deferred=(
-            None
-            if data.get("required_deferred") is None
-            else tuple(data["required_deferred"])
+            None if data.get("required_deferred") is None else tuple(data["required_deferred"])
         ),
         required_raw=str(data.get("required_raw", "")),
         review_token=data.get("review_token"),

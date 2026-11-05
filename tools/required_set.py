@@ -93,6 +93,7 @@ from tools.mergify_config_guard import (
     _success_names,
 )
 
+
 class RequiredSetUnreadable(Exception):
     """Neither the config nor the committed snapshot yields a usable required set."""
 
@@ -310,5 +311,3 @@ def resolve_required_set(root: Path) -> RequiredSet:
             f"required set unreadable from BOTH sources — {MERGIFY_REL}: {primary}; "
             f"{RECORD_REL}: absent or carrying no `required_contexts`"
         ) from None
-
-

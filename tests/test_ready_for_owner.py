@@ -411,7 +411,11 @@ def test_a_malformed_timeout_knob_is_caught_in_a_FRESH_PROCESS() -> None:
     """
     env = {**os.environ, "READY_GATE_GH_TIMEOUT": "1m", "READY_GATE_GIT_TIMEOUT": "2m"}
     proc = subprocess.run(
-        [sys.executable, "-c", "import tools.ready_for_owner as m; print(m.GH_TIMEOUT, m.GIT_TIMEOUT)"],
+        [
+            sys.executable,
+            "-c",
+            "import tools.ready_for_owner as m; print(m.GH_TIMEOUT, m.GIT_TIMEOUT)",
+        ],
         cwd=str(REPO_ROOT),
         env=env,
         capture_output=True,
@@ -1278,7 +1282,6 @@ def test_a_code_formatted_verdict_is_a_verdict() -> None:
         check = _check("blocking-finding", comments=comments)
         assert check.passed is True, f"{body!r} still read NEUTRAL: {check.raw}"
         assert "last-clear=2" in check.raw, f"{body!r}: {check.raw}"
-
 
 
 def test_issues_verdict_is_a_blocking_record() -> None:
@@ -2890,8 +2893,9 @@ def test_the_retraction_rule_source_is_the_same_text_in_both_forms() -> None:
     vocabulary may never be windowed at all. So every fragment must be graded SOMEWHERE, and the
     two exclusions must be exactly those two.
     """
-    assert (rfo._R1_NO_LONGER + rfo._R2_ATTRIBUTED + rfo._R3_EXCEPTION + rfo._R4_WORDS) == \
-        rfo._RETRACTION_RULES_1_TO_3
+    assert (
+        rfo._R1_NO_LONGER + rfo._R2_ATTRIBUTED + rfo._R3_EXCEPTION + rfo._R4_WORDS
+    ) == rfo._RETRACTION_RULES_1_TO_3
     # …and the detached form is exactly that minus rule (3) and minus rule (4), not some other
     # subset…
     assert rfo._R3_EXCEPTION not in rfo._NEXT_PARA_RETRACTION_RE.pattern
@@ -2994,7 +2998,6 @@ def test_the_zero_count_and_the_noun_qualifier_clear_spellings_still_clear() -> 
         "**Verdict: CLEAN.**\n\nI fixed the P1 and the P2 in 4f450ae81.",
     ):
         assert rfo.asserts_a_clear(body) is True, body
-
 
 
 def test_a_negation_that_reaches_a_completion_verb_does_not_clear_the_finding() -> None:
