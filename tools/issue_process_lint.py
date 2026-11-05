@@ -28,7 +28,7 @@ arm                        flagged when
                            of 18 PRs naming a P0/P1, 18 used ``Refs`` and 5 of 29 used a closing
                            keyword — so delivered work never closed and the count never moved.
 ``wip-no-satisfies``       an issue has WIP but **no ``## Satisfies`` checklist** anywhere in its
-                           comments — work started before the completion criteria existed.
+                           body or comments — work started before the completion criteria existed.
 =========================  =========================================================================
 
 A CLAIM, NOT A MENTION — and why that distinction is the whole arm
@@ -198,7 +198,12 @@ DECLINE_RE = re.compile(
     re.IGNORECASE,
 )
 SATISFIES_HEADING_RE = re.compile(r"^[ \t]{0,3}#{2,3}[ \t]*Satisfies\b", re.IGNORECASE | re.MULTILINE)
-CHECKBOX_RE = re.compile(r"^[ \t]*[-*][ \t]+\[[ xX]\]", re.MULTILINE)
+# The task-list marker SET is the sibling grammar's (`closes_landing._TASK_ITEM_RE`), including
+# `+` and ordered markers: GitHub renders all four as task lists, so counting only `-`/`*` reads a
+# legitimately scoped issue as having NO checklist and flags it (a false positive on finished
+# scoping). Not imported verbatim because that pattern also requires trailing whitespace after the
+# bracket, which would miss a bare `- [ ]` at end of line.
+CHECKBOX_RE = re.compile(r"^[ \t]*(?:[-*+]|\d{1,9}[.)])[ \t]+\[[ xX]\]", re.MULTILINE)
 IN_FLIGHT_RE = re.compile(r"IN[ -]FLIGHT\s*:\s*(?P<rest>.*)$", re.IGNORECASE)
 # A marker whose remainder is only a placeholder (`<ids> — branch <b> …`) is the CONVENTION being
 # quoted, not a claim; a remainder that says the issue was released is a release, not a claim.
@@ -217,7 +222,7 @@ RELEASE_WORDS = ("none", "released", "unclaimed", "free", "—", "-")
 # but also appears in ordinary work (`free tier`), so it stays a FIRST-TOKEN-only word.
 RELEASE_ANYWHERE_RE = re.compile(
     r"(?:^|[—–:;,.(\[]|\s-\s)\s*(?:none|released|unclaimed)\b(?![\w-])"
-    r"(?=\s*(?:\d{4}-\d{2}-\d{2}|[)\].,;]|$|—|–))",
+    r"(?=\s*(?:\(?\s*(?:on\s+)?\d{4}-\d{2}-\d{2}|[)\].,;]|$|—|–))",
     re.IGNORECASE)
 
 ARM_PR = "pr-unclaimed-issue"
@@ -298,11 +303,17 @@ def _claims_in(text: str, own_number: int | None = None,
         line_no = sum(1 for st in line_starts if st <= m.start()) - 1
         into = found["declined"] if line_no in declined_lines else None
         word = re.sub(r"\s+", " ", (m.group("kw") or m.group("ckw")).lower())
-        # The claiming word governs its WHOLE same-line list (F3).
-        refs = [(m.group("qual"), int(m.group("num")))]
-        refs += [(c.group("qual"), int(c.group("num")))
+        # The claiming word governs its WHOLE same-line list (F3) — but a list continuation is a
+        # CLAIM, never a RESOLUTION. GitHub credits only the FIRST ref of a closing keyword (its
+        # documented multi-issue form is `Resolves #10, resolves #123` — the keyword repeated), and
+        # `closes_landing.parse_closing_refs` credits exactly one. Crediting `#13` in
+        # `Closes #12, #13` reported CLEAN on work nothing closed, which is the #10534 hole this
+        # arm exists to shut (review P2). A continuation of a resolving word is still CLAIMED, so
+        # it lands in `weak` and is still flagged.
+        refs = [(m.group("qual"), int(m.group("num")), False)]
+        refs += [(c.group("qual"), int(c.group("num")), True)
                  for c in CONTINUATION_RE.finditer(m.group("more") or "")]
-        for qual, num in refs:
+        for qual, num, continued in refs:
             if own_number is not None and num == own_number:
                 continue  # a PR quoting its own number from a review is not claiming an issue
             if qual and repo is None:
@@ -311,14 +322,14 @@ def _claims_in(text: str, own_number: int | None = None,
                 if skipped is not None:
                     skipped.append(num)
                 continue
-            if qual and (repo is None or qual.lower() != repo.lower()):
+            if qual and qual.lower() != repo.lower():
                 continue  # `owner/repo#N` for another repo is not this PR's business
             if into is not None:
                 into.append(num)
             elif word in CLOSING_WORDS:
-                found["closing"].append(num)
+                (found["weak"] if continued else found["closing"]).append(num)
             elif word in SATISFIES_WORDS:
-                found["satisfies"].append(num)
+                (found["weak"] if continued else found["satisfies"]).append(num)
             else:
                 found["weak"].append(num)
     for key in found:
@@ -388,7 +399,8 @@ def in_flight_markers(comment_bodies: list[str]) -> list[str]:
 # --- the two arms ---------------------------------------------------------------------------
 def classify_pr(body: str, number: int | str, repo: str | None = None,
                 labels: list[str] | None = None,
-                notes: list[str] | None = None) -> list[Finding]:
+                notes: list[str] | None = None,
+                repo_unknown: str | None = None) -> list[Finding]:
     """ARM 1 — a PR that claims an issue which no keyword resolves.
 
     `notes`, when supplied, receives the UNTERMINATED-FENCE note for this body. It lives here rather
@@ -403,8 +415,8 @@ def classify_pr(body: str, number: int | str, repo: str | None = None,
     skipped: list[int] = []
     c = _claims_in(text, own, repo, skipped)
     if skipped and notes is not None:
-        notes.append(f"{len(skipped)} owner/repo#N claim(s) in #{number} were NOT read — the repo "
-                     f"is unknown offline; pass --repo to count them")
+        why = repo_unknown or "the repo is unknown; pass --repo to count them"
+        notes.append(f"{len(skipped)} owner/repo#N claim(s) in #{number} were NOT read — {why}")
     claimed = sorted((set(c["closing"]) | set(c["satisfies"]) | set(c["weak"]))
                      - set(c["declined"]))
     if not claimed:
@@ -457,9 +469,9 @@ def classify_issue(comment_bodies: list[str], number: int | str,
         return [], measured  # negative control: a fresh issue has no criteria yet, by design
     if measured["had_satisfies"]:
         return [], measured
-    detail = ("has WIP but no `## Satisfies` checklist in its comments — work started before the "
-              "completion criteria existed, so nothing can tell this issue it is finished "
-              "(SCOPING posts that comment)")
+    detail = ("has WIP but no `## Satisfies` checklist in its body or comments — work started "
+              "before the completion criteria existed, so nothing can tell this issue it is "
+              "finished (SCOPING posts that comment)")
     populations = ([] if source == "injected"
                    else ["branches", "worktrees", "ref-claims"])
     return [Finding(arm=ARM_ISSUE, subject=f"issue #{number}", detail=detail,
@@ -603,9 +615,17 @@ def main(argv: list[str] | None = None) -> int:
         # An explicit `--repo` is still honoured offline; it just is not looked up.
         live_mode = bool(args.pr or args.issue or args.sweep or args.sweep_issues)
         repo = resolve_repo(args.repo) if live_mode else args.repo
+        # WHY the repo is unknown decides the note's wording: in a file mode it is expected and
+        # `--repo` fixes it; in a LIVE mode a gh failure made this population NARROWER than the
+        # one the caller asked for, and saying "offline" there named a mode they were not in.
+        repo_unknown = None if repo else (
+            "the repo could not be resolved (gh failed) — this population is NARROWER than the "
+            "one you asked for; pass --repo to count them"
+            if live_mode else
+            "the repo is unknown offline; pass --repo to count them")
         if args.body_file is not None:
             body = args.body_file.read_text(encoding="utf-8")
-            findings += classify_pr(body, "body-file", repo, notes=notes)
+            findings += classify_pr(body, "body-file", repo, notes=notes, repo_unknown=repo_unknown)
             population = "1 body (offline)"
         elif args.issue_body_file is not None:
             bodies = _comments_from_file(args.comments_file) if args.comments_file else []
@@ -617,7 +637,7 @@ def main(argv: list[str] | None = None) -> int:
             population = f"1 issue body + {len(bodies)} comment(s) (offline)"
         elif args.pr is not None:
             body, labels = fetch_pr(args.pr, repo)
-            findings += classify_pr(body, args.pr, repo, labels, notes=notes)
+            findings += classify_pr(body, args.pr, repo, labels, notes=notes, repo_unknown=repo_unknown)
             population = "1 PR"
         elif args.issue is not None:
             # The body is a comment-shaped input on the LIVE path too — the offline sibling twelve
@@ -631,7 +651,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.sweep:
             rows = sweep_prs(repo, args.limit)
             for number, body, labels in rows:
-                findings += classify_pr(body, number, repo, labels, notes=notes)
+                findings += classify_pr(body, number, repo, labels, notes=notes, repo_unknown=repo_unknown)
             population = f"{len(rows)} open PR(s)"
         else:  # --sweep-issues
             rows = sweep_issues(repo, args.limit, args.label)

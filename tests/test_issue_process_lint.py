@@ -727,3 +727,69 @@ def test_the_arm_table_states_the_claiming_word_requirement():
     assert "comma-continued list" in doc.lower()
     # ...and it agrees with the code: a bare `#N` with no claiming word is a mention.
     assert L.classify_pr("This reds only #10 and #11, the two criterion ids.\n", 1) == []
+
+
+# --- review round 6: a list continuation is a CLAIM, never a RESOLUTION ------------------------
+# Round 1 widened the comma-continued list to every claiming word, which made `Closes #A, #B`
+# credit BOTH as resolved and report CLEAN — while GitHub closes only #A (its documented
+# multi-issue form repeats the keyword: `Resolves #10, resolves #123`) and this repo's own
+# `closes_landing.parse_closing_refs` credits exactly one. A false PASS, new in this PR series.
+
+
+def test_a_continuation_of_a_closing_word_is_claimed_but_not_resolved():
+    """`Closes #A, #B` resolves #A only; #B must still be FLAGGED.
+
+    The sibling grammar is the oracle — crediting both would have reported clean on work nothing
+    closed, which is the #10534 hole arm 1 exists to shut.
+    """
+    from tools.closes_landing import parse_closing_refs
+    body = "Closes #10107, #10157.\n"
+    c = L.claims(body, None, None)
+    assert c["closing"] == parse_closing_refs(body) == [10107]
+    assert c["weak"] == [10157]          # claimed, so it is still reported…
+    assert [f.arm for f in L.classify_pr(body, 999)] == [L.ARM_PR]   # …and NOT silently clean
+
+
+def test_a_linking_word_still_governs_its_whole_list():
+    """The control: the round-1 fix must survive — a linking word claims every subject."""
+    assert L._claims_in(L.strip_code("Part of #10085, #10063\n")[0], None)["weak"] == [10063, 10085]
+    assert L._claims_in(L.strip_code("Refs #10327, #10182, #7613\n")[0], None)["weak"] == [7613, 10182, 10327]
+
+
+@pytest.mark.parametrize("marker", [
+    "3.2c — released (2026-11-05)",
+    "3.2c — released on 2026-11-05",
+])
+def test_a_dated_release_annotation_still_clears(marker):
+    """The terminal lookahead must admit a bracketed or `on <date>` annotation — requiring the
+    date to sit immediately after the word re-broke the most natural dated forms and flagged
+    finished work (the exact class rounds 2 and 3 fixed)."""
+    assert L.in_flight_markers(["IN FLIGHT: " + marker]) == []
+
+
+@pytest.mark.parametrize("marker", ["- [ ] a", "* [ ] a", "+ [ ] a", "1. [ ] a", "2) [x] a"])
+def test_every_github_task_list_marker_counts_as_a_checklist(marker):
+    """GitHub renders all four markers as task lists; counting only `-`/`*` read a scoped issue as
+    UNSCOPED and flagged it. The marker set mirrors `closes_landing._TASK_ITEM_RE`."""
+    assert L.has_satisfies_checklist(["## Satisfies\n" + marker + "\n"]) is True
+
+
+def test_the_arm_two_wording_names_the_body_too():
+    """Both the arm table and the emitted detail must name the BODY: since the round-2 fix every
+    issue mode feeds `[body, *comments]` in, so "in its comments" understates the population."""
+    doc = L.__doc__ or ""
+    assert "anywhere in its\n                           body or comments" in doc
+    findings, _ = L.classify_issue([IN_FLIGHT], 1)
+    assert "body or comments" in findings[0].detail
+
+
+def test_the_skipped_claim_note_names_the_right_cause(monkeypatch, capsys):
+    """The note fires in the LIVE modes too, where the cause is a gh failure — calling that
+    "offline" named a mode the caller was not in (round-4 F5)."""
+    monkeypatch.setattr(L, "resolve_repo", lambda repo: None)
+    monkeypatch.setattr(L, "fetch_pr", lambda n, repo: ("Refs daniel-ospina/tortoise#12\n", []))
+    L.main(["--pr", "11078"])
+    out = capsys.readouterr().out
+    assert "could not be resolved" in out
+    assert "NARROWER" in out
+    assert "offline" not in out
