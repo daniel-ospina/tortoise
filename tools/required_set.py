@@ -122,7 +122,6 @@ class RequiredSet:
     queue_names: tuple[str, ...] = ()
     merge_names: tuple[str, ...] = ()
     snapshot_agrees: bool | None = None
-    notes: tuple[str, ...] = ()
     # `branch_protection_injection_mode` — LOAD-BEARING, never assumed. Under
     # `merge` (set here) the required contexts are injected for the MERGE only, so
     # `queue_conditions` IS the entry gate and a name in both lists is a config
@@ -244,7 +243,6 @@ def derive_from_config(root: Path) -> RequiredSet:
         )
 
     snapshot = _snapshot_names(root)
-    notes: list[str] = []
     agrees: bool | None = None
     if not snapshot:
         # `None` = absent/unreadable record, `()` = an EMPTY `required_contexts`.
@@ -264,22 +262,37 @@ def derive_from_config(root: Path) -> RequiredSet:
             f"({'absent or unreadable' if snapshot is None else '`required_contexts` is EMPTY'}) "
             f"— {MERGIFY_REL} is readable, but its union cannot be checked against "
             "the record of the live branch-protection read (contract clause 1), so "
-            "condition 2 would be a PASS/FAIL about an UNVERIFIED set. Restore the "
-            "record (re-cut it) rather than deleting it: its absence is otherwise "
-            "the cheapest way to make this gate report READY over a red required "
-            "check"
+            "condition 2 would be a PASS/FAIL about an UNVERIFIED set. RESTORE the "
+            "record's `required_contexts` (from branch protection, re-attested with "
+            "`tools/mergify_config_guard.py --live` under a credential that can read it) "
+            "rather than deleting it: its absence is otherwise the cheapest way to make "
+            "this gate report READY over a red required check"
         )
     else:
-        agrees = set(snapshot) == set(union)
-        # THE UNSAFE DIRECTION IS A CONFIG ERROR, NOT A NOTE. `snapshot` is the
-        # committed record of a LIVE branch-protection read, so a context it names
-        # and the config does not derive is a name the tool KNOWS is required and
-        # then never evaluates: condition 2 would report PASS over a set it can
-        # already see is not the required set (clause 1 is an EQUALITY). The note
-        # alone let `--pr` exit 0 while that context was `failure` — measured at
-        # 0995b1137 by deleting one `check-success=docs` line, which is exactly the
-        # #3016 regression this module exists to catch.
-        snapshot_only = tuple(n for n in dict.fromkeys(snapshot) if n not in set(union))
+        # ⛔ BOTH DIVERGENCE DIRECTIONS ARE A CONFIG ERROR, NOT A NOTE. Clause 1 is an
+        # EQUALITY, and the CI guard (`mergify_config_guard._clause_iv`) already treats
+        # both as `EXIT_DIVERGED` (`config_checks != required_set`). A note in either
+        # direction would make this instrument quietly tolerate a divergence the repo's
+        # own guard calls an error, and the two would disagree about whether the tree is
+        # sound.
+        #
+        # The SNAPSHOT-ONLY direction is the unsafe one: `snapshot` is the committed
+        # record of a LIVE branch-protection read, so a context it names and the config
+        # does not derive is a name the tool KNOWS is required and then never evaluates.
+        # The note alone let `--pr` exit 0 while that context was `failure` — measured at
+        # 0995b1137 by deleting one `check-success=docs` line, exactly the #3016
+        # regression this module exists to catch.
+        #
+        # The CONFIG-ONLY direction is the fail-closed one for a gate (it evaluates more
+        # names than the record knows, so it can only over-refuse), which is why refusing
+        # costs nothing real: the reachable window is between a config edit landing and
+        # branch protection catching up, and CI is red in that window anyway.
+        # ⛔ THE REMEDY NAMED BELOW IS CHECKED, NOT ASSUMED: `mergify_config_guard.py
+        # --recut` writes ONLY `gate_digest`, `emitters` and `verified_at` (see its
+        # `run_recut`) — it never touches `required_contexts`, so naming it here would
+        # send an operator round a loop while every readiness verdict stays refused.
+        union_set, snapshot_set = set(union), set(snapshot)
+        snapshot_only = tuple(n for n in dict.fromkeys(snapshot) if n not in union_set)
         if snapshot_only:
             raise RequiredSetConfigError(
                 f"{RECORD_REL} records {', '.join(snapshot_only)} as a live-required "
@@ -288,41 +301,29 @@ def derive_from_config(root: Path) -> RequiredSet:
                 "clause 1), and evaluating condition 2 against it would report "
                 "READY while a required check is red. Re-add the `check-success=` "
                 "line, or, if the context was DELIBERATELY removed from branch "
-                "protection, re-cut the record so the two agree"
+                "protection, re-attest the record from the live read "
+                "(`tools/mergify_config_guard.py --live`) so the two agree"
             )
-        if not agrees:
-            # ⛔ BOTH DIRECTIONS REFUSE, because clause 1 is an EQUALITY and the CI guard
-            # (`mergify_config_guard._clause_iv`) already treats both as `EXIT_DIVERGED`:
-            # `config_checks != required_set`. A note here would make this instrument
-            # quietly tolerate a divergence the repo's own guard calls an error, and the
-            # two would disagree about whether the tree is sound.
-            #
-            # The config-only direction IS the fail-closed one for a gate (it evaluates
-            # more names than the record knows, so it can only over-refuse), which is why
-            # refusing still costs nothing real: the reachable window is between a config
-            # edit landing and the record being re-cut, and in that window CI is red
-            # already, so no PR could merge anyway. Re-cut the record instead.
-            config_only = tuple(n for n in union if n not in set(snapshot))
-            if config_only:
-                raise RequiredSetConfigError(
-                    f"{MERGIFY_REL} derives {', '.join(config_only)} but {RECORD_REL} does "
-                    "not record it as live-required — the two sources disagree about "
-                    "clause 1's EQUALITY, so condition 2 would be a verdict about a set "
-                    "the repo does not agree is required. Re-cut the record with "
-                    "`uv run python tools/mergify_config_guard.py --recut`"
-                )
-            notes.append(
-                f"{RECORD_REL} disagrees with {MERGIFY_REL}: snapshot-only="
-                f"{sorted(set(snapshot) - set(union))} config-only="
-                f"{sorted(set(union) - set(snapshot))}"
+        config_only = tuple(n for n in union if n not in snapshot_set)
+        if config_only:
+            raise RequiredSetConfigError(
+                f"{MERGIFY_REL} derives {', '.join(config_only)} but {RECORD_REL} does "
+                "not record it as live-required — the two sources disagree about "
+                "clause 1's EQUALITY, so condition 2 would be a verdict about a set "
+                "the repo does not agree is required. Fix it on the PROTECTION side and "
+                "re-attest: make the context required on the branch, then run "
+                "`tools/mergify_config_guard.py --live` with a credential that can read "
+                "protection (that records `required_contexts` from the observed live "
+                "set). `--recut` does NOT fix this — it rewrites only `gate_digest`, "
+                "`emitters` and `verified_at`"
             )
+        agrees = True
     return RequiredSet(
         names=union,
         source=f"{MERGIFY_REL} (queue_conditions union merge_conditions)",
         queue_names=q,
         merge_names=m,
         snapshot_agrees=agrees,
-        notes=tuple(notes),
         mode=mode,
     )
 
@@ -357,10 +358,15 @@ def derive_from_ref(cwd: Path, ref: str = "origin/main", *, timeout: int = 60) -
     import tempfile
 
     def _rev_parse() -> str:
-        """The sha `ref` resolves to HERE — so the caller can see what was actually read."""
+        """The COMMIT `ref` resolves to HERE — so the caller can see what was read.
+
+        ``^{commit}`` is load-bearing: bare ``--verify`` returns the TAG OBJECT for an
+        annotated tag, while ``git show <ref>:<path>`` reads the COMMIT the tag points at,
+        so the disclosed sha would name an object whose files were never the ones read.
+        """
         try:
             proc = subprocess.run(
-                ["git", "rev-parse", "--verify", ref],
+                ["git", "rev-parse", "--verify", f"{ref}^{{commit}}"],
                 cwd=str(cwd),
                 capture_output=True,
                 text=True,

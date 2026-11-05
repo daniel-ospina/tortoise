@@ -264,14 +264,54 @@ def test_a_context_the_config_derives_and_the_record_lacks_also_refuses(tmp_path
     """⛔ BOTH DIVERGENCE DIRECTIONS REFUSE. Clause 1 is an EQUALITY, and the CI guard
     (`mergify_config_guard._clause_iv`) compares the same two sets for that reason.
 
-    This is the config-ONLY direction: evaluate-more-than-required is the fail-closed way
-    to be wrong, so a note would be tempting — but the repo's own guard calls it
-    `EXIT_DIVERGED`, and an instrument that quietly tolerates it would disagree with the
-    guard about whether the tree is sound. Revert to a note and this reds.
+    This is the config-ONLY direction, so the record must be a strict SUBSET of the
+    derived union. (An earlier version of this case passed a SUPERSET record, which made
+    the snapshot-only arm fire first and left the config-only arm completely unpinned —
+    the mutation `if config_only:` → `if False:` stayed GREEN.) Revert the config-only
+    raise to a note and this reds on the derived name.
     """
     with pytest.raises(RequiredSetConfigError) as excinfo:
-        derive_from_config(_tree(tmp_path, required_contexts=[*ENTRY, HEAVY, "unrecorded"]))
-    assert "unrecorded" in str(excinfo.value)
+        derive_from_config(_tree(tmp_path, required_contexts=list(ENTRY)))
+    message = str(excinfo.value)
+    assert HEAVY in message
+    # The remedy must be one that WORKS. `--recut` rewrites only gate_digest/emitters/
+    # verified_at, so it must never be presented as the fix — naming it only to rule it
+    # out is the point, and the real remedy (`--live`) must be there.
+    assert "--live" in message
+    assert "does NOT fix this" in message
+
+
+def test_derive_from_ref_discloses_the_COMMIT_for_an_annotated_tag(tmp_path: Path) -> None:
+    """`git rev-parse --verify <ref>` returns the TAG OBJECT; `git show <ref>:<path>` reads
+    the COMMIT the tag points at. Disclosing the tag object's sha would name an object
+    whose files were never the ones read, which is the opposite of provenance.
+
+    Remove `^{commit}` from the `rev-parse` call and this reds (the disclosed sha becomes
+    the tag's).
+    """
+    _tree(tmp_path)
+    _git(tmp_path, "init", "-b", "main")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "config")
+    _git(tmp_path, "-c", "user.email=t@example.com", "tag", "-a", "cfg4", "-m", "tagged")
+    commit = subprocess.run(
+        ["git", "rev-parse", "--verify", "HEAD"],
+        cwd=str(tmp_path),
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    tag_object = subprocess.run(
+        ["git", "rev-parse", "--verify", "cfg4"],
+        cwd=str(tmp_path),
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert commit != tag_object, "an annotated tag must not point at itself"
+    required = derive_from_ref(tmp_path, "cfg4")
+    assert commit[:12] in required.source
+    assert tag_object[:12] not in required.source
 
 
 def test_derive_from_ref_discloses_the_sha_it_read(tmp_path: Path) -> None:

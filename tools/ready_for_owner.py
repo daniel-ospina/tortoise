@@ -1402,13 +1402,25 @@ def check_gates(probe: Probe) -> Check:
                 failed.append(f"{token}:{context}")
 
     raw = "; ".join(seen) if seen else "no check-runs on this head"
+    # ⛔ THE SOURCE IS PART OF THE VERDICT, ON EVERY ARM. The required set is read from a
+    # local ref that is never fetched by that read, so the ONLY honest statement about
+    # what was read is the sha `required_raw` carries — and it used to appear on the two
+    # unreadable arms only, leaving a PASS (and any named-check failure) silent about
+    # provenance. Reverting to `{raw}` alone reds
+    # `test_the_gates_raw_discloses_the_required_set_source`.
+    source = probe.required_raw or "required-set: not read"
     if failed:
-        return Check("gates", False, f"entry={len(probe.required)} {raw}", ",".join(failed))
+        return Check(
+            "gates",
+            False,
+            f"entry={len(probe.required)} {raw} [{source}]",
+            ",".join(failed),
+        )
     return Check(
         "gates",
         True,
         f"entry={len(probe.required)} all/{REQUIRED_CONCLUSION} "
-        f"deferred={len(probe.required_deferred or ())} {raw}",
+        f"deferred={len(probe.required_deferred or ())} {raw} [{source}]",
     )
 
 
@@ -2121,11 +2133,13 @@ def _read_required_contexts(gh: Gh, workdir: Path) -> tuple[RequiredSet, str]:
         # guessed set.
         raise ReadError(str(exc)) from None
     raw = (
-        f"source={required.source}@origin/{PROTECTED_BRANCH} "
+        # `required.source` already ends with `at <ref> (<sha12>)` — derive_from_ref
+        # discloses what it READ, so the ref must not be appended a second time here
+        # (`… at origin/main (abc)@origin/main` was the shape that bug produced).
+        f"source={required.source} "
         f"entry={len(required.queue_names)} "
         f"merge-time={len(required.merge_names)} mode={required.mode} "
         f"snapshot_agrees={required.snapshot_agrees}"
-        + (f" {' '.join(required.notes)}" if required.notes else "")
     )
     return required, raw
 
@@ -2579,11 +2593,13 @@ def collect_probe(
     #
     # ⛔ WHAT THIS ORDER DOES *NOT* BUY, stated so nobody re-derives it as a guarantee:
     # `derive_from_ref` does not fetch, and `git show` succeeds on any ref that EXISTS,
-    # stale or not — so ordering alone cannot prove freshness. What holds is narrower and
-    # sufficient: every `_read_tree` path that FAILS returns `tree=None` BEFORE the base
-    # fetch, so a run that reaches a verdict has `tree` readable and therefore fetched.
-    # Everything weaker than that is disclosed rather than assumed — the derived `source`
-    # carries the sha it actually read.
+    # stale or not — so ordering alone cannot prove freshness. What holds is narrower:
+    # a run that reaches **READY** has `tree=True`, which requires that same run's base
+    # fetch to have succeeded. (Two `_read_tree` failure paths — a failed base fetch and a
+    # failed `merge-tree` — do run after it, so "every failing path fails before the fetch"
+    # is NOT true; they simply cannot reach READY.) Anything weaker than that is disclosed
+    # rather than assumed: the derived `source` carries the sha it actually read, and
+    # `check_gates` puts that source in its raw on every arm.
     probe.tree, probe.tree_raw = _try_tree(gh, pr, head, workdir)
     try:
         required, probe.required_raw = _read_required_contexts(gh, workdir)
@@ -2732,7 +2748,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def report_required_set(workdir: Path, ref: str = "origin/main") -> int:
+def report_required_set(workdir: Path, ref: str | None = "origin/main") -> int:
     """Print the derived required set. Exit 0 PASS · 2 unusable (with the REASON labelled).
 
     A REPORTING verb, and it is deliberately a separate output shape from the
@@ -2744,9 +2760,22 @@ def report_required_set(workdir: Path, ref: str = "origin/main") -> int:
     verb to find out WHY, and `REQUIRED-SET-UNREADABLE(<the config is wrong>)` points at
     the wrong subsystem — the body would say the contract is violated while the label
     says I/O failed.
+
+    ⛔ AN EMPTY `--ref` IS REFUSED, not treated as "read the workdir". A caller doing
+    `--required-set --ref "$BRANCH"` with `$BRANCH` unset must not silently get the
+    BRANCH'S OWN set printed at exit 0 — that is the self-attestation the whole module
+    exists to refuse. The workdir read is available only as `ref=None`, which is an
+    in-process diagnostic (tests), not a CLI flag.
     """
+    if ref is not None and not ref.strip():
+        print(
+            "REQUIRED-SET-UNREADABLE(--ref must name a ref; an empty value is not "
+            "'read this worktree', because a branch must never certify its own "
+            "required set)"
+        )
+        return 2
     try:
-        required = derive_from_ref(workdir, ref) if ref else derive_from_config(workdir)
+        required = derive_from_ref(workdir, ref) if ref is not None else derive_from_config(workdir)
     except RequiredSetConfigError as exc:
         print(f"REQUIRED-SET-CONFIG-ERROR({exc})")
         return 2
@@ -2769,8 +2798,6 @@ def report_required_set(workdir: Path, ref: str = "origin/main") -> int:
     print(f"OVERLAP: {', '.join(required.overlap) if required.overlap else '(none)'}")
     print(f"union ({len(required.names)}): {', '.join(required.names)}")
     print(f"snapshot_agrees: {required.snapshot_agrees}")
-    for note in required.notes:
-        print(f"note: {note}")
     return 0
 
 

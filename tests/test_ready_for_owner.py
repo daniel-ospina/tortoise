@@ -2334,11 +2334,45 @@ def test_the_required_set_verb_labels_a_config_error_as_one(
     record = tmp_path / RECORD_REL
     record.parent.mkdir(parents=True, exist_ok=True)
     record.write_text(json.dumps({"required_contexts": ["docs", "vanished"]}), encoding="utf-8")
-    code = rfo.main(["--required-set", "--workdir", str(tmp_path), "--ref", ""])
+    # `ref=None` is the in-process workdir diagnostic; an EMPTY `--ref` from the CLI is
+    # refused (see the test below), so this cannot be reached by a caller passing a ref.
+    code = rfo.report_required_set(tmp_path, None)
     out = capsys.readouterr().out
     assert code == 2
     assert "REQUIRED-SET-CONFIG-ERROR" in out
     assert "REQUIRED-SET-UNREADABLE" not in out
+
+
+def test_the_required_set_verb_refuses_an_empty_ref(capsys: pytest.CaptureFixture[str]) -> None:
+    """⛔ `--required-set --ref "$BRANCH"` with `$BRANCH` UNSET must not fall back to
+    reading the worktree — that would print the BRANCH's own required set at exit 0, which
+    is the self-attestation the module exists to refuse.
+
+    Revert the `if ref is not None and not ref.strip():` guard and this reds (it exits 0
+    having derived the workdir's set).
+    """
+    code = rfo.main(["--required-set", "--workdir", str(REPO_ROOT), "--ref", ""])
+    out = capsys.readouterr().out
+    assert code == 2
+    assert "REQUIRED-SET-UNREADABLE(--ref must name a ref" in out
+    assert "queue_conditions" not in out
+
+
+def test_the_gates_raw_discloses_the_required_set_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The source (and the sha it resolved to) must appear on EVERY gates arm.
+
+    The required set is read from a local ref that is never fetched by that read, so the
+    sha is the only honest statement about provenance. It used to appear on the two
+    unreadable arms only, leaving a PASS — the verdict a merge rests on — silent about
+    what set it certified. Revert to `{raw}` alone and this reds.
+    """
+    probe = _collect(monkeypatch, _gh_payloads())[0]
+    gates = next(c for c in rfo.evaluate(probe).checks if c.name == "gates")
+    assert gates.passed is True, gates.raw
+    assert "source=" in gates.raw
+    assert ".mergify.yml" in gates.raw
 
 
 def test_collect_probe_marks_an_unreadable_declared_union(
