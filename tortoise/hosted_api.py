@@ -35282,6 +35282,12 @@ _REGISTRY_PROBE_URI: str | None = None
 #: In production the pin is constant, so this costs nothing there.
 _REGISTRY_PROBE_PATH: str | None = None
 
+#: How many times `_registry_probe_sdk` rebuilds when the identity MOVES across
+#: a build (see the verification step there). One retry is what a single
+#: `monkeypatch` flip needs; the bound exists so an identity that flaps on every
+#: build cannot spin, and it is low because a build is a TCP+TLS handshake.
+_REGISTRY_PROBE_BUILD_ATTEMPTS = 3
+
 
 def _registry_probe_identity() -> tuple[str, str]:
     """The cache identity of the registry probe: (URI, embedded path pin).
@@ -35351,69 +35357,93 @@ def _registry_probe_sdk() -> TortoiseSDK:
     re-check. A peer that won the race keeps its handle and the loser closes
     its OWN — a loser is never installed and never leaked, which is the
     invariant the old code wanted, and the lock is never held across a
-    construction the stack can call back into.
+    construction the stack can call back into. The identity installed WITH the
+    handle is VERIFIED stable across the build (pre-read == post-read), so the
+    cache key provably identifies its value; a drift mid-build is not installed
+    at all (bounded retry, then raise → the caller's fail-open `None`).
     """
     global _REGISTRY_PROBE_SDK, _REGISTRY_PROBE_URI, _REGISTRY_PROBE_PATH
-    identity = _registry_probe_identity()
-    uri, path_pin = identity
-    cached = _REGISTRY_PROBE_SDK
-    if (cached is not None and uri == _REGISTRY_PROBE_URI
-            and path_pin == _REGISTRY_PROBE_PATH):
-        return cached
-
-    sdk = _make_sdk(namespace="registry")
-    try:
-        sdk._get_proj()
-    except Exception:
-        try:  # noqa: SIM105
-            sdk.close()
-        except Exception:
-            pass
-        raise
-    # Re-read the identity AFTER the build: `_make_sdk` re-reads the env itself
-    # a line before it constructs, so a drift landing BEFORE that read is
-    # picked up by this read too — which is the drift a `monkeypatch` in this
-    # suite produces. Recording the PRE-build read instead would let such a
-    # drift pair a NEW server's handle with the OLD identity, and a later
-    # caller still on the old identity would be served it.
-    #
-    # ⚠️ Residual, stated rather than claimed away: a drift landing AFTER
-    # `_make_sdk`'s own read and BEFORE this one still pairs a handle built for
-    # the old URI with the new identity. That window is narrower and in the
-    # opposite direction from the pre-fix one (there the stale identity
-    # outlived the build entirely), and it is not reachable in production where
-    # the pin is constant — it takes an environment mutation mid-build, which
-    # only the test suite's `monkeypatch` does. Closing it would mean threading
-    # the identity `_make_sdk` actually read back out of it; not worth a
-    # signature change for a window no production caller can enter.
-    installed = _registry_probe_identity()
-    installed_uri, installed_path = installed
-    retired = None
-    with _KEEPALIVE_LOCK:
+    for _attempt in range(_REGISTRY_PROBE_BUILD_ATTEMPTS):
+        identity = _registry_probe_identity()
+        uri, path_pin = identity
         cached = _REGISTRY_PROBE_SDK
-        if (cached is not None and installed_uri == _REGISTRY_PROBE_URI
-                and installed_path == _REGISTRY_PROBE_PATH):
-            # A peer installed a matching handle while we were building. Keep
-            # ITS handle (one cached handle per identity, as before) and close
-            # ours — the loser closes its own, so nothing leaks.
-            retired, sdk = sdk, cached
-        else:
-            # The configured server OR the embedded path pin changed — a
-            # reconfiguration event, not a request event (the embedded anchor
-            # evicts on drift the same way, #1502). Drop the handle: reusing it
-            # would probe a graph this process no longer resolves to.
-            retired = cached
-            _REGISTRY_PROBE_SDK = sdk
-            _REGISTRY_PROBE_URI, _REGISTRY_PROBE_PATH = installed
-    if retired is not None:
-        # Closed OUTSIDE the lock (#2172): a slow close must not block a
-        # concurrent construction, and a close under the lock is the
-        # close-under-use hazard #8867 finding 1 owns.
-        try:  # noqa: SIM105
-            retired.close()
+        if (cached is not None and uri == _REGISTRY_PROBE_URI
+                and path_pin == _REGISTRY_PROBE_PATH):
+            return cached
+
+        sdk = _make_sdk(namespace="registry")
+        try:
+            sdk._get_proj()
         except Exception:
-            pass
-    return sdk
+            try:  # noqa: SIM105
+                sdk.close()
+            except Exception:
+                pass
+            raise
+        # ⛔ THE IDENTITY IS VERIFIED, NOT ASSUMED (#10962 test (f)/(g)). The
+        # recorded identity must be the one the handle was BUILT against, and a
+        # single read cannot establish that: `_make_sdk` re-reads the
+        # environment itself, so a drift landing after ITS read and before the
+        # caller's is invisible to either read alone. Recording that post-build
+        # read (`db3043cc7`) installed a handle built for the OLD identity under
+        # the NEW one — and, unlike the pre-fix arm (which recorded the
+        # PRE-build read, so the next caller rebuilt), the FAST PATH then
+        # accepted the wrong pairing for the whole lifetime of the new identity:
+        # the auth path reads a store the test never seeded (#9334). MEASURED:
+        # `db3043cc7`'s first CI run turned required checks (f) and (g) red
+        # (`403 != 404` in tests/test_invites_http.py, empty
+        # `GET /v1/organizations` in tests/test_onboarding_endpoints.py) where
+        # the previous head was green.
+        #
+        # So the build is only PUBLISHED if the identity is unchanged across it
+        # (`_make_sdk`'s own read lies strictly between the two reads),
+        # otherwise the handle is unverifiable: close it and rebuild under the
+        # settled identity. Bounded by `_REGISTRY_PROBE_BUILD_ATTEMPTS` — an
+        # identity that flaps on every build raises, which the never-raise
+        # caller turns into its documented `None`, rather than caching an
+        # unverifiable pairing.
+        installed = _registry_probe_identity()
+        if installed != identity:
+            # Drift DURING the build: this handle belongs to whichever identity
+            # `_make_sdk` happened to read, which is not knowable here. Install
+            # nothing; the retry builds under the settled one.
+            try:  # noqa: SIM105
+                sdk.close()
+            except Exception:
+                pass
+            continue
+        installed_uri, installed_path = installed
+        retired = None
+        with _KEEPALIVE_LOCK:
+            cached = _REGISTRY_PROBE_SDK
+            if (cached is not None and installed_uri == _REGISTRY_PROBE_URI
+                    and installed_path == _REGISTRY_PROBE_PATH):
+                # A peer installed a matching handle while we were building.
+                # Keep ITS handle (one cached handle per identity, as before)
+                # and close ours — the loser closes its own, so nothing leaks.
+                retired, sdk = sdk, cached
+            else:
+                # The configured server OR the embedded path pin changed — a
+                # reconfiguration event, not a request event (the embedded
+                # anchor evicts on drift the same way, #1502). Drop the handle:
+                # reusing it would probe a graph this process no longer
+                # resolves to.
+                retired = cached
+                _REGISTRY_PROBE_SDK = sdk
+                _REGISTRY_PROBE_URI, _REGISTRY_PROBE_PATH = installed
+        if retired is not None:
+            # Closed OUTSIDE the lock (#2172): a slow close must not block a
+            # concurrent construction, and a close under the lock is the
+            # close-under-use hazard #8867 finding 1 owns.
+            try:  # noqa: SIM105
+                retired.close()
+            except Exception:
+                pass
+        return sdk
+
+    raise RuntimeError(
+        "the registry probe's identity changed across every build attempt "
+        f"({_REGISTRY_PROBE_BUILD_ATTEMPTS}); not caching an unverifiable handle")
 
 
 def _registry_existing_graphs() -> set[str] | None:

@@ -10980,6 +10980,136 @@ class TestUriRegistryProbeConnectionReuse:
         assert ha_mod._registry_existing_graphs() == {"org_a"}
         assert len(constructed) == 2, "an unchanged identity rebuilt the handle"
 
+    def test_a_drift_DURING_the_build_is_not_installed_under_the_new_identity(
+            self, monkeypatch):
+        """#10962 test (f)/(g): the identity recorded WITH the handle must be
+        the one the handle was BUILT against.
+
+        Post-`db3043cc7` the probe re-reads the identity AFTER the build and
+        records THAT read. A `TORTOISE_DB_URI`/`TORTOISE_DB_PATH` flip landing
+        between `_make_sdk`'s own read and the re-read therefore installed a
+        handle built for the OLD identity under the NEW one — and, unlike the
+        pre-fix arm (which recorded the PRE-build read, so the next caller
+        rebuilt), the fast path then ACCEPTED the pairing for as long as the
+        new identity lasted.
+
+        That is the #9334/#2090 failure class this pin exists to prevent — the
+        auth path reading a store the test never seeded, i.e. exactly the
+        `403 != 404` in `tests/test_invites_http.py` and the empty
+        `GET /v1/organizations` in `tests/test_onboarding_endpoints.py` — with
+        the difference that it is now CACHED instead of evicted. The suite's
+        autouse isolation hook resets the cache between tests, but a probe
+        already IN FLIGHT across a test boundary (`_reset_registry_probe_sdk`
+        is a no-op when the in-flight thread has not installed yet) lands its
+        install inside the NEXT test's window, where the pin has already moved.
+        """
+        import tortoise.hosted_api as ha_mod
+
+        old = "docker://:pw@localhost:6379/probe-drift-old"
+        new = "docker://:pw@localhost:6379/probe-drift-new"
+        monkeypatch.setenv("TORTOISE_DB_URI", old)
+        built_for: list[str] = []
+        closed: list[bool] = []
+
+        class _Sdk:
+            def __init__(self, built_uri):
+                self.built_uri = built_uri
+
+            def _get_proj(self):
+                class _Db:
+                    @staticmethod
+                    def list_graphs():
+                        return []
+
+                class _Proj:
+                    db = _Db()
+
+                return _Proj()
+
+            def close(self):
+                closed.append(True)
+
+        def _make_sdk(*, namespace=None, graph_name=None):
+            built_uri = os.environ["TORTOISE_DB_URI"]
+            built_for.append(built_uri)
+            if len(built_for) == 1:
+                # The drift lands INSIDE the build window: `_make_sdk` has
+                # already resolved `built_uri`, so the caller's post-build
+                # re-read sees the NEW identity while this handle belongs to
+                # the OLD one.
+                monkeypatch.setenv("TORTOISE_DB_URI", new)
+            return _Sdk(built_uri)
+
+        monkeypatch.setattr(ha_mod, "_make_sdk", _make_sdk)
+
+        cached = ha_mod._registry_probe_sdk()
+
+        assert built_for == [old, new], (
+            "the handle built for the OLD identity was installed under the NEW "
+            f"one (constructions: {built_for}) — the next caller on the new "
+            "identity is served a store it never seeded (#9334)")
+        assert cached.built_uri == new
+        assert cached.built_uri == ha_mod._REGISTRY_PROBE_URI, (
+            "the recorded identity is not the one the cached handle was built "
+            "against — the cache key no longer identifies its value")
+        assert closed == [True], (
+            "the drift-built handle was not closed — a retried build leaks the "
+            "loser's connection")
+
+    def test_a_drift_that_never_settles_stays_fail_open_and_leaks_nothing(
+            self, monkeypatch):
+        """The retry is BOUNDED: an identity that flips on every build must
+        not be installed at all. The never-raise wrapper turns it into the
+        documented `None` verdict (callers skip the sweep this cycle) and no
+        half-built handle is cached or leaked."""
+        import tortoise.hosted_api as ha_mod
+
+        # URI mode is what puts the call on the cached-probe path at all.
+        monkeypatch.setenv("TORTOISE_DB_URI",
+                           "docker://:pw@localhost:6379/probe-churn-0")
+        calls: list[int] = []
+        closed: list[bool] = []
+
+        class _Sdk:
+            def _get_proj(self):
+                class _Db:
+                    @staticmethod
+                    def list_graphs():
+                        return []
+
+                class _Proj:
+                    db = _Db()
+
+                return _Proj()
+
+            def close(self):
+                closed.append(True)
+
+        def _make_sdk(*, namespace=None, graph_name=None):
+            calls.append(len(calls))
+            # Flip the pin on EVERY build: pre-read and post-read can never
+            # agree, so no build is ever verifiable.
+            monkeypatch.setenv(
+                "TORTOISE_DB_URI",
+                f"docker://:pw@localhost:6379/probe-churn-{len(calls)}")
+            return _Sdk()
+
+        monkeypatch.setattr(ha_mod, "_make_sdk", _make_sdk)
+
+        assert ha_mod._registry_existing_graphs() is None, (
+            "a never-settling identity must stay fail-open (None), not raise "
+            "out of the probe")
+        assert len(calls) == 3, (
+            f"the drift retry was unbounded or absent (constructions: "
+            f"{len(calls)}) — a flapping identity must be given a bounded "
+            "number of attempts, then abandoned")
+        assert closed == [True, True, True], (
+            f"a drifted build was leaked instead of closed ({len(closed)} "
+            "closed of 3)")
+        assert ha_mod._REGISTRY_PROBE_SDK is None, (
+            "an unverifiable handle was installed — the next caller on ANY "
+            "identity is served a store it never seeded")
+
 
 class TestOnboardingProjectionSamplesTheRegistryOnce:
     """#4661: the projection probes the registry ONCE, and opens the name it
