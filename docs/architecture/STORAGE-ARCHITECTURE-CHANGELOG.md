@@ -1973,7 +1973,8 @@ with the 93 MB named as the TOTAL index size of which only part is HNSW; and it 
 stored vector payload (12,657 × 1,536 B)"* as a **2026-11-04** measurement of the live graph. It is
 neither: 12,657 is the **2026-09-24** count of the `:Object` 7,859 + `:Event` 4,798 embeddings — the
 **unindexed** population, 38 % of every vector stored — and `#5090`'s 2026-10-08 comment reaches it as a
-SCOPE correction (*"the 50 MB figure requires counting the `:Point` leg — the one leg that IS indexed"*),
+SCOPE correction (*"the 50 MB figure requires counting the `:Point` leg — the one leg that IS indexed and
+working …"*),
 not as a re-measurement. `#10976`'s measured block carries no vector count and no 19.4 MB line, and
 `tools/dod_5090_probe.py`'s own census docstring says the 12,657 figure is a 2026-09-24 number and is not
 to be re-quoted — `--census` re-measures per label on a named graph at a timestamp. Quoting it beside a

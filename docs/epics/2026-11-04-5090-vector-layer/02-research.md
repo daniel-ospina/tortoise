@@ -117,7 +117,11 @@ comparables now say what that measurement will probably show, and how to run it:
    phenomenon at milder selectivity.
 2. **The measurement has a known-good method and a known-good control**: exact ground truth computed
    in-database, swept over **our** filter selectivities, reporting **filtered** recall (never global).
-   That makes scope item 2 cheap and decisive rather than a research project.
+   That makes **E1**, the filtered-ANN recall measurement, cheap and decisive rather than a research
+   project. ⚠️ **E1 is PARKED WITH V1, not in this epic's scope** — it was item 2 of the scope's first
+   revision and the second revision removed it (`03-scope.md` §1's exclusion table and §6; `01-align.md`
+   K3): it is evidence *for a move*, and no move is planned, so a lane must not read this brief as
+   approving it. Its numbers stay here so they are not lost when V1 is taken.
 3. **`hnsw.iterative_scan` is a genuine capability we do not have at all today** — FalkorDB has no
    equivalent. So branch 2 is not strictly a loss: it trades in-graph index residency for **filtered ANN
    we currently cannot do**, paying tail latency for it. ⚠️ This is an argument *for* branch 2 that the
@@ -129,8 +133,8 @@ comparables now say what that measurement will probably show, and how to run it:
 |---|---|---|---|
 | Vectors are stored and unindexed on **two** labels in the 2026-09-24 count (`Object` 7,859 + `Event` 4,798 = 12,657; four served labels are unindexed). ⚠️ NOT a claim that `Source`/`Subject` can never hold one — their writers DO store `embedding` (`_upsert_document` → `:Source`, `_upsert_subject`), which is why the census measures `db.labels()` instead of the index inventory | high | `ENTITY_TYPE_LABELS` (5 served) + `Point`-only DDL (`projection/__init__.py:19765`, `:19783`) | re-run `tools/dod_5090_probe.py --census` on a graph that holds rows |
 | The EMBED rule exists and is **off** by default | high | `embed_gate.RULE_SET is value_gate.RULES` → `True`; flag unset in the 4 shipped surfaces that exist | the arming measurement (scope item 1) |
-| **A cross-store move PRESERVES recall on OUR mix** (this is the `01-align.md` K3 statement; §3's evidence below is *against* it) | **low — the hinge** | 0.942 → 0.401 @ 10 % selectivity (post-filter); 0.63–0.72 (epic's comparable); both **not our corpus** | scope item 2 — exact ground truth, our selectivities, filtered recall reported separately |
-| `hnsw.iterative_scan` compensates enough to be a net win | **low — unmeasured** | recovers 0.847 in one config; costs CPU/memory/tail latency | scope item 2, same sweep |
+| **A cross-store move PRESERVES recall on OUR mix** (this is the `01-align.md` K3 statement; §3's evidence below is *against* it) | **low — the hinge** | 0.942 → 0.401 @ 10 % selectivity (post-filter); 0.63–0.72 (epic's comparable); both **not our corpus** | **E1** (parked with V1) — exact ground truth, our selectivities, filtered recall reported separately |
+| `hnsw.iterative_scan` compensates enough to be a net win | **low — unmeasured** | recovers 0.847 in one config; costs CPU/memory/tail latency | **E1**, same sweep |
 | The record can serve reads without the graph | medium | 4/4 layers in schema; `record_*` modules exist; **armed** (`record.armed: true` at 2026-11-05T15:07Z, `#9548`) but hosted writes reject `22P02` (`#10593`, OPEN) and no hosted projection is evidenced | serve a query with the graph stopped |
 | Arming the gate moves the write rate materially | medium | `#5008` ordered measurement first | scope item 1 |
 | Object/Subject embeddings absent from the record are **re-embed cost, not data loss** | high | an embedding is derivable from its text | a stored vector whose source text is gone |
@@ -158,7 +162,7 @@ comparables now say what that measurement will probably show, and how to run it:
 - **No comparable meters capacity in per-graph bytes** (`#7879`, comment 28). Our byte unit has no
   precedent to copy; it can only be measured here.
 - **No published figure for filtered-ANN recall on a graph-state filter set like ours.** Every number found
-  is on synthetic or unrelated selectivity. ⇒ the measurement in scope item 2 has no substitute.
+  is on synthetic or unrelated selectivity. ⇒ the measurement in **E1** (parked with V1) has no substitute.
 
 ---
 
