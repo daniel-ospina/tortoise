@@ -209,7 +209,7 @@ follow them as pointers at this head.
 
 The **SUPERSEDED** `capstone-measured-e0fc940b.log` carried the cites **as-of its own
 stamp**, and those are the numbers listed here — the ones that log rendered, exactly as it
-renders them: `sdk.py:12444` (the meta fold), `sdk.py:12725` (the
+renders them: `sdk.py:12401` (the meta fold), `sdk.py:12682` (the
 references-edge writer), `sdk.py:2367` (`_TURN_WRITE_CYPHER`), `edges.py:467`
 (`_DERIVATION_REFERENCES_LABELS`), `edges.py:494-503` (`_anchor_on_create` / `_DERIVATION_ANCHOR_SET`,
 re-derived by this bundle to `774`/`782`), `edges.py:2168-2192` (`link_source_to_event`),
@@ -421,7 +421,7 @@ derivation target labels are `_DERIVATION_REFERENCES_LABELS` (`edges.py:747`: `E
 got one of them backwards: `extractedFrom` points FROM the derived node
 (`(Point)-[:extractedFrom]->(GraphEvent|Event)`), while `references` points AT it
 (`(Source)-[:references]->(Event|Document)` — `link_source_to_event`, `edges.py:2832-2857`,
-reached from the capture path at `sdk.py:17151` (`proj.link_source_to_event(source_key,
+reached from the capture path at `sdk.py:17161` (`proj.link_source_to_event(source_key,
 event_id)`)). So the rule now applied — printed in the log,
 applied by one Cypher query per label — is:
 
@@ -715,7 +715,7 @@ anchor in one direction (so its `:Event 0/41` contradicted its own `references=7
 fixed both, but its envelope was stale: every `tortoise/sdk.py` line it cited (`:12196` for the meta
 fold, `:12477` for `link_source_to_event`, `:2306-2331` for `_TURN_WRITE_CYPHER`) had moved under
 it when `main` advanced, so the one instruction it carried for #9116 — "the fix targets
-`sdk.py:12239`" — pointed into unrelated code. `8a8bbcba2` fixed
+`sdk.py:12196`" — pointed into unrelated code. `8a8bbcba2` fixed
 the OFF-block witness hazard, but its rule accepted `enabled: true` on its own — and `enabled` is the
 FLAG, not activity (see "The eight steps" above), so a single flag-on/empty-list session could have
 made V5 pass on a step nobody observed; its derivation figure was also circular (`132/132`, a class
