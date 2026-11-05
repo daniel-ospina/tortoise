@@ -1648,10 +1648,14 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # Pinned by TWO cases, and they do not cover the same thing:
              # tests/test_ci_selection.py::test_gh_write_preflight_tool_change_selects_core_not_tier1
              # (the entry EXISTS; green under either the exact path or the prefix) and
-             # ::test_gh_write_preflight_carveout_is_a_PREFIX_so_a_sibling_cannot_be_dropped
+             # tests/test_ci_selection.py::test_gh_write_preflight_carveout_is_a_PREFIX_so_a_sibling_cannot_be_dropped
              # (the entry is a PREFIX; reds iff it is narrowed back to the exact path — measured:
              # with the exact path the second case FAILS and the first still passes, which is why
              # the first alone did not pin this line).
+             # ⚠️ Both citations carry their `tests/…py` path deliberately. The ratchet that makes
+             # "Pinned by" checkable only resolves citations written as `tests/<path>.py::<name>`,
+             # so a bare `::<name>` is INVISIBLE to it — such a citation would silently survive a
+             # rename or deletion of the very case that pins this line.
              # #11027: PREFIX, not the exact path (the #9487 P2 lesson applied to this entry).
              # NOTE THE TUPLE: this entry is in `CORE_ALSO` (matched by `_selection_relevant`'s
              # `path.startswith(CORE_ALSO)`), not in `TOOL_CARVEOUTS` — a `TOOL_CARVEOUTS` member

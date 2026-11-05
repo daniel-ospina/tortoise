@@ -2968,19 +2968,23 @@ def test_gh_write_preflight_carveout_is_a_PREFIX_so_a_sibling_cannot_be_dropped(
 
     `_selection_relevant` claims a changed path with `path.startswith(CORE_ALSO)` — this entry's
     tuple, NOT `TOOL_CARVEOUTS` (whose members force the FULL matrix; this one yields `core` only) —
-    so an entry naming `tools/gh_write_preflight.py` exactly claims ONLY that spelling. Two ordinary
-    refactors then
-    re-open the silent drop the entry exists to close, with no test noticing:
+    so an entry naming `tools/gh_write_preflight.py` exactly claims ONLY that spelling. One ordinary
+    refactor then re-opens the silent drop the entry exists to close, with no test noticing:
 
-      * a rename (`tools/write_preflight.py`) — nothing claims it, so a diff to the gate runs none
-        of the gate's own arms; and
-      * a split-out sibling (`tools/gh_write_preflight_urls.py`) — the same, and this is the
-        realistic shape, because the tool's URL parsing is already the most defect-dense part.
+      * a split-out sibling (`tools/gh_write_preflight_urls.py`) — nothing claims it, so a diff to
+        the gate runs none of the gate's own arms. This is the realistic shape, because the tool's
+        URL parsing is already the most defect-dense part, and it is what this entry now covers.
 
-    The test immediately above cannot catch either: it exercises the exact path, which matches a
-    prefix AND an exact entry, so it stays green under the regression. This is the falsifier that
-    distinguishes them — reverting the entry to `"tools/gh_write_preflight.py"` fails the FIRST
-    assert below and leaves that test green, which is the whole reason both exist.
+    ⛔ A rename (`tools/write_preflight.py`) is NOT covered, by the prefix or by the exact path:
+    neither claims a path that no longer carries the stem. It is named here only so the boundary is
+    explicit — this change buys the sibling shape, not rename survival, and a reader who assumes
+    both would be relying on a pin that does not exist. A rename-detection pin belongs with the
+    rename (in the diff that performs it), not here.
+
+    The test immediately above cannot catch this: it exercises the exact path, which matches a
+    prefix AND an exact entry, so it stays green under the regression. The case below is the
+    falsifier that distinguishes them — reverting the entry to `"tools/gh_write_preflight.py"`
+    fails its FIRST assert and leaves that test green, which is the whole reason both exist.
 
     Over-matching is the accepted cost, bounded here: `git ls-files 'tools/gh_write_preflight*'`
     is one path today, so the prefix claims nothing that is not the tool.
