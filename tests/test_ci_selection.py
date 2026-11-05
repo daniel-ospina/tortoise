@@ -2977,7 +2977,7 @@ def test_gh_write_preflight_test_file_change_selects_core():
 
 
 def test_gh_write_preflight_tool_change_fails_closed_to_full():
-    """#11027: a tool-only change must run the preflight's own 72 hermetic arms.
+    """#11027: a tool-only change must run the preflight's own 73 hermetic arms.
 
     `tools/gh_write_preflight.py` owns `tests/test_gh_write_preflight.py`, which pins
     the properties that make the tool safe to tell every lane to run: no credential
