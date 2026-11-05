@@ -141,10 +141,18 @@ def test_the_bound_search_keys_value_is_the_graph_s_string_verbatim():
     body — `json.loads(bound)` — is retained as the second arm because it is
     the acceptance test Postgres applies to a `jsonb` input.
 
-    ⛔ WHAT STILL REDS: the second arm below fails if any parameter bound to a
-    column the schema still declares `jsonb` is not a JSON document — which is
-    exactly the pre-fix shape (`_jsonb_or_scalar` passing a bare graph string
-    through as TEXT), and exactly Postgres's 22P02 refusal.
+    ⛔ WHAT REDS HERE: the loop below fails if any parameter bound to a column
+    the schema still declares `jsonb` is not a JSON document — the acceptance
+    test Postgres applies to a `jsonb` input.
+
+    ⚠️ THAT LOOP IS A SHAPE GUARD ON THIS STATEMENT, NOT THE #9548 PIN. Because
+    `search_keys` is `text` since #10620, the only `jsonb` parameter left here
+    is `props`, whose `{}` parses EITHER WAY — so the PRE-FIX encoder satisfies
+    it. The rule's own discriminating pin is
+    `test_the_encoder_still_JSON_quotes_a_bare_string_bound_to_a_jsonb_column`
+    below (#10726 review, P2: measured at 171 passed with the pre-fix
+    `_jsonb_or_scalar` restored, i.e. this file could not see the defect it was
+    written for).
     """
     from tortoise import record_projection as rp
 
@@ -179,6 +187,45 @@ def test_the_bound_search_keys_value_is_the_graph_s_string_verbatim():
                 f"the value bound to `{column}` is not a JSON document "
                 f"({value!r}: {exc}) — a `jsonb` column refuses it with 22P02 "
                 "and the seam drops the row (#9548)")
+
+
+def test_the_encoder_still_JSON_quotes_a_bare_string_bound_to_a_jsonb_column():
+    """The #9548 ENCODER rule — a pin that actually REDS without it.
+
+    ⛔ WHY THIS EXISTS SEPARATELY (#10726 review, P2). `_jsonb_or_scalar`'s
+    `str` -> `json.dumps` arm IS the #9548 fix, and until this test it had NO
+    pin that failed when the arm was removed. The reason: `point.search_keys`
+    is `text` since #10620, so the only `jsonb` parameter left on THIS file's
+    statement is `props`, whose `{}` parses either way — the pre-fix body
+    satisfies the shape loop above. Measured, not argued: restoring
+    (`json.dumps(value) if isinstance(value, (dict, list)) else value`) and
+    running this file plus `tests/test_record_projection.py` gave
+    **171 passed, exit 0**.
+
+    `public.event.payload` is still declared `jsonb`, so the rule is exercised
+    where it still governs: a bare graph string bound there must come back as a
+    JSON DOCUMENT that `json.loads` returns to the graph's own flat `str`.
+    Pre-fix the same call returns the bare string, which `json.loads` refuses
+    with a `JSONDecodeError` — exactly the 22P02 the seam reports as a
+    `write_failed` row drop.
+    """
+    from tortoise import record_projection as rp
+
+    assert "payload" in rp.jsonb_columns(), (
+        "`public.event.payload` is the column this pin uses because it is "
+        "STILL `jsonb`. If the schema narrowed it too, pick another live "
+        "`jsonb` column rather than deleting the pin — the encoder rule is "
+        "this file's subject")
+
+    encoded = rp._jsonb_or_scalar("payload", GRAPH_KEYS)
+    assert encoded != GRAPH_KEYS, (
+        "a bare string bound to a `jsonb` column was passed through UNENCODED "
+        "— that is the #9548 defect: Postgres reads it as raw JSON text and "
+        f"refuses the row with 22P02 (got {encoded!r})")
+    assert json.loads(encoded) == GRAPH_KEYS, (
+        "the encoded value must read back as the graph's own flat string — a "
+        "JSON ARRAY would read back as a `list`, which is the array-valued "
+        f"`search_keys` the FTS index cannot match (got {encoded!r})")
 
 
 def test_the_read_side_yields_the_graph_s_string_not_an_array():

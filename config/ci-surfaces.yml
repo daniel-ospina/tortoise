@@ -2874,8 +2874,11 @@ surfaces:
   # `supabase/tests/20261022000001_record_tenancy_posture.sql`, registered in
   # `supabase/tests/pglite/validate.mjs`.
   - test_record_tenancy_guc.py
-  # #9548 — the record DROPPED every Point carrying `search_keys`. The column is
-  # `jsonb`; the graph (and every `PointAdded`/`PointPromoted` journal snapshot,
+  # #9548 — the record DROPPED every Point carrying `search_keys`. The column
+  # WAS `jsonb` when #9548 was measured (#10620's `20261102000002` has since
+  # narrowed it to `text` — the `test_9548_record_arming_health.py` block above
+  # states the same fact in the same tense); the graph (and every
+  # `PointAdded`/`PointPromoted` journal snapshot,
   # which carries the NODE's own value) holds the space-joined STRING FalkorDB's
   # Point FULLTEXT index needs (`projection/entities.py::flatten_search_keys_prop`
   # — a list-valued property is never indexed, #5482). `_jsonb_or_scalar`
