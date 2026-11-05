@@ -325,7 +325,15 @@ class TestARefusalIsNotSuccess:
 @pytest.mark.skipif(not _DB_URI, reason="needs TORTOISE_DB_URI (docker lane)")
 class TestTheSkipArmWritesNothing:
     def test_a_second_ingest_skips_and_does_not_print_a_completion_summary(
-            self, tmp_path):
+            self, tmp_path, monkeypatch):
+        # The S7 stage builds the REAL embedding model, which on a hermetic lane
+        # is a blocked https://huggingface.co request retried five times per file
+        # (#4387) — and this arm is on the `core` surface, so an unmocked ingest
+        # here is a flake in every PR's required lane, not a slow test. This
+        # arm's subject is what a SKIP writes, not entity extraction (review
+        # round 11, P3; the same stub the partial-extraction arm already uses).
+        monkeypatch.setattr("tortoise.ingest._s7_document_entities",
+                            lambda *_a, **_k: {})
         doc = tmp_path / "note.md"
         doc.write_text(
             "---\ntitle: Repro Note\n---\n\n## Section one\n\nSomething true.\n",
@@ -487,15 +495,15 @@ class TestTheSkipArmWritesNothing:
 # The sweep: outstanding work is not a completed ask.
 # --------------------------------------------------------------------------
 
+# ⛔ The two enum-only assertions that used to open
+# `TestTheSweepReportsOutstandingWork` (`PARTIAL.returncode == 1`,
+# `SKIPPED_NOTHING_PENDING.returncode == 0`) are DELETED, not relocated (review
+# round 11, P3): they never drove the sweep, so under this class name they read
+# as the sweep's pins while the real ones are the live arm below and
+# `TestTheSweepDoesNotRedOnItsOwnIdempotency` — and every outcome's exit status
+# is already table-pinned by `TestTheExitContractIsOneMapping`.
+
 class TestTheSweepReportsOutstandingWork:
-    def test_leftover_pending_work_is_partial_not_done(self):
-        assert IngestOutcome.PARTIAL.returncode == 1
-        assert IngestOutcome.PARTIAL is not IngestOutcome.DONE
-
-    def test_an_empty_sweep_is_not_a_failure(self):
-        """An empty sweep is the ask's own answer, not a refusal."""
-        assert IngestOutcome.SKIPPED_NOTHING_PENDING.returncode == 0
-
     @pytest.mark.skipif(not _DB_URI, reason="needs TORTOISE_DB_URI (docker lane)")
     def test_the_sweep_returns_partial_when_it_leaves_a_document_behind(
             self, tmp_path, monkeypatch):
@@ -609,9 +617,10 @@ class TestTheSweepDoesNotRedOnItsOwnIdempotency:
             self, tmp_path, monkeypatch):
         """The `SKIPPED_NOTHING_PENDING` return, DRIVEN (round-2 review, 2nd half).
 
-        Nothing pinned this arm: `test_an_empty_sweep_is_not_a_failure` asserts
-        `IngestOutcome.SKIPPED_NOTHING_PENDING.returncode == 0`, which is a
-        property of the ENUM. Delete the `return IngestOutcome.
+        Nothing pinned this arm: the enum-only assertions that used to open
+        `TestTheSweepReportsOutstandingWork` (deleted in round 11 — they asserted
+        `IngestOutcome.SKIPPED_NOTHING_PENDING.returncode == 0`, a property of
+        the ENUM) never drove the sweep. Delete the `return IngestOutcome.
         SKIPPED_NOTHING_PENDING` above the loop and the sweep falls through to
         the `DONE` tail while every enum assertion stays green.
         """

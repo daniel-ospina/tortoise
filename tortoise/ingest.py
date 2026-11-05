@@ -953,9 +953,10 @@ def _do_upgrade_all(proj, api, args):
     # the docstring) and IS outstanding; `partial_sections` counts documents
     # that were upgraded with sections missing (they had their marker cleared,
     # so nothing else can report them).
-    if unresolved or not_document or partial_sections:
-        # Same predicate as `outstanding` above, kept as the single return site
-        # so the exit status and the printed verdict cannot drift apart.
+    if outstanding:
+        # ⛔ THE SAME VARIABLE THE PRINTED VERDICT READS — a second copy of the
+        # expression is exactly the drift this line exists to prevent, and it
+        # said "same predicate" while re-spelling it (review round 11, P3).
         return IngestOutcome.PARTIAL
     return IngestOutcome.DONE
 
@@ -1044,7 +1045,11 @@ def main(argv=None) -> IngestOutcome:
     ap.add_argument("--db", type=str, required=True,
                     help="Docker URI (docker://:pass@host:port/graph) or file path")
     ap.add_argument("--log", type=Path, default=Path("events.jsonl"))
-    ap.add_argument("--out", type=Path, default=Path("graph.html"))
+    ap.add_argument("--out", type=Path, default=Path("graph.html"),
+                    help="graph render path — written by a full ingest that "
+                         "reaches completion; `--upgrade` and `--upgrade-all` "
+                         "write NO render, and a skip or a refusal leaves an "
+                         "existing file exactly as it was")
     ap.add_argument("--resolution", action="store_true",
                     help="mark this ingest as a resolution event (auto-grounds)")
     ap.add_argument("--force", action="store_true", help="reprocess even if seen")
