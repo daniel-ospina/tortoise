@@ -1884,19 +1884,26 @@ def test_the_floor_citations_RESOLVE_to_what_they_claim_at_this_head():
     head: `tools/ci_queue_health.py:304` is the trailing COMMENT (the assignment is
     one line below, at `:305`), and `docs/ops/ci-wall-clock.md` §6's earlier citation
     pointed at a `timeout-minutes` kill table rather than at the derivation sentence
-    it quotes (which is at `390-392`). The illustrative span for that second drift is
-    deliberately NOT restated here: this PR grew the document by 48 lines, which moved
-    every one of those numbers, and a coordinate that is only true on `origin/main`
-    tells the next reader a checkable fact that is false at this head (round 12, P3).
-    docstring names the reader who will follow these numbers and warns that whoever
-    mis-locates the derivation "discards the one section that supports this floor" —
-    so a stale coordinate sends the next lane to exactly the misreading the paragraph
-    exists to prevent.
+    it quotes.
+
+    ⛔ NEITHER DRIFT'S ILLUSTRATIVE SPAN IS RESTATED HERE (round 13's P3s — the first
+    attempt to describe them restored the staleness it was warning about). This PR grew
+    that document by 48 lines, which moved every one of those numbers, so a coordinate
+    that is only true on `origin/main` hands the next reader a checkable fact that is
+    false at this head. The lesson needs no coordinate: a citation can name another
+    section entirely, and the docstring quoted above warns that whoever mis-locates the
+    derivation "discards the one section that supports this floor" — so a stale
+    coordinate sends the next lane to exactly the misreading the paragraph exists to
+    prevent.
 
     Pinned MECHANICALLY instead of corrected by hand a third time: the numbers are
     read back out of the docstring and resolved against the files they cite, so a
     later insert anywhere in either file reddens this instead of silently re-arming
-    the defect. Discriminating: restore `:304` or `326-332` and it reddens.
+    the defect. Coverage is EXACT, not best-effort (round 13, P2): the sibling
+    docstring's citation must be found exactly once — a phrasing that silently
+    disappears from the checked set is the same false PASS as a stale number — and any
+    `quoted derivation is at` parenthetical is resolved too. Discriminating: restore
+    `:304`, or shift the span the citation names, and it reddens.
     """
     root = Path(__file__).resolve().parents[1]
     src = (root / "tools" / "ci_check_repair.py").read_text()
@@ -1936,12 +1943,17 @@ def test_the_floor_citations_RESOLVE_to_what_they_claim_at_this_head():
     #    derivation") — or a second copy of the parenthetical — stayed GREEN while
     #    stale, which is the same false PASS this pin exists to prevent (round 12, P2).
     own_src = Path(__file__).read_text()
-    found_spans = re.findall(
-        r"quoted derivation is at `([0-9]{1,4})-([0-9]{1,4})`", own_src)
-    found_spans += re.findall(
+    sibling_hits = re.findall(
         r"§6 lines ([0-9]{1,4})-([0-9]{1,4}) records the same derivation", own_src)
-    assert found_spans, "this file no longer cites the derivation span at all"
-    for found in found_spans:
+    parenthetical_hits = re.findall(
+        r"quoted derivation is at `([0-9]{1,4})-([0-9]{1,4})`", own_src)
+    assert len(sibling_hits) == 1, (
+        f"expected exactly ONE '§6 lines A-B records the same derivation' citation in "
+        f"this file's docstrings, found {len(sibling_hits)} — ZERO means the citation "
+        "moved to a phrasing this pin does not cover (round 13's P2: a phrasing that "
+        "silently leaves the checked set is the same false PASS as a stale number), "
+        "and more than one means a copy nothing examines")
+    for found in [*sibling_hits, *parenthetical_hits]:
         assert found == (str(first), str(last)), (
             f"a docstring in this file cites the derivation at {found[0]}-{found[1]} "
             f"while the file's own citation (and the pinned span above) says "
