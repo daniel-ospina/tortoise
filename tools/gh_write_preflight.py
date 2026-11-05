@@ -48,6 +48,8 @@ ACTUALLY RETURNS for that reason — the code the process exits with — so the 
 again (review N1/P2: comparing it with `exit_code_for()` ALONE let `no-git-checkout` read `[exit 1]`
 here while the binary exited 2, because a call site can pass `cannot_verify=True` and overrule the
 helper). A row must stay on ONE line to be checked, so keep the marker at the end of an unwrapped row.
+⚠️ `_emit` now takes NO bucket argument at all, so a call site can no longer overrule the helper —
+that override WAS the divergence, and dropping it makes this table's claim structurally true.
 -------------------------------------------------------------------------------
     no-remote                  no `origin` to probe (and no --repo to assert against)   [exit 1]
     no-git-checkout            --workdir is not a git work tree                          [exit 2]
@@ -57,7 +59,7 @@ helper). A row must stay on ONE line to be checked, so keep the marker at the en
     cannot-verify:git-push-form  the push never reached the credential (mirror/signed-refspec/ref-lock config) [2]
     ls-remote-mismatch         push exited 0 but the ref is not on the remote, or its sha differs [2]
     cleanup-failed             the probe WROTE and the ref could not be removed — names the ref [2]
-    cannot-verify:*            usage/bad-repo-argument/repo-mismatch/git-missing/timeout/ls-remote-failed/probe-error/probe-ref-exists [2]
+    cannot-verify:*            usage/bad-repo-argument/repo-mismatch/git-missing/timeout/ls-remote-failed/probe-error/probe-ref-exists/no-head/credential-not-exercised [2]
 
 `--repo` is an ASSERTION, never a redirect
 ------------------------------------------
@@ -74,6 +76,12 @@ Safety
   Every string this tool echoes — including the resolved remote URL and the ``--repo`` argument — is
   passed through a userinfo scrubber first, because ``https://x-access-token:<TOKEN>@host/o/n.git``
   is a real remote shape and echoing it verbatim was a measured leak.
+* ⚠️ KNOWN LIMIT of the `credential=` LABEL (review P3-3), not of the verdict: the label models gh's
+  github.com chain (`GH_TOKEN` -> `GITHUB_TOKEN` -> the stored login). On a GitHub **Enterprise
+  Server** host gh resolves `GH_ENTERPRISE_TOKEN` / `GITHUB_ENTERPRISE_TOKEN` before either, and this
+  label does not read those — so on a GHES remote it can name `store:`/`absent` while the push
+  actually used a shadowing enterprise token. The VERDICT is unaffected (it comes from the real
+  push); only the diagnostic label is incomplete, and github.com — where the fleet runs — is exact.
 * The probe ref is ``gh-write-preflight-<branch-slug>-<utc-stamp>-<pid>-<6 hex>`` — derived from the LANE's own
   branch, so a leftover is attributable to the lane that made it (and a reaper can find it).
 * A throwaway BRANCH is CI-safe **in this repo**: every ``push:`` workflow is filtered to
@@ -272,8 +280,8 @@ def _is_git_worktree(cwd: Path) -> bool:
 
 def _git_available() -> bool:
     """⛔ A MISSING `git` IS NOT AN UNWRITABLE CREDENTIAL. Without this, `_is_git_worktree`'s OSError
-    reads as "not a checkout", which the caller reports as a measured refusal (exit 1) and sends an
-    operator to the token's permissions page for a broken toolchain."""
+    reads as "not a checkout", which the caller reports as a repo-state problem and sends an operator
+    to the token's permissions page for a broken toolchain."""
     try:
         return subprocess.run(
             [GIT, "--version"], capture_output=True, timeout=30, check=False
@@ -789,7 +797,8 @@ def main(argv: list[str] | None = None) -> int:
         prog="gh_write_preflight.py",
         description="Answer, in one call, whether the credential this checkout resolves can write "
         "repository contents — by pushing a throwaway ref, confirming it, and deleting it.",
-        epilog="Exit 0 = can write. Exit 1 = measured refusal. Exit 2 = cannot verify (still not a pass).",
+        epilog="Exit 0 = can write. Exit 1 = refusal — read the reason before you act. "
+        "Exit 2 = cannot verify (still not a pass).",
     )
     parser.add_argument(
         "--workdir",
@@ -832,7 +841,6 @@ def main(argv: list[str] | None = None) -> int:
             _fail("cannot-verify:git-missing", f"`{GIT}` is not runnable — nothing was measured"),
             json_out=args.json,
             quiet=args.quiet,
-            cannot_verify=True,
         )
     if not cwd.is_dir() or not _is_git_worktree(cwd):
         # ⛔ NO EXPLICIT `cannot_verify=` HERE (review P2). Passing True made this arm the authority on
@@ -870,7 +878,6 @@ def main(argv: list[str] | None = None) -> int:
                 ),
                 json_out=args.json,
                 quiet=args.quiet,
-                cannot_verify=True,
             )
         # ⛔ AN ASSERTION, NOT A REDIRECT. The probe can only exercise this checkout's `origin`; a
         # label naming anything else would certify a repo the tool never touched.
@@ -894,7 +901,6 @@ def main(argv: list[str] | None = None) -> int:
                 ),
                 json_out=args.json,
                 quiet=args.quiet,
-                cannot_verify=True,
             )
         repo = explicit
     else:
@@ -917,7 +923,6 @@ def main(argv: list[str] | None = None) -> int:
             ),
             json_out=args.json,
             quiet=args.quiet,
-            cannot_verify=True,
         )
     try:
         verdict = probe(cwd, repo, targets, timeout)
@@ -931,11 +936,11 @@ def main(argv: list[str] | None = None) -> int:
         )
         verdict.repo = repo
         verdict.detail += split_note
-        return _emit(verdict, json_out=args.json, quiet=args.quiet, cannot_verify=True)
+        return _emit(verdict, json_out=args.json, quiet=args.quiet)
     except (OSError, subprocess.SubprocessError) as exc:
         verdict = _fail("cannot-verify:probe-error", f"{type(exc).__name__}: {exc}", repo=repo)
         verdict.detail += split_note
-        return _emit(verdict, json_out=args.json, quiet=args.quiet, cannot_verify=True)
+        return _emit(verdict, json_out=args.json, quiet=args.quiet)
 
     # ⛔ ONLY ON A PASS. Appending the note to a failure produced "nothing was pushed [… each of those
     # targets was confirmed]" — a lane grepping `confirmed` read a pass out of an exit-2 run (measured
@@ -945,15 +950,7 @@ def main(argv: list[str] | None = None) -> int:
             verdict.detail += split_note
         elif not verdict.ok:
             verdict.detail = _split_failure_detail(verdict.detail, push_repos)
-    return _emit(
-        verdict,
-        json_out=args.json,
-        quiet=args.quiet,
-        # ⛔ `cleanup-failed` and `ls-remote-mismatch` are NOT the measured-refusal bucket, and
-        # `_emit` now derives the code from `verdict.reason` through `exit_code_for()` — the single
-        # owner of that rule — so this argument can never disagree with the reason above it.
-        cannot_verify=exit_code_for(verdict.reason) == 2,
-    )
+    return _emit(verdict, json_out=args.json, quiet=args.quiet)
 
 
 # ⛔ THE BUCKET RULE, IN ONE PLACE (review N1). The docstring's reason table states an exit code per
@@ -983,7 +980,7 @@ def exit_code_for(reason: str) -> int:
     return 1
 
 
-def _emit(verdict: Verdict, *, json_out: bool, quiet: bool, cannot_verify: bool = False) -> int:
+def _emit(verdict: Verdict, *, json_out: bool, quiet: bool) -> int:
     if verdict.ok:
         if not quiet:
             print(
@@ -995,9 +992,10 @@ def _emit(verdict: Verdict, *, json_out: bool, quiet: bool, cannot_verify: bool 
             print(json.dumps(verdict.as_dict(), sort_keys=True))
         return 0
 
-    # the ONE bucket decision, derived from the reason the caller just emitted (the `cannot_verify`
-    # argument is accepted for call-site readability and never allowed to disagree with the reason)
-    cannot_verify = cannot_verify or exit_code_for(verdict.reason) == 2
+    # the ONE bucket decision, derived from the reason the caller just emitted. There is NO override
+    # argument: the old one let a call site escalate a reason's own bucket (`no-git-checkout` was
+    # exactly that), so the helper could be correct while the binary disagreed with it.
+    cannot_verify = exit_code_for(verdict.reason) == 2
 
     # ⛔ THE FOOTER MUST MATCH THE BUCKET. It always said "fix the credential" — including for
     # `cannot-verify:git-push-form` (a `remote.origin.mirror` problem, decided before any credential is

@@ -2957,7 +2957,7 @@ TOOL_CARVEOUTS = (
     # collision-check change is rare and fail-closed is the safe default.
     "tools/collision_preflight.py",
     # #11027: the credential write-capability preflight (tools/gh_write_preflight.py)
-    # owns tests/test_gh_write_preflight.py — the 71 hermetic arms that pin the
+    # owns tests/test_gh_write_preflight.py — the 72 hermetic arms that pin the
     # safety-critical properties of the tool a lane runs BEFORE the first hour of
     # work: no credential value reaches stdout/stderr/`--json` on any route, every
     # exit-0 path measured push-exit-0 + an exact `refs/heads/<ref>` `ls-remote`

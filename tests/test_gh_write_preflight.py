@@ -25,6 +25,7 @@ Run under pytest:    python3 -m pytest tests/test_gh_write_preflight.py -q
 from __future__ import annotations
 
 import contextlib
+import inspect
 import io
 import json
 import os
@@ -1268,6 +1269,30 @@ def test_the_emitted_exit_code_survives_as_a_real_process_exit_status(tmp_path: 
         f"{res.returncode}: {combined}"
     )
 
+
+
+def test_emit_takes_no_bucket_override_so_a_call_site_cannot_contradict_the_reason() -> None:
+    """⛔ REVIEW P2-1, THE MECHANISM — the half the emitted-code pin cannot see.
+
+    `_emit` accepted `cannot_verify` and OR-ed it over the reason's own bucket. The comment above that
+    `or` claimed the argument "is accepted for call-site readability and never allowed to disagree
+    with the reason", which was false by construction: `no-git-checkout` is exactly a call site that
+    disagreed, and it is how the table, the helper and the binary came apart while every test stayed
+    green. Fixing the one call site leaves the mechanism that let it happen in place — any future arm
+    can reintroduce the divergence and only a fresh review would notice.
+
+    Pinned structurally: with no such parameter there is exactly ONE bucket owner
+    (`exit_code_for`), and `_emit`'s int — which IS the process exit status, since `main()` returns it
+    straight to `sys.exit` — cannot disagree with the reason it was given.
+
+    Mutation check: re-adding `cannot_verify: bool = False` to the signature reds this test.
+    """
+    mod = _load_tool()
+    params = inspect.signature(mod._emit).parameters
+    assert "cannot_verify" not in params, (
+        "_emit takes a bucket override again, so a call site can once more contradict the exit code "
+        f"its own reason documents: {sorted(params)}"
+    )
 
 
 def test_a_second_refusing_pushurl_cannot_pass(tmp_path: Path) -> None:
