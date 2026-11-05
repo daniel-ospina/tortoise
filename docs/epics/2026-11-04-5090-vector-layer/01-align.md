@@ -4,7 +4,7 @@ type: decision
 domain: planning
 doc_status: draft
 created: 2026-11-04
-updated: 2026-11-04
+updated: 2026-11-05
 subjects.team: epistemic-team
 aboutSubjects: Tortoise memory graph
 aboutObjects: "epic #5090, the vector layer, decision V1, embed gate, STORAGE-ARCHITECTURE.md §12"
@@ -49,8 +49,8 @@ Recorded first, because the scope is wrong if they are taken on trust. Each was 
 
 **The labels, precisely.** The served/written set is `{Event, Object, Point, Source, Subject}`
 (`ENTITY_TYPE_LABELS`). `Point` is indexed ⇒ **four** labels are unindexed ⇒ *"index them in the graph"*
-means **four further resident HNSW structures**, not three. ⚠️ `STORAGE-ARCHITECTURE.md` §12.1c still says
-*"a SECOND … and a THIRD"*; that count is wrong and is corrected in **§7.2**, not here.
+means **four further resident HNSW structures**, not three. ⚠️ `STORAGE-ARCHITECTURE.md` §12.1c **said**
+*"a SECOND … and a THIRD"*; that count was wrong and **this PR corrects it — see §8.3**.
 
 ### 1.2 Alternatives considered
 
@@ -271,7 +271,7 @@ so the next lane does not repeat it.
 | **The two-store cost model exists** | — | **§17.4** | Closed form: `multiplier = 1/(f + (1+ρ)/778.7)` → **0.99× at `f`=1.00, 4.83× at `f`=0.20**. §17.4.5: the split is **`f`-conditional** and **net-negative today**, because §2.0's *"keep the limit in falkor high"* **is `f = 1`**. |
 | **`f` cannot be measured today** | 2026-10-17 | §17.4.6 (M8) | It needs a window over a tenant's real query mix; **hosted capture is off by owner ruling 2026-10-14** and no self-hosted tenant serves a workload. The instrument exists (`tortoise/read_ledger.py`); the reading does not. |
 | **Per-graph offload is Enterprise-only** | 2026-09-24 + confirmed 2026-11-05 | #4333 (D11 record) | `falkordbe.idle-threshold-ms` (**default `0` = disabled**), `evict-interval-ms`, `/data/offload`, `GRAPH.LOAD` are documented **only** under Enterprise. ⚠️ **New in this lane:** Enterprise is offered as **BYOA inside our own AWS account**, so §16.1's *"(self-managed)"* is narrower than the vendor's offering — but **#4333 owns pricing it**, and it is **not this epic's**. |
-| **Eviction cannot be a server policy** | 2026-11 | **#11004** (open) | Measured: `maxmemory-policy allkeys-lru` at a ceiling below resident size evicted **a whole graph — 20,000 → 0, silently**; `GRAPH.LIST` still named it. Every key had `ttl=-1`. That is why `noeviction` is pinned and why the sweep **refuses** until the record can serve. |
+| **Eviction cannot be a server policy** | 2026-11 | **#10976** (OPEN — `#11004` is its merged census PR) | Measured: `maxmemory-policy allkeys-lru` at a ceiling below resident size evicted **a whole graph — 20,000 → 0, silently**; `GRAPH.LIST` still named it. Every key had `ttl=-1`. That is why `noeviction` is pinned and why the sweep **refuses** until the record can serve. |
 | **Who owns the storage architecture** | 2026-09-23 (re-scope) | **#4333** | Re-scoped by the owner from *investigate* to **own the storage architecture**. The changelog records as a **correction of a wrong owner**: *"§5090 is a **consumer** of the vector layer, not the enumeration"* — §17.5's placement enumeration is **#7955**'s, §17.1's routing half is **#7951**'s. |
 
 ### 8.2 What this lane withdraws

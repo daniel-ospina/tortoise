@@ -167,7 +167,7 @@ requests; its census half is not.
 | **a "state the rule for what earns an embedding" child** | Duplicates **`#5008`** (CLOSED — the mechanism exists). Filing it is the failure the 2026-10-31 lane already refused. |
 | **a DoD-scoring child** | **`#10465`** did it (CLOSED); the instrument is re-runnable. |
 | **an economics child** | **`#4333`** (OPEN, native child) owns it. |
-| **eviction / egress** | **`#10976`** + **`#11004`** (OPEN) — and its own rule: *"a pass that cannot answer that must refuse, never sweep."* |
+| **eviction / egress** | **`#10976`** (OPEN) — its census PR `#11004` is merged — and its own rule: *"a pass that cannot answer that must refuse, never sweep."* |
 | **ingress** | **`#10000`** (`P0-blocker`). |
 | **record authority** | **`#7879`** / **`#9548`**. |
 | **`_upsert_document` retired-text embed** | **`#8419`** (OPEN) — root is the **D10 fold** (`#5088`). |

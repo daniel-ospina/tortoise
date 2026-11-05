@@ -1944,7 +1944,7 @@ four-versus-one conclusion with no reference to the passage's previous wording.
 
 **§14.3 — V1's numbers.** The V1 row gave the vector question's weight as *"≈50 MB of stored vectors + a
 45 MB index total, on 141 MB"*. Two independent problems: the 141/45 MB pair is the dated 2026-09-24
-reading of a graph that has since grown 2.7×, and the ≈50 MB payload is that same dated measurement's
+reading of a graph whose NODE COUNT has since grown 2.7× (24,978 capped → 68,526 resident) while its bytes went 141 MB → 195 MB, and the ≈50 MB payload is that same dated measurement's
 additive estimate over three labels — it was never a current payload reading either. The row now carries
 the **2026-11-04 graph reading** from `live-v4` (`#10976`): **93 MB of index total on a 195 MB graph**,
 with the 93 MB named as the TOTAL index size of which only part is HNSW; and it names the payload axis as
@@ -2008,7 +2008,7 @@ properties ≈ 50 MB"* sentence (`:945`); **§12.1a**'s per-node ratio (`:1030`)
 against 141 MB"* (`:1129`); **§12.8**'s attribute-byte sentence (`:1395`); and **§13**'s V3 bullet
 (`:1476`), which still stated the 12,657 count and *"13.5 % of the graph"* with no date at all — now
 dated to the 141 MB graph it was measured on. Two cross-references that would otherwise have gone stale
-in the other direction are fixed the same way: §1's *"§2 and §12 state 141 MB and 45 MB"* (now
+in the other direction are fixed the same way: the §0 ruling block's *"§2 and §12 state 141 MB and 45 MB"* (now
 `§12.1's 2026-09-24 table`) and the cost model's *"on a ~141 MB graph"* (kept as that date's reading,
 with the 2026-11-04 reading named beside it).
 

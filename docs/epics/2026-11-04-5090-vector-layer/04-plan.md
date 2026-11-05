@@ -50,7 +50,7 @@ E2E, because those are the two places where "the metric went green and the promi
 | **J2** | **Agent searches a label with no index.** | four of five served labels have no vector index, and two of them (`Object` 7,859 + `Event` 4,798) hold stored vectors that a query full-scans today (`Source`/`Subject` hold none — §12.1b) | the answer arrives for a label that carries vectors, **and the trace names `scan_fallback`** so a caller can see it degraded |
 | **J3** | **Operator inspects the store's contract.** | setup has run | sees the serves/indexes pair for **every** served label — not only the broken ones |
 | **J4** | **Operator audits a write.** | a row was written without a vector | every embedding writer is either gated or carries a **runtime-resolvable** exemption |
-| **J5** | **Operator weighs removing dead vectors.** | the four unindexed labels hold stored vectors | a dry-run census names the population, its bytes, and **exactly which query results would change** — and the surface call is requested, not taken |
+| **J5** | **Operator weighs removing dead vectors.** | two of the four unindexed labels (`Object`, `Event`) hold stored vectors — 12,657 between them; `Source`/`Subject` hold none (§12.1b) | a dry-run census names the population, its bytes, and **exactly which query results would change** — and the surface call is requested, not taken |
 
 **Edge cases (empty / error / degraded), all present in E2E:** empty store; a label with zero vectors; a
 store with **no** gap (the case that is silent today — E2E-4); an unreadable index catalogue; a writer the

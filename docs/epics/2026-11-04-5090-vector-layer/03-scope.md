@@ -75,7 +75,7 @@ self-hosting (**owner: not now**), and compression (§15: no engine to apply it 
 | Embedding compression / quantization | **§15's do-not-re-invent list** | *"no engine to apply it to"* — FalkorDB's stored form is `vecf32`. |
 | Filtered-ANN recall measurement | **V1's evidence, when V1 is taken** | It is evidence *for a move*. With no move planned, measuring it now is work with no consumer. Recorded in `02-research.md` so it is not lost. |
 | Creating indexes for the four unindexed labels | **V1** | It is V1's content, and it commits four further resident HNSW structures. The brief forbids it without a stated non-reversal; there is none. |
-| Nothing evicts the cache | **`#10976`** · **`#11004`** (open) | **Egress.** |
+| Nothing evicts the cache | **`#10976`** (OPEN — `#11004` is its merged census PR) | **Egress.** |
 | Raw turns + narrative in the graph | **`#10000`** (`P0-blocker`) | **Ingress**; larger than this epic. |
 | The record's authority / arming | **`#7879`** · **`#9548`** | **Authority.** |
 | Node volume + per-node cost | **`#4333`** | Economics. |
