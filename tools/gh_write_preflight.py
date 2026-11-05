@@ -124,7 +124,12 @@ REASONS = {
     "internal-error": "the probe itself failed unexpectedly (no verdict is available)",
 }
 
-# ── redaction ──────────────────────────────────────────────────────────────────────────────────
+# ── redaction ──────────────────────────────
+
+# Userinfo that carries NO secret. `git@`/`ssh@`/`hg@` are ordinary SSH accounts; routing them
+# through the credential-alias path would rewrite and break the most common remote there is.
+_NON_SECRET_USERINFO = frozenset({"git", "ssh", "hg", "svn", "deploy"})
+# ──────────────────────────────────────────────────────────────────────────────────────────────
 # Applied at INGESTION (see `step()`), so every later render is safe by construction. Deliberately
 # broad: a false redaction costs one diagnostic, a leak costs a credential.
 _REDACT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
@@ -360,7 +365,20 @@ def _url_has_credential(url: str) -> bool:
     # asymmetry: a false positive only routes the target through the `insteadOf` env rewrite, which
     # git resolves to the same URL, while a false negative puts a secret on world-readable argv.
     userinfo = url.split("@", 1)[0]
-    return "@" in url and "/" not in userinfo and ":" in userinfo
+    if "@" in url and "/" not in userinfo and ":" in userinfo:
+        return True
+    # ⛔ A LONE userinfo is a credential too: `https://mytoken123@host/p.git` is a form GitHub
+    # documents, carries no `ghp_`/`github_pat_` prefix, and has no password field — so every check
+    # above misses it while `redact()` hides it in the display, and the raw token lands on argv
+    # (0444) on a shared cell. Measured false negative: userinfo `mytoken123` -> False.
+    # Only the KNOWN non-secret account names are exempt: `git@`/`ssh@`/`hg@` carry no secret, and
+    # treating them as credentials would route every ordinary SSH remote through the alias path (a
+    # false block on the most common configuration there is).
+    if parts.scheme and parts.netloc and "@" in parts.netloc:
+        candidate = parts.netloc.rsplit("@", 1)[0].split(":", 1)[0]
+        if candidate and candidate.lower() not in _NON_SECRET_USERINFO:
+            return True
+    return False
 
 
 class Runner:
@@ -629,35 +647,27 @@ def _check_writable(
     # `--porcelain` is REQUIRED: a push that is "Everything up-to-date" exits 0 having written
     # NOTHING, so an exit code alone does not prove a write happened. The ref flag must be `*`
     # (new) or `+` (updated).
-    push_ok = step(
-        "push",
-        runner.run(
-            [
-                "git", "push", "--porcelain", "--no-verify", remote,
-                f"HEAD:refs/heads/{verdict.probe_ref}",
-            ],
-            cwd=root,
-        ),
+    push_proc = runner.run(
+        [
+            "git", "push", "--porcelain", "--no-verify", remote,
+            f"HEAD:refs/heads/{verdict.probe_ref}",
+        ],
+        cwd=root,
     )
+    push_ok = step("push", push_proc)
+    # ⛔ Parse the write flag from the RAW stdout — NEVER from `steps[-1]["detail"]`, which `step()`
+    # has already truncated to its last 800 chars and redacted. A remote that prints >800 chars of
+    # advisory output while ACCEPTING the push pushes the porcelain line out of that window, turning
+    # a real write into `push-refused` (a false block: the lane parks deliverable work). MEASURED
+    # against real git: a bare remote whose `pre-receive` prints 40 advisory lines and exits 0.
     wrote = False
-    if push_ok:
-        for line in verdict.steps[-1]["detail"].splitlines():
-            parts = line.split("\t")
-            if len(parts) >= 2 and parts[0].strip() in ("*", "+"):
-                wrote = True
-                break
+    for line in push_proc.out.splitlines():
+        parts = line.split("\t")
+        if len(parts) >= 2 and parts[0].strip() in ("*", "+"):
+            wrote = True
+            break
 
-    if push_ok and not wrote:
-        # No line claimed a write -> "up to date": nothing was created, so nothing is proven.
-        verdict.reason = "push-refused"
-        verdict.detail = (
-            "push exited 0 but reported NO ref update (Everything up-to-date) — nothing was "
-            "written, so write capability is not proven"
-        )
-        verdict.cleaned_up = True
-        return verdict
-
-    if push_ok:
+    if push_ok and wrote:
         # (7) Confirm on the REMOTE(S) WE PUSHED TO, not from push's own word. stdout only.
         state = _ref_state_multi(
             runner, root, read_targets, verdict.probe_ref, env_extra=read_env
@@ -669,6 +679,8 @@ def _check_writable(
         )
         step("ls-remote-verify", vp)
         seen = vp.out.split()[0] if vp.out.strip() else ""
+        # ⛔ The CONTENT check is the difference between "a ref exists" and "OUR write landed":
+        # a pre-existing ref at another sha would otherwise pass as a proven write.
         if state == "present" and seen == head:
             verdict.writable = True
         else:
@@ -677,6 +689,17 @@ def _check_writable(
                 f"push reported success but ls-remote returned {seen or '<nothing>'} "
                 f"for refs/heads/{verdict.probe_ref} (expected {head})"
             )
+    elif push_ok:
+        # No line claimed a write -> "up to date": nothing was created, so nothing is proven.
+        # ⛔ Do NOT `return` here and do NOT claim cleanup: a pre-existing probe ref (or a remote
+        # that accepted the update but reported it differently) still has to be DELETED and the
+        # deletion CONFIRMED below. Returning early here reported `cleaned_up=True` with no read at
+        # all — abandoning the litter it was claiming not to have left.
+        verdict.reason = "push-refused"
+        verdict.detail = (
+            "push exited 0 but reported NO ref update (Everything up-to-date) — nothing was "
+            "written, so write capability is not proven"
+        )
     else:
         # The defect this tool exists to catch: a read-only credential fails HERE. Do NOT conclude
         # the ref is absent — a transport error can arrive AFTER the remote applied the update, so

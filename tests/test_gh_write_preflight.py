@@ -80,7 +80,7 @@ def _git(*argv: str, cwd: Path | None = None) -> subprocess.CompletedProcess:
     )
 
 
-def _make_pair(tmp_path: Path, *, read_only: bool = False) -> tuple[Path, Path]:
+def _make_pair(tmp_path: Path, *, read_only: bool = False, noisy: bool = False) -> tuple[Path, Path]:
     """Create <tmp>/work (a clone with one commit) and <tmp>/remote.git (bare origin)."""
     tmp_path.mkdir(parents=True, exist_ok=True)
     remote = tmp_path / "remote.git"
@@ -100,6 +100,20 @@ def _make_pair(tmp_path: Path, *, read_only: bool = False) -> tuple[Path, Path]:
             'echo "remote: Permission to daniel-ospina/tortoise.git denied to lane." >&2\n'
             'echo "remote: The requested token lacks contents: write." >&2\n'
             "exit 1\n"
+        )
+        hook.chmod(0o755)
+
+    if noisy:
+        # A remote that ACCEPTS the push but prints a lot of advisory output first — the shape that
+        # pushed the porcelain ref line out of the last-800-char window `step()` keeps.
+        hook = remote / "hooks" / "pre-receive"
+        hook.write_text(
+            "#!/bin/sh\n"
+            + "".join(
+                f'echo "remote: advisory line {i} ' + "x" * 40 + '" >&2\n'
+                for i in range(40)
+            )
+            + "exit 0\n"
         )
         hook.chmod(0o755)
 
@@ -717,25 +731,44 @@ def test_argv_never_carries_the_display_value_or_a_credential(tmp_path: Path):
 def test_credential_bearing_pushurl_never_reaches_argv(tmp_path: Path):
     """A push url embedding a token must reach git via an env `insteadOf`, never as an argument.
 
-    Measured after the cycle-6 fix: the raw token appeared in the process table for every read.
+    argv is world-readable (/proc/<pid>/cmdline is 0444) and lanes share a cell. Measured after
+    the cycle-6 fix: the raw token appeared in the process table for every read.
+
+    ⛔ The stub must let the run REACH the push and the delete — an earlier version returned 128 on
+    the first read, so no push/delete argv was ever inspected and a raw secret on those argv slots
+    escaped (verified by mutation).
     """
     work, _fetch = _make_pair(tmp_path)
     push_remote = tmp_path / "push.git"
     _git("init", "--bare", "-q", str(push_remote), cwd=tmp_path)
     secret_url = "https://x-access-token:ghp_SUPERSECRETTOKEN123@example.invalid/push.git"
     _git("remote", "set-url", "--push", "origin", secret_url, cwd=work)
+    head = _git("rev-parse", "HEAD", cwd=work).stdout.strip()
 
     seen = []
+    deleted = []
 
     class Recording(Runner):
         def run(self, argv, cwd=None, timeout=120, env_extra=None):
             seen.append((list(argv), dict(env_extra or {})))
+            if argv[1] == "ls-remote" and "refs/heads/" in " ".join(argv):
+                if deleted:
+                    return Proc(0, out="")
+                return Proc(0, out=f"{head}\trefs/heads/gh-write-preflight/x\n")
             if argv[1] == "ls-remote":
-                return Proc(128, err="stub: unreachable")
+                return Proc(0, out="")
+            if argv[1] == "push" and "--delete" in argv:
+                deleted.append(argv[-1])
+                return Proc(0, out="")
+            if argv[1] == "push":
+                return Proc(0, out="*\tHEAD:refs/heads/gh-write-preflight/x\t[new branch]\n")
             return super().run(argv, cwd=cwd, timeout=timeout, env_extra=env_extra)
 
-    check_writable(work, runner=Recording())
+    verdict = check_writable(work, runner=Recording())
 
+    assert [a[1] for a, _e in seen].count("push") >= 2, (
+        f"the run must reach push AND delete; saw {[a[1] for a, _e in seen]}"
+    )
     for call, _env in seen:
         assert "ghp_SUPERSECRETTOKEN123" not in " ".join(call), (
             f"a credential reached the process argv: {call}"
@@ -748,6 +781,165 @@ def test_credential_bearing_pushurl_never_reaches_argv(tmp_path: Path):
         for k, v in env.items()
         if k.startswith("GIT_CONFIG_")
     ), f"the insteadOf rewrite never carried the push url; envs: {[e for _c, e in seen]}"
+    assert verdict.writable is True, verdict
+
+
+def test_lone_userinfo_is_treated_as_a_credential(tmp_path: Path):
+    """`https://mytoken123@host/p.git` is a token form GitHub documents: no password, no prefix.
+
+    It must not reach argv. Measured false negative before the fix.
+    """
+    work, _fetch = _make_pair(tmp_path)
+    _git("remote", "set-url", "--push", "origin", "https://mytoken123@example.invalid/p.git", cwd=work)
+
+    seen = []
+
+    class Recording(Runner):
+        def run(self, argv, cwd=None, timeout=120, env_extra=None):
+            seen.append((list(argv), dict(env_extra or {})))
+            if argv[1] == "ls-remote":
+                return Proc(128, err="stub: unreachable")
+            return super().run(argv, cwd=cwd, timeout=timeout, env_extra=env_extra)
+
+    check_writable(work, runner=Recording())
+    for call, _env in seen:
+        assert "mytoken123" not in " ".join(call), f"a lone-userinfo token reached argv: {call}"
+    assert any(
+        "mytoken123" in f"{k}={v}"
+        for _c, env in seen
+        for k, v in env.items()
+        if k.startswith("GIT_CONFIG_")
+    ), "a lone userinfo must route through the alias path, not be passed as data"
+
+
+def test_ordinary_ssh_userinfo_is_not_treated_as_a_credential(tmp_path: Path):
+    """`ssh://git@host` carries NO secret — routing it through the alias path would be a false block."""
+    from tools.gh_write_preflight import _url_has_credential
+
+    for url in (
+        "ssh://git@example.invalid/x.git",
+        "https://git@example.invalid/x.git",
+        "git@example.invalid:o/r.git",
+        "https://example.invalid/x.git",
+    ):
+        assert _url_has_credential(url) is False, url
+    for url in (
+        "https://mytoken123@example.invalid/p.git",
+        "https://x-access-token:ghp_abc@example.invalid/p.git",
+        "https://user:pw@example.invalid/x.git",
+        # scp-LIKE with a password: `urlsplit` reads "user" as the SCHEME, so a branch gated on
+        # `not parts.scheme` was dead and this form went to argv. GitHub's scp syntax carries no
+        # password, but a credential written this way must still not be treated as data.
+        "user:pass@example.invalid:o/r.git",
+    ):
+        assert _url_has_credential(url) is True, url
+
+
+def test_noisy_accepting_remote_still_proves_the_write(tmp_path: Path):
+    """A remote that prints >800 chars of advisory output while ACCEPTING the push.
+
+    `steps[].detail` is truncated to the last 800 chars, so parsing the write flag from it loses
+    the porcelain line on exactly this shape: a real write becomes `push-refused` (false block) and
+    cleanup is skipped while being reported as done. Measured against real git.
+    """
+    work, _remote = _make_pair(tmp_path)
+    head = _git("rev-parse", "HEAD", cwd=work).stdout.strip()
+    noise = chr(10).join(f"remote: advisory line {i} " + "x" * 40 for i in range(40))
+
+    deleted = []
+
+    class Noisy(Runner):
+        def run(self, argv, cwd=None, timeout=120, env_extra=None):
+            if argv[1] == "ls-remote" and "refs/heads/" in " ".join(argv):
+                if deleted:
+                    return Proc(0, out="")
+                return Proc(0, out=f"{head}\trefs/heads/gh-write-preflight/x\n")
+            if argv[1] == "ls-remote":
+                return Proc(0, out="")
+            if argv[1] == "push" and "--delete" in argv:
+                deleted.append(argv[-1])
+                return Proc(0, out="")
+            if argv[1] == "push" and "--delete" not in argv:
+                # The REAL shape: `--porcelain` writes the ref line to STDOUT while the remote's
+                # advisory output arrives on STDERR. `Proc.detail` is `out + err`, so the porcelain
+                # line ends up FIRST — and a 40-line advisory tail pushes it out of the last-800
+                # window `step()` stores. That is exactly how a real write became `push-refused`.
+                return Proc(
+                    0,
+                    out="*\tHEAD:refs/heads/gh-write-preflight/x\t[new branch]\n",
+                    err=noise,
+                )
+            if argv[1] == "push":
+                return Proc(0, out="")
+            return super().run(argv, cwd=cwd, timeout=timeout, env_extra=env_extra)
+
+    verdict = check_writable(work, runner=Noisy())
+
+    assert len(verdict.steps[1]["detail"]) <= 800
+    assert verdict.writable is True, (
+        f"a noisy ACCEPTING remote must still prove the write; got reason={verdict.reason!r}"
+    )
+    assert verdict.cleaned_up is True
+
+
+def test_up_to_date_push_still_deletes_and_confirms_cleanup(tmp_path: Path):
+    """`push` exiting 0 with no ref update must NOT short-circuit cleanup.
+
+    A pre-existing probe ref (or a remote that reports differently) still has to be deleted and the
+    deletion CONFIRMED. Reporting `cleaned_up=True` without a read abandons litter it claims not to
+    have left.
+    """
+    work, _remote = _make_pair(tmp_path)
+    deleted = []
+
+    class UpToDate(Runner):
+        def run(self, argv, cwd=None, timeout=120, env_extra=None):
+            if argv[1] == "ls-remote" and "refs/heads/" in " ".join(argv):
+                # Present until the delete runs, absent after — so cleanup is confirmable.
+                return Proc(0, out="" if deleted else "0" * 40 + "\trefs/heads/gh-write-preflight/x\n")
+            if argv[1] == "ls-remote":
+                return Proc(0, out="")
+            if argv[1] == "push" and "--delete" in argv:
+                deleted.append(argv[-1])
+                return Proc(0, out="")
+            if argv[1] == "push":
+                return Proc(0, out="=")  # porcelain: up to date, NO write
+            return super().run(argv, cwd=cwd, timeout=timeout, env_extra=env_extra)
+
+    verdict = check_writable(work, runner=UpToDate())
+
+    assert verdict.writable is False
+    assert verdict.reason == "push-refused"
+    assert deleted, "cleanup was skipped for an up-to-date push"
+    assert verdict.cleaned_up is True, f"cleanup must be CONFIRMED, saw {verdict.cleaned_up}"
+    assert verdict.leftover_ref is False
+
+
+def test_present_at_a_different_sha_is_a_verify_mismatch(tmp_path: Path):
+    """The content proof: a ref that exists at ANOTHER sha is not OUR write.
+
+    Mutating `state == "present" and seen == head` to `state == "present"` escaped a 57-test suite,
+    so the whole difference between "a ref exists" and "our write landed" was unpinned.
+    """
+    work, _remote = _make_pair(tmp_path)
+
+    class WrongSha(Runner):
+        def run(self, argv, cwd=None, timeout=120, env_extra=None):
+            other = "a" * 40
+            if argv[1] == "ls-remote" and "refs/heads/" in " ".join(argv):
+                return Proc(0, out=f"{other}\trefs/heads/gh-write-preflight/x\n")
+            if argv[1] == "ls-remote":
+                return Proc(0, out="")
+            if argv[1] == "push" and "--delete" not in argv:
+                return Proc(0, out="*\tHEAD:refs/heads/gh-write-preflight/x\t[new branch]\n")
+            if argv[1] == "push":
+                return Proc(0, out="")
+            return super().run(argv, cwd=cwd, timeout=timeout, env_extra=env_extra)
+
+    verdict = check_writable(work, runner=WrongSha())
+
+    assert verdict.writable is False, "a ref at another sha must not prove OUR write"
+    assert verdict.reason == "verify-mismatch"
 
 
 def test_every_credential_pushurl_gets_its_own_insteadof_rewrite(tmp_path: Path):
@@ -1300,3 +1492,24 @@ if __name__ == "__main__":
     # it). Pinned by test_documented_standalone_command_actually_runs.
     os.environ.setdefault("TORTOISE_TEST_CARVE_OUT", "1")
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+def test_noisy_ACCEPTING_remote_proves_the_write_against_real_git(tmp_path: Path):
+    """REAL git: a bare remote whose `pre-receive` prints 40 advisory lines and exits 0.
+
+    This is the measured reproduction of the P1: the porcelain ref line sits FIRST in
+    `Proc.detail` (= out + err) and the advisory tail pushes it past the 800-char cut, so parsing
+    the write flag from `steps[-1]["detail"]` turned a real write into `push-refused` — a false
+    block that also skipped cleanup while reporting it. No stub: a real remote, a real hook.
+    """
+    work, remote = _make_pair(tmp_path, noisy=True)
+
+    verdict = check_writable(work)
+
+    assert verdict.writable is True, (
+        f"a noisy ACCEPTING remote must prove the write; got reason={verdict.reason!r} "
+        f"detail={verdict.detail!r}"
+    )
+    assert verdict.cleaned_up is True, "the probe ref must be deleted and the deletion confirmed"
+    assert verdict.leftover_ref is False
+    assert "gh-write-preflight" not in _remote_refs(remote), "the probe ref was left on the remote"
