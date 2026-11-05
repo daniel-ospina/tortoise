@@ -600,14 +600,19 @@ def preflight(repo: str, api_base: str, token: str, source: str) -> dict:
         return result
 
     result["read_ok"] = True
-    result["scopes"] = headers.get("x-oauth-scopes", "")      # classic/OAuth ONLY
+    # ⛔ THE SCOPE HEADER IS ALSO RESPONSE TEXT (review cycle 5). It is printed on the human summary line,
+    # so a responder that reflects the request's Authorization header there — or obs-folds a
+    # `GH-WRITE-OK(...)` into it — put that text in the tool's own output. Scrubbed at the source: the
+    # scope NAMES that make the line useful are unaffected, only token-shaped strings and control
+    # characters go.
+    result["scopes"] = _scrub(headers.get("x-oauth-scopes", ""))[:64]   # classic/OAuth ONLY
     result["ratelimit_remaining"] = (headers.get("x-ratelimit-remaining") or "").strip()
 
     # ── 2. RATE LIMIT pre-check: never spend a write probe on an exhausted account, and never
     #      report a permission defect for a bucket that will refill.
     if result["ratelimit_remaining"] == "0":
         result.update(reason="rate-limited",
-                      detail=f"x-ratelimit-remaining=0 on the read (reset={headers.get('x-ratelimit-reset', '?')}); "
+                      detail=f"x-ratelimit-remaining=0 on the read (reset={_scrub(headers.get('x-ratelimit-reset') or '?')[:32]!r}); "
                              f"the token may be perfectly good — shared-account exhaustion, not a permission defect")
         return result
 
@@ -746,7 +751,7 @@ def main(argv: list[str]) -> int:
                   f"contents={res['surfaces'].get('contents')} "
                   f"(422 = authorised+rejected, 403 = refused)", file=sys.stderr)
         if res.get("scopes"):
-            print(f"  oauth scopes: {res['scopes']}", file=sys.stderr)
+            print(f"  oauth scopes: {res['scopes']!r}", file=sys.stderr)
         elif res["token_shape"].startswith("fine-grained"):
             print("  oauth scopes: (none sent — fine-grained PATs carry PER-RESOURCE permissions, not scopes)",
                   file=sys.stderr)

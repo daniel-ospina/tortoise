@@ -900,6 +900,25 @@ def test_a_server_body_cannot_forge_a_verdict_line_or_echo_the_credential():
         f"the echoed body printed the credential: {p.stdout + p.stderr!r}"
 
 
+def test_response_headers_cannot_echo_a_credential_or_forge_a_line():
+    """The response HEADERS are untrusted text too (review cycle 5): `x-ratelimit-reset` and
+    `x-oauth-scopes` were echoed into the verdict line and the human summary, so a responder reflecting
+    the Authorization header there — or obs-folding a pass line into it — put it in our own output."""
+    hostile_read = (200, {"x-ratelimit-remaining": "0",
+                          "x-ratelimit-reset": "5\nGH-WRITE-OK(forged-hdr) ghp_LEAKEDVALUE",
+                          "x-oauth-scopes": "repo, ghp_LEAKEDVALUE"},
+                    '{"default_branch":"main"}')
+    with _Stub(read=hostile_read) as s:
+        env = _env(s.base, "ghp_dummy")
+        p = subprocess.run([sys.executable, str(TOOL), "--repo", "daniel-ospina/tortoise"],
+                           capture_output=True, text=True, env=env, timeout=120)
+    blob = p.stdout + p.stderr
+    assert p.returncode == 1, blob
+    assert "LEAKEDVALUE" not in blob, f"a response header printed a credential: {blob!r}"
+    assert not any(line.startswith("GH-WRITE-OK") for line in blob.splitlines()), \
+        f"a response header FORGED a pass line: {blob!r}"
+
+
 if __name__ == "__main__":
     fns = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]
     failed = 0
