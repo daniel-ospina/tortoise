@@ -321,4 +321,4 @@ precedent above is a surface registration and `tests/test_record_searchkeys_1062
 ⚠️ **`#11075`'s body still orders the opposite** ("must be registered in `config/ci-surfaces.yml`'s
 `carve_out:` list or it never rides the URI-unset leg (#10648 needed the same registration)") — on a
 precedent this section measures as false, since #10648's file rides as `api` + `core`. **This section is
-authoritative**; a lane must not act on the issue body alone, and the correction belongs posted on `#11075`.
+authoritative**; a lane must not act on the issue body alone, and the correction was posted on `#11075` (comment `6668307013`).
