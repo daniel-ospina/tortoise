@@ -1,0 +1,453 @@
+"""Hermetic, RED-FIRST tests for tools/gh_write_preflight.py.
+
+No network, no Docker, no FalkorDB, no GitHub. Each test builds a real temporary git repo with a
+real bare remote, so the probe exercises the genuine `git push` path — the same path a lane's
+deliverable uses. The "read-only credential" case is simulated the way a read-only credential
+actually manifests to git: the remote REFUSES the write. A `pre-receive` hook that prints
+``remote: Permission … denied`` and exits non-zero produces the same observable shape (non-zero
+exit, no ref created) as GitHub returning 403 for a token without ``contents: write``. It is not a
+byte-for-byte reproduction of GitHub's auth handshake, and this docstring does not claim it is.
+
+WHY RED-FIRST MATTERS HERE. This tool's entire value is that it says NO when the credential cannot
+write. A suite that only proves it says YES would pass on a tool that always returns 0 — precisely
+the fail-open it replaces (`gh api … .permissions.push` reads `true` for a read-only fine-grained
+PAT because that field describes the USER's repo role, not the token's grant). So the refusal cases
+are the load-bearing ones and are asserted first.
+
+Run standalone:      python3 tests/test_gh_write_preflight.py
+Run under pytest:    python3 -m pytest tests/test_gh_write_preflight.py -q
+"""
+
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from tools.gh_write_preflight import (  # noqa: E402
+    EXIT_UNAVAILABLE,
+    EXIT_WRITABLE,
+    Runner,
+    check_writable,
+    main,
+    redact,
+)
+
+TOOL = Path(__file__).resolve().parent.parent / "tools" / "gh_write_preflight.py"
+_GIT_ENV = {
+    "PATH": "/usr/bin:/bin:/usr/local/bin",
+    "GIT_AUTHOR_NAME": "t",
+    "GIT_AUTHOR_EMAIL": "t@example.com",
+    "GIT_COMMITTER_NAME": "t",
+    "GIT_COMMITTER_EMAIL": "t@example.com",
+    "HOME": "/tmp",
+}
+
+
+# ── fixtures ────────────────────────────────────────────────────────────────────────────────────
+def _git(*argv: str, cwd: Path | None = None) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["git", *argv],
+        cwd=str(cwd) if cwd else None,
+        capture_output=True,
+        text=True,
+        check=True,
+        env=_GIT_ENV,
+    )
+
+
+def _make_pair(tmp_path: Path, *, read_only: bool = False) -> tuple[Path, Path]:
+    """Create <tmp>/work (a clone with one commit) and <tmp>/remote.git (bare origin)."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    remote = tmp_path / "remote.git"
+    work = tmp_path / "work"
+    _git("init", "--bare", "-q", str(remote), cwd=tmp_path)
+    _git("init", "-q", str(work), cwd=tmp_path)
+    (work / "f.txt").write_text("hello\n")
+    _git("add", "f.txt", cwd=work)
+    _git("commit", "-q", "-m", "init", cwd=work)
+    _git("remote", "add", "origin", str(remote), cwd=work)
+    _git("push", "-q", "origin", "HEAD:refs/heads/main", cwd=work)
+
+    if read_only:
+        hook = remote / "hooks" / "pre-receive"
+        hook.write_text(
+            "#!/bin/sh\n"
+            'echo "remote: Permission to daniel-ospina/tortoise.git denied to lane." >&2\n'
+            'echo "remote: The requested token lacks contents: write." >&2\n'
+            "exit 1\n"
+        )
+        hook.chmod(0o755)
+
+    return work, remote
+
+
+def _remote_refs(remote: Path) -> str:
+    return _git("ls-remote", "--heads", str(remote), cwd=remote.parent).stdout
+
+
+# ══ (1) RED: a credential that cannot write MUST be refused ════════════════════════════════════
+def test_read_only_credential_is_refused(tmp_path: Path):
+    """THE load-bearing case: a rejecting remote must produce a refusal, not a pass."""
+    work, _remote = _make_pair(tmp_path, read_only=True)
+
+    verdict = check_writable(work)
+
+    assert verdict.writable is False, "a read-only credential MUST NOT report writable"
+    assert verdict.reason == "push-refused"
+    assert verdict.cleaned_up is True, "nothing was created, so nothing needed deleting"
+
+
+def test_read_only_exits_nonzero_with_the_stable_marker(tmp_path: Path, capsys):
+    """The CLI contract a lane's preamble keys on: exit 1 + GH-WRITE-UNAVAILABLE(<reason>)."""
+    work, _remote = _make_pair(tmp_path, read_only=True)
+
+    rc = main(["--repo", str(work)])
+
+    cap = capsys.readouterr()          # captured ONCE — readouterr() clears on read
+    assert rc == EXIT_UNAVAILABLE == 1
+    assert "GH-WRITE-UNAVAILABLE(push-refused)" in cap.err
+    assert "GH-WRITE-OK" not in cap.out, "a refusal must never print the OK marker"
+
+
+def test_read_only_leaves_no_ref_on_the_remote(tmp_path: Path):
+    """A refused push must not leave a probe ref behind — and the push must really be attempted."""
+    work, remote = _make_pair(tmp_path, read_only=True)
+    before = _remote_refs(remote)
+
+    verdict = check_writable(work)
+
+    assert _remote_refs(remote) == before
+    assert "gh-write-preflight/" not in _remote_refs(remote)
+    # Discriminating power: a tool that pushed NOTHING would also leave no ref, so pin that the
+    # push was actually attempted and actually failed.
+    push = [s for s in verdict.steps if s["step"] == "push"]
+    assert push and push[0]["rc"] != 0, "the refusal must come from an attempted, failed push"
+
+
+# ══ (2) GREEN: a write-capable credential MUST pass, and clean up ══════════════════════════════
+def test_write_credential_passes(tmp_path: Path):
+    work, _remote = _make_pair(tmp_path)
+
+    verdict = check_writable(work)
+
+    assert verdict.writable is True
+    assert verdict.reason is None
+    # The probe must be confirmed by ls-remote, not taken from push's own exit code.
+    assert any(s["step"] == "ls-remote-verify" and s["rc"] == 0 for s in verdict.steps)
+    assert verdict.cleaned_up is True
+
+
+def test_write_exits_zero_with_the_ok_marker(tmp_path: Path, capsys):
+    work, _remote = _make_pair(tmp_path)
+
+    rc = main(["--repo", str(work)])
+
+    cap = capsys.readouterr()
+    assert rc == EXIT_WRITABLE == 0
+    assert "GH-WRITE-OK(origin)" in cap.out
+    assert "deleted" in cap.out
+
+
+def test_write_probe_ref_is_deleted_from_the_remote(tmp_path: Path):
+    """The pass must not litter the remote: after the run, no probe ref exists."""
+    work, remote = _make_pair(tmp_path)
+
+    verdict = check_writable(work)
+
+    assert verdict.writable is True
+    refs = _remote_refs(remote)
+    assert "gh-write-preflight/" not in refs, f"probe ref survived: {refs}"
+    assert "refs/heads/main" in refs, "the real branch must be untouched"
+
+
+def test_write_credential_does_not_need_a_new_commit(tmp_path: Path):
+    """The probe pushes the EXISTING HEAD, so it is safe in a dirty worktree."""
+    work, _remote = _make_pair(tmp_path)
+    head_before = _git("rev-parse", "HEAD", cwd=work).stdout.strip()
+    (work / "dirty.txt").write_text("uncommitted\n")
+
+    verdict = check_writable(work)
+
+    assert verdict.writable is True
+    assert _git("rev-parse", "HEAD", cwd=work).stdout.strip() == head_before
+    assert verdict.head_sha == head_before
+    assert "dirty.txt" in _git("status", "--porcelain", cwd=work).stdout
+
+
+# ══ (3) THE FALSE-PASS REGRESSION: GIT_DIR must not redirect the probe ═════════════════════════
+def test_git_dir_cannot_redirect_the_probe(tmp_path: Path, monkeypatch):
+    """A caller's `GIT_DIR` must not make a read-only repo look writable.
+
+    Measured defect: with `GIT_DIR` exported (git exports it inside hooks — and a pre-push gate is
+    the natural integration point), `--repo <read-only>` reported `writable=True` while
+    `repo_root` and `remote_url` named DIFFERENT repos. That is a false PASS of exactly the class
+    the tool exists to remove.
+    """
+    ro_work, _ro_remote = _make_pair(tmp_path / "ro", read_only=True)
+    good_work, _good_remote = _make_pair(tmp_path / "good")
+
+    monkeypatch.setenv("GIT_DIR", str(good_work / ".git"))
+
+    verdict = check_writable(ro_work)
+
+    assert verdict.writable is False, "GIT_DIR redirected the probe — false PASS"
+    assert verdict.reason == "push-refused"
+    # And the answer must describe the repo that was ASKED about, consistently.
+    assert str(verdict.repo_root).endswith("ro/work")
+    assert "ro/remote.git" in (verdict.remote_url or "")
+
+
+# ══ (4) distinct refusals for distinct causes (network != credential != bad path) ══════════════
+def test_missing_remote_is_named_not_guessed(tmp_path: Path):
+    work, _remote = _make_pair(tmp_path)
+
+    verdict = check_writable(work, remote="nope")
+
+    assert verdict.writable is False
+    assert verdict.reason == "no-remote"
+
+
+def test_not_a_repo_is_named(tmp_path: Path):
+    plain = tmp_path / "plain"
+    plain.mkdir()
+
+    verdict = check_writable(plain)
+
+    assert verdict.writable is False
+    assert verdict.reason == "not-a-repo"
+
+
+def test_nonexistent_path_is_not_a_repo_not_git_missing(tmp_path: Path):
+    """A bad `--repo` must not be misreported as 'git is absent'."""
+    verdict = check_writable(tmp_path / "does-not-exist")
+
+    assert verdict.writable is False
+    assert verdict.reason == "not-a-repo"
+    assert "not found" not in verdict.detail.lower()
+
+
+def test_regular_file_as_repo_exits_with_marker_not_traceback(tmp_path: Path, capsys):
+    """A file as `--repo` used to raise NotADirectoryError: a traceback with no marker."""
+    f = tmp_path / "afile.txt"
+    f.write_text("x")
+
+    rc = main(["--repo", str(f)])
+
+    cap = capsys.readouterr()
+    assert rc == EXIT_UNAVAILABLE
+    assert "GH-WRITE-UNAVAILABLE(not-a-repo)" in cap.err
+    assert "Traceback" not in cap.err
+
+
+def test_empty_repo_without_head_is_named(tmp_path: Path):
+    work = tmp_path / "empty"
+    _git("init", "-q", str(work), cwd=tmp_path)
+    _git("remote", "add", "origin", str(tmp_path / "nowhere.git"), cwd=work)
+
+    verdict = check_writable(work)
+
+    assert verdict.writable is False
+    assert verdict.reason == "no-head"
+
+
+def test_git_absent_is_named(tmp_path: Path):
+    work, _remote = _make_pair(tmp_path)
+
+    class NoGit(Runner):
+        def run(self, argv, cwd=None, timeout=120):
+            if argv[0] == "git" and argv[1] == "--version":
+                return 127, "git: not found"
+            return super().run(argv, cwd=cwd, timeout=timeout)
+
+    verdict = check_writable(work, runner=NoGit())
+
+    assert verdict.writable is False
+    assert verdict.reason == "git-absent"
+
+
+# ══ (5) a surviving probe ref must be reported, and must not erase the primary reason ═════════
+def test_undeletable_probe_ref_is_reported(tmp_path: Path):
+    """A tool that leaves garbage on a shared remote must not report a clean PASS."""
+    work, remote = _make_pair(tmp_path)
+    hook = remote / "hooks" / "pre-receive"
+    hook.write_text(
+        "#!/bin/sh\n"
+        "while read -r old new ref; do\n"
+        '  case "$new" in 0000000000000000000000000000000000000000) '
+        '    echo "remote: deletion denied" >&2; exit 1;; esac\n'
+        "done\n"
+        "exit 0\n"
+    )
+    hook.chmod(0o755)
+
+    verdict = check_writable(work)
+
+    assert verdict.writable is False
+    assert verdict.reason == "delete-failed"
+    assert verdict.leftover_ref is True
+    assert verdict.cleaned_up is False
+
+
+def test_push_refused_but_remote_accepted_reports_leftover_without_erasing_the_cause(tmp_path: Path):
+    """Push may report failure AFTER the remote applied the update — cleanup must still run.
+
+    Simulated with a Runner: push returns 1, but the ref IS visible on `ls-remote`. The delete must
+    be attempted, and a ref that survives must be reported WITHOUT overwriting `push-refused` —
+    otherwise a caller learns about litter and never learns its lanes cannot deliver.
+    """
+    probe_prefix = "refs/heads/gh-write-preflight/"
+    state = {"ref_exists": False, "delete_attempted": False, "delete_ok": False}
+
+    class TransportLie(Runner):
+        def run(self, argv, cwd=None, timeout=120):
+            joined = " ".join(argv)
+            if argv[1] == "ls-remote" and probe_prefix.split("/")[-1] in joined:
+                return (0, "deadbeef\t" + joined.split()[-1] + "\n") if state["ref_exists"] else (0, "")
+            if argv[1] == "ls-remote":
+                return 0, "deadbeef\trefs/heads/main\n"
+            if argv[1] == "push" and "--delete" in argv:
+                state["delete_attempted"] = True
+                state["ref_exists"] = False
+                state["delete_ok"] = True
+                return 0, "deleted"
+            if argv[1] == "push":
+                state["ref_exists"] = True       # applied, then the transport died
+                return 1, "fatal: the remote end hung up unexpectedly"
+            return super().run(argv, cwd=cwd, timeout=timeout)
+
+    work, _remote = _make_pair(tmp_path)
+    verdict = check_writable(work, runner=TransportLie())
+
+    assert state["delete_attempted"] is True, "cleanup must run even when push reports failure"
+    assert verdict.writable is False
+    assert verdict.reason == "push-refused", "the primary cause must survive"
+    assert verdict.cleaned_up is True
+
+
+def test_verify_mismatch_still_attempts_cleanup(tmp_path: Path):
+    """A push that 'succeeds' but leaves no visible ref must still be cleaned up."""
+    state = {"delete_attempted": False}
+
+    class LyingPush(Runner):
+        def run(self, argv, cwd=None, timeout=120):
+            joined = " ".join(argv)
+            if argv[1] == "ls-remote" and "gh-write-preflight" in joined:
+                return 0, ""                      # nothing visible -> verify-mismatch
+            if argv[1] == "ls-remote":
+                return 0, "deadbeef\trefs/heads/main\n"
+            if argv[1] == "push" and "--delete" in argv:
+                state["delete_attempted"] = True
+                return 0, "deleted"
+            if argv[1] == "push":
+                return 0, "pushed"
+            return super().run(argv, cwd=cwd, timeout=timeout)
+
+    work, _remote = _make_pair(tmp_path)
+    verdict = check_writable(work, runner=LyingPush())
+
+    assert verdict.writable is False
+    assert verdict.reason == "verify-mismatch"
+    assert state["delete_attempted"] is True
+
+
+def test_keep_ref_is_explicit_and_the_message_does_not_lie(tmp_path: Path, capsys):
+    """`--keep-ref` must not claim the ref was deleted."""
+    work, remote = _make_pair(tmp_path)
+
+    rc = main(["--repo", str(work), "--keep-ref"])
+
+    cap = capsys.readouterr()
+    assert rc == EXIT_WRITABLE
+    assert "KEPT" in cap.out
+    assert "probe ref" in cap.out and "deleted" not in cap.out
+    assert "gh-write-preflight/" in _remote_refs(remote), "--keep-ref must leave the ref"
+
+
+# ══ (6) no credential ever reaches output, and none is retained in memory ══════════════════════
+def test_redaction_covers_every_url_scheme_and_auth_header():
+    cases = {
+        "https://x-access-token:ghs_abc123456789@github.com/o/r.git": "ghs_abc123456789",
+        "ssh://user:hunter2supersecret@example.com/r.git": "hunter2supersecret",
+        "git+ssh://user:hunter2supersecret@example.com/r.git": "hunter2supersecret",
+        "git://user:hunter2supersecret@example.com/r.git": "hunter2supersecret",
+        "//user:hunter2supersecret@example.com/r.git": "hunter2supersecret",
+        "Authorization: Basic dXNlcjp0b2tlbg==": "dXNlcjp0b2tlbg==",
+        "Authorization: Bearer abc123secret": "abc123secret",
+        "api_token = abcdef123": "abcdef123",
+        "using token ghp_ABCDEFGH12345678": "ghp_ABCDEFGH12345678",
+        "github_pat_11ABCDEFG0_xyz": "github_pat_11ABCDEFG0_xyz",
+    }
+    for dirty, secret in cases.items():
+        assert secret not in redact(dirty), f"{secret!r} leaked from {dirty!r}"
+
+
+def test_non_json_mode_does_not_print_credentials(tmp_path: Path, capsys):
+    """The non-JSON render path must be clean too (only --json was previously checked)."""
+    work, _remote = _make_pair(tmp_path, read_only=True)
+    _git(
+        "remote", "set-url", "origin",
+        "ssh://user:ghp_SECRETSECRET123@example.invalid/x.git", cwd=work,
+    )
+
+    rc = main(["--repo", str(work)])
+
+    cap = capsys.readouterr()
+    assert rc == EXIT_UNAVAILABLE
+    assert "ghp_SECRETSECRET123" not in cap.out + cap.err
+
+
+def test_json_verdict_is_redacted_and_keys_on_writable(tmp_path: Path, capsys):
+    work, _remote = _make_pair(tmp_path, read_only=True)
+    _git(
+        "remote", "set-url", "origin",
+        "https://user:ghp_SECRETSECRET123@example.invalid/x.git", cwd=work,
+    )
+
+    rc = main(["--repo", str(work), "--json"])
+
+    cap = capsys.readouterr()
+    assert rc == EXIT_UNAVAILABLE
+    assert "ghp_SECRETSECRET123" not in cap.out + cap.err
+    payload = json.loads(cap.out)
+    assert payload["writable"] is False
+    # The marker must ALSO reach stderr in --json mode, or a caller grepping for it sees nothing.
+    assert "GH-WRITE-UNAVAILABLE(" in cap.err
+
+
+def test_verdict_object_holds_no_credential(tmp_path: Path):
+    """Redaction is at INGESTION: a caller that logs/reprs the Verdict cannot leak."""
+    work, _remote = _make_pair(tmp_path, read_only=True)
+    _git(
+        "remote", "set-url", "origin",
+        "https://user:ghp_LEAKLEAKLEAK123@example.invalid/x.git", cwd=work,
+    )
+
+    verdict = check_writable(work)
+
+    assert "ghp_LEAKLEAKLEAK123" not in repr(verdict)
+    assert "ghp_LEAKLEAKLEAK123" not in json.dumps(verdict.steps)
+
+
+# ══ (7) the tool is importable/runnable the way the repo's tools are ═══════════════════════════
+def test_help_documents_the_exit_contract():
+    proc = subprocess.run(
+        [sys.executable, str(TOOL), "--help"],
+        capture_output=True,
+        text=True,
+        check=False,
+        # argparse wraps to COLUMNS; pin it so a narrow terminal cannot break the assertion.
+        env={**__import__("os").environ, "COLUMNS": "200"},
+    )
+    assert proc.returncode == 0
+    assert "Exit 0 writable" in proc.stdout
+    assert "1 unavailable" in proc.stdout
+
+
+if __name__ == "__main__":
+    raise SystemExit(pytest.main([__file__, "-q"]))
