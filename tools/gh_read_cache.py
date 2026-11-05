@@ -688,36 +688,49 @@ _API_VALUE_FLAGS = frozenset(
 _ABSOLUTE_URL = re.compile(r"^https?://[^/]+(/.*)?$", re.IGNORECASE)
 
 
+def _verb_start(argv: tuple[str, ...]) -> int | None:
+    """Index of the gh VERB, or None when the tokens do not open with one.
+
+    ⛔ THE VERB IS NOT `argv[0]`. cobra intersperses a resolved subcommand's own flags and
+    their VALUES before the verb, and gh accepts it (measured with `--help`, no call spent):
+    `gh -X GET api --help`, `gh -R cli/cli pr view --help`, `gh --limit 5 pr list --help`
+    all print the resolved subcommand's help. Anchoring at `argv[0]` served every mutable
+    read one flag to the left.
+
+    ⛔ NOR IS IT "THE FIRST TOKEN THAT IS A VERB". A porcelain POSITIONAL may be a verb word
+    — `gh search code api graphql` really joins `api graphql` into the search query — so
+    offering a suffix from every such token refused live reads. The verb is a POSITION: the
+    first token that is not a flag, once the tokens a flag consumes are skipped. A flag
+    consumes the next token only when that token is neither flag-shaped nor a verb (a
+    BOOLEAN flag like `-i`/`--paginate` consumes nothing, which is why `-i api graphql`
+    still finds `api`), and the walk STOPS at the first non-flag token that is not a verb —
+    so `search code …`, `label create …` and `-R o/n search code …` all stop before their
+    argument and are never read as commands.
+    """
+    i = 0
+    while i < len(argv):
+        tok = argv[i]
+        if tok.startswith("-"):
+            nxt = argv[i + 1] if i + 1 < len(argv) else ""
+            if nxt and not nxt.startswith("-") and nxt not in _VERB_TOKENS:
+                i += 2
+            else:
+                i += 1
+            continue
+        return i
+    return None
+
+
 def _api_route(argv: tuple[str, ...]) -> str | None:
     """The ROUTE positional of an `api` command, or None when this is not one.
 
-    `gh api` takes ONE endpoint argument, and global flags sit between the verb and it
-    (`api --paginate repos/…`, `api -X GET repos/…`). This walks past the flags and their
-    separate values and returns that single token, which is the only thing that can be a
-    route.
-
-    ⛔ NOT "every non-flag token", and not "any token shaped like a route". Both were tried
-    and both refused live reads whose ARGUMENT happened to collide with a route word:
-    `api --hostname graphql repos/o/n` (a flag VALUE), `repo list graphql`, `repo view
-    graphql/graphql-js` and `search code repos/o/n/actions/runs` (porcelain owner/query
-    positionals) all came back rc=3. The route is a POSITION, not a shape.
+    `gh api` takes ONE endpoint argument. Once the verb is located (`_verb_start`), the
+    route is the first token after it that is not a flag and not a flag's separate value
+    (`_API_VALUE_FLAGS`). Anything else — including a porcelain command, or an ARGUMENT
+    that happens to be named `api` — is not a route.
     """
-    if not argv:
-        return None
-    # ⛔ THE VERB POSITION, NOT "THE FIRST TOKEN THAT SAYS api". `label create api
-    # --description graphql` has an ARGUMENT named `api`; treating it as the verb made the
-    # description the route and refused a live read. Leading flags and their values are
-    # skipped; the first token after them must BE `api`, or this is not an `api` command.
-    start = 0
-    while start < len(argv):
-        tok = argv[start]
-        if tok == "api":
-            break
-        if tok.startswith("-"):
-            start += 2 if tok in _API_VALUE_FLAGS else 1
-            continue
-        return None
-    else:
+    start = _verb_start(argv)
+    if start is None or argv[start] != "api":
         return None
     i = start + 1
     while i < len(argv):
@@ -769,9 +782,10 @@ def _route_candidates(argv: tuple[str, ...]) -> list[str]:
     ⛔ AND `normpath` COLLAPSES MORE THAN THE EDGE DOES — which is over-refusal, not an
     over-claim. Measured, the edge collapses exactly ONE dot-segment shape:
     `/repos/../rate_limit` → 200, while `/foo/../rate_limit`,
-    `/repos/o/../rate_limit` and `/repos/o/n/../../rate_limit` all → 404. So any
-    dot-segment candidate this function adds can only refuse a read the server would have
-    404'd anyway.
+    `/repos/o/../rate_limit` and `/repos/o/n/../../rate_limit` all → 404. So a
+    dot-segment candidate whose normalised form matches NO mutable pattern can only refuse
+    a spelling the server would have 404'd — while the `repos/..` candidate refuses a LIVE
+    mutable read on purpose, which is precisely the refusal this rule wants.
 
     ⛔ BUT A PERCENT-ESCAPED SEGMENT IS NOT DECODED BY ANYONE. This file used to claim
     `p%75lls` "decodes to `pulls` inside gh"; measured against the live API, `gh` forwards
@@ -790,15 +804,14 @@ def _route_candidates(argv: tuple[str, ...]) -> list[str]:
     norm = [tok.lstrip("/") for tok in raw]
     unq = [urllib.parse.unquote(tok) for tok in norm]
     candidates = [" ".join(raw), " ".join(norm), " ".join(unq)]
-    # ⛔ THE VERB MAY SIT ANYWHERE: `gh -X GET api graphql` and `gh -R o/n pr view 42` are
-    # accepted by gh, and anchoring at argv[0] served every one of them. A suffix starts
-    # only at a token that IS one of this module's verbs.
-    # ⚠️ THE `_VERB_TOKENS` FILTER IS NOT ITSELF PINNED, AND CANNOT BE: every pattern in
-    # `MUTABLE_ARGV` begins with a verb, so a suffix starting anywhere else can never match
-    # — removing the filter leaves the suite green (measured). It is kept as a boundary on
-    # the candidate set and as the statement of intent above, not as a behaviour. Do not
-    # read a green mutant here as missing coverage.
-    candidates.extend(" ".join(unq[i:]) for i, tok in enumerate(unq) if tok in _VERB_TOKENS)
+    # ⛔ AND THE VERB MAY SIT AFTER FLAGS, SO THE WHOLE COMMAND FROM THE VERB IS ALSO A
+    # CANDIDATE: `gh -X GET api graphql` and `gh -R o/n pr view 42` are accepted by gh, and
+    # anchoring the pattern at argv[0] served every one of them. `_verb_start` returns the
+    # verb POSITION, so a porcelain positional that merely spells a verb word
+    # (`search code api graphql`) is an argument and never starts a command.
+    start = _verb_start(unq)
+    if start is not None:
+        candidates.append(" ".join(unq[start:]))
     route = _api_route(raw)
     if route is not None:
         route = urllib.parse.unquote(route)

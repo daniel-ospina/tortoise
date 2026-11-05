@@ -346,6 +346,12 @@ class CacheTest(unittest.TestCase):
             ("-R", "o/n", "run", "view", "123"),
             # the residual the cycle-5 review named: a porcelain value-flag before the verb.
             ("--limit", "5", "pr", "list"),
+            # ⛔ A BOOLEAN FLAG CONSUMES NOTHING, so the verb after it must still be found.
+            ("-i", "api", "graphql"),
+            ("--paginate", "api", "graphql"),
+            ("-R", "o/n", "--json", "state", "pr", "view", "1"),
+            ("--method=GET", "api", "graphql"),
+            ("-X", "POST", "--hostname", "h", "api", "graphql"),
             # ⛔ AN ABSOLUTE URL IS A ROUTE gh FORWARDS VERBATIM. Every declared mutable
             # route was served when spelled this way: `_route_candidates` only ever built
             # `api <path>` from `repos/`-shaped tokens, so a full URL matched nothing.
@@ -413,6 +419,21 @@ class CacheTest(unittest.TestCase):
             ("search", "code", "repos/o/n/actions/runs"),
             ("search", "code", "repos/o/n/pulls"),
             ("search", "issues", "repos/o/n/actions/workflows/x.yml"),
+            # ⛔ AND A PORCELAIN ARGUMENT THAT SPELLS A VERB WORD IS STILL AN ARGUMENT.
+            # `gh search code api graphql` joins `api graphql` into the SEARCH QUERY
+            # (measured with an unreachable host, so no call is spent:
+            # `GH_HOST=127.0.0.1:1 gh search code api graphql` builds
+            # `/search/code?…&q=api+graphql`). Offering a suffix from every token that
+            # spells a verb refused all of these — the same class as `search code repos/…`
+            # one token over, and invisible to the suite until they were added here.
+            ("search", "code", "api", "graphql"),
+            ("search", "issues", "pr", "view"),
+            ("search", "issues", "run", "view"),
+            ("search", "commits", "pr", "checks"),
+            ("issue", "list", "--search", "api", "graphql"),
+            # …and with a leading flag, which defeats a "does the command open with a flag"
+            # gate: the walk must stop at the porcelain verb, not at the first verb word.
+            ("-R", "o/n", "search", "code", "api", "graphql"),
         ):
             r = self.run_tool(
                 "get", "repo", "--repo", "o/n",
