@@ -2907,3 +2907,165 @@ def test_the_footer_does_not_call_rows_pickable_on_a_refused_run():
     text, _ = render(build_units(s, CFG), CFG, s, repo=REPO, top=5)
     assert "TOP 0 PICKABLE" in text
     assert "REFUSED" in text
+
+
+# ── a gate-refused row never reaches a rail, whatever the position (r25 #1) ─
+@pytest.mark.parametrize(
+    ("runs", "merge", "label"),
+    [
+        ("needs_fix", {"clean": True}, "structural × red check"),
+        ("green", {"clean": False, "why": "conflict: a.py"}, "structural × conflict"),
+        ("green", {"clean": True}, "structural alone"),
+    ],
+)
+def test_a_gate_refused_row_is_never_handed_a_rail(runs, merge, label):
+    """A structural refusal can be out-voted on POSITION by a red check or a conflict.
+
+    `other_fails` wins at the bucket, and the merge block downgrades unconditionally,
+    so the row was NEEDS-FIX and got `fix-one.sh` — while `next_action` printed
+    "nothing is dispatched" beside it, and `--json` carried BOTH a command and an
+    action for one unit (this file's own `command XOR action` invariant).
+    """
+    from tools.next_work import next_action
+
+    s = snap(
+        issues=[issue(100)],
+        pulls=[{**pull(1001, closes=[100]), "head_ref": "fix/100-x",
+                "base": {"ref": "release/1.x"}}],
+        check_runs={"a" * 40: _runs_for_position("NEEDS-FIX") if runs == "needs_fix" else all_green()},
+        attestation={"1001": {"verdict": "head"}},
+        merge_tree={"1001": merge},
+    )
+    (row,) = units_for(s)
+    assert next_command(row, REPO) is None, f"a rail was emitted for a gate refusal ({label})"
+    action = next_action(row, REPO) or ""
+    assert "gate refusal" in action, action
+
+
+def test_command_and_action_are_mutually_exclusive_for_every_shape():
+    """The invariant, over a population that includes the gate-refusal combinations."""
+    from tools.next_work import next_action
+
+    shapes = []
+    for base in ("main", "release/1.x"):
+        for draft in (False, True):
+            for runs in ("green", "needs_fix", "needs_test"):
+                for merge in ({"clean": True}, {"clean": False}, {"clean": None}):
+                    for verdict in ("head", "norecord", "unavailable"):
+                        shapes.append((base, draft, runs, merge, verdict))
+    for base, draft, runs, merge, verdict in shapes:
+        s = snap(
+            issues=[issue(100)],
+            pulls=[{**pull(1001, closes=[100]), "head_ref": "fix/100-x",
+                    "base": {"ref": base}, "draft": draft}],
+            check_runs={"a" * 40: {
+                "green": all_green,
+                "needs_fix": lambda: _runs_for_position("NEEDS-FIX"),
+                "needs_test": lambda: _runs_for_position("NEEDS-TEST"),
+            }[runs]()},
+            attestation={"1001": {"verdict": verdict}},
+            merge_tree={"1001": merge},
+        )
+        (row,) = units_for(s)
+        cmd, act = next_command(row, REPO), next_action(row, REPO)
+        assert (cmd is None) != (act is None), (
+            f"{base=} {draft=} {runs=} {merge=} {verdict=} → cmd={cmd!r} act={act!r}"
+        )
+
+
+def test_a_missing_check_run_is_not_a_runner_wait():
+    """A required check that never REPORTED is a harness defect, not a wait."""
+    from tools.next_work import next_action
+
+    s = snap(
+        issues=[issue(100)],
+        pulls=[{**pull(1001, closes=[100]), "head_ref": "fix/100-x"}],
+        check_runs={"a" * 40: []},  # nothing ever reported
+        attestation={"1001": {"verdict": "head"}},
+        merge_tree={"1001": {"clean": True}},
+    )
+    (row,) = units_for(s)
+    assert row.position == "NEEDS-TEST"
+    action = next_action(row, REPO) or ""
+    assert "NEVER REPORTED" in action, action
+    assert "runner queue" not in action
+
+
+def test_executable_agrees_with_next_command_across_the_shape_space():
+    """`executable` and `next_command` must classify identically for a real repo.
+
+    (With an EMPTY slug `next_command` also returns None — no addressable command —
+    while `executable` takes no repo; that case is unreachable from the CLI because
+    a missing repo is INCOMPLETE, so the predicate is compared over real slugs.)
+
+    The gate-refusal guard went into the emitter and not into this predicate, so
+    `executable=True` sat beside `next_command is None` and `render` chose the
+    RUNNABLE slot by `executable` — printing a literal `None` where the command
+    belongs, under "the first unit a lane can act on NOW".
+    """
+    for base in ("main", "release/1.x"):
+        for draft in (False, True):
+            for runs in ("green", "needs_fix", "needs_test"):
+                for merge in ({"clean": True}, {"clean": False}, {"clean": None}, {}):
+                    for verdict in ("head", "norecord", "unavailable"):
+                        s = snap(
+                            issues=[issue(100)],
+                            pulls=[{**pull(1001, closes=[100]), "head_ref": "fix/100-x",
+                                    "base": {"ref": base}, "draft": draft}],
+                            check_runs={"a" * 40: {
+                                "green": all_green,
+                                "needs_fix": lambda: _runs_for_position("NEEDS-FIX"),
+                                "needs_test": lambda: _runs_for_position("NEEDS-TEST"),
+                            }[runs]()},
+                            attestation={"1001": {"verdict": verdict}},
+                            merge_tree={"1001": merge},
+                        )
+                        (row,) = units_for(s)
+                        assert row.executable == (next_command(row, REPO) is not None), (
+                            f"{base=} {draft=} {runs=} {merge=} {verdict=}"
+                        )
+
+
+def test_a_gate_refused_second_row_does_not_take_the_runnable_slot():
+    """Two rows, both gate-refused: the RUNNABLE slot must not print a `None`."""
+    s = snap(
+        issues=[issue(100), issue(200)],
+        pulls=[
+            {**pull(1001, closes=[100]), "head_ref": "a", "base": {"ref": "release/1.x"}},
+            {**pull(2002, closes=[200], head="b" * 40), "head_ref": "b",
+             "base": {"ref": "release/1.x"}},
+        ],
+        check_runs={"a" * 40: all_green(), "b" * 40: _runs_for_position("NEEDS-FIX")},
+        attestation={"1001": {"verdict": "head"}, "2002": {"verdict": "head"}},
+        merge_tree={"1001": {"clean": True}, "2002": {"clean": True}},
+    )
+    text, _ = render(build_units(s, CFG), CFG, s, repo=REPO, top=5)
+    assert "RUNNABLE  #200" not in text, text
+    assert "RUNNABLE  none" in text or "RUNNABLE" not in text
+
+
+def test_every_place_that_lists_the_needs_test_causes_lists_all_three():
+    """Every place that enumerates the NEEDS-TEST causes must name all three.
+
+    Each cause was added to one place at a time and three of the four ended up one
+    short. What this pins: the SOURCE as a whole, the `--help` output, and the
+    `executable` docstring each name all three. It is a floor, not a per-region
+    check — a cause removed from ONE docstring still passes if a literal survives
+    elsewhere, so the prose is also reviewed by reading it.
+    """
+    root = Path(__file__).resolve().parent.parent
+    src = (root / "tools" / "next_work.py").read_text(encoding="utf-8")
+    help_text = subprocess.run(
+        [sys.executable, str(root / "tools" / "next_work.py"), "--help"],
+        capture_output=True, text=True, timeout=60,
+    ).stdout
+    for label, text in (("source", src), ("--help", help_text)):
+        low = text.lower()
+        assert "runner" in low, label
+        assert "unmeasured merge tree" in low, label
+        assert "never reported" in low, label
+    from tools.next_work import Unit
+
+    doc = (Unit.executable.__doc__ or "").lower()
+    for phrase in ("runner", "measured", "reported"):
+        assert phrase in doc, (phrase, doc)
