@@ -3271,7 +3271,10 @@ def _duplicate_key_loader():
     override — legal by the YAML merge type — is not reported. "Own" is
     recorded by object identity in ``flatten_mapping``, because after that call
     the inherited and document-written pairs sit side by side and no count can
-    tell them apart.
+    tell them apart. The merge KEY is one of those own pairs, though: two ``<<:``
+    in one mapping is a repeat and is refused (``merge_key_repeats``), because the
+    flatten deletes the key nodes and the repeat would otherwise be the one
+    duplicate this loader could not see.
     """
     global _DUP_KEY_LOADER
     if _DUP_KEY_LOADER is not None:
