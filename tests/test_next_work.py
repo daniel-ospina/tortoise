@@ -2975,9 +2975,13 @@ def test_a_malformed_pace_knob_cannot_decide_an_exit_code(
     # ⛔ THE BRANCH EVERY REAL RUN TAKES. `NEXT_WORK_PACE` is unset in production, so
     # `raw is None or raw == "" -> PACE_SECONDS_DEFAULT` is the only arm that runs outside a
     # test. Without these lines nothing pins it: mutating that branch to `return 0.0` (pacing
-    # silently disabled, i.e. the rate limits this pacing exists for) left the whole file at
-    # `284 passed`. Both spellings matter — an exported-but-empty knob is the shape a shell
-    # wrapper produces — and both must be SILENT (no spurious warning).
+    # silently disabled, i.e. the rate limits this pacing exists for) left the whole file GREEN
+    # — nothing in it notices. ⛔ Deliberately no pass COUNT here: it was written as one, and
+    # the peer commit that predates this note's own commit added a test, so the figure was
+    # already stale inside the same fold. That is the rule this PR applied twice elsewhere
+    # (`25 arms`, the `durations` row): a restated count re-stales on the next test added.
+    # Both spellings matter — an exported-but-empty knob is the shape a shell wrapper produces
+    # — and both must be SILENT (no spurious warning).
     monkeypatch.delenv("NEXT_WORK_PACE", raising=False)
     assert next_work.pace_seconds() == next_work.PACE_SECONDS_DEFAULT
     assert capsys.readouterr().err == ""
