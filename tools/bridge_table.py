@@ -1374,8 +1374,21 @@ def _approved_evidence_lines(approved: list[dict]) -> list[str]:
             )
             continue
         matched = a["homes_detail"][0]["matched"]
-        named = ", ".join(f"`{m}`" for m in matched) if matched else f"`{a['method']}`"
-        sdk = f" (SDK `{a['method']}`)" if a["method"] and a["method"] not in matched else ""
+        quote = a["homes_detail"][0]["quote"]
+        # #10602: the line must name a token the QUOTE contains — that is what makes the
+        # claim checkable against the evidence printed directly beneath it. `matched` is
+        # `aliases & members`, and `aliases` is {SDK method} ∪ {tool name minus its
+        # `tortoise_` prefix}; those coincide only while the binding equals the name (the
+        # old `sdk_method: query` on `tortoise_query`). Once the binding differs
+        # (`paginated_query`), BOTH tokens can match the same approved row and the line
+        # would name a token its own quote never states — `tests/test_bridge_table.py::
+        # test_d4_evidence_line_names_a_token_its_quoted_row_contains` caught exactly
+        # that. Tokens absent from the quote move to the `(SDK …)` slot, which is where
+        # the docstring above already puts a method the doc does not name.
+        named_tokens = [m for m in matched if m in quote] or matched
+        named = ", ".join(f"`{m}`" for m in named_tokens)
+        sdk = (f" (SDK `{a['method']}`)"
+               if a["method"] and a["method"] not in named_tokens else "")
         out.append(f"- **`{a['tool']}`** — {named}{sdk} is absorbed by `{a['home']}`:")
         out.append(f"  > {a['quote']}")
     return out

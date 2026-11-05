@@ -3768,6 +3768,25 @@ def tortoise_query(kind: str | None = None,
                      entity_type=entity_type, limit=eff_limit,
                      min_confidence=min_confidence or 0.0,
                      order_by=order_by or "relevance")
+    # #10602 review (F3): `skip`/`limit` are reserved filter keys
+    # (`security.validate_filter_key`) AND the names BOTH bounded arms below pass
+    # as explicit keywords, so a caller's `filters={"limit": 5}` would collide
+    # at those `_safe(...)` call sites — OUTSIDE its try — and escape as a bare
+    # TypeError instead of the structured "Reserved filter key" error the plain
+    # path used to return. Refused ONCE here, above BOTH arms: the F3 finding
+    # was that the plain arm was closed while the `offset=`/`page=` arm still
+    # raised (a pre-existing hole eight lines away), and one guard above the
+    # branch is what closes the class rather than the one instance of it.
+    # `tag`/`text` are not reached here: the `tag` arm ignores `filters` and the
+    # `text` arm never forwards them, so neither can collide.
+    _filters = _public_filters(filters)
+    _collide = sorted(set(_filters) & {"skip", "limit"})
+    if _collide:
+        return _SafeError({
+            "error": f"Reserved filter key: {_collide[0]!r}. This name collides "
+                     f"with internal query parameters (kind, skip, limit, "
+                     f"kind_<n>). Rename the property.",
+        })
     if paginated:
         eff_offset = offset if offset is not None else 0
         if page is not None:
@@ -3777,7 +3796,7 @@ def tortoise_query(kind: str | None = None,
                      # #7983: the SAME underscore drop as the plain path below,
                      # so one filter dict cannot be a private switch here and a
                      # property filter there.
-                     **_public_filters(filters))
+                     **_filters)
     # #7983: a caller-supplied filter may not set the SDK's PRIVATE switches
     # (PRIVATE_FILTER_KEYS), or a remote agent could turn the read ledger off
     # with a query parameter — a caller-controlled switch on a measurement that
@@ -3798,19 +3817,6 @@ def tortoise_query(kind: str | None = None,
     # `paginated_query` is the SDK method that applies LIMIT — rather than
     # slicing the full list here, which would still pay the unbounded read.
     _filters = _public_filters(filters)
-    # #10602 review (F3): `skip`/`limit` are reserved filter keys
-    # (`security.validate_filter_key`) AND the names this path now passes as
-    # explicit keywords, so a caller's `filters={"limit": 5}` would collide at
-    # THIS call site — outside `_safe`'s try — and escape as a bare TypeError
-    # instead of the structured "Reserved filter key" error the plain path used
-    # to return. Refuse it here, with the same wording the SDK raises.
-    _collide = sorted(set(_filters) & {"skip", "limit"})
-    if _collide:
-        return _SafeError({
-            "error": f"Reserved filter key: {_collide[0]!r}. This name collides "
-                     f"with internal query parameters (kind, skip, limit, "
-                     f"kind_<n>). Rename the property.",
-        })
     bounded = _safe(_get_org_sdk().paginated_query, kind, skip=0, limit=eff_limit,
                     include_retracted=include_retracted,
                     **_filters)

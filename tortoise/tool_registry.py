@@ -299,8 +299,9 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "merged in). The structural read returns at most `limit` rows (default 100) "
                     "— it is BOUNDED, not a full-population scan, so a truncated answer is not "
                     "distinguishable from a complete one; walk offset=/limit= (or 1-based page=) "
-                    "until hasMore is false when you need every row. tag= filters "
-                    "Points by TAGGED edge; include_retracted=True surfaces tombstones. For "
+                    "until hasMore is false when you need every row. ⚠️ The `tag=` arm is NOT "
+                    "capped the same way — it returns every tagged Point unless you pass "
+                    "offset=/limit= with it. include_retracted=True surfaces tombstones. For "
                     "semantic relevance use tortoise_search; for a single known ID use "
                     "tortoise_get_point.",
         risk="read",

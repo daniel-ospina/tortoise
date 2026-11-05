@@ -204,6 +204,26 @@ def test_a_reserved_filter_key_is_a_structured_error_not_a_typeerror(stub_factor
         assert "Reserved filter key" in str(result.get("error", "")), result
 
 
+def test_reserved_filter_key_is_refused_on_EVERY_bounded_arm(stub_factory):
+    """F3's class, not just its instance — review round 2's finding 3.
+
+    The collision was closed on the plain arm while the `offset=`/`page=` arm
+    eight lines away still raised a bare TypeError (pre-existing, but the F3
+    wording claimed the class was closed). One guard above BOTH arms is what
+    closes it, so this asserts every arm that forwards `filters`.
+    """
+    from tortoise.mcp_server import _SafeError, tortoise_query
+    stub_factory(n_points=5)
+    for kwargs in ({"kind": "statement"},
+                   {"kind": "statement", "offset": 0},
+                   {"kind": "statement", "page": 1}):
+        result = tortoise_query(filters={"limit": 5}, **kwargs)
+        assert isinstance(result, _SafeError), (
+            f"{kwargs} escaped as {type(result).__name__} instead of a "
+            "structured refusal")
+        assert "Reserved filter key" in str(result.get("error", "")), result
+
+
 def test_the_served_description_discloses_the_bound():
     """#10602 review F2 — the truncation must not be SILENT to the caller.
 
@@ -212,14 +232,28 @@ def test_the_served_description_discloses_the_bound():
     still returns a bare list (no `hasMore`/`total`), so the disclosure has to
     live in the text the model actually reads: the tool's SERVED description
     (`ToolDefinition.description`, what `FunctionTool.from_function` publishes),
-    not the handler docstring. Fails on the value of that description.
+    not the handler docstring.
+
+    The assertions are the POSITIVE claims, deliberately not bare substrings:
+    review round 2 showed that `"bound" in desc` is satisfied by "UNBOUNDED" and
+    `"offset" in desc` by a sentence saying offset does not page it, so a
+    description asserting the exact opposite still passed. Each assertion here
+    fails if the corresponding claim is negated or removed.
     """
     from tortoise.tool_registry import TOOL_REGISTRY
+
     entry = next(t for t in TOOL_REGISTRY if t.name == "tortoise_query")
-    desc = entry.description.lower()
-    assert "bound" in desc, (
-        "the served description does not say the structural read is bounded: "
-        f"{entry.description}")
-    assert "offset" in desc, (
-        "the served description does not say how to walk the population: "
-        f"{entry.description}")
+    desc = entry.description
+    low = desc.lower()
+
+    # the bound is stated, and stated as a bound — not its antonym
+    assert "not a full-population scan" in low, f"bound not disclosed: {desc}"
+    assert "unbounded" not in low, f"the description contradicts itself: {desc}"
+    # the number the code actually applies (eff_limit's non-paginated default)
+    assert "default 100" in low, f"the default cap is not named: {desc}"
+    # the way to see the rest — `hasMore` is the signal a walk terminates on
+    assert "hasmore" in low, f"no terminating signal named: {desc}"
+    assert "offset" in low, f"no way to page the population: {desc}"
+    # the `tag=` arm is NOT capped — over-claiming there is its own defect
+    assert "tag=" in low and "not capped" in low, (
+        f"the tag= arm's different behaviour is not disclosed: {desc}")
