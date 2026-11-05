@@ -353,7 +353,7 @@ def test_unreadable_surface_refuses_the_pick(tmp_path: Path):
     assert "REFUSED" in text
 
 
-def test_a_malformed_pace_env_never_reads_as_an_empty_queue(monkeypatch: pytest.MonkeyPatch):
+def test_a_malformed_pace_env_never_reads_as_an_empty_queue():
     """⛔ `NEXT_WORK_PACE=0.2s` must not turn into "the queue is empty".
 
     `PACE_SECONDS` was parsed by `float()` at MODULE level, so a malformed knob raised
@@ -361,12 +361,25 @@ def test_a_malformed_pace_env_never_reads_as_an_empty_queue(monkeypatch: pytest.
     documents 1 as "the queue was read and NO unit is pickable — that is an answer, not
     an error", so a consumer keying on 1 concluded the queue was EMPTY and stopped —
     the mis-grade every other path in the file (its `_repo_slug`, `--from`, snapshot
-    reads) is written to avoid. Restoring the module-level parse makes the import raise
-    and this test error out before any assertion.
+    reads) is written to avoid.
+
+    The property is IMPORT-TIME, so it is proven in a FRESH PROCESS: asserting on the
+    already-imported module passes over a partial regression that keeps
+    `_pace_seconds()` and re-adds the module-level parse (#review cycle 2).
     """
+    proc = subprocess.run(
+        [sys.executable, "-c", "import tools.next_work"],
+        env={**os.environ, "NEXT_WORK_PACE": "0.2s"},
+        cwd=str(Path(__file__).resolve().parent.parent),
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert proc.returncode == 0, f"import raised on a malformed pace knob: {proc.stderr}"
+    assert "Traceback" not in proc.stderr, proc.stderr
+
     from tools import next_work
 
-    monkeypatch.setenv("NEXT_WORK_PACE", "0.2s")
     assert next_work._pace_seconds() == next_work.PACE_DEFAULT_SECONDS
     next_work._pace()  # must not raise, and must not print a traceback
 
