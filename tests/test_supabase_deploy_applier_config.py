@@ -175,3 +175,38 @@ def test_printed_remediations_pass_yes_too() -> None:
             f"operator a hosted mutation that CLI v3 rejects in any run that cannot prompt "
             f"(#10896)"
         )
+
+
+def test_the_drift_banner_remedy_passes_yes_too() -> None:
+    """The THIRD site of the same sweep: the `::warning::` banner an operator copies (#10896).
+
+    Cycle 5 left this as its one residual, non-blocking: `test_printed_remediations_pass_yes_too`
+    pins the drift GATE's printed remedy, but the `check-drift` job's own `::warning::` — the
+    string that actually reaches the Actions summary — offered `migration repair --linked --status
+    applied <version>` with no `--yes`. The consequence is the same failure class the PR closes,
+    one level out: the copy-paste remedy dies on the v3 consent gate, so an operator resolving
+    OUT OF ORDER versions repairs nothing and cannot tell why.
+
+    Asserted on the PARSED workflow (this file's convention), and only on banner lines that print
+    the consent-gated remedy, so a banner carrying prose alone cannot false-red.
+    """
+    doc = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    banners = [
+        line
+        for job in (doc.get("jobs") or {}).values()
+        for step in (job.get("steps") or [])
+        for line in str(step.get("run") or "").splitlines()
+        if "::warning::" in line
+    ]
+    remedies = [line for line in banners if "--status applied" in line]
+    assert remedies, (
+        "the drift banner must still name the `migration repair --status applied` remedy: an "
+        "operator shown OUT OF ORDER versions needs a command to run (#1095)"
+    )
+    for line in remedies:
+        assert "--yes" in line, (
+            "the drift banner's printed remedy must carry `--yes`: `migration repair` against a "
+            "hosted project is consent-gated in CLI v3 (docs → 'Migrating to Supabase CLI v3') "
+            "and fails unattended without it, so the operator's copy-paste repairs nothing and "
+            "says nothing (#10896)"
+        )
