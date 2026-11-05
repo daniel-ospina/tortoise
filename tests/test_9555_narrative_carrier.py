@@ -1732,15 +1732,23 @@ def _section(text: str, start_heading: str, end_heading: str) -> str:
     assert text.count(start_heading) == 1, (
         f"{_STORAGE_DOC.name} carries {text.count(start_heading)} occurrences of "
         f"{start_heading!r} — this pin slices from the FIRST match, so that heading "
-        "must appear exactly once; a duplicate placed above the real section "
-        "widens the span and can leave every assertion inside it green on text "
-        "the section does not own")
-    assert text.count(end_heading) == 1, (
-        f"{_STORAGE_DOC.name} carries {text.count(end_heading)} occurrences of "
-        f"{end_heading!r} — this pin ends at the FIRST match after the start, so "
-        "that heading must appear exactly once; a duplicate placed before a "
-        "regression TRUNCATES the span and silently moves the regression outside "
-        "the text the assertions read (measured fail-open, see above)")
+        "must appear exactly once; ANY duplicate reds this count, though only one "
+        "placed ABOVE the real section widens the span and can leave every "
+        "assertion inside it green on text the section does not own")
+    # ⚠️ The END count is scoped to the span the binding actually uses (`find`
+    # starts at `start`), so a duplicate placed ABOVE the §9.4 start — which leaves
+    # the slice byte-identical and is therefore harmless — does not red with a
+    # "TRUNCATES" diagnosis that did not happen. The `end > start` guard below
+    # covers the one case this narrowing must not lose: a sole end heading that
+    # sits above the start.
+    _end_from = text.index(start_heading)
+    assert text.count(end_heading, _end_from) == 1, (
+        f"{_STORAGE_DOC.name} carries {text.count(end_heading, _end_from)} "
+        f"occurrences of {end_heading!r} AFTER {start_heading!r} — this pin ends "
+        "at the FIRST match after the start, so that heading must appear exactly "
+        "once there; ANY such duplicate reds this count, though only one placed "
+        "just BEFORE a regression truncates the span and moves that regression "
+        "outside the text the assertions read (measured fail-open, see above)")
     start = text.index(start_heading)
     # `find`, not `index`: a REORDERED end heading (present in the document, but
     # not after the start) reaches the assertion below with its diagnosis instead
