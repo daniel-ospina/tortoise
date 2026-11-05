@@ -4471,8 +4471,10 @@ surfaces:
   # `docs/architecture/STORAGE-ARCHITECTURE.md`-only diff does NOT take
   # `select()`'s early return — that path is claimed by the `onboarding`
   # `SOURCE_PATTERNS` entry, so `select()` returns `surfaces=['onboarding'],
-  # full=False, 150 files` (re-derived at `#10980`; the `131` this comment
-  # carried was that same pool ~19 `tier1` rows ago). ⚠️ Re-derive that figure
+  # full=False, 150 files` (re-derived at `#10980`). The `131` this comment
+  # carried is 19 files short, and its history is NOT all `tier1`: 60 -> 73
+  # `tier1` rows account for **13** of the 19, and six more came from the
+  # `onboarding` surface itself growing (91 -> 97 members). ⚠️ Re-derive that figure
   # after any `tier1` addition,
   # and do not attribute its whole history to one row: #5064's row accounts for
   # exactly ONE of those files (measured: 130 at the commit before it, 131
