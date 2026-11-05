@@ -550,11 +550,12 @@ no verdict: after a killed run, check `git ls-remote <remote> 'refs/heads/<prefi
   - `delete-failed` is **litter, not capability** — the push already succeeded. ⛔ **A RE-RUN DOES NOT
     CLEAN IT**: every run mints a NEW ref (`<utc>-<pid>-<rand>`) and deletes only its own, so a
     remote that refuses deletes grows one survivor per run. The tool names it — `PROBE REF SURVIVED
-    on <remote>: refs/heads/<ref>` on stderr in plain mode (the `detail` field under `--json`), and
-    `probe_ref` in `--json` — so delete THAT ref
-    (`git push <remote> --delete <ref>`), then re-run; if the remote refuses the delete too, re-probe
-    under a namespace it will let you create **and** delete (`--probe-ref-prefix`). Never read it as
-    "lanes cannot deliver".
+    on <remote>: refs/heads/<ref>` (`probe_ref`, or the `detail` field under `--json`) — so delete
+    THAT ref (`git push <remote> --delete <ref>`), then re-run. In plain mode `detail` is printed
+    truncated to its **last 600** characters, so on a verbose delete refusal the marker and the ref
+    name in it can be cut away; `--json` is the reliable read. If the remote refuses the delete too,
+    re-probe under a namespace it will let you create **and** delete (`--probe-ref-prefix`). Never
+    read it as "lanes cannot deliver".
 - `exit 2` = usage (argparse's own code, deliberately not a verdict).
 
 **Why it is a gate and not a courtesy call.** `gh` resolves `GH_TOKEN` → `GITHUB_TOKEN` →
@@ -582,7 +583,7 @@ create, a PR comment, a constituent-PR close, or an issue close — any of those
 whose contents half is fine, and vice versa. #10930 records the requirement exactly: a **landing**
 lane's preflight must prove **three grants** — `Contents`, `Pull requests`, `Issues` — **not two**,
 because #10945's two legs were `Contents` and `Pull requests` **only**, so a token holding those two
-and **no** `Issues: write` passes that probe and then fails at its first issue close — the grants are
+and **no** `Issues: write` passes that probe without ever measuring the third grant — the grants are
 independent, and the token measured on #10930 is the mirror of that shape. This gate
 proves one of the three. If your lane LANDS — comments the evidence on the PR, closes constituents,
 closes delivered issues — `exit 0` proves none of that, so prove those two surfaces by the operation
