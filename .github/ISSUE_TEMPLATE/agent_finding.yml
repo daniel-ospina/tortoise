@@ -10,14 +10,21 @@ body:
         deliberately four fields. A finding that reaches the graph is worth more than a well-formatted one
         that stays in a session.
 
-  - type: input
+  - type: markdown
+    attributes:
+      value: |
+        **Provenance is the one field the gate refuses you for (#10146).** Paste the output of
+        `uv run python tools/finding_provenance.py --emit`. It prints exactly one line, and that line has the shape `Measured at: <ref>@<40-hex-sha> on <YYYY-MM-DD>`. Do not hand-type a short sha.
+        `tools/finding_provenance.py --validate` accepts the body you are about to file.
+
+  - type: textarea
     id: measured_at
     attributes:
-      label: Measured at (commit / sha you read)
-      description: The exact revision this finding is true of. Leave blank if it was not measured against a checkout.
-      placeholder: "e.g. 98ab138c9"
+      label: Provenance (paste the `--emit` line)
+      description: The full `Measured at:` line from `uv run python tools/finding_provenance.py --emit` — a line beginning `Measured at` followed by `<ref>@<40-hex-sha> on <YYYY-MM-DD>`. Re-read the finding against the tree you name before you paste; an unmeasured guess is worse than none.
+      placeholder: Run `uv run python tools/finding_provenance.py --emit` in the checkout you measured and paste its single output line here.
     validations:
-      required: false
+      required: true
 
   - type: dropdown
     id: objective
