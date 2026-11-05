@@ -24,6 +24,7 @@ from __future__ import annotations  # noqa: I001
 
 import argparse
 import os
+from enum import StrEnum
 from pathlib import Path
 
 from .api import EventAPI, provenance
@@ -434,7 +435,10 @@ def _do_upgrade(transcript, text, source_id, proj, api, args):
     ).result_set
     if not rows:
         print(f"not a Document: {source_id} (no document Source with this url)")
-        return
+        # #8447 C3: a REFUSAL, not a no-op. The operator named a target the
+        # graph does not hold; exiting 0 made that indistinguishable from an
+        # upgrade that ran (see ``IngestOutcome``).
+        return IngestOutcome.REFUSED_NOT_FOUND
     needs_ext, doc_status = rows[0][0], rows[0][1]
     # `other_legacy_is_pending=True`: pre-D10 `--upgrade` skipped on
     # `doc_status='extracted'` alone, so it also upgraded a `draft` document —
@@ -444,7 +448,7 @@ def _do_upgrade(transcript, text, source_id, proj, api, args):
     if not _document_is_pending(needs_ext, doc_status,
                                 other_legacy_is_pending=True):
         print(f"doc already extracted, skipped: {source_id}")
-        return
+        return IngestOutcome.SKIPPED_ALREADY_EXTRACTED
 
     # 2. "Has anything to extract?" is answered BEFORE the idempotency claim
     #    (review round 7). `begin_ingest` MINTS a claim, and at a bumped
@@ -464,7 +468,7 @@ def _do_upgrade(transcript, text, source_id, proj, api, args):
                                   document_key(text), force=args.force)
         if result and result.skip:
             print(f"upgrade skip: {result.reason} (run {result.run_id}); use --force to reprocess")
-            return
+            return IngestOutcome.SKIPPED_ALREADY_PROCESSED
 
         print(f"upgrading {source_id} "
               f"(needs_extraction={needs_ext}, doc_status={doc_status}) …")
@@ -541,6 +545,79 @@ def _do_upgrade(transcript, text, source_id, proj, api, args):
 
     # 5. Lazy EP re-propagation on affected subgraph (#133 Task 3)
     _run_ep_propagation(proj, api)
+    return IngestOutcome.DONE
+
+
+class IngestOutcome(StrEnum):
+    """What an `ingest` run DID — the CLI's own completeness instrument (#8447 C3).
+
+    The ingest door is one of the four doors #8447's refusal clause names:
+
+        A refused operation must either refuse visibly (an error, or a reply
+        field that says so) or succeed. It must never return a value
+        indistinguishable from success — ``None``, ``[]``, or a ``200`` with
+        an empty body — while recording the failure somewhere the caller does
+        not read.
+
+    Before this vocabulary the door had exactly one output channel that a
+    non-human caller reads — the process exit status — and it was ``0`` on
+    EVERY arm, including the refusals. A script that ran
+    ``tortoise-ingest --upgrade <path>`` on a path that is not a Document
+    Source printed ``not a Document: …`` to stdout and exited **0**; a
+    re-run that was refused by the idempotency gate printed ``skip: …`` and
+    then fell through to the completion summary (``points : N statements``)
+    and, under ``--resolution``, still WROTE a resolution Point for work it
+    never did. ``0`` there is the clause's own counter-example: the caller
+    cannot tell a refusal from a completed ingest.
+
+    ⛔ A SKIP IS NOT A REFUSAL, and the two are kept apart on purpose. A
+    skip is the ask already satisfied — the content is in the graph at this
+    extractor version, or the document was already extracted — so ``0`` is
+    the honest answer and a re-run in a pipeline stays green. A REFUSAL is
+    the door declining: the target does not exist, or it is not a Document.
+    Collapsing those two into one non-zero code would make an idempotent
+    re-run look like a failure, which breaks callers in the other direction.
+
+    The ``returncode`` property is the ONE mapping from outcome to exit
+    status; ``main`` returns it and both entry points (the ``tortoise-ingest``
+    console script and ``python -m tortoise.ingest``) hand it to the shell.
+    """
+
+    #: The ask was done (extraction ran, or a metadata capture was written).
+    DONE = "done"
+    #: The ask was already satisfied: same content + extractor version.
+    SKIPPED_ALREADY_PROCESSED = "skipped-already-processed"
+    #: The ask was already satisfied: the document is already extracted.
+    SKIPPED_ALREADY_EXTRACTED = "skipped-already-extracted"
+    #: The sweep found nothing awaiting extraction. The ask's own answer.
+    SKIPPED_NOTHING_PENDING = "skipped-nothing-pending"
+    #: REFUSED — the named target is not there: no ``:Document`` Source holds it.
+    #: (There is NO separate "exists but is not a Document" arm: ``_do_upgrade``
+    #: cannot tell those apart — both are a miss on its ``MATCH (s:Source {url})``
+    #: — so the enum does not claim a distinction the door cannot make.)
+    REFUSED_NOT_FOUND = "refused-not-found"
+    #: The door did part of the ask and left work behind — the ``--upgrade-all``
+    #: sweep, when a candidate was unreadable or not a document. ⛔ It is NOT set
+    #: by "already claimed at this extractor version": that is the sweep's own
+    #: idempotency skip, i.e. work that is DONE, and reddening a steady-state
+    #: corpus on every re-sweep would make the marker noise.
+    PARTIAL = "partial"
+
+    @property
+    def refused(self) -> bool:
+        """True iff the door DECLINED — never True for an already-satisfied ask."""
+        return self is IngestOutcome.REFUSED_NOT_FOUND
+
+    @property
+    def returncode(self) -> int:
+        """The process exit status this outcome must produce.
+
+        A refusal and a partial run are non-zero; every skip is ``0``. The
+        split is the point of the enum: a caller that only wants "did it
+        work" reads the code, and a caller that wants the reason reads the
+        stdout line the refusal printed.
+        """
+        return 1 if (self.refused or self is IngestOutcome.PARTIAL) else 0
 
 
 def _resolve_ingest_base() -> str | None:
@@ -653,7 +730,7 @@ def _do_upgrade_all(proj, api, args):
                  "signal at all" if include_unstamped else
                  "; pass --include-unstamped to also select documents with no "
                  "signal at all") + ")")
-        return
+        return IngestOutcome.SKIPPED_NOTHING_PENDING
 
     print(f"upgrade-all: {len(rows)} document(s) to upgrade"
           + (" (--include-unstamped: documents with no extraction signal are "
@@ -792,6 +869,20 @@ def _do_upgrade_all(proj, api, args):
               f"{not_document} not a document (no ## sections), "
               f"{already_claimed} already claimed at this extractor version "
               "(re-run with --force to reprocess)")
+        # #8447 C3: outstanding work after a sweep is NOT a completed ask. A
+        # sweep that left candidates unreadable or un-extractable used to exit
+        # 0 — the caller read "success" over a corpus that was never touched.
+        # PARTIAL is the marker; the buckets above say which kind.
+        #
+        # ⛔ `already_claimed` is deliberately NOT in this predicate. It is the
+        # sweep's idempotency bucket — the same ask `_do_upgrade` answers with
+        # SKIPPED_ALREADY_PROCESSED (0) — so counting it would red a
+        # steady-state corpus on every re-sweep and train operators to ignore
+        # the exit status, which destroys the marker. `not_document` keeps its
+        # pending marker (see the docstring) and IS outstanding.
+        if unresolved or not_document:
+            return IngestOutcome.PARTIAL
+    return IngestOutcome.DONE
 
 
 def build_model(spec: str, *, reasoning: bool = False):
@@ -860,7 +951,16 @@ def _s7_document_entities(text, source_id, api, args, extractor=None):
     return ent_stats["subject_names"]
 
 
-def main(argv=None):
+def main(argv=None) -> IngestOutcome:
+    """Run one ingest and return WHAT HAPPENED (#8447 C3).
+
+    ⛔ ``main`` NEVER hands its outcome to ``sys.exit`` itself, and the console
+    script must not either. ``IngestOutcome`` is a ``StrEnum`` — a ``str`` — and
+    ``sys.exit(<str>)`` prints it to stderr and exits **1**, so pointing
+    ``[project.scripts]`` at ``main`` turned every outcome, DONE included, into
+    exit 1 (measured on the installed wrapper). :func:`cli` is the entry point
+    that dereferences ``returncode``; it is what ``pyproject.toml`` names.
+    """
     ap = argparse.ArgumentParser(description="Tortoise live ingest")
     ap.add_argument("transcript", type=Path, nargs='?', default=None,
                     help="transcript file (not needed with --upgrade-all)")
@@ -980,17 +1080,16 @@ def main(argv=None):
         # D10 (ONTOLOGY §4.4): the extraction signal is needs_extraction (the
         # retired doc_status flip is gone).
         if args.upgrade:
-            _do_upgrade(args.transcript, text, source_id, proj, api, args)
+            outcome = _do_upgrade(args.transcript, text, source_id, proj, api, args)
             # --upgrade is terminal: do NOT fall through to full ingest
             # (which would re-run begin_ingest + add_document and re-set the
             # needs_extraction flag — review cycle 3 caught this).
-            return
+            return outcome
 
         # #133 --upgrade-all: discover captured/needs_extraction Documents
         # and upgrade each. No single transcript — early return after.
         if args.upgrade_all:
-            _do_upgrade_all(proj, api, args)
-            return
+            return _do_upgrade_all(proj, api, args)
 
         # #125 capture-metadata skips begin_ingest — it is a DIFFERENT operation
         # from full extraction. Using begin_ingest here would write an
@@ -1005,6 +1104,18 @@ def main(argv=None):
                                       document_key(text), force=args.force)
         if result and result.skip:
             print(f"skip: {result.reason} (run {result.run_id}); use --force to reprocess")
+            # #8447 C3: a REFUSAL here must not produce a success-shaped
+            # artifact. Before this, the skip arm fell THROUGH to the
+            # completion block below: `--resolution` wrote a resolution Point
+            # for an ingest that never ran, and the summary printed
+            # `points : N statements` over the whole event log — a result
+            # indistinguishable from a completed ingest. A skip writes nothing,
+            # so it reports nothing that looks like a write.
+            return IngestOutcome.SKIPPED_ALREADY_PROCESSED
+        # ⛔ The `else` is NOT dead and must not be "tidied" into a de-indent of
+        # `if result:`: `result` is None in --capture-metadata mode, and the
+        # block below is the one that WRITES that mode's Source. Hoisting it
+        # under `if result:` silently disables the metadata capture.
         else:
             if result:
                 print(f"ingesting with {extractor.version} …")
@@ -1149,9 +1260,21 @@ def main(argv=None):
         print(f"points : {len(statements)} statements, {len(operators)} operators")
         print(f"graph  : {args.db}  (Cypher-queryable)")
         print(f"render : {args.out}")
+        return IngestOutcome.DONE
     finally:
         proj.close()
 
 
+def cli() -> None:
+    """The ``tortoise-ingest`` console-script entry point (#8447 C3).
+
+    The ONE place an outcome becomes a process exit status for an installed
+    entry point. `pyproject.toml` names THIS, not :func:`main`: the generated
+    wrapper is ``sys.exit(main())``, and passing it a ``StrEnum`` member exits
+    **1** with the member printed — so a DONE ingest red as a failure.
+    """
+    raise SystemExit(main().returncode)
+
+
 if __name__ == "__main__":
-    main()
+    cli()

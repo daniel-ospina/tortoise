@@ -22,7 +22,8 @@ reds on a line-number citation in §2 and on a symbol the tree does not bind. Th
 the change that made it **MARKS** — it read SILENT on every earlier head, and recording this document
 at an older commit while carrying the new row is exactly the stale-map shape (#6134) it exists to
 prevent.
-**Status:** C1 of #8447 (this document). C2 (boundary tests per surface) and C3 (the four doors)
+**Status:** C1 of #8447 (this document). C2 (boundary tests per surface) is in the tree; C3 (the four
+doors) is **2 of 4 landed, capture and ingest open** — recorded on the issue, not here.
 are tracked on the issue.
 
 ---
@@ -78,6 +79,7 @@ a reader who finds the number has drifted should search the quoted fragment: tha
 | `tortoise_query(text=…)` (MCP, `tortoise/tool_registry.py::TOOL_REGISTRY`; the `text=` arm only) | `limit` (100 on that arm) | **SILENT** | `tortoise/mcp_server.py::tortoise_query` calls `tortoise_fts_query(…, limit=eff_limit)` **without** the private marker sink, and the SDK method (`tortoise/sdk.py::tortoise_fts_query`) is declared `-> list[dict]` — so even though it CAN compute the marker (its `_truncation_out` sink), a bare list has nowhere to carry it. Its structural arm (`text=None`) is a different surface, and not all of its branches are marked, see ⚠️ below |
 | `GET /v1/points` (hosted, `tortoise/hosted_api.py::list_points`) | `limit=50` (`Query(50, ge=1, le=1000)`) | **MARKS** | the same function asks the store for `limit+1` (an internal probe row, dropped before delivery) and its own `mark_truncation`/`truncation_field` calls (`tortoise/truncation.py::truncation_field`) publish `truncated`; `total_available` is deliberately WITHHELD (`exact=False` — a probe proves *more exist*, not *how many*), so a truncated page takes the third state. `count` is still rows **delivered**, and the cap VALUES are unchanged |
 | `GET /points` (selfhost, `tortoise/selfhost_api.py::list_points`) | `limit=50` | **SILENT** | `response_model=list[PointResponse]` — a bare list on the route |
+| `tortoise ingest` (CLI, `tortoise/ingest.py`) — the **ingest door** of C3 | the whole ask: a target the graph does not hold as a `:Document` Source, an idempotency claim, and a sweep that leaves work pending | **MARKS** (exit status) | `tortoise/ingest.py::IngestOutcome` — `main` returns a named outcome and `.returncode` **is** the exit status (`DONE`/`SKIPPED_*` → 0, `REFUSED_NOT_FOUND`/`PARTIAL` → 1). ⛔ The exit status reaches the shell through `tortoise/ingest.py::cli`, which `pyproject.toml` names — **never** through `main`: the generated console wrapper is `sys.exit(<entry>())` and `IngestOutcome` is a `StrEnum`, so `sys.exit(<member>)` prints it and exits **1** for every arm including `DONE` (measured). A refusal writes NO completion artifact — no `--resolution` Point, no `points : N statements` summary, no `--out` render. ⚠️ A **skip is not a refusal**: `SKIPPED_ALREADY_PROCESSED` / `_EXTRACTED` / `_NOTHING_PENDING` stay `0`, and the sweep's own `already claimed` bucket is NOT `PARTIAL` — an idempotent re-run's answer *is* the ask, so reddening it would train callers to ignore the exit status. Pinned by `tests/test_8447_c3_ingest_door.py` (12 tests, both directions). ⚠️ **This door MARKS its refusal, NOT its every bound**: `--max-utterances N` still cuts `sections[:N]` (`tortoise/extractor.py::extract_from_document`) with no marker, and `_do_upgrade` then clears `needs_extraction`/`doc_status` — so the cut is recorded as a complete extraction and no sweep can revisit it. That is a live **SILENT** bound on a door this row declares MARKS, named here rather than fixed: it is `DONE`-shaped output over a truncated result, the same class as the list-shaped surfaces in §2a. |
 | `GET /v1/events` (hosted, `tortoise/hosted_api.py::events_poll`) | `limit=100` (`le=_MAX_EVENT_PAGE`) | **REFUSES at the edge** | `limit: int = Query(100, ge=1, le=_MAX_EVENT_PAGE)` in `events_poll` refuses 0 at the route; the seam below it (`tortoise/event_store.py::read_after`) refuses both ends — see §3 |
 
 ⚠️ **`get_cross_lens_candidates` MARKS one of its three bounds.** The marker is
@@ -281,3 +283,18 @@ A marker is only an instrument if a caller can act on it. Therefore:
   two reds and lose the only discrimination against a marker that is present but lying — so the
   nesting is the fact to carry, not a rounding detail.
 - `docs/architecture/STORAGE-ARCHITECTURE.md` — the storage seams these bounds sit on.
+
+## 6. Refusal-clause per door (C3)
+
+§1a is enforced door by door, not once:
+
+| door | mechanism | evidence |
+|---|---|---|
+| **record write** | `RecordWriteOutcome.REFUSED` + `RecordWrite.refusal`; `status` reads `degraded` | `tortoise/record_writer.py`; `_record_health` reads the counters from `/health` |
+| **session read** | the door abstains visibly instead of `200` + an empty transcript | PR #10021 |
+| **capture** | the 2xx receipt carries `errors` / `warnings` / `diagnostics`; the turn cap REFUSES at the handler (`MAX_SESSION_TURNS`), the per-turn cap MARKS (`_CAPTURE_TRUNCATION_SENTINEL`) | `tortoise/hosted_api.py::_capture_session_impl` |
+| **ingest** | `tortoise/ingest.py::IngestOutcome` — the exit status is the marker, and a refusal writes no completion artifact | `tests/test_8447_c3_ingest_door.py` |
+
+⛔ **A door's counters are part of the clause.** "Any counter it increments is read by something" —
+the record door's counters reach `/health` through `_record_health`; the ingest door increments none
+(the exit status is its instrument), so nothing is left unread there.
