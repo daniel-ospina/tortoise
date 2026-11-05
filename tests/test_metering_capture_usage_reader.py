@@ -122,13 +122,21 @@ def _names_the_reader(path):
     (``"tortoise.metering.get_capture_usage"``) are the same reference, and an arm
     scoped to ``Call``/``Subscript`` read both as CLEAN while the text scan this
     replaced caught them (#10962 review, P2 — a narrowing of the detection
-    surface, not a strengthening of it). The value must BE the name (``==``) or
-    END WITH it (``.endswith``), so prose that merely mentions
-    ``metering.get_capture_usage`` stays invisible; a docstring is excluded
+    surface, not a strengthening of it). The value must BE the name (``==``) or be
+    the dotted ``metering.get_capture_usage`` path: a bare ``endswith`` matched
+    prose that merely ENDS in the name — an error message
+    (``"… could not be resolved: metering.get_capture_usage"``) and a
+    ``"%s.get_capture_usage"`` log placeholder — which is a false RED on the
+    required scan, the mirror of the fail-open the arm was widened to close, so
+    the suffix arm also requires the ``metering`` segment. Prose that mentions or
+    ends in the path any other way stays invisible; a docstring is excluded
     explicitly and a comment never reaches the AST at all, which are what this
     helper exists to exclude. (A name built at
     RUNTIME, e.g. ``getattr(m, some_variable)`` or ``eval``, is out of scope:
-    no static pin can resolve it, and demanding it is demanding an interpreter.)
+    no static pin can resolve it, and demanding it is demanding an interpreter.
+    Declared residual: a dotted path through an ALIAS of the module
+    (``"m.get_capture_usage"`` where ``m`` is ``tortoise.metering``) is not
+    matched, because the segment check names ``metering``.)
 
     It cannot see TRANSITIVE wiring: a door that runs the gate inherits the
     reader without naming it (the declared residual on ``#10949``). "No offender"
@@ -184,7 +192,10 @@ def _names_the_reader(path):
             and id(node) not in docstrings
             and (
                 node.value == "get_capture_usage"
-                or node.value.endswith(".get_capture_usage")
+                or (
+                    node.value.endswith(".get_capture_usage")
+                    and node.value.rsplit(".", 2)[-2] == "metering"
+                )
             )
         ):
             # ⛔ A string Constant ANYWHERE in the module, not only as a call
@@ -195,10 +206,12 @@ def _names_the_reader(path):
             # constant. Scoping this arm to ``Call``/``Subscript`` read the last two
             # as CLEAN while the text scan it replaced caught them — a narrowing,
             # not the strengthening the docstring claimed (#10962 review P2).
-            # ``endswith`` covers the dotted path; ``id(node) not in docstrings``
-            # keeps a docstring that IS the path from reading as a consumer. Prose
-            # stays invisible because a log MESSAGE only CONTAINS the name —
-            # ``"metering.get_capture_usage is the reader"`` matches neither test.
+            # ``endswith`` covers the dotted path, and it is CONSTRAINED to the
+            # ``metering`` segment: a bare ``endswith`` also matched an error MESSAGE
+            # (``"… could not be resolved: metering.get_capture_usage"``) and a
+            # ``"%s.get_capture_usage"`` placeholder, both of which are prose and
+            # would FALSE-RED the required scan. ``id(node) not in docstrings``
+            # keeps a docstring that IS the path from reading as a consumer.
             return True
     return False
 
@@ -407,10 +420,12 @@ def test_the_scan_catches_the_reader_named_as_a_string_OUTSIDE_a_call(tmp_path):
     ``importlib``/plugin loader is handed. Each gets its own fixture, because an
     arm that is never exercised can be deleted without reddening anything.
 
-    ⛔ The docstring fixture is the false-POSITIVE half, and it is pinned HERE
-    rather than left implicit: once the arm matches any string Constant, a
-    docstring whose entire body IS the dotted path is the one shape that must
-    still stay off the offender list.
+    ⛔ The remaining three fixtures are the false-POSITIVE half, and they are
+    pinned HERE rather than left implicit: once the arm matches any string
+    Constant, a docstring whose entire body IS the dotted path, an error MESSAGE
+    that ends in the path, and a log FORMAT placeholder that ends in it must all
+    stay off the offender list. The last two red on an unconstrained
+    ``endswith`` (measured) — a false RED on the required scan.
     """
     (tmp_path / "dict_registered.py").write_text(
         'from tortoise.cost_dimensions import READER\n'
@@ -422,13 +437,21 @@ def test_the_scan_catches_the_reader_named_as_a_string_OUTSIDE_a_call(tmp_path):
     (tmp_path / "docstring_is_the_path.py").write_text(
         '"""tortoise.metering.get_capture_usage"""\nX = 1\n',
         encoding="utf-8")
+    (tmp_path / "error_message.py").write_text(
+        'raise RuntimeError('
+        '"meter could not be resolved: metering.get_capture_usage")\n',
+        encoding="utf-8")
+    (tmp_path / "format_placeholder.py").write_text(
+        'logger.info("%s.get_capture_usage", mod)\n', encoding="utf-8")
     offenders, scanned = _scan_capture_call_sites(tmp_path)
     assert scanned == [
         "dict_registered.py", "docstring_is_the_path.py", "dotted_path.py",
+        "error_message.py", "format_placeholder.py",
     ]
     assert sorted(offenders) == ["dict_registered.py", "dotted_path.py"], (
         "a dict-literal registration and a dotted path in a constant are both "
-        "consumers, while a docstring that IS the path is prose; found: "
+        "consumers, while a docstring that IS the path, an error message ending "
+        "in it and a ``%s`` format placeholder ending in it are prose; found: "
         f"{offenders}"
     )
 
