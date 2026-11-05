@@ -1938,8 +1938,10 @@ a THIRD"* resident HNSW index. That count is not an artifact of a widening serve
 from the two labels the 2026-09-24 measurement actually found vectors on — the pre-edit sentence named
 *"a SECOND HNSW index for `:Object` and a THIRD for `:Event`"* — while the vector leg already addressed
 **six** distinct labels on that date (`Point` via `operator`, plus `Event`, `Subject`, `Document`,
-`Object`, `Source`: `tortoise/security.py`'s `VALID_ENTITY_TYPES` at `e083c972`, and
-`search_engine.py:860`'s `label = "Point" if entity_type == "operator" else entity_type.capitalize()`).
+`Object`, `Source`: `tortoise/security.py`'s `VALID_ENTITY_TYPES` and
+`tortoise/search_engine.py:860`'s `label = "Point" if entity_type == "operator" else
+entity_type.capitalize()`, **both read at `e083c972`** — that derivation now lives in
+`security.entity_label()`).
 The five-label set below is that six with `Document` folded into `Source`, so the served set NARROWED to
 five rather than later "reaching" it — the count was wrong on its own date, which is what
 `01-align.md:53-54` already says.
@@ -2004,9 +2006,13 @@ the decision. This entry records the second pass that closed it, and why each fi
 place it stood.
 
 **The figures, and what was wrong with them.** The ≈50 MB payload figure is an additive estimate from the
-2026-09-24 measurement: `Point` ~31 MB + `Object` ~11.8 MB + `Event` ~7.2 MB, at 1.5 KB each. Its
-`Point` leg reads that label's ALL-attributes line as vector bytes, so the estimate is not exact — but the
-`Object` and `Event` legs DO exist: those labels store 7,859 and 4,798 embeddings respectively, and the
+2026-09-24 measurement: `Point` ~31 MB + `Object` ~11.8 MB + `Event` ~7.2 MB, at 1.5 KB each. **Every leg
+is a VECTOR COUNT × 1.5 KB, not an attribute line** — `Object` 7,859 × 1.5 KB ≈ 11.8 MB, `Event` 4,798 ×
+1.5 KB ≈ 7.2 MB (§12.1b), and `Point` the remaining 20,923 of 33,580 × 1.5 KB ≈ 31.4 MB. So the estimate
+is a vectors-only estimate of the three labels that store them; the sum lands on ≈50 MB, which is a
+**coincidence** with §12.1's `Point` node-attributes line of 50 MB — that line is ALL attributes of the
+label, and no leg reads it (§12.1 says so in the place it stands). The legs are still estimates of the
+payload, not a per-label measurement — but the `Object` and `Event` legs DO exist: those labels store 7,859 and 4,798 embeddings respectively, and the
 whole defect this epic exists for is that they store them with **no vector index behind them** (`Object`
 and `Event` carry no vector DDL — only `Point` does). The part of the ≈50 MB that is *removable* is
 therefore the unindexed `Object`+`Event` population: **12,657 vectors × 1,536 B = 19.4 MB, 38 % of every
