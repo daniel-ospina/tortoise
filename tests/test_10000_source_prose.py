@@ -1,4 +1,10 @@
 """#10000 (§9.1/D1) — the session `:Source` must not carry TURN prose.
+⛔ BOUND OF THIS GUARD, stated because it is blind here BY CONSTRUCTION: the
+scan's needle is a Latin phrase containing a SPACE, and a lexicon member can
+never contain one — so a space-less (CJK) capture, whose single run arrives
+WHOLE and is the turn's text verbatim (`_session_source_metadata`'s residual),
+would pass this file while carrying it. The absence leg is therefore evidence
+about word-delimited scripts; the residual is named, not claimed away.
 
 THE RULE. `docs/architecture/STORAGE-ARCHITECTURE.md` §9.1 (D1, owner ruling
 2026-09-23) puts the transcript in the RECORD: *"not in the graph, not a
