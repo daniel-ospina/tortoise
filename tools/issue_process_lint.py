@@ -107,7 +107,7 @@ Usage
     uv run python tools/issue_process_lint.py --pr 11027
     uv run python tools/issue_process_lint.py --issue 4282
     uv run python tools/issue_process_lint.py --issue 4282 --wip        # issue arms only
-    uv run python tools/issue_process_lint.py --sweep                  # open PRs
+    uv run python tools/issue_process_lint.py --sweep                  # newest 50 open PRs (a CAP)
     uv run python tools/issue_process_lint.py --sweep-issues --label P0-blocker --limit 20
     uv run python tools/issue_process_lint.py --body-file /tmp/body.md
     uv run python tools/issue_process_lint.py --issue-body-file /tmp/i.md \
@@ -201,9 +201,25 @@ CONTINUATION_RE = re.compile(
 # Markdown emphasis sits *between* the words in real bodies — measured: "deliberately **not**
 # `Closes`" defeats a plain `\s+` separator, so the separator admits emphasis characters.
 _EMPH = r"[\s*_`]+"
+# ⚠️ The bare phrase `deliberately not` is NOT a decline on its own, and treating it as one was a
+# false PASS. The decline is applied PER LINE to EVERY ref on that line, so an incidental
+# "deliberately not …" beside a claim deleted the claim: measured at the previous head,
+# `Refs #11077 — the lint is deliberately not a gate.` classified CLEAN, i.e. delivered work that
+# nothing closes reported as healthy — the #10534 shape and the direction this tool ranks worst.
+#
+# The phrase is the author's answer only when what FOLLOWS it is about closing: a closing-word stem
+# (`deliberately not closing this one`), or nothing but emphasis/punctuation to end of line — the
+# second form is the one that survives when the quoted keyword was written in an inline code span
+# and `strip_code` has already blanked it (`deliberately **not** `Closes`.`, the pinned case).
+# Emphasis characters are admitted on both sides of the tail because they wrap the word.
+_DECLINE_TAIL = (
+    rf"(?=[\s*_`]*(?:(?:a|an|the){_EMPH})?(?:clos|fix|resolv|satisf)"
+    r"|[\s*_`]*[:.,;()\[\]—–!?]"
+    r"|[\s*_`]*$)"
+)
 DECLINE_RE = re.compile(
-    rf"deliberately{_EMPH}not|does{_EMPH}not{_EMPH}clos|not{_EMPH}(?:a{_EMPH})?clos"
-    rf"|non-closing|no{_EMPH}closing",
+    rf"deliberately{_EMPH}not{_DECLINE_TAIL}|does{_EMPH}not{_EMPH}clos"
+    rf"|not{_EMPH}(?:a{_EMPH})?clos|non-closing|no{_EMPH}closing",
     re.IGNORECASE,
 )
 SATISFIES_HEADING_RE = re.compile(r"^[ \t]{0,3}#{2,3}[ \t]*Satisfies\b", re.IGNORECASE | re.MULTILINE)
@@ -582,6 +598,27 @@ def sweep_issues(repo: str | None, limit: int, label: str | None) -> list[tuple[
 
 
 # --- CLI ----------------------------------------------------------------------------------
+def _note_truncation(notes: list[str], rows: list, limit: int, noun: str) -> None:
+    """Report a sweep that stopped at its CAP instead of at the end of the population.
+
+    `--sweep`/`--sweep-issues` make ONE `gh … list --limit N` call, so a result set of exactly N is
+    indistinguishable from "there are exactly N" unless it is said out loud — and `gh` lists
+    newest-first, so the subjects skipped are the OLDEST, which is precisely where arm 2's defect
+    (work started before the completion criteria existed) concentrates. Every other narrowed
+    population in this module is already named (`Unmeasurable`, the unread `owner/repo#N` claims,
+    the unterminated fence, the "carried none" count); the truncation that can hide 97 % of the
+    subjects was the one that was silent. `>=` rather than `==` so an off-by-one in `gh`'s own
+    accounting can only over-report, never hide the bound.
+    """
+    if len(rows) < limit:
+        return
+    notes.append(
+        f"--limit {limit} stopped this sweep at its CAP with {len(rows)} {noun}(s) read — `gh` "
+        f"lists newest-first, so OLDER {noun}s were NOT read; this is a sample, not the population "
+        f"(raise --limit to widen it)"
+    )
+
+
 def _comments_from_file(path: Path) -> list[str]:
     raw = path.read_text(encoding="utf-8")
     try:
@@ -603,8 +640,15 @@ def main(argv: list[str] | None = None) -> int:
     which = ap.add_mutually_exclusive_group(required=True)
     which.add_argument("--pr", type=int, help="classify one PR by number")
     which.add_argument("--issue", type=int, help="classify one issue by number")
-    which.add_argument("--sweep", action="store_true", help="classify every open PR")
-    which.add_argument("--sweep-issues", action="store_true", help="classify every open issue")
+    # ⚠️ NOT "every" open PR/issue: each sweep makes ONE `gh … list --limit N` call, so it reads
+    # the newest `--limit` subjects and NOT the population. Calling that "every" (and `--limit` a
+    # "page size") described a pagination loop that does not exist, and the truncation ran in the
+    # HARMFUL direction — `gh` lists newest-first, so the oldest open subjects, exactly where
+    # "WIP started before the criteria existed" lives, were the ones silently skipped.
+    which.add_argument("--sweep", action="store_true",
+                       help="classify the newest --limit open PRs (NOT the whole population)")
+    which.add_argument("--sweep-issues", action="store_true",
+                       help="classify the newest --limit open issues (NOT the whole population)")
     which.add_argument("--body-file", type=Path, help="offline: a PR body")
     which.add_argument("--issue-body-file", type=Path, help="offline: an issue body")
     ap.add_argument("--repo", default=None,
@@ -617,7 +661,10 @@ def main(argv: list[str] | None = None) -> int:
                          "single-issue modes only")
     ap.add_argument("--no-wip", action="store_true", help="inject the opposite verdict")
     ap.add_argument("--label", default=None, help="--sweep-issues only: restrict the population")
-    ap.add_argument("--limit", type=int, default=50, help="--sweep/--sweep-issues page size")
+    ap.add_argument("--limit", type=int, default=50,
+                    help="--sweep/--sweep-issues: how many open subjects to read, newest-first "
+                         "(one `gh` list call — a CAP, not a page count, and a run that hits it "
+                         "says so)")
     ap.add_argument("--annotate", action="store_true",
                     help="emit GitHub Actions ::warning lines (for a warn-only workflow step)")
     ap.add_argument("--json", action="store_true", help="emit JSON")
@@ -698,6 +745,7 @@ def main(argv: list[str] | None = None) -> int:
             for number, body, labels in rows:
                 findings += classify_pr(body, number, repo, labels, notes=notes, repo_unknown=repo_unknown)
             population = f"{len(rows)} open PR(s)"
+            _note_truncation(notes, rows, args.limit, "open PR")
         else:  # --sweep-issues
             rows = sweep_issues(repo, args.limit, args.label)
             for number, bodies in rows:
@@ -705,6 +753,7 @@ def main(argv: list[str] | None = None) -> int:
                 findings += found
                 measured_rows.append(measured)
             population = f"{len(rows)} open issue(s)"
+            _note_truncation(notes, rows, args.limit, "open issue")
     except Unmeasurable as exc:
         print(f"issue_process_lint: UNMEASURED — {exc}", file=sys.stderr)
         return RC_UNMEASURABLE

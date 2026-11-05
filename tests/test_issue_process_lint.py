@@ -954,27 +954,75 @@ def test_the_first_ref_clause_is_a_closing_keyword_rule_only():
     assert "FIRST ref" not in detail("Refs #1\n")
 
 
+def _peer_vocabulary(ops_dir: Path, exclude: str) -> tuple[set, set]:
+    """The `type` / `domain` values used by the OTHER docs in `ops_dir`.
+
+    Two defects lived in the inline version of this scan (review P3), and both are why it is a
+    function here rather than a loop body:
+
+    1. `ops_dir.glob("*.md")` includes the doc UNDER TEST, so its own value seeded the set and
+       `front["type"] in peer_types` was true by construction for ANY value — an assertion that
+       cannot fail, under a name promising peer conformance.
+    2. `split("---", 2)[1]` raises `IndexError` for a peer with NO frontmatter. This test file is
+       registered on the REQUIRED `core` surface, so the next doc added to `docs/ops/` without
+       frontmatter would red a required check for a reason unrelated to its author.
+    """
+    types: set = set()
+    domains: set = set()
+    for path in sorted(ops_dir.glob("*.md")):
+        if path.name == exclude:
+            continue
+        parts = path.read_text(encoding="utf-8").split("---", 2)
+        if len(parts) < 3:  # no frontmatter at all — not a peer we can read a vocabulary from
+            continue
+        fm = yaml.safe_load(parts[1]) or {}
+        if not isinstance(fm, dict):
+            continue
+        if "type" in fm:
+            types.add(fm["type"])
+        if "domain" in fm:
+            domains.add(fm["domain"])
+    return types, domains
+
+
 def test_the_doc_frontmatter_matches_its_peers():
     """Every other `docs/ops/` doc uses `type: operations` / `domain: platform` / `doc_status:`,
     and none carries a `status:` key. This one said `type: ops` / `domain: process` beside a
     `status: draft` that contradicted its own `doc_status: live`."""
-    import yaml
     doc = (ROOT / "docs" / "ops" / "ISSUE-WORKING-PROCESS.md").read_text(encoding="utf-8")
     front = yaml.safe_load(doc.split("---", 2)[1])
     assert front["type"] == "operations"
     assert front["domain"] == "platform"
     assert front["doc_status"] == "live"
     assert "status" not in front
-    peers = [(ROOT / "docs" / "ops" / p.name) for p in (ROOT / "docs" / "ops").glob("*.md")]
-    peer_types, peer_domains = set(), set()
-    for f in peers:
-        fm = yaml.safe_load(f.read_text(encoding="utf-8").split("---", 2)[1]) or {}
-        if "type" in fm:
-            peer_types.add(fm["type"])
-        if "domain" in fm:
-            peer_domains.add(fm["domain"])
+    peer_types, peer_domains = _peer_vocabulary(ROOT / "docs" / "ops", "ISSUE-WORKING-PROCESS.md")
+    # POPULATED from other docs, or the two assertions below assert nothing.
+    assert peer_types and peer_domains, (peer_types, peer_domains)
     assert front["type"] in peer_types, (front["type"], peer_types)
     assert front["domain"] in peer_domains, (front["domain"], peer_domains)
+
+
+def test_the_peer_vocabulary_excludes_the_doc_under_test_and_survives_a_frontmatterless_peer(
+        tmp_path):
+    """Non-vacuity of the peer check itself, in both directions.
+
+    The pre-fix inline scan had (a) an assertion that could not fail — the doc under test seeded its
+    own peer set — and (b) an `IndexError` landmine for a frontmatter-less peer, on a test file that
+    runs in the REQUIRED `core` shards.
+    """
+    ops = tmp_path / "ops"
+    ops.mkdir()
+    (ops / "peer.md").write_text("---\ntype: operations\ndomain: platform\n---\n\nbody\n",
+                                  encoding="utf-8")
+    (ops / "no-frontmatter.md").write_text("# just a doc, no frontmatter\n", encoding="utf-8")
+    # (b) a frontmatter-less peer is skipped rather than raising `IndexError`
+    types, domains = _peer_vocabulary(ops, "under-test.md")
+    assert types == {"operations"} and domains == {"platform"}, (types, domains)
+    # (a) the doc UNDER TEST does not contribute its own value to its peer set
+    subject = ops / "under-test.md"
+    subject.write_text("---\ntype: process\ndomain: ops\n---\n\nbody\n", encoding="utf-8")
+    types, domains = _peer_vocabulary(ops, "under-test.md")
+    assert "process" not in types and "ops" not in domains, (types, domains)
 
 
 # --- review round 10: `--wip` was accepted on the modes that never read it ---------------------
@@ -1048,3 +1096,111 @@ def test_the_usage_block_never_advertises_wip_for_a_pr_mode():
     assert examples, "the Usage block no longer shows the flag at all"
     for line in examples:
         assert any(m in line for m in _MODES_THAT_READ_WIP), line
+
+
+# --- review round 11: the decline escape deleted a claim, and the sweeps hid their own cap ----
+# `DECLINE_RE` is applied PER LINE to EVERY ref on that line, so a bare `deliberately not` anywhere
+# on a claiming line deleted the claim. Measured at the reviewed head:
+#   `Refs #11077 — the lint is deliberately not a gate.` -> classify_pr(...) == []   (CLEAN)
+# That is a false PASS in the direction this module ranks worst (#10534: delivered work that nothing
+# closes reports as healthy), from a sentence that is not about closing the reference at all.
+def test_an_incidental_deliberately_not_does_not_delete_the_claim():
+    """The sentence beside the claim is not the author answering about the reference."""
+    body = "Refs #11077 — the lint is deliberately not a gate.\n"
+    assert L.claims(body)["declined"] == [], L.claims(body)
+    findings = L.classify_pr(body, 11078)
+    assert [f.evidence["unresolved"] for f in findings] == [[11077]], findings
+
+
+@pytest.mark.parametrize("body,why", [
+    # the pinned real shape: the quoted keyword sits in an inline code span, so `strip_code` has
+    # already blanked it — the decline must survive that (this is why the phrase is not deleted)
+    ("Refs #10602 — deliberately **not** `Closes`.\n", "quoted keyword blanked as inline code"),
+    ("Refs #10602 — deliberately not closing this one.\n", "followed by a closing-word stem"),
+    ("Refs #10602 — deliberately not a closing keyword, see the plan.\n", "article + closing stem"),
+    ("Refs #10602 — deliberately not.\n", "nothing but the phrase"),
+])
+def test_the_decline_still_clears_a_reference_the_author_says_is_not_closing(body, why):
+    """The control: narrowing the escape must not delete it — an author who says the reference is
+    deliberately not a closing one is answering, and flagging them punishes the honesty the block
+    asks for."""
+    assert L.classify_pr(body, 11054) == [], why
+
+
+def test_the_decline_window_does_not_reach_across_a_clause():
+    """The narrowing is a WINDOW, not a word list: the phrase must be adjacent to what it declines.
+
+    `deliberately not a gate` is about the gate; `deliberately not closing` is about the reference.
+    Both are pinned above/below, so this asserts only that the same sentence cannot be read the
+    other way round — the failure would be silent in the CLEAN direction.
+    """
+    # the incidental phrase must not decline, however much prose follows it
+    for tail in ("a gate", "a blocker for anyone", "worth blocking a merge over"):
+        assert L.classify_pr(f"Refs #1234 — deliberately not {tail}.\n", 99), tail
+
+
+def _sweep_rows(n: int) -> list:
+    return [(i, "Refs #1\n", []) for i in range(1, n + 1)]
+
+
+def test_a_pr_sweep_that_stops_at_its_cap_says_so(monkeypatch, capsys):
+    """`--sweep` makes ONE `gh pr list --limit N` call; a full page read as the whole population.
+
+    `gh` lists NEWEST-first, so the subjects silently skipped are the OLDEST. Every other narrowed
+    population in this module is named in the output; the truncation that can hide most of the
+    subjects was the one that was silent (review P2).
+    """
+    monkeypatch.setattr(L, "resolve_repo", lambda repo: "daniel-ospina/tortoise")
+    monkeypatch.setattr(L, "sweep_prs", lambda repo, limit: _sweep_rows(limit))
+    L.main(["--sweep", "--limit", "5"])
+    out = capsys.readouterr().out
+    assert "stopped this sweep at its CAP" in out, out
+    assert "5 open PR(s)" in out
+
+
+def test_a_pr_sweep_short_of_its_cap_makes_no_such_claim(monkeypatch, capsys):
+    """The control: a sweep that reached the end of the population must not claim truncation."""
+    monkeypatch.setattr(L, "resolve_repo", lambda repo: "daniel-ospina/tortoise")
+    monkeypatch.setattr(L, "sweep_prs", lambda repo, limit: _sweep_rows(limit - 1))
+    L.main(["--sweep", "--limit", "5"])
+    out = capsys.readouterr().out
+    assert "CAP" not in out, out
+
+
+def test_an_issue_sweep_that_stops_at_its_cap_says_so_too(monkeypatch, capsys):
+    """Arm 2's own population — and the one where the skipped OLD issues matter most."""
+    monkeypatch.setattr(L, "resolve_repo", lambda repo: "daniel-ospina/tortoise")
+    monkeypatch.setattr(L, "sweep_issues",
+                        lambda repo, limit, label: [(i, ["no markers here"]) for i in range(1, limit + 1)])
+    L.main(["--sweep-issues", "--limit", "4"])
+    out = capsys.readouterr().out
+    assert "stopped this sweep at its CAP" in out, out
+    assert "open issue" in out, out
+
+
+def test_the_cap_is_reported_in_json_and_annotate_modes_too(monkeypatch, capsys):
+    """The note must not be a human-output-only nicety: `--json` is what a caller parses."""
+    import json as _json
+    monkeypatch.setattr(L, "resolve_repo", lambda repo: "daniel-ospina/tortoise")
+    monkeypatch.setattr(L, "sweep_prs", lambda repo, limit: _sweep_rows(limit))
+    L.main(["--sweep", "--limit", "3", "--json"])
+    payload = _json.loads(capsys.readouterr().out)
+    assert any("CAP" in n for n in payload["notes"]), payload["notes"]
+    monkeypatch.setattr(L, "sweep_prs", lambda repo, limit: _sweep_rows(limit))
+    L.main(["--sweep", "--limit", "3", "--annotate"])
+    assert "CAP" in capsys.readouterr().out
+
+
+def test_the_flags_do_not_call_a_cap_a_population(capsys):
+    """The help text and the doc both said "every" and "page size", asserting a pagination loop
+    that does not exist — there is ONE `gh … list --limit N` call per sweep (review P2)."""
+    with pytest.raises(SystemExit):
+        L.main(["--help"])
+    help_text = capsys.readouterr().out
+    assert "every open PR" not in help_text, help_text
+    assert "every open issue" not in help_text, help_text
+    assert "page size" not in help_text, help_text
+    assert "CAP" in help_text, help_text
+    doc = (ROOT / "docs" / "ops" / "ISSUE-WORKING-PROCESS.md").read_text(encoding="utf-8")
+    assert "every open PR" not in doc
+    assert "a CAP, not the population" in doc
