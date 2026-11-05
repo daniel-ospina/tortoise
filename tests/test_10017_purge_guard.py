@@ -528,8 +528,12 @@ def test_a_cached_census_that_names_no_graph_is_not_evidence(tmp_path, capsys):
     all, while `cache_eviction.load_parity_report` refused the very same file. The
     lenient side was the artefact a human signs for an IRREVERSIBLE delete.
 
-    Mutation that goes RED here: removing the `graph` requirement from
-    `_report_problem` (the run then exits 0).
+    ⚠️ Which guard fires here, measured (review P2, cycle 6): removing the `graph`
+    requirement from `_report_problem` does NOT make the run exit 0 — the identity
+    refusal below fires first, on `graph: None` vs `'x'`. This pin reds on its
+    MESSAGE assertion, and `test_report_problem_refuses_a_nameless_census` is the pin
+    that reds on the `_report_problem` rule itself (which is the refusing guard on
+    paths the identity check does not reach, e.g. `_execute`'s live report).
     """
     report = _report(clean=[_clean_with_ids("s1", ["s1_t0"])])
     report["graph"] = None
@@ -544,6 +548,26 @@ def test_a_cached_census_that_names_no_graph_is_not_evidence(tmp_path, capsys):
     err = capsys.readouterr().err
     assert "nameless census is not evidence" in err
     assert not (tmp_path / "plan.json").exists()
+
+
+def test_report_problem_refuses_a_nameless_census():
+    """The SHAPE rule, pinned where it is the refusing guard.
+
+    `_report_problem` is what `_execute` applies to the LIVE report before any delete,
+    and what any second producer of `census()`'s dict meets. A nameless census must
+    not pass it, and the rule must treat every absence the same way — missing, blank,
+    whitespace, or a non-string.
+
+    Mutation that goes RED here: removing the `graph` rule (each case returns "").
+    """
+    report = _report(clean=[_clean_with_ids("s1", ["s1_t0"])])
+
+    for bad in (None, "", "   ", 3):
+        report["graph"] = bad
+        assert "nameless census is not evidence" in purge._report_problem(report), bad
+
+    report["graph"] = "x"
+    assert purge._report_problem(report) == ""
 
 
 def test_a_cached_census_of_ANOTHER_graph_cannot_license_this_one(tmp_path, capsys):
@@ -2912,3 +2936,50 @@ def test_every_plan_CLASS_is_defined_in_the_module_class_table():
     assert "DUPLICATE-WINDOW" in classes.values()
     undocumented = sorted(v for v in classes.values() if v not in doc)
     assert undocumented == []
+
+
+def test_the_census_json_help_states_the_identity_rule_and_its_residual(capsys):
+    """The flag's help is where the rule is read at the moment of choosing it.
+
+    Review P2, cycle 6: the destructive consumer ENFORCED the identity rule while its
+    help still described `--census-json` as a plain "reuse a census report", so nothing
+    on this surface said a nameless census is refused, that the report's graph must
+    match this run's, or that the comparison cannot see an INSTANCE or an earlier
+    measurement. The sibling consumer states all three in `--parity-graph`'s help.
+    """
+    with pytest.raises(SystemExit) as exc:
+        purge.main(["--help"])
+    assert exc.value.code == 0
+    text = capsys.readouterr().out
+    at = text.index("  --census-json")
+    rest = text[at + 1:]
+    block = " ".join(rest[:rest.index("\n  --")].split())
+    assert "REFUSED" in block
+    assert "another" in block and "graph" in block
+    assert "Name-only" in block and "NOT" in block
+
+
+def test_an_unresolvable_uri_on_the_CACHED_route_is_exit_three_not_a_traceback(
+        tmp_path, capsys):
+    """The resolver call the cached route added must be guarded like the live one.
+
+    Review P2, cycle 6: the identity check resolved the target OUTSIDE every handler,
+    so a URI the canonical resolver refuses (`bolt://` is a documented Tortoise URI
+    form, and the resolver accepts only docker/redis/rediss) escaped `main()` as a raw
+    traceback and the interpreter exited **1** — the documented "bad flags" code —
+    while the LIVE route for the identical flag returns a named exit 3.
+    """
+    path = tmp_path / "census.json"
+    path.write_text(json.dumps(_report(clean=[_clean_with_ids("s1", ["s1_t0"])])),
+                    encoding="utf-8")
+
+    rc = purge.main(["--uri", "bolt://h:1/x", "--org-id", "org",
+                     "--graph-id", "graph", "--record-dsn", _DSN,
+                     "--target-note", "unit test", "--census-json", str(path),
+                     "--plan-out", str(tmp_path / "plan.json")])
+
+    assert rc == 3
+    err = capsys.readouterr().err
+    assert "could not be resolved" in err
+    assert "Unsupported scheme" in err
+    assert not (tmp_path / "plan.json").exists()

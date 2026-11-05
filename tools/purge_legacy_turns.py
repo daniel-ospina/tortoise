@@ -1739,7 +1739,13 @@ def _build_parser() -> _UsageParser:
     parser.add_argument("--census-json", default=None,
                         help="reuse a census report instead of reading the "
                              "stores (preview only — --execute ALWAYS "
-                             "re-derives live)")
+                             "re-derives live). The report's own `graph` must "
+                             "equal the graph THIS run resolves from "
+                             "--uri/--db-path/--graph-name: a census that names "
+                             "none is REFUSED, and so is one naming another "
+                             "graph. ⚠️ Name-only — a same-named graph on a "
+                             "different instance, or measured earlier, is NOT "
+                             "detected")
     parser.add_argument("--json", default=None,
                         help="write the full census report to this path")
     parser.add_argument("--plan-out", default=None,
@@ -1874,8 +1880,22 @@ def main(argv: list[str] | None = None) -> int:
     # same one the cache census applies to the same artifact — the report's own
     # `graph` against the graph this run resolved — so the two consumers cannot
     # disagree about it.
-    expected_graph = census_mod.resolve_graph_name(
-        args.uri, args.db_path, args.graph_name)
+    # ⚠️ The check is NAME-ONLY: a census of the SAME graph measured on another
+    # instance, or earlier, passes (stated in `--census-json`'s help and in the plan's
+    # `census` block, never claimed closed).
+    # The resolution is GUARDED: the canonical resolver refuses a scheme it does not
+    # know (`bolt://`, a typo), and an unguarded call here escaped `main()` as a raw
+    # traceback at exit 1 — the documented USAGE code — while the LIVE route for the
+    # identical flag returns a named exit 3 (review P2, cycle 6).
+    try:
+        expected_graph = census_mod.resolve_graph_name(
+            args.uri, args.db_path, args.graph_name)
+    except (census_mod.CensusError, ValueError) as exc:
+        sys.stderr.write(
+            f"purge_legacy_turns: the graph target could not be resolved "
+            f"({type(exc).__name__}: {exc}) — an absence is NOT established, so no "
+            f"plan can be written. Nothing was deleted.\n")
+        return 3
     if report.get("graph") != expected_graph:
         sys.stderr.write(
             f"purge_legacy_turns: REFUSED {REFUSE_CENSUS_UNREADABLE}: the census "
