@@ -1601,6 +1601,43 @@ def test_collect_maps_the_head_branch_into_the_snapshot(monkeypatch):
     assert "fix/42-thing" in cmd, "the emitted command does not name the real branch"
 
 
+def test_collect_dedupes_an_issue_found_by_both_label_searches(monkeypatch):
+    """The WIRING, not the helper: `snap.issues = dedupe_issues(found)` inside `collect`.
+
+    An issue carrying BOTH labels is returned by BOTH searches — the overcount the module's
+    own comment at `collect` says it fixed. The existing arm calls `dedupe_issues` directly
+    and another dedupes in TEST-local code, so reverting the wiring to
+    `snap.issues = found` left the whole file green while `--json` emitted two units a
+    consumer keys as one and the priority ladder double-counted the same issue.
+    """
+    from tools import next_work
+
+    class FakeClient:
+        def _get_list(self, path, params="", select=".[]"):
+            return []
+
+        def list_check_runs(self, repo, sha):
+            return []
+
+    monkeypatch.setattr(next_work, "GhCli", lambda: FakeClient())
+    # The SAME issue number under both priority searches, as GitHub returns it.
+    monkeypatch.setattr(
+        next_work,
+        "_search_issues",
+        lambda c, r, label, s: [
+            {"number": 77, "title": "t", "priority": label}
+            if label in ("P0-blocker", "P1-severe")
+            else []
+        ],
+    )
+    monkeypatch.setattr(next_work, "_local_holders", lambda *a, **k: {})
+    monkeypatch.setattr(next_work, "_claim_verdicts", lambda *a, **k: None)
+
+    snap_, _, _ = next_work.collect(REPO, Path(__file__).resolve().parent.parent)
+    assert len(snap_.issues) == 1, f"the population double-counted one issue: {snap_.issues}"
+    assert snap_.issues[0]["priority"] == "P0-blocker", snap_.issues[0]
+
+
 def test_fold_constituents_may_carry_a_hash_prefix():
     """`batch_open.py` accepts `#<n>` tokens; requiring a bare digit made such a
     fold invisible here, leaving its constituents pickable ahead of it."""
@@ -1994,21 +2031,48 @@ def test_carry_patch_asks_for_a_re_record_not_a_review():
 
 
 # ── a failed gate read must be recorded, not silently substituted ─────────
-def test_a_failed_gate_read_is_recorded_as_incomplete():
+def test_a_failed_gate_read_is_recorded_as_incomplete(tmp_path: Path, monkeypatch):
     """The checkout's own `.mergify.yml` may be an uncommitted edit.
 
     Reading it after `origin/main` failed produced "no unmet conditions" →
     READY-TO-LAND with a command, while the module's own exit-2 list says an
-    unreadable gate is INCOMPLETE. This pins the wiring at the source, because the
-    fallback branch needs a real `git show` failure to reach.
+    unreadable gate is INCOMPLETE.
+
+    ⛔ BEHAVIOUR, NOT A SOURCE WINDOW. This was pinned by splitting the module's source on
+    `FALLBACK — origin/` and asserting `snap.unreadable.append` somewhere in the next 1600
+    characters — and the `except (ConfigError, OSError)` handler's OWN append sat inside that
+    window (~700 characters later), so the assertion was satisfied by an unrelated line: the
+    fallback could stop recording its failure (keep the message, `print` it to stderr
+    instead) and the pin stayed green. The arm below drives `collect` against a real
+    directory with a `.mergify.yml` on disk and no `origin/main` to read, so the only way it
+    passes is if the fallback actually records the refusal.
     """
-    src = Path(next_work_module_file()).read_text(encoding="utf-8")
-    assert "fell back to" in src, "the fallback must say so in the gate source"
-    tail = src.split("FALLBACK — origin/", 1)[1][:1600]
-    assert "snap.unreadable.append" in tail, (
-        "the fallback branch does not record the read failure, so a locally relaxed "
-        "gate would read as measured"
+    from tools import next_work
+
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / ".mergify.yml").write_text(
+        "queue_rules:\n  - name: q\n    queue_conditions:\n      - base=main\n"
+        "      - check-success=docs\n",
+        encoding="utf-8",
     )
+
+    class FakeClient:
+        def _get_list(self, path, params="", select=".[]"):
+            return []
+
+        def list_check_runs(self, repo, sha):
+            return []
+
+    monkeypatch.setattr(next_work, "GhCli", lambda: FakeClient())
+    monkeypatch.setattr(next_work, "_search_issues", lambda *a, **k: [])
+    monkeypatch.setattr(next_work, "_local_holders", lambda *a, **k: {})
+    monkeypatch.setattr(next_work, "_claim_verdicts", lambda *a, **k: None)
+
+    snap_, cfg, _ = next_work.collect(REPO, root)
+    assert cfg is not None, "the fallback copy on disk must still be parsed"
+    assert any("fell back to" in u for u in snap_.unreadable), snap_.unreadable
+    assert any(".mergify.yml" in u for u in snap_.unreadable), snap_.unreadable
 
 
 def next_work_module_file() -> str:

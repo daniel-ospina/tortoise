@@ -363,6 +363,34 @@ COUNT_BEFORE_TOKEN_RE = re.compile(
     + r"\b"
     r"|\b" + NUMERAL + r"\s+blocking\s+" + FINDING_NOUN + r"\b"
 )
+#: ⛔ THE COUNT IS `1` — the COMMONEST open-blocker count, and the one the class above cannot
+#: take. `COUNT_BEFORE_TOKEN_RE` starts its digits at 2 and its spelled numerals at `two`,
+#: because a spelled `one` is an ARTICLE as often as a count (`One P2 was fixed` is not a
+#: finding). Omitting the count entirely flipped the polarity on the DIGIT alone, measured on
+#: this module: `'CLEAN — 2 remaining P1'` blocked, `'CLEAN — 1 remaining P1'` did not.
+#: Two reviewers filed it independently (rounds 21 and 22) because the strongest wrong answer
+#: follows — `CLEAR_RE` matches that body too, so a comment whose only blocking statement is
+#: "1 remaining P1" was graded a CLEAR and the owner's tab said READY-FOR-OWNER for a PR
+#: carrying an open P1.
+#: The article guard is kept by requiring a PRESENCE CUE, not by dropping the count: the cue
+#: may sit between count and token (`1 remaining P1`, `one open P1`, `1 unresolved P1`,
+#: `1 more P1`) or after it (`1 P1 open`, `1 P1 remains`). `One P2 was fixed` has neither, so
+#: it still reads NEUTRAL — the false-BLOCK direction round 8 measured 5 of 6 phrasings into.
+_ONE_OPEN_CUE = (
+    r"(?:open|opened|opening|remaining|remains?|outstanding|unresolved|still|left|more|pending)"
+)
+ONE_OPEN_COUNT_RE = re.compile(
+    r"(?i)(?<![\w-])(?:1|one)\b(?:\s+\w+){0,2}\s+"
+    + _ONE_OPEN_CUE
+    + r"\b(?:\s+\w+){0,2}\s+"
+    + SEV
+    + r"\b"
+    r"|\b(?:1|one)\b(?:\s+\w+){0,2}\s+"
+    + SEV
+    + r"\b(?:\s+\w+){0,2}\s+"
+    + _ONE_OPEN_CUE
+    + r"\b"
+)
 #: A bracketed severity token used as a NOUN in running text (`2 [P1] open blocking defects`).
 BRACKET_SEVERITY_RE = re.compile(
     r"(?i)\[P[0-2]\]\s*(?:open|blocking|defects?|issues?|findings?|remain|unresolved)"
@@ -1085,6 +1113,7 @@ def _grades_as_blocking(text: str, item: Mapping[str, Any]) -> bool:
         or _table_finding(text)
         or BLOCKING_COUNT_RE.search(text)
         or COUNT_BEFORE_TOKEN_RE.search(text)
+        or ONE_OPEN_COUNT_RE.search(text)
         # A severity token beside an ISSUE-block SIBLING is a finding even when the body
         # never uses the word "severity" — `4 × `P2`, `check_type: bug`, `origin: diff``
         # is the dominant shape in the fold PRs (#10902/#10909/#10920).

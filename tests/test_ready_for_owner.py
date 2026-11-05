@@ -1171,6 +1171,26 @@ ROUND9_CORPUS: tuple[tuple[str, bool], ...] = (
     ("CLEAN — the guard returns 0 (2 defects remain).", True),
     ("CLEAN — 3 unresolved P1s.", True),
     ("CLEAN — 2 open P2s remain.", True),
+    # ROUND-22: the COUNT `1` — the commonest open-blocker count, and the one the class could
+    # not take (digits started at 2, spelled numerals at `two`). The polarity flipped on the
+    # digit alone: `CLEAN — 2 remaining P1` blocked, `CLEAN — 1 remaining P1` did not — and
+    # `CLEAR_RE` matches that body too, so the stronger wrong answer followed and the owner's
+    # tab said READY-FOR-OWNER for a PR carrying an open P1. Filed by two independent
+    # reviewers (rounds 21 and 22), fixed with a PRESENCE CUE rather than by dropping the
+    # article guard.
+    ("CLEAN — 1 remaining P1", True),
+    ("1 open P1 remains", True),
+    ("1 unresolved P1", True),
+    ("1 remaining P1", True),
+    ("One open P1 remains in the guard.", True),
+    ("1 more P1", True),
+    ("1 outstanding P1 finding", True),
+    ("1 P1 open", True),
+    ("1 P1 remains", True),
+    # …and the ARTICLE shapes the omission existed to protect: `one`/`1` with NO presence cue
+    # is not a count, so it must stay NEUTRAL (round 8's false-BLOCK direction).
+    ("**Outcome: CLEAN.** One P2 was fixed; two P3 deferred.", False),
+    ("**Outcome: CLEAN.** 1 P2 was fixed in the last commit.", False),
 )
 
 
