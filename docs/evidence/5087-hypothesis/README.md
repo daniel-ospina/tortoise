@@ -199,7 +199,7 @@ one *observed* fact **machine-enforced**:
    `TORTOISE_DB_URI` refusals, so a keyless or URI-less invocation exited 3 having left a
    header-only `*.log` inside this bundle — a file that reads as the setup of a run that never
    started, and the next attempt with the same `--out` was then refused at exit 2 by the one-log
-   rule while the documented reproduce command passes no `--overwrite`. Both prerequisites are now
+   rule while the documented reproduce command passes no `--overwrite`. The prerequisites are now
    checked **before anything is written**, so a refused run leaves **no file** at all. (b) The
    document↔record cross-check was `if preregistration.json is a file`, so **deleting the record
    switched the only check that the bars came from the document off** — no refusal, no line in the
@@ -272,6 +272,20 @@ it touches no count, no denominator and no bar.
     strictly after the registration's, which is the ordering the re-measurement claims and this log
     is where it is shown. **No number moves**; the guards can only refuse a
     run.
+17. **`#4282` DELETED the entry point this probe drives, so the arm can no longer run at all.** The
+    arm replays the corpus through `TortoiseSDK.capture_session`, and `#4282` (owner ruling
+    2026-10-27) deleted that method along with the rest of the surplus SDK surface. The probe now
+    **REFUSES BY NAME** as its FIRST run-precondition check — ahead of the `DEEPSEEK_API_KEY` /
+    `TORTOISE_DB_URI` checks and, deliberately, ahead of the repairable-looking ones (the `--prereg`
+    pin drift, the dirty tree, the corpus hash), because those send an operator to repair a pin or
+    clean a tree for an instrument that cannot execute at all. The refusal names the authorised
+    deletion instead of dying with an `AttributeError` on session 1 of every arm, and it leaves
+    **no file** behind. ⛔ **The surviving door is private**: the behaviour lives at
+    `hosted_api._capture_session_impl`, and the in-process extractor is reachable as
+    `sdk._extract_session_v2`; a measurement through either is a NEW instrument with its own
+    pre-registration over the pre-registered corpus, not a re-run of this one. **No number in this
+    bundle moves** — a probe that cannot execute cannot measure, and the recorded run stands on the
+    log it already carries.
 
 No bar, denominator, corpus or metric definition was touched by any of this, and the run was **not**
 repeated to get a friendlier number. The one-log rule is enforced from the FILE, not from the flag
@@ -366,7 +380,7 @@ creation**
 — an `--out` that escapes this bundle or already carries a `RATIO:`/`VERDICT:`, an unreadable
 `--prereg` or one that no ref contains or that does not precede `HEAD`, a malformed pins block, a
 document↔record digest mismatch, a moved production or metric-definition file, a dirty tree (the
-record included), a corpus-hash drift, and the two prerequisites — leave **no file** behind. **Four refusals are raised AFTER the log exists**, because they can only be known once
+record included), a corpus-hash drift, the capture-lane refusal, and the prerequisites — leave **no file** behind. **Four refusals are raised AFTER the log exists**, because they can only be known once
 the run has begun: an **arm graph that is not fresh** (a non-zero baseline census, refused *before*
 the first session is captured — a reused `--graph-prefix` would otherwise score the E2a guard over a
 previous run's Points), a fixture carrying no conversation, two arms of unequal length, and an

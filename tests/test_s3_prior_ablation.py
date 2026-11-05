@@ -1517,6 +1517,12 @@ def _stub_below_the_refusals(probe, monkeypatch, bundle: Path, doc: str) -> None
     monkeypatch.setattr(probe, "assert_clean_tree", lambda: "a1075dfc2")
     monkeypatch.setattr(probe, "probe_sha256", lambda: "sha256:" + "0" * 64)
     monkeypatch.setattr(probe, "corpus_state", lambda pins: (["wp01_x"] * 7, "sha256:" + "1" * 64))
+    # ⛔ #4282 DELETED the method this arm drives, so the REAL predicate refuses on every
+    # invocation. The tests that call this helper are about the refusals BELOW it, so it is stubbed
+    # here exactly like the git/corpus helpers above. The real predicate has its own behavioural
+    # test (`test_the_capture_lane_refusal_says_4282_and_leaves_no_log`), which is where the
+    # ordering and the no-file invariant are measured.
+    monkeypatch.setattr(probe, "assert_capture_lane", lambda sdk=None: None)
 
 
 def test_a_refused_run_leaves_no_log_file_behind(probe, monkeypatch, tmp_path, capsys):
@@ -1543,6 +1549,55 @@ def test_a_refused_run_leaves_no_log_file_behind(probe, monkeypatch, tmp_path, c
         probe.main(["--prereg", "a1075dfc2", "--out", str(out)])
     assert refusal.value.code == 3
     assert "TORTOISE_DB_URI" in capsys.readouterr().err
+    assert not out.exists()
+
+
+def test_the_capture_lane_refusal_says_4282_and_leaves_no_log(
+        probe, monkeypatch, tmp_path, capsys):
+    """#4282 deleted the arm's entry point, so the refusal is TERMINAL and first.
+
+    Three claims, each of which was wrong before the #4282 work touched this tool:
+      · it is the FIRST run-precondition refusal, ahead of the repairable-looking `source_sha` pin
+        and dirty-tree checks — those otherwise send an operator to repair a pin or clean a tree
+        for an instrument that cannot execute at all;
+      · it NAMES the authorised deletion (`#4282`, `capture_session`) rather than dying with an
+        `AttributeError` on session 1 of every arm; and
+      · it leaves NO file (review r6 F3): a header-only log reads as the setup of a run that never
+        started, and the next attempt is refused at exit 2 by the one-log rule while the documented
+        reproduce command passes no `--overwrite`.
+
+    The predicate is deliberately NOT stubbed here — this is the test that measures the real one.
+    """
+    bundle, doc = _copy_bundle(tmp_path)
+    monkeypatch.setattr(probe, "EVIDENCE_DIR", bundle)
+    monkeypatch.setattr(probe, "head_sha", lambda: "0" * 40)
+    monkeypatch.setattr(probe, "assert_prereg_binding", lambda prereg, head: prereg)
+    monkeypatch.setattr(probe, "show", lambda sha, rel: doc)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "present")
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:falkordb@localhost:6379/tortoise_test_matrix")
+    out = bundle / "s3-ablation-capture-lane.log"
+
+    with pytest.raises(SystemExit) as refusal:
+        probe.main(["--prereg", "a1075dfc2", "--out", str(out)])
+
+    assert refusal.value.code == 3
+    err = capsys.readouterr().err
+    assert "#4282" in err and "capture_session" in err, (
+        f"the refusal must name the authorised deletion, not a repairable pin: {err!r}")
+    assert not out.exists(), (
+        "a terminal refusal must leave no file — see the r6-F3 reason above")
+
+    # …and it fires AHEAD of the repairable-looking refusals. Both are stubbed to record a call, so
+    # a passing run proves neither was reached.
+    reached: list[str] = []
+    monkeypatch.setattr(probe, "assert_source_sha",
+                        lambda source_sha, head: reached.append("source_sha") or [])
+    monkeypatch.setattr(probe, "assert_clean_tree",
+                        lambda: reached.append("clean_tree") or "a1075dfc2")
+    with pytest.raises(SystemExit):
+        probe.main(["--prereg", "a1075dfc2", "--out", str(out)])
+    assert reached == [], (
+        f"the capture-lane refusal must precede the pin/tree checks, reached {reached}")
     assert not out.exists()
 
 

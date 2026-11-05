@@ -306,7 +306,7 @@ response_fields:
   emitted_when: 'the same condition as end_state_unknown, always alongside it — the ids of the covering candidates
     whose end is un-datable (#2350, #9202)'
   unchanged_when_off: yes — absent when no covering candidate has an unknown end
-# ⛔ THREE rows stood here until #4282 deleted their carriers (2026-10-27), and they are recorded
+# ⛔ FOUR rows stood here until #4282 deleted their carriers (2026-10-27), and they are recorded
 # here rather than dropped silently, because each named a REAL emitted field:
 #   • `sdk:capture_session` / `graph_ops` (#3561) — the capture's measured graph-operation count.
 #   • `sdk:capture_session` / `stats.step_witness` (#9116, landed by #10214) — the eight per-stage
@@ -314,6 +314,10 @@ response_fields:
 #     and (for the two flag-gated passes) the `enabled` flag beside them; a block witnesses its
 #     step only when the stage reports it did work, and the seam copies COUNTS, never the VET
 #     gate's per-candidate `decisions` text.
+#   • `sdk:get_provenance_chain` / `raw` — the Source index entry (source_id, content_hash,
+#     raw_state, raw_state_at, available, permanent, retryable, label, message) emitted on every
+#     returned item: the chain IS the Source link, so it existed whether or not the raw did.
+#     #4282 deleted the method and the row went with it.
 #   • `sdk:traverse` / `idx` (#6101) — now recorded on `tortoise_traverse` below, its surviving carrier.
 # The SEAM SURVIVES: it is `_capture_stats_with_step_witness` at the `_extract_session_v2` meta fold
 # (`tortoise/sdk.py`), a privatised method, and the whole extractor-v2 pipeline still reaches it. What
