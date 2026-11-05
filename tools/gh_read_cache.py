@@ -789,8 +789,14 @@ def _verb_positions(argv: tuple[str, ...]) -> list[int]:
 
     ⛔ THE WHOLE CONJUNCTION IS THE FIX, not the `argv[0]` test it replaced: degrading it to
     `argv[k].startswith("-") or k > 0` ("any index qualifies once `argv[0]` is a flag")
-    leaves the SUITE green and re-refuses `-R o/n search issues run view` — see the two
-    flag-prefixed legitimate reads pinned beside the flagless ones.
+    re-refuses `-R o/n search issues run view`. That degradation LEFT THE SUITE GREEN BEFORE
+    the two flag-prefixed legitimate reads were pinned beside the flagless ones — which is
+    why they were added — and it REDS on them now: measured at this head, 2 failures
+    (`test_a_legitimate_read_survives_the_widened_route_candidates` and
+    `test_mutable_graphql_is_refused_with_a_leading_global_flag`). ⛔ Do NOT read the earlier
+    green as "this conjunction is unpinned": it is pinned by exactly those two cases, and
+    quoting that past measurement in the present tense is how a reader concludes the opposite
+    of what the suite does.
 
     ⛔ AND AN EMPTY ARGUMENT DOES NOT END THE SEARCH, BECAUSE gh SKIPS IT. `gh "" pr view`
     does not fail: it RAN `pr view` (measured — and it spends a real call, so do not repeat

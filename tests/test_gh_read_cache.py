@@ -437,8 +437,10 @@ class CacheTest(unittest.TestCase):
             ("search", "code", "pr", "view"),
             # ⛔ AND WITH A LEADING FLAG, the position rule must still be "EVERY earlier token
             # is a flag or a flag's value", not "argv[0] is a flag": degrading the predicate
-            # to `argv[k].startswith("-") or k > 0` leaves the suite green and re-refuses
-            # these two as 'run view' / 'pr view' (measured).
+            # to `argv[k].startswith("-") or k > 0` re-refuses these two as 'run view' /
+            # 'pr view'. That degradation left the suite green only BEFORE these cases were
+            # added (which is why they were added); it reds on them now, so do not read the
+            # historical green as "nothing tests this" — the cases below ARE the pin.
             ("-R", "o/n", "search", "issues", "run", "view"),
             ("--repo", "o/n", "search", "code", "pr", "view"),
             ("search", "issues", "graphql", "--repo", "graphql/graphql-js"),
