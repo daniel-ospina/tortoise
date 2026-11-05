@@ -242,6 +242,24 @@ _MUTABLE_TOKENS: frozenset[str] = frozenset(
         "pushes",
         "oid",
         "total",
+        # whole mutable CLASSES an inventory belongs to (cycle-3 finding 7): a branch/tag set
+        # changes on every push, and an approval set changes on every review.
+        "branch",
+        "branches",
+        "branchlist",
+        "tag",
+        "tags",
+        "release",
+        "releases",
+        "assignee",
+        "assignees",
+        "approved",
+        "approvals",
+        "approvedat",
+        # glued spellings a single camelCase token produces (`headSha` splits to head/sha, but
+        # `headsha` is ONE token and the 4-char floor cannot use `sha`).
+        "headsha",
+        "headoid",
     }
 )
 
@@ -447,7 +465,7 @@ def _projection_digest(projection: str) -> str:
     return hashlib.sha1(projection.encode()).hexdigest()[:12]
 
 
-def _filename(key: str, scope: str, projection: str | None = None) -> str:
+def _filename(key: str, scope: str, projection: str | None = None, ttl_s: int | None = None) -> str:
     """Deterministic, collision-resistant, readable — SCOPED (guard 1) and PROJECTION-KEYED (F3).
 
     ⛔ THE PROJECTION IS PART OF THE IDENTITY. The second review found that a routine maintenance
@@ -458,13 +476,24 @@ def _filename(key: str, scope: str, projection: str | None = None) -> str:
     """
     if projection is None:
         projection = _projection_of(INVARIANTS[key].argv)
-    payload_id = hashlib.sha1(f"{scope}\x00{key}\x00{projection}".encode()).hexdigest()[:12]
+    if ttl_s is None:
+        ttl_s = INVARIANTS[key].ttl_s
+    # ⛔ THE EFFECTIVE TTL IS PART OF THE IDENTITY TOO (cycle-3 finding 4). `_load` rejects an entry
+    # whose stamped ttl differs from the one asked for, so without this two callers using different
+    # TTLs thrashed ONE file: measured 12 live reads for 12 accesses where a working cache does 2.
+    # That fails in the "extra calls" direction rather than staleness, but it silently disables the
+    # cache for a key — i.e. exactly the quota burn this module exists to stop.
+    payload_id = hashlib.sha1(
+        f"{scope}\x00{key}\x00{projection}\x00{int(ttl_s)}".encode()
+    ).hexdigest()[:12]
     return f"{_CACHE_PREFIX}{_slug(key)}-{_slug(scope)[:20]}-{payload_id}.json"
 
 
-def _cache_path(key: str, scope: str, projection: str | None = None) -> Path:
+def _cache_path(
+    key: str, scope: str, projection: str | None = None, ttl_s: int | None = None
+) -> Path:
     """The entry's NAME (not joined to a directory — the caller supplies cache_dir)."""
-    return Path(_filename(key, scope, projection))
+    return Path(_filename(key, scope, projection, ttl_s))
 
 
 def _envelope(
@@ -590,6 +619,16 @@ def read(
             f"{key!r} requires a non-empty scope (e.g. 'owner/repo@main'); without one, one repo's "
             f"answer is served as another's."
         )
+    # ⛔ R1's GLOBAL HALF, ENFORCED IN read() ITSELF (cycle-3 finding 3). Relying on callers to use
+    # `scope_for()` — as the USAGE block shows — left `read("user.identity", scope="o/r@main")`
+    # ACCEPTED: two lanes with different tokens then shared ONE identity entry. A global key's scope
+    # must be credential-derived, and read() is where that is checkable.
+    if key in GLOBAL_KEYS and not scope.startswith("global@"):
+        raise TtlNotPermitted(
+            f"{key!r} is a GLOBAL key: its answer depends on the TOKEN, not on a repo. Pass a "
+            f"credential-derived scope from scope_for(), not {scope!r} — otherwise one account's "
+            f"identity is served as another's."
+        )
     effective = ceiling if ttl_s is None else int(ttl_s)
     if effective <= 0:
         raise TtlNotPermitted(f"ttl_s must be positive, got {ttl_s!r}")
@@ -600,7 +639,7 @@ def read(
             f"(#1910)."
         )
 
-    path = Path(cache_dir) / _cache_path(key, scope).name
+    path = Path(cache_dir) / _cache_path(key, scope, ttl_s=effective).name
     hit = _load(path, key, scope, now=now, ttl_s=effective)
     if hit is not None:
         return hit
@@ -635,7 +674,7 @@ def default_cache_dir() -> Path:
     return Path(os.environ.get("XDG_CACHE_HOME") or (Path.home() / ".cache")) / "gh-read-cache"
 
 
-def _credential_fingerprint() -> str:
+def _credential_fingerprint() -> str | None:
     """A NON-REVERSIBLE fingerprint of the token that will answer a global read.
 
     ⛔ THE CREDENTIAL IS PART OF A GLOBAL KEY'S IDENTITY (F7). `api user` answers "which account is
@@ -650,14 +689,25 @@ def _credential_fingerprint() -> str:
     """
     token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN") or ""
     if not token:
-        return "no-token"
+        # ⛔ NO TOKEN VISIBLE IS NOT "ONE ACCOUNT" (cycle-3 finding 5). `gh` may be authenticating
+        # from ~/.config/gh/hosts.yml, so returning a constant here made every account on the box
+        # share ONE identity entry. Unknown identity FAILS CLOSED: a global key is then simply not
+        # cacheable and the caller reads live. Refusing to cache is cheap; serving another account's
+        # identity as your own is not.
+        return None
     return "tok:" + hashlib.sha256(token.encode()).hexdigest()[:12]
 
 
 def scope_for(key: str, repo: str, branch: str) -> str:
     """Global keys are scoped by CREDENTIAL (not branch); everything else by repo AND branch."""
     if key in GLOBAL_KEYS:
-        return f"global@{_credential_fingerprint()}"
+        cred = _credential_fingerprint()
+        if cred is None:
+            raise TtlNotPermitted(
+                f"{key!r} is global and no GH_TOKEN/GITHUB_TOKEN is set, so the answering account "
+                f"cannot be identified — refusing to cache it. Set a token, or read it live."
+            )
+        return f"global@{cred}"
     return f"{repo}@{branch}"
 
 

@@ -134,7 +134,7 @@ def test_mutable_key_is_refused_on_cached_lookup_too(tmp_path: Path) -> None:
     # `pr.state` is deliberately NOT in the registry, so its identity needs an explicit projection.
     blob = C._envelope("pr.state", SCOPE, b"stale-merge-state", now=1000.0, ttl_s=600,
                        projection="{id}")
-    (tmp_path / C._cache_path("pr.state", SCOPE, projection="{id}").name).write_bytes(blob)
+    (tmp_path / C._cache_path("pr.state", SCOPE, projection="{id}", ttl_s=600).name).write_bytes(blob)
     r = Counter()
     with pytest.raises(C.MutableReadRefused):
         _read("pr.state", now=1000.0, reader=r, cache_dir=tmp_path)
@@ -186,6 +186,32 @@ def test_stale_entry_is_never_a_fallback_for_a_failed_read(tmp_path: Path) -> No
     _read("repo.metadata", now=1000.0, reader=r, cache_dir=tmp_path)
     ttl = C.ttl_for("repo.metadata")
     r.fail = C.Unreadable("gh api failed: HTTP 403")
+    with pytest.raises(C.Unreadable):
+        _read("repo.metadata", now=1000.0 + ttl + 1.0, reader=r, cache_dir=tmp_path)
+
+
+@pytest.mark.parametrize(
+    "boom",
+    [
+        RuntimeError("gh api failed"),
+        OSError("disk/network fault"),
+        TimeoutError("reader timed out"),
+        ValueError("unparseable body"),
+    ],
+)
+def test_ANY_reader_failure_is_fail_closed_not_just_unreadable(boom: Exception,
+                                                               tmp_path: Path) -> None:
+    """⛔ THE GENERIC HANDLER NEEDED ITS OWN FENCE (cycle-3 finding 1).
+
+    `test_stale_entry_is_never_a_fallback_for_a_failed_read` sets `r.fail = Unreadable(...)`, which
+    is re-raised by `except Unreadable: raise` and NEVER reaches the generic `except Exception →
+    raise Unreadable`. So replacing that generic branch with `return b""`, or with a real stale
+    fallback, kept all 76 tests green — the fence could not fail for the false PASS it names.
+    """
+    r = Counter()
+    _read("repo.metadata", now=1000.0, reader=r, cache_dir=tmp_path)
+    ttl = C.ttl_for("repo.metadata")
+    r.fail = boom
     with pytest.raises(C.Unreadable):
         _read("repo.metadata", now=1000.0 + ttl + 1.0, reader=r, cache_dir=tmp_path)
 
@@ -435,8 +461,14 @@ def test_declare_invariant_cannot_widen_an_existing_ceiling() -> None:
     """That function is the documented way to add a key — so without this check the ceiling that
     `read()` defends could be raised by a one-line call, making the constraint advisory."""
     before = C.ttl_for("repo.metadata")
-    with pytest.raises(C.TtlNotPermitted):
-        C.declare_invariant("repo.metadata", ttl_s=before * 4, argv=("api", "x", "--jq", "."))
+    # ⛔ `--jq "{id}"`, NOT `--jq "."`. With `.` the PROJECTION guard fires first and
+    # `pytest.raises(TtlNotPermitted)` is satisfied by the wrong guard — deleting the ceiling check
+    # entirely then left all 76 tests green (cycle-3 finding 2).
+    with pytest.raises(C.TtlNotPermitted) as excinfo:
+        C.declare_invariant("repo.metadata", ttl_s=before * 4, argv=("api", "x", "--jq", "{id}"))
+    assert "ceiling" in str(excinfo.value), (
+        f"the refusal came from a different guard: {excinfo.value}"
+    )
     assert C.ttl_for("repo.metadata") == before, "the ceiling was widened by a rejected call"
 
 
@@ -586,9 +618,11 @@ def test_changing_a_projection_invalidates_the_cached_entry(tmp_path: Path) -> N
 # ── 9c (was P2): `--paginate` without `--slurp` was accepted for any NEW key ─────────────────
 def test_new_paginated_key_without_slurp_is_refused() -> None:
     """R7 was pinned only for the three shipped keys; the guard itself must refuse."""
+    # ⛔ `repo.license`, NOT `repo.branches`: a branch list is MUTABLE (it changes on every push),
+    # so using it as the example of a legitimate new key was itself the cycle-3 finding 7 defect.
     with pytest.raises(C.TtlNotPermitted):
-        C.declare_invariant("repo.branches", ttl_s=600,
-                            argv=("api", "repos/{repo}/branches", "--paginate", "--jq", ".[] | .name"))
+        C.declare_invariant("repo.license", ttl_s=600,
+                            argv=("api", "repos/{repo}/license", "--paginate", "--jq", ".[] | .name"))
 
 
 # ── 9d (was P2): mutable false NEGATIVES in the vocabulary ───────────────────────────────────
@@ -639,4 +673,59 @@ def test_credential_fingerprint_is_stable_and_not_the_raw_token(
     assert "same-token-value" not in one
     monkeypatch.delenv("GH_TOKEN", raising=False)
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
-    assert C._credential_fingerprint() == "no-token"
+    # ⛔ None, NOT a constant: an unidentifiable account must not share one entry (cycle-3 finding 5).
+    assert C._credential_fingerprint() is None
+    with pytest.raises(C.TtlNotPermitted):
+        C.scope_for("user.identity", "o/r", "main")
+
+
+# ── 9g (was P1): read() itself must enforce the GLOBAL key's credential scope ─────────────────
+def test_read_refuses_a_non_credential_scope_for_a_global_key(tmp_path: Path) -> None:
+    """⛔ R1's global half lived ONLY in `scope_for`, which `read()` never consults.
+
+    `read("user.identity", scope="owner/name@main")` — the exact spelling the USAGE block shows —
+    was ACCEPTED and served: two lanes with different tokens shared one identity entry.
+    """
+    r = Counter()
+    with pytest.raises(C.TtlNotPermitted):
+        _read("user.identity", now=1000.0, reader=r, cache_dir=tmp_path,
+              scope="daniel-ospina/tortoise@main")
+    assert r.n == 0
+
+
+def test_read_accepts_the_credential_scope_for_a_global_key(tmp_path: Path,
+                                                            monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GH_TOKEN", "tok-xyz")
+    r = Counter()
+    scope = C.scope_for("user.identity", "o/r", "main")
+    first = _read("user.identity", now=1000.0, reader=r, cache_dir=tmp_path, scope=scope)
+    second = _read("user.identity", now=1000.0 + 1.0, reader=r, cache_dir=tmp_path, scope=scope)
+    assert first == second and r.n == 1
+
+
+# ── 9h (was P2): two callers at different TTLs thrashed ONE file ─────────────────────────────
+def test_different_ttls_do_not_evict_each_others_entries(tmp_path: Path) -> None:
+    """The filename had no TTL component while `_load` rejects a mismatched stamped ttl, so
+    alternating TTLs produced 12 live reads where a working cache does 2 — silently disabling the
+    cache for that key, i.e. exactly the burn this module exists to stop."""
+    # ceiling TTL is the default (ttl_s=None); `tight` is the tightened one.
+    tight = 900
+    r = Counter()
+    for i in range(6):
+        _read("repo.metadata", now=1000.0 + i, reader=r, cache_dir=tmp_path)                 # ceiling
+        _read("repo.metadata", now=1000.0 + i, reader=r, cache_dir=tmp_path, ttl_s=tight)   # tight
+    assert r.n == 2, f"alternating TTLs thrashed one file: {r.n} live reads, expected 2"
+    assert len(list(tmp_path.iterdir())) == 2, "each TTL must own its own entry"
+
+
+# ── 9i (was P2, fails OPEN): whole mutable CLASSES were admitted ─────────────────────────────
+@pytest.mark.parametrize(
+    "key",
+    ["repo.branches", "repo.branchList", "repo.tags", "repo.assignees", "repo.releases",
+     "pr.approved", "pr.approvals", "pr.approvedAt", "repo.headsha", "repo.headoid"],
+)
+def test_inventory_class_mutable_names_are_refused(key: str) -> None:
+    """A branch/tag/approval SET changes on every push or review. All of these were ACCEPTED."""
+    assert C._is_mutable_name(key), f"{key!r} is mutable inventory state but was labelled invariant"
+    with pytest.raises(C.MutableReadRefused):
+        C.declare_invariant(key, ttl_s=600, argv=("api", "x", "--jq", "{id}"))
