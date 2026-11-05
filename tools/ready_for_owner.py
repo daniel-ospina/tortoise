@@ -101,12 +101,20 @@ are cached for the life of one run, so a checked PR costs one read per endpoint.
 
 from __future__ import annotations
 
+import sys
+
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/ready_for_owner.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        "`uv run python tools/ready_for_owner.py`"
+    )
+
 import argparse
 import json
 import os
 import re
 import subprocess
-import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta

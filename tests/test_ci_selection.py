@@ -5016,6 +5016,40 @@ def test_gh_write_preflight_tool_change_fails_closed_to_full():
     # unknown-path branch, not by this pin.
 
 
+def test_ready_for_owner_tool_change_fails_closed_to_full():
+    # #10962/#10968: tools/ready_for_owner.py owns tests/test_ready_for_owner.py — the arms that pin
+    # the owner-facing merge-readiness verdict. This is the same silent-drop class as
+    # attest_census/ci_check_repair/gh_write_preflight above, but in the FAIL-OPEN direction on the
+    # one tool whose whole job is to tell the owner a PR is safe to merge from the UI.
+    #
+    # Measured on the fold at #10975 (pre-fix):
+    #     echo tools/ready_for_owner.py | ci_selection.py --changed-files -
+    #       -> surfaces: []  full: False  test_files: 72 tier-1 entries,
+    #          with `test_ready_for_owner.py` ABSENT
+    # `tools/` is a flat NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row matches this tool, so
+    # the path was filtered out BEFORE the `if not matched: matched.add("core")` fallback and
+    # select() took the docs-only early return. A PR improving the merge gate would therefore have
+    # got a GREEN run in which ~232 of the gate's own tests never ran.
+    #
+    # It propagates into the tool as well: `ready_for_owner.py::_read_coverage` counts this shape as
+    # `core-smoke-only` and therefore COVERED, so the gate would certify its own untested edit as
+    # covered by CI. That is why this is a fail-closed entry and not merely a missing registration —
+    # registering `test_ready_for_owner.py` under `core` in ci-surfaces.yml covers edits of the TEST
+    # file, NOT of the tool.
+    #
+    # Mutation check: removing the TOOL_CARVEOUTS entry re-opens the docs-only early return, so the
+    # path is filtered out, `full` is False and `test_files` is the tier-1 list — every assert below
+    # fails.
+    r = _sel(["tools/ready_for_owner.py"])
+    assert r["full"] is True, r
+    assert r["test_files"] == "ALL", r
+    assert "core" in r["surfaces"], r
+    # NOT asserted here: that a renamed/split sibling (tools/ready_for_owner_extra.py) is also
+    # carved out — a `.py` TOOL_CARVEOUTS entry is a STRING prefix and does not cover a sibling (see
+    # the same note on the gh_write_preflight pin above; `tools/ci_check_repair_extra.py` measures
+    # `full=False`). Asserting it here would assert an accident, not a property.
+
+
 def test_session_schema_guard_runs_on_every_declared_writer_surface():
     # #3554: the declared :Session writer inventory SPANS surfaces —
     # tools/longmem_eval/ingest.py and ingest_v2.py select `eval`,

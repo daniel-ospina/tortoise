@@ -3197,6 +3197,22 @@ TOOL_CARVEOUTS = (
     # edits of the test file, not of the tool.
     # Pinned by test_ci_selection.test_gh_write_preflight_tool_change_fails_closed_to_full.
     "tools/gh_write_preflight.py",
+    # #10962/#10968: tools/ready_for_owner.py owns tests/test_ready_for_owner.py — the arms that
+    # pin the owner-facing merge-readiness verdict (six conditions over the tree, the required
+    # checks, the review record, coverage, the declared exclusions and open blocking findings).
+    # SAME silent-drop class as gh_write_preflight/ci_check_repair above, but the consequence is
+    # the sharpest in this list: this tool's whole job is to tell the owner a PR is safe to merge
+    # FROM THE UI, and it also self-reports its own CI coverage (`_read_coverage`) — so a
+    # `tools/ready_for_owner.py`-only diff came back `surfaces: []`, `full: false`, tier-1 smoke
+    # only, and the tool then classified that shape as `core-smoke-only` and therefore COVERED.
+    # A fail-OPEN path inside the gate that decides whether a merge is safe: the diff most worth
+    # guarding is an edit to the deciding code. MEASURED before this entry:
+    # `--changed-files tools/ready_for_owner.py` -> surfaces=[] full=False with
+    # `test_ready_for_owner.py` ABSENT from the 72 tier-1 `test_files`. Registering the TEST file
+    # under `core` in ci-surfaces.yml does NOT cover this: that applies to edits of the test file,
+    # not of the tool. Pinned by
+    # test_ci_selection.test_ready_for_owner_tool_change_fails_closed_to_full.
+    "tools/ready_for_owner.py",
 )
 
 
