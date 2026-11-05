@@ -4115,12 +4115,12 @@ _SESSION_SOURCE_SUMMARY_PREFIX = "session capture topics: "
 #: that stops them: ``_session_source_metadata`` applies it to the token list
 #: BEFORE both the content filter and the stopword-only fallback, so neither arm
 #: can re-admit a label. Three of the five (``user``/``assistant``/``speaker``)
-#: are coincidentally also members of ``_SESSION_SOURCE_STOPWORDS``, which hides
-#: the need in the CONTENT arm — but not in the fallback, which reads the token
-#: list itself, and not at all for ``system``/``tool``, which no stopword list
-#: carries. So do not read this set as partly redundant: before it existed the
-#: fallback admitted ``user``/``assistant`` into every acknowledgement-only
-#: session's lexicon — the whole lexicon of a labels-only one — a constant pair,
+#: are coincidentally also members of ``_SESSION_SOURCE_STOPWORDS``, which drops
+#: them from the CONTENT arm's counts — the whole extent of the coincidence. The
+#: fallback applies NO stopword filter and reads the token list directly, and
+#: ``system``/``tool`` are on no stopword list at all. Before this set existed
+#: the fallback admitted ``user``/``assistant`` into every ack-only session's
+#: lexicon — its WHOLE lexicon for a labels-only one — a constant pair,
 #: i.e. the same measurable defect ``_SESSION_SOURCE_SUMMARY_PREFIX`` is kept out
 #: of ``_searchText`` to avoid (under the OR-union every such session would match
 #: a one-word source query for "user"). ``system``/``tool`` are reachable roles
