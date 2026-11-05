@@ -565,7 +565,7 @@ def preflight(repo: str, api_base: str, token: str, source: str) -> dict:
         # ⛔ WHICH ENDPOINT ANSWERED IS PART OF THE VERDICT. Without this key a consumer holding the
         # `--json` artifact cannot tell a measurement of GitHub from a measurement of anything else.
         # ⛔ REDACTED, because this dict IS the `--json` output: see `_printable_base`.
-        "api_base": _printable_base(api_base),
+        "api_base": _scrub(_printable_base(api_base), token or ""),
         "credential_source": source,
         "token_shape": token_shape(token) if token else "none",
         "ok": False,
@@ -787,29 +787,32 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--json", action="store_true", help="emit the result as JSON")
     args = ap.parse_args(argv)
 
-    if not args.repo or "/" not in args.repo:
-        print("GH-WRITE-UNAVAILABLE(usage) — pass --repo owner/name (or set $OR)")
-        return 1
-    # ⛔ THE SAME GUARD THE TOKEN GETS, ON THE OTHER TWO INPUTS THAT REACH A REQUEST PATH (review cycle 3).
-    # MEASURED: `--repo 'o/rép'` makes `http.client` raise `UnicodeEncodeError` (a `ValueError`, so NOT
-    # caught by `_request`), escaping as a traceback with EMPTY stdout — breaking the
-    # `GH-WRITE-UNAVAILABLE(<reason>)` and `--json` contracts exactly as the newline token did.
-    if (not args.repo.isascii() or any(ord(ch) < 0x21 or ord(ch) == 0x7F for ch in args.repo)
-            or not re.fullmatch(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+", args.repo)):
-        if args.json:
-            # ⛔ A `--json` CALLER PARSES STDOUT — a human line here is `json.loads` raising on the
-            # consumer side, so the usage refusal must serialise like every other refusal does.
-            print(json.dumps({"repo": args.repo, "api_base": _printable_base(args.api_base),
-                              "ok": False, "reason": "usage",
-                              "detail": "--repo must be `owner/name` with no whitespace, control "
-                                        "character or non-ASCII byte (the value is not echoed)"},
-                             indent=2, sort_keys=True))
-        else:
-            print("GH-WRITE-UNAVAILABLE(usage) — --repo must be `owner/name` with no whitespace, control "
-                  "character or non-ASCII byte (the value is not echoed)")
+    # ⛔ RESOLVE THE CREDENTIAL FIRST: THE EARLY REFUSALS PRINT `api_base`, AND WITHOUT THE TOKEN THEY
+    # CANNOT VALUE-SCRUB IT (review cycle 12). MEASURED: `--repo 'o/r#'` + `--json` with the credential in
+    # the base's PATH printed the whole value while the same base with a VALID repo was correctly
+    # redacted — the fix lived only after this guard. Resolution makes no request and cannot fail.
+    token, source = resolve_credential()
+
+    # ⛔ ONE GUARD, BOTH TIERS, AND A `--json` CALLER ALWAYS GETS JSON. The `--repo` value reaches a
+    # request path; `?`/`#` collapse the three write probes onto one endpoint (cycle 10), and non-ASCII or
+    # control characters raise `UnicodeEncodeError` inside `http.client` (cycle 3). A missing `/` is the
+    # same refusal class, so it serialises the same way instead of printing a human line at a JSON consumer.
+    def _repo_refusal(detail: str) -> int:
+        print(json.dumps({"repo": args.repo,
+                          "api_base": _scrub(_printable_base(args.api_base), token),
+                          "ok": False, "reason": "usage", "detail": detail},
+                         indent=2, sort_keys=True) if args.json
+              else f"GH-WRITE-UNAVAILABLE(usage) — {detail}")
         return 1
 
-    token, source = resolve_credential()
+    if not args.repo or "/" not in args.repo:
+        return _repo_refusal("pass --repo owner/name (or set $OR)")
+    if (not args.repo.isascii() or any(ord(ch) < 0x21 or ord(ch) == 0x7F for ch in args.repo)
+            or not re.fullmatch(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+", args.repo)):
+        return _repo_refusal("--repo must be exactly `owner/name` (letters, digits, '.', '_', '-') with "
+                             "no whitespace, control character or non-ASCII byte; a value carrying '?' "
+                             "or '#' collapses the three write probes onto one endpoint (the value is "
+                             "not echoed)")
     res = _sanitise_result(preflight(args.repo, args.api_base.rstrip("/"), token, source), token)
 
     if args.json:

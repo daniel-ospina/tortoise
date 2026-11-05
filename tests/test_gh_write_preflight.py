@@ -1070,6 +1070,26 @@ def test_the_api_base_cannot_carry_the_credential_into_the_output():
         assert secret[off:off + 8] not in blob, f"api_base leaked the credential at offset {off}: {blob!r}"
 
 
+def test_the_early_repo_refusals_scrub_the_base_and_serialise_under_json():
+    """Both `--repo` refusal tiers run BEFORE the probe, so they must scrub and serialise themselves
+    (review cycle 12): the path-embedded credential leaked through the `--json` tier, and the
+    missing-slash tier printed a human line at a JSON consumer."""
+    secret = "Zq7HXq65" + "fut3Bk4rNw0EP8q0KYb9JvsW5L6pu33vmJJ6RX62kX4JP4Kh8s" + "J256vd3aE"
+    for bad_repo in ("or", "o/r#", "o/r/issues#"):
+        with _Stub() as s:
+            env = _env(s.base, secret)
+            env["GH_WRITE_PREFLIGHT_API"] = s.base + "/" + secret
+            p = subprocess.run([sys.executable, str(TOOL), "--repo", bad_repo, "--json"],
+                               capture_output=True, text=True, env=env, timeout=120)
+        assert p.returncode == 1, f"{bad_repo!r} must be refused: {p.stdout}{p.stderr}"
+        res = json.loads(p.stdout)               # a --json caller must get JSON on EVERY refusal
+        assert res["reason"] == "usage", res
+        blob = p.stdout + p.stderr
+        for off in range(0, max(1, len(secret) - 7)):
+            assert secret[off:off + 8] not in blob, \
+                f"{bad_repo!r} leaked the credential from api_base at offset {off}: {blob!r}"
+
+
 if __name__ == "__main__":
     fns = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]
     failed = 0
