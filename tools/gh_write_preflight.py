@@ -1,161 +1,142 @@
 #!/usr/bin/env python3
-"""gh_write_preflight — prove THIS lane's credential can WRITE, before it does any work.
+"""gh_write_preflight — "can this credential WRITE repository contents here?", answered before
+a lane spends an hour it cannot deliver.
 
-WHY THIS EXISTS (measured 2026-11-04, issue #10930)
-───────────────────────────────────────────────────
-A landing lane on a cell reported: *"the lane's token cannot write to PRs (403 …)"*. It could read,
-verify trees, and decide — but **could not write**, and every closure it owed died there. The
-verdict comment it could not post is the `--evidence` artifact the merge rail reads, so the failure
-does not look like an error: a landing that merges and then cannot close its constituents is
-**indistinguishable from "landed and closed nothing"** — the exact failure mode the fleet spent the
-day fighting. A lane discovers this at the END, after the merge, when the closures are owed.
+Why this exists
+---------------
+gh resolves its credential in a fixed order (GitHub's own manual, `gh help environment`):
+``GH_TOKEN`` / ``GITHUB_TOKEN`` — *"takes precedence over previously stored credentials"* — and
+only then ``$HOME/.config/gh/hosts.yml``. A cell that exports a **read-only** token as ``GH_TOKEN``
+therefore never reaches the write-capable OAuth token sitting in ``hosts.yml``, and every lane on
+that cell can read and comment but can open nothing.
 
-⛔ THE TRAP THIS TOOL EXISTS TO AVOID — AND THAT ITS FIRST VERSION FELL INTO
-────────────────────────────────────────────────────────────────────────────
-**`Issues: write` and `Pull requests: write` are DIFFERENT permissions, and a PR comment uses the
-PR one.** On a fine-grained PAT they are granted separately. The verbatim evidence from #10930:
+Measured consequence (the reason this tool is not optional): a **17-lane wave produced zero
+landings** while every lane honestly reported "built, parked". Nothing before the push said the
+credential could not push, so the failure surfaced only at the end of each lane's work.
 
-    POST /repos/daniel-ospina/tortoise/issues/10902/comments  → 403 "Resource not accessible by personal access token"   (#10902 IS A PR)
-    POST /repos/daniel-ospina/tortoise/issues/10774/comments  → 201                                                       (#10774 is an ISSUE)
-    GET  /repos/daniel-ospina/tortoise/pulls/10902            → 200
-    GET  /repos/daniel-ospina/tortoise/issues/10902/comments   → 200
+Why `gh auth status` is NOT the answer
+-------------------------------------
+``gh auth status`` exits 0 for a read-only credential: it reports that the credential exists and is
+valid, never that it can write.
 
-Note those two comment calls are the **same endpoint** — `/issues/{n}/comments` — and differ only in
-whether `{n}` names a PR or an issue. A token with `Issues: write` and no `Pull requests: write`
-therefore comments on issues and is refused on PRs.
+Why `gh api repos/<o>/<r> --jq .permissions.push` is NOT the answer either
+------------------------------------------------------------------------
+That field is documented as *the permissions **the authenticated user** has on the repository*, not
+the permissions the **token** was granted. A fine-grained PAT with ``contents: read`` authenticates
+AS THE USER, so ``.permissions.push`` reads ``true`` for an account with push/admin on the repo
+while every ``git push`` it makes is refused. That is a fail-open, and it is the shape
+`cloud-cell-bringup.sh` relies on in agent-infra (patched separately).
 
-⇒ **A probe that only touches an issue proves the wrong permission.** The first version of this tool
-deleted a repo label (an *issues* resource); it passes exactly the token this bug is about. This
-version probes **both surfaces independently** and refuses unless **both** are writable, naming
-which one is missing.
+The only ground truth is the operation itself: write a ref, read it back, delete it. This tool does
+that against the SAME remote and the SAME credential path a lane's real `git push` uses (the git
+credential helper, which on these boxes is `!gh auth git-credential`) — so a PASS here is evidence
+about the deliverable path, not about a proxy for it.
 
-WHAT IT PROBES, AND WHY EACH CHOICE IS THE ONE IT IS
-───────────────────────────────────────────────────
-1. **READ** — `GET /repos/{owner}/{repo}`. The *disambiguator*: without it a `404` from a write probe
-   could mean "no permission" or "you cannot see this repo", and those need different fixes. 200
-   here also yields `default_branch` for the pull probe.
+Contract
+--------
+* Exit **0** — the credential can write: a throwaway branch was created and confirmed by
+  ``git ls-remote`` at OUR sha, and the deletion was then **attempted** and confirmed whenever the
+  remote stayed readable. ``cleaned_up`` records exactly what is known: ``True`` only on a positive
+  "ref absent" read, ``False`` on a proven survivor, ``None`` when the confirming read failed (the
+  ref may or may not be gone). An unconfirmed cleanup is NOT a failed write — the credential still
+  wrote — so it does not change the exit code; it is reported loudly on the ``cleanup UNCONFIRMED``
+  line and in ``--json``. An UNREQUESTED known survivor is the one cleanup outcome that DOES change
+  the exit code: it exits **1** with ``GH-WRITE-UNAVAILABLE(delete-failed)``, because a tool must
+  not call a credential usable while leaving garbage on a shared remote. (``--keep-ref`` requests a
+  survivor deliberately — that one keeps ``cleaned_up=False`` and still exits 0; its litter was
+  asked for.) **Read the unrequested-survivor refusal as litter, not as capability** — the probe ref
+  was created, so this credential demonstrably CAN write; the 1 means "re-run and clean up", never
+  "your lanes cannot deliver". (An exit of 0 is reserved for a fully successful run;
+  ``sysexits(3)``: "The successful exit is always indicated by a status of 0" — so an unrequested
+  survivor MUST NOT exit 0. Pinned by
+  ``test_known_survivor_exits_nonzero_with_delete_failed_marker``.)
+* Exit **1** — ``GH-WRITE-UNAVAILABLE(<reason>)`` on stderr (emitted in ``--json`` mode too; stdout
+  stays pure JSON). Reasons are stable tokens from ``REASONS`` (top-level, non-nested), so a caller
+  can branch on them without parsing prose. **No path returns 1 without a token from that set** —
+  including an unexpected exception, which is caught and mapped to ``internal-error``. That set is
+  CLOSED, and this list is the whole of it: ``git-absent``, ``not-a-repo``, ``no-remote``,
+  ``no-head``, ``remote-unreachable``, ``push-refused``, ``push-unknown``, ``verify-mismatch``,
+  ``delete-failed``, ``internal-error``.
+  Two of the ten need their own branch in a caller's table — folding either into a neighbour
+  re-creates a diagnosis error this tool exists to remove. ``push-unknown`` means the push did not
+  COMPLETE (timed out, was signalled, produced no output), so write capability is UNKNOWN: re-run,
+  and never read it as evidence of a read-only credential, because that reading parks deliverable
+  work on a slow or OOM-killed push. ``internal-error`` means the probe itself failed, so NO verdict
+  exists — not a refusal. Both directions of this contract are pinned by
+  ``test_the_contract_publishes_the_closed_reason_set``, which reds if ``REASONS`` gains a token
+  this list omits and if this list names a token ``REASONS`` never emits.
+* Exit **2** — usage error (argparse's own code, deliberately not reused for a verdict).
 
-2. **ISSUES WRITE** — `POST /repos/{o}/{r}/issues` with an **empty body**.
-   MEASURED 2026-11-04: `422 Invalid request` when authorised, `403` when not. ⛔ **Zero side
-   effect by construction**: the payload fails validation, so no issue is created. No issue number
-   is needed, so it runs before the lane has chosen a target.
+Safety and soundness
+--------------------
+* **Repository redirection is stripped; credential-carried config is not.** Git's *state* variables
+  (``GIT_DIR``, ``GIT_WORK_TREE``, ``GIT_INDEX_FILE``, ``GIT_OBJECT_DIRECTORY``,
+  ``GIT_ALTERNATE_OBJECT_DIRECTORIES``, ``GIT_COMMON_DIR``, ``GIT_NAMESPACE``, ``GIT_PREFIX``) and
+  the trace/verbose pair (``GIT_TRACE*``, ``GIT_CURL_VERBOSE``) are removed: the first redirect
+  which repository git operates on, which once made this tool report ``writable=True`` about a
+  DIFFERENT, writable repository than the one asked for (a false PASS, pinned by
+  ``test_git_dir_cannot_redirect_the_probe``); the second would route git's own ``Authorization:``
+  header into our output. ``GIT_CONFIG_*`` and ``GIT_SSH_COMMAND`` are deliberately KEPT — they
+  carry the credential on boxes that inject it through config or a custom SSH command, and dropping
+  them would make the probe test a different path than the lane's real push and refuse a credential
+  that can write (a false block, the failure this tool exists to prevent, inverted).
+* **stdout and stderr are parsed separately.** git writes diagnostics to stderr (e.g. ``warning:
+  redirecting to https://…``); reading a "last line" out of a merged stream mistook a warning for a
+  path and could invent a leftover ref.
+* The probe ref is namespaced (``gh-write-preflight/<utc>-<pid>-<rand>``) so it cannot collide with
+  a real branch, and it is cleaned up on **every path that unwinds the interpreter** — the ordinary
+  path, a failed push that still applied the update (a transport error can arrive after the remote
+  took it), a Ctrl-C (``SIGINT`` → ``KeyboardInterrupt``) and any Python exception, all via one
+  ``try/finally``. ⛔ It is NOT covered when the process is killed by a signal Python does not
+  translate: ``SIGTERM`` (what a fleet watchdog sends) takes its default action and terminates
+  **without unwinding**, so no ``finally`` runs and the ref can be left behind. That is stated as a
+  residual below rather than claimed away, because a docstring a lane trusts is worse than a
+  residual it can see. Cleanup is confirmed by
+  ``ls-remote`` and the result is **tri-state**: ``cleaned_up=True`` only on a positive
+  "ref absent" read; a read that could not be performed sets ``cleaned_up=None`` rather than
+  claiming verified-clean from an absence of evidence.
+* The probe pushes the commit already at ``HEAD`` (``HEAD:refs/heads/<probe>``). It does not create
+  a commit and does not touch the working tree or index, so it is safe to run in a dirty worktree.
+* A credential never reaches the output: redaction happens **at ingestion** (``step()`` stores an
+  already-redacted detail, ``remote_url`` is stored redacted), so no render path can forget it.
+* A branch push does not trigger CI in this repo (no workflow has an unfiltered ``on: push``;
+  ``publish-pypi`` is ``tags: v*`` only). That is a property of THIS repo: the tool is generic via
+  ``--repo``, so probing another checkout inherits that repo's triggers.
+* The probe pushes with ``--no-verify``, so a PASS says the CREDENTIAL can write; it does not
+  claim a lane's own pre-push hook would cooperate.
+* **STATED RESIDUAL — a ruleset that restricts branch *creation* to a pattern.** If the repository
+  only permits `main`/`fix/*` and refuses `refs/heads/gh-write-preflight/…`, this tool reports
+  `push-refused` for a credential that CAN write — the tool's purpose inverted (work parked that
+  could have landed). It is not silent: git's own refusal text ("protected branch" / "policy
+  prohibits") lands in the failing step's detail on stderr, next to an explicit `--repo`, so it is
+  diagnosable rather than mysterious. No read-only credential can pass through this residual in the
+  other direction. `--probe-ref-prefix` aims the probe at a namespace a constrained repo allows.
+* **STATED RESIDUAL — a probe killed by ``SIGTERM`` can leave the ref on the remote.** The cleanup
+  guarantee is `try/finally`, and Python installs default handlers for only `SIGPIPE` (ignored) and
+  `SIGINT` (→ `KeyboardInterrupt`); `SIGTERM` therefore terminates the process without unwinding,
+  so the delete never issues. The outcome is **litter, not a false verdict** — nothing on the
+  verdict path changes and no read-only credential passes through it — and the ref is namespaced
+  and unique per run (`<utc>-<pid>-<rand>`), so it cannot collide with a later probe. `#11053`
+  item 2 records the same residual for the sibling implementation; closing it needs a handler or
+  a pre-run sweep, not a docstring edit.
 
-3. **PULL REQUESTS WRITE** — `POST /repos/{o}/{r}/pulls` with a **deliberately non-existent head
-   ref** (`refs/heads/gh-write-preflight-<16 random hex>`) and the repo's default branch as base.
-   MEASURED: `422 Validation Failed` (`field: head, code: invalid`) when authorised, `403` when not.
-   ⛔ Zero side effect: the head ref cannot exist, so no PR can be created. (The random name is what
-   makes that a property rather than a hope.)
+Usage
+-----
+    uv run python tools/gh_write_preflight.py                # probe this checkout's origin
+    uv run python tools/gh_write_preflight.py --json         # machine-readable verdict
+    uv run python tools/gh_write_preflight.py --repo <path>  # probe another checkout
 
-4. **CONTENTS WRITE** — `POST /repos/{o}/{r}/git/refs` with a random branch name and an
-   **unresolvable sha** (`000…0`).
-   MEASURED 2026-11-04 ON A LIVE BOX: `422 "Object does not exist"` when authorised, `403` when not,
-   and `GET /git/matching-refs/heads/gh-write-preflight` returns **`[]`** after both — the ref is
-   never created, in either outcome.
-   ⛔ **THIS PROBE IS NOT BELT-AND-BRACES — WITHOUT IT THE TOOL FALSE-PASSES.** Merging a PR and
-   creating a ref are charged to `contents: write`, NOT `pull_requests: write`. MEASURED, headers
-   included, on `PUT /pulls/{n}/merge` and on `POST /git/refs`, both answering
-   `x-accepted-github-permissions: contents=write` (the merge attempt returned `403` with
-   `x-ratelimit-remaining: 3313` — a permission, not a limit). So a fine-grained PAT minted with
-   `Issues: write` + `Pull requests: write` and `Contents: read` — an ordinary grant, and one #10930
-   records in the wild as `X-Accepted-Github-Permissions: contents=read` — passes the two probes
-   above and is then refused by `git push` and by the merge. A landing lane CANNOT PUBLISH ITS
-   BRANCH at all under that token, so the two-surface version of this tool reported `GH-WRITE-OK`
-   over a credential that can do none of the landing work. #10930 says it directly: *"a preflight
-   that proves only `pull_requests: write` is not sufficient — the instrument must probe
-   `contents: write` too. That choice is load-bearing, not belt-and-braces."*
-   Rejected alternative: create-then-delete a real throwaway ref. It is side-effecting *by
-   construction* and it leaves debris when the delete fails, which is exactly the class of failure
-   a preflight must not introduce. The unresolvable sha proves the permission gate and creates
-   nothing.
-
-   Alternatives rejected, with the measurement behind each:
-     * `DELETE .../labels/<name>` — this is what the FIRST version used. It is an **issues**
-       resource, so it passes a token with `Issues: write` and no `Pull requests: write` — i.e. it
-       cannot see this bug. Kept out on purpose.
-     * `POST .../issues/{n}/labels` with a real label — mutates, and notifies watchers.
-     * `POST .../issues/{n}/comments` — creates a notification even when deleted immediately, and
-       needs a target number.
-     * `GET /repos/{o}/{r}` → `.permissions` — **DOES NOT WORK, and this is the second trap.**
-       MEASURED: this same read-only-for-PRs token reports `{"admin":true,"maintain":true,
-       "push":true,"pull":true,"triage":true}`, because `permissions` describes the USER's access to
-       the repo, not the granular permissions the TOKEN carries. #10930's own body records the same
-       finding. Any preflight built on it passes the broken token.
-     * `X-Oauth-Scopes` — a real signal, but **only for classic/OAuth tokens**. A fine-grained PAT
-       (`github_pat_…`) sends **no scope header at all**, so absence of `repo` is not evidence.
-       The broken token in #10930 IS a fine-grained PAT (the box's `gh auth status` says so).
-
-5. **RATE LIMIT** — checked from the READ response *before* either write probe, and again from each
-   probe's own response. A `403` is either a permission refusal or a rate limit, and confusing them
-   wastes an hour the wrong way: re-minting a token does nothing for a rate limit, waiting does
-   nothing for a missing permission. The discriminator is the body plus the headers
-   (`x-ratelimit-remaining: 0`, `retry-after`), never the bare status code.
-
-6. **REDIRECTS ARE NEVER FOLLOWED.** Only `422` counts as "authorised"; a 2xx on a must-be-invalid
-   payload is evidence the response did not come from GitHub's validation path. See `_WRITE_OK`.
-
-REASONS (`GH-WRITE-UNAVAILABLE(<reason>)`), each with its own fix
-─────────────────────────────────────────────────────────────────
-  no-credential                no GH_TOKEN, no GITHUB_TOKEN, no github.com entry in hosts.yml
-  bad-credentials              401 — expired, revoked, or mistyped
-  repo-not-visible             404 on the READ probe, or the READ itself refused — an access
-                               question, never a missing write permission
-  wrong-host                   GH_HOST names a host other than github.com
-  rate-limited                 403/429 with rate-limit wording / remaining==0 / retry-after
-                               NOT a permission problem — do not re-mint the token for it
-  server-error                 5xx from GitHub — a service fault, not a verdict about the token
-  token-read-only              403 "Resource not accessible by …" on ALL THREE surfaces
-  contents-write-missing       contents refused  ← CANNOT PUSH A BRANCH OR MERGE
-                               fix: re-mint with `Contents: write`
-  pull-requests-write-missing  PRs refused  ← THE #10930 BUG (verdict comment, closes)
-                               fix: re-mint with `Pull requests: write`
-  issues-write-missing         issues refused (a landing also closes issues)
-
-  When more than one surface is refused (but not all three) the reason names the FIRST in landing
-  order — `contents` → `pull_requests` → `issues` — because that is the one that blocks the lane
-  soonest; `detail` and the `surfaces` map name every refused surface, so nothing is hidden. Every
-  one of these is fixed by the same action: re-mint the token carrying ALL THREE write permissions.
-  sso-unauthorized             403 naming SAML/SSO — authorise the token for the org
-  forbidden                    4xx that is neither a permission refusal nor a known class (e.g. 410
-                               Issues-disabled, 400 from a proxy, 451) — NOT charged to the token
-  transport                    could not reach the API — NOT a verdict about the token
-  usage                        bad arguments — including an `--api-base` / `$GH_WRITE_PREFLIGHT_API`
-                               that is neither DEFAULT_API nor a loopback stub, or one carrying a query,
-                               a fragment, or `user:pass@` credentials. Nothing is contacted first.
-
-⛔ **THE ENDPOINT IS PART OF THE VERDICT, AND IT IS VALIDATED BEFORE THE TOKEN MOVES.** `api_base` is
-in the result (`--json` → `"api_base"`, with any `user:pass@` userinfo REDACTED — see `_printable_base`)
-and in the `GH-WRITE-OK` line, because a pass measured against
-something that is not GitHub is not a pass: point the base at any server that answers `422` and the
-tool would otherwise print `GH-WRITE-OK(issues+pull-requests+contents writable)` for a token that
-cannot write anything. So a non-default base is accepted ONLY when it is loopback (`127.0.0.0/8`,
-`::1`, `localhost`) — the hermetic test seam — and any base carrying `user:pass@` is refused, because
-the token is sent as an `Authorization` header and never in the URL.
-
-USAGE
-─────
-  uv run python tools/gh_write_preflight.py --repo daniel-ospina/tortoise
-  uv run python tools/gh_write_preflight.py --repo "$OR" --json
-  GH_WRITE_PREFLIGHT_API=http://127.0.0.1:PORT uv run python tools/gh_write_preflight.py …   # test seam
-                                                                       (loopback only; anything else is refused as `usage`)
-
-  exit 0 = GH-WRITE-OK(issues+pull-requests+contents writable)
-  exit 1 = GH-WRITE-UNAVAILABLE(<reason>)
-
-The credential is NEVER printed, logged, or included in any output — not even truncated.
+Enablement in this repo: tests/test_gh_write_preflight.py (red-first: a rejecting remote MUST
+produce exit 1; an accepting remote MUST produce exit 0 and leave no probe ref behind).
 """
 
 from __future__ import annotations
 
 import sys
 
-# ⛔ THE INTERPRETER GUARD IS THE FIRST STATEMENT AFTER THE DOCSTRING AND `__future__`, BEFORE EVERY
-# OTHER IMPORT (#5128). That position is load-bearing: a 3.12-only import or stdlib name raises an
-# UNATTRIBUTED error on an older interpreter, which reads as "this tool is broken" rather than
-# "your interpreter is too old". Pinned by `tests/test_entry_point_python_guard.py`.
-# `UP036` fires because `pyproject` already pins >=3.12, but that is exactly the point: the pin governs
-# the INSTALLED environment, not the AMBIENT `python3` a human types, and the ambient one is what this
-# guard exists for (#5128). It is a deliberate runtime guard, not an outdated version block.
-if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard, see above
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     raise SystemExit(
         f"tools/gh_write_preflight.py requires Python >= 3.12 (got "
         f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
@@ -163,533 +144,1065 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard, see
     )
 
 import argparse
-import contextlib
-import http.client
-import ipaddress
 import json
 import os
-import secrets
-import urllib.error
-import urllib.parse
-import urllib.request
+import random
+import re
+import string
+import subprocess
+import time
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from pathlib import Path
+from urllib.parse import urlsplit
 
-DEFAULT_API = "https://api.github.com"
-TIMEOUT_S = 25
+# Exit codes. 0/1 are the verdict; 2 is argparse's usage code.
+EXIT_WRITABLE = 0
+EXIT_UNAVAILABLE = 1
 
-# ⛔ THE ONE INPUT THAT CAN MAKE EVERY OTHER FAIL-CLOSED CHECK MOOT (review round 7). Every guard in
-# this module assumes the answer came from GitHub: redirects are not followed, a 2xx on a must-be-
-# invalid payload fails closed, and an unknown 4xx may not name a permission. `api_base` defeats all
-# three at once — MEASURED on the pre-fix head: `GH_WRITE_PREFLIGHT_API=http://127.0.0.1:40933` (the
-# suite's own stub) with `token=ghp_NOT_A_REAL_CREDENTIAL` printed
-# `GH-WRITE-OK(issues+pull-requests+contents writable)` and exited 0, and NOTHING in stdout, stderr or
-# the `--json` artifact named the endpoint. So the base is now (a) reported in the verdict and the OK
-# line, and (b) accepted only when it IS GitHub, or when it is a loopback stub — the only seam the
-# hermetic suite needs. `tools/activation_cohort.py` validates its base for the same reason.
-_LOOPBACK_NAMES = frozenset({"localhost"})
+# Stable TOP-LEVEL reason tokens. Every `writable=False` verdict carries one of these, so a caller
+# can branch on a flat enum rather than walking nested state.
+REASONS = {
+    "git-absent": "the git binary is not on PATH",
+    "not-a-repo": "the target is not a directory inside a git work tree",
+    "no-remote": "the checkout has no remote of that name",
+    "no-head": "HEAD does not resolve to a commit (no pushable object)",
+    "remote-unreachable": "the remote refused or failed `ls-remote`",
+    "push-refused": "`git push` was refused (read-only credential, branch protection, or no network)",
+    "push-unknown": (
+        "`git push` did not complete (timed out, was signalled, or produced no output), so write "
+        "capability is UNKNOWN — this is NOT evidence the credential is read-only"
+    ),
+    "verify-mismatch": "the push reported success but `ls-remote` does not show the ref",
+    "delete-failed": (
+        "the probe ref is left on the remote because it could not be deleted. The push already "
+        "succeeded, so this refusal is about LITTER on a shared remote — not about whether the "
+        "credential can deliver"
+    ),
+    "internal-error": "the probe itself failed unexpectedly (no verdict is available)",
+}
 
-# Probe outcomes that prove "the authorisation gate was PASSED and the request was merely invalid".
-# ⛔ 422 IS THE ONLY SUCH ANSWER, and 2xx must NOT be read as success.
-# MEASURED (review round 3): urlopen's default opener FOLLOWS redirects, and stdlib
-# `HTTPRedirectHandler.redirect_request` DOWNGRADES POST to GET on 301/302/303. A stub that 301s the
-# write probes and 200s the resulting collection GETs made this tool print
-# `GH-WRITE-OK(issues+pull-requests writable)` and exit 0 while the server log showed NO write was
-# ever answered — a FALSE PASS of the very gate the tool exists to be. 200 is the one status that
-# cannot distinguish "authorised" from "GitHub was never asked": a proxy, WAF, captive portal, or a
-# renamed-repo redirect all answer 200. So a 2xx on a must-be-invalid payload is itself evidence the
-# response did not come from GitHub's validation path, and it fails closed below.
-_WRITE_OK = (422,)
-_SURPRISING_SUCCESS = (200, 201, 204)
+# ── redaction ──────────────────────────────
+
+# Userinfo that carries NO secret. `git@`/`ssh@`/`hg@` are ordinary SSH accounts; routing them
+# through the credential-alias path would rewrite and break the most common remote there is.
+_NON_SECRET_USERINFO = frozenset({"git", "ssh", "hg", "svn", "deploy"})
+# ──────────────────────────────────────────────────────────────────────────────────────────────
+# Applied at INGESTION (see `step()`), so every later render is safe by construction. Deliberately
+# broad: a false redaction costs one diagnostic, a leak costs a credential.
+_REDACT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    # userinfo in a URL — ANY scheme, plus scheme-relative `//user:pw@host`. The leftmost
+    # alternative wins, so `https://…` keeps its scheme and `ssh://`/`git://` are covered too.
+    # ⛔ GREEDY to the LAST `@` before the authority terminator. A single-userinfo form stopped at
+    # the FIRST `@`, so a password containing `@` was only partially hidden:
+    # `https://deploy:p@ssw0rdS3cret@host/…` rendered as `https://<userinfo-redacted>@ssw0rdS3cret@host/…`
+    # — twelve characters of the secret printed (measured). `[^/\s]*@` cannot leave the authority,
+    # because a `/` ends it.
+    (re.compile(r"([A-Za-z][A-Za-z0-9+.\-]*://|//)[^/\s]*@"), r"\1<userinfo-redacted>@"),
+    # Any Authorization header, one token or two, quoted-key repr included. The whole value goes —
+    # preserving the scheme word buys a diagnostic nobody needs and risks a one-token miss.
+    (
+        re.compile(r"(?i)([\"']?(?:proxy-)?authorization[\"']?\s*[:=]\s*)\S+(?:\s+\S+)?"),
+        r"\1<redacted>",
+    ),
+    # `token = …`, `api_token: …`, `DEEPSEEK_API_KEY=…` and friends.
+    (
+        re.compile(r"(?i)([A-Za-z0-9_.\-]*(?:token|password|secret|passwd|api_?key))(\s*[=:]\s*)\S+"),
+        r"\1\2<redacted>",
+    ),
+    # Bare token-shaped runs.
+    (re.compile(r"\b(gh[pousr]_[A-Za-z0-9]{8,})"), "<redacted>"),
+    (re.compile(r"\b(github_pat_[A-Za-z0-9_]{8,})"), "<redacted>"),
+)
 
 
-def _is_loopback(host: str) -> bool:
-    """True for `localhost`, any `127.0.0.0/8` address, and `::1` — and for nothing else.
+def redact(text: str) -> str:
+    """Strip credentials from any text this tool emits or stores."""
+    out = text
+    for pat, repl in _REDACT_PATTERNS:
+        out = pat.sub(repl, out)
+    return _redact_scp_userinfo(out)
 
-    `ipaddress` rather than a string compare, so `127.0.0.2` (a real loopback the suite could bind)
-    is not silently refused while `127.0.0.1.evil.example` is not silently allowed.
+
+# The scp-like userinfo shape (`user:secret@host:path` / `token@host:path`). `_url_has_credential`
+# recognises it, so `redact()` MUST cover it too — otherwise the tool detects a credential and then
+# prints it, which is the one asymmetry that matters: detection without redaction is a leak.
+# The userinfo is the text before the FIRST `@` and can never contain `/`, which is what separates a
+# credential from a local path that merely contains an `@`.
+_SCP_LIKE_USERINFO = re.compile(
+    # Userinfo is everything up to the LAST `@` before the host, so a password that itself contains
+    # `@` (`user:p@ss@host:path`) is covered — the earlier first-`@` form left that shape intact and
+    # therefore PRINTED a credential the detector had already classified as one (measured).
+    # The host class allows `_` (an underscore host was detected but printed in full), and the
+    # separator may be `:` (scp) or `/` (scheme-less host/path), which is captured so the shape is
+    # preserved on replacement.
+    r"(?<![\w@./-<])([^<>\s/]+)@([A-Za-z0-9._-]+)([:/])(?=\S)"
+)
+
+
+_SCP_LIKE_BARE = re.compile(
+    # Same shape, anchored at the end of the token: `user@host` with nothing after it.
+    r"(?<![\w@./-<])([^<>\s/@]+)@([A-Za-z0-9._-]+)(?=\s|$)"
+)
+
+
+def _redact_scp_userinfo(text: str) -> str:
+    def _sub(m: re.Match[str]) -> str:
+        userinfo, host = m.group(1), m.group(2)
+        sep = m.group(3) if m.lastindex and m.lastindex >= 3 else ""
+        user = userinfo.split(":", 1)[0]
+        # `git@host:` / `ssh@host:` carry no secret — redacting them would destroy ordinary
+        # diagnostics and is not required by anything.
+        if ":" not in userinfo and user.lower() in _NON_SECRET_USERINFO:
+            return m.group(0)
+        return f"<userinfo-redacted>@{host}{sep}"
+
+    out = _SCP_LIKE_USERINFO.sub(_sub, text)
+    # A BARE userinfo with NO separator at all (`token@host.example`) was classified as a credential
+    # and then printed VERBATIM: neither pattern matched, so the secret reached `--json`
+    # remote_url/push_url. `git remote get-url` prints exactly this for a scheme-less remote.
+    return _SCP_LIKE_BARE.sub(_sub, out)
+
+
+@dataclass
+class Proc:
+    """One subprocess result, with stdout and stderr kept APART.
+
+    Parsing a merged stream is how a `warning: redirecting to …` on stderr became a repository
+    path, and how a harmless warning could invent a leftover ref. Callers read `.out` for data and
+    `.err` for diagnosis.
     """
-    if host.strip().lower() in _LOOPBACK_NAMES:
+
+    rc: int
+    out: str = ""
+    err: str = ""
+
+    @property
+    def detail(self) -> str:
+        return (self.out or "") + (self.err or "")
+
+
+@dataclass
+class Verdict:
+    """The answer. `writable` is the only field a caller should branch on.
+
+    `remote_url`, `detail` and each `steps[].detail` are stored ALREADY REDACTED, so a caller that
+    logs, reprs, or prints this object cannot leak a credential through them. (`repo_root`,
+    `remote`, `probe_ref` and `head_sha` are not passed through `redact()`: they are filesystem
+    paths, a remote NAME, and commit ids — no credential can reach them.) A passing verdict carries
+    `reason=None`; only a refusal carries a `REASONS` token.
+    """
+
+    writable: bool
+    reason: str | None = None
+    detail: str = ""
+    repo_root: str | None = None
+    remote: str | None = None
+    remote_url: str | None = None
+    # The URL git actually PUSHES to (`remote.<name>.pushurl` when set), redacted for display.
+    # All confirmation reads use the RAW value (never this one) — see `_check_writable`.
+    push_url: str | None = None
+    # "configured" when `get-url --push` answered, "fellback" when we had to use the fetch url
+    # (git too old for `--push`, or no pushurl set and the read failed). Makes finding-"wrong
+    # remote" residuals visible instead of silent.
+    push_url_source: str | None = None
+    probe_ref: str | None = None
+    head_sha: str | None = None
+    steps: list[dict] = field(default_factory=list)
+    # None = cleanup could not be CONFIRMED (the confirming read failed) — never "clean".
+    # On an early return no read was attempted, so this also means "nothing to clean"; `steps`
+    # shows whether a push was ever made, which is what distinguishes the two cases.
+    cleaned_up: bool | None = None
+    kept_ref: bool = False
+    # A probe ref that SURVIVED on the remote, reported ALONGSIDE `reason` so a leftover does not
+    # erase the primary verdict (a credential that cannot write).
+    leftover_ref: bool = False
+
+    def as_json(self) -> str:
+        return json.dumps(
+            {
+                "writable": self.writable,
+                "reason": self.reason,
+                "reason_meaning": REASONS.get(self.reason or "", ""),
+                "detail": redact(self.detail),
+                "repo_root": self.repo_root,
+                "remote": self.remote,
+                "remote_url": redact(self.remote_url or ""),
+                "push_url": redact(self.push_url or ""),
+                "push_url_source": self.push_url_source,
+                "probe_ref": self.probe_ref,
+                "head_sha": self.head_sha,
+                "cleaned_up": self.cleaned_up,
+                "kept_ref": self.kept_ref,
+                "leftover_ref": self.leftover_ref,
+                "steps": [
+                    {**s, "detail": redact(s.get("detail", ""))} for s in self.steps
+                ],
+            },
+            indent=2,
+        )
+
+
+# Git variables that REDIRECT which repository git operates on, or that trace traffic. Removed.
+_GIT_REDIRECT_ENV = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_NAMESPACE",
+    "GIT_PREFIX",
+    "GIT_CURL_VERBOSE",
+)
+# Traces are prefix-matched (`GIT_TRACE`, `GIT_TRACE_PACKET`, … — new ones keep appearing).
+_GIT_TRACE_PREFIX = "GIT_TRACE"
+
+
+def _child_env(env_extra: dict[str, str] | None = None) -> dict[str, str]:
+    """The env the probe runs under.
+
+    Strips only what can REDIRECT the repository or TRACE traffic. Credential-carrying config
+    (`GIT_CONFIG_*`, `GIT_SSH_COMMAND`) is kept on purpose: a box that injects its write credential
+    that way must be probed through the same path its real `git push` uses, or the tool refuses a
+    credential that can write — a false block, and the inversion of its purpose.
+    """
+    drop = set(_GIT_REDIRECT_ENV)
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if k not in drop and not k.startswith(_GIT_TRACE_PREFIX)
+    }
+    # Never let git prompt for a credential: a preflight blocked on an interactive username prompt
+    # is a hung lane, not a verdict. `setdefault` so a box that deliberately supplies an askpass
+    # helper keeps it (see above).
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env.setdefault("GIT_ASKPASS", "true")
+    if env_extra:
+        env.update(env_extra)
+    return env
+
+
+def _insteadof_env(url: str, alias: str, slot: int) -> dict[str, str]:
+    """Env that makes git rewrite the inert `alias:` to `url`, keeping the secret OUT of argv.
+
+    `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n` (kept by `_child_env`) define the
+    rewrite inside the PROCESS ENV instead of on the command line.
+
+    ⛔ WHAT THIS BUYS, EXACTLY — do not overstate it. argv (`/proc/<pid>/cmdline`) is mode 0444:
+    readable by EVERY process on the box, including other users and `ps`. `/proc/<pid>/environ` is
+    mode 0400, owned by the lane's own user. On a cell where all lanes run as the SAME user a
+    sibling lane can still read it (measured), so this is a narrowing, not isolation: it removes the
+    blank-world-readable copy and the `ps` snapshot, and it separates lanes that run as different
+    users. A future lane should not treat the value as secret from its own user.
+
+    `slot` is the absolute `GIT_CONFIG_*` index to occupy. It is passed in rather than derived
+    from the ambient `GIT_CONFIG_COUNT` because a caller may need SEVERAL rewrites in one env:
+    deriving the slot inside this function would make every call return the SAME index, so the
+    later `GIT_CONFIG_KEY_n` would overwrite the earlier one and the first alias would be
+    unnameable — git would then fail to resolve it and the probe would refuse a credential that
+    CAN write (a false block, the one failure this tool must never add).
+    """
+    return {
+        f"GIT_CONFIG_KEY_{slot}": f"url.{url}.insteadOf",
+        f"GIT_CONFIG_VALUE_{slot}": alias,
+        "GIT_CONFIG_COUNT": str(slot + 1),
+    }
+
+
+def _read_targets(remote: str, url_raw: str, push_urls_raw: list[str]) -> list[str]:
+    """What to hand `git ls-remote` for EVERY push target.
+
+    * push urls identical to the fetch url (the common case) -> address the remote BY NAME. No URL
+      on argv at all, which is both correct (git resolves it itself) and exposure-free.
+    * a distinct push url with NO credential (`/path`, `ssh://git@host`) -> the raw url is safe on
+      argv and is the only way to reach a push-only target.
+    * a distinct push url WITH a credential -> an `insteadOf` alias (`_read_env` supplies the
+      rewrite), so the secret lives in the environment and never in the world-readable process
+      table.
+    """
+    if push_urls_raw == [url_raw]:
+        return [remote]
+    out = []
+    for idx, u in enumerate(push_urls_raw):
+        if _url_has_credential(u):
+            out.append(f"gh-write-preflight-push{idx}:")
+        else:
+            out.append(u)
+    return out
+
+
+def _read_env(remote: str, url_raw: str, push_urls_raw: list[str]) -> dict[str, str]:
+    """The env that makes `_read_targets` resolve (empty when reading by name).
+
+    Every credential-bearing target gets its OWN `GIT_CONFIG_*` slot, counting up from the ambient
+    `GIT_CONFIG_COUNT` so a box that already injects config through that channel is not clobbered.
+    """
+    if push_urls_raw == [url_raw]:
+        return {}
+    env: dict[str, str] = {}
+    slot = int(os.environ.get("GIT_CONFIG_COUNT") or 0)
+    for idx, u in enumerate(push_urls_raw):
+        if _url_has_credential(u):
+            env.update(_insteadof_env(u, f"gh-write-preflight-push{idx}:", slot))
+            slot += 1
+    return env
+
+
+def _url_has_credential(url: str) -> bool:
+    """Does this URL carry a secret in its userinfo (or a token anywhere)?
+
+    argv is world-readable (`/proc/<pid>/cmdline` is 0444) and lanes share a cell, so a URL that
+    embeds a credential must NEVER be handed to git as an argument. `git@host` (an SSH user, no
+    password) does NOT count — it carries no secret, and refusing it would be a false block.
+    """
+    # ⛔ ONE DEFINITION OF "SECRET" FOR BOTH DIRECTIONS. This used `_REDACT_PATTERNS[3:]` (bare
+    # `ghp_…`/`github_pat_…` shapes only), so a credential carried as a QUERY PARAMETER
+    # (`…/x.git?access_token=SECRET`) was masked by `redact()` but NOT treated as a credential —
+    # and `_read_targets` therefore handed the RAW url to `git ls-remote` on argv (0444), while
+    # real git even echoes the query token in its error text. `[2:]` adds the keyword form
+    # (`token=`/`api_key=`/`password=`), which requires a `=`/`:` separator so ordinary paths are
+    # unaffected.
+    if any(p.search(url) for p, _ in _REDACT_PATTERNS[2:]):   # bare token + keyword shapes
         return True
-    with contextlib.suppress(ValueError):
-        return ipaddress.ip_address(host).is_loopback
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        # ⛔ AN UNPARSEABLE-FOR-URLLIB URL IS TREATED AS CARRYING A CREDENTIAL, never as data.
+        # `urlsplit` raises `ValueError("Invalid IPv6 URL")` for a netloc holding an unmatched
+        # `[` (and for netloc chars that NFKC-decompose into `/`, `?`, `#`, `@`, `:`), so a
+        # pushurl like `https://user:pa[ss@host/r.git` fell through this arm as "no credential"
+        # while `redact()` masked the same string — and the raw password went to `git ls-remote`
+        # on argv (0444 on a shared cell) for the reachability and confirmation reads.
+        #
+        # ⚠️ THE DEFECT IS THE ARGV COPY AND ONLY THAT — do not restate it as a false block.
+        # Measured with real git: `git ls-remote --heads 'https://user:pa[ss@example.invalid/r.git'`
+        # strips the userinfo and proceeds to DNS/connect, exactly like the bracket-free control,
+        # so `urlsplit`'s refusal is urllib's rule and NOT git's — the read never became
+        # `remote-unreachable` because of this arm. Returning True costs nothing either way: the
+        # target is then reached through the `insteadOf` alias, which git rewrites to this same
+        # URL string (measured); it changes WHERE the string lives (0400 env), not what git does.
+        return True
+    if parts.password:
+        return True
+    # A userinfo with a password and NO parseable scheme, e.g. the scp-like
+    # `user:secret@host:path`. `urlsplit` reads the leading `user:` as the SCHEME, so
+    # `parts.password` stays None and the check above cannot see it — measured:
+    # `_url_has_credential("user:hunter2@host:repo.git")` returned False while the raw URL was
+    # handed to git on argv, which is mode 0444 on a shared cell. The userinfo is the text before
+    # the FIRST `@`, and a userinfo can never contain `/`, so that pair of facts separates a
+    # credential from a path that merely contains `@`. Erring toward True is safe and is the right
+    # asymmetry: a false positive only routes the target through the `insteadOf` env rewrite, which
+    # git resolves to the same URL, while a false negative puts a secret on world-readable argv.
+    userinfo = url.split("@", 1)[0]
+    if "@" in url and "/" not in userinfo and ":" in userinfo:
+        return True
+    # A LONE userinfo with no scheme (`token@host:path`) is the SAME credential as
+    # `https://token@host/…` — it must not be treated as data just because `urlsplit` sees no
+    # scheme. `git@host:path` and a bare local path stay non-secrets (the exemption list, and the
+    # `"/" not in userinfo` test above).
+    #
+    # ⚠️ DELIBERATE OVER-DETECTION, accepted. An account-name user we do not list
+    # (`daniel-ospina@github.com:o/r.git`, `repo@backup.git`) is treated as a credential too, so it
+    # is routed through the `insteadOf` alias and its display is masked. That is not free: the
+    # `remote:`/`remote_url` line shows `<userinfo-redacted>@host:` instead of the account name.
+    # It is still the right side of the asymmetry — a false positive costs a diagnostic, and the
+    # HOST and PATH (which is what identifies two different remotes) are preserved, while a false
+    # negative puts a token on world-readable argv. Do not "fix" this by adding a token-shape
+    # heuristic: an opaque token has no shape, and the heuristic would reopen the leak on exactly
+    # the credentials hardest to recognise.
+    if (
+        "@" in url
+        and "/" not in userinfo
+        and ":" not in userinfo
+        and userinfo
+        and userinfo.lower() not in _NON_SECRET_USERINFO
+    ):
+        return True
+    # ⛔ A LONE userinfo is a credential too: `https://mytoken123@host/p.git` is a form GitHub
+    # documents, carries no `ghp_`/`github_pat_` prefix, and has no password field — so every check
+    # above misses it while `redact()` hides it in the display, and the raw token lands on argv
+    # (0444) on a shared cell. Measured false negative: userinfo `mytoken123` -> False.
+    # Only the KNOWN non-secret account names are exempt: `git@`/`ssh@`/`hg@` carry no secret, and
+    # treating them as credentials would route every ordinary SSH remote through the alias path (a
+    # false block on the most common configuration there is).
+    if parts.scheme and parts.netloc and "@" in parts.netloc:
+        candidate = parts.netloc.rsplit("@", 1)[0].split(":", 1)[0]
+        if candidate and candidate.lower() not in _NON_SECRET_USERINFO:
+            return True
     return False
 
 
-def _validate_api_base(api_base: str) -> str:
-    """Return '' when this base is safe to send the credential to, else a NAMED refusal reason.
+class Runner:
+    """A thin, testable seam over subprocess.
 
-    Refusals are reported as `usage` (the documented bad-arguments verdict) and happen BEFORE any
-    request, so a rejected base never receives so much as the READ probe.
+    Tests inject a Runner subclass rather than monkeypatching `subprocess`; the real implementation
+    is the only thing that ever runs git for real.
     """
-    if not api_base:
-        return "--api-base is empty — pass " + DEFAULT_API + " or a loopback stub"
-    # ⛔ EVERY MESSAGE BELOW ECHOES `_printable_base(api_base)`, NEVER THE RAW VALUE. This function's
-    # refusals ARE a printing path: the string becomes `result["detail"]`, which reaches stdout on the
-    # `GH-WRITE-UNAVAILABLE(...)` line AND inside the `--json` artifact a lane pastes into a PR. Round 8
-    # redacted only the `api_base` KEY, so the two guards below — which run BEFORE the userinfo check —
-    # printed `user:pass@` verbatim. MEASURED at head `76a21dfd8`:
-    #     --api-base 'http://user:hunter2@127.0.0.1:9?x=1'
-    #       → ... must not carry a query or fragment (got 'http://user:hunter2@127.0.0.1:9?x=1')
-    # Hoisting the userinfo check does NOT close the class (see `_printable_base`), and redacting here
-    # keeps the invariant true regardless of branch order, so a future check added above cannot reopen it.
-    # A bare `?`/`#` parses to an EMPTY query/fragment, so `parts.query` alone cannot see it — but a
-    # base carrying one still gets mangled when the probe path is joined onto it.
-    if "?" in api_base or "#" in api_base:
-        return f"--api-base must not carry a query or fragment (got {_printable_base(api_base)!r})"
-    parts = urllib.parse.urlsplit(api_base)
-    if parts.scheme not in ("http", "https") or not parts.hostname:
-        return f"--api-base must be an absolute http(s) URL with a host (got {_printable_base(api_base)!r})"
-    # ⛔ NEVER ECHO THESE CREDENTIALS BACK. The refused base's userinfo is NOT repeated in this message
-    # on purpose: `user:pass@host` would otherwise be printed to stdout, which is the leak this branch
-    # exists to stop, arriving in the error message about stopping it.
-    if parts.username is not None or parts.password is not None:
-        return (f"--api-base host {parts.hostname!r} carries credentials ('user:pass@' in the URL) — the "
-                f"token is sent as an Authorization header, never in the URL")
+
+    def run(
+        self,
+        argv: list[str],
+        cwd: str | None = None,
+        timeout: int = 120,
+        env_extra: dict[str, str] | None = None,
+    ) -> Proc:
+        try:
+            proc = subprocess.run(
+                argv,
+                cwd=cwd,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                # `replace` so a non-UTF-8 byte in git's error text cannot raise out of the
+                # verdict path and exit 1 with no marker.
+                errors="replace",
+                # No controlling terminal on stdin. `GIT_TERMINAL_PROMPT=0` suppresses GIT's own
+                # prompt only; an ssh passphrase prompt (`GIT_SSH_COMMAND`, kept so a box can
+                # inject its key), a gpg pinentry for a signed push, or a credential helper that
+                # reads stdin would all inherit the lane's terminal — a 120 s stall plus possible
+                # keystroke theft.
+                stdin=subprocess.DEVNULL,
+                env=_child_env(env_extra),
+            )
+        except FileNotFoundError:
+            # Covers a missing binary AND a missing `cwd`; check_writable's is_dir() guard means
+            # the cwd case cannot reach here, so the message stays true.
+            return Proc(127, err=f"{argv[0]}: not found")
+        except subprocess.TimeoutExpired:
+            return Proc(124, err=f"{argv[0]}: timed out after {timeout}s")
+        except OSError as exc:
+            # EMFILE/ENOMEM/EACCES/E2BIG… — any of these used to escape as an unmarked traceback
+            # (exit 1 with no GH-WRITE-UNAVAILABLE token), breaking the contract.
+            return Proc(126, err=f"{argv[0]}: {exc}")
+        return Proc(proc.returncode, proc.stdout or "", proc.stderr or "")
+
+
+def _neutral_push_env(remote: str) -> dict[str, str]:
+    """Config that stops ambient settings from widening or breaking the probe push.
+
+    Set through `GIT_CONFIG_*` (env, kept by `_child_env`) rather than `git -c` so argv stays the
+    documented shape and no caller's flags are inherited.
+
+    ⛔ OCCUPY SLOTS **ABOVE** THE AMBIENT COUNT, never from zero. `GIT_CONFIG_COUNT=3` with keys
+    0-2 OVERWRITES every ambient slot, and on a box that injects its credential through that
+    channel (`url.<base>.insteadOf` + `credential.helper`) this REPLACED the working credential with
+    git's fallback — measured: a repo whose push target is resolved by an ambient `insteadOf`
+    returned `writable=False, push-refused` while a raw `git push` under the same env exited 0, and
+    `credential.helper` silently changed from the lane's helper to `!gh auth git-credential`. That
+    is a false block — the one failure this module says it must never add. `_read_env` counts up
+    from the ambient count for the same reason; do the same here.
+    """
+    settings = {
+        "push.followTags": "false",
+        f"remote.{remote}.mirror": "false",
+        "push.useForceIfIncludes": "false",
+        # A signed push is refused outright by a remote (or a hook) that does not accept signatures
+        # (`fatal: the receiving end does not support --signed push`), and push options are refused
+        # by a remote that does not advertise them. Both then read as "read-only credential".
+        # An EMPTY value disables the ambient push options — `--no-push-option` does NOT
+        # countermand a configured `push.pushOption` (measured: still rc 128).
+        "push.gpgSign": "false",
+        "push.pushOption": "",
+    }
+    base = int(os.environ.get("GIT_CONFIG_COUNT") or 0)
+    env: dict[str, str] = {"GIT_CONFIG_COUNT": str(base + len(settings))}
+    for offset, (key, value) in enumerate(settings.items()):
+        env[f"GIT_CONFIG_KEY_{base + offset}"] = key
+        env[f"GIT_CONFIG_VALUE_{base + offset}"] = value
+    return env
+
+
+def _probe_ref(prefix: str = "gh-write-preflight") -> str:
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    rand = "".join(random.choices(string.ascii_lowercase + string.digits, k=6))
+    return f"{prefix.strip('/')}/{stamp}-{os.getpid()}-{rand}"
+
+
+# A prefix that cannot form a valid refname, or that starts with `-`, must be refused at the CLI
+# boundary rather than handed to git as an option-looking argv element. This belt stops the
+# OBVIOUS shapes; `git check-ref-format` is the authoritative gate (see `_prefix_ok`) because
+# refname rules (no component starting `.`, none ending `.lock`, no control chars, …) cannot be
+# enumerated safely by hand.
+_BAD_PREFIX_CHARS = set(" ~^:?*[\\")
+
+
+def _valid_prefix(prefix: str) -> bool:
+    if not prefix or prefix.startswith("-") or prefix.strip("/") != prefix:
+        return False
+    if ".." in prefix or "//" in prefix or "@{" in prefix:
+        return False
+    if any(ord(ch) <= 0x20 or ord(ch) == 0x7F for ch in prefix):
+        return False
+    for comp in prefix.split("/"):
+        if comp.startswith(".") or comp.endswith(".lock"):
+            return False
+    return not (_BAD_PREFIX_CHARS & set(prefix))
+
+
+def _prefix_ok(prefix: str, runner: Runner) -> bool:
+    """Authoritative prefix check: ask git whether `<prefix>/probe` is a legal refname.
+
+    The hand-written rules above are a fast belt; this is the verdict. Without it, an impossible
+    refname (`.`, `foo.lock`, a component starting with `.`) renders a ref git rejects, and the
+    tool reports `GH-WRITE-UNAVAILABLE(push-refused)` on a fully writable remote — a usage
+    mistake reported as "your credential cannot write".
+    """
+    if not _valid_prefix(prefix):
+        return False
+    proc = runner.run(["git", "check-ref-format", f"refs/heads/{prefix}/probe"])
+    # rc==1 is git's own verdict: not a legal refname. 0 is a pass; 127 = git absent and
+    # 124/126 = this check could not run, so those fall back to the belt (the verdict path fails
+    # on its own `git --version` check and reports `git-absent`) rather than render a broken
+    # environment as "git rejects this refname".
+    return proc.rc != 1
+
+
+def _ref_state(
+    runner: Runner,
+    root: str,
+    remote: str,
+    ref: str,
+    env_extra: dict[str, str] | None = None,
+) -> str:
+    """Is `ref` on `remote`? Tri-state, because "could not check" is not "absent".
+
+    Returns ``present`` / ``absent`` / ``unverifiable``.
+    """
+    proc = runner.run(
+        ["git", "ls-remote", remote, f"refs/heads/{ref}"], cwd=root, env_extra=env_extra
+    )
+    if proc.rc != 0:
+        return "unverifiable"
+    return "present" if proc.out.strip() else "absent"
+
+
+def _ref_reads(
+    runner: Runner,
+    root: str,
+    urls: list[str],
+    ref: str,
+    env_extra: dict[str, str] | None = None,
+) -> list[tuple[str, str, str]]:
+    """Per-target (url, state, sha). ONE read per target, so no caller re-reads and disagrees.
+
+    The sha is what distinguishes "a ref exists" from "OUR write landed". Returning both from the
+    same read is deliberate: a second, separate read of the first target (as an earlier revision
+    did) can fail transiently and turn a proven write into `verify-mismatch` while the multi-read
+    says `present` — a false block on exactly the multi-pushurl configs this must get right.
+    """
+    reads: list[tuple[str, str, str]] = []
+    for u in urls:
+        proc = runner.run(
+            ["git", "ls-remote", u, f"refs/heads/{ref}"], cwd=root, env_extra=env_extra
+        )
+        if proc.rc != 0:
+            reads.append((u, "unverifiable", ""))
+        elif proc.out.strip():
+            reads.append((u, "present", proc.out.split()[0]))
+        else:
+            reads.append((u, "absent", ""))
+    return reads
+
+
+def _ref_state_multi(runner: Runner, root: str, urls: list[str], ref: str,
+                     env_extra: dict[str, str] | None = None) -> str:
+    """Is `ref` on ANY of `urls`?
+
+    ⛔ A remote may define SEVERAL pushurls, and `git push` writes to ALL of them while
+    `git remote get-url --push` (without `--all`) lists only the first. Confirming against the
+    first alone reports `cleaned_up=True` while the ref survives on another — a false verified
+    claim and litter on a shared remote. So: present if ANY says present; unverifiable if none
+    says present and ANY could not be read; absent only when every read positively says absent.
+
+    An EMPTY list is `unverifiable`, never `absent` — a vacuous truth here would report a verified
+    clean from zero reads.
+    """
+    reads = _ref_reads(runner, root, urls, ref, env_extra=env_extra)
+    if not reads:
+        return "unverifiable"
+    states = [state for _u, state, _sha in reads]
+    if "present" in states:
+        return "present"
+    if "unverifiable" in states:
+        return "unverifiable"
+    return "absent"
+
+
+def _push_verify_cleanup(
+    runner: Runner,
+    root: str,
+    remote: str,
+    read_targets: list[str],
+    read_env: dict[str, str],
+    verdict: Verdict,
+    head: str,
+    keep_ref: bool,
+    step: Callable[[str, Proc], bool],
+) -> None:
+    """Push the probe ref, verify it, delete it, verify the delete.
+
+    Mutates `verdict`; returns nothing. The real invariant is that this helper must not RAISE on
+    an ordinary path: the caller wraps it in a `try/finally` and gates its retry on
+    `sys.exc_info()[0] is not None`, so a swallowed exception here would make that guard fire a
+    second delete it must not issue. (The `finally` lives in the CALLER, not here, so a bare
+    `return` in this body is not the hazard that sentence used to describe.)
+    """
+    push_proc = runner.run(
+        [
+            "git", "push", "--porcelain", "--no-verify", "--no-follow-tags", remote,
+            f"HEAD:refs/heads/{verdict.probe_ref}",
+        ],
+        cwd=root,
+        # ⛔ NEUTRALISE AMBIENT PUSH CONFIG (through the env, so argv stays the documented shape).
+        # `push.followTags=true` made the probe push an annotated TAG to the shared remote as well —
+        # a mutation BEYOND the probe ref that survived cleanup while the verdict still said
+        # `cleaned_up: true` (measured) — and a tag push is precisely what `publish-pypi`
+        # (`tags: v*`) triggers on. `remote.<name>.mirror=true` made the push fail outright and was
+        # reported as a credential refusal on a writable remote. `--no-follow-tags` covers the CLI
+        # flag; these cover the config, which the flag alone does not override everywhere.
+        env_extra=_neutral_push_env(remote),
+    )
+    push_ok = step("push", push_proc)
+    # ⛔ Parse the write flag from the RAW stdout — NEVER from `steps[-1]["detail"]`, which `step()`
+    # has already truncated to its last 800 chars and redacted. A remote that prints >800 chars of
+    # advisory output while ACCEPTING the push pushes the porcelain line out of that window, turning
+    # a real write into `push-refused` (a false block: the lane parks deliverable work). MEASURED
+    # against real git: a bare remote whose `pre-receive` prints 40 advisory lines and exits 0.
+    wrote = False
+    for line in push_proc.out.splitlines():
+        parts = line.split("\t")
+        if len(parts) >= 2 and parts[0].strip() in ("*", "+"):
+            wrote = True
+            break
+
+    if push_ok and wrote:
+        # (7) Confirm on the REMOTE(S) WE PUSHED TO, not from push's own word. ONE read per target,
+        # carrying the sha — a separate second read of the first target can fail transiently and
+        # flip a proven write into `verify-mismatch` (a false block) while this read says present.
+        reads = _ref_reads(runner, root, read_targets, verdict.probe_ref, env_extra=read_env)
+        # ⛔ EVERY target must be present AT OUR SHA. A ref that exists at another sha is not our
+        # write; a target that cannot be read is not proven.
+        bad = [(u, st, sha) for u, st, sha in reads if not (st == "present" and sha == head)]
+        verdict.steps.append(
+            {
+                "step": "ls-remote-verify",
+                # The step's rc follows the VERDICT-DECIDING set, not mere readability: keying it on
+                # readability rendered `[ok] ls-remote-verify (rc=0)` immediately above
+                # `GH-WRITE-UNAVAILABLE(verify-mismatch)` — a false-PASS line in the log an
+                # operator reads first.
+                "rc": 1 if bad else 0,
+                "detail": redact(
+                    "; ".join(f"{u.split('@')[-1]}={st}:{sha[:12] or '-'}" for u, st, sha in reads)
+                ),
+            }
+        )
+        if not bad:
+            verdict.writable = True
+        else:
+            verdict.reason = "verify-mismatch"
+            verdict.detail = redact(
+                "push reported success but ls-remote does not confirm "
+                f"refs/heads/{verdict.probe_ref} at {head[:12]}: "
+                + "; ".join(f"{u.split('@')[-1]}={st}:{sha[:12] or '<nothing>'}" for u, st, sha in bad)
+            )
+    elif push_ok:
+        # No line claimed a write -> "up to date": nothing was created, so nothing is proven.
+        # ⛔ Do NOT `return` here and do NOT claim cleanup: a pre-existing probe ref (or a remote
+        # that accepted the update but reported it differently) still has to be DELETED and the
+        # deletion CONFIRMED below. Returning early here reported `cleaned_up=True` with no read at
+        # all — abandoning the litter it was claiming not to have left.
+        verdict.reason = "push-refused"
+        verdict.detail = (
+            "push exited 0 but reported NO ref update (Everything up-to-date) — nothing was "
+            "written, so write capability is not proven"
+        )
+    else:
+        # The defect this tool exists to catch: a read-only credential fails HERE. Do NOT conclude
+        # the ref is absent — a transport error can arrive AFTER the remote applied the update, so
+        # cleanup below still runs and is CONFIRMED by ls-remote.
+        verdict.reason = "push-refused"
+        verdict.detail = verdict.steps[-1]["detail"]
+        # ⛔ A timeout is NOT a refusal. rc 124 is OUR OWN deadline (Runner maps TimeoutExpired),
+        # so the credential's capability is UNKNOWN, not absent. Without this note the verdict reads
+        # "read-only credential" and a lane goes hunting for a permissions problem that is really a
+        # slow remote — the same "plausible diagnosis for the wrong cause" the tool exists to end.
+        # A signalled push (rc < 0 - e.g. the OOM killer, documented for these cells) or one that
+        # produced no output at all says nothing about the credential either.
+        if push_proc.rc == 124 or push_proc.rc < 0 or not (push_proc.err or "").strip():
+            # A DISTINCT TOKEN, not just prose: the published contract is that a caller can branch
+            # on `reason` without parsing detail, and `push-refused` means the credential is at
+            # fault. A timeout or a kill is not that, so pinning the token to `push-refused` parked
+            # deliverable work on a slow or OOM-killed push — the exact diagnosis error the note
+            # below exists to prevent.
+            verdict.reason = "push-unknown"
+            verdict.detail = (
+                f"{verdict.detail} | the push TIMED OUT (our own deadline) — write capability is "
+                "UNKNOWN, not refused; re-run before concluding the credential is read-only"
+            )
+
+    # (8) CLEANUP — one place. The `--keep-ref` arm returns EARLY (a bare `return`: this helper
+    # returns nothing), and that is safe because the `try/finally` that could swallow an exception
+    # is in the CALLER, not in this body — there is no `finally` here to return through.
+    if keep_ref:
+        verdict.kept_ref = True
+        # A REQUESTED survivor: the litter was asked for, so unlike the unrequested survivor below
+        # it does NOT change the exit code (`writable` stays True, the run exits 0) — see
+        # `test_keep_ref_is_explicit_and_the_message_does_not_lie`, which pins that exit 0.
+        # `cleaned_up=False` is documented as "a PROVEN SURVIVOR". On a `--keep-ref` run where the
+        # push was refused nothing was ever created, so claiming a survivor overloads the field a
+        # consumer branches on; `None` (not applicable / unknown) is the honest value.
+        # Keyed on EVIDENCE of a write, not on `push_ok`: an "up to date" push exits 0 having
+        # created nothing, and calling that a PROVEN SURVIVOR invents litter while `leftover_ref`
+        # stays False beside it.
+        verdict.cleaned_up = False if (push_ok and wrote) else None
+        return
+
+    dp = runner.run(
+        # `--` so a ref that begins with `-` can never be parsed as an option by `git push`
+        # (a `--probe-ref-prefix=-f` renders `-f/<stamp>`, which without this makes the delete
+        # exit 129 and leaves the ref behind while reporting the credential unwritable).
+        ["git", "push", "--no-verify", remote, "--delete", "--", verdict.probe_ref],
+        cwd=root,
+        # The same ambient config breaks a --delete ("--mirror can't be combined with refspecs"),
+        # which then read as `delete-failed` / "PROBE REF SURVIVED" on a remote the probe had in
+        # fact written to and could clean: measured with `remote.origin.mirror=true`.
+        env_extra=_neutral_push_env(remote),
+    )
+    step("delete", dp)
+
+    # CONFIRM ON THE REMOTE(S) WE PUSHED TO, not from the delete's own exit code — the same rule
+    # the push path follows. `cleaned_up=True` only on a positive "ref absent" read of EVERY push
+    # url; an unreadable answer is `None` (unconfirmed), never "clean".
+    state = _ref_state_multi(
+        runner, root, read_targets, verdict.probe_ref, env_extra=read_env
+    )
+    if state == "absent":
+        verdict.cleaned_up = True
+    elif state == "present":
+        verdict.cleaned_up = False
+        verdict.leftover_ref = True
+        # A surviving ref is NOT a pass: the tool must not report writable while it has left
+        # garbage on a shared remote.
+        verdict.writable = False
+        if verdict.reason is None:
+            verdict.reason = "delete-failed"
+        note = (
+            f"PROBE REF SURVIVED on {remote}: refs/heads/{verdict.probe_ref} "
+            f"({verdict.steps[-1]['detail']})"
+        )
+        verdict.detail = f"{verdict.detail} | {note}" if verdict.detail else note
+    else:
+        verdict.cleaned_up = None
+        verdict.leftover_ref = False
+        # Do NOT assert that the delete failed — it may have SUCCEEDED and only the confirming
+        # read failed (a rate limit, a transient error). Report what is actually known.
+        note = (
+            f"cleanup UNCONFIRMED — the delete's outcome could not be confirmed "
+            f"(delete rc={dp.rc}) and ls-remote could not be read for "
+            f"refs/heads/{verdict.probe_ref}; check the remote before assuming it is clean"
+        )
+        verdict.detail = f"{verdict.detail} | {note}" if verdict.detail else note
+
+
+
+def check_writable(
+    repo: str | Path = ".",
+    remote: str = "origin",
+    runner: Runner | None = None,
+    keep_ref: bool = False,
+    probe_ref_prefix: str | None = None,
+) -> Verdict:
+    """Answer "can this credential write repository contents here?".
+
+    Returns a Verdict. Never raises for an expected failure, and never returns `writable=False`
+    without a `REASONS` token.
+    """
+    runner = runner or Runner()
+    # ⛔ VALIDATE THE PREFIX AT THE API SEAM TOO. `main()` refuses a bad prefix with exit 2, but a
+    # programmatic caller goes straight to `check_writable`, where an unrenderable refspec previously
+    # surfaced as `GH-WRITE-UNAVAILABLE(push-refused)` — blaming the CREDENTIAL for a usage
+    # mistake, on a remote that writes fine. Raises (rather than returning a verdict) because no
+    # credential verdict exists to return: nothing was probed.
+    if probe_ref_prefix is not None:
+        if not _valid_prefix(probe_ref_prefix):
+            raise ValueError(
+                f"invalid probe_ref_prefix {probe_ref_prefix!r}: it must be a ref-shaped path "
+                f"segment (no empty components, no '..', no leading '-')"
+            )
+        if not _prefix_ok(probe_ref_prefix, runner):
+            raise ValueError(
+                f"invalid probe_ref_prefix {probe_ref_prefix!r}: git check-ref-format rejects "
+                f"the ref name it would produce"
+            )
+    # ⛔ THE IN-FLIGHT VERDICT IS THREADED THROUGH, not thrown away. Building a fresh Verdict on the
+    # exception path discarded `probe_ref`, `steps` and `leftover_ref` — so the one branch where
+    # litter is MOST likely (the probe died mid-push) was the branch that reported
+    # `leftover_ref: false` and did not name the ref an operator must delete. Measured: exception on
+    # the verify read with deletes denied left `refs/heads/gh-write-preflight/…` on the real remote
+    # while the verdict said `probe_ref=None, leftover_ref=False`.
+    seen: list[Verdict] = []
     try:
-        _ = parts.port
-    except ValueError:
-        return f"--api-base has an invalid port (got {_printable_base(api_base)!r})"
-    if api_base.rstrip("/") == DEFAULT_API:
-        return ""
-    if not _is_loopback(parts.hostname):
-        return (f"--api-base {_printable_base(api_base)!r} is neither {DEFAULT_API} nor a loopback stub — a verdict from an "
-                f"unrecognised endpoint is not a verdict about the credential (only 127.0.0.0/8, ::1 and "
-                f"localhost are accepted as the hermetic test seam)")
-    return ""
+        return _check_writable(repo, remote, runner, keep_ref, probe_ref_prefix, seen)
+    except Exception as exc:  # the contract is "no exit 1 without a marker"
+        verdict = seen[0] if seen else Verdict(False, repo_root=str(repo), remote=remote)
+        verdict.writable = False
+        verdict.reason = "internal-error"
+        note = redact(f"{type(exc).__name__}: {exc}")
+        verdict.detail = f"{verdict.detail} | {note}" if verdict.detail else note
+        pushed = any(s.get("step") == "push" for s in verdict.steps)
+        if pushed and verdict.probe_ref and verdict.cleaned_up is None and not verdict.kept_ref:
+            # A ref may survive this path; say so rather than implying a clean remote.
+            verdict.detail += (
+                f" | the probe ref {verdict.probe_ref} may still be on {remote} — clean it up"
+            )
+        return verdict
 
 
-def _printable_base(api_base: str) -> str:
-    """`api_base` as it may be PUT IN A VERDICT — any `user:pass@` userinfo is redacted.
+def _check_writable(
+    repo: str | Path,
+    remote: str,
+    runner: Runner,
+    keep_ref: bool,
+    probe_ref_prefix: str | None = None,
+    seen: list[Verdict] | None = None,
+) -> Verdict:
+    repo_path = Path(repo).expanduser()
 
-    ⛔ THE REFUSAL IS NOT THE ONLY PATH THAT PRINTS THE BASE. `api_base` is a key in the result dict,
-    and `--json` serialises the WHOLE dict — so a credentialed base refused for carrying credentials
-    was still echoed verbatim into the machine-readable artifact. MEASURED on the round-7 fix:
+    # (0) git present?
+    if runner.run(["git", "--version"]).rc != 0:
+        return Verdict(False, "git-absent", detail="git --version failed")
 
-        --api-base http://user:hunter2@127.0.0.1:9 --json
-        → "api_base": "http://user:hunter2@127.0.0.1:9"      ← the secret, in stdout
+    # (1) the target must be a directory. Checked FIRST so a bad `--repo` cannot masquerade as
+    # "git is missing" (a nonexistent cwd raises FileNotFoundError inside subprocess).
+    if not repo_path.is_dir():
+        return Verdict(False, "not-a-repo", detail=f"not a directory: {repo_path}")
 
-    which is credential hygiene (`R3`) failing in the artifact a lane pastes into a PR or a comment.
-    The host and path are kept so the verdict still names what was refused; only the userinfo goes.
-    """
-    try:
-        parts = urllib.parse.urlsplit(api_base)
-    except ValueError:
-        return "[unparseable --api-base, not echoed]"
-    if parts.username is not None or parts.password is not None:
-        return urllib.parse.urlunsplit(
-            (parts.scheme, parts.netloc.rsplit("@", 1)[-1], parts.path, "", ""))
-    # ⛔ `urlsplit` IS BLIND TO USERINFO IN A VALUE IT CANNOT PARSE AS A URL AT ALL. `user:hunter2@host`
-    # (no scheme) comes back as scheme='user', netloc='', path='hunter2@host', username=None,
-    # password=None — so the branch above returns it VERBATIM and a schemeless credentialed base leaks
-    # exactly as the query-bearing one did. Any '@' surviving both branches is userinfo-shaped, so the
-    # prefix is redacted and the tail (the host) kept for attributability.
-    if "@" in api_base:
-        return "[redacted userinfo]@" + api_base.rsplit("@", 1)[-1]
-    return api_base
+    # (2) is this a work tree, and where is its root? stdout ONLY.
+    p = runner.run(["git", "rev-parse", "--show-toplevel"], cwd=str(repo_path))
+    root_lines = [ln.strip() for ln in p.out.splitlines() if ln.strip()]
+    if p.rc != 0 or not root_lines:
+        return Verdict(False, "not-a-repo", detail=redact(p.detail))
+    root = root_lines[-1]
 
+    # (3) does the named remote exist? stdout only, first line.
+    p = runner.run(["git", "remote", "get-url", remote], cwd=root)
+    url_lines = [ln.strip() for ln in p.out.splitlines() if ln.strip()]
+    if p.rc != 0 or not url_lines:
+        return Verdict(False, "no-remote", detail=redact(p.detail), repo_root=root, remote=remote)
+    # ⛔ KEEP A RAW COPY FOR ARGV. `redact()` rewrites URL userinfo, so passing the redacted value
+    # to git asks it to contact a URL the config never named — `ssh://git@host/…` (no secret at
+    # all) becomes `ssh://<userinfo-redacted>@host/…` and the read fails, refusing a credential
+    # that can write. The redacted form is for DISPLAY only.
+    url_raw = url_lines[0]
+    url = redact(url_raw)
 
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    """Surface a 3xx instead of silently re-issuing it — and never as a downgraded GET.
+    # (3b) THE PUSH URL(S), NOT THE FETCH URL. git pushes to `remote.<name>.pushurl` when set, so a
+    # fork-style config (`url=…/fetch.git`, `pushurl=…/push.git`) means every confirmation read
+    # below would ask a DIFFERENT remote than the one we wrote to. And a remote may define SEVERAL
+    # pushurls — the push writes to all of them, so all of them must be confirmed. `--all` is what
+    # lists them; without it git reports only the first.
+    pa = runner.run(["git", "remote", "get-url", "--push", "--all", remote], cwd=root)
+    push_lines = [ln.strip() for ln in pa.out.splitlines() if ln.strip()]
+    if pa.rc == 0 and push_lines:
+        push_urls_raw, push_url_source = push_lines, "configured"
+    else:
+        push_urls_raw, push_url_source = [url_raw], "fellback"
+    push_url = redact(push_urls_raw[0])
 
-    Returning None leaves the request unhandled, so urllib raises the HTTPError carrying the real
-    status (301/302/303/307/308), which then fails closed like any other unexpected status.
-    """
+    # (4) HEAD must resolve — we push an EXISTING commit, never a new one.
+    p = runner.run(["git", "rev-parse", "HEAD"], cwd=root)
+    head_lines = [ln.strip() for ln in p.out.splitlines() if ln.strip()]
+    if p.rc != 0 or not head_lines:
+        return Verdict(
+            False,
+            "no-head",
+            detail=redact(p.detail),
+            repo_root=root,
+            remote=remote,
+            remote_url=url,
+            push_url=push_url,
+            push_url_source=push_url_source,
+        )
+    head = head_lines[-1]
 
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
+    verdict = Verdict(
+        False,
+        repo_root=root,
+        remote=remote,
+        remote_url=url,
+        push_url=push_url,
+        push_url_source=push_url_source,
+        head_sha=head,
+        probe_ref=_probe_ref(probe_ref_prefix or "gh-write-preflight"),
+    )
+    # Publish the in-flight verdict so the exception wrapper can report what the probe learned
+    # (probe_ref, steps) instead of discarding it exactly when litter is most likely.
+    if seen is not None:
+        seen.append(verdict)
+    # Confirmation reads address the PUSH target(s). When the push url differs from the fetch url we
+    # must name a URL rather than the remote; a credential-bearing URL goes through an `insteadOf`
+    # alias so the secret stays in the env (0400), never on argv (0444, world-readable on a shared
+    # cell).
+    read_targets = _read_targets(remote, url_raw, push_urls_raw)
+    read_env = _read_env(remote, url_raw, push_urls_raw)
 
+    def step(name: str, proc: Proc) -> bool:
+        # REDACT AT INGESTION. Nothing downstream has to remember.
+        verdict.steps.append(
+            {"step": name, "rc": proc.rc, "detail": redact(proc.detail[-800:])}
+        )
+        return proc.rc == 0
 
-_OPENER = urllib.request.build_opener(_NoRedirect)
-
-
-# ── credential resolution ────────────────────────────────────────────────────────────────────────
-# gh's OWN ORDER: GH_TOKEN, then GITHUB_TOKEN, then the config file. Reading the file beats asking
-# the binary (`gh auth token`): that is a subprocess on the critical path, and it would inherit the
-# same shim/host hazards this tool exists to report. Mirrors `objective.py::_gh_token` and
-# `pr-doctor.py::_gh_token` deliberately, so the three cannot disagree about who the lane is.
-def _hosts_path() -> str:
-    """gh's OWN directory resolution: `GH_CONFIG_DIR`, then `XDG_CONFIG_HOME`, then `~/.config`.
-
-    ⛔ THE `GH_CONFIG_DIR` LEG IS NOT COSMETIC. This tool's docstring says it mirrors
-    `objective.py::_gh_token` and `pr-doctor.py::_gh_token` so the three cannot disagree about who
-    the lane is — and BOTH siblings consult `GH_CONFIG_DIR` FIRST (`objective.py:2285`,
-    `pr-doctor.py:1761`). Omitting it made this tool read a DIFFERENT store from the one `gh` uses
-    on any box that sets it: a false `no-credential` for a lane whose `gh` can write, or a verdict
-    about a credential the landing lane will never use (#2138 r4's wrong-identity hazard).
-    MEASURED in review round 3: with `GH_CONFIG_DIR` holding a token, this returned `no-credential`.
-
-    Residual, stated rather than implied: the OS KEYRING is not read (no `gh auth token`
-    subprocess), exactly as `objective.py` documents for itself — a keyring-only box answers
-    `no-credential` here, which fails closed rather than guessing.
-    """
-    cfg = os.environ.get("GH_CONFIG_DIR")
-    if cfg:
-        return os.path.join(os.path.expanduser(cfg), "hosts.yml")
-    xdg = os.environ.get("XDG_CONFIG_HOME")
-    if xdg:
-        return os.path.join(os.path.expanduser(xdg), "gh", "hosts.yml")
-    return os.path.expanduser("~/.config/gh/hosts.yml")
-
-
-def _token_from_hosts() -> tuple[str, str]:
-    """Return (token, login) from the ACTIVE (depth-1) github.com entry only.
-
-    A multi-account hosts.yml nests other logins under `users:` ABOVE the active account's own keys,
-    so taking the first `oauth_token` anywhere in the block returns a DIFFERENT identity's credential
-    (#2138 r4). gh's own layout puts the active account at depth 1.
-    """
-    try:
-        with open(_hosts_path(), encoding="utf-8", errors="replace") as fh:
-            lines = fh.readlines()
-    except OSError:
-        return "", ""
-    in_github = False
-    token = login = ""
-    for raw in lines:
-        line = raw.rstrip("\n")
-        if not line.strip() or line.lstrip().startswith("#"):
-            continue
-        if not line[:1].isspace():                      # a depth-0 key starts a new host block
-            in_github = line.split(":", 1)[0].strip() == "github.com"
-            continue
-        if not in_github or not line.startswith("    ") or line.startswith("        "):
-            continue
-        stripped = line.strip()
-        if stripped.startswith("oauth_token:") and not token:
-            token = stripped.split(":", 1)[1].strip().strip("\"'")
-        elif stripped.startswith("user:") and not login:
-            login = stripped.split(":", 1)[1].strip().strip("\"'")
-    return token, login
-
-
-def resolve_credential() -> tuple[str, str]:
-    """Return (token, source). `source` is a LABEL, never a value."""
-    host = (os.environ.get("GH_HOST") or "github.com").strip().lower()
-    if host in ("github.com", "api.github.com"):
-        for var in ("GH_TOKEN", "GITHUB_TOKEN"):
-            tok = (os.environ.get(var) or "").strip()
-            if tok:
-                return tok, f"env:{var}"
-    tok, login = _token_from_hosts()
-    if tok:
-        return tok, f"hosts.yml:{(login or 'active')}"
-    return "", "none"
-
-
-def token_shape(tok: str) -> str:
-    """Classify the token TYPE from its documented prefix. Never the value."""
-    for prefix, label in (
-        ("github_pat_", "fine-grained-PAT (no OAuth scopes by design; permissions are per-resource)"),
-        ("ghp_", "classic-PAT (OAuth scopes apply)"),
-        ("gho_", "OAuth user-to-server (OAuth scopes apply)"),
-        ("ghs_", "server-to-server (OAuth scopes apply)"),
-        ("ghu_", "user-to-server (OAuth scopes apply)"),
+    # (5) Reachability of the target we will actually push to. ⛔ It MUST be the PUSH target: the
+    # fetch url would refuse a writable push target whose upstream is retired (a fork config) and
+    # then report the refusal against a remote that was never measured.
+    if not step(
+        "ls-remote",
+        runner.run(
+            ["git", "ls-remote", "--heads", read_targets[0]], cwd=root, env_extra=read_env
+        ),
     ):
-        if tok.startswith(prefix):
-            return label
-    return "unrecognised prefix"
+        verdict.reason, verdict.detail = "remote-unreachable", verdict.steps[-1]["detail"]
+        return verdict
 
-
-# ── the probes ───────────────────────────────────────────────────────────────────────────────────
-def _request(url: str, token: str, method: str = "GET", body: bytes | None = None) -> tuple[int, dict, str]:
-    """One API call. Returns (status, headers-lowercased, body). Transport failure -> status 0."""
-    req = urllib.request.Request(url, data=body, method=method)
-    req.add_header("Authorization", f"Bearer {token}")
-    req.add_header("Accept", "application/vnd.github+json")
-    req.add_header("X-GitHub-Api-Version", "2022-11-28")
-    req.add_header("User-Agent", "gh-write-preflight/2")
-    if body is not None:
-        req.add_header("Content-Type", "application/json")
+    # (6) THE REAL WRITE. Push the commit already at HEAD onto a namespaced throwaway ref.
+    # `--porcelain` is REQUIRED: a push that is "Everything up-to-date" exits 0 having written
+    # NOTHING, so an exit code alone does not prove a write happened. The ref flag must be `*`
+    # (new) or `+` (updated).
+    # ⛔ CLEANUP RUNS ON EVERY PATH THAT UNWINDS. Steps (6)-(8) live in a helper so the caller can
+    # wrap them in try/finally: a Ctrl-C (`SIGINT` -> `KeyboardInterrupt`) or any exception AFTER
+    # the push has landed would otherwise leave the probe ref on a REMOTE every lane shares.
+    # ⛔ NOT a fleet `SIGTERM`: Python translates only `SIGINT` into an exception, so `SIGTERM`
+    # terminates without unwinding and this `finally` never runs — stated as a residual in the
+    # module docstring, not claimed away here.
     try:
-        with _OPENER.open(req, timeout=TIMEOUT_S) as resp:
-            return resp.status, {k.lower(): v for k, v in resp.headers.items()}, \
-                resp.read().decode("utf-8", "replace")
-    except urllib.error.HTTPError as e:
-        payload = e.read().decode("utf-8", "replace") if e.fp else ""
-        return e.code, {k.lower(): v for k, v in (e.headers or {}).items()}, payload
-    except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as e:
-        # ⛔ `http.client.HTTPException` IS NOT AN `OSError` (measured: `BadStatusLine` and
-        # `IncompleteRead` are both `HTTPException` and NEITHER subclasses `OSError`), so a proxy, a
-        # captive portal or a truncated response produced a raw TRACEBACK with EMPTY stdout — which
-        # breaks the documented contract (`GH-WRITE-UNAVAILABLE(<reason>)`) and gives a `--json`
-        # consumer `json.loads("")`. It failed closed, but without a verdict (review round 4).
-        return 0, {}, str(e)
+        _push_verify_cleanup(
+            runner, root, remote, read_targets, read_env, verdict, head, keep_ref, step
+        )
+    finally:
+        # ⛔ ONLY WHEN AN EXCEPTION IS ACTUALLY PROPAGATING. An earlier revision guarded on the
+        # verdict alone (`not cleaned_up`), so the retry ALSO ran on the ordinary "delete failed"
+        # path, deleted the ref for real, and never re-read — leaving the verdict claiming
+        # `leftover_ref=True` / "PROBE REF SURVIVED" for a remote that was already clean: a false
+        # block (the one failure this tool must never add) plus a false litter claim, with two
+        # deletes issued while `steps` recorded one. `sys.exc_info()` is the in-flight test; on the
+        # ordinary path the cleanup has ALREADY reported the truth and must not be second-guessed.
+        if sys.exc_info()[0] is not None and not keep_ref and not verdict.cleaned_up:
+            try:
+                rp = runner.run(
+                    ["git", "push", "--no-verify", remote, "--delete", "--", verdict.probe_ref],
+                    cwd=root,
+                    env_extra=_neutral_push_env(remote),
+                )
+                verdict.steps.append(
+                    {"step": "delete-retry", "rc": rp.rc, "detail": redact(rp.detail[-800:])}
+                )
+                # The retry's effect is READ BACK, so the verdict describes the remote as it now is
+                # rather than as it was before the retry.
+                state = _ref_state_multi(
+                    runner, root, read_targets, verdict.probe_ref, env_extra=read_env
+                )
+                if state == "absent":
+                    verdict.cleaned_up = True
+                    verdict.leftover_ref = False
+            except Exception:
+                pass
+
+    return verdict
 
 
-def _classify_403(headers: dict, body: str) -> tuple[str, str]:
-    """Distinguish a RATE LIMIT from a PERMISSION refusal. Order matters."""
-    low = (body or "").lower()
-    remaining = (headers.get("x-ratelimit-remaining") or "").strip()
-    retry_after = (headers.get("retry-after") or "").strip()
-    # Rate limit FIRST: mis-classifying it sends the operator to re-mint a perfectly good token.
-    if "rate limit" in low or "abuse detection" in low or "secondary rate" in low:
-        return "rate-limited", "the API named a rate limit in the refusal body"
-    if remaining == "0" or retry_after:
-        return "rate-limited", (f"no quota left (x-ratelimit-remaining={remaining or '?'}, "
-                                f"retry-after={retry_after or '?'})")
-    if "saml" in low or "sso" in low:
-        return "sso-unauthorized", "the refusal names SAML/SSO — the token is not authorised for the org"
-    # The exact wording GitHub uses when a FINE-GRAINED token lacks a resource permission.
-    if "resource not accessible" in low:
-        return "not-permitted", "the token lacks write on this resource ('Resource not accessible by …')"
-    return "forbidden", "403 with no rate-limit or SSO signal — see the body below"
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="gh_write_preflight",
+        description=(
+            "Prove this credential can WRITE repository contents: push a throwaway branch, "
+            "confirm it with ls-remote, delete it. Exit 0 writable / 1 unavailable."
+        ),
+        epilog=(
+            "A branch push triggers no workflow in THIS repo (no unfiltered on:push; publish-pypi "
+            "is tags-only); a different --repo inherits that repo's triggers."
+        ),
+    )
+    parser.add_argument("--repo", default=".", help="checkout to probe (default: cwd)")
+    parser.add_argument("--remote", default="origin", help="remote name (default: origin)")
+    parser.add_argument("--json", action="store_true", help="machine-readable verdict on stdout")
+    parser.add_argument(
+        "--probe-ref-prefix",
+        default=None,
+        help=(
+            "namespace for the throwaway probe ref (default: gh-write-preflight). Use this on a "
+            "repo whose ruleset only permits certain branch patterns, or the probe is refused "
+            "for a credential that can write."
+        ),
+    )
+    parser.add_argument(
+        "--keep-ref",
+        action="store_true",
+        help="do NOT delete the probe ref (debugging only — leaves a ref on the remote)",
+    )
+    args = parser.parse_args(argv)
 
+    if args.probe_ref_prefix is not None and not _valid_prefix(args.probe_ref_prefix):
+        parser.error(
+            f"invalid --probe-ref-prefix {args.probe_ref_prefix!r}: it must be a ref-shaped path "
+            f"(no leading '-' or '/', no whitespace or control characters, no component starting "
+            f"with '.' or ending '.lock', no ': ? * [ \\ ~ ^', no '..' or '@{{')"
+        )
+    if args.probe_ref_prefix is not None and not _prefix_ok(args.probe_ref_prefix, Runner()):
+        parser.error(
+            f"invalid --probe-ref-prefix {args.probe_ref_prefix!r}: git check-ref-format rejects "
+            f"refs/heads/{args.probe_ref_prefix}/probe as a refname"
+        )
 
-def _write_probe(url: str, token: str, body: bytes) -> dict:
-    """Run one write-surface probe. Returns {'ok': bool, 'reason': str, 'detail': str, 'status': int}."""
-    status, headers, payload = _request(url, token, method="POST", body=body)
-    if status == 0:
-        return {"ok": False, "reason": "transport", "detail": f"could not reach {url}: {payload[:160]}",
-                "status": 0}
-    if status in _WRITE_OK:
-        return {"ok": True, "reason": "permitted",
-                "detail": f"authorised (HTTP {status} — the payload was rejected, the permission was not)",
-                "status": status}
-    if status in _SURPRISING_SUCCESS:
-        # ⛔ A 2xx ON A MUST-BE-INVALID PAYLOAD IS NOT A PASS. Either the payload was accepted (it
-        # cannot be — an issue needs a title, the head ref cannot exist) or the response came from
-        # something that is not GitHub's validation path (a redirect downgraded to a GET, a proxy, a
-        # captive portal). Fail closed and say so.
-        return {"ok": False, "reason": "forbidden",
-                "detail": f"HTTP {status} on a must-be-invalid payload — the request was accepted or "
-                          f"rewritten, so this did NOT prove the permission gate",
-                "status": status}
-    if status == 401:
-        return {"ok": False, "reason": "bad-credentials", "detail": "401 from the write probe", "status": status}
-    if status == 403:
-        reason, detail = _classify_403(headers, payload)
-        return {"ok": False, "reason": reason, "detail": detail, "status": status}
-    if status == 404:
-        return {"ok": False, "reason": "repo-not-visible", "detail": "404 from the write probe", "status": status}
-    # ⛔ AN HTTP 429 IS A RATE LIMIT REGARDLESS OF ITS BODY. It is NOT a permission refusal, and it
-    # must never fall through to the generic branch below — a 429 on the pulls surface would then be
-    # reported as `pull-requests-write-missing` and send the operator to re-mint a perfectly good
-    # token, which is the exact hour-wasting misdirection this tool exists to prevent.
-    if status == 429:
-        return {"ok": False, "reason": "rate-limited",
-                "detail": "HTTP 429 Too Many Requests — a shared-account limit, not a permission defect",
-                "status": status}
-    # ⛔ A 5xx IS GITHUB'S FAULT, NOT THE TOKEN'S. Reporting it as a permission verdict would charge
-    # an outage to the credential.
-    if status >= 500:
-        return {"ok": False, "reason": "server-error",
-                "detail": f"HTTP {status} from GitHub — a service fault, not a verdict about the token",
-                "status": status}
-    return {"ok": False, "reason": "forbidden", "detail": f"unexpected HTTP {status}: {payload[:200]}",
-            "status": status}
+    verdict = check_writable(
+        args.repo, args.remote, keep_ref=args.keep_ref, probe_ref_prefix=args.probe_ref_prefix
+    )
+    # Belt: the type promises a REASONS token; never emit a bare `(None)`.
+    reason = verdict.reason if verdict.reason in REASONS else "internal-error"
+    # Apply it to the PAYLOAD as well as the marker — but ONLY on a refusal. A passing verdict
+    # legitimately carries `reason=None`, and stamping `internal-error` on it would report "no
+    # verdict is available" about a credential that just proved it can write.
+    if not verdict.writable:
+        verdict.reason = reason
 
-
-def preflight(repo: str, api_base: str, token: str, source: str) -> dict:
-    result: dict = {
-        "repo": repo,
-        # ⛔ WHICH ENDPOINT ANSWERED IS PART OF THE VERDICT. Without this key a consumer holding the
-        # `--json` artifact cannot tell a measurement of GitHub from a measurement of anything else.
-        # ⛔ REDACTED, because this dict IS the `--json` output: see `_printable_base`.
-        "api_base": _printable_base(api_base),
-        "credential_source": source,
-        "token_shape": token_shape(token) if token else "none",
-        "ok": False,
-        "reason": "",
-        "detail": "",
-        "surfaces": {},
-    }
-
-    # ⛔ BEFORE THE TOKEN IS EVEN RESOLVED: a base we would refuse must never be sent a credential.
-    # This is also the defence for callers that reach `preflight()` directly, not through `main()`.
-    base_refusal = _validate_api_base(api_base)
-    if base_refusal:
-        result.update(reason="usage", detail=base_refusal)
-        return result
-
-    gh_host = (os.environ.get("GH_HOST") or "").strip().lower()
-    if gh_host and gh_host not in ("github.com", "api.github.com"):
-        result.update(reason="wrong-host",
-                      detail=f"GH_HOST={gh_host!r} — this preflight, and the rail it protects, speak github.com")
-        return result
-
-    if not token:
-        result.update(reason="no-credential",
-                      detail="GH_TOKEN and GITHUB_TOKEN are unset and hosts.yml holds no active github.com token")
-        return result
-
-    # ── 1. READ: the disambiguator for any 404 that follows, and the source of default_branch.
-    status, headers, body = _request(f"{api_base}/repos/{repo}", token)
-    if status == 0:
-        result.update(reason="transport", detail=f"could not reach {api_base}: {body[:160]}")
-        return result
-    if status == 401:
-        result.update(reason="bad-credentials", detail="the API returned 401 — expired, revoked, or mistyped")
-        return result
-    if status == 404:
-        result.update(reason="repo-not-visible",
-                      detail=f"{repo} is not visible to this credential — an access question, not a write question")
-        return result
-    if status == 403:
-        reason, detail = _classify_403(headers, body)
-        # ⛔ A REFUSED **READ** IS A READ PROBLEM, NOT A MISSING WRITE PERMISSION. `_classify_403`'
-        # wording/name is written for a write probe ("the token lacks write …"), and `not-permitted`
-        # is deliberately absent from the REASONS contract — so feeding it straight through emitted an
-        # UNDOCUMENTED reason carrying write-shaped advice about a read (review round 3).
-        if reason == "not-permitted":
-            reason = "repo-not-visible"
-            detail = "the token cannot READ this repo — an access question, not a write question"
-        result.update(reason=reason, detail=f"on the READ probe: {detail}")
-        return result
-    if status == 429:
-        result.update(reason="rate-limited",
-                      detail="HTTP 429 on the READ probe — a shared-account limit, not a permission defect")
-        return result
-    if status >= 500:
-        result.update(reason="server-error",
-                      detail=f"HTTP {status} on the READ probe — a GitHub service fault, not a verdict about the token")
-        return result
-    if status != 200:
-        result.update(reason="forbidden", detail=f"unexpected HTTP {status} on the read probe: {body[:160]}")
-        return result
-
-    result["read_ok"] = True
-    result["scopes"] = headers.get("x-oauth-scopes", "")      # classic/OAuth ONLY
-    result["ratelimit_remaining"] = (headers.get("x-ratelimit-remaining") or "").strip()
-
-    # ── 2. RATE LIMIT pre-check: never spend a write probe on an exhausted account, and never
-    #      report a permission defect for a bucket that will refill.
-    if result["ratelimit_remaining"] == "0":
-        result.update(reason="rate-limited",
-                      detail=f"x-ratelimit-remaining=0 on the read (reset={headers.get('x-ratelimit-reset', '?')}); "
-                             f"the token may be perfectly good — shared-account exhaustion, not a permission defect")
-        return result
-
-    default_branch = "main"
-    with contextlib.suppress(ValueError, AttributeError):
-        default_branch = json.loads(body).get("default_branch") or "main"
-
-    # ── 3. ISSUES WRITE — empty payload, so nothing can be created.
-    issues = _write_probe(f"{api_base}/repos/{repo}/issues", token, b"")
-    result["surfaces"]["issues"] = issues["status"]
-
-    # ── 4. PULL REQUESTS WRITE — a head ref that cannot exist, so no PR can be created.
-    bogus_head = f"gh-write-preflight-{secrets.token_hex(8)}"
-    pulls_body = json.dumps({"head": f"refs/heads/{bogus_head}", "base": default_branch,
-                             "title": "gh-write-preflight (never created)"}).encode()
-    pulls = _write_probe(f"{api_base}/repos/{repo}/pulls", token, pulls_body)
-    result["surfaces"]["pull_requests"] = pulls["status"]
-
-    # ── 5. CONTENTS WRITE — a random ref name and an unresolvable sha, so no ref can be created.
-    # ⛔ LOAD-BEARING, NOT BELT-AND-BRACES. Merging a PR and creating a ref are charged to
-    # `contents: write`, not `pull_requests: write` — measured on PUT /pulls/{n}/merge and
-    # POST /git/refs, both answering `x-accepted-github-permissions: contents=write`. A token with
-    # Issues+PR write and Contents: read therefore passed the two probes above and was then refused
-    # by `git push`: a lane could not publish its branch at all while this tool said GH-WRITE-OK.
-    # MEASURED: 422 "Object does not exist" authorised, 403 refused, and matching-refs stays empty.
-    bogus_ref = f"gh-write-preflight-{secrets.token_hex(8)}"
-    contents_body = json.dumps({"ref": f"refs/heads/{bogus_ref}", "sha": "0" * 40}).encode()
-    contents = _write_probe(f"{api_base}/repos/{repo}/git/refs", token, contents_body)
-    result["surfaces"]["contents"] = contents["status"]
-
-    issues_ok, pulls_ok, contents_ok = issues["ok"], pulls["ok"], contents["ok"]
-
-    # ── 6. Verdict. ⛔ ONLY A `not-permitted` PROBE MAY PRODUCE A PERMISSION VERDICT.
-    # This is deliberately a ONE-item allow-list and not a list of known non-permission reasons.
-    # It used to be the latter, which meant every status nobody had thought of — a 410 (Issues
-    # disabled on the repo), a 400 from a proxy/WAF, a 451 — fell through to `forbidden` and was then
-    # PROMOTED to a missing-permission verdict, sending the operator to re-mint a perfectly good
-    # token. A list of known-bad reasons fails open for the unknown ones; naming the ONE reason that
-    # is allowed to claim a missing permission fails closed instead.
-    for name, probe in (("issues", issues), ("pull_requests", pulls), ("contents", contents)):
-        if not probe["ok"] and probe["reason"] != "not-permitted":
-            result.update(reason=probe["reason"], detail=f"on the {name} surface: {probe['detail']}")
-            return result
-
-    if issues_ok and pulls_ok and contents_ok:
-        result.update(ok=True, reason="issues+pull-requests+contents writable",
-                      detail=f"all three write surfaces authorised (issues HTTP {issues['status']}, "
-                             f"pull_requests HTTP {pulls['status']}, contents HTTP {contents['status']})")
-        return result
-
-    # ── 7. Name WHICH permission is missing. Every probe reaching here is `not-permitted`, so the
-    # naming below is a real statement about which permission is missing rather than a guess about an
-    # unrecognised status. All three refused is a different fact from one refused.
-    surfaces = (("issues", issues_ok, issues), ("pull_requests", pulls_ok, pulls),
-                ("contents", contents_ok, contents))
-    refused = [name for name, ok, _ in surfaces if not ok]
-    statuses = ", ".join(f"{name} HTTP {probe['status']}" for name, _ok, probe in surfaces)
-    if len(refused) == 3:
-        result.update(reason="token-read-only",
-                      detail=f"all three write surfaces refused ({statuses}): {contents['detail']}")
-        return result
-
-    # Landing order: a lane pushes a branch first, then comments on the PR, then closes issues. Naming
-    # the earliest blocker is the one that actually stops it; `detail` and `surfaces` name all of them.
-    _MISSING = {
-        "contents": ("contents-write-missing",
-                     "CONTENTS are not writable — the lane cannot push its branch or merge at all, so it "
-                     "would fail before it could comment"),
-        "pull_requests": ("pull-requests-write-missing",
-                          "PULL REQUESTS are not writable — a landing lane posts its verdict comment on a "
-                          "PR, so it would fail at the closure step"),
-        "issues": ("issues-write-missing",
-                   "ISSUES are not writable — a landing also closes issues"),
-    }
-    for name in ("contents", "pull_requests", "issues"):             # landing order, earliest first
-        if name in refused:
-            reason, why = _MISSING[name]
-            writable = ", ".join(n for n, ok, _ in surfaces if ok) or "none"
-            result.update(reason=reason,
-                          detail=f"{why}. Writable: {writable}; refused: {', '.join(refused)} "
-                                 f"({statuses})")
-            return result
-    result.update(reason="forbidden", detail=f"unrecognised surface state: {refused}")
-    return result
-
-
-def main(argv: list[str]) -> int:
-    ap = argparse.ArgumentParser(
-        description="Prove this lane's credential can WRITE (issues, pull requests, contents) before it "
-                    "does any work.")
-    ap.add_argument("--repo", default=os.environ.get("OR", ""), help="owner/name (default: $OR)")
-    ap.add_argument("--api-base", default=os.environ.get("GH_WRITE_PREFLIGHT_API", DEFAULT_API),
-                    help="API base URL — default https://api.github.com, or a LOOPBACK stub for the "
-                         "hermetic test seam; anything else is refused as `usage`")
-    ap.add_argument("--json", action="store_true", help="emit the result as JSON")
-    args = ap.parse_args(argv)
-
-    if not args.repo or "/" not in args.repo:
-        print("GH-WRITE-UNAVAILABLE(usage) — pass --repo owner/name (or set $OR)")
-        return 1
-
-    token, source = resolve_credential()
-    res = preflight(args.repo, args.api_base.rstrip("/"), token, source)
+    # The marker ALWAYS goes to stderr, in both modes, so a caller that greps for it works with
+    # --json too (stdout stays pure JSON there).
+    if not verdict.writable:
+        print(f"GH-WRITE-UNAVAILABLE({reason}) — {REASONS[reason]}", file=sys.stderr)
 
     if args.json:
-        print(json.dumps(res, indent=2, sort_keys=True))
-    elif res["ok"]:
-        # ⛔ THE OK LINE NAMES THE ENDPOINT. A pass is only a pass if it was measured against GitHub,
-        # so the verdict carries the thing it is a verdict about — in the human line, not only in JSON.
-        print(f"GH-WRITE-OK({res['reason']} @ {res['api_base']}) — {res['detail']}")
+        print(verdict.as_json())
     else:
-        print(f"GH-WRITE-UNAVAILABLE({res['reason']}) — {res['detail']}")
+        print(f"repo:   {verdict.repo_root or '<unresolved>'}")
+        print(f"remote: {verdict.remote or '<none>'} {verdict.remote_url or ''}")
+        if verdict.push_url and verdict.push_url != verdict.remote_url:
+            # Name the remote that was actually MEASURED — on a fork-style config `remote:` above
+            # names the fetch url, which is not where the probe pushed.
+            print(f"push:   {verdict.push_url} ({verdict.push_url_source or 'configured'})")
+        if verdict.head_sha:
+            print(f"head:   {verdict.head_sha[:12]}")
+        for s in verdict.steps:
+            print(f"  [{'ok' if s['rc'] == 0 else 'FAIL'}] {s['step']} (rc={s['rc']})")
+        if verdict.writable:
+            # Key the wording on the TRI-STATE, never on `kept_ref` alone: claiming "deleted" when
+            # cleanup could not be confirmed is the same verified-clean-from-absence-of-evidence
+            # error the field itself was fixed to avoid — and this is the line lanes parse.
+            if verdict.kept_ref:
+                cleanup = f"probe ref {verdict.probe_ref} KEPT (--keep-ref)"
+            elif verdict.cleaned_up is True:
+                cleanup = f"probe ref {verdict.probe_ref} deleted"
+            else:
+                cleanup = (
+                    f"probe ref {verdict.probe_ref} deletion UNCONFIRMED — check the remote "
+                    f"(see stderr)"
+                )
+            print(f"GH-WRITE-OK({verdict.remote}) — push confirmed by ls-remote; {cleanup}")
+        if verdict.detail:
+            print(verdict.detail.strip()[-600:], file=sys.stderr)
 
-    if not res["ok"]:
-        print(f"  credential: {res['credential_source']} · shape: {res['token_shape']}", file=sys.stderr)
-        if res.get("surfaces"):
-            print(f"  surfaces: issues={res['surfaces'].get('issues')} "
-                  f"pull_requests={res['surfaces'].get('pull_requests')} "
-                  f"contents={res['surfaces'].get('contents')} "
-                  f"(422 = authorised+rejected, 403 = refused)", file=sys.stderr)
-        if res.get("scopes"):
-            print(f"  oauth scopes: {res['scopes']}", file=sys.stderr)
-        elif res["token_shape"].startswith("fine-grained"):
-            print("  oauth scopes: (none sent — fine-grained PATs carry PER-RESOURCE permissions, not scopes)",
-                  file=sys.stderr)
-        print("  fix per reason: contents-write-missing→re-mint with `Contents: write` · "
-              "pull-requests-write-missing→re-mint with `Pull requests: write` · "
-              "issues-write-missing→re-mint with `Issues: write` · "
-              "rate-limited→wait (shared account), do NOT re-mint · "
-              "token-read-only→re-mint with all three write permissions · "
-              "bad-credentials→re-source · no-credential→supply one · sso→authorise for org",
-              file=sys.stderr)
-        return 1
-    return 0
+    return EXIT_WRITABLE if verdict.writable else EXIT_UNAVAILABLE
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    sys.exit(main())
