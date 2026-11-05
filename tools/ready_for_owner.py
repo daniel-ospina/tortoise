@@ -492,7 +492,18 @@ def fetch_check_runs(repo: str, sha: str) -> list[dict]:
     # pushed out — `len(runs)` is then back to `total` while one run is genuinely
     # ABSENT, which is how a required check's only attempt reads as missing. Counting
     # ids closes it: N entries carrying a duplicate is N-1 runs, not N.
-    distinct = {r.get("id") for r in runs}
+    # ⛔ VALIDATE THE ID BEFORE HASHING IT. `{r.get("id") for r in runs}` raises
+    # `TypeError: unhashable type: 'dict'` on a non-scalar id, which escapes every
+    # handler as a traceback and exits 1 — reading to a caller as "a required check
+    # is red" instead of "I could not read the set". A bool is excluded for the same
+    # reason it is excluded on `total_count`: `isinstance(True, int)`.
+    ids = [r.get("id") for r in runs]
+    if not all(isinstance(i, int) and not isinstance(i, bool) for i in ids):
+        raise RequiredSetUnreadable(
+            f"check-runs response for {sha} carried a non-integer `id` — "
+            "cannot prove the set is complete"
+        )
+    distinct = set(ids)
     if len(runs) < total or len(distinct) < total:
         raise RequiredSetUnreadable(
             f"check-runs truncated for {sha}: received {len(runs)} entries "
@@ -956,6 +967,13 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 print(f"{FAIL_UNREADABLE}: {exc}")
             return EXIT_UNREADABLE
+        # ⛔ `evaluable` must answer the SAME question condition 2 answers, or this
+        # flag certifies what the gate refuses. Beyond the snapshot case, a `merge`
+        # config with NO entry check names is an empty entry gate: every row would be
+        # DEFERRED, and `condition_2` returns FAIL(unreadable) because nothing is
+        # decided at the head. Reporting `verdict: PASS` / exit 0 there is the same
+        # fail-open the report path already closes.
+        evaluable = bool(rs.entry_merge_split) and (rs.mode == "queue" or bool(rs.queue_names))
         if args.json:
             # `--json` promises machine-readable stdout; a human report here
             # breaks that for any consumer that adds the flag uniformly.
@@ -969,11 +987,11 @@ def main(argv: list[str] | None = None) -> int:
                 "snapshot_agrees": rs.snapshot_agrees,
                 "notes": list(rs.notes),
                 "entry_merge_split": rs.entry_merge_split,
-                "evaluable": rs.entry_merge_split,
-                "verdict": PASS if rs.entry_merge_split else FAIL_UNREADABLE,
+                "evaluable": evaluable,
+                "verdict": PASS if evaluable else FAIL_UNREADABLE,
                 "error": None,
             }, indent=2))
-            return EXIT_PASS if rs.entry_merge_split else EXIT_UNREADABLE
+            return EXIT_PASS if evaluable else EXIT_UNREADABLE
         print(f"source: {rs.source}")
         print(f"queue_conditions: {', '.join(rs.queue_names) or '(none)'}")
         print(f"merge_conditions: {', '.join(rs.merge_names) or '(none)'}")
@@ -991,6 +1009,14 @@ def main(argv: list[str] | None = None) -> int:
             # came from the flat snapshot, so condition 2 cannot be evaluated and
             # a scripted consumer must not read exit 0 as "the set resolved".
             print("cannot evaluate condition 2: this set has no entry/merge split")
+            return EXIT_UNREADABLE
+        if not evaluable:
+            # The snapshot case above, plus a `merge` config whose entry gate is
+            # EMPTY: every row would be DEFERRED, so `condition_2` refuses too.
+            print(
+                "cannot evaluate condition 2: no entry check is named, so nothing "
+                "would be decided at the PR head (an empty entry gate)"
+            )
             return EXIT_UNREADABLE
         return EXIT_PASS
 

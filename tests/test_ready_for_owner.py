@@ -788,7 +788,7 @@ def test_the_check_run_endpoint_pins_filter_all_per_page_and_head_sha(monkeypatc
 
     def _capture(endpoint: str) -> dict:
         seen.append(endpoint)
-        return {"check_runs": [{"name": "docs"}], "total_count": 1}
+        return {"check_runs": [{"name": "docs", "id": 11}], "total_count": 1}
 
     monkeypatch.setattr(rfo, "_gh_api_json", _capture)
     rfo.fetch_check_runs("o/r", "deadbeefcafe")
@@ -873,6 +873,71 @@ def test_short_check_runs_are_unreadable_when_total_count_is_missing(monkeypatch
     with pytest.raises(rfo.RequiredSetUnreadable) as excinfo:
         rfo.fetch_check_runs("o/r", "deadbeef")
     assert "total_count" in str(excinfo.value)
+
+
+def test_the_overlap_banner_still_says_CONFIG_ERROR_under_mode_merge(capsys):
+    """The `merge` arm is DEFENSIVE — pin it, or a mutation can silently drop it.
+
+    `derive_from_config` raises `RequiredSetConfigError` before any report carries a
+    merge-mode overlap, so no end-to-end run reaches this branch; the arm exists so a
+    hand-built report (or a future caller) cannot print a config error as legal. Its
+    reachability is the reason to pin it from a SYNTHESIZED report rather than to
+    delete it: an unpinned arm is one a mutation can hollow out with every test green.
+    """
+    rfo._print_report({
+        "pr": 1, "head_sha": "deadbeefcafe", "verdict": "NOT-READY",
+        "required_set": {
+            "names": ["docs", "python-ci-gate"], "source": "synthetic",
+            "overlap": ["python-ci-gate"], "injection_mode": "merge",
+        },
+        "conditions": [],
+    })
+    out = capsys.readouterr().out
+    assert "config error" in out, out
+    assert "legal under" not in out, out
+
+
+def test_a_non_integer_check_run_id_is_a_verdict_not_a_traceback(monkeypatch):
+    """Hashing an unvalidated `id` raised TypeError → exit 1, i.e. "a required check is red".
+
+    A traceback that exits 1 is a misgrade: the caller reads "red" where the truth is
+    "could not read the set". `_newest_per_group` already refuses a non-int id for the
+    same reason; the completeness guard must too, and BEFORE it hashes anything.
+    """
+    monkeypatch.setattr(
+        rfo, "_gh_api_json",
+        lambda endpoint: {"total_count": 1, "check_runs": [{"name": "docs", "id": {}}]},
+    )
+    with pytest.raises(rfo.RequiredSetUnreadable) as excinfo:
+        rfo.fetch_check_runs("o/r", "deadbeef")
+    assert "non-integer `id`" in str(excinfo.value)
+
+
+def test_required_set_json_refuses_an_empty_entry_gate(tmp_path, capsys):
+    """`--required-set` must not report `evaluable: PASS` where condition 2 refuses.
+
+    A `merge` config whose `queue_conditions` carries no positive `check-success=` has
+    an EMPTY ENTRY GATE: every row is DEFERRED, so `condition_2` returns
+    `FAIL(unreadable)`. Reporting `verdict: PASS` / exit 0 on this flag would certify
+    exactly that state — the same fail-open, on the other path.
+    """
+    entryless = """\
+queue_rules:
+  - name: main
+    queue_conditions:
+      - base=main
+      - -draft
+    branch_protection_injection_mode: merge
+    merge_conditions:
+      - check-success=python-ci-gate
+"""
+    tree = _write_tree(tmp_path, mergify=entryless)
+    assert rfo.main(["--required-set", "--json", "--root", str(tree)]) == rfo.EXIT_UNREADABLE
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["evaluable"] is False
+    assert doc["verdict"] == rfo.FAIL_UNREADABLE
+    assert doc["names"] == ["python-ci-gate"]  # the set is still reported
+    assert rfo.main(["--required-set", "--root", str(tree)]) == rfo.EXIT_UNREADABLE
 
 
 def test_the_overlap_banner_says_LEGAL_under_mode_queue(tmp_path, capsys):
