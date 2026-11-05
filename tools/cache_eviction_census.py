@@ -25,9 +25,12 @@ which cannot mint either.
         --out /tmp/egress-census.json
 
     # …with the one class that HAS a parity instrument already measured. The report
-    # comes from that instrument's `--json` (it has no `--out`), and the graph it was
-    # measured on is named by `--parity-graph` — REQUIRED, and required to equal
-    # `--graph`, because the instrument emits no graph identity of its own:
+    # comes from that instrument's `--json` (it has no `--out`), and it carries the
+    # graph it measured (`graph`, emitted by `turn_parity_census.census`).
+    # `--parity-graph` is still REQUIRED and still must equal `--graph`: it is the
+    # operator's declaration, and the report's own identity must MATCH it — the binding
+    # no longer rests on the flag alone (review P1 on #11004: the loader used to fill a
+    # missing graph in with the caller's own name, so the check could never fail):
     uv run python tools/turn_parity_census.py --uri "$TORTOISE_DB_URI" \\
         --graph-name tortoise --json /tmp/turns.json
     uv run python tools/cache_eviction_census.py \\
@@ -318,16 +321,20 @@ def main(argv: list[str] | None = None) -> int:
     if args.parity_report and not args.parity_graph:
         return _usage_error(
             parser,
-            "--parity-report requires --parity-graph: the instrument emits no graph "
-            "identity, so without naming the graph it measured a CLEAN census of one "
-            "graph would license evicting another",
+            "--parity-report requires --parity-graph: it is the operator's "
+            "declaration of the graph the report was measured on, and the report's "
+            "own `graph` field must match it (a report naming none is refused)",
         )
     if args.parity_graph is not None and args.parity_graph != args.graph:
         # ⛔ THE ASSERTION MUST NAME THE GRAPH BEING MEASURED. Comparing the report
         # against an operator-typed string that may name a DIFFERENT graph made the
         # binding vacuous: `--graph A --parity-report <clean census of B>
         # --parity-graph B` produced a PLAN for A on evidence about B. Requiring
-        # equality to `--graph` (itself pinned to the URI) is what closes it.
+        # equality to `--graph` (itself pinned to the URI) closes that half; the
+        # report's own `graph` (emitted by `turn_parity_census.census`) closes the
+        # other — `load_parity_report` refuses a report that names no graph, so a
+        # foreign or stale census cannot be re-badged by repeating `--graph` here
+        # (review P1 on #11004).
         return _usage_error(
             parser,
             f"--parity-graph {args.parity_graph!r} must be the graph being measured "

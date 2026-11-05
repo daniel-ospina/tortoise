@@ -260,7 +260,7 @@ and the reason is measured: `:Document` occurs on **56** lines across **18**
 files under `tortoise/` (`git grep -n ':Document'` → 56 lines,
 `git grep -l ':Document'` → 18 files — the file count is not the line count).
 It was **55** across **17** when this was first measured at `4f68a2aa7`; the
-line since added is `cache_eviction.py:616`, the census's own note on why node
+line since added is `cache_eviction.py:618`, the census's own note on why node
 labels do not partition the node set — the #10976 deliverable is itself one more
 piece of prose naming the retired label, which is the point rather than an
 accident: this population grows for good reasons, so the figure tracks the tree
@@ -274,7 +274,7 @@ a docstring, a comment, a printed message, or an RST literal in
 catch a mint also catches those,
 and one narrow enough to skip them (`\(\w*:Document`) still matches **three**
 lines — the two RST literals in `migrate_kinds.py:63,170`, plus that same
-`cache_eviction.py:616` comment. A guard carrying a hand-maintained allowlist of
+`cache_eviction.py:618` comment. A guard carrying a hand-maintained allowlist of
 docstrings is a guard nobody can trust, so the label claim stays evidence
 recorded here rather than a check that would have to be argued with.
 

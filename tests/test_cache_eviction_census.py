@@ -546,13 +546,15 @@ def _real_shape_report(**overrides):
     """A report in `tools/turn_parity_census.py`'s own shape (census()'s return).
 
     Keys copied from that function's return dict: `instrument` (REQUIRED by
-    `load_parity_report`), `population.episodic_graph_nodes` (the DELETE SET),
-    `dry_run.would_delete_turn_nodes` / `held_back_turn_nodes`, and a top-level
-    `verdict`. There is no `totals` and no `counts` — a loader reading those cannot
-    ever open the gate, which is why the real shape is pinned here.
+    `load_parity_report`), `graph` (REQUIRED too — the graph the GRAPH leg read, which
+    the consumer compares against the graph being measured), `population.episodic_graph_nodes`
+    (the DELETE SET), `dry_run.would_delete_turn_nodes` / `held_back_turn_nodes`, and a
+    top-level `verdict`. There is no `totals` and no `counts` — a loader reading those
+    cannot ever open the gate, which is why the real shape is pinned here.
     """
     payload = {
         "instrument": PARITY_INSTRUMENTS["turn"],
+        "graph": "tortoise",
         "verdict": "CLEAN",
         "population": {"episodic_graph_nodes": 120, "turn_shaped_nodes": 120},
         "dry_run": {"would_delete_turn_nodes": 120, "held_back_turn_nodes": 0},
@@ -613,16 +615,44 @@ def test_a_report_of_another_graph_is_refused(tmp_path):
         load_parity_report(str(path), graph_name="tortoise")
 
 
-def test_a_report_carrying_no_graph_identity_records_the_assertion(tmp_path):
-    """The instrument emits no graph name — the census says so instead of pretending."""
+def test_a_report_carrying_no_graph_identity_is_REFUSED(tmp_path):
+    """⛔ THE LOADER MUST NOT AUTHOR THE BINDING IT IS SUPPOSED TO CHECK.
+
+    Measured before the fix (review P1 on PR #11004): a report with no `graph` field was
+    ATTRIBUTED to the caller's own `graph_name`, so `mismatched` could never fire and
+    `unbound` was unreachable from `main()` — the only path that produces a real report.
+    The binding then proved exactly one thing: that the operator typed `--graph` and
+    repeated it in `--parity-graph`. The instrument now emits `graph`
+    (`turn_parity_census.census`), so a report without one is an artifact that cannot
+    say what it measured.
+
+    Mutation that goes RED here: restoring `graph_name=str(reported_graph) if
+    reported_graph is not None else graph_name`.
+    """
+    import json
+
+    payload = _real_shape_report()
+    payload.pop("graph")
+    path = tmp_path / "x.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(CacheReadError) as excinfo:
+        load_parity_report(str(path), graph_name="tortoise")
+
+    assert "names no graph" in str(excinfo.value)
+
+
+def test_a_null_graph_identity_is_refused_like_a_missing_one(tmp_path):
+    """A field present-but-null is the same absence, and must not be filled in."""
     import json
 
     path = tmp_path / "x.json"
-    path.write_text(json.dumps(_real_shape_report()), encoding="utf-8")
+    path.write_text(json.dumps(_real_shape_report(graph=None)), encoding="utf-8")
 
-    report = load_parity_report(str(path), graph_name="tortoise")
+    with pytest.raises(CacheReadError) as excinfo:
+        load_parity_report(str(path), graph_name="tortoise")
 
-    assert report.graph_name == "tortoise"
+    assert "names no graph" in str(excinfo.value)
 
 
 def test_a_report_naming_NO_instrument_is_refused(tmp_path):
@@ -828,6 +858,10 @@ def test_parity_graph_must_name_the_graph_being_measured(tmp_path, capsys):
     other_graph> --parity-graph other_graph` produced a PLAN for `evict_probe` on
     evidence about `other_graph`. Comparing the report against an operator-typed
     string only proves the operator typed the same string twice.
+
+    This is the FLAG arm. The REPORT arm — the one that made the pre-fix outcome
+    still reachable through the argv this pin requires — is
+    `test_a_clean_census_of_another_graph_cannot_license_this_one`.
     """
     import json
 
@@ -841,6 +875,101 @@ def test_parity_graph_must_name_the_graph_being_measured(tmp_path, capsys):
 
     assert code == 1
     assert "must be the graph being measured" in capsys.readouterr().err
+
+
+def _turn_parity():
+    tools = Path(__file__).resolve().parent.parent / "tools"
+    sys.path.insert(0, str(tools))
+    import turn_parity_census
+
+    return turn_parity_census
+
+
+def _clean_turn_census(graph_name: str) -> dict:
+    """A CLEAN census produced by the REAL instrument, for *graph_name*.
+
+    The two dictionaries are the shapes `read_graph_turns` / `read_record_turns` return
+    (one turn, byte-identical on both sides), so `census()` reaches its CLEAN arm
+    without a store — the artifact an operator would hand to `--parity-report`.
+    """
+    node = {
+        "id": "s1_t0",
+        "content": "[user] body of s1_t0",
+        "speaker": "user",
+        "status": "draft",
+        "createdAt": "2026-10-25T00:00:00+00:00",
+        "pointKind": "event",
+        "embedding": None,
+        "sessions": {"s1"},
+    }
+    row = {
+        "node_key": "s1_t0",
+        "content": "[user] body of s1_t0",
+        "speaker": "user",
+        "status": "draft",
+        "created_at": "2026-10-25T00:00:00+00:00",
+        "point_kind": "event",
+        "is_episodic": True,
+        "embedding": None,
+    }
+    return _turn_parity().census(
+        {"nodes": {"s1_t0": node}},
+        {"rows_by_key": {"s1_t0": row}, "non_turn_shaped": 0},
+        sample=0, graph_name=graph_name)
+
+
+def test_a_clean_census_of_another_graph_cannot_license_this_one(tmp_path, capsys):
+    """⛔ THE HOLE THE ROUND-2 FIX LEFT OPEN (review P1 on PR #11004, measured).
+
+    `--graph A --parity-report <CLEAN census of B> --parity-graph A` (the argv the
+    round-2 fix REQUIRES — the flag must equal `--graph`) produced a PLAN for A on
+    evidence about B, because `load_parity_report` filled A into a report carrying no
+    graph identity. The two invocations need not even name the same instance: the census
+    takes `--graph-uri`, and the report comes from a separate
+    `turn_parity_census.py --uri …` run.
+
+    The report here is built by the REAL instrument (`turn_parity_census.census`), not a
+    hand-written dict, so the pin follows the artifact the operator actually hands over.
+
+    Mutation that goes RED here: any return of the fill-in in `load_parity_report`
+    (the run then reaches the licence code instead of the refusal).
+    """
+    import json
+
+    foreign = _clean_turn_census("other_graph")
+    assert foreign["graph"] == "other_graph"
+    assert (foreign["verdict"],
+            foreign["dry_run"]["would_delete_turn_nodes"],
+            foreign["population"]["episodic_graph_nodes"]) == ("CLEAN", 1, 1), \
+        foreign
+    path = tmp_path / "turns.json"
+    path.write_text(json.dumps(foreign), encoding="utf-8")
+
+    code = _cli().main([
+        "--graph-uri", "docker://h:1/tortoise", "--graph", "tortoise",
+        "--parity-report", str(path), "--parity-graph", "tortoise",
+    ])
+
+    assert code == 3, (code, capsys.readouterr().err)
+    err = capsys.readouterr().err
+    assert "other_graph" in err and "tortoise" in err
+
+
+def test_a_real_clean_census_of_THIS_graph_still_licenses_it(tmp_path):
+    """The positive arm: the fix must not refuse the honest report.
+
+    Without this, deleting the whole `graph` comparison would keep the refusal tests
+    green — a refusal-only suite cannot tell "the gate works" from "the gate is shut".
+    """
+    import json
+
+    path = tmp_path / "turns.json"
+    path.write_text(json.dumps(_clean_turn_census("tortoise")), encoding="utf-8")
+
+    report = load_parity_report(str(path), graph_name="tortoise")
+
+    assert report.graph_name == "tortoise"
+    assert report.proves() is True
 
 
 def test_an_unbounded_cache_is_not_reported_as_clean():

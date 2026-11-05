@@ -200,17 +200,19 @@ class ParityReport:
     ``instrument`` is the tool's path; ``verdict`` is that tool's own word, kept
     verbatim so this module never has to agree with a paraphrase of it. The population
     pair is read from the instrument's REAL report shape (see
-    :func:`load_parity_report`), and ``graph_name`` is the graph the operator asserts
-    it was run against.
+    :func:`load_parity_report`), and ``graph_name`` is the graph the report says it
+    measured.
 
-    ⚠️ ``graph_name`` is an OPERATOR ASSERTION, not a proof: `turn_parity_census.py`
-    does not emit a graph identity, so nothing here can verify it. It is required
-    anyway, because the alternative — no binding at all — lets a CLEAN census of
-    graph A license evicting graph B, and a named assertion is at least reviewable.
-    Enforced in two places so neither surface can produce one: `load_parity_report`
-    takes ``graph_name`` as a REQUIRED argument, and :func:`assess` demotes an unbound
-    report exactly like a mismatched one. Making the instrument emit the identity is
-    the follow-up that would make it a proof; this module never claims more than it has.
+    ``graph_name`` is CHECKED, not asserted: the report must carry its own ``graph``
+    (``tools/turn_parity_census.py::census`` emits it), :func:`load_parity_report`
+    refuses a report that carries none, and a name that disagrees with the graph being
+    measured is refused too. ⚠️ What that buys is a real comparison, not a proof: the
+    reader still trusts the instrument to name the graph it actually opened, and the
+    reader cannot correlate a name with an INSTANCE (two hosts can both call a graph
+    ``tortoise``). Stated here rather than overclaimed: the previous version of this
+    docstring called the field "an OPERATOR ASSERTION" and the loader filled in a
+    missing name with the caller's own — which made the check unable to fail at all
+    (review P1 on #11004).
     """
 
     instrument: str
@@ -897,12 +899,12 @@ def load_parity_report(path: str, *, graph_name: str) -> ParityReport:
     the reason string, that the report was unreadable, so a real integration defect
     never reads as "the record cannot serve".
 
-    *graph_name* is the graph this census is measuring, and it is **required**: a
-    report carrying its own ``graph`` field must agree with it, and a report carrying
-    none is attributed to the graph the CALLER asked to measure (the instrument emits
-    no graph identity of its own). Neither is a proof — the binding is an operator
-    ASSERTION — but an UNBOUND report is no assertion at all, so it is refused here and
-    demoted by :func:`assess` rather than being eligible for any graph.
+    *graph_name* is the graph this census is measuring, and it is **required**. The
+    report's OWN ``graph`` field (``tools/turn_parity_census.py::census`` emits it) must
+    agree with it, and a report carrying **no** graph identity is REFUSED — not stamped
+    with the caller's name, which is what made this check unable to fail (review P1 on
+    #11004). An UNBOUND :class:`ParityReport` is still refused here and demoted by
+    :func:`assess`, so a library caller cannot mint one either way.
     """
     import json
 
@@ -966,7 +968,23 @@ def load_parity_report(path: str, *, graph_name: str) -> ParityReport:
     total = population.get("episodic_graph_nodes")
 
     reported_graph = payload.get("graph") or payload.get("graph_name")
-    if graph_name is not None and reported_graph is not None and reported_graph != graph_name:
+    # ⛔ A REPORT THAT NAMES NO GRAPH IS REFUSED, not attributed to the caller's own.
+    # Filling the field in with ``graph_name`` made the binding VACUOUS: the loader
+    # authored the assertion it was supposed to check, so `mismatched` could never fire
+    # and `unbound` could never be reached from this door — the only path that produces
+    # a real report. A CLEAN census taken on another instance, or of a past state, then
+    # loaded as a licence to sweep THIS graph, with the operator's typed `--graph` and
+    # the repeated `--parity-graph` as the whole of the evidence (review P1 on #11004).
+    # `tools/turn_parity_census.py::census` emits the identity, so the honest path is
+    # open; a report without one is an artifact that cannot say what it measured.
+    if reported_graph is None or not str(reported_graph).strip():
+        raise CacheReadError(
+            f"parity report {path} names no graph — the field is REQUIRED "
+            f"(`graph`, emitted by `tools/turn_parity_census.py::census`): an "
+            f"unattributed report cannot be told apart from a CLEAN census of "
+            f"another graph, so it licenses nothing"
+        )
+    if reported_graph != graph_name:
         raise CacheReadError(
             f"parity report {path} measured graph {reported_graph!r}, but this census "
             f"is measuring {graph_name!r} — a CLEAN census of one graph does not "
@@ -978,5 +996,5 @@ def load_parity_report(path: str, *, graph_name: str) -> ParityReport:
         verdict=str(payload.get("verdict") or ""),
         measured_nodes=_int_or_none(measured),
         total_nodes=_int_or_none(total),
-        graph_name=str(reported_graph) if reported_graph is not None else graph_name,
+        graph_name=str(reported_graph),
     )
