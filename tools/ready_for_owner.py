@@ -477,12 +477,13 @@ def fetch_check_runs(repo: str, sha: str) -> list[dict]:
     # passes the int check and makes `len(runs) < total` false for a ONE-element
     # set — a JSON `{"total_count": true}` would then return a 1-of-5 set as
     # complete. Excluded explicitly: a bool is not a count.
-    if not isinstance(total, int) or isinstance(total, bool):
+    if not isinstance(total, int) or isinstance(total, bool) or total < 0:
         # A guard that silently disables itself when its input is missing is
         # fail-open: an absent/rewritten `total_count` must not turn the ONLY
-        # truncation defence off.
+        # truncation defence off. A NEGATIVE (or zero) count does exactly that,
+        # because `len(runs) < total` is then false for any body.
         raise RequiredSetUnreadable(
-            f"check-runs response for {sha} carried no integer `total_count` — "
+            f"check-runs response for {sha} carried no usable `total_count` ({total!r}) — "
             "cannot prove the set is complete"
         )
     # The guard must count DISTINCT runs, not entries. `_gh_api_json` extends the
@@ -504,7 +505,12 @@ def fetch_check_runs(repo: str, sha: str) -> list[dict]:
             "cannot prove the set is complete"
         )
     distinct = set(ids)
-    if len(runs) < total or len(distinct) < total:
+    # EQUALITY on DISTINCT ids, not `len(runs) < total`. Two directions matter:
+    #   * a duplicate boundary entry makes `len(runs) > total` while every run is
+    #     present — that is COMPLETE, so the comparison must be on distinct ids;
+    #   * a count BELOW the distinct ids (`total_count: 0` with one run) is
+    #     inconsistent and must not read as complete just because `<` is false.
+    if len(distinct) != total:
         raise RequiredSetUnreadable(
             f"check-runs truncated for {sha}: received {len(runs)} entries "
             f"({len(distinct)} distinct) of {total} — refusing to read a partial set"
@@ -597,6 +603,11 @@ def _newest_per_group(
         if not isinstance(name, str) or not name:
             continue
         app = (run.get("app") or {}).get("slug") if isinstance(run.get("app"), dict) else None
+        # `app` is a DICT KEY, so a non-scalar slug raises `TypeError: unhashable
+        # type` at `groups.get(key)` — a traceback and exit 1, read as "a required
+        # check is red", with no JSON in `--json` mode. Normalise to None.
+        if app is not None and not isinstance(app, str):
+            app = None
         run_id = _run_id_of(run)
         workflow = workflow_of.get(run_id) if run_id is not None else None
         identity = workflow if workflow is not None else run_id

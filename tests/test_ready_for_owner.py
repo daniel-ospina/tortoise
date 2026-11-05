@@ -1336,6 +1336,58 @@ def test_a_plain_timeout_is_not_reported_as_a_rate_limit():
         sp.run = original
 
 
+@pytest.mark.parametrize("bad_total", [-1, 0, 99])
+def test_a_nonsensical_or_mismatched_total_count_is_unreadable(monkeypatch, bad_total):
+    """A negative/zero count makes `len < total` false and disables the guard."""
+    runs = [{"name": "docs", "status": "completed", "conclusion": "success", "id": 1}]
+    monkeypatch.setattr(rfo, "_gh_api_json",
+                        lambda endpoint: {"total_count": bad_total, "check_runs": runs})
+    with pytest.raises(rfo.RequiredSetUnreadable):
+        rfo.fetch_check_runs("o/r", "deadbeef")
+
+
+def test_a_malformed_check_runs_container_is_a_verdict(tmp_path, monkeypatch):
+    tree = _write_tree(tmp_path, mergify=_mergify())
+    for payload in ({"check_runs": None, "total_count": 1}, {"check_runs": "oops"}):
+        monkeypatch.setattr(rfo, "_gh_api_json", lambda endpoint, p=payload: p)
+        result = rfo.condition_2(tree, "o/r", "deadbeef")
+        assert result.verdict == rfo.FAIL_UNREADABLE
+
+
+def test_a_non_scalar_app_slug_does_not_traceback(tmp_path):
+    """`app` is a dict key — an unhashable slug must not raise TypeError."""
+    runs = [run("docs"), _replacement("ai-review-gate")]
+    runs[1]["app"] = {"slug": ["x"]}
+    result = evaluate(_write_tree(tmp_path, mergify=_mergify()), runs)
+    assert result.verdict in {rfo.PASS, rfo.FAIL_MISSING, rfo.FAIL_UNREADABLE}
+
+
+def test_a_trailing_non_object_fragment_is_refused():
+    with pytest.raises(rfo.RequiredSetUnreadable) as excinfo:
+        rfo._split_pages('{"a": 1}garbage', "ep")
+    assert "trailing non-object content" in str(excinfo.value)
+
+
+def test_fetch_workflow_ids_degrades_to_a_reason_instead_of_raising(monkeypatch):
+    def boom(endpoint):
+        raise rfo.RequiredSetUnreadable("HTTP 403")
+
+    monkeypatch.setattr(rfo, "_gh_api_json", boom)
+    mapping, reason = rfo.fetch_workflow_ids("o/r", "deadbeef")
+    assert mapping == {} and "403" in reason
+
+    monkeypatch.setattr(rfo, "_gh_api_json", lambda endpoint: {"workflow_runs": {}})
+    mapping, reason = rfo.fetch_workflow_ids("o/r", "deadbeef")
+    assert mapping == {} and reason
+
+    monkeypatch.setattr(
+        rfo, "_gh_api_json",
+        lambda endpoint: {"workflow_runs": [{"id": 1, "workflow_id": "not-an-int"}]},
+    )
+    mapping, reason = rfo.fetch_workflow_ids("o/r", "deadbeef")
+    assert mapping == {} and reason is None
+
+
 # ── helpers ─────────────────────────────────────────────────────────────────
 
 
