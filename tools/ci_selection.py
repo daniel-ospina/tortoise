@@ -1707,6 +1707,22 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # does not exist" class (the prefix case's docstring states the same boundary; a
              # rename-detection pin belongs with the diff that performs the rename).
              "tools/gh_write_preflight",
+             # #11052 review P0: tools/gh_read_cache.py owns
+             # tests/test_gh_read_cache.py (registered `core`), and the same silent
+             # drop bit it: `tools/` is swallowed by NON_PYTHON_PREFIXES and no
+             # SOURCE_PATTERNS row matches the tool, so a TOOL-ONLY change selected
+             # NO surface, took the docs-only early return and landed on tier-1
+             # smoke, where that file is not registered. The very PR that can weaken
+             # the refusal denylist, drop the `--jq` projection or drop an identity
+             # field would then be the one that never ran the 76 cases pinning them.
+             # MEASURED before this entry: `select(["tools/gh_read_cache.py"],
+             # "pull_request", load_manifest())` -> surfaces=[], full=False,
+             # test_gh_read_cache.py ABSENT; after -> surfaces=['core'], present.
+             # ⚠️ the n_test_files count is a SNAPSHOT taken at the head that measured
+             # it — re-measure, do not trust the count. Same #1349/#3332/#3616 class as
+             # the entries above. Pinned by
+             # tests/test_ci_selection.py::test_gh_read_cache_tool_change_selects_core_not_tier1.
+             "tools/gh_read_cache.py",
              # #7814 review P2: the queue-reconcile schedule installer owns
              # tests/test_install_queue_reconcile_schedule.py, registered
              # `core`, but `tools/` is swallowed by NON_PYTHON_PREFIXES and no
