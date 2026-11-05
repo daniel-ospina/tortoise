@@ -162,7 +162,8 @@ def test_the_doc_does_not_claim_a_re_capture_heals_a_pre_fix_node():
             "`_materialize_session_source` — whose only caller sits behind the "
             "fresh-capture gate — never runs and the stale pair survives "
             "(measured: `#10852` review, P1). Mirror "
-            "`cache_projection.py`'s docstring instead.\n\n{costs}")
+            "`cache_projection.py`'s docstring instead.\n\n"
+            f"{costs}")
 
 
 def test_the_doc_states_the_mechanism_and_the_routes_that_do_clear_the_pair():
