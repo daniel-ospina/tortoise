@@ -6139,14 +6139,15 @@ def _manifest_contract_issues(manifest: dict) -> list[str]:
     a non-empty map whose every weight is the `0.0` sentinel, and a stale
     capture date).
 
-    `ci_manifest.map_issues` also carries main's two newer manifest checks —
-    `fast_shard_issues` (#6135, the top-level `fast_shards` declaration) and
-    `duplicate_entries` (#2913/#5373, the same-surface `merge=union` gate) — and
-    `ci_manifest.floor_issues` (a weight declared as a floor/cap rather than a
-    reading, cut on this branch rather than inherited) beside them, because the
-    union of the two pipelines must not drop any of the three. Composing them here
-    keeps the branch's invariant (every check reachable from ONE place) while
-    keeping main's coverage.
+    `ci_manifest.map_issues` also carries `fast_shard_issues` (#6135, the
+    top-level `fast_shards` declaration), `duplicate_entries` (#2913/#5373, the
+    same-surface `merge=union` gate) and `floor_issues` (#10575, a weight declared
+    as a floor/cap rather than a reading) beside them. All three are main's: the
+    first two landed on main beside the #5050 validator, and #10575 landed on main
+    through #10704 — so none of the three is re-added here. The union of the two
+    pipelines must not drop any of them, and composing them in ONE place keeps the
+    invariant (every check reachable from one entry point) while keeping main's
+    coverage.
 
     An ImportError is reported as an issue, never swallowed: returning ``[]``
     would leave ``--integrity`` GREEN with none of these checks having run —
@@ -6600,15 +6601,14 @@ def main() -> int:
         # now coerces as well, so the packer cannot raise at all). That order is
         # preserved inside `ci_manifest.map_issues`, which owns the composition
         # as of #5050: the map's checks (`duration_issues`, `leg_coverage_issues`,
-        # `duration_coverage_issues`), main's newer manifest checks
+        # `duration_coverage_issues`), the newer manifest checks
         # (`fast_shard_issues` for the top-level `fast_shards` declaration and
         # `duplicate_entries` for the same-surface `merge=union` gate — both
-        # landed on main beside this one while it was open), and THIS branch's
-        # own `floor_issues` for a weight declared as a floor/cap rather than a
-        # reading (⚠️ `origin/main` has NO `floor_issues` at all — #10575 cut it
-        # HERE, so it is not an inherited check and must not be described as
-        # one). ALL of them are folded into the same one place rather than being
-        # re-added here, plus the
+        # landed on main beside this one while it was open), and `floor_issues`
+        # for a weight declared as a floor/cap rather than a reading (#10575,
+        # which landed on main through #10704 — so it IS inherited, and must not
+        # be described as this branch's own). ALL of them are folded into the
+        # same one place rather than being re-added here, plus the
         # plausibility/freshness checks the validator adds (any weight the writer
         # could not have rendered — sub-floor, finer precision, or negative — a
         # non-empty map whose every weight is the `0.0` sentinel, and a stale
