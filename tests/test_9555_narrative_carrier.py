@@ -1767,6 +1767,10 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
         f"this pin must not keep naming the table the projection left behind")
 
     text = _storage_doc_text()
+    #: DERIVED once, used by BOTH messages below — a failure message that
+    #: restates a number this test derives re-stales on the same renumber the
+    #: assertion is here to catch (round-2 review P2, on the §9.4 message).
+    summary_section = _ontology_section_of("summary")
 
     # ── §9.4: the corrected pointer PRESENT, the summary/ narrative blur GONE ──
     paragraph = _source_vector_section_94(text)
@@ -1775,8 +1779,8 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
         f"from `{home}` — that is what stops a design embedding the topic "
         f"lexicon `:Source.summary` becomes under `#10852`. ⛔ The value §9.4 "
         f"DOES index is the narrative, and ITS home is the record (§9.1), not a "
-        f"node field — `:Source.summary` itself stays on the node, as §4.6 "
-        f"metadata")
+        f"node field — `:Source.summary` itself stays on the node, as "
+        f"{summary_section} metadata")
     assert "never from `:Source.summary`" in paragraph, (
         "§9.4 no longer forbids `:Source.summary` as the vector's input IN THE "
         "PARAGRAPH THAT CHOOSES THE INPUT — naming the record home without "
@@ -1796,7 +1800,7 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
         f"an episodic `:Source.summary` a topic lexicon, so that sentence tells "
         f"a designer to embed the one field §9.4 says the vector must not read. "
         f"The field §9.4 indexes is the narrative in `{home}` (§9.1); the "
-        f"`summary` the Source holds is {_ontology_section_of('summary')} "
+        f"`summary` the Source holds is {summary_section} "
         f"metadata")
     assert home in footnote, (
         f"§12.1b's `:Source` footnote does not name `{home}` — the section that "
@@ -1811,9 +1815,9 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
     #: ...and the THIRD claim the footnote makes is which ontology section a
     #: `summary` is filed under — the one this PR's pre-rebase wording got WRONG
     #: (`§4.4`, which `docs/ONTOLOGY.md:454` assigns to `Document`, not `Source`).
-    #: §4.6 is DERIVED from the ontology that defines it, so a renumber reds here
-    #: instead of leaving a footnote pointing at a different type.
-    summary_section = _ontology_section_of("summary")
+    #: `summary_section` is DERIVED from the ontology that defines it, so a
+    #: renumber reds here instead of leaving a footnote pointing at a different
+    #: type.
     assert f"{summary_section} metadata" in footnote, (
         f"§12.1b's `:Source` footnote no longer files `summary` as "
         f"{summary_section} metadata — `docs/ONTOLOGY.md` puts `summary`'s row "

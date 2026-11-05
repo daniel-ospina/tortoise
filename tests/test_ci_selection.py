@@ -235,10 +235,12 @@ def test_v4_membership_gate_runs_on_both_architecture_docs():
     from both. ⚠️ BOTH are measurements, not constants, and they move for
     DIFFERENT reasons: the 150 moves with every `tier1` addition (`#10980`'s own
     row moved it from 149), while the 73 is the whole `full`-less fast pool — the
-    `60` this sentence carried was that same pool ~40 rows ago, i.e. the very
-    "a past state quoted as a current one" defect the line below warns about.
-    Re-derive both (`ci_selection.py` reports `len(test_files)`) rather than
-    trusting either — the assertions below are the pin, this sentence is a note.
+    `60` this sentence carried was that same pool **13 rows ago** (measured:
+    `len(tier1)` is 60 at `609eb72d3`, the commit that wrote it, and 73 here),
+    i.e. the very "a past state quoted as a current one" defect the line below
+    warns about. Re-derive both (`ci_selection.py` reports `len(test_files)`)
+    rather than trusting either — the assertions below are the pin, this
+    sentence is a note.
     """
     storage = _sel(["docs/architecture/STORAGE-ARCHITECTURE.md"])
     assert storage["surfaces"] == ["onboarding"], storage["surfaces"]
