@@ -411,6 +411,54 @@ def test_cli_default_is_a_dry_run_and_writes_the_plan(tmp_path, capsys):
     assert any("restore-proof" in m for m in plan["recovery"]["missing"])
 
 
+def test_the_census_artifact_names_the_graph_the_run_opened(monkeypatch, tmp_path):
+    """⛔ `census()` HAS A SECOND PRODUCER, AND IT MUST NAME ITS TARGET TOO.
+
+    `purge_legacy_turns.py` calls `census()` too, and it reuses the same
+    `instrument` tag — so an artifact it writes is fed to
+    `cache_eviction.load_parity_report`, which now REFUSES a report that names no graph
+    (review P2 on #11097). Omitting the name did not merely lose a field: it made every
+    artifact this producer writes unusable AS EVIDENCE, while asserting an absence the
+    run itself disproves (`census()`'s own comment: an artifact that does not know its
+    target must say so — this one does know).
+
+    Mutation that goes RED here: dropping `graph_name=` from the call site (then
+    `seen["graph_name"]` is None while the report says null).
+    """
+    seen: dict = {}
+    real_census = purge.census_mod.census
+
+    def capture(graph, record, *, sample, graph_name=None):
+        seen["graph_name"] = graph_name
+        return real_census(graph, record, sample=sample, graph_name=graph_name)
+
+    node = {"id": "s1_t0", "content": "[user] body of s1_t0",
+            "speaker": "user", "status": "draft",
+            "createdAt": "2026-10-25T00:00:00+00:00", "pointKind": "event",
+            "embedding": None, "sessions": {"s1"}}
+    row = {"node_key": "s1_t0", "content": "[user] body of s1_t0",
+           "speaker": "user", "status": "draft",
+           "created_at": "2026-10-25T00:00:00+00:00", "point_kind": "event",
+           "is_episodic": True, "embedding": None}
+    monkeypatch.setattr(purge.census_mod, "census", capture)
+    monkeypatch.setattr(purge.census_mod, "read_graph_turns",
+                        lambda *a, **k: {"nodes": {"s1_t0": node}})
+    monkeypatch.setattr(purge.census_mod, "read_record_turns",
+                        lambda *a, **k: {"rows_by_key": {"s1_t0": row},
+                                         "non_turn_shaped": 0})
+
+    rc = purge.main(["--uri", "docker://:pw@127.0.0.1:1/team_x",
+                     "--record-dsn", _DSN,
+                     "--org-id", "org", "--graph-id", "graph",
+                     "--target-note", "unit test",
+                     "--plan-out", str(tmp_path / "plan.json")])
+
+    assert rc == 0, seen
+    # The graph the URI names — resolved by the instrument's own canonical helper,
+    # never a second parse of the URI here.
+    assert seen["graph_name"] == "team_x"
+
+
 def test_cli_refuses_execute_from_a_cached_census(tmp_path, capsys):
     census_path = tmp_path / "census.json"
     census_path.write_text(json.dumps(_report()), encoding="utf-8")

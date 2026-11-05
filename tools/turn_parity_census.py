@@ -725,7 +725,14 @@ def resolve_graph_name(uri: str | None, db_path: str | None,
         # refuses it by name before reaching here, and a library caller must not get
         # the embedded default for a target it did not ask for). The canonical
         # derivation refuses a degenerate URI rather than inventing a name.
-        from tortoise.projection import resolve_db_endpoint
+        # The import is GUARDED for the same reason `read_graph_turns` guards its own:
+        # a broken/partial install must read as "the graph could not be resolved"
+        # (exit 3), never as a traceback a caller mistakes for the exit-1 usage code.
+        try:
+            from tortoise.projection import resolve_db_endpoint
+        except Exception as exc:  # pragma: no cover - import env problem
+            raise CensusError(
+                f"tortoise import failed ({type(exc).__name__}: {exc})") from exc
 
         return resolve_db_endpoint(uri).graph_name
     return "tortoise"
@@ -2055,7 +2062,12 @@ def main(argv: list[str] | None = None) -> int:
     # naming `tortoise`, which the cache census accepts for a hosted graph of the same
     # name. A shell accident therefore licensed a sweep of an instance the census never
     # touched: the exact `different instance` shape the binding exists to refuse.
-    for flag, value in (("--uri", args.uri), ("--db-path", args.db_path)):
+    # `--graph-name` is in the same loop for the mirror reason (review P2, cycle 2):
+    # `--graph-name ""` used to win `graph_name is not None` and be written into the
+    # artifact as `graph: ""` while the EMBEDDED read fell back to `tortoise` — an
+    # artifact that misstates its own target AND can never be loaded as evidence.
+    for flag, value in (("--uri", args.uri), ("--db-path", args.db_path),
+                       ("--graph-name", args.graph_name)):
         if value is not None and not str(value).strip():
             sys.stderr.write(
                 f"turn_parity_census: {flag} was passed but is EMPTY (a shell "

@@ -496,21 +496,48 @@ def test_resolve_graph_name_never_treats_an_EMPTY_uri_as_no_uri():
         tpc.resolve_graph_name("", None, None)
 
 
-@pytest.mark.parametrize("flag", ["--uri", "--db-path"])
-def test_an_EMPTY_graph_target_flag_refuses_by_name(flag, capsys):
+@pytest.mark.parametrize("flag,extra", [
+    ("--uri", []),
+    ("--db-path", []),
+    # ⛔ `--graph-name ""` won the `graph_name is not None` branch and was written
+    # into the artifact as `graph: ""` while the EMBEDDED read fell back to
+    # `tortoise` — an artifact that misstates its own target AND can never be
+    # loaded, because the consumer refuses a blank name (review P2, cycle 2).
+    ("--graph-name", ["--uri", "docker://:@127.0.0.1:1/g"]),
+])
+def test_an_EMPTY_graph_target_flag_refuses_by_name(flag, extra, capsys):
     """An empty flag value is NOT "no flag" — the rule the record flags already state.
 
     Wrong outcome before the fix: `--uri ""` fell through to the EMBEDDED store, exited
     0 CLEAN, and (once this tool authors the identity) wrote a report naming a graph on
     an instance the run never opened (review P2 on #11097).
     """
-    code = tpc.main([flag, "", "--record-dsn", "postgresql://x/y",
+    code = tpc.main([flag, "", *extra, "--record-dsn", "postgresql://x/y",
                      "--org-id", "o", "--graph-id", "g"])
 
     assert code == 1
     err = capsys.readouterr().err
     assert "EMPTY" in err and flag in err
     assert "EMBEDDED" in err
+
+
+def test_a_broken_tortoise_import_is_a_CensusError_not_a_traceback(monkeypatch):
+    """The URI arm's import is guarded, like `read_graph_turns`' own.
+
+    Measured before the fix (review P2, cycle 2): the new unguarded
+    `from tortoise.projection import resolve_db_endpoint` raised ImportError straight
+    out of `main()`, which exits the interpreter with **1** — the documented USAGE
+    code — so a broken install read as a mistyped flag and the operator retried flags
+    instead of repairing the environment.
+    """
+    import sys as _sys
+
+    monkeypatch.setitem(_sys.modules, "tortoise.projection", None)
+
+    with pytest.raises(tpc.CensusError) as excinfo:
+        tpc.resolve_graph_name("docker://h:1/g", None, None)
+
+    assert "tortoise import failed" in str(excinfo.value)
 
 
 def test_main_maps_clean_to_zero_and_refused_to_two(monkeypatch, tmp_path):

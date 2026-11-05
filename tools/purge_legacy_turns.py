@@ -1808,7 +1808,18 @@ def main(argv: list[str] | None = None) -> int:
                     "drained graph). Pass --expect-empty if the graph is known "
                     "to hold no turn nodes.\n")
                 return 3
-            report = census_mod.census(graph, record, sample=args.sample)
+            report = census_mod.census(
+                graph, record, sample=args.sample,
+                # ⛔ THE ARTIFACT MUST NAME THE TARGET THIS RUN OPENED (review P2 on
+                # #11097). `census()` emits `graph`, and the consumer
+                # (`cache_eviction.load_parity_report`) REFUSES a report that names
+                # none — so omitting it here did not merely lose a field: it made
+                # every artifact this producer writes unusable as evidence, while
+                # asserting an absence the run itself disproves. Resolved through the
+                # instrument's own helper (the canonical URI derivation), never a
+                # second parse.
+                graph_name=census_mod.resolve_graph_name(
+                    args.uri, args.db_path, args.graph_name))
     except census_mod.CensusError as exc:
         sys.stderr.write(f"purge_legacy_turns: {exc}\n")
         return 3
@@ -2430,7 +2441,13 @@ def _execute(plan: dict, args, target: dict) -> int:
                 node_keys=ids)
             now_graph = census_mod.read_graph_turns(
                 None, None, None, node_ids=ids, g=proj.g)
-            recheck = census_mod.census(now_graph, held, sample=0)
+            recheck = census_mod.census(
+                now_graph, held, sample=0,
+                # The delete-time re-check names the graph the DELETES go to — the
+                # projection this run issues them through — for the same reason the
+                # `target-drift` check above reads `proj.graph_name` rather than
+                # `args.graph_name` (review P2 on #11097).
+                graph_name=getattr(proj, "graph_name", None))
         except census_mod.CensusError as exc:
             sys.stderr.write(
                 f"purge_legacy_turns: the record or the graph could not be "

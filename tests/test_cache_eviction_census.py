@@ -626,8 +626,10 @@ def test_a_report_carrying_no_graph_identity_is_REFUSED(tmp_path):
     (`turn_parity_census.census`), so a report without one is an artifact that cannot
     say what it measured.
 
-    Mutation that goes RED here: restoring `graph_name=str(reported_graph) if
-    reported_graph is not None else graph_name`.
+    Mutation that goes RED here: deleting the `names no graph` refusal, or restoring
+    the `graph_name` alias fallback (see the ALIAS pin below — with the refusal in
+    place, the RETURN expression alone is a no-op, because `reported_graph` is already
+    non-None by then; naming it as the mutation was a claim the pin could not support).
     """
     import json
 
@@ -978,8 +980,10 @@ def test_a_clean_census_of_another_graph_cannot_license_this_one(tmp_path, capsy
     The report here is built by the REAL instrument (`turn_parity_census.census`), not a
     hand-written dict, so the pin follows the artifact the operator actually hands over.
 
-    Mutation that goes RED here: any return of the fill-in in `load_parity_report`
-    (the run then reaches the licence code instead of the refusal).
+    Mutation that goes RED here: deleting the `reported_graph != graph_name` comparison
+    (measured — the run then loads the FOREIGN report and refuses later for a different
+    reason, so the error no longer names both graphs). NOT the fill-in: this report
+    carries `graph: "other_graph"`, so a fill-in could not change its outcome.
     """
     import json
 

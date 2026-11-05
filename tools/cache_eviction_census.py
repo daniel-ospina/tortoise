@@ -291,8 +291,9 @@ def main(argv: list[str] | None = None) -> int:
                               "(`tools/turn_parity_census.py --json` emits it) and "
                               "that name must match this one: a report naming no "
                               "graph is REFUSED, so a CLEAN census of another graph "
-                              "or another instance cannot be re-badged by repeating "
-                              "--graph here."))
+                              "cannot be re-badged by repeating --graph here. "
+                              "⚠️ The check is NAME-ONLY: a graph of the same name "
+                              "on a different INSTANCE is NOT detected here."))
     parser.add_argument("--ceiling-bytes", type=int, default=None,
                         metavar="N",
                         help=("a declared ceiling; defaults to "
