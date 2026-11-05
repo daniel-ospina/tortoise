@@ -2693,10 +2693,9 @@ class TestToolCallAdmissionBoundary:
         witness's membership is now DERIVED and asserted rather than assumed,
         so the next retirement fails with the live population named.
         """
-        from tortoise.mcp_server import create_http_app
         from tortoise.mcp_auth import ERR_EXCLUDED
-        from tortoise.tool_registry import (
-            RETIRED_USE_INSTEAD, TOOL_REGISTRY, get_http_allowed)
+        from tortoise.mcp_server import create_http_app
+        from tortoise.tool_registry import RETIRED_USE_INSTEAD, TOOL_REGISTRY, get_http_allowed
 
         # The hidden state is DERIVED at this head: every live registry tool the
         # HTTP filter leaves out. The witness must be one of them (a retired or

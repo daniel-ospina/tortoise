@@ -1797,7 +1797,9 @@ MEASURED_KILLS = [
 ]
 
 
-def run_kill_attribution(*argv: str) -> subprocess.CompletedProcess[str]:
+def run_kill_attribution(
+    *argv: str, timeout: float = 60
+) -> subprocess.CompletedProcess[str]:
     """Run the attribution reporter the way the workflow does."""
     return subprocess.run(
         ["bash", str(KILL_SCRIPT), *argv],
@@ -1805,7 +1807,7 @@ def run_kill_attribution(*argv: str) -> subprocess.CompletedProcess[str]:
         capture_output=True,
         text=True,
         check=False,
-        timeout=60,
+        timeout=timeout,
     )
 
 
@@ -1910,6 +1912,44 @@ def test_kill_attribution_bad_invocation_is_exit_2(argv: list[str]) -> None:
     required `lint` leg, which is how this pair was caught.
     """
     assert run_kill_attribution(*argv).returncode == 2, argv
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [["--rc"], ["--budget-min"], ["--elapsed"], ["--rc", "137", "--elapsed"]],
+    ids=["rc-last", "budget-last", "elapsed-last", "elapsed-last-after-a-pair"],
+)
+def test_a_flag_with_a_missing_value_is_exit_2_not_a_hang(argv: list[str]) -> None:
+    """A trailing flag must be a usage error, not a spin loop.
+
+    Measured at `dbf7cf9d8` (the head this was found on): `timeout 3 bash
+    .github/scripts/pytest-kill-attribution.sh --rc 137 --elapsed` exits **124**
+    — killed by `timeout` because it never terminated. Each arm read its value
+    with `${2:-}` and then ran `shift 2` unconditionally; when the flag is the
+    LAST argv element `shift 2` fails (`2 > $#`), shifts nothing, and — with
+    `set -uo pipefail` and no `-e` — the `while [ $# -gt 0 ]` loop re-reads the
+    same flag for ever. The banner then looks like a wedged shell rather than
+    the usage error it is, and the reporter's stated purpose is that a human or
+    a lane reruns it BY HAND.
+
+    The bound below is what turns the pre-fix hang into a FAILURE instead of a
+    60 s stall per case; the guard is on the count of remaining argv, so
+    `["--elapsed", ""]` (the documented absent-stamp call) must still report
+    UNKNOWN — see `test_a_missing_start_stamp_fails_closed` for that direction.
+    """
+    try:
+        result = run_kill_attribution(*argv, timeout=10)
+    except subprocess.TimeoutExpired:
+        pytest.fail(
+            f"{argv} HUNG: a flag with a missing value must be a usage error "
+            "(exit 2), not a spin loop. `shift 2` on a one-element tail shifts "
+            "nothing and `set -uo pipefail` carries no `-e`, so the argv loop "
+            "never advances — guard each arm on `[ $# -ge 2 ]` before shifting."
+        )
+    assert result.returncode == 2, (argv, result.returncode, result.stdout, result.stderr)
+    # The message names the flag that was left dangling — the LAST argv element,
+    # which is `--elapsed` in the shape where an earlier pair is already consumed.
+    assert f"{argv[-1]} requires a value" in result.stderr, (argv, result.stderr)
 
 
 def test_the_reporter_is_never_the_verdict() -> None:

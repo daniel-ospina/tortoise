@@ -58,7 +58,14 @@
 #                 passing a fabricated 0: the script then says UNKNOWN instead of
 #                 claiming the budget was reached.
 #   Exit 0: reported (a line was printed, or the rc is not a kill rc).
-#   Exit 2: bad invocation.
+#   Exit 2: bad invocation — INCLUDING a flag whose value is missing (`--rc` as the
+#           last argv element). Each arm guards on the COUNT of remaining argv, not
+#           on the value being non-empty: `--elapsed ""` is a legitimate call (the
+#           absent start stamp, see above) and must still reach the UNKNOWN arm.
+#           Without that guard `shift 2` fails on a one-element tail, shifts
+#           nothing, and `while [ $# -gt 0 ]` never advances — measured at
+#           `dbf7cf9d8`: `timeout 3 … --elapsed` exits 124, i.e. it spins for ever.
+#           `set -uo pipefail` carries no `-e`, so the failed shift is silent.
 # ============================================================================
 set -uo pipefail
 
@@ -68,9 +75,15 @@ BUDGET_MIN=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --rc)          RC="${2:-}";         shift 2 ;;
-    --elapsed)     ELAPSED="${2:-}";    shift 2 ;;
-    --budget-min)  BUDGET_MIN="${2:-}"; shift 2 ;;
+    --rc)
+      [ $# -ge 2 ] || { echo "pytest-kill-attribution: --rc requires a value" >&2; exit 2; }
+      RC="${2:-}"; shift 2 ;;
+    --elapsed)
+      [ $# -ge 2 ] || { echo "pytest-kill-attribution: --elapsed requires a value (pass an empty one for UNKNOWN)" >&2; exit 2; }
+      ELAPSED="${2:-}"; shift 2 ;;
+    --budget-min)
+      [ $# -ge 2 ] || { echo "pytest-kill-attribution: --budget-min requires a value" >&2; exit 2; }
+      BUDGET_MIN="${2:-}"; shift 2 ;;
     -h|--help)     sed -n '2,70p' "$0"; exit 0 ;;
     *)             echo "pytest-kill-attribution: unknown argument: $1" >&2; exit 2 ;;
   esac
