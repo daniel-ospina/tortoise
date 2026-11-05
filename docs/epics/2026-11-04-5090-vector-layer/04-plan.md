@@ -52,9 +52,11 @@ E2E, because those are the two places where "the metric went green and the promi
 | **J4** | **Operator audits a write.** | a row was written without a vector | every embedding writer is either gated or carries a **runtime-resolvable** exemption |
 | **J5** | **Operator weighs removing dead vectors.** | the 2026-09-24 count put all 12,657 stored-but-unindexed vectors on `Object` + `Event`; `Source`/`Subject` have no vector index and that reading counted none, but their writers do store `embedding` — so the census measures the live population rather than assuming it | a dry-run census names the population, its bytes, and **exactly which query results would change** — and the surface call is requested, not taken |
 
-**Edge cases (empty / error / degraded), all present in E2E:** empty store; a label with zero vectors; a
-store with **no** gap (the case that is silent today — E2E-4); an unreadable index catalogue; a writer the
-census cannot classify.
+**Edge cases (empty / error / degraded).** In E2E: a label with zero vectors; a store with **no** gap (the
+case that is silent today — E2E-4); an unreadable index catalogue. **Contract, not E2E**, and named here so
+the gap is not read as coverage: an **empty store** (no D-case instantiates one) and a **writer the census
+cannot classify** (D3 asserts there are *zero* such writers, the inverse of exercising one; the refusal
+contract is §6.2's).
 
 ---
 
