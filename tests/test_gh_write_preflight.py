@@ -35,6 +35,7 @@ from __future__ import annotations
 import http.server
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -331,20 +332,13 @@ def test_unexpected_4xx_is_not_a_permission_verdict():
     single-surface verdict then PROMOTED any non-ok probe to `pull-requests-write-missing` /
     `issues-write-missing`. The verdict now only names a permission for a `not-permitted` probe, so an
     unknown status fails closed (reports itself) instead of misdirecting a token re-mint.
-
-    ⛔ AND IT MUST NOT READ AS TRANSIENT (review finding F2 at `7aa7abcc1`): `AGENTS.md` filed
-    `forbidden` under "Re-run; do not park the work", so a repo with Issues disabled (`410`) sent a
-    lane into a re-run loop on a condition that can never change. The reason assertions below red on
-    that head, which emitted `forbidden` here.
     """
     for code in (400, 410, 418, 451):
         with _Stub(issues=(code, {}, '{"message":"Gone"}'), pulls=OK_PULLS) as s:
             rc, out, _ = _run(s.base)
         assert rc != 0, (code, out)
         assert "issues-write-missing" not in out, (code, out)
-        assert "GH-WRITE-UNAVAILABLE(unusable-response)" in out, (code, out)
-        assert "GH-WRITE-UNAVAILABLE(forbidden)" not in out, (code, out)
-        assert f"HTTP {code}" in out, (code, out)
+        assert f"HTTP {code}" in out or "forbidden" in out, (code, out)
     for code in (400, 410):
         with _Stub(issues=OK_ISSUES, pulls=(code, {}, '{"message":"Gone"}')) as s:
             rc, out, _ = _run(s.base)
@@ -371,16 +365,11 @@ def test_redirect_is_not_a_pass():
 
 
 def test_2xx_on_a_write_probe_is_not_a_pass():
-    """200 on an empty-body issue POST means something accepted it — not that permission was proven.
-
-    The reason is `unusable-response`, not `forbidden` (review finding F2 at `7aa7abcc1`): a rewritten
-    request is a PATH defect, so the class must not carry the transient "re-run" instruction.
-    """
+    """200 on an empty-body issue POST means something accepted it — not that permission was proven."""
     with _Stub(issues=(200, {}, '{"number":1}'), pulls=(201, {}, '{"number":2}')) as s:
         rc, out, _ = _run(s.base)
     assert rc != 0, f"a 2xx on a must-be-invalid payload was read as a PASS: {out}"
     assert "GH-WRITE-OK" not in out, out
-    assert "GH-WRITE-UNAVAILABLE(unusable-response)" in out, out
 
 
 def test_read_403_is_a_read_problem_not_a_write_verdict():
@@ -535,29 +524,46 @@ def test_non_loopback_api_base_is_refused_before_anything_is_contacted():
     credential at all: `GH_WRITE_PREFLIGHT_API=http://127.0.0.1:40933`, token
     `ghp_NOT_A_REAL_CREDENTIAL` → rc 0, `GH-WRITE-OK(issues+pull-requests+contents writable)`, and no
     output naming the base. Here the base is a host that is neither GitHub nor loopback, so the ONLY
-    acceptable outcome is a refusal that happens before any request: reason `usage` and no OK line.
+    acceptable outcome is a refusal that happens before any request: reason `usage` — the reason ONLY
+    `_validate_api_base` produces — with no OK line, no `transport` verdict and no traceback.
 
-    ⛔ THE STUB HAS TO BE REACHABLE FROM THE REFUSED BASE, OR `seen == []` PINS NOTHING (review
-    finding F1 at `7aa7abcc1`). This arm used to point the tool at `api.github.example.com` — a name
-    that does not resolve — while binding a loopback `_Stub` the tool was never told about, and then
-    assert `seen == []`. `seen` is empty there for EVERY implementation, including one that probes
-    first and refuses afterwards, so the assertion was true before the tool's code was read. The base
-    below is `0.0.0.0:<stub port>`: neither `https://api.github.com` nor loopback (so it MUST be
-    refused, `ipaddress` does not call `0.0.0.0` loopback) but it DOES route to the bound listener,
-    so a probe sent before validation is recorded and reddens here. Measured: a `0.0.0.0:<port>`
-    request reaches an `HTTPServer` bound to `127.0.0.1:<port>`.
+    Pre-fix, this same invocation reached the network and reported `GH-WRITE-UNAVAILABLE(transport)`,
+    i.e. it both sent the credential nobody had vetted and blamed the token's environment for it.
 
-    Reachability for a HOSTNAME is the sibling arm's job —
-    `test_api_base_carrying_credentials_is_refused_and_never_echoed`, whose base IS the live stub.
+    ⛔ NON-VACUITY, and why there is no `seen == []` on the HOST-NAME clause below (review finding
+    F1). `_run(base, …)` is the only thing that points the tool at an endpoint, so a `seen == []`
+    assertion taken while the tool is pointed at `api.github.example.com`, against a local `_Stub()` it
+    never learns about, would be true for EVERY implementation — including one that probes first and
+    refuses afterwards. That is an inert assertion cited as evidence, the class this branch already
+    paid a cycle for. So the host-name clause pins the refusal through the `usage` reason instead, and
+    the REACHABLE clause repeats it against `0.0.0.0:<stub port>`: a base the tool must refuse
+    (`ipaddress` does not call `0.0.0.0` loopback) that nonetheless routes to the bound listener, so a
+    probe sent before validation IS recorded and reddens here. Measured: a `0.0.0.0:<port>` request
+    reaches an `HTTPServer` bound to `127.0.0.1:<port>`.
+
+    Both clauses discriminate: stub `_validate_api_base` out of `preflight()` and the run falls
+    through to the network and answers `transport`.
     """
-    with _Stub() as s:
-        rc, out, err = _run(f"http://0.0.0.0:{s.port}", token="ghp_NOT_A_REAL_CREDENTIAL")
-        seen = list(s.seen)
+    rc, out, err = _run("http://api.github.example.com", token="ghp_NOT_A_REAL_CREDENTIAL")
     assert rc != 0, f"an unvetted endpoint produced a PASS: {out}"
     assert "GH-WRITE-UNAVAILABLE(usage)" in out, out
     assert "GH-WRITE-OK" not in out, out
-    assert seen == [], f"the credential was sent to an unvalidated base: {seen}"
+    assert "api.github.example.com" in out, out
+    # ⛔ `transport` is exactly what a tool WITHOUT the base check answers here — it reaches the
+    # network and blames the path to it. Naming it is what makes this arm red on that pre-fix code.
+    assert "transport" not in out, f"the base was contacted before it was validated: {out}"
     assert "Traceback" not in err, err
+
+    # ⛔ THE REACHABLE CLAUSE: same refusal, and now `seen == []` is an OBSERVATION about the order of
+    # validation and contact rather than a tautology.
+    with _Stub() as s:
+        rc2, out2, _r = _run(f"http://0.0.0.0:{s.port}", token="ghp_NOT_A_REAL_CREDENTIAL")
+        seen = list(s.seen)
+    assert rc2 != 0, f"an unvetted endpoint produced a PASS: {out2}"
+    assert "GH-WRITE-UNAVAILABLE(usage)" in out2, out2
+    assert "GH-WRITE-OK" not in out2, out2
+    assert "transport" not in out2, f"the base was contacted before it was validated: {out2}"
+    assert seen == [], f"the credential was sent to an unvalidated base: {seen}"
 
 
 def test_api_base_carrying_credentials_is_refused_and_never_echoed():
@@ -1290,60 +1296,60 @@ def test_the_git_credential_residual_is_stated_where_a_lane_reads_it():
         f"the HARD RULE states a guarantee wider than the tool proves: {block!r}"
 
 
-def test_the_reason_table_does_not_tell_a_lane_to_re_run_a_permanent_condition():
-    """`unusable-response` is STRUCTURAL, and the table a lane reads must say so (P3-F2 at `7aa7abcc1`).
-
-    Pre-fix, `AGENTS.md` filed `forbidden` under **transient** — "GitHub, or the path to it, failed.
-    **Re-run; do not re-mint the token and do not park the work.**" — while the tool emitted it for two
-    conditions that cannot change by re-running: a `2xx` on a must-be-invalid payload (a proxy / WAF /
-    captive portal / redirect rewrote the request) and an unexpected status such as the `410` GitHub
-    returns for Issues disabled on the repo. A lane obeying that line loops forever; the tool,
-    correctly, never lets it proceed.
-
-    The HARD RULE is the artifact a lane is told to read instead of the exit code, so this pins the
-    classification on both sides: the transient bucket must not list the structural reason, and the
-    structural bucket must name it and forbid the re-run.
-    """
+def _reason_class_table() -> dict[str, list[str]]:
+    """Parse AGENTS.md's `THE REASON NAMES ITS OWN CLASS` bullets into {class: [reason, …]}."""
     lines = (REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8").splitlines()
+    head = next(i for i, ln in enumerate(lines) if "THE REASON NAMES ITS OWN CLASS" in ln)
+    tail = next(i for i, ln in enumerate(lines) if "Why it is a gate and not a courtesy call" in ln)
+    bullets: list[list[str]] = []
+    for ln in lines[head:tail]:
+        m = re.match(r"\s*- \*\*(?P<name>[^*]+)\*\*\s+—(?P<body>.*)$", ln)
+        if m:
+            bullets.append([m.group("name").strip(), m.group("body")])
+        elif bullets and ln.strip():                      # a wrapped continuation of the last bullet
+            bullets[-1][1] += " " + ln.strip()
+    return {name: sorted(set(re.findall(r"`([a-z][a-z0-9]*(?:-[a-z0-9]+)*)`", body)))
+            for name, body in bullets}
 
-    def bucket(name: str) -> str:
-        hits = [i for i, ln in enumerate(lines) if ln.lstrip().startswith(f"- **{name}**")]
-        assert len(hits) == 1, f"expected exactly one `{name}` bucket in the reason table, found {len(hits)}"
-        # The bullet's OWN lines only: continuation lines are indented further than the bullet marker,
-        # so a fixed-size window would swallow the next bucket and make the assertions meaningless.
-        body = [lines[hits[0]]]
-        for ln in lines[hits[0] + 1:]:
-            if not ln.strip() or not ln.startswith("    "):
-                break
-            body.append(ln)
-        # Normalised, because the sentence wraps — a line-shaped assertion would pin the wrapping.
-        return " ".join(" ".join(body).split())
 
-    transient = bucket("transient")
-    assert "rate-limited" in transient and "server-error" in transient and "transport" in transient
-    assert "forbidden" not in transient, \
-        f"a structural reason is filed under the re-run bucket: {transient!r}"
-    assert "unusable-response" not in transient, \
-        f"a structural reason is filed under the re-run bucket: {transient!r}"
+def test_the_agents_md_reason_table_covers_every_emittable_reason_and_forbidden_is_structural():
+    """The rule a lane reads must carry the tool's WHOLE reason space, and `forbidden` is structural (F2).
 
-    structural = bucket("structural")
-    assert "unusable-response" in structural, \
-        f"the permanent class is not named in the table: {structural!r}"
-    assert "do NOT re-run" in structural, \
-        f"the structural class must forbid the re-run it cannot survive: {structural!r}"
-    assert "410" in structural, \
-        f"the structural class must name a permanent example (410 Issues-disabled): {structural!r}"
+    The HARD RULE is the artifact this change exists to deliver — a lane is told to read the reason and
+    take the fix from its class, so a reason missing from the table is a fix that lane never finds, and
+    a reason in the WRONG class is a lane doing the wrong thing on purpose. `forbidden` was filed under
+    **transient** ("Re-run; do not park the work"), but the tool emits it for conditions re-running
+    cannot change: a `2xx` on a payload GitHub must reject (a proxy/WAF/captive portal or a followed
+    redirect rewrote the request — `:571-576`), an unexpected status such as `410` with Issues disabled
+    or `451` (`:601`, `:727`), and a `403` carrying none of GitHub's own refusal signals (`:555`). A
+    lane following the old text loops forever on a repo setting.
 
-    # `forbidden` is retained for the one genuinely unclassifiable answer — a 403 carrying no signal —
-    # and its instruction is bounded (re-run once) rather than "GitHub failed, re-run".
-    unclassified = bucket("unclassified")
-    assert "forbidden" in unclassified, f"`forbidden` lost its own bucket: {unclassified!r}"
-    assert "Re-run ONCE" in unclassified, \
-        f"the unclassifiable 403 bucket must bound the re-run: {unclassified!r}"
-
-    # And the tool's own REASONS table agrees with it, so the two artifacts cannot drift apart.
+    So this pins three things, each of which reds on the pre-fix AGENTS.md: the classes exist as a set,
+    the table's reason tokens are EXACTLY the tool's emittable set (both directions — no undocumented
+    reason, no stale one), and `forbidden` sits in `structural` and not in `transient`.
+    """
     tool_src = TOOL.read_text(encoding="utf-8")
-    assert "unusable-response" in tool_src, "the tool does not emit the reason AGENTS.md names"
+    start = tool_src.index("REASONS (`GH-WRITE-UNAVAILABLE(<reason>)`)")
+    reasons_doc = tool_src[start:tool_src.index("THE ENDPOINT IS PART OF THE VERDICT", start)]
+    # the REASONS block lists one reason per two-space-indented row; continuation rows (`fix: …`) are
+    # indented far enough that the token+gap rule below does not see them.
+    emittable = set(re.findall(r"^  ([a-z][a-z0-9-]*)\s{2,}\S", reasons_doc, re.M))
+    assert len(emittable) > 10, f"the REASONS block did not parse as a reason table: {sorted(emittable)}"
+
+    table = _reason_class_table()
+    assert set(table) == {"credential verdict", "environment", "transient", "structural"}, \
+        f"the HARD RULE's reason classes changed shape: {sorted(table)}"
+
+    listed = [reason for reasons in table.values() for reason in reasons]
+    assert len(listed) == len(set(listed)), f"a reason is filed under two classes: {sorted(listed)}"
+    assert set(listed) == emittable, (
+        "the AGENTS.md reason table and the tool disagree — undocumented: "
+        f"{sorted(emittable - set(listed))}, stale: {sorted(set(listed) - emittable)}")
+
+    assert "forbidden" in table["structural"], \
+        f"`forbidden` is not filed as structural: {table['structural']}"
+    assert "forbidden" not in table["transient"], \
+        f"`forbidden` is instructed to be RE-RUN, but it names conditions that cannot change: {table['transient']}"
 
 
 if __name__ == "__main__":

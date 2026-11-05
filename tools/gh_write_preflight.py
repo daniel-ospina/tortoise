@@ -92,6 +92,14 @@ WHAT IT PROBES, AND WHY EACH CHOICE IS THE ONE IT IS
 
 6. **REDIRECTS ARE NEVER FOLLOWED.** Only `422` counts as "authorised"; a 2xx on a must-be-invalid
    payload is evidence the response did not come from GitHub's validation path. See `_WRITE_OK`.
+   ⛔ **THE `422`-vs-`403` ORDER IS MEASURED, NOT DOCUMENTED, AND THE WHOLE VERDICT RESTS ON IT.**
+   GitHub documents `403 Resource not accessible by personal access token` for a fine-grained token
+   missing a grant and `422 Validation Failed` for a malformed request, but not which one wins when a
+   request is BOTH unauthorised and invalid — which is what every probe here is, by construction
+   (they must fail validation to be side-effect-free). The measurements above are the evidence for the
+   ordering; if it ever inverted, an under-scoped token would answer `422` and this tool would print
+   `GH-WRITE-OK`. Stated here rather than left implied because a promise wider than the measurement is
+   the defect — the same reason the `git`-credential residual below is spelled out.
 
 ⛔ WHAT THE VERDICT DOES NOT COVER — the credential **`git`** uses
 ───────────────────────────────────────────────────────────────────────
@@ -137,15 +145,12 @@ REASONS (`GH-WRITE-UNAVAILABLE(<reason>)`), each with its own fix
   soonest; `detail` and the `surfaces` map name every refused surface, so nothing is hidden. Every
   one of these is fixed by the same action: re-mint the token carrying ALL THREE write permissions.
   sso-unauthorized             403 naming SAML/SSO — authorise the token for the org
-  forbidden                    a 403 carrying NO signal this tool can classify (no rate-limit wording,
-                               no exhausted quota / retry-after, no SSO/SAML, no "Resource not
-                               accessible") — re-run ONCE, never re-mint. Also the fallback for an
-                               unrecognised internal surface state, which is a tool defect: report it.
-  unusable-response            the answer was not one this gate can read: a 2xx on a payload GitHub
-                               MUST reject (a proxy, WAF, captive portal or redirect rewrote it), or
-                               an unexpected status on either probe (410 Issues-disabled, 451, a proxy
-                               400) — the PATH or the SURFACE, never the credential, so re-running
-                               cannot help until the cause is fixed
+  forbidden                    STRUCTURAL — re-running cannot change it, and it is NOT charged to the
+                               token: a 4xx that is neither a permission refusal nor a known class
+                               (410 Issues-disabled, 400 from a proxy/WAF, 451), a 403 naming neither
+                               a rate limit, SSO, nor a resource permission, or a 2xx on a
+                               must-be-invalid payload (the request was rewritten, so nothing was
+                               proven). Report it; do not re-run and do not re-mint for it.
   transport                    could not reach the API — NOT a verdict about the token
   usage                        bad arguments — including an `--api-base` / `$GH_WRITE_PREFLIGHT_API`
                                that is neither DEFAULT_API nor a loopback stub, or one carrying a query,
@@ -580,10 +585,7 @@ def _write_probe(url: str, token: str, body: bytes) -> dict:
         # cannot be — an issue needs a title, the head ref cannot exist) or the response came from
         # something that is not GitHub's validation path (a redirect downgraded to a GET, a proxy, a
         # captive portal). Fail closed and say so.
-        # ⛔ THE REASON MUST NOT READ AS TRANSIENT (review finding F2 at 7aa7abcc1). `forbidden` was
-        # filed under "Re-run; do not park the work", but a rewritten request is a PATH defect: a lane
-        # following that instruction loops on a condition that cannot change by itself.
-        return {"ok": False, "reason": "unusable-response",
+        return {"ok": False, "reason": "forbidden",
                 "detail": f"HTTP {status} on a must-be-invalid payload — the request was accepted or "
                           f"rewritten, so this did NOT prove the permission gate",
                 "status": status}
@@ -608,10 +610,7 @@ def _write_probe(url: str, token: str, body: bytes) -> dict:
         return {"ok": False, "reason": "server-error",
                 "detail": f"HTTP {status} from GitHub — a service fault, not a verdict about the token",
                 "status": status}
-    # ⛔ STRUCTURAL, NOT TRANSIENT (review finding F2): a `410` here is Issues disabled on the repo and
-    # a `451` or a proxy `400` is also permanent until something outside the credential changes, so
-    # the reason must not tell a lane to re-run.
-    return {"ok": False, "reason": "unusable-response", "detail": f"unexpected HTTP {status}: {len(payload)} bytes of response text, not echoed",
+    return {"ok": False, "reason": "forbidden", "detail": f"unexpected HTTP {status}: {len(payload)} bytes of response text, not echoed",
             "status": status}
 
 
@@ -737,7 +736,7 @@ def preflight(repo: str, api_base: str, token: str, source: str) -> dict:
                       detail=f"HTTP {status} on the READ probe — a GitHub service fault, not a verdict about the token")
         return result
     if status != 200:
-        result.update(reason="unusable-response", detail=f"unexpected HTTP {status} on the read probe: {len(body)} bytes of response text, not echoed")
+        result.update(reason="forbidden", detail=f"unexpected HTTP {status} on the read probe: {len(body)} bytes of response text, not echoed")
         return result
 
     result["read_ok"] = True
