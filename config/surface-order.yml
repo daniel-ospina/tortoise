@@ -91,14 +91,26 @@ family_rank:
 # (create 18->17, operate 7->6, link 4->5 — `tortoise_manage_sources` derives
 # `link`). Recorded deliberately, per the note above: a change to the
 # distribution requires editing the registry AND recording the expectation here.
+# #4282 Phase 3.2: FIVE of the seven `onboarding_*` tools left the ADVERTISED
+# set, 81 -> 76 (`tortoise_onboarding_state`, `tortoise_onboarding_seed`,
+# `tortoise_onboarding_demo_create`, `tortoise_onboarding_github_connect`,
+# `tortoise_onboarding_github_status`) — owner ruling 2026-09-22, `run_onboarding`
+# dropped for `check_connection`. The SERVED set moved the same way, 99 -> 94,
+# because these five are DELETED rather than retired into nothing, so no shim
+# exists to keep serving them; every one of their REST routes survives in
+# `tortoise/hosted_api.py`. Moved: create 17->15, list 9->9, check 8->7,
+# operate 6->5, link 5->4, find 6->6; fetch/update/delete/trace unmoved.
+# (`link` moves because `tortoise_onboarding_github_connect`'s `connect` token
+# derives it; the other four derive create/check/operate.)
+# Recorded deliberately, per the note above.
 baseline_counts:
   fetch: 14
-  create: 17
+  create: 15
   list: 9
-  check: 8
-  operate: 6
+  check: 7
+  operate: 5
   update: 8
   find: 6
   delete: 6
-  link: 5
+  link: 4
   trace: 2
