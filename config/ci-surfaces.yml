@@ -5897,6 +5897,27 @@ surfaces:
   # (`config/ci-runner-labels.json`). Pure stdlib + PyYAML: no graph, no URI, no network,
   # so the `core` fallback is its home and any diff touching it selects it.
   - test_ci_runner_label_coverage.py
+  # #10976: the egress census — `tortoise/cache_eviction.py` (`classify` / `assess` /
+  # `proves` over a live graph's populations) and its CLI
+  # `tools/cache_eviction_census.py`. `core` is its HOME surface: the module matches
+  # no `SOURCE_PATTERNS` row, so a `tortoise/cache_eviction.py`-only diff falls
+  # through to the `core` fallback and THIS row is what selects the suite for the
+  # code it guards. Without it the file is in NO surface and
+  # `ci_selection.py --integrity` lists it as manifest drift, redding the REQUIRED
+  # `manifest-integrity` leg — measured at `c8d1efd1e` (run 41942325406, job
+  # 126965948205): `--integrity` -> `❌ manifest drift:
+  # ['test_cache_eviction_census.py']`, exit 1.
+  #
+  # ⚠️ The registration alone does NOT make the pin run on the CLI it guards:
+  # `tools/` is a flat `NON_PYTHON_PREFIXES` entry and the tool matches no
+  # `SOURCE_PATTERNS` row either, so a `tools/cache_eviction_census.py`-only diff
+  # filters to `changed == []` and takes the docs-only early return. That half is
+  # closed by the `CORE_ALSO` entry beside this one in `tools/ci_selection.py` — the
+  # #1349/#3332/#3616 silent-drop class. The suite is hermetic (`_FakeGraph` records
+  # every statement, report files come from `tmp_path`, no DB/URI/network), so it is
+  # deliberately NOT carve_out-registered: it belongs on the fast pool, at the flat
+  # `DEFAULT_FAST_WEIGHT` row below until a push-to-main sweep measures it.
+  - test_cache_eviction_census.py
   ep:
   # #7951 (remaining doors) / review P1: DUAL-REGISTERED with `core` (below)
   # and the other exact-match surfaces. The write-door INVENTORY scans ALL of
@@ -10272,6 +10293,19 @@ durations:
   test_9555_narrative_carrier.py: 3.4
   test_backfill_references_5141.py: 0.1
   test_bm25_lexical_8488.py: 9.4
+  # #10976: unmeasured by CI — a file a PR ADDS can never carry a junit reading
+  # (the refresher samples push-to-main runs only), so it takes the header's flat
+  # `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a
+  # SHARD-LAYOUT input (#2818/#3419). The row has to EXIST, not merely default: the
+  # `core` registration above puts the file in `fast_pool()`. What the weight
+  # covers: hermetic and near-free — a `_FakeGraph` that records EVERY statement so
+  # a `DELETE`/`DETACH DELETE`/`DROP` on a refusal path fails the run, plus a
+  # handful of `sys.executable` CLI cases over `tmp_path` report files; no DB, no
+  # URI, no docker, no network, no model. No count is cited here on purpose: this
+  # file collects MORE cases than it has `def test_` lines (parametrize), so a
+  # cited count would be read by the wrong instrument. `tools/ci_timing.py
+  # --refresh-durations` replaces this row from junit once a sweep collects it.
+  test_cache_eviction_census.py: 2.0
   test_cache_projection.py: 0.3
   test_cache_projection_live.py: 0.3
   test_calendar_anchors.py: 0.2

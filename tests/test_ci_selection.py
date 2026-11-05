@@ -13739,6 +13739,33 @@ def test_runner_label_gate_runs_on_a_tools_only_change():
     assert "test_ci_runner_label_coverage.py" in r["test_files"], r
 
 
+def test_cache_eviction_census_runs_on_the_diffs_that_can_weaken_it():
+    # #10976: `tests/test_cache_eviction_census.py` pins the egress census —
+    # `tortoise/cache_eviction.py` (an unproven population may not be swept) and its
+    # CLI `tools/cache_eviction_census.py` (the LICENCE exit split, the
+    # destructive-flag guard, `--graph`/`--parity-graph` disagreement, the report
+    # provenance rules).
+    #
+    # TWO arms, because the census has TWO subjects and they reach CI by different
+    # routes:
+    #  * the MODULE arm is the `core` surface row (`tortoise/cache_eviction.py`
+    #    matches no SOURCE_PATTERNS row, so it takes the `core` fallback). Mutation
+    #    check: dropping that row from `config/ci-surfaces.yml` fails arm 2.
+    #  * the CLI arm needs `CORE_ALSO`:
+    #    `tools/` is a flat NON_PYTHON_PREFIXES entry, so before that entry a
+    #    tool-only diff filtered to `changed == []` and took the docs-only early
+    #    return — `select(["tools/cache_eviction_census.py"])` returned
+    #    surfaces=[], 72 files, the suite ABSENT, i.e. the #1349/#3332/#3616
+    #    silent-drop class on the file that decides whether a population is swept.
+    #    Mutation check: removing the CORE_ALSO entry fails arm 1 (surfaces == []
+    #    and the suite absent from test_files).
+    for path in ("tools/cache_eviction_census.py", "tortoise/cache_eviction.py"):
+        r = _sel([path])
+        assert r["full"] is False, (path, r["full"])
+        assert r["surfaces"] == ["core"], (path, r["surfaces"])
+        assert "test_cache_eviction_census.py" in r["test_files"], (path, r["test_files"])
+
+
 def test_turn_parity_census_guard_runs_on_a_tools_only_change():
     # #10017: `tests/test_10017_turn_parity_census.py` (registered `core`)
     # pins the refusal arms of `tools/turn_parity_census.py` — the purge gate
