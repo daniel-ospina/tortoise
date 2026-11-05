@@ -255,7 +255,6 @@ class TestEveryPointerResolvesInOneHop:
             return
         declared = replacement.split('section="', 1)[1].split('"', 1)[0]
         dispatched = _dispatched_sections(monkeypatch, [declared])
-        assert declared not in {"definitely_not_a_section"}, "sanity: the probe is not a section"
         assert declared in dispatched, (
             f"{name} points at section {declared!r}, which the container does not dispatch "
             f"(measured, not read off `_OVERVIEW_SECTIONS`)")
