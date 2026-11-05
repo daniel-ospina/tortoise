@@ -83,6 +83,7 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
 
 import argparse
 import ast
+import re
 import subprocess
 import types
 from pathlib import Path
@@ -301,13 +302,99 @@ def _refuse(exc: SurfaceEvidenceUnreadable) -> int:
     return 1
 
 
-def _read_manifest(path: Path | None = None) -> dict:
+#: A full object name. `cut` records `git rev-parse HEAD`, so an abbreviated,
+#: upper-cased or otherwise invented value never came from the generator.
+_FULL_SHA_RE = re.compile(r"\A[0-9a-f]{40}\Z")
+
+#: `cut_commit_verdict`'s answers. `UNPROVABLE` is NOT a pass — the reader that gets it
+#: says so out loud (`cmd_check` prints it); it is the arm for a clone that cannot answer.
+CUT_RESOLVED = "resolved"
+CUT_FABRICATED = "fabricated"
+CUT_UNPROVABLE = "unprovable"
+
+#: What git says when a PROMISOR REMOTE (`blob:none`, the fleet's default clone) was
+#: asked for an object and answered that it does not have it. That is a DISPROOF, not a
+#: fetch failure: the remote replied. Without this arm a partial clone — which is most
+#: of the fleet's checkouts — could only ever answer UNPROVABLE.
+_REMOTE_HAS_NO_SUCH_OBJECT = re.compile(
+    r"not our ref|couldn't find remote ref|could not read [0-9a-f]{40}", re.IGNORECASE)
+
+
+def _git(*args: str) -> tuple[int, str, str]:
+    """(rc, stdout, stderr) for one `git` run rooted at ROOT; rc 127 when git is absent."""
+    try:
+        proc = subprocess.run(
+            ["git", *args], cwd=ROOT, capture_output=True, text=True, check=False
+        )
+    except OSError as exc:  # no git binary, or no repository to run it in
+        return 127, "", str(exc)
+    return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
+
+
+def cut_commit_verdict(sha: str) -> tuple[str, str]:
+    """(verdict, why) for a `cut_at_commit` value — `resolved` / `fabricated` / `unprovable`.
+
+    `cut_at_commit` is PROVENANCE and is excluded from the drift comparison
+    (`NON_DERIVABLE_DOC_KEYS`), so this is the ONLY thing that constrains it. Before this
+    function it was constrained by nothing: `_read_manifest` asserted a non-empty string,
+    so a value naming no object at all passed `check`, `render`, `cut` and
+    `tools/surface-guard.py` — and `cmd_render` slices the value to nine characters for
+    the document's header, so the corruption was invisible in the rendered doc (measured
+    on #10914: `911a1e240c16c37a1a8e0f2bc46dba9dd8ae2a90`, an abbreviation whose 30-char
+    tail had been invented; the real merge commit is
+    `911a1e240c2415b094b370f32a2a24f88a5fb1ea`).
+
+    Three verdicts, because a checkout that does not hold the object cannot distinguish
+    "fabricated" from "not fetched" — and turning that absence into a refusal would red
+    the required `surface-guard` job (default `fetch-depth: 1`) on a HEALTHY tree, since
+    `cut_at_commit` names an ancestor of the head rather than the head itself:
+
+    * `resolved`   — the object is a commit THIS clone holds. Provenance carried.
+    * `fabricated` — the value is not a full 40-char lowercase sha, OR the object is absent
+      and its absence is PROVEN: either the repository is not shallow (nothing is missing
+      for it to hide in), or a promisor remote was asked and answered that it has no such
+      object. A fabricated provenance is a refusal.
+    * `unprovable` — git is unavailable, or this clone is shallow and no remote answered.
+      NOT a pass, and never silent: `cmd_check` prints the arm it took.
+    """
+    if not _FULL_SHA_RE.match(sha):
+        return CUT_FABRICATED, (
+            f"{sha!r} is not a full 40-character lowercase commit sha — `cut` records "
+            "`git rev-parse HEAD`, which always is one"
+        )
+    rc, _, stderr = _git("cat-file", "-e", f"{sha}^{{commit}}")
+    if rc == 0:
+        return CUT_RESOLVED, ""
+    if rc == 127:
+        return CUT_UNPROVABLE, f"git is not runnable here ({stderr.splitlines()[-1:] or ['']})"
+    if _REMOTE_HAS_NO_SUCH_OBJECT.search(stderr):
+        return CUT_FABRICATED, (
+            "`git cat-file` asked the remote for it and the remote answered that it has no "
+            f"such object — git said: {stderr.splitlines()[0] if stderr else '(no output)'}"
+        )
+    rc_shallow, shallow, _ = _git("rev-parse", "--is-shallow-repository")
+    if rc_shallow == 0 and shallow == "true":
+        return CUT_UNPROVABLE, (
+            "this clone is SHALLOW, so the object may simply not have been fetched (git "
+            f"said: {stderr.splitlines()[0] if stderr else '(no output)'})"
+        )
+    return CUT_FABRICATED, (
+        "this clone is not shallow and holds no such commit, so nothing is missing for it "
+        f"to be hiding in (git said: {stderr.splitlines()[0] if stderr else '(no output)'})"
+    )
+
+
+def _read_manifest(path: Path | None = None, *, check_provenance: bool = True) -> dict:
     """Read the frozen baseline, or refuse. Never returns a partial document.
 
     `path` is resolved at CALL time (never bound as a default), so a caller that
     redirects `MANIFEST_FILE` — the tests do, and so would any future tool — reads the
     file it redirected to. A default argument bound at import time silently read the
     original, which is how a redirection can look effective and verify nothing.
+
+    `check_provenance=False` is for `cut` ONLY: a re-cut is the REPAIR path for a
+    `cut_at_commit` that resolves to nothing, so refusing to read the baseline there
+    would refuse the only way to fix it. Every gating reader keeps the default.
     """
     if path is None:
         path = MANIFEST_FILE
@@ -342,6 +429,16 @@ def _read_manifest(path: Path | None = None) -> dict:
             f"{path} records no `cut_at_commit`: it must name the commit the baseline was cut "
             "at, as a non-empty string. Re-cut the baseline."
         )
+    if check_provenance:
+        verdict, why = cut_commit_verdict(doc["cut_at_commit"])
+        if verdict == CUT_FABRICATED:
+            raise SurfaceEvidenceUnreadable(
+                f"{path} records `cut_at_commit: {doc['cut_at_commit']}`, which is NOT a commit "
+                f"({why}). The field is PROVENANCE and is excluded from the drift comparison, "
+                "so this check is the only gate on it — and a value naming no object is a "
+                "fabricated provenance, not a stale one: restore the commit the baseline was "
+                "actually cut at, or re-cut the baseline."
+            )
     # A DUPLICATE NAME is unverified content, not a harmless repetition. Every comparison
     # in this file — here and in tools/surface-guard.py — keys rows by NAME, so a second
     # row with an existing name is silently DROPPED: a doctored duplicate inserted before
@@ -1679,7 +1776,7 @@ def cmd_cut(args: argparse.Namespace) -> int:
     doomed: list[tuple[str, str]] = []
     if MANIFEST_FILE.exists():
         try:
-            doomed = _recorded_approvals(_read_manifest())
+            doomed = _recorded_approvals(_read_manifest(check_provenance=False))
         except SurfaceEvidenceUnreadable as exc:
             return _refuse(exc)
     if doomed and not getattr(args, "allow_approval_reset", False):
@@ -2359,6 +2456,20 @@ def cmd_check(args: argparse.Namespace) -> int:
             SurfaceEvidenceUnreadable(
                 f"could not import the surface declaration: {type(exc).__name__}: {exc}"
             )
+        )
+
+    # `cut_at_commit` is PROVENANCE, excluded from the drift comparison, so
+    # `_read_manifest` is its only gate — and there it can answer `unprovable` when this
+    # clone does not hold the object. That arm is NAMED here rather than left silent: a
+    # verification that did not happen must never read as one that passed. (("a check
+    # nobody runs reports to nobody") — the same reason `changes` prints that the capstone
+    # ordering gate is UNPROVABLE on a shallow checkout rather than quietly skipping.)
+    verdict, why = cut_commit_verdict(doc["cut_at_commit"])
+    if verdict == CUT_UNPROVABLE:
+        print(
+            f"surface_manifest: `cut_at_commit: {doc['cut_at_commit']}` was NOT VERIFIED — "
+            f"{why}. Re-run `check` in a full clone (or with the object fetched) to prove "
+            "the provenance resolves."
         )
 
     verbs = order["keywords"]

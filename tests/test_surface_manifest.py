@@ -3081,6 +3081,154 @@ def test_the_check_refuses_a_baseline_with_no_cut_at_commit(checker, tmp_path):
     assert "::error::" in out and "cut_at_commit" in out, out
 
 
+# ── `cut_at_commit` is PROVENANCE, and `_read_manifest` is its only gate ──────
+#
+# The field is excluded from the drift comparison, so before `cut_commit_verdict` the ONLY
+# thing that touched it was a non-empty-string assertion: a value naming no object at all
+# passed `check`, `render`, `cut` and `tools/surface-guard.py`, while `cmd_render` slices it
+# to nine characters for the document's header — so the corruption was invisible in the
+# rendered document too. Measured on #10914: `911a1e240c16c37a1a8e0f2bc46dba9dd8ae2a90`, an
+# abbreviation whose 30-char tail had been INVENTED, in the one commit whose whole purpose
+# was to record that provenance. The real merge commit is
+# `911a1e240c2415b094b370f32a2a24f88a5fb1ea`.
+#
+# Every arm below is driven through a STUBBED `_git`, because the verdict depends on what
+# the clone can answer (shallow vs full, promisor remote vs not) and a test that asserted
+# one of those would pass or fail on the checkout rather than on the code.
+
+#: The value from the finding: shape-valid, 30 of its 40 chars invented.
+FABRICATED_SHA = "911a1e240c16c37a1a8e0f2bc46dba9dd8ae2a90"
+
+
+def _stub_git(monkeypatch, sm, *, rc=1, stderr="fatal: Not a valid object name", shallow="false"):
+    """Replace `_git` with the two answers the verdict reads; assert nothing else is asked."""
+    calls: list[tuple[str, ...]] = []
+
+    def fake_git(*args: str):
+        calls.append(args)
+        if args[:2] == ("cat-file", "-e"):
+            return rc, "", stderr
+        if args[:2] == ("rev-parse", "--is-shallow-repository"):
+            return 0, shallow, ""
+        raise AssertionError(f"cut_commit_verdict asked git something unexpected: {args}")
+
+    monkeypatch.setattr(sm, "_git", fake_git)
+    return calls
+
+
+def _baseline_at(tmp_path, **overrides) -> Path:
+    doc = _manifest()
+    doc.update(overrides)
+    path = tmp_path / "baseline.yml"
+    path.write_text(yaml.safe_dump(doc, sort_keys=False, allow_unicode=True, width=110))
+    return path
+
+
+def test_the_committed_cut_at_commit_is_a_full_sha_and_the_resolved_arm_works():
+    """The artifact's own value, plus real git on the one object every clone holds.
+
+    The shape half is hermetic and would have caught the abbreviation this finding is
+    about; the resolution half runs against `HEAD` because that object is present in
+    every checkout — shallow, partial, or full — so the arm is measured without assuming
+    history.
+    """
+    sm = _load_manifest_tool()
+    sha = _manifest()["cut_at_commit"]
+    assert re.fullmatch(r"[0-9a-f]{40}", sha), (
+        f"`cut_at_commit: {sha}` is not a full 40-char lowercase sha — `cut` records "
+        "`git rev-parse HEAD`, so an abbreviated value cannot have come from the generator")
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True)
+    assert head.returncode == 0, head.stderr
+    verdict, why = sm.cut_commit_verdict(head.stdout.strip())
+    assert verdict == sm.CUT_RESOLVED, f"the resolved arm does not resolve HEAD: {verdict} / {why}"
+    # `HEAD` resolves; a well-formed value that names no commit does not. In a shallow
+    # clone this can only reach UNPROVABLE, so the assertion is the NEGATIVE one.
+    assert sm.cut_commit_verdict("deadbeef" * 5) != sm.CUT_RESOLVED
+
+
+def test_a_fabricated_cut_at_commit_REFUSES_even_where_nothing_is_missing(
+        monkeypatch, tmp_path):
+    """A full clone that holds no such object is a DISPROOF: refuse, do not warn."""
+    sm = _load_manifest_tool()
+    _stub_git(monkeypatch, sm, rc=1, stderr="fatal: Not a valid object name", shallow="false")
+    assert sm.cut_commit_verdict(FABRICATED_SHA)[0] == sm.CUT_FABRICATED
+    with pytest.raises(sm.SurfaceEvidenceUnreadable) as excinfo:
+        sm._read_manifest(_baseline_at(tmp_path, cut_at_commit=FABRICATED_SHA))
+    assert FABRICATED_SHA in str(excinfo.value)
+    assert "NOT a commit" in str(excinfo.value)
+
+
+def test_a_promisor_remotes_refusal_is_a_DISPROOF_even_in_a_SHALLOW_clone(monkeypatch):
+    """The arm that makes this gate bite on the fleet's own checkouts.
+
+    `blob:none` promisor clones are shallow AND remote-backed: asking for an object the
+    remote does not have returns rc=128 with `not our ref`, which is the remote ANSWERING.
+    Keying only on shallowness would report UNPROVABLE here — i.e. it would not have
+    caught the very value this finding is about, on the very checkout that holds it.
+    """
+    sm = _load_manifest_tool()
+    _stub_git(
+        monkeypatch, sm, rc=128,
+        stderr=f"fatal: remote error: upload-pack: not our ref {FABRICATED_SHA}",
+        shallow="true")
+    verdict, why = sm.cut_commit_verdict(FABRICATED_SHA)
+    assert verdict == sm.CUT_FABRICATED, (
+        f"a remote's \"not our ref\" was not read as a disproof ({verdict}): {why}")
+    assert "has no such object" in why, why
+
+
+def test_a_shallow_clone_that_cannot_answer_is_UNPROVABLE_and_NEVER_SILENT(
+        checker, monkeypatch, tmp_path):
+    """Fail-open is the defect, but a FALSE BLOCK on a healthy tree is not the fix.
+
+    The required `surface-guard` job checks out at the default `fetch-depth: 1`, and
+    `cut_at_commit` names an ancestor rather than the head, so absence there proves
+    nothing. The arm is therefore UNPROVABLE — and `check` NAMES it instead of returning a
+    green that reads as verified (the same shape `changes` prints for the capstone ordering
+    gate on its shallow path).
+    """
+    sm = _load_manifest_tool()
+    _stub_git(monkeypatch, sm, rc=1, stderr="fatal: Not a valid object name", shallow="true")
+    verdict, why = sm.cut_commit_verdict(FABRICATED_SHA)
+    assert verdict == sm.CUT_UNPROVABLE, verdict
+    assert "SHALLOW" in why, why
+    # A healthy tree in a shallow clone must NOT red: `_read_manifest` returns the doc.
+    assert sm._read_manifest(_baseline_at(tmp_path))["cut_at_commit"]
+    # …and the unverified arm is stated, not silent. The stub goes on the SAME module
+    # instance `cmd_check` runs from (`checker`), never on a second load: a stub on a
+    # sibling instance leaves the real `git` in place and the test then measures the
+    # checkout instead of the code.
+    _stub_git(monkeypatch, checker, rc=1, stderr="fatal: Not a valid object name", shallow="true")
+    doc = _manifest()
+    doc["cut_at_commit"] = FABRICATED_SHA
+    rc, out = _check(checker, doc, tmp_path)
+    assert rc == 0, f"a shallow checkout red the check on a provenance it cannot see:\n{out}"
+    assert "NOT VERIFIED" in out and FABRICATED_SHA in out, out
+
+
+def test_an_abbreviated_cut_at_commit_is_refused_without_asking_git(monkeypatch):
+    """No abbreviation, no upper case, no `HEAD`-ish symbolic name: `cut` writes a sha."""
+    sm = _load_manifest_tool()
+    calls = _stub_git(monkeypatch, sm, rc=0, stderr="", shallow="false")
+    for bad in ("911a1e240c", FABRICATED_SHA.upper(), "HEAD", "main"):
+        assert sm.cut_commit_verdict(bad)[0] == sm.CUT_FABRICATED, bad
+    assert calls == [], f"the shape check shelled out to git for a value it could refuse: {calls}"
+
+
+def test_a_recut_can_STILL_read_a_baseline_whose_provenance_is_fabricated(
+        monkeypatch, tmp_path):
+    """The repair path must not be self-blocked.
+
+    `cut` reads the existing baseline to carry hand-curated cells forward, and a re-cut is
+    the repair for a `cut_at_commit` that resolves to nothing — so refusing to read it there
+    would remove the only way to fix the field (`check_provenance=False`).
+    """
+    sm = _load_manifest_tool()
+    _stub_git(monkeypatch, sm, rc=1, stderr="fatal: Not a valid object name", shallow="false")
+    path = _baseline_at(tmp_path, cut_at_commit=FABRICATED_SHA)
+    assert sm._read_manifest(path, check_provenance=False)["cut_at_commit"] == FABRICATED_SHA
+
+
 def test_the_render_refuses_instead_of_tracing(tmp_path, monkeypatch, capsys):
     """`cmd_render` indexed `family_rank` / `cut_at_commit` with no guard at all."""
     sm = _load_manifest_tool()
