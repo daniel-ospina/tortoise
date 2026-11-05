@@ -58,6 +58,19 @@ def _client_for_env(monkeypatch, tmp_path, **env):
     return TestClient(selfhost.app)
 
 
+#: How many times `_wait_for_probe` may release the ONE shared probe worker while
+#: it waits for a verdict it can USE (#3683). One release per starvation episode
+#: is normally enough (the release abandons the thread holding the slot, so the
+#: next refresh runs on a free one) — the cap exists so a genuinely recurring
+#: wedge cannot turn the wait into a thread pump.
+_PROBE_WAIT_SLOT_RELEASES = 4
+
+#: Minimum spacing between two releases: the refresher's cadence is
+#: ``max(health_probe_interval(), probe_duration)`` (0.5-15 s), so re-releasing
+#: inside one cadence would abandon a probe that has not had a chance to run.
+_PROBE_WAIT_RELEASE_GAP_S = 0.5
+
+
 def _wait_for_probe(selfhost_mod, timeout: float = 40.0, *, require_ok: bool = True):
     """Block until the background liveness refresher's verdict has SETTLED.
 
@@ -77,29 +90,66 @@ def _wait_for_probe(selfhost_mod, timeout: float = 40.0, *, require_ok: bool = T
     ``require_ok=False`` when the test DELIBERATELY drives a failing probe and
     only needs the verdict to land.
 
+    #3683 (decision `2026-09-30-3683-health-probe-honesty`): a probe that never
+    reached the reachability query — its shared probe-worker slot was held for
+    the whole phase allowance — is a probe that was never ASKED, and an unasked
+    probe is the documented ``unknown`` state, NOT a verdict about the DB. ``probe_db``
+    reports it as ``observed=False``, so it must not satisfy this wait in either
+    direction: a caller that asked for a MEASUREMENT has not got one, and a
+    caller that asked "is it degraded?" would be reading a slot-starvation
+    artifact as a DB failure. When a COMPLETED verdict is unobserved we release
+    the shared worker — the documented ops escape hatch
+    (``monitoring._reset_probe_worker``: "when a probe thread is presumed
+    wedged") — because only the WAIT on that worker is ever bounded, never the
+    WORK (CPython #87185): the submission holding the slot cannot be cancelled,
+    but the worker it holds can be abandoned, which gives the next refresh a
+    free slot. Measured on the ARM pool (run 41964347676, job 127067312539):
+    every ``/health`` refresh for 40 s reported ``observed=False`` with
+    "probe sdk acquisition did not start within 2.0s", so the old wait could
+    only ever expire.
+
     On expiry the failure names the probe's OWN state instead of surfacing as a
     bare ``assert 'degraded' == 'ok'``, which misreads as a product divergence.
     """
     import time
 
+    from tortoise import monitoring as mon
+
     deadline = time.monotonic() + timeout
+    released = 0
+    last_release = 0.0
     while True:
         info = selfhost_mod._HEALTH_PROBE.info()
-        if info.get("result_age_s") is not None:
-            if not require_ok:
+        snap = selfhost_mod._HEALTH_PROBE.snapshot()
+        observed = snap.get("observed", True) is not False
+        if observed and info.get("result_age_s") is not None:
+            if not require_ok or snap.get("ok") is True:
                 return
-            if selfhost_mod._HEALTH_PROBE.snapshot().get("ok") is True:
-                return
+        # Only a COMPLETED unobserved verdict says anything about the slot: an
+        # in-flight probe (or none yet) is the cold start this wait exists to
+        # absorb, and releasing on it would abandon exactly the probe we want.
+        if (not observed and info.get("result_age_s") is not None
+                and info.get("in_flight") is False
+                and released < _PROBE_WAIT_SLOT_RELEASES):
+            now = time.monotonic()
+            if now - last_release >= _PROBE_WAIT_RELEASE_GAP_S:
+                mon._reset_probe_worker()
+                released += 1
+                last_release = now
         if time.monotonic() >= deadline:
+            released_note = (
+                f" (released the shared probe worker {released}x)"
+                if released else " (the shared probe worker was never released)")
             if not require_ok:
                 raise AssertionError(
-                    "the selfhost liveness refresher never produced a verdict "
-                    f"within {timeout}s — probe info {info!r}"
+                    "the selfhost liveness refresher never produced a usable "
+                    f"verdict within {timeout}s{released_note} — probe info "
+                    f"{info!r}"
                 )
             raise AssertionError(
                 "the selfhost daemon never became healthy within "
-                f"{timeout}s — snapshot "
-                f"{selfhost_mod._HEALTH_PROBE.snapshot()!r}, probe info {info!r}"
+                f"{timeout}s{released_note} — snapshot {snap!r}, "
+                f"probe info {info!r}"
             )
         time.sleep(0.02)
 
@@ -593,6 +643,149 @@ def _mcp_post_auth(tc, key, payload):
     return r, _parse_sse_json(r)
 
 
+def _is_wait_bound_refusal(body) -> bool:
+    """Is this JSON-RPC body the #3834 transport-wait-bound REFUSAL?
+
+    The refusal is a caller-visible "this call did not start in time" answer,
+    not a tool verdict: the server says so structurally
+    (``structuredContent.error.code == -32009``) and flags the payload with
+    ``_meta.tortoise_wait_bound``. Any OTHER error shape (a tool's own
+    fail-closed dict, a protocol error) is NOT a refusal and must never be
+    retried here — retrying it would mask the very answer under test.
+    """
+    result = (body or {}).get("result") or {}
+    meta = result.get("_meta") or {}
+    if meta.get("tortoise_wait_bound"):
+        return True
+    err = (result.get("structuredContent") or {}).get("error") or {}
+    return err.get("code") == -32009
+
+
+def _mcp_tool_call_after_cold_start(tc, key, payload, *, attempts: int = 2):
+    """One ``tools/call``, tolerating the transport wait bound ONCE on cold start.
+
+    #3834's transport bound refuses a ``tools/call`` whose dispatch exceeds 10 s
+    with the legible ``-32009``/``tortoise_wait_bound`` shape. A FRESH embedded
+    graph pays a cold SDK construction + ``_ensure_indexes()`` + the selfhost
+    onboarding node inside the tool call, which on the self-hosted ARM pool
+    (measured 4.46x a hosted runner per the python-ci leg's own note) can exceed
+    that 10 s — measured in run 41964347676 / job 127067312539, where
+    ``test_tortoise_health_degraded_matches_http_health`` got the refusal
+    instead of its answer while the SAME probe was already stubbed to fail.
+    That is a cold-start property of the harness, not a health verdict, so the
+    call is retried once and the assertions run on the warm answer.
+
+    Nothing is masked: only the refusal shape is retried, and a refusal that
+    survives the retry is returned to the caller like any other body, so a
+    genuinely over-bounded tool call still reds its assertion.
+    """
+    r = body = None
+    for _attempt in range(max(1, attempts)):
+        r, body = _mcp_post_auth(tc, key, payload)
+        if not _is_wait_bound_refusal(body):
+            return r, body
+    return r, body
+
+
+def _wait_bound_refusal_body():
+    """The #3834 transport-wait-bound refusal, byte-shaped like the server's."""
+    return {"jsonrpc": "2.0", "id": 1, "result": {
+        "_meta": {"tortoise_wait_bound": True},
+        "content": [{"type": "text", "text": "The server's wait budget for this "
+                                             "request was exceeded"}],
+        "structuredContent": {"error": {
+            "code": -32009,
+            "message": "wait budget exceeded",
+            "data": {"retry_after": 10},
+        }},
+        "isError": True,
+    }}
+
+
+def _verdict_body(payload: dict):
+    import json
+    return {"jsonrpc": "2.0", "id": 1, "result": {"content": [
+        {"type": "text", "text": json.dumps(payload)}]}}
+
+
+def test_the_cold_start_tolerance_retries_the_refusal_and_never_a_verdict(
+        monkeypatch):
+    """The wait-bound tolerance is bounded and shape-specific (#10726 `test (b)`).
+
+    Both directions are pinned, because a tolerance that retried ANY body would
+    silently turn a wrong verdict into a right-looking one: the refusal shape is
+    retried once (and the warm answer is what the assertions see), while a real
+    tool verdict is returned on the FIRST call.
+    """
+    import sys
+
+    mod = sys.modules[__name__]
+    calls = []
+
+    def _refusing(tc, key, payload):
+        calls.append(payload)
+        if len(calls) == 1:
+            return object(), _wait_bound_refusal_body()
+        return object(), _verdict_body({"status": "degraded"})
+
+    monkeypatch.setattr(mod, "_mcp_post_auth", _refusing)
+    _r, body = mod._mcp_tool_call_after_cold_start(
+        None, "k", {"params": {"name": "tortoise_health"}})
+    assert len(calls) == 2, "the refusal must be retried exactly once"
+    assert mod._tool_result(body)["status"] == "degraded"
+
+    calls.clear()
+
+    def _answering(tc, key, payload):
+        calls.append(payload)
+        return object(), _verdict_body({"status": "degraded"})
+
+    monkeypatch.setattr(mod, "_mcp_post_auth", _answering)
+    _r, body = mod._mcp_tool_call_after_cold_start(
+        None, "k", {"params": {"name": "tortoise_health"}})
+    assert len(calls) == 1, "a real verdict must NOT be retried"
+    assert mod._tool_result(body)["status"] == "degraded"
+
+
+def test_the_health_wait_releases_a_starved_probe_slot(monkeypatch, tmp_path):
+    """A slot-starved probe is `unknown`, so the wait RECOVERS instead of expiring.
+
+    #3683 decision `2026-09-30-3683-health-probe-honesty`: a probe that never
+    reached the DB is not a verdict. Measured failure this pins — CI run
+    41964347676, job 127067312539 (`test (b)`), the required gate on #10726:
+    every refresh for 40 s reported ``{'ok': False, 'observed': False, 'error':
+    'probe sdk acquisition did not start within 2.0s'}``, so the pre-fix wait
+    could only ever raise while the daemon was healthy throughout.
+
+    The slot is held here exactly as a wedged/overrunning probe holds it, and
+    the ONE refresh period is shortened so the recovery is a couple of seconds
+    rather than the shipped 15 s cadence.
+    """
+    import threading
+
+    from tortoise import monitoring as mon
+
+    monkeypatch.setenv("TORTOISE_HEALTH_PROBE_INTERVAL", "1")
+    held = threading.Event()
+    release = threading.Event()
+
+    def _hold_the_one_shared_slot():
+        held.set()
+        release.wait(30.0)  # abandoned, never joined: the wait must not block on it
+
+    tc = _client_for_env(monkeypatch, tmp_path)
+    from tortoise import selfhost
+
+    mon._probe_worker().submit(_hold_the_one_shared_slot)
+    assert held.wait(5.0), "the slot holder never started"
+    try:
+        with tc:
+            _wait_for_probe(selfhost, timeout=25.0)
+    finally:
+        release.set()
+    assert selfhost._HEALTH_PROBE.snapshot()["ok"] is True
+
+
 class TestHealthTruthMCP:
     """#2202 — tortoise_health reports the same truth as the daemon's /health.
 
@@ -617,7 +810,7 @@ class TestHealthTruthMCP:
             assert health.status_code == 200
             assert health.json()["status"] == "ok"
 
-            r, body = _mcp_post_auth(tc, "k", {
+            r, body = _mcp_tool_call_after_cold_start(tc, "k", {
                 "jsonrpc": "2.0", "id": 1, "method": "tools/call",
                 "params": {"name": "tortoise_health", "arguments": {}},
             })
@@ -664,7 +857,7 @@ class TestHealthTruthMCP:
                 "also produce 'degraded', so assert the MESSAGE (#3446)"
             )
 
-            r, body = _mcp_post_auth(tc, "k", {
+            r, body = _mcp_tool_call_after_cold_start(tc, "k", {
                 "jsonrpc": "2.0", "id": 1, "method": "tools/call",
                 "params": {"name": "tortoise_health", "arguments": {}},
             })
