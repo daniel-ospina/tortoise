@@ -53,7 +53,18 @@ Contract
 * Exit **1** — ``GH-WRITE-UNAVAILABLE(<reason>)`` on stderr (emitted in ``--json`` mode too; stdout
   stays pure JSON). Reasons are stable tokens from ``REASONS`` (top-level, non-nested), so a caller
   can branch on them without parsing prose. **No path returns 1 without a token from that set** —
-  including an unexpected exception, which is caught and mapped to ``internal-error``.
+  including an unexpected exception, which is caught and mapped to ``internal-error``. That set is
+  CLOSED, and this list is the whole of it: ``git-absent``, ``not-a-repo``, ``no-remote``,
+  ``no-head``, ``remote-unreachable``, ``push-refused``, ``push-unknown``, ``verify-mismatch``,
+  ``delete-failed``, ``internal-error``.
+  Two of the ten need their own branch in a caller's table — folding either into a neighbour
+  re-creates a diagnosis error this tool exists to remove. ``push-unknown`` means the push did not
+  COMPLETE (timed out, was signalled, produced no output), so write capability is UNKNOWN: re-run,
+  and never read it as evidence of a read-only credential, because that reading parks deliverable
+  work on a slow or OOM-killed push. ``internal-error`` means the probe itself failed, so NO verdict
+  exists — not a refusal. Both directions of this contract are pinned by
+  ``test_the_contract_publishes_the_closed_reason_set``, which reds if ``REASONS`` gains a token
+  this list omits and if this list names a token ``REASONS`` never emits.
 * Exit **2** — usage error (argparse's own code, deliberately not reused for a verdict).
 
 Safety and soundness

@@ -400,6 +400,49 @@ def test_cli_never_prints_a_none_reason(tmp_path: Path, capsys, monkeypatch):
     assert payload["reason_meaning"]  # non-empty
 
 
+def test_the_contract_publishes_the_closed_reason_set():
+    """The published token list must be the WHOLE of `REASONS` — and `REASONS` the whole of it.
+
+    A consumer written from the contract (a lane brief, a caller's `case` table) branches on the
+    list the contract publishes. The PR body called EIGHT tokens a "closed set" while `REASONS`
+    held ten, omitting exactly the two that need a distinct branch: `push-unknown` (the push did
+    not COMPLETE, so capability is UNKNOWN — re-run, never "cannot write") and `internal-error`
+    (no verdict exists at all). A caller with no arm for `push-unknown` falls through to the
+    park-deliverable-work diagnosis that token was split out to prevent, so an omission here is not
+    a typo. The list therefore lives in the module docstring — where the next consumer reads it —
+    instead of only in a PR body.
+    """
+    import tools.gh_write_preflight as gwp
+
+    published = {
+        "git-absent",
+        "not-a-repo",
+        "no-remote",
+        "no-head",
+        "remote-unreachable",
+        "push-refused",
+        "push-unknown",
+        "verify-mismatch",
+        "delete-failed",
+        "internal-error",
+    }
+    # Both directions: an unpublished token is a caller's silent `default:`, and a published token
+    # the code cannot emit sends that caller chasing a branch that never fires.
+    assert set(REASONS) == published, (
+        f"REASONS and the published set disagree: unpublished={set(REASONS) - published}, "
+        f"unemittable={published - set(REASONS)}"
+    )
+
+    flat = " ".join((gwp.__doc__ or "").split())
+    assert "CLOSED" in flat, "the contract must SAY the set is closed, or a caller cannot trust it"
+    missing = [tok for tok in sorted(published) if f"``{tok}``" not in flat]
+    assert not missing, f"the contract's closed set omits {missing}"
+    # The two additions are only useful if the contract says what a caller must DO with them.
+    assert "never read it as evidence of a read-only credential" in flat
+    assert "re-run" in flat
+    assert "NO verdict" in flat and "not a refusal" in flat
+
+
 def test_cleanup_unconfirmed_never_claims_deleted(tmp_path: Path, capsys, monkeypatch):
     """A `cleaned_up=None` verdict must not render "deleted".
 
