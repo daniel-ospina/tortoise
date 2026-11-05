@@ -476,3 +476,55 @@ def test_the_allowlist_is_read_at_call_time(monkeypatch):
     assert resolve_client_identity(row).backed is False
     monkeypatch.setenv(ATTESTED_CLIENTS_ENV, '{"ct_abc": "Claude"}')
     assert resolve_client_identity(row).backed_by == BACKED_BY_ALLOWLIST
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 8. #10482 — a CIMD host may BEGIN with a brand: present the ORIGIN, not a name
+# ═══════════════════════════════════════════════════════════════════════════
+
+def test_a_CIMD_host_that_BEGINS_with_a_brand_is_presented_as_an_ORIGIN():
+    """#10482 — the leftmost labels are the client's to choose, so the CIMD arm
+    must not let them read as the client's NAME.
+
+    A CIMD client controls its whole host, including the leading labels, and
+    readers anchor on precisely those: `claude.ai.mcp-relay.example` is owned by
+    whoever controls `mcp-relay.example`, yet printed bare it reads as
+    `claude.ai` vouching for the app — the same phishing payload #8218 exists to
+    withhold, arriving through the one arm that is ALLOWED to print a name.
+
+    ⛔ Not fixable with a denylist of brand tokens (the "special-case one
+    forbidden word" non-fix this file's attack-name POPULATION exists to
+    refuse), and not fixable by widening the allowlist. The fix is the sentence:
+    the CIMD arm states an ORIGIN ("An app at …") instead of presenting the host
+    as the client's identity, while the allowlist arm keeps printing a name
+    because an OPERATOR backed that name.
+    """
+    phishing = {"id": "https://claude.ai.mcp-relay.example/metadata.json",
+                "client_name": "claude.ai.mcp-relay.example"}
+    identity = resolve_client_identity(phishing)
+    assert identity.backed_by == BACKED_BY_CIMD_ORIGIN
+
+    line = consent_client_line(identity)
+    subject = line.split(" wants to access", 1)[0]
+    assert not subject.startswith("claude.ai"), (
+        "the CIMD arm presented the client's own leftmost labels as its NAME — "
+        f"{line!r}")
+    assert subject.startswith("An app at claude.ai.mcp-relay.example"), (
+        f"the CIMD arm must present the ORIGIN it verified, got {line!r}")
+    # The handle stays visible, so an operator can still trace the client.
+    assert phishing["id"] in line, line
+
+
+def test_the_allowlist_arm_still_renders_a_FIRST_PARTY_name_as_itself(monkeypatch):
+    """#10482 acceptance half: the allowlist arm is UNCHANGED.
+
+    An entry there is an OPERATOR's assertion about an identity, so printing the
+    name as the sentence subject is exactly right — the #10482 fix widens nothing
+    beyond the arm whose name is derived from the client's own host.
+    """
+    row = {"id": "ct_first_party", "client_name": "Claude"}
+    monkeypatch.setenv(ATTESTED_CLIENTS_ENV, '{"ct_first_party": "Claude"}')
+    identity = resolve_client_identity(row)
+    assert identity.backed_by == BACKED_BY_ALLOWLIST
+    line = consent_client_line(identity)
+    assert line.startswith("Claude (ct_first_party) wants to access"), line
