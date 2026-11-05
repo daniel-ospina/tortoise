@@ -35281,6 +35281,27 @@ _REGISTRY_PROBE_URI: str | None = None
 #: and the empty `GET /v1/organizations` in `test_onboarding_endpoints.py`.
 #: In production the pin is constant, so this costs nothing there.
 _REGISTRY_PROBE_PATH: str | None = None
+#: The cached handle and the identity it was built under, published as ONE
+#: immutable tuple — the READER's view of the cache (#11001 review).
+#:
+#: ⛔ WHY ONE GLOBAL AND NOT THE THREE SCALARS ABOVE. The install path stores
+#: `_REGISTRY_PROBE_SDK = sdk` and then `_REGISTRY_PROBE_URI, _REGISTRY_PROBE_PATH
+#: = identity` as SEPARATE statements, and the fast path reads them with NO lock
+#: held (it must not take one: `_make_sdk`'s embedded branch holds
+#: `_KEEPALIVE_LOCK` across a construction plus `_get_proj()`, so a probe that
+#: waited on it would stall on a connect). Two stores are not one atomic event,
+#: so a reader landing between them saw the NEW handle paired with the OUTGOING
+#: identity: it read its own identity (still the old pin), then the freshly
+#: installed `_REGISTRY_PROBE_SDK`, then the not-yet-updated `_REGISTRY_PROBE_URI`
+#: — all three agreed with each other and it was served a handle built for a
+#: DIFFERENT graph. That is exactly the #9334 wrong-graph class this cache
+#: exists to prevent, on the auth path.
+#: Publishing `(identity, sdk)` as one tuple makes the switch atomic: a reader
+#: reads it once and either matches the identity it holds or misses and builds.
+#: The three scalars are kept as MIRRORS (written under the lock, read under it
+#: and by tests) so nothing that introspects them breaks; the fast path reads
+#: ONLY this tuple, never them.
+_REGISTRY_PROBE_CACHE: tuple[tuple[str, str], TortoiseSDK] | None = None
 
 #: How many times `_registry_probe_sdk` will rebuild a handle whose identity did
 #: not hold still for the WHOLE construction (see the stability rule there).
@@ -35310,12 +35331,14 @@ def _reset_registry_probe_sdk() -> None:
     (#5049 rule 4). The close runs OUTSIDE `_KEEPALIVE_LOCK` so a slow close
     cannot block a concurrent construction (the #2172 lock discipline)."""
     global _REGISTRY_PROBE_SDK, _REGISTRY_PROBE_URI, _REGISTRY_PROBE_PATH
+    global _REGISTRY_PROBE_CACHE
     if _REGISTRY_PROBE_SDK is None:
         return
     with _KEEPALIVE_LOCK:
         sdk, _REGISTRY_PROBE_SDK = _REGISTRY_PROBE_SDK, None
         _REGISTRY_PROBE_URI = None
         _REGISTRY_PROBE_PATH = None
+        _REGISTRY_PROBE_CACHE = None
     try:  # noqa: SIM105
         sdk.close()
     except Exception:
@@ -35382,17 +35405,32 @@ def _registry_probe_sdk() -> TortoiseSDK:
     (before `_make_sdk`'s own read, or after it during `_get_proj()`) makes the
     two reads disagree, and a handle whose identity is ambiguous is CLOSED and
     never installed, then rebuilt. A reconfiguration therefore costs one extra
-    build and can never serve a wrong graph. Production never rebinds the pin,
-    so the retry path is inert there.
+    build, and the CACHED path can never serve a wrong graph: the pair is
+    published as one immutable tuple (`_REGISTRY_PROBE_CACHE`), so a reader
+    that is not building sees either the old pairing or the new one, never a
+    mixture — the two-store window this docstring's claim used to outrun.
+    Production never rebinds the pin, so the retry path is inert there.
+
+    ⛔ OWNERSHIP OF THE LAST-RESORT HANDLE (residual, declared not fixed). When
+    the identity never holds still for a single build, the handle returned from
+    the un-cached fallback below is **nobody's to close**: `_reset_registry_probe_sdk`
+    closes the CACHED handle only, so that one connection lives for the life of
+    the process. It cannot be closed here (the caller is still using it) and it
+    must not be parked for `_reset` (closing a handle a caller may still hold is
+    the close-under-use hazard #8867 finding 1 owns). Unreachable in production,
+    where the pin never rebinds; reached only by the churn leg, whose handle is a
+    spy.
     """
     global _REGISTRY_PROBE_SDK, _REGISTRY_PROBE_URI, _REGISTRY_PROBE_PATH
+    global _REGISTRY_PROBE_CACHE
     for _attempt in range(_REGISTRY_PROBE_BUILD_ATTEMPTS):
         identity = _registry_probe_identity()
-        uri, path_pin = identity
-        cached = _REGISTRY_PROBE_SDK
-        if (cached is not None and uri == _REGISTRY_PROBE_URI
-                and path_pin == _REGISTRY_PROBE_PATH):
-            return cached
+        # ONE read, one atomic publication (#11001 review). Never the three
+        # scalars: they are written as separate statements and a lock-free
+        # reader can land between them (see `_REGISTRY_PROBE_CACHE`).
+        cached_entry = _REGISTRY_PROBE_CACHE
+        if cached_entry is not None and cached_entry[0] == identity:
+            return cached_entry[1]
 
         sdk = _build_registry_probe_handle()
         if _registry_probe_identity() != identity:
@@ -35404,22 +35442,27 @@ def _registry_probe_sdk() -> TortoiseSDK:
             continue
         retired = None
         with _KEEPALIVE_LOCK:
-            cached = _REGISTRY_PROBE_SDK
-            if (cached is not None and uri == _REGISTRY_PROBE_URI
-                    and path_pin == _REGISTRY_PROBE_PATH):
+            # Under the lock the tuple and the mirrors agree (every writer holds
+            # this lock), so the decision reads ONE authority: the tuple.
+            cached_entry = _REGISTRY_PROBE_CACHE
+            if cached_entry is not None and cached_entry[0] == identity:
                 # A peer installed a matching handle while we were building.
                 # Keep ITS handle (one cached handle per identity, as before)
                 # and close ours — the loser closes its own, so nothing leaks.
-                retired, sdk = sdk, cached
+                retired, sdk = sdk, cached_entry[1]
             else:
                 # The configured server OR the embedded path pin changed — a
                 # reconfiguration event, not a request event (the embedded
                 # anchor evicts on drift the same way, #1502). Drop the handle:
                 # reusing it would probe a graph this process no longer
                 # resolves to.
-                retired = cached
+                retired = _REGISTRY_PROBE_SDK
                 _REGISTRY_PROBE_SDK = sdk
                 _REGISTRY_PROBE_URI, _REGISTRY_PROBE_PATH = identity
+                # The atomic publication — LAST, so a lock-free reader that
+                # misses it falls through and builds rather than pairing the
+                # new handle with the outgoing identity (#11001 review).
+                _REGISTRY_PROBE_CACHE = (identity, sdk)
         if retired is not None:
             # Closed OUTSIDE the lock (#2172): a slow close must not block a
             # concurrent construction, and a close under the lock is the

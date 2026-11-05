@@ -7681,6 +7681,77 @@ def test_an_identity_that_never_settles_is_served_UNCACHED_never_installed(
         ha._reset_registry_probe_sdk()
 
 
+def test_a_TORN_cache_publication_cannot_pair_a_new_handle_with_the_OUTGOING_identity(
+        monkeypatch):
+    """The cache must switch identity ATOMICALLY, or the auth path gets a
+    wrong-graph handle (#11001 review, P2).
+
+    The install path used to store the handle and its identity as SEPARATE
+    globals (`_REGISTRY_PROBE_SDK = sdk`, then the `(_URI, _PATH)` pair), and
+    the fast path read them with no lock held. A reader landing between the two
+    stores read its own identity (still the outgoing one), then the freshly
+    installed handle, then the not-yet-updated identity — all three agreed, and
+    it was handed a handle built for a DIFFERENT graph. This reproduces exactly
+    that interleaving by seeding the state a mid-install reader would observe:
+    the OLD identity on the scalars, the NEW handle already published, and the
+    atomic tuple naming the pairing that handle was really built for.
+
+    The pre-fix arm returns the poisoned handle (RED); the fix reads ONE global
+    and therefore misses, builds, and serves a handle for the identity the
+    process actually resolves to.
+    """
+    import tortoise.hosted_api as ha
+
+    uri_a = "docker://:pw@localhost:6379/torn-a"
+    uri_b = "docker://:pw@localhost:6379/torn-b"
+    monkeypatch.setenv("TORTOISE_DB_URI", uri_a)
+    monkeypatch.setenv("TORTOISE_DB_PATH", "")
+    ha._reset_registry_probe_sdk()
+    built = []
+
+    class _Handle:
+        def __init__(self, tag):
+            self.tag = tag
+            self.closed = 0
+            built.append(self)
+
+        def _get_proj(self):
+            return object()
+
+        def close(self):
+            self.closed += 1
+
+    poisoned = _Handle("built-for-B")
+    monkeypatch.setattr(ha, "_make_sdk",
+                        lambda *, namespace=None, graph_name=None: _Handle("built-for-A"))
+    try:
+        # The torn state, exactly as the two-store window left it: NEW handle
+        # already visible, identity scalars still naming the OUTGOING pin.
+        ha._REGISTRY_PROBE_SDK = poisoned
+        ha._REGISTRY_PROBE_URI = uri_a
+        ha._REGISTRY_PROBE_PATH = ""
+        ha._REGISTRY_PROBE_CACHE = ((uri_b, ""), poisoned)
+
+        hand = ha._registry_probe_sdk()
+        assert hand is not poisoned, (
+            "the probe served a handle built for the OTHER identity — the "
+            "#9334 wrong-graph class on the auth path, from a torn "
+            "handle/identity publication")
+        assert hand.tag == "built-for-A", hand.tag
+        assert poisoned.closed == 1, (
+            "the superseded handle was neither replaced-and-closed nor "
+            "retired — it was simply left in the mirror")
+        # After the call the cache names the identity the process resolves to.
+        assert ha._REGISTRY_PROBE_CACHE is not None
+        assert ha._REGISTRY_PROBE_CACHE[0] == ha._registry_probe_identity()
+        assert ha._REGISTRY_PROBE_CACHE[1] is hand
+        assert ha._registry_probe_sdk() is hand, (
+            "a repeat call at the recorded identity rebuilt a correctly-paired "
+            "handle — the cache the probe exists for was defeated")
+    finally:
+        ha._reset_registry_probe_sdk()
+
+
 def test_the_registry_probe_retry_is_BOUNDED_and_it_is_not_a_spin(
         monkeypatch):
     """The retry constant is a bound, not a slider: the rebuild exists for a
