@@ -957,6 +957,23 @@ ROUND9_CORPUS: tuple[tuple[str, bool], ...] = (
     ("| P2 | `tools/x.py:9` | a table cell |", True),
     # …and the phrase that must NOT block now that `Outcome: clean` suppresses it.
     ("**Outcome: CLEAN.** No new issues found — the round-2 P2 is fixed.", False),
+    # ROUND-12: parity with `scripts/review-pr.sh`'s own cue list — the label-noun-in-front
+    # cue and the table-row cue. Ten live shapes that declare a blocking finding read
+    # NEUTRAL before these, each measured on a real body.
+    ("**Verdict: 2 real issues — 1 P1 (red core check), 1 P2 (unmeasured write leg).**", True),
+    ("**Verdict: ISSUES — 1 blocking (P1), 1 non-blocking (P2).**", True),
+    ("**Finding [P1]**: the guard returns 0 without holding the lock.", True),
+    ("**Verdict: P1 — the guard returns 0 without a lock.**", True),
+    ("There is a **P1** in the guard", True),
+    ("**1 blocking (P1)**: a real defect", True),
+    ("Blocking finding: P1 in the guard", True),
+    ("Requires a fix: P1 in the guard", True),
+    ("| **P1** | the guard returns 0 without a lock |", True),
+    ("2 [P1] open blocking defects remain", True),
+    ("**Outcome: 2 findings (1 × P1, 1 × P2). No blocking defect.**", True),
+    # …and the zero counts, in every spelling review-pr.sh exempts.
+    ("**P1**: none.", False),
+    ("**Outcome: CLEAN.**\n\n**P1**: none.", False),
 )
 
 

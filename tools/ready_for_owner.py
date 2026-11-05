@@ -272,6 +272,43 @@ ISSUES_FOUND_RE = re.compile(r"(?i)(?<!no )\bissues?\s+found\b|\bISSUES\s+\d+\b"
 #: blocking severity (`- P1: 0, P2: 2`). A finding NAMES A LOCATION.
 SEVERITY_LOCATED_RE = re.compile(r"(?i)\bP[0-2]\b[^A-Za-z0-9\n]{0,12}`?[\w./-]*\.\w+:\d+")
 TALLY_NONZERO_RE = re.compile(r"(?i)\bP([0-2])\s*:\s*([1-9]\d*)\b")
+#: ⛔ PARITY WITH `scripts/review-pr.sh`'s OWN CUE LIST — the *label-noun-in-front* cue and
+#: the *table-row* cue, which this module did not have. Round 12 measured ten live shapes
+#: that declare a blocking finding and read NEUTRAL because every arm needed a line-lead, a
+#: `path.ext:12`, a sibling field, a heading or a tally: `**Verdict: P1 — …**`,
+#: `**Finding [P1]**: …`, `**Verdict: ISSUES — 1 blocking (P1), 1 non-blocking (P2).**`,
+#: `There is a **P1** in the guard`, `**1 blocking (P1)**: …`, `Blocking finding: P1 …`,
+#: `Requires a fix: P1 …`, `| **P1** | the guard … |` (no location), and
+#: `2 [P1] open blocking defects remain`. `review-pr.sh:1204/1221/1840` are those cues.
+#: The label-noun cue is TIGHT on purpose: the noun must be a KEY (followed by a colon) and
+#: the severity must follow within 30 characters, with no `clean` in between — otherwise
+#: ordinary CLEAN prose ("No blocking findings. The severity: P2 bar …") would block, which
+#: is the false-BLOCK direction 5 of 6 natural phrasings fell into in round 8.
+LABEL_NOUN_RE = re.compile(
+    r"(?i)(?:"
+    r"\b(?:verdict|outcome|finding|findings|issue|issues|defect|defects|blocker|blockers)"
+    r"\s*\**\s*:(?:(?!clean)[^\n]){0,30}?\bP[0-2]\b"
+    r"|\b(?:finding|issue|defect)\s*\[P[0-2]\]"
+    r"|\bblocking\s+(?:finding|issue|defect)s?\s*:\s*P[0-2]\b"
+    # A BOLD severity token used as a noun mid-sentence (`There is a **P1** in the guard`),
+    # unless it is a zero count (`**P1: 0**`, `**P1**: none.`).
+    r"|\*\*P[0-2]\*\*(?!\s*:?\s*(?:0|none|nil|zero)\b)"
+    # `Requires a fix: P1 …` / `Needs a P2 …`
+    r"|\b(?:requires?|needs?)\b[^\n]{0,25}?\bP[0-2]\b"
+    r")"
+)
+#: `1 blocking (P1)` / `2 blocking findings` — a stated NON-ZERO blocking count.
+BLOCKING_COUNT_RE = re.compile(r"(?i)(?<!no )\b[1-9]\d*[ \t]+blocking\b")
+#: A bracketed severity token used as a NOUN in running text (`2 [P1] open blocking defects`).
+BRACKET_SEVERITY_RE = re.compile(
+    r"(?i)\[P[0-2]\]\s*(?:open|blocking|defects?|issues?|findings?|remain|unresolved)"
+)
+#: A TABLE ROW whose severity cell is the token (`| **P1** | the guard returns 0 |`).
+SEVERITY_TABLE_RE = re.compile(r"(?i)\|\s*\**P[0-2]\**\s*\|")
+#: A severity COUNT of zero in any spelling — `P1: 0`, `**P1**: none.`, `P1: nil`, `P1: zero`.
+#: `review-pr.sh:1221-1224` exempts exactly these ("`**P0**: none.` is a count").
+ZERO_SEVERITY_COUNT_RE = re.compile(r"(?i)\bP[0-2]\b\**\s*:\s*\**\s*(?:0|none|nil|zero)\b")
+
 #: A severity named in a HEADING, or a plain "do not land / known P1" verdict.
 SEVERITY_HEADING_RE = re.compile(
     r"(?im)(?:^\s*#{1,6}[^\n]*\bP[0-2]\b"
@@ -847,10 +884,11 @@ def _line_finding(text: str) -> bool:
     """
     for match in BLOCKING_RE.finditer(text):
         tail = text[match.end() : match.end() + 12]
-        if re.match(r"\s*:?\s*0\b", tail):
+        # `P1: 0` / `**P1**: none.` / `P1: nil` / `P1: zero` is a COUNT, not a finding.
+        if re.match(r"\s*:?\s*(?:0|none|nil|zero)\b", tail):
             continue
         return True
-    return False
+    return False  # a zero count is never a finding
 
 
 def _grades_as_blocking(text: str, item: Mapping[str, Any]) -> bool:
@@ -886,6 +924,9 @@ def _grades_as_blocking(text: str, item: Mapping[str, Any]) -> bool:
         )
         or SEVERITY_LOCATED_RE.search(text)
         or TALLY_NONZERO_RE.search(text)
+        or BRACKET_SEVERITY_RE.search(text)
+        or SEVERITY_TABLE_RE.search(text)
+        or BLOCKING_COUNT_RE.search(text)
         # A severity token beside an ISSUE-block SIBLING is a finding even when the body
         # never uses the word "severity" — `4 × `P2`, `check_type: bug`, `origin: diff``
         # is the dominant shape in the fold PRs (#10902/#10909/#10920).
@@ -903,6 +944,10 @@ def _grades_as_blocking(text: str, item: Mapping[str, Any]) -> bool:
         return True
     # ⛔ `zero_blocking` is checked AFTER the multi-declaration case, not before: one round's
     # "0 blocking" must not short-circuit a P1 declared on another round (round-9 P1).
+    if not (p3_only_declared or EXPLICIT_CLEAN_OUTCOME_RE.search(text)) and LABEL_NOUN_RE.search(
+        text
+    ):
+        return True
     counts = _declared_counts(text)
     if not counts:
         return False
@@ -911,12 +956,23 @@ def _grades_as_blocking(text: str, item: Mapping[str, Any]) -> bool:
         # cancel a P1 declared on another. Only an explicit blocking severity on ANY round
         # blocks, so an all-P3 history stays certifiable.
         return bool(severities & {"0", "1", "2"})
+    # ⛔ A P0/P1/P2 NAMED INSIDE THE COUNT DECLARATION ITSELF outranks a `no blocking`
+    # phrase in the same body — `**Outcome: 2 findings (1 × P1, 1 × P2). No blocking
+    # defect.**` must block (round 12). A severity merely MENTIONED elsewhere (the P2 a
+    # previous round fixed) must not, or a clean round can never be certified.
+    declared_text = "".join(
+        match.group(0)
+        for match in FINDINGS_DECLARED_RE.finditer(text)
+        if match.group(2) or match.group(3)
+    )
+    if set(ANY_SEVERITY_TOKEN_RE.findall(declared_text)) & {"0", "1", "2"}:
+        return True
+    if severities & {"0", "1", "2"} and not zero_blocking:
+        return True
     if zero_blocking:
         # ONE declaration that says it named nothing blocking — e.g. a P3-only round that
         # MENTIONS the P2 it just fixed. Trust the declaration.
         return False
-    if severities & {"0", "1", "2"}:
-        return True
     return any(c > 0 for c in counts) and not (severities and severities <= {"3"})
 
 
