@@ -355,7 +355,7 @@ def _sanitise_result(res: dict, secret: str) -> dict:
     on stderr, and `--json`), and a fix applied per call site left `ratelimit_remaining` raw after
     cycles 5 and 6 both closed a sibling header — the exact "scrub at the source" lesson.
     """
-    for key in ("detail", "ratelimit_remaining", "scopes"):
+    for key in ("detail", "ratelimit_remaining", "scopes", "api_base"):
         if isinstance(res.get(key), str):
             res[key] = _scrub(res[key], secret)
     if isinstance(res.get("surfaces"), dict):
@@ -587,6 +587,17 @@ def preflight(repo: str, api_base: str, token: str, source: str) -> dict:
                       detail=f"GH_HOST={gh_host!r} — this preflight, and the rail it protects, speak github.com")
         return result
 
+    # ⛔ THE REPO SHAPE IS VALIDATED HERE, NOT ONLY IN `main` (review cycle 11). The CLI guard is the
+    # first line of defence, but `preflight()` is also reachable directly (the suite does it), and a
+    # `repo` carrying `?` or `#` makes `http.client` send the SAME target for all three probes — one 422
+    # then satisfies all three gates. A guard that only exists at one caller is not the gate.
+    if not re.fullmatch(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+", repo or ""):
+        result.update(reason="usage",
+                      detail="--repo must be exactly `owner/name` (letters, digits, '.', '_', '-'); a value "
+                             "carrying '?' or '#' collapses the three write probes onto one endpoint "
+                             "(the value is not echoed)")
+        return result
+
     if not token:
         result.update(reason="no-credential",
                       detail="GH_TOKEN and GITHUB_TOKEN are unset and hosts.yml holds no active github.com token")
@@ -670,16 +681,18 @@ def preflight(repo: str, api_base: str, token: str, source: str) -> dict:
         default_branch = json.loads(body).get("default_branch") or "main"
 
     # ── 3. ISSUES WRITE — empty payload, so nothing can be created.
-    # ⛔ THE THREE PROBE URLS MUST BE THREE DISTINCT ENDPOINTS (review cycle 10). `repo` is spliced into a
-    # request path, and `http.client` strips everything after `#`, so `--repo 'o/r/issues#'` collapsed the
-    # pulls and contents probes onto the issues path — ONE 422 then satisfied all three gates and the tool
-    # printed GH-WRITE-OK for a token that can neither push nor comment on a PR (measured, with the real
-    # GitHub answer shape: exit 0, stub saw three POSTs to /repos/o/r/issues). A URL-unsafe `repo` is
-    # refused in `main`, and this assertion fails closed even if a future caller reaches `preflight`
-    # directly: a measurement that asked one endpoint three times is not a measurement.
+    # ⛔ COMPARE THE TARGETS `http.client` WILL ACTUALLY SEND (review cycle 11). The first version of this
+    # assertion compared the URL STRINGS, which share a prefix and differ by suffix — so it was true for
+    # every possible `repo` and could never fire (measured: `preflight('o/r/issues#', …)` still returned
+    # ok=True with the stub seeing three POSTs to /repos/o/r/issues). The fragment and query are exactly
+    # what the client drops, so they are stripped before the comparison.
+    def _sent_target(u: str) -> str:
+        parts = urllib.parse.urlsplit(u)
+        return urllib.parse.urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+
     _probe_urls = (f"{api_base}/repos/{repo}/issues", f"{api_base}/repos/{repo}/pulls",
                    f"{api_base}/repos/{repo}/git/refs")
-    if len(set(_probe_urls)) != 3:
+    if len({_sent_target(u) for u in _probe_urls}) != 3:
         result.update(reason="usage",
                       detail="the three write probes do not name three distinct endpoints — a repo value "
                              "carrying '?' or '#' collapses them onto one path, so one 422 would satisfy "

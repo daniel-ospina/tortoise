@@ -1034,6 +1034,42 @@ def test_a_repo_value_cannot_collapse_the_three_probes_onto_one_endpoint():
     assert "GH-WRITE-OK" not in p.stdout, p.stdout
 
 
+def test_preflight_itself_refuses_a_collapsing_repo_not_only_the_cli():
+    """The repo guard must live in `preflight()`, not only in `main()` (review cycle 11).
+
+    Cycle 10 added a distinctness assertion over the URL STRINGS — which share a prefix and differ by
+    suffix, so it was true for every possible `repo` and could never fire. A direct caller got
+    `ok=True` with the stub seeing three POSTs to `/repos/o/r/issues`.
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("gh_write_preflight", TOOL)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    with _Stub() as s:                      # every write probe answers 422
+        res = mod.preflight("o/r/issues#", s.base, "tok", "env:GH_TOKEN")
+        seen = list(s.seen)
+    assert res["ok"] is False, f"preflight() PASSED a collapsing repo: {res}"
+    assert res["reason"] == "usage", res
+    posts = [p for m, p, _ in seen if m == "POST"]
+    assert posts == [], f"no probe may run for a refused repo, got {posts}"
+
+
+def test_the_api_base_cannot_carry_the_credential_into_the_output():
+    """`api_base` is printed on the OK line and stored in `--json`, and `_printable_base` only redacts
+    `user:pass@` userinfo — so a base with the credential in its PATH printed it (review cycle 11)."""
+    secret = "Zq7HXq65" + "fut3Bk4rNw0EP8q0KYb9JvsW5L6pu33vmJJ6RX62kX4JP4Kh8s" + "J256vd3aE"
+    with _Stub() as s:
+        env = _env(s.base, secret)
+        env["GH_WRITE_PREFLIGHT_API"] = s.base + "/" + secret
+        p = subprocess.run([sys.executable, str(TOOL), "--repo", "o/r", "--json"],
+                           capture_output=True, text=True, env=env, timeout=120)
+    blob = p.stdout + p.stderr
+    for off in range(0, max(1, len(secret) - 7)):
+        assert secret[off:off + 8] not in blob, f"api_base leaked the credential at offset {off}: {blob!r}"
+
+
 if __name__ == "__main__":
     fns = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]
     failed = 0
