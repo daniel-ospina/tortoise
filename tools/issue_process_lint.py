@@ -171,7 +171,7 @@ SATISFIES_WORDS = ("satisfy", "satisfies", "satisfied")
 # punctuation/whitespace only; a linking word keeps the lenient window, because that leniency is
 # what makes `Refs, as agreed, #12` a claim.
 CLAIM_RE = re.compile(
-    r"\b(?:(?P<kw>refs?|related|part\s+of|see\s+also|serves?|addresses)\b"
+    r"\b(?:(?P<kw>refs?|part\s+of|serves?|addresses)\b"
     r"(?P<mid>[^\n#]{0,16}?)"
     r"|(?P<ckw>satisf(?:y|ies|ied)|close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b"
     r"(?P<cmid>[\s:.,;()\[\]–—]*))"
@@ -299,7 +299,8 @@ def _claims_in(text: str, own_number: int | None = None,
     population offline than with `--repo`, and reports clean for content it did not read — which is
     the shape this module refuses everywhere else (`Unmeasurable`, never a pass).
     """
-    found: dict[str, list[int]] = {"closing": [], "satisfies": [], "weak": [], "declined": []}
+    found: dict[str, list[int]] = {"closing": [], "satisfies": [], "weak": [], "declined": [],
+                                   "continued": []}
     declined_lines = {i for i, line in enumerate(text.splitlines()) if DECLINE_RE.search(line)}
     line_starts = [0]
     for line in text.splitlines(keepends=True):
@@ -337,6 +338,11 @@ def _claims_in(text: str, own_number: int | None = None,
                 (found["weak"] if continued else found["satisfies"]).append(num)
             else:
                 found["weak"].append(num)
+            if continued:
+                # Which subjects are a LIST CONTINUATION, so the caller can say so only where it
+                # applies — the diagnosis is irrelevant for a plain `Refs #N` claim, which is the
+                # dominant class (review P3).
+                found["continued"].append(num)
     for key in found:
         found[key] = sorted(set(found[key]))
     return found
@@ -393,7 +399,16 @@ def in_flight_markers(comment_bodies: list[str]) -> list[str]:
             # 2026-11-05` / `IN FLIGHT: 3.2c (released)`. Reading only the FIRST token left both
             # as live WIP and flagged finished work (F6). Matched in an ANNOTATION POSITION only,
             # so a release word inside a branch slug cannot clear a real marker.
-            if RELEASE_ANYWHERE_RE.search(rest):
+            # EMPHASIS wraps the word (`**released**`, `_released_`) and neither side's delimiter
+            # class can admit it: `_` is a word character, so `\\b` never matches there.
+            # Flattening the markers first makes both spellings one shape, and it cannot
+            # manufacture a release because the word must still be a standalone token in an
+            # annotation position.
+            #
+            # ⚠️ A CODE SPAN is deliberately NOT covered: `` `released` `` is a QUOTED word, and
+            # `strip_code` has already blanked it before this line — the same doctrine that makes
+            # `gh pr view #1234` a quotation rather than a claim (pinned by a test).
+            if RELEASE_ANYWHERE_RE.search(rest.replace("*", "").replace("_", "").replace("`", "")):
                 continue
             if "<" in rest and ">" in rest and PLACEHOLDER_RE.match(rest):
                 continue  # the unsubstituted template
@@ -431,10 +446,13 @@ def classify_pr(body: str, number: int | str, repo: str | None = None,
     if not unresolved:
         return []
     detail = (f"claims #{', #'.join(str(n) for n in unresolved)} with no closing keyword of its "
-              f"own: neither `Satisfies #N: <ids>` nor a closing keyword resolves it — GitHub "
-              f"closes only the FIRST ref of a keyword (`Resolves #10, resolves #123`), so a "
-              f"comma-continued ref does not close it either. Delivered work then cannot close "
-              f"what it serves.")
+              f"own: neither `Satisfies #N: <ids>` nor a closing keyword resolves it.")
+    if set(unresolved) & set(c["continued"]):
+        # Only where it APPLIES: for a plain `Refs #N` claim — the dominant class, 18 of 18 in the
+        # measured population — this sentence would be an irrelevant diagnosis (review P3).
+        detail += (" GitHub closes only the FIRST ref of a keyword (`Resolves #10, resolves #123`), "
+                   "so a comma-continued ref does not close it either.")
+    detail += " Delivered work then cannot close what it serves."
     labels = labels or []
     if "owner-decision" in labels:
         # An owner-authored BODY is a record; the PR body is still the author's own, so the label

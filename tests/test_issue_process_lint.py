@@ -846,3 +846,58 @@ def test_the_arm_table_states_that_a_continuation_does_not_resolve():
     assert "a continuation is CLAIMED, never resolved" in doc
     # agree with the code
     assert L.claims("Closes #1, #2\n", None, None)["closing"] == [1]
+
+
+# --- review round 8: the repo's OWN mandated form was being flagged ---------------------------
+# `docs/ops/ISSUE-WORKING-PROCESS.md:91` records that `skills/code-review/SKILL.md` tells an author
+# to write `Related: #N` for a NON-closing reference — i.e. to say the PR does NOT serve the issue.
+# Treating that as a claim flagged work written exactly as this repo instructs, which is the
+# bureaucracy-on-legitimate-work failure the whole arm is bounded against.
+
+
+@pytest.mark.parametrize("body", ["Satisfies #1: 1\nRelated: #4282\n", "See also #4282\n",
+                                  "Related: #4282\n"])
+def test_the_non_serving_reference_forms_are_not_claims(body):
+    """`Related:` / `See also` mean "does NOT serve" — a MENTION, never a claim."""
+    assert L.classify_pr(body, 999) == []
+
+
+@pytest.mark.parametrize("body", ["Refs #1\n", "Part of #1\n", "serves #1\n", "addresses #1\n"])
+def test_the_claiming_words_are_still_claims(body):
+    """The control: dropping the non-serving forms must not weaken the arm's real population."""
+    assert [f.arm for f in L.classify_pr(body, 999)] == [L.ARM_PR]
+
+
+@pytest.mark.parametrize("marker", ["3.2c — **released**", "3.2c — **released** 2026-11-05",
+                                    "3.2c — _released_"])
+def test_an_emphasised_release_word_clears(marker):
+    """Emphasis wraps the word, and `_` is a word character so `\\b` never matched — finished work
+    was flagged (the same class rounds 3-5 fixed)."""
+    assert L.in_flight_markers(["IN FLIGHT: " + marker]) == []
+
+
+@pytest.mark.parametrize("marker", ["3.2c — **released: pending**", "3.2c — **free** tier refactor",
+                                    "3.2c — fix_unclaimed_issue"])
+def test_emphasis_flattening_does_not_manufacture_a_release(marker):
+    """The control: flattening `*`/`_`/`` ` `` must not turn a status note or a slug into a
+    release — that would be a silent miss."""
+    assert L.in_flight_markers(["IN FLIGHT: " + marker]) != []
+
+
+def test_a_quoted_release_word_in_a_code_span_is_not_a_release_statement():
+    """Deliberate, and pinned so nobody "fixes" it: `` `released` `` is a QUOTED word. `strip_code`
+    blanks it before the marker scan — the same doctrine that makes `gh pr view #1234` a quotation
+    rather than a claim."""
+    assert L.in_flight_markers(["IN FLIGHT: 3.2c — `released`"]) == ["3.2c"]
+
+
+def test_the_first_ref_clause_appears_only_where_it_applies():
+    """The FIRST-ref sentence is about a comma-continued ref; emitting it for a plain `Refs #N`
+    claim — the dominant class — is an irrelevant diagnosis in a tool whose product is the message."""
+    cont = L.classify_pr("Closes #1, #2\n", 999)[0].detail
+    plain = L.classify_pr("Refs #1\n", 999)[0].detail
+    assert "FIRST ref" in cont and "comma-continued" in cont
+    assert "FIRST ref" not in plain
+    # both still name the real cause
+    for d in (cont, plain):
+        assert "no closing keyword of its own" in d
