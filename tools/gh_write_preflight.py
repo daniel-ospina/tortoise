@@ -444,7 +444,7 @@ def resolve_credential() -> tuple[str, str]:
             tok = (os.environ.get(var) or "").strip()
             if tok:
                 return tok, f"env:{var}"
-    tok, login = _token_from_hosts()
+    tok, _login = _token_from_hosts()
     if tok:
         # ⛔ THE LABEL MUST NOT CARRY FILE CONTENT (review cycle 15). `login` is the depth-1 `user:` line —
         # arbitrary text in the file — so a prefix-less legacy value there survived both the value scrub
