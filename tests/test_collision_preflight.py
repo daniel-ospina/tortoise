@@ -9758,6 +9758,182 @@ exec {real} "$@"
         self.assertIn("1 your own", out)
 
 
+    # ── cycle-2 review findings: the arms the green suite still did not see ──
+
+    def test_a_live_pi_whose_ANCESTOR_argv_names_the_issue_blocks(self):
+        """Cycle-2 HIGH: pi REWRITES ITS OWN ARGV, so the number is in the PARENT.
+
+        `pi` sets `process.title`, so every real lane's `cmdline` is exactly
+        `pi`; the issue number lives in the launcher's command line
+        (`fix-one.sh --argv …/argv-11023`). A leaf-argv-only scan therefore
+        returned CLEAN for live lanes on #11023, #10726 and #11105 — the
+        surface's own cited incident shape. The row already carries `ppid`; the
+        ancestor's command line must be read, and the hit must NAME it.
+        """
+        table = self.tmp / "table-ancestor-argv.txt"
+        table.write_text(
+            "1 0 /sbin/init\n"
+            "763363 1 bash -l\n"
+            "763915 763363 bash /home/cmux/orchestrator/state/run-fix-3061.sh\n"
+            "763917 763915 bash /home/cmux/orchestrator/fix-one.sh --argv "
+            "/home/cmux/orchestrator/state/argv-3061\n"
+            "777003 763917 pi\n"
+        )
+        rc, out = self.run_tool(
+            env_extra={"COLLISION_PREFLIGHT_PROCESS_TABLE": str(table)})
+        self.assertEqual(rc, 1, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertIn("[live lane processes]", out)
+        self.assertIn("pid:777003", out)
+        # The hit must name the ANCESTOR, so a reader can check the evidence.
+        self.assertIn("ancestor process (pid 763917)", out)
+        self.assertIn("names #3061", out)
+
+    def test_the_ancestor_arm_is_bounded_and_number_exact(self):
+        """The polarity the ancestor arm must keep: no over-attribution.
+
+        A different issue number anywhere in the chain, and the same number far
+        beyond the bounded walk, must both leave the row UNATTRIBUTED — the walk
+        is <= 3 ppid links and boundary-exact (`number_present`), never a
+        substring scan of the whole ancestry.
+        """
+        # (a) a DIFFERENT number one link up is not this issue
+        table = self.tmp / "table-ancestor-other.txt"
+        table.write_text(
+            "1 0 /sbin/init\n"
+            "763917 1 bash /home/cmux/orchestrator/fix-one.sh --argv "
+            "/home/cmux/orchestrator/state/argv-30610\n"
+            "777004 763917 pi\n"
+        )
+        rc, out = self.run_tool(
+            env_extra={"COLLISION_PREFLIGHT_PROCESS_TABLE": str(table)})
+        self.assertNotIn("VERDICT: COLLISION", out)
+        # 777004 does not exist, so its cwd is unreadable -> INCOMPLETE, never
+        # CLEAN: the row is genuinely undecidable, which is the honest answer.
+        self.assertEqual(rc, 2, out)
+        self.assertIn("process-cwd-unreadable", out)
+
+        # (b) the SAME number five links up is outside the bounded walk
+        deep = self.tmp / "table-ancestor-deep.txt"
+        deep.write_text(
+            "1 0 /sbin/init\n"
+            "900001 1 bash /home/cmux/orchestrator/fix-one.sh --argv "
+            "/home/cmux/orchestrator/state/argv-3061\n"
+            "900002 900001 bash hop-2\n"
+            "900003 900002 bash hop-3\n"
+            "900004 900003 bash hop-4\n"
+            "900005 900004 bash hop-5\n"
+            "777005 900005 pi\n"
+        )
+        rc, out = self.run_tool(
+            env_extra={"COLLISION_PREFLIGHT_PROCESS_TABLE": str(deep)})
+        self.assertNotIn("VERDICT: COLLISION", out)
+        self.assertIn("VERDICT: INCOMPLETE", out)
+
+    def test_a_live_pi_whose_ancestor_names_an_ATTRIBUTED_PR_blocks(self):
+        """Cycle-3 HIGH: the launcher names the PR the worker was dispatched for.
+
+        `worker-terminal.sh` generates `run-fix-<N>.sh` / `fix-one.sh --argv
+        …/argv-<N>` for a PR-or-issue number, and GitHub shares ONE number space,
+        so a fixer lane on PR #7654 never names issue #3061 anywhere in its
+        ancestry. Matching only the ISSUE left the measured incident shape (the
+        live lanes on #11023 / #10726 / #11105) attributed to nothing. The PR set
+        this run has already tied to the issue is what the queue arm uses for the
+        same reason; the ancestor arm now uses it too.
+        """
+        self.gh_fixtures(open_prs=[{
+            "number": 7654,
+            "title": "fix(thing): the 3061 shape",
+            "body": "",
+            "state": "open",
+            "url": "https://example.invalid/pulls/7654",
+            "headRefName": "fix/3061-shape",
+            "mergedAt": None,
+            "closingIssuesReferences": [],
+        }])
+        table = self.tmp / "table-ancestor-pr.txt"
+        table.write_text(
+            "1 0 /sbin/init\n"
+            "763917 1 bash /home/cmux/orchestrator/fix-one.sh --argv "
+            "/home/cmux/orchestrator/state/argv-7654\n"
+            "777006 763917 pi\n"
+        )
+        # The PR's OWN hit is demoted by the self-branch declaration, so the only
+        # arm that can block here is the ancestor one.
+        rc, out = self.run_tool(
+            self_branches=("fix/3061-shape",),
+            env_extra={"COLLISION_PREFLIGHT_PROCESS_TABLE": str(table)})
+        self.assertEqual(rc, 1, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertIn("names PR #7654", out)
+
+    def test_a_non_positive_queue_pid_is_undecidable_never_clean(self):
+        """Cycle-3 MEDIUM: a corrupt `.pid` of `-5` must not read as DEAD.
+
+        `_pid_is_alive` returned False for every non-positive pid, so a lane's own
+        queue entry with `0` or `-5` in it vanished from the arm and the verdict
+        was CLEAN. `os.kill(0, 0)` targets the whole process GROUP and a negative
+        pid is a group selector — neither is a lane, and neither is a DECIDED dead
+        one. Same class as the oversized-pid finding above.
+        """
+        table = self.tmp / "table-nonpositive.txt"
+        table.write_text("1 0 /sbin/init\n")
+        for value in ("-5", "0"):
+            with self.subTest(pid=value):
+                queue = self.tmp / f"lane-queue-nonpositive-{value.strip('-')}"
+                queue.mkdir(exist_ok=True)
+                (queue / "prd-test-owner-test-repo-3061.pid").write_text(value)
+                rc, out = self.run_tool(env_extra={
+                    "COLLISION_PREFLIGHT_PROCESS_TABLE": str(table),
+                    "COLLISION_PREFLIGHT_LANE_QUEUE": str(queue),
+                })
+                self.assertNotIn("Traceback", out)
+                self.assertEqual(rc, 2, out)
+                self.assertIn("VERDICT: INCOMPLETE", out)
+                self.assertIn("lane-queue-pid-unreadable", out)
+
+    def test_an_oversized_queue_pid_is_undecidable_not_a_traceback(self):
+        """Cycle-2 MEDIUM: `os.kill()` raises `OverflowError` above the C range.
+
+        Nothing handled it, so a queue `.pid` holding a value larger than a C
+        `int` escaped every handler as a traceback with no `VERDICT` line — and
+        exit 1 is this tool's COLLISION code (crash-as-verdict, #8881's exact
+        class). An unrepresentable pid is UNDECIDABLE, so the row is INCOMPLETE.
+        """
+        table = self.tmp / "table-oversized.txt"
+        table.write_text("1 0 /sbin/init\n")
+        queue = self.tmp / "lane-queue-oversized"
+        queue.mkdir(exist_ok=True)
+        (queue / "prd-test-owner-test-repo-3061.pid").write_text("9" * 30)
+        rc, out = self.run_tool(env_extra={
+            "COLLISION_PREFLIGHT_PROCESS_TABLE": str(table),
+            "COLLISION_PREFLIGHT_LANE_QUEUE": str(queue),
+        })
+        self.assertNotIn("Traceback", out)
+        self.assertEqual(rc, 2, out)
+        self.assertIn("VERDICT: INCOMPLETE", out)
+        self.assertIn("lane-queue-pid-unreadable", out)
+        self.assertNotIn("VERDICT: COLLISION", out)
+
+    def test_pid_liveness_is_tri_state_never_an_exception(self):
+        """The unit half of the same finding, so the seam itself is pinned.
+
+        `True` alive / `False` decided-dead / `None` UNDECIDABLE. A pid Python can
+        hold but the kernel cannot (`> INT_MAX`) is the third state, and the
+        queue arm must count it as undecidable rather than have it read as dead
+        (fail-open) or escape as a crash (crash-as-verdict).
+        """
+        cp = _tool_module()
+        self.assertIs(cp._pid_is_alive(os.getpid()), True)
+        self.assertIs(cp._pid_is_alive(None), False)
+        # ⛔ NON-POSITIVE IS UNDECIDABLE, NOT DEAD (cycle-3 review). `os.kill(0, 0)`
+        # targets the whole process GROUP and a negative pid is a group selector;
+        # reading either as a decided-dead lane is the fail-open direction.
+        self.assertIs(cp._pid_is_alive(0), None)
+        self.assertIs(cp._pid_is_alive(-5), None)
+        self.assertIs(cp._pid_is_alive(10 ** 30), None)
+
+
 #: The parent's tests must not be collected twice (this subclass adds FOUR
 #: DEFECT ARMS, not a second copy of the 300-test suite). `unittest` collects
 #: inherited methods, so the parent's are removed from the subclass namespace —

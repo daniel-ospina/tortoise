@@ -561,6 +561,16 @@ def _answer_for_pull_request(exc, issue: int, repo_arg: str | None,
     return "\n\n".join(chunks) + "\n", worst
 
 
+def _ps_bin() -> str:
+    """The `ps` binary, resolved the same way the gate resolves it (`--ps`).
+
+    This verb has no `--ps` flag of its own (it is not a flag users pass here),
+    so the environment seam is the whole surface — and it is READ PER CALL rather
+    than at import so a caller/test can point it somewhere else without a reload.
+    """
+    return os.environ.get(cp.PS_ENV, "ps")
+
+
 def _hit_lines(surface) -> list[str]:
     """Per-surface hit lines, capped exactly like the gate's report so a broad
     keyword match on a 550-branch hub cannot print hundreds of lines. Every field
@@ -621,8 +631,22 @@ def who_holds(issue: int, repo_arg: str | None, gh_bin: str, git_bin: str,
             # input. Same ancestry set the gate auto-declares.
             identity=cp.Identity(
                 login=None,
-                self_pids=frozenset(cp._ancestor_pids(git_bin, timeout)),
+                # ⛔ THE ANCESTRY WALK NEEDS THE **PS** BINARY (review cycle 2,
+                # MEDIUM). This passed `git_bin`, which Linux masks: the walk
+                # answers from `/proc/<pid>/stat` there, so the bug was invisible.
+                # On a host WITHOUT procfs the macOS fallback runs
+                # `<binary> -o ppid= -p <pid>` — `git -o ppid= …` fails, the set
+                # collapses to `{getpid()}`, and the caller's own `pi` ancestor is
+                # no longer exempt, so the verb reports the caller as its own
+                # holder: the #10684 defect, one verb over, on macOS.
+                self_pids=frozenset(cp._ancestor_pids(_ps_bin(), timeout)),
             ),
+            # ⛔ AND THE SAME BINARY GOES TO THE SURFACE (cycle-3 review, LOW).
+            # `run_preflight` defaults `ps_bin` to the literal `"ps"`, so without
+            # this `COLLISION_PREFLIGHT_PS` meant two different things inside one
+            # `who_holds` run. The gate resolves `ps` ONCE and passes it to both
+            # uses; this verb must too.
+            ps_bin=_ps_bin(),
         )
     except cp.NotAWorkItem as exc:
         # A DESIGNED refusal, not an unexpected failure: the gate refuses a

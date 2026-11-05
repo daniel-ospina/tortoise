@@ -7270,6 +7270,13 @@ DEFAULT_LANE_QUEUE = "/home/cmux/orchestrator/bg"
 #: Bound on the ancestor walk. A pid chain deeper than this is corrupt; stopping
 #: can only leave MORE holders blocking (fail closed).
 MAX_ANCESTOR_DEPTH = 64
+#: How far UP a live `pi` row's ancestry the ISSUE-NUMBER attribution reads (#1233
+#: cycle-2 HIGH). Measured shape on 2026-11-05: `pi` -> `fix-one.sh --argv
+#: …/argv-11023` (1 link) -> `run-fix-11023.sh` (2) -> `bash -l` (3). Three links
+#: cover the launcher chain without reaching into an orchestrator whose argv is
+#: shared by MANY lanes — attributing a peer through it would be a false
+#: COLLISION, the fail-closed-but-wrong direction this bound exists to avoid.
+MAX_PARENT_ATTRIBUTION_DEPTH = 3
 
 
 def _argv0_pi(cmd: str) -> bool:
@@ -7457,9 +7464,27 @@ def _lane_queue_entries(slug: str | None
     return entries, False, ""
 
 
-def _pid_is_alive(pid: int | None) -> bool:
-    if not isinstance(pid, int) or pid <= 0:
+def _pid_is_alive(pid: int | None) -> bool | None:
+    """Alive / decided-dead / UNDECIDABLE (`None`).
+
+    ⛔ THREE STATES, NOT TWO (review cycle 2, MEDIUM). `os.kill()` raises
+    `OverflowError` for a value above the C `int` range, and nothing handled it:
+    a queue `.pid` holding such a value escaped every handler as a traceback with
+    no `VERDICT` line — and exit 1 is this tool's COLLISION code, so a corrupt
+    number read as "a lane is on it" (crash-as-verdict, #8881's own class). A pid
+    the kernel cannot even represent is not a DEAD lane, it is an undecidable
+    one; the caller makes the row INCOMPLETE instead of guessing.
+    """
+    if not isinstance(pid, int):
         return False
+    if pid <= 0:
+        # ⛔ NON-POSITIVE IS UNDECIDABLE, NOT DEAD (cycle-3 review, MEDIUM).
+        # `os.kill(0, 0)` targets the whole process GROUP and a negative pid is a
+        # group selector, so neither is a lane — and neither is a DECIDED-dead
+        # one: a queue `.pid` holding `0` or `-5` used to make the row disappear
+        # and the verdict CLEAN, the same fail-open the `OverflowError` finding is
+        # about, one condition over. The caller makes the row INCOMPLETE.
+        return None
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -7467,9 +7492,77 @@ def _pid_is_alive(pid: int | None) -> bool:
     except PermissionError:
         # A process we may not signal is a process that EXISTS (fail closed).
         return True
+    except (OverflowError, ValueError):
+        return None
     except OSError:  # pragma: no cover - defensive
         return False
     return True
+
+
+def _parent_attribution(parents: dict[int, tuple[int, str]], pid: int,
+                        issue: int,
+                        attributed_prs: frozenset[int] = frozenset()) -> str:
+    """Why a live `pi` row is attributed to `issue` through an ANCESTOR, or "".
+
+    ⛔ THE DEFECT THIS CLOSES (#1233 cycle-2 HIGH). `pi` rewrites its own argv
+    (`process.title`), so every real lane's row is exactly `pi` and its issue
+    number lives in the LAUNCHER's command line (measured 2026-11-05: `bash
+    /home/cmux/orchestrator/fix-one.sh --argv …/argv-11023`). A leaf-argv-only
+    scan returned CLEAN for the live lanes on #11023, #10726 and #11105 — the
+    surface's own cited incident shape. The row already carries `ppid`; this
+    reads up to `MAX_PARENT_ATTRIBUTION_DEPTH` links of it.
+
+    ⛔ AND IT MATCHES THE ATTRIBUTED PRs TOO (cycle-3 HIGH). GitHub shares ONE
+    number space, and `worker-terminal.sh` names a worker's launcher for the
+    number it was DISPATCHED for — `run-fix-11067.sh` / `--argv …/argv-11067`,
+    where 11067 is a PR. Matching only the ISSUE number left every such fixer
+    lane unattributed (its cwd is the hub, which names no number, and a
+    `worker-terminal` lane leaves no `prd-<owner>-<repo>-<PR>.pid`). The set is
+    the one the harness-queue arm already uses for exactly this reason, and it
+    is already computed by the open-PR surface — zero added API cost, and a PR
+    the run has NOT tied to this issue can never match.
+
+    Every match is `number_present` against each ancestor's command line — the
+    same boundary-exact predicate every other arm uses, so a DIFFERENT issue
+    number (`argv-30610`) or one beyond the bounded walk never attributes. The
+    returned sentence NAMES the ancestor so a reader can check the evidence.
+    """
+    prs = sorted(pr for pr in (attributed_prs or frozenset()) if pr != issue)
+    cur = pid
+    seen = {pid}
+    for _ in range(MAX_PARENT_ATTRIBUTION_DEPTH):
+        row = parents.get(cur)
+        if row is None:
+            return ""
+        ppid = row[0]
+        if ppid <= 1 or ppid in seen:
+            return ""
+        # ⛔ THE ROW IS KEYED BY THE PROCESS, SO ITS COMMAND BELONGS TO THE KEY,
+        # NOT TO ITS `ppid`. Reading `parents[cur]` as "(the ancestor's pid, the
+        # ancestor's command)" is off by one process: it tested `pi`'s own argv
+        # (`pi`) on the first hop and then named an ancestor whose command was
+        # its CHILD's. The lookup below tests the actual ancestor's row.
+        ancestor = parents.get(ppid)
+        if ancestor is None:
+            return ""
+        seen.add(ppid)
+        if number_present(ancestor[1], issue):
+            return (
+                f"its ancestor process (pid {ppid}) names #{issue} in its "
+                f"command line ({_one_line(ancestor[1], 120)}) — pi rewrites its "
+                "own argv, so a lane's number lives in the LAUNCHER's command line"
+            )
+        for pr in prs:
+            if number_present(ancestor[1], pr):
+                return (
+                    f"its ancestor process (pid {ppid}) names PR #{pr} in its "
+                    f"command line ({_one_line(ancestor[1], 120)}) — PR #{pr} is a "
+                    f"PR this run already attributed to #{issue}, and pi rewrites "
+                    "its own argv, so a lane's number lives in the LAUNCHER's "
+                    "command line"
+                )
+        cur = ppid
+    return ""
 
 
 def scan_process_surface(
@@ -7507,6 +7600,11 @@ def scan_process_surface(
     else:
         self_pids = identity.self_pids or frozenset()
         pi_rows = [r for r in rows if _argv0_pi(r[2])]
+        # `ppid` was parsed and then DISCARDED, which is how a real lane stayed
+        # invisible (see `_parent_attribution`). One dict, no second scan.
+        parents: dict[int, tuple[int, str]] = {
+            pid: (ppid, cmd) for pid, ppid, cmd in rows
+        }
         named = 0
         for pid, _ppid, cmd in pi_rows:
             if pid in self_pids:
@@ -7528,6 +7626,8 @@ def scan_process_surface(
                 # recall it exists for (a lane with no branch, no PR, no claim
                 # comment) and loses only the false positives.
                 how = f"its working directory names #{issue} ({_one_line(workdir, 120)})"
+            else:
+                how = _parent_attribution(parents, pid, issue, attributed_prs)
             if how:
                 named += 1
                 surface.add(
@@ -7610,7 +7710,14 @@ def scan_process_surface(
             # Live or finished cannot be decided from an unreadable `.pid`.
             undecidable += 1
             continue
-        if not _pid_is_alive(entry.get("pid")):
+        alive = _pid_is_alive(entry.get("pid"))
+        if alive is None:
+            # A `.pid` the kernel cannot represent is UNDECIDABLE, never dead and
+            # never a crash (#8881 cycle-2 MEDIUM) — counted with the unreadable
+            # ones so the row is INCOMPLETE rather than CLEAN.
+            undecidable += 1
+            continue
+        if not alive:
             continue
         if entry.get("pid") in self_pids:
             # ⛔ THE SAME SELF EXEMPTION AS THE PROCESS ARM (#10684). A lane that

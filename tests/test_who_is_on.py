@@ -1329,6 +1329,61 @@ exec {self.gh} "$@"
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn(f"fix/{ISSUE}-strand", proc.stdout)
 
+    def test_the_ancestry_walk_uses_the_PS_binary_not_git(self):
+        """Cycle-2 review, MEDIUM: `_ancestor_pids(ps_bin, …)` got `git_bin`.
+
+        On Linux `/proc` masks the mistake; on a host WITHOUT procfs the macOS
+        fallback runs `<binary> -o ppid= -p <pid>`, so `git -o ppid= …` fails and
+        the ancestry set collapses to `{getpid()}` — the caller's own `pi`
+        ancestor is then invisible and the verb reports the caller as its own
+        holder (the #10684 defect, one verb over, on macOS). The seam is driven
+        here so the finding cannot come back on any host: the binary handed to
+        `_ancestor_pids` must be the PS binary, never the git one.
+        """
+        import importlib.util
+        from types import SimpleNamespace
+        from unittest import mock as _mock
+
+        cp = _gate_module()
+        spec = importlib.util.spec_from_file_location("who_is_on_ps_binary", TOOL)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        used: list[str] = []
+        captured: list[object] = []
+
+        class _Captured(Exception):
+            pass
+
+        def fake_ancestors(binary, timeout):
+            used.append(binary)
+            return frozenset({424242})
+
+        def fake_preflight(issue, target, gh, git, timeout, **kw):
+            captured.append((kw.get("identity"), kw.get("ps_bin")))
+            raise _Captured("identity captured")
+
+        with _mock.patch.object(
+                cp, "_resolve_target",
+                return_value=(SimpleNamespace(path=None, slug=SLUG), 0)), \
+             _mock.patch.object(cp, "_ambiguity_refusal", return_value=None), \
+             _mock.patch.object(cp, "_ancestor_pids", fake_ancestors), \
+             _mock.patch.object(cp, "run_preflight", fake_preflight):
+            mod.who_holds(ISSUE, None, "gh", "git-binary-not-a-ps", 5.0)
+
+        self.assertEqual(len(used), 1, used)
+        self.assertNotIn("git-binary-not-a-ps", used)
+        self.assertTrue(used[0].endswith("ps"),
+                        f"the ancestry walk was handed {used[0]!r}, not a ps binary")
+        self.assertEqual(captured[0][0].self_pids, frozenset({424242}))
+        # ⛔ THE SAME RESOLUTION MUST REACH `run_preflight` TOO (cycle-3 review).
+        # It defaults to the literal `"ps"`, so `COLLISION_PREFLIGHT_PS` meant two
+        # different things inside one `who_holds` run while `_ps_bin`'s docstring
+        # claimed parity with the gate (which resolves `ps` once and passes it to
+        # BOTH uses, `collision_preflight.py:9840` and `:9860`).
+        self.assertEqual(captured[0][1], used[0],
+                         "run_preflight was not handed the same ps binary")
+
 
 if __name__ == "__main__":
     unittest.main()
