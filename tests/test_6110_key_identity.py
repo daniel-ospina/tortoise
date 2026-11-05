@@ -2166,3 +2166,153 @@ class TestContentCandidateReadMatchesThePerItemHelpers:
         assert sdk._validate_bundle({"points": [{"content": only}]}) == []
         out = sdk.ingest({"points": [{"content": only}]})
         assert out, "the ingest must commit, not raise"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# #10481 — a padded-but-REAL key is invisible to the indexed key seek
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# `tortoise/projection._POINT_RANGE_INDEX_PROPS` declares the `key` index
+# (#8400), and FalkorDB's equality seek stores the TRIMMED term while the query
+# side is not trimmed (#9599, measured). So a node stored under `"  PK  "` is
+# unfindable by its own spelling — and `create_point(dedup=True, key="  PK  ")`
+# therefore MINTED a second carrier of one key, the exact #6110 duplicate the
+# key-identity machinery exists to prevent. It is not only the writer: the
+# #6110/#8400/#9819 Phase-1 guard asks `_key_holder_state` the SAME seek and
+# gets the same empty answer, so it CERTIFIED the duplicate write.
+#
+# ⛔ DIRECTION, and why this is not a reopen of #9553: the recorded position
+# says padded identities are LEGITIMATE, so this does NOT refuse them and does
+# NOT trim what is STORED. It normalises only the SEARCH TERM to the term the
+# engine already indexes and already matches — `_find_points_by_key` is the one
+# key-identity seek, so the writer and the Phase-1 guard are fixed together at
+# the boundary rather than at each call site. Stored bytes are untouched, which
+# is what makes the fix backward-compatible (see the module note below).
+
+
+def test_a_padded_key_is_found_by_its_OWN_spelling(sdk):
+    """The recorded defect, writer half: the seek answers the spelling it was
+    given, so the second padded write folds instead of minting a carrier."""
+    a = sdk.create_point("statement", "PAD-A", key="  PK  ", dedup=True)
+    assert sdk._find_points_by_key("  PK  ", pointKind="statement") == [a["id"]]
+    # …and the trimmed spelling still resolves the same node (it always did).
+    assert sdk._find_points_by_key("PK", pointKind="statement") == [a["id"]]
+
+
+def test_a_padded_key_is_visible_to_the_Phase_1_GUARD(sdk):
+    """The recorded defect, guard half: `_key_holder_state` is what
+    `_check_endpoints` asks before certifying a key-bearing write, and it asked
+    the same unfindable seek."""
+    a = sdk.create_point("statement", "PAD-A", key="  PK  ", dedup=True)
+    holders, terminal = sdk._key_holder_state("statement", "  PK  ")
+    assert holders == [a["id"]], "the Phase-1 key-identity guard cannot see the holder"
+
+
+def test_two_padded_writes_of_ONE_key_mint_ONE_node(sdk):
+    """The #6110 duplicate this issue measured: two carriers, one key."""
+    a = sdk.create_point("statement", "PAD-A", key="  PK  ", dedup=True)
+    b = sdk.create_point("statement", "PAD-B", key="  PK  ", dedup=True)
+    assert a["id"] == b["id"], "dedup=True minted a second carrier of one key"
+    rows = sdk._get_proj().g.query(
+        "MATCH (n:Point) WHERE n.key ENDS WITH 'PK  ' RETURN n.id").result_set
+    assert len(rows) == 1, f"{len(rows)} carriers of one padded key"
+
+
+def test_a_padded_key_is_still_STORED_VERBATIM(sdk):
+    """BACKWARD COMPATIBILITY, asserted rather than promised: the fix normalises
+    the SEARCH TERM only. The stored value is the value the caller passed —
+    #9553's recorded position is untouched, and no migration is implied."""
+    a = sdk.create_point("statement", "PAD-A", key="  PK  ", dedup=True)
+    stored = sdk._get_proj().g.query(
+        "MATCH (n:Point) WHERE n.id = $id RETURN n.key",
+        params={"id": a["id"]}).result_set
+    assert stored and stored[0][0] == "  PK  ", stored
+
+
+def test_a_preexisting_twin_pair_is_SURFACED_never_silently_merged(sdk):
+    """An ALREADY-stored graph may hold both spellings as two carriers (that is
+    what the defect minted). They collide at the engine level regardless — the
+    index stores one trimmed term — so the fix's only obligation is to SURFACE
+    the pair rather than fold silently: the seek returns EVERY holder, which is
+    what `create_point`'s pre-#6110-collision warning counts."""
+    for key, content in (("PK", "TWIN-TRIM"), ("  PK  ", "TWIN-PAD")):
+        sdk._get_proj().g.query(
+            "CREATE (n:Point {id:$id, content:$c, content_hash:$ch, "
+            "pointKind:'statement', key:$k, status:'live'})",
+            params={"id": f"twin-{content}", "c": content,
+                    "ch": _content_hash(content), "k": key})
+    # Both spellings now resolve the SAME two-node set — no row changes
+    # identity on its own, and the collision is reported, not absorbed.
+    assert sorted(sdk._find_points_by_key("PK", pointKind="statement")) == [
+        "twin-TWIN-PAD", "twin-TWIN-TRIM"]
+    assert sorted(sdk._find_points_by_key("  PK  ", pointKind="statement")) == [
+        "twin-TWIN-PAD", "twin-TWIN-TRIM"]
+
+
+def test_a_padded_key_never_REASSIGNS_the_stored_spelling(sdk):
+    """THE FIRST-WRITER SPELLING STANDS (#10481 × #6110).
+
+    The seek is trim-aware, so a padded key now HITS a holder minted with the
+    trimmed spelling — and the fold must NOT write the caller's spelling over it.
+    Relaying it would rewrite the stored value on a pure dedup hit (the #6110
+    postcondition "a dedup hit never reassigns an existing key"), bump
+    ``updatedAt`` on every alternating re-run (#490 churn), and be LIVE-ONLY —
+    ``PointRevised`` folds no ``key`` arm, so a rebuild reverts it (#9732).
+    """
+    a = sdk.create_point("statement", "SPELL-A", key="PK", dedup=True)
+    before = sdk.get_point(a["id"]).get("updatedAt")
+    for _ in range(3):
+        sdk.create_point("statement", "SPELL-B", key="  PK  ", dedup=True)
+    stored = sdk._get_proj().g.query(
+        "MATCH (n:Point) WHERE n.id = $id RETURN n.key, n.updatedAt",
+        params={"id": a["id"]}).result_set
+    assert stored[0][0] == "PK", (
+        f"a padded re-run rewrote the stored spelling to {stored[0][0]!r}")
+    assert stored[0][1] == before, (
+        "a pure dedup hit bumped updatedAt (#490 churn)")
+
+
+def test_a_bundle_naming_ONE_key_by_TWO_paddings_is_the_SAME_identity(sdk):
+    """#10481 (review finding 1) — the bundle-order SIMULATION and the seek must
+    agree on what one key IS.
+
+    ``_item_dedup_key`` returns the term ``_find_points_by_key`` seeks, so
+    ``PK`` and ``"  PK  "`` are one identity inside a bundle exactly as they are
+    in the graph. Keying the simulation's maps by the RAW spelling certified the
+    later padded item as a FRESH mint, and the writer then folded it onto the
+    terminal point the first item had just minted — the #8400 mutation, one
+    statement inside the bundle.
+    """
+    assert _item_dedup_key({"key": "  PK  "}) == "PK"
+    assert _item_dedup_key({"key": "PK"}) == "PK"
+    with pytest.raises(BundleValidationError, match="FRESH key"):
+        sdk.ingest(
+            {"points": [
+                {"ref": "p1", "kind": "statement", "content": "PAD-A",
+                 "key": "PK", "status": "retracted"},
+                {"ref": "p2", "kind": "statement", "content": "PAD-B",
+                 "key": "  PK  "},
+            ]},
+            promotion_policy="auto",
+        )
+    assert _points_with_key(sdk, "PK") == [], (
+        "Phase-1 must reject BEFORE any write — the padded variant is the SAME "
+        "key, so the later item folds onto the terminal point just created")
+
+
+def test_the_bundle_key_identity_holds_in_the_OTHER_padding_direction(sdk):
+    """The mirror of the pair above: a TERMINAL item minted under the PADDED
+    spelling, then a later item under the trimmed one. Both directions are
+    asserted so a future edit cannot break one while the suite stays green
+    (#10481 review, coverage finding)."""
+    with pytest.raises(BundleValidationError, match="FRESH key"):
+        sdk.ingest(
+            {"points": [
+                {"ref": "p1", "kind": "statement", "content": "PAD-C",
+                 "key": "  PK2  ", "status": "retracted"},
+                {"ref": "p2", "kind": "statement", "content": "PAD-D",
+                 "key": "PK2"},
+            ]},
+            promotion_policy="auto",
+        )
+    assert _points_with_key(sdk, "PK2") == []

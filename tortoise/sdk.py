@@ -6906,6 +6906,54 @@ def _item_supplied_key(item: dict) -> object:
     return nested.get("key") if isinstance(nested, dict) else None
 
 
+def _key_seek_term(key: object) -> object:
+    """The term the KEY-IDENTITY seek must send for ``key`` — the value the
+    engine's index actually holds, which is the STRIPPED term (#10481).
+
+    ⛔ Why this exists, measured: ``key`` is index-backed
+    (``projection._POINT_RANGE_INDEX_PROPS``, #8400) and FalkorDB stores the
+    TRIMMED term in the index while the equality seek does not trim its query
+    side (#9599), so a node written under ``"  PK  "`` is INVISIBLE to
+    ``n.key = $key`` with ``key="  PK  "`` and findable only by ``key="PK"``.
+    ``_find_points_by_key`` therefore returned ``[]`` for a key the graph
+    demonstrably holds, and ``create_point(dedup=True, key="  PK  "..)`` minted
+    a SECOND carrier of one key — the #6110 duplicate the key-identity
+    machinery exists to prevent. It is not only the writer: the
+    #6110/#8400/#9819 Phase-1 guard (``_key_holder_state``) asks the same seek
+    and got the same empty answer, so it CERTIFIED the duplicate write.
+
+    ⛔ NOT a reopen of #9553's recorded position, and deliberately narrow. The
+    pending owner question on #9599 (comment 6342343424: refuse / trim /
+    store-verbatim) is about the STORED value, and this function never touches
+    it: a padded identity is still stored VERBATIM (asserted by
+    ``test_a_padded_key_is_still_STORED_VERBATIM``). What it normalises is the
+    SEARCH TERM — to the very term the engine already indexed and already
+    matched by the trimmed spelling, so the seek starts answering the spelling
+    it was given instead of inventing a third one. Nothing a caller can observe
+    about a stored row changes; a padded row gains findability by its own
+    spelling (it had none) and a pre-existing twin pair becomes visible as the
+    multi-holder set ``_find_points_by_key`` already returns and the writer
+    already WARNS about, rather than being silently half-invisible.
+
+    Scoped to the key leg on purpose: ``key`` is the only identity prop this
+    seek serves, and applying it to the other indexed props (``id``,
+    ``pointKind``, ``content_hash``) would be the wider ruling that question
+    reserves (§Scope of the ruling). A non-string keeps its current shape and
+    is refused downstream exactly as before.
+
+    ⚠️ A whitespace-ONLY term answers ``""``, and that is safe only because
+    every call site pre-gates on ``key.strip()`` truthiness
+    (``_resolve_dedup_hit``, ``_key_holder_state``, ``_item_dedup_key``), so it
+    is never reached. It must STAY that way: ``""`` is not a key identity
+    anything above this line defines, and a caller that stopped gating would be
+    asking this seek a question the key-identity path does not answer. (Measured
+    on the embedded engine: ``n.key = ""`` matches nothing, so the failure would
+    be a silent MISS rather than a cross-key match — still wrong, and still
+    not this function's to paper over.)
+    """
+    return key.strip() if isinstance(key, str) else key
+
+
 def _item_dedup_key(item: dict) -> str | None:
     """The effective dedup ``key`` of an ingest bundle item — the SAME value
     ``create_point`` sees after ``_coerce_props`` flattens the item (#6110,
@@ -6915,8 +6963,17 @@ def _item_dedup_key(item: dict) -> str | None:
     ``props`` on collision, and that precedence is by PRESENCE, not by
     truthiness — see :func:`_item_supplied_key`, the one home for it.
 
-    ⛔ THIS answers *"what key does the RESOLVER receive?"*, which is why a
-    blank key is treated as ABSENT (the historic content-only path). That is
+    ⛔ THIS answers *"what key does the RESOLVER receive?"*, so it returns the
+    SAME normalised term the resolver seeks — ``_key_seek_term`` (#10481): the
+    engine's equality seek is index-served by the TRIMMED term, so `"  PK  "`
+    and `"PK"` are ONE key to the writer. That is what makes the bundle-order
+    simulation agree with the write it predicts: `minted_keys` /
+    `minted_terminal` are keyed by this value, so two items naming one key by
+    two paddings are recognised as the same identity instead of one being
+    certified as a fresh mint that the writer then FOLDS (the #8400/#9173
+    terminal-mutation hazard, review finding 1).
+
+    A blank key is treated as ABSENT (the historic content-only path) —
     ``create_point``'s own test on the way IN (``_has_key`` is a ``.strip()``
     test, and it passes ``key=None`` when it fails). It is NOT the same
     question as *"what does the minted NODE hold?"* — see
@@ -6925,7 +6982,7 @@ def _item_dedup_key(item: dict) -> str | None:
     (#9819 review P2).
     """
     val = _item_supplied_key(item)
-    return val if isinstance(val, str) and val.strip() else None
+    return _key_seek_term(val) if isinstance(val, str) and val.strip() else None
 
 
 def _item_stored_key(item: dict) -> str | None:
@@ -6952,18 +7009,18 @@ def _item_stored_key(item: dict) -> str | None:
     ⛔ Do NOT "tidy" the blank/padded case here into a strip or a refusal. A
     padded-but-REAL identity (``"  s1  "``) is a RECORDED POSITION — #9599's
     body records those as legitimate identities, and trimming or refusing one
-    REOPENS that position, so the answer is an OPEN OWNER QUESTION on #9599
-    (comment 6342343424: refuse / trim / store-verbatim, with their measured
-    consequences), not a caller's choice. It is sharp for THIS field because
-    ``key`` is index-backed (``_POINT_RANGE_INDEX_PROPS``) and the engine's
-    equality seek does not trim the query side while the index stores the
-    trimmed term: measured on the embedded engine here, ``"  PK  "`` is
-    invisible to ``_find_points_by_key`` (empty) and findable only by the
-    trimmed spelling, so two ``create_point(dedup=True, key="  PK  ")`` calls
-    mint TWO carriers of one key. That is the #6110 duplicate this repo exists
-    to prevent — it is filed, not absorbed, and this simulation must model the
-    writer AS IT IS until the owner rules. (#9819 review P2.)
-    """
+    REOPENS that position, so what is STORED is still an OPEN OWNER QUESTION on
+    #9599 (comment 6342343424: refuse / trim / store-verbatim, with their
+    measured consequences), not a caller's choice. `"  PK  "` is therefore
+    stored VERBATIM, and this function's truthiness test is unchanged.
+
+    ⚠️ What #10481 DID fix is the SEEK, not the stored value:
+    ``_find_points_by_key`` now sends ``_key_seek_term(key)``, the TRIMMED term
+    the engine's index actually serves, so ``"  PK  "`` is no longer invisible
+    to its own spelling and two ``create_point(dedup=True, key="  PK  ")``
+    calls now FOLD onto one carrier instead of minting two (#6110). The writer
+    stores the padded value and resolves it by the trimmed term — i.e. this
+    simulation still models the writer as it is.    """
     val = _item_supplied_key(item)
     return val if isinstance(val, str) and val else None
 
@@ -12867,6 +12924,21 @@ class TortoiseSDK:
                                 "the identity; pass a fresh key with "
                                 "dedup=False to mint a second point (#6110)",
                                 _supplied_key, pid)
+                        # ⛔ #10481 made the KEY match trim-aware, so the
+                        # supplied spelling can differ from the one this point
+                        # was MINTED with ("  PK  " now hits a holder of "PK").
+                        # The key IS the identity and the FIRST-WRITER spelling
+                        # is what the graph holds (#6110: a dedup hit never
+                        # silently reassigns an existing key) — so the incoming
+                        # spelling is NOT applied. Relaying it would rewrite the
+                        # stored value on a pure dedup hit, bump ``updatedAt`` on
+                        # every alternating re-run (#490 churn), and be LIVE-ONLY:
+                        # ``PointRevised`` folds no ``key`` arm, so a rebuild
+                        # reverts the spelling (#9732).
+                        _existing_key = _existing.get("key")
+                        if (isinstance(_existing_key, str) and _existing_key
+                                and _existing_key != _supplied_key):
+                            props.pop("key", None)
                     else:
                         # The hit came from CONTENT, not from the key: never
                         # silently REASSIGN an existing point's key. A key
@@ -33950,11 +34022,19 @@ class TortoiseSDK:
         (#6110 — key is unique per pointKind, not globally). The WHERE clause
         is the shared ``_dedup_match_clauses`` non-operator predicate, so this
         path can never resolve a dedup onto an operator node (#2949).
+
+        ⛔ THE TERM IS NORMALISED, and this function is the BOUNDARY for it
+        (#10481): ``key`` is index-backed and the engine indexes the STRIPPED
+        term (#9599), so a seek sent the caller's raw spelling misses a node
+        stored under a padded one — see :func:`_key_seek_term`. Fixing it HERE
+        rather than in the writer is what makes the writer (``_resolve_dedup_hit``)
+        and the Phase-1 key-identity guard (``_key_holder_state``) agree: both
+        call this method, so neither can certify a write the other would fold.
         """
         clauses, params = self._dedup_match_clauses(
             point_kind=pointKind, exclude_id=exclude_id)
         clauses.append("n.key = $key")
-        params["key"] = key
+        params["key"] = _key_seek_term(key)
         rows = self._get_proj().g.query(
             f"MATCH (n:Point) WHERE {' AND '.join(clauses)} RETURN n.id",
             params=params,
