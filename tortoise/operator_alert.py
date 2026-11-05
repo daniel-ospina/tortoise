@@ -34,6 +34,7 @@ import atexit
 import collections
 import concurrent.futures
 import contextlib
+import functools
 import logging
 import sys
 import threading
@@ -158,8 +159,22 @@ _INFLIGHT: dict[tuple[str, str], float] = {}                # key -> attempt tok
 #: future was cancelled before `_run` started (the done-callback `alert_operator`
 #: registers), and `alert_operator`'s two pre-pool failure paths (no store, rejected
 #: submit). `_reap_locked` does not decrement it. The gate is `_RESERVED >=
-#: _MAX_INFLIGHT`.
+#: _MAX_INFLIGHT`. Only `_reserve_locked`/`_release_locked` write it, and every token in
+#: `_RESERVATIONS` accounts for exactly one of its units (see `_release_locked`).
 _RESERVED = 0
+#: The IDENTITY behind `_RESERVED`: one token per admitted-but-unsettled dispatch, so a
+#: release is applied to the admission it was taken for and to no other. A bare counter
+#: cannot do that, and the failure is one-sided in the wrong direction — a late release
+#: from an admission the maps no longer remember (`_reap_locked` drops the HANDLE and
+#: deliberately keeps the reservation; `reset_operator_alert_state_for_tests` zeroes the
+#: count) would decrement a reservation a DIFFERENT live dispatch is holding, after which
+#: the shed gate admits more than `_MAX_INFLIGHT` during exactly the storm it exists to
+#: cap. Observed as `tests/test_operator_alert.py::test_a_shed_never_clears_an_admitted_latch`
+#: reading `_RESERVED == 4` immediately after admitting five, on CI shard `test (h)`.
+_RESERVATIONS: set[int] = set()
+#: Monotonic for the PROCESS lifetime, never reset (a reset would let a token taken
+#: before it alias a later one, so a stale release would match a live reservation).
+_NEXT_RESERVATION = 0
 #: future -> submitted ts. Used by `join_operator_alerts` and by _reap_locked for
 #: dead-handle housekeeping — NOT by the shed gate (that reads _RESERVED).
 _HANDLES: dict[Any, float] = {}
@@ -366,11 +381,40 @@ def _reap_locked(now: float) -> None:
             _HANDLES.pop(f, None)
 
 
-def _release_locked() -> None:
-    """Release one admission reservation (caller holds ``_LOCK``); floors at 0."""
+def _reserve_locked() -> int:
+    """Take one admission reservation (caller holds ``_LOCK``); returns its token.
+
+    The token is what makes the release attributable: it is stored in
+    ``_RESERVATIONS`` and handed to the worker that settles the dispatch, which
+    releases THAT admission rather than "one unit of a global count".
+    """
+    global _RESERVED, _NEXT_RESERVATION
+    _NEXT_RESERVATION += 1
+    token = _NEXT_RESERVATION
+    _RESERVATIONS.add(token)
+    _RESERVED += 1
+    return token
+
+
+def _release_locked(token: int | None) -> None:
+    """Release the admission identified by ``token`` (caller holds ``_LOCK``).
+
+    Identity-checked, never arithmetic: a token no longer in ``_RESERVATIONS`` is a
+    NO-OP. That is the whole point — a stale worker whose handle was reaped (or whose
+    state a reset cleared) settles LATE, and its release must not decrement a
+    reservation that a different live dispatch holds, because the count it would
+    under-report is the one the shed gate reads. ``None`` is accepted for the
+    cancellation callback, which can be invoked directly in a test.
+
+    The floor is defensive only: ``_RESERVED`` is monkeypatched by tests, and it must
+    never go negative (a negative bound sheds nothing at all).
+    """
     global _RESERVED
-    if _RESERVED > 0:
-        _RESERVED -= 1
+    # ``set.discard`` returns None, so it cannot be used as the membership test.
+    if token is None or token not in _RESERVATIONS:
+        return
+    _RESERVATIONS.remove(token)
+    _RESERVED = max(0, _RESERVED - 1)
 
 
 def _prune_locked(now: float) -> None:
@@ -420,7 +464,7 @@ def _due_locked(key: tuple[str, str], now: float) -> bool:
     return True
 
 
-def _run(store, key, kind, org_id, detail, token) -> None:
+def _run(store, key, kind, org_id, detail, token, reservation) -> None:
     try:
         # Ownership check BEFORE the store write: a superseded attempt does not
         # spend a network call filing an incident its successor may already be
@@ -446,12 +490,14 @@ def _run(store, key, kind, org_id, detail, token) -> None:
         # Release the admission reservation HERE, not in the done-callback:
         # Future.set_result notifies waiters BEFORE invoking done callbacks, so a
         # callback release races the joining thread and makes `join → _RESERVED == 0`
-        # flaky. `finally` runs before the future is marked done.
+        # flaky. `finally` runs before the future is marked done. Released BY TOKEN: a
+        # worker that settles after its own admission was forgotten must not decrement
+        # the reservation a LIVE dispatch holds (`_release_locked`).
         with _LOCK:
-            _release_locked()
+            _release_locked(reservation)
 
 
-def _forget(fut) -> None:
+def _forget(fut, reservation: int | None = None) -> None:
     """Drop one dispatch's handle; release its reservation if the future was
     cancelled before ``_run`` started.
 
@@ -460,17 +506,20 @@ def _forget(fut) -> None:
     visible to ``_shutdown_pool``'s pending-handle count. The line states what is
     observed (cancelled before running); the cause — pool shutdown, a test's
     cancelling pool, ``cancel_futures`` — is not available here.
+
+    ``reservation`` is the token `alert_operator` admitted this dispatch with (bound by
+    the callback registration); a direct call without it only reports.
     """
     with _LOCK:
         _HANDLES.pop(fut, None)
         if fut.cancelled():
-            _release_locked()
+            _release_locked(reservation)
             _logger.warning("operator alert cancelled before it ran")
 
 
 def alert_operator(kind: str, org_id: str | None, detail: dict | None = None):
     """Fire-and-forget operator alert; returns the handle or None. Never raises."""
-    global _SINCE_SWEEP, _RESERVED
+    global _SINCE_SWEEP
     key = (kind, org_id or "")
     now = time.monotonic()
     shed = False
@@ -491,7 +540,7 @@ def alert_operator(kind: str, org_id: str | None, detail: dict | None = None):
             _ATTEMPT[key] = (now, _RETRY_WINDOW_S)   # provisional; _run re-arms
             _ATTEMPT.move_to_end(key)
             token = now
-            _RESERVED += 1
+            reservation = _reserve_locked()
             _INFLIGHT[key] = token
     if shed:
         _log_shed(now, kind)
@@ -507,22 +556,24 @@ def alert_operator(kind: str, org_id: str | None, detail: dict | None = None):
             # reservation.
             if _INFLIGHT.get(key) == token:
                 _INFLIGHT.pop(key, None)
-            _release_locked()
+            _release_locked(reservation)
         _logger.warning("operator alert not filed — no alert channel (kind=%s)", kind)
         return None
     try:
-        fut = _POOL.submit(_run, store, key, kind, org_id, dict(detail or {}), token)
+        fut = _POOL.submit(_run, store, key, kind, org_id, dict(detail or {}), token,
+                           reservation)
     except Exception:  # pool shutting down — never drop the alert silently
         with _LOCK:
             if _INFLIGHT.get(key) == token:  # token-guarded
                 _INFLIGHT.pop(key, None)
-            _release_locked()
+            _release_locked(reservation)
         _logger.warning("operator alert dispatch failed (kind=%s)", kind,
                         exc_info=True)
         return None
     # Register the settle callback before recording the handle, and record the handle
-    # only while the future is unsettled (both under _LOCK).
-    fut.add_done_callback(_forget)
+    # only while the future is unsettled (both under _LOCK). The reservation is bound
+    # here so the callback releases THIS admission and not "one unit of the count".
+    fut.add_done_callback(functools.partial(_forget, reservation=reservation))
     with _LOCK:
         if not fut.done():
             _HANDLES[fut] = time.monotonic()
@@ -560,6 +611,12 @@ def reset_operator_alert_state_for_tests() -> None:
     ``_RESERVED`` and ``_HANDLES`` are reset WITH the maps: a reservation left by
     a test that wedged a worker would silently shrink the budget every later test
     sees, and a stale handle would be joined (or counted) by the next test.
+    ``_RESERVATIONS`` is cleared with the count for a second reason — a worker that is
+    STILL RUNNING at this point settles later, and its token must be unknown by then so
+    its release is a no-op rather than a decrement of some live dispatch's admission.
+    ``_NEXT_RESERVATION`` is deliberately NOT reset: it is a PROCESS-lifetime monotonic
+    counter, because a reset would let a token taken before it alias one taken after and
+    reinstate exactly the stealing this identity exists to prevent.
     ``_SINCE_SWEEP`` is reset so a test that pins the amortised sweep is not
     dependent on how many admissions earlier tests happened to make.
     """
@@ -568,6 +625,7 @@ def reset_operator_alert_state_for_tests() -> None:
         _ATTEMPT.clear()
         _INFLIGHT.clear()
         _HANDLES.clear()
+        _RESERVATIONS.clear()
         _RESERVED = 0
         _SINCE_SWEEP = 0
         # Also the shed-log rate limit, or the first test to shed would silence the

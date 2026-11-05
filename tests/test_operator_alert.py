@@ -459,8 +459,15 @@ def test_reset_clears_every_piece_of_state(monkeypatch):
         oa._HANDLES[object()] = 1.0
         oa._ATTEMPT[("K", "o")] = (0.0, 1.0)
         oa._INFLIGHT[("K", "o")] = 0.0
+        oa._RESERVATIONS.add(99)
     oa.reset_operator_alert_state_for_tests()
     assert oa._RESERVED == 0
+    assert not oa._RESERVATIONS, (
+        "a stale token must not survive the reset: its late release has to be a "
+        "no-op, not a decrement of the next admission")
+    assert oa._NEXT_RESERVATION > 0, (
+        "the reservation counter is process-lifetime monotonic — resetting it would "
+        "let a stale token alias a fresh one")
     assert oa._SINCE_SWEEP == 0
     assert oa._HANDLES == {}
     assert oa._ATTEMPT == {}
@@ -624,6 +631,15 @@ def test_prune_never_sweeps_an_unsettled_latch(monkeypatch):
     finally:
         gate.set()
         oa.join_operator_alerts()
+        # ``join_operator_alerts`` cannot speak for a REAPED handle — the sweep above
+        # dropped this worker's handle from ``_HANDLES`` — so it can return while the
+        # worker is still in its pool thread, and the next test can then be one free
+        # thread short of its own precondition. Drain on the RESERVATION instead: it is
+        # released in the worker's ``finally``, which is the settle itself.
+        deadline = time.monotonic() + 30.0
+        while oa._RESERVED and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert oa._RESERVED == 0, "the worker did not settle within 30s"
 
 
 def test_a_shed_never_clears_an_admitted_latch(monkeypatch):
@@ -679,6 +695,77 @@ def test_a_shed_never_clears_an_admitted_latch(monkeypatch):
         oa.join_operator_alerts()
     assert (_KIND, "org-q") in store.calls, (
         "the queued worker must still file its incident")
+
+
+def test_a_forgotten_admissions_release_cannot_steal_a_live_one(monkeypatch):
+    """Pin: a reservation is released BY TOKEN, so a late settle cannot steal one.
+
+    The shape is the module's own, not contrived: ``_reap_locked`` drops a wedged
+    worker's HANDLE while deliberately KEEPING its reservation, so
+    ``join_operator_alerts`` cannot wait for it — and the next test's
+    ``reset_operator_alert_state_for_tests()`` zeroes the count. That worker then
+    settles LATE. With a bare ``_RESERVED -= 1`` its release decrements whatever
+    live dispatch holds a reservation at that moment, and because the shed gate is
+    ``_RESERVED >= _MAX_INFLIGHT`` the bound then admits OVER its limit — during
+    exactly the storm it exists to cap. This is the failure that made
+    ``test_a_shed_never_clears_an_admitted_latch`` read ``_RESERVED == 4`` right
+    after admitting five, on a loaded CI shard (`test (h)`, run 41934867222).
+    """
+
+    class _GatedEntrance:
+        """Blocks on its own gate and reports that it is inside."""
+
+        def __init__(self, gate, entered):
+            self.gate = gate
+            self.entered = entered
+
+        def open_incident_state(self, kind, org_id="", detail=None):
+            self.entered.set()
+            self.gate.wait(timeout=30)
+            return OpenOutcome.FILED
+
+    monkeypatch.setattr(oa, "_MAX_INFLIGHT", 8)
+    monkeypatch.setattr(oa, "_INFLIGHT_STALE_S", 0.02)
+    stale_gate, live_gate = threading.Event(), threading.Event()
+    stale_entered, live_entered = threading.Event(), threading.Event()
+    stores = {"current": _GatedEntrance(stale_gate, stale_entered)}
+    monkeypatch.setattr(oa, "alert_store", lambda: stores["current"])
+
+    try:
+        stale = oa.alert_operator(_KIND, "org-stale", {})
+        assert stale is not None
+        assert stale_entered.wait(timeout=10), (
+            "precondition: the stale worker is inside the store")
+        time.sleep(0.05)                 # age it past the stale bound
+        with oa._LOCK:
+            oa._prune_locked(time.monotonic())
+            assert not oa._HANDLES, "precondition: the reap dropped the handle"
+            assert oa._RESERVED == 1, (
+                "precondition: the reservation survives the handle reap")
+
+        # The next test's setup. The stale worker is STILL RUNNING and its
+        # reservation token must be forgotten here, not transferable to a peer.
+        oa.reset_operator_alert_state_for_tests()
+        stores["current"] = _GatedEntrance(live_gate, live_entered)
+        live = oa.alert_operator(_KIND, "org-live", {})
+        assert live is not None, "precondition: the live dispatch is admitted"
+        assert live_entered.wait(timeout=10)
+        with oa._LOCK:
+            assert oa._RESERVED == 1, (
+                "precondition: the live dispatch holds the only reservation")
+
+        stale_gate.set()                 # the stale worker settles FIRST
+        stale.result(timeout=10)
+        with oa._LOCK:
+            assert oa._RESERVED == 1, (
+                "a late release from a forgotten admission stole the live "
+                "reservation — the shed gate now admits over the bound")
+    finally:
+        stale_gate.set()
+        live_gate.set()
+        oa.join_operator_alerts()
+    with oa._LOCK:
+        assert oa._RESERVED == 0, "every reservation is released exactly once"
 
 
 def test_a_stalled_resolver_does_not_clear_a_successors_latch(monkeypatch):
