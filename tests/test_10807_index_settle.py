@@ -220,6 +220,15 @@ def _settle_call_sites(paths) -> tuple[dict[str, list[int]], dict[str, list[int]
     `_index_settle.index_rows_after_settle(proj)` are the SAME call — the form
     carries no meaning, only the arguments do — so a pin that reads one form stops
     covering the site it documents the day somebody writes the other.
+
+    ⛔ AND A THIRD FORM: `from tests._index_settle import index_rows_after_settle as
+    settle` then `settle(proj)` is the same call again, and it is neither `Name(
+    id="index_rows_after_settle")` nor an attribute — an aliased import made the
+    call INVISIBLE in both directions (no site recorded, so the floor could be met
+    by unrelated sites, and no `until` check, so a pre-drop read passed the pin).
+    Aliases are resolved from the module-level `ImportFrom` nodes rather than by
+    matching the local name, so an alias of a DIFFERENT symbol from the same module
+    is not mistaken for a call site.
     """
     missing: dict[str, list[int]] = {}
     call_sites: dict[str, list[int]] = {}
@@ -229,12 +238,25 @@ def _settle_call_sites(paths) -> tuple[dict[str, list[int]], dict[str, list[int]
         # sites would cost the suite seconds for nothing.
         if b"index_rows_after_settle" not in source:
             continue
-        for node in ast.walk(ast.parse(source)):
+        tree = ast.parse(source)
+        # local name -> the symbol it was imported as (`settle` ->
+        # `index_rows_after_settle`), from any `from ._index_settle import …`.
+        aliases: dict[str, str] = {}
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ImportFrom) or not node.module:
+                continue
+            if not node.module.endswith("_index_settle"):
+                continue
+            for alias in node.names:
+                aliases[alias.asname or alias.name] = alias.name
+        for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
             func = node.func
             named = (
-                (isinstance(func, ast.Name) and func.id == "index_rows_after_settle")
+                (isinstance(func, ast.Name)
+                 and (func.id == "index_rows_after_settle"
+                      or aliases.get(func.id) == "index_rows_after_settle"))
                 or (isinstance(func, ast.Attribute)
                     and func.attr == "index_rows_after_settle")
             )
@@ -288,20 +310,34 @@ def test_the_scan_sees_a_module_prefixed_call_and_its_missing_until(tmp_path):
     reached `call_sites` (so the floor could be met by unrelated sites) and it
     never reached `missing` (so a call that can return a pre-drop read passed the
     pin). Reverting to the bare-name test makes this case report `{}` for both.
+
+    ⛔ `test_d`/`test_e` are the THIRD form — an ALIASED import. `settle(proj)` is
+    the same call as `index_rows_after_settle(proj)`, and it was invisible to both
+    the `Name(id=…)` and `Attribute(attr=…)` arms, so an alias was a free pass past
+    the pin. `test_f` is the control that keeps the alias map from being a name
+    match: importing a DIFFERENT symbol from the same module is not a call site.
     """
     mod = tmp_path / "test_synthetic_consumer.py"
     mod.write_text(
         "import tests._index_settle as _index_settle\n"
+        "from tests._index_settle import index_rows_after_settle as settle\n"
+        "from tests._index_settle import point_index_drops_visible as visible\n"
         "def test_a(proj):\n"
         "    _index_settle.index_rows_after_settle(proj)\n"
         "def test_b(proj):\n"
         "    _index_settle.index_rows_after_settle(proj, until=lambda rows: True)\n"
         "def test_c(proj):\n"
-        "    index_rows_after_settle(proj, until=lambda rows: True)\n",
+        "    index_rows_after_settle(proj, until=lambda rows: True)\n"
+        "def test_d(proj):\n"
+        "    settle(proj)\n"
+        "def test_e(proj):\n"
+        "    settle(proj, until=lambda rows: True)\n"
+        "def test_f(proj):\n"
+        "    visible(proj)\n",
         encoding="utf-8")
     call_sites, missing = _settle_call_sites([mod])
-    assert call_sites == {"test_synthetic_consumer.py": [3, 5, 7]}, call_sites
-    assert missing == {"test_synthetic_consumer.py": [3]}, missing
+    assert call_sites == {"test_synthetic_consumer.py": [5, 7, 9, 11, 13]}, call_sites
+    assert missing == {"test_synthetic_consumer.py": [5, 11]}, missing
 
 
 def test_index_cells_flattens_every_row():
