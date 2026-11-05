@@ -2956,6 +2956,31 @@ TOOL_CARVEOUTS = (
     # A narrower core-only mapping is possible but not needed: a
     # collision-check change is rare and fail-closed is the safe default.
     "tools/collision_preflight.py",
+    # #11027: the credential write-capability preflight (tools/gh_write_preflight.py)
+    # owns tests/test_gh_write_preflight.py — the 67 hermetic arms that pin the
+    # safety-critical properties of the tool a lane runs BEFORE the first hour of
+    # work: no credential value reaches stdout/stderr/`--json` on any route, every
+    # exit-0 path measured push-exit-0 + an exact `refs/heads/<ref>` `ls-remote`
+    # confirmation on EVERY push target + a confirmed delete, and no probe ref left
+    # on any handled path (+ its refusal contract: `--repo` is an assertion, not a
+    # redirect; cannot-verify never becomes exit 0). The registration in
+    # ci-surfaces.yml is NOT a substitute: it applies to edits of the TEST file, and
+    # `--integrity` reds a PR that ADDS the test without it. For a TOOL-ONLY diff `tools/` is a flat
+    # NON_PYTHON_PREFIXES entry with no SOURCE_PATTERNS row, so `changed` comes back
+    # empty, select() takes the docs-only early return — which bypasses the
+    # `if not matched: matched.add("core")` fallback entirely — and NOT ONE of those
+    # arms runs on the most likely change to weaken the gate. Measured before this
+    # entry: `select(["tools/gh_write_preflight.py"], "pull_request",
+    # load_manifest())` -> surfaces=[], full=False, tier-1 smoke,
+    # test_gh_write_preflight.py ABSENT; after -> surfaces=['core'], full=True,
+    # test_files=ALL. No SOURCE_PATTERNS entry matches the path, so it lands in the
+    # unknown-path branch -> FULL matrix (fail closed).
+    # PREFIX, not the exact file (the #9487 P2 lesson): `_keep_changed` matches with
+    # `startswith`, so an exact path silently re-opens the drop for a rename or a
+    # split-out sibling. Over-matching costs extra CI; under-matching ships a gate
+    # with no arms.
+    # Pinned by test_ci_selection.test_gh_write_preflight_tool_change_fails_closed_to_full.
+    "tools/gh_write_preflight",
     # #4408: the local-branch reaper (tools/branch_reaper.py) owns
     # tests/test_branch_reaper.py. Same silent-drop class as the preflight
     # carve-out above: the flat "tools/" prefix would swallow a reaper-only

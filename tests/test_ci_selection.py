@@ -2926,6 +2926,53 @@ def test_worktree_report_tool_change_selects_core_not_tier1():
     assert r["full"] is False, r
 
 
+def test_gh_write_preflight_test_file_change_selects_core():
+    """#11027: the preflight suite is a `core` file — a change to IT must run it.
+
+    The other half of the registration pair (see the tool-change pin below): the suite
+    pins a gate every lane is told to run before its first hour of work, so an edit
+    that weakens a pin must be graded by the surface that owns the file. Before the
+    `core` registration, `classify_test_file` returned None and
+    `tools/ci_selection.py --integrity` redded `manifest drift:
+    ['test_gh_write_preflight.py']` — the required `manifest-integrity` leg.
+
+    Mutation check: deleting the `- test_gh_write_preflight.py` line from the `core`
+    surface fails the first assert (surfaces=[] -> tier-1 smoke) and `integrity()`
+    reports the file as drift (asserted by
+    `test_integrity_covers_all_test_files`).
+    """
+    r = _sel(["tests/test_gh_write_preflight.py"])
+    assert "core" in r["surfaces"], r
+    assert "test_gh_write_preflight.py" in r["test_files"], r
+
+
+def test_gh_write_preflight_tool_change_fails_closed_to_full():
+    """#11027: a tool-only change must run the preflight's own 67 hermetic arms.
+
+    `tools/gh_write_preflight.py` owns `tests/test_gh_write_preflight.py`, which pins
+    the properties that make the tool safe to tell every lane to run: no credential
+    value reaches any stream, every exit-0 path measured push-exit-0 + an exact
+    `refs/heads/<ref>` confirmation on EVERY push target + a confirmed delete, no
+    probe ref left behind on any handled path, `--repo` is an assertion and not a
+    redirect, and cannot-verify never becomes exit 0. Registering the TEST under
+    `core` does not cover a change to the TOOL: `tools/` is a flat
+    NON_PYTHON_PREFIXES entry with no SOURCE_PATTERNS row, so `changed` came back
+    empty, `select()` took the docs-only early return — which bypasses the
+    `if not matched: matched.add("core")` fallback entirely — and the whole suite was
+    ABSENT from a tool-only diff (measured: surfaces=[], full=False, tier-1 smoke).
+    No SOURCE_PATTERNS entry matches the path, so with the TOOL_CARVEOUTS entry it
+    lands in the unknown-path branch -> FULL matrix (fail closed), the safe default
+    for a tool whose answer decides whether a lane can deliver at all.
+
+    Mutation check: removing the `tools/gh_write_preflight` TOOL_CARVEOUTS entry
+    filters the path out (docs-only early return), failing all three asserts below.
+    """
+    r = _sel(["tools/gh_write_preflight.py"])
+    assert r["full"] is True
+    assert r["test_files"] == "ALL"
+    assert "core" in r["surfaces"]
+
+
 def test_ci_catch_history_tool_change_selects_core_not_tier1():
     """A change to the catch-history instrument must run the rules it pins (#10131 review P1).
 
