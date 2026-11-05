@@ -314,9 +314,9 @@ def test_a_STILL_QUEUED_job_that_has_STARTED_is_refused(fixture):
     exercises the LOOKUP arm instead, so the `j.get("started_at")` half can be
     deleted with the suite still green: the job then reads as "no work to
     destroy", the verdict becomes PERMIT, and a real POST destroys running work.
-    ⛔ MEASURED BEFORE THIS TEST EXISTED: deleting that disjunct left the whole
-    file green (51 passed, 0 failed — the file collects 51 once this test is
-    removed, so 52 is not a figure that state can produce). With the test in
+    ⛔ MEASURED WITH THIS TEST REMOVED FROM THE RUN: deleting that disjunct left
+    the whole file green (51 passed, 0 failed — the file collects 51 without
+    this test; `dacd1fc07^` predates BOTH pins and collects 50). With it in
     place, deleting it reds THIS test and only this test (51 passed, 1 failed),
     while `test_run_with_a_started_job_is_refused` stays green.
     """
@@ -552,13 +552,13 @@ def test_a_partial_job_list_is_fail_closed(fixture):
     matrix run with more than 100 jobs answers `total_count: 150` with the first
     100 rows. Every row can read `queued` while job 101 is `in_progress`, so
     without this disjunct a partial read becomes the claim "no job started" →
-    PERMIT → a POST destroys work the caller never saw. ⛔ MEASURED BEFORE THIS
-    TEST EXISTED: deleting the disjunct left the whole file green (51 passed, 0
-    failed — the file collects 51 without this test), which is exactly how the
-    100-row read was unpinned; with the test in place, deleting it reds THIS
-    test (51 passed, 1 failed) with `rc == 0` and a recorded POST. The
-    non-integer arms never reach this line and the negative arm pins only
-    `total < 0`.
+    PERMIT → a POST destroys work the caller never saw. ⛔ MEASURED WITH THIS
+    TEST REMOVED FROM THE RUN: deleting the disjunct left the whole file green
+    (51 passed, 0 failed — the file collects 51 without this test), which is
+    exactly how the 100-row read was unpinned; with the test in place,
+    deleting it reds THIS test (51 passed, 1 failed) with `rc == 0` and a
+    recorded POST. The non-integer arms never reach this line and the negative
+    arm pins only `total < 0`.
     """
     fixture.apply("run.json", _run_meta(sha=HEAD_OLD))
     fixture.apply("prs.json", pr(PR_HEAD_MOVED))
