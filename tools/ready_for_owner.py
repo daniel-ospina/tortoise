@@ -74,10 +74,29 @@ merged, fully-green PR would otherwise exit 1, i.e. "a required check is red").
 """
 from __future__ import annotations
 
+import sys
+
+# #5128 shape: refuse a <3.12 interpreter BEFORE the imports below. The documented
+# invocation is a bare `uv run python tools/ready_for_owner.py`, and the module-level
+# imports reach into a 3.12-era tree, so on an older interpreter the tool would otherwise
+# die with an unattributed ImportError before any of its own messaging ran. The gate that
+# enforces this shape is tests/test_entry_point_python_guard.py.
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    # Exit code 2, not `SystemExit(<str>)`'s 1: this file reports condition 2 as
+    # `0` PASS / `1` FAIL(red) / `2` FAIL(unreadable), so a refusal through 1 would be
+    # indistinguishable, by exit code, from "a required check is red" — and an old
+    # interpreter is an environment error, i.e. the same class as unreadable.
+    print(
+        f"tools/ready_for_owner.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/ready_for_owner.py`",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
+
 import argparse
 import json
 import subprocess
-import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
