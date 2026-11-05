@@ -3265,7 +3265,7 @@ part of this section, and its status is stated rather than implied:
 | drill step | status |
 |---|---|
 | verb exists, composes the shipped projection, refuses an empty source | **MEASURED** — `tests/test_9556_record_restore_verb.py` (the file's whole collected set — 42 pins / 43 collected cases when this row was written; `--collect-only` is the authority, and this numeral is a measurement, not a promise, live cache graph included) |
-| a restore executed against a **real armed record**, with the restored node/edge counts recorded | **NOT MEASURED** — and the blocker is **not** the arming any more: the record has reported `armed: true` since at least 2026-10-26 (see the Secrets Matrix row for `TORTOISE_RECORD_DSN`). What is missing is a **captured session that actually wrote a `journal_event` + `point` row** — an empty `record_write_failures` cannot stand in for one (`:3482`, `:3598-3610`) — plus `#9551` CI's `TEST_RECORD_DB_URI`. No number is claimed here for a run that has not happened |
+| a restore executed against a **real armed record**, with the restored node/edge counts recorded | **NOT MEASURED** — and the blocker is **not** the arming any more: the record has reported `armed: true` since at least 2026-10-26 (see the Secrets Matrix row for `TORTOISE_RECORD_DSN`). What is missing is a **captured session that actually wrote a `journal_event` + `point` row** — an empty `record_write_failures` cannot stand in for one (this section's own rule: it is *NOT* evidence a row was written) — plus `#9551` CI's `TEST_RECORD_DB_URI`. No number is claimed here for a run that has not happened |
 | the production graph name (`org_*`) restorable | **BLOCKED** — #2944's L2 graph-NAME guard (refusal 4 above) |
 
 When the record is armed, the drill is: capture into the record (scenario A of
@@ -3387,7 +3387,7 @@ operator who read the line above as "CI defends this" would never run it.
 | RESEND_FROM_EMAIL | ✅ (single managed sender identity — #1136; default `noreply@premiselabs.co`) | — | ✅ |
 | BILLING_FROM_EMAIL | optional (distinct billing sender override — #1136) | — | ✅ |
 | BILLING_NOTIFY_TO | ✅ (ops inbox for billing email) | — | ✅ |
-| TORTOISE_RECORD_DSN | ✅ **AUTHORISED (owner 2026-11-03) — the 2026-11-01 postponement is SUPERSEDED; read [Arming the Postgres record](#arming-the-postgres-record--tortoise_record_dsn-epic-7879-r1-9548) below before acting.** The value **is already on Fly**. `GET /health` (`api.premiselabs.co`) read `"record":{"armed":true,"ok":true,…,"record_write_failures":{},"record_non_journal_skips":{},"record_position_unproven":0,…}` at **2026-11-05T11:38:16Z** (re-measured). ⚠️ **Read that emptiness for exactly what it is:** it **falsifies "writes are failing"** — the `write_failed: 32` this row used to quote is a 2026-11-02 reading — but it **cannot establish that a row was written** (see this section's own rule at `:3482` and the capture-verification step at `:3598-3610`: an empty counter has more than one cause and does not say which). It is **not** evidence the record is healthy, and it does **not** attribute the drop's fix: the serving build is `fc6a8a64b` (`migrations_head: 20261030000001_oauth_consent_tickets`), which **predates `#10648` / `fafb8fdcc` and does not carry it**, so whether the dropping stopped is unproven from this read — and the dropped rows recorded on `#9548` (302 at the 2026-11-02 measurement, 331 in the 2026-11-03 owner decision) remain unreaped. Setting it **arms the Postgres record** (epic #7879 R1) via GitHub secret → Fly — already done, so the remaining work is the migration + backup procedure, not the arming. ⚠️ Its **user must be `tortoise_record_app`** (R6, #9554), never `postgres`/`service_role` — see [The record's connecting role](#the-records-connecting-role-r6-decision-2026-10-22-9554) below | — (the record is a Supabase Postgres project, not FalkorDB) | ✅ **set** — the GitHub secret and the Fly secret both exist; the app has reported `armed: true` continuously since at least 2026-10-26 (**measured on #9548**, quoted here, not re-measured — the row's former "value NOT created yet / no such GitHub secret exists today" was measured false). The *arming* procedure is [Arming the Postgres record](#arming-the-postgres-record--tortoise_record_dsn-epic-7879-r1-9548) — ✅ authorised 2026-11-03, gated by its own backup-first precondition |
+| TORTOISE_RECORD_DSN | ✅ **AUTHORISED (owner 2026-11-03) — the 2026-11-01 postponement is SUPERSEDED; read [Arming the Postgres record](#arming-the-postgres-record--tortoise_record_dsn-epic-7879-r1-9548) below before acting.** The value **is already on Fly**. `GET /health` (`api.premiselabs.co`) read `"record":{"armed":true,"ok":true,…,"record_write_failures":{},"record_non_journal_skips":{},"record_position_unproven":0,…}` at **2026-11-05T11:38:16Z** (re-measured). ⚠️ **Read that emptiness for exactly what it is:** it **falsifies "writes are failing"** — the `write_failed: 32` this row used to quote is a 2026-11-02 reading — but it **cannot establish that a row was written** (see this section's own rule **"`record_write_failures: {}` is NOT evidence that a row was written"** and its capture-verification step — an empty counter has more than one cause and does not say which). It is **not** evidence the record is healthy, and it does **not** attribute the drop's fix: the serving build is `fc6a8a64b` (`migrations_head: 20261030000001_oauth_consent_tickets`), which **predates `#10648` / `fafb8fdcc` and does not carry it**, so whether the dropping stopped is unproven from this read — and the dropped rows recorded on `#9548` (302 at the 2026-11-02 measurement, 331 in the 2026-11-03 owner decision) remain unreaped. Setting it **arms the Postgres record** (epic #7879 R1) via GitHub secret → Fly — already done, so the remaining work is the migration + backup procedure, not the arming. ⚠️ Its **user must be `tortoise_record_app`** (R6, #9554), never `postgres`/`service_role` — see [The record's connecting role](#the-records-connecting-role-r6-decision-2026-10-22-9554) below | — (the record is a Supabase Postgres project, not FalkorDB) | ✅ **set** — the GitHub secret and the Fly secret both exist; the app has reported `armed: true` continuously since at least 2026-10-26 (**measured on #9548**, quoted here, not re-measured — the row's former "value NOT created yet / no such GitHub secret exists today" was measured false). The *arming* procedure is [Arming the Postgres record](#arming-the-postgres-record--tortoise_record_dsn-epic-7879-r1-9548) — ✅ authorised 2026-11-03, gated by its own backup-first precondition |
 
 ### Arming the Postgres record — `TORTOISE_RECORD_DSN` (epic #7879 R1, #9548)
 
@@ -3412,9 +3412,15 @@ operator who read the line above as "CI defends this" would never run it.
 > on the running deployment plus indicator (a) — a captured session writes `journal_event` + `point`
 > rows; *(4)* only then close `#9548`, with the measurement posted there.
 > ⚠️ **Step (1) is the live blocker, and it is a missing CREDENTIAL, not a ruling:**
-> `TORTOISE_RECORD_BACKUP_DSN` and `TORTOISE_RECORD_SCRATCH_DSN` are **absent** (the only DSN we hold
-> names the RLS-bound app role, which `record_backup.py` refuses), so no backup can be taken and no
-> migration may run — measured 2026-11-03 by lane `hosted-arm-9548`, recorded on `#9548`.
+> `TORTOISE_RECORD_BACKUP_DSN` and `TORTOISE_RECORD_SCRATCH_DSN` are **absent**, and the two credentials
+> we DO hold are each refused for a *different* documented reason — `TORTOISE_RECORD_DSN` names the
+> RLS-bound app role, refused by `record_backup.require_bypassing_role`; `TORTOISE_AUDIT_DSN` is
+> deployed and its user is `postgres` (the table owner, which *does* bypass RLS), but it is a
+> **pooler** string and is refused by `record_backup.require_direct_dsn` (`tortoise/record_backup.py:409`).
+> ⚠️ **So do not go hunting for a brand-new role:** what is missing is a **DIRECT** connection string for
+> a role that bypasses RLS — exactly what `TORTOISE_RECORD_BACKUP_DSN` is for (`record_backup.py:205`).
+> Until one exists no backup can be taken and no migration may run — measured 2026-11-03 by lane
+> `hosted-arm-9548`, recorded on `#9548`.
 > **So the accurate state is AUTHORISED-BUT-BLOCKED-CRED, not postponed.** A lane reading this section
 > must not re-derive "postponed"; it must report the missing backup credential.
 >
@@ -3444,9 +3450,9 @@ operator who read the line above as "CI defends this" would never run it.
 > ⚠️ **The store is already armed** (`armed: true`) — and, re-measured
 > 2026-11-05T11:38:16Z, `record_write_failures` is EMPTY (the `write_failed: 32` quoted in this note was
 > a 2026-11-02 reading). That emptiness **falsifies "writes are failing"; it does not establish that a
-> write happened** — see this section's own rule (`:3482`: *"`record_write_failures: {}` is NOT evidence
-> that a row was written"*) and its capture-verification step (`:3598-3610`: presence is shown by a
-> `journal_event` / `point` row appearing, never by a zero counter).
+> write happened** — see this section's own rule — *"`record_write_failures: {}` is NOT evidence
+> that a row was written"* — and its capture-verification step: presence is shown by a
+> `journal_event` / `point` row appearing, never by a zero counter.
 > It also does **not** prove the drop was fixed: the serving build `fc6a8a64b` predates
 > `#10648` (`fafb8fdcc`), and the dropped rows recorded on `#9548` (302 measured 2026-11-02, 331 in the 2026-11-03 decision) are still unreaped. ⛔ **This paragraph's "never a licence" clause is SUPERSEDED with the ruling it
 > serves:** the 2026-11-03 decision authorises the act, so the live state is evidence *and* the
