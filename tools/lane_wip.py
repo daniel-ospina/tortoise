@@ -1234,13 +1234,34 @@ def cmd_pin(args: argparse.Namespace) -> int:
     # subdirectory never reaches this refusal.
     at_root = _worktree_root(root)
     if not at_root or Path(at_root).resolve() != root:
+        # ⛔ THE REMEDY MUST NAME A WORKTREE THE CALLER CAN ACTUALLY PIN. `_lane_root` keeps an
+        # ignored/empty directory's OWN key only inside the MAIN worktree, so this refusal is
+        # also reachable from the HUB — `<hub>/build`, `<hub>/.venv`, a just-created
+        # `<hub>/newpkg` — where "run inside the lane" names a lane that does not exist
+        # (measured: `origin/main` pinned the hub from `<hub>/build`, and on this branch the
+        # only thing telling that operator where to go instead is this message). Same refusal,
+        # same exit 2, same "would snapshot THAT checkout"; only the remedy and the label move.
+        if at_root and _is_main_worktree(Path(at_root).resolve()):
+            whose = f"the MAIN worktree {at_root}"
+            label = "a key of its own"
+            remedy = (
+                "A pin must be taken at the worktree root: run `tools/lane_wip.py pin` from "
+                f"{at_root} (or `--path {at_root}`). If what you are looking for is a LANE "
+                "whose worktree was removed and `mkdir`'d back under `.worktrees/`, "
+                "`tools/lane_wip.py recipe` says what is still recoverable"
+            )
+        else:
+            whose = at_root or "no repository"
+            label = "this lane's key"
+            remedy = (
+                "A pin must be taken in the lane's own worktree before anything removes it "
+                "(`tools/lane_wip.py pin` with no `--path`, run inside the lane); if the "
+                "worktree is already gone, `tools/lane_wip.py recipe` says what is still "
+                "recoverable"
+            )
         raise LaneWipError(
-            f"{root} is not a worktree root — it is a directory inside "
-            f"{at_root or 'no repository'}, so a pin taken here would snapshot THAT "
-            "checkout and label it with this lane's key. A pin must be taken in the lane's "
-            "own worktree before anything removes it (`tools/lane_wip.py pin` with no "
-            "`--path`, run inside the lane); if the worktree is already gone, "
-            "`tools/lane_wip.py recipe` says what is still recoverable"
+            f"{root} is not a worktree root — it is a directory inside {whose}, so a pin "
+            f"taken here would snapshot THAT checkout and label it with {label}. {remedy}"
         )
     # `check=False`: an unborn HEAD (a fresh `git init` with no commit) is reported by
     # `snapshot` below, which owns that message.

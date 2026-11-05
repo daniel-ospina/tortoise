@@ -4007,6 +4007,48 @@ def test_pin_refuses_a_POPULATED_recreated_lane_path(hub: Path) -> None:
         (hub / "hub_new.py").unlink(missing_ok=True)
 
 
+def test_pin_from_an_IGNORED_SUBDIRECTORY_of_the_HUB_names_the_HUB(hub: Path) -> None:
+    """A HUB subdirectory must be told to pin the HUB — never "run inside the lane".
+
+    The refusal is CORRECT: `_lane_root` keeps an ignored/empty directory's own key inside the
+    MAIN worktree, so `cd <hub>/build && pin` would snapshot the HUB under a key of its own.
+    But that shape lives in the HUB as well as in the RECIPE's recreated lane — `<hub>/build`,
+    `<hub>/.venv`, a just-created `<hub>/newpkg` — and there the old message named a lane that
+    does not exist and told the operator to go stand in it. `origin/main` PINNED the hub from
+    `<hub>/build` (rc 0), so this message is the only route back to a pin the operator can
+    actually take; it must name the worktree root.
+
+    Falsification: revert the `_is_main_worktree` branch in the refusal and the second
+    assertion below fails on "run inside the lane" while the first still passes — the exit
+    code and "not a worktree root" are the SAME in both shapes, so only the remedy text
+    discriminates, which is exactly why it needs a pin.
+    """
+    with (hub / ".gitignore").open("a") as fh:
+        fh.write("build/\n")
+    assert git("add", ".gitignore", cwd=hub).returncode == 0
+    assert git("commit", "-qm", "ignore build", cwd=hub).returncode == 0
+    build = hub / "build"
+    build.mkdir()
+    (build / "artifact.bin").write_text("ignored, but the HUB is what is behind it\n")
+    (hub / "hub_new.py").write_text("the HUB's work\n")
+    try:
+        out = run_tool("pin", cwd=build)
+        assert out.returncode == 2, f"{out.returncode}: {out.stdout}{out.stderr}"
+        assert "is not a worktree root" in out.stderr, out.stderr
+        assert str(hub) in out.stderr, (
+            "the refusal must name the worktree root the caller CAN pin — the hub — "
+            f"because no lane exists at this path: {out.stderr}"
+        )
+        assert "run inside the lane" not in out.stderr, (
+            "a HUB subdirectory was told to `run inside the lane`; there is no lane here, "
+            f"so the remedy names a place that does not exist: {out.stderr}"
+        )
+        refs = git("for-each-ref", "--format=%(refname)", "refs/pi-lane-wip/", cwd=hub)
+        assert refs.stdout.strip() == "", f"a pin was minted over the hub: {refs.stdout}"
+    finally:
+        (hub / "hub_new.py").unlink(missing_ok=True)
+
+
 def test_one_unreadable_index_only_path_does_not_cost_the_whole_pin(hub: Path) -> None:
     """The `add -f` step for index-only paths must degrade, not fail, on one bad path.
 

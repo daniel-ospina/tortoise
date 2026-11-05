@@ -1813,7 +1813,8 @@ def test_read_coverage_per_path_failure_is_unreadable(
     call now returns `full: True`, the per-path loop never executes, and this test stopped
     exercising its own subject (`uncovered` came back `()` instead of `None`). A docs-only
     path is the shape that still reaches the loop: `surfaces == []`, `full is False`, with
-    the 72 tier-1 smoke files as `test_files`.
+    the tier-1 smoke files as `test_files` (73 at this head — re-derive it with
+    `len(manifest["tier1"])`; this number moves with every classified test added).
     """
     from tools import ci_selection
 

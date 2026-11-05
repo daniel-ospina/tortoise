@@ -3206,9 +3206,11 @@ TOOL_CARVEOUTS = (
     # `tools/ready_for_owner.py`-only diff came back `surfaces: []`, `full: false`, tier-1 smoke
     # only, and the tool then classified that shape as `core-smoke-only` and therefore COVERED.
     # A fail-OPEN path inside the gate that decides whether a merge is safe: the diff most worth
-    # guarding is an edit to the deciding code. MEASURED before this entry:
+    # guarding is an edit to the deciding code. MEASURED before this entry (and 72 was
+    # `tier1`'s size THEN — it is 73 since #10980 added `test_9555_narrative_carrier.py`,
+    # so re-derive it rather than reading this as a current count):
     # `--changed-files tools/ready_for_owner.py` -> surfaces=[] full=False with
-    # `test_ready_for_owner.py` ABSENT from the 72 tier-1 `test_files`. Registering the TEST file
+    # `test_ready_for_owner.py` ABSENT from the tier-1 `test_files`. Registering the TEST file
     # under `core` in ci-surfaces.yml does NOT cover this: that applies to edits of the test file,
     # not of the tool. Pinned by
     # test_ci_selection.test_ready_for_owner_tool_change_fails_closed_to_full.

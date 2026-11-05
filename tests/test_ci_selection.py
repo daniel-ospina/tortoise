@@ -238,7 +238,9 @@ def test_v4_membership_gate_runs_on_both_architecture_docs():
       this head (97 + 73 − 6 shared) and `select()` drops 3 `carve_out` and 11
       `uri_requiring` files, so it is the union minus those, never the union;
     * the **73** is `tier1`'s own size — the entire set an empty-surface diff
-      selects. It is NOT "the whole `full`-less fast pool", which is 1094 here.
+      selects. It is NOT "the whole `full`-less fast pool", which is 1097 at
+      this head (1094 on `main` before this fold's three new test files), and it
+      moves for a third reason again — `len(fast_pool(manifest))`, re-derive it.
       The `60` this sentence carried was that same `tier1` set **13 rows ago**
       (measured: `len(tier1)` is 60 at `609eb72d3`, the commit that wrote it,
       and 73 here), i.e. the very "a past state quoted as a current one"
@@ -5052,9 +5054,10 @@ def test_ready_for_owner_tool_change_fails_closed_to_full():
     # attest_census/ci_check_repair/gh_write_preflight above, but in the FAIL-OPEN direction on the
     # one tool whose whole job is to tell the owner a PR is safe to merge from the UI.
     #
-    # Measured on the fold at #10975 (pre-fix):
+    # Measured on the fold at #10975 (pre-fix; 72 was `tier1`'s size THEN — 73 since #10980,
+    # so re-derive it rather than reading this as a current count):
     #     echo tools/ready_for_owner.py | ci_selection.py --changed-files -
-    #       -> surfaces: []  full: False  test_files: 72 tier-1 entries,
+    #       -> surfaces: []  full: False  tier-1 `test_files`,
     #          with `test_ready_for_owner.py` ABSENT
     # `tools/` is a flat NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row matches this tool, so
     # the path was filtered out BEFORE the `if not matched: matched.add("core")` fallback and
