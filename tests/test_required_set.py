@@ -7,7 +7,9 @@ WHY THESE ARE GATE PINS AND NOT UNIT TESTS
     failure a gate may never have. So each case below is written to RED if the protected
     behaviour is reverted, and the ones that matter say what to revert.
 
-Hermetic: every case writes its own `tmp_path` tree. No DB, no network, no live `gh`.
+Hermetic: no DB, no network, no live `gh`. Two cases read THIS REPO's own tracked
+`.mergify.yml` and `docs/ci/required-contexts.json` (the live set must be pinned against
+what this repo actually declares); every other case builds its own `tmp_path` tree.
 """
 
 from __future__ import annotations

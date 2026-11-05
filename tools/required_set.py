@@ -394,8 +394,15 @@ def derive_from_ref(cwd: Path, ref: str = "origin/main", *, timeout: int = 60) -
         root = Path(tmp)
         for rel in (MERGIFY_REL, RECORD_REL):
             try:
+                # ⛔ READ THROUGH THE RESOLVED SHA, not the ref. `refs/remotes/origin/main`
+                # lives in the SHARED common git dir and every lane in this fleet fetches
+                # it — including this very tool, in `_read_tree`. A fetch landing between
+                # `_rev_parse` and these reads would make the disclosed sha name a commit
+                # whose files were never the ones read, and (since each file is its own
+                # subprocess) could even pair `.mergify.yml` from one commit with the
+                # record from another. Pinning the read to `sha` makes the disclosure exact.
                 proc = subprocess.run(
-                    ["git", "show", f"{ref}:{rel}"],
+                    ["git", "show", f"{sha}:{rel}"],
                     cwd=str(cwd),
                     capture_output=True,
                     text=True,
@@ -406,11 +413,11 @@ def derive_from_ref(cwd: Path, ref: str = "origin/main", *, timeout: int = 60) -
                 # `ValueError` covers `UnicodeDecodeError`: `text=True` decodes the blob,
                 # and a non-UTF-8 `.mergify.yml` raised straight out of a function whose
                 # contract is to return a set or refuse.
-                raise RequiredSetUnreadable(f"git show {ref}:{rel}: {exc}") from None
+                raise RequiredSetUnreadable(f"reading {rel} at {ref} ({sha[:12]}): {exc}") from None
             if proc.returncode != 0:
                 detail = (proc.stderr or proc.stdout or "").strip().splitlines()
                 raise RequiredSetUnreadable(
-                    f"git show {ref}:{rel} failed: "
+                    f"reading {rel} at {ref} ({sha[:12]}) failed: "
                     f"{detail[0] if detail else f'exit {proc.returncode}'} — the required "
                     "set must be read from the protected ref, never from the tree being "
                     "judged, so this is a refusal rather than a fallback"

@@ -88,7 +88,7 @@ Live use::
     python tools/ready_for_owner.py 10962 --json
     python tools/ready_for_owner.py 10962 --repo daniel-ospina/tortoise
     python tools/ready_for_owner.py --required-set              # what is REQUIRED here
-    python tools/ready_for_owner.py --required-set --ref HEAD   # …as THIS tree declares
+    python tools/ready_for_owner.py --required-set --ref HEAD   # …as this BRANCH's last commit declares
 
 ⛔ ONE RESIDUAL IN THE GATE READ, NAMED RATHER THAN HIDDEN: the required set is DERIVED
 from `.mergify.yml` and carries check NAMES only, while `ci_verdict`'s ``GroupVerdict``
@@ -1316,8 +1316,7 @@ def check_gates(probe: Probe) -> Check:
     # local ref that the read never fetches, so the sha in `required_raw` is the ONLY honest
     # statement about what was certified — and it used to reach output only through the two
     # unreadable arms, leaving a READY (and any named-check failure) silent about provenance.
-    # (The one arm that does NOT carry it is `probe.groups is None`: that verdict is about
-    # the CHECK-RUNS read, whose provenance is its own `groups_raw`.)
+    # Every arm below carries it, the check-runs-unreadable one included.
     source = probe.required_raw or "required-set: not read"
     if probe.required is None or probe.required_deferred is None:
         # An EMPTY required set is not "nothing is required" — it is a set that was not
@@ -2098,7 +2097,7 @@ def _read_head_commit_date(gh: Gh, head: str) -> str:
     raise ReadError(f"commits/{head}: no committer date")
 
 
-def _read_required_contexts(gh: Gh, workdir: Path) -> tuple[RequiredSet, str]:
+def _read_required_contexts(workdir: Path) -> tuple[RequiredSet, str]:
     """The required set, DERIVED from the repo — never read from the protection API.
 
     ``gh api repos/<o>/<r>/branches/main/protection`` needs repository **Administration:
@@ -2609,7 +2608,7 @@ def collect_probe(
     # `check_gates` puts that source in its raw on every arm.
     probe.tree, probe.tree_raw = _try_tree(gh, pr, head, workdir)
     try:
-        required, probe.required_raw = _read_required_contexts(gh, workdir)
+        required, probe.required_raw = _read_required_contexts(workdir)
     except RateLimited:
         # A 403/429 is surfaced as RateLimited and `_try` RE-RAISES it, but the required
         # set no longer touches the network: reaching here means an unrelated surface
