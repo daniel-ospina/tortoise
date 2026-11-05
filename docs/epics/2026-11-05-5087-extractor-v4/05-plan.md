@@ -1,0 +1,185 @@
+---
+title: "Epic plan — #5087 Extractor v4"
+type: engineering
+domain: platform
+doc_status: draft
+created: 2026-11-05
+subjects.team: epistemic-team
+aboutSubjects: epistemic-team
+aboutObjects: "#5087, #10994-#11002, #11021, #11083, #7949"
+---
+
+# 05 · Epic plan — #5087 Extractor v4
+
+**Contract:** `01-align.md` (PROCEED) · `02-research-brief.md` · `03-scope.md` (10 in-scope capabilities, 7 E2E cases) · `04-test-design.md` (SF1–SF14) · `06-pack-logic-decisions.md` (the 2026-11-05 owner rulings).
+
+**Owner rulings this plan must satisfy (2026-11-05, recorded on `#11083` comment `6667121779`):** a `dev:initiative` level **between** theme and epic; a `funds` **meaning** for durable provision of funds, with money **movement** staying the `venture:disbursement` event; `produces` as a meaning with direction `<-`; `ownedBy` accepting a Subject **or** an Object with the per-edge direction carrying the meaning.
+
+## §1 — User Journeys
+
+The epic has no end-user UI. Its four **acting users** are the agent (writer), the product (reader), the operator (instrument), and the business owner (whose model the packs declare). Each journey is a complete flow with entry/exit states; an exit must be observable **by the persona named**, not by the extractor.
+
+| # | persona | journey | entry | exit (what the persona sees) |
+|---|---|---|---|---|
+| **J1** | **Agent (capture)** | a session becomes something the *next* session can rely on | `session_shutdown` → `POST /v1/sessions` | in the author's next session, a lookup finds the claim and asking about it returns the claim rather than a transcript echo; a partially-captured session is re-narrated **once**, and the losing arm's items are discarded inside the same transaction (§W1, S2.2 Level 2) |
+| **J2** | **Agent (correction)** | a later session corrects an earlier belief | a capture that contradicts a live point | the contradiction is **surfaced** to the reader (a support/attack pair they can see) — never a second silent copy |
+| **J3** | **Product (reader)** | *"what do we know about the parity harness?"* | a query | answers grounded in a **referent**, with the claims and their support/attack around it — not a node named `the parity harness` |
+| **J4** | **Product (why)** | *"why is it like this?"* | a query about an entity | the claims that argue about it, in the order the story stated them |
+| **J5** | **Operator (instrument)** | *"did the change actually reach the fleet?"* | a question about the extractor | a per-door, per-step count from the census, with `UNMEASURED` where nothing measured |
+| **J6** | **Owner (release)** | *"can the epic close?"* | the capstone | **six** rows re-scored on a fresh graph (`E1`–`E5` plus `E6`, the pack-logic row), with the arm read back |
+| **J7** | **Business owner (model)** | *"does the map I declared actually exist in the graph?"* | the shipped packs (`dev`, `pm`, `venture`, `product-strategy`) | a per-pack census of **declared → writable → written**, naming any declared connection the writer cannot produce, and a walk from a company to its goals and its work that resolves without a gap |
+
+**Edge cases each journey must survive:** an empty session (no turns); a session with turns but no extraction (keyless or degraded); a run whose lookup is partial; a run that fails after the journal append; a run where **every** candidate is discarded (a clean run that commits nothing — a legal terminal, not a failure); a pack that declares a connection nothing can write.
+
+## §2 — Workflows
+
+**W1 — the write path, on the capture doors (D1/D2), eight steps.** `S0 read → S1 narrate → S2.1 extract → S2.2 vet → S2.3 classify → S3 resolve → S5 connect → S6 commit`. Handoffs are the contract objects: `common shape + mapping` → `story` → `OUTPUT_CONTRACT payload` → `survivors` → `typed survivors` → `resolved/held/new` → `edges` → `journal + rows`. **Two things live at S2.2 that the old step list did not have:** the referentiality judgement (a mention is not an entity), and **coverage** — when S2.1 under-extracts, S2.2 Level 2 is what makes it visible (§4.4 of the architecture), so the bounded re-narrate is a step-level retry there and not a new stage. ⚠️ **This workflow is scoped to D1/D2.** `04-test-design.md` records that SF9 and SF11 carry no selection; a later lane reading "the write path is selective" is reading a claim about **SF1–SF8 only**.
+
+**W2 — the failure path.** Any step may fail; §4.4 fixes the direction per step and the invariant that survives: **I1** an unresolved identity is never asserted new; **I2** a failure holds or records, never silently drops; **I3** a run is one transaction. The transaction boundary is **S3-attach · S5-connect · S6-commit**.
+
+**W3 — the instrument path.** capture → receipt (`stats["step_witness"]`) → census → artifact. Automation: **the census runs on the frozen corpus on dispatch — never on a PR** (it is an eval-lane artifact, §7.1); the capstone probe runs on demand and writes one scored log.
+
+**W4 — the release path.** a child lands → the capstone re-runs → **a row moves** (any of six) → the `#7949` verdict. **Manual intervention triggers:** a row that moves without a re-run; an arm whose environment was not read back; a receipt with `real: false`.
+
+**Failure modes named in W1–W4, with the state each lands in:**
+
+| failure mode | surface | lands as |
+|---|---|---|
+| a mention promoted to a node | SF2/SF3 | candidate `discarded` by the referentiality rule (recorded with `rule_id` + `counterfactual`) |
+| a narrative that is degraded, not empty | SF1 | run `degraded`, re-narrated **once** |
+| an unchecked item committed | SF7 | candidate `held` |
+| a candidate classified that consolidation will delete | SF4 | the candidate is not classified (§10996) |
+| an unresolved lookup read as new | SF5 | candidate `held` with `lookup_state: unresolved` |
+| a partial run | SF8 | run `failed`, journal unchanged for the run |
+| a connection that could not be wired | SF6 | run `degraded`, `connections_incomplete` recorded |
+| a door with no measurement | SF12 | census cell `UNMEASURED` + `unmeasured_reason` |
+| an edge with no replay route | SF13 | run `degraded`; the census reports `live != rebuild` |
+| a declared pack connection nothing can write | SF15 | census row `writable: false`, named |
+
+## §3 — Prototype (non-GUI → diagram)
+
+```text
+        ┌──────────────── SF1 ────────────────┐
+turns ──► S0 READ ──► S1 NARRATE ──► S2.1 EXTRACT ──► S2.2 VET ──► S2.3 CLASSIFY
+                                         │                │              │
+                                   [ SF2 contract ]  [ SF3 gate ]  [ SF4 kinds ]
+                                         │           [ SF1 coverage ]    │
+                                         ▼                ▼              ▼
+                                   S3 RESOLVE ──► S5 CONNECT ──► S6 COMMIT ──► journal + rows
+                                    [ SF5 held ]   [ SF6/7 edges ]  [ SF8 atomic ]
+                                                                          │
+              packs ──► declared logic ──► [ SF15 census ] ◄── step_witness ┘ [ SF12 ]
+                                               │
+                                       capstone probe ──► E1–E6 rows        [ SF14 ]
+```
+
+**States, at two levels — they are not the same vocabulary:**
+- **run-level disposition:** `committed` · `held` (something was held; the run continues) · `degraded` (a step recorded a reason; the run continues) · `failed` (journal unchanged for the run) · **`committed-nothing`** (every candidate decided `discarded`; a legal terminal — it is not `failed`, because the journal *did* change by design).
+- **candidate-level:** `committed` · `held` · `discarded` (by rule, with `rule_id` + `counterfactual`) · `unclassified` (S2.3 kept it in the census without a kind).
+
+⛔ **`held` is a run-level disposition, not a step state** (architecture §4.4: *"`HOLD` is a run-level disposition, not a new VET outcome … the absence of a judgment"*). And **a step's result is never reported as absence**: it is `degraded` with a recorded reason — which is exactly what `narrative_absent` (S1) and `unclassified` (S2.3) are.
+
+## §4 — Data Model
+
+| # | shape | fields | home | why not elsewhere |
+|---|---|---|---|---|
+| **DM1** | **mention** | `surface` (verbatim), `span_start`/`span_end`, `kind_guess` | **a property on the claim Point that carried it** | the graph holds beliefs, not text (§2.4); the span is an address, not a payload (§2.4.1). **Closed 2026-11-05:** the Postgres branch is out — every child's file family in the decomposition contains no SQL surface, so an unowned branch is not a decision, it is a deferral. No `claim_id` field: on the Point branch the owning point **is** the claim |
+| **DM2** | **the contract's mention channel** | `mentions[]` beside `entities[]`, each `{surface, claim_ref, quote}` | `OUTPUT_CONTRACT` (the prompt's schema) | an entity array with no mention sibling can only express "this is a thing" |
+| **DM3** | **the held set** | `{candidate, reason, lookup_state, run_id}` | **a Postgres row** (run state, not belief) | ⛔ **not a journal record:** T4's acceptance is *"the journal is unchanged for it"*, so a journal-record home would contradict its own proof. Not a graph node: it would be recallable-but-wrong |
+| **DM4** | **suppression: kind widening** | none — `expand_kind(child) ⊇ {child, parent}`, **transitive**, **cycle-refused** (both NEW) | in-memory registry, built from `subclassOf` | today the declaration is loaded and never applied (the append is missing); transitivity and the cycle guard do not exist at all |
+| **DM5** | **hierarchy edge** | `(:Object)-[:predicate]->(:Object)` from the pack's `relations` **and** its `hierarchies:`, carrying `mechanism` + **`semantics`** (which is what fixes the direction) | the existing edge writer + a named replay route | the pack declares it, and the writer already admits `:Object` endpoints (`#7902`). ⚠️ **`semantics` is not optional:** no pack declares `direction:` — direction is keyed on the meaning via `SEMANTICS_DIRECTIONS`, so a writer that drops `semantics` cannot know which way confidence runs |
+| **DM6** | **census artifact** | per door × step: points by kind, objects + bare-definite share, operator edges, object→object edges, spans, minted vs attached, `step_witness`; **plus per pack: declared / writable / written, and the direction per hierarchy row** | a committed artifact + a pin | a datum with two readers is the drift `#5064` prevents |
+
+**Integrity constraints:** no mention row without its claim; no held item silently dropped; every committed node must walk to its `Source` (§2.4.1 — value-bearing today, the widening is `#2684`); the hierarchy edge must replay.
+
+## §5 — Architecture
+
+**Boundaries (unchanged, and that is the design):** `extractor_v2` is the pipeline body; `vet_gate` is a leaf with one importer; `kind_classifier` is a leaf; `s2_decision_seam` is the adapter (off by default); `commit_schema` is the commit shape; `projection/*` is the writer; `pack_registry` is the declaration surface.
+
+**Where the change lands:** the mention channel crosses `extractor_v2` (contract + emit), `s2_decision_seam` (a **new** prompt, not a third question on `vet-v2`), `vet_gate` (an outcome that is *not* added — a mention is not a VET verdict), and `projection` (what a mention write is worth). **Contention:** six children in `extractor_v2.py` — one lane, serialized.
+
+**Failure modes and responses:** the referentiality judgement fails → **fail-open to entity.** ⚠️ **Corrected rationale:** this is the **same** asymmetry VET uses, not the reverse of it — a wrong "mention" loses a referent (memory loss) while a wrong "entity" is noise, and §4.4's S2.2 rule is already *"FAIL-OPEN — a wrong keep is noise; a wrong drop is memory loss"*. `#11021` must still argue the cue, but it must not claim a novel asymmetry. The mention write fails → **fail-closed on the commit** (I3). The hierarchy edge fails → the item still commits and `connections_incomplete` is recorded (Job 1's direction).
+
+**Circuit breaker / retry:** bounded reconnects on the lookup; one re-narrate; no unbounded loops anywhere (§4.4).
+
+## §6 — Interfaces
+
+| interface | contract | versioning |
+|---|---|---|
+| `OUTPUT_CONTRACT` | gains `mentions[]`; `entities[]` unchanged; every `claim_ref` must resolve to an emitted point | the prompt's schema is the version; a change lands with its `stats` note and `_PARSE_RETRIES` unchanged |
+| **the referentiality question — a NEW prompt, `ref-v1`** | a `noul` question with a band, asked about **a mention inside** a claim candidate; **no verdict on a malformed answer** | ⛔ **This is not a `vet-v2` wording change.** `_vet_questions` is pinned to **"two, not more"** (Noul + Score) and `vet_verdicts` reads answers **positionally** by `keep_c{pos}` / `atomic_c{pos}`, with an anti-attribution guard that compares whole answer maps per element. A third question changes the key scheme, the element→question mapping and that guard. `ref-v1` therefore gets **its own prompt, its own key prefix, and its own batching** (mentions batched against `BATCH_MAX = 40`; the brief's 40-items/80-questions cost shape does not carry over) |
+| `vet_gate.OUTCOMES` | **unchanged** (`KEEP`/`NOOP`/`DISCARD`/`MERGE`) — a mention is decided before the outcome vocabulary, not as a new member | — |
+| the mention record | `{surface, span_start, span_end, kind_guess}`; no status, no confidence | the Point property schema in `commit_schema`; a half-span is refused by `validate_span` |
+| `kind_subclass` expansion | `expand_kind(child) ⊇ {child, parent}`; **transitive**; **cycle-refused** (both NEW) | ⚠️ **Not registry-internal:** `expand_kind` backs read-path Cypher `IN` clauses **and** the operator-kind check (`sdk.py` `"operator" in self._expand_kind(kind)`), so widening it widens what `query(kind=…)` matches. The classifier index is rebuilt, and those consumers move with it |
+| the hierarchy edge | predicate from the pack's `relations` **and** `hierarchies:`; `mechanism` + **`semantics`** decide operator-vs-structural and direction; **one replay route named** | `STRUCTURAL_REL_LABELS` / `RECORD_CARRIED_STRUCTURAL_RELS` **and** `SEMANTICS_VALUES` / `SEMANTICS_DIRECTIONS` (a new member is a §8 change; `funds` and `produces` are the two this epic adds) |
+| **direction, per edge** | the table value is the **default**; a declaration may record the opposite direction on the edge itself — which is how ruling (c) lets `ownedBy` point at a fund *or* a company | `SEMANTICS_DIRECTIONS` (table) + the edge's own `direction` field (override); the census reports the effective direction per row |
+| the census artifact | one schema, `measured` + `unmeasured_reason` per cell | a new cell is additive; a removed cell reds the pin |
+| **errors** | every refusal names (a) that it refused, (b) what failed, (c) what to do — and a surface that cannot write (c) must not refuse | `docs/ax/ax-principles.md` |
+
+## §7 — Detailed E2E tests
+
+| # | from | given | when | then (assertable) | issue | surface |
+|---|---|---|---|---|---|---|
+| **T1** | E2E-1 | the frozen corpus, a capture of `wp01` | the pipeline emits | **no** `:Object` for a mention judged non-referential; the claim that carried it exists carrying a mention row (`surface` + span) | #11021 | SF2, SF3 |
+| **T2** | E2E-1 (negative) | a load-bearing `the admin-merge rail` (owner must-keep) | the same emit | the payload carries an `:Object` for it **and** no mention row; the mention channel did not swallow it | #11021 | SF3 |
+| **T3** | E2E-2 (**control**) | **the shipped behaviour**: an exact name already in the graph | the second capture resolves | zero new nodes for that referent; the claims attach — ⚠️ **this passes today**; it guards that the fix does not break attach | #10997 | SF5 |
+| **T4** | E2E-2 (**the defect**) | a **partial prior set** so the lookup returns `unresolved` | the run commits | the candidate is **held**, not minted; the held count is reported; the journal is unchanged for it | #10997 | SF5, SF8 |
+| **T4b** | E2E-5 (second half) | the same held item | **a later run** whose lookup resolves | it commits **exactly once** and the held count returns to zero — a held set that never drains fails | #10997 | SF5, SF7 |
+| **T5** | E2E-3 | a narrative stating "A changed because of B" | the batch commits | an edge of the named class exists between the two **resolved objects** | #10999 | SF6 |
+| **T5b** | E2E-3 (evidence) | the capstone probe over the corpus | the probe writes a receipt | the receipt's **`extractor.real == true`** (`receipt["extractor"]`, written by the eval runner; `extractor_identity` is a *function*, not a receipt field) — ⛔ **eval lane, never a gate** | #10999 | SF14 |
+| **T6** | E2E-3 (degenerate) | a Job-1 wiring failure | the run commits | nodes still commit; `connections_incomplete` recorded; **no** silent hole | #10999 | SF6 |
+| **T7** | E2E-4 | the dev pack installed; the frozen corpus committed | a walk from a theme | **theme → initiative → epic → issue** resolves, and `live == rebuild` on that edge class across all four levels | #11001 | SF13 |
+| **T8** | E2E-4 (negative) | pairs the packs do **not** declare — including the now-illegal direct **theme → epic** hop | the emitter runs | **zero** edges are emitted for the pair (the universe is the emitted edge list, not the graph) | #11001 | SF13 |
+| **T9** | E2E-5 | a partial against-graph check | the run commits | the item is held; held/committed/discarded are three distinct counts | #10998 | SF7 |
+| **T10** | E2E-6 | the frozen corpus, all doors | the census runs | ≥5 doors; every cell carries a writer symbol; an unmeasured door reads `UNMEASURED`; the artifact re-derives | #10995 | SF12 |
+| **T11** | E2E-1 (record) | a **referentiality** DISCARD | the run | it carries `rule_id` **naming the referentiality rule** and a `counterfactual` that **names the removed mention** — ⚠️ the generic `rule_id`/`counterfactual` already exist on every DISCARD, so the assertion must key on those two specifics or it passes today | #10996 | SF3 |
+| **T12** | E2E-1 (order) | a candidate consolidation will `DELETE` | classification runs | it is **not** classified | #10996 | SF4 |
+| **T13** | E2E-4 (vocabulary) | `dev:issue` **and** `dev:initiative` | `expand_kind` | `dev:issue` includes `WorkItem`; `dev:initiative` exists and expands; the classifier index carries parents; **and** an initiative narrative classifies to `dev:initiative`, not `dev:theme`/`dev:epic` | #11000, #11001 | SF4, SF13 |
+| **T14** | E2E-1 (retry) | a poor batch verdict | the run | exactly one re-narrate; a tie keeps the first narrative | #11002 | SF1, SF3 |
+| **T15** | E2E-7 | the four shipped packs | the census reads **both** declaration surfaces (`relations` **and** `hierarchies`) | per pack: declared / writable / written counts; the four `pm` relations are named as unwritable (or resolved); the **direction per row** is reported; `funds` carries direction `->` + `IMPL` and declares **no** durable movement edge (movement is the `disbursement` event); `ownedBy` accepts Subject **or** Object | #11083 | SF15 |
+
+**The chain is intact:** 7 high-level cases → **15** detailed (plus two sub-cases); every detailed case names an issue and a surface; every in-scope issue (**#10994–#11002, #11021, #11083**) has at least one detailed case that would **fail without its work** — except T3, which is labelled a **control** and proves the opposite direction.
+
+### §7.1 — Where each test runs, so CI does not become the bottleneck
+
+**Owner constraint, 2026-11-05: these tests must not make every future change slow.** The layer is a **design decision of the test**. Definitions: `04-test-design.md` §"Test-layer allocation".
+
+| layer | tests | file | runs | cost added |
+|---|---|---|---|---|
+| **hermetic gate** (scripted model, `sdk=None`, no net, no DB) | T1, T2 | `test_mention_gate.py` | every PR touching the named sources | **3 files, 8 tests, ≤ 15 s total** |
+| | T11, T12, T13, T14 | `test_selection_step.py` | | |
+| | T8, T15 (declared+writable half) | `test_pack_logic.py` | | |
+| **DB gate** (lane container, scripted model, ≤ 30 s/test) | T3, T4, T4b, T5, T7 | `test_identity_hierarchy.py` | PRs touching the extractor/writer | **2 files, 6 tests, ≤ 3 min, selected only on those diffs** |
+| | T6, T9 | `test_partial_commit.py` | | |
+| **eval lane** (`tests/eval/**`, dispatch-only, **never a PR gate**) | T10, T15's *written* half, T5b, and every real-model re-score of `#7949`'s **six** rows | — | manual dispatch | **0 on the gating path** |
+
+**Three consequences that are part of the plan, not commentary on it:**
+
+1. **T10 and T5b are eval tests and are never gated.** The census reads the whole corpus and T5b needs the shipped module to actually run; putting either on the gating path is exactly the failure the owner named. Their guard against rot is that the artifact is **committed and re-derivable**, not that it runs per PR.
+2. **A behaviour observable only with a live model is not a gate.** Every detailed case above is written to be assertable against a **scripted emission**; the real-model observation of the same behaviour lives in the capstone probe. That seam is what keeps the suite fast.
+3. **No test asserts a wall-clock, a token count, or a model's judgement.** Those are measurements. A gating assertion on any of them turns the suite into a benchmark that fails on a loaded box — and it is how a CI check starts being re-run until green instead of read.
+
+**If a needed observation does not fit these bounds, the fix is a seam (make the behaviour assertable without the model), never a longer gate.**
+
+## §8 — Coherence Review + Risk Analysis
+
+**Cross-substep drift check.**
+- Journeys → Workflows: J1/J2 → W1/W2; J3/J4 are served by the read path (out of scope) but depend on SF5/SF6; J5 → W3; J6 → W4; **J7 → W3's census surface and W4's sixth row**. No journey is unserved by an in-scope workflow; J3/J4 are served *indirectly*, and that is stated.
+- Workflows → Data model: every workflow state in §2 has a shape in §4 (`held` → DM3; mention → DM1/DM2; kinds → DM4; hierarchy → DM5; census → DM6). No orphan shape.
+- Data model → Interfaces: every shape has a contract in §6. **DM1 and DM3 are now closed** (Point property; Postgres row) — the two "open homes" that a lane could not have started from are gone, and each closure names the reason it cannot be the other branch.
+- Interfaces → E2E: every interface row has a test, except `errors`, which is tested through the refusal cases in T4/T9.
+- **E2E chain:** high-level 7 → detailed 15 → issues: complete, with T3 explicitly a control.
+
+**Risks (mitigation + the artifact that would falsify the mitigation).**
+
+| # | risk | severity | mitigation | falsifier |
+|---|---|---|---|---|
+| R1 | the referentiality judgement is wrong in the **drop** direction, losing referents | **high** | measure on the 25 labelled rows **plus the 12 most-referenced rows that a name-pattern rule would have deleted** before arming; fail-open to entity until measured | a measured false-discard on the labelled set (**the 25-row probe is the only instrument**; T2 is a regression guard, not a falsifier) |
+| R2 | `#1026` read as forbidding the cue | high | `OVERRIDES:` on `#1026`; the ruling's own subject is *manifest keys that discard*, and a mention record discards nothing | the owner's answer (given 2026-11-05: not forbidden) |
+| R3 | six children in one file serialize the lane | medium | one lane, order fixed | a merge conflict between two extractor children |
+| R4 | DM1/DM3 homes chosen badly (text in the graph; a held set that becomes recallable) | medium | DM1 = Point property, DM3 = Postgres row, both closed with reasons | a mention row that `query()`/`search()` returns **without** a claim reference |
+| R5 | E4's tenth miss (`wp02`) has no owner, so 15/15 is unreachable | medium | stated in the decomposition §8; needs a re-registration or a content fix | a capstone run at 15/15 |
+| R6 | the existing 5,314 objects stay junk; the epic "improves" without moving the production graph | medium | stated everywhere; `#5333` owns it | ⚠️ **no in-epic falsifier** — E1 is scored on a *fresh* graph and the production population is out of reach until `#5333` rules; the trigger is that ruling, not a measurement here |
+| R7 | a relation declared with a meaning that contradicts its own `mechanism` — e.g. `transacts` (no confidence transfer) on a relation that declares `IMPL` — carried silently into the graph | medium | ruling checks `SEMANTICS_VALUES` against `mechanism` on load; `funds` carries `->` + `IMPL`, `produces` carries `<-` | a pack row whose `(semantics, mechanism)` pair the census flags — T15 must assert the pair, not just the counts |
+
+**Coherence verdict:** the plan is internally consistent **after** the three review rounds; the two lanes that this plan does not decide are named in §8 of the decomposition (`wp02`, E5's population), not hidden here.
