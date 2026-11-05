@@ -498,6 +498,40 @@ def test_a_callable_returning_inside_its_bound_keeps_its_result(monkeypatch):
     )
 
 
+def test_a_callable_returning_after_its_bound_is_still_a_bound_miss(monkeypatch):
+    """The over-correction pin for #10941's success arm: LATE is not a verdict.
+
+    The sibling test above presses the direction the fix had to add (an in-time
+    return owns the verdict). This one presses the half that fix must KEEP: the
+    stamp, not the witness, is what decides, so a callable that RETURNED after
+    its deadline still misses its bound. Without it, a success arm that returned
+    ``future.result()`` whenever the future is done — dropping
+    ``completed_at[0] - started < bound`` — passes every other test in this
+    module while answering callers with work that arrived after the deadline
+    they bought.
+    """
+    _stalled_delivery(monkeypatch)
+
+    def _slow_success():
+        time.sleep(0.2)
+        return "the row"
+
+    async def _run():
+        await monitoring.run_control_plane_call(
+            _slow_success, op="late-success", pool="graph", timeout=0.05)
+
+    with pytest.raises(monitoring.ControlPlaneOffloadError) as excinfo:
+        asyncio.run(_run())
+    assert "exceeded its 0.05s bound" in str(excinfo.value), excinfo.value
+    assert excinfo.value.refused is False, excinfo.value
+    last = monitoring.control_plane_offload_records()[-1]
+    assert last[0] == "late-success", last
+    assert last[2] == "bound_miss_running", (
+        f"an over-bound return recorded {last[2]!r} — it did not answer in time, "
+        "so it is a bound miss no matter that the work eventually finished"
+    )
+
+
 def test_a_cancelled_await_is_recorded_as_cancelled():
     """#5840: cancellation is a terminal state and is recorded as its own.
 
