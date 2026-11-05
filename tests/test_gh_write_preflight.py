@@ -599,8 +599,11 @@ def test_publickey_failure_is_not_called_contents_write_denied(tmp_path: Path) -
         tmp_path,
         f"""#!/bin/sh
 case "$*" in
-  "push --no-verify origin "*) echo "remote: Permission to o/n.git denied (publickey)." >&2; exit 128 ;;
-  "push "*) echo "remote: Permission to o/n.git denied (publickey)." >&2; exit 128 ;;
+  *) do_push=0; for a in "$@"; do [ "$a" = "push" ] && do_push=1; done
+     case "$*" in *--delete*) do_push=0 ;; esac
+     case "$*" in *"push "*|*"push --no-verify origin "*)
+       [ "$do_push" = 1 ] && {{ echo "remote: Permission to o/n.git denied (publickey)." >&2; exit 128; }} ;;
+     esac ;;
 esac
 exec {GIT} "$@"
 """,
@@ -761,7 +764,7 @@ def test_delete_that_reports_success_but_removes_nothing_is_cleanup_failed(tmp_p
 N="{tmp_path}/lsremote.count"
 case "$*" in
   *"--delete"*) exit 0 ;;   # claims success, removes nothing
-  "push --no-verify origin HEAD:"*) {GIT} "$@"; exit $? ;;
+  *"push --no-verify origin HEAD:"*) {GIT} "$@"; exit $? ;;
 esac
 for a in "$@"; do
   if [ "$a" = "ls-remote" ]; then
@@ -803,12 +806,15 @@ def test_push_stderr_token_is_masked(tmp_path: Path) -> None:
     stub = bindir / "git"
     stub.write_text(
         f"""#!/bin/sh
-case "$1" in
+do_push=0; for a in "$@"; do [ "$a" = "push" ] && do_push=1; done
+case "$*" in *--delete*) do_push=0 ;; esac
+if [ "$do_push" = 1 ]; then
   # ⛔ THE TOKEN IS NOT INSIDE URL USERINFO HERE — userinfo is stripped earlier by `_USERINFO`, so a
   # token hidden there would leave `_TOKEN_SHAPED` unpinned (a vacuous test). A bare token-shaped run
   # in the message is the only thing the mask can catch.
-  push) echo "remote: bad credential {fake} rejected" >&2; exit 1 ;;
-esac
+  echo "remote: bad credential {fake} rejected" >&2
+  exit 1
+fi
 exec {GIT} "$@"
 """,
         encoding="utf-8",
@@ -885,7 +891,9 @@ def test_repo_assertion_passes_on_a_real_github_origin(tmp_path: Path) -> None:
         tmp_path,
         f"""#!/bin/sh
 for a in "$@"; do [ "$a" = "ls-remote" ] && exit 0; done
-case "$1" in push) echo "remote: Permission to o/n.git denied" >&2; exit 1 ;; esac
+do_push=0; for a in "$@"; do [ "$a" = "push" ] && do_push=1; done
+case "$*" in *--delete*) do_push=0 ;; esac
+[ "$do_push" = 1 ] && {{ echo "remote: Permission to o/n.git denied" >&2; exit 1; }}
 exec {GIT} "$@"
 """,
     )
@@ -903,7 +911,9 @@ def test_repo_assertion_refuses_a_different_github_repo(tmp_path: Path) -> None:
         tmp_path,
         f"""#!/bin/sh
 for a in "$@"; do [ "$a" = "ls-remote" ] && exit 0; done
-case "$1" in push) exit 0 ;; esac
+do_push=0; for a in "$@"; do [ "$a" = "push" ] && do_push=1; done
+case "$*" in *--delete*) do_push=0 ;; esac
+[ "$do_push" = 1 ] && exit 0
 exec {GIT} "$@"
 """,
     )
@@ -947,7 +957,9 @@ def test_unlistable_origin_is_cannot_verify_and_pushes_nothing(tmp_path: Path) -
 for a in "$@"; do
   if [ "$a" = "ls-remote" ]; then echo "stub: cannot list" >&2; exit 128; fi
 done
-case "$1" in push) : > "{sentinel}"; exit 0 ;; esac
+do_push=0; for a in "$@"; do [ "$a" = "push" ] && do_push=1; done
+case "$*" in *--delete*) do_push=0 ;; esac
+[ "$do_push" = 1 ] && {{ : > "{sentinel}"; exit 0; }}
 exec {GIT} "$@"
 """,
     )
@@ -1283,9 +1295,12 @@ def test_every_token_shape_is_masked(tmp_path: Path) -> None:
         stub = bindir / "git"
         stub.write_text(
             f"""#!/bin/sh
-case "$1" in
-  push) echo "remote: bad credential {tok} rejected" >&2; exit 1 ;;
-esac
+do_push=0; for a in "$@"; do [ "$a" = "push" ] && do_push=1; done
+case "$*" in *--delete*) do_push=0 ;; esac
+if [ "$do_push" = 1 ]; then
+  echo "remote: bad credential {tok} rejected" >&2
+  exit 1
+fi
 exec {GIT} "$@"
 """,
             encoding="utf-8",
@@ -1328,7 +1343,9 @@ def test_repo_assertion_is_case_insensitive(tmp_path: Path) -> None:
         tmp_path,
         f"""#!/bin/sh
 for a in "$@"; do [ "$a" = "ls-remote" ] && exit 0; done
-case "$1" in push) echo "remote: Permission to o/n.git denied" >&2; exit 1 ;; esac
+do_push=0; for a in "$@"; do [ "$a" = "push" ] && do_push=1; done
+case "$*" in *--delete*) do_push=0 ;; esac
+[ "$do_push" = 1 ] && {{ echo "remote: Permission to o/n.git denied" >&2; exit 1; }}
 exec {GIT} "$@"
 """,
     )
@@ -1377,6 +1394,72 @@ exec {GIT} "$@"
         os.environ["PATH"] = real
     assert ok is True
     assert sha == "", f"a prefixed or decoy-path branch was mistaken for the probe ref: {sha!r}"
+
+
+def test_the_probe_does_not_publish_the_lanes_tags(tmp_path: Path) -> None:
+    """\u26d4 MEASURED ROUND 15. With `push.followTags=true` configured, a plain push of
+    `HEAD:refs/heads/<probe>` ALSO publishes every annotated tag. The run reported `GH-WRITE-OK` and
+    "leaves no trace" while leaving `refs/tags/v1` on the shared remote \u2014 and this repo's
+    `publish-pypi.yml` / `publish-selfhost.yml` trigger on `push: tags: ['v*']`, so a probe could start
+    a release. Pushing a resolved sha does not help; only `-c push.followTags=false` does.
+    """
+    clone = _make_remote_and_clone(tmp_path)
+    _git("config", "push.followTags", "true", cwd=clone)
+    _git("-c", "user.email=a@b", "-c", "user.name=a", "tag", "-a", "v1", "-m", "release", cwd=clone)
+
+    res = _run(clone)
+    combined = res.stdout + res.stderr
+    assert res.returncode == 0, combined
+    tags = _git("ls-remote", "--tags", "origin", cwd=clone).stdout
+    assert "refs/tags/v1" not in tags, f"the probe published the lane's tags: {tags!r}"
+    assert "gh-write-preflight" not in _git("ls-remote", "--heads", "origin", cwd=clone).stdout
+
+
+def test_a_git_shape_refusal_is_not_a_credential_verdict(tmp_path: Path) -> None:
+    """\u26d4 `remote.origin.mirror=true` is decided BEFORE any credential is used, but it was reported as
+    `push-refused` \u2014 exit 1, "fix the credential", "a lane must NOT start" \u2014 sending the operator to
+    the token page for a repo-config problem. It is `cannot-verify` (exit 2), like the other
+    'nothing about the credential was measured' shapes.
+    """
+    clone = _make_remote_and_clone(tmp_path)
+    _git("config", "remote.origin.mirror", "true", cwd=clone)
+    res = _run(clone)
+    combined = res.stdout + res.stderr
+    assert res.returncode == 2, f"a git-shape refusal measures no credential: {combined}"
+    assert "GH-WRITE-UNAVAILABLE(cannot-verify:git-push-form)" in combined, combined
+
+
+def test_a_workflow_scope_refusal_is_named(tmp_path: Path) -> None:
+    """A PAT without the `workflow` scope is refused on a branch touching `.github/workflows/*` \u2014 a
+    MEASURED refusal, and the incident's own shape for any lane that edits a workflow. It must be named
+    as such, not as generic "permission denied".
+    """
+    mod = _load_tool()
+    clone = _make_remote_and_clone(tmp_path)
+    bindir = _stub_bin(
+        tmp_path,
+        f"""#!/bin/sh
+do_push=0; for a in "$@"; do [ "$a" = "push" ] && do_push=1; done
+case "$*" in *--delete*) do_push=0 ;; esac
+if [ "$do_push" = 1 ]; then
+  echo "remote: refusing to allow a Personal Access Token to create or update workflow `.github/workflows/x.yml` without `workflow` scope" >&2
+  exit 1
+fi
+exec {GIT} "$@"
+""",
+    )
+    res = _run_with_path(clone, bindir)
+    combined = res.stdout + res.stderr
+    assert res.returncode == 1, combined
+    assert "GH-WRITE-UNAVAILABLE(workflow-scope-denied)" in combined, combined
+    # ⛔ BOTH REAL SPELLINGS: GitHub backticks the path AND the word, and the GitHub-App variant says
+    # "without `workflows` permission". Matching only the plain spelling missed the dominant message
+    # (measured round 16) while the test and its mutant passed.
+    for message in (
+        "refusing to allow a Personal Access Token to create or update workflow `.github/workflows/x.yml` without `workflow` scope",
+        "refusing to allow a GitHub App to create or update workflow `.github/workflows/x.yml` without `workflows` permission",
+    ):
+        assert mod._classify_push_failure(message) == "workflow-scope-denied", message
 
 
 def test_userinfo_origin_does_not_break_the_repo_assertion(tmp_path: Path) -> None:

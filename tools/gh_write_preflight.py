@@ -40,6 +40,10 @@ Reasons (stable, greppable — the whole point is that a lane's log says which o
     no-remote                  no `origin` to probe (and no --repo to assert against)
     no-git-checkout            --workdir is not a git work tree
     contents-write-denied      the server refused the push (403 / "Permission to … denied")
+    workflow-scope-denied      a PAT without the `workflow` scope, on a branch touching
+                               `.github/workflows/*` — a MEASURED refusal, and the incident's shape
+    cannot-verify:git-push-form  the push never reached the credential (mirror/signed-refspec/
+                               ref-lock configuration); a repo problem, not a credential one
     push-refused               the push failed for another measured reason (SSH key, DNS, …)
     ls-remote-mismatch         push reported success but the ref is not on the remote, or its sha
                                differs — the write did not land as claimed
@@ -320,6 +324,29 @@ def _classify_push_failure(stderr: str) -> str:
         # (publickey)`: an SSH key failure says nothing about contents scope. `host key verification`
         # needs no clause of its own — it matches no contents arm below and falls through.
         return "push-refused"
+    # ⛔ GIT-SHAPE REFUSALS FIRST: `remote.origin.mirror=true` and `push.gpgSign=true` (with no
+    # usable signer) are decided BEFORE any credential is used, and reporting them as `push-refused`
+    # sent the operator to the token page — the mislabel class this file exists to remove.
+    if (
+        "--mirror can't be combined" in low
+        or "does not support --signed" in low
+        or "src refspec" in low
+        or "does not match any" in low
+        or "cannot lock ref" in low
+    ):
+        return "cannot-verify:git-push-form"
+    # a PAT without the `workflow` scope is MEASURED, and it is the incident's own shape for any lane
+    # whose HEAD touches `.github/workflows/`: report the real cause, not "permission denied"
+    # GitHub backticks the path AND the word: ``… update workflow `.github/workflows/x.yml` without
+    # `workflow` scope`` — so matching the plain spelling alone missed the DOMINANT real message and
+    # fell through to `push-refused` (measured round 16). Both spellings, plus the GitHub-App variant
+    # ("without `workflows` permission"), are matched.
+    if (
+        "workflow" in low
+        and ("refusing to allow" in low or "personal access token" in low)
+        and ("scope" in low or "permission" in low)
+    ):
+        return "workflow-scope-denied"
     if "403" in low or "permission to" in low or "not authorized" in low:
         return "contents-write-denied"
     return "push-refused"
@@ -403,7 +430,20 @@ def _cleanup(cwd: Path, targets: list[str], ref: str, timeout: int = DEFAULT_TIM
     rc_err = ""
     try:
         # ⛔ the NAME, not a target: a delete must reach every pushurl, exactly like a push does
-        dele = _git(cwd, "push", "--no-verify", "origin", "--delete", ref, timeout=timeout)
+        # ⛔ `-c push.followTags=false` HERE TOO: with `push.followTags=true` configured, even the DELETE
+        # push publishes the lane's annotated tags (measured — the first fix on the probe push left this
+        # one and the tag still appeared on the remote).
+        dele = _git(
+            cwd,
+            "-c",
+            "push.followTags=false",
+            "push",
+            "--no-verify",
+            "origin",
+            "--delete",
+            ref,
+            timeout=timeout,
+        )
         if dele.returncode != 0:
             rc_err = " ".join((dele.stderr or dele.stdout or "").split())[:200]
     except (OSError, subprocess.SubprocessError) as exc:
@@ -513,7 +553,21 @@ def probe(cwd: Path, repo: str, targets: list[str], timeout: int = DEFAULT_TIMEO
     try:
         # ⛔ the NAME, so git exercises EVERY pushurl — a single resolved URL produced a
         # FALSE PASS when a second pushurl refused (measured, round 11)
-        push = _git(cwd, "push", "--no-verify", "origin", f"HEAD:refs/heads/{ref}", timeout=timeout)
+        # ⛔ `-c push.followTags=false`: with `push.followTags=true` configured, a plain push of
+        # `HEAD:refs/heads/<probe>` ALSO publishes every annotated tag — left permanently on the shared
+        # remote by a run that reports "leaves no trace", and in this repo `publish-pypi.yml` /
+        # `publish-selfhost.yml` trigger on `push: tags: ['v*']`, so a probe could start a release
+        # (measured, round 15). Pushing a resolved sha does NOT help; only the explicit config does.
+        push = _git(
+            cwd,
+            "-c",
+            "push.followTags=false",
+            "push",
+            "--no-verify",
+            "origin",
+            f"HEAD:refs/heads/{ref}",
+            timeout=timeout,
+        )
     except subprocess.TimeoutExpired as exc:
         # ⚠️ ORDER MATTERS: `TimeoutExpired` subclasses `SubprocessError`, so this arm must come
         # first or the timeout is swallowed as a generic failure — and it is the arm that most needs
