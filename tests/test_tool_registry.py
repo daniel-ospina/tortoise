@@ -1694,10 +1694,13 @@ class TestReadTierCannotHideAnOutOfBoundaryWrite:
         one real carve-out is declared."""
         import tool_surface_capabilities as tsc
 
-        # Pretend `query` were an out-of-boundary mutator: the read tools that
-        # reach it (tortoise_query and friends) are NOT declared, so it must fire.
+        # Pretend the accessor `tortoise_query` reaches were an out-of-boundary
+        # mutator: it is NOT declared, so it must fire. #10602 moved that tool off
+        # `sdk.query` (no LIMIT in its Cypher) onto `paginated_query`, which is the
+        # accessor its handler actually reaches now — probing `query` would test a
+        # binding that no longer exists and pass vacuously.
         monkeypatch.setitem(
-            tsc.OUT_OF_BOUNDARY_MUTATORS, "query",
+            tsc.OUT_OF_BOUNDARY_MUTATORS, "paginated_query",
             "probe: pretend a mutation lives outside sdk.py")
         violations = tsc.write_classification_violations(tsc.served_registry())
         assert any("out-of-boundary mutation" in v and "tortoise_query" in v
@@ -1736,7 +1739,10 @@ class TestReadTierCannotHideAnOutOfBoundaryWrite:
 
         import tool_surface_capabilities as tsc
 
-        monkeypatch.setitem(tsc.OUT_OF_BOUNDARY_MUTATORS, "query",
+        # #10602: tortoise_query now reaches `paginated_query`, not `query` — the
+        # probe must name the accessor the handler ACTUALLY reaches, or the arm
+        # looks vacuous while the binding it was written for is gone.
+        monkeypatch.setitem(tsc.OUT_OF_BOUNDARY_MUTATORS, "paginated_query",
                             "probe: pretend a mutation lives outside sdk.py")
         # A REAL entry (so the handler resolution is real) moved to the
         # `maintenance` tier — exactly the re-tiering a lane might attempt.

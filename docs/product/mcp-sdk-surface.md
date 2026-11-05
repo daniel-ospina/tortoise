@@ -215,7 +215,7 @@ not recorded here has no approval behind it, and the carve-out does not cover it
 
 | Tool | Does | Reaches | Used by | Recomm. | Status and rationale |
 |---|---|---|---|---|---|
-| `tortoise_query` | Query points by pointKind and/or property filters — structural exact-match retrieval for known shapes (Epic #888: paginated_query + query_points_by_tag merged in). Pagination vi… | query | agents, tooling, docs | **keep** | group: `query` · in use — called by agents |
+| `tortoise_query` | Query points by pointKind and/or property filters — structural exact-match retrieval for known shapes (Epic #888: paginated_query + query_points_by_tag merged in). Pagination vi… | paginated_query | agents, tooling, docs | **keep** | group: `query` · in use — called by agents |
 | `tortoise_belief_timeline` | Dated, ordered belief chain for a topic — decision Points with validFrom, NAND/CORRECTS links, superseded priors visible. | belief_timeline | never called, tooling, docs | **keep** | never called — not called over MCP, but used by tooling — removing it would break that |
 | `tortoise_expand_relationships` | Full relationship payload for ONE Point, incl. each related point's content (the expand side of the #1353 list/expand split — search returns bounded state entries; use this to r… | expand_relationships | never called, tooling, docs | **keep** | never called — not called over MCP, but used by tooling — removing it would break that |
 | `tortoise_get_confidence` | Get EP confidence for a claim: {mean, variance, alpha, beta}. | get_confidence | never called, tooling, docs | **keep** | never called — not called over MCP, but used by tooling — removing it would break that |
@@ -385,12 +385,12 @@ Grouped by **who reaches them**. This is the ranking that matters for cutting: e
 | `TortoiseSDK.list_pointkinds` | reached by 0 registered tool(s) and 1 retired name(s): tortoise_list_pointkinds (retired) | tooling, docs | **keep** | reached by 0 registered tool(s) and 1 retired name(s) |
 | `TortoiseSDK.list_sources` | reached by 0 registered tool(s) and 1 retired name(s): tortoise_list_sources (retired) | tooling, docs | **keep** | reached by 0 registered tool(s) and 1 retired name(s) |
 | `TortoiseSDK.list_tags` | reached by 0 registered tool(s) and 1 retired name(s): tortoise_list_tags (retired) | tooling, docs | **keep** | reached by 0 registered tool(s) and 1 retired name(s) |
-| `TortoiseSDK.paginated_query` | reached by 0 registered tool(s) and 1 retired name(s): tortoise_paginated_query (retired) | tooling, docs | **keep** | reached by 0 registered tool(s) and 1 retired name(s) |
 | `TortoiseSDK.query_points_by_tag` | reached by 0 registered tool(s) and 1 retired name(s): tortoise_query_points_by_tag (retired) | tooling, docs | **keep** | reached by 0 registered tool(s) and 1 retired name(s) |
 | `TortoiseSDK.stale_points` | reached by 0 registered tool(s) and 1 retired name(s): tortoise_stale (retired) | tooling, docs | **keep** | reached by 0 registered tool(s) and 1 retired name(s) |
 | `TortoiseSDK.status` | reached by 0 registered tool(s) and 1 retired name(s): tortoise_status (retired) | eval-harness, tooling, docs | **keep** | reached by 0 registered tool(s) and 1 retired name(s) |
 | `TortoiseSDK.taxonomy` | reached by 0 registered tool(s) and 1 retired name(s): tortoise_taxonomy (retired) | eval-harness, tooling, docs | **keep** | reached by 0 registered tool(s) and 1 retired name(s) |
 | `TortoiseSDK.get_point` | reached by 0 registered tool(s) and 2 retired name(s): tortoise_get_operator (retired), tortoise_get_point (retired) | eval-harness, tooling, docs | **keep** | reached by 0 registered tool(s) and 2 retired name(s) |
+| `TortoiseSDK.paginated_query` | reached by 1 registered tool(s) and 1 retired name(s): tortoise_paginated_query (retired), tortoise_query | tooling, docs | **keep** | reached by 1 registered tool(s) and 1 retired name(s) |
 | `TortoiseSDK.annotate_operator` | reached by 1 registered tool(s): tortoise_annotate_operator | tooling, docs | **keep** | reached by 1 registered tool(s) |
 | `TortoiseSDK.approve_merge` | reached by 1 registered tool(s): tortoise_approve_merge | tooling, docs | **keep** | reached by 1 registered tool(s) |
 | `TortoiseSDK.assess_source` | reached by 1 registered tool(s): tortoise_assess_source | tooling, docs | **keep** | reached by 1 registered tool(s) |
@@ -441,7 +441,6 @@ Grouped by **who reaches them**. This is the ranking that matters for cutting: e
 | `TortoiseSDK.org_create` | reached by 1 registered tool(s): tortoise_org_create | tooling, docs | **keep** | reached by 1 registered tool(s) |
 | `TortoiseSDK.promote_point` | reached by 1 registered tool(s): tortoise_promote_point | eval-harness, tooling, docs | **keep** | reached by 1 registered tool(s) |
 | `TortoiseSDK.provenance` | reached by 1 registered tool(s): tortoise_provenance | eval-harness, tooling, docs | **keep** | reached by 1 registered tool(s) |
-| `TortoiseSDK.query` | reached by 1 registered tool(s): tortoise_query | eval-harness, tooling, docs | **keep** | reached by 1 registered tool(s) |
 | `TortoiseSDK.recall_state` | reached by 1 registered tool(s): tortoise_recall | eval-harness, tooling, docs | **keep** | reached by 1 registered tool(s) |
 | `TortoiseSDK.retract_point` | reached by 1 registered tool(s): tortoise_retract_point | eval-harness, tooling, docs | **keep** | reached by 1 registered tool(s) |
 | `TortoiseSDK.review_connections` | reached by 1 registered tool(s): tortoise_review_connections | tooling, docs | **keep** | reached by 1 registered tool(s) |
@@ -459,6 +458,7 @@ Grouped by **who reaches them**. This is the ranking that matters for cutting: e
 | `TortoiseSDK.validate_domain` | reached by 1 registered tool(s): tortoise_validate_domain | tooling, docs | **keep** | reached by 1 registered tool(s) |
 | `TortoiseSDK.reconcile_sessions` | reached by no registered MCP tool; caller categories: cli | tooling, docs | **review** | no MCP tool binds it; callers: cli |
 | `TortoiseSDK.close` | reached by no registered MCP tool; caller categories: cli, documentation, engine, eval-harness, other-tooling, tenant-rest | eval-harness, tooling, docs | **review** | no MCP tool binds it; callers: cli, documentation, engine, eval-harness, other-tooling, tenant-rest |
+| `TortoiseSDK.query` | reached by no registered MCP tool; caller categories: cli, documentation, engine, eval-harness, other-tooling, tenant-rest | eval-harness, tooling, docs | **review** | no MCP tool binds it; callers: cli, documentation, engine, eval-harness, other-tooling, tenant-rest |
 | `TortoiseSDK.session_index_health` | reached by no registered MCP tool; caller categories: cli, engine | tooling, docs | **review** | no MCP tool binds it; callers: cli, engine |
 | `TortoiseSDK.volunteer_context` | reached by no registered MCP tool; caller categories: cli, engine, tenant-rest | eval-harness, tooling, docs | **review** | no MCP tool binds it; callers: cli, engine, tenant-rest |
 | `TortoiseSDK.apikey_create` | reached by no registered MCP tool; caller categories: cli, tenant-rest | tooling, docs | **review** | no MCP tool binds it; callers: cli, tenant-rest |

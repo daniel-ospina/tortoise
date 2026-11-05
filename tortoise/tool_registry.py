@@ -302,7 +302,15 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "tortoise_get_point.",
         risk="read",
         http_policy=True,
-        sdk_method="query",
+        # #10602: `query` → `paginated_query`. The un-paginated path used to call
+        # `sdk.query`, which has no LIMIT in its Cypher (`MATCH (n:Point) WHERE …
+        # RETURN properties(n)`), so `tortoise_query(kind="statement", limit=3)`
+        # returned the whole 15,708-row label and blew the 10 s transport wait
+        # bound with `-32009`. The bound now reaches the accessor that APPLIES a
+        # limit; `sdk.query` is no longer on this tool's path. No tool was
+        # added, removed or renamed — this is the declared binding corrected to
+        # match the handler the AST guard reads.
+        sdk_method="paginated_query",
     ),
     ToolDefinition(
         name="tortoise_paginated_query",

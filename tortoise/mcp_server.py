@@ -3696,13 +3696,15 @@ def tortoise_query(kind: str | None = None,
     retrieval for known shapes (Epic #888 consolidation of paginated_query +
     query_points_by_tag into this one tool).
 
-    - Structural path (text=None): property-filter query via sdk.query().
+    - Structural path (text=None): property-filter query, **bounded to `limit`**
+      (default 100 — see the #10602 note below).
     - tag=<name>: filter Points by TAGGED edge (previously
       tortoise_query_points_by_tag). Tag mode takes precedence over text and
       ignores kind/filters/min_confidence/entity_type/order_by.
-    - Pagination: pass offset=/limit= (or 1-based page=). When any pagination
-      param is set, returns {results, total, hasMore} (previously
-      tortoise_paginated_query); a plain list is returned otherwise. Not
+    - Pagination: pass offset=/limit= (or 1-based page=). When offset=/page= is
+      set, returns {results, total, hasMore} (previously
+      tortoise_paginated_query); a plain list is returned otherwise. `limit`
+      alone does NOT switch the return shape — it BOUNDS the plain list. Not
       combinable with text= (fts has no offset/skip) — error dict returned.
     - text=<query>: routes through tortoise_fts_query() for hybrid search
       (unchanged behavior; limit defaults to 100).
@@ -3781,9 +3783,32 @@ def tortoise_query(kind: str | None = None,
     # with a query parameter — a caller-controlled switch on a measurement that
     # is presented as authoritative. A tenant property named `_foo` is still a
     # filter (validate_filter_key accepts it), so ONLY the known switches go.
-    result = _safe(_get_org_sdk().query, kind,
-                   include_retracted=include_retracted,
-                   **_public_filters(filters))
+    # #10602 — the plain structural path is BOUNDED. `eff_limit` has always been
+    # computed above (100 when the caller passes none) and was applied only on
+    # the tag/text/paginated branches, so a `limit` passed WITHOUT offset=/page=
+    # was silently dropped here and `sdk.query` was asked for the whole label.
+    # `sdk.query` has no limit of its own (`MATCH (n:Point) WHERE … RETURN
+    # properties(n)`, no LIMIT and no ORDER BY), so on the hosted graph
+    # `tortoise_query(kind="statement", limit=3)` returned all 15,708 statements:
+    # 15,417 ms with no data, and a deterministic `-32009`
+    # "wait budget exceeded / retry_after 10" once the read + serialisation
+    # outlived `mcp_auth._TRANSPORT_WAIT_BOUND_S` (10 s). Measured 2026-11-05;
+    # the same logical read bounded at the source (`offset=0, limit=3`) answers
+    # in 1,362 ms with `total=15708`. So the bound is pushed to the ACCESSOR —
+    # `paginated_query` is the SDK method that applies LIMIT — rather than
+    # slicing the full list here, which would still pay the unbounded read.
+    bounded = _safe(_get_org_sdk().paginated_query, kind, skip=0, limit=eff_limit,
+                    include_retracted=include_retracted,
+                    **_public_filters(filters))
+    # `_safe` returns an `_SafeError` (a dict SUBCLASS) instead of raising, so
+    # reading `.get("results")` off it without this gate would turn every
+    # database failure into a successful empty read — the false PASS #10602's
+    # sibling defect exists to remove.
+    if isinstance(bounded, _SafeError):
+        return bounded
+    # The un-paginated path's contract is a plain list; `paginated_query`
+    # answers {results, total, hasMore}, so take only the page.
+    result = bounded.get("results", []) if isinstance(bounded, dict) else bounded
     # If empty results and a kind filter was provided, attach suggestion
     if isinstance(result, list) and len(result) == 0 and kind is not None:
         from tortoise.query_suggestions import compute_suggestion

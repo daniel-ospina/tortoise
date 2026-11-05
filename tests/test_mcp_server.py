@@ -163,8 +163,14 @@ class TestQueryConsolidation:
         from tortoise.mcp_server import tortoise_query
         result = tortoise_query(kind="statement")
         assert result == query_sdk.points
-        name, kind, kwargs = query_sdk.calls[-1]
-        assert (name, kind) == ("query", "statement")
+        # #10602: the un-paginated path is BOUNDED, so it reaches the one SDK
+        # accessor that applies a LIMIT (`paginated_query`) and takes only its
+        # page — `sdk.query` has no LIMIT in its Cypher at all, so the whole
+        # label came back and blew the 10 s transport wait bound. The RETURN
+        # contract is unchanged: still a plain list, all rows while under the cap.
+        name, kind, skip, limit, kwargs = query_sdk.calls[-1]
+        assert (name, kind, skip) == ("paginated_query", "statement", 0)
+        assert limit == 100, "the plain path's own computed default cap"
         assert kwargs.get("include_retracted") is False
 
     def test_pagination_params_route_to_paginated_query(self, query_sdk):
@@ -273,7 +279,7 @@ class TestQueryConsolidation:
         from tortoise.mcp_server import tortoise_query
         result = tortoise_query(kind="statement", filters={"include_retracted": True})
         assert result == query_sdk.points
-        name, kind, kwargs = query_sdk.calls[-1]  # noqa: RUF059
+        name, kind, skip, limit, kwargs = query_sdk.calls[-1]  # noqa: RUF059
         assert kwargs.get("include_retracted") is True  # filters value honored
 
     def test_explicit_include_retracted_wins_over_filters(self, query_sdk):
@@ -281,7 +287,7 @@ class TestQueryConsolidation:
         from tortoise.mcp_server import tortoise_query
         tortoise_query(kind="statement", include_retracted=True,
                        filters={"include_retracted": False})
-        name, kind, kwargs = query_sdk.calls[-1]  # noqa: RUF059
+        name, kind, skip, limit, kwargs = query_sdk.calls[-1]  # noqa: RUF059
         assert kwargs.get("include_retracted") is True
 
     def test_malformed_json_filters_does_not_raise(self, query_sdk):
