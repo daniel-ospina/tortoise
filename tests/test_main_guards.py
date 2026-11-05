@@ -200,7 +200,7 @@ def test_the_guard_retry_fits_inside_its_pytest_item_budget():
     from tortoise.embeddings import EmbeddingModel
 
     per_attempt = float(EmbeddingModel._LOAD_TIMEOUT_S) + _INGEST_WORK_ALLOWANCE_S
-    assert _GUARD_ITEM_TIMEOUT_S > 2 * per_attempt, (
+    assert 2 * per_attempt < _GUARD_ITEM_TIMEOUT_S, (
         f"a {_GUARD_ITEM_TIMEOUT_S}s item budget cannot carry two {per_attempt}s "
         "attempts — the retry would be unreachable and pytest-timeout would kill "
         "the item mid-attempt")
