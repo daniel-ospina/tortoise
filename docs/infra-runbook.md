@@ -768,8 +768,8 @@ so a slow-but-reachable store must not flip it (`monitoring.metrics`). Do not
 
 cumulative since process start, incremented on every wait-bound refusal — the
 `-32009` JSON-RPC body on the MCP surface, the `{"detail"}` 504 on the REST one.
-Both surface keys are always present, at `0`, so a measured zero is
-distinguishable from a build that cannot see breaches at all.
+On a **successful** read both surface keys are present, at `0`, so a measured
+zero is distinguishable from a build that cannot see breaches at all.
 
 `error` is `null` when the read succeeded and names the reason when it did not.
 A failed read is **not** zeroed: `total` and `by_surface` are both `null` in that

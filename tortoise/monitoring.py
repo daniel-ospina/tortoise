@@ -1642,8 +1642,10 @@ def wait_bound_breach_counts() -> dict:
     review P2, #2850). A monitoring read that can throw turns the change that
     makes an outage visible into a 500 on the endpoint Fly probes.
 
-    Every known surface is present even at 0 — a missing key and a measured
-    zero must not read the same (``#3253``'s rule for ``graph_size_error``).
+    On a SUCCESSFUL read every known surface is present even at 0 — a missing
+    key and a measured zero must not read the same (``#3253``'s rule for
+    ``graph_size_error``). When the read FAILS both fields are ``None``, so the
+    zero-padding is a success-path guarantee only (see below).
 
     ⛔ A FAILED READ IS NOT A ZERO — and it is not a zero in ANY field, so the
     failure shape is ``None``, not padded counts: when the counter family
