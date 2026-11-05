@@ -28,6 +28,7 @@ Three properties are pinned here, one class each:
 """
 from __future__ import annotations
 
+import argparse
 import contextlib
 import io
 import os
@@ -62,6 +63,7 @@ class TestTheExitContractIsOneMapping:
     def test_a_refusal_exits_non_zero(self):
         for outcome in (IngestOutcome.REFUSED_NOT_FOUND,):
             assert outcome.refused is True, outcome
+            assert outcome.returncode == 1
             assert outcome.returncode == 1, (
                 f"{outcome} is a REFUSAL but maps to exit {outcome.returncode}; "
                 "a caller cannot tell it from a completed ingest")
@@ -98,6 +100,7 @@ class TestTheExitContractIsOneMapping:
             IngestOutcome.SKIPPED_ALREADY_EXTRACTED: 0,
             IngestOutcome.SKIPPED_NOTHING_PENDING: 0,
             IngestOutcome.REFUSED_NOT_FOUND: 1,
+            IngestOutcome.REFUSED_NOT_A_DOCUMENT: 1,
             IngestOutcome.PARTIAL: 1,
         }
         assert set(expected) == set(IngestOutcome), (
@@ -197,6 +200,16 @@ class TestARefusalIsNotSuccess:
             "as the ask having been performed")
         assert outcome.returncode == 1
 
+        # The sweep is graph-global: a Source left pending here would make every
+        # LATER sweep in this file read `unresolved` and return PARTIAL. Drop it.
+        from tortoise.projection import FalkorProjection
+        proj = FalkorProjection.from_uri(_DB_URI)
+        try:
+            proj.g.query("MATCH (s:Source {url: $id}) DETACH DELETE s",
+                         params={"id": doc.name})
+        finally:
+            proj.close()
+
 
 # --------------------------------------------------------------------------
 # The skip arm must not produce a completion artifact.
@@ -211,12 +224,19 @@ class TestTheSkipArmWritesNothing:
             "---\ntitle: Repro Note\n---\n\n## Section one\n\nSomething true.\n",
             encoding="utf-8")
         base = ["--db", _DB_URI, "--log", str(tmp_path / "e.jsonl"),
-                "--out", str(tmp_path / "g.html"),
+                "--out", str(tmp_path / "second.html"),
                 "--point-model", "mock:cheap", "--relation-model", "mock:reason"]
 
         first, _ = _run([str(doc), *base])
         assert first is IngestOutcome.DONE, first
 
+        # A SECOND, untouched --out path: the first run wrote `second.html`, so
+        # existence after the skip means THE SKIP wrote it.
+        # Same argv as the first run (that is what makes the idempotency
+        # key match). The render is rewritten on every non-skip run, so an
+        # unchanged mtime after the skip is proof the SKIP wrote nothing.
+        render = tmp_path / "second.html"
+        before = render.stat().st_mtime_ns
         second, out = _run([str(doc), *base])
         assert second is IngestOutcome.SKIPPED_ALREADY_PROCESSED, (
             f"the idempotency gate skipped but returned {second!r}")
@@ -227,6 +247,42 @@ class TestTheSkipArmWritesNothing:
         assert "points :" not in out, (
             "a SKIPPED ingest printed the completion summary, so its output is "
             "byte-indistinguishable from a completed one:\n" + out)
+        # A skip writes nothing, the render included (documented in the §2
+        # census row): a caller re-running to refresh --out gets the OLD file
+        # and exit 0, so the `skip:` line is the only signal — pin both halves.
+        assert render.stat().st_mtime_ns == before, (
+            "a SKIPPED ingest rewrote the --out render, contradicting the row's "
+            "'a skip writes nothing either'")
+
+    def test_a_capture_metadata_run_on_a_non_document_is_refused(self, tmp_path):
+        """Round 3's P1: --capture-metadata fell through to a success summary.
+
+        Its ask is "emit the document Source + sessionCaptured Event", which is
+        unperformable for content with no `##` sections. Measured before: exit 0,
+        `points : 0 statements`, `--out` written, and ZERO `:Source` rows.
+        """
+        doc = tmp_path / "plain.txt"
+        doc.write_text("just prose, no ## headers at all\n", encoding="utf-8")
+        outcome, out = _run([
+            str(doc), "--capture-metadata", "--db", _DB_URI,
+            "--log", str(tmp_path / "e.jsonl"), "--out", str(tmp_path / "g.html"),
+            "--point-model", "mock:cheap", "--relation-model", "mock:reason",
+        ])
+        assert outcome is IngestOutcome.REFUSED_NOT_A_DOCUMENT, (
+            f"an unperformable --capture-metadata returned {outcome!r}; the "
+            "caller reads that as a capture that happened")
+        assert outcome.returncode == 1
+
+        # The sweep is graph-global: a Source left pending here would make every
+        # LATER sweep in this file read `unresolved` and return PARTIAL. Drop it.
+        from tortoise.projection import FalkorProjection
+        proj = FalkorProjection.from_uri(_DB_URI)
+        try:
+            proj.g.query("MATCH (s:Source {url: $id}) DETACH DELETE s",
+                         params={"id": doc.name})
+        finally:
+            proj.close()
+        assert "refused" in out, out
 
     def test_a_skipped_ingest_does_not_write_a_resolution_point(self, tmp_path):
         """`--resolution` after a skip wrote a Point for work that never ran.
@@ -287,47 +343,126 @@ class TestTheSweepReportsOutstandingWork:
         """An empty sweep is the ask's own answer, not a refusal."""
         assert IngestOutcome.SKIPPED_NOTHING_PENDING.returncode == 0
 
-
-@pytest.mark.skipif(not _DB_URI, reason="needs TORTOISE_DB_URI (docker lane)")
-class TestTheSweepDoesNotRedOnItsOwnIdempotency:
-    def test_a_second_sweep_with_only_the_already_claimed_bucket_is_green(
+    def test_the_sweep_returns_partial_when_it_leaves_a_document_behind(
             self, tmp_path, monkeypatch):
-        """The benign bucket must not make a steady-state corpus red forever.
+        """Round 3's P2: `return IngestOutcome.PARTIAL` survived a `pass` mutant.
 
-        `already_claimed` is the sweep's twin of `SKIPPED_ALREADY_PROCESSED`:
-        the content is already in the graph at this extractor version. Counting
-        it as outstanding would exit 1 on every re-sweep of an unchanged
-        corpus — noise that trains operators to stop reading the exit status,
-        which destroys the marker. `not_document` and `unresolved` keep their
-        pending marker and DO count.
+        Nothing asserted that the sweep RETURNS partial — only properties of the
+        enum — so deleting the arm shipped green and the census's MARKS claim
+        silently reverted to SILENT. This drives the real arm: park a document,
+        strip its `##` sections, sweep.
         """
         corpus = tmp_path / "corpus"
         corpus.mkdir()
-        doc = corpus / "sweep-note.md"
+        doc = corpus / "becomes-plain.md"
         doc.write_text(
             "---\ntitle: Sweep Note\n---\n\n## Section one\n\nSomething true.\n",
             encoding="utf-8")
         monkeypatch.setenv("TORTOISE_INGEST_BASE_DIR", str(corpus))
-
         base = ["--db", _DB_URI, "--log", str(tmp_path / "e.jsonl"),
                 "--out", str(tmp_path / "g.html"),
                 "--point-model", "mock:cheap", "--relation-model", "mock:reason"]
 
-        # Park the document with its pending marker without extracting it.
-        meta = [str(doc), "--capture-metadata", *base]
-        assert _run(meta)[0] is IngestOutcome.DONE
+        assert _run([str(doc), "--capture-metadata", *base])[0] is IngestOutcome.DONE
+        # Now the content has no `##` sections: the sweep cannot extract it, so
+        # the marker stays and the run is NOT a completed ask.
+        doc.write_text("just prose now\n", encoding="utf-8")
+        outcome, out = _run(["--upgrade-all", *base])
+        assert "not a document" in out, out
+        assert outcome is IngestOutcome.PARTIAL, (
+            f"a sweep that left a document pending returned {outcome!r} "
+            f"(exit {outcome.returncode}); a caller reads that as done:\n{out}")
+        assert outcome.returncode == 1
 
-        first, out1 = _run(["--upgrade-all", *base])
-        assert "1 upgraded" in out1, out1
-        assert first is IngestOutcome.DONE, (
-            f"a sweep that upgraded its only candidate returned {first!r}")
+        # The sweep is graph-GLOBAL: a Source left pending here would make every
+        # LATER sweep in this file (and on this lane) read `unresolved` and
+        # return PARTIAL. Drop what this test parked.
+        from tortoise.projection import FalkorProjection
+        proj = FalkorProjection.from_uri(_DB_URI)
+        try:
+            proj.g.query("MATCH (s:Source {url: $id}) DETACH DELETE s",
+                         params={"id": doc.name})
+        finally:
+            proj.close()
 
-        # Re-park the SAME content, then sweep again: the only bucket is
-        # `already claimed`, which must stay GREEN.
-        assert _run(meta)[0] is IngestOutcome.DONE
-        third, out3 = _run(["--upgrade-all", *base])
-        assert "1 already claimed" in out3, out3
-        assert third is IngestOutcome.DONE, (
+        # The sweep is graph-global: a Source left pending here would make every
+        # LATER sweep in this file read `unresolved` and return PARTIAL. Drop it.
+        from tortoise.projection import FalkorProjection
+        proj = FalkorProjection.from_uri(_DB_URI)
+        try:
+            proj.g.query("MATCH (s:Source {url: $id}) DETACH DELETE s",
+                         params={"id": doc.name})
+        finally:
+            proj.close()
+
+
+@pytest.mark.skipif(not _DB_URI, reason="needs TORTOISE_DB_URI (docker lane)")
+class TestTheSweepDoesNotRedOnItsOwnIdempotency:
+    """The sweep's DECISION, driven through `_do_upgrade_all` with a stubbed population.
+
+    Deliberately not a live sweep: `_discover_pending_documents` reads every
+    pending `:Source` in the graph, so "the only bucket is `already claimed`" is
+    really an assertion about whatever else this lane's graph holds — a
+    false-red generator. That is also why the round-3 reviewer measured
+    `return IngestOutcome.PARTIAL` surviving a `pass` mutant: no test drove the
+    arm at all.
+    """
+
+    @staticmethod
+    def _sweep(tmp_path, monkeypatch, rows, *, begin_skip):
+        import typing
+
+        import tortoise.ingest as ingest_mod
+
+        class _Rowset:
+            result_set: typing.ClassVar[list] = []
+
+        class _G:
+            def query(self, *_a, **_k):
+                return _Rowset()
+
+        class _Proj:
+            g = _G()
+
+        class _Result:
+            skip = begin_skip
+            reason = "already processed (same key + extractor_version)"
+            run_id = "r1"
+
+        class _API:
+            agent_id = "mock:cheap@v"
+
+            def begin_ingest(self, *_a, **_k):
+                return _Result() if begin_skip else None
+
+            def add_document(self, *_a, **_k):
+                raise AssertionError("a skip must not write a document")
+
+        monkeypatch.setenv("TORTOISE_INGEST_BASE_DIR", str(tmp_path))
+        monkeypatch.setattr(ingest_mod, "_discover_pending_documents",
+                            lambda proj, **k: rows)
+        args = argparse.Namespace(force=False, max_utterances=0, domain=None,
+                                  include_unstamped=False,
+                                  point_model="mock:cheap",
+                                  relation_model="mock:reason")
+        return ingest_mod._do_upgrade_all(_Proj(), _API(), args)
+
+    def test_only_the_already_claimed_bucket_is_green(self, tmp_path, monkeypatch):
+        doc = tmp_path / "sweep-note.md"
+        doc.write_text("## Section one\n\nSomething true.\n", encoding="utf-8")
+        outcome = self._sweep(tmp_path, monkeypatch,
+                              [(doc.name, str(doc), True, None)], begin_skip=True)
+        assert outcome is IngestOutcome.DONE, (
             "a sweep whose ONLY skip is 'already claimed at this extractor "
-            f"version' returned {third!r} (exit {third.returncode}) — a benign "
-            "idempotent re-sweep must stay green:\n" + out3[-600:])
+            f"version' returned {outcome!r} (exit {outcome.returncode}) — a "
+            "benign idempotent re-sweep must stay green")
+
+    def test_an_unreadable_candidate_is_partial(self, tmp_path, monkeypatch):
+        """The `unresolved` bucket — the arm a `pass` mutant used to survive."""
+        outcome = self._sweep(tmp_path, monkeypatch,
+                              [("gone.md", str(tmp_path / "gone.md"), True, None)],
+                              begin_skip=False)
+        assert outcome is IngestOutcome.PARTIAL, (
+            "a sweep that could not read its only candidate returned "
+            f"{outcome!r} (exit {outcome.returncode}); a caller reads that as done")
+        assert outcome.returncode == 1
