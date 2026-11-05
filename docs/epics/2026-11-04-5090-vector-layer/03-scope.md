@@ -63,7 +63,7 @@ self-hosting (**owner: not now**), and compression (§15: no engine to apply it 
 | **S1** | **The embedding rule is operative, not opt-in** | `TORTOISE_EMBED_GATE` is set in each shipped config surface that exists; the effect on the write rate is **measured** and the measurement is recorded with the command that produced it. |
 | **S2** | **The exemption register has a production home** | The three writers carrying **no declared exemption** (`hosted_backup::restore_graph`, `projection.entities::_event_plain_merge`, `projection::_rebuild_all_replay`) have one, resolvable at runtime in `tortoise/` — not only inside `tools/dod_5090_probe.py::WRITER_CENSUS`, which is a read-only instrument. DoD rows 1–2 are then re-scored as a **recorded decision**, with the reading it applies stated. |
 | **S3** | **The unretrievable vectors are censused and their removal is decided** | A dry-run census names every stored vector whose label has no vector index and no efficient query path, per label, with bytes; and the **surface consequence** is stated exactly — `entity_type='object'` / `'event'` vector search currently returns rows by full scan, and would return none afterwards. The removal itself is a **surface change** and is therefore carried by the child with the approval request attached, not spent here. |
-| **S4** | **The store reports its vector contract positively** | `_record_vector_index_inventory` reports the **served set beside the measured indexed set** for every setup, not only when a gap exists. ⚠️ **Corrected premise:** `self._vector_indexed_labels = measured & served` is assigned **unconditionally** at `projection/__init__.py:18570`; it is the `log.warning` at **`:18577`** that `if gap:` gates, and `tests/test_4997_vector_index_parity.py:415` already asserts the attribute for a no-gap store. **The served set is never retained**, so this needs **new state** — it is not one line. Not a second inventory either. |
+| **S4** | **The store reports its vector contract positively** | `_record_vector_index_inventory` reports the **served set beside the measured indexed set** for every setup, not only when a gap exists. ⚠️ **Corrected premise:** `self._vector_indexed_labels = measured & served` is assigned **unconditionally** at `projection/__init__.py:18570`; it is the `log.warning` at **`:18582`** that `if gap:` (`:18577`) gates, and `tests/test_4997_vector_index_parity.py:415` already asserts the attribute for a no-gap store. **The served set is never retained**, so this needs **new state** — it is not one line. Not a second inventory either. |
 | **S5** | **The epic's verification artifacts exist** | A **test-design / integration-surface map** and a **capstone**. `epic-workflow` mandates both; neither has ever existed for this epic. |
 
 ### Out of Scope — with explicit deferral
@@ -93,12 +93,13 @@ issues answering a question a third calls open, and nothing errors. Reconciling 
 work; deciding it is not.
 
 **Contradiction test on S3, run explicitly.** Does removing the unretrievable vectors contradict a recorded
-decision? The **2026-09-24** direction said *"keep the vectors, make them searchable"*. The **later
-2026-10-08 billing ruling** is narrower and specific: *"bytes that earn nothing and cost us RAM — the 12,657
-stored-but-UNINDEXED embeddings — should still go, **because the customer is not paying for a thing they can
-never retrieve**."* The later ruling governs, and it distinguishes the searchable vectors (keep, `Point`)
-from the unretrievable ones (remove, `Object`/`Event`/`Source`/`Subject`). **No recorded decision forbids
-S3 — and none authorises a lane to skip the surface gate it triggers**, which is why S3 stops at the census
+decision? The **2026-09-24** direction said *"keep the vectors, make them searchable"* — and for the
+unindexed labels that means ADDING indexes, which is more RAM and a surface change. The **later 2026-10-08
+billing ruling** (tiers are capped and priced per feature; **retained bytes are revenue**) removes the COST
+argument in both directions: removing bytes changes the bill by **$0.00**. So **no recorded decision
+authorises** this removal — the earlier direction points the other way, and the later ruling is silent on
+it. **That is why S3 stops at a census plus an approval request**: the removal is the owner's decision,
+taken on the census — and no lane may skip the surface gate it triggers, which is why S3 stops at the census
 plus a named approval request.
 
 ---

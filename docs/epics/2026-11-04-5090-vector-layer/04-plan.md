@@ -164,8 +164,9 @@ duplicate keys (a duplicated declaration must not silently win), and the census 
 unreadable catalogue rather than reporting an empty population.
 
 **6.4 Surface statement (⛔ the hard rule).** Nothing here adds or removes an MCP tool or public SDK method.
-**S3 is the one place that could**: removing `Object`/`Event`/`Source`/`Subject` vectors makes
-`entity_type='object'` (and friends) return **zero rows** where they return rows today. That is a surface
+**S3 is the one place that could**: removing the `Object`/`Event` vectors makes
+`entity_type='object'` / `'event'` return **zero rows** where they return rows today (`Source`/`Subject`
+hold no vectors at all — §12.1b). That is a surface
 change and **requires Daniel's approval before it is implemented** — so it is carried in the child's body as
 a request, with the census as its evidence.
 

@@ -2002,8 +2002,9 @@ probe's own docstring says the 12,657 count *"is 2026-09-24 and is not to be re-
 re-measures it per label on a named graph at a timestamp.
 
 **The places that still cited it, all now dated** — named by their ACTUAL section, because the first
-draft of this list named six and got five of them wrong: **§2.2**'s bill summary and its *"45 MB of
-indices + 51.6 MB of embeddings + 16 MB of text"* line (`:175`, `:185`); **§12.1**'s *"Stored vector
+draft of this list named six and got five of them wrong: **§2.2**'s *"45 MB of
+indices + 51.6 MB of embeddings + 16 MB of text"* line (`:175`) and the unnumbered subsection that follows
+it, *"The class that dominates our bill — measured"* (`:185`); **§12.1**'s *"Stored vector
 properties ≈ 50 MB"* sentence (`:945`); **§12.1a**'s per-node ratio (`:1030`); **§12.2**'s *"≈50 MB …
 against 141 MB"* (`:1129`); **§12.8**'s attribute-byte sentence (`:1395`); and **§13**'s V3 bullet
 (`:1476`), which still stated the 12,657 count and *"13.5 % of the graph"* with no date at all — now

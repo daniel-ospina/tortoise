@@ -114,14 +114,15 @@ assertion:
 - **T:** the census runs without writing; it exits non-zero on an unreadable catalogue rather than reporting
   an empty population; the affected query paths are enumerated; **the removal is requested, not performed**.
 - **Complexity:** standard · **Blocked by:** none (the census half) · **Blocks:** none.
-- ⛔ **Why the removal is not in this child's authority:** `entity_type='object'` (and `event`, `source`,
-  `subject`) vector search **returns rows today** by full scan. Removing the vectors removes that answer —
+- ⛔ **Why the removal is not in this child's authority:** `entity_type='object'` / `'event'` vector search
+  **returns rows today** by full scan (`Source`/`Subject` hold no vectors, so nothing changes there). Removing the vectors removes that answer —
   an MCP/SDK surface change, which `AGENTS.md` requires **Daniel's approval for before implementation**.
   The census is the evidence for that request; acting on it is not a lane's.
-- ⚠️ **Contradiction test, recorded:** the **2026-10-08** billing ruling authorises removing *unretrievable*
-  bytes (*"the customer is not paying for a thing they can never retrieve"*) and is **later and narrower**
-  than the 2026-09-24 *"keep the vectors"* direction, which it preserves for the **searchable** ones. So the
-  removal does not contradict anything — but the surface rule still gates it.
+- ⚠️ **Contradiction test, recorded:** **no recorded decision authorises** this removal. The 2026-09-24
+  direction is *"keep the vectors, make them searchable"* — for the unindexed labels that means adding
+  indexes, i.e. more RAM and a surface change. The later **2026-10-08 billing ruling** removes the COST
+  argument rather than granting one: retained bytes are revenue, so removing bytes moves the bill by
+  **$0.00**. So the census is filed, the removal is the owner's decision, and the surface rule gates it.
 - ⚠️ **Also in this child:** reconcile `#10976`'s (c) and `#7879`'s *"vectors out"* to **"pending V1"** —
   both currently read V1 as answered while §12.1c says `NOT DECIDED — owner's call`.
 

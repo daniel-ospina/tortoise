@@ -294,9 +294,11 @@ survives is what nobody else owns:
 2. **The exemption authority lives only in a read-only measurement script** — three write paths have no
 declared exemption in the product.
 3. **Four of five served labels have no vector index and no efficient query path** — two of them (`Object`, `Event`) hold the 12,657 stored vectors a full scan serves today; `Source` and `Subject` hold none (§12.1b) — and the *removal* of the
-   unretrievable ones is authorised by the 2026-10-08 billing corollary (**later** than the 2026-09-24
-   "keep the vectors" direction, and narrower: keep the searchable ones, remove the ones that can never be
-   retrieved). ⚠️ This is a **contradiction-test result**, not an assumption — see scope §1.
+   unindexed ones is **not authorised by any recorded decision**: the 2026-09-24 direction points the other
+   way ("keep the vectors, make them searchable"), and the 2026-10-08 billing ruling removes the cost
+   argument rather than granting one (retained bytes are revenue; removing bytes moves the bill by $0.00).
+   ⚠️ This is a **contradiction-test result**, not an assumption — see scope §1: the census is filed, the
+   decision is the owner's, and the surface rule gates the removal.
 4. **The epic has never had its two mandated workflow artifacts.**
 
 **Decision unchanged: REPOINT.** The repointed acceptance is in §7.1, with S3 re-scoped per the above.

@@ -140,7 +140,7 @@ comparables now say what that measurement will probably show, and how to run it:
 
 | date | source-tag | finding |
 |---|---|---|
-| 2026-09-24 | `internal-measurement` | 141 MB / 45 MB indices / 12,657 embeddings / exactly one vector index (`Point.embedding`); `Object` 16.96 ms vs `Point` 4.97 ms, both `reason: ok` — §12.1b, §12.1d |
+| 2026-09-24 | `internal-measurement` | 141 MB / 45 MB indices / 12,657 embeddings / exactly one vector index (`Point.embedding`); `Object` 16.96 ms vs `Point` 4.97 ms, both `reason: ok` — §12.1's 2026-09-24 table (141/45 MB), §12.1b (12,657, the index inventory and the full-scan p50s) |
 | 2026-09-23 | `research-brief` | `docs/research/2026-09-23-vector-index-ram-model/research-brief.md` (issue `#4333`): pgvector HNSW is **not** RAM-mandatory; adopt Position B; **four measurements M1–M4 proposed, none taken** |
 | 2026-10-08 | `paid-research-3-lens` | the cost lever is tiering **granularity**, not placement; arithmetic 2.6× high (19.4 MB, not 50); migration surface is 2 files, not 1,396; **recall trap** 0.63–0.72; derived layer not rebuildable ⇒ persist extraction output into the journal first |
 | 2026-10-09 | `paid-research-vendor` | index rebuild blocks the whole instance (7.77 s → >700 s); pgvector's index is WAL-logged; per-tenant isolation has **no clean mechanism** at our scale; planner cost, not lock exhaustion, is the real ceiling |
