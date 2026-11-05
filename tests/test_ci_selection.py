@@ -238,7 +238,9 @@ def test_v4_membership_gate_runs_on_both_architecture_docs():
       this head (97 + 73 − 6 shared) and `select()` drops 3 `carve_out` and 11
       `uri_requiring` files, so it is the union minus those, never the union;
     * the **73** is `tier1`'s own size — the entire set an empty-surface diff
-      selects. It is NOT "the whole `full`-less fast pool", which is 1094 here.
+      selects. It is NOT "the whole `full`-less fast pool", which is 1097 at
+      this head (1094 on `main` before this fold's three new test files), and it
+      moves for a third reason again — `len(fast_pool(manifest))`, re-derive it.
       The `60` this sentence carried was that same `tier1` set **13 rows ago**
       (measured: `len(tier1)` is 60 at `609eb72d3`, the commit that wrote it,
       and 73 here), i.e. the very "a past state quoted as a current one"
@@ -5062,6 +5064,53 @@ def test_attest_census_tool_change_fails_closed_to_full():
         assert r["full"] is True, (sibling, r)
         assert r["test_files"] == "ALL", (sibling, r)
         assert "core" in r["surfaces"], (sibling, r)
+
+
+# ⛔ REMOVED HERE: `test_gh_write_preflight_tool_change_fails_closed_to_full` (#10930/#10947).
+# #11026 landed `tools/gh_write_preflight.py` on `main` with a DIFFERENT implementation (a throwaway
+# ref push on the real remote, not a three-surface API probe), and registered the tool in
+# `CORE_ALSO` rather than `TOOL_CARVEOUTS`. The removed pin asserted `full is True` / `test_files ==
+# "ALL"`; the landed registration makes a tool-only diff select `core` with `full is False`, which
+# is exactly what `test_gh_write_preflight_tool_change_selects_core_not_tier1` above pins. The two
+# are mutually exclusive, so keeping both leaves one of them permanently red. Superseded, not lost:
+# `git show 15c6d179e4f2:tests/test_ci_selection.py` has the removed case. (Same supersession applies
+# to the `TOOL_CARVEOUTS` entry in `tools/ci_selection.py` and the duplicate `ci-surfaces.yml` row.)
+
+
+def test_ready_for_owner_tool_change_fails_closed_to_full():
+    # #10962/#10968: tools/ready_for_owner.py owns tests/test_ready_for_owner.py — the arms that pin
+    # the owner-facing merge-readiness verdict. This is the same silent-drop class as
+    # attest_census/ci_check_repair/gh_write_preflight above, but in the FAIL-OPEN direction on the
+    # one tool whose whole job is to tell the owner a PR is safe to merge from the UI.
+    #
+    # Measured on the fold at #10975 (pre-fix; 72 was `tier1`'s size THEN — 73 since #10980,
+    # so re-derive it rather than reading this as a current count):
+    #     echo tools/ready_for_owner.py | ci_selection.py --changed-files -
+    #       -> surfaces: []  full: False  tier-1 `test_files`,
+    #          with `test_ready_for_owner.py` ABSENT
+    # `tools/` is a flat NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row matches this tool, so
+    # the path was filtered out BEFORE the `if not matched: matched.add("core")` fallback and
+    # select() took the docs-only early return. A PR improving the merge gate would therefore have
+    # got a GREEN run in which essentially none of the gate's own tests ran. (Deliberately no
+    # count: it is the size of `test_ready_for_owner.py` and drifts with every test added.)
+    #
+    # It propagates into the tool as well: `ready_for_owner.py::_read_coverage` counts this shape as
+    # `core-smoke-only` and therefore COVERED, so the gate would certify its own untested edit as
+    # covered by CI. That is why this is a fail-closed entry and not merely a missing registration —
+    # registering `test_ready_for_owner.py` under `core` in ci-surfaces.yml covers edits of the TEST
+    # file, NOT of the tool.
+    #
+    # Mutation check: removing the TOOL_CARVEOUTS entry re-opens the docs-only early return, so the
+    # path is filtered out, `full` is False and `test_files` is the tier-1 list — every assert below
+    # fails.
+    r = _sel(["tools/ready_for_owner.py"])
+    assert r["full"] is True, r
+    assert r["test_files"] == "ALL", r
+    assert "core" in r["surfaces"], r
+    # NOT asserted here: that a renamed/split sibling (tools/ready_for_owner_extra.py) is also
+    # carved out — a `.py` TOOL_CARVEOUTS entry is a STRING prefix and does not cover a sibling (see
+    # the same note on the gh_write_preflight pin above; `tools/ci_check_repair_extra.py` measures
+    # `full=False`). Asserting it here would assert an accident, not a property.
 
 
 def test_session_schema_guard_runs_on_every_declared_writer_surface():
