@@ -26,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from tortoise.cache_eviction import (
     CACHE_CEILING_ENV,
     DERIVED_LABELS,
+    PARITY_INSTRUMENTS,
     TRUTH_LABELS,
     Assessment,
     CacheReadError,
@@ -127,6 +128,17 @@ class _FakeClient:
         self.calls.append(("ttl", (name,)))
         return self._ttl
 
+    def execute_command(self, *args, **kwargs):
+        # `GRAPH.MEMORY USAGE` — the path `measure_state` must reach through the
+        # CLIENT, not a graph handle. The reply is the real shape (a FLAT key/value
+        # list, see `tortoise/graph_storage.py::parse_memory_usage`) so the reading can
+        # be asserted as a VALUE: a fake that merely refuses told the pre-fix shape
+        # (a `Graph` handle, which has no `execute_command`) and the post-fix one apart
+        # only by the wording of an error message, which is what made the old pin
+        # vacuous.
+        self.calls.append(("execute_command", args))
+        return ["total_graph_sz_mb", 12.5]
+
     # Deliberately absent: set/delete/flushall. A census reaching for them is a
     # bug and an AttributeError here names the bug at the point of the call.
     def __getattr__(self, name):
@@ -183,7 +195,8 @@ def test_the_truth_labels_are_never_silently_treated_as_evictable():
     c = _FakeClient(used=900, maxmemory=1_000)
     # A CLEAN turn census — which must license the TURN population and NOTHING else.
     report = ParityReport(instrument="tools/turn_parity_census.py", verdict="CLEAN",
-                          measured_nodes=2_000, total_nodes=2_000)
+                          measured_nodes=2_000, total_nodes=2_000,
+                          graph_name="tortoise")
 
     result = assess(c, g, "tortoise", ceiling_bytes=100,
                     parity_reports={"tools/turn_parity_census.py": report})
@@ -203,7 +216,7 @@ def test_a_clean_verdict_over_a_partial_population_does_not_prove_anything():
     g = _FakeGraph({"Point": 100})
     c = _FakeClient(used=900, maxmemory=1_000)
     partial = ParityReport(instrument="tools/turn_parity_census.py", verdict="CLEAN",
-                           measured_nodes=40, total_nodes=100)
+                           measured_nodes=40, total_nodes=100, graph_name="tortoise")
 
     result = assess(c, g, "tortoise", ceiling_bytes=100,
                     parity_reports={"tools/turn_parity_census.py": partial})
@@ -216,7 +229,8 @@ def test_a_clean_verdict_over_a_partial_population_does_not_prove_anything():
 def test_a_verdict_with_no_population_is_not_evidence_about_a_population():
     g = _FakeGraph({"Point": 100})
     c = _FakeClient(used=900, maxmemory=1_000)
-    no_population = ParityReport(instrument="tools/turn_parity_census.py", verdict="CLEAN")
+    no_population = ParityReport(instrument="tools/turn_parity_census.py", verdict="CLEAN",
+                                 graph_name="tortoise")
 
     result = assess(c, g, "tortoise", ceiling_bytes=100,
                     parity_reports={"tools/turn_parity_census.py": no_population})
@@ -229,7 +243,7 @@ def test_a_non_clean_verdict_never_proves(verdict):
     g = _FakeGraph({"Point": 100})
     c = _FakeClient(used=900, maxmemory=1_000)
     report = ParityReport(instrument="tools/turn_parity_census.py", verdict=verdict,
-                          measured_nodes=100, total_nodes=100)
+                          measured_nodes=100, total_nodes=100, graph_name="tortoise")
 
     result = assess(c, g, "tortoise", ceiling_bytes=100,
                     parity_reports={"tools/turn_parity_census.py": report})
@@ -352,12 +366,12 @@ def test_a_report_that_is_not_a_json_object_is_refused(tmp_path):
     path.write_text("[]", encoding="utf-8")
 
     with pytest.raises(CacheReadError):
-        load_parity_report(str(path))
+        load_parity_report(str(path), graph_name="tortoise")
 
 
 def test_a_missing_report_file_is_a_usage_error_not_a_refusal(tmp_path):
     with pytest.raises(OSError):
-        load_parity_report(str(tmp_path / "absent.json"))
+        load_parity_report(str(tmp_path / "absent.json"), graph_name="tortoise")
 
 
 # --------------------------------------------------------------------------- #
@@ -445,7 +459,8 @@ def test_a_benign_label_is_not_needlessly_quoted():
 ])
 def test_proves_requires_equality_over_a_non_empty_population(measured, total, expected):
     report = ParityReport(instrument="tools/turn_parity_census.py", verdict="CLEAN",
-                          measured_nodes=measured, total_nodes=total)
+                          measured_nodes=measured, total_nodes=total,
+                          graph_name="tortoise")
 
     assert report.proves() is expected
 
@@ -455,7 +470,7 @@ def test_a_zero_population_report_cannot_flip_the_gate_open():
     g = _FakeGraph({"Point": 100})
     c = _FakeClient(used=900, maxmemory=1_000)
     empty = ParityReport(instrument="tools/turn_parity_census.py", verdict="CLEAN",
-                         measured_nodes=0, total_nodes=0)
+                         measured_nodes=0, total_nodes=0, graph_name="tortoise")
 
     result = assess(c, g, "tortoise", ceiling_bytes=100,
                     parity_reports={"tools/turn_parity_census.py": empty})
@@ -470,12 +485,14 @@ def test_a_zero_population_report_cannot_flip_the_gate_open():
 def _real_shape_report(**overrides):
     """A report in `tools/turn_parity_census.py`'s own shape (census()'s return).
 
-    Keys copied from that function's return dict: `population.episodic_graph_nodes`
-    (the DELETE SET), `dry_run.would_delete_turn_nodes` / `held_back_turn_nodes`, and
-    a top-level `verdict`. There is no `totals` and no `counts` — a loader reading
-    those cannot ever open the gate, which is why the real shape is pinned here.
+    Keys copied from that function's return dict: `instrument` (REQUIRED by
+    `load_parity_report`), `population.episodic_graph_nodes` (the DELETE SET),
+    `dry_run.would_delete_turn_nodes` / `held_back_turn_nodes`, and a top-level
+    `verdict`. There is no `totals` and no `counts` — a loader reading those cannot
+    ever open the gate, which is why the real shape is pinned here.
     """
     payload = {
+        "instrument": PARITY_INSTRUMENTS["turn"],
         "verdict": "CLEAN",
         "population": {"episodic_graph_nodes": 120, "turn_shaped_nodes": 120},
         "dry_run": {"would_delete_turn_nodes": 120, "held_back_turn_nodes": 0},
@@ -521,7 +538,7 @@ def test_a_report_from_an_unregistered_instrument_is_refused(tmp_path):
                     encoding="utf-8")
 
     with pytest.raises(CacheReadError):
-        load_parity_report(str(path))
+        load_parity_report(str(path), graph_name="tortoise")
 
 
 def test_a_report_of_another_graph_is_refused(tmp_path):
@@ -548,6 +565,90 @@ def test_a_report_carrying_no_graph_identity_records_the_assertion(tmp_path):
     assert report.graph_name == "tortoise"
 
 
+def test_a_report_naming_NO_instrument_is_refused(tmp_path):
+    """⛔ A nameless report was silently attributed to the `turn` population.
+
+    Measured before the fix: `{"verdict": "CLEAN", "population":
+    {"episodic_graph_nodes": 1000}, "dry_run": {"would_delete_turn_nodes": 1000}}`
+    loaded with `proves() is True` and produced PLAN + `plan["evictable"]` naming 1000
+    nodes — hand-written evidence opening the gate that a real report carrying an
+    UNRECOGNISED instrument name is refused for. Provenance must not be a layer of
+    interpretation on top of a claim.
+    """
+    import json
+
+    path = tmp_path / "x.json"
+    path.write_text(json.dumps({
+        "verdict": "CLEAN",
+        "population": {"episodic_graph_nodes": 1_000},
+        "dry_run": {"would_delete_turn_nodes": 1_000},
+    }), encoding="utf-8")
+
+    with pytest.raises(CacheReadError) as excinfo:
+        load_parity_report(str(path), graph_name="tortoise")
+
+    assert "names no instrument" in str(excinfo.value)
+
+
+def test_the_instrument_names_itself_so_the_honest_path_reopens(tmp_path):
+    """The other half of refusing nameless reports: the REAL one carries the name.
+
+    Without this, requiring `instrument` would be a gate that can never open — so the
+    constant the instrument emits and the value the loader accepts are pinned to each
+    other, not to a prose copy of the string.
+    """
+    from tools.turn_parity_census import INSTRUMENT
+
+    assert INSTRUMENT in PARITY_INSTRUMENTS.values(), (INSTRUMENT, PARITY_INSTRUMENTS)
+
+    import json
+
+    path = tmp_path / "x.json"
+    path.write_text(json.dumps(_real_shape_report()), encoding="utf-8")
+
+    report = load_parity_report(str(path), graph_name="tortoise")
+
+    assert report.instrument == INSTRUMENT
+    assert report.proves() is True
+
+
+def test_an_unbound_report_is_not_eligible_at_the_library_surface():
+    """⛔ `graph_name=None` must demote exactly like a MISMATCH — it is the worse hole.
+
+    `ParityReport`'s docstring says a binding is required *"because the alternative —
+    no binding at all — lets a CLEAN census of graph A license evicting graph B"*, but
+    `assess` only compared the binding WHEN ONE WAS PRESENT: a report built without one
+    (which `load_parity_report`'s old default produced) was accepted and eligible
+    without ever being compared to the graph being evicted. The CLI was safe only
+    because `main()` requires `--parity-graph`; the library — where the module promises
+    enforcement "not only at the CLI's flag surface" — was not.
+    """
+    g = _FakeGraph({"Point": 9_000, "GraphEvent": 1_000})
+    c = _FakeClient(used=900, maxmemory=1_000)
+    unbound = ParityReport(instrument=PARITY_INSTRUMENTS["turn"], verdict="CLEAN",
+                           measured_nodes=1_000, total_nodes=1_000)
+
+    result = assess(c, g, "tortoise", ceiling_bytes=100,
+                    parity_reports={PARITY_INSTRUMENTS["turn"]: unbound})
+
+    assert result.verdict == "REFUSED", result.verdict
+    assert result.eligible_classes == ()
+    assert "NO graph binding" in " ".join(result.problems), result.problems
+
+
+def test_load_parity_report_REFUSES_to_produce_an_unbound_report(tmp_path):
+    """The door itself: `graph_name` is required, so the library cannot mint one."""
+    import json
+
+    path = tmp_path / "x.json"
+    path.write_text(json.dumps(_real_shape_report()), encoding="utf-8")
+
+    with pytest.raises(CacheReadError) as excinfo:
+        load_parity_report(str(path), graph_name="  ")
+
+    assert "UNBOUND" in str(excinfo.value)
+
+
 # --------------------------------------------------------------------------- #
 # The measurement's remaining edges.
 # --------------------------------------------------------------------------- #
@@ -567,15 +668,26 @@ def test_the_meter_receives_the_client_not_a_graph_handle():
     """`GRAPH.MEMORY USAGE` needs `execute_command`; a Graph handle does not have it.
 
     Passing the handle made the field silently `None` forever — a documented reading
-    that never exists is worse than an absent field, so the failure mode is asserted.
+    that never exists is worse than an absent field, so the READING is asserted here,
+    not the absence of one error word. ⛔ The old form asserted
+    `not note.startswith("unavailable: AttributeError")`, which passed on BOTH shapes:
+    the fake client refused `execute_command` (note: "the census must not touch"), and
+    the pre-fix graph handle produced a different sentence ("'Graph' object has no
+    attribute 'execute_command'") — neither starts with that prefix. A pin that cannot
+    tell the two code shapes apart is decoration; this one asserts the value.
     """
     c = _FakeClient(used=500, maxmemory=10_000)
 
     state = measure_state(c, "tortoise")
 
-    assert state.graph_memory_usage_note is None or not state.graph_memory_usage_note.startswith(
-        "unavailable: AttributeError"
-    ), state.graph_memory_usage_note
+    # Reverting `measure_state` to pass `graph` makes this `None` (a `_FakeGraph` has
+    # no `execute_command`), so the test fails on the pre-fix code.
+    assert state.graph_memory_usage_mb == 12.5, state.graph_memory_usage_note
+    assert not (state.graph_memory_usage_note or "").startswith("unavailable"), (
+        state.graph_memory_usage_note
+    )
+    assert ("execute_command", ("GRAPH.MEMORY", "USAGE", "tortoise",
+                               "SAMPLES", 1000)) in c.calls
 
 
 def test_the_keyspace_is_probed_by_name_never_scanned():
@@ -696,7 +808,7 @@ def test_a_report_claiming_more_nodes_than_the_graph_holds_does_not_prove():
     g = _FakeGraph({"Point": 5})
     c = _FakeClient(used=900, maxmemory=1_000)
     stale = ParityReport(instrument="tools/turn_parity_census.py", verdict="CLEAN",
-                         measured_nodes=120, total_nodes=120)
+                         measured_nodes=120, total_nodes=120, graph_name="tortoise")
 
     result = assess(c, g, "tortoise", ceiling_bytes=100,
                     parity_reports={"tools/turn_parity_census.py": stale})
@@ -743,7 +855,8 @@ def test_exit_two_licenses_only_the_listed_populations():
     g = _FakeGraph({"Point": 10_000, "Object": 900})
     c = _FakeClient(used=900, maxmemory=1_000)
     report = ParityReport(instrument="tools/turn_parity_census.py", verdict="CLEAN",
-                          measured_nodes=2_000, total_nodes=2_000)
+                          measured_nodes=2_000, total_nodes=2_000,
+                          graph_name="tortoise")
 
     result = assess(c, g, "tortoise", ceiling_bytes=100,
                     parity_reports={"tools/turn_parity_census.py": report})
@@ -808,7 +921,7 @@ def test_a_report_that_is_not_utf8_is_a_refusal_not_a_traceback(tmp_path):
     path.write_bytes(b'{"verdict": "CLEAN"}\xff')
 
     with pytest.raises(CacheReadError):
-        load_parity_report(str(path))
+        load_parity_report(str(path), graph_name="tortoise")
 
 
 # --------------------------------------------------------------------------- #
@@ -829,7 +942,8 @@ def test_the_size_cross_check_uses_the_true_total_not_the_label_sum():
     g.true_total = 10_000
     c = _FakeClient(used=900, maxmemory=1_000)
     inflated = ParityReport(instrument="tools/turn_parity_census.py", verdict="CLEAN",
-                            measured_nodes=11_000, total_nodes=11_000)
+                            measured_nodes=11_000, total_nodes=11_000,
+                            graph_name="tortoise")
 
     result = assess(c, g, "tortoise", ceiling_bytes=100,
                     parity_reports={"tools/turn_parity_census.py": inflated})
@@ -890,7 +1004,8 @@ def test_refused_covers_unbounded_and_an_unbounded_plan_offers_nothing():
     g = _FakeGraph({"Point": 20_000})
     c = _FakeClient(used=8_000_000, maxmemory=0)
     report = ParityReport(instrument="tools/turn_parity_census.py", verdict="CLEAN",
-                          measured_nodes=20_000, total_nodes=20_000)
+                          measured_nodes=20_000, total_nodes=20_000,
+                          graph_name="tortoise")
 
     result = assess(c, g, "tortoise",
                     parity_reports={"tools/turn_parity_census.py": report})

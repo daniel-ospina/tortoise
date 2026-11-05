@@ -182,8 +182,10 @@ class ParityReport:
     does not emit a graph identity, so nothing here can verify it. It is required
     anyway, because the alternative — no binding at all — lets a CLEAN census of
     graph A license evicting graph B, and a named assertion is at least reviewable.
-    Making the instrument emit the identity is the follow-up that would make it a
-    proof; this module never claims more than it has.
+    Enforced in two places so neither surface can produce one: `load_parity_report`
+    takes ``graph_name`` as a REQUIRED argument, and :func:`assess` demotes an unbound
+    report exactly like a mismatched one. Making the instrument emit the identity is
+    the follow-up that would make it a proof; this module never claims more than it has.
     """
 
     instrument: str
@@ -668,19 +670,29 @@ def assess(
     # (`turn_parity_census.py` owns the structural turn predicate, #3551).
     for population, instrument in sorted(PARITY_INSTRUMENTS.items()):
         report = reports.get(instrument)
-        if report is not None and report.graph_name is not None \
-                and report.graph_name != graph_name:
+        # ⛔ TWO WAYS A BINDING CAN FAIL, and BOTH demote. A report naming ANOTHER graph
+        # is the one this used to catch; a report naming NO graph slipped through the
+        # `graph_name is not None` guard, so a `ParityReport` built without a binding was
+        # eligible at the library surface without ever being compared to the graph being
+        # evicted — the "no binding at all" hole `ParityReport`'s docstring forbids.
+        unbound = report is not None and report.graph_name is None
+        mismatched = (report is not None and report.graph_name is not None
+                      and report.graph_name != graph_name)
+        if unbound or mismatched:
             # ⛔ ENFORCED HERE, not only at the CLI's flag surface: this library is what
-            # a future sweeper is meant to consume, so a CLEAN census of graph B must
-            # not license a plan that evicts graph A's nodes through the API either.
-            # Demoted to unproven — the same shape and severity as the size demotion
-            # below.
+            # a future sweeper is meant to consume, so an unbound report (or a CLEAN
+            # census of graph B) must not license a plan that evicts graph A's nodes
+            # through the API either. Demoted to unproven — the same shape and severity
+            # as the size demotion below.
             reports[instrument] = None
             report = None
-            wrong_graph = True
-        else:
-            wrong_graph = False
-        if wrong_graph is True and report is None:
+        if unbound:
+            measured = None
+            proven = False
+            reason = (f"cannot-answer: {instrument}'s report carries NO graph binding "
+                      f"— an unbound report cannot prove which graph it measured, so "
+                      f"it licenses no graph at all")
+        elif mismatched:
             measured = None
             proven = False
             reason = (f"cannot-answer: {instrument}'s report was measured against a "
@@ -795,12 +807,13 @@ def assess(
                       problems=problems, plan=plan)
 
 
-def load_parity_report(path: str, *, graph_name: str | None = None) -> ParityReport:
+def load_parity_report(path: str, *, graph_name: str) -> ParityReport:
     """Read `tools/turn_parity_census.py`'s report into a :class:`ParityReport`.
 
     ⛔ READ THE INSTRUMENT'S REAL SHAPE, or the gate can never legitimately open. The
     report `turn_parity_census.py` emits (`census()`'s return dict) carries:
 
+        instrument                        "tools/turn_parity_census.py" — REQUIRED
         population.episodic_graph_nodes   the DELETE SET — every node the read returned
         dry_run.would_delete_turn_nodes   the nodes it proved AND proposed to purge
         dry_run.held_back_turn_nodes      the turn nodes it could NOT prove
@@ -816,13 +829,25 @@ def load_parity_report(path: str, *, graph_name: str | None = None) -> ParityRep
     the reason string, that the report was unreadable, so a real integration defect
     never reads as "the record cannot serve".
 
-    *graph_name* is the graph this census is measuring. A report carrying its own
-    ``graph`` field must agree with it. A report carrying none is attributed to the
-    graph the CALLER asked to measure — the instrument emits no identity of its own, so
-    that binding is an operator ASSERTION, which is why the CLI requires
-    ``--parity-graph`` and refuses a value that is not the graph being measured.
+    *graph_name* is the graph this census is measuring, and it is **required**: a
+    report carrying its own ``graph`` field must agree with it, and a report carrying
+    none is attributed to the graph the CALLER asked to measure (the instrument emits
+    no graph identity of its own). Neither is a proof — the binding is an operator
+    ASSERTION — but an UNBOUND report is no assertion at all, so it is refused here and
+    demoted by :func:`assess` rather than being eligible for any graph.
     """
     import json
+
+    # ⛔ REQUIRED, not keyword-optional. An unbound report is the hole
+    # `ParityReport`'s own docstring says must not exist: "no binding at all — lets a
+    # CLEAN census of graph A license evicting graph B". Refusing the absence HERE
+    # means the library's only door cannot produce one.
+    if graph_name is None or not str(graph_name).strip():
+        raise CacheReadError(
+            f"parity report {path} needs the graph this census is measuring: an "
+            f"UNBOUND report licenses every graph, which is the hole the binding "
+            f"exists to close"
+        )
 
     try:
         with open(path, encoding="utf-8") as handle:
@@ -841,16 +866,26 @@ def load_parity_report(path: str, *, graph_name: str | None = None) -> ParityRep
     if not isinstance(payload, dict):
         raise CacheReadError(f"parity report {path} is not a JSON object")
 
-    # The instrument must be one this module knows. A report naming nothing would
-    # otherwise be attributable to any population by the caller — the inversion
-    # where hand-written evidence opens the gate and real evidence cannot.
+    # ⛔ THE INSTRUMENT IS REQUIRED, and a missing one is REFUSED rather than defaulted.
+    # A report naming NOTHING was silently attributed to the `turn` population, so a
+    # hand-written `{"verdict":"CLEAN","population":{...},"dry_run":{...}}` opened a
+    # gate (verdict PLAN, exit 2, `plan["evictable"]` naming N nodes) that a real report
+    # with an unrecognised name could not — the exact inversion this check's own comment
+    # names. `tools/turn_parity_census.py` now emits `instrument`, so the honest path
+    # reopens by itself; while #10593/#7879 are open this direction costs nothing,
+    # because every verdict today is a refusal.
     instrument = payload.get("instrument")
-    if instrument is not None and instrument not in PARITY_INSTRUMENTS.values():
+    if instrument is None:
+        raise CacheReadError(
+            f"parity report {path} names no instrument — the field is REQUIRED "
+            f"({sorted(PARITY_INSTRUMENTS.values())}); a nameless report is "
+            f"attributable to any population by whoever hands it over"
+        )
+    if instrument not in PARITY_INSTRUMENTS.values():
         raise CacheReadError(
             f"parity report {path} names instrument {instrument!r}, which is not a "
             f"registered parity instrument ({sorted(PARITY_INSTRUMENTS.values())})"
         )
-    instrument = instrument or PARITY_INSTRUMENTS["turn"]
 
     population = payload.get("population") or {}
     dry_run = payload.get("dry_run") or {}
