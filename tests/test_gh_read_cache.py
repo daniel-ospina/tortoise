@@ -29,6 +29,7 @@ Run standalone:    python3 tests/test_gh_read_cache.py
 """
 from __future__ import annotations
 
+import ast
 import json
 import os
 import stat
@@ -38,6 +39,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TOOL = REPO_ROOT / "tools" / "gh_read_cache.py"
@@ -49,9 +51,20 @@ from gh_read_cache import INVARIANTS as _INV  # noqa: E402
 
 INVARIANT_REPO_TTL = _INV["repo"].ttl
 
-# The credential axis of the tool's identity. `run_tool` STRIPS these from the inherited
-# environment and pins `GH_CONFIG_DIR` itself (see the helper) — the suite must not inherit
-# the ambient account, or it passes on a reviewer's box and reds on a credential-free runner.
+# EVERY environment axis the tool reads as an INPUT. `harness_env` (the ONE construction
+# point, also used by `run_tool`) strips all of them from the inherited environment and pins
+# the ones a case does not override. The suite must not inherit any of them from the box, or
+# it passes on a reviewer's machine and reds on a credential-free runner.
+#
+# ⛔ IT IS THE TOOL'S WHOLE ENV SURFACE, NOT ONLY THE CREDENTIAL AXIS. Stripping the four
+# token variables and `GH_HOST`/`GH_CONFIG_DIR`/`XDG_CONFIG_HOME` while leaving `GH_REPO`
+# inherited red two cases that assert a MISSING repo is a usage error (`GH_REPO=o/n python3
+# tests/test_gh_read_cache.py` → 2 failed) — the same box-dependence the seam set out to
+# close, one variable over. `GH_REPO` is the documented fleet pattern for this very tool.
+# `GH_READ_CACHE_DIR`/`GH_READ_CACHE_GH` are the tool's other two inputs: inherited, they
+# would point the suite at another lane's cache or another binary.
+# `test_the_pinned_seam_covers_every_environment_axis` derives this set from the tool's own
+# AST, so a NEW env input cannot land without a decision about pinning it.
 CREDENTIAL_VARS = (
     "GH_TOKEN",
     "GITHUB_TOKEN",
@@ -60,6 +73,9 @@ CREDENTIAL_VARS = (
     "GH_HOST",
     "GH_CONFIG_DIR",
     "XDG_CONFIG_HOME",
+    "GH_REPO",
+    "GH_READ_CACHE_DIR",
+    "GH_READ_CACHE_GH",
 )
 
 
@@ -107,6 +123,22 @@ class CacheTest(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     # ── helpers ──────────────────────────────────────────────────────────────
+    def harness_env(self, **overrides: str) -> dict[str, str]:
+        """The ONE place this suite builds an environment for the tool.
+
+        ⛔ ONE CONSTRUCTION POINT, ON PURPOSE. Six cases used to re-declare the
+        credential-strip tuple inline and they had already diverged (`XDG_CONFIG_HOME`
+        stripped in four, inherited in two) — which is exactly how the missing `GH_REPO`
+        survived a suite that was otherwise careful. A case that needs a different seam
+        passes an override; it does not re-derive the base, because a re-derived base is
+        a seventh opinion about what to inherit.
+        """
+        env = {k: v for k, v in os.environ.items() if k not in CREDENTIAL_VARS}
+        env["GH_STUB_DIR"] = str(self.stubdir)
+        env["GH_CONFIG_DIR"] = str(self.ghconfig)
+        env.update(overrides)
+        return env
+
     def run_tool(
         self, *args: str, env_overrides: dict[str, str] | None = None
     ) -> subprocess.CompletedProcess:
@@ -125,11 +157,7 @@ class CacheTest(unittest.TestCase):
         `hosts.yml` holding one token per host family. `env_overrides` is for the cases that
         need a DIFFERENT seam (a second account, a host-scoped env token).
         """
-        env = {k: v for k, v in os.environ.items() if k not in CREDENTIAL_VARS}
-        env["GH_STUB_DIR"] = str(self.stubdir)
-        env["GH_CONFIG_DIR"] = str(self.ghconfig)
-        if env_overrides:
-            env.update(env_overrides)
+        env = self.harness_env(**(env_overrides or {}))
         return subprocess.run(
             [sys.executable, str(TOOL), *args],
             capture_output=True,
@@ -156,6 +184,181 @@ class CacheTest(unittest.TestCase):
         data = json.loads(p.read_text())
         data["fetched_at"] = float(data["fetched_at"]) - seconds
         p.write_text(json.dumps(data))
+
+    # ── 0. the harness seam itself ───────────────────────────────────────────
+    # The reviewer's residual finding was that the seam closed the CREDENTIAL axis and left
+    # the tool's OTHER environment inputs inherited, so the suite was hermetic for one class
+    # of box and box-dependent for the next. These four cases make the seam itself an
+    # asserted property instead of a habit.
+    def _env_reads_in_tool(self) -> set[str]:
+        """Every environment variable the TOOL can read — derived from its AST.
+
+        Derived, not hand-listed: a hand-list is exactly what missed `GH_REPO`, and the next
+        env input would be missed the same way. A non-constant key is followed through its
+        binding: `os.environ.get(key)` where `key` is a `for` target over a tuple of names (or
+        an assigned tuple) contributes those literals.
+        """
+        tree = ast.parse(TOOL.read_text())
+        found: set[str] = set()
+
+        def literals(node: ast.AST) -> set[str]:
+            return {
+                c.value
+                for c in ast.walk(node)
+                if isinstance(c, ast.Constant) and isinstance(c.value, str)
+            }
+
+        def assignments_in(scope: ast.AST, target: str, seen: frozenset[str] = frozenset()) -> set[str]:
+            if target in seen:
+                return set()
+            seen = seen | {target}
+            out: set[str] = set()
+            for node in ast.walk(scope):
+                if isinstance(node, ast.Assign):
+                    if any(
+                        isinstance(n, ast.Name) and n.id == target
+                        for t in node.targets
+                        for n in ast.walk(t)
+                    ):
+                        out |= literals(node.value)
+                elif isinstance(node, (ast.For, ast.AsyncFor)) and any(
+                    isinstance(n, ast.Name) and n.id == target for n in ast.walk(node.target)
+                ):
+                    out |= literals(node.iter)
+                    # `for key in keys:` — follow the iterable's own binding too.
+                    for inner in ast.walk(node.iter):
+                        if isinstance(inner, ast.Name):
+                            out |= assignments_in(scope, inner.id, seen)
+            return out
+
+        def visit(node: ast.AST, scope: ast.AST) -> None:
+            nonlocal found
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                scope = node
+            key: ast.AST | None = None
+            if (
+                isinstance(node, ast.Subscript)
+                and isinstance(node.value, ast.Attribute)
+                and node.value.attr == "environ"
+            ):
+                key = node.slice
+            elif (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "get"
+                and isinstance(node.func.value, ast.Attribute)
+                and node.func.value.attr == "environ"
+                and node.args
+            ):
+                key = node.args[0]
+            if isinstance(key, ast.Constant) and isinstance(key.value, str):
+                found.add(key.value)
+            elif isinstance(key, ast.Name):
+                found |= assignments_in(scope, key.id)
+            for child in ast.iter_child_nodes(node):
+                visit(child, scope)
+
+        visit(tree, tree)
+        return found
+
+    def test_the_pinned_seam_covers_every_environment_axis_the_tool_reads(self) -> None:
+        """⛔ A STRIP SET THAT MISSES ONE AXIS IS NOT A SEAM — it is a box-dependent suite.
+
+        Measured on this PR before the fix: `GH_REPO=o/n python3 tests/test_gh_read_cache.py`
+        → **2 failed, 74 passed**, because `GH_REPO` is gh's own default for `--repo` and two
+        cases assert that a MISSING repo is a usage error. Unset → 76 OK. The same suite, two
+        verdicts, decided by the operator's shell — against this file's own header.
+        """
+        reads = self._env_reads_in_tool()
+        # A sanity floor: if the discovery silently stopped working this test would be vacuous.
+        self.assertIn("GH_REPO", reads, f"the derivation must see the tool's default-repo input: {sorted(reads)}")
+        self.assertIn("GH_TOKEN", reads, f"…and the credential input: {sorted(reads)}")
+        self.assertGreaterEqual(len(reads), 8, f"the tool reads more axes than this: {sorted(reads)}")
+        missing = sorted(reads - set(CREDENTIAL_VARS))
+        self.assertEqual(
+            missing, [],
+            "the harness would inherit these from the box: "
+            f"{missing}. Pin them in CREDENTIAL_VARS (or override them per case).",
+        )
+
+    def test_no_pinned_axis_is_inherited_from_the_box(self) -> None:
+        """Every pinned name is overwritten (or dropped) by the harness, never passed through."""
+        contamination = {
+            "GH_TOKEN": "LEAKED-TOKEN",
+            "GITHUB_TOKEN": "LEAKED-TOKEN",
+            "GH_ENTERPRISE_TOKEN": "LEAKED-TOKEN",
+            "GITHUB_ENTERPRISE_TOKEN": "LEAKED-TOKEN",
+            "GH_HOST": "leaked.example.com",
+            "GH_CONFIG_DIR": "/nonexistent/leaked-gh-config",
+            "XDG_CONFIG_HOME": "/nonexistent/leaked-xdg",
+            "GH_REPO": "leak/o/n",
+            "GH_READ_CACHE_DIR": "/nonexistent/leaked-cache",
+            "GH_READ_CACHE_GH": "/nonexistent/leaked-gh",
+        }
+        self.assertEqual(
+            set(contamination), set(CREDENTIAL_VARS),
+            "a pinned axis with no contaminating value here is an axis this test cannot prove",
+        )
+        with mock.patch.dict(os.environ, contamination):
+            env = self.harness_env()
+        for name in CREDENTIAL_VARS:
+            self.assertNotEqual(env.get(name), contamination[name], f"{name} was inherited from the box")
+        self.assertEqual(env["GH_CONFIG_DIR"], str(self.ghconfig), "the harness pins its own hosts.yml")
+        for dropped in ("GH_REPO", "GH_READ_CACHE_DIR", "GH_READ_CACHE_GH"):
+            self.assertNotIn(dropped, env, f"{dropped} must be dropped, not inherited")
+
+    def test_a_leaked_default_repo_cannot_answer_a_repo_less_read(self) -> None:
+        """The behavioural half of the `GH_REPO` finding: a leaked default spends a real call.
+
+        With `GH_REPO` inherited, `get repo` and `status repo` without `--repo` stop being the
+        usage error they assert: they answer for the leaked slug, rc=0, having spent a call
+        (and `status` reports a truthful `present:true` for a question nobody asked).
+        """
+        with mock.patch.dict(os.environ, {"GH_REPO": "leak/o/n"}):
+            for args in (("get", "repo"), ("status", "repo")):
+                r = self.run_tool(*args, "--gh", str(self.stub), "--cache-dir", str(self.cachedir))
+                self.assertEqual(
+                    r.returncode, 2,
+                    f"{' '.join(args)} without --repo must stay a usage error: rc={r.returncode} {r.stderr}",
+                )
+            self.assertEqual(self.calls(), 0, "a leaked default repo must not spend a call")
+            self.assertEqual(list(self.cachedir.glob("*.json")), [], "and must not mint an entry")
+
+    def test_the_suite_builds_its_environment_only_in_the_harness(self) -> None:
+        """⛔ ONE CONSTRUCTION POINT. Six cases used to re-derive the strip tuple inline, and
+        they had already diverged — which is how the missing `GH_REPO` survived a suite that
+        was otherwise careful about the box. A seventh opinion is what this case forbids;
+        `mock.patch.dict(os.environ, …)` is a PATCH TARGET, not an env source, and stays legal.
+        """
+        tree = ast.parse(Path(__file__).read_text())
+        patched: set[int] = set()
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "dict"
+                and isinstance(node.func.value, ast.Attribute)
+                and node.func.value.attr == "patch"
+            ):
+                for arg in node.args:
+                    if isinstance(arg, ast.Attribute) and arg.attr == "environ":
+                        patched.add(id(arg))
+        offenders: list[str] = []
+        for fn in [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
+            if fn.name in {"harness_env", "test_the_suite_builds_its_environment_only_in_the_harness"}:
+                continue
+            for node in ast.walk(fn):
+                if (
+                    isinstance(node, ast.Attribute)
+                    and node.attr == "environ"
+                    and id(node) not in patched
+                ):
+                    offenders.append(fn.name)
+        self.assertEqual(
+            sorted(set(offenders)), [],
+            "these cases re-derive the environment instead of calling harness_env()"
+            " — route them through it (env_overrides for a different seam)",
+        )
 
     # ── 1. cached hit ────────────────────────────────────────────────────────
     def test_cached_hit_serves_without_a_second_call(self) -> None:
@@ -651,7 +854,7 @@ class CacheTest(unittest.TestCase):
 
     def test_gh_host_env_var_is_part_of_the_identity(self) -> None:
         """`GH_HOST` is how gh picks the instance, and it was never read."""
-        env = dict(os.environ, GH_STUB_DIR=str(self.stubdir), GH_HOST="ghe.example.com")
+        env = self.harness_env(GH_HOST="ghe.example.com")
         first = subprocess.run(
             [sys.executable, str(TOOL), "get", "repo", "--repo", "o/n", "--gh", str(self.stub), "--cache-dir", str(self.cachedir)],
             capture_output=True, text=True, env=env,
@@ -676,9 +879,6 @@ class CacheTest(unittest.TestCase):
         So each pair is asserted against the host it actually applies to.
         """
         (self.stubdir / "body").write_text('{"resources": {"core": {"remaining": 7}}}')
-        clean = {k: v for k, v in os.environ.items() if k not in (
-            "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN",
-            "GH_HOST", "GH_CONFIG_DIR")}
         no_cfg = str(Path(self.tmp) / "no-config")
         cases = (
             ("GH_TOKEN", {}),
@@ -687,8 +887,7 @@ class CacheTest(unittest.TestCase):
             ("GITHUB_ENTERPRISE_TOKEN", {"GH_HOST": "ghe.example.com"}),
         )
         for var, extra in cases:
-            env = dict(clean, **{var: f"token-via-{var}", "GH_STUB_DIR": str(self.stubdir),
-                                 "GH_CONFIG_DIR": no_cfg}, **extra)
+            env = self.harness_env(**{var: f"token-via-{var}", "GH_CONFIG_DIR": no_cfg}, **extra)
             before = self.calls()
             results = []
             for _ in range(2):
@@ -719,9 +918,7 @@ class CacheTest(unittest.TestCase):
         cfg = Path(self.tmp) / "dotcom-cfg"
         cfg.mkdir()
         (cfg / "hosts.yml").write_text("github.com:\n    oauth_token: DOTCOM-ACCOUNT-A\n")
-        base = {k: v for k, v in os.environ.items() if k not in (
-            "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "GH_HOST")}
-        env_a = dict(base, GH_ENTERPRISE_TOKEN="ghes-token", GH_CONFIG_DIR=str(cfg), GH_STUB_DIR=str(self.stubdir))
+        env_a = self.harness_env(GH_ENTERPRISE_TOKEN="ghes-token", GH_CONFIG_DIR=str(cfg))
         a = subprocess.run(
             [sys.executable, str(TOOL), "get", "rate_limit", "--gh", str(self.stub), "--cache-dir", str(self.cachedir)],
             capture_output=True, text=True, env=env_a,
@@ -747,14 +944,13 @@ class CacheTest(unittest.TestCase):
         file's token became the digest for every lane — two live accounts pooled onto it.
         """
         (self.stubdir / "body").write_text('{"resources": {"core": {"remaining": 4990}}}')
-        clean = {k: v for k, v in os.environ.items() if k not in (
-            "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN",
-            "GH_HOST", "GH_CONFIG_DIR", "XDG_CONFIG_HOME")}
         for name, token, remaining in (("a", "XDG-ACCOUNT-A", "4990"), ("b", "XDG-ACCOUNT-B", "5")):
             xdg = Path(self.tmp) / f"xdg-{name}"
             (xdg / "gh").mkdir(parents=True)
             (xdg / "gh" / "hosts.yml").write_text(f"github.com:\n    oauth_token: {token}\n")
-            env = dict(clean, XDG_CONFIG_HOME=str(xdg), GH_STUB_DIR=str(self.stubdir))
+            # A BLANK `GH_CONFIG_DIR` is what makes the tool fall through to XDG — the
+            # helper still supplies the name, so the case cannot inherit the box's value.
+            env = self.harness_env(GH_CONFIG_DIR="", XDG_CONFIG_HOME=str(xdg))
             before = self.calls()
             (self.stubdir / "body").write_text(f'{{"resources": {{"core": {{"remaining": {remaining}}}}}}}')
             r = subprocess.run(
@@ -774,12 +970,10 @@ class CacheTest(unittest.TestCase):
         B was served account A's counters - the same defect, on the auth path most boxes use.
         """
         (self.stubdir / "body").write_text('{"resources": {"core": {"remaining": 4990}}}')
-        clean = {k: v for k, v in os.environ.items() if k not in (
-            "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN")}
         cfg_a = Path(self.tmp) / "cfg-a"
         cfg_a.mkdir()
         (cfg_a / "hosts.yml").write_text("github.com:\n    oauth_token: cfg-token-A\n    user: a\n")
-        env_a = dict(clean, GH_STUB_DIR=str(self.stubdir), GH_CONFIG_DIR=str(cfg_a))
+        env_a = self.harness_env(GH_CONFIG_DIR=str(cfg_a))
         a = subprocess.run(
             [sys.executable, str(TOOL), "get", "rate_limit", "--gh", str(self.stub), "--cache-dir", str(self.cachedir)],
             capture_output=True, text=True, env=env_a,
@@ -808,9 +1002,7 @@ class CacheTest(unittest.TestCase):
         """
         empty_cfg = Path(self.tmp) / "empty-cfg"
         empty_cfg.mkdir()
-        env = {k: v for k, v in os.environ.items() if k not in (
-            "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN")}
-        env.update({"GH_STUB_DIR": str(self.stubdir), "GH_CONFIG_DIR": str(empty_cfg)})
+        env = self.harness_env(GH_CONFIG_DIR=str(empty_cfg))
         for _ in range(2):
             r = subprocess.run(
                 [sys.executable, str(TOOL), "get", "rate_limit", "--gh", str(self.stub), "--cache-dir", str(self.cachedir)],
@@ -828,16 +1020,22 @@ class CacheTest(unittest.TestCase):
         `account` unconditional made every lane in the fleet pay one call for one unchanged
         answer - the quota regression this tool exists to remove. `rate_limit` is per
         credential; `repo` must not be.
+
+        ⛔ ROUTES THROUGH THE HARNESS, AND THE BOX IS DELIBERATELY CONTAMINATED. This case
+        used to build its own `dict(os.environ, …)`, so it inherited the box's `GH_HOST`:
+        with `GH_HOST=ghe.example.com` the second read asked a DIFFERENT INSTANCE and a
+        correct MISS red the test (1 failed). The `mock.patch.dict` below is that exact
+        environment, kept in place as the proof the seam — not the box — decides the identity.
         """
-        self.run_tool("get", "repo", "--repo", "o/n", "--gh", str(self.stub), "--cache-dir", str(self.cachedir))
-        self.assertEqual(self.calls(), 1)
-        env = dict(os.environ, GH_STUB_DIR=str(self.stubdir), GH_TOKEN="another-lane-token")
-        r = subprocess.run(
-            [sys.executable, str(TOOL), "get", "repo", "--repo", "o/n", "--gh", str(self.stub), "--cache-dir", str(self.cachedir)],
-            capture_output=True, text=True, env=env,
-        )
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(self.calls(), 1, "a second credential must still HIT the repo projection")
+        with mock.patch.dict(os.environ, {"GH_HOST": "ghe.example.com", "GH_REPO": "leak/o/n"}):
+            self.run_tool("get", "repo", "--repo", "o/n", "--gh", str(self.stub), "--cache-dir", str(self.cachedir))
+            self.assertEqual(self.calls(), 1, "the first read must be the one call")
+            r = self.run_tool(
+                "get", "repo", "--repo", "o/n", "--gh", str(self.stub), "--cache-dir", str(self.cachedir),
+                env_overrides={"GH_TOKEN": "another-lane-token"},
+            )
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(self.calls(), 1, "a second credential must still HIT the repo projection")
         self.assertEqual(len(list(self.cachedir.glob("repo*.json"))), 1)
 
     def test_rate_limit_is_keyed_by_instance_too(self) -> None:
@@ -850,7 +1048,7 @@ class CacheTest(unittest.TestCase):
         reads quota precisely when it is deciding whether it may spend — the worst moment
         to hand it a sibling instance's number.
         """
-        env = dict(os.environ, GH_STUB_DIR=str(self.stubdir), GH_HOST="ghe.example.com")
+        env = self.harness_env(GH_HOST="ghe.example.com")
         (self.stubdir / "body").write_text('{"resources": {"core": {"remaining": 4990}}}')
         first = subprocess.run(
             [sys.executable, str(TOOL), "get", "rate_limit", "--gh", str(self.stub), "--cache-dir", str(self.cachedir)],
@@ -925,13 +1123,9 @@ class CacheTest(unittest.TestCase):
         digest and `rate_limit` crossed between them, reported fresh.
         """
         (self.stubdir / "body").write_text('{"resources": {"core": {"remaining": 4990}}}')
-        clean = {k: v for k, v in os.environ.items() if k not in (
-            "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN",
-            "GH_HOST", "GH_CONFIG_DIR", "XDG_CONFIG_HOME")}
 
         def read(token: str, repo: str) -> tuple[int, str]:
-            env = dict(clean, GH_TOKEN=token, GH_STUB_DIR=str(self.stubdir),
-                       GH_CONFIG_DIR=str(Path(self.tmp) / "no-config"))
+            env = self.harness_env(GH_TOKEN=token, GH_CONFIG_DIR=str(Path(self.tmp) / "no-config"))
             proc = subprocess.run(
                 [sys.executable, str(TOOL), "get", "rate_limit", "--repo", repo,
                  "--gh", str(self.stub), "--cache-dir", str(self.cachedir)],
@@ -961,13 +1155,9 @@ class CacheTest(unittest.TestCase):
     def _account_sequence(self, host: str, var: str, tokens: tuple[str, str]) -> list[str]:
         """Two reads as the first token, then one as the second; assert HIT then MISS."""
         repo = f"{host}/o/n"
-        clean = {k: v for k, v in os.environ.items() if k not in (
-            "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN",
-            "GH_HOST", "GH_CONFIG_DIR", "XDG_CONFIG_HOME")}
 
         def read(token: str) -> str:
-            env = dict(clean, **{var: token, "GH_STUB_DIR": str(self.stubdir),
-                                 "GH_CONFIG_DIR": str(Path(self.tmp) / "no-config")})
+            env = self.harness_env(**{var: token, "GH_CONFIG_DIR": str(Path(self.tmp) / "no-config")})
             r = subprocess.run(
                 [sys.executable, str(TOOL), "get", "rate_limit", "--repo", repo,
                  "--gh", str(self.stub), "--cache-dir", str(self.cachedir)],
@@ -1036,11 +1226,8 @@ class CacheTest(unittest.TestCase):
         `GH_TOKEN` collide - the same silent-wrong-quota class as the host-blind bug.
         """
         (self.stubdir / "body").write_text('{"resources": {"core": {"remaining": 4990}}}')
-        base = {k: v for k, v in os.environ.items() if k not in (
-            "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN",
-            "GH_HOST", "GH_CONFIG_DIR")}
-        env = dict(base, GH_TOKEN="the-one-gh-sends", GITHUB_TOKEN="shared-by-two-lanes",
-                   GH_STUB_DIR=str(self.stubdir), GH_CONFIG_DIR=str(Path(self.tmp) / "no-config"))
+        env = self.harness_env(GH_TOKEN="the-one-gh-sends", GITHUB_TOKEN="shared-by-two-lanes",
+                               GH_CONFIG_DIR=str(Path(self.tmp) / "no-config"))
         for _ in range(2):
             subprocess.run(
                 [sys.executable, str(TOOL), "get", "rate_limit", "--gh", str(self.stub), "--cache-dir", str(self.cachedir)],
@@ -1062,9 +1249,6 @@ class CacheTest(unittest.TestCase):
     def test_gh_config_dir_wins_over_xdg_config_home(self) -> None:
         """gh's precedence is `GH_CONFIG_DIR` -> `$XDG_CONFIG_HOME/gh` -> `~/.config/gh`."""
         (self.stubdir / "body").write_text('{"resources": {"core": {"remaining": 4990}}}')
-        base = {k: v for k, v in os.environ.items() if k not in (
-            "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN",
-            "GH_HOST", "GH_CONFIG_DIR", "XDG_CONFIG_HOME")}
         xdg = Path(self.tmp) / "xdg-precedence"
         (xdg / "gh").mkdir(parents=True)
         (xdg / "gh" / "hosts.yml").write_text("github.com:\n    oauth_token: XDG-ACCOUNT\n")
@@ -1074,7 +1258,7 @@ class CacheTest(unittest.TestCase):
 
         # Both set: the answer must be keyed by GH_CONFIG_DIR's token. Read it, then change
         # ONLY GH_CONFIG_DIR's token and require a MISS.
-        env = dict(base, GH_CONFIG_DIR=str(ghc), XDG_CONFIG_HOME=str(xdg), GH_STUB_DIR=str(self.stubdir))
+        env = self.harness_env(GH_CONFIG_DIR=str(ghc), XDG_CONFIG_HOME=str(xdg))
         self.run_env_get(env)
         (ghc / "hosts.yml").write_text("github.com:\n    oauth_token: GH_CONFIG_DIR-ACCOUNT-2\n")
         (self.stubdir / "body").write_text('{"resources": {"core": {"remaining": 9}}}')
@@ -1164,9 +1348,7 @@ class CacheTest(unittest.TestCase):
         empty_cfg = Path(self.tmp) / "empty-cfg-2"
         empty_cfg.mkdir()
         (self.stubdir / "body").write_text("")
-        env = {k: v for k, v in os.environ.items() if k not in (
-            "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN")}
-        env.update({"GH_STUB_DIR": str(self.stubdir), "GH_CONFIG_DIR": str(empty_cfg)})
+        env = self.harness_env(GH_CONFIG_DIR=str(empty_cfg))
         r = subprocess.run(
             [sys.executable, str(TOOL), "get", "rate_limit", "--gh", str(self.stub), "--cache-dir", str(self.cachedir)],
             capture_output=True, text=True, env=env,
@@ -1193,7 +1375,7 @@ class CacheTest(unittest.TestCase):
         """
         variants = ("GHE.example.com", "https://ghe.example.com", "ghe.example.com/")
         for spelling in variants:
-            env = dict(os.environ, GH_STUB_DIR=str(self.stubdir), GH_HOST=spelling)
+            env = self.harness_env(GH_HOST=spelling)
             r = subprocess.run(
                 [sys.executable, str(TOOL), "get", "repo", "--repo", "o/n", "--gh", str(self.stub), "--cache-dir", str(self.cachedir)],
                 capture_output=True, text=True, env=env,
@@ -1236,11 +1418,8 @@ class CacheTest(unittest.TestCase):
         self.assertIn("4990", a.stdout)
 
         (self.stubdir / "body").write_text('{"resources": {"core": {"remaining": 12}}}')
-        env = dict(os.environ, GH_STUB_DIR=str(self.stubdir), GH_TOKEN="account-B-token")
-        b = subprocess.run(
-            [sys.executable, str(TOOL), "get", "rate_limit", "--gh", str(self.stub), "--cache-dir", str(self.cachedir)],
-            capture_output=True, text=True, env=env,
-        )
+        b = self.run_tool("get", "rate_limit", "--gh", str(self.stub), "--cache-dir", str(self.cachedir),
+                          env_overrides={"GH_TOKEN": "account-B-token"})
         self.assertEqual(b.returncode, 0, b.stderr)
         self.assertEqual(self.calls(), 2, "a different credential must be a MISS")
         self.assertIn("12", b.stdout)
@@ -1321,8 +1500,7 @@ class CacheTest(unittest.TestCase):
 
     def test_concurrent_writers_leave_one_valid_entry_and_no_temp_files(self) -> None:
         """Atomicity (survivor M22): N parallel readers must not leave debris."""
-        env = dict(os.environ)
-        env["GH_STUB_DIR"] = str(self.stubdir)
+        env = self.harness_env()
         procs = [
             subprocess.Popen(
                 [sys.executable, str(TOOL), "get", "repo", "--repo", "o/n",
