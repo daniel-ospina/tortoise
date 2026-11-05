@@ -7495,6 +7495,12 @@ def test_the_paren_guard_reads_only_a_rows_OWN_note():
 # provenance for a WEIGHT ("the module held **30** at the #9352 head, **31** after
 # #9358") — history that must NOT be re-derived, and a guard that read those would
 # red on correct notes.
+# ⛔ EVERY claim in a row is judged, not just the first (`finditer`, not `search`;
+# #10610 review at `fdff8f432`, P2). A row that CORRECTED its leading count and left
+# the superseded one standing beside it returned `[]` — the guard's claim is "no
+# count in a row is one its file refutes", and "the first count is right" is a
+# different, weaker sentence. The two-claim arm is
+# `test_the_stale_case_count_guard_reads_EVERY_claim_in_a_row`.
 # ⛔ The JOINER is free-form: the row's ENTRY RULE tells a reader to re-derive the
 # count with `grep -c '^def test_'` and never prescribes how the note spells the
 # relation. Matching `->`/`→` ALONE left the `=` spelling unpoliced, and measured at
@@ -7508,27 +7514,33 @@ _CASE_COUNT_CLAIM_RE = re.compile(
 
 
 def _durations_rows_with_a_stale_case_count(text: str, tests_dir: Path):
-    """`(key, stated, actual)` for rows whose cited `grep -c` count is wrong.
+    """`(key, stated, actual)` for EVERY cited `grep -c` count that is wrong.
 
     `actual` is the file's `^def test_` count — the SAME instrument the row names,
     so a file that collects a different number through `parametrize` (none here; the
     two rows that cite it both say so explicitly) is not silently re-based. `None`
     means the row weighs a file that is not there, which a citation may not do.
+
+    ⛔ A row may cite the instrument more than once, and EVERY cite is examined: a
+    note whose first claim is correct and whose second is stale still hands a
+    maintainer two different numbers, which is the defect. The file is read ONCE per
+    row, not once per claim.
     """
     out = []
     for key, note in _durations_row_comments(text):
-        m = _CASE_COUNT_CLAIM_RE.search(note)
-        if m is None:
+        claims = list(_CASE_COUNT_CLAIM_RE.finditer(note))
+        if not claims:
             continue
-        stated = int(m.group("n"))
         path = tests_dir / key
-        if not path.exists():
-            out.append((key, stated, None))
-            continue
-        actual = len(re.findall(
-            r"^def test_", path.read_text(encoding="utf-8"), re.M))
-        if actual != stated:
-            out.append((key, stated, actual))
+        if path.exists():
+            actual = len(re.findall(
+                r"^def test_", path.read_text(encoding="utf-8"), re.M))
+        else:
+            actual = None
+        for m in claims:
+            stated = int(m.group("n"))
+            if actual is None or actual != stated:
+                out.append((key, stated, actual))
     return out
 
 
@@ -7596,6 +7608,48 @@ def test_the_stale_case_count_guard_is_not_vacuous(tmp_path):
         "surfaces: []\n")
     assert _durations_rows_with_a_stale_case_count(gone, tmp_path) == [
         ("test_gone.py", 4, None)]
+
+
+#: One note carrying TWO `grep -c` claims: a CORRECT one first, a STALE one second.
+#:
+#: ⛔ THE SHAPE THE `.search` VERSION COULD NOT SEE (#10610 review at `fdff8f432`,
+#: P2). `_CASE_COUNT_CLAIM_RE.search` stops at the first claim, so a row that fixed
+#: its leading count and left the old one standing beside it returned `[]` — green
+#: over exactly the contradiction the guard was widened for two cycles earlier
+#: (`tests/test_ci_selection.py`'s own comment measures that row). It is a FAIL-
+#: OPEN in a guard: the guard's job is "no row carries a count its file refutes",
+#: and "the first count is right" is not that sentence.
+_ROW_WITH_A_CORRECT_THEN_A_STALE_CLAIM = (
+    "durations:\n"
+    "  test_two.py: 3.0  # #5086: 2 cases (`grep -c '^def test_'` -> 2) — and the\n"
+    "  # older re-derivation beside it still reads (`grep -c '^def test_'` = 190).\n"
+    "surfaces: []\n")
+
+
+def test_the_stale_case_count_guard_reads_EVERY_claim_in_a_row(tmp_path):
+    """A row may cite the instrument twice; the STALE cite must be the one reported.
+
+    Non-vacuity: at the pre-fix head (`.search`) this is `[]` — measured, one arm
+    red — because the first claim is CORRECT and the search never reached the
+    second. With `finditer` it reports `('test_two.py', 190, 2)`.
+
+    ⛔ AND THE COUNT IS NOT SILENTLY DEDUPLICATED: two stale cites of DIFFERENT
+    values are two offenders, because each is a separate sentence a maintainer has
+    to delete. Two cites of the SAME stale value collapse to one only because the
+    same `(key, stated, actual)` tuple is the same repair.
+    """
+    (tmp_path / "test_two.py").write_text(
+        "def test_a():\n    pass\n\n\ndef test_b():\n    pass\n", encoding="utf-8")
+    assert _durations_rows_with_a_stale_case_count(
+        _ROW_WITH_A_CORRECT_THEN_A_STALE_CLAIM, tmp_path) == [("test_two.py", 190, 2)]
+
+    # A row whose ONLY claim is correct stays quiet — the widened read must not
+    # turn a single good cite into an offender.
+    fresh_only = (
+        "durations:\n"
+        "  test_two.py: 3.0  # #5086: 2 cases (`grep -c '^def test_'` -> 2).\n"
+        "surfaces: []\n")
+    assert _durations_rows_with_a_stale_case_count(fresh_only, tmp_path) == []
 
 
 #: `WATCHDOG_FLOOR_MIN` as a row NOTE states it: "`WATCHDOG_FLOOR_MIN` (19 min)".

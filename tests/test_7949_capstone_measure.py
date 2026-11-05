@@ -5807,8 +5807,13 @@ def test_the_e2_routing_claim_cites_the_row_it_describes():
     quoting a reading (`RED (8 of 14)`) that appears in NEITHER bundle README
     (`grep -c` = 0 in both), so the numbered claim resolved to nothing. Nothing
     redded: `test_every_readme_line_cite_carries_the_sentence_it_quotes` resolves
-    only the cites inside `E1-E5-PROOFS.md`, which carries none at this head, and no
-    pin reads a test's own docstring.
+    only the cites inside `E1-E5-PROOFS.md` — the four it carries at this head are
+    all DOCUMENT cites, none of them in a test docstring — so no pin read the cite
+    in the sentence above. (An earlier revision of this paragraph said that document
+    "carries none at this head", which its own pin refutes: that pin asserts the
+    OPPOSITE, `assert found, "E1-E5-PROOFS.md carries no README.md line cite — pin is
+    moot"`. The load-bearing half — no pin reads a test's own docstring — was and is
+    true; #10610 review at `fdff8f432`, P3.)
 
     Derivation, not duplication: the line NUMBER and the quoted readings are both
     taken from the docstring, so this pin carries no count of its own — it holds the

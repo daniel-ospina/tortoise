@@ -103,12 +103,27 @@ def launch(state_dir, co, pr=7, **kw):
 #: STATE the artifact records, so a wider deadline cannot make a defect green —
 #: only a loaded box is prevented from making correct code red. 15 s / 10 s were
 #: measured on an idle host against a stub that sleeps 1 s; on a nine-shard sweep
-#: the same wait has missed. Evidence: `test (e)` on run 42006117288 (2026-11-05,
-#: head `192de3b5f`, PR #10610) reported
-#: `test_merged_state_names_the_sha_the_rail_printed` FAILED on `pi-runner-x64-4`
-#: while the run's other seven shards were green, and that shard carries NO
-#: changed test file from the diff — the leg was killed by its 21-minute WATCHDOG
-#: at 73% progress, i.e. the box, not the rail.
+#: the same wait has missed.
+#:
+#: Evidence, re-read from the run rather than from the branch's prose (#10610 review
+#: at `fdff8f432`, P3): `test (e)` on run 42006117288 (2026-11-05, head `192de3b5f`,
+#: PR #10610) reported `test_merged_state_names_the_sha_the_rail_printed` FAILED on
+#: `pi-runner-x64-4`, and that shard carries NO changed test file from the diff. The
+#: leg was then killed by its own WATCHDOG — banner: `WATCHDOG: pytest killed after
+#: 21m (2885 passed, 1 failed, 0 errored so far)` — while its last completed test
+#: lines stood at `[ 81%]`; **73%** is the progress stamp on the FAILED test itself,
+#: not the point of the kill, so it is not evidence about the box on its own. The
+#: kill is, and so is the peer red below: the box, not the rail.
+#:
+#: ⛔ `test (d)` WAS ALSO RED ON THE SAME RUN, and saying so is the point. This
+#: comment used to say "the run's other seven shards were green"; `gh run view
+#: 42006117288 --json jobs` reports NINE `test (…)` legs — `(a)`,`(b)`,`(c)`,`(f)`,
+#: `(g)`,`(h)`,`(i)` success and `(d)`,`(e)` failure. Eight were green, not seven,
+#: and `(d)`'s red is `tests/test_codex_capture_hook.py::
+#: test_hook_detaches_so_codex_cannot_kill_the_capture` — a SPAWN-LATENCY miss on
+#: the same seam (see that file's `_WORKER_DEADLINE_S`, which records it). Two
+#: independent spawn-latency reds on one contended box is the measurement; one red
+#: beside a silently-dropped peer is the kind of proof this repo keeps catching.
 #:
 #: ⛔ RE-APPLIED ON MAIN'S TREE (PR #10610's conflicted head, 2026-11-05).
 #: `origin/main` rewrote this file independently (#10777 → #10975): the `gh`-absent
@@ -117,10 +132,14 @@ def launch(state_dir, co, pr=7, **kw):
 #: main's to own — `timeout=15.0`/`10.0` at the call sites below is the *value the
 #: flake was measured against*, not a decision main has since revisited.
 #:
-#: The process-exit bounds elsewhere in this file (`lane.wait(timeout=10)`,
-#: `a.wait(timeout=40)`, `_assert_no_worker_spawned`'s settle window) are
-#: untouched: those are process-exit and negative windows, not state-arrival
-#: bounds.
+#: The process-exit bounds elsewhere in this file are untouched — `lane.wait(
+#: timeout=10)` (a kill-and-join, below in
+#: `test_detachment_is_what_survives_the_lane`) and `a.wait(timeout=40)` /
+#: `b.wait(timeout=40)` (the two-worker exit pair): those are process-exit and
+#: negative windows, not state-arrival bounds. `_assert_no_worker_spawned`'s settle
+#: window is NOT in this file at all — it lives in `tests/test_codex_capture_hook.py`
+#: and `tests/test_cursor_capture_hook.py`, and nothing here widens it (the earlier
+#: version of this comment implied otherwise; #10610 review at `fdff8f432`, P3).
 _STATE_DEADLINE_S = 60.0
 
 
