@@ -108,8 +108,8 @@ import re
 import string
 import subprocess
 import sys
-from collections.abc import Callable
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -143,7 +143,12 @@ _NON_SECRET_USERINFO = frozenset({"git", "ssh", "hg", "svn", "deploy"})
 _REDACT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     # userinfo in a URL — ANY scheme, plus scheme-relative `//user:pw@host`. The leftmost
     # alternative wins, so `https://…` keeps its scheme and `ssh://`/`git://` are covered too.
-    (re.compile(r"([A-Za-z][A-Za-z0-9+.\-]*://|//)[^@/\s]+@"), r"\1<userinfo-redacted>@"),
+    # ⛔ GREEDY to the LAST `@` before the authority terminator. A single-userinfo form stopped at
+    # the FIRST `@`, so a password containing `@` was only partially hidden:
+    # `https://deploy:p@ssw0rdS3cret@host/…` rendered as `https://<userinfo-redacted>@ssw0rdS3cret@host/…`
+    # — twelve characters of the secret printed (measured). `[^/\s]*@` cannot leave the authority,
+    # because a `/` ends it.
+    (re.compile(r"([A-Za-z][A-Za-z0-9+.\-]*://|//)[^/\s]*@"), r"\1<userinfo-redacted>@"),
     # Any Authorization header, one token or two, quoted-key repr included. The whole value goes —
     # preserving the scheme word buys a diagnostic nobody needs and risks a one-token miss.
     (
@@ -178,19 +183,22 @@ _SCP_LIKE_USERINFO = re.compile(
     # Userinfo is everything up to the LAST `@` before the host, so a password that itself contains
     # `@` (`user:p@ss@host:path`) is covered — the earlier first-`@` form left that shape intact and
     # therefore PRINTED a credential the detector had already classified as one (measured).
-    r"(?<![\w@./-])([^\s/]+)@([A-Za-z0-9.-]+):(?=\S)"
+    # The host class allows `_` (an underscore host was detected but printed in full), and the
+    # separator may be `:` (scp) or `/` (scheme-less host/path), which is captured so the shape is
+    # preserved on replacement.
+    r"(?<![\w@./-<])([^<>\s/]+)@([A-Za-z0-9._-]+)([:/])(?=\S)"
 )
 
 
 def _redact_scp_userinfo(text: str) -> str:
     def _sub(m: re.Match[str]) -> str:
-        userinfo, host = m.group(1), m.group(2)
+        userinfo, host, sep = m.group(1), m.group(2), m.group(3)
         user = userinfo.split(":", 1)[0]
         # `git@host:` / `ssh@host:` carry no secret — redacting them would destroy ordinary
         # diagnostics and is not required by anything.
         if ":" not in userinfo and user.lower() in _NON_SECRET_USERINFO:
             return m.group(0)
-        return f"<userinfo-redacted>@{host}:"
+        return f"<userinfo-redacted>@{host}{sep}"
 
     return _SCP_LIKE_USERINFO.sub(_sub, text)
 
@@ -421,9 +429,14 @@ def _url_has_credential(url: str) -> bool:
     # negative puts a token on world-readable argv. Do not "fix" this by adding a token-shape
     # heuristic: an opaque token has no shape, and the heuristic would reopen the leak on exactly
     # the credentials hardest to recognise.
-    if "@" in url and "/" not in userinfo and ":" not in userinfo:
-        if userinfo and userinfo.lower() not in _NON_SECRET_USERINFO:
-            return True
+    if (
+        "@" in url
+        and "/" not in userinfo
+        and ":" not in userinfo
+        and userinfo
+        and userinfo.lower() not in _NON_SECRET_USERINFO
+    ):
+        return True
     # ⛔ A LONE userinfo is a credential too: `https://mytoken123@host/p.git` is a form GitHub
     # documents, carries no `ghp_`/`github_pat_` prefix, and has no password field — so every check
     # above misses it while `redact()` hides it in the display, and the raw token lands on argv
@@ -481,6 +494,23 @@ class Runner:
             # (exit 1 with no GH-WRITE-UNAVAILABLE token), breaking the contract.
             return Proc(126, err=f"{argv[0]}: {exc}")
         return Proc(proc.returncode, proc.stdout or "", proc.stderr or "")
+
+
+def _neutral_push_env(remote: str) -> dict[str, str]:
+    """Config that stops ambient settings from widening or breaking the probe push.
+
+    Set through `GIT_CONFIG_*` (env, kept by `_child_env`) rather than `git -c` so argv stays the
+    documented shape and no caller's flags are inherited.
+    """
+    return {
+        "GIT_CONFIG_COUNT": "3",
+        "GIT_CONFIG_KEY_0": "push.followTags",
+        "GIT_CONFIG_VALUE_0": "false",
+        "GIT_CONFIG_KEY_1": f"remote.{remote}.mirror",
+        "GIT_CONFIG_VALUE_1": "false",
+        "GIT_CONFIG_KEY_2": "push.useForceIfIncludes",
+        "GIT_CONFIG_VALUE_2": "false",
+    }
 
 
 def _probe_ref(prefix: str = "gh-write-preflight") -> str:
@@ -617,10 +647,18 @@ def _push_verify_cleanup(
     """
     push_proc = runner.run(
         [
-            "git", "push", "--porcelain", "--no-verify", remote,
+            "git", "push", "--porcelain", "--no-verify", "--no-follow-tags", remote,
             f"HEAD:refs/heads/{verdict.probe_ref}",
         ],
         cwd=root,
+        # ⛔ NEUTRALISE AMBIENT PUSH CONFIG (through the env, so argv stays the documented shape).
+        # `push.followTags=true` made the probe push an annotated TAG to the shared remote as well —
+        # a mutation BEYOND the probe ref that survived cleanup while the verdict still said
+        # `cleaned_up: true` (measured) — and a tag push is precisely what `publish-pypi`
+        # (`tags: v*`) triggers on. `remote.<name>.mirror=true` made the push fail outright and was
+        # reported as a credential refusal on a writable remote. `--no-follow-tags` covers the CLI
+        # flag; these cover the config, which the flag alone does not override everywhere.
+        env_extra=_neutral_push_env(remote),
     )
     push_ok = step("push", push_proc)
     # ⛔ Parse the write flag from the RAW stdout — NEVER from `steps[-1]["detail"]`, which `step()`
@@ -686,7 +724,9 @@ def _push_verify_cleanup(
         # so the credential's capability is UNKNOWN, not absent. Without this note the verdict reads
         # "read-only credential" and a lane goes hunting for a permissions problem that is really a
         # slow remote — the same "plausible diagnosis for the wrong cause" the tool exists to end.
-        if push_proc.rc == 124:
+        # A signalled push (rc < 0 - e.g. the OOM killer, documented for these cells) or one that
+        # produced no output at all says nothing about the credential either.
+        if push_proc.rc == 124 or push_proc.rc < 0 or not (push_proc.err or "").strip():
             verdict.detail = (
                 f"{verdict.detail} | the push TIMED OUT (our own deadline) — write capability is "
                 "UNKNOWN, not refused; re-run before concluding the credential is read-only"
@@ -696,7 +736,10 @@ def _push_verify_cleanup(
     # exception and emit `GH-WRITE-UNAVAILABLE(None)`).
     if keep_ref:
         verdict.kept_ref = True
-        verdict.cleaned_up = False
+        # `cleaned_up=False` is documented as "a PROVEN SURVIVOR". On a `--keep-ref` run where the
+        # push was refused nothing was ever created, so claiming a survivor overloads the field a
+        # consumer branches on; `None` (not applicable / unknown) is the honest value.
+        verdict.cleaned_up = False if (push_ok or verdict.reason != "push-refused") else None
         return verdict
 
     dp = runner.run(
@@ -705,6 +748,10 @@ def _push_verify_cleanup(
         # exit 129 and leaves the ref behind while reporting the credential unwritable).
         ["git", "push", "--no-verify", remote, "--delete", "--", verdict.probe_ref],
         cwd=root,
+        # The same ambient config breaks a --delete ("--mirror can't be combined with refspecs"),
+        # which then read as `delete-failed` / "PROBE REF SURVIVED" on a remote the probe had in
+        # fact written to and could clean: measured with `remote.origin.mirror=true`.
+        env_extra=_neutral_push_env(remote),
     )
     step("delete", dp)
 
@@ -772,17 +819,27 @@ def check_writable(
                 f"invalid probe_ref_prefix {probe_ref_prefix!r}: git check-ref-format rejects "
                 f"the ref name it would produce"
             )
+    # ⛔ THE IN-FLIGHT VERDICT IS THREADED THROUGH, not thrown away. Building a fresh Verdict on the
+    # exception path discarded `probe_ref`, `steps` and `leftover_ref` — so the one branch where
+    # litter is MOST likely (the probe died mid-push) was the branch that reported
+    # `leftover_ref: false` and did not name the ref an operator must delete. Measured: exception on
+    # the verify read with deletes denied left `refs/heads/gh-write-preflight/…` on the real remote
+    # while the verdict said `probe_ref=None, leftover_ref=False`.
+    seen: list[Verdict] = []
     try:
-        return _check_writable(repo, remote, runner, keep_ref, probe_ref_prefix)
-    except Exception as exc:  # noqa: BLE001, RUF100 — the contract is "no exit 1 without a marker"
-        return Verdict(
-            False,
-            "internal-error",
-            detail=redact(f"{type(exc).__name__}: {exc}"),
-            repo_root=str(repo),
-            remote=remote,
-            cleaned_up=None,
-        )
+        return _check_writable(repo, remote, runner, keep_ref, probe_ref_prefix, seen)
+    except Exception as exc:  # the contract is "no exit 1 without a marker"
+        verdict = seen[0] if seen else Verdict(False, repo_root=str(repo), remote=remote)
+        verdict.writable = False
+        verdict.reason = "internal-error"
+        note = redact(f"{type(exc).__name__}: {exc}")
+        verdict.detail = f"{verdict.detail} | {note}" if verdict.detail else note
+        if verdict.probe_ref and verdict.cleaned_up is None and not verdict.kept_ref:
+            # A ref may survive this path; say so rather than implying a clean remote.
+            verdict.detail += (
+                f" | the probe ref {verdict.probe_ref} may still be on {remote} — clean it up"
+            )
+        return verdict
 
 
 def _check_writable(
@@ -791,6 +848,7 @@ def _check_writable(
     runner: Runner,
     keep_ref: bool,
     probe_ref_prefix: str | None = None,
+    seen: list[Verdict] | None = None,
 ) -> Verdict:
     repo_path = Path(repo).expanduser()
 
@@ -861,6 +919,10 @@ def _check_writable(
         head_sha=head,
         probe_ref=_probe_ref(probe_ref_prefix or "gh-write-preflight"),
     )
+    # Publish the in-flight verdict so the exception wrapper can report what the probe learned
+    # (probe_ref, steps) instead of discarding it exactly when litter is most likely.
+    if seen is not None:
+        seen.append(verdict)
     # Confirmation reads address the PUSH target(s). When the push url differs from the fetch url we
     # must name a URL rather than the remote; a credential-bearing URL goes through an `insteadOf`
     # alias so the secret stays in the env (0400), never on argv (0444, world-readable on a shared
@@ -912,6 +974,7 @@ def _check_writable(
                 rp = runner.run(
                     ["git", "push", "--no-verify", remote, "--delete", "--", verdict.probe_ref],
                     cwd=root,
+                    env_extra=_neutral_push_env(remote),
                 )
                 verdict.steps.append(
                     {"step": "delete-retry", "rc": rp.rc, "detail": redact(rp.detail[-800:])}
@@ -924,7 +987,7 @@ def _check_writable(
                 if state == "absent":
                     verdict.cleaned_up = True
                     verdict.leftover_ref = False
-            except Exception:  # noqa: BLE001 — must not mask the original failure
+            except Exception:
                 pass
 
     return verdict

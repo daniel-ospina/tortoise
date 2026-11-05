@@ -30,6 +30,7 @@ caller's to set, and a lane container works too
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import subprocess
@@ -1653,10 +1654,8 @@ def test_an_exception_after_the_push_still_deletes_the_probe_ref(tmp_path: Path)
                 raise KeyboardInterrupt
             return super().run(argv, cwd=cwd, timeout=timeout, env_extra=env_extra)
 
-    try:
+    with contextlib.suppress(KeyboardInterrupt):
         check_writable(work, runner=Interrupted())
-    except KeyboardInterrupt:
-        pass
     assert deleted, "the probe ref was NOT deleted after an interrupt"
     assert "gh-write-preflight" not in _remote_refs(remote)
 
@@ -1688,6 +1687,185 @@ def test_a_push_timeout_is_reported_as_UNKNOWN_not_as_a_refusal(tmp_path: Path):
     assert "UNKNOWN, not refused" in (verdict.detail or ""), verdict.detail
 
 
+def test_a_SIGNALLED_push_is_reported_as_UNKNOWN_not_as_a_refusal(tmp_path: Path):
+    """A killed push (rc < 0 — the OOM killer, documented on these cells) is not a refusal.
+
+    Measured before: `Proc(-9, out="", err="")` produced `push-refused` with an EMPTY detail, so
+    the only text a lane saw was "read-only credential, branch protection, or no network" — the
+    plausible-diagnosis-for-the-wrong-cause failure the rc-124 note exists to prevent.
+    """
+    work, _remote = _make_pair(tmp_path)
+
+    class Killed(Runner):
+        def run(self, argv, cwd=None, timeout=120, env_extra=None):
+            if argv[1] == "push" and "--delete" not in argv:
+                return Proc(-9, out="", err="")
+            if argv[1] == "ls-remote":
+                return Proc(0, out="")
+            if argv[1] == "push":
+                return Proc(0, out="")
+            return super().run(argv, cwd=cwd, timeout=timeout, env_extra=env_extra)
+
+    verdict = check_writable(work, runner=Killed())
+
+    assert verdict.writable is False
+    assert verdict.reason == "push-refused"
+    assert "UNKNOWN, not refused" in (verdict.detail or ""), verdict.detail
+
+
+def test_the_retry_REREADS_and_records_its_step(tmp_path: Path):
+    """The retry's bookkeeping must be observable, not thrown away.
+
+    Mutation that survived a whole review cycle: making the retry set `cleaned_up = True` with NO
+    re-read left all 74 tests green — so the "RE-READS state" claim was unpinned, and the same
+    machinery is what the `internal-error` wrapper relies on to report a surviving probe ref.
+    """
+    work, _remote = _make_pair(tmp_path)
+
+    class DiesThenDeletes(Runner):
+        """Push lands, the verify read raises, and the retry's delete succeeds."""
+
+        def __init__(self):
+            self.pushed = False
+            self.deleted = False
+
+        def run(self, argv, cwd=None, timeout=120, env_extra=None):
+            if argv[1] == "push" and "--delete" not in argv:
+                self.pushed = True
+                return Proc(0, out="*\tHEAD:refs/heads/gh-write-preflight/x\t[new branch]\n")
+            if argv[1] == "push" and "--delete" in argv:
+                self.deleted = True
+                return Proc(0, out="")
+            if argv[1] == "ls-remote" and "refs/heads/" in " ".join(argv):
+                if not self.deleted:
+                    raise RuntimeError("stub: read died")
+                return Proc(0, out="")
+            if argv[1] == "ls-remote":
+                return Proc(0, out="")
+            return super().run(argv, cwd=cwd, timeout=timeout, env_extra=env_extra)
+
+    verdict = check_writable(work, runner=DiesThenDeletes())
+
+    assert verdict.reason == "internal-error"
+    # The probe ref is NAMED — an operator can clean up what this reports.
+    assert verdict.probe_ref, "the internal-error path must still name the probe ref"
+    # The in-flight steps survived the exception (the verdict was threaded, not rebuilt).
+    assert any(s["step"] == "push" for s in verdict.steps), verdict.steps
+    # The retry ran AND re-read: only a post-retry read can produce `cleaned_up=True` here.
+    assert any(s["step"] == "delete-retry" for s in verdict.steps), verdict.steps
+    assert verdict.cleaned_up is True, (
+        "the retry's effect must be READ BACK, not assumed"
+    )
+    assert "may still be on" not in (verdict.detail or ""), (
+        "a confirmed delete must not warn about litter"
+    )
+
+
+def test_internal_error_names_the_ref_when_it_may_survive(tmp_path: Path):
+    """When the retry cannot clean up, the verdict must SAY the ref may still be there."""
+    work, _remote = _make_pair(tmp_path)
+
+    class NeverDeletes(Runner):
+        def run(self, argv, cwd=None, timeout=120, env_extra=None):
+            if argv[1] == "push" and "--delete" not in argv:
+                return Proc(0, out="*\tHEAD:refs/heads/gh-write-preflight/x\t[new branch]\n")
+            if argv[1] == "push" and "--delete" in argv:
+                return Proc(1, err="stub: denied")
+            if argv[1] == "ls-remote" and "refs/heads/" in " ".join(argv):
+                raise RuntimeError("stub: read died")
+            if argv[1] == "ls-remote":
+                return Proc(0, out="")
+            return super().run(argv, cwd=cwd, timeout=timeout, env_extra=env_extra)
+
+    verdict = check_writable(work, runner=NeverDeletes())
+
+    assert verdict.reason == "internal-error"
+    assert verdict.probe_ref
+    assert "may still be on" in (verdict.detail or ""), verdict.detail
+    assert verdict.writable is False
+
+
+def test_keep_ref_on_a_refused_push_does_not_claim_a_survivor(tmp_path: Path):
+    """`cleaned_up=False` documents a PROVEN SURVIVOR. With nothing created it must be None."""
+    work, _remote = _make_pair(tmp_path, read_only=True)
+
+    verdict = check_writable(work, keep_ref=True)
+
+    assert verdict.writable is False
+    assert verdict.kept_ref is True
+    assert verdict.cleaned_up is None, (
+        f"nothing was created, so there is no survivor to report: {verdict.cleaned_up}"
+    )
+
+
+def test_a_push_follow_tags_style_config_cannot_widen_the_probe(tmp_path: Path):
+    """REAL git: an annotated tag at HEAD must NOT be pushed by the probe.
+
+    With `push.followTags=true` the probe pushed the tag to the shared remote too — a mutation
+    BEYOND the probe ref that survived cleanup while the verdict still said `cleaned_up: true`
+    (measured), and a tag push is exactly what `publish-pypi` (`tags: v*`) triggers on.
+    """
+    work, remote = _make_pair(tmp_path)
+    _git("tag", "-a", "v9.9.9", "-m", "probe must not push me", cwd=work)
+    _git("config", "push.followTags", "true", cwd=work)
+
+    verdict = check_writable(work)
+
+    assert verdict.writable is True, verdict.detail
+    assert verdict.cleaned_up is True
+    tags = _git("ls-remote", "--tags", str(remote), cwd=remote.parent).stdout.strip()
+    assert "v9.9.9" not in tags, f"the probe pushed a TAG to the shared remote: {tags!r}"
+
+
+def test_a_mirrored_remote_is_not_reported_as_a_credential_refusal(tmp_path: Path):
+    """`remote.origin.mirror=true` makes `git push <refspec>` fail — that is CONFIG, not the token."""
+    work, _remote = _make_pair(tmp_path)
+    _git("config", "remote.origin.mirror", "true", cwd=work)
+
+    verdict = check_writable(work)
+
+    assert verdict.writable is True, (
+        f"a mirrored remote must not be read as a read-only credential: {verdict.reason!r} "
+        f"{verdict.detail!r}"
+    )
+
+
+def test_the_retry_reports_a_REFUSED_delete_as_a_survivor(tmp_path: Path):
+    """The retry's delete can itself be refused, and the read-back can say PRESENT.
+
+    Mutation that survived: setting `cleaned_up = True` on the retry WITHOUT reading left every
+    test green — so the re-read was unpinned. Here the delete claims rc 0 but the ref is still
+    there, so only a real read catches it.
+    """
+    work, _remote = _make_pair(tmp_path)
+
+    class LyingDelete(Runner):
+        def __init__(self):
+            self.deleted = False
+
+        def run(self, argv, cwd=None, timeout=120, env_extra=None):
+            if argv[1] == "push" and "--delete" not in argv:
+                return Proc(0, out="*\tHEAD:refs/heads/gh-write-preflight/x\t[new branch]\n")
+            if argv[1] == "push" and "--delete" in argv:
+                return Proc(0, out="")  # claims success; the ref never goes away
+            if argv[1] == "ls-remote" and "refs/heads/" in " ".join(argv):
+                if not self.deleted:
+                    self.deleted = True
+                    raise RuntimeError("stub: first read died")
+                return Proc(0, out="a" * 40 + "\trefs/heads/gh-write-preflight/x\n")
+            if argv[1] == "ls-remote":
+                return Proc(0, out="")
+            return super().run(argv, cwd=cwd, timeout=timeout, env_extra=env_extra)
+
+    verdict = check_writable(work, runner=LyingDelete())
+
+    assert verdict.reason == "internal-error"
+    assert verdict.cleaned_up is not True, (
+        "the retry must READ BACK; a delete that merely exits 0 does not prove removal"
+    )
+    assert "may still be on" in (verdict.detail or ""), verdict.detail
+
+
 def test_password_containing_an_at_sign_is_redacted():
     """`user:p@ss@host:path` — the password holds the separator character itself.
 
@@ -1697,6 +1875,18 @@ def test_password_containing_an_at_sign_is_redacted():
     out = redact("user:p@ss@example.invalid:repo.git")
     assert "p@ss" not in out, out
     assert "example.invalid" in out, "the host must survive so the remote is still identifiable"
+    # The SCHEME form is the same leak through a different pattern: a single-userinfo match stopped
+    # at the first `@` and printed the rest of the password (measured: 12 chars).
+    for scheme_form in (
+        "https://deploy:p@ssw0rdS3cret@example.invalid/o/r.git",
+        "ssh://deploy:p@ssw0rdS3cret@example.invalid/o/r.git",
+    ):
+        got = redact(scheme_form)
+        assert "ssw0rdS3cret" not in got, f"partial password printed: {got}"
+        assert "p@ss" not in got, f"password printed: {got}"
+    # A host with an underscore, and the scheme-less `host/path` form, were detected but printed.
+    assert "hunter2" not in redact("user:hunter2@my_host.example:repo.git")
+    assert "hunter2" not in redact("user:hunter2@host.example/repo.git")
     # A plain address with a space after the colon is prose, not a URL — leave it alone.
     assert redact("write to a@b.com: please") == "write to a@b.com: please"
 
@@ -1708,7 +1898,7 @@ def test_the_retry_does_NOT_run_on_the_ordinary_delete_failed_path(tmp_path: Pat
     `delete-failed` path without re-reading, so the verdict claimed `leftover_ref=True` / "PROBE REF
     SURVIVED" for a remote that was already clean — a false block plus a false litter claim.
     """
-    work, remote = _make_pair(tmp_path)
+    work, _remote = _make_pair(tmp_path)
     deletes = []
 
     class FirstDeleteDenied(Runner):
