@@ -219,8 +219,44 @@ CLEAR_VERDICT_RE = re.compile(
     r"(?im)(?:^[ \t>*_]*CLEAN\b"
     r"|^[ \t>*_]*NO ISSUES FOUND\b"
     r"|\b(?:verdict|outcome|result|conclusion|review|reviewed|re-?review|final)\b"
-    r"[\s:*_\u2014\u2013-]{0,4}(?:NO ISSUES FOUND|CLEAN)\b)"
+    r"[\s:*_\u2014\u2013]{0,4}(?:NO ISSUES FOUND|CLEAN)\b)"
 )
+#: ⛔ A CLEAR THAT IS IMMEDIATELY RETRACTED IS NOT A CLEAR. The cue arm above asks only for the
+#: SHAPE (`verdict: CLEAN`), and a STATUS comment that talks ABOUT a past verdict satisfies that
+#: shape while asserting the OPPOSITE: *"the previous verdict: CLEAN no longer holds"*, *"the
+#: earlier verdict: CLEAN is superseded by this comment"*, *"Previous review: CLEAN, but that
+#: predates the fix request below"*, *"the record … says verdict: clean, but the head has
+#: moved"*. Each read as a CLEAR and erased an open P1 — `READY-FOR-OWNER` over a live blocker,
+#: and none of them cleared under the pre-cue `CLEAR_RE`, so the arm above made them newly
+#: reachable. The clause that FOLLOWS the phrase is what separates an assertion from a
+#: retraction, so it decides; the closed-direction lookahead on `ONE_OPEN_CUE_BEFORE_COUNT_RE`
+#: below is the same symmetry applied to the other arm.
+#:
+#: The separator class above also drops the ASCII hyphen: `reviewed-clean` is a COMPOUND
+#: ADJECTIVE describing a branch or a head (#10938's status comment: *"`efe6da47d` is that
+#: branch's reviewed-clean head"*), never a declaration — and it was matching as one.
+_CLEAR_RETRACTED_RE = re.compile(
+    r"(?is)\s*,?\s*(?:"
+    r"but\b|however\b|though\b|although\b|yet\b"
+    r"|(?:is|was|are|were|has|have|had)?\s*(?:now\s+)?(?:no\s+longer|not)\b"
+    r"|(?:is|was|are|were)\s+(?:superseded|stale|outdated|obsolete|invalid|wrong)\b"
+    r"|(?:superseded|stale|outdated|obsolete|invalid)\b"
+    r"|predat(?:e|es|ed|ing)\b"
+    r")"
+)
+
+
+def asserts_a_clear(text: str) -> bool:
+    """True when ``text`` ASSERTS a clean verdict — not when it cites, negates or supersedes one.
+
+    Every match is checked, not just the first: a body may cite a retracted verdict in one
+    clause and assert its own in another, and the assertion is what counts.
+    """
+    return any(
+        not _CLEAR_RETRACTED_RE.match(text, m.end())
+        for m in CLEAR_VERDICT_RE.finditer(text)
+    )
+
 #: A CAPPED / ABORTED / DECLARED-NEGATIVE review exit. ⛔ THE VOCABULARY IS COPIED FROM
 #: `scripts/record-review.sh`, NOT INVENTED HERE: it is that script's arms (1) and (1b) —
 #: the two it applies UNCONDITIONALLY when deciding whether a review artifact is evidence
@@ -437,9 +473,17 @@ ONE_OPEN_CUE_BEFORE_COUNT_RE = re.compile(
     # `remaining: 1 P1 was fixed`, `apart from a single P2, now closed` — the same declarative
     # form with or without a copula, and the false-BLOCK direction round 8 measured. The verb
     # itself is NOT optional in this lookahead, so a live `1 P1 (open)` is never exempted.
+    # ⛔ THE VERB SET IS NOT INTERCHANGEABLE. `fixed|closed|resolved|addressed` are completing on
+    # their own, but `landed`, `cleared` and `done` are not unambiguous here: in this fleet
+    # "landed" means MERGED / ARRIVED, so `remaining: 1 P1 landed after the last review and is
+    # unfixed` is a LIVE finding, and the bare form exempted it — the same fail-open direction,
+    # one spelling over. Those three therefore require a copula or `now`; the unambiguous four
+    # still do not, so `apart from a single P2, now closed` keeps working.
     + r"(?!\s*(?:,\s*)?(?:now\s+)?"
-    + r"(?:(?:was|were|is|are|has|have|had)\s+(?:now\s+)?)?"
-    + r"(?:fixed|closed|resolved|addressed|landed|cleared|done))"
+    + r"(?:"
+    + r"(?:(?:was|were|is|are|has|have|had)\s+(?:now\s+)?)?(?:fixed|closed|resolved|addressed)"
+    + r"|(?:was|were|is|are|has|have|had)\s+(?:now\s+)?(?:landed|cleared|done)"
+    + r"))"
 )
 #: A bracketed severity token used as a NOUN in running text (`2 [P1] open blocking defects`).
 BRACKET_SEVERITY_RE = re.compile(
@@ -1271,7 +1315,7 @@ def check_blocking_finding(probe: Probe) -> Check:
             blocking_seen += 1
             open_finding = item
             continue
-        if CLEAR_VERDICT_RE.search(text) or str(item.get("state") or "").upper() == APPROVED:
+        if asserts_a_clear(text) or str(item.get("state") or "").upper() == APPROVED:
             # A formal APPROVAL is a clear in its own right — otherwise a change request
             # at T1 could never be closed by an approval at T2, because each item is
             # graded on its own state forever, and the PR would read NOT-READY to eternity.

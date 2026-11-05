@@ -789,6 +789,52 @@ def test_a_verdict_HEADER_still_closes_a_finding() -> None:
         assert "last-clear=31" in check.raw, check.raw
 
 
+def test_a_verdict_that_is_RETRACTED_in_the_same_sentence_cannot_close_a_finding() -> None:
+    """The cue SHAPE is satisfied by prose about a verdict — the clause after it decides.
+
+    `CLEAR_VERDICT_RE`'s cue arm asks only for `verdict: CLEAN`, so a status comment that
+    NEGATES or SUPERSEDES a past verdict matched it and erased the open P1 — the same false
+    PASS as the citation arm, one door over, and NEWLY reachable because none of these bodies
+    matched the pre-cue `CLEAR_RE`. Case D is verbatim fleet prose (#10938's status comment);
+    case E is the artifact class this whole condition exists for (a status comment about a
+    stale record).
+
+    Revert red: neutralise `_CLEAR_RETRACTED_RE` (make `asserts_a_clear` a bare
+    `CLEAR_VERDICT_RE.search`) and every case below turns `passed=True` with
+    `last-clear=2`, while `test_a_verdict_HEADER_still_closes_a_finding` stays green — which
+    is exactly why the retraction needs its own corpus rather than a comment.
+    """
+    for body in (
+        # A — negation of the old verdict
+        "Needs another round — the previous verdict: CLEAN no longer holds.",
+        # B — supersession
+        "The earlier verdict: CLEAN is superseded by this comment.",
+        # C — contrast, then the reason it is stale
+        "Previous review: CLEAN, but that predates the fix request below.",
+        # D — a COMPOUND ADJECTIVE, verbatim fleet prose (#10938)
+        "…(`efe6da47d` is that branch's reviewed-clean head).",
+        # E — a status comment ABOUT a stale record
+        "The record at `4f450ae81` says verdict: clean, but the head has moved.",
+    ):
+        comments = [
+            {
+                "id": 1,
+                "created_at": "2026-11-05T09:00:00Z",
+                "kind": "review",
+                "body": "[P1] tools/x.py:5 — the guard returns 0 on a failed read",
+            },
+            {
+                "id": 2,
+                "created_at": "2026-11-05T10:00:00Z",
+                "kind": "comment",
+                "body": body,
+            },
+        ]
+        check = _assert_fails("blocking-finding", "open-blocking-finding", comments=comments)
+        assert "open=review:1" in check.raw, f"{body!r}: {check.raw}"
+        assert "last-clear=-" in check.raw, f"{body!r} counted as a CLEAR: {check.raw}"
+
+
 def test_issues_verdict_is_a_blocking_record() -> None:
     comments = [
         {
@@ -1279,6 +1325,15 @@ ROUND9_CORPUS: tuple[tuple[str, bool], ...] = (
     # finding was fixed, which is the false-BLOCK direction round 8 measured.
     ("**Outcome: CLEAN.** remaining: 1 P1 was fixed and verified.", False),
     ("**Outcome: CLEAN.** apart from a single P2, now closed after round 9.", False),
+    # …but `landed`/`cleared`/`done` are NOT completing on their own here: in this fleet
+    # "landed" means MERGED / ARRIVED, so the bare form exempted a LIVE finding — the same
+    # fail-open direction as the retracted-verdict arm, one spelling over. Those three now
+    # require a copula; the unambiguous four (`fixed|closed|resolved|addressed`) still do not.
+    ("CLEAN — remaining: 1 P1 landed after the last review and is unfixed.", True),
+    ("**Outcome: CLEAN.** remaining: 1 P1 landed from main; it is still open.", True),
+    # …while the COPULA'd form is still a completion, so the tightening does not over-correct
+    # in the false-BLOCK direction.
+    ("**Outcome: CLEAN.** remaining: 1 P1 has now landed and is verified.", False),
 )
 
 

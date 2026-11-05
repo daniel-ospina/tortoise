@@ -1581,8 +1581,10 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # systemd installer that arms it own tests/test_container_reaper.py
              # (`core`). `tools/` is swallowed by NON_PYTHON_PREFIXES, so without
              # these entries a change to the dry-run allow-list, the `--apply`
-             # path or the pins selects NO surface — 72 tier-1 smoke files and
-             # ZERO of the safety cases for a tool that DELETES containers. Same
+             # path or the pins selects NO surface — the tier-1 smoke files (73
+             # at this head; 72 was the size THEN — re-derive it rather than
+             # reading this as a current count) and ZERO of the safety cases for
+             # a tool that DELETES containers. Same
              # #1349/#3332/#3616 silent-drop class as tools/test_lane.py above.
              # Pinned by
              # tests/test_ci_selection.py::test_container_reaper_change_selects_core_not_tier1.
@@ -2749,9 +2751,10 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # `tools/lane_stash.py` and `tools/ci_catch_history.py` above).
              # The `core` row that registers the test file is CLASSIFICATION
              # only (#4348): a name in a surface's test_files only runs when that
-             # surface is ALREADY selected. MEASURED before this entry:
+             # surface is ALREADY selected. MEASURED before this entry (72 was
+             # `tier1`'s size THEN — 73 since #10980; re-derive it):
              # `select(["tools/rail_detach.py"], "pull_request",
-             # load_manifest())` -> surfaces=[], full=False, 72 files, the pin
+             # load_manifest())` -> surfaces=[], full=False, tier-1 files, the pin
              # ABSENT. CORE_ALSO (not TOOL_CARVEOUTS) because the guard is
              # hermetic (a stub rail, temp dirs) and `core` is where its suite
              # lives. Pinned by
@@ -2766,9 +2769,9 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # on the very file that defines them. That is the
              # #1349/#3332/#3616 silent-drop class: a PR that deleted R2 or weakened the
              # AND check would run `python-ci-gate` GREEN with none of its own pins.
-             # MEASURED before this entry:
+             # MEASURED before this entry (72 was `tier1`'s size THEN — 73 since #10980):
              # `select(["tools/ci_runner_labels.py"], "pull_request",
-             # load_manifest())` -> surfaces=[], 72 files, the pin ABSENT. CORE_ALSO (not
+             # load_manifest())` -> surfaces=[], tier-1 files, the pin ABSENT. CORE_ALSO (not
              # TOOL_CARVEOUTS) because the gate is hermetic (a committed JSON snapshot, no
              # graph, no URI, no network) and `core` is where its suite is registered.
              "tools/ci_runner_labels.py")

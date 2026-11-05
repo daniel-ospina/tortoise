@@ -1237,10 +1237,18 @@ def cmd_pin(args: argparse.Namespace) -> int:
         # ⛔ THE REMEDY MUST NAME A WORKTREE THE CALLER CAN ACTUALLY PIN. `_lane_root` keeps an
         # ignored/empty directory's OWN key only inside the MAIN worktree, so this refusal is
         # also reachable from the HUB — `<hub>/build`, `<hub>/.venv`, a just-created
-        # `<hub>/newpkg` — where "run inside the lane" names a lane that does not exist
+        # `<hub>/newpkg` — where "run inside the lane" named a lane that does not exist
         # (measured: `origin/main` pinned the hub from `<hub>/build`, and on this branch the
-        # only thing telling that operator where to go instead is this message). Same refusal,
-        # same exit 2, same "would snapshot THAT checkout"; only the remedy and the label move.
+        # only thing telling that operator where to go instead is this message).
+        #
+        # ⛔ AND A LANE'S OWN SUBDIRECTORY NEVER REACHES THIS REFUSAL AT ALL: `_lane_root`
+        # (`:1175`) answers a LINKED worktree's subdirectory as that LANE, so `pin` from
+        # `<lane>/build` returns rc 0 above and never gets here. So the MAIN arm is the one
+        # that fires in practice, and the `else` is the DEFENSIVE branch (`not at_root`, or a
+        # future `_lane_root` shape) — not a second live remedy. The `_is_main_worktree` call
+        # repeats the answer `_lane_root` already computed; it is kept rather than threaded
+        # through because this path exits immediately (rc 2, or 3 on an unreadable answer),
+        # so a second `rev-parse` costs nothing and keeps `_lane_root`'s signature honest.
         if at_root and _is_main_worktree(Path(at_root).resolve()):
             whose = f"the MAIN worktree {at_root}"
             label = "a key of its own"
