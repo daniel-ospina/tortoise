@@ -24433,7 +24433,24 @@ class TortoiseSDK:
                                f"mitigation) for multi-input fan-out",
                 })
             direction = conn.get("direction")
-            if direction is not None and direction not in self._INGEST_DIRECTION_VALUES:
+            if direction is not None and not isinstance(direction, str):
+                # #10520 (A3) / #11031 item 2: a NON-SCALAR ``direction`` is a
+                # SHAPE violation, REPORTED — never a crash. The membership test
+                # below is a raw frozenset test, and an unhashable value (a
+                # list/map from a JS caller or a bulk import) raised
+                # ``TypeError: unhashable type: 'list'``, aborting the WHOLE
+                # validator with a traceback instead of returning the violation it
+                # exists to return. The ``to`` arm above screens its items the
+                # same way, for the same reason (#9173 review): the contract's job
+                # is to NAME the bad field, and a traceback names nothing a caller
+                # can act on.
+                violations.append({
+                    "section": "connections", "index": index,
+                    "message": f"ingest: connections[{index}] 'direction' must "
+                               f"be a string token, got "
+                               f"{type(direction).__name__}",
+                })
+            elif direction is not None and direction not in self._INGEST_DIRECTION_VALUES:
                 violations.append({
                     "section": "connections", "index": index,
                     "message": f"ingest: connections[{index}] direction must "
