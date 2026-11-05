@@ -104,12 +104,17 @@ __all__ = [
     "PARITY_INSTRUMENTS",
     "TRUTH_LABELS",
     "Assessment",
+    "CacheReadError",
     "CacheState",
     "ClassReading",
     "ParityReport",
     "assess",
+    "classify",
     "config_labels",
+    "load_parity_report",
+    "measure_state",
     "node_total",
+    "resident_counts",
 ]
 
 #: Where a declared ceiling is read from. ⛔ ABSENT means "no ceiling declared", and
