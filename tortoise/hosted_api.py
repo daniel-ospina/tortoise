@@ -14334,7 +14334,7 @@ async def email_signup(request: Request):
 # starter seed (/internal/starter-seed) instead, which files the signing-up
 # user + their Organization as connected anchor Subjects (never sample
 # Points). The demo seed below survives ONLY as an explicit opt-in sample
-# (/v1/demo + MCP tortoise_onboarding_demo_create) for callers who ask for
+# (/v1/demo) for callers who ask for
 # it — and every demo Point it writes is EXCLUDED from the count-of-record
 # surfaces (org.point_count — the Overview memory digest) so sample content
 # is never presented as the user's own filings. The id set is the single
@@ -36989,8 +36989,7 @@ async def public_demo(org: dict = Depends(get_current_org_gated)):  # noqa: B008
         ).result_set
         if existing:
             return {"existing": True, "created": None}
-        # #1922: quota-gate the seed like the MCP twin
-        # (tortoise_onboarding_demo_create → _enforce_quota("points")). The
+        # #1922: quota-gate the seed. The
         # demo seed writes ~10 Points, so it must consume the points quota
         # like any other Point-creating write — the REST surface was the
         # 0-quota bypass (bug-hunt 2026-08-28 server P2-13). Idempotent
@@ -39012,8 +39011,7 @@ async def github_connect(body: GitHubConnectRequest | None = None,
     endpoints — the dashboard calls this with useSession: true."""
     # #2300: org-level control-plane surface (starts a ORG-wide OAuth +
     # registers org CSRF state) — graph-bound keys rejected (parity with
-    # the github index/reindex endpoints; MCP twin tortoise_onboarding_
-    # github_connect rejects graph-bound keys). A per-graph key must never
+    # the github index/reindex endpoints). A per-graph key must never
     # initiate the org's GitHub connection.
     _reject_graph_bound_org_surface(org, "github connect")
     import secrets
@@ -39825,8 +39823,8 @@ async def github_status(org: dict = Depends(get_current_org_session_ungated)):  
     selector's org is real.
     """
     # #2300: reads org-level GitHub credential state (control-plane) —
-    # graph-bound keys rejected (MCP twin tortoise_onboarding_github_status
-    # parity). A per-graph key must never observe the org's GitHub org.
+    # graph-bound keys rejected (org-level surface, C5). A per-graph key must
+    # never observe the org's GitHub org.
     _reject_graph_bound_org_surface(org, "github status")
     _org_id = org["org_id"]
     encrypted, gh_org = _github_credentials(_org_id)
