@@ -252,8 +252,17 @@ title-derived `_searchText`, silently un-indexing it in the cache.
   `_searchText`; they disagree only on `summary` (declined on the record door);
 * graph-side FTS survives on a post-#10000 row — the lexicon is restored — and
   goes, with the prose, on a legacy one, where there is no non-prose value to
-  keep. A legacy session stays unfindable on the recovery door until it is
-  re-captured (the capture now overwrites the pair with the lexicon);
+  keep. A legacy session therefore stays un-indexed on the recovery door, and a
+  RE-CAPTURE does not repair it: re-capturing an already-captured session id is
+  the #2104/#1727 no-op replay, so `_materialize_session_source` — whose only
+  production caller sits behind `capture_session`'s fresh-capture gate — never
+  runs and the stale pair survives (measured: `#10852` review, P1; pinned by
+  `tests/test_10000_source_prose.py::test_a_re_capture_does_not_heal_a_pre_fix_node`).
+  The routes that do clear it are a capture under a NEW `session_id`, a retry of a
+  prior FAILED capture, or a record-sourced re-projection for a node the
+  projection CREATES — but the write is additive (`MERGE … SET n += $props`), so
+  a node that ALREADY carries the pair keeps it across that re-projection too
+  (see the next bullet);
 * `python -m tortoise record-reconcile` builds its RECORD side through the same
   projector, so its truth side HOLDS `_searchText` for a post-#10000 row — and
   the cache-owned partition keeps every name the record side holds, so a drifted
@@ -275,7 +284,18 @@ ONE LEG PER ARM; the FOUR negative legs (a plain-document baseline, then one per
 term that must not be a signal: a transcript document carrying a `session_id`, a
 `corpus://` permalink stamped `agentSession`, a document stamped `is_episodic`);
 the row/node predicate-agreement legs; the `props`-tail leg; and the record row
-that must not be mutated. Mutation-checked, one at a time: each identity arm, EACH
+that must not be mutated. The #10965 per-row decision added four more, named here
+because this list is what a reader checks the suite against:
+`test_a_post_10000_session_row_keeps_the_field_its_fts_index_is_declared_on` (the
+restored lexicon reaches the field the Source index is declared on),
+`test_the_drop_is_decided_by_the_rows_own_provenance_not_by_the_column_name`
+(near-miss lexicons are declined, so the door is not a shape test),
+`test_the_display_summary_stays_declined_and_the_residual_is_named` (the stated
+residual), and
+`test_the_reconciler_compares_the_restored_lexicon_on_a_post_10000_row` (drift on
+the restored field reds). This doc's own repair-route claim is pinned, in both
+directions, by `tests/test_10000_cache_projection_doc_pin.py`.
+Mutation-checked, one at a time: each identity arm, EACH
 OF THE TWO DOORS (the column loop and the `props` tail — the tail filter undoes
 only the keys the tail added, so neither door subsumes the other), the label gate,
 the call-time resolution of the placement spellings, and each of the three flags
