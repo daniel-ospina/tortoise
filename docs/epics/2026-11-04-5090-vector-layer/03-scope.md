@@ -71,7 +71,7 @@ self-hosting (**owner: not now**), and compression (§15: no engine to apply it 
 | excluded | deferred to | why |
 |---|---|---|
 | **Where the vector index lives (V1)** | **§14.3** (decision home) · **`#4333`** (architecture) | Not this epic's — the changelog records `#5090` as a **consumer**. Its deciding input (`f`) is unmeasurable today (§17.4.6). |
-| Self-hosting FalkorDB | **D11** (`#4333`), **deferred** — and **owner, 2026-11-05: not now** | *"we have a lot of work that needs doing first."* Not in this epic's option set. |
+| Self-hosting FalkorDB | **D11** (`#4333`), **deferred** — and **owner, 2026-11-05, verbatim: *"we're not self-hosting flakorDB now. we have a lot of work that needs doing first"*** (relayed at [#5090 comment 6669523691](https://github.com/daniel-ospina/tortoise/issues/5090#issuecomment-6669523691)) | Not in this epic's option set. |
 | Embedding compression / quantization | **§15's do-not-re-invent list** | *"no engine to apply it to"* — FalkorDB's stored form is `vecf32`. |
 | Filtered-ANN recall measurement | **V1's evidence, when V1 is taken** | It is evidence *for a move*. With no move planned, measuring it now is work with no consumer. Recorded in `02-research.md` so it is not lost. |
 | Creating indexes for the four unindexed labels | **V1** | It is V1's content, and it commits four further resident HNSW structures. The brief forbids it without a stated non-reversal; there is none. |
@@ -204,7 +204,7 @@ Behavioural, executable, each tracing to exactly one scope item.
 ## 5. Human Approval Gate — ✅ PASSED
 
 `epic-scope` requires human approval of the boundaries before planning. **Granted by the owner,
-2026-11-05:** *"i need you to have done proper research to not reinvent the wheel and then move forward."*
+2026-11-05, verbatim with the source's own spellings: *"i dont want quesitons for quesitons sake. i need you to have done proper reserach to not reinvent the wheel and then move forward"* — relayed at [#5090 comment 6669523691](https://github.com/daniel-ospina/tortoise/issues/5090#issuecomment-6669523691), which is this gate's evidence.
 Recorded here as the gate's own record, together with the two constraints that came with it:
 
 1. **Self-hosting FalkorDB is not now.** Removed from the option set (S-out-of-scope row 2; align §8.1).

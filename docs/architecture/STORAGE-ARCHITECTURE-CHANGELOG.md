@@ -1975,8 +1975,7 @@ neither: 12,657 is the **2026-09-24** count of the `:Object` 7,859 + `:Event` 4,
 **unindexed** population, 38 % of every vector stored — and `#5090`'s 2026-10-08 comment reaches it as a
 SCOPE correction (*"the 50 MB figure requires counting the `:Point` leg — the one leg that IS indexed"*),
 not as a re-measurement. `#10976`'s measured block carries no vector count and no 19.4 MB line, and
-`tools/dod_5090_probe.py`'s own census docstring says the 12,657 figure is a 2026-09-24 number and is not
-to be re-quoted — `--census` re-measures per label on a named graph at a timestamp. Quoting it beside a
+`tools/dod_5090_probe.py`'s own census docstring says the 12,657 figure *"2026-09-24 numbers and are **not to be re-quoted**"* (verbatim from `:70-71`, emphasis included — a de-bolded form does not resolve) — `--census` re-measures per label on a named graph at a timestamp. Quoting it beside a
 2026-11-04 graph reading is exactly the mixing of readings this whole correction exists to stop.
 
 **And §12.1c no longer contradicts §14.3.** Before this correction the two disagreed *inside one
@@ -2019,8 +2018,8 @@ therefore the unindexed `Object`+`Event` population: **12,657 vectors × 1,536 B
 vector stored**, which is `#5090`'s 2026-10-08 SCOPE correction — not a re-measurement, and not a
 2026-11-04 figure. The 2026-11-04 reading of `live-v4` (`#10976`) is a **graph** reading:
 `indices_sz_mb` **93** on a **195 MB** graph, with per-label attribute bytes and no vector count; the
-probe's own docstring says the 12,657 count is a 2026-09-24 number that is not to be re-quoted, and
-`--census` re-measures it per label on a named graph at a timestamp.
+probe's own docstring says the 12,657 count is *"2026-09-24 numbers and are **not to be re-quoted**"* — quoted **verbatim including the source's own emphasis markers**, from `tools/dod_5090_probe.py:70-71`, because de-bolding it makes the quotation unresolvable and a reader who greps the clean form finds nothing. `--census`
+re-measures it per label on a named graph at a timestamp.
 
 **The places that still cited it, all now dated** — named by their ACTUAL section, because the first
 draft of this list named six and got five of them wrong: **§2.2**'s *"45 MB of
