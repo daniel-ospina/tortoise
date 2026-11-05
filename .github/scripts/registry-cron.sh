@@ -1549,15 +1549,21 @@ CURL_RC=0
 # the elapsed seconds make budget exhaustion self-evident.
 SWEEP_START="$(date +%s)"
 SWEEP_TIMEOUT_S="${SWEEP_TIMEOUT_S:-1500}"
-# #10234 review P2: the knob is passed straight to `curl -m`, so a bad value is
-# not a crash — curl rejects the option (rc=2) with NO request sent, and the
-# classifier below turns that into an empty body. That would be a green run in
-# which the sweep was never posted at all. Refuse it up front instead.
+# #10234 review P2 (round 2): bounds as well as type. `curl -m 0` means NO
+# ceiling (verified against a black-hole server), so 0 would reinstate exactly
+# the unbounded POST this change exists to remove; and a value above the job
+# ceiling means the runner kills the driver mid-leg, which the workflow's
+# `timeout-minutes` note says must not happen. The ceiling must fit UNDER the
+# job budget (45 min), so cap it at 35 min.
 case "$SWEEP_TIMEOUT_S" in
   ''|*[!0-9]*)
     fail "SWEEP_TIMEOUT_S must be whole seconds, got '${SWEEP_TIMEOUT_S}'"
     exit 1 ;;
 esac
+if [ "$SWEEP_TIMEOUT_S" -lt 60 ] || [ "$SWEEP_TIMEOUT_S" -gt 2100 ]; then
+  fail "SWEEP_TIMEOUT_S must be between 60 and 2100 seconds (the job ceiling is 45 min and the driver needs the rest), got '${SWEEP_TIMEOUT_S}'"
+  exit 1
+fi
 RUN="$(curl -sS -m "$SWEEP_TIMEOUT_S" -X POST -H "Authorization: Bearer $KEY" \
   -H "Content-Type: application/json" -d '{}' \
   "${API}/v1/internal/backups/sweep" 2>/dev/null)" || CURL_RC=$?
@@ -1739,31 +1745,53 @@ case "$RUN_STATUS" in
     if [ -n "$LAST_SWEEP_AT" ]; then
       TIMEOUT_LAST_TS="$(date -d "$LAST_SWEEP_AT" +%s 2>/dev/null || echo 0)"
     fi
-    # #10234 review P2: a stamp in the FUTURE makes the age negative, which is
-    # never `> DRIVER_DOWN_MIN` — a skewed or corrupt ops/state.json would then
-    # read as fresh forever. Treat a stamp more than 5 minutes ahead as
-    # UNUSABLE and fall through to the fail-closed branch, which is what the
-    # analytics block in this same script already does with a negative age.
-    if [ "$TIMEOUT_LAST_TS" != "0" ] \
-       && [ "$TIMEOUT_LAST_TS" -le $(( $(date +%s) + 300 )) ]; then
-      timeout_age_min=$(( ($(date +%s) - TIMEOUT_LAST_TS) / 60 ))
+    # #10234 review P2 (round 2): a stamp in the FUTURE makes the age negative,
+    # and a negative age is never `> DRIVER_DOWN_MIN` — a skewed or corrupt
+    # ops/state.json would then read as fresh forever. A future stamp is
+    # CORRUPTION, though, not "no sweep yet", so it must NOT share the benign
+    # measured-empty-pool envelope below: it reds regardless of the pool.
+    # (Round 1 routed both into the same else and a corrupt state file went
+    # silent whenever the pool happened to be measured empty.)
+    NOW_S="$(date +%s)"
+    TIMEOUT_STAMP="missing"
+    if [ "$TIMEOUT_LAST_TS" != "0" ]; then
+      if [ "$TIMEOUT_LAST_TS" -gt $(( NOW_S + 300 )) ]; then
+        TIMEOUT_STAMP="future"
+      else
+        TIMEOUT_STAMP="usable"
+      fi
+    fi
+    if [ "$TIMEOUT_STAMP" = "future" ]; then
+      log "sweep ${RUN_STATUS_SAFE} and last_sweep_at is dated in the FUTURE (${TIMEOUT_LAST_TS} > now) — corrupt or skewed state, filing SWEEP_NO_COVERAGE (job red)"
+      file_alert SWEEP_NO_COVERAGE "[DR] SWEEP_NO_COVERAGE — last_sweep_at is in the future" \
+        "the driver got no report from POST /v1/internal/backups/sweep after ${SWEEP_ELAPSED}s (curl exit ${CURL_RC}, status=${RUN_STATUS_SAFE}) and /status reports last_sweep.last_sweep_at dated in the FUTURE, which no clock-consistent writer can produce. A completion stamp in the future makes the age negative, so it would otherwise read as fresh forever — this is corruption or clock skew in ops/state.json, not a benign empty deployment. Last known last_sweep=${LAST_SWEEP_SAFE}." ""
+      NO_COVERAGE=1
+    elif [ "$TIMEOUT_STAMP" = "usable" ]; then
+      timeout_age_min=$(( (NOW_S - TIMEOUT_LAST_TS) / 60 ))
       if [ "$timeout_age_min" -gt "$DRIVER_DOWN_MIN" ]; then
         log "sweep ${RUN_STATUS_SAFE} and the last COMPLETED sweep was ${timeout_age_min}m ago (> ${DRIVER_DOWN_MIN}m) — filing SWEEP_NO_COVERAGE (job red)"
         file_alert SWEEP_NO_COVERAGE "[DR] SWEEP_NO_COVERAGE — no sweep has completed within the driver-down window" \
           "the driver got no report from POST /v1/internal/backups/sweep after ${SWEEP_ELAPSED}s (curl exit ${CURL_RC}, status=${RUN_STATUS_SAFE}), and the last COMPLETED sweep is ${timeout_age_min}m old (> ${DRIVER_DOWN_MIN}m). Unlike a bare budget timeout this IS coverage evidence: no sweep has landed inside the declared driver-down window, so sweeps have stopped completing. Last known last_sweep=${LAST_SWEEP_SAFE}." ""
         NO_COVERAGE=1
       else
-        log "sweep ${RUN_STATUS_SAFE} (curl rc=${CURL_RC}, took ${SWEEP_ELAPSED}s) — the last COMPLETED sweep was ${timeout_age_min}m ago (<= ${DRIVER_DOWN_MIN}m), so the driver's patience ran out, not the pipeline — leaving SWEEP_NO_COVERAGE unchanged"
+        # #10234 review P2 (round 2): the ride-alongs are SKIPPED on this shape
+        # (a timeout may still hold the server-side per-org locks), and the run
+        # is green — so say it here rather than leaving it to the adjacent
+        # "sweep skipped" line. An absent PURGE_FAILED on this run is not
+        # evidence that erasure ran.
+        log "sweep ${RUN_STATUS_SAFE} (curl rc=${CURL_RC}, took ${SWEEP_ELAPSED}s) — the last COMPLETED sweep was ${timeout_age_min}m ago (<= ${DRIVER_DOWN_MIN}m), so the driver's patience ran out, not the pipeline — leaving SWEEP_NO_COVERAGE unchanged. NOTE: the purge/reconcile ride-alongs are SKIPPED for this run (the sweep may still hold the server-side locks), so this run is NOT evidence that erasure or revocation ran."
       fi
     elif [ "$R2_LIST_OK" != "1" ] || [ "${R2_TEAM_COUNT:-0}" -gt 0 ]; then
-      # No usable completion evidence (absent, unparseable, or future-dated) and
-      # a pool that is NOT measured-empty: unknown is not healthy (#2790).
+      # No completion evidence at all (absent or unparseable) and a pool that is
+      # NOT measured-empty: unknown is not healthy (#2790).
       log "sweep ${RUN_STATUS_SAFE}, no usable last_sweep_at, and the pool is NOT measured-empty (R2_LIST_OK=${R2_LIST_OK}, ${R2_TEAM_COUNT} prefix(es)) — filing SWEEP_NO_COVERAGE (job red)"
       file_alert SWEEP_NO_COVERAGE "[DR] SWEEP_NO_COVERAGE — sweep timed out and completion cannot be verified" \
-        "the driver got no report from POST /v1/internal/backups/sweep after ${SWEEP_ELAPSED}s (curl exit ${CURL_RC}, status=${RUN_STATUS_SAFE}) and /status carries no usable last_sweep.last_sweep_at (absent, unparseable, or dated in the future), so there is no evidence any sweep has completed. The R2 pool is NOT measured-empty (R2_LIST_OK=${R2_LIST_OK}, ${R2_TEAM_COUNT} team prefix(es)), so this cannot be read as the chronic pre-beta empty state. Check the app's sweep lock and its ops/state.json." ""
+        "the driver got no report from POST /v1/internal/backups/sweep after ${SWEEP_ELAPSED}s (curl exit ${CURL_RC}, status=${RUN_STATUS_SAFE}) and /status carries no usable last_sweep.last_sweep_at (absent or unparseable), so there is no evidence any sweep has completed. The R2 pool is NOT measured-empty (R2_LIST_OK=${R2_LIST_OK}, ${R2_TEAM_COUNT} team prefix(es)), so this cannot be read as the chronic pre-beta empty state. Check the app's sweep lock and its ops/state.json." ""
       NO_COVERAGE=1
     else
-      log "sweep ${RUN_STATUS_SAFE}, no usable last_sweep_at, and the pool is measured empty — leaving silent"
+      # Absent stamp + measured-empty pool: the documented chronic pre-beta
+      # envelope, NOT a fault (see the 0-team false-positive envelope).
+      log "sweep ${RUN_STATUS_SAFE}, no usable last_sweep_at, and the pool is measured empty — leaving silent (chronic pre-beta envelope)"
     fi
     ;;
   transport_error)

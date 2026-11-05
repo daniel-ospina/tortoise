@@ -1928,17 +1928,24 @@ assert_match "$(cat "$LOG")" 'COMPLETED sweep is [0-9]+m old' "78b. the filed bo
 assert_match "$(cat "$LOG")" 'after [0-9]+s \(curl exit 28' "78b. the filed body still carries the elapsed seconds (#5028)"
 
 # ── 78c. #10234: a timeout with NO usable completion evidence IS red ───────
-# Unknown is not healthy (#2790). With no `last_sweep_at` at all the driver has
-# no completion evidence, and a pool holding team prefixes means this is not
-# the chronic pre-beta empty state.
+# Unknown is not healthy (#2790). With no `last_sweep` at all the driver has no
+# completion evidence, and a pool holding team prefixes means this is not the
+# chronic pre-beta empty state.
+# Review P1 (round 2): the fixture must express an ABSENT stamp. `status_body … ""`
+# does NOT — the helper's `${6:-<default>}` substitutes a concrete STALE date, so
+# this case silently re-tested 78b's stale branch and the fail-closed `elif` was
+# never reached (deleting it left the suite green). Build the body explicitly and
+# assert the branch's OWN log line.
 reset_case
 export R2_TEAMS=$'backups/teamA/'
 export R2_DEFAULT_LIST="$TS_RECENT"
-export STUB_STATUS_BODY="$(status_body true null null true 1 "")"
+export STUB_STATUS_BODY='{"enabled":true,"config_error":null,"storage_error":null,"per_team":{},"last_sweep":null,"watcher":{"running":true,"age_minutes":1}}'
 export STUB_SWEEP_RC=28
 run_driver
 assert_eq "$RC" 1 "78c. a timeout with no usable last_sweep_at stays RED"
 assert_filed "$(cat "$LOG")" SWEEP_NO_COVERAGE "78c. unverifiable completion files SWEEP_NO_COVERAGE"
+assert_contains "$OUT" "no usable last_sweep_at" "78c. the fail-closed branch is the one that ran (not the stale-age branch)"
+assert_not_contains "$OUT" "the last COMPLETED sweep was" "78c. (control) the stale-age branch did NOT run"
 
 # ── 78d. #10234: the ceiling knob exists and its default exceeds the 600s ──
 # The 600s literal WAS the defect: the sweep needs longer than its client was
@@ -1965,6 +1972,27 @@ export SWEEP_TIMEOUT_S=abc
 run_driver
 assert_eq "$RC" 1 "78d-ii. a non-numeric SWEEP_TIMEOUT_S is refused RED, not silently green"
 assert_contains "$OUT" "SWEEP_TIMEOUT_S must be whole seconds" "78d-ii. the refusal names the variable"
+
+# ── 78d-iii. #10234 review P2 (round 2): 0 and out-of-range are refused ────
+# `curl -m 0` means NO CEILING (verified against a black-hole server), so 0
+# reinstates the unbounded POST this change exists to remove; and a value above
+# the job ceiling gets the driver killed mid-leg, which the workflow comment
+# says must not happen.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body true null null true 1 "$TS_RECENT")"
+export SWEEP_TIMEOUT_S=0
+run_driver
+assert_eq "$RC" 1 "78d-iii. SWEEP_TIMEOUT_S=0 is refused (it means no ceiling to curl)"
+assert_contains "$OUT" "between 60 and 2100" "78d-iii. the refusal names the accepted range"
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body true null null true 1 "$TS_RECENT")"
+export SWEEP_TIMEOUT_S=3000
+run_driver
+assert_eq "$RC" 1 "78d-iii. a ceiling above the job budget is refused"
 unset SWEEP_TIMEOUT_S
 
 # ── 78e. #10234 review P1: a TRANSPORT failure is not a budget timeout ─────
@@ -1995,7 +2023,21 @@ export STUB_STATUS_BODY="$(status_body true null null true 1 "$FUTURE_TS")"
 export STUB_SWEEP_RC=28
 run_driver
 assert_eq "$RC" 1 "78f. a future-dated last_sweep_at fails CLOSED, not open"
-assert_contains "$OUT" "no usable last_sweep_at" "78f. the future stamp is reported as unusable"
+assert_contains "$OUT" "dated in the FUTURE" "78f. the future stamp is reported as corruption"
+
+# ── 78f-ii. #10234 review P2 (round 2): future stamp + MEASURED-EMPTY pool ──
+# Round 1 routed a future stamp into the same `else` as the benign pre-beta
+# envelope, so a corrupt ops/state.json went SILENT whenever the pool happened
+# to be measured empty — the exact failure the clamp was added for. Corruption
+# must red regardless of the pool.
+reset_case
+export R2_TEAMS=""                    # a measured-EMPTY pool
+export R2_DEFAULT_LIST=""
+export STUB_STATUS_BODY="$(status_body true null null true 1 "$FUTURE_TS")"
+export STUB_SWEEP_RC=28
+run_driver
+assert_eq "$RC" 1 "78f-ii. a future-dated stamp reds even when the pool is measured empty"
+assert_contains "$OUT" "dated in the FUTURE" "78f-ii. the corruption is named, not swallowed as pre-beta"
 
 # ── 79. #5028: an empty sweep body names empty_response, not a lock ────────
 reset_case
