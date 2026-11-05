@@ -203,6 +203,9 @@ from .quota import (
 from .canonical import derive_batch_id
 # #4911: the ONE credential scrubber for stored turn text. Stdlib-only module
 # (no `tortoise` imports), so this adds no import-cycle risk to this hot module.
+from .session_source_display import (
+    SESSION_SOURCE_SUMMARY_PREFIX as _SESSION_SOURCE_SUMMARY_PREFIX,
+)
 from .security import redact_secrets
 import threading
 from datetime import UTC
@@ -4097,16 +4100,11 @@ _SESSION_SOURCE_STOPWORDS = frozenset({
 })
 
 
-#: #10000: the DISPLAY prefix on a session Source's ``summary``. It is a LABEL,
-#: not vocabulary, so ``_source_search_text`` keeps it OUT of ``_searchText``.
-#: The Source retrieval leg OR-unions query terms (``search_engine`` →
-#: ``sparse.build_or_query``), so a constant prefix in the index makes EVERY
-#: captured session match any source query containing "session", "capture" or
-#: "topics" — and none of the three is a RediSearch stopword (its default list
-#: is function words) or a member of ``_SESSION_SOURCE_STOPWORDS``. Measured on a
-#: two-session graph (one about a migration plan, one about a fencing budget):
-#: the query "session capture topics" returned BOTH, on the prefix alone.
-_SESSION_SOURCE_SUMMARY_PREFIX = "session capture topics: "
+#: #10000: the DISPLAY prefix on a session Source's ``summary`` — imported, not
+#: defined here. It has ONE home (`tortoise/session_source_display.py`) because
+#: the CACHE PROJECTION reads the same value as the WITNESS that tells a
+#: post-#10000 row's lexicon ``_searchText`` from a pre-#10000 row's prose, and it
+#: may not import the capture to get it (#10965 / #10852 review P2).
 
 
 #: #10000: the transcript's own FRAMING labels — the ``Speaker: text`` prefix

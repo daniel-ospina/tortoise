@@ -158,6 +158,7 @@ from .residency import (
     declare_residency,
 )
 from .security import validate_rel_type
+from .session_source_display import SESSION_SOURCE_SUMMARY_PREFIX
 from .stored_form import STORED_VECTOR_PROPS, VERBATIM_MARKER, is_verbatim
 
 __all__ = [
@@ -1228,19 +1229,24 @@ def _scalar(value: Any) -> Any:
 #:
 #: ⛔ SO THE DROP IS DECIDED PER ROW, FROM THE ROW — and the test is EXACT, never a
 #: shape heuristic: the value IS `", ".join(topics)`, the join the capture computes
-#: from the very column that survives. A prose sentence is not that string; a
-#: prefix/suffix/"looks like a word list" test would re-index a legacy sentence
-#: whose opening words happened to match. See
+#: from the very column that survives, **and** `summary` carries that join behind
+#: `_SESSION_SOURCE_SUMMARY_PREFIX`. The join alone is not enough: a legacy
+#: utterance that IS a comma-space list satisfies it word for word (#10852 review,
+#: P2), so the display column is the WITNESS that the derivation is the post-#10000
+#: one. A prefix/suffix/"looks like a word list" test alone would re-index a legacy
+#: sentence whose opening words happened to match — and a join-only test DOES
+#: re-index one whose whole body does. See
 #: :func:`_episodic_source_search_text_is_the_lexicon`.
 #:
 #: ⛔ `summary` STAYS DECLINED ON EVERY ROW, and that is the stated residual
 #: (#10965), not an oversight: it is the same lexicon BEHIND
-#: `_SESSION_SOURCE_SUMMARY_PREFIX`, that prefix lives in the capture, and
-#: re-deriving it here would mean the projection importing the capture (a layering
-#: inversion). Without the prefix the descriptor is not mechanically separable
-#: from a prose sentence, so this column stays fail-closed. Cost, named: a
-#: record-restored (or served) session `:Source` carries no `summary` while a live
-#: one does.
+#: `_SESSION_SOURCE_SUMMARY_PREFIX`, and restoring it would put the whole
+#: descriptor on the node for no retrieval gain (the Source FTS index is declared
+#: on `_searchText`). The column is therefore READ AS THE WITNESS and never
+#: projected — its home is the leaf module `tortoise/session_source_display.py`,
+#: which imports nothing, precisely so this door does not import the capture (the
+#: layering inversion this module refuses). Cost, named: a record-restored (or
+#: served) session `:Source` carries no `summary` while a live one does.
 #:
 #: ⚠️ WHAT THIS DELIBERATELY DOES NOT TOUCH. `topics` is the capture's word
 #: lexicon (its most frequent content words), not a transcript slice, and it
@@ -1371,10 +1377,22 @@ def _episodic_source_search_text_is_the_lexicon(row: Mapping[str, Any]) -> bool:
 
     The ONE mechanical question that separates the two derivations of the session
     `:Source`'s pair, asked of the ROW rather than of the build that wrote it:
-    #10000's capture writes `_searchText = _source_search_text(topics=topics)`, and
-    `_source_search_text` renders a topic list as `", ".join(topics)`, storing
-    that same `topics` in the same statement. So the derivation is present iff the
-    stored text IS the join — compared as a STRING, exactly.
+    #10000's capture writes `_searchText = _source_search_text(topics=topics)` and
+    `summary = _SESSION_SOURCE_SUMMARY_PREFIX + ", ".join(topics)`, both from the
+    SAME list in ONE statement. So the derivation is present iff the stored text
+    IS the join — compared as a STRING, exactly — **and** the display column
+    carries that join behind the declared prefix.
+
+    ⛔ TWO TERMS, NOT ONE (#10852 review, P2). The join alone is NOT the
+    derivation: a pre-#10000 capture wrote `summary` as the transcript's first
+    substantive utterance and derived `_searchText` FROM it, so on a transcript
+    whose utterance is itself a comma-space list
+    (`"milk, eggs, bread, cheese, apples, oranges"`) the legacy row satisfies
+    `_search_text == ", ".join(topics)` with its PROSE, word for word. `summary`
+    is what tells the two apart — the post-#10000 value carries
+    `SESSION_SOURCE_SUMMARY_PREFIX`, which a prose utterance does not. Without
+    that second term this predicate re-indexes the sentence it exists to decline,
+    and nothing reds (the cost `:data:`_EPISODIC_SOURCE_PROSE_COLUMNS`` names).
 
     ⛔ EXACT EQUALITY, never a shape test. `startswith`, "contains no sentence",
     "few words", or a case-folded compare would accept a legacy row's sentence
@@ -1384,11 +1402,14 @@ def _episodic_source_search_text_is_the_lexicon(row: Mapping[str, Any]) -> bool:
 
     ⛔ FAIL-CLOSED ON EVERY UNCERTAIN SHAPE. A `topics` column that is not a list
     of non-empty strings (NULL, a JSON string, a list with a hole, empty) cannot
-    prove the derivation, so the row is treated as legacy and the pair stays
-    declined. The cost of a false negative is a session that stays unfindable on
-    the recovery door until it is re-captured (visible, and named at the table);
-    the cost of a false POSITIVE is turn prose on a graph node, which nothing
-    reds — so the polarity is not a preference.
+    prove the derivation; neither can a `summary` that is absent, empty, or
+    missing the declared prefix. Each such row is treated as legacy and the pair
+    stays declined. The cost of a false negative is a session that stays
+    unfindable on the recovery door until it is re-captured (visible, and named at
+    the table); the cost of a false POSITIVE is turn prose on a graph node, which
+    nothing reds — so the polarity is not a preference. ⚠️ The prefix's own home
+    is `tortoise/session_source_display.py`, a leaf module: the projection must
+    not import the capture for it (the layering inversion the table refuses).
     """
     search_text = row.get("_search_text")
     if not isinstance(search_text, str) or not search_text:
@@ -1399,7 +1420,16 @@ def _episodic_source_search_text_is_the_lexicon(row: Mapping[str, Any]) -> bool:
     tokens = [t for t in topics if isinstance(t, str) and t]
     if len(tokens) != len(topics):
         return False
-    return search_text == ", ".join(tokens)
+    joined = ", ".join(tokens)
+    if search_text != joined:
+        return False
+    # ⛔ THE WITNESS — `summary` is DECLINED on the node below, and this is why it
+    # is still read: on the post-#10000 row it carries the lexicon behind the
+    # display prefix, which is what a legacy prose row cannot carry.
+    summary = row.get("summary")
+    if not isinstance(summary, str):
+        return False
+    return summary == f"{SESSION_SOURCE_SUMMARY_PREFIX}{joined}"
 
 
 def is_episodic_source_node(props: Mapping[str, Any]) -> bool:
