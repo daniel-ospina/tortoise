@@ -581,6 +581,46 @@ def test_hand_picked_subset_of_a_declared_union_is_not_ready() -> None:
     assert "missing=['docs/ONTOLOGY.md']" in check.raw
 
 
+def test_an_extra_undeclared_file_cannot_switch_the_union_arm_off() -> None:
+    """⛔ ONE extra file must not turn an ABSENT declared constituent into a PASS.
+
+    The arm shipped as `touched < declared`, a PROPER-subset test: it fires only when the
+    diff contains nothing outside the declaration, so a fold that DROPPED a declared
+    constituent and ADDED a registrar file (`config/ci-surfaces.yml`, `MEMORY.md` — exactly
+    what a fold writes) read `PASS union=declared(3)` here with `docs/ONTOLOGY.md` never
+    named, i.e. the checks validated less than the PR claims.
+
+    Measured pre-fix with THIS fixture: `Check("coverage", True, "files=3 …
+    union=declared(3)")`, `reason=""`. Post-fix the difference decides, so the missing file
+    is named and the arm fails.
+    """
+    check = _assert_fails(
+        "coverage",
+        "hand-picked-subset:1",
+        union=["tortoise/sdk.py", "tools/ready_for_owner.py", "docs/ONTOLOGY.md"],
+        touched=["tortoise/sdk.py", "tools/ready_for_owner.py", "config/ci-surfaces.yml"],
+        touched_raw="files=3",
+    )
+    assert "missing=['docs/ONTOLOGY.md']" in check.raw, check.raw
+    assert "config/ci-surfaces.yml" not in check.reason
+
+
+def test_a_fully_covered_declared_union_with_extra_files_passes() -> None:
+    """The other direction: extra files ALONGSIDE a fully delivered union are fine.
+
+    The fix must not red an ordinary fold that writes a registrar file it did not declare —
+    only a MISSING declared file is the defect.
+    """
+    check = _check(
+        "coverage",
+        union=["tortoise/sdk.py", "tools/ready_for_owner.py"],
+        touched=["tortoise/sdk.py", "tools/ready_for_owner.py", "config/ci-surfaces.yml"],
+        touched_raw="files=3",
+    )
+    assert check.passed is True, (check.reason, check.raw)
+    assert "union=declared(2)" in check.raw
+
+
 def test_uncovered_file_is_not_ready() -> None:
     check = _assert_fails("coverage", "uncovered-files", uncovered=["tortoise/orphan_module.py"])
     assert "tortoise/orphan_module.py" in check.raw

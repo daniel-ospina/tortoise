@@ -908,6 +908,73 @@ def test_a_missing_required_label_is_not_ready_to_land():
     assert next_command(row, REPO) is None
 
 
+# ── a PR-chosen string is not a check state (bucket by PROVENANCE) ─────────
+@pytest.mark.parametrize(
+    ("base", "cfg_text"),
+    [
+        # A base ref containing `completed/` — legal per `git-check-ref-format` (no
+        # slash-separated component may begin with a dot or end `.lock`; nothing forbids
+        # `completed/`), so an author can legitimately create it. Pre-fix this landed in
+        # `fails` → NEEDS-FIX → `fix-one.sh`.
+        ("completed/spike", None),
+        # A REQUIRED LABEL whose name contains `completed/` (config-chosen, same hole).
+        (
+            "main",
+            "queue_rules:\n  - name: q\n    queue_conditions:\n      - base=main\n"
+            "      - label=completed/pending-scan\n      - check-success=docs\n",
+        ),
+        # …and a label name that is a CHECK-SHAPED word: the state bucket must be decided by
+        # the `check-success=` prefix, never by what the name spells. (The two OTHER
+        # substring strings are unreachable through PR-chosen text: `in flight` and
+        # `no check-run` both contain a SPACE, which `parse_config`'s `label=(\S+)` refuses
+        # in a label name and `git-check-ref-format` refuses in a ref — so the class this arm
+        # closes is the `completed/…` one, and the prefix rule keeps the rest shut.)
+        (
+            "main",
+            "queue_rules:\n  - name: q\n    queue_conditions:\n      - base=main\n"
+            "      - label=completed/no-check-run\n      - check-success=docs\n",
+        ),
+    ],
+)
+def test_a_gate_refusal_chosen_text_cannot_masquerade_as_a_check(base, cfg_text):
+    """⛔ `completed/` or `no check-run` in a BASE REF or LABEL NAME is not a check state.
+
+    `unmet_conditions` emits five forms and two of them embed text the PR (or the queue
+    config) chooses: `base=<base> (actual <ref>)` and `label=<name>: absent`. The buckets
+    were decided by SUBSTRING over the whole string, so `completed/spike` landed in `fails`,
+    `structural` came out EMPTY, the `gate-refusal:` detail was never written — and
+    `next_command` handed out `fix-one.sh` for a PR the queue refuses at entry, at exit 0,
+    with `next_action` saying nothing is dispatched. Measured pre-fix: `unmet ->
+    ['base=main (actual completed/spike)', 'label=completed/x: absent']` bucketed BOTH into
+    `fails`. Now the PREFIX decides which condition this is and the text is display-only.
+    """
+    cfg = CFG if cfg_text is None else parse_config(cfg_text)
+    runs = (
+        all_green()
+        if cfg_text is None
+        else [
+            {
+                "id": 1,
+                "name": "docs",
+                "status": "completed",
+                "conclusion": "success",
+                "app": {"slug": "github-actions"},
+            }
+        ]
+    )
+    s = snap(
+        issues=[issue(100)],
+        pulls=[pull(1001, closes=[100], base=base)],
+        check_runs={"a" * 40: runs},
+        attestation={"1001": {"verdict": "head"}},
+        merge_tree={"1001": {"clean": True}},
+    )
+    (row,) = build_units(s, cfg)
+    assert row.position == "NEEDS-REVIEW", row.detail
+    assert any(d.startswith("gate-refusal:") for d in row.detail), row.detail
+    assert next_command(row, REPO) is None, "a refused PR must never carry a rail command"
+
+
 # ── an unmeasured merge is an abstention, like every other one (finding 4) ──
 def test_unmeasured_merge_tree_is_not_landable():
     s = snap(
@@ -2960,6 +3027,14 @@ def test_a_malformed_pace_knob_cannot_decide_an_exit_code(
     ambient. Measured: `1 passed`. `…_is_caught_in_a_FRESH_PROCESS` below is the arm that reds.
     """
     from tools import next_work
+
+    # ⛔ TEST ISOLATION, not decoration. `_PACE_WARNED` is a PROCESS-WIDE one-shot
+    # (`tools/next_work.py`): `monkeypatch` cannot restore it, so any earlier test in this
+    # file that runs a paced call with a malformed `NEXT_WORK_PACE` leaves it True and the
+    # `"NEXT_WORK_PACE" in err` assertion below then fails for a reason that has nothing to
+    # do with the knob this test is about — a property of test ORDER, not of the code.
+    # Latent today (no earlier test triggers it), so it will never show up as red on its own.
+    monkeypatch.setattr(next_work, "_PACE_WARNED", False)
 
     monkeypatch.setenv("NEXT_WORK_PACE", "0.2s")
     assert next_work.pace_seconds() == next_work.PACE_SECONDS_DEFAULT

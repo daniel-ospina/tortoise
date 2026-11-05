@@ -819,8 +819,15 @@ def check_coverage(probe: Probe) -> Check:
     Two ways this fails, and both are the "hand-picked subset" the brief names:
 
     1. **A declared union that the tree under-delivers** — a fold/batch PR that says it
-       carries ``#A, #B, #C`` but whose diff is a strict subset. The checks then validated
-       less than the PR claims, and a green gate is evidence about the wrong set.
+       carries ``#A, #B, #C`` but whose diff is MISSING one of them. The checks then
+       validated less than the PR claims, and a green gate is evidence about the wrong set.
+       ⛔ Decided on the DIFFERENCE (``declared - touched``), never on the subset relation:
+       this arm shipped as ``touched < declared``, a PROPER-subset test that fires only when
+       the diff carries nothing outside the declaration — so ONE extra file
+       (``config/ci-surfaces.yml``, ``MEMORY.md``: exactly the append-only registrars a fold
+       writes) turned a wholly absent constituent into ``union=declared(3)`` + PASS, with the
+       missing file never named. An EXTRA file must not be able to switch a fail-closed
+       condition off (#10975 review round 22, reproduced on that tree).
     2. **A touched file for which the selection schedules NO test leg at all** —
        ``select()`` returns no surface, ``full is False`` and an EMPTY ``test_files``. An
        unfamiliar path is not this: ``select()`` fails closed to FULL for unknown paths,
@@ -865,8 +872,8 @@ def check_coverage(probe: Probe) -> Check:
         )
     if probe.union is not None:
         declared = set(probe.union)
-        if touched < declared:
-            missing = sorted(declared - touched)
+        missing = sorted(declared - touched)
+        if missing:
             return Check(
                 "coverage",
                 False,

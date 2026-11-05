@@ -897,6 +897,16 @@ def _gate_refusal_edit(conditions: list[str]) -> str:
     return "; ".join(dict.fromkeys(tips))
 
 
+def _check_state(cond: str) -> str:
+    """The STATE half of a `check-success=` condition, read from the LAST `": "`.
+
+    ⛔ The LAST separator, not the first: a check RUN may legitimately be named
+    `docs: build`, and a check whose name contains `": "` must not have its NAME
+    read as its state — that is the same `completed/` hole one level in.
+    """
+    return cond.rsplit(": ", 1)[1] if ": " in cond else ""
+
+
 def _position_for_pr(
     snap: Snapshot,
     cfg: QueueConfig | None,
@@ -925,9 +935,34 @@ def _position_for_pr(
     # through to READY-TO-LAND: a DRAFT PR, or one based on another branch, was
     # the tool's BEST position and was handed an executable command — a PR the
     # queue will refuse, advertised as the closest to done.
-    fails = [c for c in blocking if "completed/" in c and "completed/success" not in c]
-    in_flight = [c for c in blocking if "in flight" in c or "no check-run" in c]
-    structural = [c for c in blocking if c not in fails and c not in in_flight]
+    # ⛔ BUCKET BY PROVENANCE, NOT BY SUBSTRING. `unmet_conditions` emits five
+    # forms, and TWO of them embed text the PR itself chooses — its base ref in
+    # `base=<cfg.base> (actual <ref>)` and a label name in `label=<name>: absent`.
+    # The first version substring-matched `completed/`, `in flight` and
+    # `no check-run` over the WHOLE string, so a PR based on `completed/spike` —
+    # a legal ref (`git-check-ref-format`: no slash-separated component may begin
+    # with a dot or end `.lock`, and nothing forbids `completed/`) — was read as a
+    # RED CHECK: `fails` took it, `structural` came out empty, the `gate-refusal:`
+    # detail was never written, and `next_command` handed back `fix-one.sh` for a
+    # PR the queue refuses at entry, at exit 0, with `next_action` printing
+    # "nothing is dispatched" beside it. Measured on that tree: `unmet ->
+    # ['base=main (actual completed/spike)', 'label=completed/x: absent']` bucketed
+    # BOTH into `fails`. The same construction mis-graded a base ref or label
+    # containing `in flight` into NEEDS-TEST ("wait") — a wrong prescription.
+    # So: the PREFIX decides which condition this is, `_check_state` reads the
+    # state from the last `": "`, and the text is display-only. Fail-closed on
+    # top — every `check-success=` condition that is not POSITIVELY pending (no
+    # run yet, or a run still in flight) counts as a failing check, so no
+    # condition, well-formed or not, can fall out of all three buckets into
+    # READY-TO-LAND.
+    check_conds = [c for c in blocking if c.startswith("check-success=")]
+    in_flight = [
+        c
+        for c in check_conds
+        if _check_state(c) == "no check-run" or _check_state(c).endswith("(in flight)")
+    ]
+    fails = [c for c in check_conds if c not in in_flight]
+    structural = [c for c in blocking if not c.startswith("check-success=")]
 
     # ⛔ A RED REVIEW GATE IS NOT A CODE PROBLEM. `.mergify.yml` says
     # `check-success=ai-review-gate` "is red by design until a review is recorded,
