@@ -591,11 +591,12 @@ def test_main_threads_a_named_repo_into_EVERY_gh_call_it_makes(
 
     `test_a_named_repo_is_threaded_into_every_gh_call` calls `_gh` DIRECTLY: it
     proves the helper injects the flag, not that `main()` hands it a repo. Measured
-    before this pin: replacing `args.repo` with `None` at ALL FOUR `main()` call
-    sites (the fold fetch, `constituent_refs`, the label-only path and the close
-    path) left this file at 48 passed. So the measured defect that pin was written
-    for — `--apply --repo other/repo` mutating same-numbered PRs in whatever
-    repository the operator stands in — could return through any call site, green.
+    before this pin: replacing `args.repo` with `None` at ALL FIVE `main()` call
+    sites (the fold fetch, `constituent_refs`, the fold-label path, the label-only
+    path and the close path) left this file at 48 passed. So the measured defect
+    that pin was written for — `--apply --repo other/repo` mutating same-numbered
+    PRs in whatever repository the operator stands in — could return through any
+    call site, green.
 
     This runs the real `main()` end to end with `--repo` and asserts EVERY `gh` argv
     it produced carries the flag, plus the repo handed to the two seams that take it
@@ -655,7 +656,7 @@ def test_main_threads_a_named_repo_into_EVERY_gh_call_it_makes(
     assert seen_refs and all(r == "other-org/other-repo" for r in seen_refs), (
         f"constituent_refs was not handed the named repo: {seen_refs}"
     )
-    assert seen_fold == ["other-org/other-repo"] * len(seen_fold), (
+    assert seen_fold and seen_fold == ["other-org/other-repo"] * len(seen_fold), (
         "fetch_fold was not handed the named repo, so the fold body would be read "
         f"from whatever repo the operator stands in: {seen_fold}"
     )
