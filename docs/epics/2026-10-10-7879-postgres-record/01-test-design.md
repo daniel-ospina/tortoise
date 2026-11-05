@@ -250,8 +250,8 @@ grep -rn "_graph_write_with_retry" tortoise/ ; sed -n '14p' tortoise/retry.py
 
 **Added by the residual decomposition lane (`11-residual-plan-and-decomposition.md`), measured at
 `origin/main@3ac6b1636` on 2026-11-05.** The map above is **not stale**: every group in the residual plan maps
-onto a surface it already carries (G1 → S1+S2, G2 → S9+S1+S3, G3 → S1+S4+S5, plus **S6** for G3's W1b row, G4 → S2). One **failure mode** is
-missing, and it is not a surface — it is a row on S1.
+onto a surface it already carries (G1 → S1+S2, G2 → S9+S1+S3, G3 → S1+S4+S5, plus **S6** for G3's W1b row,
+G4 → S2). One **failure mode** is missing, and it is not a surface — it is a row on S1.
 
 **S1's failure-mode list currently names** *totality* (`an unknown event type skipped ⇒ totality lost in
 silence`), *idempotency* (`a second replay double-applies`), and *a carried field not projected* (`the record is
