@@ -100,6 +100,39 @@ def test_a_declined_closing_reference_is_the_authors_answer_not_a_defect():
     assert [f.evidence["unresolved"] for f in L.classify_pr("Refs #1\n\nNot closing this one.\n", 2)] == [[1]]
 
 
+@pytest.mark.parametrize("tail", [
+    "the lint is deliberately not a gate.",
+    "deliberately not the goal of this PR.",
+    "deliberately not in scope here.",
+    "deliberately not the thing this measures.",
+])
+def test_an_incidental_deliberately_not_does_not_delete_the_claim(tail):
+    """Review F1, measured at `aade694c7`: the bare `deliberately{_EMPH}not` alternative matched
+    ANY occurrence of the phrase, and the decline is applied per LINE to every ref on it — so an
+    honest sentence *about the work* (`…is deliberately not a gate.`) silently deleted the claim
+    beside it and the arm read CLEAN.
+
+    That is a false PASS in the #10534 direction (delivered work never closes, and nothing says
+    so), the one this module's docstring ranks worst — worth a false positive nowhere.
+    """
+    body = f"Refs #11077 — {tail}\n"
+    assert L.claims(body, 1)["declined"] == [], tail
+    assert [f.evidence["unresolved"] for f in L.classify_pr(body, 1)] == [[11077]], tail
+
+
+def test_the_decline_still_works_when_the_quoted_keyword_has_been_blanked():
+    """The control for the F1 fix, and the reason the alternative could not simply be deleted.
+
+    `strip_code` blanks the inline-code `Closes` in the pinned case, so what DECLINE_RE sees is
+    `deliberately **not**   .` — no closing word left for the sibling `not … clos` alternative. A
+    decline that NAMES the keyword in prose must keep working too.
+    """
+    assert L.claims("Refs #10602 — deliberately **not** `Closes`.\n", 1)["declined"] == [10602]
+    assert L.claims("Refs #10602 — deliberately not a closing one.\n", 1)["declined"] == [10602]
+    assert L.claims("Refs #10602 — deliberately not Closes.\n", 1)["declined"] == [10602]
+    assert L.classify_pr("Refs #10602 — deliberately not a closing one.\n", 1) == []
+
+
 def test_the_prs_own_number_is_never_a_claim():
     assert L.classify_pr("Refs #77\n", 77) == []
 
