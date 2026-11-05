@@ -131,7 +131,10 @@ def test_migrate_backup_created(tmp_path):
     """Backup .bak-* file created before rebuild with source content."""
     db_path, log_dir = _make_embedded_db(str(tmp_path))  # noqa: RUF059
     rc, out, err = _run_migrate(str(tmp_path))  # noqa: RUF059
-    assert rc == 0
+    # `, err` so a non-zero exit is DIAGNOSABLE. Measured 2026-11-05: this test
+    # exited 1 once in four runs behind a bare `assert rc == 0`, which printed
+    # nothing about why; the sibling above already carries the stderr.
+    assert rc == 0, err
     tortoise_dir = os.path.join(str(tmp_path), ".tortoise")
     baks = [f for f in os.listdir(tortoise_dir) if f.startswith("embedded.db.bak-")]
     assert baks, "backup file not created"
@@ -244,19 +247,33 @@ def _effective_item_budget_s(pytestconfig) -> float:
     No budget in force at all (plugin not loaded, or 0) is `inf`: there is no
     item alarm for the subprocess bound to be unreachable behind.
     """
+
+    def _positive_or_unbounded(value) -> float:
+        """`0` is NO bound, not a zero-second one — from ANY of the three sources.
+
+        `pyproject.toml` documents `--timeout=0` as "the explicit opt-out for a
+        deliberate unbounded run", and pytest-timeout arms nothing for it. Grading
+        a subprocess bound against a `0`s item budget would make this arm red on
+        every subprocess test in the module during a run that is deliberately
+        unbounded — a false red of the exact class this module exists to stop. The
+        ini rung already handled this; the CLI and env rungs did not, so
+        `pytest --timeout=0 tests/test_migrate_db.py` redded here.
+        """
+        value = float(value)
+        return value if value > 0 else float("inf")
+
     cli = pytestconfig.getoption("timeout", default=None)
     if cli is not None:
-        return float(cli)
+        return _positive_or_unbounded(cli)
     env = os.environ.get("PYTEST_TIMEOUT")
     if env is not None and env != "":
-        return float(env)  # a non-numeric value raises, as the plugin does
+        return _positive_or_unbounded(env)  # a non-numeric value raises, as the plugin does
     try:
         ini = pytestconfig.getini("timeout")
     except (KeyError, ValueError):  # pragma: no cover - plugin not loaded
         return float("inf")
     if ini:
-        value = float(ini)
-        return value if value > 0 else float("inf")
+        return _positive_or_unbounded(ini)
     return float("inf")
 
 
@@ -314,6 +331,22 @@ def test_the_item_budget_is_the_one_in_force_not_the_ini_value(monkeypatch):
     assert _effective_item_budget_s(_Config(ini="")) == float("inf"), (
         "with nothing in force there is no item alarm for the bound to be "
         "unreachable behind"
+    )
+
+    # `0` is NO bound, not a zero-second one. On the ini rung this was already
+    # right; on the CLI and env rungs a `0` used to reach the reachability arm and
+    # red every subprocess test — so `pytest --timeout=0 tests/test_migrate_db.py`
+    # (the documented unbounded form) failed a test that has nothing to do with
+    # the timeout it asked for.
+    assert _effective_item_budget_s(_Config(cli=0)) == float("inf"), (
+        "`--timeout=0` is the documented opt-out for a deliberately unbounded "
+        "run; it must resolve to `inf`, not to a 0s budget the subprocess bound "
+        "can never beat"
+    )
+    monkeypatch.setenv("PYTEST_TIMEOUT", "0")
+    assert _effective_item_budget_s(_Config()) == float("inf"), (
+        "`PYTEST_TIMEOUT=0` arms no alarm either, so it must resolve to `inf` "
+        "rather than redding the reachability arm against a 0s budget"
     )
 
 
