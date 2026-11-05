@@ -176,8 +176,15 @@ _BENCH_SKIP_REASON = (
 )
 
 
+#: The repo's flag convention is "unset or `0` means OFF" (see `_BENCH_SKIP_REASON`
+#: above, which tells an operator to arm it with `=1`). `bool(os.environ.get(…))`
+#: instead reads the STRING `"0"` as on, so the documented way to turn the bench
+#: back off would arm four >300 s arms and say nothing.
+_BENCH_OPT_IN_TRUTHY = ("1", "true", "yes", "on")
+
+
 def _bench_opted_in() -> bool:
-    return bool(os.environ.get(_BENCH_OPT_IN_ENV))
+    return os.environ.get(_BENCH_OPT_IN_ENV, "").strip().lower() in _BENCH_OPT_IN_TRUTHY
 
 
 def _recorded_questions() -> dict[str, dict]:
@@ -225,6 +232,14 @@ def test_the_bench_corpus_arms_are_opt_in_not_cache_incidental(
     assert set(_recorded_questions()) == set(RECORDED_FAILURES), (
         "the opt-in must still arm them — this gates the arms, it does not "
         "delete them")
+
+    # ...and the flag follows the repo convention the message above teaches:
+    # `unset or 0 means OFF`. `bool(os.environ.get(…))` read the STRING "0" as
+    # ON, so the documented way to switch the bench back off armed all four arms.
+    for off in ("0", "", "false", "no", " "):
+        monkeypatch.setenv(_BENCH_OPT_IN_ENV, off)
+        assert _recorded_questions() == {}, (
+            f"{_BENCH_OPT_IN_ENV}={off!r} must NOT arm the bench arms")
 
 
 # ── Indicator 1 / Target 0: 4 gold-turn-in-context fixtures ────────────────
