@@ -284,6 +284,71 @@ def test_capture_sessions_gate_allowance_read_is_off_the_event_loop(
         f"/health check, on the single loop (#2988/#3498)")
 
 
+def test_capture_sessions_gate_carry_rides_its_own_substrate_lane(
+        client, monkeypatch):
+    """#9567 round 12 + main-repair (2026-11-04): the capture door's allowance
+    CARRY must ride its OWN substrate's pool — the control-plane pool in Supabase
+    mode, the graph pool in registry mode — and never the loop's default
+    executor. (A carry pinned to ``_cp_offload`` in BOTH modes would be the
+    #3718 inversion in the other direction: in registry mode the registry IS the
+    graph connection, which is why the assertion below expects ``graph`` here.)
+
+    Sibling of the off-the-loop pin above, and the LANE half of the same rule.
+    #9567 round 12 split the gate's two reads by substrate — the carry is a
+    control-plane read (``quota.resolve_org_limits``), the count is a graph
+    read — and every async door must submit each to the pool ITS OWN substrate
+    lives in. The capture door used to submit the pair with
+    ``asyncio.to_thread(_check_org_limit, org, "sessions", sdk=sdk)``: the
+    loop's DEFAULT executor — the lane ``hosted_api._commit_sync`` and
+    ``hosted_api._seed_demo_sync`` already use. That satisfies "off the loop"
+    and violates "on its own lane", and it is what made one fault answer with
+    two bodies — a control-plane stall on ``/v1/sessions`` returned ``500
+    "Quota check failed"`` while the identical stall on ``/v1/points`` returned
+    ``503``.
+
+    This pin drives the ROUTE (the off-the-loop pin proves the thread, this one
+    proves the pool), so a door that stops reaching the shared seam fails here.
+
+    Mutation this REDs: put the capture door back on
+    ``asyncio.to_thread(_check_org_limit, org, "sessions", sdk=sdk)`` — the
+    route then never reaches ``_carry_allowances_off_loop`` and neither
+    submission below is recorded.
+    """
+    seen: list[tuple[str, str]] = []
+
+    import tortoise.hosted_api as ha
+    from tortoise import quota
+
+    async def _cp(fn, *, op, **_kw):
+        seen.append(("cp", op))
+        return fn()
+
+    async def _graph(fn, *, op, **_kw):
+        seen.append(("graph", op))
+        return fn()
+
+    monkeypatch.setattr(ha, "_cp_offload", _cp)
+    monkeypatch.setattr(ha, "_graph_offload", _graph)
+    monkeypatch.setattr(quota, "resolve_org_limits",
+                        lambda oid: {"org_id": oid, "tier": "free"})
+
+    resp = client.post("/v1/sessions", json={"conversation": _CONV})
+    assert resp.status_code in (200, 201), resp.text[:300]
+
+    # This lane runs registry/self-host mode, where the registry IS the graph
+    # connection (#3718), so BOTH halves ride the graph pool — the pin is that
+    # the door reaches the seam at all, in one submission per read, with the
+    # carry FIRST. In Supabase mode the same code sends the carry to `_cp_offload`,
+    # so the control-plane half is pinned at the seam instead of behind a whole
+    # route: ``test_the_points_door_carries_the_allowance_on_the_control_plane_lane``
+    # and ``test_the_sessions_door_carries_the_allowance_on_the_control_plane_lane``
+    # (both in ``tests/test_allowance_gate.py``, one per gated door, mode patched).
+    relevant = [(pool, op) for (pool, op) in seen
+                if op.startswith("check_org_limit.sessions")]
+    assert relevant == [("graph", "check_org_limit.sessions.allowance_carry"),
+                        ("graph", "check_org_limit.sessions")], (relevant, seen)
+
+
 def test_stalled_capture_does_not_freeze_the_event_loop(client, monkeypatch):
     """The invariant: while a capture is stalled, the API keeps answering.
 
