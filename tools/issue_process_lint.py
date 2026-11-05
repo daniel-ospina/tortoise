@@ -20,8 +20,11 @@ arm                        flagged when
 ``pr-unclaimed-issue``     a PR **claims** an issue (a ``#N`` — optionally ``owner/repo#N`` —
                            attached to a **claiming word**: ``Refs`` / ``Related`` / ``Part of`` /
                            ``See also`` / ``serves`` / ``addresses`` and the closing/satisfies words;
-                           a comma-continued list after that word is claimed in FULL) and that issue
-                           is resolved by **neither** ``Satisfies #N`` **nor** a closing keyword
+                           a comma-continued list after that word is claimed in FULL, but only the
+                           **first** ref of a RESOLVING word resolves — GitHub's documented
+                           multi-issue form repeats the keyword (``Resolves #10, resolves #123``),
+                           so a continuation is CLAIMED, never resolved) and that issue is resolved
+                           by **neither** ``Satisfies #N`` **nor** a closing keyword
                            (``Closes``/``Fixes``/``Resolves``). A bare ``#N`` with no claiming word
                            is a MENTION and is never flagged — that distinction is what took the
                            measured false-positive population from 68 % to 36 %. Measured (#10534):
@@ -218,11 +221,13 @@ RELEASE_WORDS = ("none", "released", "unclaimed", "free", "—", "-")
 # Two properties are load-bearing: the delimiter class must NOT contain a bare `-` (a hyphen is the
 # in-word separator of every branch slug, so `feat/retrieval-none-mode` would read as released), and
 # the word must be TERMINAL — followed by a date, a closing bracket, a delimiter or end of line — so
-# `(none pending)` is a status note, not a release. `free` is excluded entirely: it heads a release
+# `(none pending)` is a status note, not a release. A `:` or `-` separating the DATE (`released: …`,
+# `released - …`) is admitted only directly in front of the date: accepting it on its own would turn
+# `released: pending` into a release, a silent miss. `free` is excluded entirely: it heads a release
 # but also appears in ordinary work (`free tier`), so it stays a FIRST-TOKEN-only word.
 RELEASE_ANYWHERE_RE = re.compile(
     r"(?:^|[—–:;,.(\[]|\s-\s)\s*(?:none|released|unclaimed)\b(?![\w-])"
-    r"(?=\s*(?:\(?\s*(?:on\s+)?\d{4}-\d{2}-\d{2}|[)\].,;]|$|—|–))",
+    r"(?=\s*(?:(?:[-:]\s*)?\(?\s*(?:on\s+)?\d{4}-\d{2}-\d{2}|[)\].,;]|$|—|–))",
     re.IGNORECASE)
 
 ARM_PR = "pr-unclaimed-issue"
@@ -425,9 +430,11 @@ def classify_pr(body: str, number: int | str, repo: str | None = None,
     unresolved = [n for n in claimed if n not in resolved]
     if not unresolved:
         return []
-    detail = (f"claims #{', #'.join(str(n) for n in unresolved)} with only a linking word "
-              f"(`Refs`/`Related`/`Part of`) — neither `Satisfies #N: <ids>` nor a closing keyword "
-              f"(Closes/Fixes/Resolves) resolves it, so delivered work cannot close what it serves")
+    detail = (f"claims #{', #'.join(str(n) for n in unresolved)} with no closing keyword of its "
+              f"own: neither `Satisfies #N: <ids>` nor a closing keyword resolves it — GitHub "
+              f"closes only the FIRST ref of a keyword (`Resolves #10, resolves #123`), so a "
+              f"comma-continued ref does not close it either. Delivered work then cannot close "
+              f"what it serves.")
     labels = labels or []
     if "owner-decision" in labels:
         # An owner-authored BODY is a record; the PR body is still the author's own, so the label
