@@ -73,10 +73,11 @@ earlier blanket claim ("each is pinned by a test that fails when the guard is re
    rename-detector, and editing ``_project_repo_metadata``'s body while leaving ``“…-v1”`` in place
    served the old-schema entry as a fresh hit.
    Two layers carry it — the filename digest and the envelope stamp — and they are **deliberately
-   redundant, in DIFFERENT directions**: for the PROJECTION the envelope is authoritative (removing
-   the filename's projection alone leaves the suite green; removing the envelope's alone is killed);
-   for the TTL the FILENAME is (removing the envelope's ``ttl_s`` check alone leaves the suite
-   green). A later reader must not "simplify" either layer away believing the other covers the same
+   redundant**. For the PROJECTION both layers are now INDIVIDUALLY KILLED (removing the
+   filename's component reds the thrash test; removing the envelope's reds the
+   projection-mismatch test). For the ARGV the envelope is authoritative and the filename only
+   prevents thrashing (removing the filename's component alone survives). For the TTL the
+   FILENAME is authoritative (removing the envelope's ``ttl_s`` check alone survives). A later reader must not "simplify" either layer away believing the other covers the same
    direction.
 
 FAIL-CLOSED ON SHAPE, NOT ONLY ON TIME
@@ -244,7 +245,7 @@ def _expand(docs: Sequence[Any], key: str, container: str) -> list[Any]:
 
 def _project_repo_metadata(docs: Sequence[Any]) -> Any:
     # ⛔ `visibility` IS DELIBERATELY NOT PROJECTED. It flips public -> private, and serving a stale
-    # "public" for six hours turns a "may I quote this repo into a public artifact?" gate into a
+    # "public" for an hour turns a "may I quote this repo into a public artifact?" gate into a
     # false PASS — the only registry field whose staleness is a LEAK rather than a wait. A caller
     # that needs it must read it live.
     return _pick_last(
@@ -520,6 +521,11 @@ _MUTABLE_TOKENS: frozenset[str] = frozenset(
         "refs",
         "description",
         "topics",
+        "visibility",
+        "properties",
+        "locked",
+        "homepage",
+        "permissions",
         "message",
         "milestone",
         "milestones",
@@ -557,6 +563,13 @@ _MUTABLE_PAIRS: tuple[str, ...] = (
     "statuscheckrollup",
 )
 
+#: ⛔ SCOPE-DEPENDENT WORDS. `repo.labels` is the repo's DEFINITION set (admin-paced,
+#: invariant — it is a SHIPPED key); `pr.labels`/`issue.labels` is an ASSIGNMENT that changes on
+#: every triage. A flat token list cannot express that, so these count as mutable only when the
+#: key is not `repo.`-scoped. Without this, the honest fix for `pr.labels` would refuse the
+#: shipped key, and the dishonest fix is to leave the assignment cacheable.
+_CONTAINER_SCOPED_MUTABLE: frozenset[str] = frozenset({"label", "labels"})
+
 # A single token that glues a mutable word on an edge (`prstate` → `state`) is mutable too.
 # Only words of 4+ characters participate, so `run`/`tag`/`sha`/`job` cannot over-match (`runners`).
 # ⛔ This OVER-refuses some legitimate names (`repo.checksum` via `check`, `repo.bodyTemplate`
@@ -593,7 +606,13 @@ def _tokens(key: str) -> list[str]:
 def _is_mutable_name(key: str) -> bool:
     """Token-exact match, plus adjacent-PAIR phrases, plus a glued suffix/prefix test."""
     tokens = _tokens(key)
-    if any(t in _MUTABLE_TOKENS for t in tokens):
+    repo_scoped = bool(tokens) and tokens[0] == "repo"
+    # The container words are mutable on ANY scope EXCEPT `repo.`, where they name the
+    # DEFINITION set rather than an assignment.
+    mutable_here = _MUTABLE_TOKENS | _CONTAINER_SCOPED_MUTABLE
+    if repo_scoped:
+        mutable_here = _MUTABLE_TOKENS - _CONTAINER_SCOPED_MUTABLE
+    if any(t in mutable_here for t in tokens):
         return True
     if any((a + b) in _MUTABLE_PAIRS for a, b in itertools.pairwise(tokens)):
         return True
@@ -743,8 +762,8 @@ def _filename(key: str, scope: str, projection: str | None = None, ttl_s: int | 
 
     ⛔ THE PROJECTION AND THE EFFECTIVE TTL ARE PART OF THE IDENTITY.
     * Projection: a maintenance edit to a shipped projection would otherwise serve old-SCHEMA
-      entries as fresh hits (`repo.metadata` holds 6 h, so a newly-added field would be missing
-      for six hours).
+      entries as fresh hits (`repo.metadata` holds 1 h, so a newly-added field would be missing
+      for an hour).
     * TTL: `_load` rejects an entry stamped under a different ttl, so without this two callers at
       different TTLs thrashed ONE file — measured 12 live reads for 12 accesses where a working
       cache does 2, i.e. the cache silently disabled for that key.
@@ -917,6 +936,25 @@ def _project(key: str, raw: bytes) -> bytes:
         raise Unreadable(f"projection for {key!r} failed: {exc}") from exc
 
 
+_WRITE_WARNED = False
+
+
+def _warn_write_failed(path: Path, exc: OSError) -> None:
+    """One line, once per process: the cache is not being written, so this is a pass-through."""
+    global _WRITE_WARNED
+    if _WRITE_WARNED:
+        return
+    _WRITE_WARNED = True
+    import sys as _sys
+
+    print(
+        f"gh_read_cache: WARNING — could not write the cache entry ({path.parent}): {exc}. "
+        f"Every read will be a LIVE call until this is fixed (this tool is a pass-through, not "
+        f"a cache) — the expected-live-call burn may return.",
+        file=_sys.stderr,
+    )
+
+
 # ── the read ─────────────────────────────────────────────────────────────────────────────────
 def _credential_fingerprint() -> str | None:
     """A NON-REVERSIBLE fingerprint of the token that will answer a global read.
@@ -1036,8 +1074,14 @@ def read(
     # GitHub and is as fresh as anything can be; failing to STORE it is a lost optimisation, not a
     # lost answer. Fail-closed governs what may be SERVED from disk, never what may be RETURNED
     # after a live read — conflating them would turn a full disk into a total gh outage.
-    with contextlib.suppress(OSError):
+    try:
         _store(path, _envelope(key, scope, payload, now=now, ttl_s=effective))
+    except OSError as exc:
+        # ⛔ A WRITE FAILURE STILL RETURNS THE VALUE (it was just read live), but it must NOT be
+        # silent: an unwritable cache dir turns this tool into a PASS-THROUGH that burns the pool as
+        # before, and a caller cannot tell that from a cold cache. Warn once per process, on stderr,
+        # exactly as the other non-caching path does.
+        _warn_write_failed(path, exc)
     return payload
 
 

@@ -12,9 +12,9 @@ it turns "I could not read" into "I read X", which is this repo's false-PASS cla
 therefore about the FAILURE directions, not the happy path.
 
 ⛔ MUTATION-VERIFIED, AND HONEST ABOUT WHAT IS NOT. Two earlier rounds found fences that could not
-fail for the bug they named — a green suite proving nothing. 53 mutation rows have now been run
-(**50 distinct** — M1≡M31, M24≡M44, M26≡M43 were re-run in later rounds rather than
-re-labelled). **52 are KILLED**; M49 survives ALONE by the documented layering:
+fail for the bug they named — a green suite proving nothing. 57 mutation rows have now been run
+(**54 distinct** — M1≡M31, M24≡M44, M26≡M43 were re-run in later rounds rather than
+re-labelled). **56 are KILLED**; M49 survives ALONE by the documented layering:
 
     M1  reader returns the unprojected body ............ KILLED   M12 decode_pages first doc only .... KILLED
     M2  _load ignores freshness ........................ KILLED   M13 envelope scope check removed ... KILLED
@@ -28,7 +28,7 @@ re-labelled). **52 are KILLED**; M49 survives ALONE by the documented layering:
     M10 projection dropped from the FILENAME only ...... KILLED    M21 non-dict page accepted ....... KILLED
     M11 projection dropped from the ENVELOPE only ...... KILLED   M22 error-document marker gone .... KILLED
 
-Cycle-9/10/11 added M47-M52:
+Cycle-9/10/11 added M47-M52, cycle-12 added M53-M56 (all KILLED):
 
   M52 runner `labels` ABSENT read as empty ..... KILLED   M51 `visibility` cached again ......... KILLED
 
@@ -1759,3 +1759,73 @@ def test_the_envelope_records_the_argv(tmp_path: Path) -> None:
     p.write_text(json.dumps(env))
     _read("repo.metadata", now=1000.0, reader=r, cache_dir=tmp_path)
     assert r.n == 2
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+# 15. CYCLE-12 FINDINGS — the leak field was reachable, and two docs contradicted the code
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+@pytest.mark.parametrize(
+    "key",
+    [
+        "repo.visibility",
+        "repo.locked",
+        "repo.homepage",
+        "repo.permissions",
+        "repo.customProperties",
+        "pr.labels",
+        "issue.labels",
+    ],
+)
+def test_the_leak_field_and_assignment_sets_are_refused(key: str) -> None:
+    """⛔ `visibility` is the ONE field the module singles out as a LEAK rather than a wait — and
+    `declare_invariant("repo.visibility", …)` was ACCEPTED, so a stale "public" for an hour was
+    reachable through the registry door the guard claims to close.
+
+    `labels` is the SCOPE-DEPENDENT case: `repo.labels` is the repo's DEFINITION set (a shipped,
+    invariant key); `pr.labels`/`issue.labels` is an ASSIGNMENT that changes on every triage.
+    """
+    assert C._is_mutable_name(key), f"{key!r} is mutable but was accepted"
+    with pytest.raises(C.MutableReadRefused):
+        C.declare_invariant(key, ttl_s=600, argv=("api", "x"), projection="p", project=lambda d: d)
+
+
+def test_a_failing_cache_WRITE_is_announced_not_silent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """⛔ An unwritable cache dir turned this tool into a PASS-THROUGH with no diagnostic: every
+    read a MISS forever, indistinguishable from a cold cache, while the burn this module exists to
+    stop resumed invisibly. The value must still be RETURNED (it was just read live) — only the
+    silence was the defect.
+    """
+    monkeypatch.setattr(C, "_WRITE_WARNED", False)
+
+    def boom(path, blob):
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr(C, "_store", boom)
+    r = Counter()
+    out = _read("repo.metadata", now=1000.0, reader=r, cache_dir=tmp_path)
+    assert json.loads(out)["id"] == 1, "a failed WRITE must still return the value just read"
+    err = capsys.readouterr().err
+    assert "could not write the cache entry" in err
+    assert "pass-through" in err
+    assert "LIVE call" in err
+
+
+def test_the_write_warning_is_emitted_ONCE(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    monkeypatch.setattr(C, "_WRITE_WARNED", False)
+
+    def boom(path, blob):
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr(C, "_store", boom)
+    for i in range(4):
+        _read("repo.metadata", now=1000.0 + i, reader=Counter(), cache_dir=tmp_path)
+    assert capsys.readouterr().err.count("could not write the cache entry") == 1
+
+
+def test_a_silent_successful_write_emits_nothing(tmp_path: Path, capsys) -> None:
+    _read("repo.metadata", now=1000.0, reader=Counter(), cache_dir=tmp_path)
+    assert capsys.readouterr().err == ""
