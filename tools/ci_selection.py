@@ -1649,9 +1649,13 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # tests/test_ci_selection.py::test_gh_write_preflight_tool_change_selects_core_not_tier1
              # (the entry EXISTS; green under either the exact path or the prefix) and
              # tests/test_ci_selection.py::test_gh_write_preflight_carveout_is_a_PREFIX_so_a_sibling_cannot_be_dropped
-             # (the entry is a PREFIX; reds iff it is narrowed back to the exact path — measured:
-             # with the exact path the second case FAILS and the first still passes, which is why
-             # the first alone did not pin this line).
+             # (the entry is a PREFIX — reds on THREE mutations, not just a narrowing: narrowed
+             # back to the exact path, widened to the blanket `tools/`, and removed outright. The
+             # WIDENING is the one the sibling asserts cannot catch — a blanket `tools/` still
+             # claims both siblings — so the body carries an over-match negative control
+             # (`tools/other_tool.py` must not claim this suite), which is the bound the prefix's
+             # stated cost relies on. Measured: under the exact path the second case FAILS and the
+             # first still passes, which is why the first alone did not pin this line).
              # ⚠️ Both citations carry their `tests/…py` path deliberately. The ratchet that makes
              # "Pinned by" checkable only resolves citations written as `tests/<path>.py::<name>`,
              # so a bare `::<name>` is INVISIBLE to it — such a citation would silently survive a
