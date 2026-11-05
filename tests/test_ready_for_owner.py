@@ -1209,3 +1209,24 @@ def test_help_is_not_turned_into_a_refusal(capsys):
     # …and help + --json must not ALSO emit a usage-error document
     assert main(["--help", "--json"]) == 0
     assert '"state"' not in capsys.readouterr().out
+
+
+def test_notes_are_not_double_prefixed(capsys):
+    """The printer adds `note: `; a note that already says it prints `note: note: `."""
+    record_dir = Path(__file__).resolve().parent.parent / "docs" / "ci"
+    snapshot = record_dir / "required-contexts.json"
+    assert main(["--snapshot", str(snapshot), "--required-only"]) == 0
+    out = capsys.readouterr().out
+    assert "note: note:" not in out, out
+
+
+def test_an_unread_config_does_not_claim_the_contract_is_satisfied(tmp_path, capsys):
+    """`overlap: none — contract satisfied` for a config that was NEVER READ is a
+    measurement that did not happen — the class of claim this tool removes."""
+    record = tmp_path / "required-contexts.json"
+    record.write_text(json.dumps({"required_contexts": sorted(ALL_REQUIRED)}))
+    assert main(["--mergify", str(tmp_path / "absent.yml"), "--snapshot", str(record),
+                 "--required-only"]) == 0
+    out = capsys.readouterr().out
+    assert "contract satisfied" not in out, out
+    assert "not measured" in out

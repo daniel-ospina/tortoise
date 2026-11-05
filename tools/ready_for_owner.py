@@ -404,8 +404,8 @@ def derive_required_set(
             )
         if stale:
             notes.append(
-                f"note: {record} does not list {sorted(stale)} — it is stale, and "
-                "inert (the config is enforced)"
+                f"{record} does not list {sorted(stale)} — it is stale, and inert "
+                "(the config is enforced)"
             )
         if not unsafe_drift and not stale:
             notes.append(f"{record} agrees with the derived set")
@@ -839,7 +839,14 @@ def main(argv: list[str] | None = None) -> int:
         note(f"  merge           : {sorted(required.merge)}")
         note(f"  injected        : {sorted(required.injected)}")
         note(f"  union (required): {sorted(required.names)}")
-        note(f"  overlap         : {sorted(required.overlap) or 'none — contract satisfied'}")
+        if required.source.startswith("snapshot"):
+            # The config was NOT read: "the contract" was never parsed, so claiming
+            # it is satisfied would be a measurement that did not happen.
+            note("  overlap         : not measured — the config could not be read; "
+                 "this answer is the snapshot record")
+        else:
+            note(f"  overlap         : "
+                 f"{sorted(required.overlap) or 'none — contract satisfied'}")
         for note_text in required.notes:
             note(f"  note: {note_text}")
         if required.unsafe_drift:
