@@ -4107,27 +4107,47 @@ _SESSION_SOURCE_STOPWORDS = frozenset({
 #: may not import the capture to get it (#10965 / #10852 review P2).
 
 
-#: #10000: the transcript's own FRAMING labels — the ``Speaker: text`` prefix
-#: ``_session_llm_transcript`` writes for every turn. They are not vocabulary the
-#: session used, so they may never become a topic, and THIS set is the only thing
-#: that stops them: ``_session_source_metadata`` applies it to the token list
-#: BEFORE both the content filter and the stopword-only fallback, so neither arm
-#: can re-admit a label. Three of the five (``user``/``assistant``/``speaker``)
-#: are coincidentally also members of ``_SESSION_SOURCE_STOPWORDS``, which drops
-#: them from the CONTENT arm's counts — the whole extent of the coincidence. The
-#: fallback applies NO stopword filter and reads the token list directly, and
-#: ``system``/``tool`` are on no stopword list at all. Before this set existed
-#: the fallback admitted ``user``/``assistant`` into every ack-only session's
-#: lexicon — its WHOLE lexicon for a labels-only one — a constant pair,
-#: i.e. the same measurable defect ``_SESSION_SOURCE_SUMMARY_PREFIX`` is kept out
-#: of ``_searchText`` to avoid (under the OR-union every such session would match
-#: a one-word source query for "user"). ``system``/``tool`` are reachable roles
-#: too (``_session_llm_transcript`` title-cases the role into the line's
-#: speaker, which ``_session_source_metadata`` then folds via ``.lower()``;
-#: ``_normalize_turn_role`` only normalises None/non-strings and does no casing).
-_SESSION_SOURCE_FRAMING_TOKENS = frozenset({
-    "user", "assistant", "speaker", "system", "tool",
-})
+#: #10000: the transcript's own FRAMING label — the ``Speaker: text`` prefix
+#: ``_session_llm_transcript`` writes for every turn. It is not vocabulary the
+#: session used, so it may never become a topic, and THIS pattern is the only
+#: thing that stops it: ``_session_source_metadata`` strips it from the LINE it
+#: sits on BEFORE tokenising, so the label is gone while a body word that merely
+#: SPELLS a role survives.
+#:
+#: ⛔ POSITION, NEVER SPELLING (#10852 review, P2 — measured). This was a
+#: ``frozenset({"user", "assistant", "speaker", "system", "tool"})`` applied to
+#: EVERY token, so those five words could never be a session's vocabulary
+#: anywhere: ``_session_source_metadata("User: the system keeps restarting after
+#: the deploy")`` dropped ``system`` from the lexicon, and
+#: ``_session_source_metadata("User: system\nAssistant: tool")`` derived
+#: ``("", [])`` — ``summary=''`` with no
+#: ``_searchText``, i.e. exactly the #3518 unfindability the docstring forbids,
+#: reached by a transcript that HAS tokens of its own (the fourth cliff of that
+#: shape, after stopword-only / short-word-only / digit-only). ``system`` and
+#: ``tool`` are ordinary English CONTENT words; they are in that set only
+#: because ``_session_llm_transcript`` title-cases a role into the speaker
+#: position, and ``_normalize_turn_role`` does no casing of its own. The label is
+#: at a KNOWN POSITION (one ``"<Speaker>: <body>"`` line per turn, joined by
+#: ``\n``, speaker title-cased and matched against ``^[A-Z][\w .'-]{0,40}$``), so
+#: the fix is to delete that one prefix per line and tokenise the BODIES: a
+#: labels-only transcript still derives nothing (its bodies are empty), while a
+#: body word survives wherever it appears. Before this pattern existed the
+#: fallback admitted ``user``/``assistant`` into every ack-only session's lexicon
+#: — a constant pair, i.e. the same measurable defect
+#: ``_SESSION_SOURCE_SUMMARY_PREFIX`` is kept out of ``_searchText`` to avoid
+#: (under the OR-union every such session would match a one-word source query
+#: for "user") — and the strip keeps that closed for the same reason.
+#:
+#: ``\s*`` after the colon: the builder always writes one space, and a
+#: hand-written/unit fixture may not (``"user:\nassistant:"``).
+#:
+#: ⚠️ Stated residual: a caller that hands this function a BARE SENTENCE whose
+#: first word is followed by a colon (``"Note: the deploy failed"``) loses that
+#: word. The capture path never does — it passes ``_session_llm_transcript``'s
+#: output, whose every line starts with the speaker — and the alternative
+#: (filtering the token stream by spelling) is the defect above.
+_SESSION_SOURCE_TURN_LABEL_RE = re.compile(
+    r"^[^\W\d_][\w .'-]{0,40}:\s*", re.MULTILINE)
 
 
 def _session_source_lexicon(counts: Mapping[str, int]) -> list[str]:
@@ -4180,9 +4200,20 @@ def _session_source_metadata(transcript: str) -> tuple[str, list[str]]:
     exists to prevent, as a side effect of a filter that is a precision
     preference and not part of the §9.1/D1 rule. It is still a LEXICON, so it
     puts no sentence on the node — but it drops the transcript's FRAMING labels
-    (``_SESSION_SOURCE_FRAMING_TOKENS``): those are the generator's ``Speaker:``
+    (``_SESSION_SOURCE_TURN_LABEL_RE``): those are the generator's ``Speaker:``
     prefix, not words the session used, and indexing them put a constant
     ``user, assistant`` pair on every acknowledgement-only session.
+
+    ⛔ THE LABEL IS DROPPED BY POSITION, NOT BY SPELLING (#10852 review, P2).
+    The strip happens per LINE, BEFORE tokenising, so it removes the speaker and
+    nothing else: ``system`` and ``tool`` are ordinary content words that were
+    in the label set only because a role can sit in that position, and filtering
+    them out of the whole token stream made them unreachable as vocabulary —
+    ``"User: the system keeps restarting"`` lost ``system``, and
+    ``"User: system\nAssistant: tool"`` derived ``("", [])``: ``summary=''``,
+    no ``_searchText``, the #3518 unfindability, on a transcript that HAS tokens
+    of its own. Both are pinned in
+    ``tests/test_10000_source_prose.py::test_a_role_word_that_is_also_a_content_word_survives``.
 
     ⛔ That fallback is reached by THREE transcript shapes, and the presence test
     must not exclude any of them: stopword-only ("ok" / "yes"), short-word-only
@@ -4281,8 +4312,12 @@ def _session_source_metadata(transcript: str) -> tuple[str, list[str]]:
     # findable. Without this, ``"User: 42\nAssistant: 100 200"`` returned
     # ``("", [])``: ``_searchText`` NULL and unfindable (#3518), a regression
     # against the pre-#10000 prose derivation that DID index those digits.
-    tokens = [w for w in re.findall(r"[^\W_][\w-]*", transcript.lower())
-              if w not in _SESSION_SOURCE_FRAMING_TOKENS]
+    # ⛔ THE TURN LABELS GO FIRST, BY POSITION (#10852 review, P2): the speaker
+    # sits at the start of its line, so stripping there removes the label and
+    # leaves every body word — including ``system``/``tool``, which the old
+    # token-set filter killed wherever it appeared.
+    tokens = re.findall(r"[^\W_][\w-]*",
+                        _SESSION_SOURCE_TURN_LABEL_RE.sub("", transcript).lower())
     if not tokens:  # no tokens at all (empty/blank/punctuation-only,
         return "", []  # or nothing but the transcript's own Speaker: labels)
     words = [w for w in tokens if re.match(r"[^\W\d_]", w)]

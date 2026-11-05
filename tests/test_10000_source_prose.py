@@ -703,19 +703,91 @@ def test_an_acknowledgement_only_session_still_derives_and_is_findable(sdk):
     # The framing-only shape is the one that must stay silent now that the
     # `Speaker:` filter runs over a FLOORLESS pattern: it is the shape the old
     # `{2,}` floor used to drop by accident, so nothing else pins it.
-    # ⛔ `system:` / `tool:` are the LOAD-BEARING pair of `_SESSION_SOURCE_FRAMING_TOKENS`:
-    # `user`/`assistant`/`speaker` are also stopwords, so a fixer could delete
-    # the framing filter and believe the stopword arm still covers it — it does
-    # not, the stopword arm does not reach the fallback, and `system`/`tool` are
-    # on no stopword list at all. This leg reds on that deletion alone (verified
-    # by patching the filter out: it derives `['system', 'tool']`, and so does
-    # every such transcript in the Source FTS index).
+    # ⛔ `system:` / `tool:` are the LOAD-BEARING pair of
+    # `_SESSION_SOURCE_TURN_LABEL_RE` (#10852 review, P2): `user`/`assistant`/
+    # `speaker` are also stopwords, so a fixer could drop the per-line label
+    # strip and believe the stopword arm still covers it — it does not, the
+    # stopword arm does not reach the fallback, and `system`/`tool` are on no
+    # stopword list at all. This leg reds on that removal alone (verified by
+    # patching the strip out: it derives `['system', 'tool']`, and so does every
+    # such transcript in the Source FTS index). The pair no longer reds on a
+    # token-set filter, because there is none: the strip is positional, so a
+    # `system`/`tool` BODY word survives while the LABEL does not —
+    # `test_a_role_word_that_is_also_a_content_word_survives` is the other half.
     for wordless in ("", "   ", "...", "?!", "user:\nassistant:",
                      "system:\ntool:"):
         assert _session_source_metadata(wordless) == ("", []), (
             f"a transcript with NO word tokens ({wordless!r}) derived a "
             "descriptor — the presence test was widened past 'tokens present' "
             "and would now index punctuation or bare framing labels")
+
+
+def test_a_role_word_that_is_also_a_content_word_survives(sdk):
+    """The ``Speaker:`` label is dropped by POSITION, never by SPELLING.
+
+    THE DEFECT THIS PINS (#10852 review, P2 — measured at `7ca4871c06`). The
+    framing filter was a ``frozenset({"user", "assistant", "speaker", "system",
+    "tool"})`` applied to EVERY token, so ``system`` and ``tool`` — ordinary
+    English content words — could never enter a session's lexicon anywhere:
+
+    * ``"User: the system keeps restarting after the deploy"`` derived
+      ``['deploy', 'keeps', 'restarting']`` — ``system`` silently gone.
+    * ``"User: system\\nAssistant: tool"`` derived ``("", [])``: the two bodies
+      ARE the transcript's own tokens, so the ``("", [])`` arm fired on a
+      transcript that has words, writing ``summary=''`` and no ``_searchText`` —
+      the #3518 unfindability the docstring reserves for a transcript with no
+      token of its own, and a small REGRESSION against ``main`` (whose prose
+      fallback indexed ``system``).
+
+    ⛔ The suite could not see it: the ack-only leg pins the labels-ONLY
+    direction and asserts the absence of ``{'user', 'assistant', 'speaker'}`` —
+    the three that are also stopwords — so nothing asserted that a role word
+    survives as CONTENT. Both shapes below red on the pre-fix code and green on
+    the per-line strip, while the labels-only control in the ack-only test keeps
+    the constant-pair defect closed.
+    """
+    from tortoise.sdk import _session_source_metadata
+
+    # (1) A role word in the BODY ranks like any other content word.
+    summary, topics = _session_source_metadata(
+        "User: the system keeps restarting after the deploy")
+    assert "system" in topics, (
+        "a body word that spells a role was filtered out of the lexicon: "
+        f"{topics!r} — the framing filter is reading SPELLING, not POSITION")
+    assert summary.endswith(", ".join(topics)), (summary, topics)
+
+    # (2) The two-body cliff: the bodies ARE tokens, so the transcript is NOT
+    # wordless and must not take the `("", [])` arm.
+    body_summary, body_topics = _session_source_metadata(
+        "User: system\nAssistant: tool")
+    assert body_topics, (
+        "a transcript whose own words are `system` / `tool` derived an EMPTY "
+        "lexicon — summary='' and no _searchText, so the session is "
+        "unfindable through tortoise_fts_query(entity_type='source') (#3518)")
+    assert set(body_topics) == {"system", "tool"}, body_topics
+    assert body_summary, body_summary
+
+    # (3) NON-VACUITY for the strip: the LABELS still never become vocabulary.
+    # Without this, widening the strip to nothing (`re.sub("", ...)`) would
+    # satisfy (1) and (2) and re-open the constant-pair defect.
+    assert not ({"user", "assistant"} & set(body_topics)), (
+        "the transcript's own framing labels were re-admitted into the "
+        f"lexicon: {body_topics!r}")
+
+    # (4) …and the reachable shape writes a findable node. The capture path
+    # builds its transcript from the turns, so this is the same derivation on
+    # the same input a real session produces.
+    sdk._materialize_session_source(
+        "sess-role-words", None, "2026-09-01T12:00:00+00:00",
+        [{"role": "user", "content": "system"},
+         {"role": "assistant", "content": "tool"}])
+    written = _source_rows(sdk)["session:sess-role-words"]
+    assert written[1], (
+        "the :Source got no _searchText, so a session whose words are role "
+        f"words is unfindable through the Source FTS index: {written!r}")
+    assert written[0], written
+    assert "session:sess-role-words" in [
+        r["id"] for r in sdk.tortoise_fts_query("tool", entity_type="source")]
 
 
 def test_the_lexicon_does_not_depend_on_the_transcript_word_order():
