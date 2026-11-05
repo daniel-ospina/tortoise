@@ -3069,3 +3069,59 @@ def test_every_place_that_lists_the_needs_test_causes_lists_all_three():
     doc = (Unit.executable.__doc__ or "").lower()
     for phrase in ("runner", "measured", "reported"):
         assert phrase in doc, (phrase, doc)
+
+
+def test_an_absent_local_holder_map_is_incomplete(tmp_path: Path):
+    """Absent is not empty — for `local_holders` too.
+
+    `claims` already refused an absent map; `local_holders` fell back to `{}`, which
+    `_claim_of` reads as "nothing local holds it" — measured: a snapshot that simply
+    OMITS the field, with a local branch holding the unit, exited 0 WITH a merge
+    command. The local half has no registry entry, so no rail catches it later.
+    """
+    raw = _rich_snapshot().to_json()
+    raw.pop("local_holders")
+    path = tmp_path / "no-holders.json"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    assert _run_main(["--from", str(path), "--repo", REPO]) == 2
+
+
+def test_a_bad_pace_env_var_does_not_decide_an_exit_code():
+    """`float(os.environ[...])` at import raised before `main`'s frame: exit 1.
+
+    Exit 1 is documented as "the queue was read and NO unit is pickable" — a typo'd
+    env var must not read as an exhausted queue.
+    """
+    root = Path(__file__).resolve().parent.parent
+    env = dict(os.environ, NEXT_WORK_PACE="abc")
+    proc = subprocess.run(
+        [sys.executable, str(root / "tools" / "next_work.py"), "--help"],
+        capture_output=True, text=True, timeout=60, env=env,
+    )
+    assert proc.returncode == 0, (proc.returncode, proc.stderr[-300:])
+    assert "ignoring NEXT_WORK_PACE" in proc.stderr
+
+
+@pytest.mark.parametrize("bad", ["abc", "inf", "-inf", "1e400", "-3", "nan"])
+def test_an_unusable_pace_value_never_decides_an_exit_code(bad):
+    """`inf` parsed fine and `time.sleep(inf)` raised OverflowError (an ArithmeticError,
+    which `main`'s frame does not catch) → exit 1, the "queue exhausted" code."""
+    root = Path(__file__).resolve().parent.parent
+    env = dict(os.environ, NEXT_WORK_PACE=bad)
+    proc = subprocess.run(
+        [sys.executable, str(root / "tools" / "next_work.py"), "--help"],
+        capture_output=True, text=True, timeout=60, env=env,
+    )
+    assert proc.returncode == 0, (bad, proc.returncode, proc.stderr[-300:])
+
+
+def test_a_huge_finite_pace_value_is_capped():
+    root = Path(__file__).resolve().parent.parent
+    env = dict(os.environ, NEXT_WORK_PACE="1e9")
+    proc = subprocess.run(
+        [sys.executable, "-c",
+         f"import sys; sys.path.insert(0, {str(root)!r}); "
+         "from tools.next_work import PACE_SECONDS; print(PACE_SECONDS)"],
+        capture_output=True, text=True, timeout=60, env=env,
+    )
+    assert float(proc.stdout.strip()) <= 5.0, proc.stdout

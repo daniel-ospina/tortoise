@@ -147,6 +147,7 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
 import argparse
 import contextlib
 import json
+import math
 import os
 import re
 import shlex
@@ -433,7 +434,8 @@ class Unit:
     def executable(self) -> bool:
         """Pickable AND there is something to run now.
 
-        `NEEDS-TEST` is a real position but not an action: the head is waiting on a
+        `NEEDS-TEST` is a real position but not a RUNNABLE action (it still gets an
+        ACTION line, never a command): the head is waiting on a
         runner (checks in flight), or the merge tree could not be MEASURED, or a
         required check has never REPORTED (a harness defect), and no dispatch
         changes any of them. Reporting it as the next action
@@ -664,6 +666,17 @@ def _normalise_shapes(raw: dict[str, Any], snap: Snapshot) -> None:
             snap.local_holders = {
                 k: v for k, v in snap.local_holders.items() if isinstance(v, list)
             }
+    if "local_holders" not in raw:
+        # ⛔ ABSENT IS NOT EMPTY, for this surface too. `claims` already refuses an
+        # absent map ("freedom is not provable"); `local_holders` fell back to the
+        # dataclass default `{}`, which `_claim_of` reads as "nothing local holds it"
+        # — measured: a snapshot that simply OMITS the field, with a local branch
+        # holding the unit, exited 0 WITH a merge command. The local half has no
+        # registry entry by construction, so no rail can catch it downstream.
+        snap.unreadable.append(
+            "local_holders: the snapshot carries no local-holder map — whether this box "
+            "already holds the work is not provable"
+        )
     if "claims" not in raw:
         # ABSENT is not the same as EMPTY: `_claim_of`'s `ref not in snap.claims`
         # branch is documented as "the registry was read and does not hold this key".
@@ -1409,7 +1422,36 @@ def next_action(unit: Unit, repo: str) -> str | None:
 
 #: Seconds between GitHub calls. The API throttles per-call and a queue sweep
 #: makes ~50 of them, so the sweep is PACED rather than fanned out.
-PACE_SECONDS = float(os.environ.get("NEXT_WORK_PACE", "0.2"))
+def _pace_seconds() -> float:
+    """Parse the pacing seam DEFENSIVELY — a bad value must not decide an exit code.
+
+    `float(os.environ[...])` at import time raised `ValueError` before `main`'s frame
+    existed, so `NEXT_WORK_PACE=abc` exited **1** — the documented "the queue was read
+    and NO unit is pickable" code — from a typo'd env var.
+    """
+    raw = os.environ.get("NEXT_WORK_PACE", "0.2")
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        print(
+            f"next_work: ignoring NEXT_WORK_PACE={raw!r} (not a number); using 0.2s",
+            file=sys.stderr,
+        )
+        return 0.2
+    # ⛔ FINITE AND CAPPED, not merely non-negative. `float("inf")` (or `1e400`)
+    # parsed fine and then `time.sleep(inf)` raised `OverflowError` — an
+    # `ArithmeticError`, which `main`'s frame does not catch — so a typo'd env var
+    # still exited 1, and a huge finite value would have slept for years.
+    if not math.isfinite(value) or value < 0:
+        print(
+            f"next_work: ignoring NEXT_WORK_PACE={raw!r} (not a usable number); using 0.2s",
+            file=sys.stderr,
+        )
+        return 0.2
+    return min(value, 5.0)
+
+
+PACE_SECONDS = _pace_seconds()
 
 
 def _pace() -> None:
