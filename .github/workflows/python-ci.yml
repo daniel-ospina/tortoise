@@ -955,18 +955,32 @@ jobs:
         # as RED by design (#5219: a cancelled leg certifies nothing). A required
         # check was WITHHELD by a cache upload on a passing shard.
         #
-        # ⛔ WHY NO WRITER, AND WHY THAT DOES NOT LOSE #7612's CACHE. #7612's
+        # ⛔ WHY NO WRITER, AND HOW LONG #7612's CACHE ACTUALLY SURVIVES. #7612's
         # decision — restore the dependency caches instead of re-downloading them
-        # — is PRESERVED: this step still restores, and a hit costs 5.7-32.7 s
-        # instead of the 93-219 s cold torch download. What the run above measures
-        # is that the WRITE cannot complete on this pool: at 0.9 MB/s sustained
-        # the 3.88 GB payload needs ~72 min (the same pool also took 8 m 57 s for
-        # the 78,130,925 B HF archive), while `docs/ops/ci-wall-clock.md` §2 arm 2
-        # leaves <= ~9.9 m of this 90 m job's budget for a cache-write term. No
-        # bound compatible with the cap can complete it, so a bounded save is a
-        # 9-minute-per-shard write that never lands. Restore-only keeps the read
-        # (the value #7612 wanted) and drops a write measurement shows is
-        # impossible here. The upload rate is the term to fix — not the bound.
+        # — is preserved ONLY WHILE THE STORED ENTRY LASTS, and that is not
+        # forever. What the run above measures is that the WRITE cannot complete
+        # on this pool: at 0.9 MB/s sustained the 3.88 GB payload needs ~72 min
+        # (the same pool also took 8 m 57 s for the 78,130,925 B HF archive),
+        # while `docs/ops/ci-wall-clock.md` §2 arm 2 leaves <= ~9.9 m of this 90 m
+        # job's budget for a cache-write term. No bound compatible with the cap
+        # can complete it, so a bounded save is a 9-minute-per-shard write that
+        # never lands. The upload rate is the term to fix — not the bound.
+        #
+        # ⛔ THE COST OF THAT CHOICE, STATED SO IT IS NOT A SILENT CAPABILITY
+        # LOSS: with no writer, this restore is served entirely by entries written
+        # BEFORE this change. GitHub expires a cache entry after 7 days without a
+        # hit, and the key is `<hash uv.lock>` — so the FIRST lock bump after this
+        # lands asks for a key nothing has ever written. From then on every shard
+        # pays the cold download #7612 removed (140 wheels / 3,200 MB / 93-219 s
+        # per job) on every run, and this step logs `Cache not found` forever. The
+        # fallback here is therefore NOT "same cache, no write" — it is "no cache,
+        # cold downloads, on a timer". That makes it a REOPEN of #7612 rather than
+        # a local fix: the honest alternatives are a smaller payload (the 5.9x
+        # archive-vs-entry gap IS the torch wheel set, and
+        # `.github/actions/install-cpu-torch/action.yml` installs it with `pip`, so
+        # `~/.cache/pip` is #7612's payload and shrinking it is not free) or
+        # accepting the cold download. Owner decision; recorded rather than
+        # absorbed.
         #
         # ⚠ REINSTATE the write only against a MEASURED SUCCESSFUL save of this
         # payload inside the bound; the pin asserting this shape
