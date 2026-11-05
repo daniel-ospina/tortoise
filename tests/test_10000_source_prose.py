@@ -318,6 +318,15 @@ def test_the_first_capture_replaces_the_prose_a_pre_seeded_stub_left_behind(
         params={"u": url, "sum": stale, "st": stale})
     assert _nodes_carrying(sdk, f"{MARKER} stale"), (
         "the seeded pre-fix state is missing")
+    assert not proj.g.query(
+        "MATCH (n:Session {id:$sid}) RETURN count(n) AS n",
+        params={"sid": session_id},
+    ).result_set[0][0], (
+        "this fixture must stay the STUB shape (no `:Session`). With one "
+        "present the capture is a replay and this test silently becomes a "
+        "second copy of `test_a_re_capture_does_not_heal_a_pre_fix_node`, "
+        "passing green while covering nothing — the exact fixture/claim "
+        "mismatch `#10852` review P1 found in this test's earlier form")
 
     _capture(sdk, session_id)
 
@@ -386,6 +395,17 @@ def test_a_re_capture_does_not_heal_a_pre_fix_node(sdk):
         "it, the replay is WRITING — read #2104/#1727 before keeping that.")
     assert any("summary" in props or "_searchText" in props
                for _, props in survivors), survivors
+    # The two derived columns are one derivation and must keep together or
+    # replace together (`_source_search_text` ties them). A replay that moved
+    # only one would split the display column from the indexed column — the
+    # divergence `#10000` exists to remove, arriving by a different door.
+    stored = proj.g.query(
+        "MATCH (s:Source {url:$u}) RETURN s.summary, s._searchText",
+        params={"u": url},
+    ).result_set[0]
+    assert list(stored) == [stale, stale], (
+        "the replay changed ONE of the two derived columns and not the other — "
+        f"they must move together or not at all: {stored!r}")
 
 
 # ── the derived metadata is still FINDABLE, and the display prefix is not ──
