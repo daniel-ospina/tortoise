@@ -864,8 +864,8 @@ def test_a_closes_link_is_not_reported_as_refs_only():
 @pytest.mark.parametrize(
     ("kwargs", "expected"),
     [
-        ({"draft": True}, "NEEDS-FIX"),
-        ({"base": "release/1.x"}, "NEEDS-FIX"),
+        ({"draft": True}, "NEEDS-REVIEW"),
+        ({"base": "release/1.x"}, "NEEDS-REVIEW"),
     ],
 )
 def test_structural_gate_refusals_are_not_ready_to_land(kwargs, expected):
@@ -902,8 +902,9 @@ def test_a_missing_required_label_is_not_ready_to_land():
         merge_tree={"1001": {"clean": True}},
     )
     (row,) = build_units(s, cfg)
-    assert row.position == "NEEDS-FIX"
+    assert row.position == "NEEDS-REVIEW"
     assert any("label=ship-it: absent" in d for d in row.detail)
+    assert next_command(row, REPO) is None
 
 
 # ── an unmeasured merge is an abstention, like every other one (finding 4) ──
@@ -2661,3 +2662,103 @@ def test_a_non_int_collected_at_is_incomplete(tmp_path: Path, bad):
     path = tmp_path / "bad-collected.json"
     path.write_text(json.dumps(raw), encoding="utf-8")
     assert _run_main(["--from", str(path), "--repo", REPO]) == 2, bad
+
+
+# ── issues[].number is judged like a pull number (r21 #1) ─────────────────
+@pytest.mark.parametrize("bad", [True, False, 0, -1, 100.9, "100", None, [], {}])
+def test_an_issue_number_that_is_not_a_usable_int_is_incomplete(tmp_path: Path, bad):
+    """`isinstance(True, int)` is True and `int(100.9) == 100` succeeds, so the outer
+    frame raised nothing: `issues=[{"number": true}]` produced a dispatch command for
+    issue #1 at exit 0, for an issue the snapshot never named."""
+    raw = _rich_snapshot().to_json()
+    raw["issues"][0]["number"] = bad
+    path = tmp_path / "bad-issue-number.json"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    assert _run_main(["--from", str(path), "--repo", REPO]) == 2, bad
+
+
+def test_a_wrong_typed_issue_priority_or_title_is_incomplete(tmp_path: Path):
+    for field in ("priority", "title"):
+        raw = _rich_snapshot().to_json()
+        raw["issues"][0][field] = 7
+        path = tmp_path / f"bad-issue-{field}.json"
+        path.write_text(json.dumps(raw), encoding="utf-8")
+        assert _run_main(["--from", str(path), "--repo", REPO]) == 2, field
+
+
+# ── a gate refusal is a human edit, not a code fix (r21 #2) ──────────────
+@pytest.mark.parametrize("kwargs", [{"base": "release/1.x"}, {"draft": True}])
+def test_a_gate_refusal_dispatches_no_fixer(kwargs):
+    """`base=`/`label=` were routed to NEEDS-FIX whose rail is `fix-one.sh`.
+
+    A fixer at a PR whose only defect is its base or a missing label finds no
+    findings, pushes nothing, and re-fails the chain.
+    """
+    from tools.next_work import next_action
+
+    s = snap(
+        issues=[issue(100)],
+        pulls=[{**pull(1001, closes=[100]), "head_ref": "fix/100-x", **kwargs}],
+        check_runs={"a" * 40: all_green()},
+        attestation={"1001": {"verdict": "head"}},
+        merge_tree={"1001": {"clean": True}},
+    )
+    (row,) = units_for(s)
+    assert next_command(row, REPO) is None
+    assert "HUMAN" in (next_action(row, REPO) or "") or "DRAFT" in (next_action(row, REPO) or "")
+
+
+@pytest.mark.parametrize(
+    ("condition", "want"),
+    [
+        (["draft"], "undraft"),
+        (["base=main (actual release/1.x)"], "retarget"),
+        (["base=main (actual unknown)"], "could not be READ"),
+        (["label=ship-it: absent"], "add the required"),
+    ],
+)
+def test_each_gate_refusal_prescribes_its_own_edit(condition, want):
+    """One message for all four conditions prescribed the wrong edit for two of them."""
+    from tools.next_work import _gate_refusal_edit
+
+    text = _gate_refusal_edit(condition)
+    assert want in text, text
+
+
+@pytest.mark.parametrize("bad", ["x", 1, None, [1]])
+def test_a_non_object_pull_element_is_refused_and_named(tmp_path: Path, bad):
+    """An element that is not a pull was left to the outer frame, which raised in
+    `build_units` before `render` — so the refusal never printed."""
+    raw = _rich_snapshot().to_json()
+    raw["pulls"].append(bad)
+    path = tmp_path / "bad-pull-element.json"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    assert _run_main(["--from", str(path), "--repo", REPO]) == 2, bad
+
+
+def test_a_draft_action_names_the_edit():
+    """The remedy ('undraft') appeared only in the row detail; the ACTION is what a
+    runner reads."""
+    from tools.next_work import next_action
+
+    s = snap(
+        issues=[issue(100)],
+        pulls=[{**pull(1001, closes=[100], draft=True), "head_ref": "fix/100-wip"}],
+        check_runs={"a" * 40: all_green()},
+        attestation={"1001": {"verdict": "head"}},
+        merge_tree={"1001": {"clean": True}},
+    )
+    (row,) = units_for(s)
+    assert "UNDRAFT" in (next_action(row, REPO) or "").upper()
+
+
+def test_every_human_case_is_named_in_help():
+    """`--help` must enumerate the human cases the code emits, not just a review."""
+    root = Path(__file__).resolve().parent.parent
+    proc = subprocess.run(
+        [sys.executable, str(root / "tools" / "next_work.py"), "--help"],
+        capture_output=True, text=True, timeout=60,
+    )
+    text = proc.stdout.lower()
+    for phrase in ("review", "gate refusal", "runner", "unmeasured merge tree", "draft"):
+        assert phrase in text, phrase

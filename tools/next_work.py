@@ -46,9 +46,10 @@ WHAT IT EMITS, AND WHY THAT IS THE POINT
 ----------------------------------------
 A ranked list is a REPORT. This tool prints, for the top row, the exact command
 a runner would execute — which rail, which PR, which issue — or, when the top row
-needs a human decision (a review), is waiting on a runner, has an UNMEASURED merge
-tree, or is a DRAFT, the ACTION and then the first lower-ranked unit that DOES have
-a command. That is the difference
+needs a HUMAN (a review, or a gate refusal: another base, a missing required label,
+an unreadable base), is waiting on a runner, has an UNMEASURED merge tree, or is a
+DRAFT, the ACTION and then the first lower-ranked unit that DOES have a command.
+That is the difference
 between a consumer and an actuator, and it is why the output has a
 ``NEXT ACTION`` block rather than a table alone.
 
@@ -465,13 +466,13 @@ def _normalise_shapes(raw: dict[str, Any], snap: Snapshot) -> None:
     field: the fields in `_LIST_FIELDS` / `_MAP_FIELDS`; `gate`; the ENTRY VALUES of
     `local_holders`; `claim_ns`; `repo`/`base`/`config_source`/`collected_at`; each
     pull's `number`, `labels`, `closing_issues`, `refs_issues`, `draft`, `base`,
-    `head`, `head_ref`, `title`, `fold_line`; and the ELEMENTS of a pull's three list
-    fields. Judged by their READERS instead: `gate_text`, and the entry VALUES of
-    `attestation`/`merge_tree`/`check_runs` — one that reads as an abstention becomes
-    a POSITION (NEEDS-REVIEW / NEEDS-TEST at exit 0/1, never a command), and one the
-    reader cannot handle at all exits 2 through the outer frame without naming the
-    field. Elements of the top-level `issues`/`pulls` lists are likewise the outer
-    frame's.
+    `head`, `head_ref`, `title`, `fold_line`; the ELEMENTS of a pull's three list
+    fields; and each ISSUE element — its `number` (a non-bool positive int),
+    `priority` and `title`. Judged by their READERS instead: `gate_text`, and the
+    entry VALUES of `attestation`/`merge_tree`/`check_runs` — one that reads as an
+    abstention becomes a POSITION (NEEDS-REVIEW / NEEDS-TEST at exit 0/1, never a
+    command), and one the reader cannot handle at all exits 2 through the outer frame
+    without naming the field.
 
     A value of the RIGHT type is left exactly as it was: an empty list or map is a
     legitimate measurement ("read, and it held nothing"). ABSENT is tolerated for a
@@ -495,9 +496,42 @@ def _normalise_shapes(raw: dict[str, Any], snap: Snapshot) -> None:
         # command merged **#1** — a runnable command aimed at the wrong artifact.
         return isinstance(value, int) and not isinstance(value, bool)
 
+    # ⛔ THE ISSUE LIST HAS THE SAME ELEMENT RULE. `_is_int` guards a pull's number,
+    # but an issue's was delegated to "the outer frame" — and the outer frame raises
+    # NOTHING for `true` or `100.9`: `int(True) == 1` and `int(100.9) == 100` both
+    # succeed, so `issues=[{"number": true, …}]` produced `dispatch-merge.sh … 1` at
+    # exit 0 for an issue the snapshot never named. Same class, one level over.
+    kept_issues: list[dict[str, Any]] = []
+    bad_issue_fields: list[str] = []
+    for row in snap.issues:
+        if not isinstance(row, dict):
+            bad_issue_fields.append(f"issue element {row!r}")
+            continue
+        number = row.get("number")
+        if not isinstance(number, int) or isinstance(number, bool) or number <= 0:
+            bad_issue_fields.append(f"issue number {number!r}")
+            continue
+        if not isinstance(row.get("priority"), str):
+            bad_issue_fields.append(f"#{number}.priority")
+            row["priority"] = ""
+        if not isinstance(row.get("title"), str):
+            bad_issue_fields.append(f"#{number}.title")
+            row["title"] = ""
+        kept_issues.append(row)
+    if bad_issue_fields:
+        snap.unreadable.append(
+            f"issues: {len(bad_issue_fields)} field(s) are not the type this reader needs "
+            f"({', '.join(bad_issue_fields[:4])}) — an element that cannot be read is not absent"
+        )
+        snap.issues = kept_issues
     dropped_pulls: list[Any] = []
     for pr in snap.pulls:
         if not isinstance(pr, dict):
+            # ⛔ AN ELEMENT THAT IS NOT A PULL IS DROPPED AND NAMED, not left to the
+            # outer frame: it would raise in `build_units` before `render`, so the
+            # refusal never printed.
+            bad_pull_fields.append(f"pull element {pr!r}")
+            dropped_pulls.append(pr)
             continue
         tag = pr.get("number", "?")
         # ADDRESSABILITY IS NOT OPTIONAL: a pull with no usable number cannot be
@@ -823,6 +857,29 @@ def _claim_of(
     return (None, readable)
 
 
+def _gate_refusal_edit(conditions: list[str]) -> str:
+    """The edit each gate refusal actually needs — they are NOT all the same.
+
+    The first version emitted "a human retargets the base or adds the label" for
+    EVERY structural condition, which is the wrong prescription for a DRAFT (the
+    author undrafts it) and for `base=main (actual unknown)` (the base may be
+    correct — it could not be READ).
+    """
+    tips: list[str] = []
+    for cond in conditions:
+        if cond.startswith("draft"):
+            tips.append("the author must undraft it")
+        elif "actual unknown" in cond:
+            tips.append("the PR's base could not be READ — re-read the PR")
+        elif cond.startswith("base="):
+            tips.append(f"retarget the PR ({cond})")
+        elif cond.startswith("label="):
+            tips.append(f"add the required label {cond.split(':', 1)[0].split('=', 1)[-1]}")
+        else:
+            tips.append(cond)
+    return "; ".join(dict.fromkeys(tips))
+
+
 def _position_for_pr(
     snap: Snapshot,
     cfg: QueueConfig | None,
@@ -870,8 +927,19 @@ def _position_for_pr(
     att = snap.attestation.get(str(pr["number"])) or {}
     verdict = str(att.get("verdict") or "")
 
-    if other_fails or structural:
+    if other_fails:
         pos = "NEEDS-FIX"
+    elif structural:
+        # ⛔ A BASE MISMATCH OR A MISSING REQUIRED LABEL IS NOT A CODE FIX. These
+        # landed on NEEDS-FIX, whose rail is `fix-one.sh` — a fixer dispatched at a
+        # PR whose only defect is that it targets another branch or lacks a label
+        # finds no findings, pushes nothing, and re-fails the chain. Same conflation
+        # round 14 fixed for the review gate; a human retargets or relabels.
+        pos = "NEEDS-REVIEW"
+        detail.append(
+            f"gate-refusal: {'; '.join(structural)} — no code change and no rail fixes this; "
+            f"{_gate_refusal_edit(structural)}"
+        )
     elif review_red and verdict not in ("head", "carry"):
         # Red by design: the record does not bind this head. The attestation block
         # below decides whether a review or a re-record is owed.
@@ -1231,14 +1299,20 @@ def next_action(unit: Unit, repo: str) -> str | None:
     target = f"#{unit.issue}" if unit.kind == "issue" else f"fold PR #{unit.fold_pr}"
     if unit.draft:
         return (
-            f"none — {target} is a DRAFT, so the queue will not take it and a fixer must not "
-            "be dispatched at the author's branch"
+            f"the author must UNDRAFT {target} — the queue will not take it and a fixer must "
+            "not be dispatched at the author's branch"
         )
     if unit.position == "NEEDS-REVIEW" and any("nodigest" in d for d in unit.detail):
         # The record carries no usable digest: re-mint at the head, no review owed.
         return (
             f"re-record {target} at head {unit.head} — the record has no usable digest, so "
             f"record-review.sh {unit.pr} <current-head> clean {repo} needs NO new review"
+        )
+    if any(d.startswith("gate-refusal:") for d in unit.detail):
+        why = next(d.split(":", 1)[1].strip() for d in unit.detail if d.startswith("gate-refusal:"))
+        return (
+            f"a HUMAN fixes the gate refusal on {target}: {why}. No code change and no rail does "
+            "this, so nothing is dispatched"
         )
     if any(d.startswith("review-gate-red:") for d in unit.detail):
         return (
@@ -2145,8 +2219,9 @@ def _main(argv: Sequence[str] | None = None) -> int:
             "that just finished, a human. Deliberately NOT a timer: cmux authorises by ancestry, so "
             "a launchd job cannot act on a pane, and an actuator that cannot deliver is the defect "
             "this fleet keeps re-learning. The 'NEXT ACTION' block is the actuator half: the exact "
-            "command for the top row — or, when the top row needs a review, is waiting on a "
-            "runner, has an UNMEASURED merge tree, or is a DRAFT, the ACTION for it plus the "
+            "command for the top row — or, when the top row needs a HUMAN (a review, or a gate "
+            "refusal: another base, a missing required label, an unreadable base), is waiting on "
+            "a runner, has an UNMEASURED merge tree, or is a DRAFT, the ACTION for it plus the "
             "first unit below it that DOES have a command.\n\n"
             "IDEMPOTENT BY CONSTRUCTION: the ordering key is total — (priority, position, "
             "(kind, number)), where an issue is (0, n) and a fold is (1, pr) — "
