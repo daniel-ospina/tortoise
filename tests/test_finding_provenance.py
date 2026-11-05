@@ -33,6 +33,7 @@ discussion comment is routed away without ever being validated.
 """
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import tempfile
@@ -79,6 +80,46 @@ def _commit(cwd: Path, filename: str, content: str) -> str:
 
 def _provenance(ref: str, sha: str) -> str:
     return f"Measured at: {ref}@{sha} on 2026-09-20\n"
+
+
+def _decide_source() -> str:
+    """The workflow's `decide` step `run:` source, verbatim."""
+    wf = (ROOT / ".github" / "workflows" / "finding-provenance.yml").read_text(
+        encoding="utf-8")
+    decide = wf.split("Decide whether this issue is a finding", 1)[1]
+    return decide.split("Gate the finding's provenance", 1)[0]
+
+
+def _run_decide(*, body: str, labels: str,
+                kind: str = "issue") -> tuple[int, str, str]:
+    """EXECUTE the workflow's own `decide` step against a body + labels.
+
+    Behavioural, not structural: it runs the real `run:` block, so a
+    re-introduced SKIP fails here whatever shape it takes (#10146 F2). Returns
+    ``(rc, is_finding, combined log)``.
+    """
+    wf = yaml.safe_load((ROOT / ".github" / "workflows" /
+                         "finding-provenance.yml").read_text(encoding="utf-8"))
+    run = next(step["run"] for step in wf["jobs"]["classify"]["steps"]
+               if step.get("id") == "decide")
+    with tempfile.TemporaryDirectory(prefix="decide-step.") as tmp:
+        d = Path(tmp)
+        (d / "body.md").write_text(body, encoding="utf-8")
+        (d / "labels.txt").write_text(labels, encoding="utf-8")
+        out = d / "verdict.txt"
+        out.write_text("", encoding="utf-8")
+        r = subprocess.run(
+            ["bash", "-c", run], cwd=str(ROOT),
+            env={**os.environ, "RUNNER_TEMP": tmp, "GITHUB_OUTPUT": str(out),
+                 "KIND": kind},
+            capture_output=True, text=True, check=False,
+        )
+        emitted = out.read_text(encoding="utf-8")
+    verdict = ""
+    for line in emitted.splitlines():
+        if line.startswith("is_finding="):
+            verdict = line.split("=", 1)[1].strip()
+    return r.returncode, verdict, r.stdout + r.stderr
 
 
 class FindingProvenanceTestBase(unittest.TestCase):
@@ -459,12 +500,105 @@ class FindingProvenanceTestBase(unittest.TestCase):
         measured_at field unreachable and giving an internal finding a
         one-token escape. A body that CLAIMS a measurement is gated whatever
         its labels; the exemption applies only to a report with no line."""
-        wf = (ROOT / ".github" / "workflows" / "finding-provenance.yml").read_text(
-            encoding="utf-8")
-        decide = wf.split("Decide whether this issue is a finding", 1)[1]
-        decide = decide.split("Gate the finding's provenance", 1)[0]
-        self.assertLess(decide.index("Measured at:"), decide.index("beta-feedback"),
-                        "the provenance check must precede the beta-feedback exemption")
+        decide = _decide_source()
+        self.assertLess(decide.index("--is-finding"), decide.index("beta-feedback"),
+                        "the claim check must precede the beta-feedback exemption")
+
+    # ── #10146 F2 — a form-filed finding must be REFUSED, never skipped ──
+
+    def test_decide_gates_a_claim_the_column_zero_grep_missed(self) -> None:
+        """#10146 F2: the reported shape — a claim NOT at column 0 — was skipped.
+
+        ``PROVENANCE_CLAIM_RE`` tolerates a markdown prefix, so
+        ``- Measured at: 98ab138c9`` is a claim. The issue-body arm classified
+        with ``grep -qE '^Measured at:'``, which sees column 0 only, and
+        ``internal`` is the ONLY label the agent-finding form stamps
+        (``agent_finding.yml``) — so this body matched no branch at all and the
+        step reported ``is_finding=false``. A finding that never reached the
+        gate, reported as "not a finding": the fail-open #10146's real root
+        cause left behind.
+        """
+        rc, is_finding, log = _run_decide(
+            body="### The finding\n\n- Measured at: 98ab138c9\n",
+            labels="internal\n")
+        self.assertEqual(rc, 0, log)
+        self.assertEqual(is_finding, "true",
+                         f"a claim the column-0 grep misses must still be GATED: {log}")
+
+    def test_decide_refuses_a_form_filed_body_with_no_parseable_claim(self) -> None:
+        """#10146 F2: ``required: true`` makes the field NON-EMPTY, not PARSEABLE.
+
+        A form-filed body whose provenance answer is prose selects nothing in
+        the claim parser, so the branch that decides is the label fallback —
+        and falling through to ``is_finding=false`` there is exactly the silent
+        skip this test forbids. The body must be REFUSED loudly: routed to the
+        gate, which refuses it as ``UNKNOWN_PROVENANCE`` and annotates it, with
+        the refusal NAMED in the log rather than a "skipping" note.
+        """
+        body = "### Provenance (paste the `--emit` line)\n\nprose answer\n"
+        rc, is_finding, log = _run_decide(body=body, labels="internal\n")
+        self.assertEqual(rc, 0, log)
+        self.assertEqual(is_finding, "true",
+                         f"a form-filed body with no parseable line must be "
+                         f"refused by the gate, not skipped: {log}")
+        self.assertIn("REFUSED", log, log)
+        for word in ("agent-finding form", "UNKNOWN_PROVENANCE"):
+            self.assertIn(word, log, log)
+        # …and the gate this routes to really does refuse that body. Without
+        # this half the test would pin only that the step stopped skipping, not
+        # that stopping is a REFUSAL.
+        v = subprocess.run([PYTHON, str(TOOL), "--validate", "-"], input=body,
+                           capture_output=True, text=True, check=False)
+        self.assertEqual(v.returncode, 1, v.stdout + v.stderr)
+        self.assertIn("UNKNOWN_PROVENANCE", v.stdout)
+
+    def test_decide_never_uses_a_shell_copy_of_the_claim_predicate(self) -> None:
+        """#10146 F2 root cause: the issue arm classified with a ``grep``.
+
+        This workflow's own header forbids a second copy of the predicate — "a
+        second copy drifts, and then the cheap copy decides silently" — and the
+        copy HAD drifted, which is why the arm above skipped claims the parser
+        selects. Pinned structurally as well as behaviourally: ONE call site for
+        ``--is-finding``, ahead of every label test, and no shell regex standing
+        in for the claim parser.
+        """
+        decide = _decide_source()
+        code = [ln for ln in decide.splitlines()
+                if not ln.strip().startswith("#")]
+        calls = [ln for ln in code if "--is-finding" in ln]
+        self.assertEqual(len(calls), 1,
+                         f"there must be ONE call site for the claim parser, "
+                         f"got {calls}")
+        self.assertFalse(
+            [ln for ln in code if "grep" in ln and "Measured" in ln],
+            "the claim predicate must never be re-implemented as a shell grep")
+        # The classifier runs before every label-based branch, so no label can
+        # exempt a body that claims to be a finding.
+        self.assertLess(code.index(calls[0]),
+                        min(code.index(ln) for ln in code if "labels.txt" in ln),
+                        "the claim parser must run before any label test")
+
+    def test_decide_names_each_skip_so_a_new_one_cannot_hide(self) -> None:
+        """Every arm that can decline a body must SAY which test declined.
+
+        The old final branch said "not a finding (no provenance line, not an
+        internal bug) — skipping" for every shape, so a form-filed finding and
+        a feature request were indistinguishable in the log. Each skip now
+        names its own discriminator, and the ``bug`` / ``internal`` labels are
+        gated rather than skipped.
+        """
+        decide = _decide_source()
+        code = [ln for ln in decide.splitlines()
+                if not ln.strip().startswith("#")]
+        for label in ("beta-feedback", "internal", "bug"):
+            self.assertTrue([ln for ln in code if f"grep -qx '{label}'" in ln],
+                            f"the {label!r} branch is gone")
+        # `internal` (the agent-finding form's label) must reach the GATE.
+        internal_at = next(i for i, ln in enumerate(code)
+                           if "grep -qx 'internal'" in ln)
+        internal_arm = "\n".join(code[internal_at:internal_at + 3])
+        self.assertIn("is_finding=true", internal_arm,
+                      "a form-filed issue must be gated, never skipped")
 
     # ── the COMMENT path's workflow shape (#4732)
 

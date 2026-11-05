@@ -1340,10 +1340,24 @@ def test_mitigate_operator_survives_an_idless_mitigation(sdk):
         "MATCH (op:Point {id:$id})-[:mitigated_by]->(m:Point) RETURN m.id",
         params={"id": op["id"]}).result_set == [[None]]
 
-    with pytest.raises(UnaddressableClaimError):
+    with pytest.raises(UnaddressableClaimError,
+                       match=r"mitigation Point with no id"):
         sdk.mitigate_operator(op["id"], "second reason", strength=0.5)
-    # The false success is gone — no evidence row keyed on the ``None`` id.
+    # ⛔ THE PIN IS THE ``pytest.raises`` ABOVE, AND SPECIFICALLY ITS CLASS —
+    # not the two assertions below. Both of them are UNCHANGED since #9262 and
+    # both held BEFORE this fix too: the old ``{}`` success wrote no
+    # ``_evidence`` row and no mitigation content either, so neither can
+    # demonstrate anything about #9754. A correction of an earlier version of
+    # this comment, which credited them with showing "the false success is
+    # gone" — a comment that overstates a test's power is worse than none.
+    # What they do pin is the OTHER wrong repair, a refusal that still writes a
+    # row keyed on the ``None`` id (``_evidence[None] = ...``, the measured
+    # ``origin/main`` residue) or partially updates a node it cannot address.
     assert None not in sdk._evidence
+    assert g.query(
+        "MATCH (op:Point {id:$id})-[:mitigated_by]->(m:Point) "
+        "RETURN collect(m.content)",
+        params={"id": op["id"]}).result_set == [[["[MITIGATION] legacy"]]]
 
 
 def test_guidance_for_a_source_linked_legacy_point_actually_works(sdk):

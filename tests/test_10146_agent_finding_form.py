@@ -6,14 +6,29 @@ read the other:
 
 * the form asked for a bare short sha in a field that was ``required: false``;
 * the gate needs a line matching ``PROVENANCE_RE``
-  (``Measured at: <ref>@<40-hex-sha> on <YYYY-MM-DD>``) and, seeing any looser
-  ``Measured at`` claim, reports ``FAIL UNKNOWN_PROVENANCE``.
+  (``Measured at: <ref>@<40-hex-sha> on <YYYY-MM-DD>``).
 
-So a finding filed **through the intended form** still failed the gate. These
-tests pin the two halves to ONE source of truth: the gate's own module-level
-regexes, imported — never copied. A test written against a copy of the regex
-would drift exactly as the form did (the owner's implementation constraint on
-the issue).
+So a finding filed **through the intended form** could not satisfy the gate.
+These tests pin the two halves to ONE source of truth: the gate's own
+module-level regexes, imported — never copied. A test written against a copy of
+the regex would drift exactly as the form did (the owner's implementation
+constraint on the issue).
+
+⛔ WHICH PARSER DECIDES WHICH SURFACE — the part the first reading of #10146
+got wrong, corrected here because a docstring that asserts a consequence the
+code does not produce is worse than no docstring. ``claims_finding()`` /
+``PROVENANCE_CLAIM_RE`` is reached ONLY from ``--is-finding``, which the
+workflow called ONLY for the COMMENT arm. The ISSUE-BODY arm classified with
+``grep -qE '^Measured at:'`` — a column-0 shell copy of the predicate — and
+``--validate`` uses ``PROVENANCE_RE`` alone. So the claim parser never decided
+an issue body, and a rendered heading claim did **not** become
+``FAIL UNKNOWN_PROVENANCE`` on the issue path: the grep did not see it, the
+``bug``/``beta-feedback`` label fallbacks did not match (the form stamps
+``internal``), and the body was **silently skipped** — never gated at all.
+That fail-open is the real residual of #10146 and is closed in the workflow's
+``decide`` step, which now classifies BOTH arms with ``--is-finding`` and
+REFUSES a form-filed body carrying no parseable claim instead of skipping it
+(pinned in ``tests/test_finding_provenance.py``).
 
 The rendering below mirrors what GitHub puts in the created issue body: a
 ``markdown`` block's ``value`` verbatim, and for each question field a
@@ -64,13 +79,41 @@ def test_rendered_form_never_ships_a_malformed_provenance_claim():
 
     The claim parser tolerates leading ``#``/``>``/``*``/``-``, so a field
     LABEL of ``Measured at …`` renders as ``### Measured at …`` — a claim the
-    strict parser then rejects. The filer who follows the form fails the gate.
+    strict parser rejects, i.e. ``FAIL UNKNOWN_PROVENANCE`` wherever it IS
+    classified.
+
+    ⛔ Do NOT read this as "the form's label made the gate fail" (#10146's
+    miscited root cause). It made the gate **skip** the body: the issue-body
+    arm classified with a column-0 ``grep``, which cannot see a ``###`` prefix,
+    and the form's ``internal`` label matched neither label fallback. The
+    strict-parser rejection above is the consequence on the COMMENT arm (and on
+    the issue arm only since it started refusing a form-filed body with no
+    parseable claim). The assertion below is the pin in both worlds: the form
+    must ship no line the claim parser selects.
     """
     body = _render_body(_load())
     hits = [ln for ln in body.splitlines() if PROVENANCE_CLAIM_RE.match(ln)]
     assert not hits, (
-        "the form renders lines the provenance claim parser selects (each one "
-        f"becomes FAIL UNKNOWN_PROVENANCE): {hits}")
+        "the form renders lines the provenance claim parser selects (a claim "
+        "the strict parser rejects, so the body is UNKNOWN_PROVENANCE wherever "
+        f"it is classified): {hits}")
+
+
+def test_the_old_label_claim_is_selected_by_one_parser_and_refused_by_the_other():
+    """The mechanism this module is about, in one assertion pair.
+
+    ``### Measured at (commit / sha you read)`` — the label the form used to
+    ship, and the line the pre-fix red run reported — is a CLAIM (the claim
+    parser tolerates the ``###`` prefix) and is never a valid provenance line.
+    That split is exactly what the two halves must never disagree about; and it
+    is why the ISSUE-BODY arm's column-0 ``grep`` was the deeper defect, since
+    it reads neither parser and so saw no claim here at all.
+    """
+    line = "### Measured at (commit / sha you read)"
+    assert PROVENANCE_CLAIM_RE.match(line), (
+        "the label the form used to render is a claim the claim parser selects")
+    assert not PROVENANCE_RE.search(line), (
+        "…and it is never a valid provenance line — the strict parser refuses it")
 
 
 def test_no_field_label_or_description_reads_as_a_provenance_claim():
@@ -134,7 +177,11 @@ def test_the_shape_the_form_asks_for_is_the_shape_the_gate_accepts():
     "Measured at: origin/main@" + "a" * 40,         # no date
 ])
 def test_the_old_form_shape_is_refused(bad):
-    """Pin the defect: the shape the form used to ask for fails the gate."""
+    """Pin the defect: the shape the form used to ask for fails the gate.
+
+    Selected-then-refused is the pair that makes it ``UNKNOWN_PROVENANCE``
+    rather than silence — on the arm that uses the claim parser at all.
+    """
     assert not PROVENANCE_RE.search(bad)
     assert PROVENANCE_CLAIM_RE.match(bad), (
         "a malformed provenance claim must still be SELECTED by the claim "

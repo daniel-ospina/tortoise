@@ -22845,8 +22845,17 @@ class TortoiseSDK:
                 mitigation point is a calibrated live evidence point and the
                 decide flow ranks on the first try (no CalibrationError).
 
-        Raises ValueError if id not found, not an operator, strength out of
-        [0, 1], or credibility outside the ladder.
+        Raises ``ValueError`` if id not found, not an operator, strength out of
+        [0, 1], or credibility outside the ladder — AND
+        ``UnaddressableClaimError`` (a ``ValueError`` SUBCLASS, ``exceptions.py``,
+        #9754) when the operator's existing mitigation Point carries no ``id``:
+        the node this call would rewrite cannot be addressed at all, so refusing
+        is the only honest answer (it used to return ``{}`` — a false success).
+        The two are distinguishable BY CLASS, which is the point of the subclass:
+        a caller that can skip one unrepairable node and continue catches the
+        subclass (``commit_ops.apply_payload_operators`` does exactly that, per
+        item), while a caller that must abort on a defect in its OWN record
+        leaves the parent uncaught.
         Idempotent: a second call updates the existing CURRENT mitigation
         (reason + strength), does not create a duplicate. A mitigation the graph
         records as terminal (retracted/superseded/outdated/archived) is never
