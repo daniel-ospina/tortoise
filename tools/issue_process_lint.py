@@ -17,12 +17,16 @@ Which makes exactly two shapes defects, and this tool flags only those:
 =========================  =========================================================================
 arm                        flagged when
 =========================  =========================================================================
-``pr-unclaimed-issue``     a PR **claims** an issue (``Refs`` / ``Related`` / ``Part of`` / a bare
-                           ``#N`` on that line) and that issue is resolved by **neither**
-                           ``Satisfies #N`` **nor** a closing keyword (``Closes``/``Fixes``/
-                           ``Resolves``). Measured (#10534): of 18 PRs naming a P0/P1, 18 used
-                           ``Refs`` and 5 of 29 used a closing keyword — so delivered work never
-                           closed and the count never moved.
+``pr-unclaimed-issue``     a PR **claims** an issue (a ``#N`` — optionally ``owner/repo#N`` —
+                           attached to a **claiming word**: ``Refs`` / ``Related`` / ``Part of`` /
+                           ``See also`` / ``serves`` / ``addresses`` and the closing/satisfies words;
+                           a comma-continued list after that word is claimed in FULL) and that issue
+                           is resolved by **neither** ``Satisfies #N`` **nor** a closing keyword
+                           (``Closes``/``Fixes``/``Resolves``). A bare ``#N`` with no claiming word
+                           is a MENTION and is never flagged — that distinction is what took the
+                           measured false-positive population from 68 % to 36 %. Measured (#10534):
+                           of 18 PRs naming a P0/P1, 18 used ``Refs`` and 5 of 29 used a closing
+                           keyword — so delivered work never closed and the count never moved.
 ``wip-no-satisfies``       an issue has WIP but **no ``## Satisfies`` checklist** anywhere in its
                            comments — work started before the completion criteria existed.
 =========================  =========================================================================
@@ -156,14 +160,23 @@ SATISFIES_WORDS = ("satisfy", "satisfies", "satisfied")
 # A claim is a reference the author attaches a **claiming word** to. Anything else is a mention.
 # The window between the word and the `#` is short on purpose: "See #12 for background, and this
 # closes nothing" must not read as a closing claim, and a long window is how that happens.
+#
+# ⚠️ The window is NOT the same for both directions, and applying the lenient one to the RESOLVING
+# words was a false PASS: `mid` accepts any 16 non-`#` characters, so a PROSE sentence — "The fix
+# in #12 was reviewed this morning" — manufactured a closing resolution and arm 1 reported clean,
+# which is the #10534 hole the arm exists to close. A resolving word must therefore be followed by
+# punctuation/whitespace only; a linking word keeps the lenient window, because that leniency is
+# what makes `Refs, as agreed, #12` a claim.
 CLAIM_RE = re.compile(
-    r"\b(?P<kw>refs?|related|part\s+of|see\s+also|satisf(?:y|ies|ied)|"
-    r"close[sd]?|fix(?:e[sd])?|resolve[sd]?|serves?|addresses)\b"
-    r"(?P<mid>[^\n#]{0,16}?)(?:(?P<qual>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+))?#(?P<num>\d{1,7})\b"
+    r"\b(?:(?P<kw>refs?|related|part\s+of|see\s+also|serves?|addresses)\b"
+    r"(?P<mid>[^\n#]{0,16}?)"
+    r"|(?P<ckw>satisf(?:y|ies|ied)|close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b"
+    r"(?P<cmid>[\s:.,;()\[\]–—]*))"
     # A COMMA-CONTINUED list is claimed in full: `Part of #10085, #10063` claims BOTH, and
     # reading only the first dropped every subject after it (F3) — measured on three open PRs
     # (#11038, #11065, #11093). The list shape is unambiguous in a way a bare `#N` elsewhere on
     # the line is not, so only the comma-continued form is taken.
+    r"(?:(?P<qual>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+))?#(?P<num>\d{1,7})\b"
     r"(?P<more>(?:\s*,\s*(?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#\d{1,7}\b)*)",
     re.IGNORECASE,
 )
@@ -195,11 +208,17 @@ RELEASE_WORDS = ("none", "released", "unclaimed", "free", "—", "-")
 # scan is a silent MISS in the flagging direction: the marker the process block mandates carries
 # author text after the ids (`IN FLIGHT: 4282 — branch fix/unclaimed-issue-arm2 — box cell-3`), and
 # `unclaimed` is this tool's OWN vocabulary, so a lane named after the arm it is working on would
-# clear its own WIP marker. A release is a delimited annotation — `— released …`, `(released)`,
-# `; none` — so that is what is matched. `free` is excluded entirely: it heads a release, but also
-# appears in ordinary work (`free tier`), so it stays a FIRST-TOKEN-only word.
+# clear its own WIP marker.
+#
+# Two properties are load-bearing: the delimiter class must NOT contain a bare `-` (a hyphen is the
+# in-word separator of every branch slug, so `feat/retrieval-none-mode` would read as released), and
+# the word must be TERMINAL — followed by a date, a closing bracket, a delimiter or end of line — so
+# `(none pending)` is a status note, not a release. `free` is excluded entirely: it heads a release
+# but also appears in ordinary work (`free tier`), so it stays a FIRST-TOKEN-only word.
 RELEASE_ANYWHERE_RE = re.compile(
-    r"(?:^|[—–\-(;,])\s*(?:none|released|unclaimed)\b", re.IGNORECASE)
+    r"(?:^|[—–:;,.(\[]|\s-\s)\s*(?:none|released|unclaimed)\b(?![\w-])"
+    r"(?=\s*(?:\d{4}-\d{2}-\d{2}|[)\].,;]|$|—|–))",
+    re.IGNORECASE)
 
 ARM_PR = "pr-unclaimed-issue"
 ARM_ISSUE = "wip-no-satisfies"
@@ -259,10 +278,17 @@ def claims(body: str, own_number: int | None = None,
 
 
 def _claims_in(text: str, own_number: int | None = None,
-               repo: str | None = None) -> dict[str, list[int]]:
+               repo: str | None = None,
+               skipped: list[int] | None = None) -> dict[str, list[int]]:
     """`claims` over ALREADY-normalised text, so a caller that needs `hidden_lines` from the same
     pass does not strip the body twice (two passes of a pure function cannot disagree, but a caller
-    that reported a count from one pass and classified from another would be reading two bodies)."""
+    that reported a count from one pass and classified from another would be reading two bodies).
+
+    `skipped`, when supplied, receives every `owner/repo#N` claim dropped because the repo was
+    UNKNOWN. Without that sink the drop is invisible: the same body then measures a SMALLER
+    population offline than with `--repo`, and reports clean for content it did not read — which is
+    the shape this module refuses everywhere else (`Unmeasurable`, never a pass).
+    """
     found: dict[str, list[int]] = {"closing": [], "satisfies": [], "weak": [], "declined": []}
     declined_lines = {i for i, line in enumerate(text.splitlines()) if DECLINE_RE.search(line)}
     line_starts = [0]
@@ -271,7 +297,7 @@ def _claims_in(text: str, own_number: int | None = None,
     for m in CLAIM_RE.finditer(text):
         line_no = sum(1 for st in line_starts if st <= m.start()) - 1
         into = found["declined"] if line_no in declined_lines else None
-        word = re.sub(r"\s+", " ", m.group("kw").lower())
+        word = re.sub(r"\s+", " ", (m.group("kw") or m.group("ckw")).lower())
         # The claiming word governs its WHOLE same-line list (F3).
         refs = [(m.group("qual"), int(m.group("num")))]
         refs += [(c.group("qual"), int(c.group("num")))
@@ -279,6 +305,12 @@ def _claims_in(text: str, own_number: int | None = None,
         for qual, num in refs:
             if own_number is not None and num == own_number:
                 continue  # a PR quoting its own number from a review is not claiming an issue
+            if qual and repo is None:
+                # It MIGHT be this repo — we simply do not know — so it is neither claimed nor
+                # silently forgotten; the caller reports the narrower population (F3 of round 3).
+                if skipped is not None:
+                    skipped.append(num)
+                continue
             if qual and (repo is None or qual.lower() != repo.lower()):
                 continue  # `owner/repo#N` for another repo is not this PR's business
             if into is not None:
@@ -368,7 +400,11 @@ def classify_pr(body: str, number: int | str, repo: str | None = None,
     if hidden and notes is not None:
         notes.append(f"an unterminated fence hid {hidden} line(s) from the scan in #{number}")
     own = number if isinstance(number, int) and number > 0 else None
-    c = _claims_in(text, own, repo)
+    skipped: list[int] = []
+    c = _claims_in(text, own, repo, skipped)
+    if skipped and notes is not None:
+        notes.append(f"{len(skipped)} owner/repo#N claim(s) in #{number} were NOT read — the repo "
+                     f"is unknown offline; pass --repo to count them")
     claimed = sorted((set(c["closing"]) | set(c["satisfies"]) | set(c["weak"]))
                      - set(c["declined"]))
     if not claimed:
@@ -523,7 +559,9 @@ def main(argv: list[str] | None = None) -> int:
     which.add_argument("--sweep-issues", action="store_true", help="classify every open issue")
     which.add_argument("--body-file", type=Path, help="offline: a PR body")
     which.add_argument("--issue-body-file", type=Path, help="offline: an issue body")
-    ap.add_argument("--repo", default=None, help="owner/name (default: resolved from gh)")
+    ap.add_argument("--repo", default=None,
+                    help="owner/name (default: resolved from gh in the LIVE modes only; pass it "
+                         "explicitly to count owner/repo#N claims in the offline file modes)")
     ap.add_argument("--comments-file", type=Path, default=None,
                     help="offline issue mode: comment bodies (JSON list, gh-shaped, or markdown)")
     ap.add_argument("--wip", action="store_true",
