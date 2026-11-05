@@ -926,29 +926,23 @@ async def test_the_seam_returns_the_write_contract_and_still_abandons(slow_dispa
 def test_the_citations_in_this_contract_are_SYMBOLS_not_sdk_line_numbers():
     """An `sdk.py:<line>` citation is a claim that rots on the next upstream edit.
 
-    This branch converted its own `sdk.py` line citations to symbols. One
-    `origin/main` merge shifted every one of them by +104 (22427 → 22531), and that
-    single instance is the whole argument: a line number is only meaningful against
-    one revision, so in a file that outlives the revision it can be stale with
-    nothing saying so — prose cannot red a check.
-
-    ⛔ No counting history is recorded here. An earlier version of this docstring
-    tried to and got it wrong (several times, in several ways of being wrong), which
-    is itself the demonstration: the rule below is what a reader can apply, and a
-    number they are invited to check is a worse artifact.
+    A line number is only meaningful against one revision, so in a file that
+    outlives the revision it can go stale with nothing saying so — prose cannot red
+    a check. This branch de-cited its own `sdk.py` citations; by the time it did,
+    one `origin/main` merge had shifted every one of those numbers by +104
+    (22427 → 22531).
 
     The repo's own convention is the symbol (see
     `docs/architecture/STORAGE-ARCHITECTURE-CHANGELOG.md`: "the emitters are named
     by SYMBOL now … reds on a bare `sdk.py:<N>`"). This pins it for the files this
-    contract's claims live in, so neither this lane nor the next can reintroduce a
-    line citation to `tortoise/sdk.py` — the file that moves under them.
+    contract's claims live in.
 
     ⛔ SCOPE, so this does not claim more than it does: the pattern is
     `sdk.py:<digits>`. Line citations to OTHER modules already exist in these files
     from before this PR (`mcp_auth.py:515-538`, `mcp_server.py:1304`,
     `fastmcp/tools/base.py:363-369`, `record_read.py:1029`) and are not this
-    lane's debt to convert — `sdk.py` is the file whose citations this branch
-    converted.
+    lane's debt to convert — `sdk.py` is the precedent this branch already set, and
+    the file this gate polices.
     """
     import pathlib
     import re
