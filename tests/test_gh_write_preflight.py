@@ -154,9 +154,10 @@ def _env(stub_base: str, token: str | None, **overrides: str) -> dict:
     # MEASURED for the `http://` stub bases this file uses: `http_proxy` (any case) → the probe goes to
     # the proxy and `seen` stays empty on a probe-everything mutant, i.e. an inert arm again, silently.
     # `https_proxy` is not a vector for an `http://` base, and it IS one for an `https://` base
-    # (measured: the proxy answered `CONNECT 127.0.0.1:1`), so stripping it also covers a future test
-    # that binds one. `all_proxy` is a different case: `getproxies_environment` files it under the key
-    # `all`, `ProxyHandler` mints `all_open` from it, and nothing ever dispatches to that name — URL
+    # (measured: the CLIENT sends `CONNECT 127.0.0.1:1 HTTP/1.1` to the proxy), so stripping it also
+    # covers a future test that binds one. `all_proxy` is a different case:
+    # `getproxies_environment` files it under the key `all`, `ProxyHandler` mints `all_open` from it,
+    # and nothing ever dispatches to that name — URL
     # dispatch is `<scheme>_open`, i.e. `http`/`https` — so it is read and never CONSULTED (measured:
     # `ALL_PROXY` set → direct, stub recorded the request). It is stripped because a reader expects it
     # to matter and the strip is free, NOT because it covers any base.
@@ -580,57 +581,188 @@ def test_the_child_env_carries_no_proxy():
 def _child_env_violations(path: Path) -> list[str]:
     """Every `subprocess` call in this file must pass `env=` derived from `_env(…)` (review F1/F2).
 
-    A SPELLING LIST IS NOT A PIN. Counting `os.environ`+`.items()` (then `{**os.environ`, then
-    `.copy()`) missed `dict(os.environ)`, `{** os.environ}` and `os.environ | {…}` — all measured GREEN
-    until this replaced the counting — and it could never see the worst shape, a `subprocess` call that
-    omits `env=` and silently inherits the host. So this reads the AST instead: for every
-    `subprocess.<call>`, `env=` must be present, and every name in that expression must be assigned
-    from a `_env(…)` call somewhere in the file. A literal spread has no such name, so it fails.
+    A SPELLING LIST IS NOT A PIN, and neither is a FILE-GLOBAL NAME MAP. Two measured rounds of
+    holes got it here: counting spellings missed `dict(os.environ)`, `{** os.environ}`,
+    `os.environ | {…}` and an omitted `env=`; then a file-global "every assignment of this name is a
+    `_env(…)` call" map missed `def f(env): … env=env` (a parameter), `for env in [{**os.environ}]`,
+    `(env,) = (dict(os.environ),)`, `if (env := dict(os.environ))`, `with cfg as env` — because ~30
+    innocent `env = _env(…)` records elsewhere in the file vouched for the name — and it named 29
+    innocent lines instead of the one offending site.
+
+    So: per SCOPE binding facts, and derivation as a RECURSIVE predicate over the expression.
+      - `_env(…)` is derived. A name is derived when the nearest scope binds it (only) to derived
+        values — a scope that declares it unknown (parameter, `for`/`with`/`except`/walrus target,
+        import) makes it NOT derived, which fails closed. A composite expression (a dict spread, a
+        `dict(...)`/`vars(...)` wrapper) is derived when any of its sub-expressions is, so
+        `{**_env(…), "K": "v"}` passes while `{**os.environ}` does not.
+      - `_env`'s own body is graded like any other scope rather than skipped: its local `env` is the
+        host-env comprehension, so a `subprocess` call hidden inside the builder is flagged instead of
+        being vouched for by the builder itself.
+    Each violation names the SUBPROCESS call's line — and, for a name, the lines that bound it.
     """
     import ast
 
-    tree = ast.parse(path.read_text(encoding="utf-8"))
-    # `_env`'s OWN body assigns the host-env comprehension to a local called `env`, and that is the one
-    # legitimate non-`_env(...)` assignment in the file — skip its line range rather than special-case a
-    # name.
-    builder_ranges = [(n.lineno, getattr(n, "end_lineno", n.lineno)) for n in ast.walk(tree)
-                      if isinstance(n, ast.FunctionDef) and n.name == "_env"]
+    def target_names(target: ast.AST) -> set[str]:
+        # ⛔ NEVER `ast.walk` HERE: a `env["K"] = v` target is a Subscript whose walk INCLUDES the name
+        # `env`, which would mark the very binding the site just made as unknown (measured: 13 false
+        # positives, all of them `env = _env(…)` followed by `env["…"] = …`). Only a binding NAME — or an
+        # unpacking of them — is a target that shadows.
+        if isinstance(target, ast.Name):
+            return {target.id}
+        if isinstance(target, ast.Starred):
+            return target_names(target.value)
+        if isinstance(target, (ast.Tuple, ast.List)):
+            names: set[str] = set()
+            for element in target.elts:
+                names |= target_names(element)
+            return names
+        return set()
 
-    def inside_builder(lineno: int) -> bool:
-        return any(lo <= lineno <= hi for lo, hi in builder_ranges)
+    class Checker(ast.NodeVisitor):
+        """One ordered pass: bindings are recorded before the calls that read them (they precede)."""
 
-    from_env_call: dict[str, list[ast.expr]] = {}
-    for node in ast.walk(tree):
-        if not isinstance(node, (ast.Assign, ast.AnnAssign)) or inside_builder(node.lineno):
-            continue
-        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
-            from_env_call.setdefault(node.targets[0].id, []).append(node.value)
-        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-            from_env_call.setdefault(node.target.id, []).append(node.value)
+        def __init__(self) -> None:
+            self.scopes: list[dict[str, list[ast.expr] | None]] = [{}]
+            self.violations: list[str] = []
 
-    def is_env_call(expr: ast.expr) -> bool:
-        return (isinstance(expr, ast.Call) and isinstance(expr.func, ast.Name)
-                and expr.func.id == "_env")
+        # ── scope facts ──────────────────────────────────────────────────────────────────────
+        def _unknown(self, names: set[str]) -> None:
+            for name in names:
+                self.scopes[-1][name] = None
 
-    violations: list[str] = []
-    for node in ast.walk(tree):
-        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                and isinstance(node.func.value, ast.Name) and node.func.value.id == "subprocess"):
-            continue
-        env_kw = next((kw for kw in node.keywords if kw.arg == "env"), None)
-        if env_kw is None:
-            violations.append(f"line {node.lineno}: no `env=` — the child inherits the host environment")
-            continue
-        if is_env_call(env_kw.value):
-            continue
-        names = {n.id for n in ast.walk(env_kw.value) if isinstance(n, ast.Name)}
-        # ⛔ AN UNASSIGNED NAME IS NOT DERIVED (measured: `env={**os.environ}` passed this check because
-        # `os` has no assignments, so "every assignment is a `_env` call" was vacuously true). Each name
-        # must have at least one assignment AND all of them must be `_env(...)` calls.
-        if names and all(from_env_call.get(n) and all(is_env_call(v) for v in from_env_call[n]) for n in names):
-            continue                                    # `env = _env(…)`, then `env=env`
-        violations.append(f"line {node.lineno}: `env=` is not derived from `_env(…)`")
-    return violations
+        def _bind(self, name: str, value: ast.expr) -> None:
+            scope = self.scopes[-1]
+            if scope.get(name) is None and name in scope:      # already unknown: stays unknown
+                return
+            scope.setdefault(name, []).append(value)
+
+        def _lookup(self, name: str) -> tuple[bool, list[ast.expr] | None]:
+            for scope in reversed(self.scopes):
+                if name in scope:
+                    return True, scope[name]
+            return False, None
+
+        def _derived(self, expr: ast.expr, seen: frozenset[str] = frozenset()) -> bool:
+            if isinstance(expr, ast.Call) and isinstance(expr.func, ast.Name) and expr.func.id == "_env":
+                return True
+            if isinstance(expr, ast.Name):
+                found, bindings = self._lookup(expr.id)
+                if not found or not bindings or expr.id in seen:
+                    return False
+                return all(self._derived(value, seen | {expr.id}) for value in bindings)
+            return any(self._derived(child, seen) for child in ast.iter_child_nodes(expr)
+                       if isinstance(child, ast.expr))
+
+        # ── declarations that make a name unknown (fail closed) ─────────────────────────────
+        def _push_function(self, node) -> None:
+            args = node.args
+            params = {a.arg for a in (*args.posonlyargs, *args.args, *args.kwonlyargs)}
+            for extra in (args.vararg, args.kwarg):
+                if extra is not None:
+                    params.add(extra.arg)
+            for default in (*args.defaults, *args.kw_defaults):
+                if default is not None:
+                    self.visit(default)                        # evaluated in the ENCLOSING scope
+            self.scopes.append({name: None for name in params})
+            for stmt in node.body:
+                self.visit(stmt)
+            self.scopes.pop()
+
+        visit_FunctionDef = _push_function
+        visit_AsyncFunctionDef = _push_function
+
+        def visit_Lambda(self, node: ast.Lambda) -> None:
+            # visit in place: lambdas here are `key=` arguments, never a child-env source
+            for child in ast.iter_child_nodes(node):
+                self.visit(child)
+
+        def _push_comprehension(self, node) -> None:
+            self.scopes.append({})
+            for gen in node.generators:
+                self.visit(gen.iter)
+                self._unknown(target_names(gen.target))
+                for cond in gen.ifs:
+                    self.visit(cond)
+            if isinstance(node, ast.DictComp):
+                self.visit(node.key)
+                self.visit(node.value)
+            else:
+                self.visit(node.elt)
+            self.scopes.pop()
+
+        visit_ListComp = _push_comprehension
+        visit_SetComp = _push_comprehension
+        visit_DictComp = _push_comprehension
+        visit_GeneratorExp = _push_comprehension
+
+        def visit_For(self, node: ast.For) -> None:
+            self.generic_visit(node)
+            self._unknown(target_names(node.target))
+
+        visit_AsyncFor = visit_For
+
+        def visit_With(self, node: ast.With) -> None:
+            self.generic_visit(node)
+            for item in node.items:
+                if item.optional_vars is not None:
+                    self._unknown(target_names(item.optional_vars))
+
+        visit_AsyncWith = visit_With
+
+        def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
+            self.generic_visit(node)
+            if node.name:
+                self._unknown({node.name})
+
+        def visit_NamedExpr(self, node: ast.NamedExpr) -> None:
+            self.generic_visit(node)
+            self._unknown(target_names(node.target))
+
+        def visit_Import(self, node: ast.Import) -> None:
+            self._unknown({(a.asname or a.name.split(".")[0]) for a in node.names})
+
+        def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+            self._unknown({(a.asname or a.name) for a in node.names})
+
+        # ── bindings and the check itself ───────────────────────────────────────────────────
+        def visit_Assign(self, node: ast.Assign) -> None:
+            if len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+                self._bind(node.targets[0].id, node.value)
+            else:
+                for target in node.targets:                    # unpacking: origin unknown
+                    self._unknown(target_names(target))
+            self.generic_visit(node)
+
+        def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+            if isinstance(node.target, ast.Name) and node.value is not None:
+                self._bind(node.target.id, node.value)
+            elif isinstance(node.target, ast.Name):
+                self._unknown({node.target.id})
+            self.generic_visit(node)
+
+        def visit_Call(self, node: ast.Call) -> None:
+            is_subprocess = (isinstance(node.func, ast.Attribute)
+                             and isinstance(node.func.value, ast.Name)
+                             and node.func.value.id == "subprocess")
+            if is_subprocess:
+                env_kw = next((kw for kw in node.keywords if kw.arg == "env"), None)
+                if env_kw is None:
+                    self.violations.append(
+                        f"line {node.lineno}: no `env=` — the child inherits the host environment")
+                elif not self._derived(env_kw.value):
+                    detail = ""
+                    if isinstance(env_kw.value, ast.Name):
+                        found, bindings = self._lookup(env_kw.value.id)
+                        where = ("unknown origin" if not found or not bindings
+                                 else "line(s) " + ", ".join(str(b.lineno) for b in bindings))
+                        detail = f" (`{env_kw.value.id}`: {where})"
+                    self.violations.append(
+                        f"line {node.lineno}: `env=` is not derived from `_env(…)`{detail}")
+            self.generic_visit(node)
+
+    checker = Checker()
+    checker.visit(ast.parse(path.read_text(encoding="utf-8")))
+    return checker.violations
 
 
 def test_non_loopback_api_base_is_refused_before_anything_is_contacted():
