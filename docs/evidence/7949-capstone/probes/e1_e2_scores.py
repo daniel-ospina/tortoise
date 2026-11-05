@@ -299,7 +299,17 @@ def _read_json(path: Path) -> dict:
         raise _refuse(f"{path} does not exist — a row cannot cite an artifact "
                       "the tree does not carry")
     try:
-        payload = json.loads(path.read_text())
+        text = path.read_text()
+    except UnicodeDecodeError as exc:
+        # ⛔ A RECORD THAT IS NOT UTF-8 IS CORRUPT INPUT, NOT A CRASH (#10610 review
+        # at `858675ade`, P2): the sibling `is not JSON` arm exists precisely to turn
+        # corrupt input into an exit-2 refusal, and a truncated or UTF-16 file raised
+        # `UnicodeDecodeError` -> exit **1** beside it. `read_text()` was called
+        # INSIDE the try but only `JSONDecodeError` was caught.
+        raise _refuse(f"{path} is not UTF-8 text, so it cannot be the record it "
+                      f"is cited as: {exc}") from exc
+    try:
+        payload = json.loads(text)
     except json.JSONDecodeError as exc:  # pragma: no cover - corrupt input
         raise _refuse(f"{path} is not JSON: {exc}") from exc
     # ⛔ THE TOP LEVEL IS AN OBJECT OR IT IS REFUSED (#10610 review at `73382c7e6`,
@@ -407,11 +417,18 @@ def _unit_id_members(where: str, session_id, field: str, members: list) -> None:
     `_consistent_share` already convert-and-refuse in this file; this is the one
     guard the whole E2a partition rests on, so it cannot be the one that skips it.
 
-    A unit id is a string by construction: `e2a_value_units.py:150-152` writes
-    `value_ids` / `value_survived` / `value_lost`, the last two built by the
-    `[uid for uid in value_ids …]` comprehensions at `:124` and `:143`, and
-    `value_bearing_ids` reads `unit["id"]` out of the corpus gold — so a member
-    that is not a string is an edited record, not a shape this reader can grade.
+    A unit id is a string by construction: `e2a_value_units.py:150-153` writes
+    `value_ids` / `value_survived` / `value_lost`, the first two carried straight
+    from the `survived` comprehensions at `:124-125` (as-written) and `:143-144`
+    (with-anchor), and `value_lost` built on `:152` by
+    `[v for v in value_ids if v not in set(survived)]`; `value_bearing_ids` reads
+    `unit["id"]` out of the corpus gold — so a member that is not a string is an
+    edited record, not a shape this reader can grade.
+
+    (#10610 review at `858675ade`, P3: an earlier revision attributed `value_lost`
+    to those `:124`/`:143` comprehensions. Both of them build `survived`, i.e. the
+    `value_survived` list, and the miscitation left the one key this new guard
+    exists for — `value_lost` — with no provenance at all.)
     """
     for member in members:
         if not isinstance(member, str):
@@ -590,11 +607,22 @@ def frozen_denominators(repo: Path) -> dict:
     driver and the probe that scores the row cannot read two thresholds.
     """
     prereg = _read_json(repo / PREREG)
-    floors = prereg.get("denominator_floors") or {}
+    # ⛔ THE TWO SUB-OBJECTS ARE SHAPE-CHECKED, not truthiness-defaulted (#10610 review
+    # at `858675ade`, P2 — the same `(value or {})` shape cycle 3 fixed one level
+    # down). `prereg["denominator_floors"] = 7` reached
+    # `"e1_objects" not in floors` as `TypeError: argument of type 'int' is not
+    # iterable`, and `corpus = "sha256:dead"` reached `.get` as an `AttributeError`
+    # — both exit **1**, before any refusal. `None`/absent stay "missing", which the
+    # named-key refusals below report with their own wording.
+    floors = prereg.get("denominator_floors")
+    floors = {} if floors is None else _object_block(
+        str(PREREG), "denominator_floors", floors)
     for key in ("e1_objects", "e1_min_before_share", "e2b_surviving_units"):
         if key not in floors:
             raise _refuse(f"{PREREG} carries no denominator_floors.{key}")
-    corpus = prereg.get("corpus") or {}
+    corpus = prereg.get("corpus")
+    corpus = {} if corpus is None else _object_block(
+        str(PREREG), "corpus", corpus)
     if not corpus.get("fixtures_hash"):
         raise _refuse(f"{PREREG} carries no corpus.fixtures_hash")
     # ⛔ A PIN THAT IS PRESENT BUT NOT A STRING IS REFUSED HERE (#10610 review at
@@ -879,7 +907,14 @@ def read_on_arm(repo: Path) -> dict:
     path = repo / EVIDENCE / ON_ARM_LOG
     if not path.is_file():
         raise _refuse(f"{EVIDENCE / ON_ARM_LOG} does not exist")
-    text = path.read_text()
+    try:
+        text = path.read_text()
+    except UnicodeDecodeError as exc:
+        # Same class as `_read_json`'s (#10610 review at `858675ade`, P2): a log that
+        # is not UTF-8 was an uncaught traceback, not the exit-2 refusal the module
+        # promises for a corrupt input.
+        raise _refuse(f"{EVIDENCE / ON_ARM_LOG} is not UTF-8 text, so it cannot be "
+                      f"the log it is cited as: {exc}") from exc
     objects = _int_token(text, r"^e1-aux objects_in_graph=(\d+)",
                         what="e1-aux objects_in_graph")
     bare = _int_token(text, r"^e1-aux objects_in_graph=\d+ bare_definite=(\d+)",

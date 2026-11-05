@@ -7694,6 +7694,82 @@ def test_a_fixtures_hash_that_is_not_a_string_is_refused(tmp_path, capsys):
         assert "not a string" in err, err
 
 
+def test_a_prereg_sub_object_that_is_not_an_object_is_refused(tmp_path, capsys):
+    """#10610 review cycle 4 (P2): `(value or {})` one level UP was the same traceback.
+
+    `frozen_denominators` defaulted `denominator_floors` and `corpus` with
+    `prereg.get(...) or {}`, so a truthy non-dict reached `"e1_objects" not in
+    floors` as `TypeError: argument of type 'int' is not iterable`, and
+    `corpus.get(...)` as `AttributeError` — exit **1**, before any refusal. Cycle 3
+    fixed this shape for the falsifier's blocks; the parent record's two
+    sub-objects were the same read one level up.
+
+    Non-vacuity: at the pre-fix head both arms exit 1 (measured). `None` and an
+    ABSENT key are still the "missing" case, reported by the named-key refusals —
+    asserted here so the shape guard cannot quietly swallow that wording.
+    """
+    path = Path("docs/evidence/7949-capstone/preregistration.json")
+    for field, value, name in (("denominator_floors", 7, "int"),
+                               ("denominator_floors", ["e1_objects"], "list"),
+                               ("corpus", "sha256:dead", "str"),
+                               ("corpus", [1, 2], "list")):
+        repo = _bundle(tmp_path / f"{field}-{name}")
+        prereg_path = repo / path
+        prereg = json.loads(prereg_path.read_text())
+        assert isinstance(prereg[field], dict), field     # the shipped shape
+        prereg[field] = value
+        prereg_path.write_text(json.dumps(prereg))
+        with pytest.raises(SystemExit) as refused:
+            scores_probe.score(repo)
+        assert refused.value.code == 2, (field, value, refused.value)
+        err = capsys.readouterr().err
+        assert f"carries a {field} that is not a JSON object" in err, err
+        assert f"{name}:" in err, err
+
+    # `null` is still "missing": the refusal names the KEY, not the shape, which is
+    # the message a reader with a stripped pre-registration needs.
+    repo = _bundle(tmp_path / "null-floors")
+    prereg_path = repo / path
+    prereg = json.loads(prereg_path.read_text())
+    prereg["denominator_floors"] = None
+    prereg_path.write_text(json.dumps(prereg))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    assert "carries no denominator_floors.e1_objects" in capsys.readouterr().err
+
+
+def test_a_record_that_is_not_utf8_is_refused_not_tracebacked(tmp_path, capsys):
+    """#10610 review cycle 4 (P2): corrupt BYTES were a traceback, next to the JSON arm.
+
+    `_read_json` called `read_text()` inside its `try` but caught only
+    `json.JSONDecodeError`, and `read_on_arm` called it with no handler at all — so a
+    truncated or UTF-16 record raised `UnicodeDecodeError` and exited **1**, while the
+    `is not JSON` branch beside it exists to turn corrupt input into the exit-2
+    refusal. Same contract, one line earlier in the same function.
+
+    Non-vacuity: at the pre-fix head both arms exit 1 with `UnicodeDecodeError`.
+    """
+    repo = _bundle(tmp_path / "json")
+    (repo / "docs/evidence/9889/e2a-value-units.json").write_bytes(
+        b'\xff\xfe{"value_units": 14}\n')
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert "is not UTF-8 text" in err, err
+
+    # …and the LOG path (`read_on_arm`), which had no handler at all.
+    repo = _bundle(tmp_path / "log")
+    (repo / "docs/evidence/9889/on-arm.log").write_bytes(
+        b'\xff\xfe# head: deadbeef\ne1-aux objects_in_graph=1 bare_definite=1 '
+        b'share=1.0\n')
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    assert "is not UTF-8 text" in capsys.readouterr().err
+
+
 def test_the_after_arm_is_witnessed_by_the_gate_drops_record(tmp_path, capsys):
     """#10610 review at `f12471075` (P0): a self-consistent ON-log edit scored GREEN.
 
