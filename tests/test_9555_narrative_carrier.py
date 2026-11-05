@@ -1696,6 +1696,11 @@ def test_section_9_1b_counts_the_routes_it_actually_enumerates():
 # PRESENT.
 _RETIRED_SUMMARY_BLUR = "We already write the summary — it is the S1 narrative"
 _RETIRED_VECTOR_FOOTNOTE = "would be **indexing an existing field**"
+#: The trap §9.4 and §12.1b both name — the field the vector must NOT read. ONE
+#: constant, because both object-bound guards about it (`_negates_the_summary`
+#: below, and the count/absence asserts in the pin body) must spell it the same
+#: way, or they measure different objects under the same name.
+_SUMMARY_OBJECT = ":Source.summary"
 _SOURCE_VECTOR_FOOTNOTE_ANCHOR = "Practical footnote for `:Source`"
 #: §9.4's DECIDING sentence — the one line that says what the vector reads. Carries
 #: BOTH the pointer and the negation, so both are asserted on THIS LINE (resolved
@@ -1791,7 +1796,8 @@ def _assert_vector_reads_the_narrative(line: str, where: str, home: str) -> None
         f"these sections forbid (measured GREEN before this assert)")
     assert not _negates_the_home(line, home), (
         f"{where} NEGATES the pointer — a negation cue (`not` / `never` / `no "
-        f"longer`) is applied to the READ of `{home}`, which a presence check "
+        f"longer` / `cannot` / `by no means` / `in no case` / an `-n't` "
+        f"contraction) is applied to the READ of `{home}`, which a presence check "
         f"cannot see; the negation these sections DO want is about "
         f"`:Source.summary`, not about the narrative's home. ⚠️ The cue is "
         f"bound to `{home}` on purpose: an unbounded `'not read from' not in "
@@ -1805,6 +1811,21 @@ def _assert_vector_reads_the_narrative(line: str, where: str, home: str) -> None
         f"§9.4 forbids. ⚠️ The match is COLUMN-SHAPED, not 'a period follows "
         f"the home': a correct sentence ending *'…read from `{home}`.'* is "
         f"not a column and must not red (measured)")
+
+
+#: The negation cues BOTH object-bound guards read. ONE list, because the two
+#: guards refuse the same claim about two different objects (`home`, and
+#: `:Source.summary`) — a cue admitted by one and missed by the other is the same
+#: hole twice over, and the next reader should not have to find it twice.
+#: ⚠️ `cannot` / `can not` / `by no means` / `in no case` were measured MISSING
+#: from the first set: *"the vector's text cannot be the S1 narrative read from
+#: `home`"* was ACCEPTED (cycle 17 widened the SPAN, not the vocabulary — the
+#: span fix and the cue fix are different halves). Pinned in both directions by
+#: `_VECTOR_INVERSIONS` and `_SUMMARY_NEGATION_INVERSIONS`.
+_NEGATION_CUE = (
+    r"(?:\b(?:not|never|cannot|can\s?not|no longer|by no means|in no case)\b"
+    r"|\w+n['’]t\b)"
+)
 
 
 def _negates_the_home(line: str, home: str) -> bool:
@@ -1839,10 +1860,45 @@ def _negates_the_home(line: str, home: str) -> bool:
     from reaching across a clause boundary or another backticked name.
     """
     return re.search(
-        rf"(?:\b(?:not|never|no longer)\b|\w+n['’]t\b)"
+        _NEGATION_CUE +
         rf"[^`;:,.—–(]{{0,40}}"
         rf"(?:read|reads|reading|embed|embeds|embedding|index|indexes|"
         rf"indexing|come|comes)\b[^`;]{{0,30}}`{re.escape(home)}`",
+        line, re.IGNORECASE) is not None
+
+
+def _negates_the_summary(line: str) -> bool:
+    r"""Does a negation cue apply to `:Source.summary` — the trap, not the line?
+
+    ⛔ THE OBJECT IS BOUND, not the PHRASING. The assert this replaced was
+    ``assert "never from `:Source.summary`" in deciding`` — a spelling lock on one
+    draft, so the SAME instruction re-written as *"…and not from
+    `:Source.summary`"* or *"…which must not be `:Source.summary`"* went RED and
+    was reported as *"no longer states the NEGATION"*, i.e. the message named the
+    inverse of what the sentence said. That is the class cycles 16–17 fixed for
+    `_negates_the_home`; this clause is the same claim about a different object,
+    and it never got the same treatment (measured: both re-wordings RED before
+    this helper existed).
+
+    Same shape as `_negates_the_home`, with the trap as the object: a cue from
+    `_NEGATION_CUE`, at most 40 characters carrying NO backtick and NO clause
+    boundary (`. , ; : ( — –`), then the backticked `:Source.summary`.
+
+      • **NO BACKTICK** keeps a negation of a DIFFERENT backticked name from
+        reaching the summary — *"it is not `public.session_narrative`; it is
+        `:Source.summary`"* negates the other name;
+      • **NO CLAUSE BOUNDARY** keeps a negation in a neighbouring clause from
+        binding to this one.
+
+    ⚠️ It does NOT accept a line that merely NAMES the trap: *"⛔ read from
+    `:Source.summary`"* carries the object and no cue, and is REFUSED — that is
+    the regression this assert exists for, and it is a control case in
+    `_SUMMARY_NEGATION_INVERSIONS`, so a future loosening reds a test rather than
+    a docs-only PR.
+    """
+    return re.search(
+        _NEGATION_CUE + r"[^`;:,.—–(]{0,40}" +
+        rf"`{re.escape(_SUMMARY_OBJECT)}`",
         line, re.IGNORECASE) is not None
 
 
@@ -2039,6 +2095,12 @@ _VECTOR_INVERSIONS: list[tuple[str, str]] = [
      "the S1 narrative read from `{home}`.`summary` is what the vector embeds"),
     ("the home namespacing its own column (possessive form)",
      "the S1 narrative read from `{home}`'s `summary` column is the vector"),
+    # ⚠️ The CUE VOCABULARY, not the span. Cycle 17 widened the span (so three
+    # content words could not smuggle the cue to the verb) but left `cannot` out
+    # of the cue set, so this line — the same inverted claim — was ACCEPTED
+    # (measured). It is refused now that `_NEGATION_CUE` carries it.
+    ("the pointer's own negation, through a cue the first set did not carry",
+     "the vector's text cannot be the S1 narrative read from `{home}`"),
 ]
 
 
@@ -2079,7 +2141,8 @@ def test_the_vector_helper_ACCEPTS_a_correct_rewording(why: str, line: str):
 @pytest.mark.parametrize(
     "why,line", _VECTOR_INVERSIONS,
     ids=["negated-pointer", "negated-pointer-three-content-words",
-         "column-dot-form", "column-possessive-form"])
+         "column-dot-form", "column-possessive-form",
+         "negated-pointer-cannot-cue"])
 def test_the_vector_helper_REFUSES_an_inversion(why: str, line: str):
     """*What value makes this test fail?* A fix that DROPS the two guards.
 
@@ -2102,6 +2165,109 @@ def test_the_vector_helper_REFUSES_an_inversion(why: str, line: str):
         f"removed to stop them misfiring on a correct re-wording")
 
 
+#: The §9.4 NEGATION re-written WITHOUT changing the claim — every one applies a
+#: negation cue to `:Source.summary` and differs only in phrasing. The pin must
+#: ACCEPT all of them. Each went RED against the phrase lock this replaced
+#: (``assert "never from `:Source.summary`" in deciding``) with the message
+#: *"no longer states the NEGATION"* — about a sentence that states it
+#: (measured; cycle 18).
+_SUMMARY_NEGATION_REWORDINGS: list[tuple[str, str]] = [
+    ("the head document's own wording", "never from `:Source.summary`"),
+    ("and not from", "and not from `:Source.summary`"),
+    ("must not be", "which must not be `:Source.summary`"),
+    ("never the field", "never the field `:Source.summary`"),
+]
+
+#: Lines that NAME the trap with NO negation cue applied to it, or apply one to
+#: something else. These are what the assert is FOR, so they must stay REFUSED:
+#: deleting the guard (rather than binding it) would pass the list above and
+#: fail here, and so would a cue bound to the wrong object.
+_SUMMARY_NEGATION_INVERSIONS: list[tuple[str, str]] = [
+    ("the negation dropped, the trap still named",
+     "⛔ read from `:Source.summary`"),
+    ("the negation bound to ANOTHER backticked name",
+     "⛔ not `public.session_narrative`; it is `:Source.summary`"),
+    ("the negation in a neighbouring clause",
+     "⛔ the narrative is not on the node; `:Source.summary`"),
+]
+
+
+@pytest.mark.parametrize(
+    "why,clause", _SUMMARY_NEGATION_REWORDINGS,
+    ids=["head-document-wording", "and-not-from", "must-not-be",
+         "never-the-field"])
+def test_the_summary_negation_ACCEPTS_a_correct_rewording(why: str, clause: str):
+    """*What value makes this test fail?* The phrase lock the object-bound helper
+    replaced — on every case but the first.
+
+    The old assert required the literal ``"never from `:Source.summary`"``, so a
+    correct re-wording of the SAME instruction — *"…and not from
+    `:Source.summary`"*, *"…which must not be `:Source.summary`"* — red with
+    *"no longer states the NEGATION"*: a message naming the inverse of what the
+    sentence says. A pin that forces a documentation re-wording to satisfy a
+    substring assertion is a spelling lock, which this file's own cycle-2/F4
+    decision forbids ("rendering-agnostic over merged prose").
+    """
+    assert _negates_the_summary(clause), (
+        f"`_negates_the_summary` REFUSED a correct re-wording of the §9.4 "
+        f"negation ({why}): {clause!r} — the cue is bound to the OBJECT "
+        f"`{_SUMMARY_OBJECT}`, not to the phrase, so a re-phrasing that keeps "
+        f"the claim must be accepted; refusing it reports a defect the document "
+        f"does not contain")
+
+
+@pytest.mark.parametrize(
+    "why,clause", _SUMMARY_NEGATION_INVERSIONS,
+    ids=["negation-dropped", "negates-another-name",
+         "negation-in-other-clause"])
+def test_the_summary_negation_REFUSES_a_line_that_only_NAMES_the_trap(
+        why: str, clause: str):
+    """*What value makes this test fail?* Deleting the guard instead of binding it.
+
+    Each line either names `:Source.summary` with no negation cue, applies the
+    cue to a DIFFERENT backticked name, or puts it in a neighbouring clause. If
+    the assert is dropped — or narrowed to a bare object-presence check — these
+    pass, and the pin certifies the *\"embed the summary already there\"* reading
+    §9.4 forbids.
+    """
+    assert not _negates_the_summary(clause), (
+        f"`_negates_the_summary` ACCEPTED a line that does not deny "
+        f"`{_SUMMARY_OBJECT}` ({why}): {clause!r} — the cue is bound to the "
+        f"OBJECT, so naming the trap is not denying it, and a cue that lands on "
+        f"another backticked name or in another clause does not reach it")
+
+
+def test_the_pin_ACCEPTS_a_reworded_negation_on_the_REAL_deciding_sentence():
+    """The control the helper lists cannot give: the REAL §9.4 sentence re-worded.
+
+    *What value makes this test fail?* The phrase lock, on the actual artifact
+    rather than on a constructed one. The deciding sentence is read from the
+    tree, its own negation clause is replaced by each re-wording in
+    `_SUMMARY_NEGATION_REWORDINGS`, and the FULL sentence is put back through
+    both object-bound guards — so acceptance is proved on the document a
+    re-wording would actually edit, and the pointer half is re-asserted on the
+    same mutated line (a re-worded negation must not be read as negating
+    `home`, which is the misfire cycle 16 measured).
+    """
+    deciding = _source_vector_section_94_line(_storage_doc_text())
+    head_clause = "never from `:Source.summary`"
+    assert head_clause in deciding, (
+        f"the head document's deciding sentence no longer carries "
+        f"{head_clause!r} — this control mutates THAT clause, so a re-wording of "
+        f"the document must update this anchor or the control silently skips")
+    for why, replacement in _SUMMARY_NEGATION_REWORDINGS:
+        if replacement == head_clause:
+            continue
+        mutated = deciding.replace(head_clause, replacement)
+        assert mutated != deciding, (
+            f"the mutation for {why!r} changed nothing in the deciding sentence")
+        assert _negates_the_summary(mutated), (
+            f"re-wording the negation ({why}): {replacement!r} still states the "
+            f"claim, but `_negates_the_summary` refused the sentence: {mutated!r}")
+        _assert_vector_reads_the_narrative(
+            mutated, f"§9.4's deciding sentence re-worded ({why})", _HOME)
+
+
 def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
     """§9.4 and §12.1b may not disagree about what the source vector embeds.
 
@@ -2121,9 +2287,10 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
     paragraph above it is caught too), but that half is not executed by a plain
     run at all. From `b748df7d0` (the base before the rebase,
     post-`#10978`) onward NEITHER retired string is present, and neither is
-    present at this head's BASE `78161a50a` (the merge-base after `95bfc475c`
-    merged `origin/main`; `e2584e2cb` was the base before that merge) — nor at any
-    commit of THIS branch: both of this branch's earlier bases already carried
+    present at `78161a50a` — the merge-base at `83c4129a9`, and ⚠️ no longer the
+    base: the later main-merge `6b1d697193` moved it to `acfebd81f5`, where
+    neither string is present either (measured 0 and 0 on BOTH trees) — nor at
+    any commit of THIS branch: both of this branch's earlier bases already carried
     `#10978`'s correction (`b748df7d0` before the rebase, `e2584e2cb` after it).
     So on this
     branch both halves are that correction's REGRESSION GUARD, not its author:
@@ -2189,13 +2356,21 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
         f"and negation asserts while §9.4 itself no longer says what the source "
         f"vector reads; re-derive where §9.4 states it before trusting this pin")
     _assert_vector_reads_the_narrative(deciding, "§9.4's DECIDING sentence", home)
-    assert "never from `:Source.summary`" in deciding, (
-        "§9.4's DECIDING sentence no longer states the NEGATION — naming "
-        "`:Source.summary` beside the narrative's home without saying which one "
-        "the vector must not read leaves the *\"embed the summary already "
-        "there\"* reading open. Asserted on the sentence, not the section: a "
-        "negation that survives elsewhere in §9.4 is not the instruction a "
-        "reader of this sentence receives")
+    # ⛔ OBJECT-BOUND, not phrase-locked: `_negates_the_summary` asks whether a
+    # NEGATION CUE APPLIES TO `:Source.summary`, so a correct re-wording of the
+    # instruction (*"…and not from `:Source.summary`"*, *"…which must not be
+    # `:Source.summary`"*) is accepted instead of reding with a message that
+    # reports the inverse of what the sentence says. The accept list is
+    # `_SUMMARY_NEGATION_REWORDINGS`; the controls that keep it from vacuous-
+    # passing (naming the trap with no cue, negating another name, negating a
+    # neighbouring clause) are `_SUMMARY_NEGATION_INVERSIONS`.
+    assert _negates_the_summary(deciding), (
+        "§9.4's DECIDING sentence no longer NEGATES `:Source.summary` — naming "
+        "the trap beside the narrative's home without applying a negation cue "
+        "to it leaves the *\"embed the summary already there\"* reading open. "
+        "Asserted on the sentence, not the section: a negation that survives "
+        "elsewhere in §9.4 is not the instruction a reader of this sentence "
+        "receives")
     assert s94.count(":Source.summary") == 1, (
         f"§9.4 names `:Source.summary` {s94.count(':Source.summary')} times — "
         f"§9.4 is the paragraph that says which field the vector must NOT "
@@ -2227,7 +2402,7 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
         f"this pin exists to catch")
     # ⛔ NO section-wide negation assert here, and its absence is deliberate. It
     # WOULD have been unreachable: `deciding in s94` above plus
-    # `"never from `:Source.summary`" in deciding` together imply it, so it could
+    # `_negates_the_summary(deciding)` together imply it, so it could
     # never be the assert that reds — a check that cannot fail, whose message
     # claimed it diagnosed "the whole paragraph moved" while the move actually
     # reds one line earlier, on the DECIDING-sentence binding, with a better
