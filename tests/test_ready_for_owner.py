@@ -417,8 +417,8 @@ def test_a_non_bool_head_stable_from_a_fixture_is_never_a_stable_head(value: Any
     `is_draft` fields take the same coercion and previously failed closed only by accident
     (a string coerced to `True` reads as merged/draft); they are `_tri_bool` now too.
 
-    Mutation check: reverting `head_stable` to `bool(data["head_stable"])` turns the `"false"`
-    and `"unstable"` arms green and fails this test.
+    Mutation check: reverting `head_stable` to `bool(data["head_stable"])` turns the `"false"`,
+    `"unstable"`, `0` and `1` arms green (every param but a real `bool`) and fails this test.
     """
     check = _check("exclusions", head_stable=value)
     assert check.passed is False, f"head_stable={value!r} graded PASS"

@@ -2972,6 +2972,19 @@ def test_a_malformed_pace_knob_cannot_decide_an_exit_code(
     monkeypatch.setenv("NEXT_WORK_PACE", "0")
     assert next_work.pace_seconds() == 0.0
 
+    # ⛔ THE BRANCH EVERY REAL RUN TAKES. `NEXT_WORK_PACE` is unset in production, so
+    # `raw is None or raw == "" -> PACE_SECONDS_DEFAULT` is the only arm that runs outside a
+    # test. Without these lines nothing pins it: mutating that branch to `return 0.0` (pacing
+    # silently disabled, i.e. the rate limits this pacing exists for) left the whole file at
+    # `284 passed`. Both spellings matter — an exported-but-empty knob is the shape a shell
+    # wrapper produces — and both must be SILENT (no spurious warning).
+    monkeypatch.delenv("NEXT_WORK_PACE", raising=False)
+    assert next_work.pace_seconds() == next_work.PACE_SECONDS_DEFAULT
+    assert capsys.readouterr().err == ""
+    monkeypatch.setenv("NEXT_WORK_PACE", "")
+    assert next_work.pace_seconds() == next_work.PACE_SECONDS_DEFAULT
+    assert capsys.readouterr().err == ""
+
 
 def test_a_malformed_pace_knob_is_caught_in_a_FRESH_PROCESS() -> None:
     """THE property the fix exists for: the MODULE still imports — so a run still reaches the
