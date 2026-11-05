@@ -886,6 +886,7 @@ def load_parity_report(path: str, *, graph_name: str) -> ParityReport:
     report `turn_parity_census.py` emits (`census()`'s return dict) carries:
 
         instrument                        "tools/turn_parity_census.py" — REQUIRED
+        graph                             the graph the census MEASURED — REQUIRED
         population.episodic_graph_nodes   the DELETE SET — every node the read returned
         dry_run.would_delete_turn_nodes   the nodes it proved AND proposed to purge
         dry_run.held_back_turn_nodes      the turn nodes it could NOT prove
