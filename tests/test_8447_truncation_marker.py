@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time
 
 import pytest
 
@@ -53,6 +54,28 @@ from tortoise.truncation import (
     mark_truncation,
     truncation_field,
 )
+
+#: A read that asserts a COMPLETE verdict must NOT race the 500 ms COLLECTIVE
+#: retrieval deadline, because a genuine timeout and the behaviour these arms pin
+#: are the same assertion: ``degradation_chain`` records a leg that missed the
+#: deadline as ``reason="timeout"``, ``lost_leg_owners`` correctly reads that as a
+#: leg that never answered, and ``truncated: true`` is then the RIGHT answer.
+#:
+#: Measured, not theorised — this is the red that blocked PR #10691's required
+#: ``test (d)`` (run 41969677011, head ``1a6fde8a5``):
+#:
+#:     WARNING search_engine: Strategies timed out (500ms) — collected 1/3,
+#:             cancelling remaining
+#:     WARNING search_engine: FTS query exceeded timeout: 997ms > 500ms
+#:     FAILED ...::test_the_arm_raising_does_not_mark_a_complete_read
+#:            - AssertionError: assert {'truncated': True} == {'truncated': False}
+#:
+#: The arm was right about the arm and wrong about the box. Elevating the budget
+#: is the seam the end-to-end budget arms already use for exactly this
+#: (``tests/test_2952_degraded_read.py``, ``tests/test_source_fts.py``): it moves
+#: the DEADLINE only — never the verdict logic under test — so an arm that claims
+#: "this read was complete" can keep claiming it on a loaded shard.
+_COMPLETE_READ_TIMEOUT_MS = 8000
 
 # ── the marker's own contract ────────────────────────────────────────────
 
@@ -160,7 +183,9 @@ class TestEndToEndTruncation:
         assert truth == 3
 
         sink: dict = {}
-        rows = sdk.tortoise_fts_query("zebra", limit=5, _truncation_out=sink)
+        rows = sdk.tortoise_fts_query(
+            "zebra", limit=5, _truncation_out=sink,
+            _elevated_timeout_ms=_COMPLETE_READ_TIMEOUT_MS)
 
         assert len(rows) == truth
         assert truncation_field(sink)[TRUNCATED_FIELD] is False
@@ -170,7 +195,9 @@ class TestEndToEndTruncation:
         """Boundary: limit == match count is COMPLETE, not truncated."""
         _seed(sdk, 4)
         sink: dict = {}
-        rows = sdk.tortoise_fts_query("zebra", limit=4, _truncation_out=sink)
+        rows = sdk.tortoise_fts_query(
+            "zebra", limit=4, _truncation_out=sink,
+            _elevated_timeout_ms=_COMPLETE_READ_TIMEOUT_MS)
         assert len(rows) == 4
         assert truncation_field(sink)[TRUNCATED_FIELD] is False
 
@@ -382,7 +409,9 @@ class TestADownstreamDropIsNotComplete:
         """Control: the same store, nothing dropped, is positively COMPLETE."""
         _seed(sdk, 5)
         sink: dict = {}
-        rows = sdk.tortoise_fts_query("zebra", limit=10, _truncation_out=sink)
+        rows = sdk.tortoise_fts_query(
+            "zebra", limit=10, _truncation_out=sink,
+            _elevated_timeout_ms=_COMPLETE_READ_TIMEOUT_MS)
         assert len(rows) == 5
         assert truncation_field(sink) == {TRUNCATED_FIELD: False}
 
@@ -728,7 +757,9 @@ class TestTheLexicalArmsOwnFailureIsNotTheShippedLegs:
             lambda name: False if name == "bm25" else _real_allow(name))
 
         sink: dict = {}
-        rows = sdk.tortoise_fts_query("zebra", limit=10, _truncation_out=sink)
+        rows = sdk.tortoise_fts_query(
+            "zebra", limit=10, _truncation_out=sink,
+            _elevated_timeout_ms=_COMPLETE_READ_TIMEOUT_MS)
 
         assert len(rows) == 3, "the shipped lexical leg's rows must survive"
         assert truncation_field(sink) == {TRUNCATED_FIELD: False}, (
@@ -738,6 +769,23 @@ class TestTheLexicalArmsOwnFailureIsNotTheShippedLegs:
     def test_the_arm_raising_does_not_mark_a_complete_read(self, sdk, monkeypatch):
         _seed(sdk, 3)
         monkeypatch.delenv("TORTOISE_BM25_LEXICAL", raising=False)  # default ON
+        # DELIBERATELY slow shipped lexical leg: 2.0 s against the 500 ms
+        # collective deadline this read ran under before #10691's `test (d)` red.
+        # This is the CI state, made deterministic instead of load-dependent —
+        # and it is what makes the arm non-vacuous: with the default budget the
+        # chain records the straggler `reason="timeout"`, the read genuinely IS
+        # incomplete, and `truncated: true` is CORRECT, so this arm reds for a
+        # reason it never names. Under the elevated budget the whole chain
+        # answers and the ONLY failure left to attribute is the arm's own.
+        import tortoise.search_engine as _se
+
+        _real_fts = _se.run_fts_query
+
+        def _slow_shipped_leg(*a, **k):
+            time.sleep(2.0)
+            return _real_fts(*a, **k)
+
+        monkeypatch.setattr(_se, "run_fts_query", _slow_shipped_leg)
 
         def _boom(*_a, **_k):
             raise RuntimeError("bm25 exploded")
@@ -745,10 +793,50 @@ class TestTheLexicalArmsOwnFailureIsNotTheShippedLegs:
         monkeypatch.setattr("tortoise.bm25.bm25_rank", _boom)
 
         sink: dict = {}
-        rows = sdk.tortoise_fts_query("zebra", limit=10, _truncation_out=sink)
+        rows = sdk.tortoise_fts_query(
+            "zebra", limit=10, _truncation_out=sink,
+            _elevated_timeout_ms=_COMPLETE_READ_TIMEOUT_MS)
 
         assert len(rows) == 3
-        assert truncation_field(sink) == {TRUNCATED_FIELD: False}
+        assert truncation_field(sink) == {TRUNCATED_FIELD: False}, (
+            "the SHIPPED leg answered (slowly) and the arm raised — neither is a "
+            "drop, and a slow box is not one either")
+
+    def test_the_arm_raising_under_the_default_cap_is_marked_by_the_TIMEOUT(
+            self, sdk, monkeypatch):
+        """Control: the pre-fix shape, pinned so the budget cannot silently go.
+
+        The same read, the same raising arm, the DEFAULT 500 ms cap and the same
+        slow shipped leg. `truncated: true` here is CORRECT — the leg missed the
+        deadline and its rows are unreachable — which is exactly why the arm
+        above must not run under that cap. If someone drops
+        ``_elevated_timeout_ms`` from it, the two arms disagree and this one says
+        why; if the deadline ever stops censoring a straggler, this arm reds.
+        """
+        _seed(sdk, 3)
+        monkeypatch.delenv("TORTOISE_BM25_LEXICAL", raising=False)  # default ON
+        import tortoise.search_engine as _se
+
+        _real_fts = _se.run_fts_query
+
+        def _slow_shipped_leg(*a, **k):
+            time.sleep(2.0)
+            return _real_fts(*a, **k)
+
+        monkeypatch.setattr(_se, "run_fts_query", _slow_shipped_leg)
+
+        def _boom(*_a, **_k):
+            raise RuntimeError("bm25 exploded")
+
+        monkeypatch.setattr("tortoise.bm25.bm25_rank", _boom)
+
+        sink: dict = {}
+        sdk.tortoise_fts_query("zebra", limit=10, _truncation_out=sink)
+
+        assert truncation_field(sink)[TRUNCATED_FIELD] is True, (
+            "a leg that missed the collective deadline never answered this read "
+            "— its rows are unreachable, so the read is INCOMPLETE. This is the "
+            "CI red (#10691 run 41969677011) reproduced without the flake")
 
     def test_a_shipped_leg_failure_alongside_the_arm_is_still_lost(
             self, sdk, monkeypatch):
@@ -868,8 +956,9 @@ class TestAnArmThatServedTheSlotIsNotALostLeg:
 
         trace: list[dict] = []
         sink: dict = {}
-        rows = sdk.tortoise_fts_query("zebra", limit=5, _truncation_out=sink,
-                                      leg_trace=trace)
+        rows = sdk.tortoise_fts_query(
+            "zebra", limit=5, _truncation_out=sink, leg_trace=trace,
+            _elevated_timeout_ms=_COMPLETE_READ_TIMEOUT_MS)
 
         assert len(rows) == 3
         # non-vacuous: the lexical leg really did fail on the absent index …
