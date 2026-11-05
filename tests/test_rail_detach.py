@@ -944,6 +944,29 @@ def test_one_record_is_readable_under_any_spelling_of_its_repo(tmp_path, monkeyp
         kill_group(ln.pid)
 
 
+def _guaranteed_dead_pid() -> int:
+    """A pid that cannot be live here.
+
+    ⛔ `PID=999999` IS NOT DEAD ON A BOX WITH `kernel.pid_max` 4194304 (this cell's
+    value): once that number is recycled into any session/group leader, a record
+    pointing at it reads LIVE through `_rail_alive`'s group fallback, and a test
+    that seeds a "dead" record reds for a reason that has nothing to do with the
+    code under test. `pid_max + 1` is outside the namespace on procfs boxes; where
+    procfs is absent, a spawned-and-reaped process's pid is the best available
+    answer (it may be recycled, and the assertion is then a false red, never a
+    false green).
+    """
+    try:
+        return int(Path("/proc/sys/kernel/pid_max").read_text().strip() or 0) + 1
+    except (OSError, ValueError):
+        dead = subprocess.Popen(["/bin/true"], start_new_session=True,
+                                stdin=subprocess.DEVNULL,
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL)
+        dead.wait()
+        return dead.pid
+
+
 def test_a_record_written_under_an_older_spelling_still_blocks(tmp_path):
     """⛔ A RECORD THE NEW NAME CANNOT SEE IS THE DUPLICATE-RAIL GUARD BYPASSED.
 
@@ -1011,8 +1034,9 @@ def test_a_record_written_under_an_older_spelling_still_blocks(tmp_path):
         # PR and started a SECOND rail — the module's own P1. Both orders are pinned,
         # because "prefer the canonical path" fails in exactly one of them.
         canonical = rd.artifact_path(sd, "o/r", 771)
+        dead_pid = _guaranteed_dead_pid()
         legacy.write_text(f"PR=771\nREPO=github.com/o/r\nSTARTED_AT={rd._iso_now()}\n"
-                          f"PID=999999\n", encoding="utf-8")            # DEAD
+                          f"PID={dead_pid}\n", encoding="utf-8")        # DEAD
         canonical.write_text(f"PR=771\nREPO=o/r\nSTARTED_AT={rd._iso_now()}\n"
                              f"PID={live.pid}\n", encoding="utf-8")     # LIVE
         st = rd.collect(sd, "o/r", 771)
@@ -1020,7 +1044,7 @@ def test_a_record_written_under_an_older_spelling_still_blocks(tmp_path):
         assert st.artifact == str(canonical), "the live record must win"
 
         canonical.write_text(f"PR=771\nREPO=o/r\nSTARTED_AT={rd._iso_now()}\n"
-                             f"PID=999999\n", encoding="utf-8")         # DEAD
+                             f"PID={dead_pid}\n", encoding="utf-8")     # DEAD
         legacy.write_text(f"PR=771\nREPO=github.com/o/r\nSTARTED_AT={rd._iso_now()}\n"
                           f"PID={live.pid}\n", encoding="utf-8")        # LIVE
         st = rd.collect(sd, "o/r", 771)
@@ -1038,9 +1062,41 @@ def test_a_record_written_under_an_older_spelling_still_blocks(tmp_path):
         # Both dead: the record is still reported (never "absent") — the guard reads
         # it as finished, which is what lets the next `start` through.
         legacy.write_text(f"PR=771\nREPO=github.com/o/r\nSTARTED_AT={rd._iso_now()}\n"
-                          f"PID=999999\n", encoding="utf-8")
+                          f"PID={dead_pid}\n", encoding="utf-8")
         st = rd.collect(sd, "o/r", 771)
         assert st is not None and st.state == rd.LOST, (st and st.as_dict())
+
+        # ── A TERMINAL MERGE OUTRANKS A LIVE-LOOKING STALE RECORD
+        # ⛔ MEASURED ON d957903d4: ranking by LIVENESS ALONE hid a merged canonical
+        # record behind a stale legacy record whose pid read live through
+        # `_rail_alive`'s group fallback (a record with no `CHILD_PID`/`STARTED_AT`
+        # gets the unbounded group claim). `collect --assert-merged` then answered 1 —
+        # "did NOT merge" — about a merged PR, with the merge sha unreachable. A
+        # merge is monotone: nothing downstream can un-merge it, while `waiting` is
+        # not evidence of anything.
+        sd2 = tmp_path / "state2"
+        sd2.mkdir()
+        canon2 = rd.artifact_path(sd2, "o/r", 55)
+        logp2 = canon2.with_suffix(".log")
+        canon2.write_text(
+            f"PR=55\nREPO=o/r\nSTARTED_AT={rd._iso_now()}\nATTEMPT_ID=abc\n"
+            f"EXIT_ATTEMPT=abc\nEXIT=0\nLOG={logp2}\n", encoding="utf-8")
+        logp2.write_text(
+            f"\n{rd.ATTEMPT_MARK} x attempt=abc (detached) =====\n"
+            "admin-merge: ✅ merged PR #55 at deadbeefcafe1234 "
+            "(state=MERGED confirmed via the API)\n", encoding="utf-8")
+        # …and a stale legacy record that READS LIVE (no STARTED_AT ⇒ unbounded
+        # group claim, and `live` is a session leader whose group answers).
+        stale = sd2 / "rail-github.com-o-r-55.md"
+        stale.write_text(f"PR=55\nREPO=github.com/o/r\nPID={live.pid}\n",
+                         encoding="utf-8")
+        assert rd._record_is_live(stale), (
+            "fixture is not the shape this arm pins: the stale record must read live")
+        st = rd.collect(sd2, "o/r", 55)
+        assert st is not None and st.state == rd.MERGED, (st and st.as_dict())
+        assert st.merge_sha == "deadbeefcafe1234"
+        assert rd.main(["collect", "55", "--state-dir", str(sd2),
+                        "--assert-merged"]) == 0
     finally:
         live.kill()
         live.wait()

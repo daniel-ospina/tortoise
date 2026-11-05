@@ -1202,10 +1202,18 @@ def _artifact_for_any_spelling(state_dir: Path, repo: str, pr: int) -> Path | No
         return None
     if len(cands) == 1:
         return cands[0]
-    # ⛔ MEASURED BEFORE THIS LINE EXISTED: a dead canonical record beside a LIVE
-    # legacy one read `lost`, and read alone the legacy record read `waiting` — so
-    # `launch`'s `prior.state == WAITING` guard was False and it started a second
-    # rail on one PR. Liveness is the decision; naming is only the tie-break.
+    # ⛔ TERMINAL EVIDENCE OUTRANKS LIVENESS, BECAUSE A MERGE IS MONOTONE. Ranking
+    # by liveness alone (cycle-2 fix) regressed the other direction, measured: a
+    # canonical record carrying this attempt's `✅ merged` was outranked by a STALE
+    # legacy record whose pid read live through `_rail_alive`'s group fallback, so
+    # `collect --assert-merged` answered 1 ("did NOT merge") about a merged PR and
+    # the merge sha became unreachable — the durable-wrong-verdict class #2235
+    # forbids, aimed at the fleet's machine gate. Nothing can un-merge a PR, while
+    # `waiting`/`lost`/`refused` are all still in flight in the sense that matters
+    # here. So: merged first, then live, then canonical, then newest.
+    for cand in cands:
+        if _record_is_merged(cand, pr):
+            return cand
     for cand in cands:
         if _record_is_live(cand):
             return cand
@@ -1222,6 +1230,31 @@ def _artifact_for_any_spelling(state_dir: Path, repo: str, pr: int) -> Path | No
             return ""
 
     return sorted(cands, key=_started, reverse=True)[0]
+
+
+def _record_is_merged(art: Path, pr: int) -> bool:
+    """Does this record carry THIS attempt's terminal merge?
+
+    ⛔ SCOPED TO THE ATTEMPT, with the same two rules the verdict path uses —
+    `_attempt_log` for the evidence boundary and `_merge_evidence` for "the rail
+    SAID merged about THIS PR and THIS repo". Read unscoped, the log is
+    append-only across attempts, so one old `✅ merged` line would make every later
+    record for the same PR read merged (evidence forged by concatenation).
+    """
+    try:
+        text = art.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    logp = Path(read_field(text, "LOG", str(art.with_suffix(".log"))))
+    if not logp.exists():
+        return False
+    try:
+        full = logp.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    scoped = _attempt_log(full, read_field(text, "ATTEMPT_ID"))
+    state, _sha = _merge_evidence(scoped, pr, read_field(text, "REPO"))
+    return state == MERGED
 
 
 def _record_is_live(art: Path) -> bool:
