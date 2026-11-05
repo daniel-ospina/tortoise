@@ -1463,6 +1463,22 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # file's suite. (`integrity()` does NOT read CORE_ALSO — measured: it
              # returns `[]` with and without this entry — so it is not a pin.)
              "tools/batch_open.py",
+             # #10955: `tools/next_work.py` owns `tests/test_next_work.py`
+             # (registered `core`), and `tools/` is in NON_PYTHON_PREFIXES, so a
+             # next_work-only change was filtered out BEFORE the "not matched ->
+             # core" fallback and took the docs-only early return —
+             # `select(["tools/next_work.py"])` yielded NO surface, so the guard
+             # that pins the pick never ran on the file the pick is made by. That
+             # is the fail-OPEN direction for this tool in particular: its whole
+             # job is to decide which unit a lane may act on, so the diff most
+             # worth guarding is an edit to the deciding code. The entry makes
+             # `_selection_relevant()` keep the path so `core` — and this tool's
+             # own guard — is selected. Pinned by
+             # tests/test_next_work.py::test_a_next_work_only_change_selects_core_so_this_guard_actually_runs,
+             # which asserts `select(["tools/next_work.py"])` returns `core` AND
+             # this file's suite (the same #1349/#3332/#3616 silent-drop class as
+             # queue_resweep/batch_open above).
+             "tools/next_work.py",
              # #6388: `tools/seal_session_events.py` is the session-events seal
              # policy, guarded by tests/test_session_events_seal.py, which is
              # `core`-registered — but `tools/` is swallowed by
@@ -1565,8 +1581,10 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # systemd installer that arms it own tests/test_container_reaper.py
              # (`core`). `tools/` is swallowed by NON_PYTHON_PREFIXES, so without
              # these entries a change to the dry-run allow-list, the `--apply`
-             # path or the pins selects NO surface — 72 tier-1 smoke files and
-             # ZERO of the safety cases for a tool that DELETES containers. Same
+             # path or the pins selects NO surface — the tier-1 smoke files (73
+             # at this head; 72 was the size THEN — re-derive it rather than
+             # reading this as a current count) and ZERO of the safety cases for
+             # a tool that DELETES containers. Same
              # #1349/#3332/#3616 silent-drop class as tools/test_lane.py above.
              # Pinned by
              # tests/test_ci_selection.py::test_container_reaper_change_selects_core_not_tier1.
@@ -2747,9 +2765,10 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # `tools/lane_stash.py` and `tools/ci_catch_history.py` above).
              # The `core` row that registers the test file is CLASSIFICATION
              # only (#4348): a name in a surface's test_files only runs when that
-             # surface is ALREADY selected. MEASURED before this entry:
+             # surface is ALREADY selected. MEASURED before this entry (72 was
+             # `tier1`'s size THEN — 73 since #10980; re-derive it):
              # `select(["tools/rail_detach.py"], "pull_request",
-             # load_manifest())` -> surfaces=[], full=False, 72 files, the pin
+             # load_manifest())` -> surfaces=[], full=False, tier-1 files, the pin
              # ABSENT. CORE_ALSO (not TOOL_CARVEOUTS) because the guard is
              # hermetic (a stub rail, temp dirs) and `core` is where its suite
              # lives. Pinned by
@@ -2786,9 +2805,9 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # on the very file that defines them. That is the
              # #1349/#3332/#3616 silent-drop class: a PR that deleted R2 or weakened the
              # AND check would run `python-ci-gate` GREEN with none of its own pins.
-             # MEASURED before this entry:
+             # MEASURED before this entry (72 was `tier1`'s size THEN — 73 since #10980):
              # `select(["tools/ci_runner_labels.py"], "pull_request",
-             # load_manifest())` -> surfaces=[], 72 files, the pin ABSENT. CORE_ALSO (not
+             # load_manifest())` -> surfaces=[], tier-1 files, the pin ABSENT. CORE_ALSO (not
              # TOOL_CARVEOUTS) because the gate is hermetic (a committed JSON snapshot, no
              # graph, no URI, no network) and `core` is where its suite is registered.
              "tools/ci_runner_labels.py")
@@ -3201,6 +3220,32 @@ TOOL_CARVEOUTS = (
     "tools/ci_check_repair_launchd.py",
     "tools/ci-check-repair-local.sh",
     "tools/install-ci-check-repair-schedule.sh",
+    # ⛔ NOT HERE: `tools/gh_write_preflight.py`. #10930's carve-out for it is SUPERSEDED by #11026,
+    # which landed the tool on `main` with a different implementation (a throwaway push on the real
+    # remote, not a three-surface API probe) and registered it in `CORE_ALSO` above instead — a
+    # tool-only diff selects `core` and runs tests/test_gh_write_preflight.py, NOT the full matrix.
+    # Do not re-add it here: the two registrations contradict each other (this one tells `_keep_changed`
+    # the path is an unknown tool → FULL matrix; `CORE_ALSO` says it maps to `core`), and their pins
+    # assert opposite values (`full is False` vs `full is True`), so only one of them can be green.
+    # Pinned by test_ci_selection.test_gh_write_preflight_tool_change_selects_core_not_tier1.
+    # #10962/#10968: tools/ready_for_owner.py owns tests/test_ready_for_owner.py — the arms that
+    # pin the owner-facing merge-readiness verdict (six conditions over the tree, the required
+    # checks, the review record, coverage, the declared exclusions and open blocking findings).
+    # SAME silent-drop class as gh_write_preflight/ci_check_repair above, but the consequence is
+    # the sharpest in this list: this tool's whole job is to tell the owner a PR is safe to merge
+    # FROM THE UI, and it also self-reports its own CI coverage (`_read_coverage`) — so a
+    # `tools/ready_for_owner.py`-only diff came back `surfaces: []`, `full: false`, tier-1 smoke
+    # only, and the tool then classified that shape as `core-smoke-only` and therefore COVERED.
+    # A fail-OPEN path inside the gate that decides whether a merge is safe: the diff most worth
+    # guarding is an edit to the deciding code. MEASURED before this entry (and 72 was
+    # `tier1`'s size THEN — it is 73 since #10980 added `test_9555_narrative_carrier.py`,
+    # so re-derive it rather than reading this as a current count):
+    # `--changed-files tools/ready_for_owner.py` -> surfaces=[] full=False with
+    # `test_ready_for_owner.py` ABSENT from the tier-1 `test_files`. Registering the TEST file
+    # under `core` in ci-surfaces.yml does NOT cover this: that applies to edits of the test file,
+    # not of the tool. Pinned by
+    # test_ci_selection.test_ready_for_owner_tool_change_fails_closed_to_full.
+    "tools/ready_for_owner.py",
 )
 
 
