@@ -992,8 +992,11 @@ def test_the_runbook_venice_row_states_the_lane_each_rule_holds_for(monkeypatch)
 #: ``tests/test_8501_capture_path_anchor.py`` was the module this sweep first
 #: missed (review round 4): it declared no helper at all — the four-key hand-list
 #: was INLINED in two test bodies, so a guard keyed on ``(module, helper)`` could
-#: not see it. Its new ``_keyless`` helper plus this entry are the repair, which
-#: is why the durability claim above now holds for that module too.
+#: not see it. Its ``_keyless`` helper plus the entry that followed WERE the repair,
+#: and that coverage is now GONE rather than merely stale: #4282 deleted the module
+#: together with ``TortoiseSDK.capture_session`` (see the note on
+#: ``_KEYLESS_CAPTURE_HELPERS`` below). Recorded in past tense on purpose — the
+#: durability claim above held for that module and no longer can.
 #:
 #: ``tests/test_doctor.py`` was the next module in that population (review rounds
 #: 6-7): its hand-list lived in the ``clean_llm_env`` FIXTURE, not in a capture

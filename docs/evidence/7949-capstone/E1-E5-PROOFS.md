@@ -285,11 +285,14 @@ published `2/15`. Pinned by `tests/test_7949_capstone_measure.py`
 # the suite gate, not a dependency of this test.
 TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_7949_e5_section10_writeback.py -q -p no:cacheprovider
 
-# the pre-existing proofs cited above
+# the pre-existing proofs cited above.
+# ⛔ `tests/test_8501_capture_path_anchor.py` is NOT in this list: #4282 deleted the
+# module with the `TortoiseSDK.capture_session` door it whole-cloth drove, so naming
+# it here makes the recipe abort at argument parsing and run NOTHING. The E3 rows
+# above record that pin as deleted; this command must not pretend to re-run it.
 TORTOISE_TEST_CARVE_OUT=1 \
 uv run pytest tests/test_e1_e2_measurement.py::test_the_shipped_arm_moves_the_share_by_exactly_zero \
               tests/test_extractor_v2.py::TestMasterList::test_operational_value_carve_out_surfaces \
-              tests/test_8501_capture_path_anchor.py \
               tests/test_graph_census_7949.py \
               tests/eval/write_path/test_score_qualifiers.py -q -p no:cacheprovider
 ```

@@ -466,10 +466,15 @@ class TestTheMitigationWriteIsNeverAdvertisedAsRepeatable:
         )
 
     # `test_the_sdk_door_states_the_same_condition` was deleted WITH its door: #4282
-    # deleted `TortoiseSDK.operator_action`, so the "third channel" this test graded
-    # (the SDK docstring) no longer exists. The condition itself is still graded on the
-    # surviving channel by `test_no_door_to_the_mitigation_write_claims_unqualified_idempotence`
-    # above — what is gone is the SDK surface that could disagree with it, not the claim.
+    # deleted `TortoiseSDK.operator_action`, so the SDK docstring that test read no
+    # longer exists. ⛔ Coverage is NOT equivalent, and saying so is the point —
+    # `test_no_door_to_the_mitigation_write_claims_unqualified_idempotence` above
+    # grades the MCP tool DESCRIPTIONS only (`mitigation_writers()` enumerates registry
+    # entries, never SDK methods). The SDK surface for this same write SURVIVES as
+    # `TortoiseSDK.mitigate_operator`, and NOTHING reads its docstring — so re-adding
+    # "(idempotent)" there would ship with every gate green, which is the exact defect
+    # the deleted test existed to catch, one door over. Re-pin that docstring if the
+    # SDK channel becomes load-bearing.
 
 
 class TestTheReadThroughToolsRegressionPin:
