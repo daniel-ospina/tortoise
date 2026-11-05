@@ -100,6 +100,39 @@ def test_a_declined_closing_reference_is_the_authors_answer_not_a_defect():
     assert [f.evidence["unresolved"] for f in L.classify_pr("Refs #1\n\nNot closing this one.\n", 2)] == [[1]]
 
 
+@pytest.mark.parametrize("tail", [
+    "the lint is deliberately not a gate.",
+    "deliberately not the goal of this PR.",
+    "deliberately not in scope here.",
+    "deliberately not the thing this measures.",
+])
+def test_an_incidental_deliberately_not_does_not_delete_the_claim(tail):
+    """Review F1, measured at `aade694c7`: the bare `deliberately{_EMPH}not` alternative matched
+    ANY occurrence of the phrase, and the decline is applied per LINE to every ref on it — so an
+    honest sentence *about the work* (`…is deliberately not a gate.`) silently deleted the claim
+    beside it and the arm read CLEAN.
+
+    That is a false PASS in the #10534 direction (delivered work never closes, and nothing says
+    so), the one this module's docstring ranks worst — worth a false positive nowhere.
+    """
+    body = f"Refs #11077 — {tail}\n"
+    assert L.claims(body, 1)["declined"] == [], tail
+    assert [f.evidence["unresolved"] for f in L.classify_pr(body, 1)] == [[11077]], tail
+
+
+def test_the_decline_still_works_when_the_quoted_keyword_has_been_blanked():
+    """The control for the F1 fix, and the reason the alternative could not simply be deleted.
+
+    `strip_code` blanks the inline-code `Closes` in the pinned case, so what DECLINE_RE sees is
+    `deliberately **not**   .` — no closing word left for the sibling `not … clos` alternative. A
+    decline that NAMES the keyword in prose must keep working too.
+    """
+    assert L.claims("Refs #10602 — deliberately **not** `Closes`.\n", 1)["declined"] == [10602]
+    assert L.claims("Refs #10602 — deliberately not a closing one.\n", 1)["declined"] == [10602]
+    assert L.claims("Refs #10602 — deliberately not Closes.\n", 1)["declined"] == [10602]
+    assert L.classify_pr("Refs #10602 — deliberately not a closing one.\n", 1) == []
+
+
 def test_the_prs_own_number_is_never_a_claim():
     assert L.classify_pr("Refs #77\n", 77) == []
 
@@ -1098,20 +1131,11 @@ def test_the_usage_block_never_advertises_wip_for_a_pr_mode():
         assert any(m in line for m in _MODES_THAT_READ_WIP), line
 
 
-# --- review round 11: the decline escape deleted a claim, and the sweeps hid their own cap ----
-# `DECLINE_RE` is applied PER LINE to EVERY ref on that line, so a bare `deliberately not` anywhere
-# on a claiming line deleted the claim. Measured at the reviewed head:
-#   `Refs #11077 — the lint is deliberately not a gate.` -> classify_pr(...) == []   (CLEAN)
-# That is a false PASS in the direction this module ranks worst (#10534: delivered work that nothing
-# closes reports as healthy), from a sentence that is not about closing the reference at all.
-def test_an_incidental_deliberately_not_does_not_delete_the_claim():
-    """The sentence beside the claim is not the author answering about the reference."""
-    body = "Refs #11077 — the lint is deliberately not a gate.\n"
-    assert L.claims(body)["declined"] == [], L.claims(body)
-    findings = L.classify_pr(body, 11078)
-    assert [f.evidence["unresolved"] for f in findings] == [[11077]], findings
-
-
+# --- review round 11: the sweeps hid their own cap, and the peer scan was vacuous ---------------
+# The `--sweep` / `--sweep-issues` cap and the peer-vocabulary defects live here; the third finding
+# of that round (the decline escape) is pinned above, next to `DECLINE_RE`'s own controls — a
+# concurrent lane landed the same fix on this branch, so the two copies were reconciled rather than
+# stacked.
 @pytest.mark.parametrize("body,why", [
     # the pinned real shape: the quoted keyword sits in an inline code span, so `strip_code` has
     # already blanked it — the decline must survive that (this is why the phrase is not deleted)
@@ -1128,14 +1152,14 @@ def test_the_decline_still_clears_a_reference_the_author_says_is_not_closing(bod
 
 
 def test_the_decline_window_does_not_reach_across_a_clause():
-    """The narrowing is a WINDOW, not a word list: the phrase must be adjacent to what it declines.
+    """The narrowing is a WINDOW, not a word list: the phrase must sit beside the reference's clause.
 
     `deliberately not a gate` is about the gate; `deliberately not closing` is about the reference.
-    Both are pinned above/below, so this asserts only that the same sentence cannot be read the
-    other way round — the failure would be silent in the CLEAN direction.
+    Both directions are pinned (the incident cases above, the controls here and in the parametrised
+    case below), because the failure mode in the CLEAN direction is silent.
     """
-    # the incidental phrase must not decline, however much prose follows it
-    for tail in ("a gate", "a blocker for anyone", "worth blocking a merge over"):
+    for tail in ("a gate", "a blocker for anyone", "worth blocking a merge over",
+                 "the thing this measures"):
         assert L.classify_pr(f"Refs #1234 — deliberately not {tail}.\n", 99), tail
 
 

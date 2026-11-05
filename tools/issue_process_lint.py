@@ -201,25 +201,28 @@ CONTINUATION_RE = re.compile(
 # Markdown emphasis sits *between* the words in real bodies — measured: "deliberately **not**
 # `Closes`" defeats a plain `\s+` separator, so the separator admits emphasis characters.
 _EMPH = r"[\s*_`]+"
-# ⚠️ The bare phrase `deliberately not` is NOT a decline on its own, and treating it as one was a
-# false PASS. The decline is applied PER LINE to EVERY ref on that line, so an incidental
-# "deliberately not …" beside a claim deleted the claim: measured at the previous head,
-# `Refs #11077 — the lint is deliberately not a gate.` classified CLEAN, i.e. delivered work that
-# nothing closes reported as healthy — the #10534 shape and the direction this tool ranks worst.
+# ⛔ The decline must be a statement ABOUT THE REFERENCE, not any incidental "deliberately not …"
+# sharing its line. The alternative used to be a bare `deliberately{_EMPH}not`, and the decline is
+# applied per LINE to EVERY ref on it — so
+#     `Refs #11077 — the lint is deliberately not a gate.`
+# read CLEAN: the claim was silently dropped (measured, review F1). That is a false PASS in the
+# #10534 direction (delivered work never closes), the one this module ranks worst, so the phrase
+# now has to END its clause: after it comes only punctuation/emphasis, or the very closing word it
+# is declining.
 #
-# The phrase is the author's answer only when what FOLLOWS it is about closing: a closing-word stem
-# (`deliberately not closing this one`), or nothing but emphasis/punctuation to end of line — the
-# second form is the one that survives when the quoted keyword was written in an inline code span
-# and `strip_code` has already blanked it (`deliberately **not** `Closes`.`, the pinned case).
-# Emphasis characters are admitted on both sides of the tail because they wrap the word.
-_DECLINE_TAIL = (
-    rf"(?=[\s*_`]*(?:(?:a|an|the){_EMPH})?(?:clos|fix|resolv|satisf)"
-    r"|[\s*_`]*[:.,;()\[\]—–!?]"
-    r"|[\s*_`]*$)"
-)
+# Both halves are load-bearing, and the pinned case is why the alternative cannot simply be deleted:
+# in the body `Refs #10602 — deliberately **not** \`Closes\``, `strip_code` blanks the inline-code
+# keyword, so what reaches this regex is `deliberately **not**   .` — punctuation only, no `clos`
+# left to match (the sibling `not{_EMPH}(?:a{_EMPH})?clos` alternative cannot see it either). A
+# decline that names the keyword in prose (`deliberately not a closing one`) still declines,
+# through that sibling, so nothing legitimate is lost by tightening this one.
+_DECLINE_TAIL = r"[\s*_`.,;:!?()\[\]—–-]*"
+_CLOSING_STEM = (r"(?:clos(?:e[sd]?|ing)|fix(?:e[sd]?|ing)?"
+                 r"|resolv(?:e[sd]?|ing)?|satisf(?:y|ies|ied|ying))\b")
 DECLINE_RE = re.compile(
-    rf"deliberately{_EMPH}not{_DECLINE_TAIL}|does{_EMPH}not{_EMPH}clos"
-    rf"|not{_EMPH}(?:a{_EMPH})?clos|non-closing|no{_EMPH}closing",
+    rf"deliberately{_EMPH}not(?={_DECLINE_TAIL}(?:$|{_CLOSING_STEM}{_DECLINE_TAIL}$))"
+    rf"|does{_EMPH}not{_EMPH}clos|not{_EMPH}(?:a{_EMPH})?clos"
+    rf"|non-closing|no{_EMPH}closing",
     re.IGNORECASE,
 )
 SATISFIES_HEADING_RE = re.compile(r"^[ \t]{0,3}#{2,3}[ \t]*Satisfies\b", re.IGNORECASE | re.MULTILINE)
