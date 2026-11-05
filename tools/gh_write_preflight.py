@@ -190,9 +190,13 @@ class Verdict:
     repo_root: str | None = None
     remote: str | None = None
     remote_url: str | None = None
-    # The URL git actually PUSHES to (`remote.<name>.pushurl` when set). All confirmation reads use
-    # this, never `remote_url`, or a fork-style config confirms against the wrong repository.
+    # The URL git actually PUSHES to (`remote.<name>.pushurl` when set), redacted for display.
+    # All confirmation reads use the RAW value (never this one) — see `_check_writable`.
     push_url: str | None = None
+    # "configured" when `get-url --push` answered, "fellback" when we had to use the fetch url
+    # (git too old for `--push`, or no pushurl set and the read failed). Makes finding-"wrong
+    # remote" residuals visible instead of silent.
+    push_url_source: str | None = None
     probe_ref: str | None = None
     head_sha: str | None = None
     steps: list[dict] = field(default_factory=list)
@@ -216,6 +220,7 @@ class Verdict:
                 "remote": self.remote,
                 "remote_url": redact(self.remote_url or ""),
                 "push_url": redact(self.push_url or ""),
+                "push_url_source": self.push_url_source,
                 "probe_ref": self.probe_ref,
                 "head_sha": self.head_sha,
                 "cleaned_up": self.cleaned_up,
@@ -344,9 +349,14 @@ def _prefix_ok(prefix: str, runner: "Runner") -> bool:
     if not _valid_prefix(prefix):
         return False
     proc = runner.run(["git", "check-ref-format", f"refs/heads/{prefix}/probe"])
-    if proc.rc == 127:          # git absent: fall back to the belt (the verdict path will fail on
-        return True             # its own `git --version` check and say `git-absent`).
-    return proc.rc == 0
+    if proc.rc == 0:
+        return True
+    if proc.rc == 1:
+        return False             # git's own verdict: not a legal refname
+    # 127 = git absent; 124/126 = this check could not run. Fall back to the belt (the verdict
+    # path fails on its own `git --version` check and reports `git-absent`), rather than render a
+    # broken environment as "git rejects this refname".
+    return True
 
 
 def _ref_state(runner: Runner, root: str, remote: str, ref: str) -> str:
@@ -358,6 +368,23 @@ def _ref_state(runner: Runner, root: str, remote: str, ref: str) -> str:
     if proc.rc != 0:
         return "unverifiable"
     return "present" if proc.out.strip() else "absent"
+
+
+def _ref_state_multi(runner: Runner, root: str, urls: list[str], ref: str) -> str:
+    """Is `ref` on ANY of `urls`?
+
+    ⛔ A remote may define SEVERAL pushurls, and `git push` writes to ALL of them while
+    `git remote get-url --push` (without `--all`) lists only the first. Confirming against the
+    first alone reports `cleaned_up=True` while the ref survives on another — a false verified
+    claim and litter on a shared remote. So: present if ANY says present; unverifiable if none
+    says present and ANY could not be read; absent only when every read positively says absent.
+    """
+    states = [_ref_state(runner, root, u, ref) for u in urls]
+    if "present" in states:
+        return "present"
+    if "unverifiable" in states:
+        return "unverifiable"
+    return "absent"
 
 
 def check_writable(
@@ -416,16 +443,25 @@ def _check_writable(
     url_lines = [ln.strip() for ln in p.out.splitlines() if ln.strip()]
     if p.rc != 0 or not url_lines:
         return Verdict(False, "no-remote", detail=redact(p.detail), repo_root=root, remote=remote)
-    url = redact(url_lines[0])  # stored redacted at ingestion
+    # ⛔ KEEP A RAW COPY FOR ARGV. `redact()` rewrites URL userinfo, so passing the redacted value
+    # to git asks it to contact a URL the config never named — `ssh://git@host/…` (no secret at
+    # all) becomes `ssh://<userinfo-redacted>@host/…` and the read fails, refusing a credential
+    # that can write. The redacted form is for DISPLAY only.
+    url_raw = url_lines[0]
+    url = redact(url_raw)
 
-    # (3b) THE PUSH URL, NOT THE FETCH URL. git pushes to `remote.<name>.pushurl` when it is set,
-    # so a fork-style config (`url=…/fetch.git`, `pushurl=…/push.git`) means every confirmation
-    # read below would ask a DIFFERENT remote than the one we wrote to — reporting
-    # `verify-mismatch` for a credential that can write, and (worse) `cleaned_up=True` from the
-    # wrong repository while the probe ref survives on the push target.
-    pp = runner.run(["git", "remote", "get-url", "--push", remote], cwd=root)
-    push_lines = [ln.strip() for ln in pp.out.splitlines() if ln.strip()]
-    push_url = redact(push_lines[0]) if pp.rc == 0 and push_lines else url
+    # (3b) THE PUSH URL(S), NOT THE FETCH URL. git pushes to `remote.<name>.pushurl` when set, so a
+    # fork-style config (`url=…/fetch.git`, `pushurl=…/push.git`) means every confirmation read
+    # below would ask a DIFFERENT remote than the one we wrote to. And a remote may define SEVERAL
+    # pushurls — the push writes to all of them, so all of them must be confirmed. `--all` is what
+    # lists them; without it git reports only the first.
+    pa = runner.run(["git", "remote", "get-url", "--push", "--all", remote], cwd=root)
+    push_lines = [ln.strip() for ln in pa.out.splitlines() if ln.strip()]
+    if pa.rc == 0 and push_lines:
+        push_urls_raw, push_url_source = push_lines, "configured"
+    else:
+        push_urls_raw, push_url_source = [url_raw], "fellback"
+    push_url = redact(push_urls_raw[0])
 
     # (4) HEAD must resolve — we push an EXISTING commit, never a new one.
     p = runner.run(["git", "rev-parse", "HEAD"], cwd=root)
@@ -438,6 +474,8 @@ def _check_writable(
             repo_root=root,
             remote=remote,
             remote_url=url,
+            push_url=push_url,
+            push_url_source=push_url_source,
         )
     head = head_lines[-1]
 
@@ -447,9 +485,12 @@ def _check_writable(
         remote=remote,
         remote_url=url,
         push_url=push_url,
+        push_url_source=push_url_source,
         head_sha=head,
         probe_ref=_probe_ref(probe_ref_prefix or "gh-write-preflight"),
     )
+    # argv uses the RAW urls; only the Verdict carries the redacted display values.
+    verdict._push_urls_raw = push_urls_raw  # type: ignore[attr-defined]
 
     def step(name: str, proc: Proc) -> bool:
         # REDACT AT INGESTION. Nothing downstream has to remember.
@@ -474,13 +515,14 @@ def _check_writable(
     )
 
     if push_ok:
-        # (7) Confirm on the REMOTE WE PUSHED TO, not from push's own word. stdout only.
+        # (7) Confirm on the REMOTE(S) WE PUSHED TO, not from push's own word. stdout only.
+        state = _ref_state_multi(runner, root, push_urls_raw, verdict.probe_ref)
         vp = runner.run(
-            ["git", "ls-remote", push_url, f"refs/heads/{verdict.probe_ref}"], cwd=root
+            ["git", "ls-remote", push_urls_raw[0], f"refs/heads/{verdict.probe_ref}"], cwd=root
         )
-        verified = step("ls-remote-verify", vp)
-        seen = vp.out.split()[0] if verified and vp.out.strip() else ""
-        if verified and seen == head:
+        step("ls-remote-verify", vp)
+        seen = vp.out.split()[0] if vp.out.strip() else ""
+        if state == "present" and seen == head:
             verdict.writable = True
         else:
             verdict.reason = "verify-mismatch"
@@ -511,10 +553,10 @@ def _check_writable(
     )
     step("delete", dp)
 
-    # CONFIRM ON THE REMOTE WE PUSHED TO, not from the delete's own exit code — the same rule the
-    # push path follows. `cleaned_up=True` only on a positive "ref absent" read; an unreadable
-    # answer is `None` (unconfirmed), never "clean".
-    state = _ref_state(runner, root, push_url, verdict.probe_ref)
+    # CONFIRM ON THE REMOTE(S) WE PUSHED TO, not from the delete's own exit code — the same rule
+    # the push path follows. `cleaned_up=True` only on a positive "ref absent" read of EVERY push
+    # url; an unreadable answer is `None` (unconfirmed), never "clean".
+    state = _ref_state_multi(runner, root, push_urls_raw, verdict.probe_ref)
     if state == "absent":
         verdict.cleaned_up = True
     elif state == "present":
@@ -609,6 +651,10 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print(f"repo:   {verdict.repo_root or '<unresolved>'}")
         print(f"remote: {verdict.remote or '<none>'} {verdict.remote_url or ''}")
+        if verdict.push_url and verdict.push_url != verdict.remote_url:
+            # Name the remote that was actually MEASURED — on a fork-style config `remote:` above
+            # names the fetch url, which is not where the probe pushed.
+            print(f"push:   {verdict.push_url} ({verdict.push_url_source or 'configured'})")
         if verdict.head_sha:
             print(f"head:   {verdict.head_sha[:12]}")
         for s in verdict.steps:

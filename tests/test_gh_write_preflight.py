@@ -469,6 +469,20 @@ def test_legal_prefixes_are_still_accepted(tmp_path: Path):
         assert verdict.probe_ref.startswith(good + "/")
 
 
+def test_legal_prefix_passes_the_cli_guard(tmp_path: Path, capsys):
+    """The CLI guard must ACCEPT a legal prefix (it runs at parse time, before any push).
+
+    Without this, the guard could reject everything and the suite would not notice.
+    """
+    work, _remote = _make_pair(tmp_path)
+
+    rc = main(["--repo", str(work), "--probe-ref-prefix=fix/ci-probe"])
+    cap = capsys.readouterr()
+
+    assert rc == EXIT_WRITABLE, f"a legal prefix must pass the guard: {cap.err}"
+    assert "fix/ci-probe/" in cap.out
+
+
 def test_confirmation_reads_the_PUSH_url_not_the_fetch_url(tmp_path: Path):
     """A fork-style `pushurl` must be the remote we confirm against.
 
@@ -505,6 +519,117 @@ def test_read_only_pushurl_is_refused_even_when_fetch_url_is_writable(tmp_path: 
 
     assert verdict.writable is False
     assert verdict.reason == "push-refused"
+
+
+def test_cleanup_reads_the_PUSH_remote_not_the_fetch_remote(tmp_path: Path):
+    """The fail-open half of the wrong-remote bug: cleanup must confirm on the push target.
+
+    Config: the FETCH url is writable and gets the probe ref deleted; the PUSH url is a different
+    remote where the ref SURVIVES. Confirming cleanup against the fetch url would report
+    `cleaned_up=True` while litter sits on the push target. Reverting the confirmation to the
+    fetch url must fail here.
+    """
+    work, fetch_remote = _make_pair(tmp_path)                       # fetch side: writable
+    push_remote = tmp_path / "push.git"
+    _git("init", "--bare", "-q", str(push_remote), cwd=tmp_path)
+    _git("remote", "set-url", "--push", "origin", str(push_remote), cwd=work)
+
+    class PushSurvives(Runner):
+        """The ref is created on the push remote and its delete never takes effect there."""
+
+        def run(self, argv, cwd=None, timeout=120):
+            joined = " ".join(argv)
+            if argv[1] == "ls-remote" and _PROBE in joined:
+                ref = joined.split()[-1]
+                if "push.git" in joined:
+                    return Proc(0, out=f"deadbeef\t{ref}\n")     # survives on the push target
+                return Proc(0, out="")                          # absent on the fetch url
+            if argv[1] == "ls-remote":
+                return Proc(0, out="deadbeef\trefs/heads/main\n")
+            if argv[1] == "push" and "--delete" in argv:
+                return Proc(0, out="deleted")
+            return super().run(argv, cwd=cwd, timeout=timeout)
+
+    verdict = check_writable(work, runner=PushSurvives())
+
+    assert verdict.push_url and "push.git" in verdict.push_url
+    assert verdict.cleaned_up is False, "cleanup must be confirmed on the PUSH remote"
+    assert verdict.leftover_ref is True
+
+
+def test_multiple_pushurls_all_must_be_clean(tmp_path: Path):
+    """`git push` writes to EVERY pushurl; confirming only the first is a false clean claim."""
+    work, _remote = _make_pair(tmp_path)
+    push_a = tmp_path / "push_a.git"
+    push_b = tmp_path / "push_b.git"
+    for r in (push_a, push_b):
+        _git("init", "--bare", "-q", str(r), cwd=tmp_path)
+    _git("remote", "set-url", "--push", "origin", str(push_a), cwd=work)
+    _git("remote", "set-url", "--push", "--add", "origin", str(push_b), cwd=work)
+
+    class SurvivesOnB(Runner):
+        def run(self, argv, cwd=None, timeout=120):
+            joined = " ".join(argv)
+            if argv[1] == "ls-remote" and _PROBE in joined:
+                ref = joined.split()[-1]
+                if "push_b.git" in joined:
+                    return Proc(0, out=f"deadbeef\t{ref}\n")
+                return Proc(0, out="")
+            if argv[1] == "ls-remote":
+                return Proc(0, out="deadbeef\trefs/heads/main\n")
+            if argv[1] == "push" and "--delete" in argv:
+                return Proc(0, out="deleted")
+            return super().run(argv, cwd=cwd, timeout=timeout)
+
+    verdict = check_writable(work, runner=SurvivesOnB())
+
+    assert verdict.cleaned_up is False, "a ref surviving on the SECOND pushurl must be reported"
+    assert verdict.leftover_ref is True
+
+
+def test_argv_gets_the_raw_url_not_the_redacted_display_value(tmp_path: Path):
+    """`redact()` rewrites userinfo, so the display value MUST NOT be handed to git.
+
+    `ssh://git@host/…` carries no secret at all; passing the redacted form would ask git to
+    contact `ssh://<userinfo-redacted>@host/…` and refuse a credential that can write.
+    """
+    work, _remote = _make_pair(tmp_path)
+    raw = "ssh://git@example.invalid/x.git"
+    _git("remote", "set-url", "origin", raw, cwd=work)
+
+    seen = []
+
+    class Recording(Runner):
+        def run(self, argv, cwd=None, timeout=120):
+            seen.append(list(argv))
+            joined = " ".join(argv)
+            # Reachability succeeds (no network needed); the push is refused, which sends us into
+            # cleanup — and cleanup is the step that addresses a URL.
+            if argv[1] == "ls-remote" and "--heads" in argv:
+                return Proc(0, out="")
+            if argv[1] == "ls-remote":
+                return Proc(0, out="")
+            if argv[1] == "push":
+                return Proc(1, err="stub: refused")
+            return super().run(argv, cwd=cwd, timeout=timeout)
+
+    verdict = check_writable(work, runner=Recording())
+
+    ls_calls = [a for a in seen if a[1] == "ls-remote"]
+    assert ls_calls, "reads must have run"
+    # No read may ever be handed the redacted display value.
+    for call in ls_calls:
+        assert "<userinfo-redacted>" not in " ".join(call), f"redacted URL reached argv: {call}"
+    # The confirmation read addresses a URL — it must get the RAW configured value.
+    url_calls = [a for a in ls_calls if any(raw in x for x in a)]
+    assert url_calls, f"a URL-bearing read must carry the configured URL; saw {ls_calls}"
+    # ...while the DISPLAY value stored on the verdict is still redacted.
+    assert "<userinfo-redacted>" in (verdict.remote_url or "")
+    assert "<userinfo-redacted>" in (verdict.push_url or "")
+    # ...while the DISPLAY value (and the JSON) is still redacted.
+    assert "git@" not in (verdict.remote_url or "") or "<userinfo-redacted>" in (
+        verdict.remote_url or ""
+    )
 
 
 def test_delete_success_but_ref_still_present_is_leftover(tmp_path: Path):
