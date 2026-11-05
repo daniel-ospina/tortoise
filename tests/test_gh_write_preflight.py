@@ -2255,6 +2255,15 @@ def test_the_carve_out_guard_is_the_LAST_block_in_this_file():
         "it can be collected by pytest or shadow the guard: "
         f"{ast.unparse(tree.body[-1])[:90]!r}"
     )
+    # ⛔ POSITION IS NOT ENOUGH: an `else:`/`elif:` clause is INSIDE the guard node, so it is not a
+    # later `tree.body` element — and `orelse` is what executes on import while `body` never runs.
+    # Measured: `if __name__ == "__main__": … else: def test_else_branch()…` left the positional
+    # assert GREEN and pytest collected the case (`1/93 tests collected`).
+    assert not guards[0].orelse, (
+        "the `__main__` carve-out guard must carry no `else:`/`elif:` clause — that branch runs on "
+        "import, so a case defined there is collected while the guard is not the whole story: "
+        f"{ast.unparse(guards[0].orelse[0])[:90]!r}"
+    )
 
 
 if __name__ == "__main__":
