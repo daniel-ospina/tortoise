@@ -2981,7 +2981,7 @@ def test_gh_write_preflight_carveout_is_a_PREFIX_so_a_sibling_cannot_be_dropped(
         matrix — `tools/work_claim.py` -> all eight surfaces, `full=True`.
       * a KEPT path's surface is `SOURCE_PATTERNS`' job (`tools/longmem_eval/x.py` -> `eval`,
         `full=False`).
-      * in NEITHER tuple the path is not kept at all -> `surfaces=[]`, `full=False`, the tier-1
+      * in NEITHER tuple is the path kept at all -> `surfaces=[]`, `full=False`, the tier-1
         smoke set, which does not carry this suite.
 
     Both of the first two are measured against paths that NO `SOURCE_PATTERNS` row matches, so the
@@ -2990,7 +2990,7 @@ def test_gh_write_preflight_carveout_is_a_PREFIX_so_a_sibling_cannot_be_dropped(
 
     Because the matcher is `startswith`, an entry naming `tools/gh_write_preflight.py` EXACTLY
     claims only that spelling. One ordinary refactor then re-opens the silent drop the entry exists
-    to close, with no test noticing:
+    to close — which, before this case existed, no test noticed:
 
       * a split-out sibling (`tools/gh_write_preflight_urls.py`) — nothing claims it, so a diff to
         the gate runs none of the gate's own arms. This is the realistic shape, because the tool's

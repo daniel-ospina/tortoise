@@ -1673,7 +1673,7 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              #     `full=True`. Measured by moving THIS entry there: `full=True`, every surface.
              #   * a KEPT path's surface is `SOURCE_PATTERNS`' job (`tools/longmem_eval/x.py` ->
              #     `eval`, `full=False`).
-             #   * in NEITHER tuple the path is not kept at all: `surfaces=[]`, `full=False` — the
+             #   * in NEITHER tuple is the path kept at all: `surfaces=[]`, `full=False` — the
              #     tier-1 smoke set, which does not carry this suite. That is the silent drop below.
              # ⚠️ Both of the first two are measured against paths that NO `SOURCE_PATTERNS` row
              # matches, so the tuple alone is the variable that differs between them — do not
