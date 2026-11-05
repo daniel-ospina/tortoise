@@ -98,8 +98,8 @@ The brief requires this justification, and two of the answers are findings rathe
 | E3's metric | **`#9736`** (closed) | — | the row needs a re-run, not work |
 | E4's receipt retrievability | **`#9596`** (open) | — | a different gap from E4's unformed edges |
 | the relocation / destructive half | **`#5333`** + **`#5059`** (open, owner-gated) | — | **no pass may remove a committed row**; see §8 |
-| the claim-class write path (L8: `#9417`, `#9727`, `#9819`) | **all three CLOSED** — re-measured 2026-11-04 (2026-11-01, 2026-11-01, 2026-11-02) | supersede · ingest | ⚠️ `SUBSTRATE-REBUILD-MAP.md` still reads `DECLARED, no issue yet`, which is **stale by measurement** — the same failure §1 describes. The three fixes landed, so **no sequencing edge is claimed here** |
-| vector reaping / text-worth-a-vector | **`#4997`** · **`#4998`** (open) | — | not this epic |
+| the claim-class write path (L8: `#9417`, `#9727`, `#9819`) | **all three CLOSED** — re-measured 2026-11-04 (`#9417` 2026-11-01, `#9727` 2026-11-02, `#9819` 2026-11-01) | supersede · ingest | ⚠️ `SUBSTRATE-REBUILD-MAP.md` still reads `DECLARED, no issue yet`, which is **stale by measurement** — the same failure §1 describes. The three fixes landed, so **no sequencing edge is claimed here** |
+| vector reaping / text-worth-a-vector | **`#4997`** — CLOSED 2026-10-05 · **`#4998`** — a MERGED PR (2026-09-24) | — | re-measured: both are done, so this row is history, not an open dependency |
 
 ---
 
@@ -136,9 +136,9 @@ Every row of §4's last block is out for a reason that is **not** capacity: it h
 
 - **`#5333` / `#5059` (relocation, owner-gated)** — *"a pass may add; after COMMIT no pass may remove a committed row except through the journaled `restatus` fold where no visible successor exists, or the D7 `ObjectSuperseded` arm where one does; a physical delete is foreclosed to every pass."* No child here writes to an existing Object.
 - **`#2684` (the every-point span)** — the value-bearing half is measured at 101 of 112; the widening is a different mechanism with its own registry row and tracking issue. A child here that claimed "the span layer" would recreate exactly the declared-implies-present defect `#5064` exists to catch.
-- **L8 (`#9417`, `#9727`, `#9819`)** — **all three are CLOSED** (re-measured 2026-11-04). The substrate map's *"declare the family, then build it"* row predates their landing, so **the "L8 before E1's payoff" edge is no longer a live precondition** and is not claimed by this document.
+- **L8 (`#9417`, `#9727`, `#9819`)** — **all three are CLOSED** (re-measured 2026-11-04). The substrate map's `DECLARED, no issue yet` row — whose §3.1 says only that *"they need their own lane issue declaring the `sdk.py` family"* — predates their landing, so **the "L8 before E1's payoff" edge is no longer a live precondition** and is not claimed by this document.
 
-**Also out, and named so it is not rediscovered:** `#5009` (the sufficiency router — the only remaining item of the one open lane), `#9879` (the atomic write — a precondition of the exact-dedup arm, deliberately *not* a `preconditions:` edge on it), `#10000`/`#10394` (narrative/raw persistence), `#10176` (the seam's request shape), `#10448`, `#10533`/`#10449`, `#9596`, `#10360`, `#9736`, `#8503`, `#8500`, `#4997`, `#4998`, `#1936`, `#5202`/`#8325`/`#9412`.
+**Also out, and named so it is not rediscovered:** `#5009` (the sufficiency router — the only remaining item of the one open lane), `#9879` (the atomic write — a precondition of the exact-dedup arm, deliberately *not* a `preconditions:` edge on it), `#10000`/`#10394` (narrative/raw persistence), `#10176` (the seam's request shape), `#10448`, `#10533`/`#10449`, `#9596`, `#10360`, `#9736`, `#8503`, `#8500`, `#4997`/`#4998` (both CLOSED, §4), `#1936`, `#5202`/`#8325`/`#9412`.
 
 ---
 
@@ -152,6 +152,7 @@ Three fresh-context rounds, and what was done with each finding. **A finding is 
 | **MECE** | 6 findings | split D into **D1**/**D2** (only the pair flips `failure_policy`); added **H** (the re-narrate + S4 removal, which no open issue owned); added the edges B→C, D→E, F-after-C; corrected C's and F's file families; scoped **C** to carry an `OVERRIDES:` line and to flip the default in `extractor_v2`, never in the `value_gate` leaf; scoped **B** to declare `#10449`/`#10533` rather than add a third reader | *"B and E both claim E4 is observable"* — **accepted**: E owns the E4 read, B publishes doors only |
 | **align** | 1 verdict, 3 findings | reordered the claim/edge children ahead of **G**; instructed G to try the one-call operator path first | *"the zero Object→Object count is by design (`#9736`)"* — **refused**, see §5 |
 | **PR review** (fresh context, at the first head) | 2 P1 · 5 P2 | **all applied in the second commit**: E4's 10th miss has no owner (§1/§8, and the two E4-owning issues say so); L8's three issues are CLOSED, not a live family (§4/§6); the collision pre-flight's stall is attributed correctly (§7); the align review's 64% figure is marked owner-supplied and non-re-derivable (§5); the per-child count corrected to 7 of 8 (§7); the `m2` branch named as test-only (§1); `#5064` restored as G1's declared home (§4); and the arbiter probe's claim narrowed from precision-and-recall to specificity (§8) | — |
+| **PR review, round 2** (fresh context, at the second head) | 3 P2 | **all applied in the third commit**: §4's L8 close dates corrected (two were transposed) and §9's re-check now emits `closedAt`; §6's L8 quotation replaced with the map's actual words; §8's `wp02` closure route stated the right way round (**excluded** from the 15-edge row, not re-included). An independent citation sweep run alongside found two more stale states — `#4997` CLOSED 2026-10-05 and `#4998` a **merged PR** — both corrected in §4/§6 | — |
 
 **Two process facts, recorded rather than smoothed over:** `tools/collision_preflight.py 5087 --repo .` **reached no verdict** in this worktree — the invocation was still running after ~9 minutes and was abandoned. Its per-command seam has a `DEFAULT_TIMEOUT = 60` s and a timed-out command returns `rc=124` with an `INCOMPLETE` verdict (exit 2), so the stall was **not** a single hung subprocess; the likeliest cause is the tool's own multi-stage pass over a very large open-issue population. It is recorded as **no verdict**, which is not a clean one — so the mandated pre-dispatch collision check is *declared not run*, not satisfied; and the epic-workflow sequence-enforcer's stage gates blocked the parent session's shell, so the mechanical half of this lane (issue creation, this document, the PR) was executed by child sessions while the judgment stayed with the parent.
 
@@ -179,7 +180,7 @@ Three fresh-context rounds, and what was done with each finding. **A finding is 
 
 **A second, smaller hole in the same class: E5's population reconciliation is unowned.** `#9738` closed on its own *record* correction, not on a measurement; E5 is registered over **29 marker-bearing sentences** and measured over **25 bound qualifiers**, and `preregistration.json` says *"neither is final until the populations are reconciled"*. No issue owns that reconciliation today. It is a measurement, so it may belong to `#7949` rather than to this epic — but someone must own it, or E5 stays RED by attrition.
 
-**A third hole, and it caps E4: its tenth miss has no owner.** `#8503`'s nine-loss split (4 selection + 5 endpoint recall) covers 9 of the 10 misses on the frozen **15**-edge denominator; the tenth is `wp02`, which `#9873` excluded from the criterion's 14-edge reading and which is a **content-level** miss, not a connect-level one. So **E4 cannot reach 15 of 15 on this decomposition even if both of its E4-owning children land** — closing it needs either `wp02` re-included by re-registration or a content-level extraction fix that no issue owns. Recorded here rather than discovered at the capstone.
+**A third hole, and it caps E4: its tenth miss has no owner.** `#8503`'s nine-loss split (4 selection + 5 endpoint recall) covers 9 of the 10 misses on the frozen **15**-edge denominator; the tenth is `wp02`, which `#9873` excluded from the criterion's 14-edge reading and which is a **content-level** miss, not a connect-level one. So **E4 cannot reach 15 of 15 on this decomposition even if both of its E4-owning children land** — closing it needs either `wp02` **excluded** from the 15-edge row by re-registration (making the row 14-of-14), or a content-level extraction fix that no issue owns. Recorded here rather than discovered at the capstone.
 
 ---
 
@@ -207,9 +208,9 @@ grep -n "kind_subclasses.items" -A 4 tortoise/pack_registry.py
 grep -n "def _vet_enabled\|def _value_gate_enabled\|def _classify_later_enabled" -A 6 tortoise/extractor_v2.py
 
 # the L8 family's real state (the substrate map is stale on it)
-gh issue view 9417 --json number,state --jq '"\(.number)\t\(.state)"'
-gh issue view 9727 --json number,state --jq '"\(.number)\t\(.state)"'
-gh issue view 9819 --json number,state --jq '"\(.number)\t\(.state)"'
+gh issue view 9417 --json number,state,closedAt --jq '"\(.number)\t\(.state)\t\(.closedAt)"'
+gh issue view 9727 --json number,state,closedAt --jq '"\(.number)\t\(.state)\t\(.closedAt)"'
+gh issue view 9819 --json number,state,closedAt --jq '"\(.number)\t\(.state)\t\(.closedAt)"'
 
 # the acceptance rows (re-run the probe; never edit a number)
 uv run python docs/evidence/7949-capstone/probes/e1_e2_scores.py --out /tmp/e1-e2-scores.json
