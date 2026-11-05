@@ -346,12 +346,24 @@ def _is_credential_target(url: str) -> bool:
     # is a real remote that consults a credential, but the `@`-arm above misses it, so it fell to
     # `local` and the tool answered `cannot-verify:credential-not-exercised` with the detail "a push
     # there uses no credential" — a FALSE DIAGNOSIS that also made the documented exit-0 gate
-    # unpassable for such a checkout. Git's OWN rule for the scheme-less form is "a `:` before the
-    # first `/` means ssh", which is exactly the arm below; it keeps the local shapes local because
-    # each one has a `/` (or no colon) after that first colon: `/srv/x`, `../x`, `C:/x`, `file:///x`.
-    # Misreading a LOCAL path as a remote was the false PASS this predicate exists to stop, so this
-    # arm is strictly narrower than "anything with a colon".
-    return bool(re.match(r"^[^/@\s:]+:[^/\s]", u))
+    # unpassable for such a checkout.
+    #
+    # ⛔ AND THE PATH AFTER THE COLON MAY BE ABSOLUTE. An earlier arm required a non-`/` there, which
+    # excluded the conventional on-prem spelling `gitserver:/srv/git/owner/name.git` — measured with
+    # `git ls-remote --heads <url>`, which answers `ssh: Could not resolve hostname gitserver`: git
+    # takes the SSH path, so it DOES consult a credential and the tool's "every push target is local"
+    # sentence was false about it. The rule below is git's own (`connect.c::url_is_local_not_ssh`): a
+    # `:` before the first `/` means ssh — NOT "a `:` followed by a RELATIVE path".
+    #
+    # ⛔ THE TWO SHAPES THAT HAVE A `:` BEFORE THEIR FIRST `/` AND ARE STILL LOCAL ARE NAMED FIRST,
+    # which is why this is not simply `':' in u`: a DOS drive prefix (`C:/x`, `D:\x`) and the `file:`
+    # scheme. Reading a LOCAL path as a remote is the round-18 FALSE PASS (the probe would push over
+    # the filesystem with no credential and report GH-WRITE-OK), so the local arms must win. Every
+    # other local shape has no colon before its first `/` and never reaches the rule at all:
+    # `/srv/x`, `../x`, `./x`, `x/y:z`, `repo.git`, `~/x`, `\\server\share\repo.git`, `''`.
+    if low.startswith("file:") or re.match(r"^[A-Za-z]:[\\/]", u):
+        return False
+    return bool(re.match(r"^[^/@\s:]+:", u))
 
 
 def _repo_from_url(url: str) -> str:

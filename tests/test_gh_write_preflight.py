@@ -945,24 +945,45 @@ def test_credential_target_accepts_the_userless_scp_form_but_no_local_path() -> 
     credential" — a false diagnosis that also made the documented exit-0 gate unpassable for it. The
     reverse error is far worse: misreading a local path as a remote was the false PASS this predicate
     exists to stop, so the LOCAL shapes are pinned first and outnumber the remote ones.
+
+    An earlier arm also required a non-`/` after the colon, which excluded the conventional on-prem
+    spelling `gitserver:/srv/git/owner/name.git` — `git ls-remote --heads <url>` answers `ssh: Could
+    not resolve hostname gitserver`, i.e. git takes the SSH path, so the tool's "every push target is
+    local" sentence was false about it. The rule is git's own: a `:` before the first `/` means ssh.
+    The two shapes that HAVE an early colon and are still local (a DOS drive prefix and `file:`) are
+    pinned here because they are the ones a `':' in u` shortcut would get wrong — and that direction
+    of error is the false PASS.
     """
     mod = _load_tool()
     for url in (
         "/srv/mirrors/owner/name.git",
         "/tmp/repo.git",
+        "/tmp/x:y",
         "../relative/repo.git",
         "./repo.git",
         "repo.git",
+        "tmp/x:y/repo.git",
+        "x/y:z",
+        "~/repo.git",
         "file:///srv/repo.git",
+        "file://localhost/srv/repo.git",
         "C:/Users/x/repo.git",
-        "/tmp/x:y",
+        "C:\\Users\\x\\repo.git",
+        "\\\\server\\share\\repo.git",
+        ".",
+        "..",
         "",
     ):
         assert mod._is_credential_target(url) is False, f"{url!r} was read as a credential target"
     for url in (
         "myhost:owner/name.git",  # ssh-config alias with no user — the arm this test exists for
+        "myhost:/srv/git/repo.git",  # …and the same alias with an ABSOLUTE path
+        "gitserver:/srv/git/tortoise.git",
         "github.com:owner/name.git",
+        "github.com:/srv/git/repo.git",
+        "dir:name/x.git",
         "git@github.com:owner/name.git",
+        "git@host:/abs/path.git",
         "ssh://git@github.com/owner/name.git",
         "https://github.com/owner/name",
         "git://github.com/owner/name.git",
