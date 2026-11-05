@@ -252,8 +252,17 @@ title-derived `_searchText`, silently un-indexing it in the cache.
   `_searchText`; they disagree only on `summary` (declined on the record door);
 * graph-side FTS survives on a post-#10000 row — the lexicon is restored — and
   goes, with the prose, on a legacy one, where there is no non-prose value to
-  keep. A legacy session stays unfindable on the recovery door until it is
-  re-captured (the capture now overwrites the pair with the lexicon);
+  keep. A legacy session therefore stays un-indexed on the recovery door, and
+  ⛔ **a RE-CAPTURE does NOT repair it** — this is the claim `#10852` measured
+  as FALSE and retracted from three other artifacts, so it is stated here in
+  the corrected form: re-capturing an already-captured session id is the
+  `#2104`/`#1727` no-op replay, so `_materialize_session_source` — whose only
+  production caller sits behind the fresh-capture gate — **never runs** and the
+  stale pair survives (pinned by
+  `tests/test_10000_source_prose.py::test_a_re_capture_does_not_heal_a_pre_fix_node`).
+  The routes that DO clear it are a capture under a NEW `session_id`, a retry of
+  a prior FAILED capture, or a record-sourced re-projection for a node the
+  projection CREATES — see the next bullet;
 * `python -m tortoise record-reconcile` builds its RECORD side through the same
   projector, so its truth side HOLDS `_searchText` for a post-#10000 row — and
   the cache-owned partition keeps every name the record side holds, so a drifted
@@ -268,16 +277,34 @@ title-derived `_searchText`, silently un-indexing it in the cache.
 
 ### The pin
 
-`tests/test_10853_session_source_prose.py`: the drop; the narrowness of the drop;
-the reconciler counting the declined pair as `graph_only` (not divergence) while a
-DOCUMENT with a differing summary is still counted field by field;
-ONE LEG PER ARM; the FOUR negative legs (a plain-document baseline, then one per
-term that must not be a signal: a transcript document carrying a `session_id`, a
-`corpus://` permalink stamped `agentSession`, a document stamped `is_episodic`);
-the row/node predicate-agreement legs; the `props`-tail leg; and the record row
-that must not be mutated. Mutation-checked, one at a time: each identity arm, EACH
-OF THE TWO DOORS (the column loop and the `props` tail — the tail filter undoes
-only the keys the tail added, so neither door subsumes the other), the label gate,
-the call-time resolution of the placement spellings, and each of the three flags
-re-added — every one reds at least the leg that names it, plus the row/node
-agreement shape that exists to catch exactly that drift.
+`tests/test_10853_session_source_prose.py`, the `#10853` arms: the drop; the
+narrowness of the drop; the reconciler counting the declined pair as `graph_only`
+(not divergence) while a DOCUMENT with a differing summary is still counted field
+by field; ONE LEG PER ARM; the FOUR negative legs (a plain-document baseline,
+then one per term that must not be a signal: a transcript document carrying a
+`session_id`, a `corpus://` permalink stamped `agentSession`, a document stamped
+`is_episodic`); the row/node predicate-agreement legs; the `props`-tail leg; and
+the record row that must not be mutated. Mutation-checked, one at a time: each
+identity arm, EACH OF THE TWO DOORS (the column loop and the `props` tail — the
+tail filter undoes only the keys the tail added, so neither door subsumes the
+other), the label gate, the call-time resolution of the placement spellings, and
+each of the three flags re-added — every one reds at least the leg that names it,
+plus the row/node agreement shape that exists to catch exactly that drift.
+
+and, in the same file, the FOUR `#10965` arms of the per-row decision:
+`test_a_post_10000_session_row_keeps_the_field_its_fts_index_is_declared_on` (the
+restored `_searchText` is the lexicon, and the index really is declared on it);
+`test_the_drop_is_decided_by_the_rows_own_provenance_not_by_the_column_name`
+(four near-miss shapes that only LOOK like the derivation are still dropped, plus
+the legacy control); `test_the_display_summary_stays_declined_and_the_residual_is_named`
+(the stated residual, pinned so it cannot become an accident); and
+`test_the_reconciler_compares_the_restored_lexicon_on_a_post_10000_row` (a restored
+`_searchText` that drifts from the record REDS instead of hiding in `graph_only`).
+
+The `#10852` prose-retraction arms live in `tests/test_10000_source_prose.py`:
+`test_the_write_site_does_not_claim_a_re_capture_heals_a_pre_fix_node` (the write
+site's comment), `test_a_re_capture_does_not_heal_a_pre_fix_node` (the stale pair
+SURVIVES a replay), and
+`test_the_projection_door_doc_does_not_claim_a_re_capture_repairs_a_legacy_node`
+(THIS section — the doc is the fourth artifact to have carried the retracted
+premise, so it is now guarded rather than trusted).

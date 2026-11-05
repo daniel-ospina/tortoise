@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import inspect
 import re
+from pathlib import Path
 
 import pytest
 
@@ -223,6 +224,116 @@ def test_the_write_site_does_not_claim_a_re_capture_heals_a_pre_fix_node():
                 "function's docstring carries no such note (measured at "
                 "`4529894849`) — the note is in `_materialize_session_source`'s "
                 "own docstring. Point at the artifact that says it")
+
+
+def _the_projection_door_costs_section() -> tuple[str, str]:
+    """``(the whole doc, its ``### Costs, named rather than implied`` section)``.
+
+    ``docs/epics/2026-10-10-7879-postgres-record/06-cache-projection.md`` is the
+    artifact a reader of the record↔cache contract opens when they ask what
+    happens to a legacy session's prose, so it is where a re-armed false premise
+    does the most damage.
+
+    ⛔ THE HEADING IS ASSERTED TO MATCH EXACTLY ONCE. A ``split``-on-first-hit
+    over a doc with two candidate headings would silently inspect the wrong one
+    and the guard would then be measuring a paragraph nobody reads. A heading
+    that stops matching is a FAIL, never an empty section.
+
+    The WHOLE doc is returned as well on purpose: the absence arm below scans
+    the whole file, not only the section, so relocating the claim out of this
+    section cannot take it out of the guard's scope.
+    """
+    doc = (Path(__file__).resolve().parents[1]
+           / "docs" / "epics" / "2026-10-10-7879-postgres-record"
+           / "06-cache-projection.md")
+    text = doc.read_text(encoding="utf-8")
+    heading = "### Costs, named rather than implied"
+    assert text.count(heading) == 1, (
+        f"the projection door's costs section ({heading!r}) must appear "
+        f"EXACTLY ONCE in {doc.name}; found it {text.count(heading)} times. "
+        "Re-point this guard at the section rather than deleting it — it is "
+        "the only thing tying this file to the doc that decides what a "
+        "legacy session looks like on the recovery door")
+    section = text.split(heading, 1)[1]
+    end = section.find("\n### ")
+    if end != -1:
+        section = section[:end]
+    return text, section
+
+
+def test_the_projection_door_doc_does_not_claim_a_re_capture_repairs_a_legacy_node():
+    """The FOURTH artifact, and the only one nothing was guarding.
+
+    THE DEFECT THIS PINS. This PR measured that a pre-#10000 node is **NOT**
+    healed by a re-capture (the MINT GATE makes the re-capture a `#2104`/`#1727`
+    no-op replay, so the capture's `SET`s are never reached) and corrected three
+    artifacts that said otherwise. It then ADDED the retracted claim to
+    `docs/epics/2026-10-10-7879-postgres-record/06-cache-projection.md` — the
+    projection door's own ruling doc, which is where an operator goes to learn
+    what to DO about a legacy session.
+
+    Why that is actionable rather than prose drift: a pair-bearing legacy node
+    was, by construction, written by a run where `session_existed` was false, so
+    it coexists with its own `:Session` node and the next capture of that id
+    takes the replay arm and returns **without reaching any `SET`**. A reader
+    told the population self-heals skips the only three routes that clear it, and
+    the session stays un-indexed indefinitely — the visibility loss this arm
+    exists to bound. The write-site guard
+    (`test_the_write_site_does_not_claim_a_re_capture_heals_a_pre_fix_node`)
+    only polices the comment block in `sdk.py`; nothing red here, so the doc was
+    free to re-arm it.
+
+    WHAT IS ASSERTED is the CORRECTION in both directions, the same shape as the
+    write-site guard: the retracted claim is ABSENT from the whole doc, the
+    correcting MECHANISM is PRESENT in the costs section (so deleting the bullet
+    is not a cheap green), and the test the section cites actually exists.
+
+    RED on the pre-fix doc (`e13c6eeea` added the retracted sentence), GREEN here.
+    """
+    whole, section = _the_projection_door_costs_section()
+
+    # (1) The retracted claim is ABSENT — from the WHOLE doc, so a bullet moved
+    # to another section stays in scope. These are the shapes a future lane
+    # re-introduces it in; the second is the pre-fix text verbatim, so this arm
+    # was RED at `e13c6eeea`.
+    for retracted in ("until it is re-captured",
+                      "now overwrites the pair",
+                      "heals on re-capture",
+                      "HEALS on re-capture"):
+        assert retracted not in whole, (
+            f"06-cache-projection.md asserts the RETRACTED mechanism "
+            f"({retracted!r}): a re-capture does not repair a pre-#10000 node — "
+            "the mint gate makes it a `#2104`/`#1727` no-op replay, so the "
+            "capture's `SET`s are never reached (#10852 review, P2). An "
+            "operator who reads this skips the three routes that DO clear it "
+            "and the session stays un-indexed on the recovery door.")
+
+    # (2) The CORRECTION is PRESENT in the costs section — the mint-gate
+    # mechanism and the three routes that actually clear the pair. Deleting the
+    # bullet cannot pass this, and neither can a reworded retraction.
+    lowered = section.lower()
+    assert "does not repair" in lowered and "re-capture" in lowered, (
+        "the projection door's costs section no longer states, in corrected "
+        "form, that a RE-CAPTURE does not repair a legacy node — the absence "
+        "arm above is satisfiable by deleting the bullet, and a bullet that "
+        f"says nothing leaves the false premise to be re-derived:\n\n{section}")
+    for mechanism in ("no-op replay", "1727", "new `session_id`",
+                      "projection creates"):
+        assert mechanism in lowered, (
+            f"the costs section omits {mechanism!r} — the mechanism that makes "
+            "the correction checkable rather than an assertion. Without the "
+            "replay clause the sentence is readable as 'something else fixes "
+            "it', and without the three routes an operator has no action to "
+            f"take instead of a re-capture:\n\n{section}")
+
+    # (3) Executable citation, the same discipline as the write-site guard: a
+    # prose reference to a test that is not there reads as proof and pins
+    # nothing.
+    for cited in set(re.findall(r"(?<![/\w])(test_[a-z0-9_]+)(?!\.py)", section)):
+        assert cited in globals(), (
+            f"the costs section cites `{cited}`, which does not exist in this "
+            "module — the doc would be pointing a reader at a guard that is "
+            "not there")
 
 
 def _capture(sdk, session_id: str) -> dict:
