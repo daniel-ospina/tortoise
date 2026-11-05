@@ -14,8 +14,14 @@ the fail-open it replaces (`gh api … .permissions.push` reads `true` for a rea
 PAT because that field describes the USER's repo role, not the token's grant). So the refusal cases
 are the load-bearing ones and are asserted first.
 
-Run standalone:      python3 tests/test_gh_write_preflight.py
+Run standalone:      TORTOISE_TEST_CARVE_OUT=1 python3 -m pytest tests/test_gh_write_preflight.py -q
 Run under pytest:    python3 -m pytest tests/test_gh_write_preflight.py -q
+
+The bare `python3 tests/test_gh_write_preflight.py` form does NOT work in this repo: it still
+loads `tests/conftest.py`, whose session-scoped autouse `_p4_uri_required` fixture
+(`tests/_embedded.py`) fails the session with "default pytest requires TORTOISE_DB_URI (epic
+#1647 P4)" — this suite needs no database, so it takes the carve-out (`TORTOISE_TEST_CARVE_OUT=1`)
+or a lane container (`uv run python tools/test_lane.py run -- tests/test_gh_write_preflight.py -q`).
 """
 
 from __future__ import annotations
@@ -30,7 +36,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from tools.gh_write_preflight import (  # noqa: E402
+from tools.gh_write_preflight import (
     EXIT_UNAVAILABLE,
     EXIT_WRITABLE,
     REASONS,
@@ -528,7 +534,7 @@ def test_split_pushurl_shows_the_measured_remote_and_its_source(tmp_path: Path, 
     so a `push:` line and a `push_url_source` field are the only way a lane can tell which remote
     the verdict is about.
     """
-    work, fetch_remote = _make_pair(tmp_path)
+    work, _fetch_remote = _make_pair(tmp_path)
     push_remote = tmp_path / "push.git"
     _git("init", "--bare", "-q", str(push_remote), cwd=tmp_path)
     _git("remote", "set-url", "--push", "origin", str(push_remote), cwd=work)
@@ -610,7 +616,7 @@ def test_cleanup_reads_the_PUSH_remote_not_the_fetch_remote(tmp_path: Path):
     `cleaned_up=True` while litter sits on the push target. Reverting the confirmation to the
     fetch url must fail here.
     """
-    work, fetch_remote = _make_pair(tmp_path)                       # fetch side: writable
+    work, _fetch_remote = _make_pair(tmp_path)                      # fetch side: writable
     push_remote = tmp_path / "push.git"
     _git("init", "--bare", "-q", str(push_remote), cwd=tmp_path)
     _git("remote", "set-url", "--push", "origin", str(push_remote), cwd=work)
@@ -735,6 +741,72 @@ def test_credential_bearing_pushurl_never_reaches_argv(tmp_path: Path):
         for k, v in env.items()
         if k.startswith("GIT_CONFIG_")
     ), f"the insteadOf rewrite never carried the push url; envs: {[e for _c, e in seen]}"
+
+
+def test_every_credential_pushurl_gets_its_own_insteadof_rewrite(tmp_path: Path):
+    """Two credential-bearing pushurls must BOTH be resolvable, not just the last one.
+
+    The rewrite for each credential target is an `insteadOf` alias carried in the child env, and
+    the slots are absolute `GIT_CONFIG_*` indices. If every rewrite were derived from the SAME
+    ambient `GIT_CONFIG_COUNT`, the second `GIT_CONFIG_KEY_n` would overwrite the first and alias 0
+    would name nothing — git would fail to resolve the reachability read and the probe would
+    report `remote-unreachable` for a credential that CAN write. That is a false block, the one
+    failure mode this tool must never add, and it is invisible on a single-pushurl config.
+
+    Mutation check: derive the slot inside the rewrite helper instead of counting up, and the
+    first `ls-remote` here returns 128 -> `remote-unreachable` -> `writable is False`.
+    """
+    work, _fetch = _make_pair(tmp_path)
+    secret_a = "https://x-access-token:ghp_AAAAAAAAAAAAAAAA@example.invalid/a.git"
+    secret_b = "https://x-access-token:ghp_BBBBBBBBBBBBBBBB@example.invalid/b.git"
+    _git("remote", "set-url", "--push", "origin", secret_a, cwd=work)
+    _git("remote", "set-url", "--push", "--add", "origin", secret_b, cwd=work)
+
+    head = {"sha": None}
+    state = {"deleted": False}
+
+    class AliasAware(Runner):
+        """Fails a read whose `insteadOf` alias the env does not define — as git would."""
+
+        def run(self, argv, cwd=None, timeout=120, env_extra=None):
+            joined = " ".join(argv)
+            if argv[1] == "rev-parse":
+                p = super().run(argv, cwd=cwd, timeout=timeout, env_extra=env_extra)
+                if p.rc == 0 and p.out.strip():
+                    head["sha"] = p.out.strip().splitlines()[-1]
+                return p
+            if argv[1] == "ls-remote":
+                target = next(
+                    (a for a in argv if a.startswith("gh-write-preflight-push")), None
+                )
+                if target is not None:
+                    defined = {
+                        v
+                        for k, v in (env_extra or {}).items()
+                        if k.startswith("GIT_CONFIG_VALUE_")
+                    }
+                    if target not in defined:
+                        return Proc(128, err=f"fatal: could not resolve {target}")
+                if _PROBE in joined:
+                    if state["deleted"]:
+                        return Proc(0, out="")
+                    return Proc(0, out=f"{head['sha']}\t{joined.split()[-1]}\n")
+                return Proc(0, out=f"{head['sha']}\trefs/heads/main\n")
+            if argv[1] == "push" and "--delete" in argv:
+                state["deleted"] = True
+                return Proc(0, out="deleted")
+            if argv[1] == "push":
+                return Proc(0, out="*\tHEAD:refs/heads/gh-write-preflight/x\t[new branch]")
+            return super().run(argv, cwd=cwd, timeout=timeout, env_extra=env_extra)
+
+    verdict = check_writable(work, runner=AliasAware())
+
+    assert verdict.reason != "remote-unreachable", (
+        "a second credential pushurl must not make the first one unnameable: "
+        f"{verdict.detail}"
+    )
+    assert verdict.writable is True, verdict.detail
+    assert verdict.cleaned_up is True, verdict.detail
 
 
 def test_delete_success_but_ref_still_present_is_leftover(tmp_path: Path):

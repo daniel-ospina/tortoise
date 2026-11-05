@@ -275,46 +275,38 @@ def _child_env(env_extra: dict[str, str] | None = None) -> dict[str, str]:
     return env
 
 
-def _insteadof_env(url: str, alias: str) -> dict[str, str]:
+def _insteadof_env(url: str, alias: str, slot: int) -> dict[str, str]:
     """Env that makes git rewrite the inert `alias:` to `url`, keeping the secret OUT of argv.
 
     `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n` (kept by `_child_env`) define the
     rewrite inside the PROCESS ENV — which is mode 0400 — instead of on the command line, which is
     mode 0444 and readable by every process on a shared cell.
+
+    `slot` is the absolute `GIT_CONFIG_*` index to occupy. It is passed in rather than derived
+    from the ambient `GIT_CONFIG_COUNT` because a caller may need SEVERAL rewrites in one env:
+    deriving the slot inside this function would make every call return the SAME index, so the
+    later `GIT_CONFIG_KEY_n` would overwrite the earlier one and the first alias would be
+    unnameable — git would then fail to resolve it and the probe would refuse a credential that
+    CAN write (a false block, the one failure this tool must never add).
     """
-    base = int(os.environ.get("GIT_CONFIG_COUNT") or 0)
-    n = base
-    env = {
-        f"GIT_CONFIG_KEY_{n}": f"url.{url}.insteadOf",
-        f"GIT_CONFIG_VALUE_{n}": alias,
-        "GIT_CONFIG_COUNT": str(base + 1),
+    return {
+        f"GIT_CONFIG_KEY_{slot}": f"url.{url}.insteadOf",
+        f"GIT_CONFIG_VALUE_{slot}": alias,
+        "GIT_CONFIG_COUNT": str(slot + 1),
     }
-    return env
 
 
-def _read_spec(
-    remote: str, url_raw: str, push_urls_raw: list[str]
-) -> tuple[str, dict[str, str]]:
-    """What to hand `git ls-remote`, and any env it needs.
+def _read_targets(remote: str, url_raw: str, push_urls_raw: list[str]) -> list[str]:
+    """What to hand `git ls-remote` for EVERY push target.
 
     * push urls identical to the fetch url (the common case) -> address the remote BY NAME. No URL
       on argv at all, which is both correct (git resolves it itself) and exposure-free.
     * a distinct push url with NO credential (`/path`, `ssh://git@host`) -> the raw url is safe on
       argv and is the only way to reach a push-only target.
-    * a distinct push url WITH a credential -> an `insteadOf` alias, so the secret lives in the
-      environment and never in the world-readable process table.
+    * a distinct push url WITH a credential -> an `insteadOf` alias (`_read_env` supplies the
+      rewrite), so the secret lives in the environment and never in the world-readable process
+      table.
     """
-    if push_urls_raw == [url_raw]:
-        return remote, {}
-    target = push_urls_raw[0]
-    if not _url_has_credential(target):
-        return target, {}
-    alias = "gh-write-preflight-push:"
-    return f"{alias}{target.split('://', 1)[-1] if '://' in target else target}", {}
-
-
-def _read_targets(remote: str, url_raw: str, push_urls_raw: list[str]) -> list[str]:
-    """The argv values to read for EVERY push target (see `_read_spec`)."""
     if push_urls_raw == [url_raw]:
         return [remote]
     out = []
@@ -327,13 +319,19 @@ def _read_targets(remote: str, url_raw: str, push_urls_raw: list[str]) -> list[s
 
 
 def _read_env(remote: str, url_raw: str, push_urls_raw: list[str]) -> dict[str, str]:
-    """The env that makes `_read_targets` resolve (empty when reading by name)."""
+    """The env that makes `_read_targets` resolve (empty when reading by name).
+
+    Every credential-bearing target gets its OWN `GIT_CONFIG_*` slot, counting up from the ambient
+    `GIT_CONFIG_COUNT` so a box that already injects config through that channel is not clobbered.
+    """
     if push_urls_raw == [url_raw]:
         return {}
     env: dict[str, str] = {}
+    slot = int(os.environ.get("GIT_CONFIG_COUNT") or 0)
     for idx, u in enumerate(push_urls_raw):
         if _url_has_credential(u):
-            env.update(_insteadof_env(u, f"gh-write-preflight-push{idx}:"))
+            env.update(_insteadof_env(u, f"gh-write-preflight-push{idx}:", slot))
+            slot += 1
     return env
 
 
@@ -432,7 +430,7 @@ def _valid_prefix(prefix: str) -> bool:
     return not (_BAD_PREFIX_CHARS & set(prefix))
 
 
-def _prefix_ok(prefix: str, runner: "Runner") -> bool:
+def _prefix_ok(prefix: str, runner: Runner) -> bool:
     """Authoritative prefix check: ask git whether `<prefix>/probe` is a legal refname.
 
     The hand-written rules above are a fast belt; this is the verdict. Without it, an impossible
@@ -443,14 +441,11 @@ def _prefix_ok(prefix: str, runner: "Runner") -> bool:
     if not _valid_prefix(prefix):
         return False
     proc = runner.run(["git", "check-ref-format", f"refs/heads/{prefix}/probe"])
-    if proc.rc == 0:
-        return True
-    if proc.rc == 1:
-        return False             # git's own verdict: not a legal refname
-    # 127 = git absent; 124/126 = this check could not run. Fall back to the belt (the verdict
-    # path fails on its own `git --version` check and reports `git-absent`), rather than render a
-    # broken environment as "git rejects this refname".
-    return True
+    # rc==1 is git's own verdict: not a legal refname. 0 is a pass; 127 = git absent and
+    # 124/126 = this check could not run, so those fall back to the belt (the verdict path fails
+    # on its own `git --version` check and reports `git-absent`) rather than render a broken
+    # environment as "git rejects this refname".
+    return proc.rc != 1
 
 
 def _ref_state(
@@ -512,7 +507,7 @@ def check_writable(
     runner = runner or Runner()
     try:
         return _check_writable(repo, remote, runner, keep_ref, probe_ref_prefix)
-    except Exception as exc:  # noqa: BLE001 — the contract is "no exit 1 without a marker"
+    except Exception as exc:  # noqa: BLE001, RUF100 — the contract is "no exit 1 without a marker"
         return Verdict(
             False,
             "internal-error",
