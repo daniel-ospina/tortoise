@@ -2956,6 +2956,40 @@ def test_gh_write_preflight_tool_change_selects_core_not_tier1():
     assert r["full"] is False, r
 
 
+def test_gh_write_preflight_carveout_is_a_PREFIX_so_a_sibling_cannot_be_dropped():
+    """The carve-out entry must be a PREFIX, not the exact path (#11027).
+
+    `_keep_changed` claims a changed path with `startswith(TOOL_CARVEOUTS)`, so an entry naming
+    `tools/gh_write_preflight.py` exactly claims ONLY that spelling. Two ordinary refactors then
+    re-open the silent drop the entry exists to close, with no test noticing:
+
+      * a rename (`tools/write_preflight.py`) — nothing claims it, so a diff to the gate runs none
+        of the gate's own arms; and
+      * a split-out sibling (`tools/gh_write_preflight_urls.py`) — the same, and this is the
+        realistic shape, because the tool's URL parsing is already the most defect-dense part.
+
+    The test immediately above cannot catch either: it exercises the exact path, which matches a
+    prefix AND an exact entry, so it stays green under the regression. This is the falsifier that
+    distinguishes them — reverting the entry to `"tools/gh_write_preflight.py"` fails the FIRST
+    assert below and leaves that test green, which is the whole reason both exist.
+
+    Over-matching is the accepted cost, bounded here: `git ls-files 'tools/gh_write_preflight*'`
+    is one path today, so the prefix claims nothing that is not the tool.
+    """
+    for sibling in (
+        "tools/gh_write_preflight_urls.py",
+        "tools/gh_write_preflight_probe.py",
+    ):
+        r = _sel([sibling])
+        assert "core" in r["surfaces"], (sibling, r)
+        assert "test_gh_write_preflight.py" in r["test_files"], (sibling, r)
+
+    # The prefix is not a blanket: an unrelated tool under `tools/` stays unclaimed, so the
+    # entry's cost is bounded to the `gh_write_preflight*` family rather than all of `tools/`.
+    unrelated = _sel(["tools/other_tool.py"])
+    assert "test_gh_write_preflight.py" not in (unrelated["test_files"] or []), unrelated
+
+
 def test_worktree_report_tool_change_selects_core_not_tier1():
     """A change to the lane report must run the rules it pins (#10220).
 

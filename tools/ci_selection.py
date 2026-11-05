@@ -1645,8 +1645,13 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # "pull_request", load_manifest())` -> surfaces=[], full=False, test file ABSENT;
              # after -> surfaces=['core'], present. Same #1349/#3332/#3616 class as above.
              # ⚠️ n is a SNAPSHOT — re-measure, do not trust a count.
-             # Pinned by
-             # tests/test_ci_selection.py::test_gh_write_preflight_tool_change_selects_core_not_tier1.
+             # Pinned by TWO cases, and they do not cover the same thing:
+             # tests/test_ci_selection.py::test_gh_write_preflight_tool_change_selects_core_not_tier1
+             # (the entry EXISTS; green under either the exact path or the prefix) and
+             # ::test_gh_write_preflight_carveout_is_a_PREFIX_so_a_sibling_cannot_be_dropped
+             # (the entry is a PREFIX; reds iff it is narrowed back to the exact path — measured:
+             # with the exact path the second case FAILS and the first still passes, which is why
+             # the first alone did not pin this line).
              # #11027: PREFIX, not the exact path (the #9487 P2 lesson applied to this entry).
              # `_keep_changed` matches with `startswith(TOOL_CARVEOUTS)`, so an EXACT path
              # silently re-opens this very drop for a rename or a split-out sibling
