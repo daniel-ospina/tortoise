@@ -46,7 +46,7 @@ claim and not an assertion:
 | `#4999` | CLOSED (PR #5159) | **not re-filed.** `scan_fallback` is MET; D13 is a regression pin only. |
 | `#4333` | OPEN, native child | **not re-filed.** Owns the storage architecture; cited 6× as the home of what this epic excludes. |
 | `#8419` | OPEN, parented by neither | **not re-filed.** Root is the D10 fold (`#5088`); named in §4, not claimed. |
-| `#5096` | CLOSED COMPLETED | **not re-filed.** The query and traversal legs; exercised by D6 and D13, and the epic adds no new leg. |
+| `#5096` | CLOSED COMPLETED | **not re-filed.** Its **query** leg is exercised by D13 (`scan_fallback`); **no** D-case issues a traversal-leg query, and the epic adds no new leg. |
 | `#5407` | CLOSED COMPLETED | **not re-filed.** The three label sets now agree — the premise D8 asserts (*one declaration, not a second*). |
 | `#10465` | CLOSED | **not re-filed.** Its instrument is re-runnable and is cited in C6. |
 | `#10541` | CLOSED COMPLETED 2026-11-04 | **not re-filed.** Delivered the census; **C2** is the narrower, different residual — the exemption authority has no production home. |

@@ -1944,7 +1944,7 @@ four-versus-one conclusion with no reference to the passage's previous wording.
 
 **§14.3 — V1's numbers.** The V1 row gave the vector question's weight as *"≈50 MB of stored vectors + a
 45 MB index total, on 141 MB"*. Two independent problems: the 141/45 MB pair is the dated 2026-09-24
-reading of a graph whose NODE COUNT has since grown 2.7× (24,978 capped → 68,526 resident) while its bytes went 141 MB → 195 MB, and the ≈50 MB payload is that same dated measurement's
+reading taken on a **capped** base (24,978 quota-counted, against 89,701 resident), so it is not a growth baseline — the current reading's `MATCH (n)` count is 68,526, *lower* than that 89,701, while bytes went 141 MB → 195 MB and indices 45 → 93 MB, i.e. the growth is in the index, not the node count; and the ≈50 MB payload is that same dated measurement's
 additive estimate over three labels — it was never a current payload reading either. The row now carries
 the **2026-11-04 graph reading** from `live-v4` (`#10976`): **93 MB of index total on a 195 MB graph**,
 with the 93 MB named as the TOTAL index size of which only part is HNSW; and it names the payload axis as
@@ -2016,8 +2016,8 @@ with the 2026-11-04 reading named beside it).
 **What was deliberately NOT done: no per-node ratio from the new reading.** The 2026-09-24 ratio,
 1.34 embeddings per node, is over **capped** nodes (~25,000). The 2026-11-04 reading's node base is
 68,526 **resident** nodes, a different denominator, and §0's own rule is that a per-node figure is never
-quoted without its base — deriving 0.18/ node from it would have repeated the exact error class the
-section exists to warn about. The ratio stays attached to the reading it was measured on.
+quoted without its base — deriving 0.49/ node (33,580 over 68,526) — or 0.18/ node for the 12,657 removable
+subset — would have repeated the exact error class the section exists to warn about. The ratio stays attached to the reading it was measured on.
 
 **No decision moved.** V1 remains `OPEN` and owner-owned, `#4333` remains its architecture home, and the
 correction changes the size of the question, not its answer.
