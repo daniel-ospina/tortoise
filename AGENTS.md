@@ -507,7 +507,8 @@ no verdict: after a killed run, check `git ls-remote <remote> 'refs/heads/<prefi
   later step needs a remote ref for) — subject to the branch-ruleset caveat in the `push-refused`
   bullet below, which is the one sub-case of `push-refused` where the branch *namespace* — not the
   credential — is what the remote rejects. (The other `push-refused` causes — no network, a transport
-  failure — are also not credential verdicts: re-run before concluding "read-only".) Read the `cleanup`
+  failure, or a push that exited 0 without reporting a ref update — are also not credential verdicts:
+  re-run, or read the detail line, before concluding "read-only".) Read the `cleanup`
   clause rather than assuming the remote is clean: `deleted` (confirmed), `KEPT (--keep-ref)` (asked
   for), or `deletion UNCONFIRMED` (the delete or its read-back failed — the credential still wrote;
   check the remote).
@@ -600,11 +601,10 @@ naive two-route proof false-PASSes a token of #10945's shape (`Contents` + `Pull
   is, but it creates a real issue — close it, or record the residue rather than leaving it.
 
 If neither leg can be proven without residue, **escalate rather than build**; do not record a surface
-as proven because a proxy for it passed. It also proves the credential **`git`** resolves for this
-checkout's push URL (normally the same token `gh`
-resolves, because the helper is `!gh auth git-credential`; a box whose helper is something else is the
-exception — and even for one token the grant is **per resource kind**, which is why the surfaces above
-stay unproven).
+as proven because a proxy for it passed. The preflight also proves the credential **`git`** resolves
+for this checkout's push URL (normally the same token `gh` resolves, because the helper is
+`!gh auth git-credential`; a box whose helper is something else is the exception — and even for one
+token the grant is **per resource kind**, which is why the surfaces above stay unproven).
 
 ### ⛔ HARD RULE: Confirm the Dispatch Landed — `cmux send` Success Is Not Delivery
 
