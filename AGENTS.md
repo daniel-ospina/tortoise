@@ -489,7 +489,8 @@ failure paths belong to the caller, and they must be **measured and pinned, not 
 
 ### ⛔ HARD RULE: Prove the Credential Can WRITE — before an hour you cannot deliver
 
-**One line, before delivery work:** `uv run python tools/gh_write_preflight.py --repo .`
+**One line, as the lane's FIRST command — before any work you intend to deliver:**
+`uv run python tools/gh_write_preflight.py --repo .`
 
 It proves the write by **doing** it: push the commit already at `HEAD` onto a namespaced throwaway
 ref (`gh-write-preflight/<utc>-<pid>-<rand>`), confirm it with `git ls-remote` (never trusting
@@ -503,11 +504,15 @@ ref (`gh-write-preflight/<utc>-<pid>-<rand>`), confirm it with `git ls-remote` (
   clean: `deleted` (confirmed), `KEPT (--keep-ref)` (asked for), or `deletion UNCONFIRMED` (the delete
   or its read-back failed — the credential still wrote; check the remote).
 - `exit 1` = `GH-WRITE-UNAVAILABLE(<reason>)` on **stderr** (stdout stays clean/JSON) — do NOT start
-  the work yet; name the reason in your report. `REASONS` is a **closed set of ten** and the module
+  the work yet, EXCEPT on `delete-failed` (litter, see below: the credential already wrote — re-run);
+  name the reason in your report. `REASONS` is a **closed set of ten** and the module
   docstring publishes all of it. **Ten tokens, three groupings — plus one token that reads like a
   refusal and is not:**
   - **refusal** — `push-refused` (read-only credential, a branch protection/ruleset, or no network),
     `remote-unreachable`, `verify-mismatch` (the push claimed success and `ls-remote` disagrees).
+    If the run's own detail names a branch protection / ruleset rather than a credential refusal,
+    re-run once with `--probe-ref-prefix <a namespace the ruleset allows>` before concluding the
+    credential is read-only — otherwise a constrained repo parks deliverable work.
   - **NO VERDICT, re-run — never "read-only"** — `push-unknown` (the push did not COMPLETE: timed
     out, signalled, no output) and `internal-error` (the probe itself failed). Folding either into
     `push-refused` parks deliverable work on a slow or OOM-killed push; that split is pinned by
@@ -516,9 +521,7 @@ ref (`gh-write-preflight/<utc>-<pid>-<rand>`), confirm it with `git ls-remote` (
     never `owner/name`), `no-remote` (no remote of that name), `no-head` (`HEAD` does not resolve).
   - `delete-failed` is **litter, not capability** — the push already succeeded; a survivor ref is
     left on the shared remote, so re-run and clean up. Never read it as "lanes cannot deliver".
-- `exit 2` = usage (argparse's own code, deliberately not a verdict). `--probe-ref-prefix` exists for
-  a repo whose ruleset only permits certain branch patterns, or the probe is refused for a credential
-  that CAN write.
+- `exit 2` = usage (argparse's own code, deliberately not a verdict).
 
 **Why it is a gate and not a courtesy call.** `gh` resolves `GH_TOKEN` → `GITHUB_TOKEN` →
 `$HOME/.config/gh/hosts.yml`, and GitHub's manual states the env vars *"take precedence over
