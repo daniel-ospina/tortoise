@@ -92,6 +92,14 @@ WHAT IT PROBES, AND WHY EACH CHOICE IS THE ONE IT IS
 
 6. **REDIRECTS ARE NEVER FOLLOWED.** Only `422` counts as "authorised"; a 2xx on a must-be-invalid
    payload is evidence the response did not come from GitHub's validation path. See `_WRITE_OK`.
+   ⛔ **THE `422`-vs-`403` ORDER IS MEASURED, NOT DOCUMENTED, AND THE WHOLE VERDICT RESTS ON IT.**
+   GitHub documents `403 Resource not accessible by personal access token` for a fine-grained token
+   missing a grant and `422 Validation Failed` for a malformed request, but not which one wins when a
+   request is BOTH unauthorised and invalid — which is what every probe here is, by construction
+   (they must fail validation to be side-effect-free). The measurements above are the evidence for the
+   ordering; if it ever inverted, an under-scoped token would answer `422` and this tool would print
+   `GH-WRITE-OK`. Stated here rather than left implied because a promise wider than the measurement is
+   the defect — the same reason the `git`-credential residual below is spelled out.
 
 ⛔ WHAT THE VERDICT DOES NOT COVER — the credential **`git`** uses
 ───────────────────────────────────────────────────────────────────────
