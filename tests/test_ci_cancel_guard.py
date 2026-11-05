@@ -679,6 +679,36 @@ def test_self_test_passes_on_a_host_with_no_database(fixture):
     assert "1 passed" in r.stdout, r.stdout
 
 
+def test_self_test_survives_the_ci_docker_half_lane_signal(fixture):
+    """⛔ `--self-test` POPPED THE URI BUT KEPT THE DEMAND FOR ONE — measured CI red.
+
+    `test (d)` run 41930448389 set `TORTOISE_TEST_EXPECT_URI=1` (the docker half's
+    E2E-6 signal, `python-ci.yml`) and this tool's `_self_test` popped
+    `TORTOISE_DB_URI` while leaving that signal set. `tests/conftest.py`
+    then failed the child session at setup — "TORTOISE_TEST_EXPECT_URI=1 but
+    TORTOISE_DB_URI unset" — and the tool reported the ENVIRONMENT contradiction as
+    "the guard's tests fail":
+
+        FAILED test_self_test_passes_on_a_host_with_no_database
+        FAILED test_a_red_self_test_is_70_never_the_post_failure_1
+
+    Both spellings of the lane declaration are dropped now (`TORTOISE_TEST_EXPECT_URI`
+    and the workflow's `EXPECT_URI`), because a child that opts itself into the
+    URI-less carve-out must not also carry a promise of a live URI.
+
+    Pre-fix: the child session errors at setup and this returns 70.
+    """
+    r = guard(fixture, "--self-test",
+              env={"TORTOISE_TEST_EXPECT_URI": "1",   # the docker half's signal
+                   "EXPECT_URI": "1",                  # and $GITHUB_ENV's spelling
+                   "TORTOISE_DB_URI": "",
+                   "TORTOISE_TEST_CARVE_OUT": "",   # CI's docker half sets no carve-out
+                   "PYTEST_ADDOPTS": _ONE_CASE})
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "1 passed" in r.stdout, r.stdout
+    assert "TORTOISE_DB_URI unset" not in r.stdout + r.stderr, r.stdout + r.stderr
+
+
 def test_a_red_self_test_is_70_never_the_post_failure_1(fixture, tmp_path):
     """Round-6 finding 2, second half: a red suite returned pytest's `1`, which this
     file's exit table reserves for `1 = the cancel POST failed` — so a caller switching

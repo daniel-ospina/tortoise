@@ -445,9 +445,24 @@ def _self_test() -> int:
     `TORTOISE_DB_URI` is POPPED rather than trusted: this file must not use a database,
     and leaving a set-but-wedged URI in place would let the #6073 tripwire fail the
     session, reintroducing the same misattribution from the other direction.
+
+    ⛔ AND THE LANE SIGNAL GOES WITH IT. Popping the URI while KEEPING
+    `TORTOISE_TEST_EXPECT_URI=1` (CI's docker halves export it, `python-ci.yml`) leaves
+    an environment that asserts a contradiction — "this session must run against the
+    server" with no server configured — so `tests/conftest.py::_assert_backend_identity`
+    fails the child session before any case runs and this verb reports that ENVIRONMENT
+    contradiction as "the guard's tests fail". Measured on `test (d)` run 41930448389:
+    `test_self_test_passes_on_a_host_with_no_database` and
+    `test_a_red_self_test_is_70_never_the_post_failure_1` both red, with `--self-test`
+    exiting 70 over an `ERROR at setup` naming the URI gate. `EXPECT_URI` is the
+    workflow's `$GITHUB_ENV` spelling of the same declaration and `tests/_live_gate.py`
+    reads it too, so BOTH are dropped: a child that declares itself URI-less
+    (`TORTOISE_TEST_CARVE_OUT=1`) must not also carry a promise it cannot keep.
     """
     env = dict(os.environ)
     env.pop("TORTOISE_DB_URI", None)
+    env.pop("TORTOISE_TEST_EXPECT_URI", None)
+    env.pop("EXPECT_URI", None)
     env["TORTOISE_TEST_CARVE_OUT"] = "1"
     proc = subprocess.run(
         [sys.executable, "-m", "pytest",
