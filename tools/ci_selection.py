@@ -6217,8 +6217,17 @@ def _manifest_contract_issues(manifest: dict) -> list[str]:
     `fast_shard_issues` (#6135, the top-level `fast_shards` declaration) and
     `duplicate_entries` (#2913/#5373, the same-surface `merge=union` gate) — and
     `ci_manifest.floor_issues` (a weight declared as a floor/cap rather than a
-    reading, cut on this branch rather than inherited) beside them, because the
-    union of the two pipelines must not drop any of the three. Composing them here
+    reading) beside them, because the union of the two pipelines must not drop
+    any of the three. ⚠️ `floor_issues` was CUT on this branch by #10575 and has
+    since been INHERITED rather than cut: `main` landed #10575 through #10704,
+    so `config/ci-surfaces.yml`'s own manifest module carries it on both sides
+    (`git rev-parse HEAD:tools/ci_manifest.py` == `git rev-parse
+    origin/main:tools/ci_manifest.py` == `7b5b6f2c6`, whose
+    `grep -c 'def floor_issues'` is 1; at the merge base `641e5f1b3` it was 0).
+    This sentence read "cut on this branch rather than inherited" until the
+    `f53eb5929` review found it, and the same correction was applied to the
+    sibling comment in `main()` — a provenance note its own file refutes is the
+    class ledger entry 10(a) exists for. Composing them here
     keeps the branch's invariant (every check reachable from ONE place) while
     keeping main's coverage.
 
