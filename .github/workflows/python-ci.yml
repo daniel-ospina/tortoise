@@ -983,8 +983,8 @@ jobs:
       # gated on the restore's own `cache-hit`, so a HIT writes nothing at all.
       # On a MISS the cost is that all nine shards tar their payload before one of
       # them can win the key: `@actions/toolkit` `cache.ts` orders `createTar()`
-      # before `reserveCache()`, and a lost reservation is a `logWarning` with
-      # exit 0. Nothing blocks and nothing reds, but ~8 shards' work is wasted per
+      # before `reserveCache()`, and a lost reservation is logged and exits 0.
+      # Nothing blocks and nothing reds, but ~8 shards' work is wasted per
       # cold key (the first run after this lands, and every `uv.lock` bump) — which
       # is why the bound is 7 m and not 30.
       - name: Restore pip dependency cache (#7612, read-only — #11063)
