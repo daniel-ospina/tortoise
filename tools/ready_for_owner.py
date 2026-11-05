@@ -499,15 +499,35 @@ def asserts_a_clear(text: str) -> bool:
     so does `I fixed the P1 and the P2 in …` — the completion reaches the second token.
     `P1s` is a token too: the plural is what a review summary writes.
 
-    ⛔ KNOWN RESIDUAL, DELIBERATE, and pinned in `tests/test_ready_for_owner.py`: rule (3)'s
-    EXCEPTION WORDS do not cross a blank line. Detached there they are ordinary English —
-    `no other files changed except the fixture` retracts nothing — so
-    `**Verdict: CLEAN.**\n\nExcept the concern raised in cycle 4.` still clears. That is a
-    measured trade, not an oversight: carrying rule (3) across refused real clears (that same
-    `… except the fixture` sentence, the #10962 false-NOT-READY direction with measured
-    history). A retraction that NAMES a finding is caught at any distance; only ones that name
-    nothing can hide behind a blank line. Two earlier revisions of this docstring claimed that
-    family was closed outright, which was false — hence this paragraph.
+    ⛔ TWO KNOWN RESIDUALS, EACH DELIBERATE AND EACH PINNED in
+    `tests/test_ready_for_owner.py`. They are listed HERE, on the artifact a fixer reads, and
+    not in the commit message that introduced them — a residual that lives only in a commit
+    message is invisible to the next reader, which is how the rule-(3) trade was re-derived as
+    a fresh finding one cycle after it was decided.
+
+      (1) rule (3)'s EXCEPTION WORDS do not cross a blank line. Detached there they are
+          ordinary English — `no other files changed except the fixture` retracts nothing — so
+          `**Verdict: CLEAN.**\n\nExcept the concern raised in cycle 4.` still clears. That is
+          a measured trade, not an oversight: carrying rule (3) across refused real clears
+          (that same `… except the fixture` sentence, the #10962 false-NOT-READY direction with
+          measured history). A retraction that NAMES a finding is caught at any distance; only
+          ones that name nothing can hide behind a blank line.
+
+      (2) rule (4)'s WORD arm requires the word `open` (`remains open` / `still open`), so a
+          live finding written WITHOUT a severity token and without `open` is invisible to
+          BOTH arms — `**Verdict: CLEAN.** A critical finding remains.` reads
+          `asserts_a_clear → True` and `_grades_as_blocking → False`, i.e. it CLOSES whatever
+          was open. Tracked with the sibling corpus gaps on #11048.
+          ⛔ THIS ONE IS NOT A CHEAP PATCH, and that is why it is recorded rather than fixed
+          here: the word arm has NO negation scope, so the obvious `|remains?\b` addition
+          blocks `No issues remain.` and `Nothing remains.` — the permanent false NOT-READY
+          class whose measured history (#10962) is the reason this module widens the positive
+          vocabulary at all. A correct fix is a NEGATION-GOVERNED word arm, the same shape as
+          `_SEVERITY_NEGATED_BEFORE_RE`; that is design work, not a ninth patch inside a fold
+          PR whose subject is five unrelated harness tools.
+
+    Two earlier revisions of this docstring claimed the rule-(3) family was closed outright,
+    which was false — hence this paragraph.
     """
     for m in CLEAR_VERDICT_RE.finditer(text):
         if _retracted_from(text, m.end()):

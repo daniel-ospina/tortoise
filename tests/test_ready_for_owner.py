@@ -2653,3 +2653,48 @@ def test_the_zero_count_and_the_noun_qualifier_clear_spellings_still_clear() -> 
         "**Verdict: CLEAN.**\n\nI fixed the P1 and the P2 in 4f450ae81.",
     ):
         assert rfo.asserts_a_clear(body) is True, body
+
+
+
+def test_the_word_arm_declares_its_own_gap_rather_than_carrying_it_silently() -> None:
+    """⛔ A RECORDED GAP, NOT DESIRED BEHAVIOUR — #11048. Read this before editing.
+
+    Rule (4)'s WORD arm (`_R4_WORDS`) spells a still-live finding as `still open` /
+    `remains open` / `unfixed` / `unaddressed`, so a live finding written WITHOUT a severity
+    token and WITHOUT the word `open` is invisible to BOTH arms of `check_blocking_finding`:
+
+        '**Verdict: CLEAN.** A critical finding remains.'   asserts_a_clear=True  blocking=False
+        '**Verdict: CLEAN.** The concern remains.'          asserts_a_clear=True  blocking=False
+
+    Measured here, not assumed: this arm executes both functions. The consequence is a false
+    PASS on the comment itself — `_grades_as_blocking` is false, so `asserts_a_clear` wins and
+    the comment CLOSES whatever `open_finding` was set (see `check_blocking_finding`'s OR-chain).
+
+    ⛔ WHY IT IS PINNED INSTEAD OF FIXED. `_R4_WORDS` has NO negation scope, so the one-line
+    `|remains?` addition blocks `No issues remain.` and `Nothing remains.` — the permanent
+    false NOT-READY class (#10962) this module widens its positive vocabulary to avoid. The
+    correct shape is a negation-governed word arm like `_SEVERITY_NEGATED_BEFORE_RE`, which is
+    design work; it is carried on #11048 with the sibling corpus gaps.
+
+    ⛔ SO THIS ARM IS A TRIPWIRE: fixing the gap means changing it ON PURPOSE. When #11048
+    lands, flip every assertion below and delete this docstring. It exists so the gap cannot be
+    re-derived as a fresh P1 finding, and so it cannot be "fixed" only in the over-block
+    direction, which no test above would catch.
+    """
+    for body in (
+        "**Verdict: CLEAN.** A critical finding remains.",
+        "**Verdict: CLEAN.** The concern remains.",
+    ):
+        assert rfo.asserts_a_clear(body) is True, body
+        assert rfo._grades_as_blocking(body, {}) is False, body
+    # …and the BOUNDARY, so a later tightening knows what it is buying: a severity token, the
+    # word `open`, or a NUMBERED count already puts the same finding in front of an arm that
+    # does see it. The gap is prose-with-no-token, not "prose is unreadable".
+    for body in (
+        "**Verdict: CLEAN.** One P1 remains.",
+        "**Verdict: CLEAN.** A P1 finding remains.",
+        "**Verdict: CLEAN.** A critical finding remains open.",
+        "**Verdict: CLEAN.** One important finding remains.",
+    ):
+        caught = (rfo.asserts_a_clear(body) is False) or rfo._grades_as_blocking(body, {})
+        assert caught, body
