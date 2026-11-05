@@ -923,6 +923,50 @@ def test_up_to_date_push_still_deletes_and_confirms_cleanup(tmp_path: Path):
     assert verdict.leftover_ref is False
 
 
+def test_updated_ref_flag_porcelain_plus_proves_the_write(tmp_path: Path):
+    """The `+` porcelain flag is a write, exactly like `*` — an UPDATE of a pre-existing ref.
+
+    Every other fixture in this suite emits `*` (new branch) or `=` (up to date), so mutating
+    `parts[0].strip() in ("*", "+")` to `("*",)` left all 89 cases green: the arm was unpinned (the
+    residual the adversarial review recorded at `07423b9f1`). It is reachable in production —
+    `_probe_ref()` stamps a second/pid/random ref, so a crashed run's leftover ref makes the next
+    probe's push an UPDATE rather than a creation. Refusing that would be a false block on a
+    credential that CAN write.
+    """
+    work, _remote = _make_pair(tmp_path)
+    head = _git("rev-parse", "HEAD", cwd=work).stdout.strip()
+    deleted = []
+
+    class Updated(Runner):
+        def run(self, argv, cwd=None, timeout=120, env_extra=None):
+            if argv[1] == "ls-remote" and "refs/heads/" in " ".join(argv):
+                if deleted:
+                    return Proc(0, out="")
+                return Proc(0, out=f"{head}\trefs/heads/gh-write-preflight/x\n")
+            if argv[1] == "ls-remote":
+                return Proc(0, out="")
+            if argv[1] == "push" and "--delete" in argv:
+                deleted.append(argv[-1])
+                return Proc(0, out="")
+            if argv[1] == "push":
+                # Real git's `--porcelain` line for a forced/updated ref (git-push(1) flag table:
+                # `+` forced update). The ref existed, so this is an UPDATE, not a creation.
+                return Proc(
+                    0,
+                    out="+\toldsha:newsha\tforced update\n",
+                )
+            return super().run(argv, cwd=cwd, timeout=timeout, env_extra=env_extra)
+
+    verdict = check_writable(work, runner=Updated())
+
+    assert verdict.writable is True, (
+        "an updated-ref (`+`) porcelain line proves the write; got "
+        f"reason={verdict.reason!r} detail={verdict.detail!r}"
+    )
+    assert verdict.cleaned_up is True
+    assert verdict.leftover_ref is False
+
+
 def test_present_at_a_different_sha_is_a_verify_mismatch(tmp_path: Path):
     """The content proof: a ref that exists at ANOTHER sha is not OUR write.
 
@@ -1459,12 +1503,23 @@ def test_documented_standalone_command_actually_runs():
 
     DISCRIMINATION: delete the `os.environ.setdefault("TORTOISE_TEST_CARVE_OUT", "1")` line and this
     test fails (the child re-reports the session-gate ERROR and exits 1). To keep the child from
-    recursing into all 57 cases, `PYTEST_ADDOPTS` narrows it to ONE; and the child env has
+    recursing into all its cases, `PYTEST_ADDOPTS` narrows it to ONE; and the child env has
     TORTOISE_DB_URI / TORTOISE_TEST_CARVE_OUT STRIPPED, so the assertion cannot be satisfied
     vacuously on a lane that happens to export a live URI.
+
+    TORTOISE_TEST_EXPECT_URI is stripped for the same reason and it is not optional: CI's docker
+    half exports `TORTOISE_TEST_EXPECT_URI=1` (`.github/workflows/python-ci.yml:1567`) and the
+    E2E-6 tripwire (`tests/conftest.py:1789`) FAILS any session that claims to be a docker session
+    while `TORTOISE_DB_URI` is unset. Keeping the expectation while deleting the only URI is a
+    self-contradictory child env — and it red `test (c)` at 07423b9f1 with
+    "TORTOISE_TEST_EXPECT_URI=1 but TORTOISE_DB_URI unset", i.e. the harness pointed at itself.
+    The child is DELIBERATELY a URI-less carve-out session, so the parent lane's expectation does
+    not describe it; the thing under test here is the `__main__` carve-out, and it stays the only
+    thing supplying that opt-in.
     """
     stripped = (
         "TORTOISE_DB_URI",
+        "TORTOISE_TEST_EXPECT_URI",
         "TORTOISE_TEST_CARVE_OUT",
         "TORTOISE_LIVE",
         "PYTEST_ADDOPTS",
