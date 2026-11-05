@@ -112,7 +112,7 @@ aboutObjects: "#5087, #7949, #10994-#11002, #11021, #11083"
 
 **Given:** a graph built from the frozen corpus with the dev pack installed
 **When:** a user walks from a theme
-**Then:** they reach its **initiatives**, each initiative's epics, and each epic's issues — the four-level path the 2026-11-05 ruling fixed (theme → initiative → epic → issue, `docs/epics/2026-11-05-5087-extractor-v4/06-pack-logic-decisions.md` §KIN-1)
+**Then:** they reach its **initiatives**, each initiative's epics, and each epic's issues — the four-level path the 2026-11-05 ruling fixed (theme → initiative → epic → issue, `docs/epics/2026-11-05-5087-extractor-v4/06-pack-logic-decisions.md` §KIN-R)
 **And:** a rebuild from the journal reproduces the same edges
 **And:** a pair the packs do **not** declare — including a direct theme → epic hop, which the new level makes illegal — produces no edge
 
