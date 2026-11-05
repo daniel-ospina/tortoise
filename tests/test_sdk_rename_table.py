@@ -1127,10 +1127,13 @@ C3B_DIVERGENCES_LITERAL: dict[str, tuple[str, str, str]] = {
     "list_sources": ("list_knowledge", "graph_overview", "tortoise_list_sources"),
     "list_topics": ("graph_overview", "list_knowledge", "tortoise_list_topics"),
     "org_create": ("UNBACKED", "tenancy:create_memory_graph", "tortoise_org_create"),
+    # #10602: `tortoise_query` now binds `paginated_query` (the accessor its handler
+    # actually reaches), so the collapse group's tool column moved to it and `query` —
+    # which no tool binds any more — is no longer a divergence this comparison can see.
+    # The pinned literal is what makes such a shift impossible to do silently.
     "paginated_query": ("list_knowledge", "search_knowledge",
-                        "tortoise_paginated_query"),
+                        "tortoise_query"),
     "promote_point": ("update_knowledge", "refresh_confidence", "tortoise_promote_point"),
-    "query": ("list_knowledge", "search_knowledge", "tortoise_query"),
     "query_points_by_tag": ("list_knowledge", "search_knowledge",
                             "tortoise_query_points_by_tag"),
     "set_point_baseline": ("update_knowledge", "refresh_confidence",
@@ -1148,7 +1151,12 @@ C3B_DETERMINATIONS_LITERAL: dict[str, str] = {
     'list_topics': "**Part A is right; the bridge is wrong.** beta's narrow-aliases row names `list_topics` among the aliases absorbed by `graph_overview`, and canonical R6 lists it there too.",
     'org_create': "**Genuinely contested — no owner ruling.** No approved doc places organisation-account creation. `create_memory_graph` (beta row 29) provisions a memory GRAPH, not an account, and beta's tenancy block has no creation row. Part A's `UNBACKED` is the honest record; the bridge asserts a destination no doc states.",
     'promote_point': "**Part A is right; the bridge is wrong — and the map is owner-approved, so it is reported here, not edited.** The owner-approved MCP list absorbs `promote_point` into `revise_knowledge`, whose beta successor is `update_knowledge`; beta names it a FIELD on that update, and promote's incident-operator cascade and approval gate ride with it. The bridge's `refresh_confidence` recomputes confidence and does not cover the cascade.",
-    'query': '**Part A is right; the bridge is wrong.** beta: “`query`, `paginated_query`, `query_points_by_tag` \\| 3 \\| → `list_knowledge`”, and canonical R2 (`list_knowledge`) lists all three. beta row 4 is explicit that `list_knowledge` is the browse-and-filter method.',
+    # #10602: no `query` entry, and `paginated_query`'s bound tool moved to
+    # `tortoise_query`. Both follow from one correction — `tortoise_query`'s declared
+    # `sdk_method` changed `query` → `paginated_query`, the accessor its handler
+    # actually reaches — so the collapse group's disagreement is now keyed by the two
+    # methods that still have a binding and by the tool that binds one of them. The
+    # literal is pinned precisely so a shift like this cannot happen silently.
     'paginated_query': '**Part A is right; the bridge is wrong.** beta: “`query`, `paginated_query`, `query_points_by_tag` \\| 3 \\| → `list_knowledge`”, and canonical R2 (`list_knowledge`) lists all three. beta row 4 is explicit that `list_knowledge` is the browse-and-filter method.',
     'query_points_by_tag': '**Part A is right; the bridge is wrong.** beta: “`query`, `paginated_query`, `query_points_by_tag` \\| 3 \\| → `list_knowledge`”, and canonical R2 (`list_knowledge`) lists all three. beta row 4 is explicit that `list_knowledge` is the browse-and-filter method.',
     'set_point_baseline': "**Part A is right; the bridge is wrong — and the map is owner-approved, so it is reported here, not edited.** Same approved absorption as `promote_point`; beta names the starting belief a FIELD on `update_knowledge`. The bridge's `refresh_confidence` recomputes confidence, which is a different operation.",
@@ -2352,10 +2360,11 @@ def test_validate_rows_requires_a_determination_for_every_bridge_divergence(
     assert generator_module._validate_rows(rows, targets) == []
 
     trimmed = {k: v for k, v in generator_module.BRIDGE_DETERMINATION.items()
-               if k != "query"}
+               if k != "paginated_query"}
     monkeypatch.setattr(generator_module, "BRIDGE_DETERMINATION", trimmed)
     errs = generator_module._validate_rows(rows, targets)
-    assert any("BRIDGE DIVERGENCE UNDETERMINED" in e and "query" in e for e in errs), (
+    assert any("BRIDGE DIVERGENCE UNDETERMINED" in e and "paginated_query" in e
+               for e in errs), (
         f"an undetermined bridge divergence did not fail the build: {errs}"
     )
 

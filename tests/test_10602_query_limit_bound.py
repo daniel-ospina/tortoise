@@ -263,8 +263,11 @@ def test_the_served_description_discloses_the_bound():
     # has no LIMIT, so the whole tagged population is materialised and then sliced
     # (tortoise/sdk.py). That distinction is the one review round 4 found mis-stated in
     # the opposite direction (round 2 under-claimed "not capped", round 3's fix then
-    # over-claimed "not a full-population scan"). Pin the ACCURATE sentence, and pin the
-    # SDK fact it rests on, so a future edit cannot restore either error silently.
+    # over-claimed "not a full-population scan"). These assertions pin the SENTENCE, not
+    # the SDK fact it rests on: if `query_points_by_tag` ever gained a LIMIT the text
+    # would keep asserting an unbounded read and nothing would red — the safe direction
+    # (an under-claim), and the SDK's own Cypher is what the sentence quotes. Kept
+    # explicit so a future reader does not assume more coverage than exists.
     assert "tag=" in low, f"the tag= arm is not addressed at all: {desc}"
     assert "not capped" not in low, (
         f"the description still claims one arm is uncapped: {desc}")
@@ -281,7 +284,8 @@ def test_the_tag_alias_is_not_silently_truncated_by_the_new_bound(stub_factory):
     no way to see the rest — and no way to tell. It now passes an explicit limit.
     """
     from tortoise.mcp_server import _TAG_ALIAS_LIMIT, tortoise_query_points_by_tag
-    assert _TAG_ALIAS_LIMIT == 10_000, "the alias's ceiling is the SDK's own max limit"
+    assert _TAG_ALIAS_LIMIT == 10_000, (
+        "the alias's cap is population-sized; no SDK limit guard runs on this path")
     stub_factory(n_points=5, n_tag_points=250)
     result = tortoise_query_points_by_tag("pricing")
     assert len(result) == 250, (

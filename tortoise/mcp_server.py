@@ -910,12 +910,13 @@ def _declared_dry_run_default(name: str):
 _COERCES_TO_TRUE = frozenset({"true", "1", "yes", "on", "t", "y"})
 
 #: #10602: the `limit` the RETIRED `tortoise_query_points_by_tag` alias passes, so the new
-#: bound in `tortoise_query` cannot silently truncate it. Set to the ceiling the SDK's own
-#: `limit` validation accepts (1-10000), i.e. "the whole realistic population" rather than
-#: an arbitrary page: that alias's contract is the RAW, complete tag result set and its
-#: signature offers no `offset`/`page` with which to walk a truncation, so a smaller default
-#: would turn a complete answer into an incomplete one that looks complete. The alias is
-#: removed next release; this constant goes with it.
+#: bound in `tortoise_query` cannot silently truncate it to the un-paginated default (100).
+#: A population-sized cap, NOT a validated ceiling: no SDK limit guard runs on this path at
+#: all (`paginated_query` checks only `limit >= 1`, tortoise/sdk.py, and the `tag=` arm
+#: slices a list — `rows[:eff_limit]` — consulting no validator), so "within the SDK's max"
+#: would be false. 10_000 is chosen to exceed any realistic tag population: the alias's
+#: contract is the RAW tag result set and its signature offers no `offset`/`page` with
+#: which to walk a truncation. The alias is removed next release; so is this constant.
 _TAG_ALIAS_LIMIT = 10_000
 
 
