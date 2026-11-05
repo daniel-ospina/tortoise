@@ -183,8 +183,8 @@ watchdog + 6 m embedder + **~7.3 m of MEASURED startup, not the ~1 m an earlier 
 (`Set up job` 182 s = 3 m 02 s, 10:21:30 → 10:24:32, plus 4 m 14 s of uncapped setup steps to the
 suite's first line — the 10:24:32 → 10:28:58 window of 266 s MINUS the embedder's own measured 12 s,
 whose 6 m cap is already a term above; run 42000057137, job `test (d)`, `actions/jobs/127165076497`)
-+ **an 8 m cache-write term (1 m prune + 7 m save)** + ~0.4 m last-failed save = **57.6 m against 90,
-x 1.5 = 86.5**. The write term fits because #11063 split this job's cache by payload: `~/.cache/pip`
+plus **an 8 m cache-write term (1 m prune + 7 m save)** and ~0.4 m last-failed save = **57.6 m against
+90, x 1.5 = 86.5**. The write term fits because #11063 split this job's cache by payload: `~/.cache/pip`
 (3,616,385,308 B in a PR scope, the torch wheel set, 93% of the 3.88 GB payload the defect uploaded)
 is now read from the shared `pip-<os>-<hash uv.lock>` key that FOUR other jobs write, while
 `~/.cache/uv` keeps exactly one writer here, bounded in size (`uv cache prune`) and in time
