@@ -788,11 +788,15 @@ _BODY_FENCE = "  | "
 #: covers both spacings (and still never matches ``[validity …]``).
 _VALID_WINDOW_OPEN = re.compile(r"\[valid\b")
 _FLAG_SUPERSEDED_BY = re.compile(r"\[SUPERSEDED BY:")
-#: The CLOSED-window flag is shape-exhaustive without a change: the arrow only
-#: appears in ``[valid <from> → <to>]`` (orderable start ⇒ a space) or
-#: ``[valid → <to>]`` (a PRESENT but UNORDERABLE start: #9730 omits the start
-#: clause and the literal space before the arrow is retained — an ABSENT start
-#: renders no marker at all, so this shape never comes from a missing bound).
+#: The CLOSED-window flag is shape-exhaustive: the arrow only appears in
+#: ``[valid <from> → <to>]`` (orderable start) or ``[valid → <to>]`` (no start
+#: clause: a PRESENT but UNORDERABLE start, #9730, or — since #8067 — a start
+#: that was never stored, i.e. an END-ONLY window such as the one
+#: ``invalidate_point`` writes). BOTH keep the literal space before the arrow,
+#: which is the invariant this pattern actually depends on — ⚠️ the earlier
+#: note here claimed an ABSENT start "renders no marker at all, so this shape
+#: never comes from a missing bound", and #8067 refuted it while leaving the
+#: regex correct.
 _FLAG_CLOSED_WINDOW = re.compile(r"\[valid [^\]]*→")
 
 
