@@ -10553,6 +10553,23 @@ durations:
   # ⛔ NO CASE COUNT and NO past-count anecdote — a hand-written count re-stales on every case a round adds,
   # and quoting one as history ("N against a quoted M") re-stales the same way one step removed. A VGATE
   # caught exactly that in this lane's own doc row, and a round-8 review caught this row repeating it.
+  # The ungated arms are pure enum/entry-point assertions and run everywhere. ⛔ This row once said
+  # "NOT hermetic" and carried a two-minute figure; both were wrong for the SAME reason, and the mechanism
+  # is the part worth keeping. The cost was the DOCUMENT UPSERT constructing the real embedding model
+  # (`add_document` → projection apply → `entities.encode_for_row` → `EmbeddingModel.get()`), whose
+  # huggingface.co HEAD request the hermetic egress guard blocks and retries five times (#4387) — NOT the S7
+  # stage, which round 11 stubbed to no effect. The cost lands on the FIRST ingest in a PROCESS (the
+  # embedder's failed-load negative cache then answers the rest), which is why a pin on the single slow arm
+  # only moved it to the next arm that needed the model. The pin that holds is FILE-WIDE: the module-level
+  # autouse fixture `_no_embedder` requests `tests/conftest.py::force_sparse_tfidf` (#2573/#2772 — the
+  # documented "no embedder" pin) for every arm, so the file runs in SECONDS again. That is what makes `6.0`
+  # a safe flat weight rather than a two-minute flake on every PR's required lane. ⛔ Do not de-duplicate it
+  # against the arm-level request: the arm-level one alone does not cover the other full-ingest arms.
+  # ⛔ NO WALL-CLOCK FIGURE and NO CASE COUNT — both re-stale (a count on every case a round adds; a figure
+  # on every host, and on every arm that gains a model call — this row has now been wrong twice that way).
+  # The mechanism and the fixture name are the durable content; the number is not. An anecdote about a past
+  # count re-stales the same way one step removed (a VGATE caught that in this lane's own doc row; a round-8
+  # review caught this row repeating it).
   # `tools/ci_timing.py --refresh-durations` replaces this from junit once a
   # push-to-main sweep includes it.
   test_8447_truncation_marker.py: 21.0
