@@ -1267,15 +1267,22 @@ def _test_node_names(path: Path) -> set[str] | None:
             `condition=` keyword as conditions; a `cond=` keyword is IGNORED, so a
             call carrying only `cond=` (or only `reason=`, or nothing) has NO
             condition and pytest skips UNCONDITIONALLY — measured `SKIPPED` for
-            all of those. That is pytest's own `# Unconditional.` branch
-            (`_pytest/skipping.py::evaluate_skip_marks`: `if not conditions: ...
-            return Skip(reason)`), re-measured on the pinned pytest 9.1.1
-            (`2 skipped` for `skipif(reason=…)` and `skipif(cond=False)` over an
-            `assert False` body) — an older pytest without that branch leaves the
-            node RUNNING, so the floor matters, not the prose. So: no conditions
-            at all => cannot red; every condition a non-string literal => cannot
-            red iff ANY of them is truthy (pytest's ANY-of rule); anything
-            non-literal => unknowable, kept as a pin.
+            all of those. The arm is explicit in the library, not an emergent
+            consequence of the ANY-of rule: pytest 9.1.1 `_pytest/skipping.py:
+            177-180` reads `# Unconditional. / if not conditions: reason =
+            mark.kwargs.get("reason", "") / return Skip(reason)`, so an
+            `evaluate_skip_marks` reading that stopped at `any(conditions)`
+            (review @`70284375f`) would mis-predict it. Settled by execution on
+            this head: a probe file whose four nodes are
+            `skipif(reason=…)` x2, `skipif(cond=True)` and bare `skipif()` —
+            each asserting `False` where it could — reported `4 skipped`, i.e.
+            none of them ran (re-measured by the second repair lane on the same
+            pytest: `2 skipped` for `skipif(reason=…)` and `skipif(cond=False)`).
+            An older pytest without that branch leaves the node RUNNING, so the
+            floor matters, not the prose. So: no conditions at all => cannot red;
+            every condition a non-string literal => cannot red iff ANY of them is
+            truthy (pytest's ANY-of rule); anything non-literal => unknowable,
+            kept as a pin.
             """
             conditions: list[ast.expr] = []
             if isinstance(call, ast.Call):

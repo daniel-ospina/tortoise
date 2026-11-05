@@ -3284,6 +3284,9 @@ def _duplicate_key_loader():
             self.duplicate_keys: list[tuple[str, int, int]] = []
             # id(MappingNode) -> the pair objects a `<<:` merge inserted into it.
             self.inherited_pairs: dict[int, list[tuple]] = {}
+            #: `<<` keys repeated inside ONE mapping — a key repeat the flatten
+            #: would otherwise erase (it deletes the merge key nodes).
+            self.merge_key_repeats: list[tuple[int, int]] = []
 
         def flatten_mapping(self, node):
             """Record WHICH pairs a `<<:` merge inserted — by object identity.
@@ -3291,17 +3294,28 @@ def _duplicate_key_loader():
             `SafeConstructor.flatten_mapping` deletes the `<<` entry (or
             entries) and PREPENDS the merged pairs into `node.value`, so
             afterwards the inherited and document-written pairs sit side by side
-            in one list. Neither of the two obvious ways to separate them works:
+            in one list. Counting them apart does NOT work, in two independent
+            ways, and both false-RED a legal document in the required
+            `manifest-integrity` job (#10790 review r3 P2):
 
-            * a COUNT taken before the call is short by one per `<<:` entry
+            * a count taken before the call is short by one per `<<:` entry
               (`len(node.value) - own_pairs == len(merge) - n_merge_keys`), so
               the LAST merged pair(s) are classified as document-written and a
-              legal override of that key is refused (#10790 review r3 P2);
-            * a count is also wrong for a mapping reached through a merge CHAIN:
-              the parent's `flatten_mapping` recurses into the merged value
-              node and flattens it THERE, so by the time that node is
-              constructed its `<<` is already gone and every inherited pair
-              looks document-written.
+              legal override of that key is refused — measured: the shipped pin
+              with its anchor rows swapped raised `duplicate mapping key
+              'weight': line 6 repeats line 3`, naming the pair inside the
+              anchor; and
+            * a count is also wrong for a mapping that was flattened by its
+              PARENT before this node was constructed. `flatten_mapping`
+              recurses into the merged value node, and pyyaml completes nested
+              mappings from its generator queue AFTER the shallower ones, so an
+              anchor nested under an earlier key and merged by a later sibling
+              arrives here already collapsed, its `<<` gone — every inherited
+              pair then looks document-written. Measured on the count-based
+              repair: `group: {base: &b {x: 1}, mid: &m {<<: *b, x: 2}}` +
+              `top: {<<: *m, y: 3}` raised `duplicate mapping key 'x': line 6
+              repeats line 3`, which `yaml.safe_load` accepts as `mid == {'x':
+              2}`.
 
             Identity is the property that survives both: `merge.extend(
             value_node.value)` copies the tuple REFERENCES, so an inherited pair
@@ -3326,6 +3340,21 @@ def _duplicate_key_loader():
 
         def construct_mapping(self, node, deep=False):
             if isinstance(node, yaml.MappingNode):
+                # The `<<` key is a key like any other, so TWO of them in one
+                # mapping is a duplicate (YAML 1.2.2 §3.2.1.3) — and
+                # `tools/registry_integrity.py`, the sibling step of the same
+                # required job, refuses it from the raw node graph. The flatten
+                # DELETES the merge keys, so the repeat is invisible downstream:
+                # without this check the two required gates would report
+                # different verdicts on one document, which is the exact shape
+                # the guard-agreement pins exist to prevent. A document can
+                # still merge several mappings with `<<: [*a, *b]`.
+                merge_key_lines = [
+                    key_node.start_mark.line + 1 for key_node, _ in node.value
+                    if key_node.tag == "tag:yaml.org,2002:merge"]
+                if len(merge_key_lines) > 1:
+                    self.merge_key_repeats.append(
+                        (merge_key_lines[0], merge_key_lines[-1]))
                 self.flatten_mapping(node)
                 inherited = {
                     id(pair) for pair in self.inherited_pairs.get(id(node), ())}
@@ -3379,8 +3408,14 @@ def parse_manifest_text(text: str) -> dict:
         parsed = loader.get_single_data()
     finally:
         loader.dispose()
-    if loader.duplicate_keys:
+    if loader.duplicate_keys or loader.merge_key_repeats:
         raise DuplicateManifestKeyError([
+            f"duplicate mapping key '<<': line {last} repeats line {first} "
+            f"— YAML requires a mapping's keys to be unique (1.2.2 §3.2.1.3) "
+            f"and the merge key is one of them; merge several mappings with "
+            f"`<<: [*a, *b]` instead of repeating the key"
+            for first, last in loader.merge_key_repeats
+        ] + [
             f"duplicate mapping key {key!r}: line {line} repeats line {first} "
             f"— a YAML loader keeps only the LAST value, so one of the two rows "
             f"(usually a stale union-merge copy) is silently discarded"
