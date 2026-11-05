@@ -322,6 +322,27 @@ def test_an_unparsable_module_reds_instead_of_reading_as_clean(tmp_path):
         raise AssertionError("an unparsable module was read as CLEAN")
 
 
+def test_the_scope_scan_still_flags_a_dynamic_reference_in_a_string(tmp_path):
+    """The AST must not become an identifier-only scan.
+
+    Main's pre-merge ``_text_without_comments`` repair (``71832318b``, landed
+    with #10935) stripped COMMENT tokens and kept STRING tokens in scope, and
+    this leg is the half of that repair worth keeping: a reference assembled as
+    a literal string (``getattr(metering, "get_capture_usage")``) is still a
+    wiring of the reader. The comment-stripping half is subsumed rather than
+    dropped — ``test_a_comment_naming_the_reader_is_not_a_consumer`` above
+    excludes a comment AND a docstring AND still catches a real code reference,
+    which is strictly stronger than a comment strip alone. Kept as a distinct
+    fixture shape because the ``getattr``/``setattr`` arm is the one an
+    identifier-only scanner silently loses.
+    """
+    (tmp_path / "tool_registry.py").write_text(
+        'READER = getattr(metering, "get_capture_usage")\n', encoding="utf-8")
+    offenders, scanned = _scan_capture_call_sites(tmp_path)
+    assert offenders == ["tool_registry.py"]
+    assert scanned == ["tool_registry.py"]
+
+
 def test_the_scope_scan_exempts_only_the_defining_modules(tmp_path):
     """The exemption set is exact: the defining modules are skipped, and ONLY them."""
     for name in _ALLOWED:

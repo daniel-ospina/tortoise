@@ -299,11 +299,12 @@ def test_capture_sessions_gate_carry_rides_its_own_substrate_lane(
     read — and every async door must submit each to the pool ITS OWN substrate
     lives in. The capture door used to submit the pair with
     ``asyncio.to_thread(_check_org_limit, org, "sessions", sdk=sdk)``: the
-    loop's DEFAULT executor, which this file already gives ``_commit_sync``
-    and ``_seed_demo_sync``. That satisfies "off the loop" and violates "on its
-    own lane", and it is what made one fault answer with two bodies — a
-    control-plane stall on ``/v1/sessions`` returned ``500 "Quota check
-    failed"`` while the identical stall on ``/v1/points`` returned ``503``.
+    loop's DEFAULT executor — the lane ``hosted_api._commit_sync`` and
+    ``hosted_api._seed_demo_sync`` already use. That satisfies "off the loop"
+    and violates "on its own lane", and it is what made one fault answer with
+    two bodies — a control-plane stall on ``/v1/sessions`` returned ``500
+    "Quota check failed"`` while the identical stall on ``/v1/points`` returned
+    ``503``.
 
     This pin drives the ROUTE (the off-the-loop pin proves the thread, this one
     proves the pool), so a door that stops reaching the shared seam fails here.
@@ -337,9 +338,11 @@ def test_capture_sessions_gate_carry_rides_its_own_substrate_lane(
     # This lane runs registry/self-host mode, where the registry IS the graph
     # connection (#3718), so BOTH halves ride the graph pool — the pin is that
     # the door reaches the seam at all, in one submission per read, with the
-    # carry FIRST. In Supabase mode the same code sends the carry to `_cp_offload`
-    # (asserted by ``test_the_points_door_carries_the_allowance_on_the_control_plane_lane``,
-    # where the mode is patched without a whole route behind it).
+    # carry FIRST. In Supabase mode the same code sends the carry to `_cp_offload`,
+    # so the control-plane half is pinned at the seam instead of behind a whole
+    # route: ``test_the_points_door_carries_the_allowance_on_the_control_plane_lane``
+    # and ``test_the_sessions_door_carries_the_allowance_on_the_control_plane_lane``
+    # (both in ``tests/test_allowance_gate.py``, one per gated door, mode patched).
     relevant = [(pool, op) for (pool, op) in seen
                 if op.startswith("check_org_limit.sessions")]
     assert relevant == [("graph", "check_org_limit.sessions.allowance_carry"),

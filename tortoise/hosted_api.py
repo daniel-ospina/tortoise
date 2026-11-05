@@ -9174,10 +9174,11 @@ async def _carry_allowances_off_loop(org: dict, resource: str, *,
     LOCKED region) without a second resolver read.
 
     A helper rather than two copies because TWO doors need it for the same
-    reason: ``_check_org_limit_off_loop`` (the points doors, which submit the
-    count to the graph pool) and ``/v1/sessions/commit`` (which submits its
-    whole read→plan→write region to a worker UNDER A PER-GRAPH LOCK — the carry
-    must NOT ride inside that lock, see the route's note). Both must pick the
+    reason: ``_check_org_limit_off_loop`` (the points doors AND the capture
+    door, which submit the count to the graph pool) and ``/v1/sessions/commit``
+    (which submits its whole read→plan→write region to a worker UNDER A
+    PER-GRAPH LOCK — the carry must NOT ride inside that lock, see the route's
+    note). Both must pick the
     pool by SUBSTRATE, not by whichever pool the rest of their work uses, and
     both must stamp the marker so the second half does not re-read. A second
     copy of that decision is how the two drift back apart (#9567 review round
@@ -9216,7 +9217,9 @@ async def _check_org_limit_off_loop(org: dict, resource: str, *,
                                     sdk=None) -> None:
     """``_check_org_limit`` for an ``async def`` door — each read on ITS lane.
 
-    The gate is two reads, and they belong to two different pools:
+    The gate's two ALLOWANCE reads belong to two different pools (and, for
+    `sessions`, a THIRD — the extractor's meter, riding inside the count's graph
+    submission — is latent and filed as #10949):
 
     * the allowance CARRY is a CONTROL-PLANE read (``quota.resolve_org_limits``
       → ``_orgs_row_fail_soft``'s PostgREST ladder in Supabase mode; the
@@ -9252,8 +9255,9 @@ async def _check_org_limit_off_loop(org: dict, resource: str, *,
     and never ``graph_unavailable``.
 
     The carry itself is ``_carry_allowances_off_loop``, shared with the commit
-    lane (#9567 review round 13) — this function is the points-doors half: hoist
-    the carry onto its own lane, then submit ONLY the count to the graph pool.
+    lane (#9567 review round 13) — this function is the gated-request half,
+    serving ``points`` and ``sessions``: hoist the carry onto its own lane, then
+    submit ONLY the count to the graph pool.
 
     ``sdk=`` is #8906's IDENTITY argument, forwarded verbatim to the count
     (``_check_org_limit(carried, resource, sdk=sdk)``): it is the handle the
@@ -17521,14 +17525,18 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # ⛔ "Off the loop" is not the whole rule (main-repair, 2026-11-04, after
     # the #9567 round-12/13 pool split landed): `asyncio.to_thread` runs the
     # call on the LOOP'S DEFAULT EXECUTOR, which carries this file's graph-lane
-    # work (`_commit_sync`, `_seed_demo_sync`). The gate is TWO reads on TWO
-    # substrates — the allowance CARRY is a control-plane read, the COUNT is a
-    # graph read — and round 12's rule is that a read is submitted to the pool
-    # ITS OWN substrate lives in. Submitted as one blob to the default
-    # executor, a control-plane stall occupied a slot that the commit lane
-    # needs, and it answered `500 "Quota check failed"` where the identical
-    # stall on `/v1/points` answers `503 control_plane_unavailable` — one
-    # fault, two bodies, across two gated doors of one seam. So this door uses
+    # work (`_commit_sync`, `_seed_demo_sync`). The gate's TWO ALLOWANCE reads
+    # sit on TWO substrates — the allowance CARRY is a control-plane read, the
+    # COUNT is a graph read — and round 12's rule is that a read is submitted to
+    # the pool ITS OWN substrate lives in. (For `sessions` there is also a THIRD
+    # read — the extractor's meter, riding INSIDE the count's graph submission.
+    # It is latent and is the SECOND DECLARED RESIDUAL below, filed as #10949,
+    # so "two reads" is exact about this seam and not about the whole gate.)
+    # Submitted as one blob to the default executor, a control-plane stall
+    # occupied a slot that the commit lane needs, and it answered
+    # `500 "Quota check failed"` where the identical stall on `/v1/points`
+    # answers `503 control_plane_unavailable` — one fault, two bodies, across
+    # two gated doors of one seam. So this door uses
     # the SAME seam as the points doors (`_check_org_limit_off_loop`): carry on
     # `_cp_offload`/`_graph_offload` by substrate, then the count on the graph
     # pool. The CONTEXT story, stated exactly (review cycle 2 corrected an
@@ -17559,8 +17567,9 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # capture-shaped `unavailable=` factory threaded through
     # `_carry_allowances_off_loop` (which already accepts one at `_cp_offload`),
     # and it is named here rather than left for someone to discover from a
-    # dashboard line. The `error_code` (`control_plane_unavailable`) is correct
-    # either way.
+    # dashboard line. Filed as #10967 (review cycle 6 required the id next to
+    # the claim, not only the diagnosis). The `error_code`
+    # (`control_plane_unavailable`) is correct either way.
     #
     # ⚠️ SECOND DECLARED RESIDUAL (main-repair review cycle 3, P1): for
     # `resource="sessions"` the gate has a THIRD read, and it is a control-plane
