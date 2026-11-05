@@ -612,6 +612,12 @@ def build_plan(report: dict, *, target: dict, health: dict | None,
             # must never read as the strong one.
             "record_leg": record.get("leg"),
             "record_dir": record.get("dir"),
+            # ⛔ WHICH GRAPH THE PARITY EVIDENCE MEASURED (review P2, cycle 5). The
+            # census emits it and `load_parity_report` REFUSES a report that names
+            # none; the plan — the artefact a human signs for an IRREVERSIBLE delete —
+            # dropped it, so two consumers of one dict disagreed about whether a
+            # nameless census is evidence, and the lenient side was the signed one.
+            "graph": report.get("graph"),
             "compared_fields": report.get("compared_fields") or [],
             "declared_absent": report.get("declared_absent") or [],
             "episodic_graph_nodes": pop.get("episodic_graph_nodes"),
@@ -1298,6 +1304,18 @@ def _report_problem(report) -> str:
     if not isinstance(report.get("declared_absent"), list):
         return ("declared_absent is missing or is not a list, so which fields "
                 "were NOT compared is not established")
+    # ⛔ A NAMELESS CENSUS IS NOT EVIDENCE (review P2, cycle 5) — the SAME rule
+    # `cache_eviction.load_parity_report` applies, because a plan is the artefact a
+    # human approves and the two consumers must not disagree about what evidence is
+    # worth: a `--census-json` file with `graph: null` was accepted here and produced
+    # an exit-0 signable plan that named no graph at all, while the cache census
+    # refused the very same file. `Graph` is what `census()` emits
+    # (`tools/turn_parity_census.py`); an artifact without it cannot say what it
+    # measured.
+    reported_graph = report.get("graph")
+    if not isinstance(reported_graph, str) or not reported_graph.strip():
+        return ("`graph` is missing or blank, so which graph this parity evidence "
+                "measured is not established — a nameless census is not evidence")
     for key in ("clean_sessions", "failed_sessions"):
         if not isinstance(report["parity"].get(key), list):
             return f"parity.{key} is missing or is not a list"
@@ -1847,6 +1865,23 @@ def main(argv: list[str] | None = None) -> int:
             f"purge_legacy_turns: REFUSED {REFUSE_CENSUS_UNREADABLE}: the "
             f"census report cannot be read as a census: {report_problem}. "
             f"Nothing was deleted and no plan was written.\n")
+        return 3
+
+    # ⛔ THE PLAN'S EVIDENCE MUST BE EVIDENCE ABOUT **THIS** TARGET (review P2, cycle
+    # 5). `--census-json` is the only preview path on a postponed hosted deployment,
+    # and a cached census of graph A was accepted for a run whose `--uri` names graph
+    # B: everything downstream compared counts, never identities. The check is the
+    # same one the cache census applies to the same artifact — the report's own
+    # `graph` against the graph this run resolved — so the two consumers cannot
+    # disagree about it.
+    expected_graph = census_mod.resolve_graph_name(
+        args.uri, args.db_path, args.graph_name)
+    if report.get("graph") != expected_graph:
+        sys.stderr.write(
+            f"purge_legacy_turns: REFUSED {REFUSE_CENSUS_UNREADABLE}: the census "
+            f"report measured graph {report.get('graph')!r}, but this run targets "
+            f"{expected_graph!r} — a CLEAN census of one graph does not license "
+            f"purging another. Nothing was deleted and no plan was written.\n")
         return 3
 
     if args.health_url and args.health_json:

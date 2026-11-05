@@ -59,6 +59,12 @@ def _report(clean=None, failed=None) -> dict:
     # fixture carries each clean session's ids on a side key so the helper can
     # reproduce that list without pretending to be the store legs.
     return {
+        # ⛔ THE EVIDENCE'S TARGET IS PART OF "IS THIS A CENSUS REPORT" (review P2,
+        # cycle 5): a nameless census is refused (the same rule
+        # `cache_eviction.load_parity_report` applies) and a census of ANOTHER graph
+        # is refused for the target this run resolved. "x" is the graph
+        # `_TARGET_ARGV`'s URI names.
+        "graph": "x",
         "population": {"episodic_graph_nodes": 9, "turn_shaped_nodes": 9,
                        "sessions_with_graph_turns": len(clean) + len(failed),
                        "outside_population": 0},
@@ -507,6 +513,62 @@ def test_the_census_artifact_names_the_graph_the_run_opened(monkeypatch, tmp_pat
     # The graph the URI names — resolved by the instrument's own canonical helper,
     # never a second parse of the URI here.
     assert seen["graph_name"] == "team_x"
+    # …and the SIGNED artefact names it too (review P2, cycle 5): the plan is what a
+    # human approves for an irreversible delete, so the graph its parity evidence
+    # measured must be in it, not only in the census artifact the plan summarises.
+    plan = json.loads((tmp_path / "plan.json").read_text(encoding="utf-8"))
+    assert plan["census"]["graph"] == "team_x"
+
+
+def test_a_cached_census_that_names_no_graph_is_not_evidence(tmp_path, capsys):
+    """⛔ TWO CONSUMERS OF ONE DICT MUST NOT DISAGREE ABOUT WHAT EVIDENCE IS.
+
+    Measured before the fix (review P2, cycle 5): a `--census-json` file with
+    `graph: null` was accepted and produced an exit-0 signable plan naming no graph at
+    all, while `cache_eviction.load_parity_report` refused the very same file. The
+    lenient side was the artefact a human signs for an IRREVERSIBLE delete.
+
+    Mutation that goes RED here: removing the `graph` requirement from
+    `_report_problem` (the run then exits 0).
+    """
+    report = _report(clean=[_clean_with_ids("s1", ["s1_t0"])])
+    report["graph"] = None
+    path = tmp_path / "census.json"
+    path.write_text(json.dumps(report), encoding="utf-8")
+
+    rc = purge.main([*_TARGET_ARGV, "--target-note", "unit test",
+                     "--census-json", str(path),
+                     "--plan-out", str(tmp_path / "plan.json")])
+
+    assert rc == 3
+    err = capsys.readouterr().err
+    assert "nameless census is not evidence" in err
+    assert not (tmp_path / "plan.json").exists()
+
+
+def test_a_cached_census_of_ANOTHER_graph_cannot_license_this_one(tmp_path, capsys):
+    """The plan's evidence must be about the target this run resolved.
+
+    Measured before the fix (review P2, cycle 5): `--census-json <census of graph B>`
+    with `--uri …/x` exited 0 with a signable plan — every comparison downstream was
+    of counts, never identities.
+
+    Mutation that goes RED here: removing the `report["graph"] != expected_graph`
+    refusal (the run then exits 0).
+    """
+    report = _report(clean=[_clean_with_ids("s1", ["s1_t0"])])
+    report["graph"] = "other_graph"
+    path = tmp_path / "census.json"
+    path.write_text(json.dumps(report), encoding="utf-8")
+
+    rc = purge.main([*_TARGET_ARGV, "--target-note", "unit test",
+                     "--census-json", str(path),
+                     "--plan-out", str(tmp_path / "plan.json")])
+
+    assert rc == 3
+    err = capsys.readouterr().err
+    assert "other_graph" in err and "'x'" in err
+    assert not (tmp_path / "plan.json").exists()
 
 
 def test_cli_refuses_execute_from_a_cached_census(tmp_path, capsys):
