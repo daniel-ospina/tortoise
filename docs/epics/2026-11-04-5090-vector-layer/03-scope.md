@@ -237,7 +237,7 @@ Ontology low · Accessibility low · Library-deps none.
 
 ### 7.1 Stage 1 — align (`01-align.md`)
 
-**Cycle 1** — fresh context, `epic-align` prompt + 8 independent fact-checks with commands. **1 P0, 4 P1, 3 P2, 1 P3.** Incorporated: the `#9548` authorisation wording; the setup-time (not per-search) warning; `1 of 4` MET not 3-of-4; DoD row 2's omitted remainder; the `P0-blocker`s' matrix placement; A1's reasons; the profit recomputation; the four-vs-three label count; the `§14.3` register row; the 4-exist/6-walked surfaces.
+**Cycle 1** — fresh context, `epic-align` prompt + 8 independent fact-checks with commands. **2 P0, 4 P1, 3 P2, 1 P3.** Incorporated: the `#9548` authorisation wording; the setup-time (not per-search) warning; `1 of 4` MET not 3-of-4; DoD row 2's omitted remainder; the `P0-blocker`s' matrix placement; A1's reasons; the profit recomputation; the four-vs-three label count; the `§14.3` register row; the 4-exist/6-walked surfaces.
 **Cycle 2** — corrections-only pass. **2 P1, 1 P3.** Incorporated: A1's sole surviving reason **falsified** (the doc row at `:1520` and the runtime warning both state the deferral) → **A1 re-argued on actionability and the decision changed from PROCEED to REPOINT**; the `§14.3` register correction **delivered for real** rather than pointed at a non-existent section; the `§0-preamble` mis-citation.
 
 ### 7.2 Stage 2 — research (`02-research.md`)

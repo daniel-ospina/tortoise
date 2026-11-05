@@ -36,9 +36,9 @@ counts reconcile (5 items → 6 children, +1 because S5 is two artifacts).**
 
 ⚠️ **Reconciled against the PRIOR decomposition, not just the issue tracker.** `#5090` carries a
 **2026-10-31** decomposition comment (pointer: `#5087` · `issuecomment-6550250938`) whose child set was
-**six** existing children — `#4997` · `#4999` · `#5096` · `#5407` · `#4333` · `#8419` · `#10465` is seven
-ids because `#8419` reaches the epic by neither mechanism, as the comment says — plus one new. Per-child
-disposition, so "MECE" is a claim and not an assertion:
+**six** existing children — `#4997` · `#4999` · `#5096` · `#5407` · `#4333` · `#8419` — **plus one newly
+filed** (`#10465`), which is why its own list carries seven ids. Per-child disposition, so "MECE" is a
+claim and not an assertion:
 
 | prior child | state | disposition here |
 |---|---|---|
@@ -46,6 +46,8 @@ disposition, so "MECE" is a claim and not an assertion:
 | `#4999` | CLOSED (PR #5159) | **not re-filed.** `scan_fallback` is MET; D13 is a regression pin only. |
 | `#4333` | OPEN, native child | **not re-filed.** Owns the storage architecture; cited 6× as the home of what this epic excludes. |
 | `#8419` | OPEN, parented by neither | **not re-filed.** Root is the D10 fold (`#5088`); named in §4, not claimed. |
+| `#5096` | CLOSED COMPLETED | **not re-filed.** The query and traversal legs; exercised by D6 and D13, and the epic adds no new leg. |
+| `#5407` | CLOSED COMPLETED | **not re-filed.** The three label sets now agree — the premise D8 asserts (*one declaration, not a second*). |
 | `#10465` | CLOSED | **not re-filed.** Its instrument is re-runnable and is cited in C6. |
 | `#10541` | CLOSED COMPLETED 2026-11-04 | **not re-filed.** Delivered the census; **C2** is the narrower, different residual — the exemption authority has no production home. |
 | *"state the rule for what earns an embedding"* | **deliberately not filed 2026-10-31** | **still not filed.** Duplicates `#5008` (CLOSED). This lane reaches the same conclusion independently. |

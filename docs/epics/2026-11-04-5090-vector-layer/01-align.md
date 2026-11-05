@@ -30,7 +30,7 @@ Recorded first, because the scope is wrong if they are taken on trust. Each was 
 
 | lane brief says | measured at this head |
 |---|---|
-| *"the runtime warns on every search"* | **The warning is SETUP-time, not per-search.** `_record_vector_index_inventory` (`projection/__init__.py:18583`) emits `log.warning` **once per (endpoint, graph) per process**, from `_ensure_indexes`, guarded by `_VECTOR_INDEX_GAP_WARNED`. The **query-time** fallback logs at **info/debug** (source comment cites #1359 for *"not warning"*). It *looks* per-search on any short-lived CLI process (each `goal-state.py --line` invocation is a fresh process); it is not per query. **The full-scan defect is real and is paid on every query — the warning framing is what is wrong.** |
+| *"the runtime warns on every search"* | **The warning is SETUP-time, not per-search.** `_record_vector_index_inventory` (`projection/__init__.py:18491`) emits `log.warning` **once per (endpoint, graph) per process**, from `_ensure_indexes`, guarded by `_VECTOR_INDEX_GAP_WARNED`. The **query-time** fallback logs at **info/debug** (source comment cites #1359 for *"not warning"*). It *looks* per-search on any short-lived CLI process (each `goal-state.py --line` invocation is a fresh process); it is not per query. **The full-scan defect is real and is paid on every query — the warning framing is what is wrong.** |
 | *"$73/GB"* as a per-byte cost of the *whole* graph | Correct as the recorded basis (`billing.cost_basis.falkordb_per_gb = 73.0`), but it must be applied to the **removable payload**, not to 195 MB. See §3. |
 | the epic is *"3 of 4 DoD bullets met"* | **1 of 4 is MET.** `uv run python tools/dod_5090_probe.py` at this head: **`PARTIAL / PARTIAL / MET / NOT MET`**. Rows 1 and 2 are PARTIAL, row 4 NOT MET. |
 
@@ -203,7 +203,7 @@ measurement; the two mandated workflow artifacts; the writer-population remainde
 ## 6. Review gate
 
 **Cycle 1** — fresh-context reviewer, `epic-align` prompt + 8 independent fact-checks with commands.
-Result: **1 P0, 4 P1, 3 P2, 1 P3**. All incorporated:
+Result: **2 P0, 4 P1, 3 P2, 1 P3**. All incorporated:
 
 | sev | finding | disposition |
 |---|---|---|

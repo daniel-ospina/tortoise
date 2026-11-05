@@ -205,7 +205,8 @@ warning-vs-info **level** is the contract.
 
 - **Journeys ↔ E2E:** J1–J5 map to D1–D2 (J1), D5–D8 (J3), D3–D4 (J4), D9–D11 (J5). **J2** (degraded search
   naming `scan_fallback`) is already **MET** by `#4999`/PR #5159 — **D13** is the regression pin for it; D6 asserts the pair and the
-  gap warning, which is a different claim. **No journey lacks a test; no test lacks a journey.**
+  gap warning, which is a different claim. **Every behavioural test maps to a journey**; D12 is the exception and is not one — it asserts S5's
+  artifacts, and S5 is a workflow mandate with no user journey.
 - **Data model ↔ interfaces:** the register is code, not a table — consistent with §4. The one place a
   schema would have entered (an `embedding` column on object/subject) is explicitly declined and assigned to V1.
 - **Architecture ↔ interfaces:** the leaf-module requirement (§5) and the register's import contract (§6.2)
