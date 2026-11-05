@@ -327,10 +327,20 @@ class CacheTest(unittest.TestCase):
         """The widened `api <tok>` set must refuse NOTHING that is not a declared route.
 
         A widened deny-set is only safe if the direction that cannot be observed in production
-        is pinned too: an over-match here silently bricks a real invariant read. Each spelling
-        below is a live read the tool is supposed to serve, including the two shapes the wider
-        candidate set newly touches — a token equal to a flag's VALUE (`GET`, `github.com`) and
-        a projection whose text mentions a mutable word.
+        is pinned too: an over-match here silently bricks a real read.
+
+        ⛔ THE CASES MUST COLLIDE WITH THE ROUTE WORD. The first cut of this case listed only
+        `api repos/o/n`, `api user` and four other `api` spellings — so when the candidate was
+        synthesised for EVERY non-flag token, `repo list graphql`, `search repos graphql`,
+        `repo view graphql/graphql-js` and `issue list -R graphql/graphql-js` were all refused
+        rc=3 (a repo owner, a search term and a real repository name, not routes) and this case
+        stayed GREEN. It now carries those spellings, so the over-match that shipped is
+        reproducible here; `graphql/graphql-js` is a real repository, and `gh repo list
+        [<owner>]` is documented usage.
+
+        The `api` spellings stay in the table because the widened set must ALSO not have made
+        the invariant reads refuse: a token equal to a flag's VALUE (`GET`, `github.com`) is
+        still offered as a candidate under the verb-anchored rule.
         """
         for route in (
             ("api", "repos/o/n"),
@@ -339,6 +349,13 @@ class CacheTest(unittest.TestCase):
             ("api", "--paginate", "repos/o/n/branches"),
             ("api", "-X", "GET", "repos/o/n/topics"),
             ("api", "repos/o/n/releases", "--jq", ".[].state_name"),
+            # the collisions: a route WORD as a porcelain argument, never as a route.
+            ("repo", "list", "graphql"),
+            ("search", "repos", "graphql"),
+            ("repo", "view", "graphql/graphql-js"),
+            ("issue", "list", "-R", "graphql/graphql-js"),
+            ("label", "list", "-R", "graphql/graphql-js"),
+            ("search", "issues", "graphql", "--repo", "graphql/graphql-js"),
         ):
             r = self.run_tool(
                 "get", "repo", "--repo", "o/n",
