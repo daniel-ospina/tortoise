@@ -1588,6 +1588,19 @@ def _resolve_repo(cwd: Path) -> str:
             f"`gh repo view` did not answer within {GH_PROBE_TIMEOUT_S}s — refusing to "
             "detach a rail at a target this launch could not name"
         )
+    # ⛔ THE FOURTH SIBLING (review cycle 5, finding 2). `cause` is empty for a REAL process,
+    # so a real `gh` exiting 124 skipped the arm above and fell through to the generic
+    # "is `gh` installed and authenticated? … or install the `gh` CLI" — telling an operator
+    # whose binary demonstrably RAN to install it. Exactly the misdiagnosis the 126/127 real
+    # arms below exist to prevent, one code over.
+    if out.returncode == 124:
+        detail = (out.stderr or "").strip().splitlines()
+        raise Refused(
+            "could not resolve the repo from this checkout (`gh repo view` exited 124"
+            + (f": {detail[-1]}" if detail else "")
+            + ") — the `gh` on PATH ran and hit its own timeout; pass --repo, or retry "
+            "when the API is answering"
+        )
     if out.returncode == 127 and out.cause:
         # cause is set ONLY by the arm that FABRICATED this run, so the binary
         # really is not on `PATH`. Names the failing COMMAND, the CAUSE and the

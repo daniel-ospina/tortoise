@@ -2207,6 +2207,42 @@ def test_a_real_gh_that_exits_127_is_not_reported_as_missing(tmp_path, monkeypat
     assert "unresolvable gh" in msg, msg
 
 
+def test_a_real_gh_that_exits_124_is_not_told_to_install_the_cli(tmp_path, monkeypatch):
+    """`gh` exiting 124 is a process that RAN and timed out, not a missing install.
+
+    Review cycle 5, finding 2. The 124 arm is gated on `cause` (fabricated by the
+    `GH_PROBE_TIMEOUT_S` bound), so a REAL process exiting 124 skipped it and fell
+    through to the generic arm, whose remedy is "is `gh` installed and
+    authenticated? … or install the `gh` CLI" — advice that is provably wrong for a
+    binary that just produced an exit status. Same defect the 126 and 127 real arms
+    fix, one code over; `124` is what a wrapper around `gh` returns on its own
+    timeout (`timeout(1)`'s convention), so it is reachable in practice.
+    """
+    bin_dir = tmp_path / "gh-124-bin"
+    bin_dir.mkdir()
+    stub = bin_dir / "gh"
+    stub.write_text(
+        "#!/bin/sh\n"
+        'echo "gh-wrapper: gave up waiting for the API" >&2\n'
+        "exit 124\n",
+        encoding="utf-8")
+    stub.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bin_dir))
+
+    out = rd._gh(["repo", "view"], tmp_path)
+    assert out.returncode == 124, (out.returncode, out.cause)
+    assert out.cause == "", f"a real process's exit code must not be given a cause: {out.cause!r}"
+
+    with pytest.raises(rd.Refused) as exc:
+        rd._resolve_repo(tmp_path)
+    msg = str(exc.value)
+    assert "install the `gh` CLI" not in msg, msg
+    assert "installed and authenticated" not in msg, msg
+    assert "exited 124" in msg, msg
+    assert "hit its own timeout" in msg, msg
+    assert "gave up waiting" in msg, msg
+
+
 def test_a_real_gh_that_exits_126_is_not_reported_as_unexecutable(tmp_path, monkeypatch):
     """`gh` exiting 126 is a FAILURE of a process that ran, never "cannot execute".
 

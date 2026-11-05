@@ -317,8 +317,32 @@ def _retracted_from(text: str, end: int) -> bool:
     refuses the real `**Verdict: CLEAN.**\nFixed the P1 in 4f450ae81.` — the `P1` there is a
     SUBJECT, not a retraction. The docstring's earlier claim that the two trades were
     unavoidable was wrong; splitting the windows gives both.
+
+    ⛔ AND THE BLANK-LINE FORM NEEDS ONE MORE STEP, or the two windows contradict each other
+    (review cycle 5, finding 1): `para_end = text.find("\n\n", end)` LANDS ON `end` when the
+    verdict is followed by a blank line, so `para` was `""` and every rule below was skipped —
+    `**Verdict: CLEAN**\n\nthe P1 is still open.` CLEARED while the single-newline spelling of
+    the same sentence BLOCKED, one character apart, and the paragraph window claimed credit for
+    closing it.
+
+    ⛔ SO THE WINDOW LOOKS PAST A BLANK LINE ONLY AFTER A **STANDALONE** VERDICT. That is the
+    exact shape that had the hole (nothing but closing emphasis or punctuation after the
+    phrase). When the verdict SHARES its line with prose, the ordinary paragraph bound already
+    covers the rest of that line, and extending it into the next paragraph would refuse real
+    clears — the #10962 direction, with measured history. Both directions are pinned in
+    `tests/test_ready_for_owner.py`.
     """
-    para_end = text.find("\n\n", end)
+    line_end = text.find("\n", end)
+    rest_of_line = text[end : line_end if line_end != -1 else len(text)]
+    if line_end != -1 and not rest_of_line.strip(" \t\r*_`—–-.:;!()[]\"'"):
+        # standalone: skip this line's own ending AND any blank lines, then read the next
+        # paragraph in full — the window still STARTS at the verdict.
+        p = line_end + 1
+        while p < len(text) and text[p] in "\r\n":
+            p += 1
+        para_end = text.find("\n\n", p)
+    else:
+        para_end = text.find("\n\n", end)
     para = text[end : para_end if para_end != -1 else len(text)]
     if _RETRACTION_NO_SEVERITY_RE.search(para):
         return True

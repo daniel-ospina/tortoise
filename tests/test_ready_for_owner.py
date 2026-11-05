@@ -774,6 +774,15 @@ def test_the_clear_guard_grades_both_directions_on_its_own() -> None:
         "Reviewer verdict: NO ISSUES FOUND — the P1 and the P2 are both addressed now.",
         "Verdict: CLEAN — the P1 from cycle 3 is gone.",
         "Verdict: CLEAN — no P1 outstanding, all P2s closed.",
+        # J — A BLANK LINE MUST NOT WIDEN THE HOLE THE LINE BREAK USED TO HAVE (cycle 5,
+        # finding 1). These are the SAME sentence as the retraction cases below with one
+        # extra newline; before the fix they CLEARED, because `find("\n\n", end)` landed
+        # ON `end` and the paragraph window was empty. The other direction is pinned too,
+        # or the fix is just an over-block: a standalone verdict followed by a blank line
+        # and a REAL completion is still a clear.
+        "**Verdict: CLEAN.**\n\nFixed the P1 in 4f450ae81.",
+        "**Verdict: CLEAN.**\n\nThe two P2 findings are closed.",
+        "**Verdict: CLEAN**\n\nno P0/P1/P2 findings; three P3 nits noted.",
     ):
         assert rfo.asserts_a_clear(body) is True, body
     # …and standing the severity arm down does NOT stand down the retraction rules (1)–(3)
@@ -903,6 +912,14 @@ def test_a_verdict_that_is_RETRACTED_in_the_same_sentence_cannot_close_a_finding
         "**Verdict: CLEAN.**\nThat was the previous head; the P1 below is unfixed.",
         "verdict: CLEAN\r\nno longer holds",
         "verdict: CLEAN\nthe head has since moved",
+        # J — the BLANK-LINE spelling of the four cases above (cycle 5, finding 1). Each is
+        # the identical sentence with one extra newline, and each CLEARED until the window
+        # learned to look past a standalone verdict's own blank line.
+        "**Verdict: CLEAN**\n\n— except the open P1",
+        "**Verdict: CLEAN**\n\nThe head has since moved.",
+        "**Verdict: CLEAN**\n\nThis no longer holds.",
+        "**Verdict: CLEAN**\n\nThe P1 is still open.",
+        "verdict: CLEAN\r\n\r\nno longer holds",
     ):
         comments = [
             {
