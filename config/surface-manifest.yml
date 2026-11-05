@@ -46,12 +46,12 @@
 # the five `run_onboarding` tools deleted), then 76 → 72 by #10914 (the `graph_overview`
 # container, five advertised names retired into one). The pin is lowered for the same
 # reason it is raised elsewhere — it is only meaningful at the live surface: left at 82
-# it would carry ten slots of slack, and left at 76 four, so re-adding any of the retired
+# it would carry ten slots of slack, and left at 76 four, so re-adding one of the retired
 # names (the regression `tests/test_tool_registry.py` pins) would pass
-# `tools/surface-guard.py` green. ⛔ 72 IS DELIBERATE, NOT AN ANOMALY: if you are reading
-# `tools: 72` next to a live 72 and wondering whether to "restore" 82 or 76, do not — that
-# re-opens the slack. The two lowerings compose because the retired name sets are disjoint
-# (77 − 5 = 72 advertised at this head).
+# `tools/surface-guard.py` green. ⛔ 72 IS DELIBERATE, NOT AN ANOMALY: if you are
+# reading `tools: 72` next to a live 72 and wondering whether to "restore" 82 or 76, do
+# not — that re-opens the slack. #10906 and #10914 compose because their retired name
+# sets are disjoint (77 − 5 = 72 advertised at #10914's head).
 #
 # THE BASELINE BELOW IS A FREEZE OF WHAT EXISTS, NOT THE APPROVED TARGET. It exists so
 # drift is visible (tools/surface-guard.py). The approved TARGET is recorded in
@@ -60,7 +60,7 @@
 # a constant here.
 manifest_version: 1
 issue: 3863
-cut_at_commit: a7d1e05b23a4d88478acf133628ccf4357db9554
+cut_at_commit: 911a1e240c16c37a1a8e0f2bc46dba9dd8ae2a90
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
