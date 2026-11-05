@@ -16,16 +16,22 @@ and reported — and it was WRONG.
 
 Why the assertions are shaped this way — every test is written to be able to fail:
 
-1. the refusal must no longer claim to be the whole vocabulary (reverting the
-   message reddens it);
-2. the capability must be real and pinned by BEHAVIOUR — an operator can be
+1. the capability must be real and pinned by BEHAVIOUR — an operator can be
    re-labelled in place and deleted, and a plain Point still deletes through the
    same verb, so neither assertion is vacuous (routing operators away from the
    Point arm reddens both, and dropping the control would let a "delete
    everything" regression pass);
-3. the prose at the point of use is asserted on purpose. For a DISCOVERABILITY
+2. the prose at the point of use is asserted on purpose. For a DISCOVERABILITY
    defect the docstring **is** the artifact, so prose that drifts back to hiding
    operators is precisely the regression this file exists to catch.
+
+What #4282 removed, and what it did NOT remove: ``operator_action`` is gone, so
+its refusal-message test (old item 1) lost its subject and was deleted with it.
+The DISCLOSURE needles did not — they live in ``update``/``delete``, both of which
+survive — so that test stays, with the two ``operator_action`` needles excised
+from its tuple. It is kept deliberately: this is the assertion a reviewer once
+made vacuous by replacing the sentence with a neutral one, and it is the only pin
+on that disclosure anywhere in the tree.
 
 Runnable with: `.venv/bin/python -m pytest tests/test_6131_operator_mutation_vocabulary.py -v`
 The fixture is a per-test embedded DB (``db_path``), so it needs no running server.
@@ -33,8 +39,6 @@ The fixture is a per-test embedded DB (``db_path``), so it needs no running serv
 from __future__ import annotations
 
 from pathlib import Path
-
-import pytest
 
 from tortoise.sdk import TortoiseSDK
 
@@ -50,20 +54,6 @@ def _operator(sdk: TortoiseSDK) -> str:
     op = sdk.create_operator("IMPL", source_id=a["id"], target_ids=[b["id"]])
     assert op["is_operator"] is True, op
     return op["id"]
-
-
-def test_refusal_does_not_claim_to_be_the_whole_vocabulary(tmp_path: Path) -> None:
-    """The refusal named a closed set and it is not closed (#6131, part 1)."""
-    sdk = _sdk(tmp_path)
-    op_id = _operator(sdk)
-
-    with pytest.raises(ValueError) as exc:
-        sdk.operator_action("retract", id=op_id, reason="because")
-
-    msg = str(exc.value)
-    assert "not the whole operator" in msg, msg
-    assert "update(id" in msg, msg
-    assert "delete(id" in msg, msg
 
 
 def test_operator_is_a_point_so_update_relabels_it_in_place(tmp_path: Path) -> None:
@@ -100,7 +90,16 @@ def test_control_a_plain_point_still_deletes_through_the_same_verb(tmp_path: Pat
 
 
 def test_the_readable_surfaces_name_the_generic_verbs() -> None:
-    """Docstrings are the artifact for a discoverability defect (#6131, part 3)."""
+    """Docstrings are the artifact for a discoverability defect (#6131, part 3).
+
+    #4282 deleted ``operator_action``, and with it this test's two
+    ``operator_action`` needles — the ones pinning that door's own
+    ``update(<operator_id>)`` / ``delete(<operator_id>)`` pointers. The six
+    needles below all target ``update``/``delete``, which SURVIVE, so they are
+    restored verbatim: an operator is still a Point, the generic verbs still take
+    it, and the disclosure that says so still has to be present at the point of
+    use.
+    """
     for fn, needle in (
         (TortoiseSDK.delete, "operator"),
         # NOT the bare word "operator": that matches vacuously elsewhere in
@@ -118,8 +117,6 @@ def test_the_readable_surfaces_name_the_generic_verbs() -> None:
         # check runs here, and that the label is therefore stored silently.
         (TortoiseSDK.update, "no declaredness check"),
         (TortoiseSDK.update, "installs the label silently"),
-        (TortoiseSDK.operator_action, "update(<operator_id>"),
-        (TortoiseSDK.operator_action, "delete(<operator_id>"),
     ):
         # Collapse whitespace before matching: a docstring is wrapped to the
         # line length, so a needle that spans a wrap ("performs no\n        declaredness

@@ -66,9 +66,11 @@ THE RED THIS GATE WAS BUILT ON (#3904)
     ``sdk_method=""`` (handler-served), matching the #4035 / PR #4043 idiom.
 
     This is NOT an MCP/SDK surface change: no tool's name, description or
-    schema moved and ``TortoiseSDK.traverse`` / ``TortoiseSDK.operator_action``
-    are untouched. Only a DECLARATION that the code did not consume was made
-    honest, which is the #4035 repair shape.
+    schema moved, and ``TortoiseSDK.traverse`` / ``TortoiseSDK.operator_action``
+    were untouched BY THAT REPAIR. Only a DECLARATION that the code did not
+    consume was made honest, which is the #4035 repair shape. (#4282 has since
+    deleted both SDK methods outright; the tool entries stay `sdk_method=""`,
+    which is what makes that deletion invisible to the MCP surface.)
 
 THE TWO MUTATION TESTS (acceptance requirement 6)
     ``test_mutation_repointed_declaration_reds_the_gate`` repoints one entry's

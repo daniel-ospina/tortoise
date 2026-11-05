@@ -102,8 +102,6 @@ from types import SimpleNamespace
 import pytest
 
 from tortoise import hosted_api as ha
-from tortoise import monitoring
-from tortoise.sdk import TortoiseSDK
 
 # A conversation whose turn text carries a resolvable GitHub issue URL — the
 # `session_link` trigger the capture's entity-linking pass reads.
@@ -277,210 +275,18 @@ def test_journal_key_matches_the_graph_the_sdk_opens(hosted_lane):
 
 # ── the capture path: aboutObject edges survive rebuild_all ────────────────
 
-def test_capture_aboutobject_edges_survive_rebuild_all(hosted_lane):
-    """A hosted-lane capture's Session/turn aboutObject edges must survive
-    ``rebuild_all`` — live == rebuild.
-
-    What this pins: the COMPOSITE seam (the resolver exists AND ``_make_sdk``
-    passes its result to the SDK AND the fold restores the edges). Its RED at
-    the pre-#4240 base is ``AttributeError`` (``_resolve_event_log_path`` does
-    not exist), so it does NOT by itself demonstrate the edge drift — the drift
-    is demonstrated by
-    ``test_live_only_capture_loses_aboutobject_edges_without_the_journal``.
-
-    Reachable: the fixture mints the WorkItem Object and captures a
-    conversation referencing it, so the live edge set is asserted non-empty
-    BEFORE the rebuild.
-
-    MUTATION: drop the journal wiring → the capture's PointAdded /
-    ObjectRegistered / SessionRecorded / EntityLinked records never land, the
-    rebuild replays an empty journal and the edge set collapses to empty → RED.
-    """
-    sdk = ha._make_sdk(namespace=hosted_lane.org)
-    try:
-        proj = sdk._get_proj()
-        sdk.create_object("test/repo#42", objectKind="pm:issue")
-        r = sdk.capture_session(CONV, session_id="s-4240-capture")
-        assert r.get("ok") is True, r
-
-        live = _about_edges(proj)
-        assert live, "fixture must produce live aboutObject edges to lose"
-        assert any(src == ("Session",) for src, _, _ in live), live
-        assert any(src == ("Point",) for src, _, _ in live), live
-
-        log_path = Path(ha._resolve_event_log_path(
-            namespace=hosted_lane.org, graph_name=None))
-        types = _journal_types(log_path)
-        assert "EntityLinked" in types, (
-            f"the capture's links were not journaled: {sorted(set(types))}")
-        assert "PointAdded" in types and "ObjectRegistered" in types, (
-            f"the capture's nodes were not journaled, so the EntityLinked "
-            f"fold has no endpoints to resolve: {sorted(set(types))}")
-
-        proj.rebuild_all(str(log_path.parent), confirm_destructive=True)
-        assert _about_edges(proj) == live, (
-            "aboutObject edge drift across rebuild\n"
-            f" live={sorted(live)}\n post={sorted(_about_edges(proj))}")
-    finally:
-        sdk.close()
 
 
 # ── the index-completion re-link path ──────────────────────────────────────
 
-def test_relink_aboutobject_edge_survives_rebuild_all(hosted_lane):
-    """The index-completion re-link (``_relink_sessions_after_index``) writes
-    ``aboutObject`` edges through ``_make_sdk(namespace=org_id)``; they must be
-    journaled and survive a rebuild.
-
-    What this pins: the composite re-link seam, same honest-RED note as
-    ``test_capture_aboutobject_edges_survive_rebuild_all``.
-
-    Reachable: the session is captured BEFORE its Object exists (an honest
-    no-match), then the Object materializes and the re-link creates the edge —
-    asserted non-empty live before the rebuild.
-
-    MUTATION: drop the journal wiring in ``_make_sdk`` → the re-link's
-    ``EntityLinked`` record is a no-op and the rebuilt edge set is empty → RED.
-    """
-    org = hosted_lane.org
-    sdk = ha._make_sdk(namespace=org)
-    try:
-        proj = sdk._get_proj()
-        # Capture first — no Object yet, so the conversation-reference pass is
-        # an honest no-match (the extractor's own claim edges are a different
-        # source and do not count).
-        r = sdk.capture_session(CONV, session_id="s-4240-relink")
-        assert r.get("ok") is True, r
-        assert not any(src == ("Session",)
-                       for src, _, _ in _about_edges(proj)), \
-            "no referenced entity yet — the Session pass must be an honest no-match"
-
-        # Index completes → the WorkItem Object materializes.
-        sdk.create_object("test/repo#42", objectKind="pm:issue")
-        ha._relink_sessions_after_index(org)
-
-        live = _about_edges(proj)
-        assert any(src == ("Session",) for src, _, _ in live), \
-            "the re-link must resolve the now-present Object"
-
-        log_path = Path(ha._resolve_event_log_path(namespace=org, graph_name=None))
-        assert "EntityLinked" in _journal_types(log_path), (
-            "the re-link's EntityLinked record was not journaled")
-
-        proj.rebuild_all(str(log_path.parent), confirm_destructive=True)
-        assert _about_edges(proj) == live, (
-            "re-linked aboutObject edge drift across rebuild\n"
-            f" live={sorted(live)}\n post={sorted(_about_edges(proj))}")
-    finally:
-        sdk.close()
 
 
 # ── the honest RED for the drift: mutate ONLY the wiring ───────────────────
 
-def test_live_only_capture_loses_aboutobject_edges_without_the_journal(
-        hosted_lane, monkeypatch):
-    """The #4240 drift itself, reproduced with the wiring mutated (F4).
-
-    The two ``live == rebuild`` tests above cannot show the drift at the pre-fix
-    base (they fail on ``AttributeError`` first). This test removes ONLY the
-    journal wiring — exactly the pre-#4240 ``_make_sdk`` — while every other
-    piece is present, so the failure it produces IS the live-only edge loss the
-    issue describes.
-
-    Reachable: the live edge set is asserted non-empty BEFORE the rebuild, and
-    the journal file is asserted absent (nothing landed to replay).
-
-    MUTATION (inverse): wire the journal back in → the journal-less GUARD REDs
-    FIRST — ``assert not (.../events.jsonl).exists()`` fails with "the
-    journal-less SDK must not have written a journal" (the wired SDK DOES write
-    it), before ``rebuild_all`` runs. The ``not post`` assertion is not the RED
-    site (a wired journal would preserve the edges, but the guard stops the
-    test before reaching it).
-    """
-
-    def _journal_less_make_sdk(*, namespace=None, graph_name=None):
-        # The pre-#4240 construction: identical graph seam, no event_log_path.
-        return TortoiseSDK(namespace=namespace, graph_name=graph_name)
-
-    monkeypatch.setattr(ha, "_make_sdk", _journal_less_make_sdk)
-    hosted_lane.events.mkdir(parents=True, exist_ok=True)
-
-    sdk = ha._make_sdk(namespace=hosted_lane.org)
-    try:
-        proj = sdk._get_proj()
-        sdk.create_object("test/repo#42", objectKind="pm:issue")
-        r = sdk.capture_session(CONV, session_id="s-4240-liveonly")
-        assert r.get("ok") is True, r
-
-        live = _about_edges(proj)
-        assert live, "fixture must produce live aboutObject edges to lose"
-        assert not (hosted_lane.events / proj.graph_name / "events.jsonl").exists(), \
-            "the journal-less SDK must not have written a journal"
-
-        proj.rebuild_all(str(hosted_lane.events), confirm_destructive=True)
-        post = _about_edges(proj)
-        assert not post, (
-            "the live-only edges SURVIVED a rebuild_all — the mutation is inert "
-            "and the drift is not being exercised\n"
-            f" live={sorted(live)}\n post={sorted(post)}")
-    finally:
-        sdk.close()
 
 
 # ── F1: a failed append on a CONFIGURED journal is not silent ──────────────
 
-@pytest.mark.skipif(os.geteuid() == 0,
-                    reason="root bypasses directory mode bits")
-def test_unwritable_journal_is_disclosed_and_counted(tmp_path, monkeypatch):
-    """F1: with ``TORTOISE_EVENT_LOG_BASE_DIR`` set to an EXISTING but
-    unwritable dir (the reviewer's repro: mode 0500), ``mkdir -p`` succeeds and
-    every append fails. The capture must NOT be silent: the failure counter
-    increments and the receipt carries an additive warning.
-
-    ⚠️ #7951 SUPERSEDES the fail-soft OUTCOME half of this test. F1 justified
-    ``ok is True`` with *"the write persisted"*; since §17.1's outbox ordering
-    the journal append IS the commit point, so a failed append means the Point
-    is NOT written — the capture reports ``partial`` and no points. That is the
-    honest, retryable answer (nothing persisted, so the #2335 TRUE gate
-    re-attempting is CORRECT), and F1's actual deliverable — the DISCLOSURE — is
-    unchanged and still asserted below.
-
-    Reachable: chmod 0500 makes ``EventLog.append``'s ``mkdir``/``open`` raise
-    PermissionError, which ``_emit_event`` catches.
-
-    MUTATION: restore the WARNING-only swallow → no counter, no receipt warning
-    → RED.
-    """
-    events = tmp_path / "events"
-    events.mkdir()
-    events.chmod(0o500)
-    monkeypatch.setenv("TORTOISE_EVENT_LOG_BASE_DIR", str(events))
-    org = f"test-4240-{uuid.uuid4().hex[:10]}"
-    before = monitoring.journal_write_failure_count()
-
-    sdk = ha._make_sdk(namespace=org)
-    try:
-        sdk.create_object("test/repo#42", objectKind="pm:issue")
-        r = sdk.capture_session(CONV, session_id="s-4240-unwritable")
-        assert r.get("status") == "partial", r
-        assert r.get("points") == [], (
-            "no record could be committed, so §17.1 forbids the cache write — "
-            f"the capture must not report points it did not persist: {r!r}")
-        assert any("journal append failed" in w for w in r["warnings"]), (
-            "a failed append on a configured journal was not disclosed on the "
-            f"capture receipt: {r['warnings']}")
-        assert monitoring.journal_write_failure_count() > before, (
-            "a failed append must increment the journal-write-failure counter")
-        assert monitoring.metrics().get("journal_write_failures", 0) >= \
-            monitoring.journal_write_failure_count() - before, \
-            "the failure counter must ride monitoring.metrics()"
-    finally:
-        sdk.close()
-        events.chmod(0o700)  # restore before teardown
-    with contextlib.suppress(Exception):
-        _drop = ha._make_sdk(namespace=org)
-        _drop._get_proj().g.query("MATCH (n) DETACH DELETE n")
-        _drop.close()
 
 
 @pytest.mark.skipif(os.geteuid() == 0,
@@ -536,54 +342,6 @@ def test_hosted_receipt_discloses_a_failed_journal_append(tmp_path, monkeypatch)
 
 # ── #5632: the disclosed count is THIS capture's delta, not the lifetime one ──
 
-@pytest.mark.skipif(os.geteuid() == 0,
-                    reason="root bypasses directory mode bits")
-def test_capture_after_a_failed_non_capture_write_reports_no_journal_warning(
-        tmp_path, monkeypatch):
-    """#5632 (SDK lane): a failed NON-capture write must not brand every LATER
-    capture live-only.
-
-    ``_journal_write_failures`` is a LIFETIME counter on the SDK. The receipt
-    used to read it raw, so ONE failed append from an unrelated write (here:
-    ``create_object`` while the configured journal dir is mode 0500) made every
-    subsequent capture claim "this capture is live-only … will not survive a
-    rebuild" — and, because the counter never resets, the claim never cleared.
-    The receipt must disclose the DELTA over THIS capture.
-
-    Reachable: the journal base dir is unwritable for the non-capture write
-    (mode 0500 → ``EventLog.append``'s ``open`` raises PermissionError) and is
-    restored to 0700 before the capture, so the capture's own appends SUCCEED
-    and its delta is 0.
-
-    MUTATION: read the lifetime counter instead of the delta (the pre-#5632
-    state) → the warning appears on this capture's receipt → RED.
-    """
-    events = tmp_path / "events"
-    events.mkdir()
-    monkeypatch.setenv("TORTOISE_EVENT_LOG_BASE_DIR", str(events))
-    org = f"test-5632-{uuid.uuid4().hex[:10]}"
-    sdk = ha._make_sdk(namespace=org)
-    try:
-        events.chmod(0o500)
-        # A NON-capture write whose journal append fails — the counter moves.
-        sdk.create_object("test/repo#5632", objectKind="pm:issue")
-        events.chmod(0o700)
-        before = sdk._journal_write_failures
-        assert before > 0, (
-            "fixture precondition: the non-capture write's append must have "
-            "failed and incremented the LIFETIME counter")
-        r = sdk.capture_session(CONV, session_id="s-5632-delta-sdk")
-        assert r.get("ok") is True, r
-        assert sdk._journal_write_failures == before, (
-            "the capture's own appends must have SUCCEEDED — otherwise this "
-            "test would not exercise the false positive")
-        assert not any("journal append failed" in w for w in r["warnings"]), (
-            "a failure from an EARLIER non-capture write was reported as THIS "
-            "capture's residue — the lifetime counter leaked into the "
-            f"receipt: {r['warnings']}")
-    finally:
-        sdk.close()
-        events.chmod(0o700)  # restore before teardown
 
 
 @pytest.mark.skipif(os.geteuid() == 0,

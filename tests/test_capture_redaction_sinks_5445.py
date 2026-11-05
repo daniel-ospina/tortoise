@@ -29,7 +29,6 @@ from tests._provider_env import pin_provider_routing_env
 from tortoise.sdk import (
     _CAPTURE_TURN_CAP,
     TortoiseSDK,
-    _capture_turn_role_text,
     _capture_turn_window,
     _redact_summary_strings,
     _redact_turn_contents,
@@ -105,70 +104,6 @@ def _source_blob(sdk: TortoiseSDK, session_id: str) -> str:
 
 # ── #5445: a credential in `role` must not reach ANY of the three sinks ────
 
-def test_credential_in_role_is_redacted_in_all_three_sinks(sdk, monkeypatch):
-    """The role is caller-controlled and persisted as text — scrub it too.
-
-    Three sinks are asserted separately because a fix that only reads the
-    ``[role] content`` string leaves ``:Point.speaker`` (and the session
-    ``:Source``) with the raw value; a fix that only reads ``speaker`` leaves
-    the other two. The receipt must not report a silent zero either.
-    """
-    _keyless(monkeypatch)
-    secret = _secret()
-    sid = "sess-5445-role"
-    res = sdk.capture_session(
-        [{"role": secret, "content": "please review the attached patch"},
-         {"role": "user", "content": "ordinary follow-up"}],
-        session_id=sid)
-
-    stored = _stored(sdk, sid)
-    assert len(stored) == 2
-
-    # Sink 1 — the stored turn text: `[<role>] <content>`.
-    content0, speaker0 = stored[f"{sid}_t0"]
-    assert secret not in content0, (
-        f"the role VALUE survived into the stored turn text: {content0!r}")
-    assert "REDACTED:github_token" in content0, content0
-
-    # Sink 1b — the frame must ROUND-TRIP (#5445 review). The previous assertion here was
-    # `speaker0 == _capture_turn_role_text(content0)[0]`, and the writer computes `speaker` as LITERALLY
-    # that expression — `f(x) == f(x)`, which could not fail. It also missed a real defect: the role scrub
-    # writes `[REDACTED:github_token]`, so the stored text was `[[REDACTED:github_token]] please review…`
-    # and the reader's inverse (`^\[([^\]]+)\]\s*`) parsed the speaker as `[REDACTED:github_token` and
-    # handed the BODY a stray `] `. The property that actually binds is that the inverse recovers the body
-    # VERBATIM, which it cannot do if the (redacted) role ends the frame early.
-    role0, body0 = _capture_turn_role_text(content0)
-    assert body0 == "please review the attached patch", (
-        f"the stored frame does not round-trip — the role scrub wrote a `]` that ends it early: {content0!r}")
-
-    # An EMPTY role is the other way the frame can break (review round 12):
-    # ``_CAPTURE_ROLE_PREFIX`` used a ``+`` quantifier, so ``"[] hello world"`` did not match
-    # and the inverse returned the WHOLE string as the body — the served turn gained a
-    # stray ``[] `` prefix. The reader now accepts an empty role.
-    assert _capture_turn_role_text("[] hello world") == ("", "hello world"), (
-        "an empty role must round-trip, not be returned as part of the body")
-
-    # Sink 2 — :Point.speaker. It must be the role the read path parses (not a fragment), and it carries
-    # no credential.
-    assert secret not in (speaker0 or ""), (
-        f"the role VALUE survived into :Point.speaker: {speaker0!r}")
-    assert speaker0 == role0, (
-        f"the stored speaker disagrees with the reader's parse of the stored turn text (#4675 parity): "
-        f"{speaker0!r} != {role0!r}")
-
-    # Sink 3 — the session :Source (summary/topics/search text). Topics are
-    # lower-cased, so compare case-insensitively or the leak hides.
-    blob = _source_blob(sdk, sid)
-    assert secret not in blob and secret.lower() not in blob.lower(), (
-        f"the role VALUE survived into the session :Source: {blob!r}")
-
-    # The receipt is not a silent zero.
-    assert res["capture_redactions"] >= 1, res
-
-    # The ordinary turn is untouched (no over-redaction on the same capture).
-    content1, speaker1 = stored[f"{sid}_t1"]
-    assert speaker1 == "user"
-    assert content1.endswith("ordinary follow-up")
 
 
 def test_role_is_scrubbed_and_counted_at_the_chokepoint():

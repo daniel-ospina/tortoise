@@ -3282,8 +3282,10 @@ def test_hosted_capture_emits_that_session_s_graph_op_row(
     # The "no op is double-counted" question is NOT checkable from this row: the emitted
     # ``graph_ops_total`` IS ``sum(by_phase[...])`` (graph_ops.GraphOpsCounter.total), so
     # comparing the two is true by construction and can never fail. The independent oracle
-    # is tests/test_capture_graph_ops.py::test_capture_reports_nonzero_phase_attributed_ops,
-    # which counts the graph queries actually issued and compares THAT to the emitted total.
+    # that counted the graph queries actually issued and compared THAT to the emitted total
+    # lived in `tests/test_capture_graph_ops.py` and was deleted with `capture_session`
+    # (#4282) — so ⚠️ **nothing now detects a double count or a drop at that choke point**;
+    # the loss is recorded in #10226's "Coverage removed by this change".
 
 
 # ── #3843: the harness dimension of the decided per-capture record ─────────

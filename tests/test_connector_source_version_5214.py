@@ -246,48 +246,6 @@ def test_a_content_changing_repoll_advances_the_hash_and_the_ordinal():
         )
 
 
-def test_the_earlier_derivation_reads_stale_after_a_content_change():
-    """The point of the anchor, end to end: the `ON CREATE`-only edge keeps the
-    version it was read at, the Source moves on, and the read says `stale` —
-    never `current`.
-
-    FAILS IF the edge advances with the Source (the recorded limitation: that
-    would report a stale derivation as current — the exact false-current the
-    model forbids)."""
-    with fresh_sdk() as sdk:
-        proj = sdk._get_proj()
-        proj.apply(gh_issue_event())
-        anchored = _anchor(proj, GH_URL, "github-issue-test/repo-42-created")[0]
-        proj.apply(gh_issue_event(state="closed",
-                                  closed_at="2026-07-11T00:00:00Z"))
-        _point_extracted_from(sdk, GH_URL)
-        current = _source(proj, GH_URL)[0]
-        assert anchored != current, "the ON CREATE-only anchor must NOT advance"
-        rows = sdk.get_provenance_chain("pt_1")
-        verdicts = {r["linkRecordedVersion"]: r["linkCurrency"] for r in rows}
-        assert verdicts.get(anchored) == "stale", (
-            f"the superseded derivation must read `stale`, got {verdicts!r}"
-        )
-
-
-def test_a_current_derivation_reads_current():
-    """The converse pin: with no content change the verdict is `current`, so
-    the `stale` above is a real signal and not a constant.
-
-    FAILS IF `_connector_content_hash` is unstable across re-materialization
-    (the digest would differ from the anchor's on an unchanged item)."""
-    with fresh_sdk() as sdk:
-        proj = sdk._get_proj()
-        proj.apply(gh_issue_event())
-        anchored = _anchor(proj, GH_URL, "github-issue-test/repo-42-created")[0]
-        _point_extracted_from(sdk, GH_URL)
-        rows = sdk.get_provenance_chain("pt_1")
-        verdicts = {r["linkRecordedVersion"]: r["linkCurrency"] for r in rows}
-        assert verdicts.get(anchored) == "current", (
-            f"an unchanged connector derivation must read `current`, got {verdicts!r}"
-        )
-
-
 # ── 4. producer-independence (the false-stale guard) ─────────────────
 
 def test_one_item_state_hashes_equal_across_the_poll_and_webhook_producers():

@@ -47,7 +47,7 @@ class TestDeclaration:
             assert callable(handler), f"handler {spec.name}() was removed"
 
     def test_public_sdk_surface_is_unchanged(self):
-        """The SDK surface did not GROW: 150 public methods, as pinned today.
+        """The SDK surface did not GROW: 124 public methods, as pinned today.
 
         This used to read *"Only MCP tool NAMES are retired — every public SDK method
         stays"*, which #4282 phase 2 made false: `events_poll`/`restore_point_at`
@@ -56,7 +56,9 @@ class TestDeclaration:
         moves by design and this test is the pin on where it lands. A retirement or
         an approved name gaining a `def` is an OWNER-APPROVED row in
         `docs/product/beta-sdk-surface.md` (gated by
-        `tests/test_sdk_retirement.py`), never this assertion.
+        `tests/test_sdk_retirement.py`), never this assertion. The 150 → 124 move is
+        #4282's owner-ruled deletion of the 26 surplus methods nothing called
+        (2026-10-27, PR #10187).
         """
         from tortoise.sdk import TortoiseSDK
 
@@ -65,7 +67,7 @@ class TestDeclaration:
             for n in dir(TortoiseSDK)
             if not n.startswith("_") and callable(getattr(TortoiseSDK, n))
         ]
-        assert len(public) == 150, f"SDK surface changed: {len(public)} != 150"
+        assert len(public) == 124, f"SDK surface changed: {len(public)} != 124"
 
     def test_retired_sdk_bindings_that_resolve_are_still_public(self):
         from tortoise.sdk import TortoiseSDK

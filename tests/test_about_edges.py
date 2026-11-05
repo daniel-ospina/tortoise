@@ -2,8 +2,10 @@
 aboutDocument producers.
 
 Covers:
-- backfill_about_entities creates aboutEvent + aboutDocument edges
 - create_event wires aboutPoint + aboutDocument edges
+  (⚠️ the `backfill_about_entities` arm was REMOVED with the method itself — one of
+  the 26 public SDK methods #4282 deleted, 2026-10-27 — so this module covers the
+  producer half that survives; the backfill's own tests went with it)
 - existing aboutSubject/aboutObject edges unbroken
 """
 from __future__ import annotations
@@ -29,92 +31,6 @@ def sdk():
     yield s
     s.close()
     shutil.rmtree(os.path.dirname(db_path), ignore_errors=True)
-
-
-# ── backfill_about_entities ─────────────────────────────────────────────
-
-class TestBackfillAboutEntities:
-    """backfill_about_entities creates about* edges when Points mention
-    entity names (Subject, Object, Event, Document)."""
-
-    def test_backfill_creates_about_subject(self, sdk):
-        """Point mentioning a Subject name → aboutSubject edge."""
-        sdk.create_subject("alice", "engineer")
-        sdk.create_point("statement", "alice deployed the service")
-        result = sdk.backfill_about_entities()
-        assert result["scanned"] >= 1
-        assert result["updated"] >= 1
-        proj = sdk._get_proj()
-        r = proj.g.query(
-            "MATCH (p:Point)-[:aboutSubject]->(s:Subject {name:'alice'}) "
-            "RETURN count(*) > 0"
-        ).result_set
-        assert r[0][0] is True
-
-    def test_backfill_creates_about_object(self, sdk):
-        """Point mentioning an Object name → aboutObject edge."""
-        sdk.create_object("artifact-v1", "release")
-        sdk.create_point("statement", "artifact-v1 passed all checks")
-        result = sdk.backfill_about_entities()
-        assert result["scanned"] >= 1
-        assert result["updated"] >= 1
-        proj = sdk._get_proj()
-        r = proj.g.query(
-            "MATCH (p:Point)-[:aboutObject]->(o:Object {name:'artifact-v1'}) "
-            "RETURN count(*) > 0"
-        ).result_set
-        assert r[0][0] is True
-
-    def test_backfill_creates_about_event(self, sdk):
-        """Point mentioning an Event name → aboutEvent edge."""
-        ev = sdk.create_event("sprint-42-retro", "meeting")  # noqa: F841
-        sdk.create_point("statement", "sprint-42-retro covered deploy issues")
-        result = sdk.backfill_about_entities()
-        assert result["scanned"] >= 1
-        assert result["updated"] >= 1
-        proj = sdk._get_proj()
-        r = proj.g.query(
-            "MATCH (p:Point)-[:aboutEvent]->(e:Event {name:'sprint-42-retro'}) "
-            "RETURN count(*) > 0"
-        ).result_set
-        assert r[0][0] is True
-
-    def test_backfill_creates_about_document(self, sdk):
-        """Point mentioning a Document title → aboutDocument edge."""
-        doc = sdk.create_document("design-doc-42", "architecture")  # noqa: F841
-        sdk.create_point("statement", "design-doc-42 proposes a new pipeline")
-        result = sdk.backfill_about_entities()
-        assert result["scanned"] >= 1
-        assert result["updated"] >= 1
-        proj = sdk._get_proj()
-        # D10 (ONTOLOGY v3.15 §4.4): a document is a :Source — aboutDocument targets
-        # the document-bearing Source (matched on title/url, documentKind non-null).
-        r = proj.g.query(
-            "MATCH (p:Point)-[:aboutDocument]->(s:Source {title:'design-doc-42'}) "
-            "RETURN count(*) > 0"
-        ).result_set
-        assert r[0][0] is True
-
-    def test_backfill_idempotent(self, sdk):
-        """backfill_about_entities is idempotent — second run doesn't duplicate."""
-        sdk.create_subject("bob", "designer")
-        sdk.create_point("statement", "bob reviewed the wireframes")
-        first = sdk.backfill_about_entities()
-        second = sdk.backfill_about_entities()
-        assert first["scanned"] == second["scanned"]
-        # Edge count unchanged between runs (MERGE prevents duplicates)
-        proj = sdk._get_proj()
-        r = proj.g.query(
-            "MATCH ()-[e:aboutSubject]->(:Subject {name:'bob'}) RETURN count(e)"
-        ).result_set
-        assert r[0][0] == 1
-
-    def test_backfill_no_match_no_edges(self, sdk):
-        """Point mentioning no entity name → no about* edges created."""
-        sdk.create_subject("carol", "manager")
-        sdk.create_point("statement", "unrelated text with no entity names")
-        result = sdk.backfill_about_entities()
-        assert result["updated"] == 0
 
 
 # ── create_event aboutPoint / aboutDocument ─────────────────────────────
@@ -422,19 +338,6 @@ class TestAboutEdgesRegression:
             "MATCH (e:Event {eventId:$eid})-[a:aboutObject]->"
             "(o:Object {id:$oid}) RETURN count(a) > 0",
             params={"eid": ev["eventId"], "oid": obj["id"]},
-        ).result_set
-        assert r[0][0] is True
-
-    def test_backfill_about_subject_still_works(self, sdk):
-        """backfill with Subject name still creates aboutSubject (pre-existing)."""
-        sdk.create_subject("grace", "designer")
-        sdk.create_point("statement", "grace finalized the mockups")
-        result = sdk.backfill_about_entities()
-        assert result["updated"] >= 1
-        proj = sdk._get_proj()
-        r = proj.g.query(
-            "MATCH (p:Point)-[:aboutSubject]->(s:Subject {name:'grace'}) "
-            "RETURN count(*) > 0"
         ).result_set
         assert r[0][0] is True
 

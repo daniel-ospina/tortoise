@@ -31,7 +31,7 @@ New reference specifications should be added to `docs/reference/`.
 | **Curated MCP + SDK Surface** | [`docs/product/mcp-sdk-surface.md`](../product/mcp-sdk-surface.md) | Rendered from `config/surface-manifest.yml`: every served MCP tool, public SDK method, and recorded `response_fields` entry. |
 | **Canonical MCP Tool List** | [`docs/product/canonical-mcp-tools.md`](../product/canonical-mcp-tools.md) | Owner-approved target MCP surface, read/write separation, and approval metadata. |
 | **Beta SDK Surface** | [`docs/product/beta-sdk-surface.md`](../product/beta-sdk-surface.md) | Target SDK memory and multi-tenant graph management surface. |
-| **Canonical SDK Method Inventory** | [`docs/product/canonical-sdk-methods.md`](../product/canonical-sdk-methods.md) | Full inventory of all 150 public `TortoiseSDK` methods across 32 groups. |
+| **Canonical SDK Method Inventory** | [`docs/product/canonical-sdk-methods.md`](../product/canonical-sdk-methods.md) | Full inventory of all 124 public `TortoiseSDK` methods across 32 groups. |
 | **Declared SDK Public Surface** | [`docs/product/sdk-surface-declaration.md`](../product/sdk-surface-declaration.md) | AST-derived public method set reconciled against runtime reflection (`tools/sdk_surface.py`). |
 | **Bridge Table** | [`docs/product/bridge-table.md`](../product/bridge-table.md) | Generated mapping of current tools to target destinations (`tools/bridge_table.py`). |
 | **MCP Rename Table** | [`docs/product/mcp-rename-table.md`](../product/mcp-rename-table.md) | Caller migration table for retired and renamed MCP tools (`tools/mcp_rename_table.py`). |

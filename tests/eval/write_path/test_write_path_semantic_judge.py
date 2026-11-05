@@ -540,16 +540,6 @@ def test_semantic_receipt_validation_rejects_a_pin_mismatch():
     assert any("semantic_judge_pin" in issue for issue in issues)
 
 
-def test_semantic_arm_is_refused_on_the_deterministic_lane(monkeypatch):
-    """The judged lane must never silently enter the CI (m2) gate."""
-    monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")
-    report = runner.run_benchmark(judge_mode="semantic")
-    assert report["run_status"] == "failed"
-    assert report["failure_origin"] == "runner_error"
-    assert "requires the llm extractor posture" in json.dumps(report["log"]) + \
-        json.dumps(report)
-
-
 # ── Calibration harness (κ/α pending labels only) ──────────────────────────
 
 
@@ -816,11 +806,6 @@ def test_run_semantic_judge_judge_calls_excludes_paraphrase_calls(monkeypatch):
     # (6) are fewer than the per-unit paraphrase calls (16) here, whereas the
     # old ``prompt_count`` field would have reported their sum (22).
     assert block["judge_calls"] != block["paraphrase_calls"]
-
-
-def test_run_benchmark_refuses_a_degenerate_sample_count():
-    with pytest.raises(ValueError, match="judge_samples must be >= 3"):
-        runner.run_benchmark(judge_mode="semantic", judge_samples=2)
 
 
 def test_receipt_validation_rejects_a_distribution_sum_mismatch():

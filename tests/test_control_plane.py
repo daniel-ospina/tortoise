@@ -21,15 +21,15 @@ def sdk(tmp_path):
 def team(sdk):
     """Pre-created team fixture.
 
-    R6 (#221): deletes the created team in teardown so the registry graph
-    never accumulates leftover teams across runs.
+    R6 (#221) used to delete the created team in teardown so the registry graph
+    never accumulated leftover teams across runs. That teardown is gone: it
+    called `sdk.org_delete`, which #4282 deleted with no replacement, and the
+    `except Exception: pass` around it turned the removal into a silent no-op.
+    Nothing cleans up now because nothing needs to — `sdk` is built on a
+    `tmp_path` database, so this team's graph is discarded with the test.
     """
     result = sdk.org_create("test-team")
     yield result
-    try:  # noqa: SIM105
-        sdk.org_delete(result["id"], confirmation="test-team")
-    except Exception:
-        pass  # best-effort cleanup
 
 
 class TestTeamCRUD:
@@ -134,45 +134,10 @@ class TestTeamCRUD:
             "Daniel's approval — it is not a restoration of this method."
         )
 
-    def test_team_update_changes_mutable_fields(self, sdk, team):
-        sdk.org_update(team["id"], tier="pro", max_users=10)
-        updated = sdk.org_get(team["id"])
-        assert updated["tier"] == "pro"
-        assert updated["max_users"] == 10
 
-    def test_team_update_rejects_invalid_fields(self, sdk, team):
-        with pytest.raises(ControlPlaneError, match="Invalid team fields"):
-            sdk.org_update(team["id"], bogus_field=123)
 
-    def test_team_delete_cascades_to_children(self, sdk):
-        t = sdk.org_create("victim")
-        # Add membership, API key, invitation
-        sdk.membership_create(t["id"], "user-1", "admin")
-        sdk.apikey_create(t["id"], "user-1")
-        sdk.invitation_create(t["id"], "invite@test.com", "admin", "user-1")
 
-        result = sdk.org_delete(t["id"], confirmation="victim")
-        assert result["deleted"] is True
 
-        # Verify cascade — team should be gone
-        assert sdk.org_get(t["id"]) is None
-
-    def test_team_delete_requires_name_confirmation(self, sdk, team):
-        with pytest.raises(ControlPlaneError, match="must match team name"):
-            sdk.org_delete(team["id"], confirmation="wrong-name")
-
-    def test_migrate_teams_is_idempotent(self, sdk):
-        # Create a team directly in the tortoise graph (simulating old data)
-        proj = sdk._get_proj()
-        proj.g.query(
-            "CREATE (t:Team {id:'legacy-1', name:'legacy-team', "
-            "api_key:'old-hash', graph_name:'team_legacy-team', "
-            "createdAt:'2024-01-01'})"
-        )
-        result1 = sdk.migrate_orgs_to_registry()
-        assert result1["migrated"] >= 1
-        result2 = sdk.migrate_orgs_to_registry()
-        assert result2["migrated"] == 0  # Idempotent
 
 
 class TestMembershipCRUD:
@@ -192,20 +157,7 @@ class TestMembershipCRUD:
         with pytest.raises(ControlPlaneError, match="not found"):
             sdk.membership_create("bad-id", "user-1", "admin")
 
-    def test_membership_create_rejects_at_max_users(self, sdk, team):
-        sdk.org_update(team["id"], max_users=1)
-        sdk.membership_create(team["id"], "user-1", "owner")
-        with pytest.raises(ControlPlaneError, match="max users"):
-            sdk.membership_create(team["id"], "user-2", "admin")
 
-    def test_membership_list_returns_members(self, sdk, team):
-        # free tier default max_users=1 would reject the 2nd membership —
-        # raise the limit so the listing actually has 2 members to return.
-        sdk.org_update(team["id"], max_users=10)
-        sdk.membership_create(team["id"], "user-1", "admin")
-        sdk.membership_create(team["id"], "user-2", "owner")
-        members = sdk.membership_list(team["id"])
-        assert len(members) == 2
 
     def test_membership_get_returns_membership(self, sdk, team):
         m = sdk.membership_create(team["id"], "user-1", "admin")
@@ -216,24 +168,27 @@ class TestMembershipCRUD:
     def test_membership_get_returns_none_for_missing(self, sdk):
         assert sdk.membership_get("nonexistent") is None
 
-    def test_membership_update_role(self, sdk, team):
-        m = sdk.membership_create(team["id"], "user-1", "admin")
-        sdk.membership_update_role(m["id"], "owner")
-        updated = sdk.membership_get(m["id"])
-        assert updated["role"] == "owner"
+    def test_membership_create_rejects_at_max_users(self, sdk, team):
+        """#4282 deleted `org_update`, which only SET the cap here.
 
-    def test_membership_update_role_rejects_invalid(self, sdk, team):
-        m = sdk.membership_create(team["id"], "user-1", "admin")
-        with pytest.raises(ControlPlaneError, match="Invalid role"):
-            sdk.membership_update_role(m["id"], "bogus")
+        The gate under test is `membership_create`'s own `max_users` check, on
+        the SDK door — alive and otherwise covered only at the HTTP layer.
 
-    def test_membership_delete_is_idempotent(self, sdk, team):
-        m = sdk.membership_create(team["id"], "user-1", "admin")
-        assert sdk.membership_delete(m["id"])["deleted"] is True
-        # Second delete should be idempotent
-        result = sdk.membership_delete(m["id"])
-        assert result["deleted"] is False
-        assert result["reason"] == "not found"
+        The cap is set to 2, NOT the free tier's default of 1: at 1 the write
+        would be redundant and the test would pass with the write broken (the
+        default gate alone raises). At 2 the first two members must be ADMITTED
+        and only the third refused, so a cap that never landed fails the test.
+        """
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.max_users = 2",
+            params={"id": team["id"]})
+        sdk.membership_create(team["id"], "user-1", "owner")
+        sdk.membership_create(team["id"], "user-2", "admin")
+        with pytest.raises(ControlPlaneError, match="max users"):
+            sdk.membership_create(team["id"], "user-3", "member")
+
+
+
 
 
 class TestAPIKeyCRUD:
@@ -256,22 +211,7 @@ class TestAPIKeyCRUD:
         assert stored_hash != result["api_key"]
         assert stored_prefix == result["api_key"][:10]
 
-    def test_apikey_create_returns_plaintext_once(self, sdk, team):
-        result = sdk.apikey_create(team["id"], "user-1")
-        plaintext = result["api_key"]  # noqa: F841
-        # Listing should NOT include plaintext
-        keys = sdk.apikey_list(team["id"])
-        for k in keys:
-            assert "api_key" not in k or k.get("api_key") is None
 
-    def test_apikey_list_excludes_plaintext(self, sdk, team):
-        sdk.apikey_create(team["id"], "user-1")
-        sdk.apikey_create(team["id"], "user-2")
-        keys = sdk.apikey_list(team["id"])
-        assert len(keys) == 2
-        for k in keys:
-            assert "key_prefix" in k
-            assert "key_hash" not in k
 
     def test_apikey_revoke_sets_revoked_at(self, sdk, team):
         result = sdk.apikey_create(team["id"], "user-1")
@@ -334,59 +274,6 @@ class TestAPIKeyCRUD:
             sdk.apikey_create("bad-id", "user-1")
 
 
-class TestAPIKeyC1Tenancy:
-    """C1 (#2110) registry parity — APIKey node tenancy props.
-
-    Surface 3/10 (test-design #2094): the registry APIKey node carries
-    graph_id/scopes/created_by_key_id/delegation_depth and apikey_list
-    exposes them; absent on pre-C1 nodes → None-safe legacy defaults.
-    """
-
-    def test_apikey_create_legacy_shape_unchanged(self, sdk, team):
-        """Back-compat: no kwargs → no tenancy props on the node, list shows
-        None-safe defaults (legacy class)."""
-        result = sdk.apikey_create(team["id"], "user-1")
-        reg = sdk._get_registry()
-        rows = reg.query(
-            "MATCH (k:APIKey {id:$id}) RETURN k.graph_id, k.scopes, "
-            "k.delegation_depth, k.created_by_key_id",
-            params={"id": result["id"]},
-        ).result_set
-        assert (rows[0][0], rows[0][1], rows[0][2], rows[0][3]) == (None, None, None, None)
-        listed = sdk.apikey_list(team["id"])[0]
-        assert listed["graph_id"] is None
-        assert listed["scopes"] == []
-        assert listed["delegation_depth"] is None
-        assert listed["created_by_key_id"] is None
-
-    def test_apikey_create_scoped_graph_key_stores_props(self, sdk, team):
-        """A C1-minted graph-bound key stores its tenancy props."""
-        result = sdk.apikey_create(
-            team["id"], "user-1",
-            graph_id="g_abc123def4567890",
-            scopes=["graphs:read", "graphs:write"],
-            created_by_key_id="key-parent-000",
-            delegation_depth=0,
-        )
-        reg = sdk._get_registry()
-        rows = reg.query(
-            "MATCH (k:APIKey {id:$id}) RETURN k.graph_id, k.scopes, "
-            "k.delegation_depth, k.created_by_key_id",
-            params={"id": result["id"]},
-        ).result_set
-        assert rows[0][0] == "g_abc123def4567890"
-        assert rows[0][1] == ["graphs:read", "graphs:write"]
-        assert rows[0][2] == 0
-        assert rows[0][3] == "key-parent-000"
-        listed = sdk.apikey_list(team["id"])[0]
-        assert listed["graph_id"] == "g_abc123def4567890"
-        assert listed["scopes"] == ["graphs:read", "graphs:write"]
-        assert listed["delegation_depth"] == 0
-        assert listed["created_by_key_id"] == "key-parent-000"
-        # Still authenticates (registry parity: hash path unchanged)
-        valid = sdk.apikey_verify(result["api_key"])
-        assert valid is not None
-        assert valid["org_id"] == team["id"]
 
 
 class TestGraphC1Status:
@@ -419,112 +306,77 @@ class TestGraphC1Status:
         assert sdk._graph_count(team["id"]) == 2
 
 
-class TestInvitationCRUD:
-    """Invitation create, list, accept, revoke, cleanup."""
-
-    def test_invitation_create_rejects_duplicate_pending(self, sdk, team):
-        sdk.invitation_create(team["id"], "dup@test.com", "admin", "user-1")
-        with pytest.raises(ControlPlaneError, match="already exists"):
-            sdk.invitation_create(team["id"], "dup@test.com", "admin", "user-1")
-
-    def test_invitation_accept_rejects_expired(self, sdk, team):
-        from datetime import datetime, timedelta, timezone
-        inv = sdk.invitation_create(team["id"], "exp@test.com", "admin", "user-1")
-        # Manually set expires_at to past
+class TestAPIKeyC1Tenancy:
+    def test_apikey_create_legacy_shape_unchanged(self, sdk, team):
+        """Back-compat: no kwargs → no tenancy props on the node, list shows
+        None-safe defaults (legacy class)."""
+        result = sdk.apikey_create(team["id"], "user-1")
         reg = sdk._get_registry()
-        past = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()  # noqa: UP017
-        reg.query(
-            "MATCH (i:Invitation {id:$id}) SET i.expires_at = $exp",
-            params={"id": inv["id"], "exp": past},
+        rows = reg.query(
+            "MATCH (k:APIKey {id:$id}) RETURN k.graph_id, k.scopes, "
+            "k.delegation_depth, k.created_by_key_id",
+            params={"id": result["id"]},
+        ).result_set
+        assert (rows[0][0], rows[0][1], rows[0][2], rows[0][3]) == (None, None, None, None)
+        # #4282 deleted apikey_list; the props it projected are
+        # asserted directly above, off the node the create door wrote.
+
+    def test_apikey_create_scoped_graph_key_stores_props(self, sdk, team):
+        """A C1-minted graph-bound key stores its tenancy props."""
+        result = sdk.apikey_create(
+            team["id"], "user-1",
+            graph_id="g_abc123def4567890",
+            scopes=["graphs:read", "graphs:write"],
+            created_by_key_id="key-parent-000",
+            delegation_depth=0,
         )
-        with pytest.raises(ControlPlaneError, match="expired"):
-            sdk.invitation_accept(inv["id"], "user-2")
+        reg = sdk._get_registry()
+        rows = reg.query(
+            "MATCH (k:APIKey {id:$id}) RETURN k.graph_id, k.scopes, "
+            "k.delegation_depth, k.created_by_key_id",
+            params={"id": result["id"]},
+        ).result_set
+        assert rows[0][0] == "g_abc123def4567890"
+        assert rows[0][1] == ["graphs:read", "graphs:write"]
+        assert rows[0][2] == 0
+        assert rows[0][3] == "key-parent-000"
+        # #4282 deleted apikey_list; the props it projected are
+        # asserted directly above, off the node the create door wrote.
+        # Still authenticates (registry parity: hash path unchanged)
+        valid = sdk.apikey_verify(result["api_key"])
+        assert valid is not None
+        assert valid["org_id"] == team["id"]
 
-    def test_invitation_accept_creates_membership(self, sdk, team):
-        inv = sdk.invitation_create(team["id"], "join@test.com", "admin", "user-1")
-        result = sdk.invitation_accept(inv["id"], "user-2")
-        assert result["org_id"] == team["id"]
-        assert result["membership_id"]
-        # Verify membership was created
-        members = sdk.membership_list(team["id"])
-        assert any(m["user_id"] == "user-2" for m in members)
 
-    def test_invitation_accept_rejects_already_accepted(self, sdk, team):
-        inv = sdk.invitation_create(team["id"], "used@test.com", "admin", "user-1")
-        sdk.invitation_accept(inv["id"], "user-2")
-        with pytest.raises(ControlPlaneError, match="already accepted"):
-            sdk.invitation_accept(inv["id"], "user-3")
+class TestInvitationRevoke:
+    """`invitation_revoke` survives — only its create door was deleted by #4282.
 
-    def test_invitation_get_by_token_finds_match(self, sdk, team):
-        inv = sdk.invitation_create(team["id"], "token@test.com", "admin", "user-1")
-        token = inv["token"]
-        found = sdk.invitation_get_by_token(token)
-        assert found is not None
-        assert found["email"] == "token@test.com"
+    The subject here is the IDEMPOTENT branch (`already: True`) of a live public
+    method, plus the not-found refusal. Nothing else in the tree reaches either:
+    `tests/test_invites_http.py` exercises the FIRST revoke through the
+    endpoint, which 404s/409s before idempotency can show.
+    """
 
-    def test_invitation_get_by_token_returns_none_for_bad_token(self, sdk):
-        assert sdk.invitation_get_by_token("bad-token") is None
-
-    def test_invitation_revoke(self, sdk, team):
-        inv = sdk.invitation_create(team["id"], "rev@test.com", "admin", "user-1")
-        result = sdk.invitation_revoke(inv["id"])
-        assert result["revoked"] is True
-        # Accept should fail after revoke
-        with pytest.raises(ControlPlaneError, match="revoked"):
-            sdk.invitation_accept(inv["id"], "user-2")
+    def _seed_invitation(self, sdk, team, inv_id: str = "inv-probe-1") -> str:
+        # `invitation_create` was deleted; the node shape it wrote is written
+        # directly, in the graph the surviving methods read (`_get_registry`).
+        sdk._get_registry().query(
+            "CREATE (i:Invitation {id:$id, org_id:$t, email:$e, role:$r, "
+            "status:'pending'})",
+            params={"id": inv_id, "t": team["id"],
+                    "e": "rev2@test.com", "r": "admin"})
+        return inv_id
 
     def test_invitation_revoke_is_idempotent(self, sdk, team):
-        inv = sdk.invitation_create(team["id"], "rev2@test.com", "admin", "user-1")
-        sdk.invitation_revoke(inv["id"])
-        result2 = sdk.invitation_revoke(inv["id"])
-        assert result2.get("already") is True
+        inv_id = self._seed_invitation(sdk, team)
+        first = sdk.invitation_revoke(inv_id)
+        assert first["revoked"] is True and "already" not in first, first
+        assert sdk.invitation_get_by_id(inv_id)["status"] == "revoked"
 
-    def test_cleanup_expired_invitations_marks_expired(self, sdk, team):
-        inv = sdk.invitation_create(team["id"], "clean@test.com", "admin", "user-1")
-        # Manually expire
-        reg = sdk._get_registry()
-        from datetime import datetime, timedelta, timezone
-        past = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()  # noqa: UP017
-        reg.query(
-            "MATCH (i:Invitation {id:$id}) SET i.expires_at = $exp",
-            params={"id": inv["id"], "exp": past},
-        )
-        result = sdk.cleanup_expired_invitations()
-        assert result["cleaned"] >= 1
-        # #1908: the sweep also reports the fake invite-{iid} membership
-        # rows deleted (registry list_members ghost cleanup).
-        assert result["ghosts_deleted"] >= 0
+        again = sdk.invitation_revoke(inv_id)
+        assert again.get("already") is True, again
+        assert again["invitation_id"] == inv_id
 
-    def test_invitation_create_allows_remint_after_expiry(self, sdk, team):
-        """#1890: an expired invite is DEAD — the dup-check must derive expiry
-        from ``expires_at``.
-
-        This method does not even write ``status``, so the pre-fix
-        status-only predicate left an expired invite blocking a re-invite
-        with "already exists" FOREVER. The same live predicate must still
-        reject a genuinely pending duplicate.
-        """
-        from datetime import datetime, timedelta, timezone
-
-        first = sdk.invitation_create(team["id"], "remint@test.com", "admin",
-                                      "user-1")
-        reg = sdk._get_registry()
-        past = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()  # noqa: UP017
-        reg.query(
-            "MATCH (i:Invitation {id:$id}) SET i.expires_at = $exp",
-            params={"id": first["id"], "exp": past},
-        )
-
-        second = sdk.invitation_create(team["id"], "remint@test.com", "admin",
-                                       "user-1")
-        assert second["id"] != first["id"], (
-            "an expired invite must not block a re-invite — expiry is derived "
-            "from expires_at, not from a status this method never writes")
-        # The live invite just minted is a real duplicate: still refused.
-        with pytest.raises(ControlPlaneError, match="already exists"):
-            sdk.invitation_create(team["id"], "remint@test.com", "admin",
-                                  "user-1")
-
-    def test_invitation_create_rejects_invalid_role(self, sdk, team):
-        with pytest.raises(ControlPlaneError, match="Invalid role"):
-            sdk.invitation_create(team["id"], "bad@test.com", "bogus", "user-1")
+    def test_invitation_revoke_missing_is_not_an_error(self, sdk, team):
+        out = sdk.invitation_revoke("inv-does-not-exist")
+        assert out == {"revoked": False, "reason": "not found"}, out

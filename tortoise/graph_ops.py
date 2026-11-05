@@ -327,9 +327,11 @@ def counts_capture_ops(fn):
     """Method decorator: count graph ops for the whole call and attach the
     result to the returned dict under ``"graph_ops"``.
 
-    Used on ``TortoiseSDK.capture_session`` (the selfhost/CLI capture path).
-    The hosted path emits the same accounting as an analytics row instead of
-    mutating the HTTP response (see ``hosted_api._capture_session_impl``).
+    The synchronous counterpart of :func:`counts_capture_ops_async`. Its only
+    in-tree user was ``TortoiseSDK.capture_session`` (the selfhost/CLI capture
+    path), deleted by #4282; the hosted path uses the async form and emits the
+    same accounting as an analytics row instead of mutating the HTTP response
+    (see ``hosted_api._capture_session_impl``).
 
     ⚠️ **Replay asymmetry, stated so it is not discovered as a bug.** This
     decorator attaches ``graph_ops`` on EVERY ``capture_session`` call, a

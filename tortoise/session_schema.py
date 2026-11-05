@@ -122,7 +122,7 @@ class SessionClient:
 
 
 #: The ONE capture-path writer. Both capture lanes funnel through it: hosted
-#: ``_capture_session_impl`` and ``TortoiseSDK.capture_session`` call it and
+#: ``_capture_session_impl`` and ``TortoiseSDK.capture_session`` called it and
 #: hold no copy of the MERGE text (#3551).
 CAPTURE_PRIMITIVE = "tortoise/sdk.py::_write_session_and_turns"
 

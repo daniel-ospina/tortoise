@@ -556,8 +556,10 @@ def source_staleness(graph, source_ref: str) -> dict:
         # AN UNREADABLE OPERAND — its honest verdict is `unknown`. Testing the
         # stripped operand here instead classed it unanchored, withheld it from
         # `links`, and the aggregate could then certify `current` over a link it
-        # never judged: a false-fresh, and a disagreement with
-        # `get_provenance_chain`, which reports that same link `unknown`.
+        # never judged: a false-fresh, and a disagreement with the
+        # #4282-DELETED `get_provenance_chain`, which reported that same link
+        # `unknown` (this module reports the same verdict, which is why the rule
+        # stands on its own).
         anchored = remembered is not None and remembered != ""
         # The write-time discriminator is "did a DERIVATION writer mint it", and
         # at read time the two observable signals are the target's label and the

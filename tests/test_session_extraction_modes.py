@@ -992,8 +992,11 @@ def test_the_runbook_venice_row_states_the_lane_each_rule_holds_for(monkeypatch)
 #: ``tests/test_8501_capture_path_anchor.py`` was the module this sweep first
 #: missed (review round 4): it declared no helper at all — the four-key hand-list
 #: was INLINED in two test bodies, so a guard keyed on ``(module, helper)`` could
-#: not see it. Its new ``_keyless`` helper plus this entry are the repair, which
-#: is why the durability claim above now holds for that module too.
+#: not see it. Its ``_keyless`` helper plus the entry that followed WERE the repair,
+#: and that coverage is now GONE rather than merely stale: #4282 deleted the module
+#: together with ``TortoiseSDK.capture_session`` (see the note on
+#: ``_KEYLESS_CAPTURE_HELPERS`` below). Recorded in past tense on purpose — the
+#: durability claim above held for that module and no longer can.
 #:
 #: ``tests/test_doctor.py`` was the next module in that population (review rounds
 #: 6-7): its hand-list lived in the ``clean_llm_env`` FIXTURE, not in a capture
@@ -1002,13 +1005,18 @@ def test_the_runbook_venice_row_states_the_lane_each_rule_holds_for(monkeypatch)
 #: same one, and after #8133 an ambient ``VENICE_API_KEY`` flipped doctor's line to
 #: ``✅ … (venice, model deepseek-v4-flash)`` while CI (no such key) stayed green.
 #: Its ``_keyless_llm_env`` helper is what the fixture now calls.
+#: ``tests/test_8501_capture_path_anchor.py`` was the module this sweep first
+#: reached, and ``tests/test_session_semantic_retrieval.py`` alongside it — both
+#: #4282-deleted together with ``TortoiseSDK.capture_session``, the door their
+#: ``_keyless`` helper was reached through. The entries go WITH the modules: a
+#: helper list that still named them would make this sweep import a module the
+#: tree does not carry, so the guard would red on its own stale list rather than
+#: on an ambient key.
 _KEYLESS_CAPTURE_HELPERS = (
     ("tests.test_turn_embedding_write_path_4194", "_keyless"),
     ("tests.test_capture_secret_redaction_4911", "_keyless"),
     ("tests.test_capture_redaction_sinks_5445", "_keyless"),
-    ("tests.test_session_semantic_retrieval", "_keyless"),
     ("tests.test_4199_dense_scope_coverage", "_offline_llm"),
-    ("tests.test_8501_capture_path_anchor", "_keyless"),
     ("tests.test_doctor", "_keyless_llm_env"),
 )
 

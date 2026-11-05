@@ -77,6 +77,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
+import tortoise.sdk as sdk_mod  # noqa: E402
 from tortoise import (  # noqa: E402
     cache_projection,
     monitoring,
@@ -127,25 +128,43 @@ def tenant() -> tuple[str, str]:
     return _new_tenant()
 
 
-#: Journal keys whose emitted VALUE the record's declared column type could not
-#: hold — a schema/producer DISAGREEMENT, not a folding bug — and the vocabulary
-#: is now EMPTY (#10620 closed its last entry).
+#: Journal keys whose emitted VALUE the record's declared column type cannot
+#: hold — a schema/producer DISAGREEMENT, not a folding bug (`_jsonb_or_scalar`
+#: deliberately refuses to coerce, so the disagreement stays visible instead of
+#: being papered over). Derived from the RECORD ITSELF, never hard-coded by
+#: record type: the moment the schema or the producer is fixed, the record stops
+#: matching and the expectation flips to "must project cleanly" on its own — so
+#: nothing here can go stale in silence.
 #:
-#: It held ``search_keys`` (the graph's flattened STRING against
-#: `public.point.search_keys` declared `jsonb`) and, before it,
-#: ``capture_redactions`` (an integer count against a `jsonb` column, **fixed
-#: #9264** by `20261022000001_record_session_capture_redactions_integer.sql`).
-#: The ruling is the same one that closed both: the PRODUCER is authoritative
-#: about the form, so the COLUMN narrows to it. `search_keys` narrowed to `text`
-#: in `20261102000002_record_point_search_keys_text.sql` — nothing reads the
-#: record's copy as a JSON structure, and the graph's own form is the flat
-#: string (`projection/entities.py::flatten_search_keys_prop`).
+#:   * ``search_keys`` — an EXTRACTED point carries the graph's flattened string
+#:     (`_flatten_search_keys_prop`, #8006/#5482), while
+#:     `public.point.search_keys` is `jsonb`: ``invalid input syntax for type
+#:     json``. Two record types re-project the same snapshot
+#:     (``PointAdded``/``PointPromoted``), so the TYPE is not the unit.
+#:   * ``capture_redactions`` — the capture receipt's integer COUNT, while
+#:     `public.session.capture_redactions` was `jsonb`: ``column
+#:     "capture_redactions" is of type jsonb but expression is of type integer``.
+#:     **FIXED (#9264)** by the forward migration
+#:     `20261022000001_record_session_capture_redactions_integer.sql`, so the
+#:     entry and its detection are gone: every other counter on
+#:     `public.session` is `integer`, which made `jsonb` the anomaly rather than
+#:     a decision.
 #:
-#: Keeping an EMPTY dict with a live detector would be the "pin that outlives its
-#: defect" this file's own assertion message warns about, so the mechanism is
-#: gone rather than parked (and so is the dict: an assertion over an empty
-#: vocabulary is a constant `True`). Every refusal below must now be the
-#: PRE-EXISTING fold refusal (#9200), and anything else raises.
+#: Measured at #9200's head (`62ec432a8`) + this diff, against a real Postgres.
+#: Reported on #9200 (the producer-accuracy class it belongs to): the fix is a
+#: schema/placement decision, not a wiring one.
+_SCHEMA_DISAGREEMENTS = {
+    "search_keys": "invalid input syntax for type json",
+}
+
+
+def _disagreement(record: dict) -> str | None:
+    """Which declared-column disagreement this journal record carries, if any."""
+    snapshot = record.get("point") or {}
+    keys = snapshot.get("search_keys")
+    if isinstance(keys, str) and keys.strip():
+        return "search_keys"
+    return None
 
 
 #: The record migrations, read from the fold's own registry (never restated).
@@ -262,18 +281,6 @@ RECORD_REAPPLY_STEPS: list[tuple[Path, str | None]] = [
     # refusing. Pinned by `tests/test_10017_cache_tier.py`.
     (REPO_ROOT / "supabase" / "migrations"
      / "20261029000001_record_point_cache_tier.sql", None),
-    # #10620 — R4's remaining half: `public.point.search_keys` NARROWED from
-    # `jsonb` to `text`. Same class as the 20261022 entry above (a TYPE change no
-    # re-apply of the CREATE TABLE files can make), and it is the entry that
-    # removes the row-loss failure rather than a backstop gap: on a container
-    # whose `point.search_keys` is still `jsonb`, EVERY point carrying search
-    # keys is refused `22P02` and the residue pass below would blame *"a NEW
-    # defect"* on the current tree — which is exactly what a pre-#10620 container
-    # would earn. Guarded `DO` block keyed on `information_schema`, so
-    # re-applying on a narrowed column is a no-op, and its `USING` helper
-    # function is created and dropped inside the file.
-    (REPO_ROOT / "supabase" / "migrations"
-     / "20261102000002_record_point_search_keys_text.sql", None),
 ]
 
 #: Record migrations that ship AFTER the base shape yet are deliberately NOT in
@@ -406,14 +413,23 @@ def capture_sdk(tmp_path, monkeypatch):
     """A real SDK with its own graph and journal. No record DSN is set here.
 
     ⛔ HERMETIC EXTRACTION, pinned for EVERY capture leg in this file (#3695/
-    #5477 class). A capture's ``receipt["ok"]`` is computed from the
-    EXTRACTION's outcome, not from the record write — ``tortoise/sdk.py:11297``:
-    ``ok = not extraction_errors and meta.get("mode") != "empty"`` — so on a
-    box that exports a provider key each capture makes a LIVE LLM call whose
-    result decides the precondition these legs assert.
+    #5477 class). A capture's success verdict is computed from the EXTRACTION's
+    outcome, not from the record write, so on a box that exports a provider key
+    each capture makes a LIVE LLM call whose result decides the precondition
+    these legs assert.
 
-    MEASURED, and reproducible in three steps (this PR's own
-    ``test-record-postgres`` leg, run 40172546555, head 4309dda9):
+    ⚠️ The verdict used to be ``receipt["ok"]`` on the deleted wrapper
+    (``ok = not extraction_errors and meta.get("mode") != "empty"``); #4282
+    (2026-10-27) deleted that wrapper, so the surviving spelling is the hosted
+    lane's own gate — ``_capture_ok`` in ``hosted_api._capture_session_impl``,
+    ``(verb_status == STATUS_OK and not extraction_errors and not skipped)``,
+    with the mode resolved above it. The seam this fixture pins is unchanged:
+    ``TORTOISE_SESSION_LLM_MOCK=1`` makes the extraction deterministic and
+    network-free whichever lane computes the verdict.
+
+    MEASURED at run 40172546555 (head 4309dda9) — HISTORICAL: the two legs named in step 1
+    were DELETED by #4282 (they drove the deleted wrapper), so this recipe is no longer
+    runnable as written; the surviving seam's own measurement is `_capture`'s comment below.
 
     1. ``test_an_armed_capture_without_a_tenant_is_refused_and_counted`` and
        ``test_an_armed_capture_without_a_journal_is_counted_not_silent`` were 2
@@ -428,11 +444,12 @@ def capture_sdk(tmp_path, monkeypatch):
        with the pin they do not.
 
     ``TORTOISE_SESSION_LLM_MOCK=1`` is the repo's documented deterministic,
-    ZERO-NETWORK extractor — the same seam ``_capture()`` below pins on these
-    exact grounds — so a leg whose subject is the RECORD WRITE refuses the same
-    way on every box, keyed or keyless. Pinned on the FIXTURE, not per test, so
-    an arm-gate leg that never goes through ``_capture()`` cannot reopen the
-    hole.
+    ZERO-NETWORK extractor, so a leg whose subject is the RECORD WRITE refuses the
+    same way on every box, keyed or keyless. Pinned on the FIXTURE, not per test,
+    so a leg that never reaches the extractor cannot reopen the hole by leaving the
+    seam unset. (#4282 deleted `capture_session`; the `_capture()` helper and the two
+    armed legs below were restored on the surviving production sequence, and the pin is on
+    the extractor seam itself, which is what those legs actually traverse.)
     """
     monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
 
@@ -446,10 +463,6 @@ def capture_sdk(tmp_path, monkeypatch):
     return _make
 
 
-@pytest.fixture()
-def no_record_dsn(monkeypatch):
-    monkeypatch.delenv(record_writer.RECORD_DSN_ENV, raising=False)
-    return record_writer.RECORD_DSN_ENV
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -668,25 +681,6 @@ def test_the_schema_resolves_without_the_repo_checkout(monkeypatch, tmp_path):
 # ════════════════════════════════════════════════════════════════════════════
 
 
-def test_an_unarmed_capture_opens_no_record_connection(capture_sdk, no_record_dsn,
-                                                       monkeypatch):
-    """No DSN ⇒ no connection, no plan, no exception: §2.0's sequence."""
-    def _must_not_connect(dsn):                      # pragma: no cover - asserted
-        raise AssertionError(f"the record is unarmed but connected to {dsn!r}")
-
-    monkeypatch.setattr(record_writer, "_default_connect", _must_not_connect)
-    sdk, _journal = capture_sdk()
-    before = dict(monitoring.record_write_failure_counts())
-    receipt = sdk.capture_session([
-        {"role": "user", "content": "We chose FalkorDB for the hot cache."},
-        {"role": "assistant", "content": "Noted."},
-    ])
-    assert receipt["ok"] is True
-    # A DELTA, not process-global equality (#9231 review P2): the counter is a
-    # module-level Prometheus Counter, so `== {}` would only hold while no other
-    # file in the suite arms the record — an accident, not the claim.
-    after = dict(monitoring.record_write_failure_counts())
-    assert after == before, (before, after)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -694,37 +688,6 @@ def test_an_unarmed_capture_opens_no_record_connection(capture_sdk, no_record_ds
 # ════════════════════════════════════════════════════════════════════════════
 
 
-def test_an_armed_capture_without_a_tenant_is_refused_and_counted(
-        capture_sdk, monkeypatch):
-    """Armed with no tenant ⇒ REFUSED (counted `no_tenant`), never filed blind.
-
-    The DSN is syntactically valid and deliberately unreachable: a refusal that
-    had gone looking for a tenant's rows would first TRY to connect, so "no
-    connection attempted" is what proves the refusal happened before the guess.
-    """
-    monkeypatch.setenv(record_writer.RECORD_DSN_ENV,
-                       "postgresql://record:record@127.0.0.1:1/record")
-
-    def _must_not_connect(dsn):                      # pragma: no cover - asserted
-        raise AssertionError(
-            "an armed write with no tenant in scope connected to the record — "
-            "the tenant was guessed"
-        )
-
-    monkeypatch.setattr(record_writer, "_default_connect", _must_not_connect)
-    sdk, _journal = capture_sdk()
-    # A DELTA, not a process-global `>=` (#9231 review P2): the counter is a
-    # module-level Prometheus Counter, so `>= 1` would pass on some OTHER
-    # test's refusal — an accident, not this claim.
-    before = dict(monitoring.record_write_failure_counts())
-    receipt = sdk.capture_session([
-        {"role": "user", "content": "We chose FalkorDB for the hot cache."},
-        {"role": "assistant", "content": "Noted."},
-    ])
-    assert receipt["ok"] is True
-    after = dict(monitoring.record_write_failure_counts())
-    assert after.get("no_tenant", 0) > before.get("no_tenant", 0), (before, after)
-    assert after.get("write_failed", 0) == before.get("write_failed", 0), after
 
 
 def test_the_single_tenant_environment_pair_resolves_a_tenant(capture_sdk,
@@ -828,29 +791,6 @@ def test_env_example_declares_the_record_tenant_pair():
         "record_writer.CONNECT_TIMEOUT_SECONDS")
 
 
-def test_an_armed_capture_without_a_journal_is_counted_not_silent(
-        capture_sdk, monkeypatch):
-    """A journal-less deployment with an armed record is a NAMED misconfiguration.
-
-    `tortoise/config.py` supports the journal-less lane by design, so an
-    operator can arm the record and forget the journal — and then nothing is
-    written and NOTHING could heal it later, because the record's sustainable
-    source is the journal. Silent would be the #9078 hole wearing a green
-    health check.
-    """
-    monkeypatch.setattr(record_writer, "_default_connect",
-                        lambda dsn: pytest.fail("connected with no journal"))
-    monkeypatch.setenv(record_writer.RECORD_DSN_ENV,
-                       "postgresql://record:record@127.0.0.1:1/record")
-    sdk, _journal = capture_sdk(journal=False)
-    before = dict(monitoring.record_write_failure_counts())
-    receipt = sdk.capture_session([
-        {"role": "user", "content": "We chose FalkorDB for the hot cache."},
-        {"role": "assistant", "content": "Noted."},
-    ])
-    assert receipt["ok"] is True
-    after = dict(monitoring.record_write_failure_counts())
-    assert after.get("no_journal", 0) > before.get("no_journal", 0), after
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -1186,32 +1126,6 @@ def test_the_seam_writes_nothing_from_a_scratch_buffer(monkeypatch):
         f"`record_write_failures` must stay zero-meaningful: {failures_after}")
 
 
-def test_the_sdk_door_reads_durability_off_its_log(capture_sdk, monkeypatch):
-    """A door READS `durable`; it must not assume every `EventLog` is a journal.
-
-    `EventLog` now declares `durable = True` explicitly rather than relying on
-    the doors' `getattr(log, "durable", True)` fallback, so a log constructed
-    onto a SCRATCH path can say so — which is exactly what the MCP mining
-    lane's temp-file journal does (`mcp_server`, `tempfile.mkdtemp`). Before
-    this, `sdk.py` and `mining.py` passed no `durable` at all, so such a buffer
-    filed rows whose journal was a directory nothing references, and no replay
-    could ever heal them (#9231 review P1).
-    """
-    monkeypatch.setenv(record_writer.RECORD_DSN_ENV,
-                       "postgresql://record:record@127.0.0.1:1/record")
-    monkeypatch.setattr(record_writer, "_default_connect", lambda dsn: pytest.fail(
-        "the SDK door filed a record from a log that declared itself a "
-        "scratch buffer"))
-    sdk, _journal = capture_sdk()
-    log = sdk._get_event_log()
-    assert log is not None, "the fixture configures a journal"
-    assert log.durable is True, "a real journal is durable by default"
-    log.durable = False
-    before = dict(monitoring.record_non_journal_skip_counts())
-    sdk.capture_session([{"role": "user", "content": "We chose FalkorDB."}])
-    after = dict(monitoring.record_non_journal_skip_counts())
-    assert after.get("no_durable_journal", 0) > before.get(
-        "no_durable_journal", 0), after
 
 
 def test_the_m2_capture_lane_never_files_a_row_its_journal_never_carried(        capture_sdk, monkeypatch):
@@ -1898,25 +1812,6 @@ def test_the_record_connection_is_bounded(monkeypatch):
         "a similarly-spelled query key is not `connect_timeout`")
 
 
-def test_a_malformed_dsn_on_the_journal_less_lane_is_counted(
-        capture_sdk, monkeypatch):
-    """A typo'd DSN with no journal produced ZERO signal before this fix.
-
-    On the journal-less lane the seam is never called (there is no append to
-    hook), so `write_live_record`'s own `malformed_dsn` count could never fire:
-    the bare `except Exception: return` swallowed the misconfiguration. The
-    armed-but-malformed shape is the one an operator hits first when arming.
-    """
-    monkeypatch.setenv(record_writer.RECORD_DSN_ENV, "mysql://not-postgres/nope")
-    sdk, _journal = capture_sdk(journal=False)
-    before = dict(monitoring.record_write_failure_counts())
-    receipt = sdk.capture_session([
-        {"role": "user", "content": "We chose FalkorDB for the hot cache."},
-        {"role": "assistant", "content": "Noted."},
-    ])
-    assert receipt["ok"] is True
-    after = dict(monitoring.record_write_failure_counts())
-    assert after.get("malformed_dsn", 0) > before.get("malformed_dsn", 0), after
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -2210,194 +2105,10 @@ def _journal_records(journal_path: Path) -> list[dict]:
             journal_path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
-def _capture(capture_sdk, monkeypatch,
-             tenant: tuple[str, str]) -> tuple[object, Path, int]:
-    """Seed, arm, capture through the PUBLIC API, return (sdk, journal, losses)."""
-    # The WRITER connects as the app role (the gate refuses the provisioning
-    # superuser); `_record_db()` keeps the superuser for seeding/assertions.
-    monkeypatch.setenv(record_writer.RECORD_DSN_ENV,
-                       _app_role_dsn(os.environ[RECORD_DB_ENV]))
-    # ⛔ The extraction leg must be HERMETIC (#3695/#5477 class). The semantic-
-    # layer claim below is asserted against the objects a capture EMITS, and on a
-    # box with no provider key the capture SKIPS extraction by design (#3892) —
-    # so the same armed leg passed on a keyed laptop and RED in CI, for an
-    # environment cause. Measured 2026-10-23 on PR #9772's own leg: armed and
-    # keyless, the journal held ['EventRecorded', 'PointAdded', 'SessionRecorded',
-    # 'SourceCreated'] and the run failed on `assert objects`. The mock seam is
-    # the repo's documented deterministic, ZERO-NETWORK extractor (the same one
-    # `test_capture_session.py` uses), so the leg exercises the real capture →
-    # record path identically on every box.
-    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
-    sdk, journal_path = capture_sdk()
-    before = dict(monitoring.record_write_failure_counts())
-    with use_record_tenant(*tenant):
-        receipt = sdk.capture_session([
-            {"role": "user", "content": "We chose FalkorDB for the hot cache."},
-            {"role": "assistant", "content": "Noted: FalkorDB holds the hot cache."},
-        ])
-    lost = (monitoring.record_write_failure_counts().get("write_failed", 0)
-            - before.get("write_failed", 0))
-    assert receipt["ok"] is True, receipt
-    return sdk, journal_path, lost
 
 
-def test_the_public_capture_path_writes_the_record(capture_sdk, monkeypatch,
-                                                  tenant):
-    """The record, written by the PUBLIC capture path — and the residue NAMED.
-
-    Layer by layer, from the schema's own shape:
-
-    * **event stream** — `event` / `source` / `session` (migration 1's episodic
-      tables) AND `journal_event`, the position row layer 1 IS (exposed as
-      `public.record_event_stream`). The row is keyed on the ordinal
-      `EventLog.append` reported (#9190), so the live write and a later replay
-      give one record one number;
-    * **semantic** — `object` only, asserted against the objects the capture
-      actually emitted (counted from the journal, so the claim is non-vacuous
-      either way: a capture that emits no Object record must produce no Object
-      row). The layer's **Subject** half is a SEPARATE leg below: this sentence
-      used to claim `subject` here, which was never true of this leg, and this
-      file's capture lane is its deterministic `TORTOISE_SESSION_LLM_MOCK`
-      payload, whose one entity classifies as an Object (`core:strategy`) — so
-      a `subject` assertion against THIS capture would be vacuous (#9893). A
-      capture CAN emit `SubjectAdded` (the v2 lane routes any payload entity of
-      a declared Subject kind to `create_entity("subject", …)`); it is this
-      lane's payload, not the product, that produces none.
-    * **procedural** — a VIEW, never a table ("the procedural layer owns no
-      table", migration 4): `object_current_status` folds the `object` rows.
-
-    Then the RESIDUE, per RECORD and unconditionally: every journal record is
-    replayed on its own, and a refusal must name a known cause — either a
-    schema/producer disagreement (the emitted value does not fit the declared
-    column) or one of the pre-existing fold refusals PR #9200 fixes. Anything
-    else is a NEW defect and fails here. Every allowance is derived from what
-    the record itself carries or from a MEASURED fold behaviour, so nothing can
-    go stale in silence.
-    """
-    conn = _record_db()
-    try:
-        _ensure_record_schema(conn)
-        _seed_tenant(conn, tenant)
-        # The layer-1 count is a property of THIS run (#9307 review F4).
-        # `journal_event` is append-only by trigger, so nothing clears it; taken
-        # as a DELTA against a tenant only this test has used, it stays correct
-        # on a database a previous run migrated, and the count can only move in
-        # the direction the door writes it.
-        before = _count(conn, "journal_event", tenant)
-        _sdk, journal_path, lost = _capture(capture_sdk, monkeypatch, tenant)
-        after = _count(conn, "journal_event", tenant)
-        written = after - before
-
-        # 1. the event stream, from the production path
-        for table in ("event", "source", "session"):
-            assert _count(conn, table, tenant) >= 1, (
-                f"{table} received no row from the public capture path")
-        # 2. layer 1 is written from the journal's OWN ordinal (#9190).
-        #    `journal_event` is `public.record_event_stream`'s source, and it is
-        #    the acceptance sentence of the epic: before the ordinal was
-        #    threaded it stayed EMPTY on every live write (the deferral this PR
-        #    shipped), and the row count must therefore be at least one per
-        #    record the journal carried — never zero, and never more than the
-        #    journal holds (an invented number would invent rows).
-        records = _journal_records(journal_path)
-        assert written >= 1, (
-            "the live door wrote no position row — layer 1 "
-            "(`public.journal_event`, exposed as `public.record_event_stream`) "
-            "is empty, so the epic's event-stream claim is unmet by the very "
-            "path that is supposed to meet it (#9190's ordinal)")
-        # One row per record, at most: a row numbered beyond the journal's own
-        # length would be an invented seq (the collision #9190 removes). The
-        # journal file is the ground truth for that length.
-        assert written <= len(records), (
-            f"the record gained {written} position row(s) for "
-            f"{len(records)} journal record(s) — a row numbered past the "
-            "journal is an invented seq")
-
-        # 3. the semantic + procedural layers, counted against the journal.
-        #    `assert objects` FIRST and unconditionally: without it the count
-        #    comparison below is satisfiable by `0 >= 0`, i.e. by a capture that
-        #    emitted no ObjectRegistered record at all — which is the pre-fix
-        #    world (nothing written) reading as a pass. Measured: the public
-        #    capture emits ObjectRegistered, so this is a real assertion.
-        objects = [r for r in records if r.get("type") == "ObjectRegistered"]
-        assert objects, (
-            "the capture emitted no ObjectRegistered record, so the semantic- "
-            f"layer claim would be vacuous — journal types: "
-            f"{sorted({r.get('type') for r in records})}")
-        assert _count(conn, "object", tenant) >= len(objects), (
-            f"the record holds {_count(conn, 'object', tenant)} Object row(s) for "
-            f"the {len(objects)} ObjectRegistered record(s) the journal carried")
-        with conn.cursor() as cur:
-            cur.execute("SELECT count(*) FROM public.object_current_status "
-                        "WHERE org_id=%s", (tenant[0],))
-            assert int(cur.fetchone()[0]) >= len(objects), (
-                "the procedural layer's view returns fewer rows than the "
-                "objects the record holds")
-
-        # 4. the residue, per record — on the APP-ROLE connection, inside a
-        #    transaction. `replay()` gates the connecting role and verifies the
-        #    tenant GUC before the plan, so the superuser/autocommit handle this
-        #    loop used to borrow is refused before a single statement (#9600
-        #    review cycle 7).
-        refused = 0
-        replay_conn = _record_replay_db()
-        for record in records:
-            try:
-                record_projection.replay([record], replay_conn, org_id=tenant[0],
-                                         graph_id=tenant[1], position=False)
-                replay_conn.commit()
-            except Exception as exc:
-                replay_conn.rollback()
-                message = str(exc)
-                if _engine_refusal(message) is not None:
-                    # A pre-existing fold refusal: the record never reached
-                    # Postgres, so it cannot be judged on its values yet.
-                    refused += 1
-                    continue
-                # ⛔ A HARD failure, never an absorbed loss (#10620 review P1).
-                # The disagreement vocabulary is EMPTY, so an assertion over it
-                # would be a constant `True`: a NEW schema/producer
-                # disagreement (the #9264/#10620 class) would be counted into
-                # `refused` and the `lost == refused` check below would stay
-                # green — the defect this branch is supposed to catch, tolerated.
-                raise AssertionError(
-                    f"{record.get('type')} cannot be projected and the refusal "
-                    f"is not the pre-existing fold refusal: {message}. "
-                    "_SCHEMA_DISAGREEMENTS is EMPTY (#9264 closed "
-                    "`capture_redactions`, #10620 closed `search_keys`), so a "
-                    "refusal here is a NEW schema/producer disagreement — fix "
-                    "the side the producer does not own, and keep this branch "
-                    "failing rather than tolerating it."
-                ) from exc
-        replay_conn.close()
-        # 5. the capture lost exactly those records and nothing else
-        assert lost == refused, (
-            f"the capture counted {lost} lost record(s); replaying the journal "
-            f"shows {refused} refused record(s)")
-    finally:
-        conn.close()
 
 
-@pytest.mark.xfail(condition=_fold_refuses_captured_points(), strict=True,
-                   reason=_ENGINE_DEPENDENCY)
-def test_the_public_capture_path_writes_the_epistemic_layer(capture_sdk,
-                                                            monkeypatch, tenant):
-    """`point` / `relation` receive rows from the production path.
-
-    THE claim the epic makes about a user's data ("a user's Points … exist in
-    Postgres"). It is the ONLY assertion gated on the engine, because it is the
-    only one the pre-existing fold defect makes unreachable: on a tree without
-    #9200 every captured Point is refused, so `point` would be empty.
-    """
-    conn = _record_db()
-    try:
-        _ensure_record_schema(conn)
-        _seed_tenant(conn, tenant)
-        _capture(capture_sdk, monkeypatch, tenant)
-        assert _count(conn, "point", tenant) >= 1, (
-            "the epistemic layer received no row from the capture")
-    finally:
-        conn.close()
 
 
 def test_the_public_subject_door_writes_the_semantic_layers_subject_half(
@@ -2411,7 +2122,8 @@ def test_the_public_subject_door_writes_the_semantic_layers_subject_half(
     capture leg (#9893 measured `subject | 0` after the whole file ran against
     a real `postgres:16`).
 
-    This is the exact mirror of the `object` assertion above, and the mirror is
+    This is the exact mirror of the `object` assertion in
+    `test_the_public_capture_path_writes_the_record`, and the mirror is
     the point: `assert subjects` FIRST and unconditionally, because without it
     `0 >= 0` is satisfiable by a door that journaled nothing — the pre-fix world
     reading as a pass. Then the row count must cover the records the journal
@@ -2952,124 +2664,9 @@ def test_the_dream_drain_carries_the_enqueueing_requests_tenant(monkeypatch):
             for k in (key, default_key):
                 hosted_api._DREAM_QUEUES.pop(k, None)
                 hosted_api._DREAM_RECORD_TENANTS.pop(k, None)
-                hosted_api._DREAM_DRAIN_GRAPHS.pop(k, None)
                 task = hosted_api._DREAM_TASKS.pop(k, None)
                 if task is not None:
                     task.cancel()
-
-    asyncio.run(_drive())
-
-
-def test_the_dream_drain_opens_the_graph_the_enqueue_resolved(monkeypatch):
-    """#10452 review P2: the drain's GRAPH and its TENANT come from one instant.
-
-    The tenant was captured at ENQUEUE time (the request's credential) while the
-    graph was resolved at DRAIN time — `_open_sdk` called `_org_sdk(org_id)`,
-    i.e. read `organizations.graph_name` again. A `promote_default_graph`
-    committing in that window made the pass write its nodes into the PROMOTED
-    graph while `_bind_dream_record_tenant` filed every record it emitted under
-    the DEMOTED one: the `derived != measured` split #10025 exists to remove,
-    and a direct contradiction of the promise `promote_graph` publishes — "an
-    in-flight capture … including the dream drain it enqueues … finishes against
-    the graph it started on".
-
-    FAIL-ON: with the graph resolved at drain time (the pre-fix shape) `opened`
-    records the RE-READ (`_org_sdk`) instead of the enqueue's own answer, i.e.
-    the pass runs against whatever the control plane says NOW.
-    """
-    from tortoise import hosted_api
-
-    opened: list[tuple[str, str | None]] = []
-    bound: list[tuple[str, str]] = []
-
-    class _FakeSDK:
-        def _mark_dirty(self, roots):
-            self.roots = roots
-
-        def dream(self, **kw):
-            self.dreamed = kw
-
-        def _bind_record_tenant(self, org_id, graph_id):
-            bound.append((org_id, graph_id))
-
-        def close(self):
-            pass
-
-    def _from_name(org_id, moved):
-        opened.append(("carried", moved))
-        return _FakeSDK()
-
-    def _org_sdk(org_id, **kw):
-        opened.append(("drain_time_read", None))
-        return _FakeSDK()
-
-    monkeypatch.setattr(hosted_api, "_org_sdk_from_name", _from_name)
-    monkeypatch.setattr(hosted_api, "_org_sdk", _org_sdk)
-    monkeypatch.setattr(hosted_api, "_make_sdk", lambda **kw: _FakeSDK())
-
-    async def _pool(fn, factory):
-        return fn(factory())
-
-    monkeypatch.setattr(hosted_api, "_run_dream_on_pool", _pool)
-
-    async def _no_webhooks(*a, **kw):
-        return None
-
-    monkeypatch.setattr(hosted_api, "_dispatch_webhooks", _no_webhooks)
-
-    # The graph the enqueueing request's own credential resolved, i.e. what
-    # `_data_sdk` opened for the write that enqueued these roots.
-    promoted = "org_org-a_g_promoted"
-    default_key = hosted_api._dream_key("org-a", None)
-    bare_key = hosted_api._dream_key("org-a", None)
-
-    async def _drive() -> None:
-        try:
-            hosted_api._enqueue_dream("org-a", ["root-1"],
-                                     record_tenant=("org-a", "g_promoted"),
-                                     default_graph_name=promoted)
-            # Take the queue away from the task `_enqueue_dream` just spawned
-            # and drive the worker directly, so the assertions see ONE pass.
-            task = hosted_api._DREAM_TASKS.pop(default_key, None)
-            if task is not None:
-                task.cancel()
-            assert hosted_api._DREAM_DRAIN_GRAPHS[default_key] == promoted
-
-            await hosted_api._dream_worker("org-a", default_key)
-            assert opened == [("carried", promoted)], (
-                "the drain re-resolved the org's default instead of opening the "
-                "graph the enqueueing request resolved — a promotion in that "
-                "window splits the pass's nodes from its records: "
-                f"{opened!r}")
-            assert bound == [("org-a", "g_promoted")], bound
-
-            # …and with NO tenant carried there is no pair to keep together, so
-            # the pre-fix fail-soft read is unchanged (the pass's records are
-            # refused `no_tenant` either way — nothing can be misfiled).
-            opened.clear()
-            bound.clear()
-            # The key is deliberately the SAME one (the org-wide key carries no
-            # graph component), so the first arm's carried answers have to go —
-            # dropping them is what a re-created queue does via the worker's own
-            # eviction.
-            hosted_api._DREAM_DRAIN_GRAPHS.pop(bare_key, None)
-            hosted_api._DREAM_RECORD_TENANTS.pop(bare_key, None)
-            hosted_api._enqueue_dream("org-a", ["root-2"], record_tenant=None)
-            task = hosted_api._DREAM_TASKS.pop(bare_key, None)
-            if task is not None:
-                task.cancel()
-            assert bare_key not in hosted_api._DREAM_DRAIN_GRAPHS
-            await hosted_api._dream_worker("org-a", bare_key)
-            assert opened == [("drain_time_read", None)], opened
-            assert bound == [], bound
-        finally:
-            for k in (default_key, bare_key):
-                hosted_api._DREAM_QUEUES.pop(k, None)
-                hosted_api._DREAM_RECORD_TENANTS.pop(k, None)
-                hosted_api._DREAM_DRAIN_GRAPHS.pop(k, None)
-                item = hosted_api._DREAM_TASKS.pop(k, None)
-                if item is not None:
-                    item.cancel()
 
     asyncio.run(_drive())
 
@@ -4116,3 +3713,375 @@ def test_the_arm_gate_is_a_file_the_job_calls_never_an_inline_heredoc():
     assert any(RECORD_LEG_GATE.name in run for run in called), (
         f"no step of the armed job calls {RECORD_LEG_GATE.name} — the tested "
         "decision is not the decision that runs")
+
+
+def _capture(capture_sdk, monkeypatch,
+             tenant: tuple[str, str]) -> tuple[object, Path, int]:
+    """Seed, arm, capture through the SURVIVING writer, return (sdk, journal, losses)."""
+    # The WRITER connects as the app role (the gate refuses the provisioning
+    # superuser); `_record_db()` keeps the superuser for seeding/assertions.
+    monkeypatch.setenv(record_writer.RECORD_DSN_ENV,
+                       _app_role_dsn(os.environ[RECORD_DB_ENV]))
+    # ⛔ The extraction leg must be HERMETIC (#3695/#5477 class). The semantic-
+    # layer claim below is asserted against the objects a capture EMITS, and on a
+    # box with no provider key the capture SKIPS extraction by design (#3892) —
+    # so the same armed leg passed on a keyed laptop and RED in CI, for an
+    # environment cause. Measured 2026-10-23 on PR #9772's own leg: armed and
+    # keyless, the journal held ['EventRecorded', 'PointAdded', 'SessionRecorded',
+    # 'SourceCreated'] and the run failed on `assert objects`. The mock seam is
+    # the repo's documented deterministic, ZERO-NETWORK extractor (the same one
+    # `test_capture_session.py` uses), so the leg exercises the real capture →
+    # record path identically on every box.
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    sdk, journal_path = capture_sdk()
+    before = dict(monitoring.record_write_failure_counts())
+    # ⛔ #4282 (2026-10-27) DELETED `TortoiseSDK.capture_session`, the wrapper these legs
+    # used to drive. Its work survives in FOUR calls, and this helper replays them in the
+    # order the hosted production lane makes them
+    # (`hosted_api._capture_session_impl`: writer → mint → materialize):
+    #
+    #   1. `_write_session_and_turns` — the shared turn/Session writer, also driven by
+    #      `test_10017_turn_carrier_replay.py`, `test_10017_record_carrier.py`,
+    #      `test_3516_client_captured_at.py` and `test_4199_dense_scope_coverage.py`; it
+    #      journals `SessionRecorded` + the turn writes;
+    #   2. `create_event(..., "sessionCaptured")` — the mint the event stream is projected
+    #      from (the hosted lane's `_server_id` is the only difference);
+    #   3. `_materialize_session_source` — the session `:Source` and its
+    #      `(Source)-[:references]->(Event)` wiring.
+    #
+    # ⚠️ WHAT CALL (1) ALREADY WRITES, measured rather than inferred: the writer journals
+    # `SessionRecorded`, whose projection is a `Session` NodeSnapshot → an
+    # `INSERT INTO public.session` (+ `node_identity`, `session_narrative`). So of the three
+    # episodic tables this leg counts, `session` is written by call (1) ALONE and cannot
+    # witness (2)/(3); `event` and `source` are the two that need them (the `sessionCaptured`
+    # Event and the typed session `:Source`).
+    sid = "sess_9078_production_path"
+    now = "2026-10-25T00:00:00+00:00"
+    turns = [{"role": "user", "content": "We chose FalkorDB for the hot cache."},
+             {"role": "assistant", "content": "Noted: FalkorDB holds the hot cache."}]
+    with use_record_tenant(*tenant):
+        sdk_mod._write_session_and_turns(sdk._get_proj(), sdk, sid, turns, now=now)
+        _event = sdk.create_event(
+            f"session_{sid}", "sessionCaptured",
+            _server_id=f"sess9078_{tenant[0]}",
+            startedAt=now, endedAt=now, sessionId=sid, is_episodic=True,
+        )
+        _event_id = _event.get("id") or _event.get("eventId")
+        # ⚠️ The wrapper's `receipt["ok"]` gate died with it and is NOT re-established
+        # here — but a mint that returns no id is the shape that would silently leave the
+        # event stream empty, so the surviving call's own success is still asserted.
+        assert _event_id, f"the sessionCaptured mint returned no id: {_event!r}"
+        sdk._materialize_session_source(sid, _event_id, now, turns)
+        #   4. `_extract_session_v2` — the assembly the hosted lane runs after the mint
+        #      (`hosted_api._capture_session_impl`), which is what emits the derived
+        #      Objects/Points the semantic layer is projected from. Without it the
+        #      `object` claim below is vacuous — measured: the journal held
+        #      ['EventRecorded', 'SessionRecorded', 'SourceCreated', 'TurnsRecorded'] and
+        #      no `ObjectRegistered`.
+        sdk._extract_session_v2(turns, sid, now)
+    lost = (monitoring.record_write_failure_counts().get("write_failed", 0)
+            - before.get("write_failed", 0))
+    return sdk, journal_path, lost
+
+
+def test_the_public_capture_path_writes_the_record(capture_sdk, monkeypatch,
+                                                  tenant):
+    """The record, written by the capture path — and the residue NAMED.
+
+    ⚠️ The DOOR moved: this leg drove `TortoiseSDK.capture_session` until #4282
+    (2026-10-27) DELETED it, and now drives `_write_session_and_turns` — the
+    surviving writer, the same one `test_10017_turn_carrier_replay.py`,
+    `test_10017_record_carrier.py`, `test_3516_client_captured_at.py` and
+    `test_4199_dense_scope_coverage.py` drive. The name keeps the job's shared
+    `test_the_public_capture_path` convention (`test_9555_narrative_carrier.py`
+    uses it for legs that only READ a replayed record), so it names the JOB's
+    end-to-end family, not a call to the deleted public door.
+
+    Layer by layer, from the schema's own shape:
+
+    * **event stream** — `event` / `source` / `session` (migration 1's episodic
+      tables) AND `journal_event`, the position row layer 1 IS (exposed as
+      `public.record_event_stream`). The row is keyed on the ordinal
+      `EventLog.append` reported (#9190), so the live write and a later replay
+      give one record one number;
+    * **semantic** — `object` only, asserted against the objects the capture
+      actually emitted (counted from the journal, so the claim is non-vacuous
+      either way: a capture that emits no Object record must produce no Object
+      row). The layer's **Subject** half is a SEPARATE leg
+      (`test_the_public_subject_door_writes_the_semantic_layers_subject_half`): this file's
+      capture lane is its deterministic `TORTOISE_SESSION_LLM_MOCK`
+      payload, whose one entity classifies as an Object (`core:strategy`) — so
+      a `subject` assertion against THIS capture would be vacuous (#9893). A
+      capture CAN emit `SubjectAdded` (the v2 lane routes any payload entity of
+      a declared Subject kind to `create_entity("subject", …)`); it is this
+      lane's payload, not the product, that produces none.
+    * **procedural** — a VIEW, never a table ("the procedural layer owns no
+      table", migration 4): `object_current_status` folds the `object` rows.
+
+    Then the RESIDUE, per RECORD and unconditionally: every journal record is
+    replayed on its own, and a refusal must name a known cause — either a
+    schema/producer disagreement (the emitted value does not fit the declared
+    column) or one of the pre-existing fold refusals PR #9200 fixes. Anything
+    else is a NEW defect and fails here. Every allowance is derived from what
+    the record itself carries or from a MEASURED fold behaviour, so nothing can
+    go stale in silence.
+    """
+    conn = _record_db()
+    try:
+        _ensure_record_schema(conn)
+        _seed_tenant(conn, tenant)
+        # The layer-1 count is a property of THIS run (#9307 review F4).
+        # `journal_event` is append-only by trigger, so nothing clears it; taken
+        # as a DELTA against a tenant only this test has used, it stays correct
+        # on a database a previous run migrated, and the count can only move in
+        # the direction the door writes it.
+        before = _count(conn, "journal_event", tenant)
+        _sdk, journal_path, lost = _capture(capture_sdk, monkeypatch, tenant)
+        after = _count(conn, "journal_event", tenant)
+        written = after - before
+
+        # 1. the event stream, from the production path
+        for table in ("event", "source", "session"):
+            assert _count(conn, table, tenant) >= 1, (
+                f"{table} received no row from the public capture path")
+        # 2. layer 1 is written from the journal's OWN ordinal (#9190).
+        #    `journal_event` is `public.record_event_stream`'s source, and it is
+        #    the acceptance sentence of the epic: before the ordinal was
+        #    threaded it stayed EMPTY on every live write (the deferral this PR
+        #    shipped), and the row count must therefore be at least one per
+        #    record the journal carried — never zero, and never more than the
+        #    journal holds (an invented number would invent rows).
+        records = _journal_records(journal_path)
+        assert written >= 1, (
+            "the live door wrote no position row — layer 1 "
+            "(`public.journal_event`, exposed as `public.record_event_stream`) "
+            "is empty, so the epic's event-stream claim is unmet by the very "
+            "path that is supposed to meet it (#9190's ordinal)")
+        # One row per record, at most: a row numbered beyond the journal's own
+        # length would be an invented seq (the collision #9190 removes). The
+        # journal file is the ground truth for that length.
+        assert written <= len(records), (
+            f"the record gained {written} position row(s) for "
+            f"{len(records)} journal record(s) — a row numbered past the "
+            "journal is an invented seq")
+
+        # 3. the semantic + procedural layers, counted against the journal.
+        #    `assert objects` FIRST and unconditionally: without it the count
+        #    comparison below is satisfiable by `0 >= 0`, i.e. by a capture that
+        #    emitted no ObjectRegistered record at all — which is the pre-fix
+        #    world (nothing written) reading as a pass. Measured: the public
+        #    capture emits ObjectRegistered, so this is a real assertion.
+        objects = [r for r in records if r.get("type") == "ObjectRegistered"]
+        assert objects, (
+            "the capture emitted no ObjectRegistered record, so the semantic- "
+            f"layer claim would be vacuous — journal types: "
+            f"{sorted({r.get('type') for r in records})}")
+        assert _count(conn, "object", tenant) >= len(objects), (
+            f"the record holds {_count(conn, 'object', tenant)} Object row(s) for "
+            f"the {len(objects)} ObjectRegistered record(s) the journal carried")
+        with conn.cursor() as cur:
+            cur.execute("SELECT count(*) FROM public.object_current_status "
+                        "WHERE org_id=%s", (tenant[0],))
+            assert int(cur.fetchone()[0]) >= len(objects), (
+                "the procedural layer's view returns fewer rows than the "
+                "objects the record holds")
+
+        # 4. the residue, per record — on the APP-ROLE connection, inside a
+        #    transaction. `replay()` gates the connecting role and verifies the
+        #    tenant GUC before the plan, so the superuser/autocommit handle this
+        #    loop used to borrow is refused before a single statement (#9600
+        #    review cycle 7).
+        refused = 0
+        replay_conn = _record_replay_db()
+        for record in records:
+            try:
+                record_projection.replay([record], replay_conn, org_id=tenant[0],
+                                         graph_id=tenant[1], position=False)
+                replay_conn.commit()
+            except Exception as exc:
+                replay_conn.rollback()
+                message = str(exc)
+                if _engine_refusal(message) is not None:
+                    # A pre-existing fold refusal: the record never reached
+                    # Postgres, so it cannot be judged on its values yet.
+                    refused += 1
+                    continue
+                disagreement = _disagreement(record)
+                assert disagreement is not None, (
+                    f"{record.get('type')} cannot be projected and the refusal "
+                    f"is not a schema/producer disagreement: {message}. That is "
+                    "a NEW defect, not a widened allowance."
+                )
+                assert _SCHEMA_DISAGREEMENTS[disagreement] in message, (
+                    f"{record.get('type')} carries a {disagreement} "
+                    f"disagreement but the error does not name it: {message}"
+                )
+                refused += 1
+            else:
+                assert _disagreement(record) is None, (
+                    f"{record.get('type')} now projects cleanly, so its "
+                    f"{_disagreement(record)!r} disagreement is FIXED — delete "
+                    "it from _SCHEMA_DISAGREEMENTS. A pin that outlives its "
+                    "defect hides the next one."
+                )
+        replay_conn.close()
+        # 5. the capture lost exactly those records and nothing else
+        assert lost == refused, (
+            f"the capture counted {lost} lost record(s); replaying the journal "
+            f"shows {refused} refused record(s)")
+    finally:
+        conn.close()
+
+
+@pytest.mark.xfail(condition=_fold_refuses_captured_points(), strict=True,
+                   reason=_ENGINE_DEPENDENCY)
+def test_the_public_capture_path_writes_the_epistemic_layer(capture_sdk,
+                                                            monkeypatch, tenant):
+    """`point` / `relation` receive rows from the production path.
+
+    THE claim the epic makes about a user's data ("a user's Points … exist in
+    Postgres"). It is the ONLY assertion gated on the engine, because it is the
+    only one the pre-existing fold defect makes unreachable: on a tree without
+    #9200 every captured Point is refused, so `point` would be empty.
+    """
+    conn = _record_db()
+    try:
+        _ensure_record_schema(conn)
+        _seed_tenant(conn, tenant)
+        _capture(capture_sdk, monkeypatch, tenant)
+        assert _count(conn, "point", tenant) >= 1, (
+            "the epistemic layer received no row from the capture")
+    finally:
+        conn.close()
+
+
+
+
+# ── Restored by the #4282 merge-recovery: its subject is `hosted_api`'s DREAM
+# DRAIN (graph vs tenant from one instant, #10452 review P2), not the deleted
+# SDK door — it builds a `_FakeSDK` and never touches `capture_session`. The
+# whole-file resolution dropped it with the five legs that DO drive the door.
+
+def test_the_dream_drain_opens_the_graph_the_enqueue_resolved(monkeypatch):
+    """#10452 review P2: the drain's GRAPH and its TENANT come from one instant.
+
+    The tenant was captured at ENQUEUE time (the request's credential) while the
+    graph was resolved at DRAIN time — `_open_sdk` called `_org_sdk(org_id)`,
+    i.e. read `organizations.graph_name` again. A `promote_default_graph`
+    committing in that window made the pass write its nodes into the PROMOTED
+    graph while `_bind_dream_record_tenant` filed every record it emitted under
+    the DEMOTED one: the `derived != measured` split #10025 exists to remove,
+    and a direct contradiction of the promise `promote_graph` publishes — "an
+    in-flight capture … including the dream drain it enqueues … finishes against
+    the graph it started on".
+
+    FAIL-ON: with the graph resolved at drain time (the pre-fix shape) `opened`
+    records the RE-READ (`_org_sdk`) instead of the enqueue's own answer, i.e.
+    the pass runs against whatever the control plane says NOW.
+    """
+    from tortoise import hosted_api
+
+    opened: list[tuple[str, str | None]] = []
+    bound: list[tuple[str, str]] = []
+
+    class _FakeSDK:
+        def _mark_dirty(self, roots):
+            self.roots = roots
+
+        def dream(self, **kw):
+            self.dreamed = kw
+
+        def _bind_record_tenant(self, org_id, graph_id):
+            bound.append((org_id, graph_id))
+
+        def close(self):
+            pass
+
+    def _from_name(org_id, moved):
+        opened.append(("carried", moved))
+        return _FakeSDK()
+
+    def _org_sdk(org_id, **kw):
+        opened.append(("drain_time_read", None))
+        return _FakeSDK()
+
+    monkeypatch.setattr(hosted_api, "_org_sdk_from_name", _from_name)
+    monkeypatch.setattr(hosted_api, "_org_sdk", _org_sdk)
+    monkeypatch.setattr(hosted_api, "_make_sdk", lambda **kw: _FakeSDK())
+
+    async def _pool(fn, factory):
+        return fn(factory())
+
+    monkeypatch.setattr(hosted_api, "_run_dream_on_pool", _pool)
+
+    async def _no_webhooks(*a, **kw):
+        return None
+
+    monkeypatch.setattr(hosted_api, "_dispatch_webhooks", _no_webhooks)
+
+    # The graph the enqueueing request's own credential resolved, i.e. what
+    # `_data_sdk` opened for the write that enqueued these roots.
+    promoted = "org_org-a_g_promoted"
+    default_key = hosted_api._dream_key("org-a", None)
+    bare_key = hosted_api._dream_key("org-a", None)
+
+    async def _drive() -> None:
+        try:
+            hosted_api._enqueue_dream("org-a", ["root-1"],
+                                     record_tenant=("org-a", "g_promoted"),
+                                     default_graph_name=promoted)
+            # Take the queue away from the task `_enqueue_dream` just spawned
+            # and drive the worker directly, so the assertions see ONE pass.
+            task = hosted_api._DREAM_TASKS.pop(default_key, None)
+            if task is not None:
+                task.cancel()
+            assert hosted_api._DREAM_DRAIN_GRAPHS[default_key] == promoted
+
+            await hosted_api._dream_worker("org-a", default_key)
+            assert opened == [("carried", promoted)], (
+                "the drain re-resolved the org's default instead of opening the "
+                "graph the enqueueing request resolved — a promotion in that "
+                "window splits the pass's nodes from its records: "
+                f"{opened!r}")
+            assert bound == [("org-a", "g_promoted")], bound
+
+            # …and with NO tenant carried there is no pair to keep together, so
+            # the pre-fix fail-soft read is unchanged (the pass's records are
+            # refused `no_tenant` either way — nothing can be misfiled).
+            opened.clear()
+            bound.clear()
+            # The key is deliberately the SAME one (the org-wide key carries no
+            # graph component), so the first arm's carried answers have to go —
+            # dropping them is what a re-created queue does via the worker's own
+            # eviction.
+            hosted_api._DREAM_DRAIN_GRAPHS.pop(bare_key, None)
+            hosted_api._DREAM_RECORD_TENANTS.pop(bare_key, None)
+            hosted_api._enqueue_dream("org-a", ["root-2"], record_tenant=None)
+            task = hosted_api._DREAM_TASKS.pop(bare_key, None)
+            if task is not None:
+                task.cancel()
+            assert bare_key not in hosted_api._DREAM_DRAIN_GRAPHS
+            await hosted_api._dream_worker("org-a", bare_key)
+            assert opened == [("drain_time_read", None)], opened
+            assert bound == [], bound
+        finally:
+            for k in (default_key, bare_key):
+                hosted_api._DREAM_QUEUES.pop(k, None)
+                hosted_api._DREAM_RECORD_TENANTS.pop(k, None)
+                hosted_api._DREAM_DRAIN_GRAPHS.pop(k, None)
+                item = hosted_api._DREAM_TASKS.pop(k, None)
+                if item is not None:
+                    item.cancel()
+
+    asyncio.run(_drive())
+
+# ── #9602 review P2-2: a container migrated by an OLDER tree gets narrowed ────
+#
+# `_ensure_record_schema` decides "already migrated" from `public.journal_event`
+# alone. That is the right question for the CREATE TABLE files and the WRONG one
+# for a column narrowing: a container first migrated by a pre-#9264 tree has
+# `journal_event` AND `session.capture_redactions jsonb`, so the shortcut would
+# return without narrowing it. These cases pin both halves of the branch — and
+# their closure (#9800 review P2) — without a Postgres; the DB leg further down
+# is the one that actually EXECUTES the re-apply, against a container whose
+# `session_narrative` is gone.

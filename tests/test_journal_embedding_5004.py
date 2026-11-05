@@ -478,49 +478,6 @@ def test_a_refused_width_is_not_resurrected_by_the_prewipe_snapshot(tmp_path):
             fresh.close()
 
 
-def test_session_turn_producer_journals_the_vector(tmp_path, monkeypatch):
-    """The episodic turn producer must journal the vector it stored live.
-
-    Round-2 P2: the highest-volume Point producer wrote `emb` to the node but
-    the `PointAdded` snapshot carried no vector, so replay re-encoded and a
-    changed embedder silently changed every captured turn's vector.
-    """
-    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
-    events = tmp_path / "events"
-    events.mkdir()
-    conv = [
-        {"role": "user", "content": "the auth dead-end is the top issue"},
-        {"role": "assistant", "content": "agreed, ship serve --http first"},
-    ]
-    with mock.patch(_EMBED_PATCH, _embed_a), mock.patch(_BATCH_PATCH, _BATCH_A):
-        sdk = TortoiseSDK(str(tmp_path / "c.db"),
-                          event_log_path=str(events / "events.jsonl"))
-        try:
-            sdk.capture_session(conv)
-            turn_events = [
-                e for e in _events(events)
-                if e.get("type") == "PointAdded"
-                and (e.get("point") or {}).get("pointKind") == "event"
-            ]
-            assert turn_events, "capture_session journaled no turn Points"
-            for e in turn_events:
-                assert "embedding" in e["point"], (
-                    "a captured turn's vector was not journaled (#5004)")
-                assert e["point"]["embedding_model"] == EMBEDDING_MODEL
-
-            pid = turn_events[0]["point"]["id"]
-            before = _vector(sdk, pid)
-            # Exact value now that the batch seam is deterministic (the live
-            # turn vector used to come from the real model).
-            assert before == _embed_a(turn_events[0]["point"]["content"]), (
-                "the live turn vector is not the batch embedder's output")
-
-            with mock.patch(_EMBED_PATCH, _embed_b):
-                sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
-            assert _vector(sdk, pid) == before, (
-                "a captured turn's vector changed on replay")
-        finally:
-            sdk.close()
 
 
 def test_identity_keys_cannot_be_set_through_props(tmp_path):
@@ -623,73 +580,6 @@ def test_revise_path_is_explicitly_out_of_scope_for_5004(sup):
 # key (the vector, or an explicit `None`), and the replay restores-or-leaves-
 # unset, never invents.
 
-def test_turn_recapture_with_the_embedder_down_keeps_the_journalled_vector(
-        tmp_path, monkeypatch):
-    """A vector-less RE-CAPTURE must not overwrite the journalled vector.
-
-    Reproduction (round-3 P2): capture 1 under embedder A; capture 2 with the
-    SAME content and the embedder DOWN. The live write preserves A on the node,
-    but the journal gained a second `PointAdded` with no vector — and a rebuild
-    under embedder B then set the turn to B while live still held A.
-    """
-    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
-    events = tmp_path / "events"
-    events.mkdir()
-    conv = [
-        {"role": "user", "content": "keep the turn vector stable across recapture"},
-        {"role": "assistant", "content": "the live write preserves it"},
-    ]
-
-    def _embedder_down(*_a, **_k):
-        raise RuntimeError("embedder unavailable (simulated)")
-
-    # An EXPLICIT session id on both captures: the turn ids are
-    # `{session_id}_t{i}`, and the whole point here is the SECOND write to the
-    # SAME id (a fresh auto-minted session would write different nodes).
-    sid = "resp_recapture_probe"
-    with mock.patch(_EMBED_PATCH, _embed_a), mock.patch(_BATCH_PATCH, _BATCH_A):
-        sdk = TortoiseSDK(str(tmp_path / "recap.db"),
-                          event_log_path=str(events / "events.jsonl"))
-        try:
-            sdk.capture_session(conv, session_id=sid)
-            first = [e["point"] for e in _events(events)
-                     if e.get("type") == "PointAdded"
-                     and (e.get("point") or {}).get("pointKind") == "event"]
-            assert first, "capture 1 journaled no turns"
-            pid = first[0]["id"]
-            live_before = _vector(sdk, pid)
-            assert live_before is not None, (
-                "premise: capture 1 stored a vector for the turn")
-            assert first[0].get("embedding") is not None, (
-                "premise: capture 1 journalled the vector it stored")
-
-            # Capture 2 — identical content, embedder DOWN.
-            with mock.patch("tortoise.embeddings.encode_batch_for_store",
-                            _embedder_down):
-                sdk.capture_session(conv, session_id=sid)
-
-            # The LIVE write preserved the prior vector (this is the trap).
-            assert _vector(sdk, pid) == live_before, (
-                "premise changed: the live re-capture no longer preserves the "
-                "vector for unchanged content — revisit this pin")
-
-            # ... and the LAST journal record for that id carries it too.
-            snapshots = [e["point"] for e in _events(events)
-                         if e.get("type") == "PointAdded"
-                         and (e.get("point") or {}).get("id") == pid]
-            assert len(snapshots) >= 2, "expected a second PointAdded"
-            assert "embedding" in snapshots[-1], (
-                "the re-capture journalled NO vector for an id the write "
-                "PRESERVED — the replay would recompute over it (round-3 P2)")
-            assert snapshots[-1]["embedding"] is not None
-
-            with mock.patch(_EMBED_PATCH, _embed_b):
-                sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
-            assert _vector(sdk, pid) == live_before, (
-                "replay overwrote a PRESERVED vector with the active "
-                "embedder's output (round-3 P2)")
-        finally:
-            sdk.close()
 
 
 def test_point_created_with_the_embedder_down_gains_no_vector_on_replay(tmp_path):
@@ -866,52 +756,6 @@ def test_content_that_cannot_be_hashed_does_not_raise_on_replay():
         set())
 
 
-def test_a_preserved_turn_vector_is_not_attested_to_the_active_model(
-        tmp_path, monkeypatch):
-    """A captured-and-PRESERVED vector must not claim the current model.
-
-    Round-4 P2: the second capture encodes nothing, so the record carries the
-    vector the write PRESERVED — computed by whatever model ran the FIRST
-    capture. Stamping the active model on it records a false origin, and hides
-    a model change entirely whenever the original record is gone.
-    """
-    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
-    events = tmp_path / "events"
-    events.mkdir()
-    conv = [{"role": "user", "content": "attestation of a preserved vector"}]
-
-    def _embedder_down(*_a, **_k):
-        raise RuntimeError("embedder unavailable (simulated)")
-
-    sid = "resp_attest_probe"
-    with mock.patch(_EMBED_PATCH, _embed_a), mock.patch(_BATCH_PATCH, _BATCH_A):
-        sdk = TortoiseSDK(str(tmp_path / "attest.db"),
-                          event_log_path=str(events / "events.jsonl"))
-        try:
-            sdk.capture_session(conv, session_id=sid)
-            pid = f"{sid}_t0"
-            first = [e["point"] for e in _events(events)
-                     if e.get("type") == "PointAdded"
-                     and (e.get("point") or {}).get("id") == pid]
-            assert first and first[0].get("embedding_model"), (
-                "premise: capture 1 attests its model")
-
-            with mock.patch("tortoise.embeddings.encode_batch_for_store",
-                            _embedder_down):
-                sdk.capture_session(conv, session_id=sid)
-
-            recs = [e["point"] for e in _events(events)
-                    if e.get("type") == "PointAdded"
-                    and (e.get("point") or {}).get("id") == pid]
-            assert len(recs) >= 2, "expected a second PointAdded"
-            assert recs[-1].get("embedding") is not None, (
-                "premise: the preserved vector is journalled")
-            assert "embedding_model" not in recs[-1], (
-                "a PRESERVED vector was attested to the ACTIVE model — the "
-                "record claims an origin it cannot know (round-4 P2)")
-            assert "embedding_text_hash" not in recs[-1]
-        finally:
-            sdk.close()
 
 
 # ── 11. round-5 review findings — regression pins ────────────────────────
@@ -1007,49 +851,6 @@ def test_update_point_with_a_caller_vector_marks_the_node(tmp_path):
 
 # ── 12. round-6 review findings — regression pins ────────────────────────
 
-def test_a_cleared_turn_vector_is_cleared_on_replay_too(tmp_path, monkeypatch):
-    """An owned `None` is a CLEAR, not merely a refusal to write.
-
-    Round-6 P1: the round-3 fix stopped an owned `None` being RECOMPUTED, but
-    the SET clause's `WHEN $embedding IS NULL THEN n.embedding` PRESERVED
-    whatever an EARLIER record had set. So for a turn re-captured with CHANGED
-    content while the embedder was down — where the live write deliberately
-    writes NULL, because a vector for text no longer on the node is the
-    dense-leg lie — the replay resurrected capture 1's vector. On the
-    highest-volume producer, under the SAME embedder.
-    """
-    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
-    events = tmp_path / "events"
-    events.mkdir()
-    sid = "resp_clear_probe"
-
-    def _embedder_down(*_a, **_k):
-        raise RuntimeError("embedder unavailable (simulated)")
-
-    with mock.patch(_EMBED_PATCH, _embed_a), mock.patch(_BATCH_PATCH, _BATCH_A):
-        sdk = TortoiseSDK(str(tmp_path / "clear.db"),
-                          event_log_path=str(events / "events.jsonl"))
-        try:
-            sdk.capture_session(
-                [{"role": "user", "content": "ORIGINAL turn text"}],
-                session_id=sid)
-            pid = f"{sid}_t0"
-            assert _vector(sdk, pid) is not None, "premise: capture 1 embedded"
-
-            # CHANGED content + embedder down => the live write CLEARS.
-            with mock.patch(_BATCH_PATCH, _embedder_down):
-                sdk.capture_session(
-                    [{"role": "user", "content": "a DIFFERENT replacement"}],
-                    session_id=sid)
-            assert _vector(sdk, pid) is None, (
-                "premise: the live write clears the vector for changed text")
-
-            sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
-            assert _vector(sdk, pid) is None, (
-                "the replay RESURRECTED a vector the live write CLEARED — an "
-                "owned `None` must be a clear, not a no-op (round-6 P1)")
-        finally:
-            sdk.close()
 
 
 def test_a_wrong_width_caller_vector_is_not_written_on_either_side(tmp_path):

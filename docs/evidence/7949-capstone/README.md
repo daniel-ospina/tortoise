@@ -469,7 +469,7 @@ does not re-emit the pre-amendment figure as if it were this run's — and it sa
 
 ⛔ **E3's Point denominator mixes classes that CANNOT derive, and the figure is taken over the
 writer class — not over the link.** Of the 338 `Point` nodes: **159 mechanical turn rows**
-(`_write_capture_turns`, `_TURN_WRITE_CYPHER` at `sdk.py:2452`, wired only by `CONTAINS`),
+(`_write_capture_turns`, `_TURN_WRITE_CYPHER` at `sdk.py:2451`, wired only by `CONTAINS`),
 **141 extraction claims**, **29 operator Points** and **9 other Points** — each class read off the
 property its **writer** stamps (`is_episodic`, `is_operator`, an `extractedFrom` edge), none
 hand-typed, and each printed with its own anchored count.

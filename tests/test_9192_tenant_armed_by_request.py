@@ -150,7 +150,10 @@ def two_tenant_lane(tmp_path, monkeypatch):
     tenants: dict[str, dict] = {}
     for name in ("a", "b"):
         org = reg.org_create(f"org-{name}")
-        reg.org_update(org["id"], max_points=10_000, max_graphs=10, max_sessions=10_000)
+        # `org_update` was one of the 26 methods #4282 deleted. It was SETUP
+        # here and no assertion in either leg consumes a quota cap, so the
+        # line is dropped rather than re-aimed at the registry graph: a cap
+        # nothing reads makes a test look configured while proving nothing.
         graph = reg._graph_create(org["id"], f"graph-{name}", kind="custom")
         key = reg.apikey_create(
             org["id"], f"probe-{name}", graph_id=graph["graph_id"],
@@ -537,56 +540,6 @@ class TestTheProductionCaller:
             "the middleware did not install the credential's tenant around the "
             f"request (saw {seen})")
 
-    def test_a_registry_graph_id_is_never_installed(
-            self, two_tenant_lane, record_calls, monkeypatch):
-        """The SELF-HOST lane's graph ids are not record ids — install nothing.
-
-        #9192 review C1. `apikey_verify` returns `api_keys.graph_id` on the
-        Supabase lane, which is `REFERENCES public.graphs(id)` — the id the
-        record's layer tables key on. On the self-host registry lane the same
-        field is the Falkor `:Graph` node id (`g_<hex>`, minted in
-        `sdk._graph_create`) and registry graphs are never inserted into
-        `public.graphs`, so installing it would displace a correctly declared
-        single-tenant pair with a value the FK cannot satisfy — every write
-        `write_failed`, cause unattributable.
-
-        So the lane keeps its pre-#9192 arming exactly: UNDECLARED ⇒ refused
-        (never misfiled under the planted pair), DECLARED single-tenant ⇒ filed
-        under the pair. Both phases drive the real mounted MCP app.
-        """
-        reg, tenants = two_tenant_lane
-        monkeypatch.setenv(RECORD_ORG_ENV, tenants["a"]["org_id"])
-        monkeypatch.setenv(RECORD_GRAPH_ENV, tenants["a"]["graph_id"])
-        monkeypatch.delenv(RECORD_SINGLE_TENANT_ENV, raising=False)
-
-        from tortoise.mcp_server import create_http_app
-
-        app = create_http_app(allowed_origins=["https://app.premiselabs.co"],
-                              _registry_sdk=reg)
-        client = _mounted_test_client(app)
-        before = dict(monitoring.record_write_failure_counts())
-        with client:
-            _write_a_point(client, tenants["a"]["api_key"], "a: undeclared")
-            _write_a_point(client, tenants["b"]["api_key"], "b: undeclared")
-        after = dict(monitoring.record_write_failure_counts())
-
-        assert record_calls == [], (
-            "a registry-lane request filed a record under an id the record's "
-            "tables cannot key on (or under the env pair it did not declare): "
-            f"{record_calls}")
-        assert after.get("no_tenant", 0) >= before.get("no_tenant", 0) + 2, (
-            before, after)
-
-        # DECLARED: the self-host single-tenant deployment still records, and it
-        # records under the pair — the pre-#9192 behaviour, preserved.
-        monkeypatch.setenv(RECORD_SINGLE_TENANT_ENV, "1")
-        record_calls.clear()
-        with client:
-            _write_a_point(client, tenants["a"]["api_key"], "a: declared")
-        assert record_calls == [(tenants["a"]["org_id"], tenants["a"]["graph_id"])], (
-            f"a declared single-tenant self-host deployment lost its pair "
-            f"(got {record_calls})")
-
 
 # ── 2. the arming modes ─────────────────────────────────────────────────────
 
@@ -718,54 +671,6 @@ class TestTheArmingModes:
 
         assert record_tenant() == ("solo-org", "solo-graph")
 
-    def test_an_org_wide_credential_is_refused_not_guessed(
-            self, two_tenant_lane, record_calls, monkeypatch, caplog):
-        """An org-wide credential on the REGISTRY lane is REFUSED, never guessed.
-
-        ⚠️ This is the REGISTRY lane: the refusal here comes from the
-        `control_plane_ids=False` id space, not from an unnameable default graph.
-        The control-plane org-wide case is the OPPOSITE direction since #10025
-        and is pinned by
-        `test_an_org_wide_control_plane_key_is_named_by_its_default_graph` two
-        tests up — the two lanes stay one answer each, and neither guesses.
-
-        The process here is UNDECLARED (multi-tenant, the default) with no env
-        pair, which is the shape a deployment that serves several orgs actually
-        has — and the registry lane's `g_<hex>` Falkor ids have no
-        `public.graphs` row, so nothing can name a tenant there and the write
-        must not land.
-        """
-        reg, tenants = two_tenant_lane
-        _clear_record_env(monkeypatch)
-        org_wide = reg.apikey_create(
-            tenants["b"]["org_id"], "probe-org-wide",
-            scopes=["graphs:read", "graphs:write"])
-
-        from tortoise.mcp_server import create_http_app
-
-        app = create_http_app(allowed_origins=["https://app.premiselabs.co"],
-                              _registry_sdk=reg)
-        client = _mounted_test_client(app)
-        before = dict(monitoring.record_write_failure_counts())
-        with client, caplog.at_level("WARNING"):
-            _write_a_point(client, org_wide["api_key"],
-                           "org-wide: no named graph")
-        after = dict(monitoring.record_write_failure_counts())
-
-        assert record_calls == [], (
-            "an org-wide credential filed a record under a tenant it cannot "
-            f"name (got {record_calls})")
-        assert after.get("no_tenant", 0) > before.get("no_tenant", 0), (before, after)
-        # The remediation must be one this operator can ACT on. "wrap the write
-        # in use_record_tenant" is not: this lane installs that scope per
-        # request, so the actionable sentence names the graph-bound credential
-        # (#9192 review A5).
-        message = "\n".join(record.message for record in caplog.records)
-        assert "no_tenant" in message, message
-        assert "tk_" in message and "graph-bound" in message, (
-            "the org-wide refusal did not name the credential fix, so its only "
-            f"advice is unfollowable on this lane: {message}")
-
 
 # ── suite isolation ─────────────────────────────────────────────────────────
 
@@ -815,3 +720,103 @@ class TestTheSuiteCannotBeArmedByTheDeveloperMachine:
                 f"tests/conftest.py does not clear {name} per test — a machine "
                 "armed the way `.env.example` documents leaks it into the whole "
                 f"suite (cleared: {sorted(cleared)})")
+
+    def test_a_registry_graph_id_is_never_installed(
+            self, two_tenant_lane, record_calls, monkeypatch):
+        """The SELF-HOST lane's graph ids are not record ids — install nothing.
+
+        #9192 review C1. `apikey_verify` returns `api_keys.graph_id` on the
+        Supabase lane, which is `REFERENCES public.graphs(id)` — the id the
+        record's layer tables key on. On the self-host registry lane the same
+        field is the Falkor `:Graph` node id (`g_<hex>`, minted in
+        `sdk._graph_create`) and registry graphs are never inserted into
+        `public.graphs`, so installing it would displace a correctly declared
+        single-tenant pair with a value the FK cannot satisfy — every write
+        `write_failed`, cause unattributable.
+
+        So the lane keeps its pre-#9192 arming exactly: UNDECLARED ⇒ refused
+        (never misfiled under the planted pair), DECLARED single-tenant ⇒ filed
+        under the pair. Both phases drive the real mounted MCP app.
+        """
+        reg, tenants = two_tenant_lane
+        monkeypatch.setenv(RECORD_ORG_ENV, tenants["a"]["org_id"])
+        monkeypatch.setenv(RECORD_GRAPH_ENV, tenants["a"]["graph_id"])
+        monkeypatch.delenv(RECORD_SINGLE_TENANT_ENV, raising=False)
+
+        from tortoise.mcp_server import create_http_app
+
+        app = create_http_app(allowed_origins=["https://app.premiselabs.co"],
+                              _registry_sdk=reg)
+        client = _mounted_test_client(app)
+        before = dict(monitoring.record_write_failure_counts())
+        with client:
+            _write_a_point(client, tenants["a"]["api_key"], "a: undeclared")
+            _write_a_point(client, tenants["b"]["api_key"], "b: undeclared")
+        after = dict(monitoring.record_write_failure_counts())
+
+        assert record_calls == [], (
+            "a registry-lane request filed a record under an id the record's "
+            "tables cannot key on (or under the env pair it did not declare): "
+            f"{record_calls}")
+        assert after.get("no_tenant", 0) >= before.get("no_tenant", 0) + 2, (
+            before, after)
+
+        # DECLARED: the self-host single-tenant deployment still records, and it
+        # records under the pair — the pre-#9192 behaviour, preserved.
+        monkeypatch.setenv(RECORD_SINGLE_TENANT_ENV, "1")
+        record_calls.clear()
+        with client:
+            _write_a_point(client, tenants["a"]["api_key"], "a: declared")
+        assert record_calls == [(tenants["a"]["org_id"], tenants["a"]["graph_id"])], (
+            f"a declared single-tenant self-host deployment lost its pair "
+            f"(got {record_calls})")
+
+
+    def test_an_org_wide_credential_is_refused_not_guessed(
+            self, two_tenant_lane, record_calls, monkeypatch, caplog):
+        """An org-wide credential on the REGISTRY lane is REFUSED, never guessed.
+
+        ⚠️ This is the REGISTRY lane: the refusal here comes from the
+        `control_plane_ids=False` id space, not from an unnameable default graph.
+        The control-plane org-wide case is the OPPOSITE direction since #10025
+        and is pinned by
+        `test_an_org_wide_control_plane_key_is_named_by_its_default_graph` two
+        tests up — the two lanes stay one answer each, and neither guesses.
+
+        The process here is UNDECLARED (multi-tenant, the default) with no env
+        pair, which is the shape a deployment that serves several orgs actually
+        has — and the registry lane's `g_<hex>` Falkor ids have no
+        `public.graphs` row, so nothing can name a tenant there and the write
+        must not land.
+        """
+        reg, tenants = two_tenant_lane
+        _clear_record_env(monkeypatch)
+        org_wide = reg.apikey_create(
+            tenants["b"]["org_id"], "probe-org-wide",
+            scopes=["graphs:read", "graphs:write"])
+
+        from tortoise.mcp_server import create_http_app
+
+        app = create_http_app(allowed_origins=["https://app.premiselabs.co"],
+                              _registry_sdk=reg)
+        client = _mounted_test_client(app)
+        before = dict(monitoring.record_write_failure_counts())
+        with client, caplog.at_level("WARNING"):
+            _write_a_point(client, org_wide["api_key"],
+                           "org-wide: no named graph")
+        after = dict(monitoring.record_write_failure_counts())
+
+        assert record_calls == [], (
+            "an org-wide credential filed a record under a tenant it cannot "
+            f"name (got {record_calls})")
+        assert after.get("no_tenant", 0) > before.get("no_tenant", 0), (before, after)
+        # The remediation must be one this operator can ACT on. "wrap the write
+        # in use_record_tenant" is not: this lane installs that scope per
+        # request, so the actionable sentence names the graph-bound credential
+        # (#9192 review A5).
+        message = "\n".join(record.message for record in caplog.records)
+        assert "no_tenant" in message, message
+        assert "tk_" in message and "graph-bound" in message, (
+            "the org-wide refusal did not name the credential fix, so its only "
+            f"advice is unfollowable on this lane: {message}")
+

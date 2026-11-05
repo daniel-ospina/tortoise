@@ -1240,6 +1240,18 @@ def main(argv: list[str] | None = None) -> int:
     from tortoise.sdk import TortoiseSDK  # imported late: the gates above need no client
 
     sdk = TortoiseSDK()
+    # ⛔ #4282 (owner ruling 2026-10-27) DELETED the entry point G4 drives. The
+    # `except Exception` below would already turn the `AttributeError` into a
+    # refusal, but it would report "the entry point raised" — which reads as a bug
+    # in the pass rather than as the authorised deletion it is. Name it, and name
+    # the surviving door.
+    if not hasattr(sdk, "capture_session"):
+        return refuse("#4282 deleted TortoiseSDK.capture_session — the entry point G4 "
+                      "drives does not exist, so no pass can be observed; the surviving "
+                      "in-process door is the private sdk._extract_session_v2, which the "
+                      "hosted handler still reaches, and a measurement against it is a "
+                      "NEW instrument with its own pre-registration",
+                      prereg_ok=True, code=4, corpus=corpus)
     session_id = f"capstone_{uuid.uuid4().hex[:12]}"
     try:
         captured = sdk.capture_session(turns, session_id=session_id)

@@ -320,7 +320,7 @@ ARM_OFF = ("TORTOISE_VALUE_GATE", "TORTOISE_S2_DECISION_SEAM")
 
 #: The three Point classes E3's frozen denominator mixes, each read off a
 #: property its writer stamps (never a hand-kept list): ``is_episodic`` is set by
-#: the turn writer (``_TURN_WRITE_CYPHER``, ``tortoise/sdk.py:2452`` — turn
+#: the turn writer (``_TURN_WRITE_CYPHER``, ``tortoise/sdk.py:2451`` — turn
 #: rows carry ``is_episodic=true``, ``is_operator=false`` and are wired only by
 #: ``CONTAINS``), ``is_operator`` by the operator writers, and an
 #: ``extractedFrom`` edge by the extraction projection.
@@ -1202,6 +1202,18 @@ def run_corpus(graph: str, sessions: list[str]) -> list[dict]:
     from tortoise.sdk import TortoiseSDK
 
     sdk = TortoiseSDK(graph_name=graph)
+    # ⛔ #4282 (owner ruling 2026-10-27) DELETED `TortoiseSDK.capture_session`.
+    # This probe drives it directly, so with the method gone every session would
+    # raise `AttributeError` and the run would report a crash instead of the
+    # authorised deletion. Refuse by NAME (the pre-registration rule: a
+    # measurement that cannot be taken is a refusal, never a silent zero).
+    if not hasattr(sdk, "capture_session"):
+        raise SystemExit(
+            "capstone-measure: REFUSED — #4282 deleted TortoiseSDK.capture_session, "
+            "the entry point this probe drives. No pass can be measured; the "
+            "surviving in-process door is the private sdk._extract_session_v2 "
+            "(reached by the hosted handler at hosted_api.py), and a measurement "
+            "against it is a NEW instrument needing its own pre-registration.")
     results = []
     for sid in sessions:
         fixture = load_fixture(sid)

@@ -780,15 +780,17 @@ class TestCapabilityModel:
         mutators = sdk_graph_mutators()
         assert {"create_point", "delete", "update"} <= mutators
         assert not ({"query", "get_point", "list_pointkinds"} & mutators)
-        # over-inclusion sentinel: control-plane READS are not mutators
-        assert not ({"org_list", "graph_list", "apikey_list", "org_get"} & mutators)
+        # over-inclusion sentinel: control-plane READS are not mutators. `apikey_list`
+        # was here until #4282 deleted it; `apikey_verify` is the surviving read in the
+        # same family, so the sentinel keeps a live name instead of going vacuous.
+        assert not ({"org_list", "graph_list", "apikey_verify", "org_get"} & mutators)
         fs = sdk_filesystem_methods()
         assert {"ingest_corpus", "index_directory"} <= fs
         assert not ({"_probe_embedded_busy", "session_index_health"} & fs)
         op = sdk_operator_only_mutators()
         assert {"org_create", "membership_create", "apikey_revoke",
-                "invitation_create"} <= op
-        assert not ({"org_list", "graph_list", "apikey_list"} & op)
+                "invitation_revoke"} <= op
+        assert not ({"org_list", "graph_list", "apikey_verify"} & op)
 
     def test_handler_operations_reads_value_passed_and_alias_forms(self):
         """`_get_org_sdk().<m>` as a passed value and via an alias are both seen."""

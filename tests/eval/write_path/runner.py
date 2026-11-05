@@ -1,112 +1,64 @@
-"""W2-b write-path benchmark runner (issue #2098, epic #2080 W2-b).
+"""W2-b write-path measurement helpers (issue #2098, epic #2080 W2-b).
 
-Replays the committed planted-gold corpus (W2-a, merged via #2155) through
-the REAL session→graph write path and grades the written graph against the
-sealed gold:
+**The replay leg this module was built around is GONE (#4282).** The runner
+used to drive each committed session through the REAL write path
+(store-file render → ``session_import`` parser round-trip →
+``sdk.capture_session`` on a hermetic graph → dream EP pass), grade the
+written graph and publish a receipt.  #4282 deleted ``capture_session`` from
+the SDK surface. No surviving PUBLIC SDK entry point reaches an in-memory
+conversation capture (``index_sessions`` / ``reconcile_sessions`` index session
+*files*; the hosted ``POST /v1/sessions`` door is a server route, not an SDK
+method, and its async ``_capture_session_impl`` is the only door that survives
+whole). ⚠️ The PRIVATE ``_extract_session_v2`` *does* capture in-process — measured,
+four probes, in `tests/test_graph_census_7949.py`'s header — but it mints no
+``:Session`` and writes no ``(Source)-[:references]->(Event)`` link, so a fixture
+driving it reads 0 points through ``snapshot_session``; closing that gap means
+re-implementing the deleted door's ordering contract inside a fixture.  ``run_benchmark`` and the ``run`` CLI sub-command were
+therefore removed with it, and so was every probe that drove them
+(``test_write_path_benchmark.py`` — including the #4860 rotating-key
+failover guard — and the ``run``-gate tests in
+``test_write_path_runner.py``).  The line that produced the receipt's
+per-session capture diagnostics went with the same leg.
 
-    preflight → per-session replay (store-file render → REAL session-import
-    parser round-trip → SDK ``capture_session`` on a hermetic graph → dream
-    EP pass) → mechanical grading (grading.py, authoritative) → aggregate
-    the canonical 6-metric vocabulary → ``--compare`` verdict vs the
-    committed baseline (schema.compare_run) → validated receipt.
+What is LEFT is the measurement scaffolding that never called the write path,
+kept because surviving tests and the CLI still use it:
 
-Blindness / grading discipline:
+* the **real parser seam** — ``render_store_lines`` + ``parse_roundtrip``
+  (byte-identical round-trip over the committed corpus);
+* ``preflight`` — manifest / hash / baseline / resolved-config checks for a
+  run over the committed corpus;
+* ``snapshot_session`` + the **#8444 report-only graph census** (E1 Object
+  composition, E3 edge anchors: ``graph_census``, ``census_or_error``,
+  ``aggregate_graph_census``);
+* the **additive banded semantic-judge arm** (#5085) and its #5106
+  pre-screen audit seam (``_run_semantic_judge``, ``_validate_semantic_units``);
+* ``build_receipt`` / ``validate_receipt`` — the epic §6.6 receipt contract
+  (run_status / verdict / failure_origin / commit / corpus_hash / judge_pin /
+  resolved_config / cost_usd);
+* operator drop/audit note helpers, which read a report rather than produce
+  one.
 
-* **Mechanical checks are authoritative** over judge output (issue grading
-  hierarchy).  BPRE (the default mode) runs the mechanical arm only and
-  records ``JUDGE_PIN_MECHANICAL`` — numbers are publishable against a
-  pinned judge (the schema requires non-null judge_pin on publish).
-  ADDITIVE (issue #5085, D14 "two-number split"): ``--judge semantic`` runs
-  the blind banded judge BESIDE the mechanical arm and records a
-  ``semantic_judge`` block (per-unit bands + band-weighted score + band
-  distribution + its own ``SEMANTIC_JUDGE_PIN``).  It is opt-in, refused on
-  the deterministic m2 posture, and never enters ``metrics`` — the judged
-  lane cannot silently enter the CI gate.  (The earlier note that the
-  salience judge was "not yet wired" is now stale: the BLIND banded arm is
-  the wired one; the older FULL/PARTIAL/ABSENT ``SalienceJudge`` remains the
-  unit-tested protocol from #2098 and is not what the runner invokes.)
-  ADDITIVE (issue #5106): an OPTIONAL deterministic first-stage pre-screen
-  (``--prescreen lexical|nli``, OFF by default) may short-circuit only the
-  confident ends (``same_fact`` / ``likely_not``) before the LLM judge sees
-  them.  It fails OPEN (an abstain/error/unavailable result goes to the LLM
-  judge; no unit is ever dropped), it is not an exemption from the §J4
-  blindness guard, and with it off the receipt block is byte-identical to
-  the #5085 shape.  It reuses the already-declared ``embeddings`` extra —
-  no dependency is added (see ``prescreen.py`` for the recorded decision).
-  ``runner prescreen-audit`` measures it offline over any judged receipt
-  produced WITHOUT the pre-screen — a receipt that already ran the screen
-  carries the screen's own verdict on those units, so they are excluded from
-  the reported agreement (auditing them would score the screen against
-  itself; see ``audit_receipt``).
-* **Verbatim control lane**: every session's gold is ALSO graded against a
-  control memory (the conversation written back verbatim).  Control macro
-  survival is 1.0 by construction; anything less is a CORPUS/GRADER bug
-  (the anchor is not recoverable from the verbatim transcript) and aborts
-  the run as a runner_error — the pre-flight never lets a broken corpus
-  silently punish (or flatter) the pipeline.
-* **Sessions-emitting invariant**: a replayed session that produced no
-  memory points (capture error / silent extraction skip) is a runner-level
-  failure with a named origin — a session is NEVER dropped from the report
-  (skipped never counts as pass).
-* **Hermeticity**: replay runs on a per-run hermetic graph (namespace-scoped
-  server graph under TORTOISE_DB_URI, transient embedded file otherwise);
-  deterministic offline replay is the ``TORTOISE_SESSION_LLM_MOCK=1`` +
-  ``TORTOISE_SESSION_EXTRACTOR=m2`` seam (content-preserving echo, no
-  network — the CI lane); the real v2 extractor (provider key) is the
-  product-parity lane used for first-baseline publishes.  The extractor
-  posture (``llm`` | ``m2``) is part of the resolved-config comparability
-  surface (REVIEW-FIX, PR #2183 findings 1+4): a run on one lane never
-  compares against a baseline on the other (config mismatch ⇒
-  inconclusive); the m2 lane blesses its own committed m2.json baseline
-  (determinism gate) while the llm lane owns main.json + the standing
-  leakage quality bar.
-* **Cost (G9, round-3)**: receipts record ``cost_usd`` from capture
-  telemetry ``llm_cost_usd`` when the extractor seam reports it, with an
-  explicit cost-not-tracked / cost-partial note otherwise. Today NO seam
-  reports ``llm_cost_usd`` (the mock never does; the real v2 extractor's
-  telemetry does not yet surface it), so real-LLM-lane runs record 0.0 with
-  the note — HARD_STOP_USD / per-run cost guarding cannot operate until the
-  extractor seam reports cost (fix-wave item for the W5 wave; disclosed,
-  never silently faked).
+CLI (``_main``): ``bless`` (promote a receipt's numbers into a posture
+baseline), ``validate-receipt``, ``calibrate`` (build/report the banded-judge
+calibration sample) and ``prescreen-audit`` (recompute the #5106 pre-screen
+over a judged receipt).  There is deliberately NO ``run`` sub-command: it
+would have nothing to measure.
 
-Receipts follow the epic §6.6 contract (run_status / verdict /
-failure_origin / commit / corpus_hash / judge_pin / resolved_config /
-cost_usd) plus the run detail an auditor needs to reproduce the number.
-Validated by ``validate_receipt`` before any commit.
-
-⚠️ **Key source — start the llm lane through the wrapper (#2718 / #4860).**
-This runner reads provider keys straight from the process env and never loads
-the repo ``.env`` (the repo's only ``.env`` loader,
-``mcp_server._load_dotenv``, is not imported here — and where it does run it
-only fills keys that are ABSENT, never overriding an ambient one). So a shell
-that exported ``OPENROUTER_API_KEY`` / ``DEEPSEEK_API_KEY`` is what gets
-billed. On 2026-09-23 the sealed #2552 run billed an exhausted ambient
-OpenRouter key (HTTP 403, 7/7 sessions aborted) while a healthy evals key sat
-in ``.env`` — and the receipt named no key. Always start the llm lane with
-``tools/run-with-eval-keys.sh``: it strips the ambient provider keys, loads
-the repo-root ``.env`` with override, prints the ``source`` + fingerprint of
-each key it set, and execs the command. Paste that block into the receipt::
-
-    PYTHONPATH=$PWD TORTOISE_TEST_CARVE_OUT=1 \
-      tools/run-with-eval-keys.sh \
-        .venv/bin/python -m tests.eval.write_path.runner run --out <receipt>
-
-Exit contract (CLI): 0 = completed non-regression, 1 = regression or
-runner_error (the CI-gate signal), 2 = inconclusive (nothing committed yet /
-config, corpus, or judge-pin drift — the umbrella aggregates receipts, never exit
-codes; a CI wiring must map 2 explicitly, never treat it as pass).
+⚠️ **Cost / key notes that still apply to any receipt you bless.** Receipts
+record ``cost_usd`` from capture telemetry only when a seam reports it; today
+no seam reports ``llm_cost_usd``, so a receipt carries the explicit
+cost-not-tracked note rather than a silently-faked 0.0.  Provider keys are
+read straight from the process env and never from the repo ``.env`` — start
+any real-key lane through ``tools/run-with-eval-keys.sh`` (#2718 / #4860) and
+paste its key-source block into the receipt.
 """
 from __future__ import annotations
 
 import argparse
-import contextlib
 import json
 import os
 import re
 import sys
-import tempfile
-import uuid
-from datetime import UTC, datetime
 from pathlib import Path
 
 # Module root helpers — this file doubles as the CLI entry
@@ -147,14 +99,6 @@ class RunError(Exception):
 # ── Pre-flight (S4: manifest/hash/baseline/config) ──────────────────────────
 
 
-def _env_posture() -> str:
-    """Extractor posture for the current run (REVIEW-FIX, PR #2183 findings
-    1+4): ``TORTOISE_SESSION_EXTRACTOR=m2`` selects the deterministic echo
-    lane; anything else (incl. absent) is the product ``llm`` lane.
-    """
-    if os.environ.get("TORTOISE_SESSION_EXTRACTOR", "").strip() == "m2":
-        return "m2"
-    return "llm"
 
 
 def preflight(root: Path = corpus.WRITE_PATH_DIR, *, posture: str = "llm") -> dict:
@@ -874,55 +818,6 @@ def graph_census_notes(census: dict | None) -> list[str]:
     ]
 
 
-# ── Per-session grading ─────────────────────────────────────────────────────
-
-
-def grade_session(
-    session_id: str,
-    gold: dict,
-    conversation: list[dict],
-    points: list[dict],
-    rephrase_edges: list[tuple[str, str]] | None = None,
-) -> dict:
-    """Grade one session's gold against its memory layer → session result.
-
-    The result feeds ``grading.aggregate_metrics``; see grading.py for the
-    pinned metric semantics.  Every session contributes its unit-level detail
-    (macro/strict + named failure) so the run report names failure classes.
-    """
-    rephrase_edges = rephrase_edges or []
-    macro = grading.macro_survival_counts(gold, points, rephrase_edges)
-    strict = grading.strict_survival_counts(gold, points, rephrase_edges)
-    leaked = grading.distractor_leakage(gold, points)
-    quotes = grading.quote_fidelity_counts(gold, points, conversation)
-    provenance = grading.provenance_counts(points)
-    emitted = grading.session_emitted(points)
-    unit_detail = grading.unit_level_detail(gold, points, rephrase_edges)
-    control = judge.control_macro_counts(gold, conversation)
-    return {
-        "session_id": session_id,
-        "gold_total_units": macro["total"],
-        "macro": macro,
-        "strict": strict,
-        "leaked": leaked,
-        "quotes": quotes,
-        "provenance": provenance,
-        "emitted": emitted,
-        "unit_detail": unit_detail,
-        "control_macro_survived": control["survived"],
-        "control_macro_total": control["total"],
-        "memory_point_count": len([p for p in points if not grading.is_turn_echo(p.get("content") or "")]),
-        "turn_count": len(conversation),
-    }
-
-
-# ── The run ─────────────────────────────────────────────────────────────────
-
-
-def _now_iso() -> str:
-    return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
-
-
 # ── Additive banded semantic judge arm (issue #5085) ───────────────────────
 
 
@@ -1210,476 +1105,6 @@ def _validate_semantic_units(units: object, issues: list[str]) -> None:
             )
 
 
-def run_benchmark(
-    *,
-    root: Path = corpus.WRITE_PATH_DIR,
-    config: dict | None = None,
-    session_ids: list[str] | None = None,
-    sdk=None,
-    workdir: Path | None = None,
-    ep_pass: bool = True,
-    run_id: str | None = None,
-    notes: list[str] | None = None,
-    log: list[str] | None = None,
-    judge_mode: str = "mechanical",
-    judge_samples: int = judge.DEFAULT_JUDGE_SAMPLES,
-    judge_model: str | None = None,
-    paraphrase_model: str | None = None,
-    judge_temperature: float = judge.DEFAULT_JUDGE_TEMPERATURE,
-    judge_factory=None,
-    prescreen: str = prescreen_mod.PRESCREEN_OFF,
-    prescreen_model: str | None = None,
-) -> dict:
-    """Full benchmark run: preflight → replay → grade → aggregate.
-
-    ``sdk`` may be an existing open SDK (tests own their hermetic graph) or
-    None (the CLI opens one from the ambient env posture — namespace-scoped
-    server graph under TORTOISE_DB_URI, transient embedded file otherwise).
-
-    ``judge_mode`` (issue #5085): ``"mechanical"`` (default) is the gated
-    BPRE lane — byte-identical to the pre-#5085 runner.  ``"semantic"``
-    ADDITIONALLY runs the blind banded judge and records its additive
-    ``semantic_judge`` block (per-unit bands + band-weighted score + band
-    distribution) in the report/receipt; it never touches ``metrics`` or the
-    ``judge_pin``, and it is REFUSED on the deterministic ``m2`` posture so
-    the CI lane can never silently acquire a non-reproducible number.
-
-    Returns ``{"run_id", "date", "run_status", "verdict", "failure_origin",
-     "commit", "corpus_hash", "judge_pin", "resolved_config", "cost_usd",
-     "metrics", "session_results": [...], "notes": [...]}`` — plus, on a
-    completed run, the additive ``operator_audit`` (issue #2514 planted-
-    operator layer-2 grading: ``{planted, edge_correct, content_ok,
-    operators_total, operators_provenanced, by_session}`` — NOT a gated
-    metric in this change). ``operators_*`` is the #2552 structural probe:
-    reified operator Points that entered the retrievable memory layer
-    (eventId-stamped by the capture path).
-    Also on a completed run, the additive ``graph_census`` (``#8444``, for
-    `#7949` E1/E3): per session and aggregated, the `:Object` count and its
-    `^the <X>` share, plus the anchored/total counts of the capture's
-    ``extractedFrom``/``references`` derivation edges — REPORT-ONLY, not a
-    gated metric, so no baseline is re-blessed and no verdict moves.
-    On a pre-flight failure or a control-lane violation the report comes back
-    with run_status "failed" + the named origin — it NEVER raises mid-run
-    (the umbrella aggregates receipts).
-    """
-    log = log if log is not None else []
-    run_id = run_id or f"w2b-{uuid.uuid4().hex[:12]}"
-    notes = list(notes or [])
-    # REVIEW-FIX (round-3 F3): the extractor posture is derived EXCLUSIVELY
-    # from the env seam (TORTOISE_SESSION_EXTRACTOR=m2 selects the echo
-    # lane). BASELINE_CONFIG carries a posture DEFAULT (llm) for snapshot
-    # shape, but it is NOT part of the caller-overridable surface: a
-    # caller-supplied ``config`` may NOT relabel the run's posture (an
-    # llm-labeled run executed under m2 env, or an m2-labeled run under llm
-    # env, would compare against the wrong lane's baseline and/or dodge the
-    # llm standing leakage bar — the dishonest cross-extractor compare
-    # finding 4 was meant to forbid). Any config posture that contradicts
-    # the env seam is rejected; the env always wins.
-    env_posture = _env_posture()
-    resolved_config = dict(corpus.BASELINE_CONFIG)
-    resolved_config.pop("extractor_posture", None)  # env owns it (round-3 F3)
-    if config is not None:
-        config_posture = config.get("extractor_posture")
-        if config_posture is not None and config_posture != env_posture:
-            raise ValueError(
-                "extractor_posture in config "
-                f"({config_posture!r}) contradicts the env lane selector "
-                f"({env_posture!r}) — the env seam owns the posture"
-            )
-        resolved_config.update(config)
-    resolved_config["extractor_posture"] = env_posture
-    posture = env_posture
-    date = _now_iso()
-    commit = _git_head_short()
-
-    pf = preflight(root, posture=posture)
-    if not pf["ok"]:
-        # REVIEW-FIX (PR #2183 review finding 6): corpus-hash/manifest drift
-        # is the audit-grade ``hash_mismatch`` origin (E2E-2 — a gold-only
-        # edit must surface as the hash failure it is), not a generic
-        # runner_error. Everything else stays runner_error. Round-3 F7: the
-        # classifier keys on the ACTUAL drift issue prefixes (the preflight
-        # drift checks that report ``fixtures_hash ... corpus drift`` and the
-        # manifest verification failures) rather than substring-matching any
-        # issue text that happens to contain "hash"/"manifest" (a malformed
-        # manifest schema issue is a corpus-validity failure, not drift).
-        drift_issues = [i for i in pf["issues"]
-                        if "corpus drift" in i
-                        or i.startswith("manifest verification failed")]
-        origin = "hash_mismatch" if drift_issues else "runner_error"
-        return summary_failed_report(
-            run_id, date, commit, pf["fixtures_hash"], resolved_config,
-            pf["issues"], origin=origin, label="preflight issues", log=log,
-        )
-    baseline = pf["baseline"]
-    fixtures_hash = pf["fixtures_hash"]
-    if judge_mode not in ("mechanical", "semantic"):
-        raise ValueError(
-            f"unknown judge_mode {judge_mode!r} — one of ('mechanical', 'semantic')"
-        )
-    if prescreen not in prescreen_mod.PRESCREEN_NAMES:
-        raise ValueError(
-            f"unknown prescreen {prescreen!r} — one of {prescreen_mod.PRESCREEN_NAMES}"
-        )
-    if prescreen != prescreen_mod.PRESCREEN_OFF and judge_mode != "semantic":
-        # The pre-screen exists to skip work for the JUDGED arm; with the
-        # mechanical arm there is nothing to skip, and silently accepting the
-        # flag would suggest a number had changed when none could have.
-        raise ValueError(
-            f"--prescreen {prescreen!r} requires --judge semantic (the pre-screen "
-            "feeds the banded judge, which the mechanical arm never runs)"
-        )
-    if judge_mode == "semantic" and judge_samples < 3:
-        # The probability IS an agreement fraction; the owner floor is >=3
-        # independent judgements per unit per order.  Below 3 the grid cannot
-        # reach every band (and 1 sample collapses it to 0/1), so refuse rather
-        # than publish a degenerate number.
-        raise ValueError(
-            "judge_samples must be >= 3 for the semantic arm (the owner floor "
-            f"for an earned agreement fraction), got {judge_samples!r}"
-        )
-    if judge_mode == "semantic" and posture != "llm":
-        # Determinism: the CI lane replays byte-reproducibly on the m2 echo
-        # posture; an LLM-judged arm there would be neither meaningful (the
-        # echo memory carries the verbatim transcript) nor reproducible.
-        # Fail closed rather than silently admit a non-deterministic number.
-        return _failed_report(
-            run_id, date, commit, fixtures_hash, resolved_config,
-            origin="runner_error",
-            detail=(
-                "--judge semantic requires the llm extractor posture; the "
-                f"m2 deterministic lane is refused (posture={posture!r}) — "
-                "the judged lane must never enter the CI gate"
-            ),
-            log=log,
-        )
-    selected = session_ids or corpus.session_ids(root)
-    missing = [s for s in selected if s not in corpus.session_ids(root)]
-    if missing:
-        return _failed_report(
-            run_id, date, commit, fixtures_hash, resolved_config,
-            origin="runner_error",
-            detail=f"unknown sessions: {missing}", log=log,
-        )
-
-    judge_pin = judge.JUDGE_PIN_MECHANICAL
-    owned_sdk = sdk is None
-    if owned_sdk:
-        sdk = _open_hermetic_sdk(run_id)
-    session_results: list[dict] = []
-    runner_errors: list[str] = []
-    semantic_block: dict | None = None
-    total_cost: float = 0.0
-    cost_tracked: bool = True  # flipped False if any capture lacks a cost figure
-    quote_spans_total: int = 0
-    try:
-        workdir = workdir or Path(tempfile.mkdtemp(prefix=f"w2b_{run_id}_"))
-        for session_id in selected:
-            fixture = corpus.load_fixture(session_id, root)
-            gold = corpus.load_gold(session_id, root)
-            conversation = None  # REVIEW-FIX (F5): never leak a prior
-            # iteration's parsed conversation into a failed capture's grading.
-            try:
-                conversation = parse_roundtrip(
-                    session_id, fixture["conversation"], fixture["harness"],
-                    workdir=workdir, log=log,
-                )
-                capture = sdk.capture_session(
-                    conversation, session_id=session_id, harness=fixture["harness"]
-                )
-                notes.append(
-                    f"{session_id}: capture ok={capture.get('ok')} "
-                    f"extraction_mode={capture.get('extraction_mode')} "
-                    f"extracted={capture.get('extracted')}"
-                )
-                if capture.get("ok") is not True:
-                    runner_errors.append(
-                        capture_failure_detail(session_id, capture)
-                    )
-                # REVIEW-FIX (cost honesty): accumulate the extractor's
-                # reported cost when the capture telemetry carries it; a
-                # None/missing figure (mock seam, unknown adapter) flips
-                # cost_tracked False so the receipt records an explicit
-                # note rather than a silently-fake 0.0.
-                telemetry = capture.get("telemetry") or {}
-                session_cost = telemetry.get("llm_cost_usd")
-                if session_cost is None:
-                    cost_tracked = False
-                else:
-                    total_cost += float(session_cost)
-            except Exception as exc:
-                runner_errors.append(f"{session_id}: capture raised {type(exc).__name__}: {exc}")
-                capture = {}
-            snapshot = snapshot_session(sdk, session_id)
-            grade_conv = conversation if conversation is not None \
-                else fixture["conversation"]
-            result = grade_session(
-                session_id, gold, grade_conv,
-                snapshot["points"], snapshot["rephrase_edges"],
-            )
-            result["operator_counts"] = snapshot["operator_counts"]
-            result["capture_ok"] = capture.get("ok")
-            # #8503: the extractor's OWN warnings, per session. The receipts
-            # carried none, so an ``edge_missing`` verdict could not be
-            # attributed between "the edge was never formed" and "the seam
-            # dropped it" (the two mechanisms #8503 refuses to conflate).
-            result["extraction_warnings"] = list(capture.get("warnings") or [])
-            session_results.append(result)
-        if ep_pass:
-            try:
-                dream = sdk.dream(
-                    full=True, require_calibration=False, warm_start=False
-                )
-                notes.append(
-                    "dream EP pass: "
-                    f"total_affected={dream.get('total_affected')} "
-                    f"coverage={dream.get('coverage')} "
-                    f"converged_all={dream.get('converged_all')}"
-                )
-                # Re-grade AFTER the EP pass: strict survival reads the EP
-                # state the dream pass left behind.
-                re_snapshots = {
-                    sid: snapshot_session(sdk, sid) for sid in selected
-                }
-                fresh: list[dict] = []
-                for result in session_results:
-                    snap = re_snapshots[result["session_id"]]
-                    refreshed = grade_session(
-                        result["session_id"],
-                        corpus.load_gold(result["session_id"], root),
-                        corpus.load_fixture(result["session_id"], root)["conversation"],
-                        snap["points"], snap["rephrase_edges"],
-                    )
-                    refreshed["operator_counts"] = snap["operator_counts"]
-                    refreshed["capture_ok"] = result["capture_ok"]
-                    # #8503: the warnings belong to the CAPTURE, not to the
-                    # re-grade — carry them through the EP-pass refresh so a
-                    # completed run never loses the attribution it just
-                    # measured.
-                    refreshed["extraction_warnings"] = result.get(
-                        "extraction_warnings", [])
-                    fresh.append(refreshed)
-                session_results = fresh
-            except Exception as exc:
-                runner_errors.append(f"dream EP pass raised {type(exc).__name__}: {exc}")
-
-        # #2514 planted-operator (layer-2) grading — corpus-wide (the cross-
-        # session SUPERSEDE resolves its to-anchor in another session's memory
-        # layer).  The EP pass only rewrites confidence, so the operator
-        # surface is re-snapshotted once here (post-dream state).  Additive
-        # AUDIT dimension carried on every run (both lanes) — NOT a
-        # METRIC_VALUES member in this change (scoping note 2026-09-07-2514-).
-        # On the m2 echo lane the planted edges are graded by a cue-word
-        # relation stage, so the score is structurally low and not comparable
-        # with the llm lane's — expected and noted, never a quality bar.
-        operator_audit = None
-        graph_census_report = None
-        if not runner_errors:
-            golds = {sid: corpus.load_gold(sid, root) for sid in selected}
-            points_by_session: dict[str, list] = {}
-            surfaces_by_session: dict[str, dict] = {}
-            snapshot_errors: dict[str, str] = {}
-            for sid in selected:
-                try:
-                    snap = snapshot_session(sdk, sid)
-                except Exception as exc:
-                    runner_errors.append(
-                        f"{sid}: operator snapshot raised {type(exc).__name__}: {exc}"
-                    )
-                    # Remembered for the census below: the stand-in snapshot is
-                    # NOT a measurement, and a census over it would publish a
-                    # zero for a session whose graph was never read.
-                    snapshot_errors[sid] = f"{type(exc).__name__}: {exc}"
-                    snap = {"points": [], "direct_edges": [],
-                            "operator_edges": [], "mitigations": []}
-                points_by_session[sid] = snap.get("points", [])
-                surfaces_by_session[sid] = snap
-            # #8444 (for `#7949` E1/E3): the report-only census, taken off the
-            # SAME post-dream snapshot the operator audit reads, so the two
-            # dimensions cannot describe different graphs. Additive and NOT a
-            # `METRIC_VALUES` member — see the block comment on `graph_census`.
-            graph_census_report = build_graph_census(
-                sdk, surfaces_by_session, snapshot_errors=snapshot_errors)
-            notes.extend(graph_census_notes(graph_census_report))
-            for result in session_results:
-                result["graph_census"] = graph_census_report["sessions"].get(
-                    result["session_id"])
-            if not runner_errors:
-                operator_audit = grading.grade_planted_operators(
-                    golds, points_by_session, surfaces_by_session
-                )
-                # #2552 (layer-2 WIRE — the structural leg): operator nodes
-                # that entered the retrievable memory layer. The structural
-                # fix stamps the capture's operators with the
-                # sessionCaptured eventId, so every operator the write path
-                # committed is retrievable and provenanced; a total > 0 with
-                # provenanced < total is the pre-fix drop signature.
-                operator_audit["operators_total"] = sum(
-                    s.get("operators_total", 0)
-                    for s in surfaces_by_session.values()
-                )
-                operator_audit["operators_provenanced"] = sum(
-                    s.get("operators_provenanced", 0)
-                    for s in surfaces_by_session.values()
-                )
-                # #8503: carry the extractor's own drop warnings beside the
-                # verdicts, so an `edge_missing` row is ATTRIBUTABLE from the
-                # receipt (never formed by the model vs dropped by the seam).
-                operator_audit["drop_warnings"] = operator_drop_warnings(
-                    session_results)
-                notes.extend(operator_drop_notes(
-                    operator_audit["drop_warnings"], posture))
-                for result in session_results:
-                    sid = result["session_id"]
-                    owned = [
-                        d for d in operator_audit["results"].values()
-                        if d.get("owner_session") == sid
-                    ]
-                    result["planted_operators"] = owned
-                # ``operator_audit_notes`` handles the None case itself, so this
-                # needs no guard of its own.
-                notes.extend(operator_audit_notes(operator_audit, posture))
-
-        # #5085 additive blind banded judge: runs INSIDE the try (it needs the
-        # open SDK and the post-dream memory layer) and only when the
-        # mechanical replay is sound — a broken capture must fail the run, not
-        # publish a judged number over a memory layer that was never written.
-        if judge_mode == "semantic" and not runner_errors:
-            try:
-                semantic_block = _run_semantic_judge(
-                    sdk, selected, root,
-                    samples=judge_samples,
-                    judge_model=judge_model,
-                    paraphrase_model=paraphrase_model,
-                    temperature=judge_temperature,
-                    judge_factory=judge_factory,
-                    notes=notes,
-                    prescreen=prescreen,
-                    prescreen_model=prescreen_model,
-                )
-            except judge.JudgeBlindnessError as exc:
-                # LOAD-BEARING (plan §J4): a blindness violation is a harness
-                # failure — fail the run, never publish a lexically-matched
-                # number produced while the judge could see the anchor.
-                runner_errors.append(f"semantic judge blindness violation: {exc}")
-            except Exception as exc:
-                semantic_block = {
-                    "status": "failed",
-                    "pin": (
-                        judge.SEMANTIC_JUDGE_PIN
-                        if prescreen == prescreen_mod.PRESCREEN_OFF
-                        else judge.SEMANTIC_JUDGE_PIN_PRESCREEN
-                    ),
-                    "error": f"{type(exc).__name__}: {exc}",
-                }
-                notes.append(
-                    "semantic judge FAILED (additive arm only — the "
-                    f"mechanical metrics are unaffected): {type(exc).__name__}: {exc}"
-                )
-    finally:
-        if owned_sdk:
-            _close_and_wipe(sdk)
-
-    # Control-lane self-check: verbatim macro survival must be 1.0 across the
-    # corpus — a lower value means the corpus/grader cannot even recover the
-    # planted anchors from the verbatim transcript (broken corpus, not
-    # pipeline), and the run must not publish a number against it.
-    control_bad = [
-        f"{r['session_id']}: control macro {r['control_macro_survived']}/"
-        f"{r['control_macro_total']}"
-        for r in session_results
-        if r["control_macro_total"]
-        and r["control_macro_survived"] < r["control_macro_total"]
-    ]
-    if control_bad:
-        runner_errors.append("control lane < 1.0 (corpus/grader bug): " + "; ".join(control_bad))
-
-    # Sessions that were replayed but did not emit violate the 100% invariant
-    # AND any session whose capture failed is a runner error (never dropped).
-    no_gold = [r["session_id"] for r in session_results if r["gold_total_units"] == 0]
-    if no_gold:
-        runner_errors.append(f"sessions with no graded gold units: {no_gold}")
-
-    if runner_errors:
-        report = summary_failed_report(
-            run_id, date, commit, fixtures_hash, resolved_config,
-            runner_errors, origin="runner_error", label="runner_errors",
-            log=log, session_results=session_results,
-        )
-        report["metrics"] = _safe_metrics(session_results)
-        report["judge_pin"] = judge_pin
-        return report
-
-    metrics = grading.aggregate_metrics(session_results)
-    # REVIEW-FIX (F3): surface quote vacuity — a gold corpus that never
-    # quotes yields a vacuous quote_fidelity 1.0 (floor, not bar). The
-    # graded snapshot stays canonical-6; the REPORT carries the raw span
-    # count + a note so the committed 1.0 is never misread.
-    quote_spans_total = sum(r["quotes"]["total"] for r in session_results)
-    if quote_spans_total == 0:
-        notes.append(
-            "quote_fidelity 1.0 is VACUOUS: the corpus gold contains no "
-            "double-quoted spans (quote_spans_total=0) — this number is a "
-            "floor, not a fidelity bar; it will not hold under a future "
-            "corpus that quotes"
-        )
-    log.append(f"metrics: {json.dumps({k: round(v, 4) if isinstance(v, float) else v for k, v in metrics.items()})}")
-    verdict = schema.compare_run(
-        metrics, baseline,
-        resolved_config=resolved_config,
-        run_fixtures_hash=fixtures_hash,
-        run_judge_pin=judge_pin,  # round-3 G2: protocol-honest compare
-    )
-    failure_origin = None
-    if verdict == schema.VERDICT_REGRESSION:
-        failure_origin = "gate_regression"
-    elif verdict == schema.VERDICT_INCONCLUSIVE:
-        # Distinguish config / hash / judge-pin / pending for the receipt
-        # origin (round-3 N3: a pin-drifted inconclusive must not be
-        # indistinguishable from a benign first-run-pending one).
-        if fixtures_hash != baseline.get("fixtures_hash"):
-            failure_origin = "hash_mismatch"
-        elif resolved_config != baseline.get("config"):
-            failure_origin = "config_mismatch"
-        elif baseline.get("judge_pin") and judge_pin != baseline.get("judge_pin"):
-            failure_origin = "judge_pin_mismatch"
-        elif not (baseline.get("metrics") or {}):
-            failure_origin = None  # first-run-pending — nothing to compare yet
-    if not cost_tracked:
-        if total_cost > 0.0:
-            notes.append(
-                "cost partial: some sessions reported llm_cost_usd and others "
-                "did not — receipt cost_usd is the tracked PARTIAL sum "
-                f"({round(total_cost, 6)}), understating true cost; never read "
-                "it as a full measured figure"
-            )
-        else:
-            notes.append(
-                "cost not tracked: the extractor seam reported no llm_cost_usd "
-                "in any session (mock/unknown adapter) — receipt cost_usd is "
-                "0.0 with this note, never a silently-fake measured figure"
-            )
-    return {
-        "run_id": run_id,
-        "date": date,
-        "run_status": "completed",
-        "verdict": verdict,
-        "failure_origin": failure_origin,
-        "commit": commit,
-        "corpus_hash": fixtures_hash,
-        "judge_pin": judge_pin,
-        "resolved_config": resolved_config,
-        "cost_usd": round(total_cost, 6),  # partial-sum when mixed; 0.0 + note when untracked
-        "metrics": metrics,
-        "quote_spans_total": quote_spans_total,
-        "operator_audit": operator_audit,
-        "graph_census": graph_census_report,
-        "extractor_identity": extractor_identity(),
-        "semantic_judge": semantic_block,
-        "session_results": session_results,
-        "notes": notes,
-        "log": log,
-    }
 
 
 def extractor_identity() -> dict:
@@ -1982,11 +1407,6 @@ def operator_drop_warnings(session_results: list[dict]) -> dict:
             "by_session": by_session}
 
 
-def _safe_metrics(session_results: list[dict]) -> dict:
-    """Metrics for a FAILED run — partial, but only when sessions were graded."""
-    if not session_results:
-        return {}
-    return grading.aggregate_metrics(session_results)
 
 
 def _failed_report(
@@ -2026,125 +1446,18 @@ def _failed_report(
 SUMMARY_BOUND = 8
 
 
-def failed_run_diagnostics(report: dict) -> list[str]:
-    """The diagnostic log lines a run must echo to stdout.
-
-    A ``completed`` run needs none: its artifact is the receipt.  A FAILED
-    run's ``log`` is the diagnosis, and stdio is the one channel that survives
-    independently of ``--out``.
-    """
-    if report.get("run_status") == "completed":
-        return []
-    return [str(line) for line in (report.get("log") or [])]
 
 
-def capture_failure_detail(session_id: str, capture: dict) -> str:
-    """The diagnostic line for ONE failed capture.
-
-    ``capture["errors"]`` is the customer-facing contract and is deliberately
-    generic: ``sdk._capture_resp_error_split`` maps an ``S1 chunk failed:
-    HTTPError: 403 …`` to *"Part of the extraction failed partway through.
-    Retry the capture — the retry will re-attempt it."*  The raw
-    ``S<t>: <TypeName>: <message>`` strings ride the ADDITIVE ``diagnostics``
-    list (``tortoise/sdk.py``, #2335 WI-2).  Carry BOTH, plus ``error``: the
-    ``capture_session`` result always carries ``diagnostics``, but the
-    lighter ``ok=False`` shapes on other seams put their message under
-    ``error`` alone, and a diagnostic that names nothing is the defect here.
-    """
-    return (
-        f"{session_id}: capture ok=False "
-        f"(errors={capture.get('errors')}; "
-        f"diagnostics={capture.get('diagnostics')}; "
-        f"error={capture.get('error')})"
-    )
 
 
-def summary_overflow_line(items: list, *, label: str) -> list[str]:
-    """The log line carrying what a ``detail`` summary dropped.
-
-    ``_failed_report`` is given a ``SUMMARY_BOUND``-bounded ``detail`` (a
-    concise summary for a human reading a receipt).  Items past the bound
-    would otherwise exist nowhere at all, so they ride the log — which is what
-    reaches stdout.  The bound is read from the one module constant rather
-    than taken as a parameter, so the summary and this tail cannot drift apart
-    and silently lose the items between them.
-    """
-    if len(items) <= SUMMARY_BOUND:
-        return []
-    return [
-        f"{label} (all {len(items)}): "
-        + "; ".join(str(i) for i in items[SUMMARY_BOUND:])
-    ]
 
 
-def summary_failed_report(
-    run_id: str, date: str, commit: str, fixtures_hash: str,
-    resolved_config: dict, items: list, *, origin: str, label: str,
-    log: list[str] | None = None, session_results: list[dict] | None = None,
-) -> dict:
-    """A ``_failed_report`` whose log carries ALL ``items``, not just the bound.
-
-    The single place a failure report is built from a list of causes, so the
-    summary/overflow pairing is exercised by the tests rather than re-derived
-    at each call site.
-    """
-    report = _failed_report(
-        run_id, date, commit, fixtures_hash, resolved_config,
-        origin=origin, detail="; ".join(str(i) for i in items[:SUMMARY_BOUND]),
-        log=log, session_results=session_results,
-    )
-    report["log"].extend(summary_overflow_line(items, label=label))
-    return report
 
 
-def _git_head_short() -> str:
-    try:
-        import subprocess
-
-        out = subprocess.run(
-            ["git", "-C", str(_REPO_ROOT), "rev-parse", "--short", "HEAD"],
-            capture_output=True, text=True, check=False, timeout=5,
-        )
-        if out.returncode == 0:
-            return out.stdout.strip() or "unknown"
-    except Exception:
-        pass
-    return "unknown"
 
 
-def _open_hermetic_sdk(run_id: str) -> object:
-    """Open a hermetic per-run graph from the ambient env posture.
-
-    With TORTOISE_DB_URI set: a namespace-scoped server graph named after the
-    run (team_w2bench_<run_id>).  Without: a transient embedded file under a
-    temp dir.  TORTOISE_TEST_MODE/TORTOISE_TEST_SESSION, when present in the
-    environment (pytest session), route the construction through the
-    redirect seam like any other test construction.
-    """
-    from tortoise.sdk import TortoiseSDK
-
-    uri = os.environ.get("TORTOISE_DB_URI", "").strip()
-    namespace = f"w2bench_{re.sub(r'[^a-zA-Z0-9_]', '', run_id)}"
-    if uri and os.environ.get("TORTOISE_TEST_MODE") != "1":
-        # CLI docker posture: team-scoped graph on the URI server.
-        return TortoiseSDK(namespace=namespace)
-    # Embedded (or test-session redirect): explicit temp path.
-    tmp = Path(tempfile.mkdtemp(prefix="w2b_graph_")) / f"{run_id}.db"
-    return TortoiseSDK(db_path=str(tmp), namespace=namespace)
 
 
-def _close_and_wipe(sdk) -> None:
-    """Best-effort teardown: detach-delete the run's graph, then close.
-
-    Never raises — hygiene failures must not fail a completed run (the graph
-    name is still namespace-scoped + session-journaled under pytest, so the
-    session sweep is the backstop).
-    """
-    with contextlib.suppress(Exception):  # #2174-lint SIM105
-        proj = sdk._get_proj()
-        proj.g.query("MATCH (n) DETACH DELETE n")
-    with contextlib.suppress(Exception):  # #2174-lint SIM105
-        sdk.close()
 
 
 # ── Receipt build + validation (§6.6) ───────────────────────────────────────
@@ -2425,51 +1738,9 @@ def _main(argv: list[str] | None = None) -> int:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_run = sub.add_parser("run", help="preflight + replay + grade + compare")
-    p_run.add_argument("--root", type=Path, default=corpus.WRITE_PATH_DIR)
-    p_run.add_argument("--session", action="append", default=None,
-                       help="restrict to session ids (repeatable)")
-    p_run.add_argument("--no-ep-pass", action="store_true",
-                       help="skip the dream EP pass")
-    p_run.add_argument("--out", type=Path, default=None,
-                       help="write the run receipt JSON to this path")
-    p_run.add_argument("--json", action="store_true",
-                       help="emit the run report JSON on stdout")
     # #5085 additive banded semantic judge (opt-in; off in the CI lane).
-    p_run.add_argument("--judge", choices=("mechanical", "semantic"),
-                       default="mechanical",
-                       help="mechanical (default, gated BPRE lane) or semantic "
-                            "(additionally run the blind banded judge and "
-                            "record its additive semantic_judge block)")
-    p_run.add_argument("--judge-samples", type=int,
-                       default=judge.DEFAULT_JUDGE_SAMPLES,
-                       help="independent judgements per unit per order "
-                            f"(default {judge.DEFAULT_JUDGE_SAMPLES}; the "
-                            "agreement fraction is the probability)")
-    p_run.add_argument("--judge-model", default=None,
-                       help="MODELS registry key for the blind judge "
-                            f"(default {judge.DEFAULT_JUDGE_MODEL}; keep it "
-                            "different from the extractor to blunt "
-                            "self-preference bias)")
-    p_run.add_argument("--paraphrase-model", default=None,
-                       help="MODELS registry key for the paraphrase stage "
-                            "(default: the judge model)")
-    p_run.add_argument("--judge-temperature", type=float,
-                       default=judge.DEFAULT_JUDGE_TEMPERATURE,
-                       help="sampling temperature for the judge's repeated "
-                            "judgements (0.0 makes every sample identical)")
     # #5106 deterministic first-stage pre-screen (opt-in; OFF by default so
     # the semantic_judge numbers stay comparable to #5085).
-    p_run.add_argument("--prescreen",
-                       choices=prescreen_mod.PRESCREEN_NAMES,
-                       default=prescreen_mod.PRESCREEN_OFF,
-                       help="deterministic first stage for the banded judge "
-                            "(#5106): off (default) | lexical (zero "
-                            "dependencies) | nli (reuses the already-declared "
-                            "embeddings extra; fails OPEN when absent)")
-    p_run.add_argument("--prescreen-model", default=None,
-                       help="NLI checkpoint for --prescreen nli (default "
-                            f"{prescreen_mod.DEFAULT_NLI_MODEL})")
 
     p_bless = sub.add_parser("bless", help="bless a baseline from a run receipt")
     p_bless.add_argument("--receipt", type=Path, required=True)
@@ -2527,92 +1798,6 @@ def _main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
 
-    if args.command == "run":
-        if args.prescreen != prescreen_mod.PRESCREEN_OFF and args.judge != "semantic":
-            parser.error(
-                f"--prescreen {args.prescreen} requires --judge semantic — the "
-                "pre-screen feeds the banded judged arm; the mechanical arm "
-                "has no judged calls to skip"
-            )
-        if args.judge == "semantic" and args.judge_samples < 3:
-            parser.error(
-                "--judge-samples must be >= 3 for --judge semantic "
-                f"(got {args.judge_samples}) — the unit probability is an "
-                "agreement fraction over independent judgements, and fewer "
-                "than 3 votes cannot reach every band"
-            )
-        report = run_benchmark(
-            root=args.root,
-            session_ids=args.session,
-            ep_pass=not args.no_ep_pass,
-            judge_mode=args.judge,
-            judge_samples=args.judge_samples,
-            judge_model=args.judge_model,
-            paraphrase_model=args.paraphrase_model,
-            judge_temperature=args.judge_temperature,
-            prescreen=args.prescreen,
-            prescreen_model=args.prescreen_model,
-        )
-        print(f"run_status={report['run_status']} verdict={report['verdict']} "
-              f"failure_origin={report['failure_origin']} run_id={report['run_id']}")
-        if report.get("metrics"):
-            for key, value in report["metrics"].items():
-                print(f"  {key}: {value}")
-        census = (report.get("graph_census") or {}).get("aggregate")
-        if census:
-            obj = census["objects"]
-            share = obj["the_share"]
-            edges = census["derivation_edges"]
-            print(
-                "  graph_census (report-only, NOT a gated metric): "
-                f"objects={obj['total']} "
-                f"the_prefixed={obj['the_prefixed']} "
-                f"the_share={'n/a (no Objects)' if share is None else f'{share:.1%}'} "
-                f"objects_with_derivation_link={obj['with_derivation_link']} "
-                f"extractedFrom={edges['extractedFrom']['anchored']}/"
-                f"{edges['extractedFrom']['total']} anchored "
-                f"references={edges['references']['anchored']}/"
-                f"{edges['references']['total']} anchored "
-                f"(excluded: containment="
-                f"{edges['references'].get('containment_excluded', 0)}, "
-                f"identity={edges['references'].get('identity_excluded', 0)})"
-            )
-        semantic = report.get("semantic_judge")
-        if semantic and semantic.get("status") == "completed":
-            print("  semantic_judge (additive, NOT a gated metric):")
-            print(f"    band_weighted_score: {semantic['band_weighted_score']}")
-            print(f"    probability_mean:    {semantic['probability_mean']}")
-            print(f"    survival>=0.50:      {semantic['semantic_survival_rate']}")
-            print(f"    band_distribution:   {semantic['band_distribution']}")
-            print(f"    pin:                 {semantic['pin']}")
-        elif semantic:
-            print(f"  semantic_judge: {semantic.get('status')} "
-                  f"({semantic.get('error')})")
-        if report.get("notes"):
-            for note in report["notes"]:
-                print(f"  note: {note}")
-        # #4860: a failed run states WHY on stdout, not only inside the
-        # receipt.  `--json` already dumps the whole report, but that is an
-        # opt-in flag, so the default invocation printed the status line and
-        # nothing else while the cause lived only in the `--out` file.
-        for line in failed_run_diagnostics(report):
-            print(f"  log: {line}")
-        receipt = build_receipt(report)
-        issues = validate_receipt(receipt)
-        print(f"receipt valid: {not issues}" + (f" ({'; '.join(issues)})" if issues else ""))
-        if args.out is not None:
-            args.out.parent.mkdir(parents=True, exist_ok=True)
-            args.out.write_text(json.dumps(receipt, indent=2), encoding="utf-8")
-            print(f"receipt written: {args.out}")
-        if args.json:
-            print(json.dumps(report, indent=2))
-        if report["run_status"] != "completed":
-            return EXIT_RUNNER_ERROR
-        if report["verdict"] == schema.VERDICT_REGRESSION:
-            return EXIT_REGRESSION
-        if report["verdict"] == schema.VERDICT_INCONCLUSIVE:
-            return EXIT_INCONCLUSIVE
-        return EXIT_OK
 
     if args.command == "bless":
         receipt = json.loads(args.receipt.read_text(encoding="utf-8"))

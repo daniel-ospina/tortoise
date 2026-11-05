@@ -796,8 +796,8 @@ def grade_planted_operators(
 def aggregate_metrics(session_results: list[dict]) -> dict:
     """Fold per-session grading results into the canonical 6-metric snapshot.
 
-    ``session_results`` is one dict per replayed session (see
-    ``runner.grade_session``)::
+    ``session_results`` is one dict per replayed session (``runner.grade_session``
+    wrote these before #4282 deleted the run leg; the shape is unchanged)::
 
         {"session_id", "gold_total_units", "macro": {...}, "strict": {...},
          "leaked": [...], "quotes": {...}, "provenance": {...},

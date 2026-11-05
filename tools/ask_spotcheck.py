@@ -574,9 +574,9 @@ def _seed_memory(sdk: TortoiseSDK, question: dict, *,
     The turn window, the whole-session blank gate and the node/edge write all
     live in ``seed_capture_turn_store`` — the SAME function the other ask
     fixtures seed through (#3914), so this lane cannot drift from them. That
-    function is still a THIRD copy of capture's per-turn store (the two live
-    writers being ``TortoiseSDK.capture_session`` and
-    ``hosted_api._capture_session_impl``); the NOTE at ``tortoise/sdk.py`` /
+    function is still a THIRD copy of capture's per-turn store (the ONE live
+    writer being ``hosted_api._capture_session_impl`` — ``TortoiseSDK.capture_session``
+    was the other until #4282 deleted it); the NOTE at ``tortoise/sdk.py`` /
     ``tortoise/hosted_api.py`` names it — a comment, not an enforced check;
     #3551 tracks collapsing all three onto one shared primitive.
 

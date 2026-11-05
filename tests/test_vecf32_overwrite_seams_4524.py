@@ -210,8 +210,8 @@ def test_event_plain_merge_embedding_overwrite_lands(tmp_path, monkeypatch):
 def test_turn_write_cypher_embedding_overwrite_lands(tmp_path):
     """``_TURN_WRITE_CYPHER`` — the ONE shared capture turn writer.
 
-    Both capture lanes (``TortoiseSDK.capture_session`` and hosted
-    ``_capture_session_impl``) write turns through this single statement, so a
+    Both capture lanes (``TortoiseSDK.capture_session`` — deleted by #4282 — and hosted
+    ``_capture_session_impl``) wrote turns through this single statement, so a
     silently-discarded overwrite here has the widest blast radius of any seam in
     this file: the node keeps its OLD vector while holding the NEW text, and the
     rotation self-heal the statement exists to provide never runs.

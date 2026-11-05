@@ -512,7 +512,7 @@ _LOG_SYMBOLS = {
     "tortoise/vector_write.py": (
         "clear_embedding", "clear_then_set_prefix", "set_embedding_clause",
     ),
-    "tortoise/sdk.py": ("capture_session",),
+    "tortoise/hosted_api.py": ("_capture_session_impl",),
 }
 
 
